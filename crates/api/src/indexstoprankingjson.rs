@@ -180,10 +180,9 @@ fn render(root: &Path, asked: &Asked) -> Result<Value, String> {
         bootstrap_work: work,
         split_work: work,
     };
-    let mut held = CACHE
-        .get_or_init(|| Mutex::new(None))
-        .try_lock()
-        .map_err(|_| "cumulative result cache is busy; no request queued")?;
+    // Taken out for this request and put back afterwards; never held
+    // across the cold open (locks-2, D-1912).
+    let mut held = crate::detail::Checkout::take(CACHE.get_or_init(|| Mutex::new(None)));
     // NOT CONSTANT-TIME WHEN UNPINNED, WARM OR COLD. The pin must be known
     // before the cache can be compared, so every unpinned request walks the
     // search's checkpoint reservation directories and reads the newest

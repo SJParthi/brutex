@@ -11,6 +11,16 @@ thread_local! {
     /// Armed by a test on its own thread, taken by the next publication on
     /// that thread and by nothing else.
     static PAYLOAD_LOCKED: RefCell<Option<PayloadHook>> = const { RefCell::new(None) };
+    /// Armed by a test, taken by the next publication on this thread once its
+    /// `complete` marker is visible to readers.
+    static MARKER_VISIBLE: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+}
+
+/// Called by `publish_inner` right after its marker becomes discoverable.
+pub(super) fn marker_visible() {
+    if let Some(hook) = MARKER_VISIBLE.with(|slot| slot.borrow_mut().take()) {
+        hook();
+    }
 }
 
 /// Called by `publish_inner` right after it takes the payload lock: runs the
@@ -257,5 +267,64 @@ fn os_litter_is_passed_over_and_a_stranger_is_named() -> Result<(), String> {
     fs::write(dir.join("notes.txt"), b"x").map_err(error)?;
     let why = discover(&dir).err().ok_or("a stranger refuses")?;
     assert!(why.contains("\"notes.txt\""), "{why}");
+    Ok(())
+}
+
+/// CE-3, D-1909: a completion marker cut short by a crash is an interrupted
+/// reservation. The newest whole checkpoint is `latest`, and the resume
+/// publishes the next sequence. A publication leaves no scratch marker.
+#[test]
+fn a_torn_completion_marker_is_an_interrupted_reservation() -> Result<(), String> {
+    for kept in [0_u64, 31] {
+        let scratch = Scratch::new().map_err(error)?;
+        let mut journal = Journal::open(&scratch.0, "expression-search-v1", [12; 32])?;
+        journal.publish(b"valid old", 1024)?;
+        journal.publish(b"torn", 1024)?;
+        let newest = journal.directory.join("0000000000000002");
+        assert!(!newest.join("complete.writing").exists());
+        OpenOptions::new()
+            .write(true)
+            .open(newest.join("complete"))
+            .and_then(|marker| marker.set_len(kept))
+            .map_err(error)?;
+        drop(journal);
+        let mut reopened = Journal::open(&scratch.0, "expression-search-v1", [12; 32])?;
+        let latest = reopened
+            .latest(1024)?
+            .ok_or("the whole checkpoint is latest")?;
+        assert_eq!(latest.sequence, 1);
+        assert_eq!(latest.payload, b"valid old");
+        let (sequence, _) = reopened.publish(b"resumed", 1024)?;
+        assert_eq!(sequence, 3);
+        let resumed = reopened.latest(1024)?.ok_or("the resume is latest")?;
+        assert_eq!(resumed.payload, b"resumed");
+    }
+    Ok(())
+}
+
+/// locks-3, D-1913: once a checkpoint's marker is discoverable, a reader of
+/// that checkpoint is never refused as busy by the publishing writer.
+#[test]
+fn a_discoverable_checkpoint_is_never_refused_as_busy() -> Result<(), String> {
+    let scratch = Scratch::new().map_err(error)?;
+    let mut journal = Journal::open(&scratch.0, "and-checkpoint-v1", [13; 32])?;
+    let seen: Rc<RefCell<Option<Result<Vec<u8>, String>>>> = Rc::default();
+    let into = Rc::clone(&seen);
+    let base = scratch.0.clone();
+    MARKER_VISIBLE.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move || {
+            let read = Snapshot::open(&base, "and-checkpoint-v1", [13; 32])
+                .and_then(|snapshot| snapshot.ok_or_else(|| "namespace".to_owned()))
+                .and_then(|snapshot| snapshot.read(1, 1024))
+                .map(|saved| saved.payload);
+            *into.borrow_mut() = Some(read);
+        }));
+    });
+    journal.publish(b"visible", 1024)?;
+    let read = seen
+        .borrow_mut()
+        .take()
+        .ok_or("the hook ran once the marker was visible")?;
+    assert_eq!(read?, b"visible");
     Ok(())
 }

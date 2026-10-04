@@ -55234,3 +55234,235 @@ fix below was checked by breaking the code it guards and watching the test fail.
   one site from unreachable to driven (P1-17-02). C-V53-02's event is read back
   from the binary's log (P1-17-03). FX3-01's one-call write and its rollback
   wiring are read from `append_locked` and `append_raw` (P1-17-04).
+### D-1900 — Every ledger append rolls back on a write or barrier failure, and a failed barrier is never confirmed by a second one — 2026-10-03
+
+**The findings.** cli2-1 (sweep evidence), pop1-2 (Population V6, Observation
+V1/V2), sel-1 (Execution V4), search-2 (Pre-Admission V1/V2) and slice24-F1
+(Finalization V3/V4, Statistics V2) each appended with a plain
+`seek(End)` + `write_all` + `sync`. A short write (ENOSPC, EIO) left a ragged
+tail that refused every later open, read-only included, for good. resources-1
+and pop1-4 found the other half: after a failed `sync_all`, the `Err(first)`
+arms in `lib.rs` and Population V1's retry "confirmed" the bytes with a second
+barrier. On Linux a failed `fsync` marks the dirty pages clean, so the second
+barrier returns success having written nothing — the old `results.rs` argument
+that a re-sync proves durability was wrong.
+
+**The decision.** One rule for every fixed-stride append in `cli`: a write
+error or a failed barrier truncates the file back to the length it had before
+the call (`set_len` + `sync_all`), and if that rollback fails the refusal names
+both failures. A failed barrier is also remembered for its path in this
+process, and a reuse/confirm path refuses that path rather than issuing a
+second barrier. `results.rs`, `frontier.rs`, `trades.rs`, `result_set.rs`,
+`sweep_evidence.rs`, Execution V3/V4, Pre-Admission V1/V2, Population V1/V6,
+Observation V1/V2, Finalization V3/V4, Statistics V2/V3 and Admission V3/V4 all
+go through `crate::fixed_tail` (D-1902). A sweep-evidence file whose first
+append was refused is cut to zero bytes, header included, so a sweep-evidence
+reader now counts an empty file as no rows, exactly as it counts an absent one.
+
+**Evidence.** The ZL-01..ZL-12 rows in `docs/04-invariants.md`. Each test arms
+a write or barrier fault inside the ledger's own commit path and proves the
+file ends on a whole record, the committed authority stays readable, and the
+exact rerun commits.
+
+### D-1901 — A writer cuts a provably uncommitted torn tail under its exclusive lock; a reader never does — 2026-10-03
+
+**The findings.** sweep-2 (frontier, trades, detail sets, `runs.bin`, the
+sweep-evidence journals) and cli3-3 (`admission_store`,
+`institutional_statistics`, `stored_data_completeness`). A kill inside
+`write(2)` leaves a sub-record tail. No record is acknowledged before its
+whole stride passed its barrier, so those bytes name nothing — but every open
+refused them forever, and an operator had to cut the file by hand.
+
+**The decision.** The next WRITER, holding the ledger's exclusive lock, cuts
+bytes past the last whole record (`fixed_tail::heal_torn_tail`), makes the cut
+durable and emits a `cli.ledger` warn event naming the path, the length found
+and the length kept. It cuts only when the file begins with its own magic (and
+version where the header carries one), so a foreign or legacy file is never
+touched. The sweep-evidence journals also cut a file that is a strict prefix of
+its own header (`fixed_tail::heal_torn_header`): header and first rows are one
+write behind one barrier, so a short header names nothing either. Readers keep
+refusing. This narrows the older "`runs.bin` is refused, not healed" rule: the
+writer now heals under its lock. `frontier` and `trades` writers now take the
+exclusive lock in `open`, because measuring a tail without it could land inside
+a live append (cli2-3).
+
+### D-1902 — One shared helper, `cli::fixed_tail`, and a thread-local fault injector — 2026-10-03
+
+Rollback, failed-barrier memory, torn-tail cutting, orphan discarding and
+header cutting live in `crates/cli/src/fixed_tail.rs`. Ledgers keep their own
+encodings and messages and call it. The local `append_with_rollback` copies in
+Admission V3/V4 were replaced. A `#[cfg(test)]` thread-local fault
+(`fixed_tail::fault::Armed`) fails the next write (after `keep` bytes) or
+barrier whose subject names a file, so tests exercise each ledger's own commit
+path rather than a copy of it. It is compiled out of production.
+
+### D-1903 — Files created on the first append get a directory barrier — 2026-10-03
+
+pop2-5 and slice24-F2: Statistics V2/V3 and Observation V1/V2 created their
+data and lock files and never synced the directory, so a power loss could lose
+the names of files whose contents were durable. Each now syncs its root after
+writing a new header (`sync_parent` / `sync_observation_root`). A source-shape
+test pins each call, because a directory entry's durability cannot be observed
+without a power cut.
+
+### D-1904 — A trailing orphan that repeats a completed identity is refused at open — 2026-10-03
+
+slice24-F3: Statistics V2 and Observation V1/V2 accepted a trailing receipt-less
+block whose identity was already complete, then refused every other append
+because of it. A writer checks for reuse before it writes, so no crash can leave
+one. The scan now refuses it by name, for readers and writers alike. Statistics
+V3 got the same check. Finalization V4 and Admission V3/V4 already refused it.
+
+### D-1905 — A receipt-less orphan that is not this exact retry is scratch — 2026-10-03
+
+pop2-4: a whole-record trailing block without its Completion or receipt, left
+by a crashed writer of a DIFFERENT identity, refused every later append in
+Statistics V2/V3, Finalization V4, Admission V3/V4 and Population V1. Nobody
+was ever told that block committed. The next writer, under its exclusive lock,
+now completes it when it is byte-identical to its own block (the existing exact
+retry). Otherwise the writer cuts it back to where it began
+(`fixed_tail::discard_orphan`, which emits a `cli.ledger` warn event) and writes
+its own block. Everything before the orphan was proven complete by the scan.
+
+### D-1906 — The exact retry completes a whole-row prefix of its own block — 2026-10-03
+
+pop2-1 / slice23-F1 (Admission V3) and pop1-1 (Population V1): a write cut
+between rows left a whole-row prefix of the block. Admission V3 accepted only a
+complete trailing block. Population V1 indexed the prefix as a short block and
+refused it as "different row facts". Admission V3 now appends the missing
+decisions behind one barrier and then the Completion. Population V1 cuts its
+receipt-less trailing block when it is not exactly the offered rows and
+rewrites the whole block (D-1905). The resulting bytes are the same.
+
+### D-1907 — A store month whose append barrier failed takes no further append in this process — 2026-10-03
+
+store1-2: `store::file::BarFile::append` returned the error of a failed
+`sync_all`, but a retry on the same handle rewrote the same records and
+"committed" them behind a second barrier. A reopened handle answered
+`AlreadyPresent` from a page-cache header slot whose barrier had failed. Every
+append barrier (records, sidecar, header slot) now records its path in a
+process-wide set when it fails. `append` refuses such a path with the new
+`StoreError::BarrierFailed` before any other check, including the duplicate
+check. `store` cannot depend on `cli`, so this is its own small copy of the
+D-1900 rule.
+
+### D-1908 — Only the owner-lock race is answered by a committed VIX receipt — 2026-10-03
+
+ledgers-1: `index_stop_vix::publish` answered EVERY failure of its own attempt
+with the committed receipt when one existed (`Err(_) if
+persistence::committed`). A failed receipt or directory barrier after this
+call's own 112 bytes were visible therefore returned the saved companion as a
+publication, although nothing had made it durable. The closure now returns
+`Ok(Some(why))` only for `prepare_in_namespace`'s owner-lock refusal, which
+wrote nothing (`boolean_candidate_persistence::lost_owner_race`, matched on the
+new `OWNER_REFUSED` prefix). Every other failure of this call propagates. The
+race answer itself is unchanged.
+
+### D-1909 — A checkpoint marker is renamed into place, and a short one is an interrupted reservation — 2026-10-03
+
+CE-3: `search_checkpoint::publish_inner` created `<seq>/complete` under its
+final name and then wrote the 32-byte seal. A kill or ENOSPC between the two
+left a 0-31 byte marker. `discover_through` counted any regular `complete` as
+acknowledged and made it `latest`, and `read_saved` then refused "marker
+width mismatch" on every resume, forever. The marker is now written as
+`complete.writing`, synced, and renamed to `complete` before the directory
+barrier, so a crash leaves only a scratch name nothing reads. Discovery counts
+a regular `complete` shorter than 32 bytes, left by an older build, as
+interrupted, so `latest` is the newest whole checkpoint and the resume takes
+the next sequence. A whole-width marker that disagrees with its payload is
+still refused, not skipped.
+
+### D-1910 — Store-root and rung-root ledger writers cut a kill-torn tail on open — 2026-10-03
+
+ledgers-3: a kill or power loss inside a `write` left Pre-Admission V1/V2,
+Base Evidence V2 and Candidate Universe (all in the store root), and Execution
+V4, Observation V1/V2 and Search Lineage V4 (per rung root), with a
+sub-record tail. Every open, the writer's included, refused it before any
+orphan or retry logic ran, so even the identical rerun could not recover, and
+the three store-root ledgers wedged every `ledger-all` and `ledger-v6` run on
+the store. Each of these ledgers is receipt-last, so bytes past the last whole
+record were never acknowledged. The writable open now calls
+`fixed_tail::heal_torn_tail` under its exclusive lock, after the header is
+verified (D-1901): it cuts to the last whole record, syncs, and emits a
+`cli.ledger` warn event naming the file and both lengths. Lineage V4 cuts at
+the 768-byte member stride, so a whole NIFTY member of a torn pair is kept as
+the orphan the scan already resumes. Read-only opens still refuse until a
+writer has healed the file. A whole-record tail with a bad seal still refuses.
+
+### D-1911 — The serve lock names the host, not another instance, when flock itself is refused — 2026-10-03
+
+locks-1: `take_serve_lock` reported every `try_lock` refusal as "another
+brutex api is already serving this store" and quoted line 1 of `serve.lock`.
+`TryLockError::Error` is the host refusing `flock` (ENOLCK on a mount without a
+lock manager, ENOTSUP on a filesystem without advisory locks). No other
+instance exists then, and the stamp is the last SUCCESSFUL holder's, a dead
+pid. The new `serve_lock_refusal` keeps the text and the holder stamp for
+`WouldBlock` only. `Error(host)` names the host refusal, says no other instance
+is implied, and asks for a filesystem with advisory locks. The serve is still
+refused in both cases. This is the D-0955 split, applied to this site.
+
+### D-1912 — Index-stop JSON caches hold their slot only to take and return the reader — 2026-10-03
+
+locks-2: the five index-stop JSON caches (`indexstopvixjson`,
+`indexstopcandlesjson`, `indexstopqualificationjson`, `indexstopjson`,
+`indexstoprankingjson`) held a process-wide `Mutex::try_lock` guard across the
+whole render, a cold `Reader::open` included. `spawn_blocking` cannot be
+cancelled, so a request the page had just abandoned kept the slot, and the same
+viewer's next selection was refused 503 "busy". The new
+`detail::Checkout` empties the slot into the request under a lock held only for
+that move, derefs to the `Option` the render code already used, and puts a
+still-admitted entry back on drop. A request that finds the slot empty opens
+its own reader, and the last to finish is the one retained. Concurrency stays
+bounded by `detail::run`'s admission. Two concurrent cold requests for one
+identity now both open a reader rather than one being refused.
+
+### D-1913 — A checkpoint payload lock is released before its marker is discoverable — 2026-10-03
+
+locks-3: `search_checkpoint::publish_inner` created the `complete` marker
+while it still held the payload's exclusive flock, and kept it through two
+fsyncs and a full re-read of the payload. Every `Snapshot` reader that found
+the new sequence in that window (the campaign monitor, unpinned
+`/index-stop-ranking.json`, `/expression-search.json`, the qualified observer)
+was refused "checkpoint payload is busy" for bytes already durable and
+verified. Three such refusals in a row stopped the campaign monitor. The
+payload lock is now released by name (D-0693) after the first verification
+and the directory barrier, before the marker exists. The second verification
+runs on the same, now unlocked, descriptor. The namespace's `owner.lock`
+still excludes any second writer, and a reader's own seal check still covers
+the marker.
+
+### D-1914 — Only log damage newer than the newest sweep marker makes external status unknown — 2026-10-03
+
+CE-11: `observe_elsewhere` judged faults across the whole 256-record
+lifecycle window. A line torn by a killed CLI command (`terminate_torn_tail`
+makes it one malformed line) therefore blocked every browser launch and showed
+`unknown` while it stayed in the window, even when it was OLDER than the newest
+sweep marker. File order is sequence order, so such a line cannot hide a newer
+marker. When the window shows a fault and holds a marker at index `i`, the
+lifecycle is walked again with limit `i + 1`. The walk stops on the marker, so
+only damage between it and the newest end is judged. If that walk does not end
+on the same record (a newer one landed between the walks), the whole window's
+verdict stands. Damage newer than the marker still blocks launch.
+
+### D-1915 — A failed barrier on Base Evidence, Candidate Universe or Boolean evidence is withdrawn, never reused — 2026-10-03
+
+ledgers-2: a failed `fsync` left its bytes in place, and a later run's
+barrier on a fresh descriptor reported success over them (K2: after a failed
+writeback the pages are clean, and the second `fsync` writes nothing).
+
+- Base Evidence V2 and Candidate Universe (both in the store root): the record
+  and completion barriers now go through `fixed_tail::sync_or_roll_back`, so a
+  failure cuts the block and is remembered for this process (D-1900). A
+  receipt-less orphan that matches the exact retry is cut back and written
+  again whole rather than vouched for by a new barrier. The bytes are
+  identical. The reuse path refuses a path whose barrier failed in this
+  process.
+- Boolean and index-stop evidence (`write_or_equal`): a file this call created
+  whose write or barrier failed is removed by name, so its whole-length
+  receipt is never `committed` to the next run. The reuse arm now syncs the
+  file it compared.
+
+Not covered here, and still open: Search Lineage V4, Selection V6, Global
+Replay V4 and Admission V4 re-sync in place on their exact-retry or reuse
+paths. Pre-Admission, Execution V4, Population V6, Observation, Statistics V3
+and Finalization V4 already cut a failed barrier (D-1900).

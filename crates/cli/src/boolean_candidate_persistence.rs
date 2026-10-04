@@ -111,7 +111,7 @@ pub(crate) fn prepare_in_namespace(
         crate::readonly_file::open(&owner_path).map_err(display)?,
         owner_path.clone(),
     )
-    .map_err(|why| format!("Boolean candidate namespace already owned or lock refused: {why}"))?;
+    .map_err(|why| format!("{OWNER_REFUSED}: {why}"))?;
     let generation = crate::result_set::file_generation(&owner, &owner_path)?;
     if owner.metadata().map_err(display)?.len() != 0 {
         return Err("Boolean candidate owner contains unexpected bytes".to_owned());
@@ -149,6 +149,16 @@ pub(crate) fn prepare_in_namespace(
 /// The length of a whole completion receipt.
 const RECEIPT_BYTES: usize = 112;
 const RECEIPT_LEN: u64 = RECEIPT_BYTES as u64;
+
+/// The prefix of the refusal `prepare_in_namespace` returns when another
+/// holder has the owner lock, before this call wrote any byte.
+const OWNER_REFUSED: &str = "Boolean candidate namespace already owned or lock refused";
+
+/// Whether `why` is `prepare_in_namespace`'s owner-lock refusal, the only
+/// failure that leaves this call's own bytes unwritten (D-1908).
+pub(crate) fn lost_owner_race(why: &str) -> bool {
+    why.starts_with(OWNER_REFUSED)
+}
 
 /// Whether `directory` holds a whole completion receipt, so its body is
 /// published history. A missing or shorter receipt is an attempt that was
@@ -230,13 +240,35 @@ fn directory(parent: &Path, path: &Path) -> Result<(), String> {
 fn write_or_equal(path: &Path, body: &[u8]) -> Result<(), String> {
     match OpenOptions::new().write(true).create_new(true).open(path) {
         Ok(mut file) => {
-            file.write_all(body).map_err(display)?;
-            retained(&file, path, body.len())
+            // WITHDRAWN, NOT LEFT (ledgers-2, D-1915). A file this call created
+            // whose write or barrier failed stayed whole-length in the page
+            // cache, and the next run reused it as committed history: a
+            // receipt is `committed` by its length alone, and a barrier on a
+            // fresh descriptor cannot prove what a failed one did not.
+            let written = file
+                .write_all(body)
+                .map_err(display)
+                .and_then(|()| retained(&file, path, body.len()));
+            if let Err(why) = written {
+                drop(file);
+                return Err(match std::fs::remove_file(path) {
+                    Ok(()) => format!("{why}; the unacknowledged file was withdrawn"),
+                    Err(withdraw) => format!(
+                        "{why}; withdrawing the unacknowledged file ALSO failed: {withdraw}"
+                    ),
+                });
+            }
+            Ok(())
         }
         Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => {
             if read_exact(path, body.len() as u64)? != body {
                 return Err("Boolean evidence already exists with different or incomplete bytes; history preserved".to_owned());
             }
+            // The reused file is synced too, so a reuse never reports success
+            // over bytes no barrier of this run reached (ledgers-2, D-1915).
+            File::open(path)
+                .and_then(|file| file.sync_all())
+                .map_err(display)?;
             Ok(())
         }
         Err(why) => Err(display(why)),
@@ -244,7 +276,7 @@ fn write_or_equal(path: &Path, body: &[u8]) -> Result<(), String> {
 }
 
 fn retained(file: &File, path: &Path, bytes: usize) -> Result<(), String> {
-    file.sync_all().map_err(display)?;
+    crate::fixed_tail::sync_all_hooked(file, path).map_err(display)?;
     let before = crate::result_set::file_generation(file, path)?;
     if file.metadata().map_err(display)?.len() != bytes as u64 {
         return Err("Boolean evidence write was not retained".to_owned());

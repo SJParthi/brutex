@@ -154,10 +154,9 @@ fn render(root: &Path, asked: &Asked) -> Result<Value, String> {
         memory_bytes: bytes,
         page_records: crate::detail::MAX_RESULT_ROWS,
     };
-    let mut held = CACHE
-        .get_or_init(|| Mutex::new(None))
-        .try_lock()
-        .map_err(|_| "original-source reader busy; nothing queued")?;
+    // Taken out for this request and put back afterwards; never held
+    // across the cold open (locks-2, D-1912).
+    let mut held = crate::detail::Checkout::take(CACHE.get_or_init(|| Mutex::new(None)));
     if !held.as_ref().is_some_and(|cached| {
         cached.root == root
             && cached.identity == asked.identity

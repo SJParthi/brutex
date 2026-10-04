@@ -873,54 +873,78 @@ impl Frontier {
     ///
     /// # Errors
     ///
-    /// Refuses when the directory cannot be made, the file cannot be opened,
-    /// the magic is not `BRUTEXFR`, the version is one this build does not
-    /// write, or the length does not divide by the stride -- each named, and
-    /// nothing written in any of them.
+    /// Refuses when the directory cannot be made, the file cannot be opened
+    /// or locked, the magic is not `BRUTEXFR`, or the version is one this
+    /// build does not write -- each named, and nothing written in any of
+    /// them. A torn tail past the last whole row is cut, under the exclusive
+    /// lock, with a `cli.ledger` event (D-1901).
     pub fn open(root: &Path) -> Result<Self, Refusal> {
         let dir = root.join("results");
         std::fs::create_dir_all(&dir)
             .map_err(|why| format!("the results directory could not be made: {why}"))?;
         let path = Self::path(root);
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
             .open(&path)
             .map_err(|why| format!("{} could not be opened: {why}", path.display()))?;
-
-        let len = file
-            .metadata()
-            .map_err(|why| format!("{} could not be measured: {why}", path.display()))?
-            .len();
-
-        if len == 0 {
-            write_fresh_header(&mut file, &path)?;
-            return Ok(Self {
-                file,
-                path,
-                root: root.to_path_buf(),
-                require_parent: false,
-                blocks: std::collections::HashMap::new(),
-                scanned: HEADER,
-                write_refusal: None,
-            });
-        }
-        check_header(&mut file, &path, len)?;
-        let Indexed {
-            blocks,
-            write_refusal,
-        } = index_of(&mut file, len)?;
-        Ok(Self {
+        // THE WRITER'S OPEN HOLDS THE EXCLUSIVE LOCK while it measures, cuts
+        // a torn tail and indexes (D-1901, sweep-2). Unlocked, the length could
+        // land inside another writer's live append, and cutting THAT would
+        // destroy a write in progress.
+        file.lock()
+            .map_err(|why| format!("the frontier file could not be locked: {why}"))?;
+        let mut frontier = Self {
             file,
             path,
             root: root.to_path_buf(),
             require_parent: false,
+            blocks: std::collections::HashMap::new(),
+            scanned: HEADER,
+            write_refusal: None,
+        };
+        let indexed = frontier.index_locked();
+        let released = frontier
+            .file
+            .unlock()
+            .map_err(|why| format!("the frontier file could not be unlocked: {why}"));
+        indexed.and(released).map(|()| frontier)
+    }
+
+    /// [`Self::open`]'s body under the exclusive lock.
+    ///
+    /// A torn tail -- bytes past the last whole row -- is never a row: a
+    /// frontier block is exposed only under a committed result-set receipt
+    /// and ledger row, both written after this file's block is whole and
+    /// synced. So the writer cuts it, says so, and carries on. Read-only opens
+    /// still refuse it.
+    fn index_locked(&mut self) -> Result<(), Refusal> {
+        crate::fixed_tail::heal_torn_tail(
+            &self.file,
+            &self.path,
+            HEADER,
+            STRIDE,
+            &crate::fixed_tail::magic_and_version(MAGIC, VERSION),
+        )?;
+        let len = self
+            .file
+            .metadata()
+            .map_err(|why| format!("{} could not be measured: {why}", self.path.display()))?
+            .len();
+        if len == 0 {
+            return write_fresh_header(&mut self.file, &self.path);
+        }
+        check_header(&mut self.file, &self.path, len)?;
+        let Indexed {
             blocks,
-            scanned: len,
             write_refusal,
-        })
+        } = index_of(&mut self.file, len)?;
+        self.blocks = blocks;
+        self.scanned = len;
+        self.write_refusal = write_refusal;
+        Ok(())
     }
 
     /// How many rows the file holds. **O(1)** — arithmetic on the length.
@@ -1042,7 +1066,7 @@ impl Frontier {
 
     /// [`Self::append_all`]'s work, with the lock already held.
     fn append_locked(&mut self, rows: &[Row]) -> Result<u64, Refusal> {
-        self.append_locked_with(rows, std::io::Write::write_all)
+        self.append_locked_with(rows, std::io::Write::write_all, File::sync_all)
     }
 
     /// The append body with an injectable write used to prove partial-write
@@ -1051,7 +1075,17 @@ impl Frontier {
         &mut self,
         rows: &[Row],
         write: impl FnOnce(&mut File, &[u8]) -> std::io::Result<()>,
+        sync: impl FnOnce(&File) -> std::io::Result<()>,
     ) -> Result<u64, Refusal> {
+        // A tail another writer's killed append left since this handle opened
+        // is cut here, under the exclusive lock (D-1901).
+        crate::fixed_tail::heal_torn_tail(
+            &self.file,
+            &self.path,
+            HEADER,
+            STRIDE,
+            &crate::fixed_tail::magic_and_version(MAGIC, VERSION),
+        )?;
         // This handle may have been opened before another process appended.
         // Refresh while holding the same exclusive lock that protects the
         // write, then repeat duplicate rejection against current disk state.
@@ -1099,18 +1133,14 @@ impl Frontier {
         // on every later open, hiding older committed blocks and preventing an
         // exact rerun from recovering. `end` was measured under the exclusive
         // lock, so truncating to it removes only this call's uncommitted bytes.
-        write(&mut self.file, &buffer).map_err(|why| match self.file.set_len(end) {
-            Ok(()) => format!(
-                "the frontier rows could not be written: {why}. The partial write was rolled back to byte {end}, so every older whole row remains readable"
-            ),
-            Err(and) => format!(
-                "the frontier rows could not be written: {why}. Rolling the partial write back to byte {end} ALSO failed: {and}. The file may now end mid-row and is refused until its tail is repaired"
-            ),
-        })?;
+        crate::fixed_tail::write_at_end(&mut self.file, &self.path.display(), end, &buffer, write)
+            .map_err(|why| format!("the frontier rows could not be written: {why}"))?;
         // FLUSHED BEFORE THE COUNT IS REPORTED. A count taken from a length the
-        // operating system has not committed is a number that can shrink.
-        self.file
-            .sync_all()
+        // operating system has not committed is a number that can shrink. A
+        // failed barrier cuts the block too: on Linux the failed pages stay
+        // readable but clean, so keeping them let a lookup find the block and
+        // a second barrier "confirm" it (resources-1, D-1900).
+        crate::fixed_tail::sync_or_roll_back(&self.file, &self.path, end, sync)
             .map_err(|why| format!("the frontier rows could not be flushed: {why}"))?;
 
         // THE INDEX LEARNS ABOUT THE BLOCK IT JUST WROTE, so a process that
@@ -1318,6 +1348,9 @@ impl Frontier {
     /// Names a shared-lock, durability-barrier, or unlock failure. A caller
     /// must not promote the child to the public ledger after any such refusal.
     pub fn confirm_durable(&mut self) -> Result<(), Refusal> {
+        // A barrier that already failed on this file in this process is never
+        // confirmed by a second one (resources-1, D-1900).
+        crate::fixed_tail::refuse_after_failed_barrier(&self.path)?;
         self.file
             .lock_shared()
             .map_err(|why| format!("the frontier file could not be locked for syncing: {why}"))?;
@@ -1862,8 +1895,8 @@ fn check_header(file: &mut File, path: &Path, len: u64) -> Result<(), Refusal> {
         let spare = body % STRIDE;
         return Err(format!(
             "{} has {spare} bytes past its last whole row — an append was \
-             interrupted. {whole} whole rows are intact; the remainder is left \
-             alone. Nothing was written.",
+             interrupted. {whole} whole rows are intact; a reader leaves the \
+             remainder alone, and the next writer cuts it under its lock. Nothing was written.",
             path.display()
         ));
     }
@@ -2941,15 +2974,22 @@ mod tests {
             .len();
 
         let why = store
-            .append_locked_with(&[row(2, 1)], |file, bytes| {
-                file.write_all(bytes.get(..3).unwrap_or_default())?;
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::StorageFull,
-                    "injected full filesystem after a three-byte prefix",
-                ))
-            })
+            .append_locked_with(
+                &[row(2, 1)],
+                |file, bytes| {
+                    file.write_all(bytes.get(..3).unwrap_or_default())?;
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::StorageFull,
+                        "injected full filesystem after a three-byte prefix",
+                    ))
+                },
+                std::fs::File::sync_all,
+            )
             .expect_err("the injected partial write refuses");
-        assert!(why.contains("rolled back"), "the recovery is named: {why}");
+        assert!(
+            why.contains("truncated back"),
+            "the recovery is named: {why}"
+        );
         assert_eq!(
             std::fs::metadata(Frontier::path(&dir))
                 .expect("the rolled-back file has metadata")
@@ -3001,7 +3041,7 @@ mod tests {
         file.write_all(&[0_u8; 3]).expect("a torn tail");
         drop(file);
 
-        let why = Frontier::open(&dir).expect_err("a ragged file is refused");
+        let why = Frontier::open_read(&dir).expect_err("a reader refuses a ragged file");
         assert!(
             why.contains('3'),
             "the refusal counts the spare bytes: {why}"
@@ -3009,6 +3049,64 @@ mod tests {
         assert!(
             why.contains('2'),
             "the refusal says how many whole rows are intact: {why}"
+        );
+        // sweep-2, D-1901: the writer, under the exclusive lock, cuts the
+        // three bytes that were never a row and the shared file records again.
+        let mut writer = Frontier::open(&dir).expect("the writer cuts the torn tail");
+        assert_eq!(writer.len().expect("a whole-row count"), 2);
+        assert_eq!(
+            std::fs::metadata(Frontier::path(&dir))
+                .expect("the cut file has metadata")
+                .len(),
+            super::HEADER + 2 * STRIDE
+        );
+        writer
+            .append_all(&[row(2, 1)])
+            .expect("a later run records");
+        drop(writer);
+        assert_eq!(
+            Frontier::open_read(&dir)
+                .expect("a reader opens the healed file")
+                .len()
+                .expect("a whole-row count"),
+            3
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// resources-1, D-1900: a failed barrier cuts the block it was meant to
+    /// make durable, and the file is never confirmed durable afterwards.
+    #[test]
+    fn a_failed_frontier_barrier_cuts_the_block_and_is_never_confirmed() {
+        let dir = root("failed-barrier");
+        let mut store = Frontier::open(&dir).expect("a fresh file opens");
+        store
+            .append_all(&[row(1, 1)])
+            .expect("the committed prefix appends");
+        let before = std::fs::metadata(Frontier::path(&dir))
+            .expect("the prefix has metadata")
+            .len();
+        let why = store
+            .append_locked_with(&[row(2, 1)], std::io::Write::write_all, |_| {
+                Err(std::io::Error::other("injected EIO at fsync"))
+            })
+            .expect_err("the injected barrier refuses");
+        assert!(why.contains("injected EIO at fsync"), "{why}");
+        assert_eq!(
+            std::fs::metadata(Frontier::path(&dir))
+                .expect("the cut file has metadata")
+                .len(),
+            before,
+            "the unconfirmed block is gone"
+        );
+        let mut reopened = Frontier::open(&dir).expect("the prefix reopens");
+        assert!(!reopened.holds(&[2; 32]), "nothing to promote");
+        let refused = reopened
+            .confirm_durable()
+            .expect_err("a failed barrier is never confirmed by a second");
+        assert!(
+            refused.contains("already failed in this process"),
+            "{refused}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

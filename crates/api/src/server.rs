@@ -17877,33 +17877,8 @@ fn take_serve_lock(store_root: &Path, addr: std::net::SocketAddr) -> Result<Serv
     let file = match store::flock::Flock::try_lock(file, path.clone()) {
         Ok(held) => held,
         Err(refusal) => {
-            // WHO HOLDS IT, NOT MERELY THAT SOMEBODY DOES. The holder wrote its
-            // address and pid into this file after taking the lock, and reading a
-            // locked file is not itself a locked operation.
-            //
-            // THE FIRST LINE ONLY. A holder stamps one line. A file stamped by a
-            // build that did not cut it to its own stamp can still carry an
-            // older, longer holder's tail after that line, and quoting the whole
-            // file showed the operator a second, stale pid as though it held the
-            // store. R9-api-cx-2, D-1446.
-            let held_by = std::fs::read_to_string(&path).unwrap_or_default();
-            let held_by = held_by.lines().next().unwrap_or_default().trim();
             release_root(&key);
-            return Err(format!(
-                "REFUSED: another brutex api is already serving this store.\n  \
-                 store: {}\n  lock:  {} ({refusal})\n  held by: {}\n\
-                 Two servers over one store run two autopilots against one \
-                 append-only tree and spend one shared vendor token's quota twice. \
-                 A different port is not a second store. Stop the other instance, \
-                 or point this one at another BRUTEX_STORE.",
-                store_root.display(),
-                path.display(),
-                if held_by.is_empty() {
-                    "an instance that had not yet stamped the file"
-                } else {
-                    held_by
-                }
-            ));
+            return Err(serve_lock_refusal(store_root, &path, &refusal));
         }
     };
     // STAMPED AFTER THE LOCK IS HELD, so the value a refused instance reads was
@@ -17936,6 +17911,56 @@ fn take_serve_lock(store_root: &Path, addr: std::net::SocketAddr) -> Result<Serv
 /// its own length, and decides what a failure leaves (v3b-2, D-1481): a
 /// cleared file is served with one WARN event and a stderr line, an uncleared
 /// one is the refusal returned.
+/// Names why the one-server lock was refused (locks-1, D-1911).
+///
+/// ONLY `WouldBlock` MEANS ANOTHER INSTANCE HOLDS IT. `TryLockError::Error` is
+/// the host refusing `flock` itself (ENOLCK on a mount with no lock manager,
+/// ENOTSUP on a filesystem with no advisory locks): no other instance exists,
+/// and the first line of the file is the last SUCCESSFUL holder's stamp, a
+/// dead process. Both arms used to say "another brutex api is already
+/// serving" and quote that pid. The census lock was split the same way by
+/// D-0955.
+fn serve_lock_refusal(store_root: &Path, path: &Path, refusal: &std::fs::TryLockError) -> String {
+    match refusal {
+        std::fs::TryLockError::WouldBlock => {
+            // WHO HOLDS IT, NOT MERELY THAT SOMEBODY DOES. The holder wrote its
+            // address and pid into this file after taking the lock, and reading a
+            // locked file is not itself a locked operation.
+            //
+            // THE FIRST LINE ONLY. A holder stamps one line. A file stamped by a
+            // build that did not cut it to its own stamp can still carry an
+            // older, longer holder's tail after that line, and quoting the whole
+            // file showed the operator a second, stale pid as though it held the
+            // store. R9-api-cx-2, D-1446.
+            let held_by = std::fs::read_to_string(path).unwrap_or_default();
+            let held_by = held_by.lines().next().unwrap_or_default().trim();
+            format!(
+                "REFUSED: another brutex api is already serving this store.\n  \
+                 store: {}\n  lock:  {} ({refusal})\n  held by: {}\n\
+                 Two servers over one store run two autopilots against one \
+                 append-only tree and spend one shared vendor token's quota twice. \
+                 A different port is not a second store. Stop the other instance, \
+                 or point this one at another BRUTEX_STORE.",
+                store_root.display(),
+                path.display(),
+                if held_by.is_empty() {
+                    "an instance that had not yet stamped the file"
+                } else {
+                    held_by
+                }
+            )
+        }
+        std::fs::TryLockError::Error(host) => format!(
+            "REFUSED: the host refused to lock {} for store {}: {host}. No other \
+             instance is implied, so stopping one or changing the port will not \
+             help; refused rather than served without the lock. Put the store on \
+             a filesystem that supports advisory locks.",
+            path.display(),
+            store_root.display()
+        ),
+    }
+}
+
 fn stamp_serve_lock(
     file: &store::flock::Flock<std::fs::File>,
     addr: std::net::SocketAddr,
@@ -18804,6 +18829,32 @@ async fn run_in_over(
 mod tests {
     use super::*;
     use std::io::Write as _;
+
+    /// locks-1, D-1911: a host refusal of `flock` names the host, never another
+    /// instance, and never quotes the last holder's stamp; only `WouldBlock`
+    /// says another api is serving and names its holder.
+    #[test]
+    fn a_host_lock_refusal_is_not_reported_as_another_instance() {
+        let root = std::env::temp_dir().join(format!("brutex-locks1-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("scratch");
+        let path = root.join(SERVE_LOCK);
+        std::fs::write(&path, "addr=127.0.0.1:8080 pid=4242\n").expect("stale stamp");
+        let host = std::fs::TryLockError::Error(std::io::Error::from_raw_os_error(37));
+        let why = serve_lock_refusal(&root, &path, &host);
+        assert!(why.contains("the host refused to lock"), "{why}");
+        assert!(!why.contains("another brutex api"), "{why}");
+        assert!(!why.contains("pid=4242"), "{why}");
+        let busy = serve_lock_refusal(&root, &path, &std::fs::TryLockError::WouldBlock);
+        assert!(
+            busy.contains("another brutex api is already serving"),
+            "{busy}"
+        );
+        assert!(
+            busy.contains("held by: addr=127.0.0.1:8080 pid=4242"),
+            "{busy}"
+        );
+        std::fs::remove_dir_all(&root).expect("cleanup");
+    }
 
     /// A directory holding one or both masters, named after the test.
     /// The third mastered vendor's file, written for every fixture.

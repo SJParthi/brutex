@@ -126,10 +126,9 @@ struct Cached {
 fn render(root: &Path, asked: &Asked) -> Result<Value, String> {
     static CACHE: OnceLock<Mutex<Option<Cached>>> = OnceLock::new();
     let budget = crate::detail::BooleanObservationBudget::load()?;
-    let mut held = CACHE
-        .get_or_init(|| Mutex::new(None))
-        .try_lock()
-        .map_err(|_| "single-stop evidence cache is busy; no request queued")?;
+    // Taken out for this request and put back afterwards; never held
+    // across the cold open (locks-2, D-1912).
+    let mut held = crate::detail::Checkout::take(CACHE.get_or_init(|| Mutex::new(None)));
     if asked.completion.is_none()
         || !held.as_ref().is_some_and(|value| {
             value.root == root && value.identity == asked.identity && value.budget == budget

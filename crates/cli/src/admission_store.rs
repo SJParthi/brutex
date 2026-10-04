@@ -617,6 +617,32 @@ impl AdmissionAuthorityLedger {
                 COMPLETION_MAGIC,
                 FORMAT_VERSION_V1,
             )?;
+            // THE WRITER CUTS A TORN TAIL UNDER ITS LOCK (D-1901, cli3-3): no
+            // record is acknowledged before its whole stride passed a barrier,
+            // so bytes past the last whole record name nothing. Readers still
+            // refuse them.
+            for (file, path, magic, stride) in [
+                (
+                    &decision_file,
+                    &decision_path,
+                    DECISION_MAGIC,
+                    ADMISSION_DECISION_STRIDE,
+                ),
+                (
+                    &completion_file,
+                    &completion_path,
+                    COMPLETION_MAGIC,
+                    ADMISSION_COMPLETION_STRIDE,
+                ),
+            ] {
+                crate::fixed_tail::heal_torn_tail(
+                    file,
+                    path,
+                    HEADER,
+                    stride,
+                    &crate::fixed_tail::magic_and_version(magic, FORMAT_VERSION_V1),
+                )?;
+            }
             sync_directory(&directory)?;
             Self::from_files(
                 decision_file,
@@ -1019,8 +1045,10 @@ impl AdmissionAuthorityLedger {
         self.write_decisions(population_id, at, at, decisions, decisions.len())
     }
 
-    /// Writes `decisions` at `at` as ONE buffer, so a kill can no longer stop
-    /// between records of one call, and rolls a failed write back to `at`.
+    /// Writes `decisions` at `at` as ONE buffer and rolls a failed write back
+    /// to `at`. One `write(2)` still is not atomic: a fatal signal can stop it
+    /// between pages, leaving a sub-record tail that the next writer's `open`
+    /// cuts under its lock (D-1901, cli3-3).
     /// The block that results starts at `first` and holds `total` records.
     fn write_decisions(
         &mut self,
@@ -2046,6 +2074,39 @@ mod tests {
         AdmissionDecisionRecordV1, COMPLETION_PAYLOAD_BYTES, DECISION_PAYLOAD_BYTES, HEADER,
         MAX_ADMISSION_PAGE_ROWS_V1,
     };
+
+    /// cli3-3, D-1901: a sub-record tail is refused by a reader and cut by
+    /// the next writer under its exclusive lock; committed bytes stay.
+    #[test]
+    fn a_torn_tail_is_cut_by_the_writer_and_refused_by_a_reader() {
+        let root = root("torn-tail");
+        let _ = std::fs::remove_dir_all(&root);
+        drop(AdmissionAuthorityLedger::open(&root).expect("the writer opens"));
+        for path in [
+            AdmissionAuthorityLedger::decision_path(&root),
+            AdmissionAuthorityLedger::completion_path(&root),
+        ] {
+            let whole = std::fs::metadata(&path).expect("metadata").len();
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .expect("reopen for the torn fixture");
+            std::io::Write::write_all(&mut file, &[7_u8; 3]).expect("torn tail");
+            drop(file);
+            assert!(
+                AdmissionAuthorityLedger::open_read(&root).is_err(),
+                "a reader refuses the torn tail"
+            );
+            drop(AdmissionAuthorityLedger::open(&root).expect("the writer opens"));
+            assert_eq!(
+                std::fs::metadata(&path).expect("metadata").len(),
+                whole,
+                "the writer cut exactly the torn bytes"
+            );
+            drop(AdmissionAuthorityLedger::open_read(&root).expect("a reader opens the cut file"));
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
 

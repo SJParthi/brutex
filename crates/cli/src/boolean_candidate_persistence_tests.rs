@@ -1,7 +1,7 @@
 #![cfg(test)]
 //! Receipt-last publication: scratch from a cut-short attempt is rewritten,
 //! committed history is compared and kept (D-1760).
-use super::{committed, prepare_in_namespace, read_exact, write_or_equal};
+use super::{committed, lost_owner_race, prepare_in_namespace, read_exact, write_or_equal};
 use std::fs;
 use std::path::PathBuf;
 
@@ -141,5 +141,57 @@ fn an_unreceipted_body_link_is_unlinked_never_followed() -> Result<(), String> {
         b"must survive"
     );
     assert_eq!(read_exact(&directory.join("body.bin"), 64)?, b"real body");
+    Ok(())
+}
+
+/// ledgers-1, D-1908: only the owner-lock refusal, which wrote nothing, is
+/// the race a committed receipt may answer. A refusal of anything this call
+/// did itself is never mistaken for it.
+#[test]
+fn only_the_owner_lock_refusal_is_a_lost_race() -> Result<(), String> {
+    let root = scratch("lost-race");
+    let identity = [11_u8; 32];
+    let held = prepare_in_namespace(&root, "index-stop-vix-reference-v1", identity, b"winner")?;
+    let refusal = prepare_in_namespace(&root, "index-stop-vix-reference-v1", identity, b"loser")
+        .err()
+        .unwrap_or_default();
+    drop(held);
+    assert!(lost_owner_race(&refusal), "{refusal}");
+    for own in [
+        "Input/output error (os error 5)",
+        "Boolean evidence already exists with different bytes; history preserved",
+        "",
+    ] {
+        assert!(!lost_owner_race(own), "{own}");
+    }
+    Ok(())
+}
+
+/// ledgers-2, D-1915: a receipt or body whose barrier failed is withdrawn, so
+/// no later run reuses it as committed history; the rerun then commits.
+#[test]
+fn a_file_whose_barrier_failed_is_withdrawn_and_the_rerun_commits() -> Result<(), String> {
+    for name in ["complete.bin", "body.bin"] {
+        let root = scratch(&format!("withdrawn-{}", name.replace('.', "-")));
+        let identity = [13_u8; 32];
+        let body = b"barrier evidence".to_vec();
+        let digest = brutex_core::blake3::hash(&body);
+        let directory = publication(&root, identity);
+        {
+            let _armed =
+                crate::fixed_tail::fault::Armed::arm(name, crate::fixed_tail::fault::Kind::Sync);
+            let attempt =
+                prepare_in_namespace(&root, "index-stop-vix-reference-v1", identity, &body)
+                    .and_then(|pending| {
+                        pending.verify_body(digest, body.len() as u64)?;
+                        pending.finish(identity, digest, body.len() as u64)
+                    });
+            assert!(attempt.is_err(), "{name}");
+        }
+        assert!(!directory.join(name).exists(), "{name}");
+        assert!(!committed(&directory)?, "{name}");
+        publish(&root, identity, &body)?;
+        assert!(committed(&directory)?, "{name}");
+    }
     Ok(())
 }

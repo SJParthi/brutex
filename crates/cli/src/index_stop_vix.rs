@@ -390,6 +390,12 @@ pub(crate) fn publish(
     if persistence::committed(&directory)? {
         return saved(root, identity, pin, feed, bounds);
     }
+    // `Some(why)` is the ONE race the receipt may answer: another publisher
+    // held the owner lock, so this call wrote nothing (ledgers-1, D-1908).
+    // Every other failure is this call's own, including a failed receipt or
+    // directory barrier after the 112 bytes were visible, and is returned: a
+    // whole-length receipt this call failed to make durable is not a
+    // publication.
     let published = catalog.with_current(|| {
         let image = capture(store, feed, catalog, bounds)?;
         let body = codec::encode(&image, bounds.bytes)?;
@@ -399,17 +405,23 @@ pub(crate) fn publish(
             bounds,
         )?;
         let digest = hash(&body);
-        let pending = persistence::prepare_in_namespace(root, NAMESPACE, lookup, &body)?;
+        let pending = match persistence::prepare_in_namespace(root, NAMESPACE, lookup, &body) {
+            Ok(pending) => pending,
+            Err(why) if persistence::lost_owner_race(&why) => return Ok(Some(why)),
+            Err(why) => return Err(why),
+        };
         pending.verify_body(digest, body.len() as u64)?;
         pending.finish(lookup, digest, body.len() as u64)?;
-        Ok(())
-    });
+        Ok(None)
+    })?;
     match published {
-        Ok(()) => Reader::open(root, identity, pin, bounds),
+        None => Reader::open(root, identity, pin, bounds),
         // A concurrent publisher of the same catalog finished first, and its
         // capture saw a different VIX store: its receipt is the answer.
-        Err(_) if persistence::committed(&directory)? => saved(root, identity, pin, feed, bounds),
-        Err(why) => Err(why),
+        Some(why) if persistence::committed(&directory)? => {
+            saved(root, identity, pin, feed, bounds).map_err(|saved| format!("{why}; {saved}"))
+        }
+        Some(why) => Err(why),
     }
 }
 

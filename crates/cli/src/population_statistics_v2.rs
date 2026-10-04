@@ -2288,6 +2288,16 @@ impl PopulationStatisticsV2Ledger {
                 .ok_or_else(|| "population-statistics remaining record underflowed".to_owned())?;
             if remaining < block_records {
                 validate_orphan_prefix(&mut self.data_file, cursor, remaining, &manifest)?;
+                // AN ORPHAN REPEATING A COMPLETED AUDIT IS REFUSED (D-1904,
+                // slice24-F3): the writer reuses a completed audit before it
+                // writes, so no crash leaves one, and resuming it would
+                // complete the same identity twice.
+                if self.audits.contains_key(&manifest.audit_id) {
+                    return Err(format!(
+                        "population-statistics trailing orphan duplicates completed audit {}",
+                        hex32(manifest.audit_id)
+                    ));
+                }
                 self.orphan = Some(OrphanV2 {
                     first_record: cursor,
                     present_records: remaining,
@@ -4539,7 +4549,21 @@ impl PopulationStatisticsV2Ledger {
             return Ok(PopulationStatisticsV2Append::Reused(existing));
         }
         if let Some(orphan) = self.orphan {
-            return self.resume_orphan(prepared, &orphan);
+            if orphan.manifest.audit_id == prepared.manifest.audit_id {
+                return self.resume_orphan(prepared, &orphan);
+            }
+            // A FOREIGN RECEIPT-LESS ORPHAN IS SCRATCH (D-1905, pop2-4): no
+            // Completion ever acknowledged it, and refusing every other audit
+            // because of it wedged the ledger for good.
+            crate::fixed_tail::discard_orphan(
+                &self.data_file,
+                &self.data_path,
+                record_offset(orphan.first_record)?,
+                &format!("audit {}", hex32(orphan.manifest.audit_id)),
+            )?;
+            self.orphan = None;
+            self.data_generation =
+                file_generation(&self.data_file, &self.data_path, self.bounds.file_bytes)?;
         }
         if self.completed_audits >= self.bounds.audits {
             return Err("population-statistics append reached audit bound".to_owned());
@@ -4572,24 +4596,36 @@ impl PopulationStatisticsV2Ledger {
             .len()
             .checked_sub(1)
             .ok_or_else(|| "planned block lacks completion".to_owned())?;
+        let block = crate::fixed_tail::start(&mut self.data_file, &self.data_path.display())?;
         for raw in planned
             .get(..completion)
             .ok_or_else(|| "planned data prefix is absent".to_owned())?
         {
-            append_raw_record(&mut self.data_file, raw)?;
+            append_raw_record(&mut self.data_file, &self.data_path, block, raw)?;
         }
-        self.data_file
-            .sync_all()
-            .map_err(|why| format!("cannot sync population-statistics Data block: {why}"))?;
+        crate::fixed_tail::sync_or_roll_back(
+            &self.data_file,
+            &self.data_path,
+            block,
+            File::sync_all,
+        )
+        .map_err(|why| format!("cannot sync population-statistics Data block: {why}"))?;
+        let block = crate::fixed_tail::start(&mut self.data_file, &self.data_path.display())?;
         append_raw_record(
             &mut self.data_file,
+            &self.data_path,
+            block,
             planned
                 .get(completion)
                 .ok_or_else(|| "planned completion is absent".to_owned())?,
         )?;
-        self.data_file
-            .sync_all()
-            .map_err(|why| format!("cannot sync population-statistics Completion: {why}"))?;
+        crate::fixed_tail::sync_or_roll_back(
+            &self.data_file,
+            &self.data_path,
+            block,
+            File::sync_all,
+        )
+        .map_err(|why| format!("cannot sync population-statistics Completion: {why}"))?;
         let manifest = prepared.manifest.with_sequence(self.completed_audits);
         let audit = validate_complete_block(&mut self.data_file, first, &manifest)?;
         self.audits.insert(prepared.manifest.audit_id, audit);
@@ -4626,24 +4662,36 @@ impl PopulationStatisticsV2Ledger {
             .checked_sub(1)
             .ok_or_else(|| "orphan retry plan lacks Completion".to_owned())?;
         let present = usize_of(orphan.present_records, "orphan present records")?;
+        let block = crate::fixed_tail::start(&mut self.data_file, &self.data_path.display())?;
         for raw in planned
             .get(present..completion)
             .ok_or_else(|| "orphan retry Data suffix is outside plan".to_owned())?
         {
-            append_raw_record(&mut self.data_file, raw)?;
+            append_raw_record(&mut self.data_file, &self.data_path, block, raw)?;
         }
-        self.data_file
-            .sync_all()
-            .map_err(|why| format!("cannot sync orphan Data suffix: {why}"))?;
+        crate::fixed_tail::sync_or_roll_back(
+            &self.data_file,
+            &self.data_path,
+            block,
+            File::sync_all,
+        )
+        .map_err(|why| format!("cannot sync orphan Data suffix: {why}"))?;
+        let block = crate::fixed_tail::start(&mut self.data_file, &self.data_path.display())?;
         append_raw_record(
             &mut self.data_file,
+            &self.data_path,
+            block,
             planned
                 .get(completion)
                 .ok_or_else(|| "orphan retry Completion is absent".to_owned())?,
         )?;
-        self.data_file
-            .sync_all()
-            .map_err(|why| format!("cannot sync orphan completion: {why}"))?;
+        crate::fixed_tail::sync_or_roll_back(
+            &self.data_file,
+            &self.data_path,
+            block,
+            File::sync_all,
+        )
+        .map_err(|why| format!("cannot sync orphan completion: {why}"))?;
         let audit =
             validate_complete_block(&mut self.data_file, orphan.first_record, &orphan.manifest)?;
         self.audits.insert(prepared.manifest.audit_id, audit);
@@ -5403,9 +5451,21 @@ fn ensure_header(file: &mut File, path: &Path) -> Result<(), PopulationStatistic
             .and_then(|_| file.write_all(&bytes))
             .and_then(|()| file.sync_all())
             .map_err(|why| format!("cannot initialize {}: {why}", path.display()))?;
-        return Ok(());
+        // The new names are durable too (D-1903, pop2-5): a file's own
+        // barrier does not make its directory entry durable.
+        return sync_parent(path);
     }
     verify_header(file, path)
+}
+
+/// Makes the directory entries of `path`'s parent durable.
+fn sync_parent(path: &Path) -> Result<(), PopulationStatisticsV2Refusal> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("{} has no parent directory", path.display()))?;
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|why| format!("cannot sync {}: {why}", parent.display()))
 }
 
 fn verify_header(file: &mut File, path: &Path) -> Result<(), PopulationStatisticsV2Refusal> {
@@ -5476,13 +5536,17 @@ fn read_raw_record(
     Ok(raw)
 }
 
+/// Appends one record of the block that began at `block`. A write error cuts
+/// the file back to `block`, so no ragged tail survives it (D-1900).
 fn append_raw_record(
     file: &mut File,
+    path: &Path,
+    block: u64,
     raw: &[u8; RECORD_BYTES],
 ) -> Result<(), PopulationStatisticsV2Refusal> {
-    file.seek(SeekFrom::End(0))
-        .and_then(|_| file.write_all(raw))
-        .map_err(|why| format!("cannot append population-statistics record: {why}"))
+    crate::fixed_tail::write_at_end(file, &path.display(), block, raw, |file, raw| {
+        file.write_all(raw)
+    })
 }
 
 fn open_file(
@@ -6216,6 +6280,59 @@ mod tests {
             .expect("resealed record writes");
     }
 
+    /// slice24-F1, D-1900: a short write or failed barrier on the Data block
+    /// or the Completion is cut back; the exact rerun writes.
+    #[test]
+    fn a_failed_write_or_barrier_is_cut_and_the_rerun_writes() {
+        use crate::fixed_tail::fault::{Armed, Kind};
+        let prepared = fixture(1);
+        for (case, (kind, skip)) in [
+            (
+                Kind::Write {
+                    keep: RECORD_BYTES / 2,
+                },
+                0,
+            ),
+            (
+                Kind::Write {
+                    keep: RECORD_BYTES / 2,
+                },
+                1,
+            ),
+            (Kind::Sync, 0),
+            (Kind::Sync, 1),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let root = TempRoot::new("fault");
+            let mut ledger = PopulationStatisticsV2Ledger::open_writer(root.path(), bounds())
+                .expect("writable fixture ledger opens");
+            let armed = Armed::arm_after(DATA_FILE, kind, skip);
+            let refusal = ledger.append(&prepared).err().unwrap_or_default();
+            assert!(!Armed::pending(), "case {case} fired");
+            drop(armed);
+            assert!(refusal.contains("injected"), "case {case}: {refusal}");
+            drop(ledger);
+            let len = std::fs::metadata(root.path().join(DATA_FILE))
+                .expect("stat fault file")
+                .len();
+            assert_eq!(
+                len.saturating_sub(HEADER_BYTES as u64) % RECORD_BYTES as u64,
+                0,
+                "case {case} ends on a whole record"
+            );
+            PopulationStatisticsV2Ledger::open_read(root.path(), bounds())
+                .expect("the cut ledger opens read-only");
+            let mut rerun = PopulationStatisticsV2Ledger::open_writer(root.path(), bounds())
+                .expect("writer reopens");
+            assert!(matches!(
+                rerun.append(&prepared).expect("the exact rerun writes"),
+                PopulationStatisticsV2Append::Written(_)
+            ));
+        }
+    }
+
     #[test]
     fn complete_pair_recomputes_reopens_pages_and_exactly_reuses() {
         let root = TempRoot::new("reopen");
@@ -6715,22 +6832,28 @@ mod tests {
         );
     }
 
-    #[test]
-    fn exact_trailing_prefix_retry_completes_and_foreign_retry_refuses() {
-        let root = TempRoot::new("orphan");
-        let prepared = fixture(2);
-        let ledger = PopulationStatisticsV2Ledger::open_writer(root.path(), bounds())
-            .expect("empty fixture ledger opens");
+    /// The half-written block a crashed writer left, at the end of `root`.
+    fn orphan_fixture(root: &Path, prepared: &PreparedPopulationStatisticsV2) -> usize {
+        drop(
+            PopulationStatisticsV2Ledger::open_writer(root, bounds())
+                .expect("empty fixture ledger opens"),
+        );
         let planned = prepared.records(0, 0).expect("planned bytes build");
-        drop(ledger);
-        let data_path = root.path().join(DATA_FILE);
         let prefix_len = planned.len() / 2;
         for raw in planned
             .get(..prefix_len)
             .expect("fixture prefix is inside plan")
         {
-            write_bytes(&data_path, raw);
+            write_bytes(&root.join(DATA_FILE), raw);
         }
+        prefix_len
+    }
+
+    #[test]
+    fn exact_trailing_prefix_retry_completes() {
+        let root = TempRoot::new("orphan");
+        let prepared = fixture(2);
+        let prefix_len = orphan_fixture(root.path(), &prepared);
         let mut orphaned = PopulationStatisticsV2Ledger::open_writer(root.path(), bounds())
             .expect("one valid trailing prefix is recoverable");
         assert_eq!(orphaned.completed_audits(), 0);
@@ -6744,11 +6867,6 @@ mod tests {
             u64::try_from(prefix_len).expect("fixture prefix fits u64")
         );
         assert!(prefix.present_records() < prefix.planned_records());
-        let foreign = fixture(3);
-        let why = orphaned
-            .append(&foreign)
-            .expect_err("foreign orphan retry refuses");
-        assert!(why.contains("trailing orphan belongs"));
         let completed = orphaned
             .append(&prepared)
             .expect("byte-identical orphan retry completes");
@@ -6759,6 +6877,75 @@ mod tests {
         drop(orphaned);
         PopulationStatisticsV2Ledger::open_read(root.path(), bounds())
             .expect("completed orphan reopens");
+    }
+
+    /// pop2-4, D-1905: a receipt-less orphan that is not this exact retry is
+    /// scratch. The writer cuts it and records, and the ledger is not wedged.
+    #[test]
+    fn a_foreign_writer_discards_a_receipt_less_orphan_and_records() {
+        let root = TempRoot::new("foreign-orphan");
+        orphan_fixture(root.path(), &fixture(2));
+        let foreign = fixture(3);
+        let mut writer = PopulationStatisticsV2Ledger::open_writer(root.path(), bounds())
+            .expect("one valid trailing prefix is recoverable");
+        let written = writer
+            .append(&foreign)
+            .expect("a foreign writer discards the orphan and records");
+        assert!(matches!(written, PopulationStatisticsV2Append::Written(_)));
+        drop(writer);
+        let mut reopened = PopulationStatisticsV2Ledger::open_read(root.path(), bounds())
+            .expect("the ledger reopens");
+        assert_eq!(reopened.completed_audits(), 1);
+        assert!(
+            reopened
+                .reopen_audit(&foreign.manifest.audit_id)
+                .expect("lookup works")
+                .is_some()
+        );
+        assert!(
+            reopened
+                .trailing_prefix_audit()
+                .expect("generation current")
+                .is_none(),
+            "the orphan is gone"
+        );
+    }
+
+    /// slice24-F3, D-1904: a trailing orphan repeating a completed audit is
+    /// refused at open rather than offered for a second completion.
+    #[test]
+    fn a_trailing_orphan_repeating_a_completed_audit_is_refused() {
+        let root = TempRoot::new("duplicate-orphan");
+        let prepared = fixture(4);
+        append_population_statistics_v2(root.path(), bounds(), &prepared).expect("commits");
+        let first = u64::try_from(prepared.records(0, 0).expect("first block builds").len())
+            .expect("record count fits u64");
+        let planned = prepared.records(1, first).expect("planned bytes build");
+        write_bytes(
+            &root.path().join(DATA_FILE),
+            planned.first().expect("a Data record"),
+        );
+        for refusal in [
+            PopulationStatisticsV2Ledger::open_read(root.path(), bounds()).err(),
+            PopulationStatisticsV2Ledger::open_writer(root.path(), bounds()).err(),
+        ] {
+            let refusal = refusal.unwrap_or_default();
+            assert!(refusal.contains("duplicates completed audit"), "{refusal}");
+        }
+    }
+
+    /// pop2-5, D-1903: creating the data file syncs the root. Measured on the
+    /// source because a directory entry's durability cannot be observed
+    /// without a power cut.
+    #[test]
+    fn creating_the_data_file_syncs_its_directory() {
+        let src = include_str!("population_statistics_v2.rs");
+        let shipping = src.split("\nmod tests {").next().unwrap_or(src);
+        let (_, body) = shipping
+            .split_once("fn ensure_header(")
+            .expect("ensure_header exists");
+        let body = body.split_once("\nfn ").map_or(body, |(head, _)| head);
+        assert!(body.contains("return sync_parent(path);"), "{body}");
     }
 
     #[test]

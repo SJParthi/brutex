@@ -44,7 +44,7 @@
 )]
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
@@ -2485,6 +2485,35 @@ impl ExecutionV4Ledger {
             if named_identity(&root)? != root_identity {
                 return Err("Execution V4 root changed while child files opened".to_owned());
             }
+            if writable {
+                // ledgers-3, D-1910: the writer cuts a kill-torn tail under its exclusive
+                // lock; the bytes past the last whole record were never acknowledged.
+                for (file, path, stride) in [
+                    (
+                        &parameter_file,
+                        &parameter_path,
+                        EXECUTION_V4_PARAMETER_BYTES,
+                    ),
+                    (
+                        &percentile_file,
+                        &percentile_path,
+                        EXECUTION_V4_PERCENTILE_BYTES,
+                    ),
+                    (
+                        &disposition_file,
+                        &disposition_path,
+                        EXECUTION_V4_DISPOSITION_BYTES,
+                    ),
+                    (
+                        &completion_file,
+                        &completion_path,
+                        EXECUTION_V4_COMPLETION_BYTES,
+                    ),
+                ] {
+                    let stride = usize_to_u64(stride, "heal stride")?;
+                    crate::fixed_tail::heal_torn_tail(file, path, 0, stride, &[])?;
+                }
+            }
             let lock_generation = file_generation(&lock_file, &lock_path, LOCK_MAX_BYTES)?;
             let parameter_generation =
                 file_generation(&parameter_file, &parameter_path, bounds.parameters.bytes)?;
@@ -2725,28 +2754,16 @@ impl ExecutionV4Ledger {
         self.require_append_bound(prepared, &trailing)?;
 
         self.append_parameter_suffix(prepared, trailing.parameters.len())?;
-        self.parameters
-            .file
-            .sync_data()
-            .map_err(|why| format!("cannot sync Execution V4 parameters: {why}"))?;
         self.parameters.refresh()?;
         self.parameter_records = self.parameters.record_count()?;
         self.require_unchanged()?;
 
         self.append_percentile_suffix(prepared, trailing.percentiles.len())?;
-        self.percentiles
-            .file
-            .sync_data()
-            .map_err(|why| format!("cannot sync Execution V4 percentiles: {why}"))?;
         self.percentiles.refresh()?;
         self.percentile_records = self.percentiles.record_count()?;
         self.require_unchanged()?;
 
         self.append_disposition_suffix(prepared, trailing.dispositions.len())?;
-        self.dispositions
-            .file
-            .sync_data()
-            .map_err(|why| format!("cannot sync Execution V4 dispositions: {why}"))?;
         self.dispositions.refresh()?;
         self.disposition_records = self.dispositions.record_count()?;
         self.require_unchanged()?;
@@ -2899,12 +2916,19 @@ impl ExecutionV4Ledger {
         prepared: &PreparedExecutionV4,
         start: usize,
     ) -> Result<(), ExecutionV4Refusal> {
-        for record in prepared.parameters.get(start..).ok_or_else(|| {
+        let records = prepared.parameters.get(start..).ok_or_else(|| {
             format!("Execution V4 parameter suffix start {start} is outside the block")
-        })? {
-            append_raw(&mut self.parameters.file, &record.encode()?)?;
-        }
-        Ok(())
+        })?;
+        // One block, one barrier: a failed write or barrier cuts every record
+        // this call wrote, so no unconfirmed orphan is left for a retry to
+        // "confirm" from the page cache (D-1900, sel-1).
+        crate::fixed_tail::append_block(
+            &mut self.parameters.file,
+            &self.parameters.path,
+            records.iter().map(ExecutionV4ParameterRecord::encode),
+            File::sync_data,
+        )
+        .map(|_| ())
     }
 
     fn append_percentile_suffix(
@@ -2912,12 +2936,19 @@ impl ExecutionV4Ledger {
         prepared: &PreparedExecutionV4,
         start: usize,
     ) -> Result<(), ExecutionV4Refusal> {
-        for record in prepared.percentiles.get(start..).ok_or_else(|| {
+        let records = prepared.percentiles.get(start..).ok_or_else(|| {
             format!("Execution V4 percentile suffix start {start} is outside the block")
-        })? {
-            append_raw(&mut self.percentiles.file, &record.encode()?)?;
-        }
-        Ok(())
+        })?;
+        // One block, one barrier: a failed write or barrier cuts every record
+        // this call wrote, so no unconfirmed orphan is left for a retry to
+        // "confirm" from the page cache (D-1900, sel-1).
+        crate::fixed_tail::append_block(
+            &mut self.percentiles.file,
+            &self.percentiles.path,
+            records.iter().map(ExecutionV4PercentileRecord::encode),
+            File::sync_data,
+        )
+        .map(|_| ())
     }
 
     fn append_disposition_suffix(
@@ -2925,12 +2956,19 @@ impl ExecutionV4Ledger {
         prepared: &PreparedExecutionV4,
         start: usize,
     ) -> Result<(), ExecutionV4Refusal> {
-        for record in prepared.dispositions.get(start..).ok_or_else(|| {
+        let records = prepared.dispositions.get(start..).ok_or_else(|| {
             format!("Execution V4 disposition suffix start {start} is outside the block")
-        })? {
-            append_raw(&mut self.dispositions.file, &record.encode()?)?;
-        }
-        Ok(())
+        })?;
+        // One block, one barrier: a failed write or barrier cuts every record
+        // this call wrote, so no unconfirmed orphan is left for a retry to
+        // "confirm" from the page cache (D-1900, sel-1).
+        crate::fixed_tail::append_block(
+            &mut self.dispositions.file,
+            &self.dispositions.path,
+            records.iter().map(ExecutionV4DispositionRecord::encode),
+            File::sync_data,
+        )
+        .map(|_| ())
     }
 
     fn append_completion(
@@ -2946,11 +2984,12 @@ impl ExecutionV4Ledger {
             first_percentile_record,
             first_disposition_record,
         )?;
-        append_raw(&mut self.completions.file, &completion.encode()?)?;
-        self.completions
-            .file
-            .sync_data()
-            .map_err(|why| format!("cannot sync Execution V4 Completion: {why}"))?;
+        crate::fixed_tail::append_block(
+            &mut self.completions.file,
+            &self.completions.path,
+            [completion.encode()],
+            File::sync_data,
+        )?;
         sync_directory(&self.root_file, &self.root)?;
         self.completions.refresh()?;
         self.completion_records = self.completions.record_count()?;
@@ -4928,12 +4967,6 @@ fn read_fixed_at<const N: usize>(
     Ok(raw)
 }
 
-fn append_raw(file: &mut File, raw: &[u8]) -> Result<(), ExecutionV4Refusal> {
-    file.seek(SeekFrom::End(0))
-        .and_then(|_| file.write_all(raw))
-        .map_err(|why| format!("cannot append Execution V4 fixed record: {why}"))
-}
-
 fn bounded_vec<T>(count: u64, max: u64, name: &str) -> Result<Vec<T>, ExecutionV4Refusal> {
     if count > max {
         return Err(format!(
@@ -5296,6 +5329,7 @@ impl<'a> FixedReader<'a> {
     reason = "private fixed-record tests fail fixture setup loudly and intentionally inspect exact canonical slots"
 )]
 mod tests {
+    use std::io::Write as _;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     #[cfg(unix)]
@@ -6433,6 +6467,40 @@ mod tests {
         );
     }
 
+    /// sel-1, D-1900: a short write or a failed barrier in any of the four
+    /// files is cut back, so the ledger stays open and the exact rerun commits.
+    #[test]
+    fn a_failed_write_or_barrier_in_any_file_is_cut_and_the_rerun_commits() {
+        use crate::fixed_tail::fault::{Armed, Kind};
+        let prepared = prepared(30);
+        for (name, stride) in [
+            (PARAMETER_FILE, EXECUTION_V4_PARAMETER_BYTES),
+            (PERCENTILE_FILE, EXECUTION_V4_PERCENTILE_BYTES),
+            (DISPOSITION_FILE, EXECUTION_V4_DISPOSITION_BYTES),
+            (COMPLETION_FILE, EXECUTION_V4_COMPLETION_BYTES),
+        ] {
+            for kind in [Kind::Write { keep: stride / 2 }, Kind::Sync] {
+                let root = TestRoot::new("fault-rollback");
+                let armed = Armed::arm(name, kind);
+                let refusal = commit_prepared_for_test(&root.path, bounds(), &prepared)
+                    .err()
+                    .unwrap_or_default();
+                assert!(!Armed::pending(), "{name} {kind:?} fired");
+                drop(armed);
+                assert!(refusal.contains("injected"), "{name} {kind:?}: {refusal}");
+                let len = std::fs::metadata(root.path.join(name))
+                    .expect("faulted file metadata")
+                    .len();
+                assert_eq!(len % stride as u64, 0, "{name} {kind:?} is whole");
+                ExecutionV4Ledger::open_read(&root.path, bounds())
+                    .expect("the faulted ledger still opens");
+                let rerun = commit_prepared_for_test(&root.path, bounds(), &prepared)
+                    .expect("the exact rerun commits");
+                assert!(rerun.was_written(), "{name} {kind:?}");
+            }
+        }
+    }
+
     #[test]
     fn every_execution_v4_companion_byte_is_bound_after_outer_resealing() {
         let root = TestRoot::new("all-byte-reseal");
@@ -6605,6 +6673,15 @@ mod tests {
         file.write_all(&[1]).expect("append ragged byte");
         file.sync_data().expect("sync ragged byte");
         assert!(ExecutionV4Ledger::open_read(&ragged.path, bounds()).is_err());
+        // ledgers-3, D-1910: the next writer cuts the never-acknowledged tail.
+        drop(ExecutionV4Ledger::open_write(&ragged.path, bounds()).expect("writer heals"));
+        assert_eq!(
+            std::fs::metadata(ragged.path.join(DISPOSITION_FILE))
+                .expect("measure")
+                .len(),
+            0
+        );
+        drop(ExecutionV4Ledger::open_read(&ragged.path, bounds()).expect("reader opens"));
 
         #[cfg(unix)]
         {

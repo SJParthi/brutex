@@ -81,6 +81,9 @@ mod build_provenance;
 mod commit_stamp;
 #[cfg(test)]
 mod equity_statement_tests;
+/// Fixed-stride ledger tails: rollback of a failed append and the writer-side
+/// cut of a torn tail (D-1900, D-1901, D-1902).
+mod fixed_tail;
 #[cfg(test)]
 mod operator_boundary_tests;
 mod readonly_file;
@@ -17377,9 +17380,13 @@ fn ensure_run_record(
                 confirm_result_directory(root)?;
                 Ok(Committed::Written(index))
             }
-            // A concurrent identical append or a completed write followed by a
-            // failed sync may already be present. Refresh the validated handle
-            // and compare all deterministic fields before confirming durability.
+            // A concurrent identical append may already be present. Refresh the
+            // validated handle and compare all deterministic fields before
+            // confirming durability. This call's OWN failed barrier is never
+            // promoted here: the append cut the record back, and
+            // `confirm_durable` refuses a path whose barrier already failed in
+            // this process, should that cut itself have failed (D-1900,
+            // resources-1).
             Err(first) => {
                 store.refresh().map_err(|why| {
                     format!("{first}; validating its append outcome also failed: {why}")
@@ -24463,32 +24470,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A kill that leaves a ragged detail tail cannot be repaired honestly: no
-    /// row follows it and no ledger marker is written.
+    /// A kill that leaves a ragged detail tail: the torn byte was never a row,
+    /// so the next writer cuts it under its lock and the exact preparation
+    /// resumes (sweep-2, D-1901). It still gains no ledger marker.
     #[test]
-    fn a_torn_prepared_tail_blocks_every_later_commit() {
+    fn a_torn_prepared_tail_is_cut_and_the_exact_preparation_resumes() {
         let root = result_commit_root("torn");
         let _ = std::fs::remove_dir_all(&root);
         let identity = [73; 32];
         let row = result_commit_frontier(identity, 11);
         super::ensure_frontier_rows(&root, &identity, &[row]).expect("whole preparation");
+        let path = crate::frontier::Frontier::path(&root);
+        let whole = std::fs::metadata(&path).expect("whole length").len();
         let mut file = std::fs::OpenOptions::new()
             .append(true)
-            .open(crate::frontier::Frontier::path(&root))
+            .open(&path)
             .expect("opens the simulated crash tail");
         std::io::Write::write_all(&mut file, &[0x7f]).expect("one torn byte");
         file.sync_all()
             .expect("the torn state is durable for the test");
 
-        let why = super::ensure_frontier_rows(&root, &identity, &[row])
-            .expect_err("a ragged file cannot be resumed");
-        assert!(
-            why.contains("whole rows") || why.contains("tail"),
-            "the structural damage is named: {why}"
+        super::ensure_frontier_rows(&root, &identity, &[row])
+            .expect("the writer cuts the torn byte and the exact block resumes");
+        assert_eq!(
+            std::fs::metadata(&path).expect("cut length").len(),
+            whole,
+            "exactly the torn byte was cut"
         );
         assert!(
             !crate::results::Results::path(&root).exists(),
-            "damage never receives a ledger marker"
+            "a preparation alone never receives a ledger marker"
         );
         let _ = std::fs::remove_dir_all(&root);
     }

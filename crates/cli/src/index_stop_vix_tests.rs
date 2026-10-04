@@ -842,3 +842,27 @@ fn index_stop_vix_compound_projection_excludes_each_writer_and_releases_on_error
     }
     Ok(())
 }
+
+/// ledgers-1, D-1908: the committed-receipt answer is reachable only from the
+/// owner-lock race. This call's own failure, a failed receipt barrier
+/// included, is returned. Measured on the source because a failed barrier
+/// after the receipt's bytes are visible cannot be produced here.
+#[test]
+fn only_a_lost_owner_race_is_answered_by_the_committed_receipt() {
+    let source = include_str!("index_stop_vix.rs");
+    let (_, publish) = source
+        .split_once("pub(crate) fn publish(")
+        .expect("publish exists");
+    let publish = publish
+        .split_once("\nfn saved(")
+        .map_or(publish, |(body, _)| body);
+    assert!(
+        !publish.contains("Err(_) if persistence::committed"),
+        "{publish}"
+    );
+    assert!(
+        publish.contains("Err(why) if persistence::lost_owner_race(&why) => return Ok(Some(why)),")
+    );
+    assert!(publish.contains("Some(why) if persistence::committed(&directory)? =>"));
+    assert!(publish.contains("Err(why) => return Err(why),"));
+}
