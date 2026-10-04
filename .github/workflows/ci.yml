@@ -3540,18 +3540,19 @@ jobs:
         id: probe
         run: |
           set -euo pipefail
-          n=$(git ls-files 'crates/*/Cargo.toml' | wc -l | tr -d ' ')
-          if [ "$n" -eq 0 ]; then
-            echo "has_crates=false" >> "$GITHUB_OUTPUT"
-            echo "::warning title=No crate exists yet::\
-          The toolchain gates (fmt, build, clippy, deny, test) compiled NOTHING \
-          on this commit because the workspace has no members. This is not a \
-          passing build — it is an empty one. It stops being possible as soon \
-          as crates/core is merged."
-          else
-            echo "has_crates=true" >> "$GITHUB_OUTPUT"
-            echo "$n crate manifest(s) tracked — the toolchain gates apply."
-          fi
+          # D-2315. Every decision below that used to be an awk, sed or grep
+          # pipeline is `.github/gates_jobs.rs`, built here once for this job
+          # and proven by its own tests before any gate trusts it. Gate 0's
+          # `spawns` lets a tool start only git, so cargo, rustc, rustfmt and
+          # clippy-driver stay one straight-line command each, writing a file
+          # the tool reads. Without a crate, `has_crates=false` and a warning:
+          # the toolchain gates would compile NOTHING, which is not a passing
+          # build but an empty one.
+          gates="$RUNNER_TEMP/gates-jobs"
+          rustc --edition=2024 --test -D warnings .github/gates_jobs.rs -o "$gates-tests"
+          "$gates-tests"
+          rustc --edition=2024 -D warnings .github/gates_jobs.rs -o "$gates"
+          "$gates" probe
 
       - name: Gate 6a — formatting
         if: steps.probe.outputs.has_crates == 'true'
@@ -3568,17 +3569,13 @@ jobs:
           # Cargo.lock intentionally contains target-gated browser bindings.
           # Their presence in the lock is legal; reachability from the current
           # host workspace graph is not. `cargo tree` prints no inverse tree
-          # when a named package is unreachable for this target.
-          for binding in wasm-bindgen js-sys web-sys; do
-            host_tree=$(cargo tree --workspace --locked -i "$binding" --prefix none)
-            if [ -n "$host_tree" ]; then
-              echo "FORBIDDEN HOST-REACHABLE BINDING: $binding"
-              printf '%s\n' "$host_tree"
-              echo "Lock-only target-gated entries are allowed; a host path is not."
-              exit 1
-            fi
-          done
-          echo "OK — wasm-bindgen, js-sys and web-sys are unreachable on the host graph."
+          # when a named package is unreachable for this target. The tool
+          # refuses a missing tree file, so dropping a line below is red.
+          t="$RUNNER_TEMP"
+          cargo tree --workspace --locked -i wasm-bindgen --prefix none > "$t/13a-wasm-bindgen.txt"
+          cargo tree --workspace --locked -i js-sys --prefix none > "$t/13a-js-sys.txt"
+          cargo tree --workspace --locked -i web-sys --prefix none > "$t/13a-web-sys.txt"
+          "$RUNNER_TEMP/gates-jobs" gate-13a "$t"
 
       - name: Gate 13b — nothing banned is in the host build graph
         if: steps.probe.outputs.has_crates == 'true'
@@ -3604,6 +3601,13 @@ jobs:
           #
           # The matcher proves itself first on a fixture holding `ring`, so a
           # pattern that matched nothing would be a red build, not a pass.
+          #
+          # The list stays here, as data, because
+          # `crates/core/tests/banned_lists.rs` reads it from this step; the
+          # matching (each name, or the name, `-` or `_` and more name, then
+          # ` v`), the fixture and the verdict are `gates_jobs gate-13b`. The
+          # depth-prefixed tree is read only to say why a refused package is
+          # built, since the tool may not start cargo itself.
           snake="$(printf 'py')thon"
           banned_built="
           pyo3 c${snake} rust${snake}-vm ${snake}3-sys
@@ -3619,32 +3623,13 @@ jobs:
           starlark rune gluon mun koto steel-core piccolo libR-sys perl-sys libperl-sys tcl
           ring aws-lc-rs aws-lc-sys cc openssl-sys
           "
-          pattern=$(printf '%s\n' $banned_built | sed 's/.*/&|&[-_][A-Za-z0-9_-]+/' | paste -sd'|')
-          pattern="^(${pattern}) v"
-          fixture=$(printf '%s\n' 'serde v1.0.0' 'ring v0.17.14' 'rustls v0.23.0' 'cc v1.2.0' 'ccache-sys v1.0.0' 'luau v1.0.0')
-          caught=$(grep -cE "$pattern" <<< "$fixture" || true)
-          if [ "$caught" != 2 ]; then
-            echo "GATE 13B'S MATCHER IS BROKEN: it caught $caught of the fixture's 2 banned lines."
-            exit 1
-          fi
-          tree=$(cargo tree --workspace --locked --offline -e normal,build,dev \
-                   --prefix none --format '{p}' | sort -u)
-          [ -n "$tree" ] || { echo "GATE 13B READ AN EMPTY BUILD GRAPH."; exit 1; }
-          hits=$(grep -E "$pattern" <<< "$tree" || true)
-          echo "host build graph: $(grep -c . <<< "$tree") package(s)"
-          if [ -n "$hits" ]; then
-            printf 'BANNED PACKAGE IN THE HOST BUILD GRAPH:\n%s\n' "$hits"
-            for p in $(awk '{print $1}' <<< "$hits"); do
-              echo "--- why $p is built:"
-              cargo tree --workspace --locked --offline -e normal,build,dev -i "$p" | head -20
-            done
-            echo
-            echo "CLAUDE.md section 2 forbids a vendored binding to another language"
-            echo "without exception. Lock-only optional entries are legal; a built"
-            echo "one is not."
-            exit 1
-          fi
-          echo "OK — no banned runtime or native crate is built for the host."
+          t="$RUNNER_TEMP"
+          cargo tree --workspace --locked --offline -e normal,build,dev \
+            --prefix none --format '{p}' > "$t/13b-tree.txt"
+          cargo tree --workspace --locked --offline -e normal,build,dev \
+            --prefix depth --format '{p}' > "$t/13b-depth.txt"
+          # shellcheck disable=SC2086
+          "$RUNNER_TEMP/gates-jobs" gate-13b "$t/13b-tree.txt" "$t/13b-depth.txt" $banned_built
 
       - name: Gate 4 — locked, offline
         if: steps.probe.outputs.has_crates == 'true'
@@ -3667,49 +3652,13 @@ jobs:
           #
           # The extraction proves itself first on two fixture messages, one
           # clean and one that links `ring_core`, so a pattern that matched
-          # nothing would be a red build, not a pass.
-          linked() {
-            grep '"reason":"build-script-executed"' "$1" \
-              | { grep -o '"linked_libs":\[[^]]*\]' || true; } \
-              | { grep -v '"linked_libs":\[\]' || true; }
-          }
-          fx="${RUNNER_TEMP:-/tmp}/gate13c-fixture.json"
-          printf '%s\n' \
-            '{"reason":"build-script-executed","package_id":"a","linked_libs":[],"out_dir":"/x"}' \
-            '{"reason":"build-script-executed","package_id":"ring","linked_libs":["static=ring_core"],"out_dir":"/y"}' \
-            > "$fx"
-          [ "$(linked "$fx" | grep -c .)" = 1 ] \
-            || { echo "GATE 13C'S EXTRACTION IS BROKEN on its own fixture."; exit 1; }
-          msgs="${RUNNER_TEMP:-/tmp}/gate13c-build.json"
+          # nothing would be a red build, not a pass. The fixture, the
+          # extraction of `linked_libs` and `out_dir`, the walk for `*.o`,
+          # `*.obj`, `*.a`, `*.lib`, `*.so`, `*.dylib` and `*.dll` files and the
+          # verdict are `gates_jobs gate-13c`.
+          msgs="$RUNNER_TEMP/gate13c-build.json"
           cargo build --workspace --locked --offline --all-targets --message-format=json > "$msgs"
-          n=$(grep -c '"reason":"build-script-executed"' "$msgs" || true)
-          [ "$n" -gt 0 ] || { echo "GATE 13C SAW NO BUILD SCRIPT RUN. libc has one; the read is broken."; exit 1; }
-          bad=0
-          libs=$(linked "$msgs")
-          if [ -n "$libs" ]; then
-            printf 'A BUILD SCRIPT LINKS A NATIVE LIBRARY:\n%s\n' "$libs"
-            bad=1
-          fi
-          : > "${RUNNER_TEMP:-/tmp}/gate13c-objects.txt"
-          while IFS= read -r dir; do
-            [ -d "$dir" ] || continue
-            find "$dir" -type f \( -name '*.o' -o -name '*.obj' -o -name '*.a' -o -name '*.lib' \
-                 -o -name '*.so' -o -name '*.dylib' -o -name '*.dll' \) \
-              >> "${RUNNER_TEMP:-/tmp}/gate13c-objects.txt"
-          done < <(grep '"reason":"build-script-executed"' "$msgs" \
-                   | { grep -o '"out_dir":"[^"]*"' || true; } | sed 's/^"out_dir":"//; s/"$//')
-          if [ -s "${RUNNER_TEMP:-/tmp}/gate13c-objects.txt" ]; then
-            echo "A BUILD SCRIPT LEFT NATIVE OBJECTS IN ITS OUTPUT DIRECTORY:"
-            sed 's/^/  /' "${RUNNER_TEMP:-/tmp}/gate13c-objects.txt"
-            bad=1
-          fi
-          echo "read ${n} build-script run(s)"
-          if [ "$bad" -ne 0 ]; then
-            echo "CLAUDE.md section 2 forbids a vendored binding to another language"
-            echo "and native code compiled through a build script, without exception."
-            exit 1
-          fi
-          echo "OK — no build script linked or compiled native code."
+          "$RUNNER_TEMP/gates-jobs" gate-13c "$msgs"
 
       - name: Gate 6b — clippy
         if: steps.probe.outputs.has_crates == 'true'
@@ -3720,15 +3669,16 @@ jobs:
           set -euo pipefail
           # D-1600 (hunt-ci-5). They are built by bare rustc, so 6a and 6b
           # never read them. Test and non-test builds both, as gate 0 does.
-          tools=$(git ls-files '.github/*.rs')
-          [ -n "$tools" ] || { echo "GATE 6c READ NO TOOL."; exit 1; }
-          out="${RUNNER_TEMP:-/tmp}/gate-6c"
-          for f in $tools; do
-            rustfmt --edition 2024 --check "$f"
-            clippy-driver --edition=2024 -D warnings "$f" -o "$out"
-            clippy-driver --edition=2024 --test -D warnings "$f" -o "$out-t"
-          done
-          echo "OK — $(wc -w <<< "$tools") tool(s) are formatted and clippy-clean."
+          # `gates_jobs tools` lists them and refuses an empty list; xargs
+          # hands clippy-driver one root at a time and fails if any fails.
+          tools=$("$RUNNER_TEMP/gates-jobs" tools)
+          out="$RUNNER_TEMP/gate-6c"
+          # shellcheck disable=SC2086
+          rustfmt --edition 2024 --check $tools
+          xargs -n1 clippy-driver --edition=2024 -D warnings -o "$out" <<< "$tools"
+          xargs -n1 clippy-driver --edition=2024 --test -D warnings -o "$out-t" <<< "$tools"
+          echo "OK — every tool listed is formatted and clippy-clean:"
+          echo "$tools"
 
       - name: Gate 5 — unsafe is denied, exceptions are counted
         run: |
@@ -3745,15 +3695,11 @@ jobs:
           # been invisible. Counting occurrences directly fixes both.
           # D-1610 (hunt-ci-13): `allow(unsafe_code, reason = ..)` and
           # `expect(unsafe_code)` are exceptions too, not only the bare form.
-          pat='(allow|expect)\(unsafe_code[,)]'
-          n=$( { git ls-files '*.rs' | xargs -r grep -ohE "$pat" || true; } \
-               | wc -l | tr -d ' ')
-          echo "documented unsafe exceptions: $n"
-          if [ "$n" -gt 3 ]; then
-            echo "More than 3 unsafe exceptions. Each needs a decision entry."
-            git ls-files '*.rs' | xargs -r grep -nE "$pat"
-            exit 1
-          fi
+          # D-2315: `gates_jobs gate-5` reads every tracked `.rs` itself, so a
+          # path xargs would split or misquote is read too, and an unreadable
+          # file is a refusal rather than a silent zero.
+          gates="$RUNNER_TEMP/gates-jobs"
+          "$gates" gate-5
 
       - name: Gate 3 — dependency policy
         if: steps.probe.outputs.has_crates == 'true'
@@ -3801,30 +3747,33 @@ jobs:
           # Tests step already compiled, as their READMEs describe. Two viewer
           # tests need an operator-captured store and vocabulary and are
           # skipped BY NAME; docs/06-limits.md says so.
-          t="${RUNNER_TEMP:-/tmp}/web-native"; mkdir -p "$t"
+          #
+          # D-2315: `gates_jobs gate-6d` finds exactly one rlib per linked
+          # crate in cargo's messages (refusing none or two), writes them as
+          # rustc `@file` arguments, and writes the api rlib's and the two
+          # wrapper sources' SHA-256, which the tests read through `env!`.
+          t="$RUNNER_TEMP/web-native"; mkdir -p "$t"
           cargo build -p api -p cli --lib --tests --locked --message-format=json > "$t/art.json"
-          ext=""
-          for n in serde serde_json axum tower tokio api cli brutex_core vocab; do
-            p=$( { grep '"reason":"compiler-artifact"' "$t/art.json" \
-                   | grep -o "\"crate_types\":\[\"lib\"\],\"name\":\"$n\".*" \
-                   | grep -o '"filenames":\["[^"]*\.rlib"' || true; } | sed 's/.*\["//; s/"$//' | sort -u)
-            [ "$(grep -c . <<< "$p")" -eq 1 ] || { echo "GATE 6d: no single rlib for $n: $p"; exit 1; }
-            ext="$ext --extern $n=$p"
-          done
-          api=$(sed -E 's/.* --extern api=([^ ]+).*/\1/' <<< "$ext")
-          sha() { sha256sum "$1" | cut -c1-64; }
-          export BRUTEX_INSPECTOR_API_SHA256="$(sha "$api")" BRUTEX_VIEWER_API_SHA256="$(sha "$api")"
-          export BRUTEX_INSPECTOR_SOURCE_SHA256="$(sha web/sweep-readiness/main-inspector.rs)"
-          export BRUTEX_VIEWER_SOURCE_SHA256="$(sha web/saved-backtest/viewer.rs)"
+          "$RUNNER_TEMP/gates-jobs" gate-6d "$t/art.json" "$t"
+          read -r api_sha inspector_sha viewer_sha < "$t/sha.txt"
+          export BRUTEX_INSPECTOR_API_SHA256="$api_sha" BRUTEX_VIEWER_API_SHA256="$api_sha"
+          export BRUTEX_INSPECTOR_SOURCE_SHA256="$inspector_sha" BRUTEX_VIEWER_SOURCE_SHA256="$viewer_sha"
+          deps="dependency=target/debug/deps"
+          skip="--skip vocabulary_comes_from_linked_rust_table_and_foreign_grid_refuses"
+          skip="$skip --skip exact_saved_search_rejects_foreign_pin_through_existing_handler"
           rustc --edition=2024 -D warnings web/sweep-readiness/verify.rs -o "$t/verify"
-          for f in web/sweep-readiness/frontend-publish.rs web/sweep-readiness/main-inspector.rs \
-                   web/sweep-readiness/deployment-preflight.rs web/saved-backtest/viewer.rs; do
-            b=$(basename "$f" .rs)
-            # shellcheck disable=SC2086
-            rustc --edition=2024 --test -D warnings "$f" -o "$t/$b" -L dependency=target/debug/deps $ext
-            ( cd "$t" && "./$b" --skip vocabulary_comes_from_linked_rust_table_and_foreign_grid_refuses \
-                                --skip exact_saved_search_rejects_foreign_pin_through_existing_handler )
-          done
+          rustc --edition=2024 --test -D warnings web/sweep-readiness/frontend-publish.rs -o "$t/frontend-publish" -L "$deps" @"$t/externs"
+          rustc --edition=2024 --test -D warnings web/sweep-readiness/main-inspector.rs -o "$t/main-inspector" -L "$deps" @"$t/externs"
+          rustc --edition=2024 --test -D warnings web/sweep-readiness/deployment-preflight.rs -o "$t/deployment-preflight" -L "$deps" @"$t/externs"
+          rustc --edition=2024 --test -D warnings web/saved-backtest/viewer.rs -o "$t/viewer" -L "$deps" @"$t/externs"
+          # shellcheck disable=SC2086
+          (cd "$t" && ./frontend-publish $skip)
+          # shellcheck disable=SC2086
+          (cd "$t" && ./main-inspector $skip)
+          # shellcheck disable=SC2086
+          (cd "$t" && ./deployment-preflight $skip)
+          # shellcheck disable=SC2086
+          (cd "$t" && ./viewer $skip)
           echo "OK — every native test under web/ but the two named above ran."
 
       - name: The browser crate actually builds for the browser
@@ -3851,13 +3800,15 @@ jobs:
       - name: Measure
         run: |
           set -euo pipefail
-          n=$(git ls-files 'crates/*/Cargo.toml' | wc -l | tr -d ' ')
-          if [ "$n" -eq 0 ]; then
-            echo "::warning title=Coverage measured nothing::\
-          No crate exists yet, so 100% coverage is vacuously true. \
-          See docs/06-limits.md section 7."
-            exit 0
-          fi
+          # D-2315: the tool for this job and gate 20, built and proven once.
+          gates="$RUNNER_TEMP/gates-jobs"
+          rustc --edition=2024 --test -D warnings .github/gates_jobs.rs -o "$gates-tests"
+          "$gates-tests"
+          rustc --edition=2024 -D warnings .github/gates_jobs.rs -o "$gates"
+          # `no-crates` exits 0 ONLY when no crate manifest is tracked (and
+          # warns that 100% is then vacuous, docs/06-limits.md section 7); any
+          # other answer, a failure to ask git included, measures.
+          "$gates" no-crates && exit 0
           # THE MEASURING INSTRUMENT IS PINNED. `--locked` pins the tool's own
           # dependency graph, not the tool version, so this used to install
           # whatever cargo-llvm-cov was newest that day. `--fail-under-regions
@@ -4002,62 +3953,24 @@ jobs:
           # file to the end of the report, so every crate sorting after
           # `telemetry/` was counted as telemetry. Measured on this tree: it
           # swept in `crates/vocab`. See D-0167.
-          read -r total zero <<EOF
-          $(awk '
-            /^\/.*\.rs:$/ { f=0 }
-            /telemetry\/src\/[a-z_]+\.rs:/ { f=1; next }
-            f && /^ *[0-9]+\| *[0-9]+\|/ { t++; if ($0 ~ /^ *[0-9]+\| *0\|/) z++ }
-            END { printf "%d %d\n", t+0, z+0 }
-          ' /tmp/cov.txt)
-          EOF
-          if [ "$total" -lt 500 ] || [ $(( zero * 2 )) -gt "$total" ]; then
-            echo "NO USABLE COVERAGE PROFILE — $zero of $total telemetry lines"
-            echo "read as uncovered. A real profile leaves about 19. The measure"
-            echo "step did not produce usable data, which usually means the"
-            echo "workspace failed to BUILD or the target directory was cleared"
-            echo "underneath it. This gate is reporting THAT, not a coverage"
-            echo "regression. Measured: a stale profile read 13.96% where a"
-            echo "real one read 96.80%."
-            exit 1
-          fi
-
-          # THE CLEAR IS THE WHOLE CORRECTNESS OF THIS BLOCK, AND IT WAS MISSING.
-          # `f` held the last telemetry file name until the next telemetry file
-          # replaced it -- never until the next file of ANY kind. Since the
-          # report is in path order, every uncovered line in every crate sorting
-          # after `crates/telemetry/` was attributed to
+          #
+          # THE CLEAR IS THE WHOLE CORRECTNESS OF THE ATTRIBUTION, AND IT WAS
+          # MISSING. `f` held the last telemetry file name until the next
+          # telemetry file replaced it -- never until the next file of ANY kind.
+          # Since the report is in path order, every uncovered line in every
+          # crate sorting after `crates/telemetry/` was attributed to
           # `telemetry/src/value.rs`. MEASURED on this tree before the fix:
           # `value.rs 1`, where `value.rs` has ZERO uncovered lines and the line
           # belongs to `crates/vocab/src/mask.rs`. The gate would have sent an
           # operator to the wrong crate and asked them to declare a telemetry
           # limit that does not exist. D-0167.
-          actual=$(awk '
-            /^\/.*\.rs:$/ { f="" }
-            /telemetry\/src\/[a-z_]+\.rs:/ { f=$0; sub(".*/crates/telemetry/src/","",f); sub(":","",f); next }
-            f && /^ *[0-9]+\| *0\|/ { n[f]++ }
-            END { for (k in n) printf "%s %d\n", k, n[k] }
-          ' /tmp/cov.txt | sort)
-          # `paste` joins with a TAB and awk prints a SPACE; normalise, or the
-          # gate fails on whitespace while every count agrees.
-          want=$(printf '%s\n' $declared | paste - - | tr '\t' ' ' | sort)
-
-          echo "declared:"; printf '%s\n' "$want"   | sed 's/^/  /'
-          echo "measured:"; printf '%s\n' "$actual" | sed 's/^/  /'
-
-          if [ "$want" != "$actual" ]; then
-            echo
-            echo "THE LOGGER'S UNCOVERED SET IS NOT THE DECLARED ONE."
-            echo
-            diff <(printf '%s\n' "$want") <(printf '%s\n' "$actual") || true
-            echo
-            echo "A file with MORE uncovered lines than declared has a new gap:"
-            echo "cover it, or add it to docs/06-limits.md section 54 with the"
-            echo "reason it cannot run and raise the count here in the same"
-            echo "commit. A file with FEWER has a declaration that is now false:"
-            echo "lower the count and delete the prose that justified it."
-            exit 1
-          fi
-          echo "OK — every uncovered line in crates/telemetry is declared."
+          #
+          # D-2315: the profile check (at least 500 counted telemetry lines,
+          # at most half uncovered), the per-file attribution with that clear,
+          # and the exact comparison against `declared` are
+          # `gates_jobs gate-20`, pinned by its tests.
+          # shellcheck disable=SC2086
+          "$RUNNER_TEMP/gates-jobs" gate-20 /tmp/cov.txt $declared
 
       - name: Retain the measured line report for diagnosis
         if: always()
@@ -4110,7 +4023,14 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p /tmp/mutation-plan
-          base="$BASE_REF"
+          # D-2315: the base choice, the diff, the walked-file check, the
+          # self-test's edit and verdict and the matrix output are
+          # `.github/gates_jobs.rs`; cargo-mutants and mutation_gate are still
+          # started here, since gate 0 lets a tool start only git.
+          gates="$RUNNER_TEMP/gates-jobs"
+          rustc --edition=2024 --test -D warnings .github/gates_jobs.rs -o "$gates-tests"
+          "$gates-tests"
+          rustc --edition=2024 -D warnings .github/gates_jobs.rs -o "$gates"
           # ── D-0677: ONE PULL REQUEST, ONE COMMIT, AND IT EXPIRES ──────────
           #
           # PR #13 carries 589,022 inserted lines under crates/*/src against
@@ -4129,16 +4049,8 @@ jobs:
           # anything cut from `main` afterwards, and every later pull request
           # is planned against its own base exactly as before. An unreachable
           # object makes `merge-base` fail, which reads as "not an ancestor".
-          integration=0d4fef1391db280b11492e0cae40c9d38720a798
-          if [ -n "$base" ] \
-            && git merge-base --is-ancestor "$integration" HEAD 2>/dev/null \
-            && ! git merge-base --is-ancestor "$integration" "$base" 2>/dev/null; then
-            echo "D-0677: planning mutations against $integration, not $base"
-            base="$integration"
-          fi
-          if [ -z "$base" ]; then
-            base=$(git rev-parse --verify HEAD~1 2>/dev/null || true)
-          fi
+          # The commit is `INTEGRATION` in the tool; with no base at all the
+          # plan reads HEAD~1, and with no HEAD~1 the root commit's own diff.
           # ── D-1119: EVERY FILE CARGO-MUTANTS WALKS, UNDER THE NAME IT USES ──
           #
           # The pathspec was `crates/*/src/*.rs`, so a change to a file mounted
@@ -4150,39 +4062,28 @@ jobs:
           # `mutation_gate respell` re-heads each diff section under every
           # spelling cargo-mutants walks. Files it does not walk (tests,
           # benches, build scripts) stay in the diff and match nothing.
-          if [ -n "$base" ]; then
-            git diff "$base"...HEAD -- 'crates/*.rs' > /tmp/mutation-plan/raw.diff
-          else
-            git diff-tree --no-commit-id --root -p HEAD -- 'crates/*.rs' > /tmp/mutation-plan/raw.diff
-          fi
+          "$gates" mutant-diff /tmp/mutation-plan/raw.diff
           cargo mutants --list-files --colors never > /tmp/mutation-plan/walked.txt
-          [ -s /tmp/mutation-plan/walked.txt ] || { echo "GATE 18: cargo-mutants walked no file"; exit 1; }
+          "$gates" mutant-walked /tmp/mutation-plan/walked.txt
           /tmp/mutation-gate respell /tmp/mutation-plan/raw.diff /tmp/mutation-plan/walked.txt \
             > /tmp/mutation-plan/changed.diff
 
           # SELF-TEST: a change inside the build-time verifier must plan a
           # mutant. Before D-1119 this list was empty, and nothing said so.
-          probe=crates/cli/build_provenance.rs
-          at=$(awk '/^fn delta_varint\(/ { print NR + 1; exit }' "$probe")
-          [ -n "$at" ] || { echo "GATE 18 SELF-TEST: no delta_varint in $probe"; exit 1; }
-          sed -i "${at}s|\$| // gate 18 self-test|" "$probe"
-          git diff -- "$probe" > /tmp/mutation-plan/probe.diff
+          # `mutant-probe-mark` appends a comment to the line after
+          # `fn delta_varint(` in crates/cli/build_provenance.rs and writes git's
+          # diff of it; `mutant-probe-check` restores the file and refuses a
+          # list that names no mutant in it.
+          "$gates" mutant-probe-mark /tmp/mutation-plan/probe.diff
           /tmp/mutation-gate respell /tmp/mutation-plan/probe.diff /tmp/mutation-plan/walked.txt \
             > /tmp/mutation-plan/probe-spelled.diff
           cargo mutants --list --in-diff /tmp/mutation-plan/probe-spelled.diff --colors never -p cli \
             > /tmp/mutation-plan/probe.txt
-          git checkout -- "$probe"
-          if ! grep -q 'build_provenance\.rs:' /tmp/mutation-plan/probe.txt; then
-            echo "GATE 18 SELF-TEST: a change to $probe plans no mutant."
-            echo "cargo-mutants no longer walks it, or names it in a way respell"
-            echo "does not reach. Either way the plan below would be blind to it."
-            exit 1
-          fi
-          echo "self-test: $(grep -c . /tmp/mutation-plan/probe.txt) mutant(s) planned for a one-line change in $probe"
+          "$gates" mutant-probe-check /tmp/mutation-plan/probe.txt
 
           cargo mutants --list --in-diff /tmp/mutation-plan/changed.diff --colors never > /tmp/mutation-plan/all.txt
-          matrix=$(/tmp/mutation-gate plan /tmp/mutation-plan/all.txt)
-          printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
+          /tmp/mutation-gate plan /tmp/mutation-plan/all.txt > "$RUNNER_TEMP/mutation-matrix.json"
+          "$gates" output matrix "$RUNNER_TEMP/mutation-matrix.json"
           git rev-parse HEAD > /tmp/mutation-plan/commit.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -4318,20 +4219,18 @@ jobs:
           # rather than a pass: CLAUDE.md section 3 rule 4 makes this gate the
           # enforcement mechanism for constant per-operation cost, and a gate
           # cannot enforce over nothing. See D-0034.
-          n=$(git ls-files 'crates/*/benches/*.rs' | wc -l | tr -d ' ')
-          if [ "$n" -eq 0 ]; then
-            echo "GATE 8 MEASURED NOTHING — no crate carries a bench."
-            echo "Write one, or record abandoning the invariant in"
-            echo "docs/05-decisions.md. This step does not skip."
-            exit 1
-          fi
-          # The `if` above names the cause; this line is the refusal gate 14
-          # proves. D-1601's `step-runs` (rightly) refuses a line inside an
-          # `if` as one that may never run, so the proof needs a TOP-LEVEL
+          gates="$RUNNER_TEMP/gates-jobs"
+          rustc --edition=2024 --test -D warnings .github/gates_jobs.rs -o "$gates-tests"
+          "$gates-tests"
+          rustc --edition=2024 -D warnings .github/gates_jobs.rs -o "$gates"
+          # `gates_jobs gate-8` counts the tracked benches, names the cause and
+          # refuses when there are none (D-2315); the next line is the refusal
+          # gate 14 proves. D-1601's `step-runs` (rightly) refuses a line inside
+          # an `if` as one that may never run, so the proof needs a TOP-LEVEL
           # command that fails the step when no bench is tracked: git exits 1
           # on a pathspec that matches nothing. D-1460.
+          "$gates" gate-8
           git ls-files --error-unmatch 'crates/*/benches/*.rs' > /dev/null
-          echo "$n bench source file(s) tracked."
           # Each harness is `harness = false`: it prints every number it took
           # and exits non-zero on a breach. See docs/04-invariants.md C-01,
           # C-07 through C-10 for the ratios and the ceiling.
@@ -4354,22 +4253,21 @@ jobs:
 
       - name: Gate W1 — web/build matches web/src
         run: |
+          set -euo pipefail
+          # D-2315: the verdicts of W1, W3, W4, W5 and W6 are
+          # `.github/gates_jobs.rs`, built here once for this job. The front
+          # end's own toolchain (npm, node) still runs here, as section 2
+          # allows; the tool reads what it wrote.
+          gates="$RUNNER_TEMP/gates-jobs"
+          rustc --edition=2024 --test -D warnings .github/gates_jobs.rs -o "$gates-tests"
+          "$gates-tests"
+          rustc --edition=2024 -D warnings .github/gates_jobs.rs -o "$gates"
           npm --prefix web run build
-          if ! git diff --exit-code --stat -- web/build; then
-            echo
-            echo "The committed bundle is not what this source builds."
-            echo
-            echo "web/build is served from disk by the Rust binary, so the"
-            echo "artifact in this repository is what an operator actually"
-            echo "runs. A source change committed without a rebuild ships a"
-            echo "page that does not match its own source, and nothing else"
-            echo "in CI would notice."
-            echo
-            echo "Fix: npm --prefix web run build, then commit web/build."
-            exit 1
-          fi
-          echo "The bundle corresponds to the source. Fingerprint:"
-          cat web/build/_app/version.json
+          # web/build is served from disk by the Rust binary, so the artifact
+          # in this repository is what an operator actually runs. `w1` refuses
+          # when `git diff --exit-code -- web/build` finds the committed bundle
+          # is not what this source builds, and prints the fingerprint when it is.
+          "$gates" w1
 
       - name: Gate W2 — the front-end tests
         run: node --test web/tests/*.test.js
@@ -4393,34 +4291,11 @@ jobs:
           # for a reason nobody can act on, so it now reads either form.
           # `-i` for the case and `ERRORS?` for the singular; `tail -1` still
           # takes the SUMMARY, which is the last such line in both formats.
-          FOUND=$(grep -oiE '[0-9]+ ERRORS?' /tmp/check.log | tail -1 | grep -oE '[0-9]+' || echo missing)
-          if [ "$FOUND" = missing ]; then
-            echo "svelte-check produced no ERRORS line — it did not run, and a"
-            echo "gate that cannot run must fail rather than pass."
-            exit 1
-          fi
-          echo "svelte-check errors: $FOUND (ceiling $CEILING)"
-          if [ "$FOUND" -gt "$CEILING" ]; then
-            echo "The tree types clean at $CEILING and this change does not."
-            echo
-            echo "Look for the ROOT, not the reported line. Every error this"
-            echo "gate has ever counted in bulk came from a handful of untyped"
-            echo "declarations — an empty array inside \$state(...) inferring"
-            echo "never[], or a callback parameter with no annotation — and"
-            echo "the errors surface at the READERS, never at the cause."
-            echo
-            echo "A JSDoc cast belongs INSIDE \$state(...), not above it:"
-            echo "  let x = \$state(/** @type {{ rows: any[] }} */ ({ rows: [] }));"
-            echo "and the block must open with /** — a plain /* is not read."
-            echo
-            echo "If this genuinely cannot reach zero, raise CEILING in this"
-            echo "file and say why in docs/06-limits.md."
-            exit 1
-          fi
-          if [ "$FOUND" -lt "$CEILING" ]; then
-            echo "Fewer than the ceiling. Lower CEILING to $FOUND in this file so"
-            echo "the ratchet keeps its meaning."
-          fi
+          # The match (digits, one space, `error` in any case), the summary as
+          # the LAST such match, the refusal when there is none, and the
+          # ceiling are `gates_jobs w3` (D-2315). Raising CEILING above is the
+          # escape hatch, and it is said why in docs/06-limits.md.
+          "$RUNNER_TEMP/gates-jobs" w3 /tmp/check.log "$CEILING"
 
       - name: Gate W5 — no comment swallows a CSS rule
         run: |
@@ -4445,7 +4320,11 @@ jobs:
           # written inline here was a second language in a tracked file outside
           # web/, and gate 0 now refuses an interpreter handed a program inline.
           # It refuses an empty file list itself.
-          node web/ci/css-comments.mjs $(find web/src -name '*.svelte' -o -name '*.css' | sort)
+          # D-2315: `gates_jobs w5-files` lists every `.svelte` and `.css` path
+          # under web/src, sorted, exactly as `find -name ... | sort` did, and
+          # refuses an empty list before the program does.
+          "$RUNNER_TEMP/gates-jobs" w5-files > "$RUNNER_TEMP/w5-files.txt"
+          xargs -d '\n' node web/ci/css-comments.mjs < "$RUNNER_TEMP/w5-files.txt"
 
       - name: Gate W6 — the masters script spends no vendor request on load
         run: |
@@ -4466,14 +4345,8 @@ jobs:
           #
           # So the HTML half stayed in Rust — one script tag, external, no
           # inline handler — and this is the half that only makes sense here.
-          f=web/masters.js
-          if [ ! -f "$f" ]; then
-            echo "$f is missing. /masters loads it by name; without it the page"
-            echo "renders and every status cell stays empty."
-            exit 1
-          fi
-          # THE TEXT BELOW SEES ONE SPELLING, SO IT IS NOT THE PROOF (D-1118).
-          # It refuses `refresh();` at column zero and passed an indented call,
+          # THE TEXT CHECKS SEE ONE SPELLING, SO THEY ARE NOT THE PROOF (D-1118).
+          # They refuse `refresh();` at column zero and passed an indented call,
           # `verify()` with no semicolon, `setTimeout(refresh)`, a `load` or
           # `DOMContentLoaded` listener and an `onload` assignment, each of
           # which spends the request on load (LATE gates-and-ci #11). The proof
@@ -4483,48 +4356,17 @@ jobs:
           # for `/masters/status.json` and nothing else. Gate W2 runs it; this
           # step refuses if it is gone, and keeps the text checks as the fast
           # first answer.
-          t=web/tests/masters-load.test.js
-          if ! git ls-files --error-unmatch "$t" >/dev/null 2>&1; then
-            echo "$t is not tracked. It is what proves opening /masters spends"
-            echo "no vendor request; the text checks below see one spelling."
-            exit 1
-          fi
-          bad=0
-          for fn in refresh verify; do
-            if ! grep -q "addEventListener('click', $fn)" "$f"; then
-              echo "\`$fn\` is not bound to a press in $f."
-              bad=1
-            fi
-            # A BARE `fn();` AT COLUMN ZERO IS A CALL ON LOAD. `function fn()`
-            # and `const fn = ` are declarations and do not match; an indented
-            # call inside another function is reached only through a press.
-            if grep -qE "^$fn\(\);" "$f"; then
-              echo "\`$fn()\` is INVOKED ON LOAD in $f, which spends work nobody"
-              echo "asked for. Bind it to the press and let the press call it."
-              bad=1
-            fi
-          done
-          for fact in '/indexmap.json?feed=' 'Unconfirmed' 'Which ones' 'no exchange confirms'; do
-            if ! grep -Fq "$fact" "$f"; then
-              echo "The cross-verification script no longer carries: $fact"
-              bad=1
-            fi
-          done
-          if ! grep -Fq 'Restart the server' "$f"; then
-            echo "A successful refresh no longer says the running parse is stale."
-            bad=1
-          fi
-          # `status()` is the one call on load that IS allowed: it reads
-          # `/masters/status.json`, which stats four files and opens no socket.
-          if ! grep -qE '^status\(\);' "$f"; then
-            echo "NOTE: status() is no longer called on load — the table will be"
-            echo "empty until something presses. If that is deliberate, update"
-            echo "this gate; it is here because the empty table looked like a bug."
-            bad=1
-          fi
-          [ "$bad" = 1 ] && exit 1
-          echo "OK — refresh and verify are bound to a press and called by"
-          echo "     nothing on load; only the socket-free status() runs."
+          #
+          # `gates_jobs w6` (D-2315) refuses: web/masters.js missing; the test
+          # above untracked; `refresh` or `verify` not bound by
+          # `addEventListener('click', fn)`; a BARE `fn();` AT COLUMN ZERO, a
+          # call on load (`function fn()` and `const fn = ` are declarations
+          # and do not match, and an indented call is reached only through a
+          # press); any of the cross-verification facts or the stale-parse
+          # notice gone; and `status();` no longer at column zero -- the one
+          # call on load that IS allowed, since `/masters/status.json` stats
+          # four files and opens no socket.
+          "$RUNNER_TEMP/gates-jobs" w6
       - name: Gate W4 — unused CSS does not grow
         run: |
           set -euo pipefail
@@ -4533,26 +4375,11 @@ jobs:
           # piped into tee with no pipefail), and a log without vite's
           # "built in" line is refused rather than read as zero warnings.
           npm --prefix web run build > /tmp/build.log 2>&1
-          if ! grep -qE 'built in [0-9]' /tmp/build.log; then
-            echo "GATE W4 READ NO BUILD OUTPUT. A silent zero is not a pass."
-            tail -20 /tmp/build.log
-            exit 1
-          fi
-          FOUND=$( { grep -F 'Unused CSS selector' /tmp/build.log || true; } \
-                  | sed -E 's/.*selector "([^"]+)".*/\1/' | sort -u | wc -l | tr -d ' ')
-          echo "distinct unused CSS selectors: $FOUND (ceiling $CEILING)"
-          if [ "$FOUND" -gt "$CEILING" ]; then
-            echo
-            echo "A rule was added for markup that does not exist, or markup was"
-            echo "deleted and its styling left behind. The second is how this"
-            echo "repository loses safeguards: the comment beside the rule keeps"
-            echo "asserting a guarantee the page no longer delivers."
-            exit 1
-          fi
-          if [ "$FOUND" -lt "$CEILING" ]; then
-            echo "Fewer than the ceiling. Lower CEILING to $FOUND in this file so"
-            echo "the ratchet keeps its meaning."
-          fi
+          # D-2315: `gates_jobs w4` refuses a log with no `built in <digit>`
+          # (printing its last 20 lines), takes each `Unused CSS selector`
+          # line's quoted selector (the whole line when none is quoted), counts
+          # the distinct ones and holds them to CEILING.
+          "$RUNNER_TEMP/gates-jobs" w4 /tmp/build.log "$CEILING"
 
   ci-ok:
     name: ci-ok
