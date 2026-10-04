@@ -748,6 +748,129 @@ fn knobs_in(body: &WireBody) -> Vec<(&'static str, String)> {
     out
 }
 
+/// Every member [`WireBody`] declares except `screen_budget_ms`, which
+/// [`refuse_screen_budget`] refuses on every route before this list is read.
+///
+/// # Why a route refuses a KNOWN field it does not read -- P3-01-02, D-1972
+///
+/// [`WireBody`] is the union of three routes' bodies, so every route decoded
+/// every member and read only its own. `{"rung":"5min"}` on `/backtest/run`,
+/// which reads `rungs`, swept all eight rungs; `"validate":"0"` on a descent,
+/// which applies no knob, was validated and dropped. Each route now names the
+/// members it reads and refuses any other KNOWN member by name, as
+/// [`strict_knobs`] already did for its one word. Unknown members stay ignored
+/// for compatibility (BE-03, D-0685): they are not settings anyone here offers.
+const WIRE_FIELDS: [&str; 26] = [
+    "feed",
+    "underlying",
+    "from_year",
+    "from_month",
+    "to_year",
+    "to_month",
+    "rungs",
+    "command",
+    "rung",
+    "min_hits",
+    "max_points",
+    "support_ppm",
+    "ceiling",
+    "screen_cap",
+    "top",
+    "validate",
+    "horizon_bars",
+    "grid_rungs",
+    "grid_resolution",
+    "sizing_rate_bp",
+    "min_rr_bp",
+    "min_win_rate_bp",
+    "min_trades",
+    "min_ret_over_dd_bp",
+    "min_weakest_bp",
+    "max_mae_ppm",
+];
+
+/// What a span-taking command word reads: its word, feed, instrument, span and
+/// one rung.
+const COMMAND_SPAN_RUNG: [&str; 8] = [
+    "command",
+    "feed",
+    "underlying",
+    "from_year",
+    "from_month",
+    "to_year",
+    "to_month",
+    "rung",
+];
+
+/// [`COMMAND_SPAN_RUNG`] and a `min_hits` count.
+const COMMAND_SPAN_RUNG_HITS: [&str; 9] = [
+    "command",
+    "feed",
+    "underlying",
+    "from_year",
+    "from_month",
+    "to_year",
+    "to_month",
+    "rung",
+    "min_hits",
+];
+
+/// What `screen` reads: [`COMMAND_SPAN_RUNG`] and its three own numbers.
+const COMMAND_SCREEN: [&str; 11] = [
+    "command",
+    "feed",
+    "underlying",
+    "from_year",
+    "from_month",
+    "to_year",
+    "to_month",
+    "rung",
+    "support_ppm",
+    "max_points",
+    "top",
+];
+
+/// What `sweep-all` reads. `cli sweep-all VENDOR RUNG MIN_HITS` takes no
+/// instrument and no span, so a body naming either is refused: a scoped-looking
+/// request must not become a whole-store batch (P3-02-06, D-1972).
+const COMMAND_SWEEP_ALL: [&str; 4] = ["command", "feed", "rung", "min_hits"];
+
+/// Whether a route applies the [`KNOBS`] it is sent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Knobs {
+    /// Every [`KNOBS`] member is read (and validated by the route's own rule).
+    Applied,
+    /// None is read beyond the members the route names itself.
+    NotApplied,
+}
+
+/// Refuses, by name, the first known member `route` does not read.
+///
+/// `reads` lists the members the route consumes; with [`Knobs::Applied`] every
+/// [`KNOBS`] member is read as well. See [`WIRE_FIELDS`] for why. D-1972.
+fn refuse_unread(
+    body: &WireBody,
+    route: &str,
+    reads: &[&str],
+    knobs: Knobs,
+) -> Result<(), Refusal> {
+    for name in WIRE_FIELDS {
+        let present = body.string(name).is_some()
+            || body.scalar(name).is_some()
+            || list_field(body, name).is_some();
+        let read = reads.contains(&name)
+            || (knobs == Knobs::Applied && KNOBS.iter().any(|&(knob, _)| knob == name));
+        if present && !read {
+            return Err(Refusal::Malformed(format!(
+                "`{name}` is not read by {route}, so it is refused rather than \
+                 dropped: a setting that silently did nothing would be the \
+                 fallback CLAUDE.md §4 bans. Omit it. No setting was ignored."
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// What one `POST /backtest/descend` body asked for.
 ///
 /// # Three fields the sweep does not take, and why each is a FACT and not a knob
@@ -899,12 +1022,28 @@ pub fn asked_from(body: &str) -> Result<Asked, Refusal> {
     // line runs. The budget itself decodes as any value, so it is never the
     // field that fails the decode. D-0695.
     refuse_screen_budget(&body)?;
+    // `rung` (singular) is descend's and command's member: read here it was
+    // dropped and the run swept all eight rungs. D-1972.
+    refuse_unread(
+        &body,
+        "`POST /backtest/run`",
+        &[
+            "feed",
+            "underlying",
+            "from_year",
+            "from_month",
+            "to_year",
+            "to_month",
+            "rungs",
+        ],
+        Knobs::Applied,
+    )?;
     asked_from_wire(&body)
 }
 
-/// [`asked_from`] after the strict JSON boundary has been crossed once.
-fn asked_from_wire(body: &WireBody) -> Result<Asked, Refusal> {
-    let feed = field(body, "feed")
+/// The feed every body names, or the refusal that says why it is required.
+fn feed_from(body: &WireBody) -> Result<String, Refusal> {
+    field(body, "feed")
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
             Refusal::Malformed(
@@ -913,7 +1052,12 @@ fn asked_from_wire(body: &WireBody) -> Result<Asked, Refusal> {
              it cannot be defaulted."
                     .to_owned(),
             )
-        })?;
+        })
+}
+
+/// [`asked_from`] after the strict JSON boundary has been crossed once.
+fn asked_from_wire(body: &WireBody) -> Result<Asked, Refusal> {
+    let feed = feed_from(body)?;
     let underlying = field(body, "underlying")
         .filter(|s| !s.is_empty())
         .ok_or_else(|| Refusal::Malformed("no `underlying` in the request.".to_owned()))?;
@@ -1076,6 +1220,25 @@ pub fn descent_from(body: &str) -> Result<AskedDescent, Refusal> {
     // body is refused by name here, as [`asked_from`] refuses it, rather than
     // decoded and dropped. D-0685.
     refuse_screen_budget(&body)?;
+    // A DESCENT APPLIES NO KNOB. `AskedDescent` has no field for one and
+    // `conduct_descent` sets none, so a typed `validate` or `screen_cap` is
+    // refused here rather than validated and dropped. D-1972.
+    refuse_unread(
+        &body,
+        "`POST /backtest/descend`",
+        &[
+            "feed",
+            "underlying",
+            "from_year",
+            "from_month",
+            "to_year",
+            "to_month",
+            "rung",
+            "max_points",
+            "top",
+        ],
+        Knobs::NotApplied,
+    )?;
     descent_from_wire(&body)
 }
 
@@ -2863,6 +3026,10 @@ fn command_from_wire(body: &WireBody) -> Result<Command, Refusal> {
         )));
     }
 
+    if let Some((reads, knobs)) = command_reads(&word) {
+        refuse_unread(body, &format!("the `{word}` command"), reads, knobs)?;
+    }
+
     match word.as_str() {
         "audit-range" => Ok(Command::AuditRange {
             span: rung_from(body)?,
@@ -2910,7 +3077,10 @@ fn command_from_wire(body: &WireBody) -> Result<Command, Refusal> {
             min_hits: positive_min_hits(body)?,
         }),
         "sweep-all" => {
-            let asked = asked_from_wire(body)?;
+            // THE FEED ALONE. This called `asked_from_wire`, which REQUIRED an
+            // instrument and a span that `cli sweep-all` does not take, then
+            // kept only the feed. Naming either is refused above. D-1972.
+            let feed = feed_from(body)?;
             let rung = field(body, "rung")
                 .filter(|s| EVERY_RUNG.contains(&s.as_str()))
                 .ok_or_else(|| {
@@ -2920,7 +3090,7 @@ fn command_from_wire(body: &WireBody) -> Result<Command, Refusal> {
                     ))
                 })?;
             Ok(Command::SweepAll {
-                feed: asked.feed,
+                feed,
                 rung,
                 min_hits: positive_min_hits(body)?,
             })
@@ -2929,6 +3099,20 @@ fn command_from_wire(body: &WireBody) -> Result<Command, Refusal> {
             "`{other}` is not a command this route runs. It accepts: {}.",
             EVERY_COMMAND.join(", ")
         ))),
+    }
+}
+
+/// The members an ordinary command word reads, or `None` for a word
+/// [`command_from_wire`] refuses on its own. See [`WIRE_FIELDS`]. D-1972.
+fn command_reads(word: &str) -> Option<(&'static [&'static str], Knobs)> {
+    match word {
+        "audit-range" | "sweep-stored" => Some((&COMMAND_SPAN_RUNG_HITS, Knobs::NotApplied)),
+        // `strict_knobs` validates every knob and refuses its two by name.
+        "audit-audited-range" => Some((&COMMAND_SPAN_RUNG_HITS, Knobs::Applied)),
+        "screen" => Some((&COMMAND_SCREEN, Knobs::NotApplied)),
+        "auto-stored" => Some((&COMMAND_SPAN_RUNG, Knobs::NotApplied)),
+        "sweep-all" => Some((&COMMAND_SWEEP_ALL, Knobs::NotApplied)),
+        _ => None,
     }
 }
 
@@ -5833,8 +6017,143 @@ mod tests {
 
     /* ==================== the command dispatcher ==================== */
 
+    /// A good body for `extra`'s word. `sweep-all` takes no instrument and no
+    /// span, and naming either is refused (D-1972), so it gets neither.
     fn command_body(extra: &str) -> String {
+        if extra.contains(r#""command":"sweep-all""#) {
+            return format!(r#"{{"feed":"zerodha",{extra}}}"#);
+        }
         format!(r#"{{"feed":"zerodha","underlying":"NIFTY",{SPAN},{extra}}}"#)
+    }
+
+    /// P3-01-02 and P3-02-06, D-1972. Every route refuses, BY NAME, a known
+    /// member it does not read, instead of decoding it and dropping it.
+    #[test]
+    fn every_route_refuses_a_known_field_it_does_not_read_by_name() {
+        // `/backtest/run` reads `rungs`; a singular `rung` swept all eight.
+        let why = asked_from(&body_with("zerodha", SPAN, r#","rung":"5min""#))
+            .expect_err("rung is descend's member");
+        assert!(
+            why.why()
+                .contains("`rung` is not read by `POST /backtest/run`"),
+            "{}",
+            why.why()
+        );
+        assert!(
+            why.why().contains("No setting was ignored"),
+            "{}",
+            why.why()
+        );
+        let why = asked_from(&body_with("zerodha", SPAN, r#","max_points":50"#))
+            .expect_err("a sweep has no stop ceiling");
+        assert!(why.why().contains("`max_points`"), "{}", why.why());
+        // ...while every knob it applies is still taken.
+        assert!(
+            asked_from(&body_with(
+                "zerodha",
+                SPAN,
+                r#","validate":"0","screen_cap":7"#
+            ))
+            .is_ok()
+        );
+
+        // A descent applies no knob.
+        let descent = |extra: &str| {
+            descent_from(&format!(
+                r#"{{"feed":"dhan","underlying":"NIFTY",{SPAN},"rung":"5min","max_points":50,"top":5{extra}}}"#
+            ))
+        };
+        assert!(descent("").is_ok());
+        for (extra, name) in [
+            (r#","validate":"0""#, "validate"),
+            (r#","screen_cap":7"#, "screen_cap"),
+            (r#","support_ppm":100"#, "support_ppm"),
+            (r#","rungs":["5min"]"#, "rungs"),
+            (r#","min_hits":5"#, "min_hits"),
+        ] {
+            let why = descent(extra).expect_err("a descent applies no knob");
+            assert!(
+                why.why()
+                    .contains(&format!("`{name}` is not read by `POST /backtest/descend`")),
+                "{}",
+                why.why()
+            );
+        }
+
+        // The ordinary command words, each with a member it does not read.
+        for (words, name) in [
+            (
+                r#""command":"audit-range","rung":"15min","min_hits":5,"validate":"0""#,
+                "validate",
+            ),
+            (
+                r#""command":"sweep-stored","rung":"15min","min_hits":5,"screen_cap":7"#,
+                "screen_cap",
+            ),
+            (
+                r#""command":"auto-stored","rung":"1min","min_hits":5"#,
+                "min_hits",
+            ),
+            (
+                r#""command":"screen","rung":"15min","support_ppm":5,"max_points":2,"top":2,"ceiling":3"#,
+                "ceiling",
+            ),
+            (
+                r#""command":"audit-audited-range","rung":"5min","min_hits":5,"rungs":["5min"]"#,
+                "rungs",
+            ),
+            (
+                r#""command":"sweep-all","rung":"15min","min_hits":5,"validate":"0""#,
+                "validate",
+            ),
+        ] {
+            let why = command_from(&command_body(words)).expect_err(words);
+            assert!(
+                why.why()
+                    .contains(&format!("`{name}` is not read by the `")),
+                "{words}: {}",
+                why.why()
+            );
+        }
+        // The strict word still takes its knobs.
+        assert!(
+            command_from(&command_body(
+                r#""command":"audit-audited-range","rung":"5min","min_hits":5,"validate":"0""#
+            ))
+            .is_ok()
+        );
+    }
+
+    /// P3-02-06, D-1972. `sweep-all` takes what `cli sweep-all VENDOR RUNG
+    /// MIN_HITS` takes. A body naming an instrument or a span is refused,
+    /// because it would otherwise become a whole-store batch.
+    #[test]
+    fn sweep_all_takes_no_instrument_and_no_span() {
+        let documented =
+            r#"{"command":"sweep-all","feed":"zerodha","rung":"15min","min_hits":500}"#;
+        let batch = command_from(documented).expect("the documented shape parses");
+        assert_eq!(batch.word(), "sweep-all");
+        assert_eq!(batch.feed(), "zerodha");
+        for extra in [
+            r#","underlying":"BANKNIFTY""#,
+            r#","from_year":2024"#,
+            r#","from_month":1"#,
+            r#","to_year":2024"#,
+            r#","to_month":1"#,
+        ] {
+            let body = format!(
+                r#"{{"command":"sweep-all","feed":"zerodha","rung":"15min","min_hits":500{extra}}}"#
+            );
+            let why = command_from(&body).expect_err("a scoped-looking batch");
+            assert!(
+                why.why().contains("is not read by the `sweep-all` command"),
+                "{}",
+                why.why()
+            );
+        }
+        let why = command_from(r#"{"command":"sweep-all","rung":"15min","min_hits":500}"#)
+            .expect_err("the feed is still required");
+        assert!(why.why().contains("no `feed`"), "{}", why.why());
     }
 
     #[test]
@@ -5935,11 +6254,16 @@ mod tests {
     #[test]
     fn a_command_needing_a_rung_is_refused_without_one() {
         for word in ["audit-range", "auto-stored", "sweep-stored", "sweep-all"] {
-            let why = command_from(&command_body(&format!(
-                r#""command":"{word}","min_hits":500"#
-            )))
-            .expect_err("{word} needs a rung");
-            assert!(why.why().contains("rung"), "{}", why.why());
+            // `auto-stored` reads no `min_hits`, and naming it is refused
+            // (D-1972), so its body omits the field.
+            let hits = if word == "auto-stored" {
+                ""
+            } else {
+                r#","min_hits":500"#
+            };
+            let why = command_from(&command_body(&format!(r#""command":"{word}"{hits}"#)))
+                .expect_err("{word} needs a rung");
+            assert!(why.why().contains("`rung`"), "{}", why.why());
         }
     }
 

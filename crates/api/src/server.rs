@@ -16639,12 +16639,16 @@ fn route_table(assets: std::sync::Arc<assets::Assets>) -> axum::Router<Loaded> {
             )),
         )
         // THE AUDIT'S TWO. `/audit.json` is what the browser console reads and
-        // `/audit` is the no-script page, unchanged. Before the JSON route
+        // `/audit/page` is the no-script page. It answered `/audit` until
+        // P3-02-01 (D-1971): a registered route beats the fallback, so a nav
+        // click rendered the Svelte console and a reload rendered this page --
+        // the collision `/backtest` below documents. `/audit` is now the front
+        // end's, through the fallback, exactly as `/backtest` is. Before the JSON route
         // existed the console fetched the PAGE and parsed its table back out
         // with `DOMParser`, which coupled a browser to `render::audit_row`'s
         // markup and left one path answered by two different applications.
         .route("/audit.json", axum::routing::get(audit_json::audit_json))
-        .route("/audit", axum::routing::get(audit_get))
+        .route("/audit/page", axum::routing::get(audit_get))
         .route("/store", axum::routing::get(store_get))
         .route("/bars", axum::routing::get(bars_get))
         // THE LOG, READABLE FROM THE APPLICATION THAT WROTE IT.
@@ -22867,6 +22871,22 @@ mod tests {
         std::sync::Arc::new(assets::Assets::new(&dir))
     }
 
+    /// `/audit` ITSELF IS THE FRONT END'S, by reload as by click (P3-02-01,
+    /// D-1971). A registered `/audit` beat the fallback, so a nav click
+    /// rendered Svelte and a reload rendered the Rust page.
+    async fn the_audit_path_is_the_front_ends(addr: std::net::SocketAddr) {
+        let console = get(addr, "/audit").await;
+        assert!(console.contains("200 OK"), "{console}");
+        assert!(
+            console.contains("<title>shell</title>"),
+            "the shell answers /audit: {console}"
+        );
+        assert!(
+            !console.contains("It is a file on disk, not memory"),
+            "and the Rust page does not: {console}"
+        );
+    }
+
     #[tokio::test]
     async fn the_server_answers_every_route_and_then_shuts_down_gracefully() {
         let dir = agreeing("serve");
@@ -22943,7 +22963,7 @@ mod tests {
             "Store is a real link now: {root}"
         );
         assert!(
-            root.contains("<a class=\"lnk\" href=\"/audit\">Audit</a>"),
+            root.contains("<a class=\"lnk\" href=\"/audit/page\">Audit</a>"),
             "and Audit is a real link too: {root}"
         );
         assert!(
@@ -22983,7 +23003,7 @@ mod tests {
         // pull has been run against this store root, and a page that 500s on a
         // fresh install is a page that is broken exactly when it is first
         // opened.
-        let audit_page = get(addr, "/audit?page=3").await;
+        let audit_page = get(addr, "/audit/page?page=3").await;
         let status = audit_page.lines().next().unwrap_or_default();
         assert!(status.contains("200 OK"), "{audit_page}");
         assert!(audit_page.contains("nothing recorded yet"), "{audit_page}");
@@ -22991,6 +23011,7 @@ mod tests {
             audit_page.contains("It is a file on disk, not memory"),
             "and it says where the history lives: {audit_page}"
         );
+        the_audit_path_is_the_front_ends(addr).await;
 
         // A GET ON A POST ROUTE STARTS NOTHING. A crawler follows links and a
         // browser refetches on back; either would otherwise begin an ingest.

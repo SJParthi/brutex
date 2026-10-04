@@ -499,13 +499,53 @@ async fn credentialed_zerodha() -> Result<pull::http::HttpSource, String> {
 /// Unlike a sweep, this is four files and seconds — there is no progress to
 /// poll and no slot to claim. A route that returned `202` here would invent a
 /// state machine for work that finishes before the response would have.
+///
+/// # But it does not die with the connection -- P3-01-04, D-1974
+///
+/// On a sick host the ladder outlasts the page's 90 s ceiling, and the abort
+/// closed the connection, which dropped this future: files already landed
+/// stayed replaced on disk, while the per-source records and the reload never
+/// ran. The work now runs on its own task, as `recovery::start`'s does, so
+/// every source is recorded and the universe re-parsed whether or not anyone
+/// is still waiting for the answer.
 pub async fn refresh(
+    axum::extract::State(site): axum::extract::State<crate::server::Loaded>,
+) -> (axum::http::StatusCode, JsonHeaders, String) {
+    detached(refresh_work(site)).await
+}
+
+/// Runs `work` on its own task and answers with what it returned.
+///
+/// Dropping the returned future drops only the wait: the task keeps running to
+/// its end. A task that did not return is a 500 that says where the outcome is.
+async fn detached(
+    work: impl std::future::Future<Output = (axum::http::StatusCode, JsonHeaders, String)>
+    + Send
+    + 'static,
+) -> (axum::http::StatusCode, JsonHeaders, String) {
+    match tokio::spawn(work).await {
+        Ok(answer) => answer,
+        Err(why) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            json_headers(),
+            format!(
+                r#"{{"landed":[],"refusal":{}}}"#,
+                crate::render::json_string(&format!(
+                    "the refresh task did not return ({why}); /masters/status.json and /logs say what landed"
+                ))
+            ),
+        ),
+    }
+}
+
+/// [`refresh`]'s work, on the task [`detached`] gives it.
+async fn refresh_work(
     // THE SITE IS READ **AND WRITTEN** NOW, which reverses this parameter's
     // former comment. It used to say *"this route writes files and never
     // touches the parsed universe"*, and that was the whole defect: an
     // operator pressed Refresh, four files landed, and every page kept
     // answering from the boot parse. `Site::reparse` is what closes it.
-    axum::extract::State(site): axum::extract::State<crate::server::Loaded>,
+    site: crate::server::Loaded,
 ) -> (axum::http::StatusCode, JsonHeaders, String) {
     // FIFO async lock covers fetch -> landing -> reload, including credentials
     // and all sources. An older download cannot publish after a newer refresh.
@@ -920,11 +960,55 @@ mod tests {
             let waker = std::task::Waker::noop();
             let mut cx = std::task::Context::from_waker(waker);
             assert!(std::future::Future::poll(next.as_mut(), &mut cx).is_pending());
-            // Cancel while queued: no directory lookup, credential or fetch.
+            // Dropping the WAIT does not cancel the refresh (D-1974): it is
+            // queued on its own task behind the lock. Nothing here yields, so
+            // that task never runs before this runtime is dropped, and no
+            // directory lookup, credential or fetch happens in this test.
             drop(next);
             drop(first);
             assert!(super::REFRESH.try_lock().is_ok());
         });
+    }
+
+    /// P3-01-04, D-1974. The page aborts at 90 s and the abort drops the
+    /// handler's future; the refresh must still record every source and
+    /// reload. `refresh` hands its whole work to `detached`, and `detached`
+    /// keeps the work running after its caller is gone.
+    #[test]
+    fn a_refresh_whose_caller_goes_away_still_runs_to_its_end() {
+        block_on(async {
+            let gate = std::sync::Arc::new(tokio::sync::Notify::new());
+            let opened = std::sync::Arc::clone(&gate);
+            let (done, finished) = tokio::sync::oneshot::channel();
+            let mut waiter = Box::pin(super::detached(async move {
+                opened.notified().await;
+                let _ = done.send(());
+                (
+                    axum::http::StatusCode::OK,
+                    super::json_headers(),
+                    String::new(),
+                )
+            }));
+            let waker = std::task::Waker::noop();
+            let mut cx = std::task::Context::from_waker(waker);
+            assert!(std::future::Future::poll(waiter.as_mut(), &mut cx).is_pending());
+            // THE PAGE'S CEILING FIRES and the connection's future is dropped.
+            drop(waiter);
+            gate.notify_one();
+            finished
+                .await
+                .expect("the work ran to its end although nobody was waiting");
+        });
+        let source = include_str!("mastersrun.rs");
+        let handler = source
+            .split_once("pub async fn refresh(")
+            .and_then(|(_, rest)| rest.split_once("\n}\n"))
+            .map(|(body, _)| body)
+            .expect("the handler");
+        assert!(
+            handler.contains("detached(refresh_work(site)).await"),
+            "the handler runs its work detached: {handler}"
+        );
     }
 
     #[test]
@@ -1621,7 +1705,7 @@ mod tests {
             "/dashboard",
             "/instruments",
             "/pull",
-            "/audit",
+            "/audit/page",
             "/store",
             "/logs",
         ] {
