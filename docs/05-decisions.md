@@ -53808,3 +53808,105 @@ the existing `9223372036854775808` refusal. No refusal was removed.
 **Rejected.** Exporting `TOP_CEILING` from `cli` so the api test could name
 it. It is `pub(crate)` on purpose, and the api has no use for it outside this
 pin. The literal is the documented value in `USAGE` and D-1727.
+
+### D-1734 — The tier walk prices its grids once per forced stop; D-1731 is CLOSED — 2026-10-04
+
+**Closes D-1731**, which was left OPEN "until that cost is accepted or a sound
+cheaper walk replaces it". This is the sound cheaper walk. D-1731's text is
+not edited; this entry supersedes its cost paragraph.
+
+**What was wrong.** After D-1731 removed the unsound mildest-first probe,
+`walk_ladder` ran one full `screen` per tier, and each `screen` re-priced both
+sides' exit grids for every candidate. On a span where nothing admits that is
+the whole ladder: the debug test
+`tests::the_audit_renders_every_stage_of_the_institutional_stack` had not
+finished after 2,960 s (6.0 s with the probe). Its ladder is 18,480 tiers, not
+the "960 to 4,800" D-1731 quoted: `tiers` is `stops × ratios × rates` and the
+rate count follows the sample.
+
+**What a screen depends on, read from the code.** `screen` read `rules` in two
+places. (1) The grids: `grid::Levels::forced` is `max_mae_ppm`, and the
+calibration cap (`cap_for_budget`) is timed on those same levels. Nothing else
+in the grid pass reads `rules`. (2) The judgement: `shown_cell` (through
+`Rules::admits`, `Rules::protects`), the side choice, `measure_top` (its rebuild
+uses `max_mae_ppm` again, so the same levels), the steady gate
+(`min_weakest_bp`), `top`, the page and the capture's per-tier record. Of the
+admission terms, five never move down a generated ladder within one cascade:
+`max_mae_ppm` per stop, and `min_ret_over_dd_bp`, `require_protective_exits`,
+`min_fill_headroom_bp`, `min_avg_rr_bp`, which `Tier::rules` copies from the
+operator's policy. The cache is keyed on exactly those five (`GridKey`), so
+within a cascade the keys are the distinct forced stops. The candidate set,
+`horizon`, the slice and its facts, `screen_cap()` and the stop ladder do not
+vary across one walk and are not in the key; a different value of any of them
+is a different walk.
+
+**The decision.** `screen` is split, unchanged in what it returns, into
+`price_grids` (the grids), `tier_rows` (shown cell, side, capture record per
+policy) and `finish_screen` (priced map, sorts, `measure_top`, steady gate,
+page). `walk_tiers` walks the ladder in the same order through
+`walk_ladder_cached`, which calls `price_grids` the first time it meets a key
+and keeps the result for every later tier with that key. Each key is priced at
+its ENVELOPE: each floor `Rules::admits` checks with `>=` (`min_rr_bp`,
+`min_win_rate_bp`, `min_trades`, `min_assurance_bp`) at its minimum over the
+tiers sharing the key. A cell any keyed tier admits is admitted by the
+envelope, so each side keeps only the envelope's admitted cells plus the
+cells equal to `shown_cell`'s fallback; `prune_cells` gives the argument that
+`shown_cell` then answers identically for every keyed tier, and
+`Capture::record_inner` re-checks it on every recorded candidate. Every tier
+is still judged on its own floors, in order, stopping at the first that
+admits; nothing is inferred across tiers, which was D-1731's objection to the
+probe. A tier none of whose rows the cell rules admitted is answered without
+`measure_top` or the page, because the steady gate only demotes. The capture,
+when present, still records one tier per policy judged, in walk order, with
+the same evaluated count and rules, so its tier ordinals are unchanged.
+
+**Proof.** The pre-D-1734 `screen` is kept verbatim (comments dropped) as
+`screen_policy_tests::screen_reference`, and `walk_ladder` as a
+`#[cfg(test)]` reference. `the_cached_tier_walk_equals_the_full_walk_on_real_screens`
+compares the two walks on real screens over ten ladders (nothing admits on
+the 2,520-tier generated ladder and over three interleaved stops, the first
+admits, only a later tier admits, one key with strict floors before or after
+the mild tier, a trade floor, only the last admits, ties, one tier either way,
+empty): the same verdict, rank, page, subject, priced map and UNMET list.
+`the_cached_walk_equals_the_reference_walk_and_builds_each_key_once` does the
+same over fakes, including refusals from a judgement, the last tier and a
+build. `the_tier_walk_builds_one_grid_pass_per_distinct_forced_stop` counts
+`price_grids` calls: one for the 2,520-tier one-stop ladder, three for six
+tiers over three stops, one for a single screen.
+`a_pruned_grid_shows_every_keyed_tier_what_the_full_grid_shows`,
+`the_envelope_is_each_floors_minimum_over_its_own_key` and
+`the_split_screen_equals_the_monolithic_screen` pin the parts. Two hand
+mutants were run against these tests: the envelope taking the last tier's
+win-rate floor instead of the minimum, and the pruning dropping the fallback
+cell. Both failed the suite (the first through the pruning and envelope
+tests; the walk tests alone did not catch it on this fixture, because there
+the admitted cell is also the fallback). Invariant SCB-13.
+
+**Measured.** The audit test passes in 3.2 s (`finished in 3.20s`), with one
+grid pass for the walk's single key and one for the operator's own rules.
+Memory: every key's grids stay resident until the walk ends; measured on the
+audit test, 196 cells (264 bytes each) across 98 candidates' two sides,
+because nothing admits and each side keeps only its fallback. The bound and
+its UNVERIFIED parts are in `docs/06-limits.md`.
+
+**What changes at the edges.** Grid-progress telemetry now ticks per grid
+pass, so a walk emits progress `S` times, not `T` times. With
+`BRUTEX_SCREEN_BUDGET_MS` set (unrecorded `audit` only, D-0685), the
+timing-derived cap is calibrated once per key, not once per tier; that cap
+was never deterministic, so no recorded answer moves.
+
+**A test that pinned the old shape.**
+`crates/cli/tests/limits_o1cli_6.rs` counted the two `rows.sort_by_key(`
+calls inside `fn screen<'a>(`. They moved, unchanged, into `finish_screen`,
+so the test now reads that body and also asserts that `screen` finishes
+through it. Every assertion it made is still made, on the function that now
+holds the sorts.
+
+**Rejected.** Keeping every candidate's FULL grid per key: exact, but
+`C × 2 × G` cells per key resident in every case, including the
+nothing-admits case this exists for. A Pareto frontier over the four floors:
+exact too and smaller in the admitting case, but `O(n × f)` per side to build
+and more code to prove, for a case where the walk usually stops early.
+Grouping tiers by key and walking each group to its end so only one key's
+grids are resident: it reorders the capture's tier records and its refusals,
+so a recorded run would differ from the per-tier walk.

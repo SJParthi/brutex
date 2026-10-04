@@ -11469,28 +11469,38 @@ pub const YOUR_RULES_UNMET: &str = "YOUR RULES: UNMET";
 /// listing that dropped them would leave a reader unable to tell "nothing
 /// passed" from "nothing was tried".
 ///
-/// # Every tier walked is a full re-screen, and this said otherwise
+/// # Every tier walked was a full re-screen; now each FORCED STOP is priced once
 ///
 /// This section was headed "why the grid is built once and the tiers only
 /// re-filter", and it claimed the tiers cost passes over cells already
 /// computed rather than sweeps. That was false (W2-cli8-0, D-1720): each tier
-/// calls [`screen`], and `screen` hands the tier's `max_mae_ppm` to
+/// called [`screen`], and `screen` hands the tier's `max_mae_ppm` to
 /// `grid::Levels::forced`, which `runner::grid` merges INTO the stop ladder. A
-/// tier with a different forced stop prices a different grid, so no tier can
-/// reuse another's cells.
+/// tier with a different forced stop prices a different grid.
 ///
-/// The honest bound, per cascade, is `O(T × (M + C × 2 × G))`: `T` tiers
-/// screened, `M` one screen's setup over the execution bars, `C` priced
-/// candidates (at most `screen_cap()`), two sides each, `G` one exit grid.
-/// [`walk_ladder`] screens tiers strictest first and stops at the first that
-/// admits, so `T` is that tier's rank plus one, and the WHOLE ladder when
-/// nothing admits: no tier is skipped, because a stricter tier's forced stop
-/// can price a rung the mildest grid lacks (D-1731). Making a tier O(1) would need one grid holding every tier's forced stop at
-/// once, which is a different grid and a different run identity: rejected in
-/// D-1720 and stated in `docs/06-limits.md`. The screen COUNTS are proven by
-/// `cli::screen_policy_tests::the_tier_walk_checks_each_tier_in_order_and_stops_at_the_first_admission`
-/// (invariant SCB-01); the per-screen cost is UNVERIFIED as a measurement, as
-/// no bench times a cascade.
+/// What IS true, and what [`walk_tiers`] now uses (D-1734): tiers with the SAME
+/// forced stop price the same grid. The grids are built once per [`GridKey`]
+/// (the forced stop plus four admission terms no tier relaxes), pruned to the
+/// cells that key's mildest floors admit, and every tier is then judged on its
+/// own floors against them.
+///
+/// The bound, per cascade, is `O(S × (M + C × 2 × G) + T × C × 2 × K + A × F)`:
+/// `S` distinct keys reached (at most one per stop rung, so at most 64), `M`
+/// one screen's setup over the execution bars, `C` priced candidates (at most
+/// `screen_cap()`), `G` one exit grid, `T` tiers judged, `K` cells a pruned side
+/// holds, and `A` tiers whose rows the cell rules admitted (plus the last),
+/// each paying `F`, the rest of a screen (`measure_top`, the sorts and the
+/// page). [`walk_ladder_cached`] stops at the first tier that admits, so `T` is
+/// that tier's rank plus one, and the whole ladder when nothing admits; no tier
+/// is skipped (D-1731). The pass count is proven by
+/// `cli::screen_policy_tests::the_tier_walk_builds_one_grid_pass_per_distinct_forced_stop`
+/// and the answer by
+/// `cli::screen_policy_tests::the_cached_tier_walk_equals_the_full_walk_on_real_screens`
+/// (invariants SCB-01 and SCB-13). MEASURED on the debug test
+/// `tests::the_audit_renders_every_stage_of_the_institutional_stack`, whose
+/// ladder is 18,480 tiers over one key and 98 candidates, nothing admitting:
+/// one grid pass, test time 3.2 s, where the per-tier walk had not finished
+/// after 2,960 s.
 ///
 /// # It never invents a tier
 ///
@@ -11698,57 +11708,58 @@ fn screen_cascade<'a>(
     // what prevents a mask visited by a broader earlier cap from being stamped
     // later with rules under which it was never priced.
     let mut final_priced = yours.priced;
-    // EVERY TIER IS WALKED IN ORDER, STRICTEST FIRST, AND THE WALK STOPS AT THE
-    // FIRST ONE THAT ADMITS (D-1731).
+    // EVERY TIER IS JUDGED IN ORDER, STRICTEST FIRST, AND THE WALK STOPS AT THE
+    // FIRST ONE THAT ADMITS (D-1731). ITS GRIDS ARE BUILT ONCE PER FORCED STOP
+    // (D-1734).
     //
-    // # What the walk costs, measured
+    // # What the walk cost, measured
     //
-    // Every tier is a FULL re-screen of the whole candidate set. On the
+    // Every tier was a FULL re-screen of the whole candidate set. On the
     // operator's 60min rung the log showed one pass every ~20 seconds over 577
-    // candidates -- and since `screen` prices both sides, each pass is two exit
-    // grids per candidate. When nothing passes, the walk pays that once per
-    // tier: the machine spends longest on exactly the spans that have no answer
-    // to find. That cost is accepted, because the shortcut that avoided it was
-    // not sound.
+    // candidates, and the debug audit test went from 6 s to more than 2,960 s
+    // when D-1731 made the walk visit every tier: 960 to 4,800 grid passes on a
+    // span where nothing admits.
     //
     // # Why the mildest tier cannot be probed instead (D-1731)
     //
     // D-1720 screened the mildest tier first and, when it admitted nothing,
-    // declared every tier UNMET without walking them, on the argument that each
-    // tier only relaxes floors and `Rules::admits` is monotone in them. The
-    // floors are monotone; the GRID is not. A tier's `max_mae_ppm` becomes
-    // `grid::Levels::forced`, which `runner::grid` merges INTO the stop ladder,
-    // so a stricter tier prices a stop rung the mildest tier's grid may lack. A
-    // cell at that rung can pass the stricter tier and exist nowhere milder, and
-    // the probe would have printed "every tier UNMET" over a ladder that had an
-    // answer. Nothing proved that cannot happen, so the walk no longer assumes
-    // it.
+    // declared every tier UNMET without walking them. The floors are monotone;
+    // the GRID is not. A tier's `max_mae_ppm` becomes `grid::Levels::forced`,
+    // which `runner::grid` merges INTO the stop ladder, so a stricter tier
+    // prices a stop rung the mildest tier's grid may lack, and a cell there can
+    // pass the stricter tier and exist nowhere milder.
+    //
+    // # Why the grids can be shared anyway (D-1734)
+    //
+    // The grid depends on the forced stop, not on the floors. Tiers sharing a
+    // forced stop (and the four admission predicates no tier relaxes, which
+    // `GridKey` names) price the same grids, so `walk_tiers` prices them once
+    // per key, keeps the cells the key's mildest floors admit, and judges each
+    // tier against those. Every tier is still judged; no tier's verdict is
+    // inferred from another's.
     //
     // # Admission, not a subject (W2-cli8-8, D-1720)
     //
     // The walk once asked `selected.is_none()`. `selected` stopped meaning
     // "admitted" when `final_selection` began falling back to the best row that
     // TRADED, so the loop printed the STRICTEST tier as MET over a table in
-    // which nothing had passed. `walk_ladder` decides on `admitted_any` alone,
-    // and its tests pin every shape of the walk: none admits, the first admits,
-    // only the mildest admits, only a stricter tier admits, an empty ladder.
-    let walk = walk_ladder(
+    // which nothing had passed. The walk decides on `admitted_any` alone.
+    // EVERY TIER'S RULES, ONCE. `walk_tiers` keys its grid cache on them and
+    // folds each key's envelope over them, so they are read before the walk.
+    let ladder: Vec<(Tier, Rules)> = ladder
+        .iter()
+        .map(|tier| (*tier, tier.rules(top, reference)))
+        .collect();
+    let walk = walk_tiers(
+        bars,
+        column,
+        by_evidence,
+        horizon,
+        pricing,
+        facts,
         &ladder,
-        |tier| {
-            screen(
-                bars,
-                column,
-                by_evidence,
-                horizon,
-                tier.rules(top, reference),
-                pricing,
-                facts,
-            )
-        },
-        |body| body.admitted_any,
-        |rank, body| {
+        |rank| {
             let _ = writeln!(out, "  {:<8} UNMET", Tier::label(rank));
-            replace_priced(&mut final_priced, body.priced);
         },
     )?;
     match walk {
@@ -11777,7 +11788,7 @@ fn screen_cascade<'a>(
                 admitted_any: false,
             })
         }
-        LadderWalk::Met(rank, tier, body) => {
+        LadderWalk::Met(rank, (tier, _), body) => {
             let _ = writeln!(
                 out,
                 "  {:<8} MET -- {}\n",
@@ -11818,8 +11829,12 @@ enum LadderWalk<'t, T, S> {
     Exhausted,
 }
 
-/// Walks `ladder` strictest first and stops at the first tier whose screen
-/// ADMITTED a row.
+/// THE REFERENCE WALK: one full `screen_at` per tier, strictest first, stopping
+/// at the first tier whose screen ADMITTED a row.
+///
+/// Production walks with [`walk_ladder_cached`], which must answer exactly as
+/// this does; `cli::screen_policy_tests` runs both and compares (D-1734). Kept
+/// for that comparison only.
 ///
 /// Every tier walked and found unmet BEFORE the last is handed to `unmet` in
 /// rank order; the last tier's unmet screen is returned in
@@ -11835,6 +11850,7 @@ enum LadderWalk<'t, T, S> {
 /// Cost: `rank + 1` calls of `screen_at` when tier `rank` is the first to
 /// admit, `ladder.len()` when none does, zero for an empty ladder. Each call is
 /// a full re-screen; see `screen_cascade`.
+#[cfg(test)]
 fn walk_ladder<T, S>(
     ladder: &[T],
     mut screen_at: impl FnMut(&T) -> Result<S, String>,
@@ -11853,6 +11869,127 @@ fn walk_ladder<T, S>(
         unmet(rank, body);
     }
     Ok(LadderWalk::Exhausted)
+}
+
+/// Walks `ladder` strictest first and stops at the first tier whose screen
+/// ADMITTED a row, building each tier's expensive part once per KEY.
+///
+/// `build` is called once for each distinct `key_of(tier)`, the first time the
+/// walk reaches a tier with that key, and its result is kept for every later
+/// tier with the same key. `judge` and `screen_at` then answer for one tier
+/// from that shared part:
+///
+/// - `judge(prepared, tier)` for every tier but the last: `None` when the tier
+///   admitted nothing (the body is then never built), else the tier's full
+///   screen;
+/// - `screen_at(prepared, tier)` for the last tier, whose full screen is the
+///   diagnostic shown when nothing admits.
+///
+/// Every tier is judged exactly once, so a tier is never skipped on an argument
+/// about another (D-1731), and `admitted` is still the whole verdict
+/// (W2-cli8-8). The answer equals [`walk_ladder`] with
+/// `screen_at = |t| screen_at(&build(&key_of(t))?, t)` whenever a `None` from
+/// `judge` means exactly "that screen admitted nothing";
+/// `cli::screen_policy_tests` compares the two (D-1734).
+///
+/// Cost: one `build` per distinct key among the tiers reached, and one `judge`
+/// or `screen_at` per tier reached. Memory: every built part is kept until the
+/// walk ends, so it is bounded by the number of distinct keys.
+fn walk_ladder_cached<T, K, P, S>(
+    ladder: &[T],
+    key_of: impl Fn(&T) -> K,
+    mut build: impl FnMut(&K) -> Result<P, String>,
+    mut judge: impl FnMut(&P, &T) -> Result<Option<S>, String>,
+    mut screen_at: impl FnMut(&P, &T) -> Result<S, String>,
+    admitted: impl Fn(&S) -> bool,
+    mut unmet: impl FnMut(usize),
+) -> Result<LadderWalk<'_, T, S>, String>
+where
+    K: Eq + core::hash::Hash,
+{
+    // PRE-SIZED to the most keys a generated ladder can carry: one per forced
+    // stop, and `stop_rungs_in_points` yields at most `grid_rungs`, which
+    // `rungs_within_budget` caps at 64. A caller with more keys still gets a
+    // correct walk; the map grows.
+    const KEYS_PRESIZED: usize = 64;
+    let mut cache: std::collections::HashMap<K, P> =
+        std::collections::HashMap::with_capacity(ladder.len().min(KEYS_PRESIZED));
+    let last = ladder.len().saturating_sub(1);
+    for (rank, tier) in ladder.iter().enumerate() {
+        let prepared = match cache.entry(key_of(tier)) {
+            std::collections::hash_map::Entry::Occupied(held) => held.into_mut(),
+            std::collections::hash_map::Entry::Vacant(free) => {
+                let prepared = build(free.key())?;
+                free.insert(prepared)
+            }
+        };
+        if rank == last {
+            let body = screen_at(prepared, tier)?;
+            return Ok(if admitted(&body) {
+                LadderWalk::Met(rank, tier, body)
+            } else {
+                LadderWalk::NoneAdmit(rank, body)
+            });
+        }
+        if let Some(body) = judge(prepared, tier)?
+            && admitted(&body)
+        {
+            return Ok(LadderWalk::Met(rank, tier, body));
+        }
+        unmet(rank);
+    }
+    Ok(LadderWalk::Exhausted)
+}
+
+/// The generated tier ladder's walk over real screens, grids built once per
+/// [`GridKey`].
+///
+/// Each key's grids are priced by [`price_grids`] at the key's envelope
+/// ([`GridKey::envelope`] over the whole ladder), then every tier is judged by
+/// [`tier_rows`] and, when it admitted a row or is the last tier,
+/// [`finish_screen`]. A tier none of whose rows the cell rules admitted is
+/// answered `None` without the calendar measurement or the page: the steady
+/// gate in `finish_screen` only ever DEMOTES a row, so that screen's
+/// `admitted_any` is `false` whatever the rest of it would print.
+///
+/// The answer is the reference walk's, `walk_ladder` with `screen` per tier,
+/// byte for byte: proven by
+/// `cli::screen_policy_tests::the_cached_tier_walk_equals_the_full_walk_on_real_screens`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the six slice inputs every screen takes, the ladder, and the unmet sink"
+)]
+fn walk_tiers<'t, 'a>(
+    bars: &[indicators::Candle],
+    column: &indicators::column::Column,
+    by_evidence: &[&'a runner::rank::Scored],
+    horizon: Horizon,
+    pricing: Pricing<'_>,
+    facts: &runner::trade::SliceFacts,
+    ladder: &'t [(Tier, Rules)],
+    unmet: impl FnMut(usize),
+) -> Result<LadderWalk<'t, (Tier, Rules), ScreenResult<'a>>, String> {
+    walk_ladder_cached(
+        ladder,
+        |(_, rules)| GridKey::of(rules),
+        |key| {
+            let envelope = key.envelope(ladder.iter().map(|(_, rules)| rules));
+            price_grids(bars, column, by_evidence, horizon, envelope, pricing, facts)
+        },
+        |grids, (_, rules)| {
+            let rows = tier_rows(grids, by_evidence, horizon, *rules, pricing)?;
+            Ok(rows
+                .iter()
+                .any(|row| row.admitted)
+                .then(|| finish_screen(rows, bars, column, horizon, *rules, facts)))
+        },
+        |grids, (_, rules)| {
+            let rows = tier_rows(grids, by_evidence, horizon, *rules, pricing)?;
+            Ok(finish_screen(rows, bars, column, horizon, *rules, facts))
+        },
+        |body| body.admitted_any,
+        unmet,
+    )
 }
 
 /// Replaces one policy tier's priced cells with the next tier's complete map.
@@ -12022,27 +12159,27 @@ fn shown_cell(g: &grid::Grid, rules: Rules) -> Option<(grid::Cell, bool)> {
     if let Some(admitted) = g.best_within(|c| rules.admits(c)).copied() {
         return Some((admitted, true));
     }
-    let shown = g
-        .best_within(|c| Rules::protects(rules.require_protective_exits, c))
-        .copied()
-        .or_else(|| g.best().copied())?;
+    // ONE AUTHORITY for steps 2 and 3, shared with `prune_cells`, which must
+    // keep exactly the cell this falls back to.
+    let shown = fallback_cell(g, rules.require_protective_exits)?;
     Some((shown, false))
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "the exit-grid pricing pass, and its length is ONE PIPELINE rather \
-              than branching: 24 sequential bindings establishing the levels, \
-              the slice facts, the forced-exit table, the horizon and the \
-              budget-derived cap, feeding a single `par_iter` over the screened \
-              candidates. There are no early returns and no match arms to lift \
-              out. `cli`'s own comment calls the loop below the place \
-              \"where a multi-hour sweep spends nearly all of its time\" -- 87.6% \
-              of a measured 48-minute run -- and every binding above it is an \
-              input that loop reads once. Splitting the setup from the pass \
-              would put the facts in one function and the only consumer that \
-              can check they agree in another"
-)]
+/// One policy screen: price every candidate's grids, then judge them by `rules`.
+///
+/// # Split in two, and why the split is the cost of the tier ladder (D-1734)
+///
+/// A screen is two computations with different inputs. [`price_grids`] builds
+/// both sides' exit grids for every priced candidate, and the only thing it
+/// reads from `rules` is what [`GridKey`] names: the forced stop (`max_mae_ppm`
+/// becomes `grid::Levels::forced`) and the admission predicates that never move
+/// down a tier ladder. [`tier_rows`] and [`finish_screen`] then apply the
+/// floors (`min_rr_bp`, `min_win_rate_bp`, `min_assurance_bp`, `min_trades`,
+/// `min_weakest_bp`, `top`) to those grids. A single screen runs both once,
+/// exactly as the one function did. [`walk_tiers`] builds the first half ONCE
+/// per distinct [`GridKey`] and re-applies only the second half per tier, which
+/// is what took the walk from one full re-screen per tier back to one grid pass
+/// per distinct forced stop.
 fn screen<'a>(
     bars: &[indicators::Candle],
     column: &indicators::column::Column,
@@ -12053,18 +12190,216 @@ fn screen<'a>(
     // Built once per slice by `trade_and_screen` (D-1190), not once per tier.
     facts: &runner::trade::SliceFacts,
 ) -> Result<ScreenResult<'a>, String> {
+    // ONE POLICY IS ITS OWN ENVELOPE: the grids are pruned to the cells `rules`
+    // admits plus the fallback `shown_cell` would show, which is every cell
+    // `rules` can select.
+    let grids = price_grids(bars, column, by_evidence, horizon, rules, pricing, facts)?;
+    let rows = tier_rows(&grids, by_evidence, horizon, rules, pricing)?;
+    Ok(finish_screen(rows, bars, column, horizon, rules, facts))
+}
+
+/// What a screen's GRIDS depend on in its `Rules`, and nothing else.
+///
+/// `max_mae_ppm` is the forced stop merged into the stop ladder and the one
+/// admission bound every cell is checked against. The other four are admission
+/// predicates no generated tier relaxes: `Tier::rules` copies them from the
+/// operator's policy into every tier. Two screens whose rules agree on these
+/// five fields price byte-identical grids, and differ only in the floors
+/// [`GridKey::envelope`] folds. Within one cascade the four constants agree, so
+/// the distinct keys are exactly the distinct forced stops: at most one per
+/// rung of `stop_rungs_in_points`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct GridKey {
+    max_mae_ppm: i64,
+    min_ret_over_dd_bp: i64,
+    require_protective_exits: bool,
+    min_fill_headroom_bp: i64,
+    min_avg_rr_bp: i64,
+}
+
+impl GridKey {
+    const fn of(rules: &Rules) -> Self {
+        Self {
+            max_mae_ppm: rules.max_mae_ppm,
+            min_ret_over_dd_bp: rules.min_ret_over_dd_bp,
+            require_protective_exits: rules.require_protective_exits,
+            min_fill_headroom_bp: rules.min_fill_headroom_bp,
+            min_avg_rr_bp: rules.min_avg_rr_bp,
+        }
+    }
+
+    /// The mildest policy any of `ladder`'s rules with this key states: this
+    /// key's own fields, and the SMALLEST of each floor `Rules::admits` checks
+    /// with `>=`.
+    ///
+    /// # Why every cell a keyed tier can select survives pruning to it
+    ///
+    /// `Rules::admits` is a conjunction. The five keyed terms are identical for
+    /// every tier with this key, and the four floors (`min_rr_bp`,
+    /// `min_win_rate_bp`, `min_trades`, `min_assurance_bp`) are each a `>=`, so
+    /// lowering one can only admit more. The envelope holds each at its lowest,
+    /// so a cell admitted by any keyed tier is admitted by the envelope. Nothing
+    /// here assumes the LADDER is ordered by dominance -- it is not, and that
+    /// was D-1731's objection to the mildest-first probe -- because the minimum
+    /// is taken per floor, over exactly the tiers sharing the key.
+    ///
+    /// A key no rule in `ladder` carries gets floors at their maxima, which
+    /// admits nothing; [`walk_tiers`] only ever asks for a key it read from the
+    /// ladder.
+    fn envelope<'r>(self, ladder: impl IntoIterator<Item = &'r Rules>) -> Rules {
+        let mut envelope = Rules {
+            max_mae_ppm: self.max_mae_ppm,
+            min_rr_bp: i64::MAX,
+            min_win_rate_bp: i64::MAX,
+            min_trades: u64::MAX,
+            min_assurance_bp: i64::MAX,
+            min_weakest_bp: i64::MAX,
+            min_ret_over_dd_bp: self.min_ret_over_dd_bp,
+            require_protective_exits: self.require_protective_exits,
+            min_fill_headroom_bp: self.min_fill_headroom_bp,
+            min_avg_rr_bp: self.min_avg_rr_bp,
+            top: 0,
+        };
+        for rules in ladder.into_iter().filter(|rules| Self::of(rules) == self) {
+            envelope.min_rr_bp = envelope.min_rr_bp.min(rules.min_rr_bp);
+            envelope.min_win_rate_bp = envelope.min_win_rate_bp.min(rules.min_win_rate_bp);
+            envelope.min_trades = envelope.min_trades.min(rules.min_trades);
+            envelope.min_assurance_bp = envelope.min_assurance_bp.min(rules.min_assurance_bp);
+            envelope.min_weakest_bp = envelope.min_weakest_bp.min(rules.min_weakest_bp);
+        }
+        envelope
+    }
+}
+
+/// One candidate side's exit grid, reduced to the cells a keyed policy can show.
+struct PrunedSide {
+    side: Side,
+    /// The evaluated grid with its ladders, signal count and refusal count
+    /// intact and its cells cut to [`prune_cells`]'s subset, in grid order.
+    grid: grid::Grid,
+    /// `tightest_containment` of the FULL grid, taken before pruning: the
+    /// TIGHTEST column reports what any variant reached, admitted or not.
+    tightest: Option<grid::Cell>,
+}
+
+/// Every priced candidate's two grids for one [`GridKey`], and the levels and
+/// cap they were priced at.
+struct PricedGrids {
+    rungs: usize,
+    step_ppm: i64,
+    forced: Option<i64>,
+    stop_rungs: Vec<i64>,
+    /// One entry per priced candidate, in evidence order: `[long, short]`.
+    /// Its length is the priced cap, `by_evidence.len().min(priced_cap)`.
+    sides: Vec<[PrunedSide; 2]>,
+}
+
+impl PricedGrids {
+    /// Cells held across every candidate side: the memory this key keeps
+    /// resident while a walk reuses it.
+    #[cfg(test)]
+    fn cells_held(&self) -> usize {
+        self.sides
+            .iter()
+            .flat_map(|pair| pair.iter())
+            .map(|side| side.grid.cells.len())
+            .sum()
+    }
+}
+
+/// The fallback cell [`shown_cell`] shows when nothing is admitted: the best
+/// PROTECTED cell, else the best cell at all.
+fn fallback_cell(g: &grid::Grid, require_protective_exits: bool) -> Option<grid::Cell> {
+    g.best_within(|c| Rules::protects(require_protective_exits, c))
+        .copied()
+        .or_else(|| g.best().copied())
+}
+
+/// Cuts `g` to the cells `envelope` admits (with `trades > 0`, as
+/// `best_within` filters) plus every cell equal to the fallback.
+///
+/// # Why `shown_cell` answers identically on the cut grid, for every keyed tier
+///
+/// `shown_cell` returns a COPY, so only cell values and their order matter.
+///
+/// 1. `best_within(admits)`: a cell a keyed tier admits is admitted by the
+///    envelope ([`GridKey::envelope`]), so the tier's admitted cells are the
+///    same subsequence, in the same order, on both grids. `max_by_key` returns
+///    the LAST maximum, and the last maximum of one subsequence is one value.
+/// 2. The fallback, reached only when step 1 found nothing: the full grid's
+///    fallback value `F` is kept. Every kept cell is a full-grid cell, so if
+///    `F` is the last maximum among the protected cells there, no kept cell
+///    after it can tie it. If the full grid holds no protected trading cell,
+///    neither does the cut grid (every envelope cell is protected and trades),
+///    so both reach `best()`, and the cut grid holds only copies of `F`.
+///
+/// `Capture::record_inner` re-runs `shown_cell` on the grid it is handed and
+/// refuses on any difference, so a recorded run would refuse loudly, not
+/// silently, if this argument were wrong.
+fn prune_cells(g: grid::Grid, envelope: Rules) -> grid::Grid {
+    let fallback = fallback_cell(&g, envelope.require_protective_exits);
+    let grid::Grid {
+        cells,
+        signals,
+        stops,
+        targets,
+        trails,
+        refused_paths,
+    } = g;
+    let mut cells: Vec<grid::Cell> = cells
+        .into_iter()
+        .filter(|c| (c.trades > 0 && envelope.admits(c)) || fallback == Some(*c))
+        .collect();
+    // An in-place collect keeps the full grid's allocation; the cache must not.
+    cells.shrink_to_fit();
+    grid::Grid {
+        cells,
+        signals,
+        stops,
+        targets,
+        trails,
+        refused_paths,
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only count of [`price_grids`] passes on this thread: one per grid
+    /// build of the whole candidate set, which is the cost D-1734 bounds.
+    static GRID_PASSES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The expensive half of a screen: both sides' exit grids for every priced
+/// candidate, at the levels `envelope` names, cut by [`prune_cells`].
+///
+/// Reads from `envelope` only what [`GridKey`] names and the floors its
+/// pruning admits under, so ONE call serves every policy with that key whose
+/// floors are at or above the envelope's.
+///
+/// # Cost
+///
+/// `O(M + C × 2 × G)`: `M` the setup scans over the bars, `C` priced candidates,
+/// `G` one exit grid. Memory kept: the pruned cells, at most `C × 2 × G` and in
+/// practice the admitted cells plus one fallback per side (`docs/06-limits.md`).
+fn price_grids(
+    bars: &[indicators::Candle],
+    column: &indicators::column::Column,
+    by_evidence: &[&runner::rank::Scored],
+    horizon: Horizon,
+    envelope: Rules,
+    pricing: Pricing<'_>,
+    facts: &runner::trade::SliceFacts,
+) -> Result<PricedGrids, String> {
+    #[cfg(test)]
+    GRID_PASSES.with(|passes| passes.set(passes.get().saturating_add(1)));
+    // A capture that already refused refuses this screen, before any grid is
+    // priced: `tier_rows` would refuse it in `Capture::tier` anyway.
+    if let Some(capture) = pricing.capture {
+        capture.check()?;
+    }
     let recording = pricing.recording;
     // Built ONCE for the whole screen: the same ladder judges every combination,
     // and `Levels` only borrows it.
-    // THE INSTRUMENT'S OWN PRICE, hoisted beside the other per-run work.
-    //
-    // The TIGHTEST column below rendered `ppm_to_points(worst_mae)`, which
-    // divides by a hardcoded 25,000. On a 150-rupee stock a real MAE of 1 rupee
-    // printed as `166pt` instead of `1pt`; on an 80,000-rupee stock a real 100
-    // rupees printed as `31pt` instead of `100pt`. That column exists so a
-    // reader learns what is REACHABLE before choosing a threshold, so a wrong
-    // number in it is worse than no column at all.
-    let reference = reference_price(bars);
     // SIZED BY THE HOLD. See `window_range_percentile`.
     let stop_rungs = stop_ladder_ppm(bars, horizon.as_bars() as usize);
 
@@ -12125,7 +12460,7 @@ fn screen<'a>(
     let levels = grid::Levels {
         rungs,
         step_ppm: Some(step_ppm),
-        forced: (rules.max_mae_ppm > 0).then_some(rules.max_mae_ppm),
+        forced: (envelope.max_mae_ppm > 0).then_some(envelope.max_mae_ppm),
         ratios: true,
         stops_ppm: &stop_rungs,
     };
@@ -12137,35 +12472,11 @@ fn screen<'a>(
     // loop below prices every candidate against the whole exit grid and is where
     // a multi-hour sweep spends nearly all of its time. It said nothing at all
     // until it finished -- see `note_grid_progress` for the measurement.
-    let captured_tier = pricing
-        .capture
-        .map(|capture| {
-            capture.tier(candidate_trades::Tier {
-                index: 0,
-                eligible: by_evidence.len() as u64,
-                evaluated: by_evidence.len().min(priced_cap) as u64,
-                horizon: u64::from(horizon.as_bars()),
-                rungs: rungs as u64,
-                step_ppm: levels.step_ppm,
-                forced_ppm: levels.forced,
-                ratios: levels.ratios,
-                rules,
-                stops_ppm: stop_rungs.clone(),
-            })
-        })
-        .transpose()?;
     let progress = GridProgress::over(by_evidence.len().min(priced_cap), recording);
-    let mut rows: Vec<Screened<'_>> = by_evidence
+    let sides: Vec<[PrunedSide; 2]> = by_evidence
         .par_iter()
         .take(priced_cap)
-        .enumerate()
-        .filter_map(|(rank, scored)| {
-            if pricing
-                .capture
-                .is_some_and(|capture| capture.check().is_err())
-            {
-                return None;
-            }
+        .map(|scored| {
             // `side_of_evidence` IS DELIBERATELY NOT CALLED HERE ANY MORE.
             //
             // It answered "which way did the raw forward mean point", and that
@@ -12231,30 +12542,96 @@ fn screen<'a>(
             // The same key the rows are ranked by, so the winning side is the one
             // that would rank higher -- picking on net here and ranking on
             // drawdown later would be two answers to one question.
-            let priced = [Side::Long, Side::Short].map(|s| -> Result<_, String> {
+            let sides = [Side::Long, Side::Short].map(|side| {
+                let full =
+                    grid::evaluate_over(bars, column, &scored.mask, horizon, side, levels, facts);
+                let tightest = full.tightest_containment().copied();
+                PrunedSide {
+                    side,
+                    grid: prune_cells(full, envelope),
+                    tightest,
+                }
+            });
+            // TICKED ONCE PER CANDIDATE, after both of its grids: this line
+            // measures grid evaluations, and every candidate here paid two.
+            progress.tick();
+            sides
+        })
+        .collect();
+    Ok(PricedGrids {
+        rungs,
+        step_ppm,
+        forced: levels.forced,
+        stop_rungs,
+        sides,
+    })
+}
+
+/// The cheap half of a screen, per policy: each priced candidate's shown cell
+/// under `rules`, its better side, and the capture record for this policy.
+///
+/// `grids` must come from [`price_grids`] with an envelope whose [`GridKey`]
+/// equals `GridKey::of(&rules)` and whose floors are at or below `rules`'.
+/// [`screen`] passes `rules` itself, [`walk_tiers`] the key's envelope.
+///
+/// Cost `O(C × 2 × K)`, `K` the cells each pruned side holds: no grid is built.
+fn tier_rows<'a>(
+    grids: &PricedGrids,
+    by_evidence: &[&'a runner::rank::Scored],
+    horizon: Horizon,
+    rules: Rules,
+    pricing: Pricing<'_>,
+) -> Result<Vec<Screened<'a>>, String> {
+    // ONE CAPTURE TIER PER POLICY JUDGED, as when every policy priced its own
+    // grids: the capture's tier ordinals follow the walk, not the grid passes.
+    let captured_tier = pricing
+        .capture
+        .map(|capture| {
+            capture.tier(candidate_trades::Tier {
+                index: 0,
+                eligible: by_evidence.len() as u64,
+                evaluated: grids.sides.len() as u64,
+                horizon: u64::from(horizon.as_bars()),
+                rungs: grids.rungs as u64,
+                step_ppm: Some(grids.step_ppm),
+                forced_ppm: grids.forced,
+                ratios: true,
+                rules,
+                stops_ppm: grids.stop_rungs.clone(),
+            })
+        })
+        .transpose()?;
+    let rows: Vec<Screened<'a>> = grids
+        .sides
+        .par_iter()
+        .zip(by_evidence.par_iter())
+        .enumerate()
+        .filter_map(|(rank, (sides, scored))| {
+            if pricing
+                .capture
+                .is_some_and(|capture| capture.check().is_err())
+            {
+                return None;
+            }
+            let priced = sides.each_ref().map(|priced| -> Result<_, String> {
                 if let Some(capture) = pricing.capture {
                     capture.check()?;
                 }
-                let g = grid::evaluate_over(bars, column, &scored.mask, horizon, s, levels, facts);
-                let shown = shown_cell(&g, rules);
+                let shown = shown_cell(&priced.grid, rules);
                 if let (Some(capture), Some(tier)) = (pricing.capture, captured_tier.as_ref()) {
                     capture.record(
                         tier,
                         &candidate_trades::Evaluated {
                             rank: rank as u64 + 1,
                             mask: &scored.mask,
-                            direction: direction_of(s),
-                            grid: &g,
+                            direction: direction_of(priced.side),
+                            grid: &priced.grid,
                             selected: shown,
                         },
                     )?;
                 }
-                Ok((s, g, shown))
+                Ok((priced, shown))
             });
-            // TICKED HERE AND NOT AT THE END OF THE ARM, because the arm has four
-            // `?` exits below it and a candidate that priced and was then discarded
-            // still cost the grid evaluation this line is measuring.
-            progress.tick();
             let [long, short] = priced;
             let priced = [long.ok()?, short.ok()?];
             // THE BEST VARIANT THAT SATISFIES THE RULES, falling back to the best
@@ -12268,9 +12645,11 @@ fn screen<'a>(
             // answer than one that did not, however much it made.
             let best = priced
                 .into_iter()
-                .filter_map(|(s, g, shown)| shown.map(|(cell, admitted)| (s, g, cell, admitted)))
-                .filter(|&(_, _, cell, _)| cell.trades > 0)
-                .max_by_key(|&(_, _, cell, admitted)| {
+                .filter_map(|(priced, shown)| {
+                    shown.map(|(cell, admitted)| (priced, cell, admitted))
+                })
+                .filter(|&(_, cell, _)| cell.trades > 0)
+                .max_by_key(|&(_, cell, admitted)| {
                     (
                         admitted,
                         ranked(cell.return_over_drawdown()),
@@ -12278,15 +12657,15 @@ fn screen<'a>(
                         cell.pessimistic,
                     )
                 });
-            let (side, g, cell, admitted) = best?;
+            let (priced, cell, admitted) = best?;
             Some(Screened {
                 rank: rank.saturating_add(1),
                 // THE SIDE THE CELL WAS PRICED WITH, not a second reading of
-                // the evidence. `side` is the value handed to `grid::evaluate`
-                // four lines up, so the column cannot describe a different
-                // trade from the one measured.
-                side: direction_of(side),
-                tightest: g.tightest_containment().copied(),
+                // the evidence. `priced.side` is the value `price_grids` handed
+                // to `grid::evaluate_over`, so the column cannot describe a
+                // different trade from the one measured.
+                side: direction_of(priced.side),
+                tightest: priced.tightest,
                 admitted,
                 cell,
                 scored,
@@ -12300,6 +12679,28 @@ fn screen<'a>(
     if let Some(capture) = pricing.capture {
         capture.check()?;
     }
+    Ok(rows)
+}
+
+/// The rest of a screen over judged rows: the priced map, the two sorts, the
+/// calendar measurement of the top band, the steady gate and the page.
+fn finish_screen<'a>(
+    mut rows: Vec<Screened<'a>>,
+    bars: &[indicators::Candle],
+    column: &indicators::column::Column,
+    horizon: Horizon,
+    rules: Rules,
+    facts: &runner::trade::SliceFacts,
+) -> ScreenResult<'a> {
+    // THE INSTRUMENT'S OWN PRICE, hoisted beside the other per-run work.
+    //
+    // The TIGHTEST column below rendered `ppm_to_points(worst_mae)`, which
+    // divides by a hardcoded 25,000. On a 150-rupee stock a real MAE of 1 rupee
+    // printed as `166pt` instead of `1pt`; on an 80,000-rupee stock a real 100
+    // rupees printed as `31pt` instead of `100pt`. That column exists so a
+    // reader learns what is REACHABLE before choosing a threshold, so a wrong
+    // number in it is worse than no column at all.
+    let reference = reference_price(bars);
 
     // PASSERS FIRST, then by net. `Reverse` and not a negation, for the reason
     // `audit::grid` gives: `pessimistic` saturates at `i64::MIN` and negating
@@ -12505,12 +12906,12 @@ fn screen<'a>(
     // MEASURED FROM THE ROWS, not inferred from `selected`. This is the only
     // place that can answer it, because it is the only place holding them.
     let admitted_any = rows.iter().any(|row| row.admitted);
-    Ok(ScreenResult {
+    ScreenResult {
         text: out,
         selected,
         priced,
         admitted_any,
-    })
+    }
 }
 
 /// The rules banner: every rule that is on, and `off` for every one that is not.
