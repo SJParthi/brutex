@@ -2167,8 +2167,50 @@ const FOLD_LITERAL: &str = "-0 -5 -0945 -1400 -token --exact --nocapture";
 // in a session.rs reason string. None is a path segment.
 const AUDIT_LITERAL: &str = "-354 -7 repeats";
 
+// ---- group 32: THE GDFL IMPORT AND ITS TESTS (D-3179). Every word was
+// read at its site in crates/pull/src/gdfl_*.rs before it was listed.
+// None is an org, an env, a vendor or a field of a credential; the
+// scanner is shape-based and these have a segment's shape.
+//
+//   PRODUCTION, gdfl_import.rs. `indices` and `stocks` are two of the
+//     three `ImportKind::as_str` words the `cli` verb takes (`options`
+//     is already declared). `imports` is the store directory the
+//     journal lives in (`<store>/imports/gdfl.journal`), `begin` and
+//     `done` the journal's line verbs. `late_rows`, `late_unresolved`,
+//     `max_back_s`, `seconds`, `days`, `only` and `missing` are LEFT
+//     sides of `.with(...)` on `gdfl.import` events; `filed` is an
+//     event message. `journal`, `calendar` and `listing` are the
+//     `about` of a named failure: which stage refused the day.
+//   TEST SCRATCH ROOTS, each named for the case it arranges, the same
+//     class as group 28: the `import-*`, `nfo-*` and `seconds-*` tags
+//     handed to `gdfl_fixtures::scratch`, `zips` and `ts` its source
+//     subdirectories, `parents` the `expect` label of its
+//     `create_dir_all`, `plain` a file put where a root belongs.
+//   TEST LABELS AND HOSTILE INPUTS. `w` `f` `j` `n` `c` and `5` are
+//     one-character payloads of refusals whose Display is asserted;
+//     `crashed` `clean` `mended` `twin` `invented` `futures` are
+//     assertion labels and fixture prose; `a9` `9a` `1x` `1225` `0100`
+//     `10` are strike and two-digit fixtures the decoder must refuse or
+//     read; `nan` `inf` `-inf` `1e3` `-3` `-42` `-10000` are prices
+//     and numbers a reader must refuse or decode exactly; `09-15-00`
+//     is a time with the wrong separator; `_search` and `_` are the
+//     tails of banned-construct names a source-shape test splits so
+//     it does not trip gate 11 itself.
+const GDFL_LITERAL: &str = "
+    indices stocks imports begin done late_rows late_unresolved max_back_s
+    seconds days only missing filed journal calendar listing
+    import-ambiguous import-both import-census import-cm-refusal
+    import-corrupt import-crash import-days import-derive import-journal
+    import-journal-write import-kind import-only import-order import-rerun
+    nfo-both nfo-faults seconds-edges seconds-filter seconds-filter-ok
+    seconds-idem seconds-lookup seconds-nfo-prefix seconds-rename
+    seconds-spike seconds-torn seconds-twins zips ts parents plain
+    w f j n c 5 crashed clean mended twin invented futures
+    a9 9a 1x 1225 0100 10 nan inf -inf 1e3 -3 -42 -10000 09-15-00 _search _
+";
+
 /// Every declared group, in the order the step joined them.
-const DECLARED: [&str; 49] = [
+const DECLARED: [&str; 50] = [
     SEG_SHAPE,
     VENDOR_WIRE,
     CLAIM_STANDING,
@@ -2218,6 +2260,7 @@ const DECLARED: [&str; 49] = [
     SIGNED_NUMBER,
     FOLD_LITERAL,
     AUDIT_LITERAL,
+    GDFL_LITERAL,
 ];
 
 fn declared() -> BTreeSet<&'static str> {

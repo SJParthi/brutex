@@ -636,7 +636,9 @@ fn note(event: &telemetry::Event<'_>) {
 }
 
 /// A failure about `about`, logged at `Error` and returned for the report.
-fn failed(kind: ImportKind, day: Day, about: &str, why: &str) -> Failure {
+/// Named `note_*` so gate 19 sees the event beside every failure it makes
+/// (D-3179).
+fn note_failure(kind: ImportKind, day: Day, about: &str, why: &str) -> Failure {
     let day_text = day.to_string();
     note(
         &telemetry::Event::error(TARGET, "refused")
@@ -690,7 +692,7 @@ impl DayWork<'_> {
             Ok(converted) => converted,
             Err(why) => {
                 self.report.files_refused += 1;
-                let failure = failed(self.run.kind, self.day, &file.name, &why.to_string());
+                let failure = note_failure(self.run.kind, self.day, &file.name, &why.to_string());
                 self.failures.push(failure);
                 return;
             }
@@ -715,7 +717,7 @@ impl DayWork<'_> {
         }
         if !self.begun {
             if let Err(why) = self.journal.append(&format!("begin {}", self.key)) {
-                let failure = failed(self.run.kind, self.day, "journal", &why.to_string());
+                let failure = note_failure(self.run.kind, self.day, "journal", &why.to_string());
                 self.failures.push(failure);
                 return;
             }
@@ -735,7 +737,7 @@ impl DayWork<'_> {
         self.report.seconds_committed += done.bars_committed;
         self.held.extend(done.pending);
         for failure in done.failures {
-            let failure = failed(self.run.kind, self.day, &file.name, &failure.why);
+            let failure = note_failure(self.run.kind, self.day, &file.name, &failure.why);
             self.failures.push(failure);
         }
         note(
@@ -760,7 +762,7 @@ fn calendar_admits(kind: ImportKind, day: Day, report: &mut Report) -> bool {
         }
         Err(why) => {
             report.days_refused += 1;
-            let failure = failed(kind, day, "calendar", &why.to_string());
+            let failure = note_failure(kind, day, "calendar", &why.to_string());
             report.failures.push(failure);
             false
         }
@@ -864,7 +866,12 @@ where
         report.files_skipped += read.skipped;
         report.files_refused += read.refused.len();
         for refusal in read.refused {
-            failures.push(failed(run.kind, day, &refusal.instrument, &refusal.why));
+            failures.push(note_failure(
+                run.kind,
+                day,
+                &refusal.instrument,
+                &refusal.why,
+            ));
         }
         if !read.held {
             missing_day(run.kind, day, &mut report, failures);
@@ -872,7 +879,7 @@ where
         }
         report.days_imported += 1;
         if let Some(why) = record_held(run.store_root, Vendor::Gdfl, &held) {
-            failures.push(failed(run.kind, day, "census", &why));
+            failures.push(note_failure(run.kind, day, "census", &why));
         }
         let clean = failures.is_empty();
         if begun || clean {
@@ -887,7 +894,7 @@ where
             );
             let verdict = if clean { "done" } else { "incomplete" };
             if let Err(why) = journal.append(&format!("{verdict} {key} {stats}")) {
-                failures.push(failed(run.kind, day, "journal", &why.to_string()));
+                failures.push(note_failure(run.kind, day, "journal", &why.to_string()));
             }
         }
         note_day(run.kind, day, &report, &before, failures.len());

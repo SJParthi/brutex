@@ -1706,6 +1706,13 @@ jobs:
           cli/src/operation_audit.rs:eprintln!:2
           pull/src/cash_auction.rs:eprintln!:3
           pull/src/cash_session_cache.rs:eprintln!:2"
+          # TWO MORE, test-only measurements (D-3179): the GDFL attack files
+          # print the sweep counts and the p50/p99/max timings their asserts
+          # bound, so a reader of the run sees the numbers the decisions
+          # quote. Both files are `#![cfg(test)]` modules (line 1), no
+          # production path reaches them, and nothing is wrong when they print.
+          declared="$declared pull/src/gdfl_nfo_attack_tests.rs:eprintln!:6
+          pull/src/gdfl_seconds_attack_tests.rs:eprintln!:2"
 
           # CLAUSE A2 — the same question, asked of the handle spellings.
           #

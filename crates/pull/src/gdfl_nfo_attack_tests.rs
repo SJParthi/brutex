@@ -1033,7 +1033,7 @@ fn dpn_11_entry_names_that_try_to_leave_the_options_folder_file_nothing() {
     assert!(decode_ticker("..", day).is_err());
     // Mixed separators are one ticker, and a ticker listed both ways is a
     // duplicate, never two files.
-    let mut listing: NfoDay<u32> = NfoDay::new(day);
+    let mut listing: NfoDay<u32> = NfoDay::new(day, 4);
     listing.push(&format!("{folder}/Options\\X04APR24100CE.NFO.csv"), 1, 1, 0);
     listing.push(&format!("{folder}\\Options/X04APR24100CE.NFO.CSV"), 1, 1, 1);
     listing.push(
@@ -1068,7 +1068,7 @@ fn dpn_12_locate_does_not_grow_with_the_duplicates_a_day_holds() {
     let day = d(2024, 4, 1);
     let folder = day_folder_name(day);
     let build = |dups: usize| {
-        let mut listing: NfoDay<u32> = NfoDay::new(day);
+        let mut listing: NfoDay<u32> = NfoDay::new(day, 4);
         for i in 0..dups {
             for k in 0..2_u32 {
                 listing.push(
@@ -1238,7 +1238,7 @@ fn dpn_15_locate_per_probe_cost_over_listing_size() {
     let folder = day_folder_name(day);
     let mut p50s = Vec::new();
     for size in [1_000_usize, 10_000, 100_000, 1_000_000] {
-        let mut listing: NfoDay<usize> = NfoDay::new(day);
+        let mut listing: NfoDay<usize> = NfoDay::new(day, 4);
         for i in 0..size {
             listing.push(
                 &format!("{folder}\\Options\\U{i}04APR24100CE.NFO.csv"),
@@ -1395,7 +1395,7 @@ fn dpn_18_exactly_the_two_measured_extensions_are_filed() {
         let entry = format!("{folder}\\Options\\NIFTY06SEP1811500CE{ext}");
         assert_eq!(entry_ticker(&folder, &entry), None, "{ext:?}");
     }
-    let mut listing: NfoDay<u8> = NfoDay::new(day);
+    let mut listing: NfoDay<u8> = NfoDay::new(day, 4);
     listing.push(
         &format!("{folder}\\Options\\NIFTY06SEP1811500CE.NFO.CSV"),
         1,

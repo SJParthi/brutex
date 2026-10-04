@@ -70,13 +70,14 @@
 //! # Cost
 //!
 //! A day listing is O(entries) once per day; after it [`NfoDay::locate`] is
-//! two hash probes (expected O(1), measured by `C-GI-02` in
-//! `crates/pull/benches/ratio.rs`). [`decode_ticker`] is O(ticker length),
+//! one hash probe (expected O(1); its flatness against the listing size and
+//! against duplicates is measured by `attack_tests::dpn_12` and `dpn_15`,
+//! debug-profile tests, not by the bench gate). [`decode_ticker`] is O(ticker length),
 //! bounded by the 64-byte cap it refuses past. [`decode`] is O(bytes).
 //! Fetching a file is O(its compressed and rebuilt bytes). The listing and
 //! the fetch are limits in `docs/06-limits.md`, not constant-time claims.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -584,23 +585,25 @@ pub struct NfoDay<L> {
     day: Day,
     folder: String,
     entries: Vec<ListedFile<L>>,
-    by_ticker: HashMap<Box<str>, usize>,
-    /// Every ticker named by more than one entry: a set, so [`Self::locate`]
-    /// stays one probe however many duplicates a day holds (D-3162).
-    duplicates: HashSet<Box<str>>,
+    /// Each ticker's entry, or `None` once a second entry names it: one map,
+    /// so [`Self::locate`] is one probe however many duplicates a day holds
+    /// (D-3162, D-3166).
+    by_ticker: HashMap<Box<str>, Option<usize>>,
     skipped: usize,
 }
 
 impl<L> NfoDay<L> {
-    /// An empty listing of `day`.
+    /// An empty listing of `day`, sized for the `entries` its source states
+    /// (a day zip's central directory, a tick-store index): no push of those
+    /// entries reallocates, and the bound is the source's own count, never a
+    /// guess (gate 11 rule 3, D-3166).
     #[must_use]
-    pub fn new(day: Day) -> Self {
+    pub fn new(day: Day, entries: usize) -> Self {
         Self {
             day,
             folder: day_folder_name(day),
-            entries: Vec::new(),
-            by_ticker: HashMap::new(),
-            duplicates: HashSet::new(),
+            entries: Vec::with_capacity(entries),
+            by_ticker: HashMap::with_capacity(entries),
             skipped: 0,
         }
     }
@@ -611,9 +614,10 @@ impl<L> NfoDay<L> {
         let at = self.entries.len();
         match entry_ticker(&self.folder, entry) {
             Some(ticker) => {
-                if self.by_ticker.insert(ticker.into(), at).is_some() {
-                    self.duplicates.insert(ticker.into());
-                }
+                self.by_ticker
+                    .entry(ticker.into())
+                    .and_modify(|seen| *seen = None)
+                    .or_insert(Some(at));
             }
             None => self.skipped += 1,
         }
@@ -649,22 +653,19 @@ impl<L> NfoDay<L> {
         entry_ticker(&self.folder, &file.entry)
     }
 
-    /// The file holding `ticker`, if the day has one: two hash probes, the
-    /// duplicate set and the ticker map.
+    /// The file holding `ticker`, if the day has one: one hash probe.
     ///
     /// # Errors
     ///
     /// [`NfoRefusal::DuplicateTicker`] when two entries name it.
     pub fn locate(&self, ticker: &str) -> Result<Option<&ListedFile<L>>, NfoRefusal> {
-        if self.duplicates.contains(ticker) {
-            return Err(NfoRefusal::DuplicateTicker {
+        match self.by_ticker.get(ticker) {
+            None => Ok(None),
+            Some(None) => Err(NfoRefusal::DuplicateTicker {
                 ticker: ticker.to_owned(),
-            });
+            }),
+            Some(&Some(at)) => Ok(self.entries.get(at)),
         }
-        Ok(self
-            .by_ticker
-            .get(ticker)
-            .and_then(|&at| self.entries.get(at)))
     }
 }
 
@@ -741,7 +742,7 @@ impl NfoSource for NfoTickStore {
         let len = file.metadata().map_err(unavailable)?.len();
         let entries = read_index(&file, len)?;
         let file = Arc::new(file);
-        let mut listing = NfoDay::new(day);
+        let mut listing = NfoDay::new(day, entries.len());
         for entry in entries {
             let (name, size, crc) = (entry.name.clone(), entry.size, entry.crc);
             listing.push(
@@ -846,8 +847,9 @@ pub fn listing_in<B: ReadAt>(
         return Ok(None);
     };
     let (base, span) = stored_span(&**file, &inner)?;
-    let mut listing = NfoDay::new(day);
-    for entry in zip_entries(&**file, base, span)? {
+    let entries = zip_entries(&**file, base, span)?;
+    let mut listing = NfoDay::new(day, entries.len());
+    for entry in entries {
         listing.push(
             &entry.name,
             entry.len,

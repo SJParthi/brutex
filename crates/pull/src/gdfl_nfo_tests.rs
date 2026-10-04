@@ -479,7 +479,7 @@ fn only_option_files_of_the_day_folder_are_filed_by_ticker() {
     ] {
         assert_eq!(entry_ticker(&folder, &other), None, "{other}");
     }
-    let mut listing: NfoDay<u8> = NfoDay::new(d);
+    let mut listing: NfoDay<u8> = NfoDay::new(d, 4);
     listing.push(&entry(d, "A01APR241CE"), 3, 4, 0);
     listing.push(&format!("{folder}\\Futures\\X.NFO.csv"), 3, 4, 1);
     assert_eq!(listing.day(), d);
@@ -493,7 +493,7 @@ fn only_option_files_of_the_day_folder_are_filed_by_ticker() {
 #[test]
 fn a_ticker_listed_twice_is_refused_by_name() {
     let d = trade();
-    let mut listing: NfoDay<u8> = NfoDay::new(d);
+    let mut listing: NfoDay<u8> = NfoDay::new(d, 4);
     listing.push(&entry(d, "A01APR241CE"), 3, 4, 0);
     listing.push(
         &format!("{}\\Options\\A01APR241CE.NFO.CSV", day_folder_name(d)),
@@ -627,7 +627,7 @@ fn every_fault_of_a_source_is_refused_by_name() {
         Err(CmRefusal::ArchiveUnavailable { .. })
     ));
     // A file that is not an option file of the day, read anyway.
-    let mut listing: NfoDay<crate::gdfl_nfo::StoreLocator> = NfoDay::new(d);
+    let mut listing: NfoDay<crate::gdfl_nfo::StoreLocator> = NfoDay::new(d, 4);
     let fine = NfoTickStore::new(&root.join("a")).day(d).unwrap().unwrap();
     let mut odd = fine.entries()[0].clone();
     odd.entry = "elsewhere.csv".into();
