@@ -635,7 +635,7 @@ struct WindowExtremes {
     /// Bars read so far, deque pushes and block scans alike: the cost a test
     /// holds to O(1) amortised per query (o1eng2-1, D-1572).
     /// Proved by
-    /// `runner::outcome::window_tests::a_backward_right_end_is_answered_in_constant_reads`.
+    /// `runner::window_tests::a_backward_right_end_is_answered_in_constant_reads`.
     touched: u64,
     /// The left end the deques were last popped to. A query left of it cannot
     /// be served from them.
@@ -767,7 +767,7 @@ fn scan_extremes(bars: &[Candle], lo: usize, hi: usize, touched: &mut u64) -> Op
 /// removed, whose two `n·log₂ n` tables were 21 levels deep at 1,222,791 bars;
 /// this one is 15 levels of 19,107 pairs there, about 4.6 MB. The 4.6 MB is
 /// arithmetic, not a measurement; the O(1) query is proved by
-/// `runner::outcome::window_tests::a_backward_right_end_is_answered_in_constant_reads`.
+/// `runner::window_tests::a_backward_right_end_is_answered_in_constant_reads`.
 struct BlockExtremes {
     /// `levels[k][b]`: the extremes of blocks `b ..= b + 2^k - 1`.
     levels: Vec<Vec<(i64, i64)>>,
@@ -811,7 +811,7 @@ impl BlockExtremes {
 
     /// The extremes of blocks `first ..= last`: two overlapping runs, O(1).
     /// Proved by
-    /// `runner::outcome::window_tests::a_backward_right_end_is_answered_in_constant_reads`.
+    /// `runner::window_tests::a_backward_right_end_is_answered_in_constant_reads`.
     fn over(&self, first: usize, last: usize) -> Option<(i64, i64)> {
         let count = last.checked_sub(first)?.checked_add(1)?;
         let depth = count.ilog2();
@@ -4492,7 +4492,7 @@ mod window_tests {
     /// the scan, and the bars read must stay within a constant per query plus
     /// one pass over the slice. Rebuilding the deques on every backward query
     /// read ~1,000 bars per query. This test is
-    /// `runner::outcome::window_tests::a_backward_right_end_is_answered_in_constant_reads`.
+    /// `runner::window_tests::a_backward_right_end_is_answered_in_constant_reads`.
     #[test]
     fn a_backward_right_end_is_answered_in_constant_reads() {
         let n = 20_000_usize;
