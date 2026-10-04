@@ -3382,6 +3382,20 @@ an artefact of the fixture.
    constant is a constant.** What was wrong was never the bound — it was that the
    number attached to it everywhere was the wrong number.
 
+**Re-measured 2026-10-04 on a Linux container, and two lock-free designs tried
+(D-2331).** Intel Xeon @ 2.10 GHz, `nproc` 4, ext4, shared with other builds
+(load average 5 to 9), so the 8-thread rows oversubscribe it. Medians over 60
+alternated runs of the bench: p99 2,797 ns at 1 thread, 4,642 ns at 4 and
+4,279 ns at 8, with a quarter of runs near 25 to 37 µs. Rendering the line
+outside the lock did not improve the tail. Flat combining made each run's p99
+tighter (q90 at or under 11 µs) but raised the 8-thread p50 3.4× and the max
+2 to 2.5×. Neither was adopted. The remaining tail is wake-up and scheduling
+latency, which stays on the emit path while emit must wait for its own write
+to reach the page cache. Only an asynchronous writer removes it, and that
+gives up `Written` and loses queued events on a release panic (`panic =
+"abort"`). **A contention-free emit with today's contract is UNVERIFIED: it
+needs a measurement on an idle machine with at least 8 cores.**
+
 ### The flatness claim is now gated at p99 as well as at the mean
 
 C-T-01b applies the **same** `CEILING_PERMILLE` to the **same** claim, measured
