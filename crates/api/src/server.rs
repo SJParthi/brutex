@@ -10499,6 +10499,14 @@ fn landed_answer(
     facts.push(("Rows folded into an open bar", done.rows_folded.to_string()));
     facts.push(("Slices the census counted", done.counted.to_string()));
     facts.push(("Rows dropped", done.census.total().to_string()));
+    // THE CANDLES THE DECODER DECLINED, ON THE PAGE AS WELL AS IN THE SUM
+    // (D-3180). `rows_read` counts them since D-3122 and `balances` accounts
+    // for them; a receipt that printed neither said "3 read = 2 stored + 0
+    // folded + 0 dropped", an equation that is false.
+    facts.push((
+        "Candles the decoder skipped",
+        decoder_skips_said(done.decoder_skips),
+    ));
     // One instrument can generate several coverage/derivation diagnostics;
     // this list also contains run-level failures, so it is not a member count.
     facts.push(("Failure diagnostics", done.failures.len().to_string()));
@@ -10509,19 +10517,22 @@ fn landed_answer(
         "Balances",
         if done.balances() {
             format!(
-                "yes — {} read = {} stored + {} folded + {} dropped",
-                done.rows_read,
-                done.bars_stored,
-                done.rows_folded,
-                done.census.total()
-            )
-        } else {
-            format!(
-                "NO — {} rows read, {} stored, {} folded, {} dropped, {} failure diagnostics",
+                "yes — {} read = {} stored + {} folded + {} dropped + {} skipped by the decoder",
                 done.rows_read,
                 done.bars_stored,
                 done.rows_folded,
                 done.census.total(),
+                done.decoder_skips.total()
+            )
+        } else {
+            format!(
+                "NO — {} rows read, {} stored, {} folded, {} dropped, {} skipped by the \
+                 decoder, {} failure diagnostics",
+                done.rows_read,
+                done.bars_stored,
+                done.rows_folded,
+                done.census.total(),
+                done.decoder_skips.total(),
                 done.failures.len()
             )
         },
@@ -10555,6 +10566,28 @@ fn landed_answer(
         axum::http::StatusCode::OK,
         stored_html("Spot pull", verdict, reason, &facts),
     )
+}
+
+/// The decoder's skips as one receipt cell: the total, then each reason that
+/// fired. D-3180.
+fn decoder_skips_said(skips: pull::fetch::DecodeSkips) -> String {
+    let mut said = skips.total().to_string();
+    let mut reasons = Vec::new();
+    for (count, reason) in [
+        (skips.null_price, "null price"),
+        (skips.negative_volume, "negative volume"),
+        (skips.negative_open_interest, "negative open interest"),
+        (skips.impossible_ohlc, "impossible OHLC"),
+    ] {
+        if count > 0 {
+            reasons.push(format!("{count} {reason}"));
+        }
+    }
+    if !reasons.is_empty() {
+        said.push_str(" — ");
+        said.push_str(&reasons.join(", "));
+    }
+    said
 }
 
 /// One local-archive run, from the folder to the receipt.
@@ -19945,7 +19978,7 @@ mod tests {
         );
         assert!(page.contains("<th>Members read</th><td>1</td>"));
         assert!(page.contains("<th>Failure diagnostics</th><td>2</td>"));
-        assert!(page.contains("0 dropped, 2 failure diagnostics"));
+        assert!(page.contains("0 dropped, 0 skipped by the decoder, 2 failure diagnostics"));
         assert!(page.contains("PARTIAL OR FAILED"));
         assert!(page.contains("missing minute"));
         assert!(page.contains("derived bucket withheld"));
@@ -34900,3 +34933,7 @@ mod calendar_identity {
 #[cfg(test)]
 #[path = "http_admission_tests.rs"]
 mod http_admission_tests;
+
+#[cfg(test)]
+#[path = "attack_r2_receipt_tests.rs"]
+mod attack_r2_receipt_tests;

@@ -2155,6 +2155,29 @@ impl BarFile {
         if record == self.header.last_ts_micros {
             return Ok(());
         }
+        // THE RECORD MAY BE THE ONE THAT IS WRONG (D-3181). A disagreement is
+        // either a header that lies or a record that rotted, and the sidecar
+        // can tell them apart: the record's block is verified HERE, on the
+        // refusal path only, so a rotted stamp is refused as the
+        // `BlockChecksum` it is rather than sending an operator to a header
+        // slot that is right. A block that verifies leaves the header as the
+        // liar. Reached only when the stamps already disagree, so D-0910's
+        // "a full tail block is not read by a following append" is unchanged
+        // for every append that would have committed.
+        if let Some(sidecar) = self.crc_path.as_deref() {
+            let (from, end) = refused(self.layout.record_byte_range(last), &self.bars_path)?;
+            let mut whole = [0u8; MAX_ROW_LEN];
+            let whole = usize::try_from(end.saturating_sub(from))
+                .ok()
+                .and_then(|width| whole.get_mut(..width))
+                .ok_or(StoreError::NotCommitted {
+                    index: last,
+                    n_valid: self.header.n_valid,
+                })?;
+            let mut cache = self.verified.lock().unwrap_or_else(PoisonError::into_inner);
+            cache.block = NO_BLOCK;
+            self.verify_block_of(sidecar, self.layout.block_of(last), from, whole, &mut cache)?;
+        }
         Err(StoreError::Format {
             path: self.bars_path.clone(),
             source: FormatError::LastStampDisagrees {

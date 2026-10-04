@@ -701,7 +701,17 @@ impl Record {
     ) -> Self {
         let note = done.failures.first().map_or_else(
             || {
-                if done.balances() {
+                // A CANDLE THE DECODER SKIPPED IS NONE OF THE THREE (D-3180).
+                // This record's stride has no field for the count, so the
+                // note names it rather than claim three places for a row
+                // that is in a fourth.
+                if done.balances() && done.decoder_skips.total() > 0 {
+                    // Within NOTE_CAPACITY for any count a usize can hold.
+                    format!(
+                        "every row accounted for; {} skipped by the decoder",
+                        done.decoder_skips.total()
+                    )
+                } else if done.balances() {
                     "every row accounted for: stored, folded into an open bar, or dropped"
                         .to_owned()
                 } else {
