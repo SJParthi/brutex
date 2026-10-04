@@ -929,7 +929,7 @@ impl Assets {
                      <a href=\"/instruments\">/instruments</a>, \
                      <a href=\"/pull\">/pull</a>, \
                      <a href=\"/store\">/store</a>, \
-                     <a href=\"/audit\">/audit</a>.</p>",
+                     <a href=\"/audit/page\">/audit/page</a>.</p>",
                     crate::render::escape(INDEX),
                     crate::render::escape(&index.display().to_string()),
                     crate::render::escape(&e.to_string()),
@@ -1029,7 +1029,7 @@ impl Assets {
                  <a href=\"/instruments\">/instruments</a>, \
                  <a href=\"/pull\">/pull</a>, \
                  <a href=\"/store\">/store</a>, \
-                 <a href=\"/audit\">/audit</a>, \
+                 <a href=\"/audit/page\">/audit/page</a>, \
                  <a href=\"/autopilot.json\">/autopilot.json</a>.</p>",
                 crate::render::escape(&self.named.display().to_string()),
                 crate::render::escape(WEB_ENV),

@@ -36,7 +36,7 @@ impl Drop for Scratch {
 pub(crate) const EXEMPT: &[(&str, &str)] = &[
     ("/dashboard", PAGE),
     ("/instruments", PAGE),
-    ("/audit", PAGE),
+    ("/audit/page", PAGE),
     ("/store", PAGE),
     ("/bars", PAGE),
     ("/logs", PAGE),
@@ -407,6 +407,46 @@ async fn cancelled_request_records_cancellation_and_never_completed() {
         journal::read(&root.0, ID_BASE + 1).unwrap().unwrap().phase,
         Phase::Cancelled
     );
+}
+
+/// P3-01-03, D-1973. A write route whose client goes away keeps running to its
+/// real terminal: a launch's admission cannot be cancelled, so the record must
+/// not say `Cancelled` while the handler can still dispatch.
+#[tokio::test]
+async fn a_write_whose_client_goes_away_records_the_handlers_real_outcome() {
+    let _apart = crate::detail::apart_from_slot_owners().await;
+    let root = Scratch::new();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (notify, gate) = (Arc::clone(&entered), Arc::clone(&release));
+    let path = root.0.clone();
+    let connection = tokio::spawn(async move {
+        super::request_audited_detached(path, "POST /backtest/run".to_owned(), async move {
+            notify.notify_one();
+            gate.notified().await;
+            (StatusCode::ACCEPTED, "launched").into_response()
+        })
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
+    // THE CLIENT GOES AWAY mid-admission: hyper drops the handler's future.
+    connection.abort();
+    assert!(connection.await.unwrap_err().is_cancelled());
+    release.notify_one();
+    let mut record = None;
+    for _ in 0..500 {
+        let seen = journal::read(&root.0, ID_BASE + 1).unwrap().unwrap();
+        if seen.phase.terminal() {
+            record = Some(seen);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let record = record.expect("the handler's terminal was recorded");
+    assert_eq!(record.phase, Phase::Completed);
+    assert_eq!(record.response_status, 202);
 }
 
 #[tokio::test]

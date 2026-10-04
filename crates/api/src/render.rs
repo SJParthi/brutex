@@ -900,7 +900,7 @@ pub(crate) fn nav(current: &str) -> String {
         // is the defect the `/logs` line below already records once. D-0312.
         ("/masters", "Masters", true),
         ("/pull", "Ingest", true),
-        ("/audit", "Audit", true),
+        ("/audit/page", "Audit", true),
         ("/store", "Store", true),
         // THE LOG, REACHABLE WITHOUT KNOWING THE URL. `crate::logs` existed
         // before this line did, which made it a page only somebody who had
@@ -2051,7 +2051,7 @@ fn journal_note(note: JournalNote<'_>) -> String {
         escape(note.path),
         if note.present {
             format!(
-                "{} record(s), {} byte(s) so far. <a href=\"/audit\">Read them</a>.",
+                "{} record(s), {} byte(s) so far. <a href=\"/audit/page\">Read them</a>.",
                 note.records, note.bytes
             )
         } else {
@@ -2173,7 +2173,7 @@ pub fn receipt_page(receipt: &Receipt<'_>) -> String {
     let _ = write!(
         body,
         "<p class=\"fine\">{} <a href=\"/pull\">Back to the forms</a> · \
-         <a href=\"/audit\">the record of every run</a>.</p>",
+         <a href=\"/audit/page\">the record of every run</a>.</p>",
         escape(receipt.footnote)
     );
     body.push_str("</div></section>");
@@ -2949,7 +2949,7 @@ pub fn audit_page(view: &AuditView<'_>) -> String {
     // stays reachable. The footer already carries the visible half — "Rendered
     // on the server. No JavaScript" — and this is the half a tab, a bookmark and
     // a history entry can show.
-    let mut body = open("brutex · audit · server-rendered", "/audit");
+    let mut body = open("brutex · audit · server-rendered", "/audit/page");
     body.push_str(&hero(
         "EVERY PULL · ON DISK · SURVIVES A RESTART",
         "What was asked,<br>and what it did.",
@@ -3007,7 +3007,7 @@ pub fn audit_page(view: &AuditView<'_>) -> String {
         body.push_str(&share_legend());
         body.push_str("</section>");
     }
-    body.push_str(&pager("/audit", view.page, view.last_page));
+    body.push_str(&pager("/audit/page", view.page, view.last_page));
     body.push_str(&notes_block(view.notes));
     body.push_str(FOOT);
     body
@@ -4212,7 +4212,7 @@ mod tests {
         assert!(html.contains("/tmp/store/audit/pull.journal"), "{html}");
         assert!(html.contains("3 record(s), 768 byte(s)"), "{html}");
         assert!(
-            html.contains("href=\"/audit\""),
+            html.contains("href=\"/audit/page\""),
             "and a way to read it: {html}"
         );
 
@@ -4544,7 +4544,7 @@ mod tests {
         assert!(html.contains("Nothing here was written to the store"));
         assert!(html.contains("href=\"/pull\""), "a way back: {html}");
         assert!(
-            html.contains("href=\"/audit\""),
+            html.contains("href=\"/audit/page\""),
             "and to the record: {html}"
         );
         assert!(html.contains("badge bad"), "nothing ran: {html}");

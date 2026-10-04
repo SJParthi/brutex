@@ -57268,3 +57268,35 @@ and Finalization V4 already cut a failed barrier (D-1900).
 - `/masters` page: #74's escaped page (D-1585) is kept over staging's `createElement` page (CE-25/CE-26, D-1768); both stop vendor markup and both report a refused re-parse. `web/tests/masters-text.test.js` is removed and ZR-30/ZR-31 now cite `masters-load.test.js`. The `/masters` footer and its test keep staging's wording (D-1762/D-1769).
 - `api::emitted`: the lib emit-site count is 65 (D-1765's two driven sites plus D-1582/D-1583's two unreachable ones) and `UNREACHABLE` is 10 (P1-17-02 moved one out, D-1582/D-1583 added two).
 
+
+### D-1970 — the run configuration states what `build.rs` stamps — 2026-10-04
+
+- P3-02-07. `.claude/launch.json` told the operator a build without `BRUTEX_COMMIT` "refuses every sweep". `crates/cli/build.rs` stamps the commit from git's own files, and only a tree with uncommitted Rust or Cargo source is left unstamped, so the sentence sent an operator hunting a missing variable instead of the uncommitted source.
+- The configuration drops the `BRUTEX_COMMIT=$(git rev-parse HEAD)` prefix (an explicit value is only an assertion `build.rs` checks, never authority) and its name now says a clean tree records and a dirty one refuses.
+- Proved by `cli::operator_boundary_tests::the_launch_configuration_states_what_build_rs_actually_stamps` (ZW-01).
+
+### D-1971 — `/audit` belongs to the front end; the Rust page moves to `/audit/page` — 2026-10-04
+
+- P3-02-01. The binary registered `.route("/audit", ...)`, and a registered route beats `Router::fallback`, so in the shipped binary a nav click rendered the Svelte console and a reload, bookmark or typed address rendered the Rust page: the collision the `/backtest` and `/dashboard` comments already describe. Removing `/audit` from the Vite proxy had fixed development only.
+- The no-script page now answers `/audit/page`, as `/dashboard` was moved off `/` (D-0064). Every Rust page's nav, the pull receipt, the pull page and the front-end-missing pages link there; `/audit` reaches the fallback and the front end's shell. The `web/vite.config.js` sentence claiming the problem was fixed now says where it was and how.
+- Proved by `api::server::tests::the_server_answers_every_route_and_then_shuts_down_gracefully`, which reads `/audit/page` as the Rust page and `/audit` as the shell (ZW-02).
+
+### D-1972 — every engine route refuses, by name, a known field it does not read — 2026-10-04
+
+- P3-01-02, P3-02-06. `WireBody` is the union of three routes' bodies, so each route decoded every member and read only its own: `{"rung":"5min"}` on `/backtest/run` swept all eight rungs, `validate`/`screen_cap`/`support_ppm` on `/backtest/descend` and on the ordinary `/engine/command` words were validated and dropped, and `sweep-all` required an `underlying` and a span it then discarded.
+- Each route now names the members it reads and refuses any other known `WireBody` member by name ("is not read by ... No setting was ignored"), the rule `strict_knobs` already applied to `audit-audited-range`. `/backtest/run` reads the span, `rungs` and every knob; a descent reads the span, `rung`, `max_points` and `top` and no knob; each command word reads its own list (`command_reads`). Unknown members stay ignored for compatibility (BE-03, D-0685).
+- `sweep-all` reads `command`, `feed`, `rung` and `min_hits`, as `cli sweep-all VENDOR RUNG MIN_HITS` does. An instrument or span on it is refused, so a scoped-looking request cannot become a whole-store batch.
+- The browser is unaffected: `/backtest/run` sends the span, `rungs` and the fifteen knob names; `/backtest/descend` sends exactly what it reads; the receipt batch sends `audit-audited-range` with its strict knobs.
+- Proved by `api::sweeprun::tests::every_route_refuses_a_known_field_it_does_not_read_by_name` and `api::sweeprun::tests::sweep_all_takes_no_instrument_and_no_span` (ZW-03, ZW-04).
+
+### D-1973 — an audited write runs to its real terminal after its client goes away — 2026-10-04
+
+- P3-01-03. A dropped connection dropped the audited handler future, and the armed attempt's `Drop` wrote `Cancelled`/0. On a launch route the admission is a `spawn_blocking` closure that a dropped `JoinHandle` does not cancel, so it went on to take the lease and start the run under a record saying it was cancelled.
+- `note_request` now runs every non-GET/HEAD audited route through `request_audited_detached`, which runs the handler and its terminal on their own task. A client going away drops only the wait, and the record carries the handler's real outcome. A read dispatches nothing, so it stays bound to its connection and its `Cancelled` remains the truth.
+- Proved by `api::operation_audit::tests::a_write_whose_client_goes_away_records_the_handlers_real_outcome` (ZW-05).
+
+### D-1974 — `/masters/refresh` runs detached from the connection — 2026-10-04
+
+- P3-01-04. The retry ladder can outlast the page's 90 s ceiling; the abort dropped the handler future, so files already landed stayed replaced while the per-source records and the reload never ran.
+- `refresh` now hands its whole work to `detached`, a `tokio::spawn` the handler only waits on, as `recovery::start` does. Every source is recorded and the universe re-parsed whether or not the page is still waiting. The `/mapping` page, on a timeout, says the refresh keeps running and where its outcome goes, and re-reads the on-disk table.
+- Proved by `api::mastersrun::tests::a_refresh_whose_caller_goes_away_still_runs_to_its_end` (ZW-06).

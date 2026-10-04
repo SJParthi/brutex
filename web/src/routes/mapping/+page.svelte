@@ -198,12 +198,18 @@
       // avoid drawing.
       await fetchJoin(feeds.active);
     } catch (error) {
+      // THE SERVER DID NOT STOP WHEN THIS PAGE DID (P3-01-04, D-1974). The
+      // refresh runs on its own task, so a timeout here leaves it recording
+      // every source to /logs and re-parsing the universe. Say so, and re-read
+      // what is on disk rather than leaving the pre-refresh table up.
+      const said = error instanceof Error ? error.message : 'The refresh threw a value that is not an Error.';
       masters = {
         phase: 'done',
         rows: [],
-        why: error instanceof Error ? error.message : 'The refresh threw a value that is not an Error.',
+        why: `${said} The refresh keeps running on the server: each source's outcome is written to /logs, and the table below is re-read now. Press Refresh again only after it shows the files written.`,
         universe: ''
       };
+      await readMasters();
     }
   }
 

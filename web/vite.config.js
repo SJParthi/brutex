@@ -167,8 +167,11 @@ const ROUTES = [
 	// The collision was real: both surfaces wanted the same path, and the
 	// Svelte one had no other source of data. `/audit.json` is what removed
 	// that — see `crates/api/src/audit_json.rs`. The page now owns `/audit`
-	// here, the Rust page still answers `/audit` on the API's own port, and
-	// nothing renders differently depending on how the operator arrived.
+	// here AND on the API's own port: removing it from this proxy fixed only
+	// development, because the binary registered `/audit` ahead of its
+	// front-end fallback and a reload there still got Rust (P3-02-01). The
+	// Rust page now answers `/audit/page` instead (D-1971), so nothing renders
+	// differently depending on how the operator arrived, in either place.
 	'/pull',
 	// THE AUTOPILOT. Four entries and NOT the `/autopilot` prefix, deliberately:
 	// `/autopilot` is a PAGE this app renders, and proxying that prefix would
