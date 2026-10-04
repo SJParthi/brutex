@@ -778,7 +778,7 @@ pub struct AskedDescent {
     pub from: (u16, u8),
     /// Last month of the span.
     pub to: (u16, u8),
-    /// The stop ceiling, in whole index points.
+    /// The stop ceiling, in whole index points. Zero is no ceiling (D-1732).
     pub max_points: i64,
     /// How many rows the listing shows.
     pub top: usize,
@@ -1069,7 +1069,8 @@ pub use cli::EVERY_RUNG;
 /// # Errors
 ///
 /// Everything [`asked_from`] refuses, plus a rung that is not one of the eight,
-/// a stop ceiling below one point, and a listing bound of zero.
+/// a negative stop ceiling, and a listing bound of zero. A ceiling of zero is
+/// no ceiling (D-1732).
 pub fn descent_from(body: &str) -> Result<AskedDescent, Refusal> {
     let body = wire_body(body)?;
     // A DESCENT RECORDS AND ITS WALK PRICES THE SCREEN, so a budget named in its
@@ -1104,9 +1105,15 @@ fn descent_from_wire(body: &WireBody) -> Result<AskedDescent, Refusal> {
         )));
     }
 
-    // A CEILING IS A DISTANCE, SO IT IS PARSED AS ONE AND REFUSED AT ZERO.
+    // A CEILING IS A DISTANCE, SO IT IS PARSED AS ONE AND REFUSED BELOW ZERO.
     // `cli` converts it against the midpoint of the span's own bars; this side
     // never sees a ppm, which is the whole reason that entry point exists.
+    //
+    // ZERO IS NO CEILING, NOT A REFUSAL (D-1732). This once refused zero as "a
+    // ceiling of zero admits no trade". That is false: `Rules::admits` reads a
+    // zero `max_mae_ppm` as no ceiling, `grid::Levels::forced` forces nothing
+    // at zero, and `cli`'s `USAGE` documents `MAX_POINTS = 0` that way. The
+    // browser could not ask for the run the command line offers.
     let max_points = field(body, "max_points")
         .and_then(|text| text.parse::<i64>().ok())
         .ok_or_else(|| {
@@ -1116,10 +1123,10 @@ fn descent_from_wire(body: &WireBody) -> Result<AskedDescent, Refusal> {
                     .to_owned(),
             )
         })?;
-    if max_points <= 0 {
+    if max_points < 0 {
         return Err(Refusal::Malformed(format!(
-            "`max_points` is {max_points}. A ceiling of zero admits no trade \
-             and a negative one is not a distance."
+            "`max_points` is {max_points}. A negative ceiling is not a \
+             distance; 0 means no ceiling beyond the ladder the bars derive."
         )));
     }
 
@@ -2903,10 +2910,11 @@ fn command_from_wire(body: &WireBody) -> Result<Command, Refusal> {
             }
             let max_points: i64 = whole(body, "max_points", "a whole number of index points")?;
             let top: usize = whole(body, "top", "a whole number of rows to list")?;
-            if max_points <= 0 || top == 0 {
+            // Zero is no ceiling, as at the descent door and in `cli` (D-1732).
+            if max_points < 0 || top == 0 {
                 return Err(Refusal::Malformed(
-                    "`max_points` must be 1 index point or more and `top` must \
-                     be 1 row or more."
+                    "`max_points` must be 0 (no ceiling) or more index points \
+                     and `top` must be 1 row or more."
                         .to_owned(),
                 ));
             }
@@ -5869,17 +5877,36 @@ mod tests {
     }
 
     #[test]
-    fn a_stop_ceiling_of_zero_or_less_is_refused_rather_than_swept_with() {
-        for points in ["0", "-20"] {
+    fn a_negative_stop_ceiling_is_refused_rather_than_swept_with() {
+        for points in ["-1", "-20"] {
             let why = descent_from(&descent_body(&format!(
                 r#""rung":"15min","max_points":{points},"top":25"#
             )))
-            .expect_err("a ceiling of zero admits no trade");
+            .expect_err("a negative ceiling is not a distance");
             assert!(why.why().contains("max_points"), "{}", why.why());
         }
         // AND A MISSING ONE IS NOT ZERO. Defaulting it would pick the
         // operator's risk for them, silently.
         assert!(descent_from(&descent_body(r#""rung":"15min","top":25"#)).is_err());
+    }
+
+    /// D-1732. `cli` and `Rules::admits` read a zero ceiling as NO ceiling,
+    /// and `USAGE` documents it so. The api refused it at both doors with "a
+    /// ceiling of zero admits no trade", which is false: the browser could not
+    /// ask for the run the command line offers.
+    #[test]
+    fn a_stop_ceiling_of_zero_means_no_ceiling_as_cli_reads_it() {
+        let asked = descent_from(&descent_body(r#""rung":"15min","max_points":0,"top":25"#))
+            .expect("zero is no ceiling, not a refusal");
+        assert_eq!(asked.max_points, 0);
+        let screen = command_from(&command_body(
+            r#""command":"screen","rung":"15min","support_ppm":50000,"max_points":0,"top":25"#,
+        ))
+        .expect("the screen door reads zero the same way");
+        assert!(
+            matches!(screen, super::Command::Screen { max_points: 0, .. }),
+            "{screen:?}"
+        );
     }
 
     #[test]
@@ -6049,7 +6076,7 @@ mod tests {
         for extra in [
             r#""command":"screen","rung":"15min","max_points":20,"top":25"#,
             r#""command":"screen","rung":"15min","support_ppm":0,"max_points":20,"top":25"#,
-            r#""command":"screen","rung":"15min","support_ppm":50000,"max_points":0,"top":25"#,
+            r#""command":"screen","rung":"15min","support_ppm":50000,"max_points":-1,"top":25"#,
             r#""command":"screen","rung":"15min","support_ppm":50000,"max_points":20,"top":0"#,
         ] {
             assert!(

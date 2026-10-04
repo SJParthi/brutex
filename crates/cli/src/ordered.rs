@@ -9,8 +9,17 @@
 //! input order, but every shared durable write inside an item, the evidence
 //! journal's attempt tokens and terminals and the run ledger's rows, landed in
 //! whichever order the threads reached it. `sweep-all` was split into ordered
-//! phases (D-1564); these run whole audit and candidate transactions, so the
-//! order is imposed at the shared writes themselves instead.
+//! phases (D-1564, kept as D-1701's chunks by D-1708); these run whole audit
+//! and candidate transactions, so the order is imposed at the shared writes
+//! themselves instead.
+//!
+//! # Who uses it
+//!
+//! The Boolean family pools. `range-all` and `pool` pass 1 run their rungs and
+//! instruments one at a time through `crate::in_input_order` instead (D-1701,
+//! kept for those two by D-1709): eight lanes in flight would have to divide
+//! the machine's ceiling by eight, and the run identity folds the ceiling, so
+//! each rung would record a different run from the same rung run alone.
 //!
 //! # The order
 //!
@@ -53,7 +62,7 @@ use std::cell::{Cell, RefCell};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
 /// Lanes admitted at once. A constant, so the order is the same on every
-/// machine; eight is `range-all`'s whole ladder.
+/// machine.
 pub(crate) const WINDOW: usize = 8;
 
 /// Bytes of stack each lane thread gets: the main thread's customary size, so

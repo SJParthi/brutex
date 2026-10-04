@@ -95,7 +95,8 @@ pub const CURDAY_RUNGS: [i32; 11] = [0, 236, 382, 500, 618, 786, 1000, 1272, 161
 /// offset rather than a second copy of the number. `crates/pull/src/fold.rs`
 /// records what a UTC-anchored grid cost when it shipped: every daily bar moved
 /// back one calendar day, and the store held 20 records stamped on a SUNDAY on
-/// an exchange that trades Monday to Friday. One definition, three crates.
+/// an exchange that ordinarily trades Monday to Friday. One definition, three
+/// crates.
 pub const IST_OFFSET_MICROS: i64 = 19_800 * 1_000_000;
 const MICROS_PER_DAY: i64 = 86_400 * 1_000_000;
 
@@ -136,9 +137,11 @@ pub fn ist_day(ts_micros: i64) -> i64 {
 /// store holds nothing before 1970, but a `%` here would be correct only by
 /// accident of the data.
 ///
-/// NSE trades Monday to Friday, and a Saturday or Sunday bar sets NOTHING
-/// rather than being folded into an adjacent day: `docs/03-vocabulary.md` §4 —
-/// an unknowable condition is unset, not guessed.
+/// NSE ordinarily trades Monday to Friday, and the vocabulary names those five
+/// days and no others. A Saturday or Sunday bar — six charter-recorded weekend
+/// sessions exist, below — sets NOTHING rather than being folded into an
+/// adjacent day, by design (D-0694): `docs/03-vocabulary.md` §4 — a condition
+/// the vocabulary cannot name is unset, not guessed.
 ///
 /// # The reason this used to give was false, and the charter says so
 ///
@@ -180,7 +183,8 @@ pub const fn weekday_bit(ts_micros: i64) -> Option<u16> {
         4 => Some(365), // Monday
         5 => Some(366), // Tuesday
         6 => Some(367), // Wednesday
-        // 2 and 3 are Saturday and Sunday: NSE does not trade them.
+        // 2 and 3 are Saturday and Sunday. NSE has traded six recorded weekend
+        // sessions (charter §3); no weekday bit names one, by design (D-0694).
         _ => None,
     }
 }
@@ -2023,9 +2027,10 @@ mod candle {
         assert_eq!(crate::weekday_bit(start + 2 * day), Some(367), "wednesday");
         assert_eq!(crate::weekday_bit(start + 3 * day), Some(368), "thursday");
         assert_eq!(crate::weekday_bit(start + 4 * day), Some(369), "friday");
-        // NSE DOES NOT TRADE THESE, so nothing is set rather than a neighbour
-        // being guessed. A weekend bar in an equity series is a store defect and
-        // folding it into Friday would hide the only symptom of it.
+        // NO WEEKDAY BIT NAMES A WEEKEND, so nothing is set rather than a
+        // neighbour being guessed. NSE has traded six charter-recorded weekend
+        // sessions, and folding one into Friday would put a Saturday's bars in a
+        // Friday condition's numerator (D-0694).
         assert_eq!(crate::weekday_bit(start + 5 * day), None, "saturday");
         assert_eq!(crate::weekday_bit(start + 6 * day), None, "sunday");
         // And the week closes.

@@ -61,9 +61,9 @@ fn value(name: &str, raw: &str) -> bool {
     match name {
         "BRUTEX_CEILING" => machine_count(raw, crate::ceiling_limit()).is_some(),
         "BRUTEX_SCREEN_CAP" => machine_count(raw, crate::SCREEN_CAP_CEILING).is_some(),
-        "BRUTEX_TOP" => nonnegative_floor(raw)
-            .and_then(|count| usize::try_from(count).ok())
-            .is_some_and(|count| count > 0),
+        // `1..=TOP_CEILING`: the band `measure_top` prices is eight rows per
+        // printed row, so an unbounded TOP was an unbounded request (D-1727).
+        "BRUTEX_TOP" => machine_count(raw, crate::TOP_CEILING).is_some(),
         "BRUTEX_VALIDATE" => matches!(raw.trim(), "0" | "1"),
         "BRUTEX_HORIZON_BARS" => {
             raw.trim().eq_ignore_ascii_case("rung") || crate::knobs::horizon_count(raw).is_some()
@@ -189,10 +189,12 @@ mod tests {
                 "4294967295".to_owned(),
                 "4294967296".to_owned(),
             ),
+            // The shared reader's ceiling is `TOP_CEILING` since D-1727; the
+            // exact limit moved from `i64::MAX` to it.
             (
                 "BRUTEX_TOP",
-                usize::try_from(i64::MAX).unwrap_or(usize::MAX).to_string(),
-                "9223372036854775808".to_owned(),
+                crate::TOP_CEILING.to_string(),
+                (crate::TOP_CEILING + 1).to_string(),
             ),
             (
                 "BRUTEX_SCREEN_CAP",

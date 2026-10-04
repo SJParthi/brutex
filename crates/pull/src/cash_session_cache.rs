@@ -72,6 +72,18 @@ impl VerifiedLifecycleMaster {
         &self.provenance
     }
 
+    /// This master's dated closing-auction flag for one exact EQ identity: the
+    /// same lookup the pull fold's `cash_auction::Schedule` is built from, so a
+    /// stored reader holds no second eligibility authority. `Ok(false)` is an
+    /// explicit zero in the master, not absent evidence. Expected O(1) plus
+    /// bounded key bytes, against the index parsed once at load.
+    ///
+    /// # Errors
+    /// Returns `UNVERIFIED` for an absent symbol, ISIN mismatch or invalid key.
+    pub fn eligibility(&self, symbol: &str, isin: &str) -> Result<bool, String> {
+        self.daily.eligibility(symbol, isin)
+    }
+
     /// Inspect one exact EQ identity using the already parsed index.
     /// Expected O(1) plus bounded key bytes/three-field assessment. This does
     /// not scan the CSV, read disk or fetch metadata again for each symbol.
@@ -864,6 +876,26 @@ mod tests {
             assert_eq!(
                 fs::read(&payload).expect("invalid evidence retained"),
                 bytes
+            );
+        }
+    }
+
+    #[test]
+    fn a_loaded_master_answers_the_dated_flag_its_index_holds_and_refuses_a_wrong_identity() {
+        let temp = Temp::new();
+        let csv = format!("{LIFECYCLE_CSV}2030,ZEROCO,EQ,INE000Z01019,0,1296345600,0,0\n");
+        install(&temp.0, day(3), &gzip(csv.as_bytes())).expect("fixture receipt installs");
+        let master = read_local_lifecycle(&temp.0, day(3)).expect("local master reads");
+        assert_eq!(master.eligibility("IRFC", "INE053F01010"), Ok(true));
+        assert_eq!(master.eligibility("ZEROCO", "INE000Z01019"), Ok(false));
+        for (symbol, isin) in [("IRFC", "INE000Z01019"), ("ABSENT", "INE053F01010")] {
+            let why = master
+                .eligibility(symbol, isin)
+                .expect_err("a wrong or absent identity is never a flag");
+            assert!(why.contains("UNVERIFIED"), "{why}");
+            assert_eq!(
+                master.eligibility(symbol, isin),
+                master.daily.eligibility(symbol, isin)
             );
         }
     }

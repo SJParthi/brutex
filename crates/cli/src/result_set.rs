@@ -279,7 +279,7 @@ impl Receipts {
     /// duplicate identity, or I/O failure. Every refusal names the path/cause.
     pub fn open_read(root: &Path) -> Result<Self, Refusal> {
         let path = Self::path(root);
-        let file = File::open(&path)
+        let file = crate::readonly_file::regular(OpenOptions::new().read(true), &path)
             .map_err(|why| format!("{} could not be opened: {why}", path.display()))?;
         let lock = validation_lock(&file, &path, false)?;
         Self::from_file(file, lock, path, None)
@@ -297,7 +297,7 @@ impl Receipts {
     /// over-limit file is not partially indexed.
     pub fn open_read_bounded(root: &Path, max_bytes: u64) -> Result<Self, Refusal> {
         let path = Self::path(root);
-        let file = File::open(&path)
+        let file = crate::readonly_file::regular(OpenOptions::new().read(true), &path)
             .map_err(|why| format!("{} could not be opened: {why}", path.display()))?;
         let lock = validation_lock(&file, &path, false)?;
         Self::from_file(file, lock, path, Some(max_bytes))
@@ -314,13 +314,15 @@ impl Receipts {
         std::fs::create_dir_all(&dir)
             .map_err(|why| format!("the results directory could not be made: {why}"))?;
         let path = Self::path(root);
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)
-            .map_err(|why| format!("{} could not be opened: {why}", path.display()))?;
+        let mut file = crate::readonly_file::regular(
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false),
+            &path,
+        )
+        .map_err(|why| format!("{} could not be opened: {why}", path.display()))?;
         let lock = validation_lock(&file, &path, true)?;
         if file
             .metadata()

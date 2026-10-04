@@ -1200,7 +1200,7 @@ fn holds_exactly(target: &Path, body: &[u8]) -> bool {
         return false;
     }
     let mut reader = file.take(body.len() as u64);
-    let mut chunk = [0_u8; 8 * 1_024];
+    let mut chunk = [0_u8; 8_192];
     let mut offset = 0_usize;
     while offset < body.len() {
         let want = chunk.len().min(body.len() - offset);

@@ -76,8 +76,11 @@ impl Inputs {
         let (current_daily, current_daily_id) = collector.one(Timeframe::DAY_1, current)?;
         let daily =
             stored::daily_context_from_span(join(prior_daily, current_daily)?, &loaded.bars)?;
-        let exact_minute =
-            stored::exact_minute_context_from_span(join(prior_minute, minute)?, &loaded.bars)?;
+        let exact_minute = stored::exact_minute_context_from_span(
+            join(prior_minute, minute)?,
+            &loaded.bars,
+            request.store_root,
+        )?;
         let roles = [
             signal_id,
             minute_id,
@@ -243,4 +246,4 @@ fn error(why: impl std::fmt::Display) -> String {
 mod tests;
 
 #[cfg(test)]
-pub(crate) use tests::{with_warmed_store, with_warmed_symbols};
+pub(crate) use tests::{with_unsourceable_close, with_warmed_store, with_warmed_store_of};
