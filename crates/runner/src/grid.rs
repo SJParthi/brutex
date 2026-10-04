@@ -1573,21 +1573,22 @@ impl Candidate {
     /// contiguous bars only, so the order that fired there is the first that
     /// fired (D-1183 for a refused bar, D-1514 for the walk's located hole,
     /// which also covers a missing minute). A hole at the exit offset itself
-    /// still refuses: that is the bar that cannot be read. Every refused bar
-    /// carries its location (D-1452), so no count is read without one. O(1),
-    /// UNVERIFIED as a
+    /// still refuses: that is the bar that cannot be read. A refused-bar count
+    /// with no location keeps the conservative answer. O(1), UNVERIFIED as a
     /// measurement; `docs/06-limits.md` states it (D-1514).
     fn refused_at(&self, exit_offset: usize) -> bool {
-        // LOCATED, NOT COUNTED (D-1452). `first_refused` is `Some` on exactly
-        // the paths whose `refused()` is non-zero: `excursion::admit_located`
-        // is the only production site that counts a refusal, and it records
-        // the first one's offset in the same call. A `map_or(refused() > 0,
-        // ..)` read the count only where it was zero, so its comparison was a
-        // surviving mutant no test could observe.
+        // LOCATED WHERE A LOCATION EXISTS (D-1452, D-1514). On every
+        // production path `first_refused` is `Some` exactly when `refused()` is
+        // non-zero, because `excursion::admit_located` counts a refusal and
+        // records its offset in one call. A count with no location is still
+        // answered conservatively rather than read as clean, and
+        // `unmeasured_and_refused_at_answer_each_cause_on_its_own` builds one
+        // with `with_unlocated_refusals`, so the comparison D-1452 found
+        // unobservable is now pinned by a test.
         let crossing_hole = self
             .cross
             .first_refused()
-            .is_some_and(|hole| hole <= exit_offset);
+            .map_or(self.cross.refused() > 0, |hole| hole <= exit_offset);
         self.block_only || crossing_hole || self.hole.is_some_and(|hole| hole <= exit_offset)
     }
 }
