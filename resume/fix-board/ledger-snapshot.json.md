@@ -1,6 +1,6 @@
 {
-  "as_of": "2026-10-04 08:04 UTC",
-  "prev_as_of": "2026-10-04 07:44 UTC",
+  "as_of": "2026-10-04 08:20 UTC",
+  "prev_as_of": "2026-10-04 08:04 UTC",
   "states": {
     "Lane 1|W3-store1-3": "pushed",
     "Lane 1|W3-store1-0": "found",
@@ -903,6 +903,24 @@
     "Zero-rounds: tests, docs, security|P4-01": "fixing",
     "Zero-rounds: tests, docs, security|P4-02": "fixing",
     "Zero-rounds: numbers and complexity|num:p4num-1": "fixing",
-    "Zero-rounds: numbers and complexity|num:p4num-2": "fixing"
+    "Zero-rounds: numbers and complexity|num:p4num-2": "fixing",
+    "Zero-rounds: crashes and edge inputs|CE-52": "found",
+    "Zero-rounds: crashes and edge inputs|CE-53": "found",
+    "Zero-rounds: crashes and edge inputs|CE-54": "found",
+    "Zero-rounds: crashes and edge inputs|CE-55": "found",
+    "Zero-rounds: tests, docs, security|P5-01": "found",
+    "Zero-rounds: tests, docs, security|P5-02": "found",
+    "Zero-rounds: tests, docs, security|P5-03": "found",
+    "Zero-rounds: tests, docs, security|P5-04": "found",
+    "Zero-rounds: tests, docs, security|P5-05": "found",
+    "Zero-rounds: tests, docs, security|P5-06": "found",
+    "Zero-rounds: tests, docs, security|P5-07": "found",
+    "Zero-rounds: numbers and complexity|num:p5num-1": "found",
+    "Zero-rounds: numbers and complexity|num:p5num-2": "found",
+    "Zero-rounds: numbers and complexity|num:p5num-3": "found",
+    "Zero-rounds: numbers and complexity|num:p5num-4": "found",
+    "Zero-rounds: numbers and complexity|num:p5num-5": "found",
+    "Zero-rounds: numbers and complexity|num:p6num-1": "found",
+    "Zero-rounds: numbers and complexity|num:p6num-2": "found"
   }
 }
