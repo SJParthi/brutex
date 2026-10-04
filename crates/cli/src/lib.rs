@@ -24924,7 +24924,8 @@ mod tests {
     }
 
     /// **The pool's union opens the parent ledger once, not once per
-    /// instrument.** Rust and O(1) sweep OS-4, D-2301.
+    /// instrument.** Rust and O(1) sweep OS-4, D-2301. Proved by this test,
+    /// `cli::tests::the_pool_union_opens_the_parent_ledger_once_for_every_instrument`.
     ///
     /// Two committed runs and one refused screen. The union holds both runs'
     /// frontier rows in screen order, the refused screen contributes nothing,

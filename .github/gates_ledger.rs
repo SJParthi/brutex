@@ -1500,9 +1500,10 @@ const ALLOW_SCAN: Allow = &[
     ("crates/runner/src/exit_grid_policy.rs", 1),
     ("crates/runner/src/grid.rs", 2),
     ("crates/runner/src/research_family.rs", 1),
-    ("crates/runner/src/signal_candle_stop.rs", 2),
+    ("crates/runner/src/signal_candle_stop.rs", 1),
     ("crates/runner/src/validate.rs", 5),
     ("crates/telemetry/src/record.rs", 1),
+    ("crates/telemetry/src/sink.rs", 1),
 ];
 
 /// EMPTY SINCE D-1121. D-1115 pinned the 41 chained searches rule 6 first

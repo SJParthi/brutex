@@ -2595,9 +2595,11 @@ fn inline_programs(l: &str) -> Vec<(String, &'static str, Family)> {
 /// (D-2342). Gates that pre-date the scanner read text with them; each one a
 /// gate moves into a `.github/*.rs` tool lowers its file's count here, and a
 /// new one anywhere is refused. Equality, not a ceiling, so the number
-/// cannot drift above what is there.
+/// cannot drift above what is there. Zero since D-2311..D-2315 moved every
+/// remaining program into the `.github/gates_*.rs` tools: any inline `awk`
+/// in `ci.yml` is now refused.
 const AWK_RATCHET: &[(&str, usize)] = &[(".github/workflows/ci.yml", AWK_IN_CI)];
-const AWK_IN_CI: usize = 71;
+const AWK_IN_CI: usize = 0;
 
 /// Workflow-wide refusals. `continue-on-error` anywhere turns a red step
 /// into a green job. A pipe into `grep -q` under `pipefail` reads a match

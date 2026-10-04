@@ -559,7 +559,7 @@ pub(crate) async fn hold_every_slot() -> Result<HeldSlots, &'static str> {
 /// handle still take its growth branch -- D-1560's O(indexed bytes) re-hash
 /// -- one at a time. That is not removed: `refresh` mutates the handle, and a
 /// second request that waits is served the already-refreshed handle, where
-/// refreshing beside it would pay the same re-hash again.
+/// refreshing beside it would pay the same re-hash again. Proved by `api::detail::the_slot_lock_is_free_while_a_handle_opens_or_refreshes`.
 pub struct Cached<T> {
     inner: std::sync::Mutex<Option<(std::path::PathBuf, Slot<T>)>>,
 }
@@ -587,7 +587,7 @@ impl<T> Cached<T> {
     }
 
     /// The handle cached for `root`, if any: one O(1) look under the slot lock,
-    /// released before the caller touches the handle.
+    /// released before the caller touches the handle. Proved by `api::detail::the_slot_lock_is_free_while_a_handle_opens_or_refreshes`.
     fn cached_for(&self, root: &std::path::Path) -> Option<Slot<T>> {
         match lock_through_poison(&self.inner).as_ref() {
             Some((at, slot)) if at.as_path() == root => Some(std::sync::Arc::clone(slot)),
@@ -598,7 +598,7 @@ impl<T> Cached<T> {
     /// Install a handle `open` has just returned and run `f` on it. The
     /// handle's own lock is taken BEFORE it is published, so no other request
     /// refreshes it before `f` has run; the slot lock is held only for the
-    /// O(1) store, and never while waiting on a handle's lock.
+    /// O(1) store, and never while waiting on a handle's lock. Proved by `api::detail::the_slot_lock_is_free_while_a_handle_opens_or_refreshes`.
     fn install<R>(&self, root: &std::path::Path, opened: T, f: impl FnOnce(&mut T) -> R) -> R {
         let slot: Slot<T> = std::sync::Arc::new(std::sync::Mutex::new(opened));
         let mut handle = lock_through_poison(&slot);

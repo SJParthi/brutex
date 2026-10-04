@@ -1752,7 +1752,9 @@ fn held_draws(periods: usize, block: usize, draws: usize, rng: &mut Rng) -> Vec<
 ///
 /// The draw loops of [`reality_check`], [`spa`] and both receipts hold one
 /// buffer for every draw, so B draws allocate once rather than B times (Rust
-/// and O(1) sweep OE-2, D-2305, AFG-05). The indices are the same: one `rng` stream,
+/// and O(1) sweep OE-2, D-2305, proved by
+/// `runner::bootstrap::a_reused_index_buffer_draws_exactly_what_a_fresh_one_does`).
+/// The indices are the same: one `rng` stream,
 /// consumed in the same order.
 fn stationary_indices_into(out: &mut Vec<usize>, periods: usize, block: usize, rng: &mut Rng) {
     out.clear();
@@ -2377,7 +2379,8 @@ mod tests {
     }
 
     /// **One buffer reused across draws yields the draws a fresh vector
-    /// does.** Rust and O(1) sweep OE-2, D-2305, AFG-05.
+    /// does.** Rust and O(1) sweep OE-2, D-2305. Proved by this test,
+    /// `runner::bootstrap::a_reused_index_buffer_draws_exactly_what_a_fresh_one_does`.
     ///
     /// Two generators from one seed: one fills a single buffer for every draw,
     /// the other allocates per draw. Every draw's indices are equal, at block

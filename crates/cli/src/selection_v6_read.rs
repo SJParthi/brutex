@@ -198,7 +198,10 @@ pub enum StoredSelectionV6Rung {
 /// stride, so block `from` is one seek away and the file's block count is its
 /// length. The reader once read every block and refused a file holding more
 /// than its cap, so a rung's 65th commit made that rung unreadable for good
-/// (Rust and O(1) sweep OS-5, D-2303, AFG-03). Duplicate identities are refused
+/// (Rust and O(1) sweep OS-5, D-2303). Proved through the API that pages it,
+/// `api::selectionv6json::tests::the_page_selectors_are_bounded_and_strict`
+/// (`api::tests::the_page_selectors_are_bounded_and_strict` to gate 12), and
+/// by the paging assertions in `cli::selection_v6::tests`. Duplicate identities are refused
 /// within the page; the commit door already refuses them across the whole
 /// file before it appends.
 #[must_use]

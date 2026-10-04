@@ -76,7 +76,9 @@ async fn an_equity_family_is_refused_loudly_and_only_the_two_indices_select() {
 }
 
 /// **The page selectors are bounded and strict.** Rust and O(1) sweep OS-5,
-/// D-2303.
+/// D-2303. Proved by this test,
+/// `api::selectionv6json::tests::the_page_selectors_are_bounded_and_strict`
+/// (`api::tests::the_page_selectors_are_bounded_and_strict` to gate 12).
 ///
 /// `from` and `limit` are decimal block numbers, each at most once; `limit`
 /// is 1 to `PAGE_BLOCKS`. Absent rungs report zero blocks at the page asked

@@ -13907,6 +13907,10 @@ remove at a cost worth paying, so none was rewritten.
     fixed `RESEARCH_FAMILY_BYTES_V1` record.
   telemetry/record.rs -- `Record::field`, at most `MAX_FIELDS`
     (twelve), enforced by `Record::decode`.
+  telemetry/sink.rs -- `Config::refusal` finds the first per-target
+    level prefix longer than `MAX_TARGET_BYTES`, over at most
+    `MAX_TARGET_LEVELS` (eight) overrides, the count the line before it
+    refuses past; once per configuration, never per event (D-2373).
   vocab/expression.rs -- REMOVED (o1engine-24): a name token now
     resolves through `vocab::table::index_of`, a compile-time hash
     index, so the row-order scan of `table::TABLE` is gone and the
@@ -13935,16 +13939,15 @@ remove at a cost worth paying, so none was rewritten.
 
   DATA-SIZED, AT A PREPARATION OR VALIDATION BOUNDARY
   cli/candidate_universe.rs, cli/pre_admission_data.rs,
-    runner/signal_candle_stop.rs 1 of 2 -- locate the execution
+    runner/signal_candle_stop.rs 1 -- locate the execution
     slice's first bar in the complete minute context. O(M) in that
     context, once per attestation, beside an O(M) ordering or hash
     pass over the same slice; the cost docs/06-limits.md sections
     134 and 142 record. A binary search would be cheaper and rule 1
     bans it.
-  runner/signal_candle_stop.rs 1 of 2 -- the first daily period at
-    or after `first_day`, O(days) once per evaluation. The `filter`
-    on the next statement walks the same periods and the evaluation
-    then walks every signal bar, so the search adds no order.
+  runner/signal_candle_stop.rs -- REMOVED (D-2307): the first daily
+    period of an evaluation is one read of a per-day table built at
+    preparation, so the count is 1.
   runner/validate.rs 4 -- the argmax re-checks (the two rows above
     plus `anchored` V4's and `choice_matches_visible_v2`'s), each over
     one fold's retained placements, each beside a `.max()` over the

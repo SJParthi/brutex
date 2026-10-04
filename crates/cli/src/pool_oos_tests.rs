@@ -222,7 +222,8 @@ fn a_planted_in_sample_only_winner_fails_out_of_sample_and_a_persistent_one_hold
 }
 
 /// **The streamed judge holds no span and no training series, and loses no
-/// trade.** Rust and O(1) sweep OS-1, OS-2, D-2300, AFG-01.
+/// trade.** Rust and O(1) sweep OS-1, OS-2, D-2300, AFG-01. Proved by this
+/// test, `cli::pool_oos::the_streamed_judge_books_every_trade_and_keeps_no_training_series`.
 ///
 /// A training walk keeps tallies only. A later walk books every trade it
 /// tallies, so each pooled row sums to exactly its tally. The judge over
