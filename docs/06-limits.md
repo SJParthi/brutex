@@ -10962,6 +10962,15 @@ rows of the slice and the grid, not with a constant. The single-shot
 `evaluate_training_grid_attested` still attests per call, so a caller that
 uses it per candidate still reads the whole slice per candidate. Not timed.
 
+**The Population V4 producer no longer does (D-1837, W3-runner4-1).**
+`produce_population_admission_v1` called `evaluate_training_grid_attested`
+for every closed mask and side. It now attests each side once, at that side's
+first closed mask, and prices every later mask with `evaluate_with_attested`.
+Counted, not timed: 98 closed masks attested 196 times before and twice after
+(`a_population_attests_its_training_slice_once_per_side`). The remaining
+per-call callers reconstruct one selected stream each (`reconstruct_selected`,
+Global Replay V1/V2), where each stream also replays its own OOS slice.
+
 ## The stationary bootstrap's block ceiling is arithmetic, not statistical — D-0742, 30 September 2026
 
 The continuation draw is `1_000_000_u64.saturating_sub(1_000_000 / block as u64)`

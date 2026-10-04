@@ -56858,3 +56858,24 @@ one through the sized path, with equal committed identities, and refuses a
 sized context for another underlying, rung, span, load ceiling or receipt
 policy without computing anything.
 
+### D-1837 — The Population V4 producer attests its TRAINING slice once per side — 2026-10-03
+
+**What was found (W3-runner4-1; left stated in `docs/06-limits.md` under
+D-0741).** `produce_population_admission_v1` priced each closed mask's side
+with `evaluate_training_grid_attested`, which validates, hashes and indexes
+the whole execution slice and column before pricing: O(B) per closed mask and
+side for work that depends on neither.
+
+**The change.** The producer holds one `AttestedTrainingV1` per side, taken at
+that side's first closed mask, and prices every mask with
+`evaluate_with_attested`. `evaluate_training_grid_attested` is exactly
+`attest_training` followed by `evaluate_with_attested`, so every grid, row and
+refusal is unchanged; an attestation refusal is still reported at the first
+closed mask of its side, with the same message, and a population with no
+closed mask attests nothing. No stored byte, digest or identity changes.
+
+**What it proves.**
+`cli::population_admission_writer::tests::a_population_attests_its_training_slice_once_per_side`
+counts two attestations for a population of 98 closed masks (196 through the
+per-mask door) and requires a second run to produce identical rows.
+
