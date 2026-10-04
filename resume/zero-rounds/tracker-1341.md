@@ -1,4 +1,4 @@
-# Tracker snapshot 13:45 UTC
+# Tracker snapshot 13:54 UTC
 
 ```
 id	state	commit	note
@@ -525,4 +525,21 @@ conc15-6	found	-	helpers round 12 conc pass 15 (autopilot)
 CE-88	found	-	helpers round 12 crash pass 17 (repair tools)
 CE-89	found	-	helpers round 12 crash pass 17 (repair tools)
 CE-90	found	-	helpers round 12 crash pass 17 (repair tools)
+P15-01	found	-	helpers round 12 tests pass 15 (CI gate bypasses)
+P15-02	found	-	helpers round 12 tests pass 15 (CI gate bypasses)
+P15-03	found	-	helpers round 12 tests pass 15 (CI gate bypasses)
+P15-04	found	-	helpers round 12 tests pass 15 (CI gate bypasses)
+P15-05	found	-	helpers round 12 tests pass 15 (CI gate bypasses)
+P15-06	found	-	helpers round 12 tests pass 15 (CI gate bypasses)
+P15-07	found	-	helpers round 12 tests pass 15 (CI gate bypasses)
+P15-08	found	-	helpers round 12 tests pass 15 (CI gate bypasses)
+P15-09	found	-	helpers round 12 tests pass 15 (CI gate bypasses)
+P15-10	found	-	helpers round 12 tests pass 15 (CI gate bypasses)
+P15-11	found	-	helpers round 12 tests pass 15 (CI gate bypasses)
+P15-12	found	-	helpers round 12 tests pass 15 (CI gate bypasses)
+P15-13	found	-	helpers round 12 tests pass 15 (CI gate bypasses)
+P15-14	found	-	helpers round 12 tests pass 15 (CI gate bypasses)
+P15-15	found	-	helpers round 12 tests pass 15 (CI gate bypasses)
+P15-16	found	-	helpers round 12 tests pass 15 (CI gate bypasses)
+P15-17	found	-	helpers round 12 tests pass 15 (CI gate bypasses)
 ```
