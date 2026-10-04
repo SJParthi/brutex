@@ -26,3 +26,13 @@ Note: non-root cargo via setpriv fails in the cloud box (/root, which holds the 
 | Numeric | 5 | denominators, refused stats shown as numbers | p5num-1 med (calendar gate only on first `top` rows), p5num-2..5 low | numeric-pass5.md |
 | Tests/docs/security | 5 | invariant rows vs code, weak tests, new inputs | P5-01 med (gate 10 fails earlier on RS-08, ZR-44), P5-02..07 low | tests-docs-security-pass5.md |
 All sent to the zero-findings thread. Round 1 + 2 total: 34 new findings. Next: round 3 when the zero head moves (re-verify all open rows), plus new themes if it does not.
+
+## Round 3 (same head 1f4de71, new areas) — done 2026-10-04 ~08:50 UTC
+| Angle | Pass | Area | New | Report |
+|---|---|---|---|---|
+| Crash/edge | 8 | vendor parsers, web under bad replies | CE-56 med (duplicate JSON key in live Dhan rolling read), CE-57..60 low | crash-edge-pass8.md |
+| Concurrency | 6 | api state machines | conc6-1..4 low | conc-pass6.md |
+| Numeric | 6 | costs, greeks, indicators | p6num-1, p6num-2 low (greeks, indicators clean) | numeric-pass6.md |
+| Tests/docs | 6 | Rust-only, gate replay, graph, vocab | P6-01..03 med (gates 1d, 11, 12 red at 1f4de71; green at #74 73441e5), P6-04 low | tests-docs-security-pass6.md |
+Rust-only: clean across 982 files. Owner question left open by D-1602: CI shell/awk vs CLAUDE.md §2 "no interpreted runtime as a tool".
+Total new across rounds 1-3: 49.
