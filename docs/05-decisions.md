@@ -57661,3 +57661,23 @@ tails at one offset get two quarantines. An existing quarantine of the same
 name holds the same bytes by construction and is replaced by the rename.
 
 **Evidence.** ZK-02.
+
+### D-2555 — Population V5 cuts a failed barrier, rewrites its own retried prefix and discards a foreign one — 2026-10-04
+
+**The findings.** conc4-2 (and the Population V5 halves of pop1-4 and
+ledgers-2): V5, written by every `ledger-all` run, synced its rows with a bare
+`sync_data` and left them in place on failure, and the exact retry appended
+nothing and "confirmed" the prefix with a barrier on a fresh descriptor (K2).
+pop2-4 for V5: a receipt-less trailing block of another identity refused every
+later block on the rung ("not an exact canonical prefix"), and a rebuild or new
+data made that refusal permanent.
+
+**The decision.** Rows and Completion barriers go through
+`fixed_tail::sync_or_roll_back`; the reuse path refuses a path whose barrier
+failed in this process. A receipt-less trailing block is withdrawn before the
+append: cut and rewritten whole when it is this exact retry's prefix (bytes
+identical), discarded with a `cli.ledger` warn event otherwise (the D-1905
+rule). `append_rollback`'s module doc no longer says a failed-barrier orphan is
+safe to leave in place.
+
+**Evidence.** ZK-03.

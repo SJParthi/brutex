@@ -2197,16 +2197,23 @@ impl PopulationV5Ledger {
             return self.reuse_existing(prepared, &existing);
         }
         if let Some(trailing) = self.trailing.clone() {
-            return self.complete_trailing(prepared, &trailing);
+            self.withdraw_trailing(prepared, &trailing)?;
         }
         let count = u64::try_from(prepared.rows.len())
             .map_err(|_| "Population V5 prepared count does not fit u64".to_owned())?;
         self.require_append_bound(count, 1)?;
         let first = self.row_records;
+        let block_start = row_offset(first)?;
         self.append_row_suffix(&prepared.rows, 0)?;
-        self.row_file
-            .sync_data()
-            .map_err(|why| format!("cannot sync Population V5 rows: {why}"))?;
+        // A failed barrier cuts the whole block back and is remembered for
+        // this process; a second barrier never confirms it (conc4-2, D-2555).
+        crate::fixed_tail::sync_or_roll_back(
+            &self.row_file,
+            &self.row_path,
+            block_start,
+            File::sync_data,
+        )
+        .map_err(|why| format!("cannot sync Population V5 rows: {why}"))?;
         self.row_records = self
             .row_records
             .checked_add(count)
@@ -2217,47 +2224,41 @@ impl PopulationV5Ledger {
         self.finish_written(prepared.population_id)
     }
 
-    fn complete_trailing(
+    /// Cuts the receipt-less trailing block before this append writes.
+    ///
+    /// No Completion acknowledged it, so it is scratch. When it is this exact
+    /// retry's own prefix it is REWRITTEN, not vouched for: it may be the bytes
+    /// of a run whose barrier failed, and a barrier on this descriptor cannot
+    /// prove them durable (conc4-2, D-2555). When it is another identity's,
+    /// refusing every other block because of it wedged the rung for good
+    /// (pop2-4, D-1905), so it is discarded with a warn event (D-2555).
+    fn withdraw_trailing(
         &mut self,
         prepared: &PreparedPopulationV5,
         trailing: &TrailingRows,
-    ) -> Result<PopulationV5StructuralCommit, PopulationV5Refusal> {
-        let prefix_len = trailing.rows.len();
-        let expected_prefix = prepared.rows.get(..prefix_len).ok_or_else(|| {
-            format!(
-                "Population V5 trailing block has {prefix_len} rows above retry count {}",
-                prepared.rows.len()
-            )
-        })?;
-        if trailing.population_id != prepared.population_id
-            || trailing.rows.as_slice() != expected_prefix
-        {
-            return Err(format!(
-                "Population V5 trailing Population {} is not an exact canonical prefix of retry {}",
-                hex32(trailing.population_id),
-                hex32(prepared.population_id)
-            ));
+    ) -> Result<(), PopulationV5Refusal> {
+        let at = row_offset(trailing.first_row_record)?;
+        let exact = trailing.population_id == prepared.population_id
+            && prepared.rows.get(..trailing.rows.len()) == Some(trailing.rows.as_slice());
+        if exact {
+            self.row_file
+                .set_len(at)
+                .and_then(|()| self.row_file.sync_all())
+                .map_err(|why| format!("cannot cut Population V5 retry prefix: {why}"))?;
+        } else {
+            crate::fixed_tail::discard_orphan(
+                &self.row_file,
+                &self.row_path,
+                at,
+                &format!(
+                    "Population V5 {} that is not this exact retry",
+                    hex32(trailing.population_id)
+                ),
+            )?;
         }
-        let missing = prepared
-            .rows
-            .len()
-            .checked_sub(prefix_len)
-            .ok_or_else(|| "Population V5 trailing prefix length underflowed".to_owned())?;
-        let missing = u64::try_from(missing)
-            .map_err(|_| "Population V5 missing suffix count does not fit u64".to_owned())?;
-        self.require_append_bound(missing, 1)?;
-        self.require_unchanged()?;
-        self.append_row_suffix(&prepared.rows, prefix_len)?;
-        self.row_file
-            .sync_data()
-            .map_err(|why| format!("cannot sync completed Population V5 row prefix: {why}"))?;
-        self.row_records = self.row_records.checked_add(missing).ok_or_else(|| {
-            "Population V5 row count overflowed while completing prefix".to_owned()
-        })?;
-        self.refresh_row_generation()?;
-        self.require_unchanged()?;
-        self.append_completion(prepared, trailing.first_row_record)?;
-        self.finish_written(prepared.population_id)
+        self.row_records = trailing.first_row_record;
+        self.trailing = None;
+        self.refresh_row_generation()
     }
 
     fn append_row_suffix(
@@ -2282,10 +2283,18 @@ impl PopulationV5Ledger {
         first_row_record: u64,
     ) -> Result<(), PopulationV5Refusal> {
         let completion = prepared.expected_completion(self.completion_records, first_row_record)?;
+        let completion_start = self
+            .completion_records
+            .checked_mul(POPULATION_V5_COMPLETION_BYTES as u64)
+            .ok_or_else(|| "Population V5 Completion offset overflowed".to_owned())?;
         append_raw(&mut self.completion_file, &completion.encode()?)?;
-        self.completion_file
-            .sync_data()
-            .map_err(|why| format!("cannot sync Population V5 Completion: {why}"))?;
+        crate::fixed_tail::sync_or_roll_back(
+            &self.completion_file,
+            &self.completion_path,
+            completion_start,
+            File::sync_data,
+        )
+        .map_err(|why| format!("cannot sync Population V5 Completion: {why}"))?;
         sync_directory(&self.root_file, &self.root)?;
         self.completion_records = self
             .completion_records
@@ -2335,6 +2344,10 @@ impl PopulationV5Ledger {
                 hex32(existing.population_id)
             ));
         }
+        // A path whose barrier failed in this process is never confirmed by
+        // a second one (conc4-2, D-2555).
+        crate::fixed_tail::refuse_after_failed_barrier(&self.row_path)?;
+        crate::fixed_tail::refuse_after_failed_barrier(&self.completion_path)?;
         self.row_file
             .sync_data()
             .map_err(|why| format!("cannot sync reused Population V5 rows: {why}"))?;
@@ -3148,6 +3161,13 @@ fn read_fixed_at<const N: usize>(
 
 /// Label every append to this ledger names, and its rollback test injects with.
 const APPEND_LABEL: &str = "Population V5 fixed record";
+
+/// The byte offset of row record `index` (the row file is headerless).
+fn row_offset(index: u64) -> Result<u64, PopulationV5Refusal> {
+    index
+        .checked_mul(POPULATION_V5_ROW_BYTES as u64)
+        .ok_or_else(|| "Population V5 row offset overflowed".to_owned())
+}
 
 fn append_raw(file: &mut File, raw: &[u8]) -> Result<(), PopulationV5Refusal> {
     crate::append_rollback::append(file, raw, APPEND_LABEL)
@@ -4725,6 +4745,55 @@ mod tests {
         }
     }
 
+    /// conc4-2, D-2555: a failed row or Completion barrier cuts the block
+    /// back, so no later barrier on a fresh descriptor vouches for it; the
+    /// exact retry over its own receipt-less prefix issues a barrier of its
+    /// own (a fault armed on that retry cuts the prefix too); the rerun writes.
+    #[test]
+    fn a_failed_population_v5_barrier_is_cut_and_the_retry_rewrites() {
+        use crate::fixed_tail::fault::{Armed, Kind};
+        let prepared = prepared(1, 1);
+        for name in [ROW_FILE, COMPLETION_FILE] {
+            let root = TestRoot::new("failed-v5-barrier");
+            create_empty_files(root.path());
+            {
+                let _armed = Armed::arm(name, Kind::Sync);
+                let mut writer =
+                    PopulationV5Ledger::open_write(root.path(), bounds()).expect("writer");
+                assert!(writer.append(&prepared).is_err(), "{name}");
+            }
+            assert_eq!(
+                std::fs::metadata(root.path().join(COMPLETION_FILE))
+                    .expect("measure")
+                    .len(),
+                0,
+                "{name}: no Completion survives"
+            );
+            if name == COMPLETION_FILE {
+                // The rows are now a receipt-less exact prefix of the retry.
+                let _armed = Armed::arm(ROW_FILE, Kind::Sync);
+                let mut writer =
+                    PopulationV5Ledger::open_write(root.path(), bounds()).expect("writer");
+                assert!(writer.append(&prepared).is_err());
+                assert!(!Armed::pending(), "the retry issued its own barrier");
+            }
+            assert_eq!(
+                std::fs::metadata(root.path().join(ROW_FILE))
+                    .expect("measure")
+                    .len(),
+                0,
+                "{name}: the rows are cut back"
+            );
+            assert!(
+                PopulationV5Ledger::open_write(root.path(), bounds())
+                    .expect("writer")
+                    .append(&prepared)
+                    .expect("the exact rerun writes")
+                    .was_written()
+            );
+        }
+    }
+
     #[test]
     fn a_failed_append_truncates_back_and_the_ledger_stays_open() {
         let root = TestRoot::new("append-rollback");
@@ -4764,8 +4833,12 @@ mod tests {
         assert_eq!(std::fs::read(&row_path).expect("read rows"), expected_rows);
     }
 
+    /// pop2-4 / ledgerall-1, D-2555: a receipt-less trailing block of ANOTHER
+    /// identity was never acknowledged, so the writer discards it and commits
+    /// its own block rather than refusing the rung for good. A Completion
+    /// without rows still refuses.
     #[test]
-    fn foreign_orphan_and_orphan_completion_fail_closed_without_truncation() {
+    fn foreign_orphan_is_discarded_and_orphan_completion_fails_closed() {
         let root = TestRoot::new("foreign-orphan");
         let expected = prepared(1, 1);
         let foreign = prepared(1, 0);
@@ -4773,21 +4846,20 @@ mod tests {
         let row_path = root.path().join(ROW_FILE);
         let foreign_raw = foreign.rows[0].encode().expect("encode foreign orphan");
         std::fs::write(&row_path, foreign_raw).expect("write foreign orphan");
-        let before = std::fs::read(&row_path).expect("read foreign orphan before retry");
         let mut writer = PopulationV5Ledger::open_write(root.path(), bounds())
             .expect("foreign-orphan writer opens structurally");
         assert!(
             writer
                 .append(&expected)
-                .expect_err("foreign orphan must refuse")
-                .contains("not an exact canonical prefix")
+                .expect("a foreign orphan is scratch")
+                .was_written()
         );
         drop(writer);
-        assert_eq!(
-            std::fs::read(&row_path).expect("read foreign orphan after refusal"),
-            before,
-            "valid foreign orphan bytes must never be truncated"
-        );
+        let mut expected_rows = Vec::new();
+        for row in &expected.rows {
+            expected_rows.extend_from_slice(&row.encode().expect("encode expected row"));
+        }
+        assert_eq!(std::fs::read(&row_path).expect("rows"), expected_rows);
 
         let torn_root = TestRoot::new("orphan-completion");
         create_empty_files(torn_root.path());
