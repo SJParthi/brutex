@@ -1,35 +1,33 @@
 # GDFL one-second engine build: resume state (Mac)
 
-Saved by the GDFL build thread (Mac, Remote Control) at 20:10 UTC on 3 Oct, when weekly usage reached 93%. The build is STOPPED, and no agent or cargo process is left running. The exact prompts, scripts and every open review issue are in [gdfl-build-prompts.md](gdfl-build-prompts.md). The full kit is on the Mac at `/Volumes/WD_BLACK/brutex/fresh-20260919/work-20260925/state/resume-kit/` (RESUME.md, read from the end).
+Saved 2026-10-04 13:42 UTC by the GDFL build thread (new account, Mac, Remote Control) as the 5-hour limit neared 93%. Weekly 45%+. Supersedes the 3 Oct 20:10 save. No GDFL data rows are in this file or on any branch pushed. All four part branches stay LOCAL on the Mac (never pushed).
 
-## Where each part stands
+## Heads at save time (worktrees under work-20260925/wt/G-<part>)
 
-| Part | Branch (local on the Mac, never pushed) | Head | Next step | Blocking issues left |
-|---|---|---|---|---|
-| census: `gdfl-census` report-only verb | feat/gdfl-census | 56962ae2 | repair round 2 (2 should-fix, 1 nit) | 0 |
-| core-second: `core::second` | feat/gdfl-core-second | 27d2dcd3 | review round 3 (round 2 repaired) | 0 |
-| store-grid: one-second grid file | feat/gdfl-store-grid | 5ef5c377 (worktree clean) | review round 3 (round 2 repaired) | 0 |
-| gdfl-cm: `pull::gdfl_cm` reader | feat/gdfl-cm-reader | bfee2e39 | repair round 2 (stopped just after it started; worktree clean) | 0 |
-| Integration | feat/gdfl-1s (not created yet) | none | after the parts are clean: squash each part in, run the full Definition of Done | none |
+| Part | Branch | Head | Uncommitted files |
+|---|---|---|---|
+| census | feat/gdfl-census | 3593ca0d | 0 |
+| core-second | feat/gdfl-core-second | 0272901e | 0 |
+| store-grid | feat/gdfl-store-grid | b8ee88f9 | 0 |
+| gdfl-cm | feat/gdfl-cm-reader | 786e1122 | 5 |
 
-Each part loops review (3 lenses: tests-bite, behaviour-extremes-o1, law-and-design) then repair, up to round 5, until no lens refutes and nothing above nit is open.
+## Where it stands
 
-## Steps for the next session or account (on the Mac, project folder /Volumes/WD_BLACK/brutex/fresh-20260919/project)
+- Round-3 reviews done, 9 of 9, with background Agent-tool workers (no Workflow run). Results: core-second clean except nits; store-grid 2 blocking (GS-01b shape test missed walks/defaults) + nits; gdfl-cm 2 gate failures (1d, 12), 1 should-fix, 1 surviving mutant (gdfl_cm.rs:906 && -> ||), nits; census repair r2 in progress. Repairs were committed on top (heads above); their full Definition-of-Done runs were still finishing.
+- Coverage scope decided by the thread (4 Oct): each part is held to 100% line+branch on its OWN diff (nightly llvm-cov --branch); pre-existing main debt belongs to PR #74.
+- New decision numbers for this thread: D-2800..D-2899. Taken: D-2800 (gdfl-cm reads the vendor zips; CmSource trait), D-2801 (tick-store CmSource, pure-Rust ruzstd), D-2802..D-2807 reserved for api/web wiring, D-2808 (per-second volume in SecondCell + grid record).
 
-1. Add `/Volumes/WD_BLACK/brutex/fresh-20260919/work-20260925` as a session folder.
-2. Check usage with get_usage. Kill leftover build processes from earlier sessions, one pid at a time, unsandboxed, in **bash** (zsh does not word-split `$pids`). Spare tools-work/fullscan, NSE_Options_Tick, Python and caffeinate. Run `nohup caffeinate -dimsu -t 172800 &`.
-3. Regenerate the per-part state from the newest build journal(s), newest first: `node state/resume-kit/make-continue-state.js <newest journal.jsonl> [older ...]`. The journals are under `~/.claude/projects/-Volumes-WD-BLACK-brutex-fresh-20260919-project/<session>/subagents/workflows/<run>/journal.jsonl`. Last run: session 0093cf60-67a5-4c37-a8f5-11bed51e6a92, runs wf_3e6c4c50-45c (newest) and wf_124b6c56-8e9. It rewrites the START line of scripts/build-wave1-continue.js. That line ALREADY holds the state at the stop, so this step is needed only if a later run has happened.
-4. Set `MAX_LIVE` in that script to match the usage you can afford (the operator asked to slow the agents; it was 1 at the stop).
-5. Launch it fresh: `Workflow({scriptPath: "/Volumes/WD_BLACK/brutex/fresh-20260919/work-20260925/state/resume-kit/scripts/build-wave1-continue.js"})`. Do NOT use resumeFromRunId on a run with many failed calls: on 3 Oct that re-ran finished builds.
-6. Watch it: `state/resume-kit/watch-build.sh 570` (set BUILD_JOURNAL to the new run's journal). Save again with `state/resume-kit/save-to-github.sh <status.md>`, unsandboxed.
+## Plan changes on 4 Oct (operator)
 
-## Hard rules
+1. The extracted GDFL CSV folders are being deleted (proven byte-identical to the zips). The reader reads the vendor zip /Volumes/WD_BLACK/NSE (Stock+Indices)_01.09.2018 to 24.09.2026_Tick.zip directly (outer zip stores 4,209 day zips uncompressed; members are deflate), behind a CmSource trait. The census verb moves to the same source.
+2. Tick store (built by the WD Black thread): /Volumes/WD_BLACK/brutex/tickstore-data, spec FORMAT.md v1 (BRTXTS01). It is CmSource implementation 2 (prioritised), so the zips can later move to the cloud.
+3. GDFL must be viewable in the EXISTING Brutex app pages (no new pages). Wiring plan: work-20260925/state/design/gdfl-tick-view.md (no page shows ticks today; /db ATM/ITM/OTM lacks a spot source).
+4. Per-second OHLCV with volume (no-LTQ ticks dropped), traceable to source ticks on /db; fills worst-case from seconds, only with enough volume; signals on minutes; exits via exit grids. Fit note: work-20260925/state/design/gdfl-1s-operator-20261004.md (volume-less indices cannot satisfy a volume gate: refuse by name).
 
-- **No real GDFL rows on GitHub, ever.** feat/gdfl-census and feat/gdfl-cm-reader were each squashed to one commit on 3 Oct, with trees identical to the reviewed tips. A grep for the GDFL row shape over each branch's `git log -p` finds 0 real rows; census's single hit is a synthetic probe row (price 1, zeros). The old tips survive only as local refs `refs/backup/gdfl-*-prerewrite-20261003`; never push them. The integration step squashes each part and must prove the same with `git log -p`.
-- Never push the part branches or feat/gdfl-1s until the operator says to land them.
-- Rust only outside web/. O(1) where claimed, proven or listed in docs/06-limits.md. CLAUDE.md is law.
-- D-0802 is folded into PR #74 (PR #21 closed). The 16 unfixed batch-1 C4 groups' findings are in resume/lanes/c4-missing-findings.md.
+## Next steps
 
-## Machine
-
-M4 Pro, 14 cores, 48 GB. WD_BLACK had ~529 GiB free on 3 Oct. Build targets for this wave are ~40 GB under work-20260925/tgt. The cargo queue in work-20260925/bin/cargo has 8 slots × 4 jobs.
+1. Finish each part's repair and its full Definition of Done; then round-4 review (3 lenses) of each new head; repeat until clean.
+2. gdfl-cm: zip source + CmSource, then tick-store source. census: read via CmSource, rerun and compare with run-b5ec8d7c. core-second + store-grid: add volume (D-2808).
+3. Squash-integrate the clean parts into feat/gdfl-1s from origin/main; prove with git log -p that no GDFL row is in any commit. Trial merges show only doc-tail conflicts on main; against origin/final/all-fixes real conflicts in store (file.rs, layout.rs, unit.rs vs store v3), core/pull vendor.rs, pull csv.rs, ci.yml, 07-plan.md: merge final/all-fixes into feat/gdfl-1s locally and resolve.
+4. Import into the existing pages per gdfl-tick-view.md; then code-only landing on PR #74 through its merge gate.
+5. Usage: checked every 15 min; pause Claude work at 5-hour 93%, save + stop at 98% or weekly 93%.
