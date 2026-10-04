@@ -2085,7 +2085,6 @@ fn waiting_json(status: &crate::autopilot::Status, paused: bool, seat: bool) -> 
 /// 4. Otherwise the backfill's own sentence, which is written on every
 ///    transition and is never empty — see [`crate::autopilot::Status::why`].
 fn blocked_by(status: &crate::autopilot::Status, paused: bool) -> String {
-    use crate::autopilot::Phase;
     if paused {
         return format!(
             "the operator's pause. Nothing is asked of any vendor until a resume, and \
@@ -2108,7 +2107,9 @@ fn blocked_by(status: &crate::autopilot::Status, paused: bool) -> String {
         );
     }
     if status.feeds.is_empty() {
-        if status.phase == Phase::Halted {
+        // The task's own word, not the phase: the clock wait is `Halted` and
+        // alive (autopilot-3, CE-46, D-2508).
+        if status.task_returned {
             return format!(
                 "nothing, because the backfill task is not running: {}",
                 status.why()
@@ -4268,6 +4269,7 @@ mod route_tests {
             &Status {
                 phase: Phase::Halted,
                 detail: String::from("the clock is unusable"),
+                task_returned: true,
                 ..Status::default()
             },
             false,

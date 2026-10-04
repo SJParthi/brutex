@@ -57694,3 +57694,35 @@ backoff, an immediate unbounded retry against a vendor answering 5xx
 `outcome_of` treats only that as a pause and gives a breaker stop its own
 sentence as the reason, so it reaches the attempt count, the backoff and the
 stall. Proven by ZC-10.
+
+### D-2508 — Resume is refused only when the backfill task has returned — 2026-10-04
+
+`fly`'s clock wait publishes `Phase::Halted` with no feed while the task is
+alive, and `admit_resume` (and `/ingest/status`'s blocked-by sentence) read that
+shape as a returned task, refusing Resume with a false "it has returned"
+(autopilot-3, CE-46). `autopilot::Status` gains `task_returned`, set only on
+`fly`'s three terminal pre-loop exits; both readers use it instead of the
+phase. Proven by ZC-11.
+
+### D-2509 — A failed telemetry roll is retried, bounded and probed — 2026-10-04
+
+`rotation_broken` was final for the life of the sink, so one transient refusal
+let the current file grow without bound until restart (CE-41). A retry is now
+made once the file has grown one more bound past the failure, and only when a
+probe (create, rename, unlink of a file of its own) shows the directory accepts
+writes; a failed probe shifts nothing. At most `keep_files` failed attempts are
+made, and an attempt that failed after it had already moved or deleted a file
+ends retries for good, because repeating it is the history shift D-1324
+stopped. The `/logs` banner now says rotation is paused and retried. Proven by
+ZC-12.
+
+### D-2510 — A sink that cannot resume its numbering says so at open — 2026-10-04
+
+`resume_point` restarted `seq` and run ids at zero in silence when the newest
+non-empty file could not be read or held no decodable line, and mapped a
+metadata error to length zero, skipping to an older file (CE-51).
+`resume_point` now returns the sentence `Sink::open` reports (into
+`Health::last_error` and once on stderr), and a metadata error other than
+absence stops the walk at that file. Proven by ZC-13. The metadata-error arm is
+not driven by a test: a `stat` refusal on a file whose directory is searchable
+is not producible portably.

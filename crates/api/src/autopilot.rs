@@ -1621,6 +1621,11 @@ pub struct Status {
     pub absorbed_ms: u64,
     /// One report per feed.
     pub feeds: Vec<FeedReport>,
+    /// Whether [`fly`] has RETURNED: set only on its three terminal pre-loop
+    /// exits, never by the clock wait, which also publishes `Halted` with no
+    /// feed while the task is alive. [`admit_resume`] refuses on this, not on
+    /// the phase. autopilot-3, CE-46, D-2508.
+    pub task_returned: bool,
 }
 
 /// How many failures the status carries.
@@ -1649,6 +1654,7 @@ impl Default for Status {
             waiting_ms: 0,
             absorbed_ms: 0,
             feeds: Vec::new(),
+            task_returned: false,
         }
     }
 }
@@ -2591,6 +2597,7 @@ pub async fn fly(site: Loaded) {
     if site.broker != Broker::Live {
         site.autopilot.publish(|status| {
             status.phase = Phase::Halted;
+            status.task_returned = true;
             status.detail = String::from(
                 "this process may not reach a live broker, so the autopilot will not \
                  start. Only the served binary sets Broker::Live.",
@@ -2625,6 +2632,7 @@ pub async fn fly(site: Loaded) {
                     u64::from(CLOCK_WAITS) * IDLE_POLL_SECS / 60
                 );
                 status.due_unix = 0;
+                status.task_returned = true;
             });
             return;
         };
@@ -2668,6 +2676,7 @@ pub async fn fly(site: Loaded) {
     let Some(timeframe) = granularity.store_timeframe() else {
         site.autopilot.publish(|status| {
             status.phase = Phase::Halted;
+            status.task_returned = true;
             status.detail = String::from("the daily rung has no directory in this store build");
         });
         return;
@@ -3792,7 +3801,11 @@ pub fn admit_resume(control: &Control) -> Admission {
                 .map(|feed| format!("{} — {}", feed.feed, feed.halted))
                 .collect();
             if status.feeds.is_empty() {
-                if status.phase == Phase::Halted {
+                // THE TASK'S OWN WORD THAT IT RETURNED, NOT THE PHASE. The
+                // clock wait publishes `Halted` with no feed while the task is
+                // alive and will resume by itself; reading the phase refused
+                // that Resume with "it has returned". autopilot-3, CE-46, D-2508.
+                if status.task_returned {
                     return Admission::Refused {
                         why: format!(
                             "{RESUME_CANNOT_CLEAR} No feed has reported at all and the \
@@ -5058,6 +5071,7 @@ mod tests {
         let site = empty_site("control-preloop");
         site.autopilot.publish(|status| {
             status.phase = Phase::Halted;
+            status.task_returned = true;
             status.detail = String::from("this process may not reach a live broker");
         });
         assert_eq!(
@@ -5077,6 +5091,35 @@ mod tests {
         assert!(
             body.contains("may not reach a live broker"),
             "the reason it stopped is what the refusal carries: {body}"
+        );
+    }
+
+    /// THE CLOCK WAIT IS ALIVE, SO ITS RESUME IS ADMITTED. autopilot-3,
+    /// CE-46, D-2508.
+    ///
+    /// While the clock is not yet usable, `fly` publishes `Halted` with no
+    /// feed and sleeps, then carries on by itself. `admit_resume` read that
+    /// shape as a returned task and refused with "it has returned", which is
+    /// false. Only `fly`'s terminal exits set `task_returned`.
+    #[test]
+    fn a_resume_during_the_clock_wait_is_admitted_and_a_returned_task_is_not() {
+        let control = Control::new();
+        control.publish(|status| {
+            status.phase = Phase::Halted;
+            status.detail = String::from("the clock is not usable yet; looking again");
+        });
+        assert_eq!(admit_resume(&control), Admission::Clear);
+        control.publish(|status| status.task_returned = true);
+        assert!(matches!(admit_resume(&control), Admission::Refused { .. }));
+        let body = include_str!("autopilot.rs")
+            .split_once("pub async fn fly(")
+            .unwrap()
+            .1;
+        let pre_loop = body.split_once("grace(&site).await;").unwrap().0;
+        assert_eq!(
+            pre_loop.matches("return;").count(),
+            pre_loop.matches("status.task_returned = true;").count(),
+            "every terminal pre-loop exit says the task returned"
         );
     }
 
@@ -6198,6 +6241,7 @@ mod tests {
         let control = Control::new();
         control.publish(|status| {
             status.phase = Phase::Halted;
+            status.task_returned = true;
             status.detail = String::from("the clock is unusable");
         });
         assert!(matches!(admit_resume(&control), Admission::Refused { .. }));

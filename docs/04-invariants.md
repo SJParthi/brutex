@@ -6527,3 +6527,6 @@ old line regex the same input and watched it pass.
 | ZC-08 | A finished pull run's Finisher and ticker never write into the next run (D-2505; runs-1) | `api::pullrun::tests::a_finished_runs_guards_never_write_into_the_next_run` | ✓ |
 | ZC-09 | A pause after the autopilot's check stops its run before any instrument (D-2506; autopilot-1) | `api::server::tests::a_pause_after_the_autopilots_check_stops_the_run_before_any_instrument` | ✓ |
 | ZC-10 | A vendor-down breaker stop costs an attempt and waits; only the operator's pause is free (D-2507; autopilot-2) | `api::autopilot::tests::a_vendor_down_breaker_stop_costs_an_attempt_and_waits` | ✓ |
+| ZC-11 | Resume is admitted during the autopilot's clock wait and refused only after the task returned (D-2508; autopilot-3, CE-46) | `api::autopilot::tests::a_resume_during_the_clock_wait_is_admitted_and_a_returned_task_is_not` | ✓ |
+| ZC-12 | A roll that failed once resumes when the directory accepts writes again (D-2509; CE-41) | `telemetry::sink::tests::a_roll_that_failed_once_resumes_when_the_directory_heals` | ✓ |
+| ZC-13 | An undecodable newest event file is named at open and no older file stands in for it (D-2510; CE-51) | `telemetry::sink::tests::an_undecodable_newest_file_is_named_and_not_replaced_by_an_older_one` | ✓ |
