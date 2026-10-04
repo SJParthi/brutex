@@ -3194,6 +3194,32 @@ fn stand_off(site: &Loaded, holder: &str) -> u64 {
     SEAT_WAIT_SECS
 }
 
+/// What holds the run slot, in the words the stand-off uses, or `None`.
+///
+/// `recovery_active` is set under `site.run` by `recovery::claim` and cleared
+/// before the slot is released, and is read here in the same order, run then
+/// active (conc6-4, D-2697).
+fn run_holder(site: &Site) -> Option<&'static str> {
+    let run = site
+        .run
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    run.as_ref()
+        .is_some_and(crate::pullrun::Progress::running)
+        .then(|| {
+            if site
+                .recovery_active
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some()
+            {
+                "a recovery plan is running"
+            } else {
+                "a hand-made pull is running"
+            }
+        })
+}
+
 async fn round(
     site: &Loaded,
     feeds: &mut [FeedState],
@@ -3235,14 +3261,13 @@ async fn round(
     // it means somebody's run ended abnormally; the flag is still readable, and
     // refusing to look would stand the backfill off forever on the strength of
     // one panicked request. Same position `pullrun::with_progress` takes.
-    let pressing = site
-        .run
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .as_ref()
-        .is_some_and(crate::pullrun::Progress::running);
-    if pressing {
-        return stand_off(site, "a hand-made pull is running");
+    //
+    // AND THE HOLDER IS NAMED. Recovery claims the same slot, including a plan
+    // the server resumed by itself at boot, and this said "a hand-made pull"
+    // for both (conc6-4, D-2697).
+    let holder = run_holder(site);
+    if let Some(holder) = holder {
+        return stand_off(site, holder);
     }
 
     let Some(_seats) = site.autopilot.take_every_seat() else {
@@ -3423,7 +3448,18 @@ fn settle(site: &Loaded, state: &mut FeedState, out: &TickOutcome) -> u64 {
             0
         }
         Next::Halt { reason } => {
+            // THE FEED'S OWN REPORT IS MARKED TOO. `round` published the feeds
+            // before the tick, with this one's `halted` empty, and nothing
+            // re-published them until the next round, which never comes while
+            // paused. A Stop then let `dwell_paused` overwrite the detail, so
+            // the reason was nowhere on the page, and `admit_resume` read the
+            // stale feeds and answered "resumed" over a terminal feed
+            // (conc6-1, D-2694). One pass over a handful of feeds.
+            let feed = state.feed.display();
             site.autopilot.publish(move |status| {
+                if let Some(report) = status.feeds.iter_mut().find(|r| r.feed == feed) {
+                    report.halted.clone_from(&reason);
+                }
                 status.phase = Phase::Halted;
                 status.detail = reason;
                 status.due_unix = 0;
@@ -3524,6 +3560,7 @@ async fn tick(
         &asked,
         site,
         &[census::read_vendor(&site.store_root, state.vendor)],
+        crate::server::StopBy::Autopilot,
     )
     .await;
     let took = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
@@ -3606,10 +3643,14 @@ pub(crate) fn outcome_of(
     complete: bool,
     journal_error: Option<String>,
 ) -> TickOutcome {
+    // THE BREAKER'S OWN SENTENCE LEADS, when it tripped: it names the outage,
+    // where the first instrument's refusal names one 503.
+    let breaker = run.stopped.as_ref().filter(|_| run.vendor_down).cloned();
     let reason = run
         .blocked
         .as_ref()
         .map(|b| b.why.clone())
+        .or(breaker)
         .or_else(|| {
             run.total
                 .failures
@@ -3628,7 +3669,12 @@ pub(crate) fn outcome_of(
         // failure, ask again at once"; a run that stopped over its credential
         // carries its own verdict below, and when that verdict is transport it
         // must reach the backoff rather than an immediate retry.
-        stopped: run.stopped.is_some() && run.credential_stop.is_none(),
+        //
+        // AND NEITHER IS THE VENDOR-DOWN BREAKER. It is the vendor's side
+        // failing on consecutive instruments, a transport failure the backoff
+        // and the month's attempt bound exist for. Read as a pause, it retried
+        // at once with no attempt counted, without limit (autopilot-2, D-2690).
+        stopped: run.stopped.is_some() && run.credential_stop.is_none() && !run.vendor_down,
         journal_error,
         credential: run.credential_stop,
     }
@@ -5217,6 +5263,86 @@ mod tests {
         let json = site.autopilot.json();
         assert!(json.contains(r#""state":"halted""#), "{json}");
         assert!(json.contains("never mints"), "{json}");
+    }
+
+    /// **conc6-1: a halt `settle` publishes marks its own feed, so a Stop
+    /// cannot hide it and a Resume cannot be admitted over it.**
+    ///
+    /// `settle` wrote the phase and the detail and left `status.feeds` as the
+    /// round published it before the tick, with `halted` empty. A Stop then
+    /// let `dwell_paused` overwrite the detail, and the reason was nowhere on
+    /// the page; `admit_resume` read the stale feeds and answered `Clear`.
+    #[tokio::test]
+    async fn a_settled_halt_marks_its_feed_so_stop_and_resume_cannot_hide_it() {
+        let site = empty_site("settle-halt-feeds");
+        site.autopilot.publish(|status| {
+            status.phase = Phase::Running;
+            status.feeds = vec![FeedReport {
+                feed: pull::vendor::Feed::Groww.display().to_owned(),
+                ..FeedReport::default()
+            }];
+        });
+        let mut state = FeedState::new(
+            pull::vendor::Feed::Groww,
+            brutex_core::vendor::Vendor::Groww,
+            month(2020, 5),
+        );
+        let dead = TickOutcome {
+            attempted: 1,
+            reached: 0,
+            stored: 0,
+            reason: Some(String::from("NIFTY: refused with status 401")),
+            complete: false,
+            stopped: false,
+            journal_error: None,
+            credential: Some(CredentialStop::SameValue),
+        };
+        assert_eq!(settle(&site, &mut state, &dead), IDLE_POLL_SECS);
+
+        // STOP, then the paused dwell overwrites the phase and the detail.
+        stop(&site.autopilot);
+        let _dwelt = tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            dwell_paused(&site.autopilot),
+        )
+        .await;
+        let json = site.autopilot.json();
+        assert!(json.contains(r#""state":"paused""#), "{json}");
+        assert!(
+            json.contains("never mints"),
+            "the halt's reason is still on the page, on its feed: {json}"
+        );
+        assert!(
+            matches!(admit_resume(&site.autopilot), Admission::Refused { .. }),
+            "the only feed is terminal, so a resume changes nothing"
+        );
+    }
+
+    /// **conc6-4: the stand-off names what actually holds the run slot.**
+    ///
+    /// `site.run` is shared by the `/pull/run` press and recovery, and the
+    /// stand-off said "a hand-made pull is running" for both, including a
+    /// recovery the server resumed by itself at boot.
+    #[tokio::test]
+    async fn the_stand_off_names_a_recovery_as_a_recovery() {
+        let site = empty_site("standoff-recovery");
+        *site
+            .run
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(crate::pullrun::Progress::claimed());
+        crate::recovery_control::activate(&site, [7; 32]);
+        let waited = round(&site, &mut [], &[], pull::vendor::Granularity::Day1).await;
+        assert_eq!(waited, SEAT_WAIT_SECS);
+        let json = site.autopilot.json();
+        assert!(json.contains("a recovery plan is running"), "{json}");
+        assert!(!json.contains("hand-made"), "{json}");
+
+        // A PRESS IS STILL NAMED A PRESS.
+        crate::recovery_control::idle(&site);
+        let _waited = round(&site, &mut [], &[], pull::vendor::Granularity::Day1).await;
+        let json = site.autopilot.json();
+        assert!(json.contains("a hand-made pull is running"), "{json}");
     }
 
     /// **A whole round runs end to end, and a refused broker degrades loudly.**

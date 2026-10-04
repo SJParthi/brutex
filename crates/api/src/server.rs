@@ -6604,7 +6604,7 @@ async fn broker_answer(
     // this line is the receipt; everything inside it is the pull.
     // FRESH, NOT `site.censuses`: see `broker_run`. One manifest read against a
     // call that is about to open sockets is free in the only units that matter.
-    let run = broker_run(&asked, site, &census::read_all(&site.store_root)).await;
+    let run = hand_run(&asked, site).await;
 
     // A refusal, recorded and rendered, with the reason it carries.
     let refuse = |facts: Vec<(&'static str, String)>, why: &str, code: axum::http::StatusCode| {
@@ -6856,6 +6856,14 @@ pub(crate) struct BrokerRun {
     /// the only thing `autopilot::FeedState::observe` may halt a feed on as a
     /// dead credential. `CLAUDE.md` §8, GAP2-36 and GAP2-37, D-0948.
     pub credential_stop: Option<crate::credential_law::CredentialStop>,
+    /// Whether [`Self::stopped`] was set by the vendor-down breaker.
+    ///
+    /// `stopped` has two producers, the operator's pause and the breaker, and
+    /// they mean opposite things to the autopilot: a pause is "not a failure,
+    /// ask again", an outage is a failure to count and back off from
+    /// (autopilot-2). Recorded where the breaker trips rather than re-read
+    /// from the sentence. D-2690.
+    pub vendor_down: bool,
 }
 
 impl BrokerRun {
@@ -6885,6 +6893,12 @@ impl BrokerRun {
         let Some(unfetched) = landed.unfetched.as_mut() else {
             return false;
         };
+        // A LATER CHUNK'S 5xx IS NOT AN OUTAGE OF THIS INSTRUMENT: earlier
+        // chunks landed, so the vendor answered and the breaker resets. The
+        // marker is still removed, so it never reaches the receipt (D-2690).
+        if unfetched.starts_with(VENDOR_DOWN) {
+            *unfetched = unfetched.trim_start_matches(VENDOR_DOWN).to_owned();
+        }
         if !unfetched.starts_with(CREDENTIAL_DEAD) {
             return false;
         }
@@ -7832,10 +7846,44 @@ fn zerodha_isin_cross_check(
     Ok(())
 }
 
+/// Whose stop a [`broker_run`] walk obeys.
+///
+/// The autopilot's stop generation was captured by EVERY caller, so pressing
+/// Stop on the autopilot page cut an operator's hand `/pull/spot`, every
+/// `/pull/run` press leg in flight, and a recovery unit at their next
+/// instrument, journalled each one FAILED as "stopped by the operator", and
+/// answered that nothing further was asked of any vendor while the press asked
+/// again a leg later (conc6-2, D-2695). The control now reaches the walk it
+/// names and no other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StopBy {
+    /// The autopilot's own tick: its Stop ends the walk at the next instrument.
+    Autopilot,
+    /// A walk the operator started by hand, or a recovery unit. The
+    /// autopilot's Stop is not addressed to it; a press stops between legs,
+    /// as `/pull/run/stop` always has.
+    Hand,
+}
+
+/// A [`broker_run`] the autopilot's Stop does not reach, over a fresh census.
+///
+/// Fresh, not `site.censuses`: see `broker_run`. One manifest read against a
+/// call that is about to open sockets.
+async fn hand_run(asked: &ingest::SpotRequest, site: &Site) -> BrokerRun {
+    broker_run(
+        asked,
+        site,
+        &census::read_all(&site.store_root),
+        StopBy::Hand,
+    )
+    .await
+}
+
 pub(crate) async fn broker_run(
     asked: &ingest::SpotRequest,
     site: &Site,
     censuses: &[census::VendorCensus],
+    stop: StopBy,
 ) -> BrokerRun {
     let started = std::time::Instant::now();
     // BEFORE ANY SOCKET. See `Broker` for what this is guarding against and how
@@ -7914,7 +7962,10 @@ pub(crate) async fn broker_run(
     // THE STOP GENERATION, CAPTURED ONCE. A run compares against the value it
     // started with, so a pause that arrives after this run began stops it and a
     // pause that happened before it began does not.
-    let epoch = site.autopilot.epoch();
+    //
+    // ONLY ON THE AUTOPILOT'S OWN WALK. A hand walk carries no generation, so
+    // the autopilot's Stop cannot reach it (conc6-2, D-2695).
+    let epoch = (stop == StopBy::Autopilot).then(|| site.autopilot.epoch());
 
     // The month these bars are for, named once rather than per instrument.
     let month = asked
@@ -7935,7 +7986,7 @@ pub(crate) async fn broker_run(
         // month is five to thirty-seven minutes on this store, and an operator
         // who presses Pause must not wait out the other seven hundred
         // instruments to be obeyed.
-        if site.autopilot.stopped(epoch) {
+        if epoch.is_some_and(|epoch| site.autopilot.stopped(epoch)) {
             out.stopped = Some(format!(
                 "{} — stopped after {} of {} instruments. The partial month is \
                  refilled on resume, because the resume point is the store's own.",
@@ -8033,6 +8084,9 @@ pub(crate) async fn broker_run(
                 index.saturating_add(1),
                 targets.len(),
             ));
+            // RECORDED AS THE BREAKER'S, so the autopilot does not read an
+            // outage as an operator's pause (autopilot-2, D-2690).
+            out.vendor_down = true;
             break;
         }
     }
@@ -8122,7 +8176,7 @@ pub(crate) async fn recovery_spot(
         .take_seat(asked.feed)
         .ok_or_else(|| "the selected feed already has an active pull".to_owned())?;
     let now = std::time::SystemTime::now();
-    let run = broker_run(asked, site, &census::read_all(&site.store_root)).await;
+    let run = hand_run(asked, site).await;
     let journal = site.journal();
     let origin = spot_audit_origin(asked.cash_identity, &run.origin);
     let record = if let Some(blocked) = &run.blocked {
@@ -8600,12 +8654,15 @@ where
                     credential_dead: false,
                     status: why.status,
                     named: why.named,
-                    // MARKED, SO THE RUN LOOP DOES NOT HAVE TO READ THIS
-                    // SENTENCE TO KNOW WHAT IT SAYS. The marker is stripped in
-                    // `broker_run` before the reason reaches an operator or the
-                    // journal, exactly as `WIRE_REACHED` is.
+                    // NO MARKER. This wrote `VENDOR_DOWN` at the head and
+                    // said `broker_run` stripped it, but no `laddered` refusal
+                    // ever reaches `broker_run`: the discovery and rolling
+                    // walks put `detail` mid-sentence after `{label}: `, so
+                    // the control character landed in the receipt, the log
+                    // and the journal (conc8-2, D-2691). The verdict is the
+                    // `status` this refusal already carries.
                     detail: format!(
-                        "{VENDOR_DOWN}{why} — and its own side has now failed \
+                        "{why} — and its own side has now failed \
                          {answered} time(s) on this {what}, out of \
                          {SERVER_ERROR_ATTEMPTS} allowed. The vendor is \
                          reachable and failing, which is not a blip this walk \
@@ -9066,8 +9123,10 @@ async fn fetch_chunks(
                 // `read_markers` only reads the head. It would have travelled
                 // all the way to the operator's page as an invisible control
                 // character and told nothing downstream anything.
-                let credential_dead = marked_why.starts_with(CREDENTIAL_DEAD);
-                let why = marked_why.trim_start_matches(CREDENTIAL_DEAD);
+                //
+                // `VENDOR_DOWN` is lifted the same way and for the same reason:
+                // it is what `broker_run`'s breaker counts (conc8-1, D-2690).
+                let (head, why) = split_head_markers(&marked_why);
                 let sentence = {
                     // THE VENDOR'S OWN WORDS, IN THEIR OWN FIELD.
                     //
@@ -9108,12 +9167,10 @@ async fn fetch_chunks(
                         nth,
                     )
                 };
-                let sentence = if credential_dead {
-                    format!("{CREDENTIAL_DEAD}{sentence}")
-                } else {
-                    sentence
-                };
-                return prefix_or_refusal(bodies, sentence);
+                // THE ORDER `read_markers` READS: `VENDOR_DOWN`, then
+                // `CREDENTIAL_DEAD`, both inside the `WIRE_REACHED` that
+                // `broker_window` puts outside them.
+                return prefix_or_refusal(bodies, format!("{head}{sentence}"));
             }
         };
         bodies.push((
@@ -9292,6 +9349,20 @@ struct Chunks {
     /// say both. `None` with an EMPTY `bodies` cannot happen: an empty prefix is
     /// the `Err` arm — see [`prefix_or_refusal`].
     unfetched: Option<String>,
+}
+
+/// The markers at the head of a refusal, in the order they arrived, and the
+/// sentence after them.
+///
+/// `VENDOR_DOWN` then `CREDENTIAL_DEAD`, the order `with_retry` can write and
+/// `read_markers` reads. Split so a caller that embeds the sentence mid-string
+/// can put the markers back at the head (conc8-1, D-2690).
+fn split_head_markers(marked: &str) -> (&str, &str) {
+    let rest = marked
+        .trim_start_matches(VENDOR_DOWN)
+        .trim_start_matches(CREDENTIAL_DEAD);
+    let at = marked.len().saturating_sub(rest.len());
+    (marked.get(..at).unwrap_or_default(), rest)
 }
 
 /// The prefix if there is one, or the refusal if there is not.
@@ -9822,8 +9893,14 @@ async fn with_retry(
                     // was asked twice more.
                     Step::Answered => return Err(text),
                     Step::ServerDown { answered } => {
+                        // MARKED, AND THIS IS THE ONE LADDER `broker_run`'s
+                        // BREAKER READS. It was unmarked, so the streak never
+                        // left zero and an outage cost every instrument the
+                        // whole 5xx ladder (conc8-1, D-2690). `fetch_chunks`
+                        // lifts it and puts it back at the head, as it does
+                        // `CREDENTIAL_DEAD`; `read_markers` strips it.
                         return Err(format!(
-                            "{text} — and its own side has now failed {answered} \
+                            "{VENDOR_DOWN}{text} — and its own side has now failed {answered} \
                              time(s) on this chunk, out of {SERVER_ERROR_ATTEMPTS} \
                              allowed. The vendor is reachable and failing, which \
                              is not a blip this run can wait out."
@@ -9983,6 +10060,14 @@ const WIRE_REACHED: &str = "\u{1}";
 /// [`broker_run`]'s instrument loop, to count CONSECUTIVE instruments lost to a
 /// 5xx. See [`VENDOR_DOWN_INSTRUMENTS`] for why a run-level count is what makes
 /// a longer per-instrument ladder affordable at all.
+///
+/// # Who writes it
+///
+/// [`with_retry`]'s `ServerDown` arm, the only ladder under `broker_run`, and
+/// `fetch_chunks` carries it to the head of its own sentence. It was written
+/// by `laddered` alone, whose refusals never reach `broker_run`, so the
+/// breaker could not trip (conc8-1, D-2690). `laddered` and the named F&O walk
+/// keep no breaker and carry no marker (conc8-2, D-2691).
 const VENDOR_DOWN: &str = "\u{2}";
 
 /// The vendor's word for what KIND of instrument is being asked for.
@@ -10105,7 +10190,7 @@ const fn breaker_trips(streak: u32) -> bool {
 ///
 /// # The order is not arbitrary
 ///
-/// [`laddered`] marks the refusal with [`VENDOR_DOWN`], and [`WIRE_REACHED`] is
+/// [`with_retry`] marks the refusal with [`VENDOR_DOWN`], and [`WIRE_REACHED`] is
 /// prepended OUTSIDE it, so they arrive as `\u{1}\u{2}…`. Testing for the
 /// second before the first is stripped finds nothing, and the breaker would
 /// then never fire — silently, because a breaker that never trips looks exactly
@@ -12017,6 +12102,12 @@ async fn fetch_chain_chunks(
                 // `CREDENTIAL_DEAD` first; prefixing the symbol in front of it
                 // buried the verdict mid-string, where no reader looks, so
                 // `fno_land` sent the dead token to every remaining contract.
+                //
+                // `VENDOR_DOWN` IS DROPPED HERE. `with_retry` writes it for
+                // `broker_run`'s breaker; the named walk keeps none, so a
+                // marker left on would reach the contract's reason as a
+                // control character (conc8-2, D-2691).
+                let refusal = refusal.trim_start_matches(VENDOR_DOWN);
                 let dead = refusal.starts_with(CREDENTIAL_DEAD);
                 let refusal = refusal.trim_start_matches(CREDENTIAL_DEAD);
                 return FetchedBatch {
@@ -20268,7 +20359,7 @@ mod tests {
         asked
             .members
             .insert(brutex_core::symbol::Symbol::new("INFY").expect("symbol"));
-        let run = broker_run(&asked, &site, &[]).await;
+        let run = broker_run(&asked, &site, &[], StopBy::Hand).await;
         assert_eq!(run.attempted, 0);
         let blocked = run
             .blocked
@@ -32033,7 +32124,7 @@ mod tests {
         .expect("a real target and a window in the past");
 
         let from = crate::emitted::mark();
-        let out = broker_run(&asked, &site, &censuses).await;
+        let out = broker_run(&asked, &site, &censuses, StopBy::Hand).await;
         assert!(
             out.blocked.is_none(),
             "a serving site reaches the loop: {out:?}"
@@ -32143,7 +32234,7 @@ mod tests {
         let from = crate::emitted::mark();
         // AN EMPTY CENSUS, PASSED EXPLICITLY. The universe is empty here, so
         // the gate has no instrument-month to probe and cannot refuse.
-        let out = broker_run(&asked, &site, &[]).await;
+        let out = broker_run(&asked, &site, &[], StopBy::Hand).await;
         assert_eq!(out.attempted, 0, "an empty universe attempts nothing");
         assert!(
             out.blocked.is_none(),

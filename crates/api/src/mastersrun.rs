@@ -37,6 +37,46 @@ use pull::masters::{self, Fetched, Landed, Source, Transport};
 
 static REFRESH: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// Refreshes admitted and not yet finished: the one running and the one
+/// queued behind it, never more than [`MAX_ADMITTED`].
+static ADMITTED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// The running refresh and ONE queued behind it.
+///
+/// Every press used to queue one more detached task on [`REFRESH`], each a
+/// full public and credentialed refresh including a Parameter Store read and
+/// the dump on the shared token, with nothing bounding the queue, while each
+/// abandoned page said nothing landed (conc6-3, D-2696). One queued refresh
+/// still serves a press made after the running one started; a third press
+/// would only repeat it, so it is refused by name at once.
+const MAX_ADMITTED: u8 = 2;
+
+/// One admitted refresh; released when its task ends, however it ends.
+struct Admitted;
+
+impl Admitted {
+    fn take() -> Option<Self> {
+        ADMITTED
+            .fetch_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |held| (held < MAX_ADMITTED).then_some(held.saturating_add(1)),
+            )
+            .ok()
+            .map(|_| Self)
+    }
+}
+
+impl Drop for Admitted {
+    fn drop(&mut self) {
+        let _ = ADMITTED.fetch_update(
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+            |held| Some(held.saturating_sub(1)),
+        );
+    }
+}
+
 /// The JSON content type every route here answers with.
 type JsonHeaders = [(axum::http::HeaderName, &'static str); 1];
 
@@ -511,7 +551,21 @@ async fn credentialed_zerodha() -> Result<pull::http::HttpSource, String> {
 pub async fn refresh(
     axum::extract::State(site): axum::extract::State<crate::server::Loaded>,
 ) -> (axum::http::StatusCode, JsonHeaders, String) {
-    detached(refresh_work(site)).await
+    let Some(admitted) = Admitted::take() else {
+        return (
+            axum::http::StatusCode::CONFLICT,
+            json_headers(),
+            format!(
+                r#"{{"landed":[],"refusal":{}}}"#,
+                crate::render::json_string(
+                    "a refresh is already running and another is queued behind it, so this \
+                     press was refused rather than queued a third: it would fetch the same \
+                     files again. Their outcome appears on /masters/status.json."
+                )
+            ),
+        );
+    };
+    detached(refresh_work(site, admitted)).await
 }
 
 /// Runs `work` on its own task and answers with what it returned.
@@ -546,6 +600,9 @@ async fn refresh_work(
     // operator pressed Refresh, four files landed, and every page kept
     // answering from the boot parse. `Site::reparse` is what closes it.
     site: crate::server::Loaded,
+    // HELD BY THE TASK, so an abandoned page still counts until its refresh
+    // has actually run.
+    _admitted: Admitted,
 ) -> (axum::http::StatusCode, JsonHeaders, String) {
     // FIFO async lock covers fetch -> landing -> reload, including credentials
     // and all sources. An older download cannot publish after a newer refresh.
@@ -950,8 +1007,56 @@ mod tests {
             .block_on(future)
     }
 
+    /// The tests that drive `refresh` share its process-wide lock and queue,
+    /// so they take turns.
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// **conc6-3: presses queue at most one refresh behind the running one; a
+    /// third is refused by name, at once.**
+    ///
+    /// Every press used to add one more detached task waiting FIFO on the
+    /// lock, each a full public and credentialed refresh, with nothing
+    /// bounding the queue, while every abandoned page said nothing landed.
+    #[test]
+    fn a_press_past_one_queued_refresh_is_refused_by_name() {
+        let _serial = SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        block_on(async {
+            let dir = scratch("refresh-bounded");
+            let site = std::sync::Arc::new(crate::server::Site::load(&dir, &dir));
+            let held = super::REFRESH.lock().await;
+            let waker = std::task::Waker::noop();
+            let mut cx = std::task::Context::from_waker(waker);
+            // THE RUNNING ONE AND THE ONE QUEUED BEHIND IT.
+            let mut first = Box::pin(super::refresh(axum::extract::State(std::sync::Arc::clone(
+                &site,
+            ))));
+            assert!(std::future::Future::poll(first.as_mut(), &mut cx).is_pending());
+            let mut second = Box::pin(super::refresh(axum::extract::State(std::sync::Arc::clone(
+                &site,
+            ))));
+            assert!(std::future::Future::poll(second.as_mut(), &mut cx).is_pending());
+            // THE THIRD IS ANSWERED NOW, and says why.
+            let mut third = Box::pin(super::refresh(axum::extract::State(site)));
+            let answered = std::future::Future::poll(third.as_mut(), &mut cx);
+            assert!(answered.is_ready(), "a third press was queued behind two");
+            let std::task::Poll::Ready((code, _, body)) = answered else {
+                return;
+            };
+            assert_eq!(code, axum::http::StatusCode::CONFLICT, "{body}");
+            assert!(body.contains("already running"), "{body}");
+            assert!(body.contains("/masters/status.json"), "{body}");
+            drop((first, second, third));
+            drop(held);
+        });
+    }
+
     #[test]
     fn refresh_requests_wait_before_starting_the_next_fetch() {
+        let _serial = SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         block_on(async {
             let dir = scratch("refresh-serialization");
             let site = std::sync::Arc::new(crate::server::Site::load(&dir, &dir));
@@ -1006,7 +1111,7 @@ mod tests {
             .map(|(body, _)| body)
             .expect("the handler");
         assert!(
-            handler.contains("detached(refresh_work(site)).await"),
+            handler.contains("detached(refresh_work(site, admitted)).await"),
             "the handler runs its work detached: {handler}"
         );
     }

@@ -662,6 +662,106 @@ fn refusal_detail(status: u16, body: &str) -> String {
     }
 }
 
+/// The most of a `GetParameter` answer this build reads, in bytes.
+///
+/// Every other client in this crate reads its body under a cap, by the
+/// declared length and then by the bytes; this one read `.text()`, which
+/// buffers whatever arrives before anything is checked (conc8-4, D-2693). The
+/// number rests on no published AWS limit, because the charter records none:
+/// it is far above any credential this build sends to a broker, and an answer
+/// past it is refused loudly rather than read.
+const MAX_ANSWER_BYTES: usize = 64 * 1024;
+
+/// The class of a fault AWS NAMED, or `None` for a name this build has no
+/// class for.
+///
+/// # Why the name outranks the status
+///
+/// This used to be decided by `AccessDenied` or 403, then `ParameterNotFound`
+/// or 404, and everything else was `Unreachable`, which the caller reads as
+/// transport. An expired session, an unknown key, a bad signature (a clock
+/// skewed past what AWS accepts lands here) and a malformed request are none of
+/// them fixed by asking again, yet each was told "worth retrying" and every
+/// instrument paid its own read (conc8-3, D-2692). Which HTTP status AWS sends
+/// them under is not recorded in the charter and is not assumed here.
+///
+/// The identity, the signature and the key are the role's problem, so
+/// `AccessDenied`. A missing parameter, a missing version and a request AWS
+/// says is malformed all send the operator to the configured path, so
+/// `NotFound`. A throttle, AWS's own failure and a write conflict are the only
+/// three that a later read can clear.
+const fn fault_kind(name: &str) -> Option<SecretError> {
+    Some(match name.as_bytes() {
+        b"AccessDeniedException"
+        | b"ExpiredTokenException"
+        | b"UnrecognizedClientException"
+        | b"InvalidSignatureException"
+        | b"MissingAuthenticationToken"
+        | b"InvalidKeyId" => SecretError::AccessDenied,
+        b"ParameterNotFound" | b"ParameterVersionNotFound" | b"ValidationException" => {
+            SecretError::NotFound
+        }
+        b"ThrottlingException" | b"InternalServerError" | b"TooManyUpdates" => {
+            SecretError::Unreachable
+        }
+        _ => return None,
+    })
+}
+
+/// Which of the port's meanings a refused read is: the fault AWS named, read
+/// from the same allowlist [`refusal_detail`] echoes, and the status only when
+/// it named none.
+fn refusal_kind(status: u16, body: &str) -> SecretError {
+    let named = AWS_FAULTS
+        .iter()
+        .find(|name| body.contains(*name))
+        .and_then(|name| fault_kind(name));
+    named.unwrap_or(match status {
+        403 => SecretError::AccessDenied,
+        404 => SecretError::NotFound,
+        _ => SecretError::Unreachable,
+    })
+}
+
+/// The answer's body, read under [`MAX_ANSWER_BYTES`].
+///
+/// The declared length is checked first, then the bytes are counted frame by
+/// frame and the read stops at the first frame that would pass the cap, so the
+/// kept buffer never exceeds it. The pattern is `http::body_within`'s; time is
+/// bounded by [`CREDENTIAL_TIMEOUT_SECS`], which the client applies to the body
+/// read as well.
+///
+/// # Errors
+///
+/// `Unreachable` when a frame cannot be read or the answer passes the cap.
+async fn answer_within(answer: &mut reqwest::Response) -> Result<String, SsmError> {
+    let past = || {
+        SsmError::unreachable(format!(
+            "Parameter Store's answer is longer than the {MAX_ANSWER_BYTES} bytes \
+             this build reads, so it was not read. A credential is far shorter; \
+             something other than Parameter Store may be answering."
+        ))
+    };
+    if answer
+        .content_length()
+        .is_some_and(|declared| declared > MAX_ANSWER_BYTES as u64)
+    {
+        return Err(past());
+    }
+    let mut kept: Vec<u8> = Vec::new();
+    while let Some(frame) = answer
+        .chunk()
+        .await
+        .map_err(|why| SsmError::unreachable(format!("the answer could not be read: {why}")))?
+    {
+        if frame.len() > MAX_ANSWER_BYTES.saturating_sub(kept.len()) {
+            return Err(past());
+        }
+        kept.extend_from_slice(&frame);
+    }
+    Ok(String::from_utf8_lossy(&kept).into_owned())
+}
+
 /// AWS fault names this build will repeat back, and nothing else.
 ///
 /// An ALLOWLIST rather than a filter, because the thing being kept out is not a
@@ -870,28 +970,19 @@ pub async fn get_parameter(
         request = request.header(name, value);
     }
 
-    let answer = request.body(body).send().await.map_err(|why| {
+    let mut answer = request.body(body).send().await.map_err(|why| {
         // `why` is reqwest's own words and never carries a header this code
         // set, so neither secret can reach this string.
         SsmError::unreachable(format!("{host} was not reached: {why}"))
     })?;
 
     let status = answer.status();
-    let text = answer
-        .text()
-        .await
-        .map_err(|why| SsmError::unreachable(format!("the answer could not be read: {why}")))?;
+    let text = answer_within(&mut answer).await?;
 
     if !status.is_success() {
         // AWS names its faults in the body; the port's four variants are what
         // an operator acts on. Mapped rather than flattened.
-        let kind = if text.contains("AccessDenied") || status.as_u16() == 403 {
-            SecretError::AccessDenied
-        } else if text.contains("ParameterNotFound") || status.as_u16() == 404 {
-            SecretError::NotFound
-        } else {
-            SecretError::Unreachable
-        };
+        let kind = refusal_kind(status.as_u16(), &text);
         // THE BODY IS NEVER QUOTED, AND THIS IS THE §8 LINE.
         //
         // The 300 characters of `text` that used to be spliced here were the
@@ -1020,6 +1111,106 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
               keep panics out of the crate rather than out of its tests"
 )]
 mod tests {
+    /// **conc8-3: a permanent fault is classed by its NAME, whatever the
+    /// status.** An expired or unknown identity, a bad signature (a skewed
+    /// clock lands here) and a malformed request are not fixed by retrying.
+    /// Classed as `Unreachable` they read as transport, so the run neither
+    /// stopped nor named the fault class. The status AWS sends them under is
+    /// not assumed: each is checked under 400 and under 500.
+    #[test]
+    fn a_permanent_parameter_store_fault_is_classed_by_its_name() {
+        for status in [400, 500] {
+            for (name, kind) in [
+                ("AccessDeniedException", SecretError::AccessDenied),
+                ("ExpiredTokenException", SecretError::AccessDenied),
+                ("UnrecognizedClientException", SecretError::AccessDenied),
+                ("InvalidSignatureException", SecretError::AccessDenied),
+                ("MissingAuthenticationToken", SecretError::AccessDenied),
+                ("InvalidKeyId", SecretError::AccessDenied),
+                ("ParameterNotFound", SecretError::NotFound),
+                ("ParameterVersionNotFound", SecretError::NotFound),
+                ("ValidationException", SecretError::NotFound),
+                ("ThrottlingException", SecretError::Unreachable),
+                ("InternalServerError", SecretError::Unreachable),
+                ("TooManyUpdates", SecretError::Unreachable),
+            ] {
+                let body = format!(r#"{{"__type":"{name}","message":"Refused."}}"#);
+                assert_eq!(refusal_kind(status, &body), kind, "{name} under {status}");
+            }
+        }
+        // EVERY ALLOWLISTED NAME HAS A CLASS OF ITS OWN, so a name added to
+        // `AWS_FAULTS` without one fails here rather than falling to the status.
+        for name in AWS_FAULTS {
+            assert!(fault_kind(name).is_some(), "{name} has no class");
+        }
+        // NO NAME: the status decides, as before.
+        assert_eq!(refusal_kind(403, "{}"), SecretError::AccessDenied);
+        assert_eq!(refusal_kind(404, "{}"), SecretError::NotFound);
+        assert_eq!(refusal_kind(400, "{}"), SecretError::Unreachable);
+        assert_eq!(refusal_kind(503, "<html>"), SecretError::Unreachable);
+    }
+
+    /// One loopback answer with `header` then `body`, then the socket closes.
+    fn answering(header: String, body: Vec<u8>) -> String {
+        use std::io::{Read as _, Write as _};
+        let socket = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+        let addr = socket.local_addr().expect("an address");
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = socket.accept() else {
+                return;
+            };
+            let mut buf = [0u8; 4096];
+            let _read = stream.read(&mut buf);
+            let _ = stream.write_all(header.as_bytes());
+            let _ = stream.write_all(&body);
+            let _ = stream.flush();
+        });
+        format!("http://{addr}/")
+    }
+
+    async fn read_from(url: &str) -> Result<String, SsmError> {
+        crate::ensure_tls_provider();
+        let mut answer = reqwest::Client::new()
+            .get(url)
+            .send()
+            .await
+            .expect("the loopback answers");
+        answer_within(&mut answer).await
+    }
+
+    /// **conc8-4: the Parameter Store answer is read under a cap, by the
+    /// declared length and by the bytes.** It was `.text()`, which buffers
+    /// whatever arrives before anything is checked.
+    #[tokio::test]
+    async fn a_parameter_store_answer_past_the_cap_is_refused() {
+        let over = MAX_ANSWER_BYTES + 1;
+        let cap = MAX_ANSWER_BYTES.to_string();
+        // DECLARED: refused on the header.
+        let declared = answering(
+            format!("HTTP/1.1 200 OK\r\ncontent-length: {over}\r\nconnection: close\r\n\r\n"),
+            vec![b'x'; over],
+        );
+        let refused = read_from(&declared).await.expect_err("past the cap");
+        assert_eq!(refused.kind, SecretError::Unreachable);
+        assert!(refused.detail.contains(cap.as_str()), "{refused}");
+        // UNDECLARED: no length, so the bytes are counted.
+        let streamed = answering(
+            "HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n".to_owned(),
+            vec![b'x'; over],
+        );
+        let refused = read_from(&streamed).await.expect_err("past the cap");
+        assert!(refused.detail.contains(cap.as_str()), "{refused}");
+        // AT THE CAP: read whole.
+        let fits = answering(
+            "HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n".to_owned(),
+            vec![b'x'; MAX_ANSWER_BYTES],
+        );
+        assert_eq!(
+            read_from(&fits).await.expect("it fits").len(),
+            MAX_ANSWER_BYTES
+        );
+    }
+
     /// §8 — the parameter path never reaches the output, whatever AWS says.
     #[test]
     fn a_refusal_never_repeats_the_body_that_names_the_parameter() {

@@ -57687,3 +57687,36 @@ line changes, and the lock's refusal stays exactly as strict. Proven locally:
 - P6-04. Gates 27 and 10b read ids with a two- or three-digit tail, so 49 ids (`S-30-session`, `RUST-UC7-a`, `AF-1203-a`, `CU-SV4-CLOSE-D0961` and others) were invisible to uniqueness. Both now read any hyphenated upper-case id (1,792 rows, header words excluded) and 10b refuses a zero match. Checked by injecting a duplicate `S-30-session` row: both gates refused it.
 - P7-01. `a_refused_page_writes_its_reason_to_the_log` returned without asserting when `telemetry::install` failed, which in its own binary only happens when telemetry or the temp directory is broken; it now expects the install, as store's sibling does.
 - P7-02. `the_surviving_set_strictly_shrinks_every_round_that_rejects` returned on an empty rejection set and asserted a per-round count that cannot fail, because a round number exists only after a non-empty round. It now requires a rejection for its fixture, each strategy at most once, and rounds in order without a gap; its doc says termination is structural.
+
+### D-2690 — The spot ladder feeds the vendor-down breaker, and the breaker's stop is a failure to the autopilot — 2026-10-04
+
+- conc8-1. `with_retry` is the only ladder under `broker_run`, and its `ServerDown` arm wrote no `VENDOR_DOWN` marker; only `laddered` wrote one, and its refusals never reach `broker_run`. So the streak stayed at zero, `vendor_down_sentence` was unreachable, and a vendor outage cost every instrument the whole 5xx ladder (measured: five requests and 30 s each; about 6.5 h over ~785 instruments). `with_retry` now marks the refusal, `fetch_chunks` lifts the marker and puts it back at the head as it does `CREDENTIAL_DEAD`, a partly landed window strips it, and the named F&O walk drops it. Measured against a loopback vendor answering 503: before, four instruments cost 20 requests; after, 15, and the fourth is not asked.
+- autopilot-2, which conc8-1 made live. `BrokerRun::stopped` has two producers, and `outcome_of` read the breaker's as an operator's pause: `Next::Retry` with no attempt counted and no backoff, without limit. `BrokerRun::vendor_down` records the breaker's stop; `outcome_of` does not set `stopped` for it and leads the reason with the breaker's sentence, so the month backs off and its attempts are counted. ZX-40.
+
+### D-2691 — No control marker on the F&O ladder's refusal — 2026-10-04
+
+- conc8-2. `laddered` wrote `VENDOR_DOWN` at the head of `Refusal::detail` and said `broker_run` stripped it; nothing on the discovery or rolling walks did, so `\u{2}` landed after `{label}: ` in the receipt, the log and the journal. `laddered` writes no marker (the refusal's `status` already carries the verdict and those walks keep no breaker), and `fetch_chain_chunks` drops the marker `with_retry` now writes. The `VENDOR_DOWN` and `read_markers` docs name the real writer. ZX-41.
+
+### D-2692 — A Parameter Store refusal is classed by its fault name — 2026-10-04
+
+- conc8-3. `get_parameter` set the kind from `AccessDenied`/403 and `ParameterNotFound`/404 alone, so `ExpiredTokenException`, `UnrecognizedClientException`, `InvalidSignatureException` (a skewed clock lands here), `MissingAuthenticationToken`, `InvalidKeyId` and `ValidationException` were `Unreachable`, which `credential_law::Unreadable::of_secret` reads as transport: the run never stopped and told the operator the fault was worth retrying. `refusal_kind` reads the name from the same `AWS_FAULTS` allowlist `refusal_detail` echoes and classes it (`fault_kind`): the identity, signature and key faults are `AccessDenied`, missing and malformed paths `NotFound`, throttle, internal error and write conflict `Unreachable`; the status decides only when no name was given. The HTTP status AWS uses for these faults is not in the charter and is not assumed; the test checks each name under 400 and 500. ZX-42.
+
+### D-2693 — The Parameter Store answer is read under a cap — 2026-10-04
+
+- conc8-4. `get_parameter` read the body with `.text()`, bounded only by the 10 s timeout. `answer_within` refuses a declared length over `MAX_ANSWER_BYTES` (64 KiB) and otherwise counts frames, refusing at the first that would pass the cap, the `http::body_within` pattern. The number rests on no published AWS limit; it is far above any credential, and an answer past it is refused as `Unreachable` with the cap named. ZX-43.
+
+### D-2694 — A settled halt marks its feed — 2026-10-04
+
+- conc6-1. `settle`'s `Halt` arm wrote the phase and detail and left `status.feeds` as the round published it before the tick, with `halted` empty. A Stop let `dwell_paused` overwrite the detail, so the halt reason vanished from `/autopilot.json`, and `admit_resume` read the stale feeds and admitted a resume over a terminal feed. The arm now writes the reason onto the halted feed's report in the same publish. ZX-44.
+
+### D-2695 — The autopilot's Stop reaches only the autopilot's walk — 2026-10-04
+
+- conc6-2. Every `broker_run` caller captured the autopilot's stop generation, so a Stop on the autopilot page cut a hand `/pull/spot`, each `/pull/run` press leg in flight and a recovery unit at their next instrument, journalled them FAILED as "stopped by the operator", while the press asked again a leg later. `broker_run` takes `StopBy`: the autopilot tick passes `Autopilot` and captures the generation; every other caller passes `Hand` and captures none. A press still stops between legs through `/pull/run/stop`, as before; a hand walk now has no mid-walk stop, which is what it had before the autopilot's control reached it by accident. ZX-45.
+
+### D-2696 — At most one masters refresh queued — 2026-10-04
+
+- conc6-3. Since D-1974 each press of `/masters/refresh` queued a detached full public and credentialed refresh on the FIFO lock, with no bound, while each abandoned page reported nothing landed. `ADMITTED` counts admitted refreshes (`MAX_ADMITTED` = 2: the running one and one queued, which still serves a press made after the running one began); a further press is answered 409 at once naming the refresh already running and `/masters/status.json`. The admission is held by the detached task, so an abandoned page still counts until its refresh has run. ZX-46.
+
+### D-2697 — The stand-off names the run slot's holder — 2026-10-04
+
+- conc6-4. `round` said "a hand-made pull is running" whenever `site.run` was held, including by a recovery the server resumed at boot. It now reads `recovery_active` under the same lock order (run, then active) and says "a recovery plan is running" for a recovery. ZX-47.

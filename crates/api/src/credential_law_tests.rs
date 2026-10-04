@@ -29,6 +29,28 @@ struct FakeVendor {
 
 impl FakeVendor {
     async fn rejecting_all_but(accept: Option<&'static str>) -> Self {
+        Self::refusing_with(accept, axum::http::StatusCode::UNAUTHORIZED).await
+    }
+
+    /// A vendor whose own side is down: every request is answered `503`.
+    async fn down() -> Self {
+        Self::refusing_with(None, axum::http::StatusCode::SERVICE_UNAVAILABLE).await
+    }
+
+    /// A vendor that takes `delay` to answer every request with `refusal`.
+    async fn slow(refusal: axum::http::StatusCode, delay: std::time::Duration) -> Self {
+        Self::serving(None, refusal, delay).await
+    }
+
+    async fn refusing_with(accept: Option<&'static str>, refusal: axum::http::StatusCode) -> Self {
+        Self::serving(accept, refusal, std::time::Duration::ZERO).await
+    }
+
+    async fn serving(
+        accept: Option<&'static str>,
+        refusal: axum::http::StatusCode,
+        delay: std::time::Duration,
+    ) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("a loopback port");
@@ -44,10 +66,11 @@ impl FakeVendor {
             let ok = accept.is_some_and(|token| carried.contains(token));
             log.lock().expect("the fake's log").push(carried);
             async move {
+                tokio::time::sleep(delay).await;
                 if ok {
                     (axum::http::StatusCode::OK, "{}")
                 } else {
-                    (axum::http::StatusCode::UNAUTHORIZED, "{}")
+                    (refusal, "{}")
                 }
             }
         });
@@ -148,7 +171,7 @@ async fn a_rejected_token_whose_re_read_is_unchanged_halts_the_spot_run_with_no_
     let script = scripted(&vendor, vec![token("stale")]);
     let (site, asked) = spot_site("same", &script);
 
-    let run = broker_run(&asked, &site, &[]).await;
+    let run = broker_run(&asked, &site, &[], StopBy::Hand).await;
 
     assert!(run.blocked.is_none(), "the run reached its loop: {run:?}");
     assert_eq!(run.attempted, 2, "two instruments were named");
@@ -220,7 +243,7 @@ async fn a_rejected_token_whose_re_read_rotated_continues_with_the_new_value() {
     let script = scripted(&vendor, vec![token("stale"), token("fresh")]);
     let (site, asked) = spot_site("rotated", &script);
 
-    let run = broker_run(&asked, &site, &[]).await;
+    let run = broker_run(&asked, &site, &[], StopBy::Hand).await;
 
     let seen = vendor.seen();
     assert_eq!(seen.len(), 2, "both instruments were asked: {seen:?}");
@@ -252,7 +275,7 @@ async fn a_read_that_returns_a_value_already_rejected_is_never_sent() {
     );
     let (site, asked) = spot_site("flapped", &script);
 
-    let run = broker_run(&asked, &site, &[]).await;
+    let run = broker_run(&asked, &site, &[], StopBy::Hand).await;
 
     assert_eq!(vendor.seen().len(), 1, "{:?}", vendor.seen());
     assert_eq!(run.credential_stop, Some(CredentialStop::SameValue));
@@ -275,7 +298,7 @@ async fn a_failed_re_read_halts_the_run_and_the_autopilot_backs_off() {
     let script = scripted(&vendor, vec![token("stale"), ssm_timed_out()]);
     let (site, asked) = spot_site("reread-failed", &script);
 
-    let run = broker_run(&asked, &site, &[]).await;
+    let run = broker_run(&asked, &site, &[], StopBy::Hand).await;
 
     assert_eq!(vendor.seen().len(), 1, "{:?}", vendor.seen());
     assert_eq!(
@@ -317,7 +340,7 @@ async fn a_configuration_fault_stops_the_run_unsent_and_halts_as_configuration()
     );
     let (site, asked) = spot_site("config", &script);
 
-    let run = broker_run(&asked, &site, &[]).await;
+    let run = broker_run(&asked, &site, &[], StopBy::Hand).await;
 
     assert!(vendor.seen().is_empty(), "{:?}", vendor.seen());
     assert_eq!(script.reads(), 1, "no re-read: nothing was rejected");
@@ -338,6 +361,220 @@ async fn a_configuration_fault_stops_the_run_unsent_and_halts_as_configuration()
     };
     assert_eq!(state.halt_kind, Some(autopilot::Halt::Configuration));
     assert!(!reason.contains("same value"), "{reason}");
+}
+
+/// A serving site over FOUR indices that Dhan names, every one in the
+/// `indices` target, with its credential taken from `script`.
+fn four_index_site(name: &str, script: &Arc<Script>) -> (Site, ingest::SpotRequest) {
+    let dir = crate::scratch::path(&format!("credential-law-{name}"));
+    std::fs::create_dir_all(&dir).expect("masters dir");
+    std::fs::write(
+        dir.join("groww_instruments.csv"),
+        "exchange,segment,underlying_symbol,trading_symbol,instrument_type,series,isin,\
+         expiry_date,strike_price,groww_symbol\n\
+         NSE,CASH,,NIFTY,IDX,,NIFTY,,,NSE-NIFTY\n\
+         NSE,CASH,,BANKNIFTY,IDX,,BANKNIFTY,,,NSE-BANKNIFTY\n\
+         NSE,CASH,,FINNIFTY,IDX,,FINNIFTY,,,NSE-FINNIFTY\n\
+         NSE,CASH,,MIDCPNIFTY,IDX,,MIDCPNIFTY,,,NSE-MIDCPNIFTY\n",
+    )
+    .expect("groww master");
+    std::fs::write(
+        dir.join("dhan_scrip.csv"),
+        "EXCH_ID,SEGMENT,ISIN,INSTRUMENT,UNDERLYING_SYMBOL,SYMBOL_NAME,INSTRUMENT_TYPE,\
+         SERIES,SM_EXPIRY_DATE,STRIKE_PRICE,OPTION_TYPE,SECURITY_ID\n\
+         NSE,I,NA,INDEX,NIFTY,NIFTY,INDEX,NA,0001-01-01,,,13\n\
+         NSE,I,NA,INDEX,BANKNIFTY,BANKNIFTY,INDEX,NA,0001-01-01,,,25\n\
+         NSE,I,NA,INDEX,FINNIFTY,FINNIFTY,INDEX,NA,0001-01-01,,,9001\n\
+         NSE,I,NA,INDEX,MIDCPNIFTY,MIDCPNIFTY,INDEX,NA,0001-01-01,,,9002\n",
+    )
+    .expect("dhan master");
+    let root = crate::scratch::path(&format!("credential-law-store-{name}"));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("manifest")).expect("store root");
+    let mut site = Site::serving(&dir, &root);
+    site.credentials = Credentials::Scripted(Arc::clone(script));
+    let asked = ingest::parse_spot(
+        "target=indices&vendor=dhan&granularity=1day&from=2026-08-03&to=2026-08-05",
+        Day::new(2026, 8, 10).expect("a day"),
+    )
+    .expect("a finished daily window");
+    (site, asked)
+}
+
+/// **conc8-1: a vendor whose own side is down stops the spot run after
+/// [`VENDOR_DOWN_INSTRUMENTS`] instruments, and the autopilot backs off.**
+///
+/// `with_retry` is the only ladder under `broker_run`, and it never wrote
+/// `VENDOR_DOWN`, so the breaker's streak stayed at zero and every instrument
+/// paid the whole 5xx ladder. Four instruments against an all-503 vendor:
+/// three ladders are spent (five requests each), the fourth instrument is
+/// never asked, and the stop names the vendor's side. No control marker
+/// reaches the operator's text.
+///
+/// autopilot-2 rides on it: the breaker's stop is not an operator's pause, so
+/// the tick counts an attempt and waits rather than retrying at once.
+#[tokio::test]
+async fn a_vendor_answering_5xx_stops_the_spot_run_after_the_breaker_count() {
+    let vendor = FakeVendor::down().await;
+    let script = scripted(&vendor, vec![token("live")]);
+    let (site, asked) = four_index_site("vendor-down", &script);
+
+    let run = broker_run(&asked, &site, &[], StopBy::Hand).await;
+
+    assert!(run.blocked.is_none(), "the run reached its loop: {run:?}");
+    assert_eq!(run.attempted, 4, "four instruments were named: {run:?}");
+    let per_instrument = SERVER_ERROR_ATTEMPTS as usize;
+    let breaker = VENDOR_DOWN_INSTRUMENTS as usize;
+    assert_eq!(
+        vendor.seen().len(),
+        per_instrument * breaker,
+        "{breaker} ladders of {per_instrument} and nothing for the fourth instrument"
+    );
+    assert!(run.vendor_down, "the stop is recorded as the breaker's");
+    let stopped = run.stopped.as_deref().expect("the stop is loud");
+    assert!(stopped.contains("consecutive"), "{stopped}");
+    assert!(stopped.contains("3 of 4"), "{stopped}");
+    for said in run
+        .refused
+        .iter()
+        .chain(std::iter::once(&stopped.to_owned()))
+    {
+        assert!(
+            !said.chars().any(char::is_control),
+            "no marker reaches operator text: {said:?}"
+        );
+    }
+
+    let outcome = autopilot::outcome_of(&run, false, None);
+    assert!(
+        !outcome.stopped,
+        "a vendor outage is not an operator's pause"
+    );
+    let mut state = autopilot::FeedState::new(
+        pull::vendor::Feed::Dhan,
+        Vendor::Dhan,
+        store::path::YearMonth::new(2026, 8).expect("a month"),
+    );
+    let next = state.observe(&outcome);
+    assert!(
+        matches!(next, autopilot::Next::Wait { .. }),
+        "the outage is backed off and counted: {next:?}"
+    );
+    assert_eq!(state.attempts, 1, "the attempt is counted");
+}
+
+/// **conc6-2: the autopilot's Stop does not cut a hand-made walk short.**
+///
+/// `broker_run` is shared by the autopilot tick, a hand `/pull/spot`, every
+/// `/pull/run` press leg and recovery, and every one of them captured the
+/// autopilot's stop generation. So a Stop pressed on the autopilot page cut
+/// an operator's own pull at its next instrument and journalled it FAILED as
+/// "stopped by the operator", while the Stop's answer spoke only of the
+/// autopilot. A hand walk now runs to its end; the autopilot's own walk
+/// still stops.
+#[tokio::test]
+async fn an_autopilot_stop_does_not_cut_a_hand_walk_short() {
+    let vendor = FakeVendor::slow(
+        axum::http::StatusCode::NOT_FOUND,
+        std::time::Duration::from_millis(300),
+    )
+    .await;
+    let script = scripted(&vendor, vec![token("live")]);
+    let (site, asked) = spot_site("hand-walk-stop", &script);
+
+    // THE STOP LANDS WHILE THE FIRST INSTRUMENT IS ON THE WIRE.
+    let press_stop = async {
+        while vendor.seen().is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        site.autopilot.pause();
+    };
+    let (run, ()) = tokio::join!(broker_run(&asked, &site, &[], StopBy::Hand), press_stop);
+
+    assert_eq!(vendor.seen().len(), 2, "both instruments were asked");
+    assert!(
+        run.stopped.is_none(),
+        "the hand walk was not stopped: {run:?}"
+    );
+
+    // THE AUTOPILOT'S OWN WALK STILL OBEYS IT.
+    let (site, asked) = spot_site("autopilot-walk-stop", &script);
+    let before = vendor.seen().len();
+    let press_stop = async {
+        while vendor.seen().len() == before {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        site.autopilot.pause();
+    };
+    let (run, ()) = tokio::join!(
+        broker_run(&asked, &site, &[], StopBy::Autopilot),
+        press_stop
+    );
+    assert_eq!(vendor.seen().len(), before + 1, "the second was not asked");
+    let stopped = run.stopped.as_deref().expect("the autopilot walk stopped");
+    // `stopped after` counts instruments REACHED, and the first was refused.
+    assert!(stopped.contains("stopped after 0 of 2"), "{stopped}");
+}
+
+/// **conc8-2: the F&O ladder's 5xx refusal carries no control marker.**
+///
+/// `laddered` wrote `VENDOR_DOWN` at the head of its `detail`, and nothing on
+/// the discovery or rolling walks ever stripped it, so `\u{2}` landed after
+/// `{label}: ` in the receipt, the rolling log and the journal. The verdict
+/// is the refusal's own `status`, which the walk already carries.
+#[tokio::test]
+async fn the_f_and_o_ladder_refusal_on_a_5xx_carries_no_control_marker() {
+    let vendor = FakeVendor::down().await;
+    let script = scripted(&vendor, vec![token("live")]);
+    let (site, _) = spot_site("laddered-down", &script);
+    let asked = std::sync::atomic::AtomicU32::new(0);
+
+    let refused = laddered(pull::vendor::Feed::Dhan, &site, "rolling request", || {
+        asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        core::future::ready(Err(pull::chain::Refusal {
+            credential_dead: false,
+            status: Some(503),
+            named: None,
+            detail: "503 Service Unavailable".to_owned(),
+        }))
+    })
+    .await
+    .expect_err("an all-503 vendor is refused");
+
+    assert_eq!(
+        asked.into_inner(),
+        SERVER_ERROR_ATTEMPTS,
+        "the whole 5xx ladder"
+    );
+    assert_eq!(refused.status, Some(503), "the verdict is the status");
+    let said = format!("NIFTY: {refused}");
+    assert!(said.contains("its own side has now failed"), "{said}");
+    assert!(
+        !said.chars().any(char::is_control),
+        "no marker reaches operator text: {said:?}"
+    );
+}
+
+/// **conc8-1 on the named F&O walk: the marker `with_retry` now writes is
+/// lifted there too.** The named walk keeps no breaker; it must still not
+/// carry the marker into the contract's reason.
+#[tokio::test]
+async fn the_named_walk_strips_the_vendor_down_marker() {
+    let vendor = FakeVendor::down().await;
+    let script = scripted(&vendor, vec![token("live")]);
+
+    let landed = named_walk("vendor-down", &vendor, &script, &[24_000]).await;
+
+    assert_eq!(vendor.seen().len(), SERVER_ERROR_ATTEMPTS as usize);
+    assert_eq!(landed.failed, 1, "{:?}", landed.why);
+    assert!(
+        landed
+            .why
+            .iter()
+            .all(|why| !why.chars().any(char::is_control) && why.contains("own side")),
+        "{:?}",
+        landed.why
+    );
 }
 
 /// A local-archive feed has no credential, and asking for one is a
@@ -562,7 +799,15 @@ async fn a_failed_re_read_mid_rolling_walk_stops_the_walk() {
 // ------------------------------------------------------- named contracts
 
 /// The named-contract walk over three contracts, against the fake.
-async fn named_walk(name: &str, vendor: &FakeVendor, script: &Arc<Script>) -> FnoLanded {
+/// The three contracts the credential walks ask for.
+const THREE_STRIKES: &[u32] = &[24_000, 24_050, 24_100];
+
+async fn named_walk(
+    name: &str,
+    vendor: &FakeVendor,
+    script: &Arc<Script>,
+    strikes: &[u32],
+) -> FnoLanded {
     let root = crate::scratch::path(&format!("credential-law-named-{name}"));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("masters")).expect("masters");
@@ -592,8 +837,8 @@ async fn named_walk(name: &str, vendor: &FakeVendor, script: &Arc<Script>) -> Fn
         store_vendor: Vendor::Groww,
     };
     let expiry = brutex_core::instrument::Expiry::new(2025, 7, 31).expect("an expiry");
-    let wanted: Vec<pull::fno::Found> = [24_000, 24_050, 24_100]
-        .into_iter()
+    let wanted: Vec<pull::fno::Found> = strikes
+        .iter()
         .map(|strike| {
             pull::fno::read_contract(&format!("NSE-NIFTY-31Jul25-{strike}-CE"), expiry)
                 .expect("a named contract")
@@ -613,7 +858,7 @@ async fn a_rejection_mid_contract_walk_stops_every_remaining_contract() {
     let vendor = FakeVendor::rejecting_all_but(None).await;
     let script = scripted(&vendor, vec![token("stale")]);
 
-    let landed = named_walk("same", &vendor, &script).await;
+    let landed = named_walk("same", &vendor, &script, THREE_STRIKES).await;
 
     assert_eq!(vendor.seen().len(), 1, "{:?}", vendor.seen());
     assert_eq!(landed.credential_stop, Some(CredentialStop::SameValue));
@@ -636,7 +881,7 @@ async fn a_rotation_mid_contract_walk_sends_the_rest_with_the_new_token() {
     let vendor = FakeVendor::rejecting_all_but(Some("fresh")).await;
     let script = scripted(&vendor, vec![token("fresh")]);
 
-    let landed = named_walk("rotated", &vendor, &script).await;
+    let landed = named_walk("rotated", &vendor, &script, THREE_STRIKES).await;
 
     let seen = vendor.seen();
     assert_eq!(seen.len(), 3, "every contract was asked: {seen:?}");
@@ -657,7 +902,7 @@ async fn an_undone_rotation_mid_contract_walk_never_resends_a_rejected_token() {
     let vendor = FakeVendor::rejecting_all_but(None).await;
     let script = scripted(&vendor, vec![token("fresh"), token("stale")]);
 
-    let landed = named_walk("flapped", &vendor, &script).await;
+    let landed = named_walk("flapped", &vendor, &script, THREE_STRIKES).await;
 
     let seen = vendor.seen();
     assert_eq!(seen.len(), 2, "stale once, fresh once: {seen:?}");
