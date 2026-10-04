@@ -623,12 +623,18 @@ impl Attempt {
                             .to_owned(),
                     );
                 }
-                file.seek(SeekFrom::End(0)).map_err(io_error)?;
-                for row in rows {
-                    let raw = encode_words::<19, RANK_BYTES>(self.evidence, row.words())?;
-                    file.write_all(&raw).map_err(io_error)?;
-                    digest.update(&raw);
-                }
+                // EVERY ROW OR NONE (D-1854): a write or encoding failure after
+                // some rows truncates the file back to its header, so no torn
+                // or partial ranking is left for a reader to refuse or misread.
+                crate::append_rollback::append_all(&mut file, "ranked sweep evidence", |file| {
+                    for row in rows {
+                        let raw = encode_words::<19, RANK_BYTES>(self.evidence, row.words())?;
+                        write_evidence(file, &raw).map_err(|why| why.to_string())?;
+                        digest.update(&raw);
+                    }
+                    Ok(())
+                })
+                .map_err(io_error)?;
                 barrier(&file, &path).map_err(io_error)
             })();
             let released = file.unlock().map_err(io_error);
@@ -1060,9 +1066,18 @@ fn reserve_start(root: &Path, evidence: Evidence) -> Result<(), String> {
     let mut raw = [0_u8; 16 + EVENT_BYTES];
     raw[..16].copy_from_slice(&EVENT_HEADER);
     raw[16..].copy_from_slice(&event_bytes(evidence)?);
-    file.write_all(&raw)
-        .and_then(|()| barrier(&file, &path))
-        .map_err(io_error)
+    // A FAILED RESERVATION LEAVES NO FILE (D-1854). The file is this token's
+    // own and was created just above, so the state before the attempt is "no
+    // file": a short write is rolled back and the file removed, rather than
+    // left torn for `require_start` to refuse.
+    if let Err(why) = append_evidence(&mut file, &raw, "sweep attempt reservation") {
+        drop(file);
+        return Err(match fs::remove_file(&path) {
+            Ok(()) => format!("{why}; the reservation file was removed"),
+            Err(and) => format!("{why}; removing the reservation file also failed: {and}"),
+        });
+    }
+    barrier(&file, &path).map_err(io_error)
 }
 
 fn require_start(root: &Path, evidence: Evidence, max_bytes: u64) -> Result<(), String> {
@@ -1144,6 +1159,24 @@ fn forget_flushed() {
     FORGOTTEN.fetch_add(1, Ordering::AcqRel);
     remembered.clear();
 }
+/// Appends `raw` at the end through the shared rollback (D-1850, D-1854): a
+/// failed or short write truncates the file back to its length before the
+/// attempt and refuses, naming `label`, the write error and the rollback.
+fn append_evidence(file: &mut File, raw: &[u8], label: &str) -> Result<(), String> {
+    crate::append_rollback::append_with(file, raw, label, write_evidence).map_err(io_error)
+}
+
+/// The one evidence write. Under test, an armed fault lands part of the bytes
+/// and fails, the shape of `ENOSPC` part-way through.
+fn write_evidence(file: &mut File, raw: &[u8]) -> std::io::Result<()> {
+    #[cfg(test)]
+    if let Some(kept) = tests::take_write_fault() {
+        file.write_all(raw.get(..kept).unwrap_or(raw))?;
+        return Err(std::io::Error::other("injected short write"));
+    }
+    file.write_all(raw)
+}
+
 fn open_append(path: &Path) -> Result<File, String> {
     OpenOptions::new()
         .read(true)
@@ -1186,9 +1219,10 @@ fn shape<const N: usize>(
                 .map_err(|why| why.to_string())?
                 .to_le_bytes(),
         );
-        file.write_all(&header)
-            .and_then(|()| barrier(file, path))
-            .map_err(io_error)?;
+        // Truncated back to zero bytes on a short write (D-1854), so the next
+        // writer creates the header again instead of refusing a torn one.
+        append_evidence(file, &header, "sweep evidence header")?;
+        barrier(file, path).map_err(io_error)?;
         if let Some(parent) = path.parent() {
             flush_directory(parent)?;
         }
@@ -1285,10 +1319,8 @@ fn append_row<const N: usize>(path: &Path, magic: [u8; 8], raw: &[u8; N]) -> Res
     file.lock().map_err(io_error)?;
     let result = (|| {
         let at = shape::<N>(&mut file, path, magic, true)?;
-        file.seek(SeekFrom::End(0))
-            .and_then(|_| file.write_all(raw))
-            .and_then(|()| barrier(&file, path))
-            .map_err(io_error)?;
+        append_evidence(&mut file, raw, "sweep evidence row")?;
+        barrier(&file, path).map_err(io_error)?;
         Ok(at)
     })();
     let released = file.unlock().map_err(io_error);
@@ -1381,10 +1413,8 @@ fn append_events(
         } else {
             rows
         };
-        file.seek(SeekFrom::End(0))
-            .and_then(|_| file.write_all(&bytes))
-            .and_then(|()| barrier(&file, path))
-            .map_err(io_error)?;
+        append_evidence(&mut file, &bytes, "sweep lifecycle events")?;
+        barrier(&file, path).map_err(io_error)?;
         if started && let Some(parent) = path.parent() {
             flush_directory(parent)?;
         }

@@ -56741,3 +56741,61 @@ columns built from those legs and from previous-day ranges 9, 100 and 902. The
 result equals a brute-force enumeration of every subset with no screen, and
 the co-firing pairs are among the combinations found. With a Fibonacci pair
 injected into the screen, the runner test fails.
+
+### D-1854 — Every remaining append writer rolls a failed write back — 2026-10-04
+
+**What was wrong (h-cli-4).** D-1850 gave sixteen `cli` ledgers the D-1622
+rollback. The same `seek(End) + write_all` shape, with no truncation after a
+failed or short write, remained in seven writers. Each of them refuses a torn
+file when it next opens or appends, so one ENOSPC or EIO wedged it for good:
+
+- `cli::anchored_search_lineage_v2` and `_v3`: `append_raw`. They also wrote a
+  pair's two members as two appends, so a failed second write left a lone
+  first member, which every open refuses as a partial trailing pair.
+- `cli::population_observations_v1`: V1 and V2 Data and Completion appends,
+  and both file headers.
+- `cli::sweep_evidence`: depth rows, lifecycle and journal events, file
+  headers, the ranking (one write per row, so an encoding or write failure
+  could leave part of a ranking), and the attempt reservation.
+- `cli::operation_audit`: the invocation index and each invocation file.
+- `api::audit`: the pull audit journal.
+- `api::recovery_journal`: single appends and seed batches. Its own test
+  pinned the wedge: after a short write, reopen refused.
+
+**The change.** Each writer now records its end and truncates back to it when
+a write fails, naming the write error and the rollback; when the truncation
+also fails both errors are named and the torn tail stays loud. The `cli`
+writers go through `cli::append_rollback`, which gains `append_all`: a
+multi-write body (the ranking) that rolls back whole on any I/O or encoding
+error. A lineage pair is one append. A failed sweep reservation also removes
+its file: it was created by `create_new` in the same call, so "no file" is the
+state before the attempt. The observation ledgers refresh their snapshot after
+a rollback that held, so the same handle can append again, as D-1850 did for
+Selection. The recovery journal still poisons its handle. A failed sync after
+a whole write is still never rolled back: that record is whole, and each
+ledger's exact-retry rule continues it. Only bytes the failing call itself
+wrote are ever removed, under the writer's lock. Stored bytes of a successful
+append, formats, digests and versions are unchanged. The added cost is one
+`seek`/`fstat` per append and one `set_len` on failure only.
+
+**Dead code, said with evidence.** Lineage V2 and V3 have no production
+caller: `lib.rs` declares them with `allow(dead_code)` / `expect(dead_code)`
+outside tests, and no other source names them. So no stored V2 or V3 file can
+exist from this binary. They are fixed anyway rather than deleted, because
+they are readers of a stored format.
+
+**Not this shape.** `telemetry::sink` appends newline-terminated lines, not
+fixed-stride records, and already terminates a line its own write tore, so a
+reader skips it. `api::backtest`'s `SeekFrom::End` measures a length for a
+read. The remaining `append(true)` and `SeekFrom::End` hits are in test code
+or already roll back (Global Replay, Admission V3/V4, Selection V5,
+institutional statistics, frontier, trades, results, result set, population,
+candidate universe, Base Evidence V2, execution capability and disposition V2,
+stored-data completeness, Search Lineage V4).
+
+**What it proves.** AHA-05 to AHA-10. Each writer has a fault-injection test
+through its own write path. The test injects a short write (or a failure that
+wrote nothing), requires the file to be byte-identical (or, for a cut
+Completion, to hold only the whole Data), and requires the next append to
+land whole. The recovery-journal test now requires the reopened crash image
+to hold the old prefix.
