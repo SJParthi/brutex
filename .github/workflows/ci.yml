@@ -77,6 +77,15 @@ jobs:
             echo "GATE 0 FAILED: crate code above starts a shell or interpreter. D-1603."
             exit 1
           fi
+          # P1-09-01, D-2660: on `workflow_run` and `pull_request_target` the
+          # auto-merge token can WRITE whoever wrote the pull request, so its
+          # `isCrossRepository` refusal is the only thing between a fork and an
+          # armed merge. Deleting it as "redundant with a read-only token" is
+          # now a red build.
+          if ! "$tool" fork-refusal .github/workflows/auto-merge.yml; then
+            echo "GATE 0 FAILED: auto-merge can arm a fork's pull request. D-2660."
+            exit 1
+          fi
           echo "OK — the scanner passed its own tests and the workflow is clean."
 
       - name: Gate 1 — extension allowlist
@@ -168,8 +177,13 @@ jobs:
                    bad=1
                  fi ;;
             esac
-            if grep -Eq "^(${any_depth_names})$" <<< "$base"; then continue; fi
-            if grep -Eq "^(${root_names})$" <<< "$base"; then
+            # WHOLE-STRING MATCHES (P1-07-03, D-2660). `grep <<< "$base"`
+            # matched if ANY LINE of a name matched, so `.gitignore<LF>x.y`
+            # took the `continue` below and `run.y<LF>md` passed as `md`.
+            # `[[ =~ ]]` anchors on the whole name, and `source_scan content`
+            # refuses a control character in any name outside web/.
+            if [[ $base =~ ^(${any_depth_names})$ ]]; then continue; fi
+            if [[ $base =~ ^(${root_names})$ ]]; then
               case "$f" in
                 LICENSE|CODEOWNERS|.github/CODEOWNERS|docs/CODEOWNERS) continue ;;
                 web/*) continue ;;
@@ -191,7 +205,7 @@ jobs:
               .claude/*) list="$claude_allowed" ; where='.claude/' ;;
               *)         list="$allowed"        ; where='outside web/' ;;
             esac
-            if ! grep -Eq "^(${list})$" <<< "$ext"; then
+            if ! [[ $ext =~ ^(${list})$ ]]; then
               printf 'FORBIDDEN FILE  %s  (extension %s, %s)\n' \
                 "$f" "${ext:-<none>}" "$where"
               bad=1
@@ -212,7 +226,12 @@ jobs:
           #
           #   1. `source_scan content`: outside web/, no NUL byte, nothing that
           #      is not UTF-8, no `.rs` opening with a shebang, and no browser
-          #      code in a `.html` or `.css`.
+          #      code in a `.html` or `.css`. Also no NAME holding a control
+          #      character, a non-ASCII byte, `"` or `\` (git quotes those in
+          #      every listing read without `-z`), and no `mutants::skip`
+          #      token in crate code: `#[cfg_attr(miri, mutants::skip)]`
+          #      compiles to nothing and still hides a function from gate 18
+          #      (P1-07-03, P1-07-04, P1-08-01, D-2660).
           #   2. `source_scan orphans`: every tracked `.rs` outside web/ is
           #      COMPILED -- reached from a crate root (lib, main, bin, test,
           #      bench, example, build script, or a manifest `path`) or a
@@ -402,7 +421,9 @@ jobs:
           # read. It is operator tooling, not source, and it is not shipped.
           # The listing first: `git ls-files ... | grep || true` swallowed a git
           # that failed and printed OK over nothing (AC-gates-law-10, D-1104).
-          listing=$(git ls-files)
+          # NUL-separated (P1-07-03, D-2660): without `-z` git C-quotes an
+          # unusual name, and `"x.yml\nmd"` hid its real `.yml` ending.
+          listing=$(git ls-files -z | tr '\0' '\n')
           [ -n "$listing" ] || { echo "GATE 1B READ NO TRACKED FILE."; exit 1; }
           bad=$(grep -E '\.(json|yml)$' <<< "$listing" \
                 | grep -Ev '^(\.github/|\.claude/|web/)' || true)
@@ -438,7 +459,10 @@ jobs:
           # `--config` forms of the same settings.
           scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
           bad=0
-          listing=$(git ls-files)
+          # NUL-separated (P1-07-04, D-2660): without `-z` git printed
+          # `"crates/\303\251/rust-toolchain.toml"`, and the closing quote
+          # broke the `$` anchor below, so a nested toolchain file passed.
+          listing=$(git ls-files -z | tr '\0' '\n')
           [ -n "$listing" ] || { echo "GATE 1G READ NO TRACKED FILE."; exit 1; }
           hits=$(grep -E '(^|/)\.cargo(/|$)' <<< "$listing" || true)
           if [ -n "$hits" ]; then
@@ -596,6 +620,17 @@ jobs:
           # (AC-gates-law-8, D-1109).
           hits=$(xargs -0 -r grep -niE "/[A-Za-z0-9_-][A-Za-z0-9_.-]*/(${envs})/" < "$c_work/tracked" \
                  || true)
+          # AND OVER THE DECODED LITERALS (P1-07-02, D-2660). The grep above
+          # reads source BYTES, so one Rust escape -- `\x70rod`, `pr\u{6f}d` --
+          # hid a standard environment word from it. `source_scan strings`
+          # prints every string literal of every tracked `.rs` outside web/
+          # with its escapes resolved, and the same pattern runs over that.
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
+          tr '\0' '\n' < "$c_work/tracked" | { grep -E '\.rs$' || true; } \
+            | { grep -v '^web/' || true; } | tr '\n' '\0' > "$c_work/rs.z"
+          xargs -0 -r "$scan" strings < "$c_work/rs.z" > "$c_work/decoded"
+          [ -s "$c_work/decoded" ] || { echo "GATE 1C READ NO STRING LITERAL."; exit 1; }
+          hits="$hits$( { grep -iE "/[A-Za-z0-9_-][A-Za-z0-9_.-]*/(${envs})/" "$c_work/decoded" || true; } )"
           if [ -n "$hits" ]; then
             printf 'LITERAL CREDENTIAL PATH IN A TRACKED FILE:\n%s\n' "$hits"
             echo
@@ -1654,6 +1689,33 @@ jobs:
           # fno.rs. `repeats` is a refusal word asserted in http.rs and prose
           # in a session.rs reason string. None is a path segment.
           audit_literal='-354 -7 repeats'
+          # Red at 1f4de71 and declared with the P1-07-02 change (D-2660):
+          # `rel` and `relative` are folder.rs's relative-HOME refusal test,
+          # `junk`, `1e-7` and the twenty nines are rolling.rs's malformed
+          # number fixtures, `post_json` is an http.rs diagnostic label, and
+          # `one-wrapper` a scratch directory in tests/folder.rs.
+          late_fixture='rel relative junk 1e-7 99999999999999999999 post_json one-wrapper'
+          # THE PIECES OF A JOINED LITERAL (P1-07-02, D-2660). Gate 1d now
+          # splits every decoded literal that holds `/` and no whitespace, and
+          # checks each segment-shaped piece, so a whole credential path is no
+          # longer invisible because the WHOLE literal is not segment-shaped.
+          # These are the pieces that split produced at 1f4de71, and none is an
+          # account, an environment or a field: public NSE and vendor URL
+          # components (`api`, `api-data`, `content`, `circulars`, `equity`,
+          # `equity-master`, `indices`, `broad-based-indices`,
+          # `strategy-indices`, `thematic-indices`, `nifty-auto`, `wp-content`,
+          # `uploads`, `all-reports`, `cm`, `futures`, `application`, `json`,
+          # `list`, `support`, `evidence`, `1m`, and date pieces `02 03 07
+          # 2021 2024 2025`); filesystem fixtures (`home`, `tmp`, `usr`, `dev`
+          # from `/dev/null`, `mkfifo`, `crates`, `src`, `tests`, `docs`); and
+          # test placeholders (`bare`, `bought`, `c`, `d`, `g`, `y`, `ghi`,
+          # `else`, `never`, `nowhere`, `somewhere`, `parameter`, `zero`).
+          joined_piece='02 03 07 1m 2021 2024 2025 all-reports api api-data
+          application bare bought broad-based-indices c circulars cm content
+          crates d dev docs else equity equity-master evidence futures g ghi
+          home indices json list mkfifo never nifty-auto nowhere parameter
+          somewhere src strategy-indices support tests thematic-indices tmp
+          uploads usr wp-content y zero'
 
           allowed="${seg_shape} ${vendor_wire} ${claim_standing} ${config_fixture}
           ${secret_fixture} ${scaffold} ${timeframe} ${governor}
@@ -1666,7 +1728,8 @@ jobs:
           ${ssm_leak_fixture}
           ${vendor_error} ${event_field} ${pull_scratch} ${bare_number}
           ${capture_field} ${pull_scratch_2} ${pull_assert} ${pull_asserted_number}
-          ${ssm_region_fixture} ${inner_literal} ${signed_number} ${fold_literal} ${audit_literal}"
+          ${ssm_region_fixture} ${inner_literal} ${signed_number} ${fold_literal} ${audit_literal}
+          ${late_fixture} ${joined_piece}"
           # MATERIALISED ONCE, AND NOT PIPED. `printf '%s\n' $allowed |
           # grep -qxF` was the shape here, and under `set -euo pipefail` it is
           # unsound in the direction that fails a green build: `grep -q` exits
@@ -1723,6 +1786,15 @@ jobs:
           { grep -E '^[a-z0-9_-][a-z0-9_-]{0,31}$' "$work/values" || true; } >> "$work/words"
           { grep -ohE '\\"[a-z0-9_-][a-z0-9_-]{0,31}\\"' "$work/values" || true; } \
             | sed 's/\\"//g' >> "$work/words"
+          # AND EVERY PIECE OF A JOINED LITERAL (P1-07-02, D-2660). A literal
+          # holding a whole path, `/acmeorg/prd/vendor/field`, is not
+          # segment-shaped in whole, so its segments were never compared with
+          # the list -- while docs/06-limits.md section 18 named this gate as
+          # the check for a joined path gate 1c's ten words miss. A literal
+          # with `/` and no whitespace is split on `/` here; prose is not.
+          { grep '/' "$work/values" || true; } | { grep -v '[[:space:]]' || true; } \
+            | tr '/' '\n' \
+            | { grep -E '^[a-z0-9_-][a-z0-9_-]{0,31}$' || true; } >> "$work/words"
           { grep -Ev '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' "$work/words" || true; } \
             | sort -u > "$work/found"
           bad=0
@@ -1835,12 +1907,16 @@ jobs:
           # which is the worst way for a gate to disagree with itself. The glob
           # `*Cargo.toml` also matches `NotCargo.toml`; the grep pins the
           # basename exactly.
-          keys=$( { git ls-files '*Cargo.toml' \
+          #
+          # THE KEY IS READ AS TOML, NOT AS A LINE (P1-07-01, D-2660). The grep
+          # `:[[:space:]]*(build|links)[[:space:]]*=` saw one spelling of four:
+          # `"build" = ..`, `package.build = ..` and `package = { build = .. }`
+          # all renamed the script past it. `source_scan build-keys` prints
+          # `package.build` / `package.links` whatever the spelling.
+          git ls-files -z -- '*Cargo.toml' > "$work/manifests.z"
+          keys=$( { tr '\0' '\n' < "$work/manifests.z" \
                     | { grep -E '(^|/)Cargo\.toml$' || true; } \
-                    | while IFS= read -r m; do
-                        awk -v F="$m" '{ l = $0; sub(/#.*$/, "", l); print F ":" NR ":" l }' "$m"
-                      done \
-                    | grep -E ':[[:space:]]*(build|links)[[:space:]]*=' || true; } )
+                    | tr '\n' '\0' | xargs -0 -r "$scan" build-keys; } )
           if [ -n "$keys" ]; then
             printf 'A MANIFEST NAMES A BUILD SCRIPT OR A NATIVE LIBRARY:\n%s\n' "$keys"
             echo 'A `build =` key renames the script out of every filename check'
@@ -2050,9 +2126,18 @@ jobs:
           # therefore the correct outcome today, not a gap.
           f=crates/web/Cargo.toml
           [ -f "$f" ] || { echo "skip — crates/web does not exist (D-0052 moved it to web/)"; exit 0; }
-          deps=$(awk '/^\[dependencies\]/{f=1;next} /^\[/{f=0} f && /=/ {print $1}' "$f" \
-                 | grep -v '^$' || true)
-          extra=$(printf '%s\n' "$deps" | grep -v '^core$' || true)
+          # READ AS TOML, BY PACKAGE (P1-08-05, D-2660). This was the flat
+          # `[dependencies]` awk D-1107 removed from gates 9 and 9b:
+          # `[dependencies.store]`, a dotted key, a target table or a
+          # dev-dependency printed nothing and the step said OK. `source_scan
+          # deps` prints `file:line:kind:name:package` for every spelling, and
+          # any declaration whose package is not `core` is refused.
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
+          if ! deps=$("$scan" deps "$f"); then
+            echo "REFUSED  $f could not be read as TOML."
+            exit 1
+          fi
+          extra=$( { printf '%s\n' "$deps" | awk -F: 'NF && $NF != "core"'; } || true)
           if [ -n "$extra" ]; then
             printf 'crates/web MAY ONLY DEPEND ON core. Found:\n%s\n' "$extra"
             echo "It compiles to wasm32 where the filesystem does not exist."
@@ -2421,7 +2506,11 @@ jobs:
           # rather than in a review comment so the difference is visible. The
           # allowlist below is the escape, and taking it should come with a
           # decisions entry.
-          bh=$( { git ls-files | awk -F/ '$NF == "build.rs" { print $0 ":1:a build script exists" }'; } || true )
+          # NUL-separated (P1-07-04, D-2660): without `-z` git C-quotes a name
+          # with a non-ASCII byte, `"` or `\`, and the closing quote hides the
+          # `build.rs` ending from `$NF`.
+          git ls-files -z > "$work/l3.z"
+          bh=$( { tr '\0' '\n' < "$work/l3.z" | awk -F/ '$NF == "build.rs" { print $0 ":1:a build script exists" }'; } || true )
 
           # AND A BUILD SCRIPT IS NOT ONE FILE. `$NF == "build.rs"` reports the
           # ROOT of the script and nothing the root declares.
@@ -2444,7 +2533,7 @@ jobs:
           # with this layer still printing "1 of 1 allowed".
           scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
           git ls-files -z > "$work/tracked"
-          roots="$( { git ls-files | awk -F/ '$NF == "build.rs" { print $0 }'; } || true )"
+          roots="$( { tr '\0' '\n' < "$work/l3.z" | awk -F/ '$NF == "build.rs" { print $0 }'; } || true )"
           bs=""
           if [ -n "$roots" ]; then
             # shellcheck disable=SC2086
@@ -2476,7 +2565,13 @@ jobs:
           # because a package that declares one is a package cargo REQUIRES a
           # build script for -- it is this layer's subject announced in a
           # different word.
-          bk=$( { grep -E ':[[:space:]]*(build|links)[[:space:]]*=' "$decl" || true; } )
+          # P1-07-01, D-2660: that grep saw one spelling of four. The key is
+          # now read as TOML by `source_scan build-keys`, quoted, dotted and
+          # inline spellings included.
+          git ls-files -z -- '*Cargo.toml' > "$work/manifests.z"
+          bk=$( { tr '\0' '\n' < "$work/manifests.z" \
+                  | { grep -E '(^|/)Cargo\.toml$' || true; } \
+                  | tr '\n' '\0' | xargs -0 -r "$scan" build-keys; } )
           if [ -n "$bk" ]; then
             bh=$( { printf '%s\n%s\n' "$bh" "$bk" | grep . || true; } )
           fi
@@ -3106,6 +3201,12 @@ jobs:
           [ -s "$g17/tracked.z" ] || { echo "GATE 17 READ NO TRACKED FILE."; exit 1; }
           # A macro invocation is printed with a trailing `!`, so a local named
           # `print` or a variable named `stderr` is not a hit.
+          # A RENAME IS NOT SEEN HERE AND IS REFUSED ELSEWHERE (P1-08-03,
+          # D-2660): this rule matches the KEY a file spells, so
+          # `t = { package = "telemetry", .. }` and `t::emit(..)` pass it. Gate
+          # 22 clause A2 refuses `telemetry`, `log` and `tracing` by PACKAGE in
+          # Cargo.lock across the whole closure of these crates, so the renamed
+          # dependency cannot be linked at all.
           rule='^.+:[0-9]+:((telemetry|log|tracing)(::.+|!)|((std|core|alloc)::)?(e?print(ln)?|dbg)!|((std|core|alloc)::)?io::(stdout|stderr))$'
           for c in $swept; do
             if [ -z "$(git ls-files -- "crates/$c/src/lib.rs")" ]; then
@@ -3208,6 +3309,16 @@ jobs:
           scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
           g23=$(mktemp -d)
           git ls-files -z -- 'crates/*/src/*.rs' > "$g23/files.z"
+          # AND EVERY PRODUCTION FILE OUTSIDE `src/` (P1-08-04, D-2660):
+          # `crates/cli/commit_stamp.rs` is mounted by `#[path]` and compiled
+          # into every `cli` build, and the glob never opened it.
+          git ls-files -z > "$g23/tracked.z"
+          if ! "$scan" prod-files "$g23/tracked.z" > "$g23/prod"; then
+            echo "  REFUSED  the production closure could not be resolved"
+            fail=1
+          fi
+          { grep -v '^crates/[^/]*/src/' "$g23/prod" | grep -v '^UNRESOLVED ' || true; } \
+            | tr '\n' '\0' >> "$g23/files.z"
           [ -s "$g23/files.z" ] || { echo "GATE 23 READ NO FILE under crates/*/src."; exit 1; }
           if ! xargs -0 -r "$scan" paths < "$g23/files.z" > "$g23/paths"; then
             echo "  REFUSED  a source file under crates/*/src could not be lexed"
@@ -4016,13 +4127,14 @@ jobs:
           # (`lib.rs`, `synthetic.rs`, `../Cargo.toml`); clause E zero. So this is
           # a hole closed, not a red build handed to somebody else.
           #
-          # WHAT IS STILL NOT PINNED, said rather than implied: nothing stops
-          # `crates/runner` declaring `store` in its manifest, because clause A
-          # does not read it. Clause C would refuse the `use`, and clause B the
-          # `std::fs` call that followed -- so the capability is still refused at
-          # the two places it has to be exercised, and only the DECLARATION is
-          # unguarded. Closing that needs a `want` for `runner` in clause A, which
-          # needs CLAUDE.md section 5 to be rewritten first.
+          # `runner`'s DEPENDENCY SET IS STILL NOT PINNED, but what it may LINK
+          # now is. This comment used to say a `store` declaration in runner was
+          # harmless because clauses B and C refused its use. That was false
+          # (P1-08-03, D-2660): `bars = { package = "store", .. }` is used as
+          # `bars::file::BarFile::open_existing(..)`, which clause C's key
+          # spellings never match, and the file I/O happens inside `store`, where
+          # clause B never looks. Clause A2 below reads the LOCK, by package,
+          # through every edge, so a rename or an intermediary crate is seen.
           PINNED='vocab indicators engine'
           SWEEP='vocab indicators engine runner'
 
@@ -4073,6 +4185,46 @@ jobs:
               fail=1
             fi
           done
+
+          # ── CLAUSE A2 — nothing the sweep LINKS can read a bar or log ─────────
+          #
+          # P1-08-03, D-2660. Clauses C and gate 17 recognise `store`, `pull`,
+          # `lake`, `api`, `telemetry`, `log` and `tracing` by the dependency
+          # KEY a source file spells, and a Cargo `package =` rename changes the
+          # key and nothing else. So the question is asked of the PACKAGE, in
+          # Cargo.lock, through the whole transitive closure of the four SWEEP
+          # crates: a renamed `store` in runner, and a `store` reached through
+          # an unpinned intermediary such as `costs`, are both refused here.
+          # The lock does not separate dev-dependencies from the rest, so this
+          # is stricter than the build graph: a dev-dependency on one of these
+          # anywhere in the closure is refused too, and that is deliberate.
+          lock=Cargo.lock
+          if [ -z "$(git ls-files -- "$lock")" ]; then
+            echo "REFUSED  Cargo.lock is not tracked; the sweep's closure cannot be read."
+            fail=1
+          else
+            edges=$(awk '/^\[\[package\]\]/ { n = ""; d = 0 }
+                         /^name = / { n = $3; gsub(/"/, "", n) }
+                         /^dependencies = \[/ { d = 1; next }
+                         d && /^\]/ { d = 0; next }
+                         d { x = $1; gsub(/[",]/, "", x); print n, x }' "$lock")
+            [ -n "$edges" ] || { echo "REFUSED  Cargo.lock yielded no dependency edge."; fail=1; }
+            seen=' '; queue="$SWEEP"
+            while [ -n "$queue" ]; do
+              # shellcheck disable=SC2086
+              set -- $queue; c="$1"; shift; queue="$*"
+              case "$seen" in *" $c "*) continue ;; esac
+              seen="$seen$c "
+              for d in $(awk -v C="$c" '$1 == C { print $2 }' <<< "$edges"); do
+                if [[ $d =~ ^(store|pull|lake|api|telemetry|log|tracing.*)$ ]]; then
+                  echo "REFUSED  $c links package $d (Cargo.lock): the sweep's closure reaches a bar or a log"
+                  fail=1
+                fi
+                queue="$queue $d"
+              done
+            done
+            echo "clause A2: the sweep links$seen"
+          fi
 
           # ── CLAUSE B — no filesystem call site in src/ or benches/ ─────────────
           #
@@ -4814,19 +4966,24 @@ jobs:
             END { print drop > SUM; if (st != 0) exit 3 }
           '
 
-          # A FUNCTION, and not an inline filter, because bash's process
-          # substitution parser fails on `#` comments inside `<( ... )`.
-          # `grep -A 1` means the attribute has to sit immediately above the
-          # declaration to count.
-          whole_file_test_module() {
-            # The compiler excludes this entire file in every non-test build.
-            if [ "$(head -1 "$1")" = '#![cfg(test)]' ]; then return 0; fi
-            stem="${1##*/}"; stem="${stem%.rs}"
-            root="${1%/src/*}/src/lib.rs"
-            [ -f "$root" ] \
-              && grep -Eq "^(pub(\([a-z]+\))? )?mod ${stem};$" \
-                   <<< "$(grep -A 1 '^#\[cfg(test)\]$' "$root" || true)"
-          }
+          # THE FILE LIST IS THE COMPILER'S PRODUCTION CLOSURE (P1-08-04,
+          # D-2660). It was a `/src/` glob with a "whole-file test module"
+          # exempted by its file STEM, so a production `resume/manifest.rs`
+          # sharing a stem with a crate-root `#[cfg(test)] mod manifest;` was
+          # skipped, and `crates/cli/commit_stamp.rs`, mounted by `#[path]` from
+          # outside `src/` and compiled into every `cli` build, was never read.
+          # `source_scan prod-files` follows every `mod`, `#[path]` and
+          # `include!` from each crate's lib/main/bin root, skips what sits
+          # under `#[cfg(test)]` or `#[cfg(all(test, ..))]`, and refuses what it
+          # cannot resolve. A file that opens with `#![cfg(test)]` is dropped.
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
+          git ls-files -z > "$work/tracked.z"
+          if ! "$scan" prod-files "$work/tracked.z" > "$work/prod-files"; then
+            echo "REFUSED  the production closure could not be resolved:"
+            grep '^UNRESOLVED ' "$work/prod-files" | sed 's/^/  /'
+            exit 1
+          fi
+          [ -s "$work/prod-files" ] || { echo "READ NO PRODUCTION FILE."; exit 1; }
 
           walked=0; kept=0; dropped=0; undelimited=0
           while IFS= read -r f; do
@@ -4868,10 +5025,7 @@ jobs:
                   if (!ok) print name ":" p[i]
                 }
               }' "$work/one.corpus" >> "$found" 2>>"$counted"
-          done < <(git ls-files 'crates/pull/src/*.rs' 'crates/api/src/*.rs' \
-                   | while IFS= read -r cand; do
-                       whole_file_test_module "$cand" || printf %s\\n "$cand"
-                     done || true)
+          done < <(grep -E '^crates/(pull|api)/' "$work/prod-files" || true)
 
           # A gate must say what it walked. A glob that matches nothing is the
           # failure mode gate 8 shipped with for the whole life of the
@@ -5440,23 +5594,26 @@ jobs:
           # always skipped.
           #
           # A crate-root test attribute or a file-wide #![cfg(test)] must
-          # exclude the file from production. Names and comments cannot do so.
-          # `grep -A 1` means the attribute has to sit immediately above the
-          # declaration to count.
-          #
-          # A FUNCTION, and not an inline filter, because bash's process
-          # substitution parser fails on `#` comments inside `<( ... )` --
-          # "bad substitution: no closing `)'". The reasoning has to live
-          # somewhere it can be read, so it lives here.
-          whole_file_test_module() {
-            # The compiler excludes this entire file in every non-test build.
-            if [ "$(head -1 "$1")" = '#![cfg(test)]' ]; then return 0; fi
-            stem="${1##*/}"; stem="${stem%.rs}"
-            root="${1%/src/*}/src/lib.rs"
-            [ -f "$root" ] \
-              && grep -Eq "^(pub(\([a-z]+\))? )?mod ${stem};$" \
-                   <<< "$(grep -A 1 '^#\[cfg(test)\]$' "$root" || true)"
-          }
+          # exclude the file from production. Names and comments cannot do so,
+          # and neither can a file's stem: the list below is the compiler's.
+          # THE FILE LIST IS THE COMPILER'S PRODUCTION CLOSURE (P1-08-04,
+          # D-2660). It was a `/src/` glob with a "whole-file test module"
+          # exempted by its file STEM, so a production `resume/manifest.rs`
+          # sharing a stem with a crate-root `#[cfg(test)] mod manifest;` was
+          # skipped, and `crates/cli/commit_stamp.rs`, mounted by `#[path]` from
+          # outside `src/` and compiled into every `cli` build, was never read.
+          # `source_scan prod-files` follows every `mod`, `#[path]` and
+          # `include!` from each crate's lib/main/bin root, skips what sits
+          # under `#[cfg(test)]` or `#[cfg(all(test, ..))]`, and refuses what it
+          # cannot resolve. A file that opens with `#![cfg(test)]` is dropped.
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
+          git ls-files -z > "$work/tracked.z"
+          if ! "$scan" prod-files "$work/tracked.z" > "$work/prod-files"; then
+            echo "REFUSED  the production closure could not be resolved:"
+            grep '^UNRESOLVED ' "$work/prod-files" | sed 's/^/  /'
+            exit 1
+          fi
+          [ -s "$work/prod-files" ] || { echo "READ NO PRODUCTION FILE."; exit 1; }
 
 
           while IFS= read -r f; do
@@ -5487,16 +5644,12 @@ jobs:
               printf 'UNDELIMITED TEST MODULE  %s\n' "$f"
               undelimited=$((undelimited + 1))
             fi
-          done < <(git ls-files 'crates/*.rs' \
-                   | grep '/src/' | grep -vE '/(tests|benches)/' \
-                   | while IFS= read -r cand; do
-                       whole_file_test_module "$cand" || printf %s\\n "$cand"
-                     done || true)
+          done < "$work/prod-files"
 
           # A gate must say what it walked. A glob that matches nothing is the
           # failure mode gate 8 shipped with for the whole life of the
           # repository, and it reported success the entire time.
-          echo "walked ${walked} non-test source file(s) under crates/*/src/"
+          echo "walked ${walked} production source file(s) of the crates"
           echo "  ${kept} line(s) in scope, ${dropped} inside a #[cfg(test)] module"
           echo "  $(awk 'END{print NR}' "$corpus") line(s) after comment stripping"
           if [ "$walked" -eq 0 ]; then
@@ -6721,14 +6874,24 @@ jobs:
           fi
           echo "the claim reader is byte-identical in gates 12 and 14"
 
+          # Every file under `src/` AND the compiler's production closure
+          # (P1-08-04, D-2660): a `#[path]` file outside `src/` is production
+          # too. The glob is kept so a claim in a test module is still read.
+          git ls-files -z > "$work/tracked.z"
+          if ! "$scan" prod-files "$work/tracked.z" > "$work/prod-closure"; then
+            echo "GATE 14: the production closure could not be resolved:"
+            grep '^UNRESOLVED ' "$work/prod-closure" | sed 's/^/  /'
+            exit 1
+          fi
+          { git ls-files 'crates/*.rs' | grep '/src/' | grep -vE '/(tests|benches)/' || true; } \
+            | cat - "$work/prod-closure" | sort -u > "$work/prod-files"
           blocks="$work/blocks"; : > "$blocks"
           walked=0
           while IFS= read -r f; do
             [ -n "$f" ] || continue
             walked=$((walked + 1))
             claim_blocks "$f" >> "$blocks"
-          done < <(git ls-files 'crates/*.rs' \
-                   | grep '/src/' | grep -vE '/(tests|benches)/' || true)
+          done < "$work/prod-files"
 
           claims="$work/claims"; : > "$claims"
           while IFS="$tab" read -r f ln item text; do
@@ -6929,6 +7092,22 @@ jobs:
           # Both needles match only a line that BEGINS with them, which is
           # what stops them being satisfied by the `if "$scan"` lines you are
           # reading: those begin with `if`.
+          # layer 2c (P1-08-02, D-2660). `harness = false` is not the only key
+          # that decides whether gate 8 measures a bench: `bench = false` on a
+          # [[bench]] makes `cargo bench --workspace` skip it, and so does a
+          # `required-features` it does not enable -- silently, exit 0, with
+          # this gate still counting the file. Read as TOML, every spelling.
+          echo
+          echo "layer 2c: no [[bench]] is switched off for cargo bench"
+          git ls-files -z -- 'crates/*/Cargo.toml' > "$work/bench-manifests.z"
+          [ -s "$work/bench-manifests.z" ] || { echo "  REFUSED  no crate manifest read"; exit 1; }
+          if ! xargs -0 "$scan" bench-keys < "$work/bench-manifests.z" > "$work/bench-keys"; then
+            sed 's/^/  REFUSED  /' "$work/bench-keys"
+            bad=1
+          else
+            echo "  ok       no bench = false, no required-features, no inline bench array"
+          fi
+
           echo
           echo "layer 5: gate 8 still runs what this gate counted"
           # A line's PRESENCE is not a line's EXECUTION. The first repair here

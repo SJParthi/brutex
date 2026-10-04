@@ -36,8 +36,9 @@ name: Auto-merge
 #
 #   STOPPED       — CI concluded failure, a gate on this head has already
 #                   failed, the check-run list could not be read, the PR is
-#                   from a fork (a fork gets a read-only token by design), or
-#                   the merge call itself did not take. Nothing this workflow
+#                   from a fork (refused by this file's own check, see section
+#                   2: the token here CAN write), or the merge call itself did
+#                   not take. Nothing this workflow
 #                   can observe will restart it. It emits an `::error::`
 #                   annotation, writes a heading into the job summary, and
 #                   EXITS NON-ZERO.
@@ -219,12 +220,19 @@ jobs:
             not_yet "the branch moved during evaluation (evaluated ${sha}, head is now ${head}); a later run owns the new head."
           fi
 
-          # A fork PR gets a read-only token, so this workflow can NEVER arm
-          # it — not on a later push, not ever. Loud, because a green tick
-          # here would promise an automatic merge that cannot happen and the
-          # pull request would sit waiting on nobody.
+          # THIS LINE IS THE LOAD-BEARING REFUSAL, NOT A COSMETIC DUPLICATE
+          # (P1-09-01, D-2660). This file used to credit a read-only token.
+          # That holds for the `pull_request` trigger only: on `workflow_run`
+          # and on `pull_request_target` GitHub runs THIS file in the base
+          # repository with the base repository's token and the `permissions:`
+          # block above, so the token CAN write whoever wrote the pull request.
+          # A fork's own CI runs the fork's copy of ci.yml and can produce a
+          # green `ci-ok`; this check is the one thing between that and an
+          # armed merge. CI gate 0 (`source_scan fork-refusal`) fails the build
+          # if it is removed or moved after the `gh pr merge --auto` call.
+          # Loud, because the pull request needs a human.
           [ "$fork" = "false" ] || \
-            stopped "pull request #${pr} comes from a fork, and a fork gets a read-only token by design. Auto-merge can never be armed for it; review and merge it by hand."
+            stopped "pull request #${pr} comes from a fork. This workflow refuses to arm auto-merge for a fork because its token can write; review and merge it by hand."
 
           # ---------------------------------------------------------------
           # 3. Did the CI run that woke us up actually pass?

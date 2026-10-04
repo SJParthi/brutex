@@ -89,6 +89,7 @@
   // threaded through every call site.
   import { ask } from '$lib/ask.js';
   import { createPageRequests } from '$lib/page-requests.js';
+  import { mergePages, nextOrdinal, pageFor } from '$lib/audit-pages.js';
 
   /* ══════════════════════════════════════════════════════════════════════
      CONSTANTS — each one traceable to a file in this repository
@@ -422,8 +423,13 @@
   async function readOlder(ticket) {
     if (loadingOlder || pagesHeld >= Math.min(MAX_PAGES, payload?.journal?.pages ?? 1)) return;
     const feed = feeds.active;
-    const page = pagesHeld;
-    if (!feed) return;
+    // BY ORDINAL, NOT BY COUNT (P1-06-03, D-2663). `page = pagesHeld` was an
+    // offset from an end that moves while a pull appends; the page to read is
+    // the one that holds the newest missing ordinal, or the one just below
+    // the oldest held, for the total the server last reported.
+    const want = nextOrdinal(merged);
+    const page = want === null ? null : pageFor(want, payload?.journal?.records ?? 0, PAGE_ROWS);
+    if (!feed || page === null) return;
     loadingOlder = true;
     try {
       const got = await read(ticket, page, feed);
@@ -693,7 +699,12 @@
      PRIORITIES 2 AND 4 — RUNS, CAUSES, AND THE REASONS THAT ARE NOT ON DISK
      ══════════════════════════════════════════════════════════════════════ */
 
-  const runs = $derived([...(payload?.runs ?? []), ...older]);
+  /* MERGED BY ORDINAL (P1-06-03, D-2663). Page 0 refreshes against a moving
+     end and older pages do not, so a positional concatenation dropped the
+     records that slid between them and repeated the ones two reads shared.
+     `mergePages` de-duplicates by the absolute ordinal and names every hole. */
+  const merged = $derived(mergePages(payload?.runs ?? [], older));
+  const runs = $derived(merged.runs);
 
   /**
    * Fold a note into a CAUSE.
@@ -1573,6 +1584,13 @@
         {/if}
 
         <div class="logfoot">
+          {#if merged.gaps.length > 0}
+            <span class="fine" role="alert">
+              NOT HELD: ordinal(s) {merged.gaps.map((g) => (g.from === g.to ? `${g.from}` : `${g.from}–${g.to}`)).join(', ')}
+              — the journal grew between two reads, so these rows are missing from the list below. The next load
+              reads the newest of them first.
+            </span>
+          {/if}
           {#if pagesHeld < Math.min(MAX_PAGES, payload.journal.pages)}
             <button class="btn" type="button" onclick={loadOlder} disabled={loadingOlder}>
               {loadingOlder ? 'Reading…' : `Load the previous ${PAGE_ROWS}`}

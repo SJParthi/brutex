@@ -358,6 +358,53 @@ test('ledger admission refuses unsafe, duplicated, misordered, or contradictory 
   assert.equal(capped.ok, true, capped.why);
 });
 
+test('a ragged ledger tail is served as the server serves it: not appendable, every whole row kept (CE-47)', () => {
+  // The shape `a_ragged_tail_is_named_and_the_whole_records_are_still_served`
+  // pins in crates/api/src/backtest.rs: refusal null, both runs, appendable
+  // false, partial_tail true.
+  const ragged = validateLedgerPayload(ledger({ partial_tail: true, appendable: false }));
+  assert.equal(ragged.ok, true, ragged.why);
+  assert.equal(ragged.body?.runs.length, 2);
+  // A ragged tail that still claims to be appendable contradicts the server.
+  const lying = validateLedgerPayload(ledger({ partial_tail: true, appendable: true }));
+  assert.equal(lying.ok, false);
+  assert.match(lying.why, /appendable/);
+});
+
+test('one damaged unsealed row is listed and marked, and the good row beside it survives (CE-48)', () => {
+  const good = complete({ index: 1, identity: 'a'.repeat(64), finished_micros: 2 });
+  for (const damage of [
+    { bars: 6_855 + 2 ** 56 },
+    { from_month: 0 },
+    { pessimistic: 400, optimistic: 300 },
+    { feed: '' },
+    { mask_words: ['x', '0', '0', '0', '0', '0'] }
+  ]) {
+    const damaged = complete({ index: 0, identity: 'b'.repeat(64), sealed: false, ...damage });
+    const body = ledger({ unsealed: 1, best_complete: 1, runs: [good, damaged] });
+    const admitted = validateLedgerPayload(body);
+    assert.equal(admitted.ok, true, `${JSON.stringify(damage)}: ${admitted.why}`);
+    assert.equal(admitted.body?.runs.length, 2);
+    const rows = compareRuns(admitted.body?.runs, SIGNAL_RUNGS);
+    const kept = rows.find((r) => r.index === 0);
+    assert.equal(kept?.admitted, false, 'a damaged row never enters a computation');
+    assert.equal(kept?.eligible, false);
+    assert.equal(rows.find((r) => r.index === 1)?.eligible, true);
+  }
+  // The same damage on a SEALED row still refuses the envelope.
+  const sealedBad = ledger({
+    runs: [good, complete({ index: 0, identity: 'b'.repeat(64), from_month: 0 })]
+  });
+  assert.equal(validateLedgerPayload(sealedBad).ok, false);
+  // An unsealed row without even an identity or index is still refused.
+  const nameless = ledger({
+    unsealed: 1,
+    best_complete: 1,
+    runs: [good, complete({ index: 0, identity: 'not-hex', sealed: false, from_month: 0 })]
+  });
+  assert.equal(validateLedgerPayload(nameless).ok, false);
+});
+
 test('rankable rows lead by pessimistic result with stable ledger-index tie breaking', () => {
   const rows = compareRuns([
     complete({ index: 30, pessimistic: 800, optimistic: 900 }),
