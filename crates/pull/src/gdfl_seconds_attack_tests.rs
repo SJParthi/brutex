@@ -219,15 +219,18 @@ fn tree(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     let mut out = BTreeMap::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(at) = stack.pop() {
-        for entry in std::fs::read_dir(&at).unwrap() {
-            let path = entry.unwrap().path();
+        let entries =
+            std::fs::read_dir(&at).unwrap_or_else(|why| panic!("{}: {why}", at.display()));
+        for entry in entries {
+            let path = entry
+                .unwrap_or_else(|why| panic!("{}: {why}", at.display()))
+                .path();
             if path.is_dir() {
                 stack.push(path);
             } else {
-                out.insert(
-                    path.strip_prefix(dir).unwrap().to_path_buf(),
-                    std::fs::read(&path).unwrap(),
-                );
+                let bytes =
+                    std::fs::read(&path).unwrap_or_else(|why| panic!("{}: {why}", path.display()));
+                out.insert(path.strip_prefix(dir).unwrap().to_path_buf(), bytes);
             }
         }
     }
@@ -1437,22 +1440,27 @@ fn an_undecodable_option_name_is_wanted_only_by_its_whole_underlying() {
 /// contracts (operator's measurement on the real archive: one contract
 /// trades as `ACC19FEB1260PE` to 2019-01-31 and as `ACC28FEB191260PE` from
 /// 2019-02-01; 6,253 of 7,685 have such a twin; the names here are invented
-/// in that shape). Three facts, pinned:
+/// in that shape). Four facts, pinned:
 /// 1. The series is keyed by the DECODED contract (underlying, expiry,
-///    strike, side), never by ticker text: two spellings of one contract on
-///    two days land in one contract directory, one month file.
-/// 2. The pre-cutover monthly name does not decode today: it is refused by
-///    name, `MonthlyExpiryUnstated`, because no sourced monthly expiry
-///    calendar is recorded (D-2806). So its pre-cutover days are NOT joined
-///    to the dated twin; they are refused loudly, never filed under the
-///    ticker text and never guessed.
+///    strike, side), never by ticker text: one contract on two days lands
+///    in one contract directory, one month file, with no ticker text in
+///    its path.
+/// 2. Since D-3165 the pre-cutover monthly name decodes with its month's
+///    sourced day (February 2019 -> 2019-02-28), so the two names hand
+///    `nfo_day`'s sink ONE (symbol, contract): the series joins across the
+///    rename, keyed by the decoded contract, never by ticker text.
 /// 3. Every GDFL day before the calendar's first measured day
-///    (2019-12-02) is refused `CalendarUnmeasured`, the cutover included.
-/// 4. Two names of one contract on ONE day are both refused, never merged:
-///    `nfo_day` counts decoded contracts first (pinned by
-///    `two_tickers_naming_one_contract_are_both_refused`). Today no two
-///    decodable spellings of one contract exist (a non-canonical strike is
-///    `TickerUnparsed`, D-3161), so it cannot be shown across a cutover.
+///    (2019-12-02) is refused `CalendarUnmeasured`, the cutover included, so
+///    the pair cannot reach the store through `run_nfo` today: the join is
+///    proven at `nfo_day`, the step that hands the filing path its key, and
+///    the store's keying by that contract is proven by (1).
+/// 4. Two names of one contract can only meet in one second on ONE day
+///    (a second belongs to its day), and there both are refused,
+///    `TickerAmbiguous`, never merged: `nfo_day` counts decoded contracts
+///    first. Shown with the NIFTY monthly and dated spellings of the January
+///    2019 contract on 2019-01-15 (D-3176). On each side of the cutover the
+///    ACC name of the other era is refused by name, never read as the same
+///    contract.
 #[test]
 fn a_renamed_contract_is_keyed_by_its_decoded_contract_never_its_name() {
     let root = scratch("seconds-rename");
@@ -1522,20 +1530,78 @@ fn a_renamed_contract_is_keyed_by_its_decoded_contract_never_its_name() {
         "{held:?}"
     );
     assert!(!held[0].contains(one), "no ticker text in the path");
-    // 2. The cutover pair: the monthly name refuses by name; the dated twin lands.
-    day_store(jan, &["ACC19FEB1260PE"]);
-    day_store(feb, &["ACC28FEB191260PE"]);
+    // 2. The cutover pair: both names decode to one contract, and the
+    // listing hands the filing path one (symbol, contract) for both days.
+    let (monthly, dated) = ("ACC19FEB1260PE", "ACC28FEB191260PE");
+    day_store(jan, &[monthly]);
+    day_store(feb, &[dated]);
+    let (old, new) = (decoded(monthly, jan), decoded(dated, feb));
+    assert_eq!(old, new, "one contract across the rename");
+    assert_eq!(old.underlying.as_str(), "ACC");
+    assert_eq!(old.contract.as_str(), "2019-02-28-126000-PE");
+    let listed = |day: Day, only: &[String]| {
+        let run = Run {
+            kind: ImportKind::Options,
+            from: day,
+            to: day,
+            only,
+            store_root: &root.join("unused"),
+        };
+        let mut files: Vec<(String, Option<Contract>, String, usize)> = Vec::new();
+        let read = nfo_day(&source, &run, day, &mut |file| {
+            files.push((file.symbol, file.contract, file.name, file.ticks.len()));
+        });
+        (files, read)
+    };
+    let (jan_files, jan_read) = listed(jan, &[]);
+    let (feb_files, feb_read) = listed(feb, &["ACC".to_owned()]);
+    assert!(jan_read.refused.is_empty() && feb_read.refused.is_empty());
+    assert_eq!(jan_files.len(), 1, "{jan_files:?}");
+    assert_eq!(feb_files.len(), 1, "{feb_files:?}");
     assert_eq!(
-        crate::gdfl_nfo::decode_ticker("ACC19FEB1260PE", jan),
-        Err(crate::gdfl_nfo::NfoRefusal::MonthlyExpiryUnstated {
-            ticker: "ACC19FEB1260PE".to_owned()
-        })
+        (&jan_files[0].0, &jan_files[0].1),
+        (&feb_files[0].0, &feb_files[0].1),
+        "one series key on both sides of the cutover"
     );
-    let twin = decoded("ACC28FEB191260PE", feb);
-    assert_eq!(twin.underlying.as_str(), "ACC");
+    assert_eq!(jan_files[0].1, Some(old.contract));
+    assert_ne!(jan_files[0].2, feb_files[0].2, "two vendor names");
+    // Each name on the other side of the cutover is refused by name: the
+    // dated twin before it reads as the monthly form of February 2028 (no
+    // sourced day), the monthly name after it as a dated 2012-02-19.
+    assert!(matches!(
+        crate::gdfl_nfo::decode_ticker(dated, jan),
+        Err(NfoRefusal::MonthlyExpiryUnstated { .. })
+    ));
+    assert!(matches!(
+        crate::gdfl_nfo::decode_ticker(monthly, feb),
+        Err(NfoRefusal::ExpiryRefused { .. })
+    ));
+    day_store(jan, &[monthly, dated]);
+    let (both_jan, both_jan_read) = listed(jan, &[]);
+    assert_eq!(both_jan.len(), 1, "{both_jan:?}");
+    assert_eq!(both_jan[0].2, monthly);
+    assert_eq!(both_jan_read.refused.len(), 1);
+    assert_eq!(both_jan_read.refused[0].instrument, dated);
+    // 4. Two spellings of ONE contract on one day: both refused, no file
+    // reaches the sink, so no second holds rows of two names.
+    let mid = Day::new(2019, 1, 15).unwrap();
+    let pair = ["NIFTY19JAN10500CE", "NIFTY31JAN1910500CE"];
+    assert_eq!(decoded(pair[0], mid), decoded(pair[1], mid));
+    day_store(mid, &pair);
+    let (same_day, same_read) = listed(mid, &[]);
+    assert!(same_day.is_empty(), "{same_day:?}");
+    assert_eq!(same_read.refused.len(), 2, "{:?}", same_read.refused);
+    for (failure, name) in same_read.refused.iter().zip(pair) {
+        assert_eq!(failure.instrument, name);
+        assert!(
+            failure.why.contains("names the same contract"),
+            "{failure:?}"
+        );
+    }
     // And neither day is imported at all today: both lie before the
     // calendar's first measured day (`calendar::FIRST_DAY`, 2019-12-02), so
     // the session gate refuses them by name before any file is read.
+    day_store(jan, &[monthly]);
     let cut = import(jan, feb, "B");
     assert_eq!(
         (cut.days_refused, cut.files, cut.seconds),

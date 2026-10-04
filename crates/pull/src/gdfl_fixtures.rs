@@ -184,16 +184,25 @@ pub(crate) fn csv(rows: &[String]) -> Vec<u8> {
     text.into_bytes()
 }
 
-/// A scratch directory unique to `tag`, empty, under the system temp dir.
+/// Every scratch directory this process has made, so no two calls share one.
+static SCRATCH_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A scratch directory unique to this call, empty, under the system temp
+/// dir. The name carries the process, a per-process sequence number and the
+/// clock, and the leaf is made with `create_dir`, which refuses a directory
+/// that already exists: two tests can never share a tree (one's cleanup
+/// deleting the other's files mid-walk was the shape of a `NotFound` seen
+/// once in `tree`), and a collision panics here by name instead (D-3177).
 pub(crate) fn scratch(tag: &str) -> PathBuf {
+    let seq = SCRATCH_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
-        "brutex-gdfl-{tag}-{}-{}",
+        "brutex-gdfl-{tag}-{}-{seq}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos())
     ));
-    std::fs::create_dir_all(&dir).expect("a scratch dir");
+    std::fs::create_dir(&dir).expect("a fresh scratch dir, never an existing one");
     dir
 }
 

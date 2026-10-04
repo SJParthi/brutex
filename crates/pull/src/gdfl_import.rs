@@ -514,10 +514,11 @@ impl Run<'_> {
         if self.only.is_empty() {
             return "*".to_owned();
         }
-        let mut names: Vec<&str> = self.only.iter().map(String::as_str).collect();
-        names.sort_unstable();
-        names.dedup();
-        names.join(",")
+        // Ordered and deduplicated by the set (D-3178), bounded by the filter's own
+        // length, never by the data.
+        let names: std::collections::BTreeSet<&str> =
+            self.only.iter().map(String::as_str).collect();
+        names.into_iter().collect::<Vec<&str>>().join(",")
     }
 }
 
@@ -822,14 +823,14 @@ where
     let mut report = Report::default();
     for day in days(run.from, run.to) {
         let key = format!("{} {day} {filter}", run.kind.as_str());
-        if journal.done.contains(&key) {
+        if journal.done.contains(key.as_str()) {
             report.days_skipped += 1;
             continue;
         }
         if !calendar_admits(run.kind, day, &mut report) {
             continue;
         }
-        if journal.open.contains(&key) {
+        if journal.open.contains(key.as_str()) {
             report.resumed.push(day);
             let day_text = day.to_string();
             note(
@@ -945,7 +946,7 @@ fn cm_day<S: CmSource>(
         }
     };
     read.held = true;
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::with_capacity(listing.entries().len());
     let folder = format!("{}/", listing.folder());
     for file in listing.entries() {
         let key = file
@@ -1049,7 +1050,8 @@ fn nfo_day<S: NfoSource>(
     read.held = true;
     // Two tickers of the day naming one contract would file into one path:
     // counted first, and every one of them refused by name.
-    let mut named: HashMap<(String, Contract), usize> = HashMap::new();
+    let mut named: HashMap<(String, Contract), usize> =
+        HashMap::with_capacity(listing.entries().len());
     for file in listing.entries() {
         if let Some(Ok(decoded)) = listing.ticker_of(file).map(|t| decode_ticker(t, day)) {
             *named

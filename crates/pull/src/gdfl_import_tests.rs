@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Tests of the GDFL import runtime. Every value is invented at run time;
 //! no vendor row is quoted (`gdfl_cm::tests::fixtures_are_built_not_pasted`).
 
@@ -901,22 +902,22 @@ fn a_reader_refusal_in_a_capital_market_file_is_named() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-/// No two tickers of one day decode to one contract today: a strike has
-/// one spelling (D-3161), so `100.00` is `TickerUnparsed`, and a pre-cutover
-/// monthly name (`NIFTY19JAN10500CE`) refuses `MonthlyExpiryUnstated` while
-/// its dated twin (`NIFTY31JAN1910500CE`) decodes and
-/// `NIFTY24JAN1910500CE` refuses `FormsAmbiguous`; all checked on
-/// 2019-01-15, a day the calendar does not measure anyway. So `nfo_day`'s
-/// collision arm (`TickerAmbiguous`) has no reachable input; this pins that
-/// the second spelling is refused by name and the canonical one lands.
+/// Two tickers of one day naming one contract are both refused,
+/// `TickerAmbiguous`, never merged. Since D-3165 such a pair exists: on
+/// 2019-01-15 the monthly `NIFTY19JAN10500CE` (January 2019's sourced day,
+/// 2019-01-31) and the dated `NIFTY31JAN1910500CE` name one contract, while
+/// `NIFTY24JAN1910500CE` reads both ways and is refused `FormsAmbiguous`.
+/// The calendar does not measure 2019-01-15 (`CalendarUnmeasured`), so the
+/// pair is shown at `nfo_day`, where the collision arm lives. On a measured
+/// day a strike has one spelling (D-3161): `100.00` is refused by name as
+/// `TickerUnparsed` and the canonical `100` lands.
 #[test]
 fn two_tickers_naming_one_contract_are_both_refused() {
     let early = Day::new(2019, 1, 15).unwrap();
-    assert!(matches!(
-        crate::gdfl_nfo::decode_ticker("NIFTY19JAN10500CE", early),
-        Err(NfoRefusal::MonthlyExpiryUnstated { .. })
-    ));
-    assert!(crate::gdfl_nfo::decode_ticker("NIFTY31JAN1910500CE", early).is_ok());
+    let monthly = crate::gdfl_nfo::decode_ticker("NIFTY19JAN10500CE", early).unwrap();
+    let dated = crate::gdfl_nfo::decode_ticker("NIFTY31JAN1910500CE", early).unwrap();
+    assert_eq!(monthly, dated);
+    assert_eq!(monthly.contract.as_str(), "2019-01-31-1050000-CE");
     // A name that reads both as a dated contract and as a monthly one alive
     // on the trade day is refused, never guessed (D-3160).
     assert_eq!(
@@ -924,6 +925,64 @@ fn two_tickers_naming_one_contract_are_both_refused() {
         Err(NfoRefusal::FormsAmbiguous {
             ticker: "NIFTY24JAN1910500CE".to_owned()
         })
+    );
+    let root = scratch("import-ambiguous");
+    let early_folder = crate::gdfl_nfo::day_folder_name(early);
+    let early_entries: Vec<(String, Vec<u8>)> = [
+        "NIFTY19JAN10500CE",
+        "NIFTY31JAN1910500CE",
+        "NIFTY24JAN1910500CE",
+        "NIFTY19JAN11000CE",
+    ]
+    .iter()
+    .map(|t| {
+        (
+            format!("{early_folder}\\Options\\{t}.NFO.csv"),
+            option_file(t, early, "5"),
+        )
+    })
+    .collect();
+    put(
+        &root,
+        "ts/options/2019/JAN_2019/GFDLNFO_TICK_15012019.bts",
+        &bts(&as_refs(&early_entries)),
+    );
+    let source = NfoTickStore::new(&root.join("ts"));
+    let run = Run {
+        kind: ImportKind::Options,
+        from: early,
+        to: early,
+        only: &[],
+        store_root: &root.join("E"),
+    };
+    let mut landed: Vec<String> = Vec::new();
+    let read = nfo_day(&source, &run, early, &mut |file| landed.push(file.name));
+    assert_eq!(landed, ["NIFTY19JAN11000CE"], "only the unambiguous name");
+    let refused: Vec<(&str, &str)> = read
+        .refused
+        .iter()
+        .map(|f| (f.instrument.as_str(), f.why.as_str()))
+        .collect();
+    let ambiguous = |t: &str| {
+        NfoRefusal::TickerAmbiguous {
+            ticker: t.to_owned(),
+        }
+        .to_string()
+    };
+    let two_form = NfoRefusal::FormsAmbiguous {
+        ticker: "NIFTY24JAN1910500CE".to_owned(),
+    }
+    .to_string();
+    assert_eq!(
+        refused,
+        [
+            ("NIFTY19JAN10500CE", ambiguous("NIFTY19JAN10500CE").as_str()),
+            (
+                "NIFTY31JAN1910500CE",
+                ambiguous("NIFTY31JAN1910500CE").as_str()
+            ),
+            ("NIFTY24JAN1910500CE", two_form.as_str()),
+        ]
     );
     let root = scratch("import-ambiguous");
     let d = d1();
@@ -956,10 +1015,17 @@ fn two_tickers_naming_one_contract_are_both_refused() {
     );
     assert_eq!((got.files, got.files_refused), (2, 1));
     assert_eq!(got.failures.len(), 1);
-    assert!(
-        got.failures[0].why.contains("NIFTY04APR24100.00CE"),
-        "{:?}",
-        got.failures
+    assert_eq!(
+        got.failures[0].instrument,
+        format!("{d} NIFTY04APR24100.00CE")
+    );
+    assert_eq!(
+        got.failures[0].why,
+        NfoRefusal::TickerUnparsed {
+            ticker: "NIFTY04APR24100.00CE".to_owned()
+        }
+        .to_string(),
+        "the second spelling is refused by name"
     );
     assert_eq!(
         crate::gdfl_nfo::decode_ticker("NIFTY04APR24100.00CE", d),
