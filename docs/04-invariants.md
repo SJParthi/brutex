@@ -6409,3 +6409,15 @@ old line regex the same input and watched it pass.
 | AFG-01 | `pool-oos` holds no span beyond its lane and no training series: a training walk keeps no booking, every later trade is booked once, each pooled row sums to its tally, the streamed judge equals the judge over prepared spans, and a family too large to hold is refused by name (D-2300) | `cli::pool_oos::tests::the_streamed_judge_books_every_trade_and_keeps_no_training_series` | ✓ |
 | AFG-02 | `pool::union_of` opens the results ledger once per union, not once per instrument, and keeps every committed run's rows in screen order (D-2301) | `cli::tests::the_pool_union_opens_the_parent_ledger_once_for_every_instrument` | ✓ |
 | AFG-03 | `/selection-v6.json` reads one page of at most 8 blocks per rung from a seek, names each file's block count, pages past the end empty, and refuses a malformed or out-of-range page selector (D-2303) | `api::selectionv6json::tests::the_page_selectors_are_bounded_and_strict` | ✓ |
+
+### Rust and O(1) sweep, data side (D-2370 onward)
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| AFG-70 | A day whose venue session `minute_session` refuses is named in exactly one diagnostic, at every bucket width, and adds no per-bucket line; its calendar and session are looked up once per IST day (D-2370) | `pull::anchor::a_day_the_venue_refuses_is_named_once_not_once_per_bucket` | ✓ |
+| AFG-71 | One request-minute coverage line is exactly one telemetry event, `pull.request_minutes` at `Error`, naming the real instrument; `request_minutes` emits nothing itself (D-2371) | `pull::request_gap_events::each_request_minute_gap_is_exactly_one_error_event` | ✓ |
+| AFG-72 | `from_rows`, `write_overlay` and `write_greeks` do not claim constant cost; each cost section cites the append's bisection (D-1434) and old-tail verification (D-0910) (D-2372) | `pull::ingest::tests::the_store_writing_doors_state_their_real_cost` | ✓ |
+| AFG-73 | A per-target level prefix longer than `MAX_TARGET_BYTES` is refused by `Config::refusal` and by `Sink::open`, so each `level_for` comparison is bounded (D-2373) | `telemetry::sink::tests::an_override_prefix_past_the_target_ceiling_is_refused_by_name` | ✓ |
+| AFG-74 | Landing a master identical to the held one reads at most `body.len()` bytes, keeps the target's inode and refreshes only its mtime; a same-length or different-length change is replaced (D-2374) | `pull::masters::tests::an_unchanged_master_keeps_its_inode_and_only_its_mtime_moves` | ✓ |
+| AFG-75 | `LakeFile::open` refuses a file past `MAX_LAKE_BYTES` (64 MiB) as `LakeError::TooLarge` from its metadata before reading it, and reads a file of exactly the cap (D-2375) | `lake::reader::tests::a_lake_file_past_the_ceiling_is_refused_before_it_is_read` | ✓ |
+| AFG-76 | Sealing after an append reads every block into one stack buffer, and the sidecar it writes is byte-identical to the build before D-2376 at every block edge (D-2376) | `store::seal_buffer::the_sealed_bytes_are_unchanged_at_every_block_edge`, `store::seal_buffer::sealing_reads_every_block_into_one_stack_buffer` | ✓ |
