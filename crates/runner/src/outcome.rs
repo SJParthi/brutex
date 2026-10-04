@@ -42,13 +42,25 @@
 
 // The same exception `crates/greeks` and `crate::significance` take, for the
 // reason §7 states in one breath: prices are paisa integers, and statistical
-// values keep full precision. The RETURN in this module is an `i64` of paisa
-// throughout; only the mean and the t-statistic are floating, and both are
-// statistics rather than money.
+// values keep full precision. Each trade's RETURN is an `i64` of paisa, and
+// `edge` accumulates its sums in paisa integers (`i128`).
+//
+// **This module is NOT float-free money.** `Edge` carries money as `f64`:
+// `mean_paisa`, `win_sum`, `loss_sum`, `adverse_sum` and `favourable_sum`, each
+// converted once from an exact paisa integer by `wide` (D-1173, whose bound is
+// one rounding above 2^53 paisa), and the payoff ratio divides two of those
+// `f64` paisa magnitudes. D-1173 sanctions those fields because `cli` persists
+// their IEEE bits, and §3 rule 8 forbids changing that row in place. This
+// comment and the reason below used to say "only the mean and t-statistic are
+// floating", which this file contradicted; crash-edge-pass20 CE-96, D-1958.
+// The allow is still module-wide: a NEW float price computation added here is
+// not linted, so review it as such.
 #![allow(
     clippy::float_arithmetic,
-    reason = "CLAUDE.md §7 keeps statistical values at full precision. Returns \
-              are paisa i64; only the mean and t-statistic are floating."
+    reason = "CLAUDE.md §7 keeps statistical values at full precision. Per-trade \
+              returns and the accumulators are paisa integers; the mean, the \
+              t-statistic and Edge's D-1173 money fields (paisa sums converted \
+              once to floating point) are floating."
 )]
 
 use indicators::Candle;
