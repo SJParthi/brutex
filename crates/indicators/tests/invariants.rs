@@ -141,13 +141,18 @@ fn suffix_independence() {
     }
 }
 
-/// **V-04.** The VWAP family is cleared, not guessed, when volume is unavailable.
+/// The VWAP family is cleared, not guessed, when volume is unavailable.
 ///
 /// `docs/03-vocabulary.md` §4: a bit that cannot be evaluated evaluates **false**,
 /// and never "probably". Measured fact this defends: 0 of 1,222,791 one-minute
 /// index bars carry volume, so `Availability::Absent` is the real answer on the
 /// timeframe the engine sweeps — and all 20 positions must stay false rather than
 /// emitting a plain average wearing a VWAP label.
+///
+/// This is the `Absent` half of VWAP clearing on one-minute bars and drives
+/// `Vwap` alone. It was V-04's only proof and never built a daily bar
+/// (P12-01); the daily timeframe is
+/// `a_daily_bar_series_sets_no_time_of_day_or_vwap_bit` below.
 #[test]
 fn daily_mask_clears() {
     use indicators::vwap::{Availability, Vwap};
@@ -167,7 +172,106 @@ fn daily_mask_clears() {
     }
 }
 
-/// **V-05.** The fast evaluator agrees with a naive reference.
+/// **V-04.** Time-of-day (44-47) and every VWAP position (52-53 among them)
+/// are clear on a daily timeframe, through the production `Evaluator` and
+/// `Column::build`. P12-01.
+///
+/// A daily-rung bar is stamped at 00:00 IST (pinned in `crates/pull` by
+/// `the_daily_rung_is_anchored_at_ist_midnight_and_not_at_the_open`). That is
+/// before the 09:15 open, so `orb::minutes_since_open` is `None` and no
+/// time-of-day window can hold; and a daily bar is the only bar of its IST
+/// session, while a present-volume VWAP needs two contributing bars in the
+/// current session before it can answer. So the bits are clear BY THOSE TWO
+/// MECHANISMS, with volume present and with it absent. In the knowledge mask
+/// they differ, measured: every VWAP position is UNKNOWN (zero known bits),
+/// while 44-47 are KNOWN false, a midnight bar being in no window. Nothing in
+/// the evaluator knows the word "daily"; the test pins that the two
+/// mechanisms still produce the documented answer.
+///
+/// The control re-stamps the same prices at two intraday minutes of each day
+/// and requires a time-of-day bit and a VWAP side bit to appear, so the
+/// assertion is not passing on a fold that never sets these positions at all.
+#[test]
+fn a_daily_bar_series_sets_no_time_of_day_or_vwap_bit() {
+    use indicators::column::Column;
+    use indicators::evaluator::{Evaluator, Widths};
+    use indicators::vwap::Availability;
+
+    const DAY_MICROS: i64 = 24 * 60 * 60 * 1_000_000;
+    const TEN_IST_UTC_MICROS: i64 = (600 - 330) * 60 * 1_000_000;
+    const DAYS: i64 = 260;
+
+    let candle = |ts_micros: i64, d: i64| {
+        let mid = 2_500_000 + ((d * 137) % 811 - 405) * 70;
+        Candle {
+            ts_micros,
+            open: mid,
+            high: mid + 9_000 + (d % 11) * 200,
+            low: mid - 9_000 - (d % 7) * 200,
+            close: mid + ((d % 5) - 2) * 400,
+            volume: 1_000 + d,
+            open_interest: i64::MIN,
+        }
+    };
+    let daily: Vec<Candle> = (0..DAYS)
+        .map(|d| candle((20_000 + d) * DAY_MICROS - indicators::IST_OFFSET_MICROS, d))
+        .collect();
+    let intraday: Vec<Candle> = (0..DAYS)
+        .flat_map(|d| {
+            let ten = (20_000 + d) * DAY_MICROS + TEN_IST_UTC_MICROS;
+            [candle(ten, d), candle(ten + 60 * 1_000_000, d + 1)]
+        })
+        .collect();
+
+    let mut cleared: Vec<u16> = vec![44, 45, 46, 47];
+    cleared.extend(indicators::vwap::positions());
+    let any_set = |rows: &[vocab::ConditionMask], positions: &[u16]| {
+        rows.iter()
+            .any(|row| positions.iter().any(|&p| row.get(u32::from(p))))
+    };
+    let widths = Widths::pinned().expect("both pinned widths are valid");
+
+    for availability in [Availability::Present, Availability::Absent] {
+        let mut ev = Evaluator::new(widths, availability, Thresholds::CLASSICAL);
+        let column = Column::build(&daily, &mut ev);
+        assert!(
+            !column.is_empty(),
+            "the daily series must warm and emit rows, or the clearing is vacuous"
+        );
+        assert!(
+            !any_set(column.bits(), &cleared),
+            "a daily-rung bar set a time-of-day or VWAP position"
+        );
+        // VWAP is UNKNOWN on a daily bar, so a negation cannot turn it into a
+        // signal; time of day is a KNOWN false (a midnight bar is in no window).
+        assert!(
+            !any_set(column.known(), &indicators::vwap::positions()),
+            "a daily-rung bar certified a VWAP answer"
+        );
+        assert!(
+            column
+                .known()
+                .iter()
+                .all(|row| [44_u32, 45, 46, 47].iter().all(|&p| row.get(p))),
+            "a daily-rung bar left time of day uncertified"
+        );
+    }
+
+    let mut ev = Evaluator::new(widths, Availability::Present, Thresholds::CLASSICAL);
+    let control = Column::build(&intraday, &mut ev);
+    assert!(
+        any_set(control.bits(), &[44, 45, 46, 47]),
+        "the intraday control set no time-of-day bit"
+    );
+    assert!(
+        any_set(control.bits(), &[52, 53]),
+        "the intraday control set no VWAP side bit"
+    );
+}
+
+/// **V-05.** The daily pivot ladder agrees with the design document's
+/// recurrence on five sessions. It is not a differential test of the whole
+/// evaluator on random input, which is what V-05 claimed until P12-01.
 ///
 /// The reference is rebuilt here from the recurrence in `docs/09-design-sources.md`
 /// §1 — read off the source document, not off `daily.rs` — because a reference

@@ -880,11 +880,11 @@ fn the_constants_are_the_current_versions_layout() {
     assert_eq!(v2.record_stride(), RECORD_STRIDE);
     assert_eq!(v2.records_per_block(), RECORDS_PER_BLOCK);
     assert_eq!(v2.block_len(), BLOCK_LEN);
-    // THREE GEOMETRIES, NOT ONE. `KNOWN` answers "which geometries can this
-    // build read", and two of the three are sidecars: the overlay's 24-byte
-    // records at version 9 and the computed greeks' 80 at version 8, beside the
-    // bar's 56 at version 2. Resolution is by the file's own version number, so
-    // none can be confused by a reader that reads the header it was handed.
+    // FOUR ROWS, THREE GEOMETRIES. `KNOWN` answers "which geometries can this
+    // build read": the bar's 56-byte records at versions 2 and 3 (one geometry,
+    // D-1571), the overlay's 24 at version 9 and the computed greeks' 80 at
+    // version 8. Resolution is by the file's own version number, so none can
+    // be confused by a reader that reads the header it was handed.
     assert_eq!(Layout::KNOWN, &[v2, v3, Layout::OVERLAY, Layout::GREEKS]);
     assert_eq!(Layout::OVERLAY.record_stride(), 24);
     assert_eq!(Layout::GREEKS.record_stride(), 80);
@@ -893,7 +893,8 @@ fn the_constants_are_the_current_versions_layout() {
     // duplicate version makes resolution pick whichever row is first, and a
     // duplicate stride makes two geometries indistinguishable to a reader that
     // resolved correctly — asserted as a property over the whole list rather
-    // than as a pair, so a fourth row is checked against all three.
+    // than as a pair, so a new row is checked against every other. The bar
+    // pair is the one stride exemption; magic separates it (S-29).
     for (index, one) in Layout::KNOWN.iter().enumerate() {
         for other in Layout::KNOWN.iter().skip(index + 1) {
             assert_ne!(

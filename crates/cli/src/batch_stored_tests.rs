@@ -227,3 +227,70 @@ fn a_whole_store_sweep_files_its_rows_in_walk_order_not_thread_order() {
     }
     crate::knobs::clear_all();
 }
+
+/// BA-05 (P12-06, D-1795): `cli` emits progress per INSTRUMENT-MONTH, never
+/// per bar. Three generated months sweep; exactly one `stored month swept`
+/// event lands for each identity the report prints, each event's own `bars`
+/// field says it stood for a whole month of bars, and no `cli.sweep` record
+/// of any message carrying those identities comes anywhere near one per bar.
+///
+/// Read back through the shared sink and `telemetry::tail`, the shipped
+/// reader, and filtered on the printed identities: the fixture commit is
+/// this test's own, so a concurrent sweep of the same months elsewhere in
+/// this binary cannot share an identity with it.
+#[test]
+fn a_whole_store_sweep_emits_one_progress_event_per_instrument_month_not_per_bar() {
+    const SYMBOLS: [&str; 3] = ["NIFTY", "BANKNIFTY", "RELIANCE"];
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    let from = crate::ledger_all::tests::mark();
+    let report = crate::audited_stored::with_warmed_symbols(&SYMBOLS, |root| {
+        sweep_under(root, "zerodha", "5min", u64::MAX, "ba05-per-month-events")
+            .expect("the walk completes")
+    });
+    crate::knobs::clear_all();
+    let printed = report_identities(&report);
+    assert_eq!(printed.len(), SYMBOLS.len(), "{report}");
+
+    let sink = crate::ledger_all::tests::sink();
+    let dir = sink
+        .path()
+        .parent()
+        .expect("the sink writes its file inside a directory")
+        .to_path_buf();
+    let query = telemetry::Query::last(telemetry::MAX_LIMIT).from_target("cli.sweep");
+    let mine: Vec<telemetry::Record> = telemetry::tail(&dir, sink.keep_files(), &query)
+        .records
+        .into_iter()
+        .filter(|record| {
+            record.seq >= from
+                && record
+                    .field("identity")
+                    .and_then(telemetry::OwnedValue::as_str)
+                    .is_some_and(|id| printed.iter().any(|hex| hex == id))
+        })
+        .collect();
+    let swept: Vec<&telemetry::Record> = mine
+        .iter()
+        .filter(|record| record.message == "stored month swept")
+        .collect();
+    assert_eq!(swept.len(), SYMBOLS.len(), "one per month: {mine:?}");
+    for hex in &printed {
+        assert!(
+            swept
+                .iter()
+                .any(|record| crate::ledger_all::tests::says(record, "identity", hex)),
+            "every printed identity has its event: {mine:?}"
+        );
+    }
+    let fewest_bars = swept
+        .iter()
+        .filter_map(|record| record.field("bars").and_then(telemetry::OwnedValue::as_u64))
+        .min()
+        .expect("every event carries its bar count");
+    assert!(fewest_bars > 1, "an event stood for many bars: {mine:?}");
+    assert!(
+        u64::try_from(mine.len()).expect("fits") < fewest_bars,
+        "events are per month, so far fewer than bars: {mine:?}"
+    );
+}

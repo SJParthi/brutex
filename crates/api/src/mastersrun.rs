@@ -1715,4 +1715,163 @@ mod tests {
             );
         }
     }
+
+    /// MR-15 (P12-02, D-1792): the credentialed leg runs the SAME ladder as
+    /// the public one. Both legs reach a source only through `obtain`, the one
+    /// function that retries, re-primes and falls back, and a credential that
+    /// could not be read asks nothing and records a refusal with no steps.
+    ///
+    /// Read off the source because the credentialed arm needs a Parameter
+    /// Store read this binary cannot make (`CLAUDE.md` §8); a behavioural
+    /// test of that arm is not possible without the credential, and that is
+    /// the stated limit of this one.
+    #[test]
+    fn the_credentialed_leg_reaches_a_source_only_through_the_public_ladder() {
+        let source = include_str!("mastersrun.rs");
+        let body = |name: &str| {
+            source
+                .split_once(&format!("async fn {name}"))
+                .and_then(|(_, rest)| rest.split_once("\n}\n"))
+                .map(|(body, _)| body)
+                .expect("the function is defined")
+        };
+        let public = body("refresh_with<");
+        let credentialed = body("credentialed_leg<");
+        assert!(public.contains("obtain(from, clock, dir, source).await"));
+        assert!(credentialed.contains("obtain(wire, clock, dir, source).await"));
+        assert_eq!(
+            credentialed.matches("obtain(").count(),
+            1,
+            "one ladder, called once"
+        );
+        assert!(
+            credentialed.contains("Landed::Refused(why.clone())")
+                && credentialed.contains("Fetched::default()"),
+            "an unreadable credential asks nothing and says so"
+        );
+    }
+
+    /// Every record the shared sink holds for `target` from sequence `from` on.
+    fn emitted_since(target: &str, from: u64) -> Vec<telemetry::Record> {
+        let sink = crate::emitted::sink();
+        let dir = sink
+            .path()
+            .parent()
+            .expect("the sink writes a file inside a directory")
+            .to_path_buf();
+        telemetry::tail(
+            &dir,
+            sink.keep_files(),
+            &telemetry::Query::last(telemetry::MAX_LIMIT).from_target(target),
+        )
+        .records
+        .into_iter()
+        .filter(|record| record.seq >= from)
+        .collect()
+    }
+
+    /// MR-22 (P12-02, D-1792): THE LOG LEVEL FOLLOWS THE OUTCOME, at both
+    /// granularities. Per attempt: a refused prime and a retryable refusal are
+    /// `Warn`, a body is `Info`, a settled refusal is `Error`. Per source: a
+    /// landing is `Info`, a skipped source is `Warn`, a refusal and an
+    /// unconfirmed durability are `Error`. Each record is told apart by a
+    /// field this test alone writes, so a concurrent emit cannot satisfy it.
+    #[test]
+    fn every_outcome_is_logged_at_the_level_its_consequence_earns() {
+        use masters::{Attempt, Fetched, Got, Verdict};
+        use telemetry::Level;
+
+        let source = &masters::SOURCES[0];
+        let url = "https://mr22.invalid/levels";
+        let step = |number: u32, got: Got| Attempt {
+            url: url.to_owned(),
+            number,
+            waited_ms: 0,
+            got,
+        };
+        let refused = |status: Option<u16>, verdict: Verdict| Got::Refused {
+            status,
+            detail: "mr22".to_owned(),
+            verdict,
+        };
+        let tried = Fetched {
+            body: None,
+            attempts: vec![
+                step(
+                    1,
+                    Got::PrimeRefused {
+                        detail: "mr22".to_owned(),
+                    },
+                ),
+                step(2, Got::Body { bytes: 7 }),
+                step(3, refused(Some(503), Verdict::Again)),
+                step(4, refused(None, Verdict::Reprime)),
+                step(5, refused(Some(404), Verdict::Never)),
+            ],
+        };
+        let from = crate::emitted::mark();
+        super::record(
+            source,
+            &Ok(Landed::Written {
+                bytes: 922_001,
+                changed: true,
+            }),
+            &tried,
+        );
+        let quiet = Fetched::default();
+        super::record(source, &Err("mr22 skipped".to_owned()), &quiet);
+        super::record(
+            source,
+            &Ok(Landed::Refused("mr22 refused".to_owned())),
+            &quiet,
+        );
+        super::record(
+            source,
+            &Ok(Landed::Uncertain {
+                bytes: 922_002,
+                changed: false,
+                why: "mr22 uncertain".to_owned(),
+            }),
+            &quiet,
+        );
+
+        let attempts = emitted_since("api.masters.attempt", from);
+        for (number, level) in [
+            (1, Level::Warn),
+            (2, Level::Info),
+            (3, Level::Warn),
+            (4, Level::Warn),
+            (5, Level::Error),
+        ] {
+            let found: Vec<_> = attempts
+                .iter()
+                .filter(|record| {
+                    crate::emitted::says(record, "url", url)
+                        && crate::emitted::counts(record, "attempt", number)
+                })
+                .collect();
+            assert_eq!(found.len(), 1, "attempt {number}: {attempts:?}");
+            assert!(
+                found.iter().all(|record| record.level == level),
+                "attempt {number}: {found:?}"
+            );
+        }
+        let sources = emitted_since("api.masters.source", from);
+        for (needle, level) in [
+            ("922001 bytes", Level::Info),
+            ("mr22 skipped", Level::Warn),
+            ("mr22 refused", Level::Error),
+            ("mr22 uncertain", Level::Error),
+        ] {
+            let found: Vec<_> = sources
+                .iter()
+                .filter(|record| crate::emitted::says(record, "detail", needle))
+                .collect();
+            assert_eq!(found.len(), 1, "{needle}: {sources:?}");
+            assert!(
+                found.iter().all(|record| record.level == level),
+                "{needle}: {found:?}"
+            );
+        }
+    }
 }

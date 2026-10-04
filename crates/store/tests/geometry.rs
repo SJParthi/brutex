@@ -746,6 +746,39 @@ fn three_geometries_are_told_apart_by_magic_stride_and_version() {
     const { assert!(GREEK_STRIDE * (GREEK_RECORDS_PER_BLOCK + 1) > 4_096) }
 }
 
+/// S-29, over the WHOLE of `Layout::KNOWN` (P12-05, D-1794). Four rows, not
+/// three: bar versions 2 and 3 share one geometry by design (D-1571), so
+/// stride cannot separate that pair and MAGIC is what does. Every pair of
+/// rows must differ in magic and in version; exactly one pair, and it is
+/// that bar pair, may share a stride. A fifth row sharing a stride with any
+/// other fails here, and so does a re-used magic.
+#[test]
+fn every_known_geometry_has_its_own_magic_and_version_and_only_the_bar_pair_shares_a_stride() {
+    let known = Layout::KNOWN;
+    assert_eq!(known.len(), 4, "S-29 states four geometries");
+    let mut shared_stride = Vec::new();
+    for (index, one) in known.iter().enumerate() {
+        for other in known.iter().skip(index + 1) {
+            assert_ne!(one.magic(), other.magic(), "two geometries share a magic");
+            assert_ne!(
+                one.version(),
+                other.version(),
+                "two geometries share a version"
+            );
+            if one.record_stride() == other.record_stride() {
+                shared_stride.push((one.version(), other.version()));
+            }
+        }
+    }
+    assert_eq!(
+        shared_stride,
+        [(2, 3)],
+        "only bar versions 2 and 3 may share a stride"
+    );
+    assert_eq!(Layout::V2.record_stride(), RECORD_STRIDE);
+    assert_eq!(Layout::V3.record_stride(), RECORD_STRIDE);
+}
+
 /// attackdata-2 (D-1524). A greeks row outside the domain the pricer itself
 /// accepts never reaches the disk: `greeks` refuses a spot or a volatility that
 /// is not positive (`NotPositive`), so a stored row carrying one was not

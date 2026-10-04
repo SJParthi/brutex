@@ -14548,3 +14548,32 @@ inner route admits, percent-encoded twice more. That is the worst case, held in
 memory once per request; a real press is a few kilobytes per leg. One leg past
 the bound is refused by name (`Refusal::TooManyLegs`) rather than read further.
 The figure is arithmetic from the constants, not a measurement.
+
+## Gate 10's `✓`-row check cannot tell a test from a production function — D-1799, 4 October 2026
+
+Since P12-02 `.github/invariant_paths.rs` refuses a `✓` row in
+`docs/04-invariants.md` whose proof cell names nothing that could prove it. It
+accepts a backticked token naming a function some tracked source declares (at
+the end of a `crate::module::name` path, or a bare or two-segment name with at
+least two underscores), a CI gate by number, or a front-end `.test.js` file. It
+does NOT know which declared functions are tests: gate 10's declaration table
+records every `fn`, and gate 12's test-and-bench table is built separately in
+the workflow. So a `✓` row naming a production function of the right shape
+passes, as `api::logs::both_halves` did in LG-05 until P12-02 rewrote it by
+hand. Nor does it read whether a named gate, file or test proves the row, which
+nothing mechanical can. It refuses an unnamed proof; it does not certify a
+named one. Closed by feeding gate 12's test table to this check.
+
+## Two look-ahead and evaluator tests still fold a test-local union — D-1790, 4 October 2026
+
+`indicators::invariants::no_lookahead` and `suffix_independence` fold
+`CurDayFib`, `Patterns` and `SessionState` only, not the production
+`Evaluator`. V-02 and V-03 now rest on
+`indicators::column::tests::every_row_before_a_cut_ignores_an_absent_or_mutated_future`,
+which drives the real fold, but at every 25th cut of a 3,000-bar run under both
+volume availabilities rather than every cut: every cut is about 3,000 rebuilds
+of up to 3,000 bars per availability, 25 times the 480 rebuilds this test
+makes; the whole column test module ran in 6.4 s here, so every cut is
+EXTRAPOLATED at minutes, not measured. A look-ahead that only reads across a
+cut the stride skips, and only within that cut, would pass it. The stride is
+the stated bound.

@@ -370,7 +370,16 @@ fn both_halves(
     let ran = cli_dir.map_or_else(telemetry::Tail::default, |d| {
         telemetry::tail(d, telemetry::DEFAULT_KEEP_FILES, query)
     });
+    merged(served, ran, query.limit)
+}
 
+/// The union of two walked halves, and the completeness flags merged in the
+/// direction that cannot over-promise (LG-05).
+///
+/// Split from [`both_halves`] so a test can hand it two walks it cannot cause
+/// from real files, such as a half that hit its scan cap beside one that did
+/// not (P12-02, D-1791). Behaviour is unchanged.
+fn merged(served: telemetry::Tail, ran: telemetry::Tail, limit: usize) -> telemetry::Tail {
     let mut records = served.records;
     records.extend(ran.records);
     records.sort_by(|left, right| {
@@ -382,7 +391,7 @@ fn both_halves(
     // THE LIMIT APPLIES TO THE UNION. Each half already honoured it, so without
     // this the page would return up to twice what was asked for -- and the
     // caller's `limit` is what bounds the response, not a suggestion.
-    records.truncate(query.limit);
+    records.truncate(limit);
 
     telemetry::Tail {
         records,
@@ -1728,6 +1737,48 @@ mod tests {
                     "out of order: {messages:?}"
                 );
             }
+        }
+    }
+
+    /// LG-05 (P12-02, D-1791): the completeness flags of two halves merge in
+    /// the direction that cannot over-promise. `hit_scan_cap` and
+    /// `partial_tail` OR, `reached_oldest` ANDs, and `missing` sums, with a
+    /// half that answers `None` contributing nothing rather than a zero. Every
+    /// one of the four input combinations of each flag is walked.
+    #[test]
+    fn completeness_flags_merge_in_the_direction_that_cannot_over_promise() {
+        let half = |cap: bool, torn: bool, oldest: bool, missing: Option<u64>| telemetry::Tail {
+            hit_scan_cap: cap,
+            partial_tail: torn,
+            reached_oldest: oldest,
+            missing,
+            ..telemetry::Tail::default()
+        };
+        for left in [false, true] {
+            for right in [false, true] {
+                let both = super::merged(
+                    half(left, left, left, None),
+                    half(right, right, right, None),
+                    10,
+                );
+                assert_eq!(both.hit_scan_cap, left || right, "cap {left} {right}");
+                assert_eq!(both.partial_tail, left || right, "torn {left} {right}");
+                assert_eq!(both.reached_oldest, left && right, "oldest {left} {right}");
+            }
+        }
+        for (served, ran, want) in [
+            (Some(2), Some(3), Some(5)),
+            (Some(2), None, Some(2)),
+            (None, Some(3), Some(3)),
+            (None, None, None),
+            (Some(u64::MAX), Some(1), Some(u64::MAX)),
+        ] {
+            let both = super::merged(
+                half(false, false, true, served),
+                half(false, false, true, ran),
+                10,
+            );
+            assert_eq!(both.missing, want, "{served:?} + {ran:?}");
         }
     }
 

@@ -7515,4 +7515,33 @@ mod tests {
             Err(ExitGridErrorV1::UnsupportedExecutionResolution(5))
         );
     }
+
+    /// AS-09 (P12-04, D-1793). The selector byte `ExitGridPolicyV1::digest`
+    /// hashes is pinned by VALUE, not round-tripped: it enters every recorded
+    /// exit-grid policy identity, so a coordinated renumbering would move
+    /// every identity already on disk and §3 rule 8 forbids it. No test
+    /// asserted these four literals before this one. The digest is also
+    /// required to separate all four selectors, so the byte is shown to reach
+    /// the identity rather than merely to exist.
+    #[test]
+    fn the_identity_selector_byte_keeps_its_four_literal_tags() {
+        let all = [
+            (ExitGridSelectorV1::PessimisticTotal, 1_u8),
+            (ExitGridSelectorV1::EdgeThenPessimistic, 2),
+            (ExitGridSelectorV1::GuaranteedFloor, 3),
+            (ExitGridSelectorV1::OperatorRule, 4),
+        ];
+        let mut digests = Vec::new();
+        for (selector, tag) in all {
+            assert_eq!(selector_byte(selector), tag, "{selector:?}");
+            let mut with = policy();
+            with.selector = selector;
+            digests.push(with.digest());
+        }
+        for (index, one) in digests.iter().enumerate() {
+            for other in digests.iter().skip(index + 1) {
+                assert_ne!(one, other, "two selectors share a policy identity");
+            }
+        }
+    }
 }

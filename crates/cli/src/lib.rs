@@ -26525,6 +26525,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// GR-05 (P12-02, D-1791): a frontier file this build cannot read costs
+    /// only its own half of the report. The ledger row already in hand still
+    /// renders, by identity, and the unreadable file is named as unreadable
+    /// rather than as an empty result or a whole-report refusal.
+    #[test]
+    fn an_unreadable_frontier_costs_only_its_own_half_of_the_report() {
+        let root = std::env::temp_dir().join(format!("brutex-top-badfr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a temp root");
+
+        let mut ledger = crate::results::Results::open(&root).expect("a fresh ledger");
+        let mut record = record_for_naming();
+        record.identity = [13; 32];
+        record.halted = 0;
+        ledger.append(&record).expect("the row appends");
+        std::fs::write(
+            crate::frontier::Frontier::path(&root),
+            b"not a frontier file",
+        )
+        .expect("a decoy frontier");
+
+        let page = top_at(&root, None, None);
+        assert!(!page.starts_with("refused:"), "{page}");
+        assert!(page.contains(&record.identity_hex()), "{page}");
+        assert!(
+            page.contains("THE FRONTIER FILE COULD NOT BE READ"),
+            "{page}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// A halted run is never the one `top` reports on.
     ///
     /// A halted run's total covers less of the ladder than its combination count
@@ -28257,7 +28288,7 @@ mod horizon_tests {
 mod derived_floor_tests {
     use super::{
         Execution, Horizon, Rules, base_win_rate_bp, breakeven_rr_bp, floors_measured_on,
-        project_onto_execution, validate_one_minute_execution,
+        project_onto_execution, statistical_floor_ppm, support_word, validate_one_minute_execution,
     };
     use crate::knobs::serially;
     use indicators::Candle;
@@ -28478,6 +28509,43 @@ mod derived_floor_tests {
              long-only reading returned {down} against a coin flip, which is a \
              floor every combination clears"
         );
+    }
+
+    /// RF-02 (P12-02, D-1791): A FLAT FORWARD WINDOW IS A WIN FOR NEITHER
+    /// SIDE. Every window of a series that never moves is decided and flat, so
+    /// the base rate is exactly zero. Reading a flat window as "not up", the
+    /// defect `indicators/src/session.rs` records, would count each one as a
+    /// win for the short and answer 10,000.
+    #[test]
+    fn a_flat_forward_window_is_a_win_for_neither_side() {
+        let flat = drifting(300, 0);
+        assert_eq!(
+            base_win_rate_bp(&flat, Horizon::DEFAULT),
+            Some(0),
+            "flat windows are decided and won by neither side"
+        );
+    }
+
+    /// SF-13 (P12-02, D-1791): a derived threshold is NAMED as derived in the
+    /// banner, never printed as a number, and a fixed one says it is fixed.
+    #[test]
+    fn a_derived_threshold_is_named_derived_and_a_fixed_one_is_named_fixed() {
+        assert_eq!(support_word(None), "DERIVED per rung from its own bars");
+        assert_eq!(support_word(Some(47_000)), "4.7% (fixed)");
+    }
+
+    /// SF-14 (P12-02, D-1791): THE STOP CEILING AND THE LISTING BOUND CANNOT
+    /// MOVE THE STATISTICAL FLOOR. `statistical_floor_ppm` reads the win rate
+    /// and the assurance and nothing else, so `Rules::elite`'s two arguments,
+    /// the MAE ceiling and the listing bound, give one floor at every value.
+    #[test]
+    fn the_stop_ceiling_and_the_listing_bound_cannot_move_the_floor() {
+        let at = |mae: i64, top: usize| statistical_floor_ppm(&Rules::elite(mae, top), 617_921);
+        let floor = at(1, 1);
+        assert!(floor > 1, "a real floor, not the zero-bar sentinel");
+        for (mae, top) in [(0, 0), (1, 50), (250_000, 1), (i64::MAX, usize::MAX)] {
+            assert_eq!(at(mae, top), floor, "mae {mae}, top {top}");
+        }
     }
 
     /// A FLOOR THAT ROUNDS TO ZERO SWITCHES ITS OWN RULE OFF.

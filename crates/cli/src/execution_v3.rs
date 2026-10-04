@@ -4764,14 +4764,18 @@ mod tests {
             .first()
             .expect("fixture has a parameter")
             .clone();
-        for selector in [
-            ExitGridSelectorV1::PessimisticTotal,
-            ExitGridSelectorV1::EdgeThenPessimistic,
-            ExitGridSelectorV1::GuaranteedFloor,
-            ExitGridSelectorV1::OperatorRule,
+        // AS-09 (P12-04, D-1793): every tag pinned BY VALUE. Only
+        // `OperatorRule => 4` was, so a coordinated shift of the other three
+        // in the encoder and the validator passed this test.
+        for (selector, tag) in [
+            (ExitGridSelectorV1::PessimisticTotal, 1_u8),
+            (ExitGridSelectorV1::EdgeThenPessimistic, 2),
+            (ExitGridSelectorV1::GuaranteedFloor, 3),
+            (ExitGridSelectorV1::OperatorRule, 4),
         ] {
+            assert_eq!(selector_policy_tag(selector), tag, "{selector:?}");
             let mut parameter = base.clone();
-            parameter.selector_policy_tag = selector_policy_tag(selector);
+            parameter.selector_policy_tag = tag;
             let parameter = reidentify_parameter(parameter);
             let validated = parameter.validate();
             assert!(
@@ -4785,7 +4789,6 @@ mod tests {
                 "{selector:?} must survive a decode"
             );
         }
-        assert_eq!(selector_policy_tag(ExitGridSelectorV1::OperatorRule), 4);
         for outside in [0, 5] {
             let mut parameter = base.clone();
             parameter.selector_policy_tag = outside;
