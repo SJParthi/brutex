@@ -24536,11 +24536,15 @@ mod tests {
         let span = ((2025, 5), (2025, 5));
         let rung = super::elite_descend("zerodha", "NIFTY", "9min", span.0, span.1, 1, 1);
         assert!(rung.starts_with("refused: `9min` is not a rung"), "{rung}");
-        let zero = super::elite_descend_in_points("zerodha", "NIFTY", "1min", span.0, span.1, 0, 1);
+        // D-1721: zero means no ceiling and passes; only a negative refuses.
+        let negative =
+            super::elite_descend_in_points("zerodha", "NIFTY", "1min", span.0, span.1, -1, 1);
         assert!(
-            zero.starts_with("refused: the stop ceiling must be"),
-            "{zero}"
+            negative.starts_with("refused: the stop ceiling is a whole number"),
+            "{negative}"
         );
+        let zero = super::elite_descend_in_points("zerodha", "NIFTY", "1min", span.0, span.1, 0, 1);
+        assert!(!zero.starts_with("refused: the stop ceiling"), "{zero}");
         let top =
             super::elite_descend_in_points_for_attempt("zerodha", "NIFTY", "1min", span, 1, 0, 7);
         assert!(top.starts_with("refused: TOP must be 1 or more"), "{top}");

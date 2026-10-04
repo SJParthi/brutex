@@ -857,6 +857,11 @@ fn elite_ranks_by_the_lens_it_is_given() {
     // The default 50% win-rate rule has no confidence bound a 1,000-bar span
     // can reach, and `elite` refuses that pair before any step; drop it.
     crate::knobs::set("BRUTEX_MIN_WIN_RATE_BP", "0");
+    // The flow above caps every search at 256 candidates. Since D-2101 the
+    // support is scaled to the 1,500 swept rows, not the 3,000 loaded, so
+    // each step admits more and every step halted on that cap before any
+    // ranking. The lens is what this asks about, so the cap is lifted.
+    crate::knobs::set("BRUTEX_CEILING", "1048576");
     let mut report = String::new();
     crate::dispatch(&elite, &mut report);
     assert!(!report.contains("LENS must"), "{report}");

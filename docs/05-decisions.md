@@ -58931,3 +58931,12 @@ fold knows which rows it swept.
   ceiling is refused by name, and the zero path passes the caller's lens.
 - The base's lens-identity test uses the 21-term policy array, the width lane 1
   gave it when it bound the per-fold exit-ladder rung count.
+- The base's D-1645 test `every_elite_entry_refuses_a_bad_request_by_name`
+  asserted the zero refusal D-1721 removed. It now requires a negative ceiling
+  to refuse by name and zero to pass the ceiling check.
+- The base's `elite_ranks_by_the_lens_it_is_given` ran under the flow's
+  256-candidate cap. D-2101 scales support to the 1,500 swept rows, not the
+  3,000 loaded, so every step admitted more and halted on that cap before any
+  ranking, and the lens was never reached. The helper lifts the cap to
+  1,048,576 for its own run; the cap is a test budget, and the default ceiling
+  is 2^26.
