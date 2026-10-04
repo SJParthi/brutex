@@ -56652,6 +56652,7 @@ UNVERIFIED.
 `runner::outcome::overlap_window_tests::a_backward_exit_leaves_the_window_when_its_own_window_closes`
 (previous tree: 4 live hits where 3 windows were open at H=4). AFF-43, AFF-44.
 `docs/06-limits.md` restates the bounds.
+
 ### D-1462 — Telemetry tests that reopen a sink wait out any forked child, because a fork shares the sink's `flock` — 2026-10-04
 
 **What was observed.** PR #74 run 1263 (head b23976f) failed Gate 1+2 on
