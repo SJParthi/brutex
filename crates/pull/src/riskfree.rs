@@ -585,12 +585,14 @@ mod tests {
         Series::parse(text).expect_err("a refused series")
     }
 
-    fn row_fault(row_text: &str) -> RowFault {
-        let text = format!("{HEADER}\n{row_text}\n");
-        match refusal(&text) {
-            SeriesError::Row { line: 2, fault } => fault,
-            other => panic!("expected a row-2 refusal, got {other:?}"),
-        }
+    /// The refusal of a one-row table whose row is `row_text`.
+    fn row_fault(row_text: &str) -> SeriesError {
+        refusal(&format!("{HEADER}\n{row_text}\n"))
+    }
+
+    /// The refusal [`row_fault`] expects: line 2, for this fault.
+    fn at2(fault: RowFault) -> SeriesError {
+        SeriesError::Row { line: 2, fault }
     }
 
     #[test]
@@ -692,20 +694,21 @@ mod tests {
         for offset in 0..90 {
             let asked = start.plus_days(offset).expect("a day");
             let scan = releases.iter().rev().find(|r| r.before(asked)).copied();
-            match (s.on(asked), scan) {
-                (Err(LookupError::BeforeSeries { .. }), None) => {}
-                (Ok(found), Some(expected)) => {
-                    assert_eq!(found.auction.released, expected, "on {asked}");
-                    assert!(found.auction.released.before(asked));
-                    assert!(asked.ordinal() - expected.ordinal() <= MAX_AGE_DAYS);
-                }
-                (Err(LookupError::Stale { .. }), Some(expected)) => {
-                    assert!(
-                        asked.ordinal() - expected.ordinal() > MAX_AGE_DAYS,
-                        "on {asked}"
-                    );
-                }
-                (got, expected) => panic!("on {asked}: {got:?} against a scan of {expected:?}"),
+            let expected = match scan {
+                None => Err("before the series"),
+                Some(r) if asked.ordinal() - r.ordinal() > MAX_AGE_DAYS => Err("too old"),
+                Some(r) => Ok(r),
+            };
+            let got = s
+                .on(asked)
+                .map(|a| a.auction.released)
+                .map_err(|e| match e {
+                    LookupError::BeforeSeries { .. } => "before the series",
+                    LookupError::Stale { .. } => "too old",
+                });
+            assert_eq!(got, expected, "on {asked}");
+            if let Ok(released) = got {
+                assert!(released.before(asked));
             }
         }
     }
@@ -716,11 +719,7 @@ mod tests {
         let rate = s.on(day(2020, 1, 2)).expect("a rate").rate;
         // r = (365/91)·ln(1 + y·91/365), y = 6.1081 % — Hull ch. 4.
         let expected = (365.0 / 91.0) * (1.0_f64 + 0.061_081 * 91.0 / 365.0).ln();
-        assert!(
-            (rate.annual() - expected).abs() < 1e-15,
-            "{}",
-            rate.annual()
-        );
+        assert!((rate.annual() - expected).abs() < 1e-15);
         // And independently, from the price the yield came from: the two
         // differ only by the yield's fourth-decimal rounding.
         let from_price = (365.0 / 91.0) * (100.0_f64 / 98.5).ln();
@@ -743,29 +742,25 @@ mod tests {
             ("6.1083", false),
         ] {
             let text = table(&[("2020-01-01", "98.5000", published)]);
-            match Series::parse(&text) {
-                Ok(_) => assert!(accepted, "{published} accepted"),
-                Err(SeriesError::Row {
-                    line: 2,
-                    fault: RowFault::YieldDisagreesWithPrice { implied, .. },
-                }) => {
-                    assert!(!accepted, "{published} refused");
-                    assert_eq!(implied, 61_081);
-                }
-                Err(other) => panic!("{other:?}"),
-            }
+            let want = (!accepted).then(|| {
+                at2(RowFault::YieldDisagreesWithPrice {
+                    published: decimal_e4(published).expect("a decimal"),
+                    implied: 61_081,
+                })
+            });
+            assert_eq!(Series::parse(&text).err(), want, "{published}");
         }
         // Rounded HALF UP: 98.0000 implies 8.18569185… -> 8.1857.
         assert_eq!(implied_yield_e4(980_000), 81_857);
         // A yield a 182-day bill's price would carry is refused, which is what
         // keeps a column transposed from another tenor out.
-        assert!(matches!(
+        assert_eq!(
             row_fault(&line("2020-01-01", "97.0000", "6.1081")),
-            RowFault::YieldDisagreesWithPrice {
+            at2(RowFault::YieldDisagreesWithPrice {
                 published: 61_081,
                 implied: 124_051
-            }
-        ));
+            })
+        );
         // The extreme price below par: no overflow.
         assert_eq!(implied_yield_e4(1), 4_010_985_000_000);
         assert_eq!(implied_yield_e4(999_999), 4);
@@ -785,16 +780,18 @@ mod tests {
 
     #[test]
     fn every_malformed_field_is_refused_by_name() {
-        assert_eq!(row_fault("a\tb"), RowFault::FieldCount { found: 2 });
+        assert_eq!(row_fault("a\tb"), at2(RowFault::FieldCount { found: 2 }));
         assert_eq!(
             row_fault(&format!(
                 "{}\textra",
                 line("2020-01-01", "98.5000", "6.1081")
             )),
-            RowFault::FieldCount { found: 9 }
+            at2(RowFault::FieldCount { found: 9 })
         );
         for bad in [
             "2020-1-01",
+            "20200-01-01",
+            "2020-01-1",
             "20200101",
             "2020-01-01-01",
             "2020-02-30",
@@ -806,7 +803,7 @@ mod tests {
         ] {
             assert_eq!(
                 row_fault(&line(bad, "98.5000", "6.1081")),
-                RowFault::Date { field: "released" },
+                at2(RowFault::Date { field: "released" }),
                 "{bad:?}"
             );
         }
@@ -822,16 +819,16 @@ mod tests {
         ] {
             assert_eq!(
                 row_fault(&line("2020-01-01", bad, "6.1081")),
-                RowFault::Decimal {
+                at2(RowFault::Decimal {
                     field: "cut_off_price"
-                },
+                }),
                 "{bad:?}"
             );
             assert_eq!(
                 row_fault(&line("2020-01-01", "98.5000", bad)),
-                RowFault::Decimal {
+                at2(RowFault::Decimal {
                     field: "implicit_yield_pct"
-                },
+                }),
                 "{bad:?}"
             );
         }
@@ -855,7 +852,7 @@ mod tests {
         for (price, e4) in [("100.0000", 1_000_000), ("100.0001", 1_000_001), ("0", 0)] {
             assert_eq!(
                 row_fault(&line("2020-01-01", price, "0")),
-                RowFault::PriceNotBelowPar { price_e4: e4 }
+                at2(RowFault::PriceNotBelowPar { price_e4: e4 })
             );
         }
         // One ten-thousandth below par is a price.
@@ -866,9 +863,9 @@ mod tests {
     fn a_source_that_is_not_an_rbi_page_is_refused() {
         let row_text =
             line("2020-01-01", "98.5000", "6.1081").replace(URL, "https://example.com/rbi.org.in/");
-        assert_eq!(row_fault(&row_text), RowFault::Source);
+        assert_eq!(row_fault(&row_text), at2(RowFault::Source));
         let blank = line("2020-01-01", "98.5000", "6.1081").replace(URL, "");
-        assert_eq!(row_fault(&blank), RowFault::Source);
+        assert_eq!(row_fault(&blank), at2(RowFault::Source));
     }
 
     #[test]
@@ -898,12 +895,12 @@ mod tests {
     #[test]
     fn a_yield_whose_continuous_rate_is_implausible_is_refused_at_load() {
         // 50.0000 implies 401.0989 %, continuous 277.9 %: past the typo screen.
-        match row_fault(&line("2020-01-01", "50.0000", "401.0989")) {
-            RowFault::Rate(PricingError::RateImplausible { annual }) => {
-                assert!(annual > 1.0);
-            }
-            other => panic!("{other:?}"),
-        }
+        let annual = continuous(4_010_989);
+        assert!(annual > 1.0);
+        assert_eq!(
+            row_fault(&line("2020-01-01", "50.0000", "401.0989")),
+            at2(RowFault::Rate(PricingError::RateImplausible { annual }))
+        );
     }
 
     #[test]
@@ -993,10 +990,8 @@ mod tests {
             day: day(2026, 10, 1),
         }
         .to_string();
-        assert!(
-            stale.contains("2026-10-01") && stale.contains("14 days"),
-            "{stale}"
-        );
+        assert!(stale.contains("2026-10-01"));
+        assert!(stale.contains("14 days"));
         let as_error: &dyn std::error::Error = &SeriesError::Empty;
         assert!(as_error.source().is_none());
         let as_error: &dyn std::error::Error = &LookupError::Stale { day: TradeDay::MIN };

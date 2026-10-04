@@ -2168,12 +2168,12 @@ const FOLD_LITERAL: &str = "-0 -5 -0945 -1400 -token --exact --nocapture";
 const AUDIT_LITERAL: &str = "-354 -7 repeats";
 // D-2810: `pull::riskfree`, the dated RBI 91-day T-bill rate. `cut_off_price`,
 // `implicit_yield_pct` and `released` are columns of the operator's rate table
-// and the field names its refusals carry. The five malformed dates, `98`,
+// and the field names its refusals carry. The seven malformed dates, `98`,
 // `published` (a wrong header word) and `gone` (an invented OS reason) are
 // parser fixtures. `removed`, `solved` and `written` are test `expect` labels.
 // None is a parameter-path segment.
 const RISKFREE_LITERAL: &str = "cut_off_price implicit_yield_pct released 2020-01-01-01 \
-     2020-01-xx 2020-0a-01 2020-1-01 20200101 abcd-01-01 98 published gone removed solved written";
+     2020-01-xx 2020-0a-01 2020-1-01 20200-01-01 2020-01-1 20200101 abcd-01-01 98 published gone removed solved written";
 
 /// Every declared group, in the order the step joined them.
 const DECLARED: [&str; 50] = [
