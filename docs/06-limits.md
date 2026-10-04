@@ -14475,3 +14475,13 @@ UNVERIFIED for the rest:
   above) rests on the audit's measurement (14.13x open cost for 10x rows,
   o1surface2-4). `crates/cli/benches/ratio.rs` deliberately does not time
   `Results::open`, so no tracked bench repeats it.
+
+## The frontier verdict's per-row cost is counted, not timed — D-1810, 4 October 2026
+
+- `cli::frontier::Row::verdict` answers six rules (six comparisons and one
+  square root inside `assurance_bp`) and sets three unchecked flags; `api`'s
+  `write_meets` then writes nine short names and one conjunction per row, and
+  `admission_json` writes the two fixed lists once per response. That is a
+  fixed count per row, read from the source. No bench times it, so it is
+  UNVERIFIED as a measured bound. The browser's check of `meets` is one pass
+  over the served lists per row, also untimed.

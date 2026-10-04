@@ -34,16 +34,13 @@ const RULE_INTEGERS = Object.freeze([
   'max_mae_ppm',
   'top'
 ]);
-const VERDICT_BOOLEANS = Object.freeze([
-  'win_rate',
-  'reward_to_risk',
-  'return_over_drawdown',
-  'trades',
-  'assurance',
-  'all',
-  'stop_unchecked',
-  'protective_exits_unchecked'
-]);
+// Signed thresholds: `Rules::avg_payoff_holds` drops its rule at `<= 0`, so a
+// negative floor is a legal stored value and is not refused here.
+const SIGNED_RULE_INTEGERS = Object.freeze(['min_avg_rr_bp', 'min_fill_headroom_bp']);
+// Names the server's `admission` lists may carry. Only the SHAPE is checked;
+// which rules exist and which `all` conjoins is the server's answer, read
+// from `cli::frontier::VERDICT_CHECKED` and `VERDICT_UNCHECKED` (D-1810).
+const RULE_NAME = /^[a-z][a-z0-9_]*$/;
 const I64_MIN = -(1n << 63n);
 const I64_MAX = (1n << 63n) - 1n;
 
@@ -72,24 +69,12 @@ const divide = (numerator, denominator) => numerator / BigInt(denominator);
 const ratioMatches = (wire, expected) =>
   expected === I64_MAX ? wire === null : wire !== null && integer(wire) === expected;
 
-/** @param {number} wins @param {number} trades */
-const assuranceBp = (wins, trades) => {
-  if (trades === 0) return 0;
-  const z = 1.959964;
-  const n = trades;
-  const p = wins / n;
-  const z2 = z * z;
-  const denominator = 1 + z2 / n;
-  const centre = p + z2 / (2 * n);
-  const margin = z * Math.sqrt((p * (1 - p)) / n + z2 / (4 * n * n));
-  return Math.trunc(Math.min(10_000, Math.max(0, ((centre - margin) / denominator) * 10_000)));
-};
-
 /** @param {string} why */
 const refused = (why) => ({
   ok: false,
   rows: [],
   rules: null,
+  admission: null,
   admitted: 0,
   empty: false,
   why
@@ -102,6 +87,46 @@ const exactAdd = (left, right) => {
 };
 
 /**
+ * The envelope's `admission` member, shape-checked: two arrays of distinct
+ * rule names, disjoint, the checked one non-empty, neither naming a member
+ * `meets` already uses. Returns the refusal reason as a string.
+ *
+ * @param {unknown} input
+ * @returns {string | {checked: string[], unchecked: string[], members: Set<string>}}
+ */
+function checkAdmission(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return 'is not an object.';
+  }
+  const body = /** @type {Record<string, unknown>} */ (input);
+  if (Object.keys(body).length !== 2 || !Array.isArray(body.checked) || !Array.isArray(body.unchecked)) {
+    return 'must carry exactly the checked and unchecked arrays.';
+  }
+  const checked = /** @type {unknown[]} */ (body.checked);
+  const unchecked = /** @type {unknown[]} */ (body.unchecked);
+  if (checked.length === 0) return 'names no checked rule, so `all` would be vacuous.';
+  /** @type {Set<string>} */
+  const members = new Set(['all']);
+  for (const name of checked) {
+    if (typeof name !== 'string' || !RULE_NAME.test(name) || name.endsWith('_unchecked') || members.has(name)) {
+      return `checked name ${JSON.stringify(name)} is malformed, reserved or repeated.`;
+    }
+    members.add(name);
+  }
+  for (const name of unchecked) {
+    if (typeof name !== 'string' || !RULE_NAME.test(name) || members.has(name) || members.has(`${name}_unchecked`)) {
+      return `unchecked name ${JSON.stringify(name)} is malformed, reserved or repeated.`;
+    }
+    members.add(`${name}_unchecked`);
+  }
+  return {
+    checked: /** @type {string[]} */ (checked),
+    unchecked: /** @type {string[]} */ (unchecked),
+    members
+  };
+}
+
+/**
  * Admit one complete `/frontier.json` payload before it reaches ranking.
  *
  * Rust's `u64` and `i64` are wider than JavaScript's exact integer range.
@@ -111,7 +136,15 @@ const exactAdd = (left, right) => {
  *
  * @param {unknown} input
  * @param {string|undefined} expectedIdentity
- * @returns {{ok: boolean, rows: any[], rules: any, admitted: number, empty: boolean, why: string}}
+ * WHICH RULES A ROW MEETS IS THE SERVER'S ANSWER, NOT THIS FILE'S (D-1810).
+ * `meets` is checked against the envelope's `admission` lists: every listed
+ * rule present and boolean, every unanswered rule flagged `true`, no other
+ * member, and `all` exactly the conjunction of the listed rules. No threshold
+ * is compared here and no rule statistic is recomputed, so a rule added in
+ * `cli` cannot make this verifier refuse a valid answer, and a rule this file
+ * never heard of cannot be silently dropped from `all`.
+ *
+ * @returns {{ok: boolean, rows: any[], rules: any, admission: any, admitted: number, empty: boolean, why: string}}
  */
 export function validateFrontierPayload(input, expectedIdentity = undefined) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
@@ -152,6 +185,7 @@ export function validateFrontierPayload(input, expectedIdentity = undefined) {
       ok: true,
       rows: [],
       rules: null,
+      admission: null,
       admitted: 0,
       empty: true,
       why: body.refusal
@@ -168,7 +202,7 @@ export function validateFrontierPayload(input, expectedIdentity = undefined) {
     if (body.rules !== null || body.admitted !== 0) {
       return refused('/frontier.json empty rows require null rules and zero admissions.');
     }
-    return { ok: true, rows: [], rules: null, admitted: 0, empty: true, why: '' };
+    return { ok: true, rows: [], rules: null, admission: null, admitted: 0, empty: true, why: '' };
   }
 
   if (!body.rules || typeof body.rules !== 'object' || Array.isArray(body.rules)) {
@@ -178,6 +212,15 @@ export function validateFrontierPayload(input, expectedIdentity = undefined) {
     if (!Number.isSafeInteger(body.rules[field]) || body.rules[field] < 0) {
       return refused(`/frontier.json rules.${field} is not an exact non-negative integer.`);
     }
+  }
+  for (const field of SIGNED_RULE_INTEGERS) {
+    if (!Number.isSafeInteger(body.rules[field])) {
+      return refused(`/frontier.json rules.${field} is not an exact integer.`);
+    }
+  }
+  const admission = checkAdmission(body.admission);
+  if (typeof admission === 'string') {
+    return refused(`/frontier.json admission ${admission}`);
   }
   if (body.rules.top === 0) {
     return refused('/frontier.json rules.top cannot be zero for a non-empty frontier.');
@@ -216,9 +259,18 @@ export function validateFrontierPayload(input, expectedIdentity = undefined) {
     if (!row.meets || typeof row.meets !== 'object' || Array.isArray(row.meets)) {
       return refused(`/frontier.json rows[${at}].meets is not an object.`);
     }
-    for (const field of VERDICT_BOOLEANS) {
-      if (typeof row.meets[field] !== 'boolean') {
-        return refused(`/frontier.json rows[${at}].meets.${field} is not boolean.`);
+    const keys = Object.keys(row.meets);
+    if (
+      keys.length !== admission.members.size ||
+      keys.some((key) => !admission.members.has(key))
+    ) {
+      return refused(
+        `/frontier.json rows[${at}].meets does not carry exactly the served admission members.`
+      );
+    }
+    for (const key of keys) {
+      if (typeof row.meets[key] !== 'boolean') {
+        return refused(`/frontier.json rows[${at}].meets.${key} is not boolean.`);
       }
     }
 
@@ -300,39 +352,17 @@ export function validateFrontierPayload(input, expectedIdentity = undefined) {
       return refused(`/frontier.json rows[${at}] carries derived cell figures that do not match its raw totals.`);
     }
 
-    const priced = row.trades > 0;
-    const expectedMeets = priced
-      ? {
-          win_rate: expectedWinRate >= integer(body.rules.min_win_rate_bp),
-          reward_to_risk: expectedReward >= integer(body.rules.min_rr_bp),
-          return_over_drawdown: expectedReturn >= integer(body.rules.min_ret_over_dd_bp),
-          trades: integer(row.trades) >= integer(body.rules.min_trades),
-          assurance: assuranceBp(row.wins, row.trades) >= body.rules.min_assurance_bp
-        }
-      : {
-          win_rate: false,
-          reward_to_risk: false,
-          return_over_drawdown: false,
-          trades: false,
-          assurance: false
-        };
-    const verdict =
-      expectedMeets.win_rate &&
-      expectedMeets.reward_to_risk &&
-      expectedMeets.return_over_drawdown &&
-      expectedMeets.trades &&
-      expectedMeets.assurance;
-    if (
-      row.meets.win_rate !== expectedMeets.win_rate ||
-      row.meets.reward_to_risk !== expectedMeets.reward_to_risk ||
-      row.meets.return_over_drawdown !== expectedMeets.return_over_drawdown ||
-      row.meets.trades !== expectedMeets.trades ||
-      row.meets.assurance !== expectedMeets.assurance ||
-      row.meets.all !== verdict ||
-      row.meets.stop_unchecked !== true ||
-      row.meets.protective_exits_unchecked !== true
-    ) {
-      return refused(`/frontier.json rows[${at}].meets does not match its raw cell and run rules.`);
+    const conjunction = admission.checked.every((/** @type {string} */ name) => row.meets[name]);
+    if (row.meets.all !== conjunction) {
+      return refused(
+        `/frontier.json rows[${at}].meets.all is not the conjunction of the served checked rules.`
+      );
+    }
+    if (admission.unchecked.some((/** @type {string} */ name) => row.meets[`${name}_unchecked`] !== true)) {
+      return refused(`/frontier.json rows[${at}] passes a rule the server says it cannot answer.`);
+    }
+    if (!row.priced && row.meets.all) {
+      return refused(`/frontier.json rows[${at}] is admitted without ever being priced.`);
     }
     if (row.meets.all) admitted += 1;
   }
@@ -346,6 +376,7 @@ export function validateFrontierPayload(input, expectedIdentity = undefined) {
     ok: true,
     rows: body.rows,
     rules: body.rules,
+    admission: { checked: admission.checked, unchecked: admission.unchecked },
     admitted,
     empty: false,
     why: ''

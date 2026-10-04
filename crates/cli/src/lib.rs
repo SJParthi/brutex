@@ -9095,15 +9095,57 @@ impl Rules {
         //
         // The other five keep their bare comparison, because for a floor the
         // analogy holds and adding a guard would be noise.
-        (self.max_mae_ppm == 0 || cell.worst_mae <= self.max_mae_ppm)
-            && cell.reward_to_risk_bp() >= self.min_rr_bp
-            && cell.win_rate_bp() >= self.min_win_rate_bp
-            && cell.trades >= self.min_trades
-            && cell.assurance_bp() >= self.min_assurance_bp
-            && cell.return_over_drawdown() >= self.min_ret_over_dd_bp
+        //
+        // EACH TERM IS ONE NAMED METHOD, AND `frontier::Row::verdict` CALLS THE
+        // SAME ONES. Before D-1810 the frontier verdict restated five of these
+        // comparisons inline and left out average payoff, so `/frontier.json`
+        // could show PASS for a row this function refuses (W2-cli5-4). A rule
+        // edited here is now edited for both.
+        self.mae_holds(cell)
+            && self.reward_to_risk_holds(cell)
+            && self.win_rate_holds(cell)
+            && self.trades_hold(cell)
+            && self.assurance_holds(cell)
+            && self.return_over_drawdown_holds(cell)
             && Self::protects(self.require_protective_exits, cell)
             && Self::fills_hold(self.min_fill_headroom_bp, cell)
             && Self::avg_payoff_holds(self.min_avg_rr_bp, cell)
+    }
+
+    /// The stop ceiling: zero drops it, otherwise `worst_mae <= max_mae_ppm`.
+    const fn mae_holds(&self, cell: &grid::Cell) -> bool {
+        self.max_mae_ppm == 0 || cell.worst_mae <= self.max_mae_ppm
+    }
+
+    /// Smallest win over largest loss, against `min_rr_bp`.
+    pub(crate) const fn reward_to_risk_holds(&self, cell: &grid::Cell) -> bool {
+        cell.reward_to_risk_bp() >= self.min_rr_bp
+    }
+
+    /// Win rate, against `min_win_rate_bp`.
+    pub(crate) const fn win_rate_holds(&self, cell: &grid::Cell) -> bool {
+        cell.win_rate_bp() >= self.min_win_rate_bp
+    }
+
+    /// Trade count, against `min_trades`.
+    pub(crate) const fn trades_hold(&self, cell: &grid::Cell) -> bool {
+        cell.trades >= self.min_trades
+    }
+
+    /// The 95% lower bound on the win rate, against `min_assurance_bp`.
+    pub(crate) fn assurance_holds(&self, cell: &grid::Cell) -> bool {
+        cell.assurance_bp() >= self.min_assurance_bp
+    }
+
+    /// Return over drawdown, against `min_ret_over_dd_bp`.
+    pub(crate) const fn return_over_drawdown_holds(&self, cell: &grid::Cell) -> bool {
+        cell.return_over_drawdown() >= self.min_ret_over_dd_bp
+    }
+
+    /// Average win over average loss, against `min_avg_rr_bp`. See
+    /// [`Self::avg_payoff_holds`].
+    pub(crate) fn avg_payoff_holds_for(&self, cell: &grid::Cell) -> bool {
+        Self::avg_payoff_holds(self.min_avg_rr_bp, cell)
     }
 
     /// Whether `cell` carries the protection the operator requires.

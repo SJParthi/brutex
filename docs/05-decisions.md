@@ -56677,3 +56677,75 @@ a sink and reopens one on the same directory holds it for reading: 14 in
 `sink.rs` and one in `tail.rs`. Readers do not wait on each other. No production
 line changes, and the lock's refusal stays exactly as strict. Proven locally:
 4 of 60 runs failed before the change and 0 of 60 after.
+
+### D-1810 — `/frontier.json`'s verdict is `Rules::admits` on every term a row can answer, and the browser reads the rule list from the server — 2026-10-04
+
+**What was wrong (W2-cli5-4, left open by D-1632).** One admission rule was
+written three times. `cli::Rules::admits` conjoins nine terms.
+`cli::frontier::Row::verdict` restated five of them inline and set
+`admitted` from those five, so a row that `admits` refuses for average payoff
+(`min_avg_rr_bp`) was served `"all":true`. Fill headroom was neither checked
+nor flagged. `web/src/lib/frontier-analytics.js` then restated the same five
+thresholds, the assurance formula and the conjunction, and refused any answer
+whose `meets` differed from its own copy. A fix in `cli` alone would have made
+the page refuse every valid response. An unpriced row's verdict also carried
+`protective_exits_unchecked: false`, which the browser refused.
+
+**The change.** One definition per rule, served rather than copied, as D-0288
+did for the vocabulary.
+
+* `cli::Rules` gains one method per term (`win_rate_holds`,
+  `reward_to_risk_holds`, `return_over_drawdown_holds`, `trades_hold`,
+  `assurance_holds`, `avg_payoff_holds_for`, plus the private `mae_holds`).
+  `admits` is their conjunction, in the same short-circuit order as before.
+  `Row::verdict` calls the same methods on the row's own cell.
+* `Verdict` gains `avg_payoff` and `fill_headroom_unchecked` (always `true`:
+  a row stores no optimistic total). `admitted` conjoins the six answered
+  rules. Every unchecked flag is `true` on every row, priced or not.
+* `cli::frontier::VERDICT_CHECKED` and `VERDICT_UNCHECKED` name the answered
+  and unanswered terms. `Verdict::checked()` and `unchecked()` return them
+  with their values.
+* `api`'s `/frontier.json` writes `meets` from those two methods. Its envelope
+  echoes `min_avg_rr_bp` and `min_fill_headroom_bp` in `rules` and adds
+  `"admission":{"checked":[..],"unchecked":[..]}` from the two constants.
+* The browser no longer compares any threshold or recomputes assurance. It
+  checks that `meets` carries exactly the served members, all booleans, that
+  `all` is the conjunction of the served checked list, that every served
+  unchecked rule is flagged `true`, and that an unpriced row is not admitted.
+  `frontier-pages.js` refuses an `admission` list that changes between pages.
+  The verdict pill counts and names the rules from `meets` itself.
+
+**What changes on the wire and in results.** No stored byte changes: the
+frontier format and its rules are as they were. A row that clears the five old
+rules but fails `min_avg_rr_bp` now reads `"all":false`, and `admitted` and
+`total_admitted` fall by one for each such row. A rule set with
+`min_avg_rr_bp <= 0` gives the same `all` as before. `meets` gains two
+members. The envelope gains two thresholds and `admission`. A browser older
+than this change refuses the new answer, loudly, because its member list no
+longer matches. Cost per row stays O(1): six comparisons, one square root,
+three flags.
+
+**Tests.** `cli::frontier::tests::the_verdict_is_rules_admits_on_every_term_a_row_can_answer`
+compares `verdict(..).admitted` with `Rules::admits` across nine cell shapes
+(including `u64::MAX` trades and `i64::MIN`/`i64::MAX` money), nine payoff
+floors from `i64::MIN` to `i64::MAX` and two rule bases, with the three
+unanswerable terms switched off. With `avg_payoff` dropped from `admitted` it
+fails at the first row a payoff floor refuses.
+`the_served_rule_names_are_the_verdicts_fields_once_each` pins both lists and
+their order. `an_unpriced_row_fails_every_rule_and_is_marked_unpriced` now
+requires every unchecked flag. `api::frontierjson::tests::a_row_failing_only_average_payoff_is_not_served_as_admitted`
+requires the exact `meets` object, counts, thresholds and `admission` for
+floors 300 (refused), 200 (the boundary, admitted) and 100. Web:
+`tests/frontier-analytics.test.js` (an unknown served rule is enforced, an
+unknown unchecked rule must be flagged, no threshold is compared, an unpriced
+admitted row is refused, fifteen malformed admission shapes refuse);
+`tests/frontier-pages.test.js` (a changed admission list between pages
+refuses). Seven tests in `frontier-analytics.test.js` fail against the
+previous verifier.
+AGB-01, AGB-02.
+
+**Not changed.** `min_weakest_bp` is not a term of `Rules::admits` (it sets the
+screen's `steady` flag), so it is not part of this verdict either. The derived
+figures the browser still cross-checks (`win_rate_bp`, the two ratios, the two
+averages) are integrity checks on the row's own arithmetic, not admission
+rules.
