@@ -843,6 +843,14 @@ Narrative only. No row is added to the table above.
 - **OE-3** (a day-window evaluation walked every signal row and period):
   fixed by bisection, digest pinned to the old walk. D-2307, AFG-06.
 - **OE-4** (median heaps grew by doubling in the bar loop): fixed. D-2308.
+- **Owner-blocked, named and not guessed:** gaps-6 (split-adjustment
+  threshold needs a corporate-action source), gaps-7 (survivorship needs a
+  historical F&O membership source), gaps-8 (a fact only the owner has),
+  hunt-costs-5 and hunt-runner-5 (charter sources missing; D-1549 stands),
+  hunt-ci-1 (a branch-protection setting only the repository owner can
+  change), testgaps-7 (operator data not in the repository), and gaps-1 and
+  gaps-3 (no decision names where the unwired modules belong; D-1568 and
+  D-1544 stand).
 
 ### Rust and O(1) sweep, data side — dispositions — 2026-10-04
 
