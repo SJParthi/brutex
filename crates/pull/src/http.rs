@@ -4407,6 +4407,32 @@ mod tests {
         }
     }
 
+    /// An exponent that puts the decimal point exactly at the front of the
+    /// digits (`point == 0`) gains its leading zero: `number_text` promises
+    /// plain decimal notation, and `csv::paisa`, which the whole-number readers
+    /// walk, refuses a text with no whole part. So a zero count written `0e-1`
+    /// reads as the zero it is. P10-07: `point <= 0` mutated to `< 0` rendered
+    /// `.5` and `.0`, and the only negative exponent anywhere was refused for
+    /// its precision before reaching this branch. (`one_price` is not the
+    /// witness: `core`'s half-up reader accepts `.5`.)
+    #[test]
+    fn an_exponent_that_lands_the_point_at_the_front_keeps_a_whole_part() {
+        for (sent, want) in [
+            ("5e-1", "0.5"),
+            ("2.5e-1", "0.25"),
+            ("-5e-1", "-0.5"),
+            ("0e-1", "0.0"),
+        ] {
+            let number: serde_json::Number = serde_json::from_str(sent).expect("a JSON number");
+            assert_eq!(number_text(&number).as_deref(), Some(want), "{sent}");
+        }
+        let zero: serde_json::Value = serde_json::from_str("0e-1").expect("a JSON number");
+        assert_eq!(
+            one_number(&zero, "volume").expect("0e-1 is the whole number zero"),
+            0
+        );
+    }
+
     /// **THE FOUR VALUES THAT COST FORTY-TWO RUNS**, each landing on the
     /// exchange's own price.
     ///
