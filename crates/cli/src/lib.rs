@@ -21179,8 +21179,12 @@ mod tests {
         );
         assert_eq!(call(&other, false), Ok(1), "a new root opens fresh");
         assert_eq!(opens.get(), 2);
-        std::fs::remove_file(&file).expect("remove");
-        std::fs::write(&file, b"b").expect("replace");
+        // Written beside the old file and renamed over it, so both exist at
+        // once and the replacement cannot reuse the freed inode, which a
+        // remove-then-write may do.
+        let next = dir.join("next.bin");
+        std::fs::write(&next, b"b").expect("replacement");
+        std::fs::rename(&next, &file).expect("replace");
         assert_eq!(call(&other, false), Ok(1), "a replaced file opens fresh");
         fail_refresh.set(true);
         assert_eq!(call(&other, false), Ok(1), "a refused refresh opens fresh");
