@@ -43,3 +43,5 @@ open /dev/null, fifos or spawn with Stdio::null fail as uid 65534.
 - Next step: on b97b2ca, run `cargo clippy --workspace --all-targets --locked -- -D warnings` and `cargo test -p cli --lib`; the one expected failure is the /dev/null one. Then merge the current origin/final/all-fixes and push to final/all-fixes. Set OS-7 to doc at b97b2ca in fix-board/status/sweep.tsv and republish the board artifact.
 
 - 13:58Z: b97b2ca pushed to final/all-fixes after workspace clippy clean and cli lib 1736/1737 (only the /dev/null environmental failure). Remaining: republish the board artifact.
+
+- 14:15Z paused at 93% session usage. Next: .github/workflows/auto-merge.yml:263 and :358 still pass `--jq` to gh; port them to the Rust gh_json tool (D-2343) under a new D-23xx. CI on b97b2ca belongs to the PR 74 CI thread.
