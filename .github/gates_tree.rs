@@ -1950,6 +1950,10 @@ const ROLLING_SCAFFOLD: &str = "contractpath bin call put 9223372036854775807";
 //     for the duplicated census-lock descriptor it arranges: a second
 //     reference to the lock's open file description, the model of a
 //     spawned child's copy (D-0693).
+//   lock-transient census-stamp  scratch roots in `ingest.rs` (D-2766):
+//     the first arranges a transient or out-of-space failure on the
+//     census lock, the second an in-place append whose final stamp must
+//     move past its own writes. Named for the fault, not a place.
 //   interleaved                  a word asserted to appear IN a refusal
 //     sentence, so the message keeps naming the condition it refused.
 //   feed                         a scratch subdirectory in
@@ -1968,7 +1972,7 @@ const ROLLING_SCAFFOLD: &str = "contractpath bin call put 9223372036854775807";
 // has the same shape as a path segment whatever it means.
 const PULL_FIXTURE: &str = "
     dir-is-a-file lock-is-a-dir census-lock-dup interleaved
-    feed t z zzz
+    feed t z zzz lock-transient census-stamp
 ";
 
 // SIXTY-SEVEN MORE, IN FOUR GROUPS, ALL OF THEM ACCUMULATED WHILE THIS
