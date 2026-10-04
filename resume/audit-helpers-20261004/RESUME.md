@@ -100,3 +100,12 @@ Total new across rounds 1-9: 124. Round 9 = 2 medium, 10 low. Newly fixed: CE-3,
 | Costs | 13 | cost rates vs charter | p13num-1..5 low (all rates UNVERIFIED = hunt-costs-5) | numeric-pass13.md |
 | Rust-only | 13 | §2 every corner | P13-01 med (committed web/build stale; W1 red), P13-02..05 low | tests-docs-security-pass13.md |
 Total new across rounds 1-10: 149. Round 10 = 5 medium, 20 low. CI tools list for owner question D-1602 is in tests-docs-security-pass13.md.
+
+## Round 11 (same head 1f4de71) — done 2026-10-04 ~15:20 UTC
+| Angle | Pass | Area | New | Report |
+|---|---|---|---|---|
+| Crash/edge | 16 | time and clock | CE-84..87 low (wall clock used for intervals/ages) | crash-edge-pass16.md |
+| Concurrency | 14 | operations that clash (pair matrix) | conc14-1, conc14-2 low | conc-pass14.md |
+| Metrics | 14 | ranking and descriptive metrics | p14num-1 med (live "won %" inverted for sell rows, ran), p14num-2, p14num-3 low | numeric-pass14.md |
+| Docs | 14 | docs/02 store format + docs/01 vs code | P14-01 med (census header vendor bytes wrong, ran), P14-02 med (CRC sidecar layout undocumented), P14-03..06 low | tests-docs-security-pass14.md |
+Total new across rounds 1-11: 164. Round 11 = 3 medium, 12 low. Newly fixed: xcut-1, run1-3, P1-16-01/02/04..08, P1-14-02.
