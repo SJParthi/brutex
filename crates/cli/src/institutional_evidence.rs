@@ -132,6 +132,8 @@ pub struct InstitutionalCompletenessV1<'a> {
 /// redo them for every cell: O(E) per cell, O(C·E) per population. [`Self::bind`]
 /// pays them once; each cell then checks its context against the bound
 /// identity and its data source against the bound source, both O(1).
+/// Proof:
+/// `cli::population_admission_writer::evidence_binds_the_complete_population_once_not_per_cell`.
 ///
 /// The fields are private and the one constructor derives them from the
 /// authority it is given, so a bound identity or data verdict cannot be
