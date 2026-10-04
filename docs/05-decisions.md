@@ -58289,7 +58289,7 @@ Found on the staging gate run. Gate 12 triggers on the bare word `flat`, and `cr
 
 ### D-1931 — Gate 1d declares the P-03 census keys, the P10-07a number texts and the word `length` — 2026-10-04
 
-Found on the staging gate run after merging zero/calendar and fixboard/zero-p10. `on_closed_day` and `kept_unclassified_day` are telemetry field keys this repository chose for the closed-day drop (D-2673); `5e-1`, `2.5e-1` and `-5e-1` are JSON number texts a P10-07a test reads; `length` is a word in three refusal messages. None names an account, an environment or a vendor field. They are declared as `late_pieces` with that reason in the gate's own comment.
+Found on the staging gate run after merging zero/calendar and fixboard/zero-p10. `on_closed_day` and `kept_unclassified_day` are telemetry field keys this repository chose for the closed-day drop (D-2673); `5e-1`, `2.5e-1`, `-5e-1` and `0e-1` are JSON number texts a P10-07a test reads; `18935` is a day count in a session-length test; `length` is a word in three refusal messages. None names an account, an environment or a vendor field. They are declared as `late_pieces` with that reason in the gate's own comment.
 
 ### D-1781 — A withheld holed day is folded through the evaluator and only its rows leave the sweep — 2026-10-04
 
@@ -58316,3 +58316,11 @@ p11num-1, with D-1781.
 - `audit_bars` rebuilds an anchored column for each walk-forward window, and for the whole span when no prepared column is handed in, through `StoredReplay`. Rebuilding from the swept window alone would have spliced the withheld days back out, but only inside validation. `StoredReplay` now carries the whole folded series and the withheld days (`None` for `audit-stored` and the checksum-audited range, which withhold nothing). `window_withholding` folds each window from the first bar after the swept bar before it, so withheld bars directly before the window are folded in, as the whole-span fold had them. The window runs through its last swept bar. A window that is not a window of the withholding is refused by the builder's own check, never mis-indexed.
 - Gate 11 counts three new hash probes of the withheld-day set (`cli/src/lib.rs` 5 -> 7, `indicators/src/column.rs` 1). Their reasons are in `docs/06-limits.md` under rule 7. The window bounds are one forward pass, not a binary search, which rule 1 refuses.
 - Not covered by a test of its own: no test builds a walk-forward window over a holed span and compares it with the whole fold. The builder it calls is the one D-1781's tests prove. The window bounds are read off the source.
+
+### D-1932 — Gate 11 rule 2 counts `runner/src/report.rs` at 4 — 2026-10-04
+
+Found on the staging gate run after merging fixboard/zero-p8. p8num-1 (D-2725) added `bar_rows(out, bar: f64, trials)`, which prints the Student-t Bonferroni bar every row must clear. That is a fourth `f64` in `report.rs`, and the allowlist still said 3. It is a t-threshold, not a price, so the count is raised to 4, and docs/06-limits.md "Gate 11 allowlist reasons" records why.
+
+### D-1933 — Gate 23 declares the two degraded-decode stderr lines — 2026-10-04
+
+Found on the staging gate run after merging zero/data-edges. CE-57 (D-2681) and CE-58 (D-2682) each added one `eprintln!` in `crates/pull` (`csv.rs`, `masters.rs`), written beside a `telemetry::emit` of the same counts and only when a decode degraded. Gate 23 clause A already passes for `pull`; the declared print surface did not list the two lines. They are declared with that reason.

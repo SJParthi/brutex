@@ -1731,11 +1731,12 @@ jobs:
           # ---- D-1931: telemetry field keys this repository chose for the
           # P-03 closed-day drop (`on_closed_day`, `kept_unclassified_day` on
           # the fetch census line, D-2673); the JSON number texts P10-07a's
-          # test reads (`5e-1`, `2.5e-1`, `-5e-1`); and the word `length` from
-          # three refusal messages. None names an account, an environment or a
+          # test reads (`5e-1`, `2.5e-1`, `-5e-1`, `0e-1`); a day count
+          # (`18935`) in a session-length test; and the word `length` from three
+          # refusal messages. None names an account, an environment or a
           # vendor field.
           late_pieces='on_closed_day kept_unclassified_day 5e-1 2.5e-1 -5e-1
-          length'
+          0e-1 length 18935'
 
           allowed="${seg_shape} ${vendor_wire} ${claim_standing} ${config_fixture}
           ${secret_fixture} ${scaffold} ${timeframe} ${governor}
@@ -3578,6 +3579,15 @@ jobs:
           cli/src/operation_audit.rs:eprintln!:2
           pull/src/cash_auction.rs:eprintln!:3
           pull/src/cash_session_cache.rs:eprintln!:2"
+          # TWO MORE, one kind (D-1933): the stderr half of a degraded decode,
+          # each written beside a `telemetry::emit` of the same counts.
+          # `pull/src/csv.rs` names unreadable and negative volume and open
+          # interest a CSV decode stored or skipped (CE-57, D-2681), and
+          # `pull/src/masters.rs` names NSE index categories and elements the
+          # conversion skipped (CE-58, D-2682). Both print only when something
+          # was degraded, so a clean run prints nothing.
+          declared="$declared pull/src/csv.rs:eprintln!:1
+          pull/src/masters.rs:eprintln!:1"
 
           want=$(printf '%s\n' $declared | sort)
           got=$(sort /tmp/prints.txt)
@@ -5343,7 +5353,7 @@ jobs:
           crates/runner/src/bootstrap.rs 51
           crates/runner/src/bootstrap_family_pass.rs 17
           crates/runner/src/outcome.rs 26
-          crates/runner/src/report.rs 3
+          crates/runner/src/report.rs 4
           crates/runner/src/validate.rs 1
           crates/store/src/format.rs 14
           crates/lake/src/bar.rs 9

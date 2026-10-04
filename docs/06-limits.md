@@ -12718,6 +12718,10 @@ float is the input being discarded and never the value being kept.
 An adversarial audit proposed moving the function next to the other
 float-bearing module instead; that fails, because outcome.rs is pinned
 at exactly 5 and would then measure 8.
+report.rs MOVED FROM 3 TO 4 (D-1932). The fourth is `bar_rows(out, bar: f64,
+trials)` (p8num-1, D-2725): it prints the Student-t Bonferroni bar a row must
+clear, which is a t-THRESHOLD and not a price. It takes the same reason as
+`significance.rs` below, not `paisa()`'s: no money enters or leaves it.
 significance.rs MOVED FROM 7 TO 18, and the count is the whole point of
 pinning it: the reason above did not change, the module did. It gained
 Bailey-Lopez de Prado's expected-maximum (EULER_MASCHERONI, expected_max_bailey),
