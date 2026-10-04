@@ -831,3 +831,54 @@ fn derived_rung_stub_minutes_follow_the_venue_session() {
         assert_eq!(last.ts_micros, (midnight + opens_at * 60) * 1_000_000);
     }
 }
+
+/// **A DAY THE VENUE CANNOT ATTEST IS NAMED ONCE, NOT TWICE PER BUCKET.** OD-1,
+/// D-2370, invariant AFG-70.
+///
+/// NSE cash on or after 2026-08-03 needs a dated closing-auction eligibility
+/// schedule. With none, `minute_session` refuses the day. Each bucket used to
+/// push the refusal AND an "incomplete or invalid minute coverage" line, and
+/// re-derive the venue's hours, so `cli::fold_audit`'s `withheld` counted
+/// `2 x buckets` for one refused day. Two refused days, one with no schedule
+/// and one missing from a schedule, are each one line at every width.
+#[test]
+fn a_day_the_venue_refuses_is_named_once_not_once_per_bucket() {
+    use pull::fold::{complete_minutes_for_venue, complete_minutes_with_cash_schedule};
+    use pull::session::Day;
+    use pull::vendor::Venue;
+    let monday = Day::new(2026, 8, 3).unwrap();
+    let tuesday = Day::new(2026, 8, 4).unwrap();
+    assert!(pull::vendor::cash_auction_eligibility_required(monday));
+    let mut bars: Vec<_> = (0..SESSION_MINUTES)
+        .map(|m| minute(midnight_of(monday) + 555 * 60 + m * 60))
+        .collect();
+    bars.extend((0..SESSION_MINUTES).map(|m| minute(midnight_of(tuesday) + 555 * 60 + m * 60)));
+    // A schedule that names a different day: both observed days are missing.
+    let mut elsewhere = pull::cash_auction::Schedule::default();
+    elsewhere
+        .insert(Day::new(2026, 8, 5).unwrap(), false)
+        .unwrap();
+    for secs in [60_u32, 120, 300, 900, 3600] {
+        let bucket = Bucket::of_secs(secs).unwrap();
+        let none = complete_minutes_for_venue(&bars, bucket, Venue::NseCash).unwrap();
+        let missing =
+            complete_minutes_with_cash_schedule(&bars, bucket, Venue::NseCash, Some(&elsewhere))
+                .unwrap();
+        for (label, (complete, diagnostics)) in [("no schedule", none), ("elsewhere", missing)] {
+            assert!(complete.is_empty(), "{label} {secs}s: nothing certified");
+            assert_eq!(
+                diagnostics.len(),
+                2,
+                "{label} {secs}s: one line per refused day: {diagnostics:?}"
+            );
+            for (why, day) in diagnostics.iter().zip([monday, tuesday]) {
+                assert!(
+                    why.starts_with(&format!("day {}: ", day.days_from_epoch())),
+                    "{label} {secs}s: {why}"
+                );
+                assert!(why.ends_with("derived buckets withheld"), "{why}");
+                assert!(!why.contains("incomplete"), "{why}");
+            }
+        }
+    }
+}

@@ -1133,9 +1133,12 @@ pub(crate) fn prefix_median_steps_over(bars: &[Candle], accepted: Option<&[bool]
     let qualifies =
         |index: usize| accepted.is_none_or(|verdict| verdict.get(index).copied().unwrap_or(false));
     // `lower` holds the smaller floor(n/2) gaps, `upper` the larger ceil(n/2);
-    // the upper median is therefore `upper`'s minimum.
-    let mut lower: BinaryHeap<i64> = BinaryHeap::new();
-    let mut upper: BinaryHeap<Reverse<i64>> = BinaryHeap::new();
+    // the upper median is therefore `upper`'s minimum. At most `n - 1` gaps
+    // exist, so each half is sized once for its share and no push in the bar
+    // loop reallocates (D-2308).
+    let half = bars.len().div_ceil(2);
+    let mut lower: BinaryHeap<i64> = BinaryHeap::with_capacity(half);
+    let mut upper: BinaryHeap<Reverse<i64>> = BinaryHeap::with_capacity(half);
     let mut out: Vec<i64> = Vec::with_capacity(bars.len());
     let mut prior: Option<(usize, &Candle)> = None;
     for (index, bar) in bars.iter().enumerate() {

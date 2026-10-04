@@ -121,16 +121,16 @@ fn tail_rule_bp(rules: crate::Rules) -> i64 {
 }
 
 /// One instrument's pass-1 outcome: the run `range-rung` would have made.
-struct Screened {
-    symbol: String,
-    outcome: Result<crate::results::Record, String>,
+pub(crate) struct Screened {
+    pub(crate) symbol: String,
+    pub(crate) outcome: Result<crate::results::Record, String>,
 }
 
 /// One `(combination, side)` the union holds, in first-seen order.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-struct Candidate {
-    words: [u64; 6],
-    direction: Direction,
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct Candidate {
+    pub(crate) words: [u64; 6],
+    pub(crate) direction: Direction,
 }
 
 /// What one candidate did on one instrument: the cell the screen would have
@@ -412,7 +412,7 @@ fn run_under(
 /// banner (D-0696).
 /// A surface with only misfiled holdings refuses with these blocks before
 /// the opening is built. A store with no such holdings remains a page.
-fn head_under(
+pub(crate) fn head_under(
     root: &std::path::Path,
     vendor_word: &str,
     rung: &str,
@@ -495,7 +495,7 @@ fn not_walked(out: &mut String, unoffered: &str) {
 
 /// `usize` as the `u64` a telemetry field takes, saturating rather than
 /// wrapping on a platform where that could differ.
-fn count(n: usize) -> u64 {
+pub(crate) fn count(n: usize) -> u64 {
     u64::try_from(n).unwrap_or(u64::MAX)
 }
 
@@ -522,7 +522,7 @@ fn count(n: usize) -> u64 {
 /// mark of how far the instrument ran, so this names every instrument with
 /// its own reason, claims nothing about what ran, and ends with `unread`,
 /// the head's two blocks.
-fn at_least_one_screened(screened: &[Screened], unread: &str) -> Result<(), String> {
+pub(crate) fn at_least_one_screened(screened: &[Screened], unread: &str) -> Result<(), String> {
     if screened.is_empty() || screened.iter().any(|s| s.outcome.is_ok()) {
         return Ok(());
     }
@@ -705,7 +705,7 @@ fn opening(
     out
 }
 
-fn render_per_symbol(out: &mut String, screened: &[Screened]) {
+pub(crate) fn render_per_symbol(out: &mut String, screened: &[Screened]) {
     use crate::columns::{left, right};
     let _ = writeln!(out, "\n  PASS 1 -- PER SYMBOL, each on its own bars");
     // SORTED BY THE MONEY, not by name: the smallest drawdown first, then the
@@ -775,7 +775,7 @@ fn render_per_symbol(out: &mut String, screened: &[Screened]) {
 /// One `HashSet` insert per row decides membership; the `Vec` keeps first-seen
 /// order so the table is stable across runs. Instruments whose rows cannot be
 /// read are returned by name with the reason rather than skipped.
-fn union_of(
+pub(crate) fn union_of(
     root: &std::path::Path,
     screened: &[Screened],
 ) -> (Vec<Candidate>, Vec<(String, String)>) {
@@ -793,11 +793,35 @@ fn union_of(
             return (union, unread);
         }
     };
+    // THE PARENTS ARE OPENED ONCE. `Frontier::of_run` on a read-only handle
+    // cold-opens the results ledger and the receipt sidecar on every call --
+    // O(history) each -- so a pool over 210 instruments paid that 210 times.
+    // One snapshot here makes each instrument one hash probe in each parent
+    // plus its own rows (sweep audit OS-4, D-2301). The proof is the same
+    // committed-receipt gate the API's detail readers use.
+    let mut parents = match crate::result_set::CommittedParents::open_read_bounded(root, u64::MAX) {
+        Ok(parents) => parents,
+        Err(why) => {
+            for s in screened {
+                if s.outcome.is_ok() {
+                    unread.push((s.symbol.clone(), format!("parent ledger not opened: {why}")));
+                }
+            }
+            return (union, unread);
+        }
+    };
     for s in screened {
         let Ok(record) = &s.outcome else {
             continue;
         };
-        match frontier.of_run(&record.identity) {
+        let receipt = match parents.committed(&record.identity) {
+            Ok(committed) => committed.map(|committed| committed.receipt),
+            Err(why) => {
+                unread.push((s.symbol.clone(), why));
+                continue;
+            }
+        };
+        match frontier.of_run_against_receipt(&record.identity, receipt) {
             Ok((rows, damage)) => {
                 if let Some(why) = damage {
                     unread.push((s.symbol.clone(), why));
@@ -845,6 +869,66 @@ fn price_all(
     to: (u16, u8),
     union: &[Candidate],
 ) -> Result<Vec<Priced>, String> {
+    let PreparedSpan {
+        bars,
+        column,
+        horizon,
+    } = prepare_span(root, vendor, underlying, rung, from, to)?;
+    let bars = bars.as_slice();
+    let hold = usize::try_from(horizon.as_bars()).unwrap_or(usize::MAX);
+    let rules = crate::Rules::derived(bars, horizon);
+    let stop_rungs = crate::stop_ladder_ppm(bars, hold);
+    let levels = grid::Levels {
+        rungs: crate::grid_rungs(bars),
+        step_ppm: Some(crate::grid_step_ppm(bars, hold)),
+        forced: (rules.max_mae_ppm > 0).then_some(rules.max_mae_ppm),
+        ratios: true,
+        stops_ppm: &stop_rungs,
+    };
+    let facts = runner::trade::SliceFacts::of(bars, &column);
+    Ok(union
+        .iter()
+        .map(|candidate| {
+            let mask = vocab::ConditionMask::from_words(candidate.words);
+            let side = match candidate.direction {
+                Direction::Long => runner::excursion::Side::Long,
+                Direction::Short => runner::excursion::Side::Short,
+            };
+            let g = grid::evaluate_over(bars, &column, &mask, horizon, side, levels, &facts);
+            crate::shown_cell(&g, rules)
+                .map(|(cell, _admitted)| cell)
+                .filter(|cell| cell.trades > 0)
+        })
+        .collect())
+}
+
+/// One instrument's span over one month range, prepared exactly as the screen
+/// prepares one: its signal bars with interior-gap days withheld, its anchored
+/// column and the holding period the bars imply.
+///
+/// Lifted out of [`price_all`] so `pool-oos` prepares its training and later
+/// spans through the same sequence, rather than a second copy of it that could
+/// drift (D-1576). `the_pool_prepares_a_span_exactly_as_the_screen_does` pins
+/// the sequence here.
+pub(crate) struct PreparedSpan {
+    /// The signal bars, interior-gap days withheld.
+    pub(crate) bars: Vec<indicators::Candle>,
+    /// One condition row per bar of [`Self::bars`].
+    pub(crate) column: indicators::column::Column,
+    /// The holding period, in execution bars, these bars imply.
+    pub(crate) horizon: runner::outcome::Horizon,
+}
+
+/// [`PreparedSpan`] for one instrument, rung and month range, or the reason it
+/// could not be prepared. Nothing is substituted for a refused step.
+pub(crate) fn prepare_span(
+    root: &std::path::Path,
+    vendor: brutex_core::vendor::Vendor,
+    underlying: &str,
+    rung: &'static str,
+    from: (u16, u8),
+    to: (u16, u8),
+) -> Result<PreparedSpan, String> {
     let mut span = stored::load_span(root, vendor, underlying, rung, from, to)?;
     let signal_length = stored::rung_length_micros(rung)?;
     let execution_bars = if rung == crate::EXECUTION_RUNG {
@@ -884,33 +968,12 @@ fn price_all(
         signal_length,
         availability,
     )?;
-    let bars = span.bars.as_slice();
-    let horizon = crate::horizon_for(bars, rung != crate::EXECUTION_RUNG);
-    let hold = usize::try_from(horizon.as_bars()).unwrap_or(usize::MAX);
-    let rules = crate::Rules::derived(bars, horizon);
-    let stop_rungs = crate::stop_ladder_ppm(bars, hold);
-    let levels = grid::Levels {
-        rungs: crate::grid_rungs(bars),
-        step_ppm: Some(crate::grid_step_ppm(bars, hold)),
-        forced: (rules.max_mae_ppm > 0).then_some(rules.max_mae_ppm),
-        ratios: true,
-        stops_ppm: &stop_rungs,
-    };
-    let facts = runner::trade::SliceFacts::of(bars, &column);
-    Ok(union
-        .iter()
-        .map(|candidate| {
-            let mask = vocab::ConditionMask::from_words(candidate.words);
-            let side = match candidate.direction {
-                Direction::Long => runner::excursion::Side::Long,
-                Direction::Short => runner::excursion::Side::Short,
-            };
-            let g = grid::evaluate_over(bars, &column, &mask, horizon, side, levels, &facts);
-            crate::shown_cell(&g, rules)
-                .map(|(cell, _admitted)| cell)
-                .filter(|cell| cell.trades > 0)
-        })
-        .collect())
+    let horizon = crate::horizon_for(&span.bars, rung != crate::EXECUTION_RUNG);
+    Ok(PreparedSpan {
+        bars: span.bars,
+        column,
+        horizon,
+    })
 }
 
 /// UNVERIFIED performance: no named cost test or measured latency bound is established here.
@@ -1127,7 +1190,7 @@ fn ratio_cell(bp: i128) -> String {
 }
 
 /// The six mask words as hex, so a row can be matched to a frontier row.
-fn mask_hex(words: [u64; 6]) -> String {
+pub(crate) fn mask_hex(words: [u64; 6]) -> String {
     let mut out = String::with_capacity(6 * 17);
     for (i, w) in words.iter().enumerate() {
         if i > 0 {
@@ -2705,7 +2768,7 @@ mod tests {
         let screen_at = lib
             .find("fn screen_range_inner(")
             .expect("the screen exists");
-        let price_at = pool.find("fn price_all(").expect("the pool prices");
+        let price_at = pool.find("fn prepare_span(").expect("the pool prepares");
         let mut last_pool = price_at;
         let mut last_screen = screen_at;
         for step in SEQUENCE {

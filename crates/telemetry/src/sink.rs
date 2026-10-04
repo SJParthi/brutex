@@ -122,7 +122,7 @@ use std::sync::{Mutex, PoisonError};
 
 use crate::clock::now_millis;
 use crate::encode::line;
-use crate::event::Event;
+use crate::event::{Event, MAX_TARGET_BYTES};
 use crate::level::Level;
 use crate::record::Record;
 
@@ -414,6 +414,26 @@ impl Config {
                  clears the fast floor, and the walk is only constant-time \
                  because the table is bounded",
                 self.target_levels.len()
+            ));
+        }
+        // AND EACH PREFIX IS BOUNDED TOO (OD-4, D-2373). The count bound above
+        // makes `level_for` a constant number of comparisons; it did not make
+        // each comparison constant, because a prefix had no length bound and
+        // `starts_with` and `==` cost up to the prefix's length. A target is
+        // recorded at most `MAX_TARGET_BYTES` long (`encode` caps it), so a
+        // longer prefix names no target this sink writes faithfully: it is
+        // refused by name rather than clamped, which `CLAUDE.md` §4 forbids.
+        if let Some((prefix, _)) = self
+            .target_levels
+            .iter()
+            .find(|(prefix, _)| prefix.len() > MAX_TARGET_BYTES)
+        {
+            return Some(format!(
+                "a per-target override prefix of {} bytes is past the \
+                 {MAX_TARGET_BYTES}-byte target ceiling: `Sink::level_for` compares \
+                 it on every event that clears the fast floor, and each comparison \
+                 is only constant-time because the prefix is bounded",
+                prefix.len()
             ));
         }
         None
@@ -900,7 +920,8 @@ impl Sink {
     /// Longest wins so `("pull", Debug)` and `("pull.chunk", Trace)` compose:
     /// the chunk path gets its own floor without lifting the rest of the
     /// crate. Bounded by [`MAX_TARGET_LEVELS`], so this is a constant number
-    /// of prefix comparisons of a bounded-length target.
+    /// of prefix comparisons, each bounded by [`MAX_TARGET_BYTES`] because
+    /// `Config::refusal` refuses a longer prefix (OD-4, D-2373).
     pub fn level_for(&self, target: &str) -> Level {
         let mut best: Option<(usize, Level)> = None;
         for (prefix, level) in &self.target_levels {
@@ -1671,7 +1692,7 @@ mod tests {
         MAX_TARGET_LEVELS, MIN_FILE_BYTES, Sink, Target, current_path, dir_beneath_store,
         paths_newest_first, rotated_path,
     };
-    use crate::event::{Event, MAX_MESSAGE_BYTES, MAX_STR_VALUE_BYTES};
+    use crate::event::{Event, MAX_MESSAGE_BYTES, MAX_STR_VALUE_BYTES, MAX_TARGET_BYTES};
     use crate::level::{LEVELS, Level};
     use crate::record::Record;
     use crate::value::Value;
@@ -1986,6 +2007,46 @@ mod tests {
             refused.contains("ceiling"),
             "the same reason reaches the caller: {refused}"
         );
+    }
+
+    /// **Each override prefix is bounded, not only their count.** OD-4,
+    /// D-2373, invariant AFG-73.
+    ///
+    /// `level_for` compares every prefix against every target that clears the
+    /// fast floor. The count ceiling bounds how many comparisons; until D-2373
+    /// nothing bounded how long each one was, so a megabyte prefix made every
+    /// such event cost a megabyte-wide `starts_with`. A prefix exactly
+    /// `MAX_TARGET_BYTES` long is allowed; one byte longer is refused by name,
+    /// through the public field and through the builder alike.
+    #[test]
+    fn an_override_prefix_past_the_target_ceiling_is_refused_by_name() {
+        let _gate = crate::tests::no_fork_in_flight();
+        let dir = scratch("long-override-prefix");
+
+        let at = Config::new(&dir).with_target_level("p".repeat(MAX_TARGET_BYTES), Level::Debug);
+        assert!(at.refusal().is_none(), "the ceiling itself is allowed");
+        let sink = Sink::open(&at).expect("a sink at the ceiling opens");
+        assert_eq!(sink.level_for(&"p".repeat(MAX_TARGET_BYTES)), Level::Debug);
+        drop(sink);
+
+        let built =
+            Config::new(&dir).with_target_level("p".repeat(MAX_TARGET_BYTES + 1), Level::Debug);
+        let mut literal = Config::new(&dir);
+        literal
+            .target_levels
+            .push(("q".repeat(1 << 20), Level::Trace));
+        for (past, len) in [(built, MAX_TARGET_BYTES + 1), (literal, 1 << 20)] {
+            let said = past
+                .refusal()
+                .expect("a prefix past the ceiling is refused");
+            assert!(said.contains(&len.to_string()), "names the length: {said}");
+            assert!(
+                said.contains(&MAX_TARGET_BYTES.to_string()) && said.contains("level_for"),
+                "names the ceiling and the walk it bounds: {said}"
+            );
+            let refused = Sink::open(&past).expect_err("and `open` refuses it too");
+            assert_eq!(refused, said, "the same reason reaches the caller");
+        }
     }
 
     /// **The clamp, against a clock that runs backwards.**

@@ -114,7 +114,8 @@ const DECLARED: &[Declared] = &[
 /// this list, gate 13's and `deny.toml`'s and holds them together. It lives in
 /// `core` because gate 22 clause D refuses a sweep crate's compile-time include of
 /// the workflow file. Every name here answered 200 from
-/// `https://crates.io/api/v1/crates/<name>` on that date.
+/// `https://crates.io/api/v1/crates/<name>` on that date, except the two
+/// D-2350 family entries the comment beside them names.
 ///
 /// Every entry is matched with its family -- the name itself, or the name
 /// followed by `-` or `_` and more -- exactly as gate 13 matches it.
@@ -149,6 +150,31 @@ const FORBIDDEN: &[&str] = &[
     "rutie",
     "ext-php-rs",
     "openssl-sys",
+    // D-2350 (RO-9): WebAssembly runtimes and further embedded interpreters.
+    // `extendr` and `perl-sys` answered 404 on 2026-10-04 and are kept for
+    // their families; every other name below answered 200.
+    "wasmtime",
+    "wasmer",
+    "wasmi",
+    concat!("rust", "py", "thon"),
+    "deno_runtime",
+    "quick-js",
+    "rb-sys",
+    "extendr",
+    "extendr-api",
+    "extendr-engine",
+    "jlrs",
+    "starlark",
+    "rune",
+    "gluon",
+    "mun",
+    "koto",
+    "steel-core",
+    "piccolo",
+    "libR-sys",
+    "perl-sys",
+    "libperl-sys",
+    "tcl",
 ];
 
 /// An edge `Cargo.lock` records that a normal build on this host does not

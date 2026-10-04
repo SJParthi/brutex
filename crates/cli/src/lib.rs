@@ -241,6 +241,7 @@ pub mod minute_gaps;
 pub mod operation_audit;
 mod ordered;
 pub mod pool;
+pub mod pool_oos;
 /// Complete, fixed-stride candidate populations and their receipt-last commit.
 pub mod population;
 /// Pre-finalization Admission V2 decisions and receipt-last structural audit.
@@ -274,6 +275,10 @@ pub mod selection_v4;
 /// Shared-generation Population V4/admission/Execution V2 authority adapter.
 pub mod selection_v4_authority;
 mod selection_v6;
+pub use selection_v6::{
+    SELECTION_V6_EQUITY_REFUSAL, StoredSelectionV6Family, StoredSelectionV6Record,
+    StoredSelectionV6Rung, StoredSelectionV6Winner, read_stored_selection_v6, selection_v6_family,
+};
 pub mod stability;
 /// Fail-closed human-readable comparison of the complete Step-3 authority chain.
 pub mod step3_comparison;
@@ -543,6 +548,15 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    the trades. Two tables: PER SYMBOL and
                                    POOLED. No cost is charged and it says so;
                                    in sample, unvalidated. Takes `auto` too.
+       cli pool-oos     VENDOR RUNG FROM_Y FROM_M TO_Y TO_M SUPPORT_PPM LATER_FROM_Y LATER_FROM_M LATER_TO_Y LATER_TO_M CATALOG_OUT
+                                   the pool's discovery on the training months,
+                                   then the whole union judged on LATER months
+                                   it never saw: exits frozen at the training
+                                   holding period, one Romano-Wolf stepdown at
+                                   5% FWER over every candidate. The HELD ones
+                                   are written to CATALOG_OUT (created new) as
+                                   the CATALOG_FILE boolean-qualified-campaign-
+                                   stored reads. Gross of every charge.
        cli range-rung   VENDOR UNDERLYING RUNG FROM_Y FROM_M TO_Y TO_M SUPPORT_PPM
                                    ONE rung, with the WHOLE machine. `range-all`
                                    divides the candidate ceiling by eight, so a
@@ -1689,6 +1703,77 @@ fn pool_arm(
     }
 }
 
+/// `pool-oos`: the words of [`pool_arm`] plus a later span and the catalog
+/// path, every one checked before anything is read. D-1576.
+fn pool_oos_arm(
+    out: &mut String,
+    vendor: &str,
+    rung: &str,
+    months: [(&str, &str); 4],
+    support_ppm: &str,
+    catalog: &str,
+) -> u8 {
+    // A loop over the eight-entry rung table, so the `&'static` spelling is
+    // the table's own and the bound is the table's length.
+    let mut known = None;
+    for candidate in EVERY_RUNG {
+        if candidate == rung {
+            known = Some(candidate);
+        }
+    }
+    let Some(known) = known else {
+        return refuse(
+            out,
+            &format!(
+                "`{rung}` is not a rung this engine sweeps. The eight are: {}",
+                EVERY_RUNG.join(", ")
+            ),
+        );
+    };
+    let month = |(year, month): (&str, &str)| -> Result<(u16, u8), &'static str> {
+        let year = year
+            .parse::<u16>()
+            .map_err(|_| "YEAR must be a number like 2026")?;
+        let month = month
+            .parse::<u8>()
+            .ok()
+            .filter(|m| (1..=12).contains(m))
+            .ok_or("MONTH must be 1..=12")?;
+        Ok((year, month))
+    };
+    let [from, to, later_from, later_to] = months;
+    let parsed = (|| {
+        Ok::<_, &'static str>((
+            (month(from)?, month(to)?),
+            (month(later_from)?, month(later_to)?),
+            parse_support_choice(support_ppm)?,
+        ))
+    })();
+    match parsed {
+        Ok(((from, to), (later_from, later_to), support))
+            if from <= to && to < later_from && later_from <= later_to =>
+        {
+            let text = pool_oos::pool_oos(
+                vendor,
+                known,
+                (from, to),
+                (later_from, later_to),
+                support,
+                std::path::Path::new(catalog),
+            );
+            let refused = carries_refusal(&text);
+            out.push_str(&text);
+            if refused { MISUSED } else { OK }
+        }
+        Ok(_) => refuse(
+            out,
+            "the training months must be ordered, and the later months ordered and strictly \
+             after them. Nothing was read.",
+        ),
+        Err(why) => refuse(out, why),
+    }
+}
+
 fn sweep_all_arm(out: &mut String, vendor: &str, rung: &str, min_hits: &str) -> u8 {
     match parse_min_hits(min_hits) {
         Ok(h) => {
@@ -2292,6 +2377,28 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
         }
         ["research-plan", v] => research::command(v, out),
         ["pool", v, r, fy, fm, ty, tm, mh] => pool_arm(out, v, r, (fy, fm), (ty, tm), mh),
+        [
+            "pool-oos",
+            v,
+            r,
+            fy,
+            fm,
+            ty,
+            tm,
+            mh,
+            lfy,
+            lfm,
+            lty,
+            ltm,
+            catalog,
+        ] => pool_oos_arm(
+            out,
+            v,
+            r,
+            [(fy, fm), (ty, tm), (lfy, lfm), (lty, ltm)],
+            mh,
+            catalog,
+        ),
         ["range-all", v, u, fy, fm, ty, tm, mh] => range_all_arm(out, v, u, (fy, fm), (ty, tm), mh),
         ["range-rung", v, u, r, fy, fm, ty, tm, mh] => {
             range_rung_arm(out, v, u, r, (fy, fm), (ty, tm), mh)
@@ -2386,7 +2493,7 @@ fn unmatched(word: &str, given: usize) -> String {
 /// So it is written down, and `every_command_is_listed_in_both_places` asserts
 /// the list, the dispatch and the usage all name the same set. The duplication
 /// is real; the test is what makes it safe.
-const COMMANDS: [&str; 35] = [
+const COMMANDS: [&str; 36] = [
     "audit",
     "audit-audited-range",
     "audit-range",
@@ -2411,6 +2518,7 @@ const COMMANDS: [&str; 35] = [
     "ledger-v6-replay",
     "policy-check",
     "pool",
+    "pool-oos",
     "range-all",
     "range-rung",
     "research-plan",
@@ -2451,6 +2559,7 @@ pub fn is_sweep_command(command: &str) -> bool {
             | "ledger-v6"
             | "ledger-v6-replay"
             | "pool"
+            | "pool-oos"
             | "range-all"
             | "range-rung"
             | "screen"
@@ -7470,13 +7579,18 @@ fn append_condition_names(out: &mut String, record: &crate::results::Record) {
     }
 }
 
-/// The best complete trade total among rows supplied newest first.
+/// Fold one row, in APPEND order, into the best complete trade total so far.
+///
+/// One rule for `cli top` and `cli results`: both now fold the open's single
+/// pass (D-2310), so the winner they name is chosen by the same comparison.
+/// It was `best_complete_newest_first` over a newest-first slice, which needed
+/// every matching row held at once.
 ///
 /// Separate from the table because a reader scanning forty rows for the largest
 /// number is a reader who will miss it — and because `done: NO` rows must not
 /// win. A halted ladder's total is not comparable with a complete one's: it
 /// covers less of the search while its combination count looks larger.
-fn best_complete_newest_first(rows: &[crate::results::Record]) -> Option<&crate::results::Record> {
+fn keep_best(best: &mut Option<crate::results::Record>, row: &crate::results::Record) {
     // AND `trades == 0` MUST NOT WIN EITHER, for the same reason `halted` must
     // not: it is not a worse total, it is NO total.
     //
@@ -7488,14 +7602,18 @@ fn best_complete_newest_first(rows: &[crate::results::Record]) -> Option<&crate:
     // a ledger where nothing profitable was found the BEST COMPLETE RUN line
     // would name a run that made no trade at all.
     //
-    // The listing reads newest first, while `max_by_key` keeps the LAST tie.
-    // Reverse that traversal so its winner agrees with the append-order fold
-    // used by the CLI and cached HTTP top reports. Wall-clock stamps need not
-    // be monotone. No allocation or sort is needed.
-    rows.iter()
-        .rev()
-        .filter(|row| row.has_complete_trade_total())
-        .max_by_key(|row| row.pessimistic)
+    //
+    // `>=` so a later run wins a tie: two runs with identical totals are the
+    // same answer, and the newer one is the one an operator just made. Newer
+    // means later in APPEND order; wall-clock stamps need not be monotone. No
+    // allocation or sort is needed.
+    if row.has_complete_trade_total()
+        && best
+            .as_ref()
+            .is_none_or(|held| row.pessimistic >= held.pessimistic)
+    {
+        *best = Some(*row);
+    }
 }
 
 /// Describe exactly the selected row, which also supplies the quality block.
@@ -8048,7 +8166,7 @@ const LIST_ROWS: usize = 40;
 /// answer could be printed once, on the run that produced it, and never again.
 ///
 /// Which run: the **best complete** one matching the filter, chosen exactly as
-/// [`best_complete_newest_first`] chooses it — highest `pessimistic` among rows
+/// [`keep_best`] chooses it — highest `pessimistic` among rows
 /// that completed and traded. A halted run's totals are not comparable with a complete one's, so
 /// ranking them together would be the defect `range-all`'s `complete` column
 /// exists to prevent.
@@ -8287,6 +8405,9 @@ pub fn render_top_record(
 }
 
 /// The best completed, traded run matching the filter; newest wins a tie.
+///
+/// One open, and each row read once, by that open (D-2310). Still `O(runs)`:
+/// the best of all rows is an aggregate the version-3 ledger does not store.
 fn newest_complete(
     root: &std::path::Path,
     feed: Option<&str>,
@@ -8296,31 +8417,27 @@ fn newest_complete(
     // and opens with `.create(true)`, so asking `/engine/top.json` a question
     // MADE the file that answers it -- and an empty store then reported "no
     // runs" having just been handed the file that says so.
-    let mut store = crate::results::Results::open_read(root)?;
-    let count = store.len()?;
+    //
+    // ONE PASS, AND IT IS THE OPEN'S (D-2310). This read every row a second
+    // time through `Results::read` after the open had already read, sealed and
+    // decoded each one for its identity index. The rows are now folded from
+    // that pass. The FIRST damaged row is the one refused, because the forward
+    // walk this replaced reached it first and refused there; an open refusal
+    // (a duplicate identity, a torn tail) still wins over it, as it did.
     let mut best: Option<crate::results::Record> = None;
-    for index in 0..count {
-        let record = store.read(index)?;
-        // HALTED ROWS ARE NOT CANDIDATES. A halted run's total covers less of
-        // the ladder than its combination count suggests, so ranking it against
-        // a complete one compares two different searches. A zero-trade row
-        // has no measured total at all and cannot outrank a real loss.
-        if !record.has_complete_trade_total() {
-            continue;
+    let mut damaged: Option<crate::results::Refusal> = None;
+    crate::results::Results::open_read_visiting(root, &mut |_, row| match (row, &damaged) {
+        (_, Some(_)) => {}
+        (Err(why), None) => damaged = Some(why),
+        (Ok(record), None) => {
+            let kept = feed.is_none_or(|f| crate::results::read_field(&record.feed) == f)
+                && underlying.is_none_or(|u| crate::results::read_field(&record.underlying) == u);
+            if kept {
+                keep_best(&mut best, &record);
+            }
         }
-        if feed.is_some_and(|f| crate::results::read_field(&record.feed) != f) {
-            continue;
-        }
-        if underlying.is_some_and(|u| crate::results::read_field(&record.underlying) != u) {
-            continue;
-        }
-        // `>=` so a later run wins a tie: two runs with identical totals are
-        // the same answer, and the newer one is the one an operator just made.
-        if best.is_none_or(|b| record.pessimistic >= b.pessimistic) {
-            best = Some(record);
-        }
-    }
-    Ok(best)
+    })?;
+    damaged.map_or(Ok(best), Err)
 }
 
 /// Every recorded run, newest first, optionally narrowed to one feed and
@@ -8353,15 +8470,17 @@ fn newest_complete(
 ///
 /// # Cost
 ///
-/// `O(rows)` — the size of the answer, and every individual read is `O(1)` at
-/// `HEADER + i·STRIDE`. There is no scan of anything larger than the ledger and
-/// no index to maintain, which is `CLAUDE.md` §4's *"the path is the index"*
-/// applied to a file that is one array.
+/// `O(runs)` per call, in ONE read of each row: the open's identity pass, which
+/// lends each row to the listing's fold (D-2310). It read every row twice until
+/// then -- once to open, once more through `Results::read`. The page counts the
+/// matching rows and names the best complete run across all of them, and the
+/// version-3 ledger holds no aggregate to read those from, so a whole pass is
+/// the honest floor short of a new format version. It holds `O(LIST_ROWS)`
+/// records, not every matching row.
 ///
-/// **UNVERIFIED as a measurement.** The bound is argued from the
-/// shape of the code and no bench in this workspace times it.
-/// `CLAUDE.md` §3 rule 6: a structural argument is not a
-/// measurement, however sound it is.
+/// **Counted, not timed.** `results_report_tests::
+/// top_and_results_read_each_row_once_in_one_open` counts opens and row reads
+/// per call; no bench in this workspace times it. `CLAUDE.md` §3 rule 6.
 #[must_use]
 pub fn results_list(feed: Option<&str>, underlying: Option<&str>) -> String {
     let root = match store_root() {
@@ -8440,14 +8559,18 @@ fn results_at(root: &std::path::Path, feed: Option<&str>, underlying: Option<&st
     // failed outright on a read-only store while `cli top` succeeded.
     // `open_read` exists for exactly this; `top_at` was moved to it and this,
     // the sibling the same comment calls "the third and last", was not.
-    let mut store = match crate::results::Results::open_read(root) {
-        Ok(store) => store,
-        Err(why) => return format!("refused: {why}\n"),
-    };
-    let count = match store.len() {
-        Ok(count) => count,
-        Err(why) => return format!("refused: {why}\n"),
-    };
+    //
+    // ONE PASS, AND IT IS THE OPEN'S (D-2310). See `ListingFold`.
+    let mut fold = ListingFold::new(feed, underlying);
+    if let Err(why) = crate::results::Results::open_read_visiting(root, &mut |_, row| {
+        fold.visit(row);
+    }) {
+        return format!("refused: {why}\n");
+    }
+    if let Some(why) = fold.damaged {
+        return format!("refused: {why}\n");
+    }
+    let count = fold.rows;
 
     let mut out = String::from("RECORDED RUNS\n");
     let _ = writeln!(
@@ -8466,44 +8589,29 @@ fn results_at(root: &std::path::Path, feed: Option<&str>, underlying: Option<&st
         return out;
     }
 
-    // NEWEST FIRST, read backwards. The ledger is append-only, so the last row
-    // is the most recent and no sort is needed to say so.
-    let mut rows: Vec<crate::results::Record> = Vec::new();
-    for back in 1..=count {
-        match store.read(count.saturating_sub(back)) {
-            Err(why) => return format!("refused: {why}\n"),
-            Ok(record) => {
-                let keep = feed.is_none_or(|f| crate::results::read_field(&record.feed) == f)
-                    && underlying
-                        .is_none_or(|u| crate::results::read_field(&record.underlying) == u);
-                if keep {
-                    rows.push(record);
-                }
-            }
-        }
-    }
+    // NEWEST FIRST. The ledger is append-only, so the last row is the most
+    // recent and no sort is needed to say so: the fold kept the newest
+    // `LIST_ROWS` matching rows in append order, and they are turned round here.
+    let rows: Vec<crate::results::Record> = fold.newest.iter().rev().copied().collect();
+    let matching = fold.matching;
     if let (Some(f), Some(u)) = (feed, underlying) {
         let _ = writeln!(out, "  filtered to                             {f} {u}");
     }
-    let _ = writeln!(
-        out,
-        "  matching                                {}",
-        rows.len()
-    );
+    let _ = writeln!(out, "  matching                                {matching}");
     let _ = writeln!(out);
 
     // THE BEST ROW, BY THE FIGURE SELECTION USES. Chosen before the table,
     // because what it is decides what the page states above the table.
-    let best = best_complete_newest_first(&rows);
+    let best = fold.best.as_ref();
     out.push_str(&listing_equity_note(&rows, best));
 
     results_table(&mut out, &rows);
-    if rows.len() > LIST_ROWS {
+    if matching > LIST_ROWS {
         let _ = writeln!(
             out,
             "  ... {} further row(s) NOT SHOWN. The ledger is complete; this \
              table is not.",
-            rows.len().saturating_sub(LIST_ROWS)
+            matching.saturating_sub(LIST_ROWS)
         );
     }
 
@@ -8517,6 +8625,82 @@ fn results_at(root: &std::path::Path, feed: Option<&str>, underlying: Option<&st
         out.push_str(&quality_block(best));
     }
     out
+}
+
+/// What [`results_at`] keeps from the open's one pass over the ledger.
+///
+/// # The second walk it replaced (OS-7, W2-cli8-5, D-2310)
+///
+/// The listing opened the ledger -- a pass that reads, seals and decodes every
+/// row to build the identity index -- and then read every row AGAIN through
+/// `Results::read`, newest first, holding every matching row in a `Vec`. Each
+/// call therefore read the whole file twice and held O(matching) records.
+///
+/// Now the open lends its pass and this keeps only what the page prints: the
+/// row count, the matching count, the newest [`LIST_ROWS`] matching rows, the
+/// best complete row by [`keep_best`], and the newest damaged row's refusal
+/// (the backward walk reached the highest damaged ordinal first and refused
+/// there, so that is the one still named). Per call: one open, one read of each
+/// row, O(`LIST_ROWS`) records held.
+///
+/// # The bound that remains, stated
+///
+/// Still O(runs) per call, and not by choice of code: the page states how many
+/// rows match and names the best complete run across ALL of them, and the
+/// format (`results/runs.bin` version 3) carries no aggregate to read those
+/// from. Adding one would be a new store format version (`CLAUDE.md` §3 rule
+/// 8), which this change does not make. `docs/06-limits.md` says so.
+struct ListingFold<'f> {
+    feed: Option<&'f str>,
+    underlying: Option<&'f str>,
+    rows: u64,
+    matching: usize,
+    newest: std::collections::VecDeque<crate::results::Record>,
+    best: Option<crate::results::Record>,
+    damaged: Option<crate::results::Refusal>,
+}
+
+impl<'f> ListingFold<'f> {
+    fn new(feed: Option<&'f str>, underlying: Option<&'f str>) -> Self {
+        Self {
+            feed,
+            underlying,
+            rows: 0,
+            matching: 0,
+            newest: std::collections::VecDeque::with_capacity(LIST_ROWS),
+            best: None,
+            damaged: None,
+        }
+    }
+
+    /// One row, in append order.
+    fn visit(&mut self, row: Result<crate::results::Record, crate::results::Refusal>) {
+        self.rows = self.rows.saturating_add(1);
+        let record = match row {
+            Ok(record) => record,
+            Err(why) => {
+                // The LATEST damaged row is the one named, overwriting any
+                // earlier one -- the newest-first walk refused there.
+                self.damaged = Some(why);
+                return;
+            }
+        };
+        let kept = self
+            .feed
+            .is_none_or(|f| crate::results::read_field(&record.feed) == f)
+            && self
+                .underlying
+                .is_none_or(|u| crate::results::read_field(&record.underlying) == u);
+        if !kept {
+            return;
+        }
+        self.matching = self.matching.saturating_add(1);
+        if self.newest.len() == LIST_ROWS {
+            self.newest.pop_front();
+        }
+        self.newest.push_back(record);
+        keep_best(&mut self.best, &record);
+    }
 }
 
 /// What [`results_at`] states above its table: a stock's figures say what they
@@ -24370,10 +24554,11 @@ mod tests {
             ..halted_but_huge
         };
 
-        let line = super::best_complete_line(super::best_complete_newest_first(&[
-            halted_but_huge,
-            complete_but_smaller,
-        ]));
+        let mut best = None;
+        for row in [halted_but_huge, complete_but_smaller] {
+            super::keep_best(&mut best, &row);
+        }
+        let line = super::best_complete_line(best.as_ref());
         assert!(
             line.contains("min_hits 500"),
             "the COMPLETE run must win even though the halted one shows a total \
@@ -24390,7 +24575,9 @@ mod tests {
 
         // AND WHEN NOTHING COMPLETED, IT SAYS SO rather than crowning the least
         // truncated row.
-        let none = super::best_complete_line(super::best_complete_newest_first(&[halted_but_huge]));
+        let mut none = None;
+        super::keep_best(&mut none, &halted_but_huge);
+        let none = super::best_complete_line(none.as_ref());
         assert!(
             none.contains("NO COMPLETE RUN"),
             "a table of only halted rows has no comparable winner:\n{none}"
@@ -24886,6 +25073,60 @@ mod tests {
             "the rerun clock differs but every deterministic field is equal"
         );
         assert_one_complete_result_set(&root, &identity);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **The pool's union opens the parent ledger once, not once per
+    /// instrument.** Rust and O(1) sweep OS-4, D-2301. Proved by this test,
+    /// `cli::tests::the_pool_union_opens_the_parent_ledger_once_for_every_instrument`.
+    ///
+    /// Two committed runs and one refused screen. The union holds both runs'
+    /// frontier rows in screen order, the refused screen contributes nothing,
+    /// and the results ledger is opened exactly once for the whole union.
+    #[test]
+    fn the_pool_union_opens_the_parent_ledger_once_for_every_instrument() {
+        let root = result_commit_root("pool-union");
+        let _ = std::fs::remove_dir_all(&root);
+        let mut screened = Vec::new();
+        for (tag, word) in [(81_u8, 1_u64), (82, 2)] {
+            let identity = [tag; 32];
+            let mut row = result_commit_frontier(identity, 11);
+            row.mask_words = [word, 0, 0, 0, 0, 0];
+            super::ensure_frontier_rows(&root, &identity, &[row]).expect("frontier");
+            super::ensure_trade_rows(&root, &identity, &[result_commit_trade(identity)])
+                .expect("trades");
+            super::ensure_detail_receipt(&root, identity, 1, 1, costs::fill::Direction::Short)
+                .expect("receipt");
+            let mut record = record_for_naming();
+            record.identity = identity;
+            record.combinations = 11;
+            record.trades = 1;
+            super::ensure_run_record(&root, &record).expect("commits");
+            screened.push(crate::pool::Screened {
+                symbol: format!("S{tag}"),
+                outcome: Ok(record),
+            });
+        }
+        screened.insert(
+            1,
+            crate::pool::Screened {
+                symbol: "REFUSED".to_owned(),
+                outcome: Err("not screened".to_owned()),
+            },
+        );
+        crate::results::OPENS.with(|n| n.set(0));
+        let (union, unread) = crate::pool::union_of(&root, &screened);
+        assert!(unread.is_empty(), "{unread:?}");
+        assert_eq!(
+            union.iter().map(|c| c.words[0]).collect::<Vec<_>>(),
+            vec![1, 2],
+            "both runs' rows, in screen order"
+        );
+        assert_eq!(
+            crate::results::OPENS.with(std::cell::Cell::get),
+            1,
+            "one parent-ledger open for the whole union"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

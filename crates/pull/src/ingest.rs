@@ -1110,9 +1110,12 @@ pub fn from_window(
         rows,
     };
     let mut done = from_members(std::slice::from_ref(&member), store_root, plan);
+    // THE ONE EVENT PER GAP (OD-2, D-2371): `request_minutes` no longer logs,
+    // so this is the only line, at `Error` because the gap is a receipt
+    // failure and the removed `pull.file` duplicate carried that level.
     for why in request_minutes::audit(&member.rows, plan) {
         let _dropped_when_filtered = telemetry::emit(
-            &telemetry::Event::warn("pull.request_minutes", "request minute coverage incomplete")
+            &telemetry::Event::error("pull.request_minutes", "request minute coverage incomplete")
                 .with("instrument", telemetry::Value::Str(instrument))
                 .with("reason", telemetry::Value::Str(&why)),
         );
@@ -1281,7 +1284,17 @@ pub fn record_held(store_root: &Path, vendor: Vendor, held: &[Held]) -> Option<S
 ///
 /// # Cost
 ///
-/// Two opens and two appends per call, both O(1). Nothing scans.
+/// **Corrected by D-2372 (OD-3): this claimed two constant-cost appends and
+/// that nothing scanned — neither half held.** `keep_in_session` walks
+/// every bar and every overlay once, O(rows), before anything opens. Then two
+/// opens and two appends, and each
+/// `BarFile::append` is not O(1) in the file: it locates the batch against
+/// what is already stored by bisection, `already_stored`, at most
+/// `ceil(log2(n_valid + 1))` record reads plus O(batch) comparisons (D-1434);
+/// it re-reads and verifies the old tail block before re-sealing it (D-0910);
+/// and it re-reads every block the batch touches to seal its checksum.
+/// So one call is `O(rows + log n_valid + blocks touched)` reads and work, not
+/// constant. `docs/06-limits.md`, D-2372.
 ///
 /// **UNVERIFIED as a measurement.** The bound is argued from the
 /// shape of the code and no bench in this workspace times it.
@@ -2703,7 +2716,15 @@ fn write_and_count(
 ///
 /// # Cost
 ///
-/// One open and one append. O(1) per call.
+/// One open and one append — **not O(1) per call; corrected by D-2372 (OD-3)**.
+/// The open reads the header; the
+/// `BarFile::append` is not O(1) in the file: it locates the batch against
+/// what is already stored by bisection, `already_stored`, at most
+/// `ceil(log2(n_valid + 1))` record reads plus O(batch) comparisons (D-1434);
+/// it re-reads and verifies the old tail block before re-sealing it (D-0910);
+/// and it re-reads every block the batch touches to seal its checksum.
+/// So one call is `O(log n_valid + rows + blocks touched)`. `docs/06-limits.md`,
+/// D-2372.
 ///
 /// **UNVERIFIED as a measurement.** The bound is argued from the
 /// shape of the code and no bench in this workspace times it.
@@ -2789,8 +2810,15 @@ pub struct GreekTarget<'a> {
 ///
 /// # Cost
 ///
-/// One `fnv1a` over the symbol, one open and one append. **O(1) per call**,
-/// O(rows) in the bytes written and nothing else.
+/// One `fnv1a` over the symbol, one open and one append. **Not "O(1) per call
+/// and nothing else", which this said until D-2372 (OD-3).** The
+/// `BarFile::append` is not O(1) in the file: it locates the batch against
+/// what is already stored by bisection, `already_stored`, at most
+/// `ceil(log2(n_valid + 1))` record reads plus O(batch) comparisons (D-1434);
+/// it re-reads and verifies the old tail block before re-sealing it (D-0910);
+/// and it re-reads every block the batch touches to seal its checksum.
+/// So one call is `O(log n_valid + rows + blocks touched)`. `docs/06-limits.md`,
+/// D-2372.
 ///
 /// **UNVERIFIED as a measurement.** The bound is argued from the
 /// shape of the code and no bench in this workspace times it.
@@ -3415,6 +3443,43 @@ mod tests {
             "ingest::one clones a member's rows again"
         );
         assert!(body.contains(&format!("{}{}", "land_rows(&", "member.rows,")));
+    }
+
+    /// **THE THREE STORE-WRITING DOORS DO NOT CLAIM CONSTANT COST.** OD-3,
+    /// D-2372, invariant AFG-72.
+    ///
+    /// `from_rows`, `write_overlay` and `write_greeks` each called themselves
+    /// "O(1) per call" with "nothing else" or "Nothing scans", while
+    /// `BarFile::append` bisects what is stored (D-1434), verifies the old tail
+    /// block (D-0910) and re-reads each touched block to seal it, and
+    /// `from_rows` walks every row through `keep_in_session`. The needles are
+    /// assembled at run time so this test cannot match its own text.
+    /// The real cost stays UNVERIFIED as a measurement (`docs/06-limits.md`).
+    #[test]
+    fn the_store_writing_doors_state_their_real_cost() {
+        let source = include_str!("ingest.rs");
+        for false_claim in [
+            format!("{}{}", "both O(1). Nothing ", "scans."),
+            format!("{}{}", "One open and one append. ", "O(1) per call."),
+            format!("{}{}", "O(rows) in the bytes written and ", "nothing else."),
+        ] {
+            assert!(
+                !source.contains(&format!("/// {false_claim}")),
+                "a false constant-cost claim is back: {false_claim}"
+            );
+        }
+        for door in [
+            "pub fn from_rows(",
+            "fn write_overlay(",
+            "pub fn write_greeks(",
+        ] {
+            let at = source.find(door).expect("the door exists");
+            let doc = &source[..at];
+            let doc = &doc[doc.rfind("/// # Cost").expect("a cost section")..];
+            for cite in ["D-1434", "D-0910", "D-2372", "log2(n_valid + 1)"] {
+                assert!(doc.contains(cite), "{door} cost omits {cite}");
+            }
+        }
     }
 
     /// A scratch directory of this test's own, named after the line that asked

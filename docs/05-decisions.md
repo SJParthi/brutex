@@ -41131,8 +41131,8 @@ answered, and one refusal's quote changes.
    - *The bullet is rewritten in place.* It names both callers and both
      routes. `swept_rung` and `pool_arm`'s rung refusal still quote raw.
      `pool_arm`'s one caller is `dispatch`'s `pool` arm, whose rung is typed.
-     `cli::swept_rung` has eleven call sites (this said eight until the sixth
-     correction), and the chains above them were not all followed to their
+     `cli::swept_rung` has twelve call sites (this said eight until the sixth
+     correction, and eleven until D-2302 counted `pool_oos::run`), and the chains above them were not all followed to their
      end; the bullet says so. `batch.rs` has a
      `swept_rung` of its own, whose raw quote only a word `stored::rung` has
      already accepted can reach.
@@ -56677,6 +56677,1120 @@ a sink and reopens one on the same directory holds it for reading: 14 in
 `sink.rs` and one in `tail.rs`. Readers do not wait on each other. No production
 line changes, and the lock's refusal stays exactly as strict. Proven locally:
 4 of 60 runs failed before the change and 0 of 60 after.
+### D-1576 — `pool-oos`: the pool's discovery is judged out of sample under one Romano-Wolf stepdown — 2026-10-04
+
+**Finding (audit-20261003 gaps-5, medium).** `pool` ranks the union of every
+instrument's top combinations across the whole surface, and its own header
+says every figure is in sample and the table is the largest of
+`instruments × candidates` comparisons. `CLAUDE.md` §1 says such a result
+means nothing until it is validated out of sample. No verb did that for the
+pool.
+
+**Change.** A new verb, `cli pool-oos VENDOR RUNG FY FM TY TM SUPPORT_PPM
+LATER_FY LATER_FM LATER_TY LATER_TM CATALOG_OUT` (`crates/cli/src/pool_oos.rs`).
+Discovery is `pool`'s own pass 1 and union, on the training months only. The
+arm refuses a later span that does not start strictly after the training span
+ends, before anything is read. Every surface instrument's training and later
+spans are prepared through `pool::prepare_span`, which is the screen's
+sequence lifted out of `price_all` so the two cannot drift. Each candidate is
+walked with `runner::trade::walk` on the later bars at the TRAINING span's
+holding period, so later prices choose no exit, horizon or candidate. Each
+trade's pessimistic P&L is taken as ppm of its entry open, because pooling
+paisa would let a ₹20,000 index decide every day's sign over a ₹100 share. It
+is then pooled per IST session over the union of the instruments' days. The
+whole union is one family in `runner::bootstrap::romano_wolf_receipt`, at the
+audit stack's 5% FWER, seed, block and draw rule. A candidate HELD only when
+the stepdown rejects its non-positive-mean null. White's Reality Check and its
+measured calibration for the later session count are printed beside the
+table. If the stepdown has no complete receipt, the verb refuses rather than
+calling anything held or failed. The output stays gross of every charge, and
+the page says so.
+
+**What it does not do.** Fills are on the signal rung's bars, as the audit
+stack's bootstrap family's are. One later span is one draw. Neither the
+multiplicity across separate invocations (gaps-12) nor the coarse-fill gap is
+closed here; `docs/06-limits.md` records both.
+
+**Tests.** `cli::pool_oos::tests::a_planted_in_sample_only_winner_fails_out_of_sample_and_a_persistent_one_holds`
+plants "long on Monday" as a winner on twelve training weeks and a loser on
+the twelve later weeks, and "long on Tuesday" as a winner on both, across a
+₹20,000 and a ₹100 instrument. Monday FAILS and Tuesday HOLDS. The same judge
+with no split holds Monday, which is the in-sample reading this verb refuses.
+`cli::pool_oos::tests::the_pool_oos_arm_refuses_an_overlapping_split_and_bad_words_before_reading`.
+
+### D-1577 — `pool-oos` writes its held candidates as the catalog the qualification verbs read — 2026-10-04
+
+**Finding (audit-20261003 gaps-11, low).** The `boolean-*-stored`
+qualification verbs take a hand-written `CATALOG_FILE`. A discovered winner
+reached them only by transcription, with the D-0751 risk that displayed text
+cannot always be re-entered.
+
+**Change.** `pool-oos` writes every HELD candidate to `CATALOG_OUT`: one AND
+of decimal bit ids per line, one program per distinct mask (a catalog program
+is priced on both sides), and `#` comment lines that name the feed, rung and
+spans and say the content is gross research. The file is created new. An
+existing path is refused before any bar is read. Each line is parsed by
+`Expression::parse` before writing. A catalog over the readers' 65,536-byte
+`CATALOG_BYTES` is refused. After writing, the file is read back through
+`boolean_catalog_command::catalog`, the reader `boolean-qualified-campaign-stored`,
+`boolean-campaign-stored` and `boolean-oos-stored` call, and must decode to
+the same programs. With no held candidate, nothing is written, and the page
+says so.
+
+**Test.** `cli::pool_oos::tests::held_candidates_become_a_catalog_the_qualification_readers_read_back`.
+
+### D-1578 — `/selection-v6.json` and the `/selection` page show committed Selection V6; equities are refused — 2026-10-04
+
+**Finding (audit-20261003 gaps-10, low).** `ledger-v6` commits one sealed
+Selection V6 block per rung, and only its own terminal text showed it. No API
+route and no page read it, while `docs/07-plan.md` §11 order 5 asks the API
+and dashboard to expose the receipts the CLI does.
+
+**Change.** `cli::read_stored_selection_v6` (`crates/cli/src/selection_v6_read.rs`)
+reads `ROOT/selection/<rung>/global-selection-v6.bin` for each of the eight
+ledger rungs. It uses the commit door's no-follow, single-link open under a
+shared lock, with the generation unchanged across the read. Each block is
+verified by `verify_block` and decoded field for field as `encode_block`
+wrote it. A block the encoder could not have written is refused: a winner
+count over 25, a Top-10 that is not the prefix, an unknown family, terminal,
+direction or ratio word, a nonzero unused tail, a rung that disagrees with its
+directory, or a duplicate identity. A torn trailing block is refused, and so
+is a file holding more blocks than the reader shows (64 per rung through the
+API). A rung with no file is reported absent by path.
+
+The read does not re-authenticate the upstream Execution V4 / Population V6
+chain. It is a sealed stored record, not a fresh capability, and the payload's
+`authority` (`sealed-stored-selection-v6-record`) and `scope` say so. As
+`/boolean-oos.json` does, the dashboard's `BRUTEX_STORE` must be the
+`ledger-v6` ROOT.
+
+**Equities.** Selection V6 holds NIFTY (code 1) and BANKNIFTY (code 2). A
+block naming any other family code, in an envelope or a winner, is refused
+with `SELECTION_V6_EQUITY_REFUSAL`, the `CLAUDE.md` §1 sentence. The route's
+one selector, `family`, accepts only the two. `family=RELIANCE` is a 400 that
+says RELIANCE is a cash equity, followed by the sentence. Every payload
+carries the sentence as `equities`. The page offers the two families only,
+refuses an equity before making a request, and prints the sentence.
+
+The route is a sweep-result read, so it joins `operation_audit::AUDITED` (now
+22). It starts nothing and writes nothing.
+
+**Tests.** `cli::selection_v6::tests::the_display_reader_decodes_the_authoritys_winners_and_refuses_any_other_family`
+decodes a genuine committed block to the authority's own `top_twenty_five`.
+`api::selectionv6json::tests::an_equity_family_is_refused_loudly_and_only_the_two_indices_select`,
+`api::selectionv6json::tests::every_rung_is_absent_saved_or_refused_by_name`,
+`api::selectionv6json::tests::a_record_projects_exactly_and_the_family_selector_narrows_winners`,
+and `web/tests/selection-v6.test.js`.
+
+### D-2300 — `pool-oos` streams its spans and keeps no training series — 2026-10-04
+
+**Finding (Rust and O(1) sweep OS-1, OS-2, OS-3).** D-1576's `pool-oos`
+prepared every surface instrument's training and later spans in one parallel
+pass and held all of them until the judge returned, O(I × B) memory for up to
+210 instruments. It then built a dense U × N `i64` matrix for the training
+spans too, only to discard it, and allocated both matrices with an
+infallible `vec!`, so a family too large for memory aborted the process
+rather than refusing (§4). The I × U walks ran one after another inside each
+span, and the session index was rebuilt by a pairwise merge per instrument.
+
+**Change.** `walk_all` gives each Rayon lane one instrument: it prepares the
+training span, walks every union candidate over it, keeps only the tallies
+and the holding period, drops the span, then prepares and walks the later
+span at that TRAINING holding period and keeps the tallies and one
+`(candidate, day, ppm)` booking per trade. `walk_span` walks the candidates
+in parallel and gathers them in union order, so nothing depends on the
+thread count. `judge_walked` sums the tallies, counts the sessions through
+one ordered set, and builds only the later matrix, reserved with
+`try_reserve_exact`; a family that cannot be held is refused by name. Every
+figure is the same integer sum it was: each slot is the checked sum of the
+same trades' ppm, only in booking order.
+
+**Not changed.** Each training span is still prepared twice, once by pass 1's
+screen and once here: a constant factor, recorded in `docs/06-limits.md`.
+
+**Test.** `cli::pool_oos::tests::the_streamed_judge_books_every_trade_and_keeps_no_training_series`:
+a training walk keeps no booking, every tallied later trade is booked once,
+each pooled row sums to its tally, the streamed judge equals the judge over
+prepared spans row for row, and an impossible family is refused with
+"cannot be held". The four D-1576/D-1577 tests pass unchanged.
+
+### D-2301 — `pool`'s union opens the parent ledger once — 2026-10-04
+
+**Finding (Rust and O(1) sweep OS-4).** `pool::union_of`, which `pool` and
+`pool-oos` both call, asked `Frontier::of_run` for each screened
+instrument. On a read-only handle that call cold-opens the results ledger and
+the receipt sidecar every time, O(history) each, so one pool paid it up to
+210 times.
+
+**Change.** `union_of` opens `result_set::CommittedParents` once, the same
+committed-receipt gate the API's detail readers use, and hands each
+instrument's verified receipt to `Frontier::of_run_against_receipt`. A
+parent that cannot be opened names every screened instrument as unread, as a
+frontier that cannot be opened already did. A run with no parent or a
+missing receipt is refused exactly as before.
+
+**Test.** `cli::tests::the_pool_union_opens_the_parent_ledger_once_for_every_instrument`
+commits two runs, adds a refused screen, and finds both runs' rows in screen
+order with one results-ledger open, counted by a test-only counter in
+`results::Results::open_with`.
+
+### D-2302 — `cli::swept_rung` has twelve call sites — 2026-10-04
+
+**Finding.** D-1576 added `pool_oos::run`, a twelfth call of
+`cli::swept_rung`, and the raw-quote bullet in `docs/06-limits.md` and
+D-0696's fifth correction, item 3, still said eleven.
+`the_raw_quote_limit_counts_and_names_every_call_of_swept_rung` failed on the
+merged tree.
+
+**Change.** Both texts say twelve, name `pool_oos.rs`, and say they said
+eleven until this entry. `pool_oos::run` takes its rung as a parameter, as
+the bullet says of the others.
+
+### D-2303 — `/selection-v6.json` reads one page per rung — 2026-10-04
+
+**Finding (Rust and O(1) sweep OS-5).** D-1578's reader read every block of
+every rung's file on each request and refused a file holding more than 64
+blocks outright, so a rung's 65th commit made it unreadable for good, and a
+request's cost grew with the files.
+
+**Change.** `cli::read_stored_selection_v6(root, from, limit)` seeks to block
+`from` (the stride is fixed) and reads at most `limit` blocks; the file's
+block count comes from its length. `StoredSelectionV6Rung::Records` carries
+`total`, `from` and the page. The route takes `from=N` and `limit=N` (1 to
+`PAGE_BLOCKS` = 8, each at most once, decimal digits only) beside `family`,
+and every rung reports `total_blocks` and `from`. A request reads at most 64
+blocks in all. Duplicate identities are still refused inside the page; the
+commit door refuses them across the whole file before it appends.
+
+**Tests.** `cli::selection_v6::tests::the_display_reader_decodes_the_authoritys_winners_and_refuses_any_other_family`
+now pages a three-block file (one block from 1, an empty page past the end, a
+duplicate inside a page refused) where it used to assert the whole-file
+refusal. `api::selectionv6json::tests::the_page_selectors_are_bounded_and_strict`.
+
+### D-2370 — A day the venue cannot attest is withheld once, and its session is looked up once per day — 2026-10-04
+
+**Finding (OD-1, data-side Rust and O(1) sweep).** In
+`pull::fold::complete_minutes_with_calendar`, a day that `minute_session`
+refused (NSE cash on or after 2026-08-03 with no dated eligibility schedule,
+or a schedule that does not name the day) pushed two diagnostics for EVERY
+bucket: the refusal, then an "incomplete or invalid minute coverage" line,
+because `day_is_withheld` did not cover the `Unmeasured` session the refusal
+substituted. The calendar and the venue's dated hours were also re-derived for
+every bucket. `cli::fold_audit` reports `withheld: diagnostics.len()`, so one
+refused cash day at one minute counted 750. Measured before the fix: two
+refused days at one minute produced 1,500 lines.
+
+**Change.** `day_session` computes `(calendar, session)` once when a bucket
+opens a new IST day and the loop reuses it for the day's other buckets. A
+refusal pushes ONE line, `day <n>: <why>; derived buckets withheld`, and
+`day_is_withheld` now covers `Unmeasured`, so the day's buckets add no line.
+Nothing is certified that was not before; only the count of lines changed.
+
+**Proof.** `pull::anchor::a_day_the_venue_refuses_is_named_once_not_once_per_bucket`
+(AFG-70): two refused days, with no schedule and with a schedule naming
+another day, at 1, 2, 5, 15 and 60 minutes, are exactly two lines. Failed
+before (1,500 against 2).
+
+### D-2371 — One request-minute gap is one telemetry event — 2026-10-04
+
+**Finding (OD-2).** `pull::request_minutes::note_request_failure` emitted a
+`pull.file` "not filed" event at `Error` under the placeholder instrument
+"requested window", and `ingest::from_window` then emitted
+`pull.request_minutes` at `Warn` for the same line. Each gap was two events.
+`docs/06-limits.md` (D-1493) said one.
+
+**Change.** `request_minutes` no longer emits: its helper is `push_gap`, which
+only records the line (the unordered-rows refusal likewise). `from_window`'s
+event is the one event per line, at `Error`, the level the removed duplicate
+carried, because the gap is a receipt failure. It names the real instrument.
+Gate 19 still holds: the receipt `Failure` is pushed in `from_window` beside
+its emit. The `emit_sites` row for the removed site is deleted.
+
+**Proof.** `pull::request_gap_events::each_request_minute_gap_is_exactly_one_error_event`
+(AFG-71), its own test binary so no sibling test writes into the log: two
+interior gaps plus one empty response are exactly three log lines, each
+`pull.request_minutes`, `error` and naming NIFTY. Failed before (6 against 3).
+
+### D-2372 — The three store-writing doors state their real cost — 2026-10-04
+
+**Finding (OD-3).** `pull::ingest::from_rows` said "Two opens and two appends
+per call, both O(1). Nothing scans."; `write_overlay` said "One open and one
+append. O(1) per call."; `write_greeks` said "O(1) per call, O(rows) in the
+bytes written and nothing else." None held. `BarFile::append` locates a batch
+by bisection, at most `ceil(log2(n_valid + 1))` record reads plus O(batch)
+comparisons (D-1434); verifies the old tail block before re-sealing it
+(D-0910); and re-reads every block the batch touches to seal it. `from_rows`
+also walks every row through `keep_in_session`, O(rows), first.
+
+**Change.** Documentation only. Each `# Cost` section now states
+`O(rows + log n_valid + blocks touched)` (from_rows) or
+`O(log n_valid + rows + blocks touched)` (the other two), and cites D-1434 and
+D-0910. Still UNVERIFIED as a measurement. `docs/06-limits.md` records it.
+
+**Proof.** `pull::ingest::tests::the_store_writing_doors_state_their_real_cost`
+(AFG-72) refuses the three false sentences and requires each door's cost
+section to cite D-1434, D-0910, D-2372 and the bisection height.
+
+### D-2373 — A per-target level prefix longer than a target is refused — 2026-10-04
+
+**Finding (OD-4).** `telemetry::Sink::level_for` compares every override
+prefix against each event's target that clears the fast floor. `Config::refusal`
+bounded how many prefixes (`MAX_TARGET_LEVELS`), not how long each was, so a
+megabyte prefix made each comparison a megabyte `starts_with`.
+
+**Change.** `Config::refusal` refuses any prefix longer than
+`MAX_TARGET_BYTES` (48), by name, so `install` and `Sink::open` refuse it too.
+A target is recorded at most that long (`encode` caps it), so a longer prefix
+names nothing the sink writes faithfully. Refused, not clamped (§4). Each
+comparison is now bounded by 48 bytes and `level_for` by 8 × 48.
+
+**Proof.** `telemetry::sink::tests::an_override_prefix_past_the_target_ceiling_is_refused_by_name`
+(AFG-73): a 48-byte prefix opens and selects its level; 49 bytes through the
+builder and 1 MiB through the public field are refused by `refusal` and by
+`open` with the same sentence naming the length, the ceiling and `level_for`.
+
+### D-2374 — An unchanged master is compared bounded and not rewritten — 2026-10-04
+
+**Finding (OD-5).** `pull::masters::land_validated` called
+`fs::read_to_string` on the held target with no cap only to compute
+`changed`, and then rewrote the file (temporary, write, sync, rename, a new
+inode) even when the bytes were identical.
+
+**Change.** `holds_exactly` compares the metadata length first and, only when
+it equals the body's, reads exactly `body.len()` bytes in 8 KiB chunks
+compared in place: no allocation, no read past the body. When unchanged,
+`refresh_mtime` sets the target's mtime to now and syncs the file and the
+directory instead of rewriting. One reader depends on the rewrite's side
+effect: `api::mastersrun::status_rows` reports `modified_unix_millis` as when a
+master was last confirmed current, and the touch keeps that answer. A touch
+the host refuses is not hidden: the full replacement runs and its outcome is
+reported. The directory sync keeps a target whose earlier replacement ended
+`Landed::Uncertain` from being reported durable on the strength of a read.
+
+**Proof.** `pull::masters::tests::an_unchanged_master_keeps_its_inode_and_only_its_mtime_moves`
+(AFG-74): identical bytes keep the inode and move the mtime forward; a
+same-length edit and a longer file are found changed and replaced.
+
+### D-2375 — A lake file is read only up to 64 MiB — 2026-10-04
+
+**Finding (OD-6).** `lake::reader::LakeFile::open` did `fs::read(path)` with
+no size cap, so any path was read into memory in full before the magic check
+could refuse it.
+
+**Change.** `MAX_LAKE_BYTES = 64 MiB`. `open` checks the open handle's
+metadata length and refuses past it with the new `LakeError::TooLarge
+{ bytes, cap }` before reading a byte, then reads capped one byte past the
+bound so a file that grows between the check and the read is refused too —
+`pull::archive::read_bounded`'s pattern (D-1362). **The cap is derived, not
+sourced or measured.** No document states a lake file size; the largest
+measured is "a few megabytes". A file is one contract, timeframe and month,
+and the finest timeframe is one minute, so the widest file is the 17-column
+F&O layout at every minute of 31 days: 44,640 rows × 17 columns × 9 bytes =
+6,829,920 bytes plain. 64 MiB is about ten times that, and equals
+`page::MAX_PAGE_BYTES`, the largest single page this reader materialises.
+`from_bytes` is unchanged: its caller already holds the bytes.
+
+**Proof.** `lake::reader::tests::a_lake_file_past_the_ceiling_is_refused_before_it_is_read`
+(AFG-75): a sparse file one byte past 64 MiB is `TooLarge` through `open`; at
+a 16-byte cap a 16-byte file is read (then refused as not Parquet) and a
+15-byte cap refuses it as `TooLarge { bytes: 16, cap: 15 }`.
+
+### D-2376 — Sealing a block after an append allocates nothing — 2026-10-04
+
+**Finding (OD-7).** `store::file::BarFile::seal_committed` allocated a zeroed
+heap vector of the covered span for every block an append re-sealed.
+
+**Change.** One `[0u8; MAX_BLOCK_LEN]` stack array (4,088 bytes) is reused for
+every block of the append, entered through `slice_of`, which refuses a span
+past it by name (D-0914's door). Every geometry's block fits, by the existing
+`const` assertion. The bytes read, the CRC computed and the sidecar written
+are unchanged; store format versions are untouched (§3 rule 8).
+
+**Proof.** `store::seal_buffer::sealing_reads_every_block_into_one_stack_buffer`
+(source shape, as `cold_read.rs` does: a counting allocator needs `unsafe`)
+failed before. `store::seal_buffer::the_sealed_bytes_are_unchanged_at_every_block_edge`
+(AFG-76) appends in batches landing inside, on and across block edges, and
+proves the sidecar equals `store::block::seal` over the bar file's own bytes,
+equals the one-shot write's, and equals the FNV-1a digest pinned from the
+build before this decision (measured on that build: 4,413,894,360,075,297,543).
+
+### D-2340 — Gate 1 counts a module compiled only under a configuration CI builds — 2026-10-04
+
+**Finding (sweep/gates-ro RO-1).** `source_scan closure` followed every
+`mod x;` whatever its attributes, so `#[cfg(any())] mod x;` (or
+`#[cfg(windows)]`, `#[cfg(target_os = "macos")]`) made `x.rs` "compiled" for
+gate 1 while rustc never opened it. Verified at 560ce8c: `x.rs` holding
+another language passed gate 1.
+
+**Change.** The resolver evaluates every `cfg` on a `mod` declaration, an
+enclosing inline module, an inner `#![cfg]` and an `include!` over the four
+configurations CI compiles (x86-64 Linux, `test` and `debug_assertions` each
+on or off), carrying the set across files and reading each file under the
+union of the sets that reach it. A declaration no configuration reaches, a
+`cfg` name or key it cannot decide, a `cfg_attr` that applies `cfg`, and an
+`include!` inside a non-module block are refused. A tracked `.rs` outside
+`web/` that does not lex as Rust is refused by `source_scan content`. Limits:
+`docs/06-limits.md`. AFG-40.
+
+### D-2341 — Only a `run:` command that starts with `rustc` builds a `.github/*.rs` tool; Gate 0 reads every `.github/*.yml` — 2026-10-04
+
+**Finding (RO-2, RO-3).** A `.github/*.rs` counted as built when any workflow
+line mentioned `rustc` and its path, so a `name:` or `echo` line made an
+unbuilt file "compiled". Gate 0 read only `.github/workflows/*.yml`, so a
+composite action under `.github/actions/` was never scanned.
+
+**Change.** `run_lines` reads the command lines of `run:` keys (block and
+single-line), joins continuations and skips comments and heredoc bodies; a
+tool is a root only when such a line's command word is `rustc`. Every tracked
+`.github/**.yml` is read for roots, by Gate 0's workflow scan, and by gate
+1g. AFG-41.
+
+### D-2342 — Gate 0 refuses inline programs in every form it can read; inline awk is a pinned ratchet — 2026-10-04
+
+**Finding (RO-4).** The inline-program check read only the word after the
+interpreter, so `node --no-warnings -e`, `perl -w -e`, `ruby3.3 -e`
+(versioned), `"$(command -v perl)" -e`, `pwsh -c`, `Rscript -e`, `osascript
+-e`, `bash -c "$prog"`, `curl | sh`, `eval`, `awk '...'`, `jq '...'` and `gh
+--jq '...'` all passed.
+
+**Change.** Each command segment is scanned whole for an interpreter (version
+suffixes and quoting/expansion punctuation removed) and for any of its inline
+flags; shells are refused for a run-time-built `-c` program, `-s` and a pipe;
+`eval` is refused; awk and jq are refused for a program operand, jq and `gh
+--jq` passing only a bare field path. The existing workflows carried 71
+inline awk programs in `ci.yml`: rewriting every pre-scanner gate in one
+change was not done, so they are an EXACT pinned count (`AWK_IN_CI`) that
+refuses any new one and must be lowered as each moves into a `.github/*.rs`
+tool. The jq programs were moved (D-2343). AFG-42; limits in
+`docs/06-limits.md`.
+
+### D-2343 — The auto-merge and main re-check JSON rules are Rust, built from main — 2026-10-04
+
+**Finding (RO-10).** `auto-merge.yml` and `main-check.yml` carried seven
+inline `gh --jq` programs, the code-owner approval rule of D-1604 among them:
+a second language in tracked files outside `web/`.
+
+**Change.** `.github/gh_json.rs`, a dependency-free reader built by rustc,
+answers each question (`armed`, `pr-for-head`, `pr-fields`, `check-runs`,
+`filenames`, `approvers`, `ci-run-count`) from a stream of JSON documents, as
+`gh api --paginate` prints them, and fails closed on a missing field. Gate 0
+runs its tests. Both workflows check out `main` (never the pull request; no
+credentials persisted) and build it, so a pull request cannot rewrite the
+rule that judges it, as `pull_request_target` already ensured for the
+workflow file. The candidate read moved from `< <(...)` to a substitution, so
+a failed read stops the job. `--jq` with a bare field path (`.sha`,
+`.behind_by`, `.state`) remains. AFG-43.
+
+### D-2344 — Every spawn names the running binary, a cargo-built binary or a listed program — 2026-10-04
+
+**Finding (RO-5).** `source_scan spawns` refused only a shell or interpreter
+spelled as a literal: `let p = "sh"; Command::new(p)`, any unlisted program,
+and a renamed `Command` passed; `.github/*.rs` was not scanned; gate 1e did
+not shadow `sh` or `bash`.
+
+**Change.** A `Command::new` argument must name `current_exe`, a
+`CARGO_BIN_EXE_*` path, or one of `git`, `mkfifo`, `/usr/bin/mkfifo`,
+`xdg-open`, `open`, `explorer.exe` (the browser opener of D-1202), directly or
+through the nearest `let` that binds it or the `fn` it calls in the same
+file; anything else is refused, as is `Command as`. Gate 0 scans
+`.github/*.rs` too, and gate 1e shadows `sh` and `bash`. AFG-44.
+
+### D-2345 — Gate 1e builds and tests a worktree of the commit with `web/` deleted — 2026-10-04
+
+**Finding (RO-6).** CLAUDE.md section 2 says gate 1e's premise is "that the
+workspace builds with the front end moved aside"; the gate only shadowed PATH
+in the checkout, `web/` present, and its own comment said section 2 did not
+require `web/` to be absent.
+
+**Change.** The gate adds a detached worktree of `HEAD`, deletes its `web/`,
+refuses if it is still there, and runs the same stubbed `cargo build
+--all-targets` and `cargo test` inside it, so the claim CLAUDE.md makes is
+the gate's behaviour (CLAUDE.md is unchanged). `crates/api` reads `web/` at
+run time only (`assets.rs`), and the crate tests that name `web` build their
+own temporary roots. Run locally: `cargo test -p core --test findings` and
+`-p store --test cited_commits` with `sh`/`bash` stubbed (no stub invoked).
+The full worktree build and test was not run locally; CI runs it.
+
+### D-2346 — Gate 1g refuses rustdoc, runtool and variable-built environment doors — 2026-10-04
+
+**Finding (RO-7).** Gate 1g's pattern missed `CARGO_BUILD_RUSTDOC`,
+`RUSTDOCFLAGS` with a linker, link argument or `--runtool`, and an
+environment name assembled from a shell variable or written to `GITHUB_ENV`
+or `GITHUB_PATH`.
+
+**Change.** Added `CARGO_BUILD_RUSTDOC`, `RUSTC_LINKER`, `RUSTUP_TOOLCHAIN`,
+`RUSTUP_HOME`; `RUSTFLAGS`/`RUSTDOCFLAGS` (and the encoded and per-target
+forms, which contain those words) carrying `linker`, `link-arg`, `fuse-ld`,
+`runtool` or `link-self-contained`; `--runtool`/`--test-runtool`;
+`export`/`declare`/`typeset`/`readonly`/`local`/`env` with a `$` in the name;
+`printf -v`; any `GITHUB_PATH`; and any `GITHUB_ENV` line other than the two
+literal names this workflow sets. Gate 1g reads every `.github/*.yml`.
+
+### D-2347 — A build script prints only listed directives and writes nothing — 2026-10-04
+
+**Finding (RO-8).** Gate 2's literal check read whole literals, so
+`concat!("cargo:rustc-link", "-arg=...")`, a `format!`-built directive printed
+through `"{k}"`, `env::var("CARGO_HOME")` and `fs::write` passed.
+
+**Change.** On a build script's production tokens: `print!`/`println!` must
+take a literal format string starting with `cargo:` or `cargo::` and one of
+`rerun-if-env-changed=`, `rerun-if-changed=`, `rustc-env=BRUTEX_COMMIT=`,
+`warning=` (exactly what `crates/cli/build.rs` prints); `concat!`, `stdout`,
+`OpenOptions`, links, `fs::`/`File::` writes, creates, copies, renames and
+removes, renamed or group imports from `fs`, and the literals `CARGO_HOME`,
+`HOME` and `USERPROFILE` are refused. `crates/cli/build.rs` and its two
+modules pass unchanged. AFG-45.
+
+### D-2348 — `.gitignore` and `.gitattributes` only at the root or under web/ — 2026-10-04
+
+**Finding (rustonly2-5).** Gate 1 allowed both names at any depth with any
+content, an extensionless file the content checks never scanned as source.
+Tracked today: `.gitignore` and `web/.gitignore` only.
+
+**Change.** Gate 1 refuses either name anywhere but the root and `web/`,
+which section 2 leaves unrestricted.
+
+### D-2349 — Every `.github/*.rs` tool forbids unsafe, and gate 16 checks it — 2026-10-04
+
+**Finding.** `.github/source_scan.rs`, `invariant_paths.rs` and
+`mutation_gate.rs` carried no `#![forbid(unsafe_code)]`, and gate 16 read
+crate roots only.
+
+**Change.** All four tools (with `gh_json.rs`) carry it, and gate 16 layer 1c
+refuses a tool without it or with any `unsafe` token.
+
+### D-2350 — The banned runtime lists name WebAssembly runtimes and further interpreters — 2026-10-04
+
+**Finding (RO-9).** Gate 13, gate 13b, `deny.toml` and `FORBIDDEN` named no
+WebAssembly runtime and missed several embeddable interpreters.
+
+**Change.** Added `wasmtime`, `wasmer`, `wasmi`, the Rust implementation of
+the best-known interpreted language (spelled through its word's parts),
+`deno_runtime`, `quick-js`, `rb-sys`, `extendr`, `extendr-api`,
+`extendr-engine`, `jlrs`, `starlark`, `rune`, `gluon`, `mun`, `koto`,
+`steel-core`, `piccolo`, `libR-sys`, `perl-sys`, `libperl-sys`, `tcl` to all
+four lists, which `the_three_banned_lists_agree` holds together. crates.io
+answered 200 for each on 2026-10-04 except `extendr` and `perl-sys` (404),
+kept for their families; `libperl-sys` is the published binding. None is in
+`Cargo.lock`. AFG-46.
+
+### D-2304 — Sweep depth is answered in O(1) — 2026-10-04
+
+**Finding (Rust and O(1) sweep, OE-5).** `engine::Sweep::depth` and
+`engine::keep::Streamed::depth` counted the non-empty levels with a filter over
+every recorded level: O(levels) for a question the ladder's shape already
+answers.
+
+**Decision.** The level-wise walk records a level and stops when its frequent
+frontier is empty, so only the last recorded level can be empty. Depth is the
+level count, less one when the last level is empty: one `last()` and one
+subtraction. `Streamed` mirrors `Sweep` level for level, so the same form holds
+over its survivor counts.
+
+**Proof.** `engine::tests::depth_is_the_level_count_less_the_empty_last_level`
+(AFG-04) checks a ladder that ends empty and one that does not; the existing
+`engine::keep::tests::the_result_types_answer_depth_completion_and_the_derives`
+and the retained-versus-streamed depth equality keep `Streamed` bound to it.
+
+### D-2305 — One bootstrap index buffer per test, not one per draw — 2026-10-04
+
+**Finding (OE-2).** `runner::bootstrap::stationary_indices` returned a fresh
+`Vec<usize>` of `periods` entries for every bootstrap draw, so White's RC,
+Hansen's SPA and both receipt paths allocated once per draw inside the draw
+loop.
+
+**Decision.** `stationary_indices_into` fills a caller-owned buffer (cleared,
+then reserved once); each of the four draw loops holds one buffer sized to
+`periods` before the loop. `stationary_indices` stays as the wrapper the other
+callers use. The draws themselves, the random stream and every receipt are
+unchanged, so no receipt domain is versioned.
+
+**Proof.** `runner::bootstrap::tests::a_reused_index_buffer_draws_exactly_what_a_fresh_one_does`
+(AFG-05) draws through one reused buffer and through fresh vectors from the
+same seed and requires equal indices draw by draw; the runner's pinned
+bootstrap receipts stay green.
+
+### D-2306 — Recovery reconciliation borrows the stored windows — 2026-10-04
+
+**Finding (OS-8).** `api::recovery::reconcile_pending` cloned a scope's whole
+window set for every pending item, O(windows) per item, and only ever read it.
+
+**Decision.** The loop borrows the set from the scope map. No behaviour change;
+the existing recovery tests are the proof that nothing read the clone mutably.
+
+### D-2307 — A signal-candle-stop evaluation reads its day window from a table — 2026-10-04
+
+**Finding (OE-3).** `runner::signal_candle_stop::Prepared::evaluate_days`
+walked every signal row (deriving each row's IST day only to `continue` past
+it) and walked the periods twice (`position`, then `filter`), so a one-day
+evaluation cost as much as the full span, once per program and side.
+
+**Decision.** Preparation records each column row's IST day once
+(`position_days`). `validate_source` already refuses sources and signal stamps
+that are not strictly increasing, so those days are non-decreasing, and
+`period_geometry` opens periods in strictly increasing day order. An evaluation
+now takes its periods and its rows with two direct reads each from per-day
+tables built once at preparation (`days_before`: for each day of the span and
+one past it, how many rows or periods fall before it), and walks only the rows
+inside its days. A bisection was the first form and Gate 11 rule 1 refuses
+binary search on these paths, so the table replaced it before it shipped. A signal stamp whose IST day overflows is now refused with
+the same `Error::Arithmetic` at preparation instead of at the first evaluation.
+
+**Proof.** `runner::signal_candle_stop::tests::a_tabled_day_window_seals_exactly_what_the_full_row_walk_did`
+(AFG-06) folds the sealed digest of 240 window evaluations (every start day,
+three end days, both sides) and equals the fold measured on the build before
+this change.
+
+### D-2308 — The prefix cadence heaps are sized once — 2026-10-04
+
+**Finding (OE-4).** `runner::outcome::prefix_median_steps_over` built both
+running-median heaps with `BinaryHeap::new()` and grew them by doubling inside
+the bar loop.
+
+**Decision.** At most `n - 1` gaps exist and each heap holds at most half of
+them plus one transient push, so both are created with capacity `ceil(n / 2)`.
+Output is unchanged; every prefix-cadence test is the proof that it is.
+
+### D-2309 — A detail cache's slot lock is held for a lookup, not for an open or a refresh — 2026-10-04
+
+**Finding (Rust and O(1) sweep OS-6).** `api::detail::Cached::with` and
+`with_verified` held the one process-global `std::sync::Mutex` behind
+`TRADES`, `FRONTIER`, `PARENTS`, `LEDGER` (and `topjson`'s `SELECTION`) across
+the cold `open` -- O(history), up to `MAX_SCAN_BYTES` -- and across `refresh`,
+whose D-1560 growth branch re-hashes every indexed byte. While a sweep
+appended, every other request for that cache waited behind one request's
+O(indexed bytes) work, each holding a blocking permit.
+
+**Change.** The slot holds `Arc<Mutex<T>>`. Its lock is taken only to read,
+install or clear that `Arc`, O(1), and is never held across `open`, `refresh`
+or `f`. A cold `open` runs holding no lock; the opener locks the fresh handle
+before installing it, so `f` runs on it before any other request can refresh
+it, and a replaced handle is dropped after the slot lock is released.
+`refresh` and `f` run under the handle's own mutex. `with_verified` clears a
+refused handle only if the slot still holds that same `Arc`, so a handle a
+racing request opened and checked is kept. Every refusal, the reopen-on-refusal
+of `with`, the failed-open-keeps-the-slot rule and the root comparison are
+unchanged.
+
+**Limits, stated.** Requests for ONE handle still run its `refresh`, and so
+D-1560's growth re-hash, one at a time under the handle's mutex: `refresh`
+mutates the handle, and a waiter is served the already-refreshed handle where
+a parallel refresh would pay the same re-hash again. Two requests that both
+find no usable handle now both open; the later install wins and each serves
+the handle it opened. `docs/06-limits.md` states both.
+
+**Tests.** `api::detail::tests::the_slot_lock_is_free_while_a_handle_opens_or_refreshes`
+`try_lock`s the slot inside every `open`, `refresh` and `f` of both methods and
+serves another root from inside a cold `open`, which deadlocked before.
+`api::topjson::tests::a_persistent_refusal_reopens_on_every_request_and_the_cost_is_stated`
+pins the new shape of the refused-handle clear. AFG-09.
+
+### D-2310 — `cli top` and `cli results` read each ledger row once — 2026-10-04
+
+**Finding (Rust and O(1) sweep OS-7, formerly W2-cli8-5).** `newest_complete`
+(behind `cli top` and `/engine/top.json`) and `results_at` (behind
+`cli results`) cold-opened `results/runs.bin`, whose identity pass already
+reads, seals and decodes every row, and then read every row a second time
+through `Results::read`: a shared lock, an unlock, a seek, a read and the
+seal hash again per row. Each call read the file twice, and the listing held
+every matching record in memory.
+
+**What could not be made O(1).** `runs.bin` (version 3) is a fixed-stride
+array with a 16-byte header and no aggregate. `top` names the best complete
+row across ALL rows, and `results` prints how many rows match and the best
+complete row across all of them; neither is at a computable offset, and no
+existing index holds it. Storing one is a new format version, which §3 rule
+8 forbids doing in place and this entry does not do. The cold open is itself
+O(runs): it builds the identity index that refuses a duplicate run and checks
+every seal. Both commands stay O(runs) per call, and `docs/06-limits.md`
+says so.
+
+**Change.** `Results::open_read_visiting` lends each row of the open's own
+pass to a visitor, in append order: a sealed row as its `Record`, decoded
+once and shared with the identity index; a damaged row as the exact refusal
+`Results::read` makes for it (now one function, `unsealed`). `newest_complete`
+folds it with `keep_best` and names the FIRST damaged row, as its forward
+walk did; `results_at` folds it with `ListingFold`, keeping the row count,
+the matching count, the newest 40 matching rows, the best row and the LAST
+damaged row, as its newest-first walk did. An open refusal still wins over
+any of them. `best_complete_newest_first` became the append-order
+`keep_best`, the one ranking rule for both commands. Per call: one open, one
+read of each row, O(40) records held by the listing. The rows are the
+snapshot the open indexed under its one shared lock, where the old reads
+could also see a row appended after the open.
+
+**Proof.** `cli::results_report_tests::top_and_results_read_each_row_once_in_one_open`
+counts, with the test-only `results::ROW_READS` and `OPENS`, exactly one open
+and 90 row reads per call on a 90-row ledger, for six filters, intact and
+with two damaged rows (the old walk made 180), and that the listing names
+row 50 and `top` row 10. `cli::results_report_tests::the_one_pass_listing_matches_the_removed_newest_first_walk`
+rebuilds the removed walk through `Results::read` and requires the counts,
+equity note, table, omitted-row line, winner and quality block byte for byte.
+Before commit, both commands' full output for seven filters over a 90-row
+ledger, intact, with two damaged rows, with a duplicate identity and with
+both, was captured from the base tree and from this change and compared:
+identical. Counted, not timed.
+
+**Also fixed (found on the way).** `results::tests::the_ledger_is_fsynced_and_never_merely_flushed`
+reads `results.rs` up to the first `#[cfg(test)]` as its shipping half, and
+D-2301 put that attribute inside `open_with` to bump `OPENS`, so the guard
+saw one `sync_all` of three and failed on the base tree. Both counters are
+now bumped through `count_open` and `count_row_read`, defined beside them
+below the line with no-op shipping twins, and the guard passes.
+
+### D-2316 — A bootstrap resampled mean reads prefix sums over the draw's runs when that is exact — 2026-10-04
+
+**Finding (OE-1).** `runner::bootstrap::mean_at` folded
+`series.get(i).copied().unwrap_or(0) as f64` over every resampled index, so
+each strategy on each draw cost Θ(N) and every test Θ(B·S·N): White, SPA, both
+receipts, Romano--Wolf (`romano_wolf_aligned`, `null_statistic`,
+`romano_wolf_adjusted_p_values_v1`) and `family_tests_v1`'s `accumulate`. A
+stationary-bootstrap draw is a sequence of contiguous runs, about N/`block` of
+them.
+
+**Decision.** If every `|v| ≤ 2^53` and `periods × max|v| ≤ 2^53` (checked in
+`u128`), every partial sum of the f64 fold is an integer of magnitude at most
+2^53, so every addition is exact and the fold equals the exact integer sum
+converted once to f64; dividing by `index.len() as f64` is then the same
+operation it always was. Under that condition each call builds, once per
+series, an `i64` prefix row of `periods + 1` over the series padded with zeros
+(the fold's `unwrap_or(0)`), and each draw is split once into its runs
+(`next == prev + 1`; the wrap to 0 starts a new run), shared by every
+strategy, which then reads O(runs). A series outside the condition, a draw
+longer than the condition was checked for, or a run outside the padded range
+keeps the former fold over the same indices in the same order -- the same bits,
+more slowly, stated in `docs/06-limits.md` §146; nothing is refused or
+approximated. Romano--Wolf now holds each draw as its runs instead of its N
+indices. The rng stream, the draws and every receipt domain are unchanged, so
+no receipt is versioned. `MEAN_AT_CALLS` still counts one per resampled mean
+(D-1197) and `NULL_STATISTICS` is unchanged; `mean_at` survives, verbatim, as
+the test module's reference fold. Gate 11 rule 2's float allowance for
+`runner/bootstrap.rs` rises 51 -> 52 for the one new line, `exact as f64`; its
+reason is recorded under "Gate 11 allowlist reasons" in `docs/06-limits.md`.
+
+**Proof.** `runner::bootstrap::tests::the_run_prefix_mean_is_the_fold_bit_for_bit`
+(AFG-16) compares `to_bits()` against `mean_at` over periods 0, 1, 2, 3, 7, 64
+and 225, blocks 0, 1, 2, 10 and `periods + 5`, 24 seeds each, on noise,
+negative, short, at-the-bound, one-past-the-bound and `i64::MIN`/`MAX` series,
+plus indices past the padded range, a draw twice the bound and an index that
+cannot extend, and shows that a series on which the fold rounds is refused the
+prefix. `runner::bootstrap::tests::the_prefix_path_reads_one_term_per_run_not_per_period`
+counts the terms read: one per run for a draw, every period on the fold path,
+and S × total runs across a whole Romano--Wolf stepdown. Every existing runner
+test passes; one fixture line in `bootstrap_family_pass_tests` now hands
+`accumulate` the same draw as runs, its assertions unchanged. A differential
+dump of `reality_check`, `spa`, `romano_wolf`, both receipts,
+`romano_wolf_adjusted_p_values_v1` and `family_tests_v1` over 288
+configurations (periods 2--225, magnitudes 1 to 2^52 so both paths run, blocks
+1--300, three seeds) was byte-identical before and after this change; that dump
+was a temporary test and is not committed.
+
+### D-2311 — The tree-reading gates decide in Rust, not in shell text processing — 2026-10-04
+
+**Finding.** Thirteen steps of the `language-purity` job -- gates 0, 1, 1e, 1b,
+1g, 1f, 1c, 1d, 2, 9, 9b, 10b and 7 -- decided with shell text processing
+written inline in `.github/workflows/ci.yml`: two inline programs for a
+text-processing language (gate 2's manifest comment strip, gate 7's
+dependency reader), eight stream edits, and 42 `grep`, 5 `tr`, 4 `sort`, one
+`cut`, one `uniq` and one `mapfile` inside five loops and six `case`
+statements. CLAUDE.md section 2 makes Rust the only language outside `web/`;
+a program written inline in a tracked workflow is a second one. Gate 1d also
+kept its 613 declared words, and the reason for each group, in shell
+variables.
+
+**Decision.** Every listing, pattern and verdict of those steps is
+`.github/gates_tree.rs`: one std-only tool, `#![forbid(unsafe_code)]`, with a
+subcommand per gate, built and tested by `rustc` in gate 0 exactly as
+`source_scan.rs` is, and run by each later step from
+`${RUNNER_TEMP}/gates-tree`. The step names, ids, conditions, environment and
+the comments that justify each gate are kept; gate 1d's word groups moved
+into the tool unchanged, each beside the comment that argues it, and the word
+sets were compared equal (613 words). Every pattern is matched by hand and
+names the expression it replaces; where the old answer depended on the
+runner's locale (a word boundary, a case-blind match, which characters are
+space, binary-file detection), the matcher takes the reading that refuses
+more. Every listing is `git ls-files -z`.
+
+What stays in a step, and why. Gate 0's spawn rule (D-2344) lets a
+`.github/*.rs` tool start `git` and nothing else by name, so the tool cannot
+run `source_scan`: where a gate needs the scanner, the step runs it between a
+`prepare` call that writes its NUL listing and a `verdict` call that reads the
+scanner's output file and its exit status (`st=0; "$scan" .. > out ||
+st=$?`), and any non-zero status is refused. Gate 1e keeps its two `cargo`
+captures, which D-0911 and `c4_cli_02_limits` pin by text; its stubs are now
+copies of the tool binary, which log their own name beside themselves and
+exit 127, so no shell program is written to make one. Gate 0 keeps the one
+`GITHUB_ENV` write gate 1g sanctions by its exact text.
+
+Where the port refuses more than the shell did, deliberately: a name holding a
+newline is no longer accepted on any one of its lines (gate 1's extension);
+a path git would have quoted is read as itself (gates 1b, 1c, 1g, 2, 9b); a
+tracked file that cannot be read is refused rather than skipped (gates 1c, 1d,
+2, 9b); a binary or non-UTF-8 file is scanned rather than reported to standard
+error and skipped (gates 1c, 1d); `source_scan strings` failing is refused by
+name rather than stopping the step with no message of the gate's own (gate
+1d); a missing `docs/04-invariants.md`, or one in which no identifier is
+read, is refused where the pipeline printed OK (gate 10b); `web` existing as
+any kind of entry after removal is refused (gate 1e). Gate 7 keeps its old
+reading exactly, flat `[dependencies]` table only, because the crate does not
+exist and the gate skips.
+
+The ratchet `AWK_IN_CI` in `.github/source_scan.rs` pins 71 inline programs;
+this port removes two, so it must read 69 when this lands. That constant was
+not edited here.
+
+**Proof.** `rustc --test` of `.github/gates_tree.rs` (40 tests) covers every
+refusal branch of every gate and the edge cases the old expressions decided:
+comment lines, CRLF, Unicode spaces and case folds, names with spaces and
+newlines, quoted and escaped literals, the 32-character segment bound, word
+boundaries and the `printf`/guard lines gate 1g sanctions. Run on this tree,
+every ported step printed output byte-identical to the step it replaced, and
+gate 0 differs only by the ratchet count. Forty-seven mutated trees were run
+through the old step on a clone of the old tree and the new step on a clone of
+the new one. Forty-five were refused by both: gate 1 (a `.ts` under
+`crates/`, an executable `.rs`, a nested `LICENSE`, a `.json` under
+`.github/`, a name with a space and no allowed extension, an uncompiled
+`.rs`, a NUL byte, a symlink), gate 1b (root `.json`, `.yml` under `crates/`,
+a nested `.github/`), gate 1g (a tracked `.cargo` config, a nested
+`rust-toolchain`, `toolchain.path`, a nextest setup script, a wrapper, a
+`GITHUB_ENV` write, a computed `export`, the guard line with CRLF, `cargo
+--config`), gate 1f (a script body, an inline handler in a file named with a
+space), gate 1c (a literal path, an underscore org with a capital
+environment, a tracked `credentials.toml`, a path in a file named with a
+space), gate 1d (an undeclared literal, an escaped inner one, a quoted word in
+the manifest), gate 2 (a spawning build script, `build =`, `links =` with a
+trailing comment, an unresolved module), gate 9 (a dev-dependency, unreadable
+TOML), gate 9b (a dotted-table dependency, a workspace type in a comment, a
+re-export), gate 10b (a duplicated id, a duplicated suffixed id), gate 7 (two
+extra dependencies) and gate 0 (a `continue-on-error`, a crate spawning `sh`
+from a file named with a space, a crate spawning `node`). The messages were
+the same except in two places: gate 1d's remedy line now names this file
+where it said "above", and for the file named with a space the old gate 0
+refused because the scanner was handed half a name and could not open it,
+where the new step names the spawn. Of the other two trees, an untracked
+`crates/core/Cargo.toml` passed gate 9 under both steps, and a deleted
+`docs/04-invariants.md` passed the old gate 10b and stops the new one with an
+error. Gate 1e was run DRY, not built: the two `cargo` commands of both the
+old and the new step were replaced by fake commands and everything else ran
+-- the worktree with `web/` deleted, the stubs on PATH, every verdict --
+through nine scenarios (clean, a stub invoked and its failure ignored, a
+failed build, package metadata in the output, `sh`, `perl`, a stub invoked by
+a test, a failed test run, metadata in the test output), with the same
+outcome and message from both. The full workspace build and test under the
+new step was not run here.
+
+### D-2312 — The language-purity gates run as one compiled tool — 2026-10-04
+
+**Finding.** Gates 13, 15, 16, 17, 23, 21, 22 and 24 enforced §2 with shell,
+`awk`, `sed` and `grep` inside `ci.yml`: 22 of the workflow's 71 inline `awk`
+programs, 27 `sed` calls and 60 `grep` calls (0 `jq`). Four of those readings
+were looser than the gates claimed. Gate 13 word-split `git ls-files` output,
+so a manifest whose path holds a space was never read and the gate passed
+("allowed … 0 of 0"). Gate 22 discarded `grep`'s stderr, where GNU grep 3.5+
+reports a match in a binary file, so a tracked binary file holding `File::open`
+passed. Gate 16 layer 1b ended its scanner call with `|| true`, so a scanner
+error passed silently. Gate 22 let an unknown pinned crate inherit the last
+`want`. Gates 16, 21 and 23 also wrote fixed `/tmp/*.txt` files, and while
+this port was being measured a concurrent run on the same machine overwrote
+one of gate 23's.
+
+**Decision.** `.github/gates_runtime.rs` is one std-only tool with
+`#![forbid(unsafe_code)]` and one subcommand per gate (`gate13`, `gate15`,
+`gate16`, `gate17`, `gate23`, `gate21`, `gate22`, `gate24`). Gate 13's step
+builds it once with `rustc --edition=2024 -D warnings`, builds and runs its
+`--test` binary (51 tests, one or more per refusal branch), and leaves it in
+`$RUNNER_TEMP`. Each later step runs one line. Step names, ids, `if:`
+conditions, env and the explanatory comments are unchanged.
+
+- **The data stays in YAML.** The declared lists (`banned`, every `allow_*`,
+  `swept`, `declared`, `declared_handles`, `tmp_window`, `PINNED`, `SWEEP`,
+  `BANNED`) stay as shell assignments and reach the tool as `--name value`.
+  `crates/core/tests/banned_lists.rs`, `crates/cli/tests/limits_doc_drift.rs`
+  and VS-03 in `docs/04-invariants.md` read them there. Gate 15's word is
+  assembled in Rust (`WORD`, `WORD_LEN`), so the tool never spells it.
+- **The scanner is bound at compile time. This is the one integration choice
+  that needs review.** The tool tokenises Rust with gate 0's
+  `.github/source_scan.rs`. Its functions are private, and `include!` fails on
+  its inner doc comments, so the tool runs it as a process. Gate 0's spawn rule
+  admits `Command::new` only on a fixed literal, `current_exe`, or a
+  `CARGO_BIN_EXE_*` literal. The tool uses
+  `option_env!("CARGO_BIN_EXE_source_scan")`, and the step exports that
+  variable from gate 0's `$SOURCE_SCAN` before calling `rustc`. This stretches
+  "a binary cargo built" to "a binary rustc built from tracked source in the
+  same job". A build without the variable, such as gate 6c's clippy, still
+  compiles, and every scan in that build refuses rather than passes.
+- **Four readings are stricter than before, each a refusal where the old step
+  passed:**
+  - paths come from `git ls-files -z`, so they are never word-split;
+  - files are read as bytes, so binary content is searched, not skipped;
+  - a scanner error or a non-integer allowlist count refuses;
+  - an unknown pinned crate, or an include word holding glob characters,
+    refuses.
+
+  Allowlist entries must name exact tracked files. Each file is scanned in its
+  own run, so one file's lex failure cannot hide another's. The scratch files
+  are gone; scratch lives in a per-process directory under `$RUNNER_TEMP`.
+- **Not changed:** a multi-line `include_str!(` with the path on the next line
+  still escapes gate 22 clause D, exactly as it did before. The Rust diff
+  output omits `diff`'s hunk headers (`15a16`) and keeps the `<` and `>` lines.
+- **Gate 0's `AWK_IN_CI` must drop from 71 to 49.** This change leaves
+  `.github/source_scan.rs` untouched, so gate 0 fails on the ratchet until the
+  number is lowered.
+
+**Proof.** The method:
+- The tool and its tests build clean under `rustc -D warnings` and under
+  clippy, and are rustfmt-clean.
+- On the tree, every one of the eight gates passes old and new with
+  byte-identical output; the new run only adds the test lines.
+- Adversarial trees were built in scratch copies only.
+
+Old and new both **refuse** these trees:
+
+| Gate | Trees refused by both |
+|---|---|
+| 13 | `inline`, `crlf-devtable`, `quoted-renamed`, `lock`, `buildkey`, `buildmod`, `deny-jni`, `deny-wild`, `deny-unpinned` |
+| 15 | `mixedcase-md`, `nul-binary`, `space-name`, `crlf-unicode`, `allowlisted-over`, `stale-entry` |
+| 16 | `no-forbid`, `word-boundary`, `after-bracket`, `test-unsafe`, `lints-gone`, `alloc-extern`, `ci-tool` |
+| 17 | `alias`, `star-statement`, `path-module` |
+| 23 | `new-eprintln`, `handle`, `fixed-temp`, `window-edge`, `declared-drop` |
+| 21 | `write`, `glob`, `dep` |
+| 22 | `dep-table`, `alias-fs`, `computed-include`, `bar-include`, `tests-home`, `pub-use`, `space-include` |
+| 24 | `star-anon`, `comment-vs-string`, `crlf-raw` |
+
+Old and new both **pass** these controls: 13 `comment-only`, 17
+`in-comment`, 23 `window-ok`, 21 `test-only`, 24 `comment-only`.
+
+The refusal messages match line for line, apart from the omitted hunk headers.
+
+Two trees separate old from new, and they are the holes described above: 13
+`spacepath` and 22 `binary-file` pass the old step and are refused by the new
+tool.
+
+### D-2313 — Gates 25, 27, 27b, 26, 19, 10 and 11 are read by one Rust tool — 2026-10-04
+
+**Finding.** The seven `language-purity` steps from gate 25 to gate 11 held
+their logic as inline text programs in `.github/workflows/ci.yml`: 20 inline
+awk programs (gate 0's count falls from 71 to 51), sed substitutions,
+grep/cut/sort/uniq/tr/xargs pipelines and shell loops. That is a second
+language in a tracked file outside `web/` (CLAUDE.md section 2), and the
+standing default is that the rule covers CI.
+
+**Decision.** One std-only tool, `.github/gates_ledger.rs`
+(`#![forbid(unsafe_code)]`), built and tested with
+`rustc --edition=2024 [--test] -D warnings` in gate 25's step and reused from
+`RUNNER_TEMP` by the other six. One subcommand per gate: `release-profile`
+(25), `invariant-ids` (27), `decision-numbers` (27b), `tls-provider` (26),
+`failure-events` (19), `invariant-tests` (10) and `banned-constructs` (11).
+The tool starts no program but `git`, because gate 0's `spawns` rule (D-2344)
+refuses a `.github` tool that does; so gates 25 and 10 keep the scanner and
+`.github/invariant_paths.rs` as plain commands in their steps, piped through
+the two filters `path-declarations` and `module-table`, with no conditional
+or text program around them. A manifest or source the scanner cannot read
+now fails the step with the scanner's own message naming the file, where the
+old step printed a generic line. Each step keeps its name, conditions, env and the
+comments that justify it; comments that described shell mechanics moved beside
+the Rust. Gate 11's ten allowlists, gate 10's `ALLOW_PENDING` (with its
+reasons) and gate 27b's five pins moved into the tool as constants, entry for
+entry; the reasons for gate 11's entries stay in `docs/06-limits.md` (D-1451).
+The test-module stripper, formerly copied character for character into gates
+11 and 19, is one function. `ci.yml` falls from 472,900 to 424,584 bytes.
+`AWK_IN_CI` in `.github/source_scan.rs` must go from 71 to 51; that edit is
+left to the integration of the parallel CI ports.
+
+Where the old step let more through, the tool keeps the stricter reading and
+never the looser: paths are read NUL-separated rather than as git's quoted
+form; gate 10 reads a last row with no newline after it and never matches an
+empty row id against a blank allowlist line (the old step passed both, measured);
+a test-module file stem that is not an identifier exempts nothing.
+
+**Proof.** On this tree every old step body and its subcommand printed the
+same lines with the same exit status: 25, 27, 27b, 26, 19 and 10 pass; 11
+fails in both on the same two refusals that predate this change (rule 1,
+`crates/runner/src/signal_candle_stop.rs` 4 of 0; rule 6,
+`crates/telemetry/src/sink.rs` 1 of 0). The only output differences are the
+tool's own test log in gate 25's step, gate 10's `invariant_paths` verdict
+now printing before its row summary as it always ran first, and gate 11's
+closing line naming the tool. Mutated scratch trees refused by
+both, with the same lines: gate 25 by a quoted `"overflow-checks" = false`,
+a `[profile.release.package.engine]` override, a RUSTFLAGS codegen flag, a
+CRLF environment override and `panic = "unwind"`; gate 27 by a duplicate
+id, a backticked CRLF duplicate of `FV4-01` and a document with no rows;
+gate 27b by a reused number, a removed pinned `D-0076`, a five-digit
+`D-00011` and no headings; gate 26 by a removed guard, a second builder
+mention and no sites; gate 19 by a deleted emit, a failure after a test
+module, an undelimited module, a one-line `#[cfg(test)] mod`, two failures
+sharing one emit, a CRLF test module and an emit only in a comment; gate 10
+by a missing test, a test in the wrong crate and a renamed allowlisted row;
+gate 11 by an `unwrap`, a formatter-broken `.iter().position(` chain, a
+multi-line local allow, a disarmed `indexing_slicing`, an undelimited module,
+a one-line file with no newline and a runtime `assert!` beside a const one.
+The tool's own `#[test]`s cover each refusal branch and these shapes, and run
+in CI before any gate trusts it.
+
+### D-2314 — Gates 12 and 14 are one Rust tool, `.github/gates_bounds.rs` — 2026-10-04
+
+**Finding.** Gate 12 (every O(1) claim names the test that proves it) and gate
+14 (every crate that claims a bound re-measures it) were the two heaviest
+inline text programs in `.github/workflows/ci.yml`: 23 inline `awk` programs
+(8 and 15), 16 `sed`, 29 `grep`, 3 `cut`, 3 `sort`, 3 `tr` and 17 loops. The
+standing rule is Rust in every corner but `web/`, and CI is a corner. The two
+steps also carried two marked copies of one claim reader that gate 14 compared
+byte for byte (D-1116), which is a check that exists only because the reader
+was text in two places.
+
+**Decision.** Both gates are subcommands of one dependency-free tool,
+`.github/gates_bounds.rs` (`#![forbid(unsafe_code)]`, std only), built and
+self-tested in gate 12's step exactly as gate 0 builds `source_scan.rs`
+(`rustc --edition=2024 --test -D warnings`, run, then the plain build); gate 14
+reuses the binary from `$RUNNER_TEMP`. Every rule is ported unchanged, each
+pattern matched with the leftmost-longest reading the old `awk`/`sed`/`grep`
+gave it, byte by byte, with `[A-Za-z0-9_]` as the word characters (the C
+locale the local harness ran in). The steps keep their names, their
+explanatory comments and their data: gate 12's `allow_claim` and gate 14's
+`cover` table stay in the workflow and are passed to the tool as arguments, so
+widening either is still a visible diff on the workflow.
+
+- The claim reader is one function pair, `claim_blocks` and `is_claim`, that
+  both subcommands call. The byte-identity check and its `>>> CLAIM READER`
+  markers are gone because there is no second copy to compare.
+- Gate 0's `spawns` check lets a tool start `git` and no other program, so the
+  tool cannot run the source scanner. Gate 14's step keeps five lines of glue:
+  `git ls-files -z 'crates/*/benches/*.rs'`, the scanner's `code` and `strings`
+  over that list through `xargs -0`, and its two `step-runs` reports, written
+  with `|| true` to files the tool reads. A report counts only when it is one
+  `present` line, so a refusal or a crash is still REFUSED. The tool splits the
+  concatenated `code` view back per file by newline count (the scanner keeps
+  every newline) and refuses a stream that does not line up.
+- Stricter than before, by design: a tracked `.rs` that is not UTF-8 or holds
+  a NUL is an error (the old `grep` dropped it as binary); a missing
+  `docs/04-invariants.md` is an error in gate 12 (rule 3 used to switch off
+  silently); every tracked bench is lexed, so a cover row naming a path outside
+  `crates/*/benches/*.rs` is refused as not lexed, and a non-final bench with
+  no trailing newline is refused; a scanner failure stops the step at once
+  instead of after the other rows. Looser only where the old step crashed or
+  misread: a path git must quote no longer kills the step, and a crate
+  directory holding whitespace is no longer word-split.
+- Gate 0's inline-awk ratchet falls from 71 to 48 programs in `ci.yml`; the
+  constant in `source_scan.rs` is the integrator's to set.
+- `crates/core/tests/claim_reader.rs` asserted the two marked shell copies
+  (CIG-20). Two of its three tests fail against this workflow by construction;
+  they must be rewritten to assert the single function pair and the two
+  subcommand calls, and the CIG-20 row's wording follows. `allow_claim`'s
+  `FILE ITEM` test still passes unchanged.
+
+**Proof.** `.github/gates_bounds.rs`'s own tests, run by the step before the
+tool is trusted: every refusal branch of both gates, the reader's items, inner
+blocks, attribute bracket counting, CRLF and non-ASCII lines, each of the six
+scrub substitutions (including that a global substitution does not rescan its
+output), the trigger's word boundaries, the four proof-token patterns
+(`C-E-07` not `E-07`, `D-0095` and `C-09b` not ids, longest test/bench path),
+the attribute-tracked `proving` table, the `[[bench]]` reader (a second table
+discarding the first, CRLF, comments), call sites against declarations, the
+`cut -d: -f3-` string heads, the per-file split of the lexed view, and the
+`step-runs` and exact-line checks.
+
+Measured against the old step bodies on the tree at 6e4c262: gate 12's report
+is byte-identical (599 files, 15,842 `(crate, fn)` pairs, 7,395 proving, 21,274
+blocks, 468 claims, the same nine refusals and two allowances, so both FAIL
+there identically), and its `fns`, `proving` and block tables are identical
+record for record, block text included; gate 14's report and its 440 claims
+are identical apart from the reader line. A differential run of 80,000 random
+lines against the original `sed`/`grep` pipelines matched every scrubbed
+string, trigger verdict and extracted token. Adversarial trees, each refused by
+both with the same lines: `g12-adv` (a CRLF claim with non-ASCII text naming a
+production function, a proof token split across two doc lines, a multi-line
+attribute holding brackets in a string, an inner block whose only trigger is
+the predicate `flat`, an untracked bench path, row ids that do not exist,
+`XC-E-07`), `g12-proof` (a cited test demoted to production code, a cited test
+file untracked), `g12-stale` (the allowlisted file untracked); `g14-harness`
+(`harness = true`, a CRLF manifest that still reads, a new crate claiming a
+bound with no row), `g14-shape` (a measurement deleted, an id moved into a
+comment, an invariant row deleted), `g14-gate8` (`|| true` on gate 8's bench
+line, its empty-set refusal moved inside an `if`).
+
+### D-2315 — The gates after language purity decide in Rust, not in awk and sed — 2026-10-04
+
+**Finding.** Every gate in `.github/workflows/ci.yml` after the language-purity
+job decided with inline awk, sed and grep pipelines: the build job's crate
+probe and gates 13a, 13b, 13c, 6c, 5 and 6d; the coverage job's probe and gate
+20; gate 18's mutation plan; gate 8's bench count; and the browser job's gates
+W1, W3, W4, W5 and W6. That is a second language in a tracked file outside
+`web/`, which CLAUDE.md section 2 forbids, and the operator's standing rule
+(Rust in every corner but the front end) covers CI.
+
+**Decision.** Those decisions are `.github/gates_jobs.rs`: one std-only tool,
+`#![forbid(unsafe_code)]`, one subcommand per gate, built by `rustc` in each job
+that uses it (once per job, reused from `$RUNNER_TEMP`) after its own `--test`
+binary passes, and linted by gate 6c like the other `.github/*.rs` tools. Four
+inline awk programs and nine sed invocations leave the workflow, so gate 0's
+`AWK_IN_CI` ratchet falls by exactly four; that constant is not edited here.
+What stays in the workflow is deliberate:
+
+- Gate 0's `spawns` (D-2344) lets a `.github/*.rs` tool start only `git`, so
+  `cargo`, `rustc`, `rustfmt`, `clippy-driver`, `npm` and `node` are still
+  started by the workflow, each as one straight-line command writing a file the
+  tool reads. Gate 6d's per-crate `--extern` list becomes a rustc `@file`, and
+  its four test binaries are four explicit lines instead of a loop.
+- Gate 13b's `banned_built` list stays in its step as data, because
+  `crates/core/tests/banned_lists.rs` reads it there.
+- The coverage step keeps `cargo llvm-cov --workspace --locked` (read by
+  `c4_cli_02_limits`); its probe is `gates_jobs no-crates && exit 0`, which skips
+  only on an affirmative "no crate is tracked", never on a probe failure.
+- Gate 8 keeps the top-level `git ls-files --error-unmatch` and
+  `cargo bench --workspace --locked` lines gate 14 proves through `step-runs`.
+- Not ported: ci-ok's verify step (gate 0's `aggregator` pins its shell lines and
+  the job has no checkout), the coverage-target step, both "Install pinned
+  mutation tools" steps, the mutation shard's run step and W3's
+  `npm ... | tee ... || true` line. The `--jq` uses left in `auto-merge.yml` and
+  `main-check.yml` are bare field paths, which gate 0 and D-2343 allow.
+
+Two old holes close: gate 5 handed `git ls-files` through `xargs`, so a path
+with a space was split, grep's error was swallowed by `|| true` and its
+exceptions went uncounted (three exceptions in `crates/core/src/a b.rs` passed
+the old gate and fail the new one); gate W5's `$(find ...)` split the same way
+and crashed node instead of reading the file.
+
+**Proof.** The tool's 23 tests run in every job that builds it, among them
+`gate_13b_family_matching_is_the_old_pattern`,
+`gate_13b_refuses_a_banned_package_an_empty_graph_and_a_broken_list`,
+`gate_13c_refuses_a_linked_library_an_object_and_no_build_script`,
+`gate_5_counts_every_exception_form`,
+`gate_6d_finds_exactly_one_rlib_per_crate`,
+`sha256_matches_the_standard_vectors`,
+`gate_20_clears_the_file_on_any_header_d0167`,
+`gate_20_line_shapes_are_the_old_patterns`,
+`mark_probe_appends_to_the_line_after_the_function`,
+`w3_reads_both_summary_formats_and_refuses_above_the_ceiling`,
+`w4_counts_distinct_selectors_and_refuses_a_log_without_a_build` and
+`w6_accepts_the_bound_script_and_refuses_each_breach`. Each ported step was run
+in its old and its new form on this tree and on adversarial inputs, with
+`cargo`, `npm` or `cargo-mutants` replaced where needed by a stub printing a
+fixture, and returned the same verdict every time. Gates 13c and 6d were not run
+against this workspace's own build, which needed more free disk than the
+machine had; their real-cargo evidence is the scratch builds named below.
+Gate 13a on a reachable
+`js-sys`, a whitespace-only `web-sys` tree and a failing `cargo tree`; gate 13b
+on `ring`, `openssl-sys` and `mlua-sys (*)` beside the near misses `luau` and
+`ccache`, an empty graph, and a list missing `cc` or widened by `luau` (the
+fixture refuses both); gate 13c on real cargo messages from a scratch workspace
+whose build scripts link `m` and leave `x.o` in a directory with a space, and
+on fixtures with a nested `libz.a`, a unicode path and no build script; gate 6c
+on an unformatted and a clippy-failing tool and on no tool; gate 5 on four
+exceptions, the `reason` and `expect` forms with CRLF and in `web/`, and the
+boundary; gate 6d on two `tokio` rlibs, no `vocab` and an `.rmeta`-only
+`serde`, with its extern list and SHA-256 values byte-identical to the old ones
+on a real scratch build; the coverage probe with and without crates; gate 20
+on an extra, a missing and a new uncovered file, a degraded profile, a CRLF
+report and the D-0167 case; the mutation plan on a pull request, a push, a root
+commit and the D-0677 branch (every planned file and the matrix identical), and
+refusing a renamed or indented `delta_varint`, a probe that plans nothing and
+an empty walk; gate 8 with no bench; W1 on a stale and a deleted bundle file;
+W3 on both summary formats, CRLF, a missing summary and a trailing zero; W4 on
+duplicate, unquoted and empty-quoted selectors against ceilings 0, 3 and 4 and
+on a log with no `built in <digit>`; W5 with node on a swallowing comment, an
+unterminated one and no style file; and W6 on a call on load, a CRLF call, a
+lost fact, an indented `status();`, a changed binding, an untracked test and a
+missing script.
 ### D-1509 — Gate 8 proves it refuses a planted O(n) before it measures — 2026-10-03
 
 **What was observed.** The batch-1 audit marked `gate8` PARTIAL: production
@@ -57167,6 +58281,45 @@ fold count and per-fold day estimate it prints. No identity, digest or
 selection moves.
 
 **What it proves.** AGA-07.
+
+### D-2317 — Gate 8's self-test plants and judges in Rust — 2026-10-04
+
+**Finding.** D-1509 added Gate 8's planted-O(n) self-test on the base branch
+while D-2311..D-2315 were moving every `ci.yml` text program into
+`.github/gates_*.rs`. Merged, it brought back a `grep | cut` to find
+`decode_master_row`, a `sed -i` to plant the line and a `grep` to decide the
+catch, in the step the jobs tool already owns.
+
+**Decision.** `gates_jobs gate-8-plant FILE` inserts the same line after the
+first line starting `pub fn decode_master_row(` and refuses by name when there
+is none; `gates_jobs gate-8-caught LOG STATUS` passes only for a non-zero exit
+whose log has a `C-09 decode, field 4 MiB … BREACH` line, so a compile error or
+another row's breach is no catch, and prints the breach lines. `cargo bench`,
+`git checkout` and `git diff --quiet` stay in the step as plain commands
+(gate 0 lets a tool start only git, and gate 14 reads the bench lines). The
+probe log moved from a fixed `/tmp` name to `$RUNNER_TEMP`. AGC-01 is
+unchanged.
+
+**Proof.** The plant on the real `crates/core/src/vendor.rs` is byte-identical
+to the old `sed` edit (`cmp`, measured locally). The tool's tests
+`gate_8_plants_once_after_the_signature_and_refuses_without_it` and
+`gate_8_counts_a_catch_only_for_a_nonzero_exit_naming_c09` cover every refusal
+branch; the full bench probe is CI's to run.
+
+### D-2318 — Gate 22 clause D refuses an include whose path is not on its line — 2026-10-04
+
+**Finding.** Porting gate 22 (D-2312) showed, in the old shell and the new
+tool alike, that clause D reads one line at a time: `include_str!(` at the end
+of a line with its path on the next escaped both the computed-argument check
+and the literal-path check, so a sweep crate could include any file that way.
+
+**Decision.** `gates_runtime::computed_include` now also refuses an
+`include_str!(` with nothing after it on its line. A legitimate include keeps
+its literal path on the macro's own line; no tracked file under gate 22's scope
+splits one (gate 22 passes on the tree).
+
+**Proof.** The tool's test asserts `computed_include(b"include_str!(")` is now a
+refusal; gate 22 run locally on the merged tree exits 0.
 
 
 ### D-1464 — Gate 18 survivors on PR #74 killed ahead of CI, and the telemetry lock refusal loses its unreachable arm — 2026-10-04

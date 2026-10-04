@@ -410,10 +410,13 @@ pub const MAX_BLOCK: usize = 1_000_000;
 ///
 /// # Cost
 ///
+/// O(S·N) once to build each series' exact prefix sums, O(B·N) to draw and
+/// split every draw into its R runs, and O(B·S·R) to read the resampled
+/// means, R ≈ N/`block` expected (D-2316). The O(B·S·R) term holds for every
+/// series whose fold is provably exact, `N x max|v| <= 2^53`; a series outside
+/// that bound keeps the O(N) fold per draw, so the worst case is still
 /// `draws x periods x strategies`. This is a once-per-run boundary and the
-/// cost is stated rather than bounded — with 1,000 draws over 1,000 periods and
-/// 200 strategies it is 200 million operations, which is seconds, not
-/// milliseconds.
+/// cost is stated rather than bounded.
 ///
 /// UNVERIFIED as a measured figure: no bench row covers this yet.
 #[must_use]
@@ -441,8 +444,12 @@ pub fn reality_check(
 
     let mut rng = Rng::new(seed);
     let mut beaten = 0_usize;
+    let mut index = Vec::with_capacity(periods);
+    let prefixes = exact_prefixes(returns, periods);
+    let mut draw = Resample::default();
     for _ in 0..draws {
-        let index = stationary_indices(periods, block, &mut rng);
+        stationary_indices_into(&mut index, periods, block, &mut rng);
+        draw.fill(&index);
         // RECENTRED, and this is the whole test. Each resampled mean has its
         // OWN observed mean subtracted, so the bootstrap distribution is what a
         // set of strategies with NO edge would produce while keeping this set's
@@ -450,7 +457,7 @@ pub fn reality_check(
         // the question White's test asks.
         let mut best = f64::NEG_INFINITY;
         for (s, series) in returns.iter().enumerate() {
-            let resampled = mean_at(series, &index);
+            let resampled = resampled_mean(series, prefixes.get(s).and_then(Option::as_ref), &draw);
             let centred = stats.get(s).map_or(0.0, |o| resampled - o.mean);
             best = best.max(root_n * centred);
         }
@@ -510,9 +517,11 @@ pub fn reality_check(
 /// resample of every row is exactly zero and White's bootstrap maximum is a
 /// point mass at zero on every draw (D-0972).
 ///
-/// Exact rather than approximate: [`summarise`] and [`mean_at`] fold the same
-/// value the same number of times in the same order over a constant row, so
-/// `resampled - mean` is `0.0` bit for bit.
+/// Exact rather than approximate: [`summarise`] and the resampled-mean fold
+/// fold the same value the same number of times in the same order over a
+/// constant row, so `resampled - mean` is `0.0` bit for bit -- and
+/// [`resampled_mean`] is that fold's value bit for bit on either of its paths
+/// (D-2316).
 fn white_null_is_a_point_mass(returns: &[Vec<i64>]) -> bool {
     returns
         .iter()
@@ -608,12 +617,16 @@ pub fn spa(returns: &[Vec<i64>], draws: usize, seed: u64, block: usize) -> Optio
 
     let mut rng = Rng::new(seed);
     let mut beaten = 0_usize;
+    let mut index = Vec::with_capacity(periods);
+    let prefixes = exact_prefixes(returns, periods);
+    let mut draw = Resample::default();
     for _ in 0..draws {
-        let index = stationary_indices(periods, block, &mut rng);
+        stationary_indices_into(&mut index, periods, block, &mut rng);
+        draw.fill(&index);
         let mut best = f64::NEG_INFINITY;
         for (s, series) in returns.iter().enumerate() {
             let Some(own) = stats.get(s) else { continue };
-            let resampled = mean_at(series, &index);
+            let resampled = resampled_mean(series, prefixes.get(s).and_then(Option::as_ref), &draw);
             // A strategy too far below zero cannot be the best under the null,
             // so it is recentred to nothing rather than dragging the maximum up.
             // Same correction as the observed statistic: no `root_n`, because
@@ -688,8 +701,12 @@ pub fn spa(returns: &[Vec<i64>], draws: usize, seed: u64, block: usize) -> Optio
 ///
 /// # Cost
 ///
-/// O(B·N·S) time and O(N+S) temporary space for B draws, N periods and S
-/// strategies.  Constructing the receipt is not O(1).
+/// O(S·N + B·N + B·S·R) time and O(S·N + N + S) temporary space for B
+/// draws, N periods, S strategies and R runs per draw (R ≈ N/`block`
+/// expected), where every series' fold is provably exact
+/// (`N x max|v| <= 2^53`); a series outside that bound keeps the O(N) fold,
+/// so the worst case is still O(B·N·S) (D-2316).  Constructing the receipt is
+/// not O(1).
 ///
 /// **UNVERIFIED as a measured bound.** No bench in this workspace
 /// times this, so the shape above is read from the source rather
@@ -713,11 +730,19 @@ pub fn white_reality_check_receipt_v1(
 
     let mut rng = Rng::new(seed);
     let mut matched_or_exceeded = 0_usize;
+    let mut index = Vec::with_capacity(periods);
+    let prefixes = exact_prefixes(returns, periods);
+    let mut draw = Resample::default();
     for _ in 0..draws {
-        let index = stationary_indices(periods, block, &mut rng);
+        stationary_indices_into(&mut index, periods, block, &mut rng);
+        draw.fill(&index);
         let mut best = f64::NEG_INFINITY;
         for (strategy, series) in returns.iter().enumerate() {
-            let resampled = mean_at(series, &index);
+            let resampled = resampled_mean(
+                series,
+                prefixes.get(strategy).and_then(Option::as_ref),
+                &draw,
+            );
             let centred = stats
                 .get(strategy)
                 .map_or(0.0, |summary| resampled - summary.mean);
@@ -752,8 +777,12 @@ pub fn white_reality_check_receipt_v1(
 ///
 /// # Cost
 ///
-/// O(B·N·S) time and O(N+S) temporary space for B draws, N periods and S
-/// strategies.  Constructing the receipt is not O(1).
+/// O(S·N + B·N + B·S·R) time and O(S·N + N + S) temporary space for B
+/// draws, N periods, S strategies and R runs per draw (R ≈ N/`block`
+/// expected), where every series' fold is provably exact
+/// (`N x max|v| <= 2^53`); a series outside that bound keeps the O(N) fold,
+/// so the worst case is still O(B·N·S) (D-2316).  Constructing the receipt is
+/// not O(1).
 ///
 /// **UNVERIFIED as a measured bound.** No bench in this workspace
 /// times this, so the shape above is read from the source rather
@@ -782,12 +811,20 @@ pub fn spa_receipt_v1(
     };
     let mut rng = Rng::new(seed);
     let mut matched_or_exceeded = 0_usize;
+    let mut index = Vec::with_capacity(periods);
+    let prefixes = exact_prefixes(returns, periods);
+    let mut draw = Resample::default();
     for _ in 0..draws {
-        let index = stationary_indices(periods, block, &mut rng);
+        stationary_indices_into(&mut index, periods, block, &mut rng);
+        draw.fill(&index);
         let mut best = f64::NEG_INFINITY;
         for (strategy, series) in returns.iter().enumerate() {
             let own = stats.get(strategy)?;
-            let resampled = mean_at(series, &index);
+            let resampled = resampled_mean(
+                series,
+                prefixes.get(strategy).and_then(Option::as_ref),
+                &draw,
+            );
             let keep = studentized(own.mean, own.standard_error) >= gate;
             let centred = if keep {
                 resampled - own.mean
@@ -1264,8 +1301,12 @@ pub fn romano_wolf_receipt(
 ///
 /// # Cost
 ///
-/// O(S·N + S log S + B·N + B·S·N) time for S strategies, N periods and B
-/// draws.  Retained temporary space is O(B·N + B + S).  Candidate lookup on
+/// O(S·N + S log S + B·N + B·S·R) time for S strategies, N periods, B draws
+/// and R runs per draw (R ≈ N/`block` expected), where every series' fold is
+/// provably exact (`N x max|v| <= 2^53`); a series outside that bound keeps
+/// the O(N) fold, so the worst case is still O(B·S·N) (D-2316).  Retained
+/// temporary space is O(S·N + B·R + B + S): one prefix per exact series and
+/// each held draw's runs, at most two words per period.  Candidate lookup on
 /// the completed receipt is O(1); constructing the complete statistical
 /// authority is deliberately not claimed constant-time.
 ///
@@ -1323,9 +1364,8 @@ pub fn romano_wolf_adjusted_p_values_v1(
     });
 
     let mut rng = Rng::new(seed);
-    let indices: Vec<Vec<usize>> = (0..draws)
-        .map(|_| stationary_indices(periods, block, &mut rng))
-        .collect();
+    let held = held_draws(periods, block, draws, &mut rng);
+    let prefixes = exact_prefixes(returns, periods);
 
     // Walking the canonical order backwards grows one surviving suffix at a
     // time.  `maxima[m]` is therefore exactly max(t*_{r_s},...,t*_{r_S}) for
@@ -1337,8 +1377,9 @@ pub fn romano_wolf_adjusted_p_values_v1(
         let series = returns.get(strategy)?;
         let own = stats.get(strategy)?;
         let observed_statistic = *observed.get(strategy)?;
-        for (maximum, index) in maxima.iter_mut().zip(&indices) {
-            let centred = mean_at(series, index) - own.mean;
+        let prefix = prefixes.get(strategy).and_then(Option::as_ref);
+        for (maximum, draw) in maxima.iter_mut().zip(&held) {
+            let centred = resampled_mean(series, prefix, draw) - own.mean;
             let null_statistic = studentized(centred, own.standard_error);
             *maximum = maximum.max(null_statistic);
         }
@@ -1458,11 +1499,14 @@ pub(crate) fn romano_wolf_family_digest_v1<R: AsRef<[i64]>>(
 ///
 /// # Cost
 ///
-/// O(S·B·N + S·B + S log S) time for S strategies, B draws and N periods
-/// (the per-suffix selection is `select_nth_unstable_by`, whose documentation
-/// says its fallback "guarantees linear runtime for all inputs"), and
-/// O(B·N + B + S) space. The former loop was O(R·B·S·N) over R rounds. Not
-/// measured by a bench; `CLAUDE.md` §3 rule 6.
+/// O(S·N + B·N + S·B·R + S·B + S log S) time for S strategies, B draws, N
+/// periods and R runs per draw, R ≈ N/`block` expected (the per-suffix
+/// selection is `select_nth_unstable_by`, whose documentation says its
+/// fallback "guarantees linear runtime for all inputs"), and
+/// O(S·N + B·R + B + S) space. The S·B·R term needs every series' fold to be
+/// provably exact (`N x max|v| <= 2^53`); a series outside it keeps the O(N)
+/// fold, so the worst case is still O(S·B·N) (D-2316). The former loop was
+/// O(rounds·B·S·N). Not measured by a bench; `CLAUDE.md` §3 rule 6.
 fn romano_wolf_aligned(
     returns: &[Vec<i64>],
     periods: usize,
@@ -1511,9 +1555,8 @@ fn romano_wolf_aligned(
     // seed 97, in 19 of 400 configurations. Romano & Wolf's construction is one
     // B x n resample matrix, and `Rng::new(seed)` once keeps §3 rule 5.
     let mut rng = Rng::new(seed);
-    let indices: Vec<Vec<usize>> = (0..draws)
-        .map(|_| stationary_indices(periods, block, &mut rng))
-        .collect();
+    let held = held_draws(periods, block, draws, &mut rng);
+    let prefixes = exact_prefixes(returns, periods);
 
     let mut maxima = vec![f64::NEG_INFINITY; draws];
     let mut scratch: Vec<f64> = Vec::with_capacity(draws);
@@ -1525,8 +1568,9 @@ fn romano_wolf_aligned(
         let (Some(series), Some(own)) = (returns.get(strategy), stats.get(strategy)) else {
             continue;
         };
-        for (maximum, index) in maxima.iter_mut().zip(&indices) {
-            *maximum = maximum.max(null_statistic(series, index, own));
+        let prefix = prefixes.get(strategy).and_then(Option::as_ref);
+        for (maximum, draw) in maxima.iter_mut().zip(&held) {
+            *maximum = maximum.max(null_statistic(series, prefix, draw, own));
         }
         // A statistic `x` rejects against these maxima iff fewer than
         // `admissible` of them strictly exceed it, i.e. iff `x` is at least
@@ -1590,10 +1634,18 @@ thread_local! {
 }
 
 /// One strategy's recentred, studentized statistic on one resample.
-fn null_statistic(series: &[i64], index: &[usize], own: &Performance) -> f64 {
+fn null_statistic(
+    series: &[i64],
+    prefix: Option<&ExactPrefix>,
+    draw: &Resample,
+    own: &Performance,
+) -> f64 {
     #[cfg(test)]
     NULL_STATISTICS.with(|count| count.set(count.get().saturating_add(1)));
-    studentized(mean_at(series, index) - own.mean, own.standard_error)
+    studentized(
+        resampled_mean(series, prefix, draw) - own.mean,
+        own.standard_error,
+    )
 }
 
 /// Every series is the same non-zero length, and that length.
@@ -1674,8 +1726,41 @@ pub(crate) fn studentized(statistic: f64, standard_error: f64) -> f64 {
 /// resample keeps serial dependence that a single-period resample destroys.
 fn stationary_indices(periods: usize, block: usize, rng: &mut Rng) -> Vec<usize> {
     let mut out = Vec::with_capacity(periods);
+    stationary_indices_into(&mut out, periods, block, rng);
+    out
+}
+
+/// `draws` stationary-bootstrap draws held as their runs, for a procedure that
+/// reads every draw once per stepdown rank.
+///
+/// One index buffer is reused and each draw keeps only its runs, so the held
+/// set is O(B·R) words for R runs per draw -- at most two words per period,
+/// about `2·periods/block` words at the expected block length -- rather than
+/// B·N indices. The `rng` stream is consumed exactly as the index form
+/// consumed it (D-2316).
+fn held_draws(periods: usize, block: usize, draws: usize, rng: &mut Rng) -> Vec<Resample> {
+    let mut index = Vec::with_capacity(periods);
+    (0..draws)
+        .map(|_| {
+            stationary_indices_into(&mut index, periods, block, rng);
+            Resample::of(&index)
+        })
+        .collect()
+}
+
+/// [`stationary_indices`] into a caller's buffer, which is cleared first.
+///
+/// The draw loops of [`reality_check`], [`spa`] and both receipts hold one
+/// buffer for every draw, so B draws allocate once rather than B times (Rust
+/// and O(1) sweep OE-2, D-2305, proved by
+/// `runner::bootstrap::a_reused_index_buffer_draws_exactly_what_a_fresh_one_does`).
+/// The indices are the same: one `rng` stream,
+/// consumed in the same order.
+fn stationary_indices_into(out: &mut Vec<usize>, periods: usize, block: usize, rng: &mut Rng) {
+    out.clear();
+    out.reserve(periods);
     if periods == 0 {
-        return out;
+        return;
     }
     // Continue-probability as parts per million, so the draw stays integer.
     let carry_on = if block <= 1 {
@@ -1695,26 +1780,157 @@ fn stationary_indices(periods: usize, block: usize, rng: &mut Rng) -> Vec<usize>
             rng.below(periods)
         };
     }
-    out
-}
-
-/// Mean of `series` taken at `index`.
-fn mean_at(series: &[i64], index: &[usize]) -> f64 {
-    #[cfg(test)]
-    MEAN_AT_CALLS.with(|n| n.set(n.get() + 1));
-    if index.is_empty() {
-        return 0.0;
-    }
-    let sum = index.iter().fold(0.0_f64, |a, &i| {
-        a + series.get(i).copied().unwrap_or(0) as f64
-    });
-    sum / index.len() as f64
 }
 
 #[cfg(test)]
 std::thread_local! {
-    /// `mean_at` evaluations on this thread (D-1197).
+    /// Resampled means evaluated on this thread, one per strategy per draw,
+    /// whichever path [`resampled_mean`] took (D-1197; the name is the
+    /// former `mean_at`'s, which D-2316 replaced).
     static MEAN_AT_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Terms a resampled mean READ on this thread: one per run on the prefix
+    /// path, one per resampled index on the fold path (D-2316).
+    static MEAN_TERMS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// f64's contiguous-integer range, `2^53`.
+///
+/// While every partial sum of the fold is an integer no larger than this in
+/// magnitude, every `a + x as f64` is exact, so the fold IS the exact integer
+/// sum converted once to f64 (D-2316).
+const EXACT_SUM_LIMIT: u128 = 1 << 53;
+
+/// One series' integer prefix sums, padded with zeros out to `periods`.
+///
+/// Built only when the f64 fold over any `periods` of its values is exact:
+/// every `|v| <= 2^53` and `periods x max|v| <= 2^53`, computed in `u128` so
+/// the check itself cannot overflow. The zero padding is the fold's
+/// `unwrap_or(0)` for a series shorter than `periods`.
+#[derive(Debug)]
+struct ExactPrefix {
+    /// `sums[k]` is the sum of the first `k` padded values; `periods + 1` long.
+    sums: Vec<i64>,
+    /// The largest `|v|` among the first `periods` values.
+    magnitude: u128,
+}
+
+impl ExactPrefix {
+    /// `None` when the fold over this series is not provably exact -- the
+    /// caller then keeps the fold, which gives the same bits more slowly.
+    fn new(series: &[i64], periods: usize) -> Option<Self> {
+        let magnitude = series
+            .iter()
+            .take(periods)
+            .map(|v| u128::from(v.unsigned_abs()))
+            .max()
+            .unwrap_or(0);
+        let span = u128::try_from(periods).ok()?.checked_mul(magnitude)?;
+        if magnitude > EXACT_SUM_LIMIT || span > EXACT_SUM_LIMIT {
+            return None;
+        }
+        let mut sums = Vec::with_capacity(periods.checked_add(1)?);
+        let mut total = 0_i64;
+        sums.push(total);
+        for at in 0..periods {
+            total = total.checked_add(series.get(at).copied().unwrap_or(0))?;
+            sums.push(total);
+        }
+        Some(Self { sums, magnitude })
+    }
+
+    /// The exact integer sum of the padded series over `draw`, or `None` when
+    /// it is not provably the fold's value: the draw is longer than the bound
+    /// was checked for, or a run leaves the padded range (where the fold may
+    /// read a value past `periods`).
+    fn sum(&self, draw: &Resample) -> Option<i64> {
+        let span = u128::try_from(draw.len).ok()?.checked_mul(self.magnitude)?;
+        if span > EXACT_SUM_LIMIT {
+            return None;
+        }
+        let mut total = 0_i64;
+        for &(start, last) in &draw.runs {
+            let high = *self.sums.get(last.checked_add(1)?)?;
+            let low = *self.sums.get(start)?;
+            total = total.checked_add(high.checked_sub(low)?)?;
+        }
+        #[cfg(test)]
+        MEAN_TERMS.with(|n| n.set(n.get() + draw.runs.len() as u64));
+        Some(total)
+    }
+}
+
+/// Each strategy's [`ExactPrefix`], `None` where the fold is kept. Built once
+/// per call, not per draw.
+fn exact_prefixes(returns: &[Vec<i64>], periods: usize) -> Vec<Option<ExactPrefix>> {
+    returns
+        .iter()
+        .map(|series| ExactPrefix::new(series, periods))
+        .collect()
+}
+
+/// One draw as its contiguous runs, in draw order.
+///
+/// A stationary-bootstrap draw continues a block by `at + 1` and jumps
+/// otherwise, so it is a sequence of runs of consecutive indices; the wrap
+/// from the last period to 0 starts a new run. `(start, last)` is inclusive,
+/// so the runs reproduce every index of the draw in its original order.
+#[derive(Debug, Default)]
+struct Resample {
+    runs: Vec<(usize, usize)>,
+    /// Indices in the draw: the mean's divisor.
+    len: usize,
+}
+
+impl Resample {
+    /// The runs of `index`.
+    fn of(index: &[usize]) -> Self {
+        let mut out = Self::default();
+        out.fill(index);
+        out
+    }
+
+    /// Replaces this draw's runs with those of `index`: O(len) once per draw,
+    /// shared by every strategy.
+    fn fill(&mut self, index: &[usize]) {
+        self.runs.clear();
+        self.len = index.len();
+        for &at in index {
+            match self.runs.last_mut() {
+                Some((_, last)) if last.checked_add(1) == Some(at) => *last = at,
+                _ => self.runs.push((at, at)),
+            }
+        }
+    }
+
+    /// The draw's indices, in their original order.
+    fn indices(&self) -> impl Iterator<Item = usize> + '_ {
+        self.runs.iter().flat_map(|&(start, last)| start..=last)
+    }
+}
+
+/// Mean of `series` over one draw.
+///
+/// The value is the former `mean_at`'s, bit for bit: the fold
+/// `index.iter().fold(0.0, |a, &i| a + series.get(i).copied().unwrap_or(0) as f64)`
+/// divided by `index.len() as f64`, which the tests keep as their reference.
+/// O(runs) through `prefix` when it is present and provably exact for this
+/// draw; otherwise that same fold over the same indices in the same order,
+/// O(len) (D-2316).
+fn resampled_mean(series: &[i64], prefix: Option<&ExactPrefix>, draw: &Resample) -> f64 {
+    #[cfg(test)]
+    MEAN_AT_CALLS.with(|n| n.set(n.get() + 1));
+    if draw.len == 0 {
+        return 0.0;
+    }
+    let sum = if let Some(exact) = prefix.and_then(|exact| exact.sum(draw)) {
+        exact as f64
+    } else {
+        #[cfg(test)]
+        MEAN_TERMS.with(|n| n.set(n.get() + draw.len as u64));
+        draw.indices()
+            .fold(0.0, |a, i| a + series.get(i).copied().unwrap_or(0) as f64)
+    };
+    sum / draw.len as f64
 }
 
 #[cfg(test)]
@@ -2162,6 +2378,30 @@ mod tests {
         assert_eq!(rejected, again, "the same seed gave two different answers");
     }
 
+    /// **One buffer reused across draws yields the draws a fresh vector
+    /// does.** Rust and O(1) sweep OE-2, D-2305. Proved by this test,
+    /// `runner::bootstrap::a_reused_index_buffer_draws_exactly_what_a_fresh_one_does`.
+    ///
+    /// Two generators from one seed: one fills a single buffer for every draw,
+    /// the other allocates per draw. Every draw's indices are equal, at block
+    /// lengths 1, 3 and 50 and at 1 and 97 periods, and the buffer is cleared,
+    /// not appended to.
+    #[test]
+    fn a_reused_index_buffer_draws_exactly_what_a_fresh_one_does() {
+        for (periods, block) in [(1_usize, 1_usize), (97, 1), (97, 3), (97, 50)] {
+            let (mut reused, mut fresh) = (super::Rng::new(41), super::Rng::new(41));
+            let mut buffer = Vec::new();
+            for _ in 0..200 {
+                super::stationary_indices_into(&mut buffer, periods, block, &mut reused);
+                assert_eq!(
+                    buffer,
+                    super::stationary_indices(periods, block, &mut fresh)
+                );
+                assert_eq!(buffer.len(), periods);
+            }
+        }
+    }
+
     #[test]
     fn romano_wolf_names_which_strategies_rather_than_whether_any() {
         // Two genuine edges among eighteen noise series. A stepdown must be able
@@ -2294,6 +2534,179 @@ mod tests {
         assert_eq!(rc.periods, 2);
         same(rc.p_value, 1.0 / 1_001.0, "no draw can beat sqrt(2) * 15");
         assert!(rc.clears(), "the floor 1/1001 clears 5%");
+    }
+
+    /// The reference fold: `mean_at` exactly as production computed every
+    /// resampled mean before D-2316, kept here so the prefix/run path is
+    /// compared against the code it replaced rather than against itself.
+    fn mean_at(series: &[i64], index: &[usize]) -> f64 {
+        if index.is_empty() {
+            return 0.0;
+        }
+        let sum = index.iter().fold(0.0_f64, |a, &i| {
+            a + series.get(i).copied().unwrap_or(0) as f64
+        });
+        sum / index.len() as f64
+    }
+
+    /// The largest `|v|` for which `periods x |v| <= 2^53`.
+    fn exact_bound(periods: usize) -> i64 {
+        let periods = u64::try_from(periods.max(1)).expect("a period count fits u64");
+        i64::try_from((1_u64 << 53) / periods).expect("2^53 fits i64")
+    }
+
+    /// One draw's mean both ways must be the same f64, bit for bit.
+    fn prefix_matches_fold(series: &[i64], periods: usize, index: &[usize], what: &str) {
+        let prefix = super::ExactPrefix::new(series, periods);
+        let draw = super::Resample::of(index);
+        assert_eq!(
+            draw.indices().collect::<Vec<usize>>(),
+            index,
+            "{what}: the runs must reproduce the draw in order"
+        );
+        assert_eq!(draw.len, index.len(), "{what}: divisor");
+        same(
+            super::resampled_mean(series, prefix.as_ref(), &draw),
+            mean_at(series, index),
+            what,
+        );
+    }
+
+    /// OE-1 / D-2316: the run/prefix mean is `mean_at`'s fold bit for bit over
+    /// many seeds, blocks and period counts, at the exactness boundary on both
+    /// sides, on short, negative and extreme series, and wherever the prefix
+    /// path must decline and the fold answers.
+    #[test]
+    fn the_run_prefix_mean_is_the_fold_bit_for_bit() {
+        let mut fast = 0_usize;
+        let mut kept = 0_usize;
+        for periods in [0_usize, 1, 2, 3, 7, 64, 225] {
+            let bound = exact_bound(periods);
+            let alternating = |edge: i64| -> Vec<i64> {
+                (0..periods)
+                    .map(|t| if t % 3 == 1 { -edge } else { edge })
+                    .collect()
+            };
+            let mut over = alternating(bound);
+            if let Some(first) = over.first_mut() {
+                *first = bound + 1;
+            }
+            let families: Vec<(&str, Vec<i64>, bool)> = vec![
+                ("noise", noise(periods, 11), true),
+                (
+                    "negative",
+                    noise(periods, 12).iter().map(|v| v - 500).collect(),
+                    true,
+                ),
+                ("short", noise(periods / 2, 13), true),
+                ("at the bound", alternating(bound), true),
+                ("one past the bound", over, periods == 0),
+                (
+                    "extreme",
+                    (0..periods)
+                        .map(|t| if t % 2 == 0 { i64::MIN } else { i64::MAX })
+                        .collect(),
+                    periods == 0,
+                ),
+            ];
+            for (name, series, exact) in &families {
+                assert_eq!(
+                    super::ExactPrefix::new(series, periods).is_some(),
+                    *exact,
+                    "{name} at {periods} periods: exactness"
+                );
+                if *exact {
+                    fast += 1;
+                } else {
+                    kept += 1;
+                }
+                for block in [0_usize, 1, 2, DEFAULT_BLOCK, periods + 5] {
+                    for seed in 0..24_u64 {
+                        let mut rng = super::Rng::new(seed);
+                        let index = super::stationary_indices(periods, block, &mut rng);
+                        let what = format!("{name} periods {periods} block {block} seed {seed}");
+                        prefix_matches_fold(series, periods, &index, &what);
+                    }
+                }
+            }
+        }
+        assert!(fast > 0 && kept > 0, "both paths must be exercised");
+
+        // Indices past `periods` over a longer series, and a draw longer than
+        // the bound was checked for: the prefix path declines and the fold's
+        // own reads answer.
+        let long: Vec<i64> = (1..=10).collect();
+        prefix_matches_fold(&long, 5, &[3, 4, 5, 6], "past the padded range");
+        let edge = vec![exact_bound(4); 4];
+        prefix_matches_fold(
+            &edge,
+            4,
+            &[0, 1, 2, 3, 0, 1, 2, 3],
+            "a draw twice the bound",
+        );
+        prefix_matches_fold(
+            &[7, -3],
+            2,
+            &[usize::MAX, 0, 1],
+            "an index that cannot extend",
+        );
+
+        // The guard is load-bearing: here the f64 fold rounds and the exact
+        // integer sum does not, and the prefix is refused rather than used.
+        let rounding = [1_i64 << 53, 1, 1];
+        let exact_sum = ((1_i64 << 53) + 2) as f64;
+        assert!(
+            mean_at(&rounding, &[0, 1, 2]).to_bits() != (exact_sum / 3.0).to_bits(),
+            "the fold must round on this series"
+        );
+        assert!(super::ExactPrefix::new(&rounding, 3).is_none());
+        prefix_matches_fold(&rounding, 3, &[0, 1, 2], "a fold that rounds");
+    }
+
+    /// OE-1 / D-2316: the prefix path reads one term per run, not one per
+    /// period, both for one draw and across a whole Romano--Wolf stepdown, and
+    /// the fold it keeps for an inexact series reads every period.
+    #[test]
+    fn the_prefix_path_reads_one_term_per_run_not_per_period() {
+        let terms = || super::MEAN_TERMS.with(std::cell::Cell::get);
+        let periods = 4_000;
+        let series = noise(periods, 3);
+        let prefix = super::ExactPrefix::new(&series, periods).expect("noise is exact");
+        let mut rng = super::Rng::new(9);
+        let draw = super::Resample::of(&super::stationary_indices(periods, 50, &mut rng));
+        let before = terms();
+        let _ = super::resampled_mean(&series, Some(&prefix), &draw);
+        let read = terms() - before;
+        assert_eq!(read, draw.runs.len() as u64, "one term per run");
+        assert!(
+            draw.runs.len() * 10 < periods,
+            "runs {} must be far fewer than periods {periods}",
+            draw.runs.len()
+        );
+
+        let extreme = vec![i64::MAX; periods];
+        assert!(super::ExactPrefix::new(&extreme, periods).is_none());
+        let before = terms();
+        let _ = super::resampled_mean(&extreme, None, &draw);
+        assert_eq!(
+            terms() - before,
+            periods as u64,
+            "the fold reads every period"
+        );
+
+        // Whole stepdown: S strategies x the runs of every held draw.
+        let set: Vec<Vec<i64>> = (0..5).map(|s| noise(300, 40 + s)).collect();
+        let (draws, seed, block) = (120, 17, DEFAULT_BLOCK);
+        let mut rng = super::Rng::new(seed);
+        let runs: usize = super::held_draws(300, block, draws, &mut rng)
+            .iter()
+            .map(|draw| draw.runs.len())
+            .sum();
+        let before = terms();
+        let _ = romano_wolf(&set, draws, seed, block, 50_000);
+        let read = terms() - before;
+        assert_eq!(read, (set.len() * runs) as u64, "S x total runs");
+        assert!(read * 5 < (set.len() * draws * 300) as u64, "not S x B x N");
     }
 }
 

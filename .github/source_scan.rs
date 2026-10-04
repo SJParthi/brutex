@@ -15,6 +15,8 @@
 //! procedural macro, and a module declaration a `macro_rules!` expands (that
 //! one is refused rather than guessed at).
 
+#![forbid(unsafe_code)]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
@@ -797,9 +799,165 @@ fn attr_path(attr: &[Token]) -> Option<String> {
     None
 }
 
-/// A file a module pulls in: its path, whether it owns its directory, and
-/// the module path it is mounted at.
-type Child = (String, bool, Vec<String>);
+/// The configurations CI compiles, one bit each: `test` on or off times
+/// `debug_assertions` on or off, all on x86-64 Linux (D-2340). A module is
+/// read by rustc only under the configurations its `cfg`s leave set.
+const EVERY_CI_CFG: u8 = 0b1111;
+
+/// The set of CI configurations under which the `cfg` predicate `p` holds,
+/// read from its tokens. A name or key this cannot decide is an error, never
+/// a guess (RO-1, D-2340): `#[cfg(any())] mod x;` used to let `x.rs` hold
+/// another language while gate 1 counted it compiled.
+fn cfg_mask(p: &[Token]) -> Result<u8, String> {
+    let (mask, end) = cfg_pred(p, 0)?;
+    if end == p.len() {
+        Ok(mask)
+    } else {
+        Err("trailing tokens in a cfg predicate".to_owned())
+    }
+}
+
+fn cfg_pred(p: &[Token], i: usize) -> Result<(u8, usize), String> {
+    let name = p
+        .get(i)
+        .and_then(ident)
+        .ok_or("a cfg predicate that is not a name")?;
+    if matches!(name, "all" | "any" | "not") && is_punct(p.get(i + 1), '(') {
+        let close = skip_group(p, i + 1) - 1;
+        let mut parts = Vec::new();
+        let mut k = i + 2;
+        while k < close {
+            let (m, next) = cfg_pred(&p[..close], k)?;
+            parts.push(m);
+            k = next;
+            if is_punct(p.get(k), ',') {
+                k += 1;
+            } else if k != close {
+                return Err("a cfg list item is not followed by `,`".to_owned());
+            }
+        }
+        let mask = match (name, parts.as_slice()) {
+            ("not", [m]) => EVERY_CI_CFG ^ m,
+            ("not", _) => return Err("`not` takes exactly one predicate".to_owned()),
+            ("all", _) => parts.iter().fold(EVERY_CI_CFG, |a, m| a & m),
+            _ => parts.iter().fold(0, |a, m| a | m),
+        };
+        return Ok((mask, close + 1));
+    }
+    if is_punct(p.get(i + 1), '=') {
+        let Some(Tok::Str(v)) = p.get(i + 2).map(|t| &t.tok) else {
+            return Err(format!("`{name} =` without a string"));
+        };
+        let holds = match name {
+            "target_os" => v == "linux",
+            "target_family" => v == "unix",
+            "target_arch" => v == "x86_64",
+            "target_pointer_width" => v == "64",
+            "target_endian" => v == "little",
+            _ => return Err(format!("cfg key `{name}` is not one this gate can decide")),
+        };
+        return Ok((if holds { EVERY_CI_CFG } else { 0 }, i + 3));
+    }
+    let mask = match name {
+        "test" => 0b1010,
+        "debug_assertions" => 0b1100,
+        "unix" => EVERY_CI_CFG,
+        "windows" => 0,
+        _ => return Err(format!("cfg name `{name}` is not one this gate can decide")),
+    };
+    Ok((mask, i + 1))
+}
+
+/// The outer attributes of the item whose keyword sits at `i`, past any
+/// visibility, as token ranges `#`..`]` (end exclusive), nearest first.
+fn outer_attrs(t: &[Token], i: usize) -> Vec<(usize, usize)> {
+    let mut k = i;
+    if k > 0 && is_punct(t.get(k - 1), ')') {
+        // pub(crate) / pub(in path): walk back to its `(`.
+        let mut d = 0i64;
+        while k > 0 {
+            k -= 1;
+            match t[k].tok {
+                Tok::Punct(')') => d += 1,
+                Tok::Punct('(') => {
+                    d -= 1;
+                    if d == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if k > 0 && is_ident(t.get(k - 1), "pub") {
+        k -= 1;
+    }
+    let mut out = Vec::new();
+    while k > 0 && is_punct(t.get(k - 1), ']') {
+        let mut d = 0i64;
+        let mut a = k - 1;
+        loop {
+            match t[a].tok {
+                Tok::Punct(']') => d += 1,
+                Tok::Punct('[') => {
+                    d -= 1;
+                    if d == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            if a == 0 {
+                break;
+            }
+            a -= 1;
+        }
+        if a == 0 || !is_punct(t.get(a - 1), '#') {
+            break;
+        }
+        out.push((a - 1, k));
+        k = a - 1;
+    }
+    out
+}
+
+/// The configurations an item's attributes leave it compiled under, and its
+/// `#[path]` if it has one. Each range is `#`..`]` from [`outer_attrs`], or an
+/// inner `#![..]`, whose `!` is skipped.
+fn attr_effect(
+    t: &[Token],
+    attrs: &[(usize, usize)],
+    what: &str,
+    errs: &mut Vec<String>,
+) -> (u8, Option<String>) {
+    let mut mask = EVERY_CI_CFG;
+    let mut path = None;
+    for &(a, k) in attrs {
+        let inner = usize::from(is_punct(t.get(a + 1), '!'));
+        let attr = &t[a + inner..k];
+        if let Some(p) = attr_path(attr) {
+            path = Some(p);
+        } else if is_ident(attr.get(2), "cfg") && is_punct(attr.get(3), '(') {
+            match cfg_mask(&attr[4..attr.len().saturating_sub(2)]) {
+                Ok(m) => mask &= m,
+                Err(e) => errs.push(format!("{what}: {e}")),
+            }
+        } else if is_ident(attr.get(2), "cfg_attr")
+            && attr
+                .iter()
+                .any(|x| is_ident(Some(x), "path") || is_ident(Some(x), "cfg"))
+        {
+            errs.push(format!(
+                "{what}: a `cfg_attr` that applies `path` or `cfg` cannot be resolved"
+            ));
+        }
+    }
+    (mask, path)
+}
+
+/// A file a module pulls in: its path, whether it owns its directory, the
+/// module path it is mounted at, and the CI configurations that read it.
+type Child = (String, bool, Vec<String>, u8);
 
 /// Every file a module declaration, `#[path]` or `include!` in `file` pulls
 /// in. `owns_dir` is rustc's "mod-rs" ownership: true for a crate root, a
@@ -808,9 +966,13 @@ fn children(
     file: &str,
     src: &str,
     owns_dir: bool,
+    live: u8,
     exists: &dyn Fn(&str) -> bool,
-) -> Result<Vec<Child>, Vec<String>> {
-    let lexed = lex(src).map_err(|e| vec![format!("{file}: {e}")])?;
+) -> (Vec<Child>, Vec<String>) {
+    let lexed = match lex(src) {
+        Ok(l) => l,
+        Err(e) => return (Vec::new(), vec![format!("{file}: {e}")]),
+    };
     let t = &lexed.tokens;
     let fp = Path::new(file);
     let dir = fp.parent().unwrap_or(Path::new(""));
@@ -825,18 +987,36 @@ fn children(
     };
     let mut out = Vec::new();
     let mut errs = Vec::new();
-    // Brace stack: Some(name) for an inline module, None for anything else.
-    let mut stack: Vec<Option<String>> = Vec::new();
+    // The file's own configurations, narrowed by an inner `#![cfg]` at its top.
+    let mut file_live = live;
+    // Brace stack: Some(name) for an inline module, None for anything else,
+    // each with the CI configurations under which its contents are compiled.
+    let mut stack: Vec<(Option<String>, u8)> = Vec::new();
     let mut i = 0;
     while i < t.len() {
+        let here = stack.last().map_or(file_live, |f| f.1);
         match &t[i].tok {
+            Tok::Punct('#') if is_punct(t.get(i + 1), '!') && is_punct(t.get(i + 2), '[') => {
+                let end = skip_group(t, i + 2);
+                let what = format!("{file}:{}: an inner attribute", t[i].line);
+                let (m, _) = attr_effect(t, &[(i, end)], &what, &mut errs);
+                match stack.last_mut() {
+                    Some(f) => f.1 &= m,
+                    None => file_live &= m,
+                }
+                i = end;
+                continue;
+            }
             Tok::Punct('{') => {
-                let inline = if i >= 2 && is_ident(t.get(i - 2), "mod") {
-                    t.get(i - 1).and_then(ident).map(str::to_owned)
+                let frame = if i >= 2 && is_ident(t.get(i - 2), "mod") {
+                    let name = t.get(i - 1).and_then(ident).map(str::to_owned);
+                    let what = format!("{file}:{}: `mod` block", t[i].line);
+                    let (m, _) = attr_effect(t, &outer_attrs(t, i - 2), &what, &mut errs);
+                    (name, here & m)
                 } else {
-                    None
+                    (None, here)
                 };
-                stack.push(inline);
+                stack.push(frame);
             }
             Tok::Punct('}') => {
                 stack.pop();
@@ -851,72 +1031,22 @@ fn children(
                 if let (Some(name), true) =
                     (t.get(i + 1).and_then(ident), is_punct(t.get(i + 2), ';'))
                 {
-                    // Attributes before `mod`, past any visibility.
-                    let mut k = i;
-                    if k > 0 && is_punct(t.get(k - 1), ')') {
-                        // pub(crate) / pub(in path): walk back to its `(`.
-                        let mut d = 0i64;
-                        while k > 0 {
-                            k -= 1;
-                            match t[k].tok {
-                                Tok::Punct(')') => d += 1,
-                                Tok::Punct('(') => {
-                                    d -= 1;
-                                    if d == 0 {
-                                        break;
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    if k > 0 && is_ident(t.get(k - 1), "pub") {
-                        k -= 1;
-                    }
-                    let mut path_attr = None;
-                    while k > 0 && is_punct(t.get(k - 1), ']') {
-                        // Walk back to the `#` of this attribute.
-                        let mut d = 0i64;
-                        let mut a = k - 1;
-                        loop {
-                            match t[a].tok {
-                                Tok::Punct(']') => d += 1,
-                                Tok::Punct('[') => {
-                                    d -= 1;
-                                    if d == 0 {
-                                        break;
-                                    }
-                                }
-                                _ => {}
-                            }
-                            if a == 0 {
-                                break;
-                            }
-                            a -= 1;
-                        }
-                        if a == 0 || !is_punct(t.get(a - 1), '#') {
-                            break;
-                        }
-                        let attr = &t[a - 1..k];
-                        if let Some(p) = attr_path(attr) {
-                            path_attr = Some(p);
-                        } else if is_ident(attr.get(2), "cfg_attr")
-                            && attr.iter().any(|x| is_ident(Some(x), "path"))
-                        {
-                            errs.push(format!("{file}:{line}: `cfg_attr(.., path = ..)` on `mod {name}` cannot be resolved"));
-                        }
-                        k = a - 1;
-                    }
+                    let what = format!("{file}:{line}: `mod {name};`");
+                    let (own, path_attr) = attr_effect(t, &outer_attrs(t, i), &what, &mut errs);
+                    let mask = here & own;
                     let mut inside_other = false;
                     let mut inline_dir = base.clone();
                     for frame in &stack {
-                        match frame {
+                        match &frame.0 {
                             Some(n) => inline_dir.push(n),
                             None => inside_other = true,
                         }
                     }
+                    let rel = module_rel(&stack, Some(name));
                     if inside_other {
                         errs.push(format!("{file}:{line}: `mod {name};` inside a non-module block cannot be resolved"));
+                    } else if mask == 0 {
+                        errs.push(format!("{file}:{line}: `mod {name};` is compiled under no configuration CI builds, so rustc never reads its file and nothing proves it Rust (D-2340)"));
                     } else if let Some(p) = path_attr {
                         let target = if stack.is_empty() {
                             dir.join(&p)
@@ -925,7 +1055,7 @@ fn children(
                         };
                         let target = path_string(&normalise(&target));
                         if exists(&target) {
-                            out.push((target, true, module_rel(&stack, Some(name))));
+                            out.push((target, true, rel, mask));
                         } else {
                             errs.push(format!("{file}:{line}: `#[path = \"{p}\"] mod {name};` names {target}, which is not tracked"));
                         }
@@ -933,9 +1063,9 @@ fn children(
                         let a = path_string(&normalise(&inline_dir.join(format!("{name}.rs"))));
                         let b = path_string(&normalise(&inline_dir.join(name).join("mod.rs")));
                         if exists(&a) {
-                            out.push((a, false, module_rel(&stack, Some(name))));
+                            out.push((a, false, rel, mask));
                         } else if exists(&b) {
-                            out.push((b, true, module_rel(&stack, Some(name))));
+                            out.push((b, true, rel, mask));
                         } else {
                             errs.push(format!(
                                 "{file}:{line}: `mod {name};` resolves to neither {a} nor {b}"
@@ -950,11 +1080,20 @@ fn children(
                     (Some(Tok::Str(s)), true) if is_punct(t.get(i + 2), '(') => Some(s.clone()),
                     _ => None,
                 };
+                let what = format!("{file}:{line}: include!");
+                let (own, _) = attr_effect(t, &outer_attrs(t, i), &what, &mut errs);
+                let mask = here & own;
                 match lit {
+                    _ if stack.iter().any(|f| f.0.is_none()) => errs.push(format!(
+                        "{file}:{line}: include! inside a non-module block cannot be resolved"
+                    )),
+                    _ if mask == 0 => errs.push(format!(
+                        "{file}:{line}: include! is compiled under no configuration CI builds (D-2340)"
+                    )),
                     Some(p) => {
                         let target = path_string(&normalise(&dir.join(&p)));
                         if exists(&target) {
-                            out.push((target, true, module_rel(&stack, None)));
+                            out.push((target, true, module_rel(&stack, None), mask));
                         } else {
                             errs.push(format!("{file}:{line}: include!(\"{p}\") names {target}, which is not tracked"));
                         }
@@ -968,42 +1107,53 @@ fn children(
         }
         i += 1;
     }
-    if errs.is_empty() { Ok(out) } else { Err(errs) }
+    (out, errs)
 }
 
-/// The closure of `roots` under module declarations, `#[path]` and `include!`.
+/// The closure of `roots` under module declarations, `#[path]` and `include!`,
+/// following each file under the union of the CI configurations that reach it.
 fn closure(
     roots: &[String],
     read: &dyn Fn(&str) -> Option<String>,
     exists: &dyn Fn(&str) -> bool,
 ) -> (BTreeSet<String>, Vec<String>) {
-    let mut seen = BTreeSet::new();
-    let mut errs = Vec::new();
-    let mut queue: Vec<(String, bool)> = roots.iter().map(|r| (r.clone(), true)).collect();
-    while let Some((f, owns)) = queue.pop() {
-        if !seen.insert(f.clone()) {
+    let mut seen: BTreeMap<String, u8> = BTreeMap::new();
+    // The refusals of each file's LAST visit, which is under the union of
+    // every configuration that reaches it: a declaration dead under one path
+    // to a file may be live under another (D-2340).
+    let mut errs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut queue: Vec<(String, bool, u8)> = roots
+        .iter()
+        .map(|r| (r.clone(), true, EVERY_CI_CFG))
+        .collect();
+    while let Some((f, owns, live)) = queue.pop() {
+        let was = seen.get(&f).copied().unwrap_or(0);
+        if was | live == was {
             continue;
         }
+        let live = was | live;
+        seen.insert(f.clone(), live);
         let Some(src) = read(&f) else {
-            errs.push(format!("{f}: cannot be read"));
+            errs.insert(f.clone(), vec![format!("{f}: cannot be read")]);
             continue;
         };
         let owns = owns || f.ends_with("/mod.rs") || f == "mod.rs";
-        match children(&f, &src, owns, exists) {
-            Ok(c) => queue.extend(c.into_iter().map(|(p, o, _)| (p, o))),
-            Err(e) => errs.extend(e),
-        }
+        let (c, e) = children(&f, &src, owns, live, exists);
+        queue.extend(c.into_iter().map(|(p, o, _, m)| (p, o, m)));
+        errs.insert(f, e);
     }
-    (seen, errs)
+    (
+        seen.into_keys().collect(),
+        errs.into_values().flatten().collect(),
+    )
 }
 
 /// The module segments a child adds below its parent: the inline modules it
 /// sits in, then its own name (none for an `include!`, whose text is inlined).
-fn module_rel(stack: &[Option<String>], name: Option<&str>) -> Vec<String> {
+fn module_rel(stack: &[(Option<String>, u8)], name: Option<&str>) -> Vec<String> {
     stack
         .iter()
-        .flatten()
-        .cloned()
+        .filter_map(|f| f.0.clone())
         .chain(name.map(str::to_owned))
         .collect()
 }
@@ -1035,18 +1185,15 @@ fn module_paths(
             continue;
         };
         let owns = owns || f.ends_with("/mod.rs") || f == "mod.rs";
-        match children(&f, &src, owns, exists) {
-            Ok(c) => {
-                let mut lineage = ancestors.clone();
-                lineage.push(f.clone());
-                queue.extend(c.into_iter().map(|(p, o, rel)| {
-                    let mut m = module.clone();
-                    m.extend(rel);
-                    (p, o, m, lineage.clone())
-                }));
-            }
-            Err(e) => errs.extend(e),
-        }
+        let (c, e) = children(&f, &src, owns, EVERY_CI_CFG, exists);
+        let mut lineage = ancestors.clone();
+        lineage.push(f.clone());
+        queue.extend(c.into_iter().map(|(p, o, rel, _)| {
+            let mut m = module.clone();
+            m.extend(rel);
+            (p, o, m, lineage.clone())
+        }));
+        errs.extend(e);
     }
     (seen, errs)
 }
@@ -1061,6 +1208,86 @@ const PROCESS_MEMBERS_THAT_START_NOTHING: [&str; 6] = [
     "ExitStatus",
     "Termination",
 ];
+
+/// The `cargo:` directives a build script may print, as the exact text its
+/// format string starts with (RO-8, D-2347). `crates/cli/build.rs` prints
+/// these and no others; a link argument, a `rustc-cfg`, a `rustc-flags` or a
+/// library search path is a new decision, not a quiet line.
+const CARGO_DIRECTIVES: [&str; 4] = [
+    "rerun-if-env-changed=",
+    "rerun-if-changed=",
+    "rustc-env=BRUTEX_COMMIT=",
+    "warning=",
+];
+
+/// What a build script's PRODUCTION code must not do beyond starting a
+/// process (RO-8, D-2347): print a directive off the list above, print
+/// anything whose format string is not one, split a literal with `concat!`
+/// (which hid `.cargo` and `rustc-link-arg` from the literal check), reach
+/// stdout by any other door, read where cargo keeps its configuration, or
+/// write a file at all. Test code is not part of the build script and is
+/// skipped.
+fn build_output_findings(path: &str, src: &str) -> Result<Vec<String>, String> {
+    let t = production_tokens(src)?;
+    let mut out = Vec::new();
+    for (i, tok) in t.iter().enumerate() {
+        let line = tok.line;
+        if let Tok::Str(lit) = &tok.tok {
+            if matches!(lit.as_str(), "CARGO_HOME" | "HOME" | "USERPROFILE") {
+                out.push(format!(
+                    "{path}:{line}: reads {lit:?}, which locates cargo's own configuration"
+                ));
+            }
+            continue;
+        }
+        let Some(name) = ident(tok) else { continue };
+        let bang = is_punct(t.get(i + 1), '!');
+        let after_path = i >= 2 && is_path_sep(&t, i - 2);
+        let why = match name {
+            "concat" if bang => {
+                Some("splits a literal, which this scan cannot read whole".to_owned())
+            }
+            "print" | "println" if bang => {
+                let first = t.get(i + 3).map(|x| &x.tok);
+                match first {
+                    Some(Tok::Str(f)) if is_punct(t.get(i + 2), '(') => {
+                        let body = f
+                            .strip_prefix("cargo::")
+                            .or_else(|| f.strip_prefix("cargo:"));
+                        (!body.is_some_and(|b| CARGO_DIRECTIVES.iter().any(|d| b.starts_with(d))))
+                            .then(|| format!("prints {f:?}, which is not one of the directives {CARGO_DIRECTIVES:?}"))
+                    }
+                    _ => Some("prints without a literal format string".to_owned()),
+                }
+            }
+            "fs" | "File"
+                if is_ident(t.get(i + 1), "as")
+                    || (is_path_sep(&t, i + 1) && is_punct(t.get(i + 3), '{')) =>
+            {
+                Some(format!(
+                    "renames or group-imports from `{name}`, which hides a write"
+                ))
+            }
+            "stdout" | "OpenOptions" | "symlink" | "soft_link" | "hard_link" => Some(format!(
+                "names `{name}`, a door to output beyond the listed directives"
+            )),
+            "write" | "create" | "create_new" | "create_dir" | "create_dir_all" | "copy"
+            | "rename" | "set_permissions" | "remove_file" | "remove_dir" | "remove_dir_all"
+                if after_path
+                    && t.get(i - 3)
+                        .and_then(ident)
+                        .is_some_and(|p| p == "fs" || p == "File") =>
+            {
+                Some(format!("writes the file system through `{name}`"))
+            }
+            _ => None,
+        };
+        if let Some(why) = why {
+            out.push(format!("{path}:{line}: {why}"));
+        }
+    }
+    Ok(out)
+}
 
 /// Every token in a build script that can start another program, or reach
 /// code that could. Read from tokens, so spacing, comments, strings and `r#`
@@ -1121,39 +1348,136 @@ fn build_findings(path: &str, src: &str) -> Result<Vec<String>, String> {
             out.push(format!("{path}:{}: `{name}` {why}", tok.line));
         }
     }
+    out.extend(build_output_findings(path, src)?);
     Ok(out)
 }
 
-/// A shell or a language interpreter named as the program of a
-/// `Command::new("...")` anywhere in crate code, test code included
-/// (rustonly2-4, D-1603). Gate 1e shadows interpreters by NAME on PATH, so a
-/// literal absolute path walked past it, and `sh -c` reaches every program
-/// there is; gate 2 reads build scripts only. A program held in a variable is
-/// not read here (`api`'s browser opener, D-1202, is one), and that limit is
-/// stated in docs/06-limits.md.
+/// The programs crate code may start by name (RO-5, D-2344): `git` and
+/// `mkfifo` in tests that build fixtures, and the three platform URL openers
+/// `api` hands the operator's browser to (D-1202). Anything else is refused.
+const SPAWN_PROGRAMS: [&str; 6] = [
+    "git",
+    "mkfifo",
+    "/usr/bin/mkfifo",
+    "xdg-open",
+    "open",
+    "explorer.exe",
+];
+
+/// The string literals in `toks`, minus an `expect(..)` message, which names
+/// no program.
+fn program_literals(toks: &[Token]) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < toks.len() {
+        if is_ident(toks.get(i), "expect") && is_punct(toks.get(i + 1), '(') {
+            i = skip_group(toks, i + 1);
+            continue;
+        }
+        if let Tok::Str(s) = &toks[i].tok {
+            out.push(s.as_str());
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Does `toks` produce only a program this repository may start: the running
+/// binary (`current_exe`), a cargo-built one (`CARGO_BIN_EXE_*`), or a listed
+/// name? Every literal in it must be one of those, and it must name at least
+/// one of them.
+fn names_only_allowed_programs(toks: &[Token]) -> bool {
+    let lits = program_literals(toks);
+    let exe = toks.iter().any(|t| ident(t) == Some("current_exe"));
+    let all_ok = lits
+        .iter()
+        .all(|l| SPAWN_PROGRAMS.contains(l) || l.starts_with("CARGO_BIN_EXE_"));
+    all_ok && (exe || !lits.is_empty())
+}
+
+/// The program a `Command::new(..)` argument starts, resolved one step in the
+/// same file: a `let` that binds the name, or the body of the `fn` it calls.
+fn spawn_target_ok(t: &[Token], at: usize, arg: &[Token]) -> bool {
+    if names_only_allowed_programs(arg) {
+        return true;
+    }
+    let arg: Vec<&Token> = arg.iter().filter(|x| !is_punct(Some(x), '&')).collect();
+    let call =
+        arg.len() == 3 && is_punct(arg.get(1).copied(), '(') && is_punct(arg.get(2).copied(), ')');
+    let Some(name) = arg.first().and_then(|x| ident(x)) else {
+        return false;
+    };
+    if !(arg.len() == 1 || call) {
+        return false;
+    }
+    let fn_body = |f: &str| {
+        (0..t.len())
+            .find(|&k| is_ident(t.get(k), "fn") && is_ident(t.get(k + 1), f))
+            .and_then(|fi| (fi..t.len()).find(|&k| is_punct(t.get(k), '{')))
+            .is_some_and(|open| names_only_allowed_programs(&t[open..skip_group(t, open)]))
+    };
+    if call {
+        return fn_body(name);
+    }
+    // The nearest `let` before the call that binds the name.
+    for i in (0..at).rev() {
+        if is_ident(t.get(i), "let") {
+            let Some(eq) =
+                (i..t.len()).find(|&k| is_punct(t.get(k), '=') || is_punct(t.get(k), ';'))
+            else {
+                return false;
+            };
+            if is_punct(t.get(eq), '=') && t[i..eq].iter().any(|x| ident(x) == Some(name)) {
+                let end = item_end(t, eq + 1);
+                let expr = &t[eq + 1..=end.min(t.len() - 1)];
+                if names_only_allowed_programs(expr) {
+                    return true;
+                }
+                // `let x = f(..);` resolves through `fn f`.
+                return expr
+                    .first()
+                    .and_then(ident)
+                    .is_some_and(|f| is_punct(expr.get(1), '(') && fn_body(f));
+            }
+        }
+    }
+    false
+}
+
+/// Every `Command::new(..)` in crate or tool code, test code included, whose
+/// program is not the running binary, a cargo-built binary or a listed
+/// program (RO-5, D-2344). It used to refuse only a shell or an interpreter
+/// spelled as a literal, so `Command::new(program)` with `program = "sh"` one
+/// line up, or any program not on that short list, walked past; gate 1e's
+/// PATH stubs see a name only when it is run. A renamed `Command` is refused,
+/// since its calls would not read as `Command::new`.
 fn spawn_findings(path: &str, src: &str) -> Result<Vec<String>, String> {
     let lexed = lex(src)?;
     let t = &lexed.tokens;
     let mut out = Vec::new();
     for (i, tok) in t.iter().enumerate() {
-        if ident(tok) != Some("Command")
-            || !is_path_sep(t, i + 1)
-            || !is_ident(t.get(i + 3), "new")
-            || !is_punct(t.get(i + 4), '(')
+        if ident(tok) != Some("Command") {
+            continue;
+        }
+        if is_ident(t.get(i + 1), "as") {
+            out.push(format!(
+                "{path}:{}: `Command` is renamed, which hides its spawns from this scan",
+                tok.line
+            ));
+            continue;
+        }
+        if !is_path_sep(t, i + 1) || !is_ident(t.get(i + 3), "new") || !is_punct(t.get(i + 4), '(')
         {
             continue;
         }
-        let Some(Tok::Str(program)) = t.get(i + 5).map(|x| &x.tok) else {
-            continue;
-        };
-        let base = program.rsplit('/').next().unwrap_or(program);
-        if matches!(
-            base,
-            "sh" | "bash" | "dash" | "zsh" | "ksh" | "fish" | "env"
-        ) || interpreter(base).is_some()
-        {
+        let close = skip_group(t, i + 4) - 1;
+        let arg = &t[i + 5..close.max(i + 5)];
+        if !spawn_target_ok(t, i, arg) {
+            let shown = src
+                .get(t[i + 4].start..t[close.min(t.len() - 1)].end)
+                .unwrap_or("(..)");
             out.push(format!(
-                "{path}:{}: `Command::new({program:?})` starts a shell or an interpreter",
+                "{path}:{}: `Command::new{shown}` starts a program that is not current_exe, a CARGO_BIN_EXE_ binary or one of {SPAWN_PROGRAMS:?}",
                 tok.line
             ));
         }
@@ -2006,56 +2330,250 @@ fn aggregator_findings(src: &str) -> Vec<String> {
     out
 }
 
-/// Is this word, with a path and a pair of enclosing quotes removed, the name
-/// of a program that runs source handed to it?
-fn interpreter(word: &str) -> Option<&str> {
-    let w = match word.as_bytes() {
-        [q @ (b'"' | b'\''), .., e] if q == e && word.len() >= 2 => &word[1..word.len() - 1],
-        _ => word,
+/// How a program that runs source is handed that source inline (RO-4,
+/// D-2342).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Family {
+    /// A language interpreter: an inline flag, `-`, a heredoc or a pipe.
+    Script,
+    /// A shell: `-c` with a program built at run time, `-s`, or a pipe.
+    Shell,
+    /// A text-processing language whose first operand IS its program.
+    Awk,
+    /// A JSON query language whose first operand is its program; a bare
+    /// field path (`.sha`) is a path, not a program.
+    Jq,
+}
+
+/// A word with its quoting, expansion punctuation and directory removed:
+/// `"$(command`, `perl)"` and `/usr/bin/node` read as the program named.
+fn bare_word(word: &str) -> &str {
+    let w = word.trim_matches(|c| matches!(c, '\'' | '"' | '`' | '$' | '(' | ')' | '{' | '}'));
+    w.rsplit('/').next().unwrap_or(w)
+}
+
+/// Is this word, bare, the name of a program that runs source handed to it?
+/// A version suffix is part of the same name: `ruby3.3`, `perl5.38`,
+/// `node22`.
+fn interpreter(word: &str) -> Option<(&'static str, Family)> {
+    let w = bare_word(word);
+    let name = w.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+    let name = if name.is_empty() { w } else { name };
+    let found = match name {
+        "node" | "nodejs" => ("node", Family::Script),
+        "bun" => ("bun", Family::Script),
+        "deno" => ("deno", Family::Script),
+        "perl" => ("perl", Family::Script),
+        "ruby" => ("ruby", Family::Script),
+        "php" => ("php", Family::Script),
+        "lua" | "luajit" => ("lua", Family::Script),
+        "pwsh" | "powershell" => ("pwsh", Family::Script),
+        "Rscript" | "R" => ("Rscript", Family::Script),
+        "tclsh" | "wish" | "expect" => ("tclsh", Family::Script),
+        "osascript" => ("osascript", Family::Script),
+        "julia" => ("julia", Family::Script),
+        "guile" => ("guile", Family::Script),
+        "elixir" => ("elixir", Family::Script),
+        "groovy" => ("groovy", Family::Script),
+        "sh" | "bash" | "dash" | "zsh" | "ksh" | "fish" | "busybox" => ("sh", Family::Shell),
+        "awk" | "gawk" | "mawk" | "nawk" => ("awk", Family::Awk),
+        "jq" | "gojq" | "yq" => ("jq", Family::Jq),
+        _ if name.starts_with(concat!("py", "thon")) => (concat!("py", "thon"), Family::Script),
+        _ => return None,
     };
-    let prog = w.rsplit('/').next().unwrap_or(w);
-    (matches!(
-        prog,
-        "node" | "nodejs" | "bun" | "deno" | "perl" | "ruby" | "php" | "lua"
-    ) || prog.starts_with(concat!("py", "thon")))
-    .then_some(prog)
+    Some(found)
+}
+
+/// Does this flag word hand `prog` a program inline?
+fn inline_flag(prog: &str, flag: &str) -> bool {
+    let cluster = flag.starts_with('-') && !flag.starts_with("--") && flag.len() > 1;
+    let long = |names: &[&str]| {
+        names
+            .iter()
+            .any(|f| flag == *f || flag.starts_with(&format!("{f}=")))
+    };
+    match prog {
+        "node" | "bun" => (cluster && flag.contains(['e', 'p'])) || long(&["--eval", "--print"]),
+        "deno" => flag == "eval",
+        "perl" | "ruby" => cluster && flag.contains(['e', 'E']),
+        "php" => cluster && flag.contains(['r', 'R', 'B', 'E']),
+        "lua" | "Rscript" | "osascript" | "groovy" | "elixir" => {
+            (cluster && flag.contains('e')) || long(&["--eval", "--expr"])
+        }
+        "julia" => (cluster && flag.contains(['e', 'E'])) || long(&["--eval", "--print"]),
+        "guile" | "tclsh" => cluster && flag.contains(['c', 'e']),
+        "pwsh" => {
+            let f = flag.trim_start_matches('-').to_ascii_lowercase();
+            flag.starts_with('-')
+                && !f.is_empty()
+                && ("command".starts_with(&f) || "encodedcommand".starts_with(&f) || f == "ec")
+        }
+        _ => cluster && flag.contains('c'),
+    }
+}
+
+/// A `--jq`/`jq` operand that only reads a field path (`.sha`, `.a.b`).
+fn is_field_path(p: &str) -> bool {
+    let p = p
+        .trim_end_matches(')')
+        .trim_matches(|c| c == '\'' || c == '"');
+    p.starts_with('.')
+        && p[1..].split('.').all(|seg| {
+            seg.chars()
+                .next()
+                .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
+                && seg.chars().all(|c| c == '_' || c.is_ascii_alphanumeric())
+        })
+}
+
+/// One quoted shell word that may span several whitespace-split words:
+/// its text and how many words it took.
+fn operand(words: &[&str]) -> (String, usize) {
+    let Some(first) = words.first() else {
+        return (String::new(), 0);
+    };
+    let q = first.chars().next().filter(|c| *c == '\'' || *c == '"');
+    let Some(q) = q else {
+        return ((*first).to_owned(), 1);
+    };
+    let mut text = (*first).to_owned();
+    let mut n = 1;
+    while !(text.len() > 1 && text.ends_with(q)) && n < words.len() {
+        text.push(' ');
+        text.push_str(words[n]);
+        n += 1;
+    }
+    (text, n)
 }
 
 /// Every place one logical shell line hands an interpreter a program that is
-/// not a tracked file (rustonly2-2, D-1602): an inline-program flag in any
-/// spelling (`-e`, `-ne`, `-pe`, `-Bc`, `--eval`, `--eval=..`), a program on
-/// standard input (`-`, a heredoc or here-string, or a pipe into an
-/// interpreter given no script), and `deno eval`.
-fn inline_programs(l: &str) -> Vec<(String, &'static str)> {
+/// not a tracked file (rustonly2-2, D-1602; widened by RO-4, D-2342): an
+/// inline-program flag ANYWHERE in the command, not only first (`node
+/// --no-warnings -e`); a program on standard input (`-`, `/dev/stdin`, a
+/// heredoc or here-string, or a pipe into an interpreter given only flags);
+/// `deno eval`; a shell's `-c` whose program is assembled at run time, its
+/// `-s`, or a pipe into it; `eval`; an `awk` or `jq` program operand; and a
+/// `gh --jq` or `--template` program. Versioned and wrapped names count:
+/// `perl5.38`, `"$(command -v perl)"`. The third field is the family, so
+/// the awk ratchet can count its own.
+fn inline_programs(l: &str) -> Vec<(String, &'static str, Family)> {
     let mut out = Vec::new();
-    let words: Vec<&str> = l
-        .split(|c: char| c.is_whitespace() || c == ';' || c == '(' || c == '&' || c == '|')
-        .filter(|w| !w.is_empty())
-        .collect();
-    for (i, w) in words.iter().enumerate() {
-        let Some(prog) = interpreter(w) else { continue };
-        let next = words.get(i + 1).copied().unwrap_or("");
-        let cluster = next.starts_with('-') && !next.starts_with("--") && next.len() > 1;
-        let inline_flag = match prog {
-            "node" | "nodejs" | "bun" => {
-                (cluster && next.contains(['e', 'p']))
-                    || ["--eval", "--print"]
-                        .iter()
-                        .any(|f| next == *f || next.starts_with(&format!("{f}=")))
-            }
-            "deno" => next == "eval",
-            "perl" | "ruby" => cluster && next.contains(['e', 'E']),
-            "php" => cluster && next.contains('r'),
-            "lua" => cluster && next.contains('e'),
-            _ => cluster && next.contains('c'),
-        };
-        if inline_flag {
-            out.push((format!("{w} {next}"), "runs a program written inline"));
-        } else if next == "-" || words[i + 1..].iter().any(|x| x.starts_with("<<")) {
+    let mut cut = l.to_owned();
+    for sep in ["&&", "||", "$(", "`", ";", "|", "<("] {
+        cut = cut.replace(sep, "\n");
+    }
+    for seg in cut.lines() {
+        let words: Vec<&str> = seg.split_whitespace().collect();
+        if words.first().map(|w| bare_word(w)) == Some("eval") {
             out.push((
-                (*w).to_owned(),
-                "reads a program from standard input or a heredoc",
+                "eval".to_owned(),
+                "runs text assembled at run time",
+                Family::Shell,
             ));
+        }
+        let gh = words.iter().any(|w| bare_word(w) == "gh");
+        for (i, w) in words.iter().enumerate() {
+            if gh {
+                let (flag, prog) = if let Some(v) = w.strip_prefix("--jq=") {
+                    ("--jq", operand(&[v]).0)
+                } else if let Some(v) = w.strip_prefix("--template=") {
+                    ("--template", v.to_owned())
+                } else if matches!(*w, "--jq" | "-q" | "--template") {
+                    (*w, operand(&words[i + 1..]).0)
+                } else {
+                    ("", String::new())
+                };
+                if !flag.is_empty() && (flag == "--template" || !is_field_path(&prog)) {
+                    out.push((
+                        format!("gh {flag} {prog}"),
+                        "runs a query program written inline; a field path is all a workflow may pass",
+                        Family::Jq,
+                    ));
+                }
+            }
+            let Some((prog, family)) = interpreter(w) else {
+                continue;
+            };
+            let rest = &words[i + 1..];
+            match family {
+                Family::Script => {
+                    if let Some(f) = rest.iter().find(|f| inline_flag(prog, f)) {
+                        out.push((format!("{w} {f}"), "runs a program written inline", family));
+                    } else if rest
+                        .iter()
+                        .any(|x| *x == "-" || *x == "/dev/stdin" || x.starts_with("<<"))
+                    {
+                        out.push((
+                            (*w).to_owned(),
+                            "reads a program from standard input or a heredoc",
+                            family,
+                        ));
+                    }
+                }
+                Family::Shell => {
+                    if let Some(k) = rest.iter().position(|f| inline_flag(prog, f)) {
+                        let program = rest.get(k + 1).copied().unwrap_or("");
+                        if program.trim_start_matches(['"', '\'']).starts_with('$')
+                            || program.is_empty()
+                        {
+                            out.push((
+                                format!("{w} {} {program}", rest[k]),
+                                "runs a shell program assembled at run time",
+                                family,
+                            ));
+                        }
+                    } else if rest
+                        .iter()
+                        .any(|f| *f == "-s" || *f == "-" || *f == "/dev/stdin")
+                    {
+                        out.push((
+                            (*w).to_owned(),
+                            "reads a shell program from standard input",
+                            family,
+                        ));
+                    }
+                }
+                Family::Awk | Family::Jq => {
+                    let mut k = 0;
+                    let mut from_file = false;
+                    while let Some(f) = rest.get(k) {
+                        if !f.starts_with('-') || *f == "-" {
+                            break;
+                        }
+                        k += 1;
+                        if matches!(*f, "-f" | "--from-file") {
+                            from_file = true;
+                            if matches!(rest.get(k).copied(), Some("-" | "/dev/stdin")) {
+                                out.push((
+                                    (*w).to_owned(),
+                                    "reads a program from standard input",
+                                    family,
+                                ));
+                            }
+                            break;
+                        }
+                        // A flag whose value is the next word.
+                        if matches!(
+                            *f,
+                            "-v" | "-F" | "--arg" | "--argjson" | "--slurpfile" | "--rawfile"
+                        ) {
+                            k += if f.starts_with("--") { 2 } else { 1 };
+                        }
+                    }
+                    let (program, _) = operand(&rest[k.min(rest.len())..]);
+                    let inline = !from_file
+                        && !program.is_empty()
+                        && program.starts_with(['\'', '"', '$', '{', '/', '.'])
+                        && !(family == Family::Jq && is_field_path(&program));
+                    if inline {
+                        out.push((
+                            format!("{w} {program}"),
+                            "runs a program written inline",
+                            family,
+                        ));
+                    }
+                }
+            }
         }
     }
     // A pipe into an interpreter that names no script hands it its program.
@@ -2064,14 +2582,24 @@ fn inline_programs(l: &str) -> Vec<(String, &'static str)> {
             .split_whitespace()
             .skip_while(|w| matches!(*w, "{" | "(" | "!" | "then" | "do"));
         if let Some(w) = stage_words.next()
-            && interpreter(w).is_some()
-            && stage_words.next().is_none()
+            && let Some((_, family @ (Family::Script | Family::Shell))) = interpreter(w)
+            && stage_words.all(|x| x.starts_with('-'))
         {
-            out.push((format!("| {w}"), "reads a program from a pipe"));
+            out.push((format!("| {w}"), "reads a program from a pipe", family));
         }
     }
     out
 }
+
+/// Inline `awk` programs a workflow may still carry, and exactly how many
+/// (D-2342). Gates that pre-date the scanner read text with them; each one a
+/// gate moves into a `.github/*.rs` tool lowers its file's count here, and a
+/// new one anywhere is refused. Equality, not a ceiling, so the number
+/// cannot drift above what is there. Zero since D-2311..D-2315 moved every
+/// remaining program into the `.github/gates_*.rs` tools: any inline `awk`
+/// in `ci.yml` is now refused.
+const AWK_RATCHET: &[(&str, usize)] = &[(".github/workflows/ci.yml", AWK_IN_CI)];
+const AWK_IN_CI: usize = 0;
 
 /// Workflow-wide refusals. `continue-on-error` anywhere turns a red step
 /// into a green job. A pipe into `grep -q` under `pipefail` reads a match
@@ -2080,6 +2608,7 @@ fn inline_programs(l: &str) -> Vec<(String, &'static str)> {
 /// `web/`.
 fn workflow_findings(path: &str, src: &str) -> Vec<String> {
     let mut out = Vec::new();
+    let mut awk = Vec::new();
     // Join shell continuations so a pipe on the next line is seen.
     let mut logical: Vec<(usize, String)> = Vec::new();
     for (n, raw) in src.lines().enumerate() {
@@ -2130,9 +2659,25 @@ fn workflow_findings(path: &str, src: &str) -> Vec<String> {
                 ));
             }
         }
-        for (at, why) in inline_programs(l) {
-            out.push(format!("{path}:{n}: `{at}` {why}"));
+        for (at, why, family) in inline_programs(l) {
+            let line = format!("{path}:{n}: `{at}` {why}");
+            if family == Family::Awk {
+                awk.push(line);
+            } else {
+                out.push(line);
+            }
         }
+    }
+    let allowed = AWK_RATCHET
+        .iter()
+        .find(|(p, _)| *p == path)
+        .map_or(0, |(_, n)| *n);
+    if awk.len() != allowed {
+        out.extend(awk.iter().cloned());
+        out.push(format!(
+            "{path}: {} inline awk program(s) where the ratchet pins exactly {allowed} (D-2342)",
+            awk.len()
+        ));
     }
     out
 }
@@ -2151,6 +2696,81 @@ fn tracked_set(listing: &str) -> BTreeSet<String> {
         .collect()
 }
 
+/// The shell command lines of a workflow's `run:` keys, continuations joined,
+/// comments and heredoc bodies left out (RO-2, D-2341). A `name:`, an `echo`
+/// or a heredoc body that mentions a program is text, not a command.
+fn run_lines(src: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut block: Option<usize> = None;
+    let mut heredoc: Option<String> = None;
+    let mut joining = false;
+    for raw in src.lines() {
+        let indent = raw.len() - raw.trim_start().len();
+        let body = raw.trim();
+        if let Some(b) = block
+            && !body.is_empty()
+            && indent <= b
+        {
+            block = None;
+            heredoc = None;
+            joining = false;
+        }
+        let command = if block.is_some() {
+            if let Some(end) = &heredoc {
+                if body == end {
+                    heredoc = None;
+                }
+                continue;
+            }
+            body
+        } else {
+            let key = body.trim_start_matches("- ");
+            let Some(rest) = key.strip_prefix("run:") else {
+                continue;
+            };
+            let rest = rest.trim();
+            if rest.starts_with('|') || rest.starts_with('>') {
+                block = Some(indent + (body.len() - key.len()));
+                continue;
+            }
+            rest
+        };
+        if command.starts_with('#') || command.is_empty() {
+            joining = false;
+            continue;
+        }
+        if let Some(at) = command.find("<<") {
+            let word = command[at + 2..]
+                .trim_start_matches(['-', '~'])
+                .trim_start()
+                .split(|c: char| c.is_whitespace() || c == ';' || c == ')')
+                .next()
+                .unwrap_or("")
+                .trim_matches(['\'', '"']);
+            if !word.is_empty() && !command[at..].starts_with("<<<") {
+                heredoc = Some(word.to_owned());
+            }
+        }
+        match out.last_mut() {
+            Some(last) if joining => {
+                last.push(' ');
+                last.push_str(command.trim_end_matches('\\'));
+            }
+            _ => out.push(command.trim_end_matches('\\').to_owned()),
+        }
+        joining = command.ends_with('\\');
+        if block.is_none() {
+            joining = false;
+        }
+    }
+    out
+}
+
+/// Is `p` a tracked `.yml` under `.github/`, the files GitHub runs?
+fn is_github_yml(p: &str) -> bool {
+    p.starts_with(".github/") && p.ends_with(".yml")
+}
+
 /// Every root cargo or this workflow compiles: crate roots by convention,
 /// target `path` keys, and the workflow's own `.github/*.rs` tools.
 ///
@@ -2159,8 +2779,9 @@ fn tracked_set(listing: &str) -> BTreeSet<String> {
 /// or `crates/zz/src/lib.rs` holding another language passed gate 1, whose
 /// success line then said "every .rs outside web/ is compiled". A crate file
 /// is a root now only when its directory is a `workspace.members` entry of
-/// the root `Cargo.toml`, and a `.github/*.rs` only when a non-comment
-/// workflow line hands it to `rustc`. A manifest or workflow that cannot be
+/// the root `Cargo.toml`, and a `.github/*.rs` only when a `run:` command line
+/// of a tracked `.github/**.yml` starts with `rustc` and names it (RO-2,
+/// D-2341); a `name:`, an `echo` or a heredoc body naming both is text. A manifest or workflow that cannot be
 /// read is an error, never an empty list.
 fn compiled_roots(
     tracked: &BTreeSet<String>,
@@ -2183,16 +2804,11 @@ fn compiled_roots(
     }
     let member = |krate: &str| members.contains(&format!("crates/{krate}"));
     let mut built = BTreeSet::new();
-    for wf in tracked
-        .iter()
-        .filter(|f| f.starts_with(".github/workflows/") && f.ends_with(".yml"))
-    {
+    for wf in tracked.iter().filter(|f| is_github_yml(f)) {
         let src = read(wf).ok_or_else(|| format!("{wf}: cannot be read"))?;
-        for line in src.lines() {
-            let body = line.trim_start();
-            let words: Vec<&str> = body.split_whitespace().collect();
-            if body.starts_with('#') || !words.iter().any(|w| w.rsplit('/').next() == Some("rustc"))
-            {
+        for line in run_lines(&src) {
+            let words: Vec<&str> = line.split_whitespace().collect();
+            if words.first().and_then(|w| w.rsplit('/').next()) != Some("rustc") {
                 continue;
             }
             for w in words {
@@ -2262,10 +2878,15 @@ fn content_findings(path: &str, bytes: &[u8]) -> Vec<String> {
     match std::str::from_utf8(bytes) {
         Err(_) => out.push(format!("{path}: is not UTF-8")),
         Ok(text) => {
-            if path.ends_with(".rs") && lex(text).is_ok_and(|l| l.shebang) {
-                out.push(format!(
-                    "{path}: a `.rs` that opens with a shebang is a script"
-                ));
+            if path.ends_with(".rs") {
+                match lex(text) {
+                    Ok(l) if l.shebang => out.push(format!(
+                        "{path}: a `.rs` that opens with a shebang is a script"
+                    )),
+                    Ok(_) => {}
+                    // D-2340: a `.rs` that is not even Rust tokens.
+                    Err(e) => out.push(format!("{path}: does not lex as Rust: {e}")),
+                }
             }
             if path.ends_with(".html") || path.ends_with(".css") {
                 for f in browser_findings(text) {
@@ -3127,7 +3748,7 @@ mod tests {
         .collect();
         let read = |p: &str| match p {
             "Cargo.toml" => Some("[workspace]\nmembers = [\"crates/a\"]\n".to_owned()),
-            ".github/workflows/w.yml" => Some("          rustc .github/tool.rs\n".to_owned()),
+            ".github/workflows/w.yml" => Some("      - run: rustc .github/tool.rs\n".to_owned()),
             _ => None,
         };
         let r = compiled_roots(&t, &read).unwrap();
@@ -3294,10 +3915,254 @@ mod tests {
         }
         for src in [
             "fn t() { Command::new(\"/usr/bin/mkfifo\"); Command::new(\"git\"); }",
-            "fn t() { Command::new(program); let s = \"sh\"; }",
             "// Command::new(\"sh\") in prose\nfn t() {}",
         ] {
             assert_eq!(spawn_findings("t.rs", src).unwrap(), Vec::<String>::new());
         }
+    }
+
+    // ---- sweep/gates-ro (D-2340..D-2348) ----
+
+    #[test]
+    fn a_module_no_ci_configuration_compiles_is_refused() {
+        // RO-1: rustc never opens the file of a cfg'd-out `mod x;`.
+        for decl in [
+            "#[cfg(any())]\nmod x;\n",
+            "#[cfg(windows)]\nmod x;\n",
+            "#[cfg(target_os = \"macos\")]\npub(crate) mod x;\n",
+            "#[cfg(all(test, not(test)))]\nmod x;\n",
+            "#[cfg(not(unix))]\nmod x;\n",
+            "#[cfg(feature = \"never\")]\nmod x;\n",
+            "#[cfg(miri)]\nmod x;\n",
+            "#[cfg_attr(test, cfg(any()))]\nmod x;\n",
+            "#[cfg(test)]\nmod t {\n    #[cfg(not(test))]\n    mod x;\n}\n",
+            "#[cfg(any())]\nmod t {\n    mod x;\n}\n",
+            "#![cfg(windows)]\nmod x;\n",
+            "#[cfg(any())]\ninclude!(\"x.rs\");\n",
+            "fn f() { include!(\"x.rs\"); }\n",
+        ] {
+            let (read, exists) = tracked(&[
+                ("c/src/lib.rs", decl),
+                ("c/src/x.rs", "not rust at all"),
+                ("c/src/t/x.rs", "not rust at all"),
+                ("c/x.rs", ""),
+            ]);
+            let (files, errs) = closure(&["c/src/lib.rs".to_owned()], &read, &exists);
+            assert!(!errs.is_empty(), "resolved: {decl} -> {files:?}");
+        }
+        // Across files: `a` is test-only, so its `not(test)` child is never read.
+        let (read, exists) = tracked(&[
+            ("c/src/lib.rs", "#[cfg(test)]\nmod a;\n"),
+            ("c/src/a.rs", "#[cfg(not(test))]\nmod b;\n"),
+            ("c/src/a/b.rs", ""),
+        ]);
+        let (_, errs) = closure(&["c/src/lib.rs".to_owned()], &read, &exists);
+        assert!(!errs.is_empty());
+        for decl in [
+            "#[cfg(test)]\nmod x;\n",
+            "#[cfg(unix)]\nmod x;\n",
+            "#[cfg(all(test, unix))]\nmod x;\n",
+            "#[cfg(not(windows))]\nmod x;\n",
+            "#[cfg(debug_assertions)]\nmod x;\n",
+            "#[cfg(any(test, windows))]\n#[path = \"x.rs\"]\nmod y;\n",
+            "#[cfg(test)]\nmod t {\n    #[cfg(unix)]\n    mod x;\n}\n",
+            "#![cfg(test)]\nmod x;\n",
+        ] {
+            let (read, exists) = tracked(&[
+                ("c/src/lib.rs", decl),
+                ("c/src/x.rs", ""),
+                ("c/src/t/x.rs", ""),
+            ]);
+            let (_, errs) = closure(&["c/src/lib.rs".to_owned()], &read, &exists);
+            assert!(errs.is_empty(), "refused: {decl}: {errs:?}");
+        }
+        // A file reached once under test and once without is read under both.
+        let (read, exists) = tracked(&[
+            (
+                "c/src/lib.rs",
+                "#[cfg(test)]\n#[path = \"a.rs\"]\nmod a;\n#[cfg(not(test))]\n#[path = \"a.rs\"]\nmod b;\n",
+            ),
+            (
+                "c/src/a.rs",
+                "#[cfg(test)]\nmod c;\n#[cfg(not(test))]\nmod d;\n",
+            ),
+            ("c/src/c.rs", ""),
+            ("c/src/d.rs", ""),
+        ]);
+        let (files, errs) = closure(&["c/src/lib.rs".to_owned()], &read, &exists);
+        assert!(errs.is_empty(), "{errs:?}");
+        assert!(files.contains("c/src/c.rs") && files.contains("c/src/d.rs"));
+    }
+
+    #[test]
+    fn a_tracked_rs_that_does_not_lex_is_refused() {
+        // RO-1, second line of defence.
+        assert!(!content_findings("crates/a/src/x.rs", b"s = \"open").is_empty());
+        assert!(content_findings("web/x.rs", b"s = \"open").is_empty());
+    }
+
+    #[test]
+    fn only_a_run_line_whose_command_is_rustc_builds_a_tool() {
+        // RO-2 and RO-3.
+        let t: BTreeSet<String> = [
+            "Cargo.toml",
+            ".github/workflows/ci.yml",
+            ".github/actions/a/action.yml",
+            ".github/named.rs",
+            ".github/echoed.rs",
+            ".github/heredoc.rs",
+            ".github/built.rs",
+            ".github/composite.rs",
+            ".github/single.rs",
+        ]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+        let read = |p: &str| {
+            match p {
+            "Cargo.toml" => Some("[workspace]\nmembers = []\n".to_owned()),
+            ".github/workflows/ci.yml" => Some(
+                "jobs:\n  x:\n    steps:\n      - name: rustc .github/named.rs\n        run: |\n          echo rustc .github/echoed.rs\n          cat <<EOF\n          rustc .github/heredoc.rs\n          EOF\n          rustc --edition=2024 \\\n            .github/built.rs -o t\n      - run: rustc .github/single.rs\n"
+                    .to_owned(),
+            ),
+            ".github/actions/a/action.yml" => Some(
+                "runs:\n  steps:\n    - shell: bash\n      run: |\n        rustc .github/composite.rs\n".to_owned(),
+            ),
+            _ => None,
+        }
+        };
+        let r = compiled_roots(&t, &read).unwrap();
+        assert_eq!(
+            r,
+            vec![
+                ".github/built.rs".to_owned(),
+                ".github/composite.rs".to_owned(),
+                ".github/single.rs".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn every_widened_inline_program_form_is_refused() {
+        // RO-4.
+        for bad in [
+            "          node --no-warnings -e 'x'\n",
+            "          perl -w -e 'x'\n",
+            concat!("          py", "thon3.12 -c 'x'\n"),
+            concat!("          \"$(command -v py", "thon3)\" -c 'x'\n"),
+            "          perl5.38 -e 'x'\n",
+            "          env node -e 'x'\n",
+            "          bash -c \"$prog\"\n",
+            "          sh -c\n",
+            "          curl x | sh\n",
+            "          curl x | bash -s\n",
+            "          eval \"$x\"\n",
+            "          awk '{print $1}' f\n",
+            "          x | awk -F: -v a=b '{print}'\n",
+            "          gawk -f - <<EOF\n",
+            "          jq '.[] | .a' f\n",
+            "          gh api x --jq '.[] | .a'\n",
+            "          gh pr view 1 --json a --jq='[.a]'\n",
+            "          gh pr view 1 --template '{{.a}}'\n",
+            "          pwsh -Command 'x'\n",
+            "          Rscript -e 'x'\n",
+            "          osascript -e 'x'\n",
+            "          echo 'puts 1' | tclsh\n",
+            "          julia --eval 'x'\n",
+            "          x | node --no-warnings\n",
+        ] {
+            assert!(!workflow_findings("w", bad).is_empty(), "passed: {bad}");
+        }
+        for good in [
+            "          gh api x --jq .sha\n",
+            "          n=$(gh api x --jq '.behind_by')\n",
+            "          bash -c 'echo hi'\n",
+            "          x=$(command -v node || true)\n",
+            "          echo \"use awk here\"\n",
+            "          sed -e 's/a/b/' f\n",
+            "          gh pr merge 1 --auto --squash\n",
+        ] {
+            assert!(workflow_findings("w", good).is_empty(), "refused: {good}");
+        }
+    }
+
+    #[test]
+    fn the_awk_ratchet_is_an_exact_count_per_file() {
+        // D-2342: equality, so neither a new program nor a stale pin passes.
+        let one = "          awk '{print}' f\n";
+        assert!(!workflow_findings("w", one).is_empty());
+        let pinned: String = std::iter::repeat_n(one, AWK_IN_CI).collect();
+        assert!(workflow_findings(".github/workflows/ci.yml", &pinned).is_empty());
+        let more = format!("{pinned}{one}");
+        assert!(!workflow_findings(".github/workflows/ci.yml", &more).is_empty());
+        // At a pin of zero there is no "fewer"; a nonzero pin still refuses one.
+        if let Some(below) = AWK_IN_CI.checked_sub(1) {
+            let fewer: String = std::iter::repeat_n(one, below).collect();
+            assert!(!workflow_findings(".github/workflows/ci.yml", &fewer).is_empty());
+        }
+        let any = format!("x\n{one}");
+        assert!(!workflow_findings(".github/workflows/ci.yml", &any).is_empty() || AWK_IN_CI == 1);
+    }
+
+    #[test]
+    fn a_spawn_must_name_the_running_binary_a_cargo_binary_or_a_listed_program() {
+        // RO-5.
+        for src in [
+            "fn t() { Command::new(program); let s = \"sh\"; }",
+            "fn t() { let p = \"sh\"; Command::new(p); }",
+            "fn t() { Command::new(\"curl\"); }",
+            "fn t() { Command::new(format!(\"{}\", x)); }",
+            "fn t() { Command::new(pick()); } fn pick() -> &'static str { \"bash\" }",
+            "fn t() { let (p, a) = h(); Command::new(p); } fn h() -> (&'static str, u8) { (\"node\", 0) }",
+            "use std::process::Command as C; fn t() { C::new(\"sh\"); }",
+            "fn t() { Command::new(if x { \"git\" } else { \"sh\" }); }",
+        ] {
+            assert!(
+                !spawn_findings("t.rs", src).unwrap().is_empty(),
+                "passed: {src}"
+            );
+        }
+        for src in [
+            "fn t() { Command::new(std::env::current_exe().expect(\"this binary\")); }",
+            "fn t() { Command::new(std::env::current_exe()?); }",
+            "fn t() { Command::new(env!(\"CARGO_BIN_EXE_api\")); }",
+            "fn t() { let e = std::env::current_exe().unwrap(); Command::new(&e); }",
+            "fn bin() -> PathBuf { PathBuf::from(env!(\"CARGO_BIN_EXE_cli\")) } fn t() { Command::new(bin()); }",
+            "fn h() -> (&'static str, u8) { match x { A => (\"open\", 0), _ => (\"xdg-open\", 0) } } fn t() { let (program, args) = h(); Command::new(program); }",
+            "fn t() { Command::new(\"git\"); Command::new(\"/usr/bin/mkfifo\"); }",
+        ] {
+            assert_eq!(
+                spawn_findings("t.rs", src).unwrap(),
+                Vec::<String>::new(),
+                "{src}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_build_script_prints_only_listed_directives_and_writes_nothing() {
+        // RO-8.
+        for src in [
+            "fn main() { println!(concat!(\"cargo:rustc-link\", \"-arg=-fuse-ld=x\")); }",
+            "fn main() { let k = format!(\"cargo:rustc-{}\", \"link-arg=x\"); println!(\"{k}\"); }",
+            "fn main() { println!(\"{}\", \"cargo:rustc-cfg=x\"); }",
+            "fn main() { println!(\"cargo:rustc-flags=-l x\"); }",
+            "fn main() { print!(\"cargo::rustc-env=RUSTC_WRAPPER=x\\n\"); }",
+            "fn main() { let _ = std::env::var(\"CARGO_HOME\"); }",
+            "fn main() { std::fs::write(\"x\", \"y\").ok(); }",
+            "fn main() { let _ = std::fs::File::create(\"x\"); }",
+            "fn main() { let _ = std::fs::OpenOptions::new(); }",
+            "use std::fs::{write}; fn main() { write(\"x\", \"y\").ok(); }",
+            "use std::fs as f; fn main() { f::write(\"x\", \"y\").ok(); }",
+            "use std::io::Write; fn main() { writeln!(std::io::stdout(), \"cargo:x\").ok(); }",
+            "fn main() { println!(x); }",
+        ] {
+            assert!(
+                !build_findings("b.rs", src).unwrap().is_empty(),
+                "passed: {src}"
+            );
+        }
+        let ok = "fn main() {\n    println!(\"cargo:rerun-if-env-changed=BRUTEX_COMMIT\");\n    println!(\"cargo:rerun-if-changed={}\", p.display());\n    println!(\"cargo:rustc-env=BRUTEX_COMMIT={commit}\");\n    println!(\"cargo:warning=x: {}\", r);\n    let _ = std::fs::read(\"x\");\n}\n#[cfg(test)]\nmod tests { fn t() { std::fs::write(\"x\", \"y\").ok(); } }\n";
+        assert_eq!(build_findings("b.rs", ok).unwrap(), Vec::<String>::new());
     }
 }

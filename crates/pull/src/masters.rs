@@ -1146,7 +1146,22 @@ fn land_validated(dir: &Path, source: &Source, body: &str) -> Landed {
         Err(why) => return Landed::Refused(why),
     };
     let target = path_of(dir, source);
-    let changed = std::fs::read_to_string(&target).map_or(true, |held| held != body);
+    let changed = !holds_exactly(&target, body.as_bytes());
+    // IDENTICAL BYTES ARE NOT REWRITTEN (OD-5, D-2374). A vendor that
+    // regenerates once a day answers the same bytes all day, and each refresh
+    // used to write, sync and rename a full copy (up to `MAX_BODY_BYTES`) to
+    // publish nothing new. The one reader of the rewrite's side effect is
+    // `api::mastersrun::status_rows`, whose `modified_unix_millis` tells an
+    // operator when a master was last confirmed current; touching the mtime
+    // keeps that answer exactly what the rewrite gave it. A touch the host
+    // refuses is not hidden: the full replacement below runs instead and its
+    // own outcome is what this reports.
+    if !changed && refresh_mtime(&target).is_ok() {
+        return Landed::Written {
+            bytes: body.len(),
+            changed,
+        };
+    }
 
     match replace_locked(dir, source, body) {
         Ok(Ok(())) => Landed::Written {
@@ -1160,6 +1175,61 @@ fn land_validated(dir: &Path, source: &Source, body: &str) -> Landed {
         },
         Err(why) => Landed::Refused(why),
     }
+}
+
+/// Whether the master at `target` holds exactly `body`, read bounded (OD-5,
+/// D-2374).
+///
+/// The length is compared first, from metadata, so a master of a different
+/// size is answered without reading a byte of it. An equal length is then
+/// compared in fixed 8 KiB chunks against `body`, reading exactly
+/// `body.len()` bytes and allocating nothing. Until D-2374 this was one
+/// `read_to_string` of the whole target with no cap, so a held file of any
+/// size was read into memory just to answer one boolean. Any read failure
+/// answers `false`: the caller then replaces the file, which is what it did
+/// for an absent or unreadable target before.
+fn holds_exactly(target: &Path, body: &[u8]) -> bool {
+    use std::io::Read as _;
+    let Ok(file) = File::open(target) else {
+        return false;
+    };
+    if !file
+        .metadata()
+        .is_ok_and(|held| held.len() == body.len() as u64)
+    {
+        return false;
+    }
+    let mut reader = file.take(body.len() as u64);
+    let mut chunk = [0_u8; 8 * 1_024];
+    let mut offset = 0_usize;
+    while offset < body.len() {
+        let want = chunk.len().min(body.len() - offset);
+        let Some(window) = chunk.get_mut(..want) else {
+            return false;
+        };
+        if reader.read_exact(window).is_err() {
+            return false;
+        }
+        if body.get(offset..offset + want) != Some(&*window) {
+            return false;
+        }
+        offset += want;
+    }
+    true
+}
+
+/// Marks an unchanged master as confirmed now, without rewriting it (OD-5,
+/// D-2374): the mtime is set to the present, the file's metadata synced, and
+/// the containing directory synced as `replace_locked` would — so a target
+/// whose earlier replacement ended [`Landed::Uncertain`] is not reported
+/// durable on the strength of a read.
+fn refresh_mtime(target: &Path) -> std::io::Result<()> {
+    let file = OpenOptions::new().write(true).open(target)?;
+    file.set_modified(std::time::SystemTime::now())?;
+    file.sync_all()?;
+    drop(file);
+    let directory = target.parent().unwrap_or_else(|| Path::new("."));
+    File::open(directory)?.sync_all()
 }
 
 /// The sources a caller may fetch without spending the shared credential.
@@ -1898,6 +1968,74 @@ mod tests {
             panic!("the third write lands");
         };
         assert!(changed, "different bytes are a change");
+    }
+
+    /// **AN UNCHANGED MASTER IS NOT REWRITTEN, AND IS COMPARED BOUNDED.** OD-5,
+    /// D-2374, invariant AFG-74.
+    ///
+    /// `land_validated` read the whole held target into memory with no cap
+    /// just to compute `changed`, then rewrote it even when it was identical:
+    /// a new temporary, a full write, a sync and a rename, which gives the
+    /// target a new inode. Now identical bytes keep their inode and only have
+    /// their mtime refreshed — `api::mastersrun::status_rows` reports that
+    /// mtime as when the master was last confirmed current. A same-length
+    /// target with different bytes, and a longer one, are still changes and
+    /// are still replaced.
+    #[test]
+    fn an_unchanged_master_keeps_its_inode_and_only_its_mtime_moves() {
+        use std::os::unix::fs::MetadataExt as _;
+        let dir = scratch("idempotent");
+        let source = &SOURCES[1];
+        let body = a_master_for(source);
+        assert!(
+            land(&dir, source, &body).is_written(),
+            "the first write lands"
+        );
+        let target = path_of(&dir, source);
+        let long_ago = std::time::UNIX_EPOCH + std::time::Duration::from_hours(262_968);
+        std::fs::File::options()
+            .write(true)
+            .open(&target)
+            .and_then(|file| file.set_modified(long_ago))
+            .expect("the mtime is set into the past");
+        let before = std::fs::metadata(&target).expect("held");
+
+        let Landed::Written { changed, bytes } = land(&dir, source, &body) else {
+            panic!("the identical landing is still written");
+        };
+        assert_eq!((changed, bytes), (false, body.len()));
+        let after = std::fs::metadata(&target).expect("held");
+        assert_eq!(
+            after.ino(),
+            before.ino(),
+            "identical bytes are not replaced"
+        );
+        assert!(
+            after.modified().expect("an mtime") > long_ago,
+            "but the master is marked confirmed now"
+        );
+
+        // Same length, different bytes: compared, found different, replaced.
+        let mut same_length = body.clone().into_bytes();
+        if let Some(last) = same_length.iter_mut().rev().nth(1) {
+            *last = last.wrapping_add(1);
+        }
+        std::fs::write(&target, &same_length).expect("a same-length edit");
+        let Landed::Written { changed, .. } = land(&dir, source, &body) else {
+            panic!("the repair lands");
+        };
+        assert!(changed, "one byte differs at the same length");
+        assert_eq!(std::fs::read(&target).expect("held"), body.as_bytes());
+
+        // Longer: answered from metadata alone, and replaced.
+        let mut longer = body.clone();
+        longer.push('\n');
+        std::fs::write(&target, &longer).expect("a longer target");
+        let Landed::Written { changed, .. } = land(&dir, source, &body) else {
+            panic!("the repair lands");
+        };
+        assert!(changed, "a different length is a change");
+        assert_eq!(std::fs::read(&target).expect("held"), body.as_bytes());
     }
 
     #[test]
