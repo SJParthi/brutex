@@ -133,3 +133,12 @@ Artifact: https://claude.ai/artifact/VPrgywStff6zaUpdpFMXQL (version 13 = throug
 | Equities | 16 | corporate actions, survivorship | p16num-1 med (first-session overnight gap never measured, ran), p16num-2, p16num-3 low | numeric-pass16.md |
 | Tests | 16 | test determinism and isolation | P16-01 med (socket path too long on macOS, ran), P16-02 med (/dev/full absent on macOS), P16-03, P16-04 low | tests-docs-security-pass16.md |
 Total new across rounds 1-13: 203. Round 13 = 3 medium, 8 low. Newly fixed: CE-1, P1-02-04, hunt-api-6.
+
+## Round 14 (same head 1f4de71) — done 2026-10-04 ~18:00 UTC
+| Angle | Pass | Area | New | Report |
+|---|---|---|---|---|
+| Labels | 19 | mandatory labels end to end | CE-93, CE-94 low | crash-edge-pass19.md |
+| Long-run | 17 | memory and resource growth | conc17-1, conc17-2 low (both disk growth) | conc-pass17.md |
+| Search | 17 | search counting and sizing | p17num-1 med (raising read ceiling restarts alpha budget, ran) | numeric-pass17.md |
+| Limits/plan | 17 | docs/06 + docs/07 vs code | P17-01 med (Ingest page reads renamed failure key; always 0, grep-confirmed), P17-02..21 low | tests-docs-security-pass17.md |
+Total new across rounds 1-14: 229. Round 14 = 2 medium, 24 low.
