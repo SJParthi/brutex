@@ -35,7 +35,9 @@ use brutex_core::vendor::Vendor;
 
 use store::crc::crc32c;
 use store::file::{Action, Appended, BarFile, Conflict, StoreError};
-use store::format::{Bar, FormatError, HEADER_LEN, OI_NULL, RECORD_LEN, RECORD_STRIDE};
+use store::format::{
+    Bar, FLAG_CHECKSUMS, FormatError, HEADER_LEN, OI_NULL, RECORD_LEN, RECORD_STRIDE,
+};
 use store::header::Header;
 use store::layout::Layout;
 use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
@@ -159,7 +161,7 @@ fn a_fresh_month_lands_a_two_slot_header_region() {
     assert_eq!(file.header().generation, 0);
     assert_eq!(file.header().symbol_id, SYMBOL);
     assert_eq!(file.header().timeframe_secs, 60);
-    assert_eq!(file.layout(), Layout::V2);
+    assert_eq!(file.layout(), Layout::V3, "born at version 3 since D-1571");
     assert_eq!(file.path(), bars_path().to_path_buf(scratch.root()));
 
     let bytes = image(scratch.root());
@@ -168,7 +170,11 @@ fn a_fresh_month_lands_a_two_slot_header_region() {
         HEADER_LEN,
         "the whole header region is materialised, not left as a hole"
     );
-    assert_eq!(&bytes[0..8], b"BRUTEXB2", "magic at byte 0");
+    assert_eq!(
+        &bytes[0..8],
+        b"BRUTEXB3",
+        "magic at byte 0: version 3 since D-1571"
+    );
     assert!(
         bytes[64..16_384].iter().all(|b| *b == 0),
         "the rest of slot 0's span is reserved and zero"
@@ -972,7 +978,9 @@ fn a_file_shorter_than_its_header_region_is_refused() {
     // A genuine, checksum-valid slot 0 in a file with no room for slot 1.
     // Returning the commit that happened to fit would silently lose every
     // record committed since, so it is refused instead.
-    let commit = Header::genesis(SYMBOL, 60, 0).commit().expect("genesis");
+    let commit = Header::genesis(SYMBOL, 60, FLAG_CHECKSUMS)
+        .commit()
+        .expect("genesis");
     let mut stub = vec![0u8; 100];
     stub[..commit.bytes.len()].copy_from_slice(&commit.bytes);
     fs::write(&bars, &stub).unwrap();
@@ -1099,7 +1107,9 @@ fn a_file_written_at_another_timeframe_is_refused() {
 
     // A well-formed header region for five-minute bars, written through the
     // same public commit the writer uses.
-    let commit = Header::genesis(SYMBOL, 300, 0).commit().expect("genesis");
+    let commit = Header::genesis(SYMBOL, 300, FLAG_CHECKSUMS)
+        .commit()
+        .expect("genesis");
     let mut region = vec![0u8; usize::try_from(HEADER_LEN).unwrap()];
     let at = usize::try_from(commit.offset).unwrap();
     region[at..at + commit.bytes.len()].copy_from_slice(&commit.bytes);
@@ -1361,7 +1371,11 @@ fn the_reader_door_opens_what_the_writer_wrote_and_refuses_exactly_what_it_refus
     let reader = BarFile::open_existing(root, bars_path(), SYMBOL).expect("opens what was written");
     assert_eq!(reader.records(), 3, "the reader sees the committed records");
     assert_eq!(reader.header().symbol_id, SYMBOL);
-    assert_eq!(reader.layout(), Layout::V2);
+    assert_eq!(
+        reader.layout(),
+        Layout::V3,
+        "born at version 3 since D-1571"
+    );
     drop(reader);
 
     // ─── AND THE READER CREATES NO SIDECAR, WHICH IS THE HALF THAT WAS FALSE

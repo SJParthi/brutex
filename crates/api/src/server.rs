@@ -18300,7 +18300,25 @@ pub const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(1
 /// dropped: it stops with the process, its invocation audit is left without a
 /// terminal phase (the shape a crash leaves, which recovery already reads as
 /// interrupted), and the operator is told rather than finding a ghost.
+///
+/// THE STOP IS ASKED FOR FIRST (hunt-api-2, D-1551). Every engine task checks
+/// `cli::cancel` at its structural boundaries (each instrument-month, each
+/// screened candidate, each rung table, each single-stop timeframe), so a
+/// running sweep ends at its next boundary with a CANCELLED answer in its slot
+/// and a `Cancelled` invocation audit, inside the grace. Only work still
+/// between two boundaries when the grace runs out is abandoned, and that is
+/// said.
 pub fn end_runtime(runtime: tokio::runtime::Runtime, grace: std::time::Duration) -> usize {
+    cli::cancel::request();
+    wait_then_end(runtime, grace)
+}
+
+/// [`end_runtime`] without asking engine work to stop: waits at most `grace`,
+/// names what is abandoned, ends the runtime.
+///
+/// Separate so a unit test can prove the bound without setting the
+/// process-wide stop, which would cancel the other tests' engine work.
+pub(crate) fn wait_then_end(runtime: tokio::runtime::Runtime, grace: std::time::Duration) -> usize {
     let deadline = std::time::Instant::now() + grace;
     while crate::sweeprun::engine_tasks_running() > 0 && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -20910,7 +20928,7 @@ mod tests {
             // such files are what this reader's own defence still faces. Laid
             // by hand: unsealed (flags 0, the legacy shape the reader accepts
             // without a `.crc`), genesis in slot 0, the commit in slot 1.
-            let genesis = store::header::Header::genesis(id, 60, 0);
+            let genesis = store::header::Header::genesis_at(store::layout::Layout::V2, id, 60, 0); // unsealed is version 2 (D-1571)
             let committed = genesis
                 .advance(
                     u64::try_from(rows.len()).unwrap(),

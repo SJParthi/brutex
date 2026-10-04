@@ -2760,3 +2760,98 @@ fn every_stored_stock_report_names_its_largest_overnight_move() {
     }
     crate::knobs::clear_all();
 }
+
+/// **A range descent prepares its stored inputs once, and every step answers
+/// byte for byte as a fresh preparation does.** audit-20261003 o1surface2-1,
+/// D-1557.
+///
+/// Every step of `cli descend` after the first re-ran `one_rung` from scratch:
+/// one raw span load, then the audit kernel's own load of both spans, both
+/// contexts and the anchored column under a fresh preparation attempt. Now
+/// the descent asks one `AuditCache`: the same key reuses what it holds, and a
+/// different key, here another rung, prepares afresh.
+#[test]
+fn a_range_descent_prepares_its_stored_inputs_once() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    crate::knobs::set("BRUTEX_VALIDATE", "0");
+    let fixture = Fixture::warmed();
+    let store = crate::RungStore {
+        root: Ok(fixture.root.clone()),
+        commit: Some("generated-stored-descend-fixture"),
+    };
+    crate::AUDIT_INPUT_LOADS.with(|loads| loads.set(0));
+    crate::RUNG_SPAN_LOADS.with(|loads| loads.set(0));
+    let page = crate::descend_in(
+        &store,
+        "zerodha",
+        "NIFTY",
+        "5min",
+        ((2025, 5), (2025, 5)),
+        600_000,
+        crate::Cadence::PerWeek(20),
+    );
+    let steps = page
+        .lines()
+        .find_map(|line| line.trim_end().strip_suffix(" step(s)"))
+        .and_then(|line| line.rsplit(' ').next())
+        .and_then(|count| count.parse::<u64>().ok())
+        .expect("a step count");
+    assert!(steps >= 2, "a ladder, not one step:\n{page}");
+    assert!(!page.contains("refused"), "{page}");
+    assert_eq!(
+        crate::RUNG_SPAN_LOADS.with(std::cell::Cell::get),
+        1,
+        "{page}"
+    );
+    assert_eq!(
+        crate::AUDIT_INPUT_LOADS.with(std::cell::Cell::get),
+        1,
+        "{steps} steps prepared their inputs more than once:\n{page}"
+    );
+
+    // The same audits through one cache and through a fresh one per audit,
+    // on two identical stores, print the same pages.
+    let fresh = Fixture::warmed();
+    let request = |root: &std::path::Path, rung, min_hits| crate::StoredRangeAuditRequest {
+        root: root.to_path_buf(),
+        vendor: Vendor::Zerodha,
+        underlying: "NIFTY",
+        rung,
+        from: (2025, 5),
+        to: (2025, 5),
+        min_hits,
+        attempt: None,
+        commit: "generated-stored-descend-fixture",
+    };
+    let cached = Fixture::warmed();
+    let mut cache = crate::AuditCache::default();
+    crate::AUDIT_INPUT_LOADS.with(|loads| loads.set(0));
+    for min_hits in [900, 600, 450] {
+        let want =
+            crate::audit_range_kernel(request(&fresh.root, "5min", min_hits)).expect("fresh audit");
+        let got =
+            crate::audit_range_kernel_cached(request(&cached.root, "5min", min_hits), &mut cache)
+                .expect("cached audit");
+        assert!(want.contains("RESULT RECORDED"), "{want}");
+        assert_eq!(
+            got.replace(
+                &cached.root.display().to_string(),
+                &fresh.root.display().to_string()
+            ),
+            want,
+            "min_hits {min_hits}"
+        );
+    }
+    assert_eq!(
+        crate::AUDIT_INPUT_LOADS.with(std::cell::Cell::get),
+        4,
+        "3 fresh + 1 cached"
+    );
+    // A different key prepares afresh, and the held key is then replaced.
+    let other = crate::audit_range_kernel_cached(request(&cached.root, "1min", 900), &mut cache)
+        .expect("1min audit");
+    assert_eq!(crate::AUDIT_INPUT_LOADS.with(std::cell::Cell::get), 5);
+    assert!(other.contains("1min"), "{other}");
+    crate::knobs::clear_all();
+}

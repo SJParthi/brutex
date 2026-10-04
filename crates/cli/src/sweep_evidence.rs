@@ -870,6 +870,7 @@ pub fn finish_many(attempts: Vec<Attempt>, status: Completion) -> Result<(), Str
 
 /// Append global terminal rows in order under one write and one barrier.
 fn journal(root: &Path, terminals: &[Evidence]) -> Result<(), String> {
+    let _turn = crate::ordered::turn();
     append_events(&base(root).join("attempts.bin"), |_, _| {
         let mut rows = Vec::with_capacity(terminals.len().saturating_mul(EVENT_BYTES));
         for terminal in terminals {
@@ -1441,6 +1442,8 @@ fn append_events(
 /// Allocate consecutive tokens with one journal append and one barrier: the
 /// journal is durable before any reservation can name one of them.
 fn allocate(root: &Path, starts: &mut [Evidence]) -> Result<(), String> {
+    // The shared journal: one ordered event of an `ordered::map` lane. D-1556.
+    let _turn = crate::ordered::turn();
     append_events(&base(root).join("attempts.bin"), |_, index| {
         let count = u64::try_from(starts.len()).unwrap_or(u64::MAX);
         let last = index

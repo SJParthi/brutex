@@ -11420,8 +11420,11 @@ the counts the tests assert: no bench times the fold.
   Threading the loaded span and column into the kernel would remove the
   second pair; it is not done because the kernel re-derives both from the
   bars that survive its own withholding and binds them to the preparation
-  digest. Stated from the code's shape; not timed. Held to the code by
-  `a_rungs_second_load_and_build_are_stated_and_still_paid` in
+  digest. Since D-1557 both loads go through one `AuditCache` per command
+  (`one_rung_cached`, and `load_audit_inputs` for the kernel), so a `descend`
+  pays the pair once for its whole ladder, not once per step; a single rung
+  still pays both. Stated from the code's shape; not timed. Held to the code
+  by `a_rungs_second_load_and_build_are_stated_and_still_paid` in
   `crates/cli/tests/limits_o1cli_2.rs`.
 
 ## Condition names resolve through a compile-time index (audit o1engine-24)
@@ -12613,21 +12616,47 @@ not:
   D-1564).** `range-all` (`sweep_rungs`) and `pool` pass 1 no longer run
   whole audits per worker: both call `one_rung` one at a time in input order
   through `in_input_order`, so their attempt tokens and the rows they append
-  to `runs.bin` follow input order. The Boolean family pools are unchanged by
-  D-1701: they still run candidate productions per worker, and their attempt
-  tokens and appended rows follow completion order. Reports are gathered in
-  input order and every ledger lookup is by identity.
-- **Plain `descend` (D-1567).** Every ladder step after the first is a full
-  `one_rung`: the signal span, the 1-min execution span, the daily and minute
-  contexts are reloaded and the anchored column rebuilt, so a ladder of S steps
-  costs S times one rung's load and build on top of its sweeps. `cli elite`'s
-  `ScreenCache` (D-0997) does not reach this path.
+  to `runs.bin` follow input order. D-1709 keeps this shape over D-1556's
+  ordered lanes for those two loops. The Boolean family pools run as
+  `ordered::map` lanes (D-1556, "Ordered lanes" below), so their writes follow
+  input order too. Reports are gathered in input order and every ledger
+  lookup is by identity. A plain `descend` step's cost is stated under
+  "Plain `descend` (D-1557)" below, which replaced the D-1567 statement here.
 - **`latest_for` (D-1567, removed by D-1700).** It was O(runs) per call: it
   opened the results ledger, which builds the identity index and hashes the
   file, before its backward scan, once per rung of `range-all`, `pool` pass 1
   and every `descend` step. D-1700 replaced it with `recorded_row`, one
   expected-O(1) probe of the shared ledger handle after an O(delta) refresh;
   "A range rung's row is read back by identity" below states it.
+
+- **Ordered lanes (D-1556; replaces the completion-order statement D-1564
+  made here; narrowed by D-1709).** The Boolean family pools run each item as
+  a `cli::ordered::map` lane on its own thread, `ordered::WINDOW` (8) at a
+  time. Their evidence-journal and ledger writes land sorted by (round,
+  lane), a function of the inputs, so attempt tokens and `runs.bin` order no
+  longer follow completion order. The price: a lane's k-th shared write waits
+  until every lower lane has made its k-th and every higher lane its (k-1)-th,
+  so a fast lane can idle at a write while a slow lane computes towards the
+  same round, and a window ends at the pace of its slowest lane plus those
+  waits. One `Mutex` and `Condvar` per window; a wait checks every lane of the
+  window, O(WINDOW). NOT MEASURED against the former unordered fan-out.
+  `range-all` and `pool` pass 1 do not use lanes: D-1709 keeps them on
+  D-1701's one-at-a-time loop, priced under "Ordered stored commands trade
+  overlap for input order (D-1701)".
+- **Plain `descend` (D-1557; replaces the D-1567 statement made here).** A
+  descent prepares its inputs once: the raw signal span, both spans, the
+  withholding, both contexts, the anchored column under its one preparation
+  attempt and the executed-data digest are held in one `AuditCache` keyed by
+  root, feed, instrument, rung, span and build. A later step loads nothing,
+  folds nothing and writes no preparation attempt. It still pays, per step,
+  a memory copy of the held signal bars and column (O(bars), handed to the
+  audit, which consumes them), the O(bars) scans that derive its horizon,
+  grid rungs, floors and policy from the held bars, and its own sweep. NOT
+  MEASURED.
+- **`latest_for` (D-1567).** O(runs) per call: it opens the results ledger,
+  which builds the identity index and hashes the file, before its backward
+  scan. Called once per rung of `range-all`, `pool` pass 1 and every `descend`
+  step.
 ## Audit fixes — D-1480 onward, 3 October 2026
 
 **A credential watch's dead-value check is O(d), not O(1) (v3a-1, D-1482).**
@@ -14146,25 +14175,29 @@ bounds are all nonzero.
 
 ## Audit fixes of 2026-10-03 — what they leave unbounded — D-1528, D-1535, D-1536, D-1537
 
-* **A cleared header checksum flag is not detected (D-1528, audit-20261003
-  attackdata-8).** Block verification follows the header's `FLAG_CHECKSUMS`.
-  Clearing it in both slots and recomputing their CRCs turns verification off
-  for a sealed month, and the `.crc` beside it is ignored. Random rot cannot do
-  this, because the slot CRC covers the flag. The CRC is integrity, not
-  authentication. Closing it would need "sealed" recorded outside the header,
-  which is a new store format version, not an in-place change.
+* **A cleared header checksum flag is refused at version 3 (D-1528, closed for
+  new months by D-1571; audit-20261003 attackdata-8).** Every month created
+  since D-1571 is version 3, whose checksums are mandatory: a slot with
+  `FLAG_CHECKSUMS` cleared is refused as `ChecksumsRequired(3)`. What remains:
+  a version-2 month written before D-1571 keeps the optional flag (it is never
+  rewritten in place), and an actor who rewrites a version-3 month's `magic`
+  and `format_version` to version 2 in both slots and recomputes their CRCs
+  presents an unsealed version-2 month. The CRC is integrity, not
+  authentication; that actor can equally rewrite the `.crc`.
 * **A deleted month file is not detected (D-1520).** The writer refuses to
   re-initialise a month file truncated or zeroed in place when its `.crc`
   proves records were committed. A `.bin` deleted whole, sidecar left behind,
   is created again empty, as before: a deletion is an explicit act, and the
   lost records are not named.
-* **A JSON rupee price is snapped from serde's re-rendering, not the vendor's
-  text (audit-20261003 attackdata-4).** `http` reads the number as an f64 and
-  snaps `Number::to_string()` half-up. Past about 17 significant digits the
-  f64 has already rounded, so `100.12499999999999999` snaps to 100.13 where its
-  own text says 100.12. A 2,000,000-case differential found 0 differences for
-  2- and 3-decimal prices. Closing it needs `serde_json`'s
-  `arbitrary_precision`, a dependency feature change not made here.
+* **A JSON rupee price is snapped from the vendor's own text (audit-20261003
+  attackdata-4, closed by D-1570).** `serde_json` is built with
+  `arbitrary_precision`, so a number keeps its digits and `http::number_text`
+  hands them to the half-up reader unchanged (an exponent is shifted exactly).
+  What remains bounded: a price text longer than
+  `brutex_core::price::MAX_PRICE_TEXT` (64 bytes) is refused by name, where the
+  f64 path had rounded it silently; and each number node now owns its digits on
+  the heap, so the decode tree's argued peak is about twice the earlier ~16x
+  (UNMEASURED).
 * **Run-id resumption reads one block (D-1536).** `reserve_run_id` resumes above
   the largest `run` in the last 64 KiB of the newest non-empty log file. A run id
   carried only by lines further back, and above every later `seq`, is not seen.
@@ -14178,15 +14211,28 @@ bounds are all nonzero.
   primary circular recorded here, and none has been invented.
 ## crates/api audit fixes — D-1580..D-1591, 3 October 2026
 
+- **A stop is honoured at structural boundaries only (D-1551).** Engine work
+  checks `cli::cancel` once per stored instrument-month, once per screened
+  candidate, before a range table and at each single-stop timeframe: one
+  atomic load each, O(1). Between two boundaries it does not stop: one
+  rung's level-wise engine sweep over bars already loaded, or one
+  candidate's exit grid, runs to its end, because gate 17 keeps the inner
+  loops of `vocab`, `engine`, `indicators` and `runner` call-free. If that
+  stretch outlasts `SHUTDOWN_GRACE` (10 s) the task is abandoned and named,
+  as D-1582 states. How long such a stretch takes on real data is
+  unmeasured.
 - **Cross-site failed-request log lines are rationed (D-1583).** For requests
   whose `Sec-Fetch-Site` names another site, at most
   `logs::FAILED_LINES_PER_WINDOW` (50) `api.request` lines at `Warn`/`Error`
   per `FAILED_LINE_WINDOW_MS` (60 s), plus one summary line counting what was
   held back, said by the first failed request of a later window. A flood that
   is followed by silence until shutdown leaves its last count unsaid.
-  Same-origin and header-less clients are not rationed, so a local tool can
-  still fill the log. The ration is one process-wide mutex take per
-  cross-site failed request: O(1).
+  Same-origin and header-less clients draw on their own ration since D-1552:
+  at most `logs::LOCAL_FAILED_LINES_PER_WINDOW` (200) lines per window plus
+  one counted summary, about 7.4 MB an hour at the worst, 9.3 MB with the
+  cross-site ration, so a sustained flood of both still rolls the 64 MiB
+  retained log in about seven hours; it can no longer do so in seconds. The
+  ration is one process-wide mutex take per failed request: O(1).
 - **Every non-GET request body is read once before its handler (D-1587)** to
   refuse a form field named twice: O(body), bounded by `MAX_FORM_BYTES`
   (8 KiB), the same bound `DefaultBodyLimit` already put on every handler. A
@@ -14262,24 +14308,34 @@ bounds are all nonzero.
 
 ### a flipping cadence makes `forward`'s window rebuild and leaves Newey-West pairs queued — D-1550
 
-`runner::outcome::WindowExtremes` and `OverlapWindow` were documented as
-amortised O(1) per query because both window ends only advance. Since D-1410
-the exit of bar `i` is `ts(i) + step_at(i)·H`, and `step_at` is a prefix
-running median that can step DOWN. Measured by the audit (o1eng2-1) on twenty
-generated sessions with every third minute dropped: at H=9, 111 of 227 priced
-bars had an exit earlier than the previous priced bar's. Each such query
-clears and rebuilds the deques from its left end, Θ(window) for that query,
-so the per-query bound is Θ(H) in the worst case and the amortised O(1) holds
-only while the cadence is constant. The audit's timing showed no measurable
-cost at that size (279 ns/bar at H=9, 261 ns/bar at H=144), because the
-flips stop once the prefix median settles; that is one fixture, not a bound.
+**Superseded by D-1572; kept for the record.** `runner::outcome::WindowExtremes`
+and `OverlapWindow` were documented as amortised O(1) per query because both
+window ends only advance. Since D-1410 the exit of bar `i` is
+`ts(i) + step_at(i)·H`, and `step_at` is a prefix running median that can step
+DOWN (the audit measured 111 backward exits among 227 priced bars at H=9 on a
+fixture with every third minute dropped). Until D-1572 each such query cleared
+and rebuilt the deques, Θ(window), and the Newey-West drain popped only from
+the front, so a queued hit whose exit preceded the front's was counted as
+overlapping with later hits.
 
-The Newey-West drain in `OverlapWindow::observe` pops only from the front. A
-queued hit whose exit precedes the front's stays queued until the front
-drains, and its pairs with later hits are counted as overlapping although
-the two windows share no bar. Its effect on `edge`'s t-statistic is
-UNVERIFIED: nothing has measured it. A drain independent of exit order needs
-an exit-ordered structure, O(log H) per hit; it is not done here.
+**What holds now (D-1572).**
+
+- `WindowExtremes`: a backward query is answered by `BlockExtremes` in at most
+  two partial 64-bar blocks of reads plus one lookup, O(1). The table is built
+  once per `forward`, on its first backward query: O(n) time, and
+  `(n/64)·log₂(n/64)` pairs of memory, about 4.6 MB at 1,222,791 bars. A
+  `forward` whose exits never step back never builds it. Proven by
+  `runner::outcome::window_tests::a_backward_right_end_is_answered_in_constant_reads`
+  (18,008,999 bars read for 17,999 queries over 20,000 bars before; held to
+  `3n + 130·queries` now). Not timed: no bench row covers `forward`.
+- `OverlapWindow`: each hit is filed on a timing wheel by its death
+  `min(exit, o + H)` and retired when an entry reaches it, in any exit order.
+  The wheel has `min(H, bars + 1)` slots; its tick only advances, so across one
+  `edge` walk the slots visited are bounded by the bars walked, O(1) amortised
+  per bar. Proven equal to the pair-by-pair definition by
+  `runner::outcome::overlap_window_tests::a_backward_exit_leaves_the_window_when_its_own_window_closes`.
+- UNVERIFIED: how much the over-counted pairs moved `edge`'s t-statistic on
+  runs made before D-1572. Nothing measured it.
 
 ### SPA and Romano-Wolf studentize by an i.i.d. standard error — D-1549
 
@@ -14316,18 +14372,13 @@ pass over the bars at a once-per-report boundary, O(bars).
   minutes (188 for a 375-minute session), and a window of D sessions at most
   about 188·D. A cap was rejected because it would hide which minutes are
   missing. Not timed: no bench covers it.
-- **A JSON rupee price is parsed through an `f64` before its half-up snap
-  (GAP16-24, D-1494).** `serde_json` is built without `arbitrary_precision`,
-  so `http::one_price` and `rolling`'s `paisa` read the shortest
-  round-tripping text of an `f64`, not the vendor's bytes. That is exact,
-  one rounding in all, for a text of at most fifteen significant digits,
-  which covers every NSE price and every measured Dhan float. Past fifteen
-  digits the parse is a second rounding: a value within one `f64` step of a
-  half-paisa boundary can snap the other way, and the widest `i64` paisa
-  price, `92233720368547758.07`, is refused through JSON though it reads as
-  text. Checked over 160,000 texts by
-  `pull::http::tests::the_json_parse_is_exact_for_price_text_up_to_fifteen_digits`;
-  not proved for every fifteen-digit text.
+- **A JSON rupee price was parsed through an `f64` before its half-up snap
+  (GAP16-24, D-1494). Closed by D-1570:** `serde_json` is now built with
+  `arbitrary_precision`, so `http::one_price` and `rolling`'s `paisa` read the
+  vendor's own digits and the widest `i64` paisa price,
+  `92233720368547758.07`, reads through JSON exactly as it reads as text.
+  `pull::http::tests::the_json_parse_is_exact_for_price_text_up_to_fifteen_digits`
+  now asserts that equality.
 - **The closure check is O(k) per itemset and copies a level per call (c4a-6,
   D-1496).** `runner::closed::redundant_between` builds a
   `HashMap<ConditionMask, u64>` of the whole lower level, O(|F_k|) time and

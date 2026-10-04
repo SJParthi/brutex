@@ -12,9 +12,10 @@
 //!
 //! The two numbers in that formula are **not** read from this module by the
 //! read path. They come from [`crate::layout::Layout`], selected by the file's
-//! own `format_version`. The constants here are version 2's definition, and
-//! `store::unit::the_constants_are_the_current_versions_layout` pins them to
-//! it.
+//! own `format_version`. The geometric constants here are version 2's
+//! definition, which version 3 (D-1571) shares byte for byte; [`MAGIC`] and
+//! [`FORMAT_VERSION`] are version 3's, and
+//! `store::unit::the_constants_are_the_current_versions_layout` pins them.
 //!
 //! # Why this is version 2 and not an edited version 1
 //!
@@ -109,11 +110,24 @@ const _: () = assert!(MAX_SLOT_COUNT == 2 && MAX_SLOTS == 2);
 /// named as such instead of being reported as an absurd version number.
 pub const MAGIC_FAMILY: [u8; 7] = *b"BRUTEXB";
 
-/// Identifies a version-2 bar file.
-pub const MAGIC: [u8; 8] = *b"BRUTEXB2";
+/// Identifies a version-2 bar file. Read, never written, since D-1571.
+pub const MAGIC_V2: [u8; 8] = *b"BRUTEXB2";
 
-/// The only format version this build writes.
-pub const FORMAT_VERSION: u16 = 2;
+/// Identifies a bar file of the version this build writes: version 3.
+///
+/// Version 3 has version 2's geometry byte for byte. What it adds is a rule:
+/// **its block checksums are mandatory.** A version-3 slot whose `flags` lacks
+/// [`FLAG_CHECKSUMS`] is refused on read and on commit
+/// ([`FormatError::ChecksumsRequired`]), so clearing that one bit and
+/// recomputing the slot CRCs no longer turns verification off for a sealed
+/// month (audit-20261003 attackdata-8). A version-2 file keeps version 2's
+/// meaning, flag optional, and is never rewritten as version 3 — `CLAUDE.md`
+/// §3 rule 8. D-1571.
+pub const MAGIC: [u8; 8] = *b"BRUTEXB3";
+
+/// The only format version this build writes: 3 since D-1571. Version 2 is
+/// still read at its own row of [`crate::layout::Layout::KNOWN`].
+pub const FORMAT_VERSION: u16 = 3;
 
 /// Versions that existed and are no longer readable by this build.
 ///
@@ -1242,6 +1256,15 @@ pub enum FormatError {
     /// Refused on the write side too, so no slot this build commits can reach
     /// it. D-1354.
     UnknownFlags(u32),
+    /// A slot of a version whose block checksums are mandatory does not set
+    /// [`FLAG_CHECKSUMS`].
+    ///
+    /// Version 3 is born sealed and stays sealed, so a version-3 slot without
+    /// the flag was written that way on purpose: clearing it would turn block
+    /// verification off while the `.crc` sat beside the month, ignored
+    /// (audit-20261003 attackdata-8). Carries the version. Refused on the
+    /// write side too. D-1571.
+    ChecksumsRequired(u16),
     /// No slot in the header region decoded.
     ///
     /// Not a torn tail — a torn tail is unobservable. This means every copy of
@@ -1315,6 +1338,10 @@ impl std::fmt::Display for FormatError {
             Self::UnknownFlags(flags) => write!(
                 f,
                 "header flags {flags:#010x} set a bit this version does not define"
+            ),
+            Self::ChecksumsRequired(version) => write!(
+                f,
+                "format version {version} requires block checksums and this slot does not declare them"
             ),
             Self::NoValidHeader => f.write_str("no header slot survived; the header is unreadable"),
         }

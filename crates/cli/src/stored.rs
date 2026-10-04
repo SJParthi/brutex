@@ -2278,6 +2278,12 @@ fn load_classified_with_ceiling(
     month: u8,
     remaining_records: Option<u64>,
 ) -> Result<Loaded, LoadFailure> {
+    // A STRUCTURAL BOUNDARY: one instrument-month. A stopping server is
+    // honoured here, before anything is opened (hunt-api-2, D-1551).
+    crate::cancel::check(|| {
+        format!("{underlying} {rung_name} {year}-{month:02}, before it was read")
+    })
+    .map_err(LoadFailure::Refused)?;
     let timeframe = rung(rung_name)?;
     let key = swept_index(underlying)?;
     let ym = YearMonth::new(year, month)
