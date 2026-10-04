@@ -82,7 +82,13 @@ jobs:
           # D-2344: every spawn names current_exe, a CARGO_BIN_EXE_ path or a
           # listed program; .github/*.rs tools are read too.
           st_s=0; xargs -0 -r "$tool" spawns < "$work/spawns.z" > "$work/spawns" || st_s=$?
-          "$gt" gate-0 verdict "$work" "$st_w" "$st_a" "$st_s"
+          # P1-09-01, D-2660 (D-1935): on `workflow_run` and
+          # `pull_request_target` the auto-merge token can WRITE whoever wrote
+          # the pull request, so its `isCrossRepository` refusal is the only
+          # thing between a fork and an armed merge. Deleting it as "redundant
+          # with a read-only token" is a red build.
+          st_f=0; "$tool" fork-refusal .github/workflows/auto-merge.yml > "$work/fork" || st_f=$?
+          "$gt" gate-0 verdict "$work" "$st_w" "$st_a" "$st_s" "$st_f"
 
       - name: Gate 1 — extension allowlist
         run: |
@@ -469,7 +475,19 @@ jobs:
           # environment word, or an environment word in capitals, passed
           # (AC-gates-law-8, D-1109). The runtime configuration itself,
           # `credentials.toml`, is never tracked.
-          "${RUNNER_TEMP:-/tmp}/gates-tree" gate-1c
+          #
+          # AND OVER THE DECODED LITERALS (P1-07-02, D-2660, D-1935). The
+          # pattern reads source BYTES, so one Rust escape -- `\x70rod`,
+          # `pr\u{6f}d` -- hid a standard environment word from it. `source_scan
+          # strings` prints every string literal of every tracked `.rs` outside
+          # web/ with its escapes resolved, and the same pattern runs over that.
+          # A scanner that fails, or decodes no literal, is refused.
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
+          gt="${RUNNER_TEMP:-/tmp}/gates-tree"
+          work=$(mktemp -d)
+          "$gt" gate-1c prepare "$work"
+          st=0; xargs -0 -r "$scan" strings < "$work/rs.z" > "$work/decoded" || st=$?
+          "$gt" gate-1c verdict "$work" "$st"
 
       - name: Gate 1d — every segment-shaped literal in crates/pull is declared
         run: |
@@ -585,7 +603,14 @@ jobs:
           # D-2311: the listings (`*build.rs` roots, every tracked file, every
           # `Cargo.toml`), the closure's file list, the manifest-key scan and
           # the verdict are `gate-2` in .github/gates_tree.rs. The scanner runs
-          # here, twice, its output and status handed back each time.
+          # here, three times, its output and status handed back each time.
+          #
+          # THE KEY IS READ AS TOML, NOT ONLY AS A LINE (P1-07-01, D-2660,
+          # D-1935). The line reading `:[[:space:]]*(build|links)[[:space:]]*=`
+          # saw one spelling of four: `"build" = ..`, `package.build = ..` and
+          # `package = { build = .. }` all renamed the script past it.
+          # `source_scan build-keys` prints `package.build` / `package.links`
+          # whatever the spelling, and either reading is a refusal.
           scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
           gt="${RUNNER_TEMP:-/tmp}/gates-tree"
           work=$(mktemp -d)
@@ -593,7 +618,8 @@ jobs:
           st_c=0; xargs -0 -r "$scan" closure "$work/tracked" < "$work/roots.z" > "$work/closure" || st_c=$?
           "$gt" gate-2 files "$work"
           st_b=0; xargs -0 -r "$scan" build < "$work/files.z" > "$work/found" || st_b=$?
-          "$gt" gate-2 verdict "$work" "$st_c" "$st_b"
+          st_k=0; xargs -0 -r "$scan" build-keys < "$work/manifests.z" > "$work/keys" || st_k=$?
+          "$gt" gate-2 verdict "$work" "$st_c" "$st_b" "$st_k"
 
       - name: Gate 9 — core depends on nothing
         run: |
@@ -736,7 +762,10 @@ jobs:
           #
           # D-2311: `gate_10b` in .github/gates_tree.rs reads the table rows of
           # docs/04-invariants.md, and refuses a file it cannot read or one in
-          # which it finds no identifier at all.
+          # which it finds no identifier at all. The id shape is gate 27's,
+          # `[A-Z][A-Z0-9]*(-[A-Za-z0-9]+)+` (D-2667, P6-04, D-1936): the old
+          # `[A-Z]+-[0-9]+[a-z]?` could not see `FV4-01` or `S-30-session`, so a
+          # duplicate among them passed.
           "${RUNNER_TEMP:-/tmp}/gates-tree" gate-10b
 
       - name: Gate 7 — the browser crate depends on core alone
@@ -751,9 +780,20 @@ jobs:
           # therefore the correct outcome today, not a gap.
           #
           # D-2311: `gate_7` in .github/gates_tree.rs skips when
-          # crates/web/Cargo.toml is not a file and otherwise reads its flat
-          # `[dependencies]` table exactly as the old one-line program did.
-          "${RUNNER_TEMP:-/tmp}/gates-tree" gate-7
+          # crates/web/Cargo.toml is not a file.
+          #
+          # READ AS TOML, BY PACKAGE (P1-08-05, D-2660, D-1936). This was the
+          # flat `[dependencies]` reading D-1107 removed from gates 9 and 9b:
+          # `[dependencies.store]`, a dotted key, a target table or a
+          # dev-dependency printed nothing and the step said OK. `source_scan
+          # deps` prints `file:line:kind:name:package` for every spelling, and
+          # any declaration whose package is not `core` is refused.
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
+          gt="${RUNNER_TEMP:-/tmp}/gates-tree"
+          work=$(mktemp -d)
+          "$gt" gate-7 prepare "$work"
+          st=0; xargs -0 -r "$scan" deps < "$work/web.z" > "$work/deps" || st=$?
+          "$gt" gate-7 verdict "$work" "$st"
 
       - name: Gate 13 — no foreign runtime, not even through a dependency
         run: |
@@ -2166,33 +2206,9 @@ jobs:
           # The lock does not separate dev-dependencies from the rest, so this
           # is stricter than the build graph: a dev-dependency on one of these
           # anywhere in the closure is refused too, and that is deliberate.
-          lock=Cargo.lock
-          if [ -z "$(git ls-files -- "$lock")" ]; then
-            echo "REFUSED  Cargo.lock is not tracked; the sweep's closure cannot be read."
-            fail=1
-          else
-            edges=$(awk '/^\[\[package\]\]/ { n = ""; d = 0 }
-                         /^name = / { n = $3; gsub(/"/, "", n) }
-                         /^dependencies = \[/ { d = 1; next }
-                         d && /^\]/ { d = 0; next }
-                         d { x = $1; gsub(/[",]/, "", x); print n, x }' "$lock")
-            [ -n "$edges" ] || { echo "REFUSED  Cargo.lock yielded no dependency edge."; fail=1; }
-            seen=' '; queue="$SWEEP"
-            while [ -n "$queue" ]; do
-              # shellcheck disable=SC2086
-              set -- $queue; c="$1"; shift; queue="$*"
-              case "$seen" in *" $c "*) continue ;; esac
-              seen="$seen$c "
-              for d in $(awk -v C="$c" '$1 == C { print $2 }' <<< "$edges"); do
-                if [[ $d =~ ^(store|pull|lake|api|telemetry|log|tracing.*)$ ]]; then
-                  echo "REFUSED  $c links package $d (Cargo.lock): the sweep's closure reaches a bar or a log"
-                  fail=1
-                fi
-                queue="$queue $d"
-              done
-            done
-            echo "clause A2: the sweep links$seen"
-          fi
+          # D-1937: clause A2 is `clause_a2` in `gates_runtime gate22`, the
+          # walk of the lock it was here as two inline programs, which gate 0's
+          # ratchet refuses.
 
           # ── CLAUSE B — no filesystem call site in src/ or benches/ ─────────────
           #
@@ -2273,7 +2289,7 @@ jobs:
           # `crates/api` and `crates/pull` may touch the store, deliberately, and
           # gates 9 and 13 govern them.
 
-          # D-2312: clauses A to E are `gates_runtime gate22`.
+          # D-2312: clauses A to E are `gates_runtime gate22`, and A2 with them.
           "${RUNNER_TEMP:-/tmp}/gates-runtime" gate22 --pinned "$PINNED" --sweep "$SWEEP" \
             --banned "$BANNED"
 
@@ -2616,7 +2632,19 @@ jobs:
           # failure mode gate 8 shipped with for the whole life of the
           # repository, and it reported success the entire time. Walking no
           # file is a refusal. D-2313: the tool gate 25 built.
-          "${RUNNER_TEMP:-/tmp}/gates-ledger" failure-events
+          #
+          # THE FILE LIST IS THE COMPILER'S PRODUCTION CLOSURE (P1-08-04,
+          # D-2660, D-1938). It was a `/src/` glob with a "whole-file test
+          # module" exempted by its file STEM, so a production file sharing a
+          # stem with a crate-root `#[cfg(test)] mod x;` was skipped.
+          # `source_scan prod-files` follows every `mod`, `#[path]` and
+          # `include!` from each crate's roots and refuses what it cannot
+          # resolve; its output and status are handed to the tool.
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
+          work=$(mktemp -d)
+          git ls-files -z > "$work/tracked.z"
+          st=0; "$scan" prod-files "$work/tracked.z" > "$work/prod-files" || st=$?
+          "${RUNNER_TEMP:-/tmp}/gates-ledger" failure-events "$work/prod-files" "$st"
 
 
       - name: Gate 10 — every invariant names a test that exists
@@ -2701,14 +2729,14 @@ jobs:
           #
           # WHAT AN ENTRY COSTS, because it is not free. The allowlist keys on
           # the ROW, not on the token, so a row naming two tests has both
-          # silenced. P-03 names a second test that EXISTS and passes --
-          # pull::unit::a_saturday_is_a_full_session_because_there_is_no_weekend_rule,
-          # which pins the absence of a weekend rule as the current behaviour --
-          # and this step stops confirming its name for as long as the P-03
-          # entry is there. It is still run by cargo test; what is lost is this
-          # gate's check that the ROW still points at it. Both silenced tokens
-          # are printed by name in the log, so the cost is in the log rather
-          # than hidden.
+          # silenced, and both silenced tokens are printed by name in the log,
+          # so the cost is in the log rather than hidden.
+          #
+          # P-03 LEFT THE LIST (D-2673, D-1938). Its closing condition was met:
+          # the measured, sourced calendar is pull::calendar (D-1769; the
+          # charter records the trading-holiday authority), the filter is
+          # Window::verdict dropping a bar on a day kind_of records Closed, and
+          # pull::unit::calendar_filter drives it. The row is checked again.
           #
           # (crate, fn) for every tracked crate, built once.
           #
@@ -2925,7 +2953,19 @@ jobs:
           # gate 8 shipped with -- so an empty fn scope is a refusal.
           #
           # D-2313: the tool gate 25 built.
-          "${RUNNER_TEMP:-/tmp}/gates-ledger" banned-constructs
+          #
+          # THE FILE LIST IS THE COMPILER'S PRODUCTION CLOSURE (P1-08-04,
+          # D-2660, D-1938). It was a `/src/` glob with a "whole-file test
+          # module" exempted by its file STEM, so a production
+          # `resume/manifest.rs` sharing a stem with a crate-root
+          # `#[cfg(test)] mod manifest;` was skipped, and
+          # `crates/cli/commit_stamp.rs`, mounted by `#[path]` from outside
+          # `src/` and compiled into every `cli` build, was never read.
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
+          work=$(mktemp -d)
+          git ls-files -z > "$work/tracked.z"
+          st=0; "$scan" prod-files "$work/tracked.z" > "$work/prod-files" || st=$?
+          "${RUNNER_TEMP:-/tmp}/gates-ledger" banned-constructs "$work/prod-files" "$st"
 
       - name: Gate 12 — every O(1) claim names the test that proves it
         run: |
@@ -3612,7 +3652,20 @@ jobs:
           xargs -0 -r "$scan" strings < "$work/benches" > "$work/benches.strings"
           "$scan" step-runs .github/workflows/ci.yml 'cargo bench --workspace --locked' > "$work/runs-bench" || true
           "$scan" step-runs .github/workflows/ci.yml "git ls-files --error-unmatch 'crates/*/benches/*.rs'" > "$work/runs-empty" || true
-          "${RUNNER_TEMP:-/tmp}/gates-bounds" gate14 "$cover" "$work"
+          # Every file under `src/` AND the compiler's production closure
+          # (P1-08-04, D-2660, D-1939): a `#[path]` file outside `src/` is
+          # production too. A closure that does not resolve is refused.
+          git ls-files -z > "$work/tracked.z"
+          st_p=0; "$scan" prod-files "$work/tracked.z" > "$work/prod-closure" || st_p=$?
+          # layer 2c (P1-08-02, D-2660, D-1939). `harness = false` is not the
+          # only key that decides whether gate 8 measures a bench: `bench =
+          # false` on a [[bench]] makes `cargo bench --workspace` skip it, and
+          # so does a `required-features` it does not enable -- silently, exit
+          # 0, with this gate still counting the file. Read as TOML.
+          git ls-files -z -- 'crates/*/Cargo.toml' > "$work/bench-manifests.z"
+          st_k=0; xargs -0 -r "$scan" bench-keys < "$work/bench-manifests.z" > "$work/bench-keys" || st_k=$?
+          [ -s "$work/bench-manifests.z" ] || st_k=1
+          "${RUNNER_TEMP:-/tmp}/gates-bounds" gate14 "$cover" "$work" "$st_p" "$st_k"
 
   build:
     name: Gates 3-6 — fmt, clippy, deny, test

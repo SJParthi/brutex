@@ -683,6 +683,7 @@ fn gate13(repo: &dyn Repo, o: &Opts) -> Result<Report, String> {
     // same manifests parsed by the scanner.
     let mut decl: Vec<String> = Vec::new();
     let mut parsed: Vec<String> = Vec::new();
+    let mut keys: Vec<String> = Vec::new();
     let mut nt = 0usize;
     for f in repo.ls(&["*Cargo.toml"])? {
         if f.rsplit('/').next() != Some("Cargo.toml") {
@@ -702,6 +703,20 @@ fn gate13(repo: &dyn Repo, o: &Opts) -> Result<Report, String> {
         match repo.scan(&["deps", &f]) {
             Ok(s) if s.ok() => parsed.extend(lines_of(&s.out).into_iter().map(str::to_owned)),
             _ => r.refuse(format!("  REFUSED  {f} could not be read as TOML")),
+        }
+        // Layer 3's key, read as TOML (P1-07-01, D-2660, carried here by
+        // D-1937): `"build" = ..`, `package.build = ..` and
+        // `package = { build = .. }` are each `package.build`.
+        match repo.scan(&["build-keys", &f]) {
+            Ok(s) if s.ok() => keys.extend(
+                lines_of(&s.out)
+                    .into_iter()
+                    .filter(|l| !l.is_empty())
+                    .map(str::to_owned),
+            ),
+            _ => r.refuse(format!(
+                "  REFUSED  {f}: its build keys could not be read as TOML"
+            )),
         }
     }
     // Layer 2's corpus: every tracked lock, line by line.
@@ -776,7 +791,9 @@ fn gate13(repo: &dyn Repo, o: &Opts) -> Result<Report, String> {
     verdict(&mut r, "Gate 13", "2", &lh, allow_lock, &tracked);
 
     // Layer 3: a build script by its default name, every file its closure
-    // compiles into it, and a manifest `build =` or `links =` key.
+    // compiles into it, and a manifest `build =` or `links =` key. The roots
+    // come from the NUL-separated listing (P1-07-04), so a name git would
+    // quote keeps its `build.rs` ending.
     let roots: Vec<&str> = all
         .iter()
         .filter(|p| p.rsplit('/').next() == Some("build.rs"))
@@ -799,6 +816,7 @@ fn gate13(repo: &dyn Repo, o: &Opts) -> Result<Report, String> {
         }
     }
     bh.extend(decl.iter().filter(|l| build_key(l.as_bytes())).cloned());
+    bh.extend(keys);
     r.say("");
     r.say("layer 3: a build script exists anywhere in the tree, by file or by manifest key");
     if bh.is_empty() {
@@ -1328,6 +1346,13 @@ fn swept_files(
 }
 
 /// Gate 17: nothing logs from inside the sweep.
+///
+/// A RENAME IS NOT SEEN HERE AND IS REFUSED ELSEWHERE (P1-08-03, D-2660,
+/// carried here by D-1937): [`logs`] matches the KEY a file spells, so
+/// `t = { package = "telemetry", .. }` and `t::emit(..)` pass it. Gate 22
+/// clause A2 refuses `telemetry`, `log` and `tracing` by PACKAGE in
+/// Cargo.lock across the whole closure of these crates, so the renamed
+/// dependency cannot be linked at all.
 fn gate17(repo: &dyn Repo, o: &Opts) -> Result<Report, String> {
     o.only(&["swept"])?;
     let swept: Vec<&str> = o.need("swept")?.split_whitespace().collect();
@@ -1450,10 +1475,36 @@ fn gate23(repo: &dyn Repo, o: &Opts) -> Result<Report, String> {
     let mut r = Report::default();
     let tracked: BTreeSet<String> = repo.ls(&[])?.into_iter().collect();
 
-    let files = repo.ls(&["crates/*/src/*.rs"])?;
+    let mut files = repo.ls(&["crates/*/src/*.rs"])?;
     if files.is_empty() {
         r.refuse("GATE 23 READ NO FILE under crates/*/src.");
         return Ok(r);
+    }
+    // AND EVERY PRODUCTION FILE OUTSIDE `src/` (P1-08-04, D-2660, carried
+    // here by D-1937): `crates/cli/commit_stamp.rs` is mounted by `#[path]`
+    // and compiled into every `cli` build, and the glob never opened it.
+    let listing = repo.listing()?;
+    let prod = repo.scan(&["prod-files", &listing])?;
+    if !prod.ok() {
+        r.refuse("  REFUSED  the production closure could not be resolved:");
+        let bad: Vec<&str> = lines_of(&prod.out)
+            .into_iter()
+            .filter(|l| l.starts_with("UNRESOLVED "))
+            .collect();
+        r.indented(11, &bad);
+    }
+    for f in lines_of(&prod.out) {
+        let in_src = f
+            .strip_prefix("crates/")
+            .and_then(|t| t.split_once('/'))
+            .is_some_and(|(_, t)| t.starts_with("src/"));
+        if !f.is_empty()
+            && !in_src
+            && !f.starts_with("UNRESOLVED ")
+            && !files.iter().any(|x| x == f)
+        {
+            files.push(f.to_owned());
+        }
     }
     let (lines, failed) = paths_of(repo, "paths", &files);
     if !failed.is_empty() {
@@ -1946,6 +1997,96 @@ fn included_paths(line: &[u8]) -> Vec<String> {
 }
 
 /// Gate 22: the sweep crates cannot read a bar.
+/// Every `(package, dependency)` edge of a Cargo.lock: the first word of
+/// each item of a `[[package]]`'s `dependencies = [..]` array, so
+/// `"tracing 0.1.40"` is the package `tracing`. An array written on one line
+/// is read too.
+fn lock_edges(lock: &str) -> Vec<(String, String)> {
+    let mut edges = Vec::new();
+    let mut name = String::new();
+    let mut inside = false;
+    let item = |w: &str| -> Option<String> {
+        let w = w.trim().trim_start_matches('"');
+        let w = w.split([' ', '"', ',']).next().unwrap_or("");
+        (!w.is_empty()).then(|| w.to_owned())
+    };
+    for l in lines_of(lock) {
+        if l.starts_with("[[package]]") {
+            name.clear();
+            inside = false;
+        } else if let Some(v) = l.strip_prefix("name = ") {
+            name = v.trim().trim_matches('"').to_owned();
+        } else if let Some(v) = l.strip_prefix("dependencies = [") {
+            match v.find(']') {
+                Some(end) => {
+                    for w in v[..end].split(',') {
+                        if let Some(d) = item(w) {
+                            edges.push((name.clone(), d));
+                        }
+                    }
+                }
+                None => inside = true,
+            }
+        } else if inside && l.starts_with(']') {
+            inside = false;
+        } else if inside && let Some(d) = item(l) {
+            edges.push((name.clone(), d));
+        }
+    }
+    edges
+}
+
+/// `^(store|pull|lake|api|telemetry|log|tracing.*)$`: a package that reads a
+/// bar or logs.
+fn reads_or_logs(pkg: &str) -> bool {
+    matches!(pkg, "store" | "pull" | "lake" | "api" | "telemetry" | "log")
+        || pkg.starts_with("tracing")
+}
+
+/// Gate 22 clause A2 (P1-08-03, D-2660, carried here by D-1937). Clause C
+/// and gate 17 recognise `store`, `pull`, `lake`, `api`, `telemetry`, `log`
+/// and `tracing` by the dependency KEY a source file spells, and a Cargo
+/// `package =` rename changes the key and nothing else. So the question is
+/// asked of the PACKAGE, in Cargo.lock, through the whole transitive closure
+/// of the SWEEP crates: a renamed `store` in runner, and a `store` reached
+/// through an unpinned intermediary such as `costs`, are both refused. The
+/// lock does not separate dev-dependencies from the rest, so this is stricter
+/// than the build graph, deliberately.
+fn clause_a2(repo: &dyn Repo, tracked: &BTreeSet<String>, sweep: &[&str], r: &mut Report) {
+    let lock = "Cargo.lock";
+    if !tracked.contains(lock) {
+        r.refuse("REFUSED  Cargo.lock is not tracked; the sweep's closure cannot be read.");
+        return;
+    }
+    let Some(text) = repo.read(lock) else {
+        r.refuse("REFUSED  Cargo.lock could not be read; the sweep's closure is unknown.");
+        return;
+    };
+    let edges = lock_edges(&String::from_utf8_lossy(&text));
+    if edges.is_empty() {
+        r.refuse("REFUSED  Cargo.lock yielded no dependency edge.");
+        return;
+    }
+    let mut seen: Vec<String> = Vec::new();
+    let mut queue: Vec<String> = sweep.iter().map(|c| (*c).to_owned()).collect();
+    queue.reverse();
+    while let Some(c) = queue.pop() {
+        if seen.contains(&c) {
+            continue;
+        }
+        seen.push(c.clone());
+        for (_, d) in edges.iter().filter(|(p, _)| *p == c) {
+            if reads_or_logs(d) {
+                r.refuse(format!(
+                    "REFUSED  {c} links package {d} (Cargo.lock): the sweep's closure reaches a bar or a log"
+                ));
+            }
+            queue.insert(0, d.clone());
+        }
+    }
+    r.say(format!("clause A2: the sweep links {}", seen.join(" ")));
+}
+
 fn gate22(repo: &dyn Repo, o: &Opts) -> Result<Report, String> {
     o.only(&["pinned", "sweep", "banned"])?;
     let pinned: Vec<&str> = o.need("pinned")?.split_whitespace().collect();
@@ -2002,6 +2143,9 @@ fn gate22(repo: &dyn Repo, o: &Opts) -> Result<Report, String> {
             r.say("         A new dependency here is how a bar reaches the sweep.");
         }
     }
+
+    // Clause A2: nothing the sweep LINKS can read a bar or log.
+    clause_a2(repo, &tracked, &sweep, &mut r);
 
     // Clause B: no filesystem call site in src/ or benches/, by text.
     let fs_text = |l: &[u8]| banned.iter().any(|b| contains(l, b.as_bytes()));
@@ -2386,11 +2530,11 @@ mod tests {
                     Some(b) => answer(0, String::from_utf8_lossy(b).into_owned()),
                     None => answer(2, String::new()),
                 },
-                ["paths" | "paths-prod" | "deps", f] => answer(
+                ["paths" | "paths-prod" | "deps" | "build-keys", f] => answer(
                     if self.files.contains_key(*f) { 0 } else { 2 },
                     String::new(),
                 ),
-                ["unsafe", ..] => answer(0, String::new()),
+                ["unsafe", ..] | ["prod-files", _] => answer(0, String::new()),
                 ["closure", _, roots @ ..] => {
                     answer(0, roots.iter().map(|r| format!("{r}\n")).collect())
                 }
@@ -2802,6 +2946,28 @@ mod tests {
             "[package]\nname = \"a\"\nbuild = \"gen.rs\"\n",
         );
         refused(&g13(&f), "crates/a/Cargo.toml:3:build = \"gen.rs\"");
+    }
+
+    #[test]
+    fn gate13_layer_3_reads_the_build_key_in_every_toml_spelling() {
+        // P1-07-01 (D-2660, D-1937): a quoted key is invisible to the line
+        // reading and is `package.build` to the scanner.
+        let f = clean13()
+            .file(
+                "crates/a/Cargo.toml",
+                "[package]\nname = \"a\"\n\"build\" = \"gen.rs\"\n",
+            )
+            .scan(
+                "build-keys crates/a/Cargo.toml",
+                0,
+                "crates/a/Cargo.toml:3:package.build = gen.rs\n",
+            );
+        refused(&g13(&f), "crates/a/Cargo.toml:3:package.build = gen.rs");
+        let f = clean13().scan("build-keys crates/a/Cargo.toml", 2, "");
+        refused(
+            &g13(&f),
+            "REFUSED  crates/a/Cargo.toml: its build keys could not be read as TOML",
+        );
     }
 
     #[test]
@@ -3277,6 +3443,37 @@ mod tests {
     }
 
     #[test]
+    fn gate23_reads_a_production_file_outside_src() {
+        // P1-08-04 (D-2660, D-1937): a `#[path]` file outside `src/` is
+        // production, and its print is measured.
+        let f = clean23()
+            .file("crates/cli/commit_stamp.rs", "x")
+            .scan(
+                "prod-files LISTING",
+                0,
+                "crates/api/src/server.rs\ncrates/cli/commit_stamp.rs\n",
+            )
+            .scan(
+                "paths crates/cli/commit_stamp.rs",
+                0,
+                "crates/cli/commit_stamp.rs:2:println!\n",
+            );
+        refused(&g23(&f), "> cli/commit_stamp.rs:println!:1");
+        let declared = format!("{DECLARED23} cli/commit_stamp.rs:println!:1");
+        passed(
+            &g23_with(&f, &declared, "api/src/server.rs:handle:1", "\n"),
+            "OK - every print is declared",
+        );
+        let f = clean23().scan(
+            "prod-files LISTING",
+            1,
+            "UNRESOLVED crates/x/src/lib.rs: mod gone\n",
+        );
+        refused(&g23(&f), "the production closure could not be resolved");
+        refused(&g23(&f), "UNRESOLVED crates/x/src/lib.rs: mod gone");
+    }
+
+    #[test]
     fn gate23_refuses_a_print_or_a_handle_that_is_not_declared_exactly() {
         let r = g23_with(
             &clean23(),
@@ -3574,6 +3771,7 @@ mod tests {
             .file("crates/vocab/tests/t.rs", "fn t() {}\n")
             .file("crates/engine/Cargo.toml", "[package]\n")
             .file("crates/engine/src/lib.rs", "pub fn g() {}\n")
+            .file("Cargo.lock", LOCK22)
             .scan(
                 "deps crates/engine/Cargo.toml",
                 0,
@@ -3584,6 +3782,58 @@ mod tests {
                 0,
                 "crates/vocab/src/lib.rs:2:std::process::exit\n",
             )
+    }
+
+    const LOCK22: &str = "version = 4\n\n[[package]]\nname = \"engine\"\nversion = \"0.1.0\"\ndependencies = [\n \"vocab\",\n]\n\n[[package]]\nname = \"vocab\"\nversion = \"0.1.0\"\n";
+
+    #[test]
+    fn a_lock_is_read_as_package_edges() {
+        let lock = "[[package]]\nname = \"a\"\ndependencies = [\n \"b\",\n \"tracing 0.1.40\",\n]\n\n[[package]]\nname = \"c\"\ndependencies = [\"d\", \"e 1.0\"]\n";
+        let e: Vec<(String, String)> = [("a", "b"), ("a", "tracing"), ("c", "d"), ("c", "e")]
+            .iter()
+            .map(|(x, y)| ((*x).to_owned(), (*y).to_owned()))
+            .collect();
+        assert_eq!(lock_edges(lock), e);
+        for p in [
+            "store",
+            "pull",
+            "lake",
+            "api",
+            "telemetry",
+            "log",
+            "tracing",
+            "tracing-core",
+        ] {
+            assert!(reads_or_logs(p), "{p}");
+        }
+        for p in ["logos", "storefront", "core", "vocab", "apis"] {
+            assert!(!reads_or_logs(p), "{p}");
+        }
+    }
+
+    #[test]
+    fn gate22_clause_a2_refuses_a_renamed_or_transitive_store_in_the_lock() {
+        // P1-08-03 (D-2660, D-1937): `bars = { package = "store" }` in runner,
+        // or `store` reached through an unpinned crate, is a lock edge.
+        passed(&g22(&clean22()), "clause A2: the sweep links vocab engine");
+        let lock = format!(
+            "{LOCK22}\n[[package]]\nname = \"runner\"\ndependencies = [\n \"costs\",\n \"engine\",\n]\n\n[[package]]\nname = \"costs\"\ndependencies = [\n \"store\",\n \"tracing-core 0.1\",\n]\n"
+        );
+        let f = clean22()
+            .file("Cargo.lock", &lock)
+            .file("crates/runner/Cargo.toml", "[package]\n")
+            .file("crates/runner/src/lib.rs", "pub fn h() {}\n");
+        let r = g22_with(&f, "vocab engine", "vocab engine runner", BANNED22);
+        refused(&r, "REFUSED  costs links package store (Cargo.lock)");
+        refused(&r, "REFUSED  costs links package tracing-core (Cargo.lock)");
+        refused(
+            &g22(&clean22().untracked("Cargo.lock")),
+            "REFUSED  Cargo.lock is not tracked",
+        );
+        refused(
+            &g22(&clean22().file("Cargo.lock", "version = 4\n")),
+            "REFUSED  Cargo.lock yielded no dependency edge.",
+        );
     }
 
     fn g22_with(f: &Fake, pinned: &str, sweep: &str, banned: &str) -> Report {

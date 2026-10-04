@@ -62568,3 +62568,48 @@ fix is kept in each place; nothing either side proved is dropped.
   (D-2311 to D-2314). The shell-side hardening zero-work had added to those
   steps (D-2660, D-2667, D-2673, D-1930 to D-1933) is re-applied in the Rust
   tools by its own decision, not by this merge.
+
+### D-1935 — The tree gate tool carries zero-work's hardening of gates 0, 1, 1c, 1d and 2 — 2026-10-04
+
+D-1934 merged PR 74, which moved gates 0 to 10b out of shell into `.github/gates_tree.rs` (D-2311), and the shell hardening zero-work had added to those steps did not survive the merge. It is re-applied in the tool, each beside the reading it replaced.
+
+- Gate 0 (P1-09-01, D-2660). The step runs `source_scan fork-refusal .github/workflows/auto-merge.yml` and `gate-0 verdict` refuses a non-zero status, so deleting the auto-merge workflow's `isCrossRepository` refusal is a red build.
+- Gate 1 (P1-07-03, D-2660). `gate_1_record` compares a name with the four extensionless names whole. The old line reading already refused every case it got wrong, but the whole-string match alone would pass `crates/LICENSE<LF>foo.rs` as an `.rs`, so the record also refuses a name with a control character outside `web/`, beside `source_scan content`, which already refuses such names in the merged tree.
+- Gates 1b and 1g (P1-07-03, P1-07-04). Already covered: both read `ls_files`, which is `git ls-files -z`. Nothing was added.
+- Gate 1c (P1-07-02, D-2660). The step is now `prepare`, `source_scan strings` over every tracked `.rs` outside `web/`, then `verdict`, which runs the credential-path pattern over those decoded literals as well as the source bytes, and refuses a scanner that failed or decoded nothing.
+- Gate 1d (P1-07-02, P1-14-01, D-2660, D-1920, D-1931). `joined_pieces` splits a decoded literal holding `/` and no whitespace on `/`, and each segment-shaped piece is checked. `iam` joins the SigV4 group, and `LATE_FIXTURE`, `JOINED_PIECE`, `DATA_EDGES` and `LATE_PIECES` carry zero-work's four lists with their reasons. The gate was also red on the merged tree before this change on `relative` (in `LATE_FIXTURE`) and on `stamp`, `body` and `reliance`, which no list declared on either side. `LATE_LABEL` declares those three with their reasons: two `Debug` field labels from D-1776 and a CE-67 test stem from D-1772.
+- Gate 2 (P1-07-01, P1-07-04, D-2660). `prepare` writes the manifest listing, the step runs `source_scan build-keys` over it, and `gate_2_verdict` refuses every key it prints beside the old line reading. A failed scan is refused. The `build.rs` roots were already NUL-separated.
+
+Proved by GPORT-01 to GPORT-05.
+
+### D-1936 — Gates 10b, 27 and 7 read what zero-work widened them to read — 2026-10-04
+
+- Gates 10b and 27 (D-2667, P6-04). `invariant_id` in `gates_tree.rs` and `id_grammar` in `gates_ledger.rs` accept `[A-Z][A-Z0-9]*(-[A-Za-z0-9]+)+`, inside `^\| *`?ID`? *\|` for both. Each already refused a document in which it read no id, and still does. Gate 27's own test now counts `C-1` as an id, which the old pattern dropped.
+- Gate 7 (P1-08-05, D-2660). `gate-7 prepare` lists `crates/web/Cargo.toml` only when it is a file, the step runs `source_scan deps` over that listing, and `gate_7` refuses every declaration whose package is not `core`, and a manifest the scanner could not read. The flat `[dependencies]` reading is gone. The crate does not exist, so the gate still skips.
+
+Proved by GPORT-07 and GPORT-08.
+
+### D-1937 — The runtime gate tool carries zero-work's hardening of gates 13, 17, 22 and 23 — 2026-10-04
+
+- Gate 13 layer 3 (P1-07-01, P1-07-04, D-2660). `gate13` runs `source_scan build-keys` on every tracked manifest and counts each line as a build script against `allow-build`. A failed scan is refused. Roots were already read from `git ls-files -z`.
+- Gate 17 (P1-08-03, D-2660). The note that a renamed `telemetry`, `log` or `tracing` dependency passes this rule and is refused by gate 22 clause A2 is on `gate17`'s doc comment. It is a comment only.
+- Gate 22 clause A2 (P1-08-03, D-2660). The merge left A2 in the step as two inline programs, which gate 0's ratchet (D-2342) refused, so gate 0 was red on the merged tree. `clause_a2` reads Cargo.lock's package edges (`lock_edges`), walks them from the SWEEP crates and refuses any edge to `store`, `pull`, `lake`, `api`, `telemetry`, `log` or a `tracing` package. It also refuses an untracked lock, an unreadable one and one with no edge. The shell block is removed.
+- Gate 23 (P1-08-04, D-1933). `gate23` adds every file of `source_scan prod-files` outside a crate's `src/` to the glob's files, and refuses a closure that did not resolve. The two degraded-decode declarations of D-1933 were already in the merged step.
+
+Proved by GPORT-06, GPORT-13 and GPORT-14.
+
+### D-1938 — The ledger gate tool walks the production closure and carries zero-work's allowlists — 2026-10-04
+
+- Gates 11 and 19 (P1-08-04, D-2660). `banned-constructs` and `failure-events` take `PROD STATUS`, the output and exit status of `source_scan prod-files`, which the step runs. `prod_list` refuses a failed or empty closure. Gate 19 walks the closure's `crates/pull/` and `crates/api/` files. `whole_file_test_module`, the stem exemption, is gone. A listed file whose first line is `#![cfg(test)]` is still skipped.
+- Gate 11 allowlists. Rule 2 takes zero-work's `pull/src/pricing.rs` 23 (D-1958), `runner/src/report.rs` 4 (D-1932) and `runner/src/significance.rs` 41. Rule 7 takes `api/src/server.rs` 2, `cli/src/lib.rs` 7 and `indicators/src/column.rs` 1 (D-1783). Rule 6 drops `api/src/sweeprun.rs`. Where the two sides differed and the merged code needs PR 74's value, PR 74's value stays: rule 2 `runner/src/bootstrap.rs` 52, rule 4 `cli/src/lib.rs` 8 and rule 6 `runner/src/signal_candle_stop.rs` 1. Rule 4 `pull/src/folder.rs` goes from 1 to 2. Both sides allowed 1 while CE-67 (D-1772) added `keys.sort_unstable()`, so the gate was red on the merged tree. The reason is in `docs/06-limits.md`. The gate was run to confirm each value.
+- Gate 10 (D-2673). P-03 leaves `ALLOW_PENDING`, and the step's comment says why. The row's tests are checked again and resolve.
+
+Proved by GPORT-10, GPORT-11 and GPORT-15.
+
+### D-1939 — The bounds gate tool carries the trade-outcome scrub and gate 14's production closure and bench keys — 2026-10-04
+
+- Gates 12 and 14 (D-1930). `claim_scrub` drops `trades? (was |were )?flat`. Gate 12 was red on the merged tree on `crates/cli/src/pool.rs` and passes now.
+- Gate 14 (P1-08-04, D-2660). `gate14 COVER WORKDIR ST_PROD ST_BENCH_KEYS`: the step writes `prod-closure` and its status, and the gate reads that closure's files beside the `src/` glob, then refuses a closure that did not resolve or named nothing. Gate 12 needed no change: it already reads every tracked `crates/*.rs`, `crates/cli/commit_stamp.rs` among them.
+- Gate 14 layer 2c (P1-08-02, D-2660). The step runs `source_scan bench-keys` over every crate manifest, and the gate refuses each finding (`bench = false`, `required-features`, an inline bench array) and a failed or empty scan.
+
+Proved by GPORT-09 and GPORT-12.
