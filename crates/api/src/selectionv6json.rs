@@ -111,34 +111,34 @@ pub async fn selection_v6_json(uri: Uri) -> Response {
                 )
             }
         }
-        Ok(Err(why)) => refused(StatusCode::SERVICE_UNAVAILABLE, &why),
         Err(crate::detail::RunError::Saturated) => refused(
             StatusCode::TOO_MANY_REQUESTS,
             "Selection V6 read capacity full; nothing queued",
         ),
-        Err(crate::detail::RunError::Join(why)) => refused(StatusCode::SERVICE_UNAVAILABLE, &why),
+        Ok(Err(why)) | Err(crate::detail::RunError::Join(why)) => {
+            refused(StatusCode::SERVICE_UNAVAILABLE, &why)
+        }
     }
 }
 
 /// The whole payload for `root`, optionally narrowed to one family's winners.
 pub(crate) fn render(root: &Path, family: Option<&'static str>) -> Value {
-    let rungs: Vec<Value> =
-        cli::read_stored_selection_v6(root, MAX_RECORDS_PER_RUNG)
-            .into_iter()
-            .map(|(rung, read)| match read {
-                cli::StoredSelectionV6Rung::Absent(path) => {
-                    json!({"rung":rung,"status":"absent","path":path,"refusal":null,"records":[]})
-                }
-                cli::StoredSelectionV6Rung::Refused(why) => {
-                    json!({"rung":rung,"status":"refused","path":null,"refusal":why,"records":[]})
-                }
-                cli::StoredSelectionV6Rung::Records(records) => {
-                    json!({"rung":rung,"status":"saved",
+    let rungs: Vec<Value> = cli::read_stored_selection_v6(root, MAX_RECORDS_PER_RUNG)
+        .into_iter()
+        .map(|(rung, read)| match read {
+            cli::StoredSelectionV6Rung::Absent(path) => {
+                json!({"rung":rung,"status":"absent","path":path,"refusal":null,"records":[]})
+            }
+            cli::StoredSelectionV6Rung::Refused(why) => {
+                json!({"rung":rung,"status":"refused","path":null,"refusal":why,"records":[]})
+            }
+            cli::StoredSelectionV6Rung::Records(records) => {
+                json!({"rung":rung,"status":"saved",
                 "path":null,"refusal":null,
                 "records":records.iter().map(|record| project(record, family)).collect::<Vec<_>>()})
-                }
-            })
-            .collect();
+            }
+        })
+        .collect();
     let saved = rungs
         .iter()
         .any(|rung| rung.get("status") == Some(&json!("saved")));

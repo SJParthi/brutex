@@ -294,6 +294,10 @@ fn resealed(mut block: Block) -> Block {
 /// 1 or BANKNIFTY's 2 is refused with the `CLAUDE.md` §1 sentence, never
 /// shown under a guessed name, and so is an equity asked for by name.
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one genuine fixture carries the decode, the layout and both refusals"
+)]
 fn the_display_reader_decodes_the_authoritys_winners_and_refuses_any_other_family() {
     crate::step3_orchestrator::with_population_v6_evaluated_pair_fixture(
         |finalization, nifty, banknifty, population_root| {

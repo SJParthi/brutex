@@ -319,6 +319,92 @@ fn family_name(code: u64) -> Result<&'static str, String> {
     ))
 }
 
+/// The two family envelopes, NIFTY's then BANKNIFTY's; any other code is
+/// refused with the equity sentence.
+fn decode_families(d: &mut Decoder<'_>) -> Result<[StoredSelectionV6Family; 2], String> {
+    let mut families = Vec::with_capacity(2);
+    for (expected, _) in FAMILIES {
+        for _ in 0..4 {
+            d.digest()?;
+        }
+        let code = d.number()?;
+        if code != expected {
+            return Err(format!(
+                "family envelope {} holds code {code}. {SELECTION_V6_EQUITY_REFUSAL}",
+                families.len()
+            ));
+        }
+        let terminal = match d.number()? {
+            1 => "evaluated",
+            2 => "insufficient-for-cscv",
+            3 => "naturally-extinct",
+            other => {
+                return Err(format!(
+                    "family terminal code {other} is not one Selection V6 writes"
+                ));
+            }
+        };
+        families.push(StoredSelectionV6Family {
+            family: family_name(code)?,
+            terminal,
+            candidate_count: d.number()?,
+            evaluated_count: d.number()?,
+            decision_count: d.number()?,
+        });
+    }
+    families
+        .try_into()
+        .map_err(|_| "Selection V6 did not decode two family envelopes".to_owned())
+}
+
+/// One stored winner at `rank`.
+fn decode_winner(d: &mut Decoder<'_>, rank: u32) -> Result<StoredSelectionV6Winner, String> {
+    let strategy_digest = d.digest()?;
+    let disposition_id = d.digest()?;
+    let selected_exit_digest = d.digest()?;
+    let family = family_name(d.number()?)?;
+    let global_sequence = d.number()?;
+    let family_sequence = d.number()?;
+    let score = d.number()?;
+    let direction = match d.number()? {
+        1 => "long",
+        2 => "short",
+        other => {
+            return Err(format!(
+                "winner direction code {other} is not long (1) or short (2)"
+            ));
+        }
+    };
+    let mut mask_words = [0_u64; 6];
+    for word in &mut mask_words {
+        *word = d.number()?;
+    }
+    Ok(StoredSelectionV6Winner {
+        rank,
+        family,
+        strategy_digest,
+        disposition_id,
+        selected_exit_digest,
+        global_sequence,
+        family_sequence,
+        score,
+        direction,
+        mask_words,
+        drawdown: d.number()?,
+        worst_loss: d.number()?,
+        losing_rate_ppm: d.number()?,
+        losing_trades: d.number()?,
+        winning_trades: d.number()?,
+        win_rate_ppm: d.number()?,
+        average_win: d.number()?,
+        average_loss: d.number()?,
+        assurance_ppm: d.number()?,
+        pessimistic_profit: i64::from_le_bytes(d.take::<8>()?),
+        loss_ratio_ppm: d.ratio()?,
+        reward_to_risk_ppm: d.ratio()?,
+    })
+}
+
 /// One sealed block, decoded field for field as `encode_block` wrote it.
 ///
 /// # Errors
@@ -356,39 +442,7 @@ pub(crate) fn decode_block(block: &super::Block) -> Result<StoredSelectionV6Reco
     for _ in 0..(4 + 16) {
         d.number()?;
     }
-    let mut families = Vec::with_capacity(2);
-    for (expected, _) in FAMILIES {
-        for _ in 0..4 {
-            d.digest()?;
-        }
-        let code = d.number()?;
-        if code != expected {
-            return Err(format!(
-                "family envelope {} holds code {code}. {SELECTION_V6_EQUITY_REFUSAL}",
-                families.len()
-            ));
-        }
-        let terminal = match d.number()? {
-            1 => "evaluated",
-            2 => "insufficient-for-cscv",
-            3 => "naturally-extinct",
-            other => {
-                return Err(format!(
-                    "family terminal code {other} is not one Selection V6 writes"
-                ));
-            }
-        };
-        families.push(StoredSelectionV6Family {
-            family: family_name(code)?,
-            terminal,
-            candidate_count: d.number()?,
-            evaluated_count: d.number()?,
-            decision_count: d.number()?,
-        });
-    }
-    let families: [StoredSelectionV6Family; 2] = families
-        .try_into()
-        .map_err(|_| "Selection V6 did not decode two family envelopes")?;
+    let families = decode_families(&mut d)?;
     let considered = d.number()?;
     let admitted = d.number()?;
     let refused = d.number()?;
@@ -405,50 +459,7 @@ pub(crate) fn decode_block(block: &super::Block) -> Result<StoredSelectionV6Reco
     let mut winners =
         Vec::with_capacity(usize::try_from(winner_count).map_err(|why| why.to_string())?);
     for rank in 0..u32::try_from(winner_count).map_err(|why| why.to_string())? {
-        let strategy_digest = d.digest()?;
-        let disposition_id = d.digest()?;
-        let selected_exit_digest = d.digest()?;
-        let family = family_name(d.number()?)?;
-        let global_sequence = d.number()?;
-        let family_sequence = d.number()?;
-        let score = d.number()?;
-        let direction = match d.number()? {
-            1 => "long",
-            2 => "short",
-            other => {
-                return Err(format!(
-                    "winner direction code {other} is not long (1) or short (2)"
-                ));
-            }
-        };
-        let mut mask_words = [0_u64; 6];
-        for word in &mut mask_words {
-            *word = d.number()?;
-        }
-        winners.push(StoredSelectionV6Winner {
-            rank,
-            family,
-            strategy_digest,
-            disposition_id,
-            selected_exit_digest,
-            global_sequence,
-            family_sequence,
-            score,
-            direction,
-            mask_words,
-            drawdown: d.number()?,
-            worst_loss: d.number()?,
-            losing_rate_ppm: d.number()?,
-            losing_trades: d.number()?,
-            winning_trades: d.number()?,
-            win_rate_ppm: d.number()?,
-            average_win: d.number()?,
-            average_loss: d.number()?,
-            assurance_ppm: d.number()?,
-            pessimistic_profit: i64::from_le_bytes(d.take::<8>()?),
-            loss_ratio_ppm: d.ratio()?,
-            reward_to_risk_ppm: d.ratio()?,
-        });
+        winners.push(decode_winner(&mut d, rank)?);
     }
     if d.bytes
         .get(d.at..)

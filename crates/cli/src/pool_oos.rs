@@ -79,6 +79,13 @@ use rayon::prelude::*;
 use crate::frontier::Direction;
 use crate::pool::{Candidate, PreparedSpan, Screened};
 
+/// A month range, first and last month inclusive, as `(year, month)`.
+type Months = ((u16, u8), (u16, u8));
+
+/// Every candidate's pooled per-session series over one span, each
+/// candidate's tally there, and the session count.
+type PooledSeries = (Vec<Vec<i64>>, Vec<Tally>, usize);
+
 /// One instrument's two prepared spans. The training span's holding period is
 /// the one both are walked at.
 pub(crate) struct Instrument<'a> {
@@ -130,7 +137,7 @@ pub(crate) struct Judged {
 fn pooled_series(
     spans: &[(&PreparedSpan, runner::outcome::Horizon)],
     union: &[Candidate],
-) -> Result<(Vec<Vec<i64>>, Vec<Tally>, usize), String> {
+) -> Result<PooledSeries, String> {
     let days = spans.iter().fold(Vec::new(), |days, (span, _)| {
         merged(&days, &crate::session_index(&span.bars))
     });
@@ -393,8 +400,8 @@ pub(crate) fn write_catalog(
 pub fn pool_oos(
     vendor_word: &str,
     rung: &'static str,
-    training: ((u16, u8), (u16, u8)),
-    later: ((u16, u8), (u16, u8)),
+    training: Months,
+    later: Months,
     support_ppm: Option<u64>,
     catalog_out: &Path,
 ) -> String {
@@ -407,8 +414,8 @@ pub fn pool_oos(
 fn run(
     vendor_word: &str,
     rung: &'static str,
-    training: ((u16, u8), (u16, u8)),
-    later: ((u16, u8), (u16, u8)),
+    training: Months,
+    later: Months,
     support_ppm: Option<u64>,
     catalog_out: &Path,
 ) -> Result<String, String> {
@@ -443,7 +450,7 @@ fn run_under(
     vendor: brutex_core::vendor::Vendor,
     vendor_word: &str,
     rung: &'static str,
-    (training, later): (((u16, u8), (u16, u8)), ((u16, u8), (u16, u8))),
+    (training, later): (Months, Months),
     support_ppm: Option<u64>,
     catalog_out: &Path,
 ) -> Result<String, String> {
@@ -504,17 +511,7 @@ fn run_under(
         );
         return Ok(out);
     }
-    let prepared: Vec<Result<(PreparedSpan, PreparedSpan), String>> = surface
-        .par_iter()
-        .map(|symbol| {
-            let training =
-                crate::pool::prepare_span(root, vendor, symbol, rung, training.0, training.1)
-                    .map_err(|why| format!("training span: {why}"))?;
-            let later = crate::pool::prepare_span(root, vendor, symbol, rung, later.0, later.1)
-                .map_err(|why| format!("later span: {why}"))?;
-            Ok((training, later))
-        })
-        .collect();
+    let prepared = prepare_all(root, vendor, rung, &surface, (training, later));
     let mut instruments = Vec::new();
     for (symbol, spans) in surface.iter().zip(&prepared) {
         match spans {
@@ -526,19 +523,6 @@ fn run_under(
     }
     let judged = judge(&instruments, &union)?;
     render(&mut out, &union, &judged, instruments.len());
-    let held: Vec<Candidate> = judged
-        .rows
-        .iter()
-        .filter(|row| row.held)
-        .filter_map(|row| union.get(row.candidate).copied())
-        .collect();
-    if held.is_empty() {
-        let _ = writeln!(
-            out,
-            "\n  NO CATALOG WRITTEN: no candidate held out of sample, so there is nothing to qualify."
-        );
-        return Ok(out);
-    }
     let heading = format!(
         "brutex pool-oos held candidates: feed {vendor_word}, rung {rung}, training \
          {}-{:02}..{}-{:02}, later {}-{:02}..{}-{:02}.\nGross of every charge; research, \
@@ -552,7 +536,56 @@ fn run_under(
         later.1.0,
         later.1.1
     );
-    match write_catalog(catalog_out, &held, &heading) {
+    hand_off(&mut out, &union, &judged, catalog_out, &heading, later.1);
+    Ok(out)
+}
+
+/// Every surface instrument's training and later spans, prepared through the
+/// screen's own sequence, in surface order. A refusal names its span.
+fn prepare_all(
+    root: &Path,
+    vendor: brutex_core::vendor::Vendor,
+    rung: &'static str,
+    surface: &[String],
+    (training, later): (Months, Months),
+) -> Vec<Result<(PreparedSpan, PreparedSpan), String>> {
+    surface
+        .par_iter()
+        .map(|symbol| {
+            let training =
+                crate::pool::prepare_span(root, vendor, symbol, rung, training.0, training.1)
+                    .map_err(|why| format!("training span: {why}"))?;
+            let later = crate::pool::prepare_span(root, vendor, symbol, rung, later.0, later.1)
+                .map_err(|why| format!("later span: {why}"))?;
+            Ok((training, later))
+        })
+        .collect()
+}
+
+/// The held candidates, written to `catalog_out` as the qualification verbs'
+/// `CATALOG_FILE`, and the page's line saying so, or saying why not.
+fn hand_off(
+    out: &mut String,
+    union: &[Candidate],
+    judged: &Judged,
+    catalog_out: &Path,
+    heading: &str,
+    later_end: (u16, u8),
+) {
+    let held: Vec<Candidate> = judged
+        .rows
+        .iter()
+        .filter(|row| row.held)
+        .filter_map(|row| union.get(row.candidate).copied())
+        .collect();
+    if held.is_empty() {
+        let _ = writeln!(
+            out,
+            "\n  NO CATALOG WRITTEN: no candidate held out of sample, so there is nothing to qualify."
+        );
+        return;
+    }
+    match write_catalog(catalog_out, &held, heading) {
         Ok(programs) => {
             let _ = writeln!(
                 out,
@@ -560,15 +593,14 @@ fn run_under(
                  boolean-qualified-campaign-stored as it stands;\n  qualify it on months after \
                  {}-{:02}, which this page has already used.",
                 catalog_out.display(),
-                later.1.0,
-                later.1.1
+                later_end.0,
+                later_end.1
             );
         }
         Err(why) => {
             let _ = writeln!(out, "\nrefused: the held catalog was not written: {why}");
         }
     }
-    Ok(out)
 }
 
 /// The out-of-sample table, under the family's own statistics.
