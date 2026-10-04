@@ -160,3 +160,7 @@ Total new across rounds 1-15: 244. Round 15 = 2 medium, 13 low.
 | VIX | 19 | reference-only VIX | p19num-1, p19num-2 low | numeric-pass19.md |
 | Web tests | 19 | web test strength (54 mutants) | P19-01 med (rankRows untested, ran), P19-02..07 low | tests-docs-security-pass19.md |
 Total new across rounds 1-16: 259. Round 16 = 1 medium, 14 low. Newly fixed: cli3-1, replay-2, ledgers-1, CE-8, probeapi-5.
+
+## Stopped after round 16 (2026-10-04 18:35 UTC)
+
+Coordinator relayed the finish-before-weekly rule (weekly at 70%): no new rounds. Round 16 is saved and handed off; no round 17 was started. Staging was still 1f4de71. Comparison table: https://claude.ai/artifact/VPrgywStff6zaUpdpFMXQL (version 18, 259 findings). To resume later: re-verify open rows on the newest final/all-fixes-zero head, then run round 17 on themes not yet listed above.
