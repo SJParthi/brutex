@@ -806,13 +806,27 @@
 
   // The delay starts after a read completes. Hidden pages abort their read;
   // a late response cannot publish or restart a poll after navigation.
-  $effect(() => watchVisible(tick, TICK_MS, {
-    visible: () => document.visibilityState === 'visible',
-    listen: (wake) => {
-      document.addEventListener('visibilitychange', wake);
-      return () => document.removeEventListener('visibilitychange', wake);
-    }
-  }));
+  //
+  // THE HANDLE IS KEPT so `send` can revoke a poll already in flight when the
+  // control answers. A GET the server answered BEFORE the control was applied
+  // can resolve AFTER the POST did; adopting it reverted the button and wrote
+  // a false transition into the trail. conc18-3.
+  /** @type {null | ReturnType<typeof watchVisible>} */
+  let poller = null;
+  $effect(() => {
+    const watching = watchVisible(tick, TICK_MS, {
+      visible: () => document.visibilityState === 'visible',
+      listen: (wake) => {
+        document.addEventListener('visibilitychange', wake);
+        return () => document.removeEventListener('visibilitychange', wake);
+      }
+    });
+    poller = watching;
+    return () => {
+      if (poller === watching) poller = null;
+      watching();
+    };
+  });
 
   // ONE SECOND, ALWAYS. Three readings on this page are durations rather than
   // values — the cell in flight, how long this tab has watched, and how stale
@@ -1338,6 +1352,10 @@
       note(`POST ${CONTROL} action=${action} did not complete — ${why}`);
     } finally {
       control = { busy: false };
+      // REVOKE THE OLDER READ, THEN READ AGAIN. `refresh` cancels the poll in
+      // flight (its ticket stops being current, so its late answer cannot
+      // adopt) and starts a fresh one that left after the control settled.
+      poller?.refresh();
     }
   }
 
