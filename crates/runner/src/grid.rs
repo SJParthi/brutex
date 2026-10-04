@@ -4411,7 +4411,11 @@ fn one_variant(
             live,
             armed,
         };
-        let choices = ExitChoices::of(firing, pess_off, pess_off == span);
+        let choices = ExitChoices::of(
+            firing,
+            pess_off,
+            pess_off == c.time_exit.saturating_sub(c.entry),
+        );
         // NO `entry_price` HERE ANY MORE, AND ITS ABSENCE IS THE FIX.
         //
         // This read the execution bar's OPEN and handed the SAME price to both
@@ -8933,6 +8937,7 @@ mod tests {
             entry: 0,
             time_exit: 2,
             block_only: false,
+            hole: None,
             cross,
             entry_pess,
             entry_opt,
