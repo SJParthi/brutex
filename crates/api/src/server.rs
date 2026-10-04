@@ -22868,6 +22868,22 @@ mod tests {
         std::sync::Arc::new(assets::Assets::new(&dir))
     }
 
+    /// `/audit` ITSELF IS THE FRONT END'S, by reload as by click (P3-02-01,
+    /// D-1971). A registered `/audit` beat the fallback, so a nav click
+    /// rendered Svelte and a reload rendered the Rust page.
+    async fn the_audit_path_is_the_front_ends(addr: std::net::SocketAddr) {
+        let console = get(addr, "/audit").await;
+        assert!(console.contains("200 OK"), "{console}");
+        assert!(
+            console.contains("<title>shell</title>"),
+            "the shell answers /audit: {console}"
+        );
+        assert!(
+            !console.contains("It is a file on disk, not memory"),
+            "and the Rust page does not: {console}"
+        );
+    }
+
     #[tokio::test]
     async fn the_server_answers_every_route_and_then_shuts_down_gracefully() {
         let dir = agreeing("serve");
@@ -22992,19 +23008,7 @@ mod tests {
             audit_page.contains("It is a file on disk, not memory"),
             "and it says where the history lives: {audit_page}"
         );
-        // AND `/audit` ITSELF IS THE FRONT END'S, by reload as by click
-        // (P3-02-01, D-1971). A registered `/audit` beat the fallback, so a
-        // nav click rendered Svelte and a reload rendered the page above.
-        let console = get(addr, "/audit").await;
-        assert!(console.contains("200 OK"), "{console}");
-        assert!(
-            console.contains("<title>shell</title>"),
-            "the shell answers /audit: {console}"
-        );
-        assert!(
-            !console.contains("It is a file on disk, not memory"),
-            "and the Rust page does not: {console}"
-        );
+        the_audit_path_is_the_front_ends(addr).await;
 
         // A GET ON A POST ROUTE STARTS NOTHING. A crawler follows links and a
         // browser refetches on back; either would otherwise begin an ingest.

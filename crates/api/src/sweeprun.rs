@@ -6033,13 +6033,29 @@ mod tests {
         // `/backtest/run` reads `rungs`; a singular `rung` swept all eight.
         let why = asked_from(&body_with("zerodha", SPAN, r#","rung":"5min""#))
             .expect_err("rung is descend's member");
-        assert!(why.why().contains("`rung` is not read by `POST /backtest/run`"), "{}", why.why());
-        assert!(why.why().contains("No setting was ignored"), "{}", why.why());
+        assert!(
+            why.why()
+                .contains("`rung` is not read by `POST /backtest/run`"),
+            "{}",
+            why.why()
+        );
+        assert!(
+            why.why().contains("No setting was ignored"),
+            "{}",
+            why.why()
+        );
         let why = asked_from(&body_with("zerodha", SPAN, r#","max_points":50"#))
             .expect_err("a sweep has no stop ceiling");
         assert!(why.why().contains("`max_points`"), "{}", why.why());
         // ...while every knob it applies is still taken.
-        assert!(asked_from(&body_with("zerodha", SPAN, r#","validate":"0","screen_cap":7"#)).is_ok());
+        assert!(
+            asked_from(&body_with(
+                "zerodha",
+                SPAN,
+                r#","validate":"0","screen_cap":7"#
+            ))
+            .is_ok()
+        );
 
         // A descent applies no knob.
         let descent = |extra: &str| {
@@ -6057,7 +6073,8 @@ mod tests {
         ] {
             let why = descent(extra).expect_err("a descent applies no knob");
             assert!(
-                why.why().contains(&format!("`{name}` is not read by `POST /backtest/descend`")),
+                why.why()
+                    .contains(&format!("`{name}` is not read by `POST /backtest/descend`")),
                 "{}",
                 why.why()
             );
@@ -6065,21 +6082,46 @@ mod tests {
 
         // The ordinary command words, each with a member it does not read.
         for (words, name) in [
-            (r#""command":"audit-range","rung":"15min","min_hits":5,"validate":"0""#, "validate"),
-            (r#""command":"sweep-stored","rung":"15min","min_hits":5,"screen_cap":7"#, "screen_cap"),
-            (r#""command":"auto-stored","rung":"1min","min_hits":5"#, "min_hits"),
-            (r#""command":"screen","rung":"15min","support_ppm":5,"max_points":2,"top":2,"ceiling":3"#, "ceiling"),
-            (r#""command":"audit-audited-range","rung":"5min","min_hits":5,"rungs":["5min"]"#, "rungs"),
-            (r#""command":"sweep-all","rung":"15min","min_hits":5,"validate":"0""#, "validate"),
+            (
+                r#""command":"audit-range","rung":"15min","min_hits":5,"validate":"0""#,
+                "validate",
+            ),
+            (
+                r#""command":"sweep-stored","rung":"15min","min_hits":5,"screen_cap":7"#,
+                "screen_cap",
+            ),
+            (
+                r#""command":"auto-stored","rung":"1min","min_hits":5"#,
+                "min_hits",
+            ),
+            (
+                r#""command":"screen","rung":"15min","support_ppm":5,"max_points":2,"top":2,"ceiling":3"#,
+                "ceiling",
+            ),
+            (
+                r#""command":"audit-audited-range","rung":"5min","min_hits":5,"rungs":["5min"]"#,
+                "rungs",
+            ),
+            (
+                r#""command":"sweep-all","rung":"15min","min_hits":5,"validate":"0""#,
+                "validate",
+            ),
         ] {
             let why = command_from(&command_body(words)).expect_err(words);
-            assert!(why.why().contains(&format!("`{name}` is not read by the `")), "{words}: {}", why.why());
+            assert!(
+                why.why()
+                    .contains(&format!("`{name}` is not read by the `")),
+                "{words}: {}",
+                why.why()
+            );
         }
         // The strict word still takes its knobs.
-        assert!(command_from(&command_body(
-            r#""command":"audit-audited-range","rung":"5min","min_hits":5,"validate":"0""#
-        ))
-        .is_ok());
+        assert!(
+            command_from(&command_body(
+                r#""command":"audit-audited-range","rung":"5min","min_hits":5,"validate":"0""#
+            ))
+            .is_ok()
+        );
     }
 
     /// P3-02-06, D-1972. `sweep-all` takes what `cli sweep-all VENDOR RUNG
@@ -6087,7 +6129,8 @@ mod tests {
     /// because it would otherwise become a whole-store batch.
     #[test]
     fn sweep_all_takes_no_instrument_and_no_span() {
-        let documented = r#"{"command":"sweep-all","feed":"zerodha","rung":"15min","min_hits":500}"#;
+        let documented =
+            r#"{"command":"sweep-all","feed":"zerodha","rung":"15min","min_hits":500}"#;
         let batch = command_from(documented).expect("the documented shape parses");
         assert_eq!(batch.word(), "sweep-all");
         assert_eq!(batch.feed(), "zerodha");
@@ -6102,7 +6145,11 @@ mod tests {
                 r#"{{"command":"sweep-all","feed":"zerodha","rung":"15min","min_hits":500{extra}}}"#
             );
             let why = command_from(&body).expect_err("a scoped-looking batch");
-            assert!(why.why().contains("is not read by the `sweep-all` command"), "{}", why.why());
+            assert!(
+                why.why().contains("is not read by the `sweep-all` command"),
+                "{}",
+                why.why()
+            );
         }
         let why = command_from(r#"{"command":"sweep-all","rung":"15min","min_hits":500}"#)
             .expect_err("the feed is still required");

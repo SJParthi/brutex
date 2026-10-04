@@ -161,9 +161,9 @@ fn stored_self_check_reports_partial_history_and_missing_feed_as_failures()
 /// sentence sent an operator hunting a missing variable instead of the
 /// uncommitted source that actually caused the refusal.
 #[test]
-fn the_launch_configuration_states_what_build_rs_actually_stamps() {
+fn the_launch_configuration_states_what_build_rs_actually_stamps() -> std::io::Result<()> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.claude/launch.json");
-    let text = std::fs::read_to_string(&path).unwrap();
+    let text = std::fs::read_to_string(&path)?;
     assert!(!text.contains("BRUTEX_COMMIT="), "{text}");
     assert!(
         !text.contains("a server built without it refuses every sweep"),
@@ -173,15 +173,19 @@ fn the_launch_configuration_states_what_build_rs_actually_stamps() {
         text.contains("crates/cli/build.rs stamps the commit itself"),
         "{text}"
     );
-    assert!(text.contains("a build from a CLEAN tree records sweeps"), "{text}");
+    assert!(
+        text.contains("a build from a CLEAN tree records sweeps"),
+        "{text}"
+    );
     assert!(
         text.contains("\"exec cargo run --release -p api -- serve\""),
         "{text}"
     );
+    Ok(())
 }
 
 #[test]
-fn a_failed_range_never_claims_that_no_source_was_read() ->Result<(), Box<dyn std::error::Error>> {
+fn a_failed_range_never_claims_that_no_source_was_read() -> Result<(), Box<dyn std::error::Error>> {
     const CHILD: &str = "BRUTEX_TEST_FAILED_RANGE_DISCLOSURE";
     if std::env::var_os(CHILD).is_some() {
         let root = crate::store_root()?;
