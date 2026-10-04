@@ -56,16 +56,54 @@ const DAY_MICROS: i64 = 24 * 60 * ONE_MINUTE_MICROS;
 #[cfg(test)]
 const REGULAR_OPEN_IST_MINUTE: i64 = 9 * 60 + 15;
 
-/// Identity of the fill/cost behavior implemented by the current grid engine.
+/// Identity of the fill/cost behavior the grid engine implemented until
+/// D-1514. **Superseded and refused by name**: [`implemented_cost_model`]
+/// answers [`ExitGridErrorV1::SupersededCostModelIdV1`] for it.
 ///
 /// It means printed one-minute OHLC bounds, pessimistic adverse printed
 /// extremes, optimistic printed opens, level fills capped by opening gaps, and
-/// no invented outside-bar tick. V1 resolution refuses any other ID because
-/// merely hashing an arbitrary label would not prove which arithmetic produced
-/// the cell money.
+/// no invented outside-bar tick -- and, as the walk then built its paths, a
+/// hole (a refused record or a missing minute) ANYWHERE on a path up to its
+/// time exit un-priced every level exit on it, including one that closed the
+/// position before the hole. Its value is unchanged and never will be: it
+/// names the money every policy carrying it was resolved and priced with.
 #[must_use]
 pub fn printed_ohlcv_cost_model_id_v1() -> [u8; 32] {
     hash(b"brutex.runner.grid.printed-ohlcv-fill.v1.open-gap-before-retrace")
+}
+
+/// Identity of the fill/cost behavior implemented by the current grid engine.
+///
+/// Everything [`printed_ohlcv_cost_model_id_v1`] means, except the hole rule:
+/// a level exit strictly before a path's first hole is priced, and only a
+/// variant whose exit is at or after the hole is un-priced and blocks to the
+/// time exit (D-1514). That changes cell money wherever such a path exists, so
+/// it is a new identity rather than the old one re-meant. Resolution refuses
+/// any other ID because merely hashing an arbitrary label would not prove which
+/// arithmetic produced the cell money.
+#[must_use]
+pub fn printed_ohlcv_cost_model_id_v2() -> [u8; 32] {
+    hash(b"brutex.runner.grid.printed-ohlcv-fill.v2.open-gap-before-retrace.priced-before-hole")
+}
+
+/// `Ok` only for the cost model this build implements,
+/// [`printed_ohlcv_cost_model_id_v2`]. The superseded
+/// [`printed_ohlcv_cost_model_id_v1`] is refused by its own name, so a policy
+/// resolved before D-1514 says why it cannot be replayed rather than reading
+/// as an unknown label; anything else is [`ExitGridErrorV1::UnsupportedCostModelId`].
+///
+/// # Errors
+///
+/// [`ExitGridErrorV1::SupersededCostModelIdV1`] or
+/// [`ExitGridErrorV1::UnsupportedCostModelId`].
+pub fn implemented_cost_model(id: [u8; 32]) -> Result<(), ExitGridErrorV1> {
+    if id == printed_ohlcv_cost_model_id_v2() {
+        Ok(())
+    } else if id == printed_ohlcv_cost_model_id_v1() {
+        Err(ExitGridErrorV1::SupersededCostModelIdV1)
+    } else {
+        Err(ExitGridErrorV1::UnsupportedCostModelId)
+    }
 }
 
 /// Canonical identity of every field in one [`InstrumentKey`].
@@ -1049,9 +1087,7 @@ impl ExitGridPolicyV1 {
         &self,
         training_execution_1m: &[Candle],
     ) -> Result<ResolvedGridLevelsV1, ExitGridErrorV1> {
-        if self.cost_model_id != printed_ohlcv_cost_model_id_v1() {
-            return Err(ExitGridErrorV1::UnsupportedCostModelId);
-        }
+        implemented_cost_model(self.cost_model_id)?;
         if let ExecutionResolutionV1::UnsupportedSeconds(seconds) = self.execution_resolution {
             return Err(ExitGridErrorV1::UnsupportedExecutionResolution(seconds));
         }
@@ -2945,9 +2981,7 @@ impl ResolvedExitGridV1 {
         if !self.digest_is_valid() {
             return Err(ExitGridErrorV1::ResolutionDigestMismatch);
         }
-        if self.policy.cost_model_id() != printed_ohlcv_cost_model_id_v1() {
-            return Err(ExitGridErrorV1::UnsupportedCostModelId);
-        }
+        implemented_cost_model(self.policy.cost_model_id())?;
         Ok(())
     }
 
@@ -3094,6 +3128,11 @@ pub enum ExitGridErrorV1 {
     RunIdentityMismatch(&'static str),
     /// V1 grid arithmetic implements a different cost/fill model ID.
     UnsupportedCostModelId,
+    /// The policy names [`printed_ohlcv_cost_model_id_v1`], the model under
+    /// which a hole after a level exit un-priced that exit. This build prices
+    /// it (D-1514), so the policy must be resolved again under
+    /// [`printed_ohlcv_cost_model_id_v2`]; its old cells are not this build's.
+    SupersededCostModelIdV1,
     /// An exact forced stop was zero or negative.
     InvalidForcedStop(Ppm),
     /// The instrument is storable but outside the two-index sweep surface.
@@ -4506,7 +4545,7 @@ mod tests {
             ratios,
             10_000,
             ExitGridSelectorV1::GuaranteedFloor,
-            printed_ohlcv_cost_model_id_v1(),
+            printed_ohlcv_cost_model_id_v2(),
             ForcedStopV1::Disabled,
             3,
             2,
@@ -4536,7 +4575,7 @@ mod tests {
             },
             max_cells: 1,
             selector: ExitGridSelectorV1::PessimisticTotal,
-            cost_model_id: printed_ohlcv_cost_model_id_v1(),
+            cost_model_id: printed_ohlcv_cost_model_id_v2(),
             forced_stop: ForcedStopV1::Disabled,
             max_ambiguous_bars: 0,
             max_gap_fills: 0,
@@ -4720,6 +4759,77 @@ mod tests {
             assert_ne!(
                 instrument_digest_v1(&baseline_option),
                 instrument_digest_v1(&changed_option)
+            );
+        }
+    }
+
+    /// D-1514. The grid this build implements is cost model V2. A policy that
+    /// names V1, under which a hole after a level exit un-priced that exit, is
+    /// refused by that name before any level is resolved; an unknown label is
+    /// the generic refusal, and V2 resolves.
+    #[test]
+    fn a_policy_naming_the_superseded_v1_cost_model_is_refused_by_name() {
+        assert_ne!(
+            printed_ohlcv_cost_model_id_v1(),
+            printed_ohlcv_cost_model_id_v2()
+        );
+        assert_eq!(
+            implemented_cost_model(printed_ohlcv_cost_model_id_v2()),
+            Ok(())
+        );
+        assert_eq!(
+            implemented_cost_model(printed_ohlcv_cost_model_id_v1()),
+            Err(ExitGridErrorV1::SupersededCostModelIdV1)
+        );
+        assert_eq!(
+            implemented_cost_model([8; 32]),
+            Err(ExitGridErrorV1::UnsupportedCostModelId)
+        );
+        let input = bars(100);
+        assert!(policy().resolve(&nifty(), &input).is_ok());
+        for (id, refusal) in [
+            (
+                printed_ohlcv_cost_model_id_v1(),
+                ExitGridErrorV1::SupersededCostModelIdV1,
+            ),
+            ([8; 32], ExitGridErrorV1::UnsupportedCostModelId),
+        ] {
+            let mut old = policy();
+            old.cost_model_id = id;
+            assert_eq!(
+                old.resolve(&nifty(), &input).map(|r| r.family()),
+                Err(refusal)
+            );
+        }
+    }
+
+    /// D-1514. A resolution sealed under the superseded V1 cost model, with a
+    /// digest that reconciles, is still refused by the runtime integrity check
+    /// every resolved-grid door runs first, by name; an unknown model is the
+    /// generic refusal, and a broken seal is reported before either.
+    #[test]
+    fn a_resolved_grid_sealed_under_the_v1_cost_model_is_refused_at_runtime() {
+        let input = bars(100);
+        let current = policy().resolve(&nifty(), &input).expect("V2 resolves");
+        assert_eq!(current.require_runtime_integrity(), Ok(()));
+        for (id, refusal) in [
+            (
+                printed_ohlcv_cost_model_id_v1(),
+                ExitGridErrorV1::SupersededCostModelIdV1,
+            ),
+            ([8; 32], ExitGridErrorV1::UnsupportedCostModelId),
+        ] {
+            let mut sealed = current.clone();
+            sealed.policy.cost_model_id = id;
+            sealed.policy_digest = sealed.policy.digest();
+            sealed.digest = digest_resolved(&sealed);
+            assert!(sealed.digest_is_valid(), "the seal itself reconciles");
+            assert_eq!(sealed.require_runtime_integrity(), Err(refusal));
+            let mut broken = sealed;
+            broken.digest = [0; 32];
+            assert_eq!(
+                broken.require_runtime_integrity(),
+                Err(ExitGridErrorV1::ResolutionDigestMismatch)
             );
         }
     }

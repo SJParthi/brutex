@@ -4,7 +4,7 @@ use super::*;
 use crate::excursion::Side;
 use crate::exit_grid_policy::{
     ExecutionResolutionV1, ExitGridSelectorV1, ForcedStopV1, RangeResolutionV1, RatioLimitsV1,
-    RationalPercentileV1, RungPlanV1,
+    RationalPercentileV1, RungPlanV1, printed_ohlcv_cost_model_id_v2,
 };
 use brutex_core::instrument::Exchange;
 
@@ -23,7 +23,7 @@ fn internally_corrupted_resolution_cannot_reach_ladders_or_training_attestation(
         RatioLimitsV1::new(1, 1_000_000, 1)?,
         1000,
         ExitGridSelectorV1::GuaranteedFloor,
-        printed_ohlcv_cost_model_id_v1(),
+        printed_ohlcv_cost_model_id_v2(),
         ForcedStopV1::Disabled,
         1,
         1,
