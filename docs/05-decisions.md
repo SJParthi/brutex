@@ -58377,3 +58377,51 @@ held, and `BlockExtremes` answers every query it answered.
 The non-root telemetry coverage counts `sink.rs` 20 again, with `clock.rs` 1,
 `level.rs` 1, `lib.rs` 6, `record.rs` 1 and `tail.rs` 3. That equals gate 20's
 declaration, so no count changes. CIM-01..03.
+
+### D-2319 — `cli top` is not given an O(1) sidecar: it would weaken a refusal and leave three passes — 2026-10-04
+
+**Finding (Rust and O(1) sweep OS-7).** After D-2310 `cli top` still folds
+every row of `results/runs.bin` per call. The proposal was a new sidecar file
+-- its own magic and version, sealed by the ledger's `blake3` convention,
+written and fsynced under the ledger's exclusive append lock -- recording the
+row count it covers and the best complete row, so `top` would check one count
+against the file length, read one row, verify its seal and answer. `runs.bin`'s
+format would not change, so §3 rule 8 was not the obstacle.
+
+**What measuring the call found.** On a store with a committed result set,
+`top_at` is not one pass: it also opens `frontier.bin`, whose open indexes
+every frontier row, and `Frontier::of_run` calls `committed_receipt`, which
+opens `runs.bin` a second time (plus one `of_identity` read) and indexes
+`detail-sets.bin`. Counted: two ledger opens and `2 * rows + 1` row reads per
+call. The fixture D-2310 counted had no frontier, so it saw one open. A sidecar
+removing the fold leaves the call O(runs + frontier rows + receipts). An O(1)
+`top` would need persisted indexes for all three files, reconciled in one
+commit.
+
+**Why it was not shipped, even for the ledger half.** `top` refuses a ledger
+in which ANY row fails its seal or two sealed rows share an identity, whichever
+row that is. An answer read from one row cannot see the other rows, so it
+cannot make either refusal. Pinning the sidecar to the ledger's
+`FileGeneration` and rescanning when it moved would catch changes made through
+the filesystem. It would miss media damage below the filesystem, and its
+"unchanged" evidence is only as fine as the filesystem's timestamp
+granularity. `result_set::FileGeneration` says itself that it is not
+authentication. Each version is a weaker gate than the fold, and `CLAUDE.md` §4
+bans shipping a weaker gate to buy a bound. A silent rescan of a stale
+sidecar would also be the hidden fallback §4 bans. With a refusal attached it
+is honest, but then the sidecar adds code and a second file to keep consistent
+while the cost stays O(runs). `cli results` takes arbitrary feed and
+underlying filters, so its matching count cannot be precomputed. It stays
+O(runs).
+
+**Decision.** Nothing in the read path changes and no sidecar is written.
+`docs/06-limits.md`'s D-2310 bullet records the design, the passes and the
+refusal it would weaken.
+
+**Proof.** `cli::audited_stored::top_reads_the_ledger_twice_and_refuses_damage_in_a_row_it_does_not_name`
+records one generated audit (ledger row, frontier block, receipt), then
+appends seven worse complete rows. It asserts that `top` names the audited run
+with its frontier in two ledger opens and `2 * rows + 1` row reads. After it
+flips one byte in the last row, which is never the best, `top` refuses with
+`record 7 does not match its seal`. That is the refusal a one-row answer would
+lose. Counted, not timed.

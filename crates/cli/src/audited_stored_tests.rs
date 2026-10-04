@@ -1667,6 +1667,70 @@ fn top_names_a_recorded_share_as_a_share_and_an_index_as_before() {
     crate::knobs::clear_all();
 }
 
+/// **`cli top` on a committed store reads the ledger twice and refuses damage
+/// in a row it does not name -- which is why no O(1) index replaces it.**
+/// OS-7, D-2319.
+///
+/// A sidecar holding the best row would answer from one read. Two facts,
+/// counted here, rule it out without weakening a gate. The fold is not the only
+/// pass: with a frontier and a receipt on disk, `committed_receipt` opens
+/// `runs.bin` a second time (plus one `of_identity` read), so a call is two
+/// opens and `2 * rows + 1` row reads, beside the frontier and receipt indexes.
+/// And a damaged row that is NOT the best still refuses the whole report; an
+/// answer from one row cannot see the others.
+#[test]
+fn top_reads_the_ledger_twice_and_refuses_damage_in_a_row_it_does_not_name() {
+    let _knobs = crate::knobs::serially();
+    bounded_header_knobs();
+    let fixture = Traded::new("NIFTY");
+    let recorded = fixture
+        .audit("1min", 700)
+        .expect("a recorded generated audit");
+    assert!(recorded.contains("RESULT RECORDED"), "premise:\n{recorded}");
+    let mut ledger = crate::results::Results::open(&fixture.root).expect("the ledger");
+    let committed = ledger.len().expect("a count");
+    assert_eq!(committed, 1, "premise: one audited row");
+    let best = ledger.read(committed - 1).expect("the audited row");
+    assert!(best.has_complete_trade_total(), "premise: {best:?}");
+    // Worse complete rows, with no frontier: the winner does not move.
+    for nth in 1..=7_u8 {
+        let mut worse = best;
+        worse.identity = [nth; 32];
+        worse.pessimistic = best.pessimistic - i64::from(nth);
+        ledger.append(&worse).expect("a worse row");
+    }
+    drop(ledger);
+    let rows = committed + 7;
+    let counted = || {
+        crate::results::OPENS.with(|n| n.set(0));
+        crate::results::ROW_READS.with(|n| n.set(0));
+        let top = crate::top_at(&fixture.root, None, None);
+        (
+            top,
+            crate::results::OPENS.with(std::cell::Cell::get),
+            crate::results::ROW_READS.with(std::cell::Cell::get),
+        )
+    };
+    let (top, opens, reads) = counted();
+    assert!(top.contains(&best.identity_hex()), "{top}");
+    assert!(top.contains("conditions"), "the frontier half ran:\n{top}");
+    assert_eq!((opens, reads), (2, 2 * rows + 1), "{top}");
+
+    // Damage the LAST worse row: never the winner, never read by an answer
+    // that reads only the winner.
+    let path = crate::results::Results::path(&fixture.root);
+    let mut bytes = fs::read(&path).expect("the ledger bytes");
+    let last = usize::try_from(rows - 1).expect("fits");
+    bytes[crate::results::HEADER_BYTES + last * crate::results::STRIDE_BYTES + 40] ^= 1;
+    fs::write(&path, &bytes).expect("damaged");
+    let (top, _, _) = counted();
+    assert!(
+        top.starts_with(&format!("refused: record {last} does not match its seal")),
+        "{top}"
+    );
+    crate::knobs::clear_all();
+}
+
 /// **`sweep-stored` on a share says its ranking is gross of every charge.**
 ///
 /// The verb renders FINDINGS and stops -- it has no AUDIT block, so D-0681's

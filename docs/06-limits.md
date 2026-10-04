@@ -14601,6 +14601,34 @@ most 100,000).
   identity index that refuses a duplicate run, kept. Counted (one open, one
   read per row), not timed: UNVERIFIED as a measured bound.
 
+  **An O(1) `cli top` was designed and NOT shipped (D-2319).** The design was
+  a new sidecar file beside `runs.bin` -- its own magic and version, sealed,
+  fsynced under the ledger's append lock -- naming the row count it covers and
+  the best complete row, so a call would read one header and one row. It
+  fails on two counts, both counted by
+  `cli::audited_stored::top_reads_the_ledger_twice_and_refuses_damage_in_a_row_it_does_not_name`.
+  *First, the fold is not the only pass.* On a store with a committed result
+  set, `top_at` also opens `frontier.bin` (an O(frontier rows) block index)
+  and `Frontier::of_run` calls `committed_receipt`, which opens `runs.bin` a
+  SECOND time and indexes `detail-sets.bin`: two ledger opens and
+  `2 * rows + 1` row reads per call, measured on a 1 + 7-row store. Removing
+  the fold leaves the call O(runs + frontier rows + receipts); an O(1) `top`
+  would need persisted indexes for all three files, reconciled in one commit,
+  not one sidecar. *Second, and decisive, an O(1) answer cannot keep `top`'s
+  refusals.* Today a call refuses a ledger in which ANY row fails its seal or
+  two sealed rows share an identity, whichever row it is. A one-row answer
+  does not read the others, so it cannot see either. Pinning the sidecar to
+  the ledger's `FileGeneration` (device, inode, length, mtime, ctime) would
+  catch a change made through the filesystem, but not media damage below it,
+  and its "unchanged" evidence is only as fine as the filesystem's timestamp
+  granularity; `result_set::FileGeneration` itself says it is not
+  authentication. That is a weaker gate, and `CLAUDE.md` §4 bans shipping one
+  to buy a bound. The test above also proves the refusal stands: damage in the
+  last, never-best row still refuses the report by name. `cli results` takes
+  arbitrary filters, so its matching count could not be precomputed in any
+  case; it stays O(runs) for the reasons already given. Not timed: UNVERIFIED
+  as a measured bound.
+
 ## Rust and O(1) sweep, data side — D-2370 onward, 4 October 2026
 
 What these fixes left non-constant, named. None of it is timed by a bench:
