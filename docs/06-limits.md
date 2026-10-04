@@ -14131,6 +14131,10 @@ bounds are all nonzero.
     cells or requests. It is asked once per credential read or re-read.
     O(d) in the run's rotations; "Audit fixes -- D-1480 onward" above
     states it.
+  api/src/spot.rs 1 (D-2807) -- `FNO_INDEX_UNDERLYINGS.contains(&symbol)`
+    in `underlying_segment` is the FIXED `const` ARRAY case: five `&str`,
+    the same array `core::instrument::is_sweepable` walks. Asked once per
+    `/spot.json` request, never per instant.
 ~~~~
 
 ## Audit fixes of 2026-10-03 — what they leave unbounded — D-1528, D-1535, D-1536, D-1537

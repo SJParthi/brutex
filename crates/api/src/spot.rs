@@ -23,14 +23,17 @@
 //!
 //! The file is opened once per request. Each instant is one
 //! [`store::file::BarFile::first_at_or_after`] bisection — at most
-//! `ceil(log2(n_valid + 1))` record reads, proven by the store's own test —
-//! plus at most three record reads to confirm the hit or bracket the miss.
+//! `ceil(log2(n_valid + 1))` record reads, proven by the store's own test
+//! `first_at_or_after_never_probes_more_than_the_bisection_height` — plus at
+//! most two record reads to confirm the hit or bracket the miss.
 //! That is `O(log n_valid)` per instant, NOT `O(1)`: the store is addressed by
 //! row index and a month file is sparse in time, so no row offset can be
 //! computed from a timestamp alone. `n_valid` is bounded by the month's
 //! geometry (`docs/06-limits.md`, D-2807), so the bound is a constant per rung:
 //! fourteen probes at the one-minute month ceiling, twenty at the one-second.
-//! Instants per request are capped at [`MAX_SPOT_TIMES`].
+//! Instants per request are capped at [`MAX_SPOT_TIMES`]. The wall-clock
+//! time is UNVERIFIED by any gate: no bench row times this lookup, and the
+//! one measurement taken was ad hoc (`docs/06-limits.md`, D-2807).
 
 use super::{Loaded, ingest, param, render, timeframe_param};
 use crate::bars::OpenRefusalKind;
