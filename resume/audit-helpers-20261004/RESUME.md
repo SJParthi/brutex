@@ -45,3 +45,12 @@ Total new across rounds 1-3: 49.
 | Engine | 7 | Apriori + O(1) ops | p7num-1..3 low (join proven complete and injective) | numeric-pass7.md |
 | House rules | 7 | empty tests, fallbacks, float money | P7-01, P7-02 low | tests-docs-security-pass7.md |
 Total new across rounds 1-4: 59. Severity trend: round 4 = 1 medium, 9 low.
+
+## Round 5 (same head 1f4de71) — done 2026-10-04 ~10:05 UTC
+| Angle | Pass | Area | New | Report |
+|---|---|---|---|---|
+| Crash/edge | 10 | counts sizing memory/loops | CE-64 med (FIFO/device census read hangs or OOMs the api, ran), CE-65, CE-66 low | crash-edge-pass10.md |
+| Network | 8 | pull clients, retries, credentials | conc8-1 med (5xx breaker can never trip, ran), conc8-2..4 low | conc-pass8.md |
+| Statistics | 8 | RC, SPA, Romano-Wolf, bootstrap vs literature | p8num-1 med (n>=30 normal bar overspends Bonferroni alpha up to 1,322x) | numeric-pass8.md |
+| Docs vs behaviour | 8 | 35 cli commands, 50 routes | P8-01..05 low | tests-docs-security-pass8.md |
+Total new across rounds 1-5: 74. Each round still finds 1-3 mediums, so rounds continue.
