@@ -60658,3 +60658,32 @@ nothing.
 
 **Not measured.** The throughput gain against Zerodha itself. It depends on
 the real round trip, which this box cannot reach.
+
+### D-2750 — The web leaderboard scores an unbounded ratio as the worst, and a never-lost row's win:loss term as zero — 2026-10-04
+
+**Finding (p14num-2).** `rankRows` in `web/src/routes/backtest/+page.svelte`
+normalises each of the operator's eleven criteria across the run's rows and
+gave every unmeasurable value the midpoint, 0.5. Two values it treated as
+unmeasurable are not. A row with losses and no wins had `lossRatio` `null`,
+although its loss ratio is unbounded and so the worst there is; it beat every
+measured row in the lower half on "less losing ratio". A row that never lost
+arrives from `/frontier.json` with `reward_to_risk_bp` `null`, the
+`i64::MAX` sentinel `measurable` writes, and `cli::ranked` demotes exactly that
+sentinel to last in all four server ranking keys ("a cell that never lost is
+UNTESTED, not best"). The page placed it mid-board instead, against the server
+`rank` its own sort breaks ties on.
+
+**Decision.** `lossRatio` is `Infinity` when nothing was won and something was
+lost, and `null` only when neither sum moved. `norm` places `+Infinity` at the
+top of the range and `-Infinity` at the bottom; only `null`, `undefined` and
+`NaN` take the midpoint. The `rewardRisk` term is 0 for a `null`
+`reward_to_risk_bp`, matching `cli::ranked`. Both rows then score what the
+worst measured row scores, and the server rank breaks the tie.
+
+**What it changes.** Only the web re-rank's order when a run holds a never-won
+or never-lost row and the matching slider is non-zero. The server's ranking,
+the PASS/FAIL verdicts and the rendered `—` for an unmeasurable ratio are
+unchanged.
+
+**Proof.** `web/tests/rank-rows-unmeasurable.test.js`, which runs the page's
+own `rankRows` and pins the `cli::ranked` rule it mirrors. Gate W2 runs it.

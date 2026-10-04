@@ -232,14 +232,32 @@
      rather than seconds because the work legitimately takes them.
      ==================================================================== */
 
-  /** @type {{ phase: 'idle'|'running'|'done', body: any, why: string }} */
-  let crawl = $state({ phase: 'idle', body: null, why: '' });
+  /** @type {{ phase: 'idle'|'running'|'done', body: any, why: string, feed: string | null }} */
+  let crawl = $state({ phase: 'idle', body: null, why: '', feed: null });
+  /**
+   * THE CRAWL IS FEED-SPECIFIC, SO A FEED CHANGE RETIRES IT. The join counts
+   * and the publishable verdict are against ONE feed's master; nothing cleared
+   * them on a switch, so feed A's result sat under feed B, and a switch made
+   * during the five-minute crawl landed A's answer straight into B's view.
+   * Each press takes a generation, the feed effect below bumps it and resets
+   * the section, and a reply from a retired generation is dropped. conc18-5.
+   */
+  let crawlSeq = 0;
+
+  $effect(() => {
+    feeds.active;
+    untrack(() => {
+      crawlSeq += 1;
+      crawl = { phase: 'idle', body: null, why: '', feed: null };
+    });
+  });
 
   async function resolveUniverse() {
     if (crawl.phase === 'running') return;
     const feed = feeds.active;
     if (!feed) return;
-    crawl = { phase: 'running', body: null, why: '' };
+    const seq = ++crawlSeq;
+    crawl = { phase: 'running', body: null, why: '', feed };
     try {
       // FIVE MINUTES. A crawl of ~148 documents over one polite connection
       // is minutes of real work, and the console's default 15 s would
@@ -251,8 +269,10 @@
         body: `feed=${encodeURIComponent(feed)}`
       });
       const body = await response.json();
+      if (seq !== crawlSeq) return;
       crawl = {
         phase: 'done',
+        feed,
         body,
         /* `ok:false` CARRIES ITS OWN REASON and the status may still be 200:
            the route answers a refusal as a document rather than as an HTTP
@@ -274,8 +294,10 @@
         why: (body?.why ?? '') || (body?.ok === false ? 'the crawl refused and gave no reason' : '')
       };
     } catch (error) {
+      if (seq !== crawlSeq) return;
       crawl = {
         phase: 'done',
+        feed,
         body: null,
         why: error instanceof Error ? error.message : 'The crawl threw a value that is not an Error.'
       };
@@ -769,7 +791,7 @@
       {/if}
 
       <p class="mnotes">
-        digest {crawl.body.digest} · key {crawl.body.key} · identity {crawl.body.identity} · day
+        feed {crawl.body.feed ?? crawl.feed} · digest {crawl.body.digest} · key {crawl.body.key} · identity {crawl.body.identity} · day
         {crawl.body.day}
       </p>
     {/if}
