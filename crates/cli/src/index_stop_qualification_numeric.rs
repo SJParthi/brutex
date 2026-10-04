@@ -14,7 +14,7 @@ use runner::admission::{
 use runner::bootstrap_zero_v2::{self as zero, Classification};
 
 #[path = "index_stop_qualification_metrics.rs"]
-mod metrics;
+pub(super) mod metrics;
 
 pub(super) fn validate_family<S: Snapshot>(
     training: &[S],
@@ -605,7 +605,8 @@ fn project<S: Snapshot>(
             u64::try_from(statistics.splits.len()).map_err(display)? - contributing,
         );
         if contributing > 0 {
-            values.pbo_ppm = ObservedU64V1::Measured(probability(bottom, contributing)?.ppm());
+            values.pbo_ppm =
+                ObservedU64V1::Measured(probability(bottom, contributing)?.ceiling_ppm());
         }
     }
     let adjusted = scaled(facts, romano[1], romano[2])?;

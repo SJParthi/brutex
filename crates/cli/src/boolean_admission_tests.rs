@@ -77,6 +77,94 @@ fn statistics(
     )
 }
 
+/// Three priced trades on two IST days: +10, -4 and a flat 0.
+fn three_trade_coordinate() -> Result<BooleanCoordinateV1, String> {
+    let trades = [10_i64, -4, 0]
+        .into_iter()
+        .zip(0_i64..)
+        .map(|(worst, slot)| {
+            let entry =
+                1_746_157_500_000_000 + (slot / 2) * 86_400_000_000 + (slot % 2) * 120_000_000;
+            let index = usize::try_from(slot).unwrap_or_default();
+            runner::grid::TradeRow {
+                signal_bar: index * 2,
+                entry_bar: index * 2 + 1,
+                exit_bar: index * 2 + 2,
+                entry_micros: entry,
+                exit_micros: entry + 60_000_000,
+                best: worst,
+                worst,
+                adverse: 0,
+                adverse_paisa: 0,
+                favourable: 0,
+                favourable_paisa: 0,
+            }
+        })
+        .collect();
+    Ok(BooleanCoordinateV1 {
+        identity: [8; 32],
+        program_index: 0,
+        run: [9; 32],
+        side: runner::excursion::Side::Long,
+        ordinal: 0,
+        cell: runner::grid::Cell {
+            trades: 3,
+            wins: 1,
+            pessimistic: 6,
+            optimistic: 6,
+            gross_win: 10,
+            gross_loss: -4,
+            best_trade: 10,
+            min_win: 10,
+            worst_trade: -4,
+            max_drawdown: 4,
+            max_winning_streak: 1,
+            max_losing_streak: 2,
+            timed_out: 3,
+            ambiguous_bars: 1,
+            gapped: 1,
+            ..runner::grid::Cell::default()
+        },
+        refusal: runner::exit_grid_policy::ExecutionRefusalBitsV1::from_bits(0).ok_or("refusal")?,
+        periods: vec![],
+        trades,
+        selected: None,
+        summary: runner::expression::Summary {
+            evaluated: 3,
+            hits: 3,
+            misses: 0,
+            unknown: 0,
+        },
+        support_sessions: 2,
+    })
+}
+
+#[test]
+fn boolean_base_values_round_max_gated_rates_up() -> Result<(), String> {
+    // p2bool-1, D-1990: 1 of 3 and 2 of 3 are inexact in ppm. A floor put
+    // each a fraction BELOW its true value, onto a cap the true value exceeds.
+    let values = base_values(&three_trade_coordinate()?)?;
+    assert_eq!(
+        values.ambiguous_fill_rate_ppm,
+        ObservedU64V1::Measured(333_334)
+    );
+    assert_eq!(
+        values.gap_affected_rate_ppm,
+        ObservedU64V1::Measured(333_334)
+    );
+    assert_eq!(
+        values.session_concentration_ppm,
+        ObservedU64V1::Measured(666_667)
+    );
+    // Minimum-gated, and the floor the runner reconciles for the losing rate.
+    assert_eq!(values.win_rate_ppm, ObservedU64V1::Measured(333_333));
+    assert_eq!(
+        values.losing_trade_rate_ppm,
+        ObservedU64V1::Measured(666_666)
+    );
+    Ok(())
+}
+
 #[test]
 fn complete_cash_boolean_admission_retains_every_reason_and_missing_oos_cannot_pass()
 -> Result<(), String> {

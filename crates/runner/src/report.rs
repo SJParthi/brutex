@@ -257,7 +257,11 @@ fn conditions_line(mask: &ConditionMask) -> String {
 /// a derivation. Below it the report refuses a verdict rather than issuing one
 /// across two distributions -- `CLAUDE.md` §4 prefers a named refusal to a
 /// confident wrong answer.
-const MIN_OBSERVATIONS: u64 = 30;
+///
+/// Public because `/live.json` serves a `clears_bar` for the same rows and must
+/// refuse it under the same floor; it called a five-observation row clear while
+/// this report called it TOO FEW (xcut-1, D-1991).
+pub const MIN_OBSERVATIONS: u64 = 30;
 
 /// Column width for the label side of every row.
 const LABEL: usize = 34;

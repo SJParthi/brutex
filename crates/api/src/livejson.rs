@@ -235,7 +235,14 @@ fn write_row(out: &mut String, row: &cli::frontier::Row, bar_milli: i64) {
             // `t_milli - 0.5` thousandths, which is at least `bar_milli + 0.5`
             // and above the bar. `>=` read a |t| up to 1.5 milli short as
             // clearing it (CE-7, D-1769).
-            row.t_milli.saturating_abs() > bar_milli,
+            //
+            // AND ONLY A JUDGEABLE ROW. The end-of-run report refuses a verdict
+            // below thirty observations, where a normal bar understates a
+            // Student-t; this served `true` for a five-observation row the
+            // report calls TOO FEW (xcut-1, D-1991). A mispaired row never
+            // reaches here: `publish_ranked` refuses to write one.
+            row.n >= cli::live::MIN_JUDGEABLE_OBSERVATIONS
+                && row.t_milli.saturating_abs() > bar_milli,
         ),
     );
 }
@@ -312,8 +319,8 @@ mod tests {
             identity: [0; 32],
             rank: 1,
             mask_words: [1, 0, 0, 0, 0, 0],
-            hits: 1,
-            n: 1,
+            hits: 30,
+            n: 30,
             mean_milli_paisa: 0,
             t_milli,
             payoff_bp: 0,
@@ -341,6 +348,17 @@ mod tests {
             assert!(
                 out.contains(&format!(r#""clears_bar":{clears}"#)),
                 "{t_milli}: {out}"
+            );
+        }
+        // xcut-1, D-1991: below the report's thirty observations no |t| clears,
+        // however far past the bar; at thirty the same |t| does.
+        for (n, clears) in [(5, false), (29, false), (30, true)] {
+            let mut out = String::new();
+            let few = cli::frontier::Row { n, ..row(9_000) };
+            super::write_row(&mut out, &few, 4_055);
+            assert!(
+                out.contains(&format!(r#""clears_bar":{clears}"#)),
+                "n {n}: {out}"
             );
         }
     }

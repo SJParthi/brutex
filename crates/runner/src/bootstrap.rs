@@ -426,7 +426,7 @@ pub fn reality_check(
     if block > MAX_BLOCK {
         return None;
     }
-    let periods = aligned(returns)?;
+    let periods = aligned_for(returns, block)?;
     let stats: Vec<Performance> = returns.iter().map(|r| summarise(r)).collect();
 
     // THE OBSERVED STATISTIC: the best mean across strategies, scaled by the
@@ -564,7 +564,7 @@ pub fn spa(returns: &[Vec<i64>], draws: usize, seed: u64, block: usize) -> Optio
     if block > MAX_BLOCK {
         return None;
     }
-    let periods = aligned(returns)?;
+    let periods = aligned_for(returns, block)?;
     let stats: Vec<Performance> = returns.iter().map(|r| summarise(r)).collect();
 
     // HANSEN'S STATISTIC IS `sqrt(n) * mean / sigma`, AND THAT IS EXACTLY
@@ -823,7 +823,7 @@ fn exact_family_test_inputs_v1(
     if draws == 0 || block == 0 || block > MAX_BLOCK || draws.checked_add(1).is_none() {
         return None;
     }
-    let periods = aligned(returns)?;
+    let periods = aligned_for(returns, block)?;
     if periods < 2 {
         return None;
     }
@@ -1195,7 +1195,7 @@ pub fn romano_wolf(
     if block > MAX_BLOCK {
         return Vec::new();
     }
-    let Some(periods) = aligned(returns) else {
+    let Some(periods) = aligned_for(returns, block) else {
         return Vec::new();
     };
     romano_wolf_aligned(returns, periods, draws, seed, block, alpha_ppm)
@@ -1220,7 +1220,7 @@ pub fn romano_wolf_receipt(
     if draws == 0 || block == 0 || block > MAX_BLOCK || alpha_ppm > 1_000_000 {
         return None;
     }
-    let periods = aligned(returns)?;
+    let periods = aligned_for(returns, block)?;
     let rejected = romano_wolf_aligned(returns, periods, draws, seed, block, alpha_ppm);
     let mut decisions = vec![false; returns.len()];
     for result in &rejected {
@@ -1283,7 +1283,7 @@ pub fn romano_wolf_adjusted_p_values_v1(
         return None;
     }
     let denominator = draws.checked_add(1)?;
-    let periods = aligned(returns)?;
+    let periods = aligned_for(returns, block)?;
     if periods < 2 {
         return None;
     }
@@ -1603,6 +1603,18 @@ fn aligned(returns: &[Vec<i64>]) -> Option<usize> {
         return None;
     }
     Some(first)
+}
+
+/// [`aligned`], refused when the average block is longer than the series.
+///
+/// A block past the period count resamples almost every draw as one rotation of
+/// the sample, so the null distribution collapses onto the observed statistic:
+/// measured over 400 periods of pure noise, a block of 40,000 put 36 of 40
+/// families under p = 0.05 where a block of 10 put 2 (D-0742's open half,
+/// refused by D-1990). Refused rather than clamped: a block the caller did not
+/// ask for is an answer to a different question.
+fn aligned_for(returns: &[Vec<i64>], block: usize) -> Option<usize> {
+    aligned(returns).filter(|&periods| block <= periods)
 }
 
 /// Mean and standard error of one series.
@@ -3023,7 +3035,7 @@ mod block_ceiling_tests {
     /// so above one million periods the restart probability floors to zero
     /// and every draw is one rotation of the series. Every entry point
     /// refuses that block instead of resampling rotations; one million itself
-    /// is still accepted.
+    /// is under the ceiling, and a block is also refused past the series length (D-1990).
     #[test]
     fn a_block_the_ppm_draw_cannot_restart_is_refused_by_every_entry_point() {
         let ceiling = 1_000_000_usize;
@@ -3074,19 +3086,48 @@ mod block_ceiling_tests {
             Some(FamilyTestsRefusalV1::White)
         );
 
-        // A strong edge the stepdown names at the ceiling is not named beyond it.
+        // A strong edge the stepdown names at the series length is not named
+        // beyond it.
         let strong = vec![edged(periods, 21, 60), edged(periods, 22, 0)];
-        assert!(!romano_wolf(&strong, 999, 3, ceiling, 50_000).is_empty());
+        assert!(!romano_wolf(&strong, 999, 3, periods, 50_000).is_empty());
         assert!(romano_wolf(&strong, 999, 3, beyond, 50_000).is_empty());
 
-        // One million is still a block the draw can restart at, and is accepted.
-        assert!(reality_check(&set, 999, 3, ceiling).is_some());
-        assert!(spa(&set, 999, 3, ceiling).is_some());
-        assert!(white_reality_check_receipt_v1(&set, 999, 3, ceiling).is_some());
-        assert!(spa_receipt_v1(&set, 999, 3, ceiling).is_some());
-        assert!(romano_wolf_receipt(&set, 999, 3, ceiling, 50_000).is_some());
-        assert!(romano_wolf_adjusted_p_values_v1(&set, 999, 3, ceiling).is_some());
-        assert!(family_tests_v1(&set, &[0], 999, 3, ceiling).is_ok());
+        // A block as long as the series is accepted.
+        assert!(reality_check(&set, 999, 3, periods).is_some());
+        assert!(spa(&set, 999, 3, periods).is_some());
+        assert!(white_reality_check_receipt_v1(&set, 999, 3, periods).is_some());
+        assert!(spa_receipt_v1(&set, 999, 3, periods).is_some());
+        assert!(romano_wolf_receipt(&set, 999, 3, periods, 50_000).is_some());
+        assert!(romano_wolf_adjusted_p_values_v1(&set, 999, 3, periods).is_some());
+        assert!(family_tests_v1(&set, &[0], 999, 3, periods).is_ok());
+    }
+
+    /// D-0742's open half, D-1990: a block longer than the series is refused
+    /// by every entry point, even under the ppm ceiling. Measured before the
+    /// fix: over 400 periods of pure noise, a block of 40,000 put 36 of 40
+    /// families under p = 0.05.
+    #[test]
+    fn a_block_longer_than_the_series_is_refused_by_every_entry_point() {
+        let periods = 200_usize;
+        let longer = periods + 1;
+        assert!(longer <= super::MAX_BLOCK, "under the ppm ceiling");
+        let set = vec![edged(periods, 11, 3), edged(periods, 12, 0)];
+        assert!(reality_check(&set, 999, 3, longer).is_none());
+        assert!(spa(&set, 999, 3, longer).is_none());
+        assert!(white_reality_check_receipt_v1(&set, 999, 3, longer).is_none());
+        assert!(spa_receipt_v1(&set, 999, 3, longer).is_none());
+        assert!(romano_wolf_receipt(&set, 999, 3, longer, 50_000).is_none());
+        assert!(romano_wolf_adjusted_p_values_v1(&set, 999, 3, longer).is_none());
+        let strong = vec![edged(periods, 21, 60), edged(periods, 22, 0)];
+        assert!(romano_wolf(&strong, 999, 3, longer, 50_000).is_empty());
+        assert_eq!(
+            family_tests_v1(&set, &[0], 999, 3, longer).err(),
+            Some(FamilyTestsRefusalV1::RomanoWolf)
+        );
+        assert_eq!(
+            family_tests_v1(&set, &[], 999, 3, longer).err(),
+            Some(FamilyTestsRefusalV1::White)
+        );
     }
 }
 

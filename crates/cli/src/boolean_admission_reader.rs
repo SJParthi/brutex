@@ -221,10 +221,10 @@ fn apply_statistics(
             .ok_or("Boolean Wilson source differs")?,
     );
     let white = probability(summary.white[2], summary.white[3])?;
-    values.white_reality_p_value_ppm = ObservedU64V1::Measured(white.ppm());
+    values.white_reality_p_value_ppm = ObservedU64V1::Measured(white.ceiling_ppm());
     values.white_reality_decision = hypothesis_decision(white);
     values.spa_p_value_ppm =
-        ObservedU64V1::Measured(probability(summary.spa[2], summary.spa[3])?.ppm());
+        ObservedU64V1::Measured(probability(summary.spa[2], summary.spa[3])?.ceiling_ppm());
     values.bootstrap_draws = ObservedU64V1::Measured(summary.procedure[0]);
     values.bootstrap_strategies = ObservedU64V1::Measured(summary.candidates as u64);
     values.bootstrap_periods = ObservedU64V1::Measured(summary.periods);
@@ -236,14 +236,15 @@ fn apply_statistics(
     );
     if summary.contributing_splits > 0 {
         values.pbo_ppm = ObservedU64V1::Measured(
-            probability(summary.bottom_half_splits, summary.contributing_splits)?.ppm(),
+            probability(summary.bottom_half_splits, summary.contributing_splits)?.ceiling_ppm(),
         );
     }
     if let Some(romano) = row.romano {
         let family = family.ok_or("Boolean RW family rank missing")?;
-        values.fwer_p_value_ppm = ObservedU64V1::Measured(probability(family[6], family[7])?.ppm());
+        values.fwer_p_value_ppm =
+            ObservedU64V1::Measured(probability(family[6], family[7])?.ceiling_ppm());
         let adjusted = probability(romano[6], romano[7])?;
-        values.romano_wolf_p_value_ppm = ObservedU64V1::Measured(adjusted.ppm());
+        values.romano_wolf_p_value_ppm = ObservedU64V1::Measured(adjusted.ceiling_ppm());
         values.romano_wolf_decision = hypothesis_decision(adjusted);
         values.full_precision_statistics_complete = CompletenessV1::Complete;
     }
