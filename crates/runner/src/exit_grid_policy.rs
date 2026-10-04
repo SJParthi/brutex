@@ -4087,38 +4087,102 @@ fn digest_global_replay_witness(
 }
 
 /// Stable V1 digest of one indicator/execution column's durable fields, all but
-/// one.
+/// one. **Superseded by [`column_digest_v2`] for every digest this build
+/// computes but one (D-1812):** the signal-candle-stop source identity keeps
+/// V1 because its own namespace already hashes the `known()` rows.
 ///
-/// **`Column::known()` is not hashed** (W3-runner2-8, D-1498). This said
-/// "every durable field", and the per-bar availability masks are not among
-/// the bytes below, so two columns that differ only in which conditions have a
-/// certified answer share a V1 digest. Adding them would change every V1
-/// column digest already recorded, and the cell and selection digests built
-/// on it, so it needs a V2 codec under its own decision rather than an edit
-/// here.
+/// **`Column::known()` is not hashed** (W3-runner2-8, D-1498). The per-bar
+/// availability masks are not among the bytes below, so two columns that
+/// differ only in which conditions have a certified answer share a V1 digest.
 ///
-/// This is the sole codec used by grid evaluation and pre-admission durable
-/// adapters. It is O(column length), so callers compute it once at a structural
-/// boundary and retain the resulting fixed-size identity.
+/// Kept, byte for byte, because records written before D-1812 carry it: a
+/// reader holding such a record and its column verifies it with this
+/// function, by name, or asks [`column_digest_codec`] which codec it is. Its
+/// meaning never changes; `column_digest_v1_never_moves_and_v2_binds_known`
+/// pins it.
+///
+/// O(column length).
 #[must_use]
 pub fn column_digest_v1(column: &indicators::column::Column) -> [u8; 32] {
     let mut h = Hasher::new();
     h.update(b"brutex.indicators.execution-column.v1");
-    put_usize(&mut h, column.bits().len());
-    for mask in column.bits() {
+    put_column_fields_v1(&mut h, column);
+    h.finalize()
+}
+
+/// Stable V2 digest of one indicator/execution column: every V1 field, then
+/// every `Column::known()` row (W3-runner2-8, D-1812).
+///
+/// Two columns with the same truth bits but different certified availability
+/// answer different questions -- an unknown condition must never be read as
+/// false -- so a digest that cannot tell them apart is not an identity of the
+/// column. V2 is V1's field sequence under its own domain tag, followed by
+/// the length of `known()` and each of its masks, so a V2 digest never equals
+/// a V1 digest of any column.
+///
+/// This is the codec used by grid evaluation, OOS replay, the walk-forward
+/// source identity and `cli`'s candidate descriptors. It is O(column length), so callers compute it once at a
+/// structural boundary and retain the resulting fixed-size identity.
+#[must_use]
+pub fn column_digest_v2(column: &indicators::column::Column) -> [u8; 32] {
+    let mut h = Hasher::new();
+    h.update(b"brutex.indicators.execution-column.v2");
+    put_column_fields_v1(&mut h, column);
+    put_usize(&mut h, column.known().len());
+    for mask in column.known() {
         put_mask(&mut h, *mask);
     }
-    put_usize(&mut h, column.sources().len());
+    h.finalize()
+}
+
+/// The codec a stored column digest was taken under.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColumnDigestCodec {
+    /// [`column_digest_v1`]: written before D-1812, blind to `known()`.
+    V1,
+    /// [`column_digest_v2`]: what this build writes.
+    V2,
+}
+
+/// Which codec `stored` is a digest of `column` under, or `None` when it is
+/// neither -- a different column, or a corrupt digest (D-1812).
+///
+/// A reader re-verifying a record written before D-1812 calls this rather
+/// than comparing against [`column_digest_v2`] alone, so an old record is
+/// named as V1 instead of being reported as a changed column. Two O(column)
+/// passes at most; V2 is tried first.
+#[must_use]
+pub fn column_digest_codec(
+    column: &indicators::column::Column,
+    stored: [u8; 32],
+) -> Option<ColumnDigestCodec> {
+    if column_digest_v2(column) == stored {
+        Some(ColumnDigestCodec::V2)
+    } else if column_digest_v1(column) == stored {
+        Some(ColumnDigestCodec::V1)
+    } else {
+        None
+    }
+}
+
+/// The durable field sequence V1 hashes, shared by both codecs so V2 cannot
+/// drift from it. Changing this changes V1 and is forbidden (D-1812).
+fn put_column_fields_v1(h: &mut Hasher, column: &indicators::column::Column) {
+    put_usize(h, column.bits().len());
+    for mask in column.bits() {
+        put_mask(h, *mask);
+    }
+    put_usize(h, column.sources().len());
     for source in column.sources() {
-        put_usize(&mut h, *source);
+        put_usize(h, *source);
     }
     h.update(&[match column.sourced() {
         indicators::column::Sourced::Signal => 1,
         indicators::column::Sourced::Fill => 2,
     }]);
-    put_census(&mut h, column.census());
-    put_option_usize(&mut h, column.first_swept());
-    put_u64(&mut h, column.collided());
+    put_census(h, column.census());
+    put_option_usize(h, column.first_swept());
+    put_u64(h, column.collided());
     match column.evaluation_spec_token() {
         None => h.update(&[0]),
         Some(token) => {
@@ -4130,18 +4194,17 @@ pub fn column_digest_v1(column: &indicators::column::Column) -> [u8; 32] {
         None => h.update(&[0]),
         Some(accepted) => {
             h.update(&[1]);
-            put_usize(&mut h, accepted.len());
+            put_usize(h, accepted.len());
             for verdict in accepted.iter() {
                 h.update(&[u8::from(*verdict)]);
             }
         }
     }
-    put_census(&mut h, column.acceptance_census());
-    h.finalize()
+    put_census(h, column.acceptance_census());
 }
 
 fn digest_column(column: &indicators::column::Column) -> [u8; 32] {
-    column_digest_v1(column)
+    column_digest_v2(column)
 }
 
 fn require_complete_acceptance(
@@ -7210,6 +7273,127 @@ mod tests {
         assert_eq!(
             resolved.replay_selected(oos, &test_column(&clean), &wrong_spec, run),
             Err(ExitGridErrorV1::SelectionDigestMismatch)
+        );
+    }
+
+    fn hex32(bytes: [u8; 32]) -> String {
+        bytes
+            .iter()
+            .fold(String::with_capacity(64), |mut out, byte| {
+                let _ = std::fmt::Write::write_fmt(&mut out, format_args!("{byte:02x}"));
+                out
+            })
+    }
+
+    /// The column codec's byte layout, composed here from the field
+    /// primitives independently of the codec under test, so a codec that
+    /// drops or reorders a field disagrees with it.
+    fn reference_column_encoding(tag: &[u8], column: &Column, known: bool) -> [u8; 32] {
+        let mut h = Hasher::new();
+        h.update(tag);
+        put_usize(&mut h, column.bits().len());
+        for mask in column.bits() {
+            put_mask(&mut h, *mask);
+        }
+        put_usize(&mut h, column.sources().len());
+        for source in column.sources() {
+            put_usize(&mut h, *source);
+        }
+        h.update(&[match column.sourced() {
+            indicators::column::Sourced::Signal => 1,
+            indicators::column::Sourced::Fill => 2,
+        }]);
+        put_census(&mut h, column.census());
+        put_option_usize(&mut h, column.first_swept());
+        put_u64(&mut h, column.collided());
+        match column.evaluation_spec_token() {
+            None => h.update(&[0]),
+            Some(token) => {
+                h.update(&[1]);
+                h.update(token.fingerprint_v1().as_bytes());
+            }
+        }
+        match column.acceptance() {
+            None => h.update(&[0]),
+            Some(accepted) => {
+                h.update(&[1]);
+                put_usize(&mut h, accepted.len());
+                for verdict in accepted.iter() {
+                    h.update(&[u8::from(*verdict)]);
+                }
+            }
+        }
+        put_census(&mut h, column.acceptance_census());
+        if known {
+            put_usize(&mut h, column.known().len());
+            for mask in column.known() {
+                put_mask(&mut h, *mask);
+            }
+        }
+        h.finalize()
+    }
+
+    /// D-1812 (W3-runner2-8): V1's bytes never move, and V2 binds `known()`.
+    ///
+    /// The V1 pin was captured from the codec before D-1812 existed, on this
+    /// fixture; V1 must keep answering it so a record stored under V1 stays
+    /// verifiable by name. V2 is checked against an independent composition
+    /// of its layout, which includes every `known()` row.
+    #[test]
+    fn column_digest_v1_never_moves_and_v2_binds_known() {
+        let input = crate::synthetic::sessions(6);
+        let column = test_column(&input);
+        assert!(
+            column
+                .known()
+                .iter()
+                .any(|known| *known != ConditionMask::ZERO),
+            "the fixture certifies some answers, so `known()` has bytes to bind"
+        );
+        assert_eq!(
+            hex32(column_digest_v1(&column)),
+            "1ba1662e35431cac4da390e4102ec1bf2875421c59a8ea04a99a93036619cb4b",
+            "V1 is the codec every record stored before D-1812 carries"
+        );
+        assert_eq!(
+            column_digest_v1(&column),
+            reference_column_encoding(b"brutex.indicators.execution-column.v1", &column, false),
+            "and V1 hashes no `known()` byte: the omission W3-runner2-8 names, kept as V1's meaning"
+        );
+        assert_eq!(
+            column_digest_v2(&column),
+            reference_column_encoding(b"brutex.indicators.execution-column.v2", &column, true),
+            "V2 is V1's fields under its own tag, then every `known()` row"
+        );
+        assert_ne!(
+            column_digest_v2(&column),
+            reference_column_encoding(b"brutex.indicators.execution-column.v2", &column, false),
+            "so dropping `known()` from V2 changes its answer"
+        );
+        assert_ne!(column_digest_v2(&column), column_digest_v1(&column));
+        assert_eq!(
+            digest_column(&column),
+            column_digest_v2(&column),
+            "the grid, the replay and every new identity use V2"
+        );
+        assert_eq!(
+            column_digest_codec(&column, column_digest_v2(&column)),
+            Some(ColumnDigestCodec::V2)
+        );
+        assert_eq!(
+            column_digest_codec(&column, column_digest_v1(&column)),
+            Some(ColumnDigestCodec::V1),
+            "a stored V1 digest is recognised by name"
+        );
+        let other = test_column(&input[..input.len() / 2]);
+        assert_eq!(column_digest_codec(&other, column_digest_v2(&column)), None);
+        assert_eq!(column_digest_codec(&other, column_digest_v1(&column)), None);
+        assert_eq!(column_digest_codec(&column, [0; 32]), None);
+        let empty = Column::default();
+        assert_ne!(column_digest_v2(&empty), column_digest_v1(&empty));
+        assert_eq!(
+            column_digest_codec(&empty, column_digest_v1(&empty)),
+            Some(ColumnDigestCodec::V1)
         );
     }
 

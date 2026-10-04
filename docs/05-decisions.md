@@ -56795,3 +56795,81 @@ for every pair, requires one series hash per slice however many replays run
 on it, and requires foreign hoisted facts to be refused unless an earlier
 refusal wins. `validate::tests::the_oos_replay_loop_attests_once_per_fold_and_replays_in_parallel`
 is a source-shape test that fails on the previous tree. AGB-03, AGB-04.
+
+### D-1812 — Column digest V2 binds `known()`; V1 stays, byte for byte, as the named verifier of older records — 2026-10-04
+
+**What was wrong (W3-runner2-8, left open by D-1498).** `column_digest_v1`
+hashes a column's truth bits, sources, sourcing, census, first swept bar,
+collision count, evaluator fingerprint, acceptance verdicts and acceptance
+census, and not `Column::known()`, the per-row masks of conditions with a
+certified answer. Two columns with the same truths and different availability
+shared one digest, although an unknown condition must never be read as false.
+Adding `known()` to V1 would have changed the meaning of every V1 digest
+already recorded, which `CLAUDE.md` §3 rule 8 forbids.
+
+**The change.**
+
+* New `runner::exit_grid_policy::column_digest_v2`: the same field sequence
+  under the domain tag `brutex.indicators.execution-column.v2`, then the
+  length of `known()` and every `known()` mask. The tag alone keeps every V2
+  digest distinct from every V1 digest.
+* `column_digest_v1` is unchanged byte for byte; the shared field sequence is
+  one private helper both codecs call, so V2 cannot drift from V1's part of
+  it. A test pins V1's value on a fixed column, captured from the codec
+  before this change.
+* New `column_digest_codec(column, stored)` answers `Some(V2)`, `Some(V1)` or
+  `None`, so a reader holding an older record and its column verifies the
+  record's column digest by name instead of seeing a changed column.
+* Every digest this build computes uses V2: the private `digest_column`
+  (grid evaluation, `AttestedTrainingV1`, OOS replay and its slice,
+  `resolved_grid_view`, the Boolean later-period slice), the walk-forward V4
+  source identity (`AnchoredSearchPolicyFactsV4::signal_column_digest`), and
+  `cli::candidate_universe`'s signal and execution descriptor digests, its
+  self-check and its universe hash.
+* **One exception, kept on V1 on purpose:** the signal-candle-stop source
+  identity (`brutex.signal-candle-stop.source.v1`, the source id of every
+  index-stop catalog). That namespace already hashes the signal column's
+  `known()` rows directly, and its execution column is `reproject_checked` of
+  that column over bars the same hash binds, so V2 would add no coverage and
+  would re-key every stored index-stop catalog. Measured:
+  `cli::index_stop::tests::grouped_catalogs_keep_the_ungrouped_bytes_and_terminals`
+  fails with V2 there and passes with V1.
+
+**Which stored digests change.** Every value below written by this build
+differs from the value an earlier build wrote for the same inputs, on every
+column, because the codec tag differs:
+
+* the column-digest fields themselves: `signal_column_digest` and
+  `execution_column_digest` in Candidate Universe V1 descriptors and in the
+  records that copy them (Population Admission V3/V4, Population Finalization
+  V3/V4, Population V5/V6, Anchored Search Lineage V4, Step 3 receipts), and
+  `column_digest` in Execution V3/V4, Execution Disposition V2 and Selection V5
+  records;
+* every digest hashed over a column digest: the evaluated-grid, cell,
+  selection, replay and candidate-universe digests, the Global Replay V1–V3
+  witness digests, the walk-forward V4 policy-facts and family digests and
+  the candidate universe digest. Index-stop catalogs and their source ids do
+  not change.
+
+Run identities (§3 rule 3), data digests, policy and resolution digests, cell
+money and every ranking are unchanged: the column digest is a term of
+attestation, not of what was computed.
+
+**How older records are read.** Their bytes are unchanged and every decoder
+reads them: a column digest is 32 opaque bytes in each format, and no format
+version changes. Nothing that serves stored records (`api`) recomputes a
+column digest. Re-verifying an older record against this build's live
+recomputation refuses it, as it did before this change, because each of those
+records also binds the writing build's source commit through its run
+identity or policy facts; the column term is a second, independent mismatch.
+A reader that holds the record's column and wants the column digest itself
+checked calls `column_digest_codec`, which names V1. No stored record is
+rewritten.
+
+**Tests.** `runner::exit_grid_policy::tests::column_digest_v1_never_moves_and_v2_binds_known`
+pins V1 on a fixed column to its pre-change value, checks V1 and V2 against an
+independent composition of their layouts (V2 including every `known()` row,
+and differing when `known()` is left out), requires `digest_column` to be V2,
+and drives `column_digest_codec` through V2, V1, a different column, a zero
+digest and the empty column. It does not compile on the previous tree.
+AGB-05.
