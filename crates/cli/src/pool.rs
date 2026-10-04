@@ -114,8 +114,10 @@ use crate::stored;
 /// Read from the operator's `Rules` rather than written here: `min_rr_bp` is
 /// the reward-to-risk floor every single-instrument cell is admitted against,
 /// and a pooled row is held to the same number so the two tables agree on what
-/// "the rule" is. Zero — the floor OFF — marks every fired row as meeting it,
-/// which is what OFF means.
+/// "the rule" is. Zero — the floor OFF — marks every fired row that WON
+/// somewhere as meeting it, which is what OFF means; a row that never won meets
+/// no rule, exactly as `grid::Cell::clears` refuses a cell with no winner
+/// (p5num-3, D-2713).
 fn tail_rule_bp(rules: crate::Rules) -> i64 {
     rules.min_rr_bp
 }
@@ -196,8 +198,26 @@ impl Pooled {
     }
 
     /// Whether the tail rule holds at the operator's multiple.
+    ///
+    /// `wins > 0` is its own clause for the reason `grid::Cell::clears` gives:
+    /// a candidate whose every pooled trade was flat has `worst == 0`, so
+    /// [`Self::tail_bp`] is [`NEVER_LOST`] and cleared every multiple, and the
+    /// row sorted first reading "wins 0, tail never lost". No winners is never
+    /// what an operator means by a met rule (p5num-3, D-2713).
     fn meets(&self, rule_bp: i64) -> bool {
-        self.fired > 0 && self.tail_bp() >= i128::from(rule_bp)
+        self.fired > 0 && self.wins > 0 && self.tail_bp() >= i128::from(rule_bp)
+    }
+
+    /// The tail as the table prints it: `-` when nothing won, because a
+    /// smallest win over a largest loss with no win has no numerator, and
+    /// "never lost" on a row with no winner reads as the best tail there is
+    /// (p5num-3, D-2713).
+    fn tail_cell(&self) -> String {
+        if self.wins == 0 {
+            "-".to_owned()
+        } else {
+            ratio_cell(self.tail_bp())
+        }
     }
 
     /// The sort key, largest first: the rule met, then the SMALLEST drawdown
@@ -1111,7 +1131,7 @@ fn laid_pooled(shown: &[(usize, &Pooled, Option<&Candidate>)]) -> crate::columns
                     p.wins.to_string(),
                     p.worst.to_string(),
                     p.min_win.to_string(),
-                    ratio_cell(p.tail_bp()),
+                    p.tail_cell(),
                     ratio_cell(p.profit_factor_bp()),
                     p.net.to_string(),
                     p.dd_bound.to_string(),
@@ -1256,6 +1276,46 @@ mod tests {
         assert_eq!(p.candidate, 0);
         assert_eq!(p.fired, 1);
         assert_eq!(p.names, vec!["AAA"]);
+    }
+
+    /// **A candidate that never won meets no tail rule** (p5num-3, D-2713).
+    ///
+    /// Every pooled trade flat: `worst == 0`, `wins == 0`, so the tail was
+    /// the never-lost sentinel and `meets` held at every multiple, sorting the
+    /// row first. `grid::Cell::clears` refuses the same cell by its own
+    /// `wins > 0` clause.
+    #[test]
+    fn a_candidate_that_never_won_meets_no_tail_rule() {
+        let union = candidates(2);
+        let surface = vec!["AAA".to_owned(), "BBB".to_owned()];
+        let flat = cell(2, 0, 0, 0, 0, 0);
+        assert!(!flat.clears(0, 0), "the single-instrument rule refuses it");
+        let priced = vec![
+            Ok(vec![Some(flat), Some(cell(1, 1, 500, -10, 500, 10))]),
+            Ok(vec![Some(flat), None]),
+        ];
+        let pooled = fold(&union, &surface, &priced, rules_at(300));
+        assert_eq!(pooled.len(), 2);
+        let never_won = pooled
+            .iter()
+            .find(|p| p.candidate == 0)
+            .expect("the flat candidate is pooled");
+        assert_eq!((never_won.wins, never_won.worst), (0, 0));
+        for rule_bp in [0, 1, 300, i64::MAX] {
+            assert!(!never_won.meets(rule_bp), "rule {rule_bp}");
+        }
+        assert_eq!(never_won.tail_cell(), "-");
+        assert_eq!(
+            pooled.first().map(|p| p.candidate),
+            Some(1),
+            "the candidate that won and met the rule sorts first"
+        );
+        let won = pooled
+            .iter()
+            .find(|p| p.candidate == 1)
+            .expect("the winning candidate is pooled");
+        assert!(won.meets(300));
+        assert_eq!(won.tail_cell(), "50.00x");
     }
 
     /// **The ranking is the rule, then the drawdown bound, then the profit

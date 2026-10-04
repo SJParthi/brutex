@@ -57921,3 +57921,56 @@ unchanged.
 
 **Proof.** `web/tests/pinned-locale.test.js`: *no source formats in the host
 browser's locale or zone*; *the four CE-72 sites use the pinned formatters*.
+
+### D-2712 — STRATEGY REPORT prints the zero-drawdown sentinel and an empty mean in words — 2026-10-04
+
+**What was observed.** p5num-4 (numeric pass 5): `runner::audit::strategy_report`
+printed `Cell::return_over_drawdown` through `hundredths`, so the `i64::MAX`
+sentinel of an all-winner variant read `92233720368547758.07`, a measured ratio
+that never happened. The grid's `ret_dd` cell in the same file already printed
+it as `no DD`. The same report printed `avg_win()` and `avg_loss()` as `0.00`
+when their side had no trade, which reads as a measured mean.
+
+**The decision.** The report prints `no DD` for the sentinel, the same words as
+`ret_dd`. It prints `-` with the note `no winning trade` or `no losing trade`
+when that side has no trade. A losing side here still means `trades - wins`,
+the report's own `losing trades` row; p5num-2 (flats counted as losers) is not
+changed by this entry. Measured values print exactly as before.
+
+**Proof.** `runner::audit::tests::the_strategy_report_names_its_sentinels_and_empty_means_in_words`
+fails on the previous renderer. FB-13.
+
+### D-2713 — The pooled tail rule needs a winner, and a row with none prints its tail as `-` — 2026-10-04
+
+**What was observed.** p5num-3 (numeric pass 5): `cli::pool::Pooled::meets`
+was `fired > 0 && tail_bp() >= rule`. A candidate whose every pooled trade was
+flat has `worst == 0`, so `tail_bp` is `NEVER_LOST`. It met every multiple,
+sorted first (`key` leads with `meets`), and printed `wins 0, tail never lost`.
+The single-instrument rule `grid::Cell::clears` refuses the same cell by its
+`wins > 0` clause, and the pooled table's doc says it holds the same rule.
+
+**The decision.** `meets` adds `wins > 0`. The tail column prints `-` when the
+row has no win. A row with a winner ranks and prints exactly as before. Rule 0
+(the floor OFF) now marks every fired row that won as meeting it.
+
+**Proof.** `cli::pool::tests::a_candidate_that_never_won_meets_no_tail_rule`
+fails on the previous `meets`. FB-14.
+
+### D-2714 — The calendar gate judges every screened row, and a row it never measured does not pass it — 2026-10-04
+
+**What was observed.** p5num-1 (numeric pass 5): `cli::screen` applied
+`min_weakest_bp` to `rows.iter_mut().take(rules.top)` only, while `passed`,
+`admitted_any` and `final_selection` read every row. With more than `top` rows
+admitted by the cell rules and the best failing the calendar rule, row
+`top + 1` stayed admitted, was counted as passing, could be selected, and
+`YOUR RULES: MET` was printed.
+
+**The decision.** `cli::calendar_gate` runs over every row. A measured row is
+refused when its weakest grain is below the floor, as before. When the rule is
+on (`min_weakest_bp > 0`), an admitted row with no consistency measurement is
+not admitted and is marked `calendar_unmeasured`; its `rule` column reads
+`unmeasured`. With the rule off nothing changes. The run's selected subject can
+change.
+
+**Proof.** `cli::tests::the_calendar_gate_refuses_an_inconsistent_row_past_the_printed_top`
+fails on the previous gate. FB-15.
