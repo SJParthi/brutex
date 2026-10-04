@@ -1,6 +1,6 @@
 {
-  "as_of": "2026-10-04 12:02 UTC",
-  "prev_as_of": "2026-10-04 12:01 UTC",
+  "as_of": "2026-10-04 12:20 UTC",
+  "prev_as_of": "2026-10-04 12:02 UTC",
   "states": {
     "Lane 1|W3-store1-3": "pushed",
     "Lane 1|W3-store1-0": "found",
@@ -49,7 +49,7 @@
     "Lane 1|GAP13-14": "branch",
     "Lane 1|GAP16-25": "branch",
     "Lane 1|GAP13-16": "pushed",
-    "Lane 1|GAP12-6": "fixing",
+    "Lane 1|GAP12-6": "branch",
     "Lane 1|GAP4-48": "branch",
     "Lane 1|W2-cli1-5": "branch",
     "Lane 1|W2-cli3-3": "branch",
@@ -976,7 +976,7 @@
     "Named only in a status file|OS-4": "branch",
     "Named only in a status file|OS-5": "branch",
     "Named only in a status file|OS-6": "branch",
-    "Named only in a status file|OS-7": "fixing",
+    "Named only in a status file|OS-7": "partial",
     "Named only in a status file|OS-8": "branch",
     "Named only in a status file|OE-1": "fixing",
     "Named only in a status file|OE-2": "branch",
@@ -1001,6 +1001,18 @@
     "Named only in a status file|RO-9": "branch",
     "Named only in a status file|RO-10": "branch",
     "Named only in a status file|rustonly2-5": "branch",
-    "Named only in a status file|ci-awk-sed-jq": "fixing"
+    "Named only in a status file|ci-awk-sed-jq": "fixing",
+    "Zero-rounds: concurrency|conc:conc9-1": "found",
+    "Zero-rounds: concurrency|conc:conc9-2": "found",
+    "Zero-rounds: concurrency|conc:conc9-3": "found",
+    "Zero-rounds: crashes and edge inputs|CE-70": "found",
+    "Zero-rounds: crashes and edge inputs|CE-71": "found",
+    "Zero-rounds: crashes and edge inputs|CE-72": "found",
+    "Zero-rounds: crashes and edge inputs|CE-73": "found",
+    "Zero-rounds: numbers and complexity|num:p10num-1": "found",
+    "Zero-rounds: numbers and complexity|num:p10num-2": "found",
+    "Named only in a status file|L1B-min-hits-warmup": "branch",
+    "Named only in a status file|L1B-gate10-12-segments": "branch",
+    "Named only in a status file|L1B-merge-rivals": "branch"
   }
 }
