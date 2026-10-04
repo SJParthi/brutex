@@ -11251,6 +11251,150 @@ alphabet of step values, and the slice does not guarantee one. Both heaps are
 sized once to `ceil(n / 2)` before the bar loop (D-2308), so no push inside it
 reallocates. **UNVERIFIED as
 a measured bound**: no bench row times it (`CLAUDE.md` §3 rule 6).
+## The GDFL capital-market reader and its archive check — D-0808, D-0812, 1 October 2026; read from the vendor zips, D-2800, 4 October 2026
+
+* **Ticker resolution is worst-case O(1) by an existing bound, not a new one.**
+  `pull::gdfl_cm::resolve` is one `strip_suffix` of the tree's stem suffix,
+  then for an index stem a match against three literals and, on a hit,
+  `InstrumentKey::index` and `is_sweepable`; for a stock stem a length check
+  that answers `NotSwept` for any name longer than `SYMBOL_CAPACITY` (24
+  bytes) before reading it, then a scan for a dot and `InstrumentKey::cash`
+  over at most those 24 bytes, one comparison of the stem with the built
+  symbol, and one `is_sweepable` call, which is one probe of
+  `core::universe::FNO_INDEX`. Every step is bounded by a fixed count, never
+  by the argument's length, so it is O(1). (Until the round-4 review the dot
+  scan and the key build ran before any length bound, so the cost was the
+  stem's length: the reviewer measured about 0.1 µs for an 8-byte stem and
+  about 298 µs for a 10 MB one, while this row called it O(1) and also said
+  "bounded by the stem's length", which contradicted itself. Until the
+  round-2 review it said "two string comparisons for an index stem", which
+  left most of the index path out.) The guard is proven by its answer, not by
+  a timing:
+  `pull::gdfl_cm::tests::a_stock_name_longer_than_any_symbol_is_refused_before_it_is_read`
+  shows a series file one byte past the capacity answering `NotSwept`
+  rather than `SeriesVariant`, an answer it can give only if its dot was
+  never searched for. Filing a stock stem by slot
+  (`pull::gdfl_cm::stem_slot`) costs three such bounded probes, not one:
+  `resolve`'s, then `ticker_slot`'s own `is_sweepable` check and its
+  `FNO_INDEX.position`. Each probe's worst case is pinned at twelve
+  slots on a miss by
+  `core::universe::tests::a_miss_probes_further_than_a_hit_and_its_bound_is_measured_too`,
+  so the three are still worst-case O(1).
+  No Gate 8 row times `resolve` or `stem_slot` itself.
+* **Decoding a file is O(file bytes), and is not constant-time.** One pass over
+  the lines, ten fields per row, no search and no sort; the BLAKE3 and the
+  CRC-32 of the file are a second and a third pass over the same in-memory
+  bytes (design §3.3 asked for the CRC in the BLAKE3 pass; two library calls
+  over one buffer were kept instead of a fused loop, and the cost is the same
+  order). The largest files sampled are the 2026
+  index files (NIFTY BANK 2026-09-24: 101,788 rows). The row vector is not
+  reserved ahead, because the row count is only known after the pass; it is
+  bounded by `pull::fetch::MAX_ROWS` (1,000,000), past which the file refuses
+  `RowsOverCap`. UNVERIFIED as a measured time: no bench times `decode`.
+* **No byte bound precedes the fetch.** `pull::gdfl_cm::read_listed` has the
+  source fetch the whole file into memory before `decode` runs; the zip source
+  reads the member's compressed bytes in one read and inflates them, stopping
+  one byte past the length the day zip's central directory states (D-2800).
+  So `RowsOverCap` bounds the ROWS of a file already in memory, not its bytes,
+  and the only byte bound is the vendor's own stated length: a member stated
+  at several gigabytes is inflated that far before it is refused. The largest
+  files measured are small beside that (`ls -l` of the then-extracted copy:
+  NIFTY BANK 2026-09-24 is 6,141,980 bytes; the largest file in
+  `GFDLCM_STOCK_TICK_24092026` is 1,430,976 bytes), and no byte cap is set,
+  because none is measured over the whole archive.
+* **A last row cut just after its ninth comma refuses the day.** Design §3.3
+  (revision 4) drops a cut post-session last row only when it has FEWER than
+  ten fields. Cut one byte later, after the ninth comma, it has ten fields
+  with an empty open interest and refuses `MalformedRow`, losing the day,
+  although it is as clearly a post-session row as the cut one byte earlier,
+  which is dropped and recorded. The design's rule is kept, and
+  `pull::gdfl_cm::tests::a_last_row_cut_after_its_ninth_comma_refuses` pins
+  both sides; widening the drop is a design change, not this reader's.
+* **A day is listed once, at O(entries in its day zip).** 50 to 141
+  index files and 1,764 to 3,710 stock files per day (`ls` of every one of
+  the 2,001 then-extracted folders of each tree, charter GDFL section;
+  round-3 review: this row said 1,915-3,696 stock files after the design's
+  sample). Since D-2800 the listing is a `DayListing` built by the source
+  from the day zip's central directory, kept in its order. It is
+  shared by every instrument that day when the caller lists the day once and
+  calls `read_listed` for each (`read_day` lists the day per call, so a
+  caller reading many instruments of one day through it pays the listing
+  each time). Each name is split once (a scan of the name, which a zip
+  record's 16-bit length bounds at 65,535 bytes) and its stem resolved
+  (a share stem over `Symbol`'s 24 bytes is refused before any probe), then
+  filed into an array of `TICKER_SLOTS` cells (design §3.3, revision 8). Each
+  lookup after it is one index, worst-case O(1), proven in shape (no hash map,
+  set, search or sort in the module) by
+  `pull::gdfl_cm::tests::day_folder_lookup_is_one_index_into_a_ticker_slot_array`;
+  no Gate 8 row times it, so it is UNVERIFIED as a measured time.
+* **Renamed symbols resolve as absent on their older days.** The map uses
+  today's F&O symbols and no dated alias, because the design admits an alias
+  only when charter-sourced and the charter holds none. Measured with
+  `test -e`: 195 of the 208 shares have a file under today's name on
+  2024-04-01, 175 on 2021-04-01 and 159 on 2019-01-01, against 208 on
+  2026-09-24; the gap is later listings and renames (ETERNAL, UNITDSPR, LTF,
+  TMPV and others). Whether a symbol ever named a different company earlier is
+  UNVERIFIED.
+* **The archive's central directory is read once per ingest run, at
+  O(entries).** The operator's archive has 4,209 entries in a 493,028-byte
+  directory (its ZIP64 end record, read with `xxd`), whose 4,209 records end
+  exactly at its 493,028th byte (walked with `od`); the whole directory is
+  read into memory once, under a 64 MiB cap past which it refuses. Finding the
+  end record scans at most the last 65,557 bytes. UNVERIFIED as a measured
+  time: no bench times `Archive::from_source`.
+* **Finding a day zip is worst-case O(1); reading it is O(its entries).**
+  `Archive`'s `CmSource::day` is one subtraction and one index into a dense per-tree array
+  sized by the archive's span of days (about 2,950 days for 2018-09 to
+  2026-09, two slots each, so about 6,000 `Option` cells for the life of the
+  run); the proof is `pull::gdfl_archive::tests::names_that_are_not_day_zips_are_ignored_and_counted`,
+  which files two days twenty-five months apart in one table. **That is the
+  real archive's figure, not the worst case.** The width is the span between
+  the earliest and latest day-zip names, and `Day` admits 1970 to 9999, so a
+  corrupt or hostile archive naming one far-dated day zip sizes each tree's
+  table at 2,932,897 cells of 24 bytes, about 70 MB a tree and 141 MB for
+  both. `pull::gdfl_archive::tests::the_day_table_worst_case_is_the_whole_day_range`
+  pins those two figures and nothing more: it computes the day span and the
+  cell size and never builds an `Archive` from a far-dated day zip (round-4
+  review). That the table is allocated before any other check, and that a
+  bounded allocation of that size is never a crash, is REASONING from the
+  code, not something a test exercises; no cap is set below `Day`'s range
+  because none is measured (round-2 review). Reading the day
+  zip's own central directory is one bounded read of up to its directory size
+  (a stock day holds 1,764 to 3,710 files, charter GDFL section), and its
+  members are filed into the ticker-slot array of its `DayListing`, so
+  each member lookup is one index. UNVERIFIED as measured times.
+* **Fetching a member is O(its bytes), never constant-time (D-2800).** One
+  local-header read, one contiguous read of the compressed bytes, and one
+  inflate in memory; nothing is extracted to disk. UNVERIFIED as a measured
+  time: no bench times `fetch`.
+* **The per-file check costs one CRC-32 pass more than the decode.**
+  `pull::gdfl_cm::verify`, which `read_listed` runs on the fetched bytes
+  BEFORE the decode so that a file that does not decode is still named by
+  its stated length and CRC-32 (round-3 review, D-2800), compares the length
+  in O(1) and, only when the lengths agree, takes the CRC-32 in its own
+  O(bytes) pass; `decode` takes it again for `CmFile::source_crc32`, the
+  same order. UNVERIFIED as a measured time.
+* **The walked records must end at the directory's declared size,** one
+  comparison after the walk (round-3 review), so an end record whose count
+  understates its records refuses `ArchiveMalformed` instead of hiding them.
+* **A tick-store day is listed at O(entries); a file is rebuilt at O(its bytes) (D-2801).** Listing opens the `.bts`, reads its 40-byte footer and its index frame, decodes the index once and files its entries into the listing's ticker-slot array; each lookup after that is one index. A fetch reads the entry's block in one positional read and rebuilds the file: a raw block is one zstd decode, a columnar block one decode per column plus one pass to render and interleave the fields, holding every column's text in memory beside the rebuilt file. The only byte bounds are the lengths the file states: a frame is decoded to at most one byte past its stated length, and nothing caps a stated length below what the file declares. UNVERIFIED as measured times: no bench times `read_index` or `rebuild`.
+* **What the check cannot see.** A file that was already cut when the vendor
+  built the archive passes the CRC. For an index file `IndexEndsInSession`
+  still catches a cut inside the session; for a stock file it is undetectable
+  per file, and only the census's row-count comparison (report only) can flag
+  it. Stated in D-0812.
+* **One regular full session is lost to a zero LTP (round-2 review).** An
+  LTP below one tick refuses the whole file `PriceRefused` (D-0808 item 4,
+  CM-04). Over every `NIFTY 50` and `NIFTY BANK` file of the operator's copy,
+  only 2022-03-07 holds one (4 rows in NIFTY 50, at lines 4,820, 4,821, 44,168
+  and 44,169; 2 in NIFTY BANK, at lines 3,495 and 3,496; each the first second
+  after a gap in stamps, each sharing its second with a non-zero row;
+  `docs/00-charter.md`, the GDFL capital-market section). So that day, a
+  regular full session in `pull::calendar`, is refused for both swept indices
+  and is never gridded. The refusal is loud and is kept; whether such a row
+  should be dropped and counted instead is raised against the design in
+  `docs/07-plan.md`. The stock files were not searched for a zero LTP.
+
 ## A following append verifies the old tail block before re-sealing it — D-0910, 2 October 2026
 
 - **One block verification per append that lands inside a partially covered

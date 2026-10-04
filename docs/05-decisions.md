@@ -48535,6 +48535,775 @@ consequence 12 first, as the first build step, then consequences 1 to 9, 11,
 13 and 14 in this entry's order; consequence 10 is the §3 row.
 `docs/04-invariants.md`, `docs/06-limits.md`, `docs/02-store-format.md` and all
 code are untouched, because nothing has been built.
+### D-0808 — Read GDFL capital-market tick files by exact folder, name, header, ticker and date, decode the LTP exactly to two places, and refuse every other shape by name — 2026-10-01
+
+**Amended by D-2800 (2026-10-04).** The extracted folders this entry reads were retired by the operator; the reader now reads the vendor zips through `CmSource`, and `list_folder`, `DayFolder` and the folder `read_day` named below are gone. The row rules below are unchanged.
+
+**The operator's go-ahead, recorded as an operator statement (chat,
+2026-10-01 IST, verbatim, typos kept):** "see dont worry abiut gdfl data
+missign but jsut deisgn build architecture fix integrate and impelemnt to use
+the gdfl data dude okay?" Those words are a go-ahead to design, build and
+integrate the use of the GDFL data, and that is all they say. **The reading
+that the store keeps a converted one-second copy of the GDFL data is the
+orchestrator's, not an operator quotation:** it comes from the workflow's relay
+of the operator's intent ("GDFL second-level data is stored as one-second
+records"), and it is recorded as the orchestrator's reading, as the design's
+D-0818 records its own staging decision (round-2 review). **The quote does not
+answer the licence question** that item 9 below still lists as open: a
+go-ahead to build says nothing about the terms under which GDFL rows may be
+kept or redistributed. It is a statement, not a measurement: coverage is
+still measured by the census, never assumed (design §3.6). It sits beside the
+operator's earlier messages of the same day, which the D-0802 draft
+(branch `docs/d-0802-tick-precise-fills`) quotes in full: the sweep stays on
+Zerodha minute data and its rungs, every entry, exit and exit-grid fill is
+priced from GDFL one-second data at that second's adverse high or low, and
+NIFTY and BANKNIFTY trade as their volume-less spot index.
+
+**What this entry locks.** The reader of the GDFL capital-market files,
+`pull::gdfl_cm`, which is build step 5 of the one-second fill design (its
+§3.3 and §12, revision 6; its §11 assigns this topic D-0808). That design is
+the orchestrator's working document and is **held outside this repository**,
+so a reader of this repository cannot follow a citation of it; every vendor
+fact this entry and the code rely on is therefore recorded, re-measured, in
+`docs/00-charter.md`'s section "GDFL capital-market tick files — measured
+2026-10-03", and "design §n" below names where the fact or rule came from,
+not where to verify it (round-2 review). It reads; it does not fold, place,
+store or price. The archive check beside it is D-0812.
+
+1. **Folders.** `GFDLCM_INDICES_TICK_<ddmmyyyy>` and
+   `GFDLCM_STOCK_TICK_<ddmmyyyy>`, day first (`01042024` is 1 April), the date
+   a real one. Anything else refuses `FolderUnknown`. `read_day` also refuses
+   a folder that is not the instrument's own tree on the asked day.
+2. **File names.** `<Ticker>.csv` and `<Ticker>.CSV` are both accepted and the
+   spelling is recorded (`ExtVariant`); a third spelling of the wanted stem
+   refuses `ExtensionUnknown`. Two names in one folder for one ticker (the
+   two spellings of its extension) refuse `AmbiguousCaseTwins` (revision 8,
+   below); since the round-1 review, a second name with any other extension
+   refuses `ExtensionUnknown` instead. That cannot happen on the source
+   volume, which is case-insensitive (`NIFTY 50.NSE_IDX.CSV` and `.csv` are the
+   same file there: `test -e` on the `.CSV` spelling succeeds in `.csv`-only
+   folders sampled from 2018 to 2026), so the rule is proven on a synthetic
+   listing. A stem is matched by its exact bytes: `m&m.NSE` is not `M&M.NSE`.
+   One `read_dir` per day folder serves every instrument that day.
+3. **The ticker map.** `NIFTY 50.NSE_IDX` is `NSE-NIFTY`, `NIFTY BANK.NSE_IDX`
+   is `NSE-BANKNIFTY`, and `<SYM>.NSE` is the cash equity `SYM` exactly when
+   `InstrumentKey::is_sweepable` admits it. A symbol with a dot in it
+   (`M&MFIN.N1.NSE`, `1018GS2026.GS.NSE`) is a series file and never a share's
+   own series. `INDIA VIX.NSE_IDX` resolves to `ReferenceOnly` and is never
+   gridded (§1: reference only). `stem_of` is the inverse, and all 210 swept
+   instruments round-trip through it.
+4. **Rows.** The header is exactly one of the two observed literals: the
+   modern one, which is taken from the F&O descriptor's `GDFL_HEADER` rather
+   than typed twice, or `...,LTQ,Open Interest` (17 NIFTY 50 files dated
+   2018-09-03 to 2018-10-04, charter, GDFL capital-market section); anything
+   else refuses `HeaderUnknown`. Lines split on `\n` with exactly one trailing
+   `\r` stripped, which is STRICTER than `pull::csv`'s splitter (it trims every
+   trailing `\r` and then whitespace; see the round-5 bullet below, which
+   corrects this item's earlier claim that the two rules were one). A complete final row with no
+   newline is accepted and recorded (`final_newline`); neither a missing nor a
+   present final newline is taken as evidence about completeness. Each row has
+   exactly ten fields (`MalformedRow`), its Ticker equals the file's stem
+   (`TickerMismatch`), its Date equals the folder's date as `DD/MM/YYYY`
+   (`DateMismatch`), its Time is `HH:MM:SS` with digits only and a real time
+   (`MalformedRow`), its LTP is a plain decimal of at least one tick
+   (`PriceRefused`), its two quote prices are plain decimals and its two quote
+   quantities, its LTQ and its open interest plain unsigned integers
+   (`MalformedRow`). More than `pull::fetch::MAX_ROWS` rows refuses
+   `RowsOverCap`. A file with no usable row stamped inside [09:15:00,
+   15:30:00) refuses `NoSessionRows`: for an index every row is usable, for a
+   stock only a row with LTQ > 0, the row the fold keeps (D-0805).
+5. **The one short row that is not refused (design §3.3, revision 4).** The
+   file's LAST row, with no newline after it, fewer than ten fields but at
+   least four (so a comma closed the Time), this file's own Ticker and Date, a
+   real Time at or after 15:30:00, and a complete row before it also stamped at
+   or after 15:30:00. It can only be a post-session row, so it is dropped and
+   `tail_truncated_post_session` records the drop. Every other short row,
+   including a cut last row stamped inside the session, behind a session row,
+   followed by a newline, or of another ticker or date, still refuses
+   `MalformedRow`. Since the round-3 review the fields after the Time must
+   also be a prefix of a row: every field a comma closed has its column's
+   shape and the last is a prefix of one; any other cut row refuses.
+6. **An index file must reach past the session (design §3.3, revision 6,
+   restated by revision 9, below).** An index file whose LARGEST stamp is
+   before 15:30:00 refuses whole, `IndexEndsInSession { max_sod }`. Over every
+   NIFTY 50 and NIFTY BANK file of the copy (4,002), every file prints at or
+   past 15:31:59 except the four of the two disaster-recovery Saturdays, which the calendar gate refuses
+   first (charter, GDFL section; round-3 review: this item cited the design's
+   97-file sample, 16:02:56 and later, which 26 files of the copy are below),
+   so a regular day's file that stops inside the session was cut, whatever
+   its archive says (D-0812). A stock can stop printing before
+   15:30:00, so its last stamp proves nothing and it is never refused for it.
+   The census re-checks the last stamp of every index file before this is
+   relied on; a genuine regular day that ends earlier would reopen the rule.
+7. **What is handed on.** Every row in FILE ORDER with its line, its second of
+   the IST day, its LTP in paisa and its LTQ. Nothing is sorted, dropped,
+   re-stamped or placed: back-stepped rows (a replay of 12 rows over a
+   13-second hole) and pre- and post-session rows reach the fold as the file
+   wrote them, because placing them is the fold's rule (D-0805) and a reader
+   that did it would be a second fold authority. The counts the day directory
+   needs are taken on the way: rows before, inside and after the session by
+   stamp, LTQ = 0 rows, snapped rows (withdrawn in round 4, when a third
+   decimal began to refuse), the byte length, the unkeyed BLAKE3 and
+   the CRC-32 of the file (the last for D-0812).
+8. **The calendar gate.** `session_gate` admits only a day
+   `pull::calendar::kind_of` calls a regular full session. A closed day, a
+   special session and a day whose length was never measured refuse
+   `CalendarNotRegular` with the calendar's own answer; a day outside the
+   measured span (before 2019-12-02, after 2026-09-04) refuses
+   `CalendarUnmeasured`. So every folder before 2019-12-02 (303 index
+   folders: the 79 of 2018 and 224 of January to November 2019, counted by
+   name with `ls`) and every folder after 2026-09-04 (17) is read only once
+   the calendar is extended, and the append-only grid directory lets them be
+   backfilled then. (Until the round-2 review this sentence said "the 2018
+   folders", which left out the 224 folders of 2019.)
+9. **No GDFL row is committed (design §12, revision 5).** This repository is
+   public (`CLAUDE.md` §8) and the licence for the GDFL files is the operator's
+   open question (D-0802 consequence 10, a forward reference to an unlanded
+   draft), and a fixture in a public repository
+   is redistribution. Every test row is assembled at run time by
+   `synthetic_row` from invented prices, quantities and quotes, and from
+   invented stamps apart from the session edges under test (09:15:00,
+   09:15:01, 15:29:59, 15:30:00); only the field layout, the two header
+   spellings and the measured SHAPES are reproduced. (Until the round-1
+   review of 2026-10-02 this sentence was false: see that paragraph below.)
+   `fixtures_are_built_not_pasted` walks every `.rs` file under `crates/` and
+   fails on any text holding a whole capital-market row after a `.NSE` or
+   `.NSE_IDX` ticker; it was seen failing on this branch's earlier fixtures,
+   which quoted real rows, before they were rebuilt.
+
+**Where this departs from the design or from the task that commissioned it,
+and why.**
+
+- **Fixtures follow the design, not the task text.** The workflow task that
+  commissioned this step asked for "a few lines quoted from real files (cite
+  the file and line)", and this branch's first commits did that. Design
+  revision 6 withdrew real-row fixtures for the licence reason in item 9. The
+  task itself says the law wins where the design and the law disagree, and
+  `CLAUDE.md` §3 rule 1 does not let an unverified licence be assumed, so the
+  quoted rows were replaced and the detector added.
+- **The detector is narrower than "any 10-field GDFL row".** Design §12 asks
+  for a test that refuses any string literal under `crates/` matching "the
+  whole 10-field GDFL row shape". Existing tests in `api` and in
+  `pull/tests/unit.rs` hold F&O-shaped rows (`.NFO` tickers) that this step
+  did not write and that predate the licence question; refusing them would
+  rewrite two other crates' fixtures in a reader's change. The detector
+  therefore matches the capital-market tickers only. Whether those F&O
+  fixtures are vendor rows is UNVERIFIED and is left to their own owners.
+- **Superseded in round 4: a third decimal now REFUSES, as the design says
+  (see "Round-4 review repairs" below). The bullet is kept as it was decided.**
+  **A third decimal is snapped half-up, not refused.** Design §3.3 says the LTP
+  is decoded with `csv::paisa`, which refuses a third decimal. `CLAUDE.md` §7
+  says the tick grid is two decimal places and that snapping happens once, at
+  the write boundary, half-up. Nothing between this reader and the one-second
+  grid converts a price again, so this reader IS that boundary, and
+  `csv::paisa`'s own reason for refusing (a snap there would compete with the
+  one at the write boundary) does not apply. The conversion is
+  `Paisa::from_rupee_text_half_up`, the exact text conversion `core` already
+  owns, and every snapped row is counted in `snapped_rows`, so the snap is
+  never silent. Measured: sampled NIFTY 50, NIFTY BANK, RELIANCE and SBIN files
+  of 2018, 2020, 2022, 2024 and 2026 carry no LTP with a third decimal and no
+  LTP that is not a plain decimal. Only INDIA VIX carries four decimals, and it
+  is never mapped.
+- **No second ticker table, and no dated coverage yet.** Design §3.3 describes
+  a dedicated compile-time open-addressed `TickerMap` with up to four dated
+  `Validity` slots per key, each key's `from_day` measured by the census.
+  `CLAUDE.md` §1 says the F&O list is `core::universe::FNO_UNDERLYINGS` "and
+  nothing else names it", and `is_sweepable` already probes it through
+  `FNO_INDEX`, the compile-time open-addressed table the design's own citation
+  (`docs/07-o1-architecture.md` layer 4) describes. A second table naming 208
+  symbols would be a second list. The design allows aliases only when
+  charter-sourced, and the charter holds none. The `from_day` coverage is a
+  census output (build step 0, D-0819 on its own branch) and
+  `InstrumentWindowUncovered` is a run refusal in `cli` (§3.6); neither exists
+  in this step, and both stay open in `docs/07-plan.md`.
+- **The descriptor lives in `pull::gdfl_cm`, not in `pull::vendor`.** The
+  vendor table holds one `Descriptor` per feed, indexed by feed; the
+  capital-market files are the same feed laid out differently, so a second row
+  for `Feed::Gdfl` would break that table's rule.
+- **Refusals.** `SourceChanged{day}` compares against a stored day and is the
+  ingest's (step 6); it is not declared here. Added beyond the design's list:
+  `FolderUnknown`, `RowsOverCap`, `NotSwept` and `Unreadable`, each tested.
+  `LateRowTooFar`, `Truncated` and `RowsOverflow` are withdrawn by the design
+  and are not declared.
+
+**Measured on the archive (2026-10-01, read-only, with `ls`, `test -e` and
+`awk`).** Of the 208 F&O shares under today's symbols, the stock folder has a
+`<SYM>.NSE.csv` for 208 on 2026-09-24, 195 on 2024-04-01, 175 on 2021-04-01
+and 159 on 2019-01-01. The missing ones are listings that came later (SWIGGY,
+HYUNDAI, LICI) and **renames** (ETERNAL, UNITDSPR, LTF, TMPV and others). A
+rename is a dated alias, and the design admits one only when charter-sourced;
+none is recorded, so those days resolve as absent under today's name, which the
+census lists rather than this reader guessing. UNVERIFIED: whether any of the
+208 symbols named a different company earlier in the history.
+
+**Not built here.** The census, the one-second fold (D-0805), the grid store
+(D-0804) and the ingest verb. Running an ingest over the archive is the
+operator's call. The data-era rule needs nothing from the reader beyond rows
+in file order, from which rows per second are counted downstream. That rule
+is D-0816, a **pending forward reference**: no D-0816 entry is in this
+ledger, design §11 still leaves it to the operator, and the workflow relays
+it as chosen by the orchestrator on the operator's "pick everything"
+delegation (every result labelled with its data era, and by default an
+in-sample and an out-of-sample window from the same era). It is not decided
+by this entry (round-3 review).
+
+**Forward references, stated (round-3 review).** D-0804 (the grid store),
+D-0805 (the fold), D-0816 (the data era) and D-0818 (the version-1 scope)
+are the numbers design §11 assigns to entries that are **not in this ledger
+yet**, and D-0802 (the tick-precise fills, whose consequence 10 is the
+licence question) is a draft on the unlanded branch
+`docs/d-0802-tick-precise-fills` (added in round 4); each citation above says where a rule will be recorded, not that it
+is decided. The census, which design §11 does not number, took D-0819 on its
+own branch (`feat/gdfl-census`).
+
+**Design revision 8 (2026-10-02), adopted here.** Revision 8 (C43, review
+findings 14 and 17) states two things this entry now locks.
+
+- **The share keys are the universe's own.** The ticker map's slots are
+  NIFTY 0, BANKNIFTY 1, and for a swept share 2 plus its position in
+  `core::universe::FNO_UNDERLYINGS`, read by one bounded probe of `FNO_INDEX`
+  (`pull::gdfl_cm::ticker_slot`). The five index underlyings keep their five
+  empty slots, so the arithmetic stays on the one list. This is the departure
+  above made into the design's own rule: no second enumeration of the 208
+  shares exists. `ticker_map_equity_keys_are_the_universe_shares` checks that
+  every universe share resolves to its own key and its own slot and the five
+  indices to none.
+- **Lookups are one index, never a hash, set, search or sort.** `DayFolder`
+  and the archive's `DayMembers` file each name once, at O(names), into the
+  same `SlotTable`, an array of `TICKER_SLOTS` cells (215 today). "Does this
+  ticker have a file today" is then one index. The earlier ASCII-lowercased
+  `HashMap` of names and the `HashMap` of member names are gone, and
+  `day_folder_lookup_is_one_index_into_a_ticker_slot_array` fails on any hash
+  map, set, `contains(&`, search or sort in either module outside its tests.
+
+Two consequences, stated:
+
+1. **What `AmbiguousCaseTwins` now catches.** A name is filed by its stem's
+   exact bytes, so `nifty 50.nse_idx.csv` beside `NIFTY 50.NSE_IDX.csv` is an
+   unknown stem, counted with the unresolved names, and the exact name is
+   found. Two names for one slot (on a case-insensitive volume, only `.csv`
+   and `.CSV` of one stem) refuse when that ticker is looked up. In the archive
+   that is also how a member named twice refuses now: by ticker, at lookup,
+   not for the whole day zip. A day's other tickers are unaffected.
+2. **Exact bytes had to be enforced in `resolve`.** `Symbol::new` uppercases
+   its input, so building the key alone made `m&m.NSE` resolve to `M&M`.
+   The old `HashMap` lookup compared the stem bytes afterwards and hid that;
+   filing by slot exposed it (`a_folder_locates_either_spelling_by_exact_stem`
+   failed on the first slot-table build). `resolve` now requires the stem to
+   equal the built symbol's own text, and
+   `f_and_o_shares_map_with_their_own_spelling` pins `m&m.NSE`, `sbin.NSE` and
+   two more as no share's file.
+
+**Design revision 9 (2026-10-02), adopted here.** Revision 9 (C45 and review
+finding 10 of its §14h) changes two things this entry locks.
+
+- **Two key spaces, gated by the folder's kind.** Revision 8 said both that
+  each key is the exact stem bytes and that the lookup strips the exact
+  `.NSE` suffix, which left a bare stem free to match an equity key in
+  principle. `stem_slot` now takes the kind of the folder (or day zip) a name
+  was found in and resolves only in that tree's key space: index keys are
+  whole stems, probed only from index folders; equity keys are bare universe
+  symbols, probed only from stock folders after an exact, case-sensitive
+  `.NSE` (never `.NSE_IDX`) is removed. `SlotTable`, `DayFolder` and the
+  archive's `DayMembers` each carry their tree, and `read_day` refuses
+  `FolderUnknown` for a listing of the other tree. The design's "each slot
+  records the `CmKind` of its key" holds by layout: slots 0 and 1 are the
+  two index keys and every other slot is a share's, and a probe from one
+  tree can only ever return a slot of that tree, because `resolve` is asked
+  in that tree alone. Proven by CM-14.
+- **The index end check reads the largest stamp, not the last row (C45).**
+  Revision 8's "whose last row is stamped before 15:30:00", read in file
+  order, refused a file ending on in-session late rows that the fold places
+  and refuses only window by window. `CmFile::max_sod` is now the running
+  maximum of the stamps (O(1) per row), which is the stamp of the last
+  in-order row and which no late row raises, and the refusal is
+  `IndexEndsInSession { max_sod }`. When it fires the file refuses whole
+  and nothing downstream runs; when it does not, every row is handed on in
+  file order. A forward spike at or after 15:30:00 with no row after it is
+  its own largest stamp and passes. Proven by CM-08.
+
+**Where this differs from the design's words, and why.** The design calls
+the checked value the largest *effective* stamp, `hi_sod` after §3.2 step
+1's UTC re-stamp. That re-stamp is the fold's rule (D-0805, not built on this
+branch), and a reader that applied it would be a second fold authority, which
+this entry exists to prevent (item 7). So the reader judges the largest stamp
+as written. The two differ only when a re-stamped UTC row is the file's
+largest effective stamp: the re-stamp lands such a row at most 2 s past the
+running maximum (design C1), so the reader can only be STRICTER, refusing a
+file whose written maximum is 15:29:58 or 15:29:59 and whose effective
+maximum would reach 15:30:00. Over every NIFTY 50 and NIFTY BANK file of the
+copy, the UTC rows are the 227 of October 2020, every back-step lies in 19,798
+to 19,801 s, and no file but the four of the disaster-recovery Saturdays has
+a largest written stamp below 15:31:59 (charter, GDFL section, round-3
+review), so no file of the copy is near that edge; the census re-checks every
+index file's end. The direction is a refusal, never a silent admission.
+
+**Design revision 11 (2026-10-02), recorded.** The reader adds no
+plausibility check on an LTP's value (C55): a tolerance at ingest would
+refuse a regular day for one row and bake a number into append-only bytes.
+An isolated spike decodes as written (CM-15) and is the fill policy's to flag
+at load. Revision 10 (C50, the no-block directory record for a refused file)
+is the ingest's and the store's; nothing in this reader changes for it.
+
+**Round-1 review repairs (2026-10-02).** The branch's first review upheld
+these findings, and each was fixed test first.
+
+- **The "invented" fixtures were real rows shifted by a constant.**
+  `index_day()` held ten rows of the real 2024-04-01 NIFTY 50 file with
+  every stamp kept and every LTP lowered by 12,455.00; the RELIANCE rows were
+  that day's first RELIANCE row lowered by 1,484.00, quote included; the
+  September 2018 rows carried that file's last stamp. That kept vendor price
+  changes, stamps and a spread exactly, which is derived vendor data, and item
+  9's "invented" was false. Every one was replaced by values and stamps
+  invented for the shape alone, and `fixtures_are_built_not_pasted` still
+  holds. **The history is not clean and this builder cannot clean it.** The
+  quoted real rows are in commits `266561f2`, `51518fdc` and `e8f0d281`, and
+  the shifted rows in every commit from `1457dd29` to `76d5c4f8`. This
+  repository is public and the licence is open (D-0802 consequence 10, on
+  the unlanded draft branch), so the
+  branch must not be pushed, nor merged other than by a squash whose tree is
+  the clean tip, until its history is rewritten and re-checked over every
+  commit of `origin/main..HEAD`. Rewriting history is outside what this
+  builder may do (no rebase, no push), so it is left to the operator, stated
+  in `docs/07-plan.md`'s row for this step.
+- **A second name for one ticker is named by what it is.** Two names for one
+  slot both spelled `.csv` or `.CSV` are `AmbiguousCaseTwins`; any other
+  extension among them is `ExtensionUnknown` (item 2 above, as amended),
+  because `NIFTY 50.NSE_IDX.txt` beside `.csv`, or `RELIANCE.NSE.bak` beside
+  `.csv`, are not case twins and the old refusal named the wrong cause.
+- **A listing carries its tree and day.** `list_folder` takes both from the
+  folder's own name (refusing `FolderUnknown` for any other name) instead of
+  a `kind` argument a caller could get wrong, and `read_day` refuses a
+  listing of another day as it already refused one of another tree.
+- **What is pinned now that was not.** The September 2018 header literal, all
+  twelve month spellings of the archive's folders, digits-only SellQty and
+  OpenInterest, and a stock folder listed and read end to end.
+- **Recorded rather than changed.** A last row cut just after its ninth comma
+  refuses the day while one cut a byte earlier is dropped (the design's
+  "fewer than ten fields", kept); and `read_day` reads a whole file before
+  `RowsOverCap` applies. Both are rows of `docs/06-limits.md`. The module's
+  "post-close rows to about 16:46", one file's end, was replaced by the
+  design's measurement (16:02:56 to 21:40:01 over 97 files), and "one probe"
+  for a share's slot was corrected to three bounded probes.
+
+**Round-2 review repairs (2026-10-03).** The second review upheld these
+findings; each code change was made test first and seen failing.
+
+- **`snapped_rows` counts only a snap that changed the value.** It counted
+  every LTP with more than two decimals, so `1.000` and `10000.050`, which the
+  snap leaves exactly as written, were counted. A row is now counted only when
+  a digit past the second decimal is not zero.
+  `a_third_decimal_is_snapped_half_up_once_and_counted` pins `1.000`,
+  `1.00000` and `10000.050` at 0 and `10000.0501` at 1 (CM-04). (Superseded
+  in round 4: the count and that test are gone, and every one of those values
+  now refuses `PriceRefused`, pinned by `a_third_decimal_is_refused_not_snapped`.)
+- **`AmbiguousCaseTwins` names both of its causes.** Its text said "two names
+  in the folder differ only in case", which is wrong for one member name
+  repeated in a day zip (revision 8, consequence 1). It now says two names for
+  one ticker, each spelled `.csv` or `.CSV`, a case twin in a folder or one
+  name twice in a day zip.
+- **One regular full session is lost to a zero LTP, and that is now written
+  down.** Over every `NIFTY 50` and `NIFTY BANK` file of the copy, only
+  2022-03-07 holds an LTP of zero (charter, GDFL capital-market section: 4 rows
+  in NIFTY 50, 2 in NIFTY BANK, each the first second after a gap in stamps of
+  about 4 and 47 minutes, each sharing its second with a non-zero row). Item 4
+  refuses the whole file `PriceRefused`, so that day is lost for both swept
+  indices. That is loud, by design, and is kept: dropping the row would be a
+  reader-side filter the design does not have, and a silent one would be a
+  fallback (`CLAUDE.md` §4). The round-2 reviewer's run of `list_folder`,
+  `read_day` and `DayMembers::verify` over every index day folder against the
+  archive (3,342 files read and verified, 640 `CalendarUnmeasured`, 18
+  `CalendarNotRegular`; the reviewer's figures, not re-run here) found no other
+  price refusal, and the zero-LTP `grep` over every file of both indices,
+  re-run for this entry, finds no other day. Recorded as a row of
+  `docs/06-limits.md` and in CM-04, and raised against design §1.3 and §3.3 as
+  an open question in `docs/07-plan.md`: whether a zero LTP sharing its second
+  with a real print should be dropped and counted rather than refuse the day
+  is the design's to decide, not this reader's.
+- **Every vendor fact in source now traces to the charter.** The folder
+  names, the `.NSE_IDX` and `.NSE` stems, the `<SYM>.NSE` naming of the F&O
+  shares, both headers, the `.CSV` spelling, the files without a final
+  newline, the third decimals, the zero LTP day, the largest files and the
+  archive's ZIP64 layout were re-measured over the whole copy (or the files
+  named) and recorded in `docs/00-charter.md`'s section "GDFL capital-market
+  tick files — measured 2026-10-03"; the module docs now cite that section.
+  Two module statements were corrected on the way: the spaced header is in 17
+  NIFTY 50 files dated 2018-09-03 to 2018-10-04, not only "some September
+  2018 files", and `.CSV` is every file of nine September 2018 index folders
+  and of no other. The D-0802 draft's charter §4g (unlanded) lists this
+  naming as UNVERIFIED, and the design gives §4g to D-0803 (its build step 1,
+  before this step 5); `docs/07-plan.md` records that whichever lands second
+  reconciles the two.
+- **The calendar gate's span is stated in full** (item 8, as amended).
+- **The operator's quote is no longer made to say more than it does**
+  (opening paragraph, as amended).
+- **The history is still not clean, and this round adds nothing to it.** The
+  round-2 commits hold no GDFL row (the per-commit grep of the round-1 review
+  paragraph, run over them, finds none), but the earlier commits named above
+  still do. The branch must still not be pushed, nor merged other than by a
+  squash whose tree is the clean tip, until the operator rewrites it.
+
+**Round-3 review repairs (2026-10-03).** The third review upheld these
+findings. Each code change has its test; the prefix test (and D-0812's
+directory-size test) was seen failing on the old code, and the index-slot
+test failed to compile before the names it uses existed.
+
+- **The history is squashed, and main is merged rather than overwritten.**
+  The branch is now one commit, `5a55340c`, whose tree is the reviewed tip
+  `14133fa3` byte for byte (`git diff 14133fa3 5a55340c` is empty); it was
+  made on 2026-10-03 at 10:39 IST outside this builder's session, which may
+  not rewrite history. The per-commit grep of the round-1 paragraph, re-run
+  over every commit of `origin/main..HEAD`, finds 0 rows in each. The earlier
+  commits are on no branch; they stay in the local object store until pruned
+  and must never be pushed. The squash alone would not have been landable:
+  setting main to the tip's tree would have dropped main's newer D-0910 store
+  commit (`4bbd37df`). So `origin/main` was MERGED into the branch (a merge
+  commit, no rebase), the two append-at-end conflicts in
+  `docs/05-decisions.md` and `docs/06-limits.md` resolved by keeping both
+  sides' rows, and the definition of done re-run on the merged tree. Any
+  squash-merge must now be taken from a tree that contains main, never from
+  the pre-merge tip.
+- **Every vendor fact the reader relies on now traces to the charter.** The
+  module docs and this entry leaned on design §1.3 for where index files end,
+  when pre-open rows start, CRLF, the all-zero quote, LTQ and open-interest
+  fields of an index row, the archive's stored members, the files per folder
+  and the October 2020 UTC rows. Each was re-measured over every NIFTY 50 and
+  NIFTY BANK file of the copy (or every folder, or the whole archive
+  directory) and recorded in the charter's GDFL section with how it was
+  measured; the design is now cited only for where a rule came from. The
+  whole-copy measurement corrected one of them: "every sampled file prints
+  past 16:00" held for the design's 97 first-of-month files but not for the
+  copy, where 26 index files end before 16:00:00 and four before 15:30:00.
+  The four are the two disaster-recovery Saturdays (2024-03-02, 2024-05-18),
+  which `session_gate` refuses before any decode, so `IndexEndsInSession`
+  still refuses no file of the copy; `special_session_is_not_gridded` now
+  pins both Saturdays, and item 6 is amended.
+- **A cut post-session row must be a prefix of a row** (item 5, as amended):
+  a short last row whose fields after the Time are not what cutting a
+  well-formed row leaves (`abc,xyz`) refuses `MalformedRow` instead of being
+  recorded as a cut. This narrows design §3.3's rule, which is stated by field
+  count alone, so that corruption is not filed as truncation.
+- **The index slots no longer assume two indices.** `ticker_slot` returned
+  BANKNIFTY's slot for any swept index that was not NIFTY, and `stem_of`
+  named `NIFTY BANK.NSE_IDX` for it, so a third entry in `InstrumentKey::SWEPT`
+  would have compiled and read BANKNIFTY's file as its own. Both now match the
+  two symbols exactly and answer `None` otherwise, the share slots start at
+  `INDEX_SLOTS = InstrumentKey::SWEPT.len()`, and a test walks `SWEPT`.
+- **The end-check test's name says what it checks.** Design §12 names it
+  `index_end_check_reads_the_largest_effective_stamp_not_the_last_row`, but
+  the reader judges the stamp as written (item 6, "Where this differs"), so
+  it is `index_end_check_reads_the_largest_written_stamp_not_the_last_row`.
+- **CM-13 no longer says "no search".** The archive finds a zip's end record
+  with a bounded backward scan (at most 65,557 bytes), a search that is not a
+  member lookup; the source test now refuses every other `.find(` in either
+  module's live code and requires that scan to be the only one.
+- **CM-14's archive test checks both directions.**
+  `members_resolve_only_in_day_zips_of_their_kind` checked only that an index
+  day zip ignores a share's file; it now also checks that a stock day zip
+  files the share and counts the index's file, and was seen failing when
+  `Archive::day` built every slot table as an index one (CM-14 also names
+  `names_that_are_not_day_zips_are_ignored_and_counted`).
+- **The LTP floor is named for what it is.** `costs::rate::TICK` (5 paisa) is
+  documented as the index-option premium tick; here it is a positivity floor,
+  as design §3.3 names it, and not a claim about the tick of an index level or
+  a share.
+- **Forward references are marked pending, and the census number is D-0819**
+  (the paragraphs above, as amended).
+- **Recorded, not changed:** `pull`'s whole-crate coverage (95.11% of lines, 82.49% of branches, all pull tests) is below the 100%
+  `CLAUDE.md` §9 asks for, and the shortfall predates this branch; the two new
+  modules are at 100% of lines and branches. The figures are a row of
+  `docs/07-plan.md`.
+
+**Round-4 review repairs (2026-10-03).**
+
+- **A third decimal refuses, as design §3.3 says.** The round-1 bullet above
+  justified snapping by quoting only the second of `csv::paisa`'s two reasons
+  (a snap there would compete with the write boundary's). Its first reason,
+  that a third digit is the vendor sending something this build does not
+  understand, applies to this reader as much as to the F&O one, and refusing
+  does not conflict with `CLAUDE.md` §7: two places or fewer convert exactly,
+  so there is nothing to snap. The LTP is now decoded with `csv::paisa` after
+  the plain-unsigned-decimal shape check; any third decimal digit, a zero
+  included, is `PriceRefused`; `snapped_rows` is gone because it could only
+  ever be 0; and the title of this entry says so. Measured over the whole copy
+  (charter, "Third decimal in the LTP"): 0 of 147,837,877 NIFTY 50 and NIFTY
+  BANK rows carry anything but a plain decimal of at most two places, so the
+  swept indices lose nothing. The sampled-equity claim of the round-1 bullet is
+  narrowed to what the charter records (SBIN 2022-04-01); other equities are
+  not measured, and a share whose file carries a third decimal is refused by
+  name, not converted.
+- **`resolve` is O(1) in its argument.** It searched a stock name for a dot,
+  and built a key, before anything bounded the name's length, so its cost was
+  the stem's length (the reviewer measured about 298 µs for a 10 MB stem
+  against about 0.1 µs for a short one), while the module doc and
+  `docs/06-limits.md` called it worst-case O(1). A stock name longer than
+  `SYMBOL_CAPACITY` is now `NotSwept` by its length before it is read, the
+  guard `core::universe::FnoIndex::position` carries for the same reason. A
+  series file that long is reported `NotSwept` rather than `SeriesVariant`,
+  stated in the code. The module doc no longer says "two comparisons for an
+  index".
+- **A short last line ending in a bare CR is malformed, not cut.** The CR
+  shows the vendor terminated the line, so CM-05 refuses it `MalformedRow`
+  instead of dropping it as a cut post-session tail.
+- **Recorded, not changed, and not called done.** `CLAUDE.md` §9 requires 100%
+  line and branch coverage on every touched crate. `pull` is touched and is at
+  95.11% of lines and 82.49% of branches, figures the builder measured that
+  the reviewers could not reproduce crate-wide; the two new modules are at
+  100%. **This branch therefore does not meet §9's definition of done**, and
+  landing it needs the operator's recorded exception for the older modules'
+  shortfall, not a claim that it is done (`docs/07-plan.md`).
+- **The mutation counts are re-measured with one target per worker.** The
+  round-3 counts (340 caught, 21 unviable, 3 timeouts) came from a run with
+  `CARGO_TARGET_DIR` exported, which makes every `cargo mutants` worker build
+  into and run from one shared target directory, so workers can run each
+  other's mutated binaries. That is a methodology fault, not a missed mutant;
+  the reviewer's clean run (331 caught, 33 unviable, 0 missed, 0 timeouts)
+  agrees on 0 missed, and this round's own run unsets the variable.
+
+**Round-5 review repairs (2026-10-04).**
+
+- **The CR rule is this reader's own, and stricter than `pull::csv`'s.** Item
+  4, `strip_cr`'s doc and design §3.3 ("Line splitting": reuses the existing
+  splitter's CR rule, `raw_line.trim_end_matches('\r')`) all said the reader
+  applies `pull::csv`'s rule. It does not: `pull::csv` trims every trailing
+  `\r` and then whitespace (`csv.rs`, `decode_rows`), and this reader strips
+  exactly one `\r`. The stricter rule is kept and is now stated: every
+  measured line of the 4,002 NIFTY 50 and NIFTY BANK files ends in one CRLF,
+  except the unterminated last line of 34 files (charter, "Line endings"),
+  which ends in a digit (next bullet), so a second `\r` or a trailing blank is a shape the vendor
+  was never seen to write. Trimming it would pass an unmeasured shape on as
+  a clean row, the silent fallback `CLAUDE.md` §4 bans; left in the field it
+  is refused `MalformedRow` (or `HeaderUnknown` on the header). The design's
+  purpose for its rule, that `0\r` never reaches a field parser, holds under
+  either. Where the design's wording and this reader differ, the reader
+  follows the law and this bullet records why. Proven by
+  `pull::gdfl_cm::tests::only_one_cr_is_stripped_and_nothing_else_is_trimmed`.
+- **A last line ending in a bare CR is refused even when it is a complete
+  row.** Round 4 refused a SHORT last line ending in a bare CR, but a
+  complete ten-field last row ending in one was accepted with
+  `final_newline = false`, so a file cut between the CR and the LF of its last
+  CRLF was handed on as a clean unterminated file, and only the archive check
+  of `read_day_checked` could notice. `decode` now refuses any last line that
+  ends in a bare CR with no LF after it as `MalformedRow` naming that line,
+  before the cut-tail test. The measured unterminated last lines end in a
+  digit, not a CR (design §1.3: the last byte of the 17 NIFTY 50 files of
+  2018 without a final newline is `30` by `tail -c 1 | xxd -p`; the charter's
+  "Line endings" row measured all 158 index files of 2018 with the same
+  command), so no
+  measured file is affected. Proven by
+  `pull::gdfl_cm::tests::a_complete_last_row_ending_in_a_bare_cr_is_malformed`.
+- **The cut-tail rule comes before the row bound.** `RowsOverCap` was checked
+  before the cut-tail test, so a file of exactly `MAX_ROWS` complete rows and
+  a cut post-session tail refused `RowsOverCap`, while one row fewer dropped
+  and recorded the tail. A dropped tail is not a row, so the bound is now
+  applied after the tail test. Proven by
+  `pull::gdfl_cm::tests::a_cut_tail_is_dropped_before_the_row_bound_is_applied`.
+
+**Proven by** `pull::gdfl_cm::tests`, one test per refusal, and the CM-01 to
+CM-08 and CM-13 to CM-15 rows of `docs/04-invariants.md`.
+
+### D-0812 — Check every extracted GDFL capital-market file against its member in the vendor archive by length and CRC-32 before it is gridded — 2026-10-01
+
+**Amended by D-2800 (2026-10-04).** With the extracted folders retired, the check described below runs on the bytes a `CmSource` fetches, in `read_listed`, against the length and CRC-32 the day zip's central directory states; `DayMembers`, `verify`, `verify_source`, `read_day_checked`, `SourceMissing` and `ArchiveMemberMissing` named below are gone.
+
+**Why.** A file cut cleanly at a newline inside the session is well-formed row
+by row, so the reader cannot see the cut (design §3.3, revision 6, C32). The
+vendor's own archive can: each inner day zip's central directory records every
+CSV's uncompressed length and CRC-32. What is on disk beside the extracted
+tree, `_verify_log/run.log` and `_verify_log/ok/`, holds per-zip verdicts and
+zero-byte markers and no member's length or CRC (design §3.3), so it checks
+nothing per file.
+
+**What this entry locks: the reader half, `pull::gdfl_archive`.**
+
+1. **The outer archive is read once, O(entries).** Its end record is found in
+   the last 22 + 65,535 bytes; when a ZIP64 locator sits right before it, the
+   ZIP64 end record gives the entry count, the directory size and its offset.
+   Each central record's saturated fields are taken from its ZIP64 extra block
+   (id 1) in the APPNOTE order uncompressed, compressed, offset. **Measured on
+   the operator's archive (read-only; `xxd` of its last 200 bytes, and, since the round-3
+   review, its whole central directory walked record by record with `od`):**
+   the file is 128,918,864,518 bytes; its end record saturates the directory
+   offset; the ZIP64 end record gives 4,209 entries and a 493,028-byte
+   directory, and the 4,209 records end exactly at its 493,028th byte. The
+   first 256 central records carry a plain 32-bit local-header offset and a
+   9-byte `UT` block only; the other 3,953 saturate only their local-header offset and
+   carry it in an 8-byte id-1 block followed by an `UT` block. No record
+   saturates either size. (Until the round-3 review this item said "each
+   central record" saturates its offset, generalising from the last record,
+   which is all the last 200 bytes show; the reader was right either way,
+   because it reads a ZIP64 value only for a saturated field.) That is the
+   layout the design left UNVERIFIED. The reader's tests reproduce each of the
+   two record shapes (`Wide::No`, `Wide::Offset`), each in its own synthetic
+   directory; none mixes the two in one directory as the real one does.
+2. **Day zips by name, in a dense table.** A member whose name is exactly
+   `<INDICES|STOCKS>/<yyyy>/<MON>_<yyyy>/GFDLCM_<INDICES|STOCK>_TICK_<ddmmyyyy>.zip`,
+   every part agreeing with the day, is a day zip; every other name is counted
+   (`ignored`, for the census) and skipped. Day zips are filed in one array per
+   tree indexed by days since the archive's first day: arithmetic, no hash, no
+   sort, and a worst-case O(1) lookup. Two day zips for one tree and day refuse
+   `ArchiveDuplicateDay`; a day zip that is not `Stored` refuses
+   `ArchiveMemberCompressed`, because only a stored member's bytes, and so its
+   own central directory, lie at a known offset (`unzip -v` shows all 4,209
+   outer members stored).
+3. **One day zip is read once per day folder, O(its entries)**, from its local
+   header (to find where its data starts) to its own central directory, into
+   every member's exact name and declared length and CRC-32, shared by every
+   instrument that day. A day the archive does not hold, or a file the day zip
+   does not name, refuses `ArchiveMemberMissing` with the exact name looked
+   for.
+4. **The per-file check.** `DayMembers::verify` compares a decoded file's
+   `source_len`, then its `source_crc32` (D-0808 item 7), with its member's.
+   A complete file without a final newline passes; a decoded file cut at a
+   row boundary fails `SourceLengthMismatch` or, at the same length,
+   `SourceCrcMismatch`. A file that does not decode is checked on its raw
+   bytes by `verify_source` before the decode (round-3 review, below).
+5. **Every other archive shape refuses by name.** `ArchiveUnavailable` when the
+   archive cannot be opened or read (there is no fallback to the unverified
+   tree), and `ArchiveMalformed { what }` with the reason: no end record, a
+   saturated end record without a locator, a locator pointing at no ZIP64
+   record, a record past the end, a central directory over its 64 MiB cap
+   (493,028 bytes is the one that exists), a central record without its
+   signature, a record cut short, a saturated field without its ZIP64 value, a
+   day zip's local header without its signature. (Revision 8: two members
+   for one ticker no longer refuse the whole day zip; they refuse
+   `AmbiguousCaseTwins` when that ticker is looked up, D-0808.)
+6. **CRC-32 is `flate2::Crc`**, the IEEE 802.3 polynomial zip uses, from a
+   crate `pull` already depends on. Design §3.3 proposed a 256-entry `const`
+   table beside the store's `crc32c`; reusing the existing implementation
+   keeps one CRC-32 authority instead of adding a second, and
+   `crc32_matches_the_zip_polynomial` pins the check value `CBF43926`.
+
+**Residual, stated.** A file that was already cut when the vendor built the
+archive passes the CRC. For an index the `IndexEndsInSession { max_sod }`
+rule (D-0808 item 6, judged since design revision 9 on the file's largest
+stamp, never on its last row in file order, C45) still catches a cut inside
+the session; for a stock it is undetectable per
+file, and the census is to report instrument-days far below their neighbours'
+row counts (report only).
+
+**Not built here (step 6, the ingest).** Requiring `--archive` on the ingest
+verb, calling `verify` before anything is gridded, naming the reason in the
+ingest's per-instrument-day event and the census, and `SourceChanged`. That
+step cites this entry rather than taking a new number for the same rule.
+Folders the archive does not contain (the extracted tree holds index folders to
+`GFDLCM_INDICES_TICK_30092026`, the archive's last index day zip is
+`GFDLCM_INDICES_TICK_24092026.zip`, design §3.3) will refuse
+`ArchiveMemberMissing` until an archive that holds them is supplied; who added
+them is UNVERIFIED.
+
+**Round-1 review repairs (2026-10-02).**
+
+- **Reads are positional.** `ReadAt for File` did a `seek` then a
+  `read_exact` through one shared cursor, so two threads calling
+  `Archive::day` on one `Archive<File>` read each other's bytes and a valid
+  archive refused `ArchiveMalformed` (the reviewer measured 1,747 failures in
+  3,200 calls). It is now `FileExt::read_exact_at` (`pread`), the read
+  `store::file` already uses and the `read_at` design §3.3 names;
+  `concurrent_day_reads_of_one_file_never_interfere` failed 664 of 800 calls
+  before the change and none after.
+- **Only `<folder>/<file>` is a member.** A member at the root of a day zip
+  was filed under its bare name, so a root-level `NIFTY 50.NSE_IDX.CSV`
+  passed `verify` as if it were the folder's file. A name outside the day
+  folder is now counted and never filed (CM-13).
+- **The last end record decides.** The search for the end record runs back
+  from the end, as zip readers do, and a test now pins it with a
+  self-consistent end record inside a member's data; and the ZIP64 block's
+  value order is pinned with an uncompressed length unequal to the
+  compressed one.
+
+**Round-2 review repairs (2026-10-03).**
+
+- **The CRC test's name departs from the design's, because the table it
+  names does not exist.** Design §12 step 5 names
+  `crc32_table_matches_the_zip_polynomial`; item 6 replaced the design's
+  `const` table with `flate2::Crc`, so the test is
+  `crc32_matches_the_zip_polynomial` and pins the same check value.
+- **The CRC-32 is not taken in the BLAKE3 pass.** The design computes it in
+  the same pass as `source_digest`; `decode` takes the BLAKE3 and the CRC-32
+  as two library calls over the one in-memory buffer, the same O(bytes) order
+  with no fused loop to maintain (`docs/06-limits.md`, the decode row).
+- **The dense day table's worst case is stated.** It is sized by the span
+  between the earliest and latest day-zip names, and `Day` admits 1970 to
+  9999, so a corrupt or hostile archive naming one far-dated day zip sizes it
+  at 2,932,897 cells of 24 bytes per tree, about 141 MB for both, before any
+  other check. Bounded, so never a crash;
+  `the_day_table_worst_case_is_the_whole_day_range` pins both figures, and
+  `docs/06-limits.md` states it beside the real archive's 6,000 cells. No cap
+  is set below `Day`'s range, because none is measured.
+
+**Round-3 review repairs (2026-10-03).** The new tests are named in CM-09
+and CM-11; the directory-size test was seen failing on the old code, and the
+`verify_source` tests failed to compile before the method existed.
+
+- **The walked records must end at the directory's declared size.** The walk
+  stopped after the declared count and never compared where it ended with the
+  declared size, so an end record that understated its count was accepted and
+  every day zip or member after the count refused `ArchiveMemberMissing`,
+  which names the operator's inputs and writes no record (design §3.3), for
+  what is a corrupt archive (the reviewer patched a two-day outer zip to a
+  count of 1 and saw the second day refused that way). It now refuses
+  `ArchiveMalformed` ("the records do not end at the central directory's
+  declared size"), which also catches a last record whose comment runs past
+  the end. The operator's archive passes: its 4,209 records end exactly at its
+  493,028th byte (item 1), and a throwaway probe (not committed) that opened
+  it read-only and called `Archive::day` for every date from 2018-01-01 to
+  2026-12-31 in both trees read all 1,997 index and 1,997 stock day zips
+  under the new check, with no `ArchiveMalformed` (every other date refused
+  `ArchiveMemberMissing`); 1,997 + 1,997 + the 215 ignored names are the
+  4,209 entries. The same probe called `read_day_checked` for NIFTY and
+  BANKNIFTY on each of the 1,997 index days: 3,342 files matched their member
+  byte for byte (length, then CRC-32) and decoded, 2 refused `PriceRefused`
+  (2022-03-07, the zero-LTP day), 650 were refused by the calendar gate
+  before any read (632 `CalendarUnmeasured`, 18 `CalendarNotRegular`), and
+  none refused `SourceLengthMismatch`, `SourceCrcMismatch` or
+  `IndexEndsInSession` (run 2026-10-03, release build, 72 s).
+- **Item 1's layout was generalised from one record, and is corrected** (item
+  1, as amended): 256 records are plain and 3,953 wide.
+- **A file that does not decode is still named by its member.** Item 4's
+  "a file cut anywhere fails" was not what the API could deliver: `verify`
+  takes a decoded `DayFile`, so a file cut inside a session row, or with a
+  byte that breaks a field, was refused by the row parser (`MalformedRow`,
+  `PriceRefused` or `IndexEndsInSession`) and never reached the check, and the
+  census would have named the vendor's row malformed for a truncated
+  extraction. `DayMembers::verify_source` now makes the same two comparisons
+  on the raw bytes, and `pull::gdfl_cm::read_day_checked` calls it before
+  `decode` (refusing `FolderUnknown` for members of another day's folder), so
+  step 6 gets the right reason by calling that instead of `read_day`. `verify`
+  stays, and its doc now says it sees only a file that decoded. The cost is
+  one more CRC-32 pass for a file whose length matches (`docs/06-limits.md`).
+
+**Proven by** `pull::gdfl_archive::tests` and the CM-09 to CM-12 rows of
+`docs/04-invariants.md`. Every archive in those tests is built in the test from
+invented bytes; no vendor byte is read or committed.
+
+**Round-4 review repairs (2026-10-03).**
+
+- **A file the day zip holds and the folder lacks is refused, not absent.**
+  `read_day_checked` answered `Ok(None)` whenever the extracted folder had no
+  file for the instrument, so a file lost by a partial or crashed extraction,
+  or deleted before the listing, reached the fill as a missing day and the
+  census as absent. It now asks the day zip (`DayMembers::lost_by_extraction`,
+  one slot index) and refuses `SourceMissing { member }` when the day zip
+  holds the file; `Ok(None)` means neither holds it. The day zip's own
+  ambiguity for the stem (`AmbiguousCaseTwins`, `ExtensionUnknown`) refuses
+  too, rather than being guessed past.
+- **The unverified read is not public.** `read_day` decoded a file without the
+  archive check and sat `pub` beside `read_day_checked`, so an ingest could
+  have skipped the check that design §3.3 says has "never a fallback to the
+  unverified tree". It is now test-only (`#[cfg(test)] pub(crate)`), kept to
+  show what the check adds; `read_day_checked` is the one public read.
+
+**Round-5 review repairs (2026-10-04).**
+
+- **`decode` is crate-private, so the claim above is now true.** The round-4
+  bullet called `read_day_checked` the one public read, but `decode` was still
+  `pub`, so a caller outside `pull` could read a file's bytes itself and
+  decode them without the archive check. `decode` is now `pub(crate)`; no
+  other crate on any GDFL branch names it (`git grep` over the four
+  `feat/gdfl-*` branches, 2026-10-04). `list_folder` stays public: it reads a
+  folder's NAMES and never a file's bytes, so it decodes nothing, and a
+  `DayFolder` is only an input to `read_day_checked`. CM-09 says so.
 
 ### D-0910 — Verify the old tail block before a following append re-seals it — 2026-10-02
 
@@ -58425,3 +59194,152 @@ with its frontier in two ledger opens and `2 * rows + 1` row reads. After it
 flips one byte in the last row, which is never the best, `top` refuses with
 `record 7 does not match its seal`. That is the refusal a one-row answer would
 lose. Counted, not timed.
+### D-2800 — GDFL CM reader reads the vendor zips directly; extracted folders retired 4 Oct 2026 by the operator — 2026-10-04
+
+**The operator's statement (4 October 2026, 12:25 UTC, relayed by the GDFL
+build thread).** The extracted GDFL CSV folders under the operator's
+`NSE_Tick_2018-09-01_to_2026-09-24` tree are being deleted, having been
+proven byte-identical to the vendor zips, and the reader must no longer
+depend on them. The operator also plans to move the zips to cloud storage
+once a separate verified tick store, a byte-identical lossless copy, exists,
+so the zip must not be hard-wired. Recorded as stated; the deletion and the
+byte-identity proof are the operator's, not measured on this branch.
+
+**The measured zip facts this rests on** (the GDFL build thread's
+measurement, 4 October 2026, beside the charter's GDFL section and D-0812).
+The outer archive `NSE (Stock+Indices)_01.09.2018 to 24.09.2026_Tick.zip`
+holds 4,209 entries; the inner day zips (for example
+`INDICES/2026/JUN_2026/GFDLCM_INDICES_TICK_11062026.zip` and
+`STOCKS/2023/JAN_2023/GFDLCM_STOCK_TICK_19012023.zip`) are STORED (method 0)
+in it, so each is one contiguous byte range readable by offset, which D-0812
+already relied on; the members inside a day zip are DEFLATED (method 8), for
+example `GFDLCM_STOCK_TICK_19012023/<NAME>.NSE.csv`.
+
+**The choice.**
+
+1. **One small trait, `pull::gdfl_cm::CmSource`.** `day(kind, day)` answers
+   the day's `DayListing` (or `None` when the source holds no such day): every
+   entry in the source's own order, each with the original file's length and
+   CRC-32 and a source-specific locator, and each file of the day folder filed
+   by ticker slot, exactly as `DayFolder` and `DayMembers` filed names before
+   (CM-13, CM-14). `fetch(listing, file)` answers the file's bytes. Callers
+   read through `read_day(source, key, day)` or, listing a day once for many
+   instruments, `read_listed(source, listing, key)`.
+2. **Verification is intrinsic, and it is not the source's to skip.**
+   `read_listed` checks every fetched file's length and CRC-32 against what
+   its listing states BEFORE `decode` (`pull::gdfl_cm::verify`); `decode` is
+   crate-private (round-5 review). There is no unverified path from a source's
+   bytes to rows, so D-0812's archive check over an extracted file is replaced
+   rather than kept beside it.
+3. **The zip source is the only implementation now.**
+   `pull::gdfl_archive::Archive` implements `CmSource`: the outer central
+   directory is indexed once (`Archive::from_source`, O(entries), unchanged), a
+   day is one index into the day table plus one read of that day zip's
+   central directory, and a file is one local header, one contiguous read of
+   its compressed bytes and one inflate in memory (`flate2`, already a
+   dependency), stopped one byte past the stated length. Nothing is extracted
+   to disk and the archive is opened read-only. A member method other than
+   stored or deflated refuses `ArchiveMethodUnknown`; a broken deflate stream
+   refuses `ArchiveMemberCorrupt`; a member header that is not where its
+   record says, or data past the day zip, refuses `ArchiveMalformed`.
+4. **The folder path is removed, not test-gated.** `list_folder`,
+   `DayFolder`, `read_day_checked`, the folder `read_day`, `DayMembers` (with
+   `member`, `verify`, `verify_source` and `lost_by_extraction`), `Member`, and
+   the refusals `Unreadable`, `SourceMissing` and `ArchiveMemberMissing` are
+   gone: the folders they read no longer exist, and a day or file the archive
+   does not hold is now `None` (a day the vendor never shipped, the census's
+   to list), where `ArchiveMemberMissing` named it before. `SourceMissing`
+   existed only because an extraction could lose a file; reading the zip
+   cannot.
+5. **The planned second source is the tick store** (implemented the same day under D-2801, which supersedes "not read yet" below).
+   Its versioned format is specified at
+   `/Volumes/WD_BLACK/brutex/tickstore-data/FORMAT.md`, version 1
+   (`BRTXTS01`, frozen 2026-10-04), sha256
+   `6edc62a772b257a2aa1b45c0785a23936d9bff47b87648bbb1d9a84ab7063259`: one
+   file per vendor day zip, keeping every entry's name byte for byte, in the
+   zip's central-directory order, with the zip's own size, CRC-32 and DOS time
+   per entry. The trait is shaped so that a tick-store source fits it with no
+   change: the listing keeps the source's order and states size and CRC-32 per
+   entry, and the locator is the source's own type. That format must be
+   recorded in `docs/00-charter.md` before any code reads it (no invented
+   format); the tick store's reference implementation is a local tool outside
+   this repository and none of its code is copied here.
+
+**Design deviation, recorded.** Design §3.3 verifies "every extracted file"
+against its member and makes the archive a required input beside the
+extracted tree. With the tree retired, the archive is the only input and the
+check runs on the inflated bytes; the design's purpose (no unverified bytes
+reach the grid, no fallback) is kept, and its mechanism changes.
+
+**Cost** (`docs/06-limits.md`, the GDFL section): the outer index once at
+O(entries); a day at one index plus O(the day zip's entries); a lookup one
+index; a fetch O(the member's bytes); the check one CRC-32 pass more than the
+decode. UNVERIFIED as measured times.
+
+**Proven by** CM-06, CM-09, CM-10, CM-13, CM-14 and the new CM-16 in
+`docs/04-invariants.md`. Every zip in the tests is built at run time from
+invented rows; no vendor byte is read or committed.
+
+### D-2801 — Read the verified tick store as a second CmSource, strictly from its format specification v1, with the pure-Rust `ruzstd` decoder — 2026-10-04
+
+**Why now.** The operator wants GDFL ticks viewable inside the Brutex app
+from the tick store (relayed by the GDFL build thread, 4 October 2026), which
+supersedes D-2800's "not read yet". The api and web wiring is not this
+entry's (D-2802 to D-2807 are reserved for it).
+
+**The source of truth for the format.**
+`/Volumes/WD_BLACK/brutex/tickstore-data/FORMAT.md`, version 1 (`BRTXTS01`),
+sha256 `6edc62a772b257a2aa1b45c0785a23936d9bff47b87648bbb1d9a84ab7063259`,
+recorded in `docs/00-charter.md` (GDFL capital-market section). The reader
+was written from that text alone; the store's reference tool is a local,
+unpushed program and none of its code was read into or copied here.
+
+**The choice.**
+
+1. **`pull::gdfl_tickstore::TickStore` is a `CmSource`.** A day is the exact
+   path `cm/<TREE>/<yyyy>/<MON_yyyy>/<day folder>.bts` under the store root
+   (§2), so a `*.bts.tmp` is never opened; a missing `.bts` is `None` (the day
+   was not ingested), a `.bts` that cannot be opened or read refuses
+   `TickStoreUnavailable`. Files are opened read-only and read by positional
+   reads (`read_at`); nothing is mapped.
+2. **§3 exactly.** `read_index` checks the `BRTXTS01` magic, the footer's
+   `BRTXTSE1`, `index_off + index_len + 40 == file length`, the index frame
+   decoding to exactly `index_raw_len` bytes, its CRC-32, exactly `n` whole
+   entries with nothing after them, each kind 0, 1 or 2, a directory entry
+   with no block and every other block inside `[8, index_off)`. Any failure
+   refuses `TickStoreMalformed` naming the rule. The index is decoded once per
+   listed day (O(entries)) and its files filed into the listing's ticker-slot
+   array, so a lookup is one index, as for the zips.
+3. **§4 exactly.** A directory entry is empty; a raw block is its zstd frame
+   decoded to exactly the entry's size; a columnar block is rebuilt from its
+   header, its terminator (`\r\n` or `\n`), its trailing flag and its columns:
+   text columns as one field per row, numeric columns from shapes, a delta
+   flag, at most eight byte planes, zigzag, wrapping delta sums, and the
+   specified rendering (time, sign, zero padding, decimal point). A column
+   count other than the header's fields, a row count other than the index's, a
+   column text not one field per row of its stated length, or a numeric
+   payload of another shape refuses. A time value that cannot show as two-digit
+   `HH:MM:SS` refuses rather than being widened.
+4. **The size and CRC-32 check is the reader's, not the store's.** As D-2800
+   made it for the zips, `read_listed` holds every rebuilt file to the zip
+   central directory's size and CRC-32 that the index carries, before any
+   decode.
+5. **Dependency: `ruzstd` 0.8, pure Rust.** No `build.rs`, no C; the C `zstd`
+   crate is refused (it is banned on PR #74's line and would add a C build).
+   `lake` already locks `ruzstd` 0.8.2 with the same features (`std`,
+   `hash`), so `pull` names it and `Cargo.lock` gains one dependency edge and
+   no new package; `cargo deny` stays green. The crate graph between this
+   workspace's members is unchanged (gates 9, 9b, 22).
+
+**Evidence.** A read-only probe of the 21 index day files of August 2026
+compared every entry with the same entry read through the zip source: 2,982
+entries with the same names, order, sizes and CRC-32s, and 2,961 files
+(11,048,377,844 bytes) byte-identical (charter, "Tick store against the
+zip"). The probe was run once and not committed.
+
+**Cost** (`docs/06-limits.md`): a day at one open, one footer read, one index
+read and decode, O(entries); a fetch at one block read and O(the file's
+bytes) to decode and rebuild. UNVERIFIED as measured times.
+
+**Proven by** CM-17 in `docs/04-invariants.md`. Every day file in the tests
+is built at run time from invented rows.

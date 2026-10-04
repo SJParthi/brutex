@@ -5078,7 +5078,7 @@ const GDFL_FNO: ColumnLayout = ColumnLayout {
 };
 
 // The one spelling lives beside the decoder that checks it. D-1360.
-const GDFL_HEADER: &str = crate::csv::GDFL_HEADER;
+pub(crate) const GDFL_HEADER: &str = crate::csv::GDFL_HEADER;
 
 const GDFL: Descriptor = Descriptor {
     // As TRUE_DATA: a local archive of vendor files, so the bar is whatever

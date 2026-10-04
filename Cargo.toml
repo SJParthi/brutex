@@ -122,6 +122,9 @@ sha1     = "0.10"
 # stores both loose objects and packed entries as zlib streams; refusing packed
 # clones would make clean-checkout IDE stamping depend on repository age.
 flate2   = "1"
+# zstd frames in pure Rust: no build.rs, no C (D-2801). `pull` reads the GDFL
+# tick store with it; `lake` names the same version and features itself.
+ruzstd   = { version = "0.8", default-features = false, features = ["std", "hash"] }
 # SHA-256, for the AWS SigV4 signature in `pull::ssm`. Pure Rust, RustCrypto,
 # with no `asm` feature — so no assembly and no C. That is the whole reason the
 # AWS SDK was refused in favour of signing the one request by hand. See D-0051.

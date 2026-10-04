@@ -133,6 +133,10 @@ hmac = { workspace = true }
 sha2 = { workspace = true }
 # Dated NSE MII security masters are gzip CSVs; pure-Rust default backend.
 flate2 = { workspace = true }
+# The GDFL tick store's zstd frames (D-2801): pure Rust, no build.rs, no C,
+# the same version and features `lake` already locks, so no new crate. The
+# features are declared in the workspace manifest.
+ruzstd = { workspace = true }
 # TOTP is HMAC-SHA1 (RFC 6238 default). Declared in the workspace manifest
 # since before this crate needed it; `crates/pull/src/totp.rs` is the first
 # and only user.

@@ -142,6 +142,17 @@ pub mod folder;
 /// WHY EVERY ABSENT BAR IS ABSENT -- classified into four states, of which only
 /// one is a loss. The store always knew; nothing asked it.
 pub mod gaps;
+/// The vendor's GDFL capital-market zips read in place, one `CmSource`:
+/// each member inflated in memory and held to its central record. D-0812,
+/// D-2800.
+pub mod gdfl_archive;
+/// GDFL capital-market tick files: day, file name, ticker and rows, read from
+/// a `CmSource` and checked before the one-second fold sees them. D-0808,
+/// D-2800.
+pub mod gdfl_cm;
+/// The verified tick store (`BRTXTS01` day files), the second `CmSource`.
+/// D-2801.
+pub mod gdfl_tickstore;
 /// Groww's `GA00x` error vocabulary -- one vendor's row in `refusal`.
 ///
 /// The code is NESTED under `error`, which is why `ErrorNames` carries an
