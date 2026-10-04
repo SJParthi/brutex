@@ -1184,7 +1184,18 @@ fn module_table(modules: &str, out: &mut Out) -> bool {
 /// Gate 10: every invariant names a test that exists. `path_fns` is the
 /// `path-declarations` table; `invariant_paths.rs` has already read it, with
 /// the module table, by the time this runs.
-fn gate10(tree: &dyn Tree, path_fns: &str, allow: &[(&str, &str)], out: &mut Out) -> bool {
+/// `middles` is `invariant_paths.rs --middles`, one token per line: every
+/// crate-first token whose middle segments name no module of the file that
+/// declares its test. The crate-and-name check reads no middle segment, so
+/// `store::file::x_tests::name` passed on any `name` in `store` (D-2100,
+/// carried onto this tool by D-2105).
+fn gate10(
+    tree: &dyn Tree,
+    path_fns: &str,
+    middles: &str,
+    allow: &[(&str, &str)],
+    out: &mut Out,
+) -> bool {
     if listed(tree, &["crates/*.rs", ".github/*.rs"]).is_empty() {
         out.say("GATE 10 READ NO SOURCE FILE.");
         return false;
@@ -1198,6 +1209,7 @@ fn gate10(tree: &dyn Tree, path_fns: &str, allow: &[(&str, &str)], out: &mut Out
         return false;
     };
     let doc = text_of(&bytes);
+    let wrong_module: BTreeSet<&str> = records(middles).into_iter().collect();
     let tracked: BTreeSet<&str> = tree.tracked().iter().map(String::as_str).collect();
     let (mut rows, mut checked, mut missing, mut pending, mut exempt) = (0, 0, 0, 0, 0);
     // Every line, the last one included even with no newline after it: the
@@ -1229,6 +1241,12 @@ fn gate10(tree: &dyn Tree, path_fns: &str, allow: &[(&str, &str)], out: &mut Out
                 say!(
                     out,
                     "INVARIANT POINTS AT A TEST THAT DOES NOT EXIST: {t} ({id})"
+                );
+                missing += 1;
+            } else if wrong_module.contains(t) {
+                say!(
+                    out,
+                    "INVARIANT NAMES A MODULE ITS TEST IS NOT IN: {t} ({id})"
                 );
                 missing += 1;
             }
@@ -2169,7 +2187,7 @@ fn gate11(tree: &dyn Tree, lists: &Allowlists, out: &mut Out) -> bool {
 fn usage() -> String {
     "usage: gates_ledger release-profile LEAVES | invariant-ids | decision-numbers | \
      tls-provider | failure-events | path-declarations < FNS | module-table < MODULES | \
-     invariant-tests PATH_DECLARATIONS | banned-constructs"
+     invariant-tests PATH_DECLARATIONS MIDDLES | banned-constructs"
         .to_owned()
 }
 
@@ -2216,9 +2234,13 @@ fn run(args: &[String]) -> Result<bool, String> {
         (Some("decision-numbers"), 1) => gate27b(&tree, DECISION_PINS, &mut out),
         (Some("tls-provider"), 1) => gate26(&tree, &mut out),
         (Some("failure-events"), 1) => gate19(&tree, &mut out),
-        (Some("invariant-tests"), 2) => {
-            gate10(&tree, &read_text(&args[1])?, ALLOW_PENDING, &mut out)
-        }
+        (Some("invariant-tests"), 3) => gate10(
+            &tree,
+            &read_text(&args[1])?,
+            &read_text(&args[2])?,
+            ALLOW_PENDING,
+            &mut out,
+        ),
         (Some("banned-constructs"), 1) => gate11(&tree, &ALLOWLISTS, &mut out),
         _ => return Err(usage()),
     };
@@ -2744,7 +2766,7 @@ mod tests {
         ]);
         let mut out = quiet();
         (
-            gate10(&tree, &path_declarations(FNS), allow, &mut out),
+            gate10(&tree, &path_declarations(FNS), "", allow, &mut out),
             out.text,
         )
     }
@@ -2785,6 +2807,33 @@ mod tests {
     }
 
     #[test]
+    fn gate10_refuses_a_token_whose_middle_names_no_module_of_its_test() {
+        let doc = "| S-01 | `store::unit::reads` |\n| S-02 | `store::wrong::reads` |\n";
+        let tree = Mem::new(&[
+            (INVARIANTS, doc),
+            ("crates/store/Cargo.toml", ""),
+            ("crates/store/src/unit.rs", ""),
+        ]);
+        let mut out = quiet();
+        let ok = gate10(
+            &tree,
+            &path_declarations(FNS),
+            "store::wrong::reads\n",
+            &[],
+            &mut out,
+        );
+        assert!(!ok, "{}", out.text);
+        assert!(
+            out.text
+                .contains("INVARIANT NAMES A MODULE ITS TEST IS NOT IN: store::wrong::reads (S-02)"),
+            "{}",
+            out.text
+        );
+        assert!(!out.text.contains("store::unit::reads (S-01)"), "{}", out.text);
+        assert!(out.text.contains("  1 missing"), "{}", out.text);
+    }
+
+    #[test]
     fn gate10_exempts_only_a_listed_row_and_refuses_a_stale_entry() {
         let doc = "| P-03 | `store::unit::gone` |\n| S-01 | `store::unit::reads` |\n";
         let (ok, text) = g10(doc, &[("P-03", "why")]);
@@ -2810,7 +2859,7 @@ mod tests {
         assert!(text.contains("GATE 10 CHECKED NOTHING."));
         let tree = Mem::new(&[(INVARIANTS, "| S-01 | `store::unit::reads` |\n")]);
         let mut out = quiet();
-        assert!(!gate10(&tree, "", &[], &mut out));
+        assert!(!gate10(&tree, "", "", &[], &mut out));
         assert_eq!(out.text, "GATE 10 READ NO SOURCE FILE.\n");
         let mut out = quiet();
         assert!(!module_table("", &mut out));

@@ -2714,7 +2714,16 @@ jobs:
           git ls-files -z > "$work/tracked.z"
           "$scan" modules "$work/tracked.z" | "$ledger" module-table > "$work/modules"
           "$work/invariant-paths" docs/04-invariants.md "$work/path-fns" "$work/modules"
-          "$ledger" invariant-tests "$work/path-fns"
+          # D-2100, carried onto the tool by D-2105: the crate-and-name check
+          # reads no middle segment, so `store::file::x_tests::name` passed on
+          # any `name` in `store`. `inline-mods` lists every braced `mod m {`,
+          # and `--middles` every crate-first token whose middle segments name
+          # no module of the file declaring its test; `invariant-tests` refuses
+          # those it checks.
+          git ls-files -z -- 'crates/*.rs' '.github/*.rs' | xargs -0 -r "$scan" inline-mods > "$work/inline"
+          [ -s "$work/inline" ] || { echo "GATE 10 READ NO INLINE MODULE."; exit 1; }
+          "$work/invariant-paths" --middles docs/04-invariants.md "$work/path-fns" "$work/modules" "$work/inline" > "$work/middles"
+          "$ledger" invariant-tests "$work/path-fns" "$work/middles"
 
       - name: Gate 11 — banned constructs on the O(1) paths
         run: |
