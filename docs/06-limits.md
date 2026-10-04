@@ -14444,7 +14444,7 @@ UNVERIFIED for the rest:
   loop. `api::logs::a_flood_of_failed_requests_writes_a_bounded_number_of_lines`
   proves the line bound per window over 100,000 admits; nothing times one
   `admit`, so the per-request cost is by construction only.
-- **`api::server::form_read_bound` (D-1592).** "O(1)": four comparisons (two since D-1770)
+- **`api::server::form_read_bound` (D-1592).** "O(1)": four comparisons since D-1770 (two before)
   against literal paths. `api::server::form_read_bound_is_wide_only_on_the_member_routes`
   proves which route gets which bound; nothing times the call.
 - **`cli::latest_for` (D-1567).** The stated O(runs) per call (the bullet
