@@ -1,6 +1,6 @@
 //! `cli gdfl-import KIND SOURCE FROM TO [SYMBOL ...]`: GDFL one-second bars
 //! into the store, through `pull::gdfl_import`, the one runtime every kind
-//! shares (D-2802 to D-2807).
+//! shares (D-2802 to D-2806).
 //!
 //! # Where the data is read from (D-2804)
 //!
@@ -146,7 +146,7 @@ fn cli_store() -> Result<PathBuf, String> {
 /// The run's receipt.
 fn render(out: &mut String, kind: ImportKind, source: &str, store: &Path, report: &Report) {
     let _ = writeln!(out, "GDFL IMPORT -- {} from {source} into {}", kind.as_str(), store.display());
-    let _ = writeln!(out, "  rung                1s only (D-2807: no coarser rung is derived from gdfl)");
+    let _ = writeln!(out, "  rung                1s only (D-2802: no coarser rung is derived from gdfl)");
     let _ = writeln!(out, "  days imported       {}", report.days_imported);
     let _ = writeln!(out, "  days already done   {}", report.days_skipped);
     let _ = writeln!(out, "  days closed         {}", report.days_closed);

@@ -59343,3 +59343,136 @@ bytes) to decode and rebuild. UNVERIFIED as measured times.
 
 **Proven by** CM-17 in `docs/04-invariants.md`. Every day file in the tests
 is built at run time from invented rows.
+
+### D-2802 — GDFL is imported at one second only: the agreed bar, late rows deferred, one fold authority, one ingest door, and no coarser rung derived from a `gdfl` bar — 2026-10-05
+
+**Context.** The operator's priority of 4 Oct 2026 is exact GDFL data in the
+app's store, and his design change of 17:20 UTC that day is that GDFL supplies
+the ONE-SECOND rung only: minutes and every higher timeframe come from the
+Zerodha one-minute pulls, derived by the app. The bar was agreed the same day
+(`gdfl-1s-operator-20261004.md`, held outside this repository).
+
+**Decision.**
+1. **The bar.** Stocks and options: rows with LTQ > 0 only; open the first
+   such row of the second, high and low the extremes, close the last (file
+   order), volume the sum of LTQ (a sum past `i64::MAX`, or one quantity past
+   it, refuses the file `VolumeOverflow`, never saturates). Index spot: every
+   row, volume 0. Open interest: the options file's `OpenInterest`, the last
+   one of the second; `OI_NULL` for the capital-market trees. A second with no
+   kept row has no bar.
+2. **Late rows are deferred, never moved earlier** (the design's D-0805 rule):
+   a row stamped below the running maximum is placed at the stamp of the next
+   in-order row after it in the file; one with none after it is dropped and
+   counted (`late_unresolved`). The design's UTC re-stamp is NOT applied: such
+   a row is deferred like any other late row, the conservative direction.
+3. **One fold authority, one door, one write path.** The placed rows are
+   folded by `pull::fold::fold` at one second and filed by
+   `pull::ingest::from_rows`, which filters by the venue's session and writes
+   through `BarFile::append` only; the census is published once per day by
+   `ingest::record_held`. GDFL bytes never pass `csv::decode`.
+4. **One second and nothing coarser.** `pull::gdfl_import` writes `1s` alone,
+   and `ingest::derives_for(Vendor::Gdfl)` is false, so no ingest door folds a
+   coarser rung from a `gdfl` bar (`derived_count_for`, `derive_all`).
+
+**Alternatives refused.** Importing 1min as well (the operator withdrew it);
+`from_members`' automatic derivation from a 1s ingest (it refuses a non-minute
+source by design and would report seven failures per instrument); the
+D-0805 grid (`store-grid` branch), which is a later, separate store family.
+
+**Proven by** GI-01 to GI-04 (`docs/04-invariants.md`). Measured on
+2026-08-03 (PROOF.md in the thread's scratch state): 16 of 16 seconds checked
+against the raw ticks of the vendor's zip equal this rule.
+
+### D-2803 — The GDFL import is incremental, idempotent and resumable through the store's own append and one journal — 2026-10-05
+
+**Decision.** `BarFile::append` already answers `AlreadyPresent` for bars it
+holds and appends only a following suffix; on top of it the import keeps one
+journal, `<store>/imports/gdfl.journal`, keyed by kind, day and instrument
+filter: `begin` is written durably before a day's first store write, `done`
+after a clean day (a day that wrote nothing still records it), `incomplete`
+after a day with a named failure. A re-run skips every `done` day without
+reading the source and writes nothing (byte-identical store). A `begin`
+without its end is a crashed run: the day is named in `resumed` and imported
+again; the store keeps what it holds, appends the rest and the census is
+re-counted. A torn last journal line is closed and ignored; any other line
+that is not the journal's refuses the run. A day older than what a month
+file holds is refused by the store by name, never inserted. The journal
+carries no source name and no time, so a run over the zips and a run over the
+tick store leave byte-identical stores.
+
+**Proven by** GI-05 to GI-07.
+
+### D-2804 — `cli gdfl-import KIND SOURCE FROM TO [SYMBOL ...]`, with each data root named by a variable that has no default — 2026-10-05
+
+**Decision.** One verb for every kind (`indices`, `stocks`, `options`) and
+both sources (`tickstore`, `zip`), one source per run and no fallback between
+them. Roots: `BRUTEX_GDFL_TICKSTORE` (the tick store), `BRUTEX_GDFL_CM_ARCHIVE`
+(the capital-market outer zip), `BRUTEX_GDFL_NFO_ARCHIVES` (the directory of
+the yearly options zips); unset or empty refuses and names the variable. The
+bars go to the CLI's proved store root (`BRUTEX_STORE`). Every run, day and
+refusal is a `gdfl.import` telemetry event in the CLI's log, which `/logs`
+merges; the exit code is `FAILED` whenever any failure was named. The
+`/ingest` page's in-memory status is the api's and shows no CLI run.
+
+**Proven by** GI-08.
+
+### D-2805 — The trading calendar answers 2018-01-01 to 2026-10-04: the measured bitset unchanged, the spans either side from NSE's own holiday circulars — 2026-10-05
+
+**Context.** GDFL's first trading day is 2018-09-03, the operator pulls
+Zerodha warm-up from 2018-01-01, and `pull::calendar` answered only
+2019-12-02..2026-09-04, so every earlier GDFL day refused `CalendarUnmeasured`.
+
+**Decision.** `FIRST_DAY` is 2018-01-01 and `LAST_DAY` 2026-10-04. The
+store-measured bitset keeps its span (`MEASURED_FIRST_DAY..MEASURED_LAST_DAY`)
+byte for byte. Outside it a weekday is a regular session unless it is in
+`SOURCED_HOLIDAYS`, a weekend is closed, and the two Muhurat sessions of the
+span (2018-11-07, 2019-10-27) are `OpenLengthUnmeasured`, never regular days.
+Sources, each fetched and read on 2026-10-04: NSE/CMTR/36475 (2018),
+NSE/CMTR/39612 (2019), NSE/CMTR/40536 (29 Apr 2019), NSE/MSD/42319 (21 Oct
+2019), NSE/CMTR/71775 (2026). Cross-check over the vendor's day zips:
+2018-09-03..2019-12-01 holds 301 regular weekdays and every one has an index
+and a stock day zip, and the only day zips on a closed day are the two
+Muhurats (303 GDFL days); 2026-09-05..2026-09-30 likewise, 17 days. Jan-Aug
+2018 is sourced from the circular and not corroborated by any local data; GDFL
+holds nothing before 2018-09-03 (a named gap, not a block). Days before
+2018-01-01 stay `Unmeasured`.
+
+**Proven by** GI-09.
+
+### D-2806 — GDFL options are read as store contracts, by the vendor's two name forms chosen by era, with the monthly expiry from NSE's last-Thursday rule — 2026-10-05
+
+**Decision.**
+1. **Source.** The day zips of the yearly options zips (stored in the outer
+   zip, members deflated) and the tick store's `options/` tree, read through
+   the same zip and tick-store machinery as the capital-market reader; a file
+   is held to the central directory's length and CRC-32 before it decodes.
+   The day zips hold only `Options` (measured on 2018, 2022 and 2026 days):
+   there are no futures in the operator's GDFL data, so no `-I` name is read.
+2. **Names** (tick store FORMAT.md §6, revised 2026-10-04). From 2019-02-01
+   the day form `UNDERLYING DD MON YY STRIKE SIDE` only; before it the day form
+   only for NIFTY and BANKNIFTY weeklies (any weekday; their day reading wins
+   over a monthly one at the same split) and the monthly form `UNDERLYING YY
+   MON STRIKE SIDE` for every other option; expiry from the trade date (a
+   monthly: from the trade month) to +2,200 days; strike > 0 and written
+   canonically, so every decoded name renders back to itself; none or more
+   than one reading refuses by name.
+3. **Monthly expiry day.** NSE's rule for equity derivatives: "Last Thursday
+   of the expiry month. If the last Thursday is a trading holiday, then the
+   expiry day is the previous trading day" (NSE contract specifications page,
+   web.archive.org snapshot of 2019-08-16), walked on `pull::calendar`. A
+   month the calendar cannot place refuses `MonthlyExpiryUnmeasured`; a file
+   traded after its derived expiry refuses `ExpiryPassed`.
+4. **Contract key.** Bars are filed under (underlying, expiry, strike, side),
+   so a contract the vendor renamed at the 2019 cutover is one series; two
+   names of one day for one contract refuse `ContractNamedTwice`, both.
+5. **Prices.** A traded option row at one paisa is a price (options of
+   low-priced shares print at 0.01 to 0.04); only a traded row at zero refuses.
+
+**Evidence.** Over all 1,218,362 tickers of the vendor's history
+(`appearances.tsv`, names only, outside the repository), decoded on their
+first and last trade days: 0 refused, 0 disagreements with the tick store's
+own rule, 0 traded after their decoded expiry; 887,302 last traded on their
+expiry. Real days 2026-08-03 (11,524 files) and 2018-12-03 (4,719 files,
+4,512 monthly) decode with 0 refused.
+
+**Proven by** GI-10 to GI-12.

@@ -1,8 +1,8 @@
 //! The GDFL import: indices, stocks and option contracts, read from the
 //! vendor's zips or the verified tick store, folded to one-second OHLCV bars
-//! and filed through the one ingest door. D-2802 to D-2807.
+//! and filed through the one ingest door. D-2802 to D-2806.
 //!
-//! # One second, and nothing coarser (operator, 4 Oct 2026, D-2807)
+//! # One second, and nothing coarser (operator, 4 Oct 2026, D-2802)
 //!
 //! GDFL supplies the one-second rung ONLY. This module writes `1s` and no
 //! other rung, and `crate::ingest` derives no coarser rung from a `gdfl`

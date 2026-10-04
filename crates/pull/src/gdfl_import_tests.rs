@@ -457,7 +457,7 @@ fn every_kind_lands_at_one_second_and_both_sources_leave_the_same_store() {
         assert!(ra.seconds > 0 && ra.seconds_committed == ra.seconds, "{kind:?}: {ra:?}");
     }
     assert_eq!(tree(&a), tree(&b), "byte for byte, census and journal included");
-    // Only the one-second rung exists, for every kind (D-2807).
+    // Only the one-second rung exists, for every kind (D-2802).
     for path in tree(&a).keys() {
         let text = path.to_string_lossy();
         if text.starts_with("bars/") {
@@ -814,4 +814,140 @@ fn a_gdfl_bar_is_folded_into_no_coarser_rung_on_any_ingest_door() {
     assert_eq!(rungs.len(), 1, "{rungs:?}");
     assert!(rungs[0].contains("/1s/"));
     std::fs::remove_dir_all(store).unwrap();
+}
+
+// ── properties of the one-second build ─────────────────────────────────────
+
+/// A seeded generator, so every run tests the same sequences.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+    fn below(&mut self, n: u64) -> u64 {
+        self.next() % n
+    }
+}
+
+/// The rule written the slow, obvious way: keep (every row for an index,
+/// traded rows otherwise), place each late row at the next in-order stamp,
+/// drop late rows with none after them, then per placed second: first,
+/// max, min, last, sum, last OI.
+fn reference(kind: ImportKind, day: Day, ticks: &[Tick]) -> Vec<Bar> {
+    let kept: Vec<Tick> = ticks
+        .iter()
+        .copied()
+        .filter(|t| kind.every_row_counts() || t.ltq > 0)
+        .collect();
+    let mut placed: Vec<(u32, Tick)> = Vec::new();
+    for (i, t) in kept.iter().enumerate() {
+        let max_before = kept[..i].iter().map(|x| x.sod).max();
+        let late = max_before.is_some_and(|m| t.sod < m);
+        let second = if late {
+            // The next in-order row after it.
+            let mut running = max_before.unwrap();
+            let mut found = None;
+            for x in &kept[i + 1..] {
+                if x.sod >= running {
+                    found = Some(x.sod);
+                    break;
+                }
+                running = running.max(x.sod);
+            }
+            found
+        } else {
+            Some(t.sod)
+        };
+        if let Some(s) = second {
+            placed.push((s, *t));
+        }
+    }
+    let mut out: Vec<Bar> = Vec::new();
+    for (s, t) in placed {
+        let volume = if kind.every_row_counts() { 0 } else { i64::try_from(t.ltq).unwrap() };
+        let oi = t.oi.unwrap_or(OI_NULL);
+        match out.last_mut() {
+            Some(bar) if bar.ts_micros == micros_at(day, s) => {
+                bar.high = bar.high.max(t.ltp);
+                bar.low = bar.low.min(t.ltp);
+                bar.close = t.ltp;
+                bar.volume += volume;
+                if oi != OI_NULL {
+                    bar.open_interest = oi;
+                }
+            }
+            _ => out.push(Bar {
+                ts_micros: micros_at(day, s),
+                open: t.ltp,
+                high: t.ltp,
+                low: t.ltp,
+                close: t.ltp,
+                volume,
+                open_interest: oi,
+            }),
+        }
+    }
+    out
+}
+
+#[test]
+fn the_one_second_build_equals_the_rule_written_the_slow_way() {
+    let mut rng = Rng(0xD1B5_4A32_D192_ED03);
+    for case in 0..2_000 {
+        let kind = ImportKind::ALL[usize::try_from(rng.below(3)).unwrap()];
+        let n = rng.below(120);
+        let mut sod = NINE_FIFTEEN - 5 + u32::try_from(rng.below(10)).unwrap();
+        let mut ticks = Vec::new();
+        for _ in 0..n {
+            match rng.below(10) {
+                // Back-steps of every size, duplicates and forward jumps.
+                0 => sod = sod.saturating_sub(u32::try_from(rng.below(40)).unwrap()),
+                1 | 2 => {}
+                3 => sod += u32::try_from(rng.below(600)).unwrap(),
+                _ => sod += 1,
+            }
+            let ltq = if rng.below(3) == 0 { 0 } else { rng.below(1_000) };
+            let oi = (kind == ImportKind::Options).then(|| i64::try_from(rng.below(1_000_000)).unwrap());
+            ticks.push(Tick {
+                sod,
+                ltp: 5 + i64::try_from(rng.below(100_000)).unwrap(),
+                ltq,
+                oi,
+            });
+        }
+        let got = convert(kind, d1(), &ticks).unwrap();
+        assert_eq!(got.seconds, reference(kind, d1(), &ticks), "case {case} {kind:?}");
+        assert!(got.seconds.windows(2).all(|w| w[0].ts_micros < w[1].ts_micros), "strictly increasing");
+        let p = got.placement;
+        assert_eq!(p.rows, ticks.len());
+        assert!(p.ltq_zero_dropped + p.late_unresolved <= p.rows);
+    }
+}
+
+#[test]
+fn the_session_edges_keep_0915_00_and_1529_59_and_count_what_is_outside() {
+    let root = scratch("import-edges");
+    let d = d1();
+    let folder = crate::gdfl_nfo::day_folder_name(d);
+    let stem = "NIFTY04APR2422000CE.NFO";
+    let rows = csv(&[
+        row(stem, d, NINE_FIFTEEN - 1, "1", 5, 1),
+        row(stem, d, NINE_FIFTEEN, "2", 5, 2),
+        row(stem, d, CLOSE - 1, "3", 5, 3),
+        row(stem, d, CLOSE, "4", 5, 4),
+    ]);
+    let entries = vec![(format!("{folder}\\Options\\NIFTY04APR2422000CE.NFO.csv"), rows)];
+    put(&root, "ts/options/2024/APR_2024/GFDLNFO_TICK_01042024.bts", &bts(&as_refs(&entries)));
+    let store = root.join("S");
+    let got = import(&root, Src::Store, ImportKind::Options, d, d, &store);
+    assert_eq!((got.seconds_committed, got.outside_session), (2, 2), "{got:?}");
+    let held = bars(&store, "FNO", "NIFTY", Some(nifty_ce()));
+    assert_eq!(held[0].ts_micros, micros_at(d, NINE_FIFTEEN));
+    assert_eq!(held[1].ts_micros, micros_at(d, CLOSE - 1));
+    assert_eq!((held[0].close, held[1].close, held[1].open_interest), (200, 300, 3));
+    std::fs::remove_dir_all(root).unwrap();
 }

@@ -1027,3 +1027,16 @@ the code. Each stays open here so a recorded limit is not read as a closed one.
 | Read the vendor zips directly (D-2800, 2026-10-04): the extracted folders retired by the operator; `CmSource` with the zip source (`Archive`) and an in-memory test source; every fetched file checked against its stated length and CRC-32 in `read_listed` before decode; the folder path (`list_folder`, `DayFolder`, `read_day_checked`, `DayMembers`, `SourceMissing`) removed; the tick store (FORMAT.md v1) recorded as the planned second source | **Done**, D-2800, D-0808, D-0812, CM-06, CM-09, CM-10, CM-13, CM-14, CM-16 |
 | A tick-store `CmSource` over `BRTXTS01` day files (D-2801, 2026-10-04): the format v1 recorded in the charter by path, version and sha256; `TickStore` reads §3 and §4 exactly with `ruzstd`; every rebuilt file held to the zip's size and CRC-32; 21 August 2026 index days probed byte-identical to the zip | **Done**, D-2801, CM-17 |
 | Viewing GDFL ticks in the app (api and web) from the tick store | Next, D-2802 to D-2807 (reserved) |
+
+## GDFL import at one second — 2026-10-05 (D-2802 to D-2806)
+
+| Item | State |
+|---|---|
+| `cli gdfl-import KIND SOURCE FROM TO [SYMBOL ...]`: indices, stocks and option contracts at `1s`, one runtime (`pull::gdfl_import`), both sources, through `ingest::from_rows`; no coarser GDFL rung on any door | Done on `feat/gdfl-import`; real days 2026-08-03 and 2018-12-03 imported into a scratch store from both sources, byte-identical stores, 16 of 16 raw-tick spot checks equal per day (PROOF.md, scratch state) |
+| Incremental, idempotent, resumable (journal, store dedupe, crash resume) | Done (GI-05, GI-06) |
+| Options as contracts, era-aware names, monthly expiry from NSE's rule | Done; all 1,218,362 vendor tickers decode, 0 refused, 0 disagreements |
+| Calendar 2018-01-01..2026-10-04 from NSE circulars | Done (D-2805); before 2018-01-01 and after 2026-10-04 stays Unmeasured |
+| Import into the app's own store | Waiting on the operator's word; never run by this branch |
+| `.grk` greeks per contract-second (spot same second, IV, rate) | Not started: needs the RBI 91-day T-bill rate of `feat/rate-tbill` (D-2810); no rate is defaulted |
+| `/db` spot read, `/ticks.json`, futures | `/db` spot is `feat/db-spot` (D-2807); no futures exist in the GDFL data |
+| Lookup by time O(1) (`.tix`, PR #74) | Another thread; merge `origin/final/all-fixes` when it carries it, then add the `.tix`-agrees-with-`.bin` test and re-measure |

@@ -14869,3 +14869,30 @@ UNVERIFIED as measurements.
   exit record that cannot be priced; each still blocks to its time exit, the
   conservative extent, because nothing before a hole was what made them
   unpriceable.
+
+## GDFL import at one second (D-2802 to D-2806)
+
+What is constant per lookup in the stored result, and what the import itself
+costs. Measured on the operator's Mac (WD_BLACK, release build) on 2026-10-05
+over real days in a scratch store; the bench rows are `crates/pull/benches/
+ratio.rs` (C-GI-01..03).
+
+| Operation | Bound | Measured (p50 / p99 / max, ns) |
+|---|---|---|
+| A contract's file of a day by ticker (`NfoDay::locate`) | one hash probe, expected O(1), flat at 1x/10x/100x (C-GI-01) | 500 / 792 / 182,875 (11,524 tickers, 2026-08-03) |
+| A share's file of a day by stem (`DayListing::locate`) | one slot index, O(1) (C-GI-02) | 42 / 84 / 166 |
+| Ticker -> contract (`decode_ticker`) | O(ticker length), refused past 64 bytes; NOT a constant-time claim | 208 / 750 / 10,417 |
+| One stored second by row index (`BarFile::read_record`) | O(1) positional read (C-GI-03, C-28/C-29) | 2,625 / 5,208 / 65,381,500 (first-touch page cache in the max) |
+| One stored second by TIME (`BarFile::first_at_or_after`) | **NOT O(1)**: a bisection, ceil(log2(n+1)) record reads, 15 for a 22,500-second day, about 19 for a 1s month; another thread is making it direct (`.tix`, PR #74) | 23,042 / 57,917 / 70,420,708 |
+| Opening a contract's 1s file and reading its first second | open + header + one read; NOT a constant-time claim | 409,875 / 702,208 / 2,423,250 |
+| The import of one day | O(entries) listing + per file O(bytes) fetch, check and decode + O(rows) placement and fold + per file one `from_rows` (O(bars + log n_valid + blocks touched)) + one census publish per day (O(entries held)); NOT constant | indices 0.45-1.4 s, stocks 4.4-7.8 s, options (27.6 M rows, 11,524 files) 156-204 s, per source, for 2026-08-03 |
+| A re-run of a done day | one hash probe in the journal, nothing read | 0 files read, 0 bytes written |
+| The journal | read whole once per run, O(lines) | not measured |
+| Memory | one file's rows, bars and bytes at a time, plus one census row per (instrument, month) of the day | not measured |
+| Census size | one entry per (instrument or contract, month); all GDFL options of all underlyings for all years would exceed `MAX_ENTRIES` (2,097,152) UNVERIFIED as a count; import a filter (`SYMBOL ...`) when that matters | not measured |
+
+A second's spot for an option second is read at the SAME second only; on
+2026-08-03 every option second from 15:30 (the derivatives clock runs to
+15:40, the index's to 15:30) has no spot second, and on 2018-12-03 the indices
+printed in 22,045 of 22,500 seconds; such seconds are named, never matched to
+a neighbour (PROOF.md, scratch state).

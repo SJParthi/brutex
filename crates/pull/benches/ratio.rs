@@ -541,9 +541,149 @@ fn append_after_load_is_flat() -> bool {
     ok
 }
 
+// ══ GDFL import lookups (D-2802 to D-2806): C-GI-01, C-GI-02, C-GI-03 ═══════
+
+/// Single-operation latencies, nanoseconds: p50, p99 and max over `n` calls.
+/// Printed beside each ratio, never gated: one call sits near the clock's
+/// resolution, which the ratio above amortises and these do not.
+fn spread(label: &str, n: u32, mut op: impl FnMut()) {
+    let mut ns: Vec<u128> = (0..n)
+        .map(|_| {
+            let start = Instant::now();
+            op();
+            start.elapsed().as_nanos()
+        })
+        .collect();
+    ns.sort_unstable();
+    let at = |q: usize| ns.get(ns.len().saturating_sub(1) * q / 100).copied().unwrap_or(0);
+    println!(
+        "  {label:<44} p50 {:>8} ns  p99 {:>8} ns  max {:>10} ns  n={n}",
+        at(50),
+        at(99),
+        ns.last().copied().unwrap_or(0)
+    );
+}
+
+/// An options day listing of `n` invented tickers.
+fn option_day(n: u32) -> pull::gdfl_nfo::NfoDay<u32> {
+    let day = pull::session::Day::new(2026, 8, 3).unwrap_or_else(|_| refuse("a real day"));
+    let mut listing = pull::gdfl_nfo::NfoDay::new(day, n as usize);
+    for i in 0..n {
+        let name = format!("GFDLNFO_TICK_03082026\\Options\\X{i}27AUG26100CE.NFO.csv");
+        listing.push(&name, 1, 1, i);
+    }
+    listing
+}
+
+/// C-GI-01: a contract's file of the day is one hash probe, flat at 1x, 10x
+/// and 100x the listing (the real 2026-08-03 day lists 11,524).
+fn gdfl_option_lookup_is_flat() -> bool {
+    let (one, ten, hundred) = (option_day(1_000), option_day(10_000), option_day(100_000));
+    let probe = |l: &pull::gdfl_nfo::NfoDay<u32>| {
+        cost_ps(20_000, || black_box(l).locate(black_box("X77727AUG26100CE")).is_ok())
+    };
+    let base = probe(&one);
+    let a = ratio("C-GI-01 option file by ticker, 10x day", base, probe(&ten));
+    let b = ratio("C-GI-01 option file by ticker, 100x day", base, probe(&hundred));
+    spread("C-GI-01 option file by ticker, 100x day", 20_000, || {
+        black_box(hundred.locate(black_box("X99999827AUG26100CE")).is_ok());
+    });
+    a && b
+}
+
+/// A stock-day listing of `n` names, one of them a swept share's.
+fn stock_day(n: u32) -> pull::gdfl_cm::DayListing<u32> {
+    let day = pull::session::Day::new(2026, 8, 3).unwrap_or_else(|_| refuse("a real day"));
+    let mut listing = pull::gdfl_cm::DayListing::new(pull::gdfl_cm::CmKind::Stocks, day);
+    listing.push("GFDLCM_STOCK_TICK_03082026/RELIANCE.NSE.csv", 1, 1, 0);
+    for i in 1..n {
+        listing.push(&format!("GFDLCM_STOCK_TICK_03082026/Z{i}.NSE.csv"), 1, 1, i);
+    }
+    listing
+}
+
+/// C-GI-02: a share's file of the day is one slot index, flat at 1x, 10x and
+/// 100x the listing (the real day lists 3,515).
+fn gdfl_stock_lookup_is_flat() -> bool {
+    let (one, ten, hundred) = (stock_day(1_000), stock_day(10_000), stock_day(100_000));
+    let probe = |l: &pull::gdfl_cm::DayListing<u32>| {
+        cost_ps(20_000, || black_box(l).locate(black_box("RELIANCE.NSE")).is_ok())
+    };
+    let base = probe(&one);
+    let a = ratio("C-GI-02 share file by stem, 10x day", base, probe(&ten));
+    let b = ratio("C-GI-02 share file by stem, 100x day", base, probe(&hundred));
+    spread("C-GI-02 share file by stem, 100x day", 20_000, || {
+        black_box(hundred.locate(black_box("RELIANCE.NSE")).is_ok());
+    });
+    a && b
+}
+
+/// A one-second month of `n` bars for one invented contract, in a scratch
+/// directory the bench removes.
+fn second_month(root: &std::path::Path, n: u32) -> store::file::BarFile {
+    let contract = brutex_core::instrument::Contract::parse("2026-08-27-10000-CE")
+        .unwrap_or_else(|| refuse("a contract"));
+    let path = store::path::StorePath::new(store::path::PathParts {
+        vendor: Vendor::Gdfl,
+        exchange: "NSE",
+        segment: "FNO",
+        symbol: "X",
+        contract: Some(contract),
+        timeframe: Timeframe::SECOND_1,
+        month: YearMonth::new(2026, 8).unwrap_or_else(|_| refuse("a month")),
+        file: store::path::FileKind::Bars,
+    })
+    .unwrap_or_else(|_| refuse("a path"));
+    let mut file = store::file::BarFile::open_or_create(root, path, 7)
+        .unwrap_or_else(|_| refuse("a bar file"));
+    // 2026-08-03 09:15:00 IST, then one bar a second.
+    let first = 1_785_729_900_i64;
+    let bars: Vec<store::format::Bar> = (0..i64::from(n))
+        .map(|s| store::format::Bar {
+            ts_micros: (first + s) * 1_000_000,
+            open: 100,
+            high: 101,
+            low: 99,
+            close: 100,
+            volume: 75,
+            open_interest: 1_000,
+        })
+        .collect();
+    file.append(&bars).unwrap_or_else(|_| refuse("an append"));
+    file
+}
+
+/// C-GI-03: one stored second by row index is one positional read, flat at
+/// 1x, 10x and 100x the month. By TIME it is the store's bisection, which is
+/// printed as a limit and not gated (docs/06-limits.md).
+fn gdfl_second_by_index_is_flat() -> bool {
+    let root = std::env::temp_dir().join(format!("brutex-bench-gdfl-{}", std::process::id()));
+    let one = second_month(&root.join("1"), 1_000);
+    let ten = second_month(&root.join("10"), 10_000);
+    let hundred = second_month(&root.join("100"), 100_000);
+    let read = |f: &store::file::BarFile| cost_ps(20_000, || black_box(f).read_record(black_box(500)).is_ok());
+    let base = read(&one);
+    let a = ratio("C-GI-03 second by index, 10x month", base, read(&ten));
+    let b = ratio("C-GI-03 second by index, 100x month", base, read(&hundred));
+    spread("C-GI-03 second by index, 100x month", 20_000, || {
+        black_box(hundred.read_record(black_box(77_777)).is_ok());
+    });
+    let at = (1_785_729_900_i64 + 77_777) * 1_000_000;
+    spread("second by TIME (bisection, a limit, NOT O(1))", 20_000, || {
+        black_box(hundred.first_at_or_after(black_box(at)).is_ok());
+    });
+    drop((one, ten, hundred));
+    let _cleanup = std::fs::remove_dir_all(&root);
+    a && b
+}
+
+
 fn main() {
     println!("gate 8 — crates/pull, ceiling {CEILING_PERMILLE} permille");
     let mut ok = true;
+    ok &= gdfl_option_lookup_is_flat();
+    ok &= gdfl_stock_lookup_is_flat();
+    ok &= gdfl_second_by_index_is_flat();
     ok &= census_beats_the_scan_it_replaces();
     ok &= entry_lookup_is_flat();
     ok &= entry_lookup_stays_within_its_budget();

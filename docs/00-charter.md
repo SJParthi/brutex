@@ -900,3 +900,57 @@ GDFL capital-market rows).
 | The verified tick store's format | version 1 (`BRTXTS01`, frozen 2026-10-04): one `.bts` file per vendor day zip at `cm/<TREE>/<yyyy>/<MON_yyyy>/<day folder>.bts` under the store root, holding every entry of that zip in its central-directory order with the zip's own size, CRC-32 and DOS time per entry; file layout, footer, index and block encodings (directory, columnar, raw zstd) as its §3 and §4 state; `*.bts.tmp` incomplete and ignored. Specified in `/Volumes/WD_BLACK/brutex/tickstore-data/FORMAT.md`, sha256 `6edc62a772b257a2aa1b45c0785a23936d9bff47b87648bbb1d9a84ab7063259` | read 2026-10-04, `shasum -a 256`; the operator's specification, not a vendor statement (D-2800, D-2801) | specification |
 | Tick store against the zip | the 21 index day files of August 2026 (`cm/INDICES/2026/AUG_2026/`): all 2,982 entries carry the zip's names, order, sizes and CRC-32s, and all 2,961 files (11,048,377,844 bytes) rebuild byte for byte to what the zip source inflates | a read-only probe through `pull::gdfl_tickstore::TickStore` and `pull::gdfl_archive::Archive`, both `CmSource`s, 2026-10-04; the probe was not committed and no byte of either copy is | measured, August 2026 index days (D-2801) |
 | Licence terms for keeping a converted copy, and for fixtures | UNVERIFIED (D-0802 consequence 10, on its unlanded branch). So no GDFL row is committed (D-0808 item 9) | — | UNVERIFIED |
+
+## NSE trading holidays 2018-2019 and September-October 2026 — read 2026-10-04 (D-2805)
+
+Each circular was fetched from `nsearchives.nseindia.com` and read on
+2026-10-04; the dates below are copied from it.
+
+| Circular | Date | Covers | Weekday trading holidays it lists (in the calendar's span) |
+|---|---|---|---|
+| [NSE/CMTR/36475](https://nsearchives.nseindia.com/content/circulars/CMTR36475.pdf), Circular Ref. 71/2017 | 12 Dec 2017 | calendar year 2018 | 26 Jan, 13 Feb, 2 Mar, 29 Mar, 30 Mar, 1 May, 15 Aug, 22 Aug, 13 Sep, 20 Sep, 2 Oct, 18 Oct, 7 Nov (Diwali-Laxmi Pujan, "Muhurat Trading will be conducted"), 8 Nov, 23 Nov, 25 Dec |
+| [NSE/CMTR/39612](https://nsearchives.nseindia.com/content/circulars/CMTR39612.pdf), Circular Ref. 115/2018 | 7 Dec 2018 | calendar year 2019 | 4 Mar, 21 Mar, 17 Apr, 19 Apr, 1 May, 5 Jun, 12 Aug, 15 Aug, 2 Sep, 10 Sep, 2 Oct, 8 Oct, 28 Oct, 12 Nov, 25 Dec; Muhurat on Sunday 27 Oct |
+| [NSE/CMTR/40536](https://nsearchives.nseindia.com/content/circulars/CMTR40536.pdf), Circular Ref. 30/2019 | 26 Mar 2019 | partial modification of 39612 | 29 Apr 2019, Parliamentary Elections in Mumbai |
+| [NSE/MSD/42319](https://nsearchives.nseindia.com/content/circulars/MSD42319.pdf), Circular Ref. 53/2019 | 7 Oct 2019 | CM, FO and CD segments | 21 Oct 2019, Assembly Elections in Maharashtra |
+| [NSE/CMTR/71775](https://nsearchives.nseindia.com/content/circulars/CMTR71775.pdf), Circular Ref. 172/2025 | 12 Dec 2025 | calendar year 2026 | 14 Sep (Ganesh Chaturthi), 2 Oct (Mahatma Gandhi Jayanti) in 2026-09-05..2026-10-04 |
+
+Cross-check against the vendor's GDFL capital-market day zips (names of the
+outer archive, read with `unzip -Z1`): over 2018-09-03..2019-12-01 every
+weekday not listed above has an index and a stock day zip (301), and the only
+day zips on a weekend or a listed holiday are the Muhurat sessions 2018-11-07
+and 2019-10-27; over 2026-09-05..2026-09-30 every such weekday has one (17,
+the last four from the standalone 25-30 Sep day zips). January-August 2018 is
+sourced from 36475 alone; no local data corroborates it.
+
+## GDFL NSE options tick files — measured 2026-10-04 and 2026-10-05 (D-2806)
+
+- **Layout.** One outer zip per year (`<yyyy>.zip`), each day a STORED day zip
+  `<MON_yyyy>/GFDLNFO_TICK_<ddmmyyyy>.zip` (2026: 293,014,548 bytes for
+  2026-08-03, read with `unzip -v`); inside, entries
+  `GFDLNFO_TICK_<ddmmyyyy>\Options\<TICKER>.NFO.csv` with the Windows separator,
+  deflated. The verified tick store keeps every entry byte for byte under
+  `options/<yyyy>/<MON_yyyy>/GFDLNFO_TICK_<ddmmyyyy>.bts` (FORMAT.md v1, §2).
+- **Only options.** The day zips hold only an `Options` folder (2018-11-30:
+  4,669 entries; 2022-06-03: 8,988; 2026-09-24: 16,466; GDFL build thread,
+  read-only). There are no futures in the operator's GDFL data.
+- **Rows.** The capital-market header
+  `Ticker,Date,Time,LTP,BuyPrice,BuyQty,SellPrice,SellQty,LTQ,OpenInterest`,
+  the Ticker `<TICKER>.NFO`, CRLF. Traded rows of options on low-priced shares
+  print at 0.01 to 0.04 (2026-08-03: 20 files, IDEA, YESBANK, IRFC and
+  others), so one paisa is a price.
+- **Names.** Tick store FORMAT.md §6 as revised 2026-10-04 (sha256
+  `d21139f55789315c5a8280432f8074ea613f17efe8d1a838b325d193adec5be9`): day form
+  from 2019-02-01; before it the day form only for NIFTY and BANKNIFTY
+  weeklies and the monthly form for every other option. Underlyings carry
+  digits and punctuation (`TV18BRDCST`, `360ONE`, `M&M`, `NAM-INDIA`).
+- **Monthly expiry.** "Last Thursday of the expiry month. If the last Thursday
+  is a trading holiday, then the expiry day is the previous trading day." NSE
+  equity derivatives contract specifications,
+  `https://www.nseindia.com/products/content/derivatives/equities/contract_specifitns.htm`,
+  read from the web.archive.org snapshot of 2019-08-16 21:57:03 (sha256 of the
+  fetched page `883f5e4de7256a3262d55e5d1790946b9adaf6c15579f65671c2f20081e22bc1`);
+  the live page no longer serves it. The same snapshot states NIFTY 50 weekly
+  options expire every Thursday, on the previous trading day when it is a
+  holiday. The name census of the GDFL build thread found this rule equal to
+  the vendor's last-trade day and its dated twins for every month 2018-09 to
+  2022-12.

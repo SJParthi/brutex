@@ -257,6 +257,17 @@ fn a_million_strings_decode_with_an_exact_round_trip_or_a_named_refusal() {
 fn the_monthly_rule_walks_back_over_holidays_and_refuses_the_unmeasured() {
     assert_eq!(monthly_expiry(2018, 12), Some(day(2018, 12, 27)));
     assert_eq!(monthly_expiry(2018, 3), Some(day(2018, 3, 28)), "Thu 29 Mar was a holiday");
+    // Every month of the name census's monthly expiry table
+    // (state/name-census/monthly-expiry-table.txt: last Thursday, previous
+    // trading day on a holiday, equal to the vendor's last trade and dated
+    // twins).
+    for (y, m, d) in [
+        (2018, 9, 27), (2018, 10, 25), (2018, 11, 29), (2018, 12, 27), (2019, 1, 31),
+        (2019, 2, 28), (2019, 3, 28), (2019, 6, 27), (2019, 9, 26), (2019, 12, 26),
+        (2020, 6, 25), (2020, 12, 31), (2021, 6, 24), (2021, 12, 30), (2022, 12, 29),
+    ] {
+        assert_eq!(monthly_expiry(y, m), Some(day(y, m, d)), "{y}-{m}");
+    }
     assert_eq!(monthly_expiry(2017, 12), None);
     assert_eq!(monthly_expiry(2018, 13), None);
     assert_eq!(DAY_FORM_FROM_DAYS, day(2019, 2, 1).days_from_epoch());

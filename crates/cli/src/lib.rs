@@ -59,7 +59,7 @@ mod audit_publication_tests;
 /// Strict checksum-admitted historical range execution shared by CLI and API.
 pub mod audited_range_command;
 mod audited_stored;
-/// `cli gdfl-import`: GDFL one-second bars into the store (D-2802..D-2807).
+/// `cli gdfl-import`: GDFL one-second bars into the store (D-2802..D-2806).
 mod gdfl_import_command;
 /// The cooperative stop a stopping server asks engine work to honour (D-1551).
 pub mod cancel;

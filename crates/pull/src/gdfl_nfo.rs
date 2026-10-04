@@ -63,7 +63,7 @@
 //! # Cost
 //!
 //! A day listing is O(entries) once per day; after it [`NfoDay::locate`] is
-//! one hash probe (expected O(1), measured by `C-GI-02` in
+//! one hash probe (expected O(1), measured by `C-GI-01` in
 //! `crates/pull/benches/ratio.rs`). [`decode_ticker`] is O(ticker length),
 //! bounded by the 64-byte cap it refuses past. [`decode`] is O(bytes).
 //! Fetching a file is O(its compressed and rebuilt bytes). The listing and

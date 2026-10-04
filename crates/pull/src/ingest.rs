@@ -2216,7 +2216,7 @@ fn derive_all(
     // legs are `Segment::Fno` and the segment therefore cannot tell them apart
     // — the same reason `api::ladder::Leg` exists. The suffix is the test:
     // `-FUT` for a future, a strike and a side for an option.
-    // GDFL IS ONE SECOND AND NOTHING COARSER (operator, 4 Oct 2026, D-2807).
+    // GDFL IS ONE SECOND AND NOTHING COARSER (operator, 4 Oct 2026, D-2802).
     // Minutes and every higher rung come from the Zerodha one-minute pulls,
     // so no rung is ever folded from a `gdfl` bar. See `derives_for`.
     if !derives_for(into.vendor) {
@@ -2458,7 +2458,7 @@ pub fn derived_count_in(
 
 /// Whether any coarser rung is ever derived from a bar of `vendor`.
 ///
-/// False for `gdfl` ALONE, by the operator's rule of 4 Oct 2026 (D-2807): GDFL
+/// False for `gdfl` ALONE, by the operator's rule of 4 Oct 2026 (D-2802): GDFL
 /// supplies the one-second rung only, and minutes and every higher timeframe
 /// come from the Zerodha one-minute pulls, derived by the app from those. A
 /// named rule, not a missing arm: a GDFL bar filed through any ingest door
