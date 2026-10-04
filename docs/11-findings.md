@@ -841,7 +841,7 @@ Narrative only. No row is added to the table above.
 - **OS-8** (recovery cloned a scope's windows per pending item): fixed.
   D-2306.
 - **OE-3** (a day-window evaluation walked every signal row and period):
-  fixed by bisection, digest pinned to the old walk. D-2307, AFG-06.
+  fixed by a per-day table, digest pinned to the old walk. D-2307, AFG-06.
 - **OE-4** (median heaps grew by doubling in the bar loop): fixed. D-2308.
 - **Owner-blocked, named and not guessed:** gaps-6 (split-adjustment
   threshold needs a corporate-action source), gaps-7 (survivorship needs a

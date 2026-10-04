@@ -99,10 +99,12 @@ pub struct Prepared<'a> {
     duplicates: Vec<bool>,
     periods: Vec<Period>,
     period_of: Vec<usize>,
-    /// The IST day of each signal-column row, in column order. Non-decreasing,
-    /// because `validate_source` refuses rows whose sources or signal stamps
-    /// are not strictly increasing, so a day window is two bisections (D-2307).
-    position_days: Vec<i64>,
+    /// For each day `d` of the source span and one past it, the number of
+    /// signal-column rows (`rows_before[0]`) and of periods (`periods_before`)
+    /// whose IST day is before `d`. A day window is then two direct reads each
+    /// (D-2307): no row or period outside it is walked and nothing is searched.
+    rows_before: Vec<usize>,
+    periods_before: Vec<usize>,
     data_digest: [u8; 32],
     source_id: [u8; 32],
     signal_length: i64,
@@ -930,7 +932,11 @@ impl<'a> Prepared<'a> {
         identity.update(&crate::identity::identity(&run).bytes());
         let duplicates = duplicates(source.series.bars())?;
         let (periods, period_of) = period_geometry(source.series.bars(), &facts, &duplicates)?;
-        let position_days = position_days(&source)?;
+        let rows_before = days_before(&source, &position_days(&source)?)?;
+        let periods_before = days_before(
+            &source,
+            &periods.iter().map(|period| period.day).collect::<Vec<_>>(),
+        )?;
         Ok(Self {
             policy,
             source,
@@ -940,7 +946,8 @@ impl<'a> Prepared<'a> {
             duplicates,
             periods,
             period_of,
-            position_days,
+            rows_before,
+            periods_before,
             data_digest,
             source_id: identity.finalize(),
             signal_length,
@@ -999,6 +1006,14 @@ impl<'a> Prepared<'a> {
     }
     const fn full_span(&self) -> (i64, i64) {
         (self.source.first_day, self.source.last_day)
+    }
+    /// How many entries of a `days_before` table fall before `day`, one read.
+    fn before(&self, table: &[usize], day: i64) -> Result<usize, Error> {
+        let offset = day
+            .checked_sub(self.source.first_day)
+            .and_then(|offset| usize::try_from(offset).ok())
+            .ok_or(Error::Scope)?;
+        table.get(offset).copied().ok_or(Error::Scope)
     }
     fn check_window(&self, first: i64, last: i64) -> Result<(), Error> {
         let (start, end) = self.full_span();
@@ -1059,10 +1074,10 @@ impl<'a> Prepared<'a> {
         };
         // Periods are strictly increasing by day (`period_geometry` opens one per
         // new day over time-ordered bars) and the column's rows are
-        // non-decreasing by day, so the window is four bisections rather than a
-        // walk of every period and every row (D-2307).
-        let period_start = self.periods.partition_point(|row| row.day < first_day);
-        let period_end = self.periods.partition_point(|row| row.day <= last_day);
+        // non-decreasing by day, so the window is four reads of the per-day
+        // tables rather than a walk of every period and every row (D-2307).
+        let period_start = self.before(&self.periods_before, first_day)?;
+        let period_end = self.before(&self.periods_before, last_day.saturating_add(1))?;
         let window_periods = self
             .periods
             .get(period_start..period_end)
@@ -1071,8 +1086,8 @@ impl<'a> Prepared<'a> {
             .try_reserve_exact(window_periods.len())
             .map_err(|_| Error::Allocation)?;
         out.periods.extend_from_slice(window_periods);
-        let row_start = self.position_days.partition_point(|&day| day < first_day);
-        let row_end = self.position_days.partition_point(|&day| day <= last_day);
+        let row_start = self.before(&self.rows_before, first_day)?;
+        let row_end = self.before(&self.rows_before, last_day.saturating_add(1))?;
         let column = self.source.signal_column;
         let rows = column
             .bits()
@@ -1408,8 +1423,8 @@ fn duplicates(bars: &[Candle]) -> Result<Vec<bool>, Error> {
 }
 /// The IST day of every signal-column row, in column order (D-2307).
 ///
-/// Computed once at preparation so an evaluation bisects its day window instead
-/// of re-deriving every row's day. A signal stamp whose IST day overflows is
+/// Computed once at preparation, where `days_before` turns it into the per-day
+/// table an evaluation reads instead of re-deriving every row's day. A signal stamp whose IST day overflows is
 /// refused here with the `Error::Arithmetic` an evaluation used to return for it,
 /// now at preparation rather than at the first evaluation.
 fn position_days(source: &Source<'_>) -> Result<Vec<i64>, Error> {
@@ -1422,6 +1437,33 @@ fn position_days(source: &Source<'_>) -> Result<Vec<i64>, Error> {
         days.push(ist_day(bar.ts_micros)?);
     }
     Ok(days)
+}
+/// For each day of the source span and one past it, how many of `days` fall
+/// before it. `days` is non-decreasing (signal rows by validated stamp order,
+/// periods by construction), so one merge walk builds the table in
+/// O(span days + days) at preparation (D-2307).
+fn days_before(source: &Source<'_>, days: &[i64]) -> Result<Vec<usize>, Error> {
+    let span = source
+        .last_day
+        .checked_sub(source.first_day)
+        .and_then(|width| width.checked_add(2))
+        .and_then(|entries| usize::try_from(entries).ok())
+        .ok_or(Error::Arithmetic)?;
+    let mut table = Vec::new();
+    table
+        .try_reserve_exact(span)
+        .map_err(|_| Error::Allocation)?;
+    let mut seen = days.iter().peekable();
+    let mut count = 0_usize;
+    let mut day = source.first_day;
+    for _ in 0..span {
+        while seen.next_if(|&&row| row < day).is_some() {
+            count = count.checked_add(1).ok_or(Error::Arithmetic)?;
+        }
+        table.push(count);
+        day = day.checked_add(1).ok_or(Error::Arithmetic)?;
+    }
+    Ok(table)
 }
 fn period_geometry(
     bars: &[Candle],

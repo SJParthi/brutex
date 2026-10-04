@@ -57218,7 +57218,7 @@ window set for every pending item, O(windows) per item, and only ever read it.
 **Decision.** The loop borrows the set from the scope map. No behaviour change;
 the existing recovery tests are the proof that nothing read the clone mutably.
 
-### D-2307 — A signal-candle-stop evaluation bisects its day window — 2026-10-04
+### D-2307 — A signal-candle-stop evaluation reads its day window from a table — 2026-10-04
 
 **Finding (OE-3).** `runner::signal_candle_stop::Prepared::evaluate_days`
 walked every signal row (deriving each row's IST day only to `continue` past
@@ -57229,11 +57229,14 @@ evaluation cost as much as the full span, once per program and side.
 (`position_days`). `validate_source` already refuses sources and signal stamps
 that are not strictly increasing, so those days are non-decreasing, and
 `period_geometry` opens periods in strictly increasing day order. An evaluation
-now takes its periods and its rows with two bisections each and walks only the
-rows inside its days. A signal stamp whose IST day overflows is now refused with
+now takes its periods and its rows with two direct reads each from per-day
+tables built once at preparation (`days_before`: for each day of the span and
+one past it, how many rows or periods fall before it), and walks only the rows
+inside its days. A bisection was the first form and Gate 11 rule 1 refuses
+binary search on these paths, so the table replaced it before it shipped. A signal stamp whose IST day overflows is now refused with
 the same `Error::Arithmetic` at preparation instead of at the first evaluation.
 
-**Proof.** `runner::signal_candle_stop::tests::a_bisected_day_window_seals_exactly_what_the_full_row_walk_did`
+**Proof.** `runner::signal_candle_stop::tests::a_tabled_day_window_seals_exactly_what_the_full_row_walk_did`
 (AFG-06) folds the sealed digest of 240 window evaluations (every start day,
 three end days, both sides) and equals the fold measured on the build before
 this change.

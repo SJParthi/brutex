@@ -11453,9 +11453,11 @@ and `final_selection`, whose chains sat inside older `allow_scan` counts):
   complete minute context: O(M), once per attestation, beside an O(M) pass
   over the same slice (sections 134 and 142).
 - `runner::signal_candle_stop` finds an evaluation's first daily period:
-  O(log days) per evaluation by bisection since D-2307, which also bisects the
-  signal rows to the window, so an evaluation walks only the rows and periods
+  one read of a per-day table since D-2307, which also gives the window's
+  first and last signal row, so an evaluation walks only the rows and periods
   inside its days (it walked every period twice and every signal row before).
+  The tables cost O(span days + rows) once at preparation and one `usize` per
+  span day each.
 - `runner::validate` re-checks an argmax four times: O(retained placements)
   once per fold, beside a `.max()` over the same slice.
 - `cli::final_selection` finds the best traded row: O(priced rows) once per

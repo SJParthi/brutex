@@ -707,7 +707,7 @@ impl Sweep {
     /// the current level is non-empty, so an empty level can only be the last
     /// one recorded: the depth is the level count, less one when the last
     /// level is the empty one that ended the walk (Rust and O(1) sweep OE-5,
-    /// D-2304).
+    /// D-2304, AFG-04).
     #[must_use]
     pub fn depth(&self) -> usize {
         let ended_empty = self.levels.last().is_some_and(|l| l.frequent.is_empty());
@@ -4722,7 +4722,7 @@ mod tests {
     }
 
     /// **`depth` is O(1) and agrees with counting the non-empty levels.** Rust
-    /// and O(1) sweep OE-5, D-2304.
+    /// and O(1) sweep OE-5, D-2304, AFG-04.
     ///
     /// Only the level that ended the walk can be empty, so the depth is the
     /// level count less that one. The count over every level is kept here as

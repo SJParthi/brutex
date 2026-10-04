@@ -169,7 +169,7 @@ impl Streamed {
     /// [`crate::Sweep::depth`] answers, over counts rather than vectors.
     ///
     /// O(1) for the reason [`crate::Sweep::depth`] gives: only the last level
-    /// recorded can be empty (D-2304).
+    /// recorded can be empty (D-2304, AFG-04).
     #[must_use]
     pub fn depth(&self) -> usize {
         let ended_empty = self.levels.last().is_some_and(|l| l.survivors == 0);

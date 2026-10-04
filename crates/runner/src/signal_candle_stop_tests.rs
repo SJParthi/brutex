@@ -783,9 +783,9 @@ fn codecs_and_checked_aggregate_overflow_cannot_change_trade_readings_or_clocks(
 }
 
 #[test]
-fn a_bisected_day_window_seals_exactly_what_the_full_row_walk_did() {
-    // D-2307: the window is found by bisecting `position_days` and `periods`
-    // rather than by walking every row and period. The pinned fold below was
+fn a_tabled_day_window_seals_exactly_what_the_full_row_walk_did() {
+    // D-2307: the window is read from per-day tables of rows and periods
+    // rather than found by walking every row and period. The pinned fold below was
     // measured on the build before that change, over every start day and three
     // end days per start, both sides, so any drift in which rows or periods a
     // window takes changes it.
