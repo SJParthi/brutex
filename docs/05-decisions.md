@@ -57247,3 +57247,50 @@ the bar loop.
 **Decision.** At most `n - 1` gaps exist and each heap holds at most half of
 them plus one transient push, so both are created with capacity `ceil(n / 2)`.
 Output is unchanged; every prefix-cadence test is the proof that it is.
+
+### D-2316 — A bootstrap resampled mean reads prefix sums over the draw's runs when that is exact — 2026-10-04
+
+**Finding (OE-1).** `runner::bootstrap::mean_at` folded
+`series.get(i).copied().unwrap_or(0) as f64` over every resampled index, so
+each strategy on each draw cost Θ(N) and every test Θ(B·S·N): White, SPA, both
+receipts, Romano--Wolf (`romano_wolf_aligned`, `null_statistic`,
+`romano_wolf_adjusted_p_values_v1`) and `family_tests_v1`'s `accumulate`. A
+stationary-bootstrap draw is a sequence of contiguous runs, about N/`block` of
+them.
+
+**Decision.** If every `|v| ≤ 2^53` and `periods × max|v| ≤ 2^53` (checked in
+`u128`), every partial sum of the f64 fold is an integer of magnitude at most
+2^53, so every addition is exact and the fold equals the exact integer sum
+converted once to f64; dividing by `index.len() as f64` is then the same
+operation it always was. Under that condition each call builds, once per
+series, an `i64` prefix row of `periods + 1` over the series padded with zeros
+(the fold's `unwrap_or(0)`), and each draw is split once into its runs
+(`next == prev + 1`; the wrap to 0 starts a new run), shared by every
+strategy, which then reads O(runs). A series outside the condition, a draw
+longer than the condition was checked for, or a run outside the padded range
+keeps the former fold over the same indices in the same order -- the same bits,
+more slowly, stated in `docs/06-limits.md` §146; nothing is refused or
+approximated. Romano--Wolf now holds each draw as its runs instead of its N
+indices. The rng stream, the draws and every receipt domain are unchanged, so
+no receipt is versioned. `MEAN_AT_CALLS` still counts one per resampled mean
+(D-1197) and `NULL_STATISTICS` is unchanged; `mean_at` survives, verbatim, as
+the test module's reference fold. Gate 11 rule 2's float allowance for
+`runner/bootstrap.rs` rises 51 -> 52 for the one new line, `exact as f64`; its
+reason is recorded under "Gate 11 allowlist reasons" in `docs/06-limits.md`.
+
+**Proof.** `runner::bootstrap::tests::the_run_prefix_mean_is_the_fold_bit_for_bit`
+(AFG-16) compares `to_bits()` against `mean_at` over periods 0, 1, 2, 3, 7, 64
+and 225, blocks 0, 1, 2, 10 and `periods + 5`, 24 seeds each, on noise,
+negative, short, at-the-bound, one-past-the-bound and `i64::MIN`/`MAX` series,
+plus indices past the padded range, a draw twice the bound and an index that
+cannot extend, and shows that a series on which the fold rounds is refused the
+prefix. `runner::bootstrap::tests::the_prefix_path_reads_one_term_per_run_not_per_period`
+counts the terms read: one per run for a draw, every period on the fold path,
+and S × total runs across a whole Romano--Wolf stepdown. Every existing runner
+test passes; one fixture line in `bootstrap_family_pass_tests` now hands
+`accumulate` the same draw as runs, its assertions unchanged. A differential
+dump of `reality_check`, `spa`, `romano_wolf`, both receipts,
+`romano_wolf_adjusted_p_values_v1` and `family_tests_v1` over 288
+configurations (periods 2--225, magnitudes 1 to 2^52 so both paths run, blocks
+1--300, three seeds) was byte-identical before and after this change; that dump
+was a temporary test and is not committed.

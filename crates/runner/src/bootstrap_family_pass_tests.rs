@@ -426,11 +426,13 @@ fn a_count_that_cannot_grow_or_a_rank_naming_no_lane_refuses_the_walk() {
     let returns = vec![noise(6, 1), noise(6, 2)];
     let (family, periods) = saturated(&returns);
     let index: Vec<usize> = (0..periods).collect();
+    // `accumulate` reads a draw as its runs since D-2316; the draw is unchanged.
+    let draw = super::super::Resample::of(&index);
     let mut resampled = vec![0.0; family.lanes.len()];
 
     let mut tally = Tally::new(family.walk.len());
     assert_eq!(
-        family.accumulate(&index, &mut resampled, &mut tally),
+        family.accumulate(&draw, &mut resampled, &mut tally),
         Some(())
     );
     assert_eq!(
@@ -460,7 +462,7 @@ fn a_count_that_cannot_grow_or_a_rank_naming_no_lane_refuses_the_walk() {
         },
     ] {
         let mut tally = full.clone();
-        assert_eq!(family.accumulate(&index, &mut resampled, &mut tally), None);
+        assert_eq!(family.accumulate(&draw, &mut resampled, &mut tally), None);
         let mut total = full;
         assert_eq!(
             total.absorb(&Tally {

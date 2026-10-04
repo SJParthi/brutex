@@ -5189,7 +5189,7 @@ jobs:
           crates/runner/src/grid.rs 4
           crates/runner/src/significance.rs 21
           crates/runner/src/admission.rs 4
-          crates/runner/src/bootstrap.rs 51
+          crates/runner/src/bootstrap.rs 52
           crates/runner/src/bootstrap_family_pass.rs 17
           crates/runner/src/outcome.rs 26
           crates/runner/src/report.rs 3

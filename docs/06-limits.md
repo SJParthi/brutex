@@ -7495,7 +7495,9 @@ None of those operations becomes O(1) because cell ownership is now indexed.
 Candidate-adjusted Romano--Wolf probabilities and the named full-family
 maximum/intersection probability now have an in-memory exact-count authority.
 For S candidates, N periods and B draws it costs O(S·N + S log S + B·N +
-B·S·N) time and O(B·N + B + S) temporary space; only candidate lookup after
+B·S·R) time for R runs per draw where every series' fold is provably exact,
+O(B·S·N) worst case otherwise, and O(S·N + B·R + B + S) temporary space
+(§146, D-2316); only candidate lookup after
 construction is O(1). The production complete-family constructor, durable raw
 full-precision statistics record and institutional-evidence wiring remain
 absent. A generic p-value from a procedure other than this named Romano--Wolf
@@ -7680,11 +7682,32 @@ D-0462 and SC-01 preserve that boundary.
 
 ### §146 — exact institutional family statistics are bounded durable evidence, not constant-time admission
 
-For S strategies, N observations and B stationary-bootstrap draws, the shared
-Romano--Wolf construction costs O(S·N + S log S + B·N + B·S·N) time and
-O(B·N + B + S) temporary space. Candidate lookup from an already completed
+For S strategies, N observations, B stationary-bootstrap draws and R
+contiguous runs per draw (R ≈ N/`block` expected, R ≤ N always), the shared
+Romano--Wolf construction costs O(S·N + S log S + B·N + B·S·R) time and
+O(S·N + B·R + B + S) temporary space. Candidate lookup from an already completed
 receipt is positional O(1), but producing the family is not. No measured result
 supports an O(1) sweep, bootstrap, end-to-end latency or memory claim.
+
+**The B·S·R term is conditional, and the condition is exactness (D-2316).**
+Every resampled mean in `runner::bootstrap` — White, SPA, both receipts,
+Romano--Wolf and `family_tests_v1` — is read from one integer prefix row per
+series over the draw's runs, O(R) per strategy per draw, only where that is
+provably the f64 fold's own value: every `|v| ≤ 2^53` and
+`N × max|v| ≤ 2^53`, checked in `u128`. A series outside that bound (for
+example one holding values near `i64::MAX`) keeps the former O(N) fold for that
+series — the same bits, more slowly — so the worst case is still
+O(S·N + B·N + B·S·N). Nothing is refused or approximated on either path; the
+slow path is a cost, not a hidden failure.
+
+Memory: one `N + 1` `i64` prefix row per exact series (O(S·N), the size of the
+input family), plus each held draw's runs at two words per run. Romano--Wolf
+now holds every draw as runs rather than as N indices: O(B·R) words, at most
+2·B·N for `block = 1` and about 2·B·N/`block` at the expected block length.
+The draw loops of White, SPA and both receipts hold one index buffer and one
+run buffer; `family_tests_v1` holds one run buffer per running task. None of
+this is measured by a bench; `the_prefix_path_reads_one_term_per_run_not_per_period`
+counts terms read rather than timing them.
 
 Opening either Institutional Statistics V1 file decodes, seals and indexes its
 bounded fixed-record history. Generation validation hashes both complete files
@@ -7736,8 +7759,10 @@ O(S plus bounded file history). None is whole-operation O(1).
 Population Statistics V2 is intentionally the full uncapped NIFTY+BANKNIFTY
 family for one rung. With S hypotheses, N aligned periods, F walk-forward folds
 and B bootstrap draws, raw evidence alone is O(S·N + F·S) durable data. The
-current adjusted Romano--Wolf construction remains O(S·N + S log S + B·N +
-B·S·N) time and O(B·N + B + S) temporary space; White, SPA, PBO, hashing,
+current adjusted Romano--Wolf construction is O(S·N + S log S + B·N +
+B·S·R) time for R runs per draw where every series' fold is provably exact,
+O(B·S·N) worst case otherwise, and O(S·N + B·R + B + S) temporary space
+(§146, D-2316); White, SPA, PBO, hashing,
 locking and `sync_all` add their own input- and system-dependent cost. Explicit
 open/build bounds are refusal ceilings, never a hidden depth, truncation or
 sampling policy.
@@ -7775,8 +7800,10 @@ keep the legacy `>=` tie rule; a strict comparison would be another procedure
 version rather than a codec fix.
 
 For B bootstrap draws, N aligned periods and S candidates, both constructors
-remain O(B·N·S) time and use input-dependent memory for family summaries and
-one resample index vector. The complete input already occupies O(S·N). Copying
+are O(S·N + B·N + B·S·R) time for R runs per draw where every series' fold is
+provably exact and O(B·N·S) worst case otherwise (§146, D-2316), and use
+input-dependent memory for family summaries, one prefix row per exact series,
+one resample index vector and its runs. The complete input already occupies O(S·N). Copying
 one completed count, digest or bit pattern is O(1); constructing the receipt is
 not. Four focused tests, 31 bootstrap regressions and strict Runner Clippy use
 controlled inputs. They do not prove an uncapped stored family, durable
@@ -11117,7 +11144,10 @@ day. That loop is unchanged. Not timed.
 
 `romano_wolf` and `romano_wolf_receipt` walk the canonical order once:
 O(S·B·N + S·B + S log S) time for S strategies, B draws and N periods,
-and O(B·N + B + S) space. The `S·B` term is one `select_nth_unstable_by` per
+and O(B·N + B + S) space. (Superseded in its S·B·N term by D-2316: the
+resampled means are now O(S·B·R) for R runs per draw where every series' fold
+is provably exact, O(S·B·N) worst case otherwise, with O(S·N + B·R) space;
+§146 states the condition.) The `S·B` term is one `select_nth_unstable_by` per
 suffix, whose documentation in the pinned toolchain says its fallback
 "guarantees linear runtime for all inputs". The former loop was O(R·B·S·N) over R
 rounds and this file did not say so. None of these is measured by a bench;
@@ -12791,6 +12821,13 @@ site below was opened and read against that test, and not one of the
     whose running maxima, selection scratch and per-rank bars are
     the same studentized statistics; lane 4's own tree measured 51
     against its allowance of 48. No price is among them.
+  runner/bootstrap.rs 51 -> 52 (D-2316). `mean_at`'s three lines
+    (signature, fold, division) became `resampled_mean`'s four: the
+    same signature, fold and division plus `exact as f64`, the one
+    conversion of the exact integer prefix-run sum, which is the
+    fold's own value whenever the prefix path is taken. A resampled
+    mean of returns is a statistic with no paisa representation; the
+    returns themselves stay `i64` and are summed as `i64`.
   cli/institutional_evidence.rs 7 -> 8 -- GAP5-54 (D-0930) replaced
     `probability_ppm`, two lines that took `ceil(p * PPM)` in `f64`,
     with `bootstrap_fraction`, three lines that recover the exact
