@@ -16355,20 +16355,23 @@ fn repeated_form_key(body: &str) -> Option<&str> {
 /// The body bound [`one_value_per_form_field`] reads within, by route.
 ///
 /// The two member routes carry their own larger `DefaultBodyLimit`,
-/// [`crate::ingest::MAX_MEMBER_FORM_BYTES`] (D-1499). This middleware runs
+/// [`crate::ingest::MAX_MEMBER_FORM_BYTES`] (D-1499), and the two leg routes
+/// [`crate::pullrun::MAX_RUN_FORM_BYTES`] (D-1769). This middleware runs
 /// outside every route layer, so reading at the shared [`MAX_FORM_BYTES`] here
 /// answered 750 ticked members with a 413 before the route's own bound was
 /// ever consulted (D-1592). Every other route keeps the shared bound, which its
-/// extractor enforces again. O(1): two comparisons against literal paths.
+/// extractor enforces again. O(1): four comparisons against literal paths.
 /// Which route gets which bound is proven by
 /// `api::server::form_read_bound_is_wide_only_on_the_member_routes`; the
 /// constant cost is by construction and UNVERIFIED by any measurement
 /// (`docs/06-limits.md`, D-1459).
 fn form_read_bound(path: &str) -> usize {
-    if matches!(path, "/ingest/queue" | "/pull/spot") {
-        crate::ingest::MAX_MEMBER_FORM_BYTES
-    } else {
-        MAX_FORM_BYTES
+    match path {
+        "/ingest/queue" | "/pull/spot" => crate::ingest::MAX_MEMBER_FORM_BYTES,
+        // The two leg routes read the run bound for the same reason (P3-01-01,
+        // D-1769); their own `DefaultBodyLimit` is that bound too.
+        "/pull/run" | "/pull/recovery" => crate::pullrun::MAX_RUN_FORM_BYTES,
+        _ => MAX_FORM_BYTES,
     }
 }
 
@@ -24030,7 +24033,21 @@ mod tests {
             form_read_bound("/pull/spot"),
             crate::ingest::MAX_MEMBER_FORM_BYTES
         );
-        for path in ["/pull/fno", "/ingest/queue/", "/pull", "/", "/control"] {
+        for path in ["/pull/run", "/pull/recovery"] {
+            assert_eq!(
+                form_read_bound(path),
+                crate::pullrun::MAX_RUN_FORM_BYTES,
+                "{path}"
+            );
+        }
+        for path in [
+            "/pull/fno",
+            "/ingest/queue/",
+            "/pull/run/",
+            "/pull",
+            "/",
+            "/control",
+        ] {
             assert_eq!(form_read_bound(path), MAX_FORM_BYTES, "{path}");
         }
     }
