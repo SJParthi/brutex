@@ -8407,7 +8407,11 @@ pub fn render_top_record(
 /// The best completed, traded run matching the filter; newest wins a tie.
 ///
 /// One open, and each row read once, by that open (D-2310). Still `O(runs)`:
-/// the best of all rows is an aggregate the version-3 ledger does not store.
+/// the best of all rows is an aggregate the version-3 ledger does not store,
+/// and an O(1) sidecar holding it was refused by D-2319 because an answer read
+/// from one row cannot refuse damage in the others, which this fold does.
+/// Counted, with the second ledger open `committed_receipt` adds, by
+/// `cli::audited_stored::top_reads_the_ledger_twice_and_refuses_damage_in_a_row_it_does_not_name`.
 fn newest_complete(
     root: &std::path::Path,
     feed: Option<&str>,
