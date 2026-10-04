@@ -82,3 +82,12 @@ Total new across rounds 1-7: 100. Round 7 = 5 medium, 10 low. Re-checked still o
 | Indicators | 11 | condition bit semantics vs standard formulas | p11num-1 med (gapped day dropped before evaluator shifts later trend bits, ran), p11num-2..4 low | numeric-pass11.md |
 | Security | 11 | api, credentials, supply chain, history | P11-01 med (cross-site bar reads make pull writes fail Locked, ran), P11-02..04 low | tests-docs-security-pass11.md |
 Total new across rounds 1-8: 112. Round 8 = 2 medium, 10 low. P10-02 confirmed by run. Owner item added: P11-04 (personal paths/emails in docs and commit history; history rewrite is the owner's call). Newly fixed: hunt-ci-12, locks-1.
+
+## Round 9 (same head 1f4de71) — done 2026-10-04 ~14:15 UTC
+| Angle | Pass | Area | New | Report |
+|---|---|---|---|---|
+| Crash/edge | 14 | operator inputs: cli args, config, env, POST bodies | CE-76 med (instrument case breaks rerun idempotence, ran), CE-75 low (grid rungs clamped silently, ran) | crash-edge-pass14.md |
+| Concurrency | 12 | kill and resume | conc12-1 med (weekend/holiday month ends never complete; restart re-fetches, ran) | conc-pass12.md |
+| O(1) | 12 | cost of each op outside the engine | p12num-1 low (frontier/detail ledgers re-indexed every run) | numeric-pass12.md |
+| Invariants | 12 | docs/04 rows vs tests | P12-01..08 low | tests-docs-security-pass12.md |
+Total new across rounds 1-9: 124. Round 9 = 2 medium, 10 low. Newly fixed: CE-3, CE-23, W2-cli16-2 (as docs).
