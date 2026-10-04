@@ -784,11 +784,18 @@ impl BlockExtremes {
                 (high, low)
             })
             .collect();
+        // A level of runs of `2^k` blocks exists exactly when `2^k` is at most
+        // the BLOCK COUNT; it holds `blocks - 2^k + 1` runs. This compared the
+        // next span with the level below, which is `2^(k-1) - 1` shorter than
+        // the block count, so it stopped up to one level early and a backward
+        // query over most of the slice found no level and answered `None`
+        // (FB-01, D-2669).
+        let blocks = base.len();
         let mut levels = vec![base];
         let mut span = 1_usize;
         while let Some(below) = levels.last() {
             let doubled = span.saturating_mul(2);
-            if doubled > below.len() {
+            if doubled > blocks {
                 break;
             }
             let level: Vec<(i64, i64)> = below
@@ -4539,6 +4546,29 @@ mod window_tests {
         }
     }
 
+    /// **A LONG BACKWARD QUERY IS ANSWERED ON EVERY SLICE LENGTH** (FB-01,
+    /// D-2669; found by the Fix Board thread). `BlockExtremes::of` stopped
+    /// doubling when the next span passed the length of the level BELOW, which
+    /// shrinks at every level, rather than the block count, so a backward query
+    /// whose middle run needed the top level answered `None` where a scan has
+    /// extremes. Every slice from 3 to 40 blocks now agrees with the scan.
+    #[test]
+    fn a_backward_query_spanning_most_of_the_slice_is_answered() {
+        for blocks in 3..=40_usize {
+            let n = blocks * super::EXTREME_BLOCK;
+            let bars = wobble(n);
+            let mut window = WindowExtremes::new();
+            assert_eq!(window.over(&bars, 0, n - 1), scan(&bars, 0, n - 1));
+            for (lo, hi) in [(1, n - 2), (0, n - 2), (super::EXTREME_BLOCK - 1, n - 2)] {
+                assert_eq!(
+                    window.over(&bars, lo, hi),
+                    scan(&bars, lo, hi),
+                    "{blocks} blocks, backward [{lo}, {hi}]"
+                );
+            }
+        }
+    }
+
     /// No PER-BAR power-of-two table is built (D-1170): the per-bar sparse
     /// table's two `n·log₂ n` tables are gone. The one doubling table left is
     /// [`super::BlockExtremes`] (D-1572), over 64-bar BLOCKS, and this measures
@@ -4568,6 +4598,11 @@ mod window_tests {
             );
             let pairs: usize = blocks.levels.iter().map(Vec::len).sum();
             assert!(pairs <= n, "{pairs} pairs held for {n} bars");
+            assert_eq!(
+                blocks.levels.len(),
+                usize::try_from(base.max(1).ilog2()).expect("small") + 1,
+                "one level per power of two up to the block count at n={n}"
+            );
             assert_eq!(
                 touched,
                 u64::try_from(n).expect("small"),
