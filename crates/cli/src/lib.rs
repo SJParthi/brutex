@@ -507,8 +507,8 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    setup is pruned by a high support before it is
                                    ever priced, so a fixed threshold cannot find
                                    one -- this walks it.
-                                   CADENCE is `3` for three trades a WEEK, or
-                                   `6/y` for six a YEAR. A bare number keeps its
+                                   CADENCE is `3` (or `3/w`) for three trades a
+                                   WEEK, or `6/y` for six a YEAR. A bare number keeps its
                                    old meaning, so nothing you have typed before
                                    changes; `/y` is what makes a setup rarer than
                                    one a week sayable at all -- `1` is 52 a year.
@@ -1233,6 +1233,13 @@ fn results_arm(out: &mut String, filter: Option<(&str, &str)>) -> u8 {
     if refused { FAILED } else { OK }
 }
 
+/// Every sentence `elite` refuses MAX_POINTS with, in the grammar the arm
+/// accepts: zero is "no ceiling beyond the derived ladder" and USAGE tells the
+/// operator to pass it. The unparsable-word refusal said "1 or more", which
+/// contradicted both (P8-02, D-2721).
+const ELITE_MAX_POINTS: &str = "MAX_POINTS is a whole number of index points: 1 or more for a \
+                                ceiling, or 0 for no ceiling beyond the ladder the bars derive";
+
 /// The `screen` arm, lifted out of [`run`] for the reason [`audit_range_arm`]
 /// gives.
 ///
@@ -1300,9 +1307,10 @@ fn elite_arm(
             if pts < 0 {
                 return refuse(
                     out,
-                    "MAX_POINTS is a whole number of index points: 1 or more for a \
-                     ceiling, or 0 for no ceiling beyond the ladder the bars derive. \
-                     A negative ceiling is unsatisfiable, not a looser one",
+                    &format!(
+                        "{ELITE_MAX_POINTS}. A negative ceiling is unsatisfiable, \
+                         not a looser one"
+                    ),
                 );
             }
             if n == 0 {
@@ -1339,10 +1347,7 @@ fn elite_arm(
         ((_, Err(_), _, _) | (_, _, _, Err(_)), _) => {
             refuse(out, "FROM_MONTH and TO_MONTH must be 1 to 12")
         }
-        (_, (Err(_), _)) => refuse(
-            out,
-            "MAX_POINTS must be a whole number of index points, 1 or more",
-        ),
+        (_, (Err(_), _)) => refuse(out, ELITE_MAX_POINTS),
         (_, (_, Err(_))) => refuse(out, "TOP must be a whole number, 1 or more"),
     }
 }
@@ -1736,10 +1741,11 @@ fn descend_arm(
             out.push_str(&text);
             if refused { MISUSED } else { OK }
         }
-        (_, _, _, _, _, Err(_)) => refuse(
-            out,
-            "PER_WEEK must be a whole number of trades per week, at least 1.",
-        ),
+        // `parse_cadence`'s own sentence, which names every spelling it
+        // accepts. This arm discarded it and said PER_WEEK must be a whole
+        // number, so `6/yr` was told the opposite of what USAGE says CADENCE
+        // is (P8-02, D-2721).
+        (_, _, _, _, _, Err(why)) => refuse(out, why),
         (Err(_), _, _, _, _, _) | (_, _, Err(_), _, _, _) => {
             refuse(out, "YEAR must be a number like 2026")
         }
@@ -14186,8 +14192,9 @@ impl Cadence {
 /// sentence names both spellings rather than the one that failed, because an
 /// operator who typed the wrong unit cannot tell which one this accepts.
 fn parse_cadence(raw: &str) -> Result<Cadence, &'static str> {
-    const BAD: &str = "CADENCE must be a whole number of trades per week (`3`), \
-                       or per year with a `/y` suffix (`6/y`).";
+    const BAD: &str = "CADENCE must be a whole number of trades per week (`3`, \
+                       or `3/w` with the unit spelled out), or per year with a \
+                       `/y` suffix (`6/y`).";
     let word = raw.trim();
     if let Some(head) = word.strip_suffix("/y") {
         return head
@@ -20902,7 +20909,7 @@ mod tests {
     };
     use super::{Consistency, Horizon, consistency_of, evaluator, grid, grid_step_ppm, ladder_for};
     use super::{Direction, Side};
-    use super::{FAILED, carries_refusal, nothing_measured, untrustworthy};
+    use super::{Cadence, FAILED, carries_refusal, nothing_measured, parse_cadence, untrustworthy};
     use super::{
         MAX_STOP_POINTS, NIFTY_REFERENCE, PAISA_PER_POINT, STOP_FLOOR_POINTS, hundredths_of,
         points_to_ppm_at, ppm_to_points_at, reference_price, return_over_drawdown_cell,
@@ -21303,6 +21310,44 @@ mod tests {
         let mut out = String::new();
         assert_eq!(run(&argv(&["auto", "6"]), &mut out), OK, "{out}");
         assert!(!out.is_empty(), "auto rendered something");
+    }
+
+    /// A REFUSED ARGUMENT IS REFUSED IN THE GRAMMAR ITS PARSER ACCEPTS. P8-02, D-2721.
+    ///
+    /// `descend` answered every bad CADENCE with "PER_WEEK must be a whole
+    /// number of trades per week", discarding `parse_cadence`'s sentence, so
+    /// `6/yr` was told the opposite of what USAGE says. `elite` answered an
+    /// unparsable MAX_POINTS with "1 or more" while accepting 0 and USAGE
+    /// telling the operator to pass it. Both refusals now name every spelling
+    /// the parser accepts, and `/w`, which it always accepted, is documented.
+    #[test]
+    fn a_refused_cadence_or_ceiling_names_the_grammar_its_parser_accepts() {
+        let mut out = String::new();
+        let code = run(
+            &argv(&[
+                "descend", "zerodha", "NIFTY", "15min", "2024", "1", "2024", "6", "200000", "6/yr",
+            ]),
+            &mut out,
+        );
+        assert_eq!(code, MISUSED, "{out}");
+        assert!(!out.contains("PER_WEEK"), "{out}");
+        for spelling in ["`3`", "`3/w`", "`6/y`"] {
+            assert!(out.contains(spelling), "missing {spelling}:\n{out}");
+        }
+        assert_eq!(parse_cadence("3/w"), Ok(Cadence::PerWeek(3)));
+        assert!(USAGE.contains("`3/w`"), "USAGE documents the `/w` spelling");
+
+        let mut out = String::new();
+        let code = run(
+            &argv(&[
+                "elite", "zerodha", "NIFTY", "15min", "2024", "1", "2024", "6", "x", "5",
+            ]),
+            &mut out,
+        );
+        assert_eq!(code, MISUSED, "{out}");
+        let first = out.lines().next().unwrap_or_default();
+        assert!(first.contains("or 0 for no ceiling"), "{out}");
+        assert!(!first.ends_with("1 or more"), "{out}");
     }
 
     /// A THRESHOLD SEARCH THAT SETTLED ON NOTHING EXITS NON-ZERO. P8-01, D-2720.

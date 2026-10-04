@@ -57612,3 +57612,11 @@ line changes, and the lock's refusal stays exactly as strict. Proven locally:
 - Both arms now also read `untrustworthy`, which matches the verdict row `trustworthy as a whole answer  NO`. That row is printed exactly when `Outcome::is_complete` is false, and `Sweeper::auto` returns a default (incomplete) sweep whenever `affordable` is false, so the row is the predicate `sweep_completion(found.affordable && found.outcome.is_complete(), ..)` writes to the evidence. Such a run exits `FAILED` (1) and still prints its report. A `refused:` line keeps the code it had; D-2722 settles that code.
 - `a_valid_sweep_and_a_valid_auto_both_render_and_exit_zero` pinned `auto 1` as `OK`; it now pins `auto 6`, which completes.
 - Proved by `cli::tests::an_auto_search_that_settled_on_nothing_exits_non_zero` and `cli::audited_stored::tests::an_auto_stored_search_exits_as_its_sweep_evidence_records`, which reads the completion the kernel wrote and checks the exit against it (FB-21).
+
+### D-2721 — `descend` and `elite` refuse a bad argument in the grammar their parsers accept — 2026-10-04
+
+- P8-02 (tests-docs-security pass 8). `descend_arm` discarded `parse_cadence`'s refusal and printed "PER_WEEK must be a whole number of trades per week, at least 1." for every unparsable CADENCE, so `6/yr` was told the argument was a weekly count — the opposite of what `USAGE` says CADENCE is. `elite_arm` answered an unparsable MAX_POINTS with "1 or more" while the same arm accepts 0 and `USAGE` tells the operator to pass 0 for no ceiling.
+- `descend_arm` now refuses with `parse_cadence`'s own sentence. `elite_arm`'s two MAX_POINTS refusals share `ELITE_MAX_POINTS`, which states both spellings: 1 or more for a ceiling, 0 for none.
+- `parse_cadence` has always accepted a `/w` suffix (`3/w` is three a week, pinned by an existing test), and nothing documented it. It is kept, not dropped, so no command an operator has typed changes meaning, and it is now named in the refusal sentence and in `USAGE`.
+- Exit codes are unchanged: these are malformed arguments and exit `MISUSED` (2) with the usage.
+- Proved by `cli::tests::a_refused_cadence_or_ceiling_names_the_grammar_its_parser_accepts` (FB-22).
