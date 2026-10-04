@@ -2166,9 +2166,19 @@ const FOLD_LITERAL: &str = "-0 -5 -0945 -1400 -token --exact --nocapture";
 // fno.rs. `repeats` is a refusal word asserted in http.rs and prose
 // in a session.rs reason string. None is a path segment.
 const AUDIT_LITERAL: &str = "-354 -7 repeats";
+// The GDFL import and its readers (D-2800 to D-2806), met when the
+// capital-market reader was squashed onto this line and the import landed.
+// Invented test values (strikes, prices, line numbers and day pieces of
+// fixture tickers such as `NIFTY18DEC10500CE` and `...-10000-CE`), the
+// scratch-directory tags of the import's tests, the import kinds and
+// source words of `cli gdfl-import`, the journal's line words and file
+// name, the telemetry and receipt words of `pull::gdfl_import`, and the
+// tick store's tree words (`ts`, `zips`). None names an account, an
+// environment, a vendor credential or a field of a parameter path.
+const GDFL_IMPORT_LITERAL: &str = "-10000 -3 -42 00 0100 04 06 10 10500 18 19 195 1x 20 22000 24 26 30 31 5 99 9a _ _search a9 begin c calendar clean crashed days done f filed futures import-ambiguous import-both import-census import-cm-refusal import-corrupt import-crash import-days import-derive import-edges import-journal import-journal-write import-kind import-only import-order import-rerun imports indices invented j journal listing missing nfo-both nfo-faults only parents plain seconds stocks ts w zips";
 
 /// Every declared group, in the order the step joined them.
-const DECLARED: [&str; 49] = [
+const DECLARED: [&str; 50] = [
     SEG_SHAPE,
     VENDOR_WIRE,
     CLAIM_STANDING,
@@ -2218,6 +2228,7 @@ const DECLARED: [&str; 49] = [
     SIGNED_NUMBER,
     FOLD_LITERAL,
     AUDIT_LITERAL,
+    GDFL_IMPORT_LITERAL,
 ];
 
 fn declared() -> BTreeSet<&'static str> {
