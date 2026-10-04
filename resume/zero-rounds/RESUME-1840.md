@@ -30,3 +30,15 @@ Main thread: D-1930..D-1949 (D-1930 used). D-1771..1799 are all used. The helper
 2. Push `zero-work:final/all-fixes-zero` as a merge, then merge into `final/all-fixes` (PR #74; its head was ddf6d693 at 18:11).
 3. Merge the helper branches as they report.
 4. Fix the remaining `found` rows with at most two agents at a time. Fix Board owns conc18-1/2, P17-01, p14num-1 and the pr74-conc-api batch. The O(1) sweep thread owns P13-04/05, P15-07/08/09/17, P1-19-03, log-3 and P1-04-02.
+
+## Update 18:50 UTC
+
+- zero-work is now at 726971d7, with gate 1d fixed (D-1931). Gates 11 and 23 still fail.
+  - Every count in their allowlists matches (gate 11 rule 5d: 7 of 7; gate 23 clause C: 7 of 7).
+  - So the refusal is in a part that `run.sh`'s `tail -15` cut off. Extract the step to a file and run it whole to see it.
+- **New task from the coordinator (18:38):** this thread owns the merge of zero-work onto PR #74's head, 1f588aa (about 58 conflict hunks across ci.yml, api, cli, pull, runner and docs).
+  - Merge `origin/final/all-fixes` into zero-work, after zero/edges-3 is merged in.
+  - Resolve the conflicts. Then run fmt, clippy, the 29 static gates and the affected suites.
+  - Hand the PR 74 CI thread ONE validated commit with a note of its contents.
+  - Do NOT push to final/all-fixes ourselves.
+- Pause at 93% of the 5-hour limit; resume is scheduled for 22:03 UTC.
