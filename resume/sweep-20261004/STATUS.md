@@ -32,3 +32,12 @@ open /dev/null, fifos or spawn with Stdio::null fail as uid 65534.
 - OS-7: `cli top` O(1) via a sealed best-row sidecar is in progress on branch sweep/os7-index (D-2319); `cli results` stays O(runs) (arbitrary filters).
 - Stale doc quotes of removed shell: docs/04 X-05 (gate 7), docs/06 ~1859 (gate 1d).
 - Gate 22 next-line include hole: closed (D-2318).
+
+## Update 2026-10-04 13:45Z (paused for usage)
+
+- final/all-fixes is at bb6b3b4 (8c16ba3 plus the CI thread's D-1464 batch).
+- OS-7 is closed as a documented decision (D-2319, AFG-19): an O(1) one-row index for `cli top` would lose its refusal of a damaged row it does not name, and would still leave the frontier and receipt passes.
+- The OS-7 merge onto bb6b3b4 is b97b2ca, saved on claude/project-thread-v8j0jv and NOT yet on final/all-fixes.
+  - All static gates and fmt pass on it.
+  - Workspace clippy and the cli lib tests were still running when paused.
+- Next step: on b97b2ca, run `cargo clippy --workspace --all-targets --locked -- -D warnings` and `cargo test -p cli --lib`; the one expected failure is the /dev/null one. Then merge the current origin/final/all-fixes and push to final/all-fixes. Set OS-7 to doc at b97b2ca in fix-board/status/sweep.tsv and republish the board artifact.
