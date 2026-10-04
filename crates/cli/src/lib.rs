@@ -59,6 +59,8 @@ mod audit_publication_tests;
 /// Strict checksum-admitted historical range execution shared by CLI and API.
 pub mod audited_range_command;
 mod audited_stored;
+/// `cli gdfl-import`: GDFL one-second bars into the store (D-2802..D-2807).
+mod gdfl_import_command;
 /// The cooperative stop a stopping server asks engine work to honour (D-1551).
 pub mod cancel;
 /// Independent full-file checksum audit and retained historical admission receipts.
@@ -448,6 +450,12 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    dirty minute month yields coarse bars built out
                                    of gaps that no other check can see. Exits
                                    non-zero on any disagreement. Reads only.
+       cli gdfl-import KIND SOURCE FROM TO [SYMBOL ...]
+                                   GDFL one-second bars (indices, stocks, option
+                                   contracts) into the store, from the tick store
+                                   (BRUTEX_GDFL_TICKSTORE) or the vendor zips
+                                   (BRUTEX_GDFL_CM_ARCHIVE, BRUTEX_GDFL_NFO_ARCHIVES);
+                                   days YYYY-MM-DD; incremental, resumable.
        cli top          [VENDOR UNDERLYING]
                                    the ranked TOP COMBINATIONS of the best
                                    complete recorded run, read back from the
@@ -2438,6 +2446,9 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
         }
         ["verify", feed, underlying] => verify_arm(out, feed, underlying),
         ["fold-audit", v, u, fy, fm, ty, tm] => fold_audit_arm(out, v, u, (fy, fm), (ty, tm)),
+        ["gdfl-import", arguments @ ..] if arguments.len() >= 4 => {
+            gdfl_import_command::command(arguments, out)
+        }
         ["auto-stored", v, u, r, fy, fm, ty, tm] => auto_stored_arm(out, v, u, r, (fy, fm, ty, tm)),
         ["top"] => top_arm(out, None),
         ["top", feed, underlying] => top_arm(out, Some((feed, underlying))),
@@ -2493,7 +2504,7 @@ fn unmatched(word: &str, given: usize) -> String {
 /// So it is written down, and `every_command_is_listed_in_both_places` asserts
 /// the list, the dispatch and the usage all name the same set. The duplication
 /// is real; the test is what makes it safe.
-const COMMANDS: [&str; 36] = [
+const COMMANDS: [&str; 37] = [
     "audit",
     "audit-audited-range",
     "audit-range",
@@ -2513,6 +2524,7 @@ const COMMANDS: [&str; 36] = [
     "expression-search-stored",
     "expression-stored",
     "fold-audit",
+    "gdfl-import",
     "ledger-all",
     "ledger-v6",
     "ledger-v6-replay",

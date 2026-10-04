@@ -686,15 +686,19 @@ fn a_reader_refusal_in_a_capital_market_file_is_named() {
 #[test]
 fn two_tickers_naming_one_contract_are_both_refused() {
     let root = scratch("import-ambiguous");
-    let d = d1();
+    // Before the switch an index monthly can be named in both forms: the
+    // day form `NIFTY27DEC1810500CE` and the monthly `NIFTY18DEC10500CE`
+    // (expiry Thu 27 Dec 2018) name one contract.
+    let d = day(2018, 12, 3);
     let folder = crate::gdfl_nfo::day_folder_name(d);
-    let entries: Vec<(String, Vec<u8>)> = ["NIFTY04APR24100CE", "NIFTY04APR24100.00CE", "NIFTY04APR24200CE"]
+    let entries: Vec<(String, Vec<u8>)> = ["NIFTY27DEC1810500CE", "NIFTY18DEC10500CE", "NIFTY18DEC10600CE"]
         .iter()
         .map(|t| (format!("{folder}\\Options\\{t}.NFO.csv"), option_file(t, d, "5")))
         .collect();
-    put(&root, "ts/options/2024/APR_2024/GFDLNFO_TICK_01042024.bts", &bts(&as_refs(&entries)));
+    put(&root, "ts/options/2018/DEC_2018/GFDLNFO_TICK_03122018.bts", &bts(&as_refs(&entries)));
     let got = import(&root, Src::Store, ImportKind::Options, d, d, &root.join("S"));
-    assert_eq!((got.files, got.files_refused), (1, 2));
+    assert_eq!((got.files, got.files_refused), (1, 2), "{:?}", got.failures);
+    assert!(got.failures.iter().all(|f| f.why.contains("same contract")));
     // A filter that excludes them refuses nothing.
     let none = import_only(&root, Src::Store, ImportKind::Options, d, d, &root.join("T"), &["BANKNIFTY".to_owned()]);
     assert!(none.failures.is_empty());

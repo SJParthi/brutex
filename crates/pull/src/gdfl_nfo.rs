@@ -20,21 +20,38 @@
 //! the ticker being the file stem (`<TICKER>.NFO`). Unlike the capital-market
 //! reader this one keeps the open interest: an option bar carries it.
 //!
-//! # The contract a ticker names (FORMAT.md §6)
+//! # The contract a ticker names (FORMAT.md §6, revised 2026-10-04; D-2806)
 //!
-//! `UNDERLYING DD MON YY STRIKE CE|PE` (`BANKNIFTY24FEB2651500PE`), and a
-//! monthly 2018–2019 form `UNDERLYING YY MON STRIKE CE|PE` (`ACC18OCT1280PE`)
-//! that states no expiry DAY. The rule is the format's own: the first form is
-//! tried with the expiry a real weekday between the trade date and the trade
-//! date plus 2,200 days; exactly one such reading is the contract, two are
-//! refused as ambiguous, and none falls to the second form, which is refused
-//! by name because its expiry day is not in the name and no sourced monthly
-//! expiry calendar for 2018–2019 is recorded here (`docs/05-decisions.md`
-//! D-2806 names that missing fact). The underlying may hold any byte a
-//! `Symbol` admits (`M&M`, `NAM-INDIA`, `360ONE`); the strike may be decimal
-//! (`107.5`, 10,750 paisa). An expiry the ticker states on an exchange holiday
-//! is kept as the vendor stated it: the name is the contract's identity, and
-//! moving it would file two names under one path.
+//! Two vendor forms: the DAY form `UNDERLYING DD MON YY STRIKE CE|PE`
+//! (`BANKNIFTY24FEB2651500PE`) and the MONTHLY form `UNDERLYING YY MON STRIKE
+//! CE|PE` (`ACC18OCT1280PE`, October 2018). They collide (`ADANIENT18DEC195CE`
+//! reads as Dec 2018 strike 195 or as 18 Dec 2019 strike 5, and from 2020 on
+//! every day-form name also parses as a monthly one), so only the era keeps
+//! them apart, by the trade date:
+//!
+//! 1. on or after [`DAY_FORM_FROM`] (2019-02-01): the day form only;
+//! 2. before it: the day form only for the index weeklies NIFTY and
+//!    BANKNIFTY (any weekday, which covers a holiday-shifted Tuesday expiry),
+//!    and the monthly form for every option, index monthlies included;
+//! 3. the expiry lies from the trade date (a monthly: its month from the
+//!    trade month) to the trade date plus 2,200 days, and the strike is > 0;
+//! 4. no reading, or more than one, is refused by name, never guessed.
+//!
+//! A monthly name states no expiry DAY. It is derived from NSE's own rule
+//! for equity derivatives, "Last Thursday of the expiry month. If the last
+//! Thursday is a trading holiday, then the expiry day is the previous trading
+//! day" (NSE contract specifications, archived 2019-08-16; charter GDFL
+//! options section), walked back on [`crate::calendar::kind_of`]. A day the
+//! calendar has not measured refuses (`MonthlyExpiryUnmeasured`), and a file
+//! traded AFTER its derived expiry refuses (`ExpiryPassed`): that is the
+//! per-day half of the cross-check against the vendor's own appearances.
+//!
+//! The strike must be written canonically (no leading zero, no trailing
+//! fractional zero, at most two places), so every name that decodes renders
+//! back to itself byte for byte ([`OptionTicker::ticker_text`]). The
+//! underlying may hold any byte a `Symbol` admits, digits included (`M&M`,
+//! `NAM-INDIA`, `360ONE`, `TV18BRDCST`). An expiry the day form states on an
+//! exchange holiday is kept as stated: the name is the contract's identity.
 //!
 //! # What it hands on, and what it does not decide
 //!
@@ -96,15 +113,27 @@ pub enum NfoRefusal {
         /// The ticker.
         ticker: String,
     },
-    /// Two tickers of one day name one contract (`100` and `100.00`, say),
-    /// so their bars would file under one path: both refused.
+    /// The ticker has more than one reading the era admits.
     TickerAmbiguous {
         /// The ticker.
         ticker: String,
     },
-    /// The ticker is the monthly 2018–2019 form, whose expiry day is not in
-    /// the name; no sourced monthly expiry calendar is recorded (D-2806).
-    MonthlyExpiryUnstated {
+    /// Two tickers of one day name one contract (a day-form and a monthly
+    /// name of one index monthly, say), so their bars would file under one
+    /// path: both refused.
+    ContractNamedTwice {
+        /// The ticker.
+        ticker: String,
+    },
+    /// A monthly name whose derived expiry needs a day the calendar has not
+    /// measured.
+    MonthlyExpiryUnmeasured {
+        /// The ticker.
+        ticker: String,
+    },
+    /// A monthly name traded after its derived expiry: the rule and the
+    /// vendor disagree, so neither is believed.
+    ExpiryPassed {
         /// The ticker.
         ticker: String,
     },
@@ -141,7 +170,7 @@ pub enum NfoRefusal {
         line: u32,
     },
     /// An LTP that is not a plain decimal of at most two places, or a traded
-    /// row (LTQ > 0) priced below one tick.
+    /// row (LTQ > 0) priced at zero.
     PriceRefused {
         /// One-based line number.
         line: u32,
@@ -168,11 +197,19 @@ impl core::fmt::Display for NfoRefusal {
             }
             Self::TickerAmbiguous { ticker } => write!(
                 f,
+                "{ticker}: more than one reading of the ticker; refused rather than guessed"
+            ),
+            Self::ContractNamedTwice { ticker } => write!(
+                f,
                 "{ticker}: another ticker of the same day names the same contract; both refused rather than merged"
             ),
-            Self::MonthlyExpiryUnstated { ticker } => write!(
+            Self::MonthlyExpiryUnmeasured { ticker } => write!(
                 f,
-                "{ticker}: the monthly form states no expiry day and no sourced monthly expiry calendar is recorded (D-2806)"
+                "{ticker}: the monthly expiry day needs a day the calendar has not measured"
+            ),
+            Self::ExpiryPassed { ticker } => write!(
+                f,
+                "{ticker}: traded after the expiry NSE's last-Thursday rule derives; rule and vendor disagree"
             ),
             Self::UnderlyingRefused { ticker } => {
                 write!(f, "{ticker}: the underlying is not a symbol the store can file")
@@ -191,7 +228,7 @@ impl core::fmt::Display for NfoRefusal {
             Self::MalformedRow { line } => write!(f, "line {line}: not ten well-formed fields"),
             Self::PriceRefused { line } => write!(
                 f,
-                "line {line}: the LTP is not a two-place decimal, or a traded row is below one tick"
+                "line {line}: the LTP is not a two-place decimal, or a traded row is priced at zero"
             ),
             Self::OpenInterestRefused { line } => {
                 write!(f, "line {line}: the open interest does not fit an i64")
@@ -210,6 +247,24 @@ impl From<CmRefusal> for NfoRefusal {
     }
 }
 
+/// The first trade day on which every option name is in the day form,
+/// 2019-02-01, as days since the epoch (FORMAT.md §6 rule 1; the last trade
+/// date with a monthly-only name is 2019-01-31).
+pub const DAY_FORM_FROM_DAYS: u32 = 17_928;
+
+/// The underlyings whose weeklies use the day form before
+/// [`DAY_FORM_FROM_DAYS`] (FORMAT.md §6 rule 2).
+pub const EARLY_DAY_FORM: [&str; 2] = ["NIFTY", "BANKNIFTY"];
+
+/// Which vendor form a ticker was read in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TickerForm {
+    /// `UNDERLYING DD MON YY STRIKE SIDE`: the expiry day is stated.
+    Day,
+    /// `UNDERLYING YY MON STRIKE SIDE`: the expiry day is derived.
+    Monthly,
+}
+
 /// The contract one option ticker names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OptionTicker {
@@ -217,6 +272,42 @@ pub struct OptionTicker {
     pub underlying: Symbol,
     /// The store's contract segment.
     pub contract: Contract,
+    /// The form the ticker was read in.
+    pub form: TickerForm,
+    /// The expiry: stated (day form) or derived (monthly form).
+    pub expiry: Day,
+    /// The strike, paisa.
+    pub strike: i64,
+    /// Call or put.
+    pub side: OptionSide,
+}
+
+impl OptionTicker {
+    /// The ticker this reading renders back to, byte for byte the vendor's
+    /// when the name decoded (every strike is canonical, so nothing is lost).
+    #[must_use]
+    pub fn ticker_text(&self) -> String {
+        let month = MONTHS
+            .get(usize::from(self.expiry.month()).saturating_sub(1))
+            .copied()
+            .unwrap_or_default();
+        let yy = self.expiry.year() % 100;
+        let side = match self.side {
+            OptionSide::Call => "CE",
+            OptionSide::Put => "PE",
+        };
+        let (rupees, paisa) = (self.strike / 100, self.strike % 100);
+        let strike = match paisa {
+            0 => rupees.to_string(),
+            p if p % 10 == 0 => format!("{rupees}.{}", p / 10),
+            p => format!("{rupees}.{p:02}"),
+        };
+        let under = self.underlying.as_str();
+        match self.form {
+            TickerForm::Day => format!("{under}{:02}{month}{yy:02}{strike}{side}", self.expiry.day()),
+            TickerForm::Monthly => format!("{under}{yy:02}{month}{strike}{side}"),
+        }
+    }
 }
 
 /// Whether `day` is a weekday. 1970-01-01, day 0, was a Thursday.
@@ -240,28 +331,126 @@ fn two_digits(bytes: &[u8]) -> Option<u8> {
     }
 }
 
-/// A positive strike in paisa: digits, optionally a dot and one or two
-/// digits.
+/// A positive strike in paisa, written canonically: digits with no leading
+/// zero (a lone `0` before a dot excepted), then optionally a dot and one or
+/// two digits, the last not zero. Canonical, so a decoded name renders back
+/// to itself and `100` and `100.00` can never be two names of one contract.
 fn strike_paisa(text: &[u8]) -> Option<i64> {
     let text = core::str::from_utf8(text).ok()?;
-    let (whole, frac) = text.split_once('.').unwrap_or((text, ""));
-    let shaped = !whole.is_empty()
+    let (whole, frac) = text.split_once('.').map_or((text, None), |(w, f)| (w, Some(f)));
+    let whole_ok = !whole.is_empty()
         && whole.bytes().all(|b| b.is_ascii_digit())
-        && (!text.contains('.') || (!frac.is_empty() && frac.bytes().all(|b| b.is_ascii_digit())));
-    if !shaped {
+        && (whole == "0" || !whole.starts_with('0'));
+    let frac_ok = frac.is_none_or(|f| {
+        (1..=2).contains(&f.len()) && f.bytes().all(|b| b.is_ascii_digit()) && !f.ends_with('0')
+    });
+    if !(whole_ok && frac_ok) {
         return None;
     }
     crate::csv::paisa(text).filter(|&paisa| paisa > 0)
 }
 
+/// The expiry day of the monthly contract of `month` of `year`: the last
+/// Thursday, or the trading day before it when it is not one (NSE's rule,
+/// charter GDFL options section), walked on the calendar. `None` when the
+/// calendar has not measured a day the walk needs.
+fn monthly_expiry(year: u16, month: u8) -> Option<Day> {
+    let end = Day::new(year, month, 1).ok()?.end_of_month();
+    // Back from the month's end to its last Thursday: day 0 was a Thursday.
+    let mut day = end.days_from_epoch() - end.days_from_epoch() % 7;
+    for _ in 0..31 {
+        match crate::calendar::kind_of(i64::from(day)) {
+            crate::calendar::DayKind::Open(_) => return Day::from_days(day).ok(),
+            crate::calendar::DayKind::Unmeasured => return None,
+            _ => day -= 1,
+        }
+    }
+    None
+}
+
+/// One reading of a ticker before its underlying is checked.
+struct Reading {
+    at: usize,
+    form: TickerForm,
+    expiry: Day,
+    strike: i64,
+}
+
+/// Every reading the era admits for the split at `at` (FORMAT.md §6), the
+/// refusals a monthly reading meets kept as readings that refuse.
+fn readings_at(
+    body: &[u8],
+    at: usize,
+    trade: Day,
+    out: &mut Vec<Result<Reading, NfoRefusal>>,
+    ticker: &str,
+) {
+    let (Some(under), Some(rest)) = (body.get(..at), body.get(at..)) else {
+        return;
+    };
+    let latest = trade.days_from_epoch().saturating_add(EXPIRY_HORIZON_DAYS);
+    let modern = trade.days_from_epoch() >= DAY_FORM_FROM_DAYS;
+    let index_weekly = EARLY_DAY_FORM.iter().any(|name| name.as_bytes() == under);
+    if modern || index_weekly {
+        let day_form = (|| {
+            let dd = rest.get(0..2).and_then(two_digits)?;
+            let mon = rest.get(2..5).and_then(month_of)?;
+            let yy = rest.get(5..7).and_then(two_digits)?;
+            let strike = rest.get(7..).and_then(strike_paisa)?;
+            let expiry = Day::new(2000 + u16::from(yy), mon, dd).ok()?;
+            (is_weekday(expiry)
+                && expiry.days_from_epoch() >= trade.days_from_epoch()
+                && expiry.days_from_epoch() <= latest)
+                .then_some(Reading {
+                    at,
+                    form: TickerForm::Day,
+                    expiry,
+                    strike,
+                })
+        })();
+        out.extend(day_form.map(Ok));
+    }
+    if !modern {
+        let monthly = (|| {
+            let yy = rest.get(0..2).and_then(two_digits)?;
+            let mon = rest.get(2..5).and_then(month_of)?;
+            let strike = rest.get(5..).and_then(strike_paisa)?;
+            let year = 2000 + u16::from(yy);
+            let first = Day::new(year, mon, 1).ok()?;
+            let in_window = (year, mon) >= (trade.year(), trade.month())
+                && first.days_from_epoch() <= latest;
+            in_window.then_some((year, mon, strike))
+        })();
+        if let Some((year, mon, strike)) = monthly {
+            out.push(match monthly_expiry(year, mon) {
+                None => Err(NfoRefusal::MonthlyExpiryUnmeasured {
+                    ticker: ticker.to_owned(),
+                }),
+                Some(expiry) if expiry.days_from_epoch() < trade.days_from_epoch() => {
+                    Err(NfoRefusal::ExpiryPassed {
+                        ticker: ticker.to_owned(),
+                    })
+                }
+                Some(expiry) => Ok(Reading {
+                    at,
+                    form: TickerForm::Monthly,
+                    expiry,
+                    strike,
+                }),
+            });
+        }
+    }
+}
+
 /// The contract `ticker`, a file stem without `.NFO`, names for a file of
-/// trade day `trade`, by FORMAT.md §6.
+/// trade day `trade`, by FORMAT.md §6 (module doc).
 ///
 /// # Errors
 ///
-/// [`NfoRefusal::TickerUnparsed`],
-/// [`NfoRefusal::MonthlyExpiryUnstated`], [`NfoRefusal::UnderlyingRefused`]
-/// and [`NfoRefusal::ContractUnrenderable`].
+/// [`NfoRefusal::TickerUnparsed`] (no reading), [`NfoRefusal::TickerAmbiguous`]
+/// (more than one), [`NfoRefusal::MonthlyExpiryUnmeasured`],
+/// [`NfoRefusal::ExpiryPassed`], [`NfoRefusal::UnderlyingRefused`] and
+/// [`NfoRefusal::ContractUnrenderable`].
 pub fn decode_ticker(ticker: &str, trade: Day) -> Result<OptionTicker, NfoRefusal> {
     let unparsed = || NfoRefusal::TickerUnparsed {
         ticker: ticker.to_owned(),
@@ -269,74 +458,50 @@ pub fn decode_ticker(ticker: &str, trade: Day) -> Result<OptionTicker, NfoRefusa
     if ticker.len() > TICKER_CAP {
         return Err(unparsed());
     }
-    let bytes = ticker.as_bytes();
-    let (body, side) = match bytes.split_last_chunk::<2>() {
+    let (body, side) = match ticker.as_bytes().split_last_chunk::<2>() {
         Some((body, b"CE")) => (body, OptionSide::Call),
         Some((body, b"PE")) => (body, OptionSide::Put),
         _ => return Err(unparsed()),
     };
-    let latest = trade.days_from_epoch().saturating_add(EXPIRY_HORIZON_DAYS);
-    // AT MOST ONE first-form reading exists, so the first is the only one.
-    // A reading needs everything after its `DD MON YY` to be a strike, which
-    // is digits and at most one dot; a later reading's `MON` is three
-    // letters inside that strike, which no strike holds, and an earlier one's
-    // is the same argument mirrored. So a ticker cannot name two contracts by
-    // itself; two TICKERS of one day naming one contract is refused by
-    // `crate::gdfl_import` (`TickerAmbiguous`).
-    // `tests::no_ticker_reads_as_two_contracts` walks every split of a sweep
-    // of shapes to hold this.
-    let first_form = (1..body.len()).find_map(|at| {
-        let rest = body.get(at..)?;
-        let dd = rest.get(0..2).and_then(two_digits)?;
-        let mon = rest.get(2..5).and_then(month_of)?;
-        let yy = rest.get(5..7).and_then(two_digits)?;
-        let strike = rest.get(7..).and_then(strike_paisa)?;
-        let expiry = Day::new(2000 + u16::from(yy), mon, dd).ok()?;
-        (is_weekday(expiry)
-            && expiry.days_from_epoch() >= trade.days_from_epoch()
-            && expiry.days_from_epoch() <= latest)
-            .then_some((at, expiry, strike))
-    });
-    let Some((at, expiry, strike)) = first_form else {
-        // The monthly 2018–2019 form: YY MON STRIKE, no expiry day.
-        let monthly = (1..body.len()).any(|at| {
-            body.get(at..).is_some_and(|rest| {
-                rest.get(0..2).and_then(two_digits).is_some()
-                    && rest.get(2..5).and_then(month_of).is_some()
-                    && rest.get(5..).and_then(strike_paisa).is_some()
-            })
-        });
-        return Err(if monthly {
-            NfoRefusal::MonthlyExpiryUnstated {
+    let mut readings = Vec::new();
+    for at in 1..body.len() {
+        readings_at(body, at, trade, &mut readings, ticker);
+    }
+    let reading = match readings.len() {
+        0 => return Err(unparsed()),
+        1 => readings.pop().unwrap_or_else(|| Err(unparsed()))?,
+        _ => {
+            return Err(NfoRefusal::TickerAmbiguous {
                 ticker: ticker.to_owned(),
-            }
-        } else {
-            unparsed()
-        });
+            });
+        }
     };
-    let name = ticker.get(..at).unwrap_or_default();
+    let name = ticker.get(..reading.at).unwrap_or_default();
     let underlying = Symbol::new(name)
         .ok()
         .filter(|symbol| symbol.as_str() == name)
         .ok_or_else(|| NfoRefusal::UnderlyingRefused {
             ticker: ticker.to_owned(),
         })?;
-    let unrenderable = || NfoRefusal::ContractUnrenderable {
-        ticker: ticker.to_owned(),
-    };
-    let contract = Expiry::new(expiry.year(), expiry.month(), expiry.day())
+    let contract = Expiry::new(reading.expiry.year(), reading.expiry.month(), reading.expiry.day())
         .ok()
         .and_then(|expiry| {
             Contract::of(Kind::Option {
                 expiry,
-                strike: Paisa::from_raw(strike),
+                strike: Paisa::from_raw(reading.strike),
                 side,
             })
         })
-        .ok_or_else(unrenderable)?;
+        .ok_or_else(|| NfoRefusal::ContractUnrenderable {
+            ticker: ticker.to_owned(),
+        })?;
     Ok(OptionTicker {
         underlying,
         contract,
+        form: reading.form,
+        expiry: reading.expiry,
+        strike: reading.strike,
+        side,
     })
 }
 
@@ -750,7 +915,11 @@ fn decode_capped(bytes: &[u8], stem: &str, day: Day, cap: usize) -> Result<NfoFi
         let oi: i64 = oi.parse().map_err(|_| NfoRefusal::OpenInterestRefused { line })?;
         let paisa = if is_decimal(ltp) { crate::csv::paisa(ltp) } else { None }
             .ok_or(NfoRefusal::PriceRefused { line })?;
-        if ltq > 0 && paisa < costs::rate::TICK.raw() {
+        // A TRADED ROW AT ZERO IS REFUSED; ONE PAISA IS A PRICE. Options of
+        // low-priced shares print at 0.01 to 0.04 (measured on 2026-08-03: 20
+        // files, IDEA, YESBANK, IRFC and others), so the capital-market
+        // reader's five-paisa floor is not this tree's (D-2806).
+        if ltq > 0 && paisa < 1 {
             return Err(NfoRefusal::PriceRefused { line });
         }
         rows.push(NfoRow {

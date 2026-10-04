@@ -3222,11 +3222,11 @@ mod tests {
     #[test]
     fn unmeasured_day_refuses() {
         assert_eq!(
-            session_gate(day(2018, 9, 3)),
+            session_gate(day(2017, 9, 4)),
             Err(CmRefusal::CalendarUnmeasured)
         );
         assert_eq!(
-            session_gate(day(2026, 9, 24)),
+            session_gate(day(2026, 10, 5)),
             Err(CmRefusal::CalendarUnmeasured)
         );
     }
@@ -3398,7 +3398,7 @@ mod tests {
 
     #[test]
     fn read_day_gates_the_calendar_before_reading() {
-        let at = day(2018, 9, 3);
+        let at = day(2017, 9, 4);
         let source = MemSource::new().with(
             CmKind::Indices,
             at,

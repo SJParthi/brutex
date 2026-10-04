@@ -942,7 +942,7 @@ fn nfo_day<S: NfoSource>(
                     && named.get(&(decoded.underlying.as_str().to_owned(), decoded.contract)) > Some(&1) => {
                 read.refused.push(Failure {
                     instrument: ticker.to_owned(),
-                    why: NfoRefusal::TickerAmbiguous {
+                    why: NfoRefusal::ContractNamedTwice {
                         ticker: ticker.to_owned(),
                     }
                     .to_string(),
