@@ -253,8 +253,8 @@ fn a_zero_stop_ceiling_is_no_ceiling_and_never_the_points_refusal() {
         "NIFTY",
         "1min",
         ((2026, 8), (2026, 8)),
-        0,
-        10,
+        (0, 10),
+        runner::rank::Lens::Payoff,
         None,
     );
     assert!(
@@ -266,8 +266,8 @@ fn a_zero_stop_ceiling_is_no_ceiling_and_never_the_points_refusal() {
         "NIFTY",
         "1min",
         ((2026, 8), (2026, 8)),
-        -1,
-        10,
+        (-1, 10),
+        runner::rank::Lens::Payoff,
         None,
     );
     assert!(
@@ -455,7 +455,9 @@ fn the_sample_line_states_the_folds_the_walk_forward_ran() {
         "the SAMPLE line must state the run's own folds: {text}"
     );
     assert!(
-        text.contains(&format!("roughly {} day(s)", sessions / splits)),
+        // An anchored walk-forward of `splits` folds cuts the span into
+        // `splits + 1` windows; D-1646's divisor, kept by D-2104's merge.
+        text.contains(&format!("roughly {} day(s)", sessions / (splits + 1))),
         "and divide by them: {text}"
     );
 }

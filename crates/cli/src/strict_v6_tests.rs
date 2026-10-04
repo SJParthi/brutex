@@ -226,7 +226,7 @@ mod strict_v6_fixture_tests {
             let family = strict_fixture_family(&fixture, "NIFTY", evaluated)?;
             let mut files = vec![
                 "candidate-universe-completions-v1.bin",
-                "base-evidence-completions-v2.bin",
+                "base-evidence-completions-v3.bin",
                 "pre-admission-data-v2.bin",
             ];
             if evaluated {

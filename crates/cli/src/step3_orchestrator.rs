@@ -4354,7 +4354,7 @@ mod tests {
     use runner::excursion::Side;
     use runner::exit_grid_policy::{
         ExecutionResolutionV1, ExitGridSelectorV1, ForcedStopV1, RangeResolutionV1, RatioLimitsV1,
-        RationalPercentileV1, RungPlanV1, printed_ohlcv_cost_model_id_v1,
+        RationalPercentileV1, RungPlanV1, printed_ohlcv_cost_model_id_v2,
     };
     use store::file::BarFile;
     use store::format::Bar;
@@ -4758,7 +4758,7 @@ mod tests {
                 .map_err(|why| format!("fixture ratio limits refused: {why}"))?,
             1_000,
             ExitGridSelectorV1::GuaranteedFloor,
-            printed_ohlcv_cost_model_id_v1(),
+            printed_ohlcv_cost_model_id_v2(),
             ForcedStopV1::Disabled,
             u64::MAX,
             u64::MAX,
