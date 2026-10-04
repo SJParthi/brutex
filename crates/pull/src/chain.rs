@@ -404,6 +404,14 @@ fn iso_expiry(text: &str) -> Option<brutex_core::instrument::Expiry> {
     if bytes.len() != 10 || bytes.get(4) != Some(&b'-') || bytes.get(7) != Some(&b'-') {
         return None;
     }
+    // EVERY OTHER BYTE A DIGIT. `str::parse` accepts a leading `+`, so without
+    // this `"2024-+1-25"` read as 2024-01-25 — a malformed vendor string keyed
+    // to a real expiry rather than filed as unreadable. D-3112.
+    for (at, byte) in bytes.iter().enumerate() {
+        if at != 4 && at != 7 && !byte.is_ascii_digit() {
+            return None;
+        }
+    }
     let year: u16 = text.get(0..4)?.parse().ok()?;
     let month: u8 = text.get(5..7)?.parse().ok()?;
     let day: u8 = text.get(8..10)?.parse().ok()?;
@@ -837,5 +845,50 @@ mod tests {
             }
             other => panic!("expected a transport refusal, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "a test that cannot panic cannot fail"
+)]
+mod attack_pricing {
+    use super::iso_expiry;
+
+    /// **AN EXPIRY IS TEN ASCII CHARACTERS, EIGHT OF THEM DIGITS.**
+    ///
+    /// `str::parse::<u8>` accepts a leading `+`, so on the unmodified code
+    /// `"2024-+1-25"` read as 2024-01-25: a malformed vendor string was keyed
+    /// to a real expiry instead of being filed as unreadable. D-3112.
+    #[test]
+    fn dpp_a_signed_or_non_digit_field_is_not_an_expiry() {
+        for bad in [
+            "2024-+1-25",
+            "2024-01-+5",
+            "+024-01-25",
+            "2024-1 -25",
+            "2024- 1-25",
+            "2024-01-2 ",
+            "2024/01/25",
+            "2024-01-251",
+            "2024-01-2",
+            "",
+            "2024-00-25",
+            "2024-13-01",
+            "2023-02-29",
+            "2024-02-30",
+            "1989-12-31",
+            "2101-01-01",
+            "２０２４-01-25",
+        ] {
+            assert_eq!(iso_expiry(bad), None, "{bad:?} was read as an expiry");
+        }
+        let leap = iso_expiry("2024-02-29").expect("a leap day");
+        assert_eq!((leap.year(), leap.month(), leap.day()), (2024, 2, 29));
+        let edge = iso_expiry("2100-12-31").expect("the last representable day");
+        assert_eq!((edge.year(), edge.month(), edge.day()), (2100, 12, 31));
     }
 }
