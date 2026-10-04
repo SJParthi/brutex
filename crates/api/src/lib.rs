@@ -39,6 +39,7 @@
 
 #![forbid(unsafe_code)]
 
+mod answer_memo;
 pub mod assets;
 pub mod audit;
 pub mod audit_json;

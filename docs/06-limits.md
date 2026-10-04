@@ -11794,39 +11794,86 @@ rule 6); every bound is read from the source.
   section says this is paid "once per manifest change". **While a pull is
   landing, that is every request:** each body rewrites a manifest, so every
   census-backed route a console polls during a backfill misses.
-* **W1-api5-3 — `instruments_json`.** Per request: a filter over every key of
+* **W1-api5-3 — `instruments_json`.** A build is a filter over every key of
   the merged universe (O(U)), `census_now`, then `bars_by_symbol`, which
   walks every entry of every vendor's census (O(E)) into a map pre-sized to
   that count, then a sort of the tracked listing (O(T log T), T about 800).
-* **W1-api5-5 — `calendar_json`.** Per request, both branches:
-  `held_entries` over the asked feed's census (O(E_v log E_v)); the exchange
-  branch then does, per spot series, one `calendar_of::cached` probe, three
-  key `String`s and a deep clone of that series' calendar, and `agree` over
-  every day. The route doc said "one map probe per series on a hit", which
-  leaves out the collect and sort; corrected.
+  **Since D-2285 that build runs once per feed, census snapshot and universe
+  parse, not per request:** the answer is kept in `answer_memo` under the
+  snapshot's allocation and `Parsed::generation`, so a request on an
+  unchanged store and parse is `census_now`'s hit, one memo probe and a copy
+  of the answer, O(answer bytes), the response itself. A pull that moves any
+  manifest, or an accepted reparse, drops every kept answer. Proved by
+  `api::answer_memo::tests::an_answer_is_rebuilt_exactly_when_its_snapshot_or_generation_moves`
+  and `api::server::tests::instruments_json_is_built_once_per_snapshot_and_parse`.
+* **W1-api5-5 — `calendar_json`.** A build, both branches: `held_entries`
+  over the asked feed's census (O(E_v log E_v)); the exchange branch then
+  does, per spot series, one `calendar_of::cached` probe, three key `String`s
+  and a deep clone of that series' calendar, and `agree` over every day. The
+  route doc said "one map probe per series on a hit", which leaves out the
+  collect and sort; corrected. **Since D-2286 a served answer is kept per
+  feed and name for the census snapshot it was built from** (every calendar in
+  it is kept by `calendar_of::cached` under that snapshot's stamp, so the
+  answer is a function of the snapshot), and a repeat request is one memo
+  probe and a copy. Refusals are never kept, and a name the feed's census does
+  not hold is never kept, so request text cannot grow the memo. Proved by
+  `api::server::tests::calendar_json_is_built_once_per_snapshot`.
 * **W1-api5-6 — `store_html` with a filter.** With `kind=`, `symbol=`,
   `from=` or `to=`, `census::filtered` walks every entry and copies the kept
-  ones: O(E) per request. Unfiltered it borrows and pays O(page).
+  ones: O(E). Unfiltered it borrows and pays O(page). **Since D-2289 the walk
+  is paid once per filter and census snapshot, not per request:** the filtered
+  list is kept (at most `STORE_FILTERS_KEPT` = 8 lists per snapshot), so
+  paging through one filter or polling it is O(page). The first request for a
+  filter after a pull still walks every entry, and that walk is inherent to
+  the predicate: `symbol=` is a case-insensitive SUBSTRING of the symbol, and
+  no index short of one per substring answers "every entry whose symbol
+  contains `x`" without testing each distinct symbol; the walk tests each
+  entry once at O(1) (a substring of at most 24 bytes). Proved by
+  `api::server::tests::a_store_filter_is_walked_once_per_snapshot`.
 * **W1-api5-7 — `verify_json`.** `verify::vendor` walks `Manifest::newest`,
   which builds a set over the whole append log (O(log length)), and opens one
   bar file per held entry, reading its header and two records: O(E_v) file
   opens per request. The route doc said "O(1) per entry ... nothing is read
-  whole"; corrected to name the log walk.
+  whole"; corrected to name the log walk. Since D-2281 the scrub runs on the
+  store-read pool, not on the request's runtime worker (W1-api6-0). The
+  O(E_v) opens are inherent: a scrub is the request to open every month the
+  census claims and check it against the file, and an answer from anything
+  less would be a census validated against itself, which is what the route
+  exists not to be.
 * **W1-api5-8 — `bars_json` past the last bar.** When `from=` lies after the
   month's last stored bar, the bisection returns `n_valid` and the fallback
   reads the whole month to answer `[]`: O(n_valid) reads instead of
-  O(log n_valid). It is kept because the same landing is how a header naming
-  zero-filled records shows itself, and reading the month is what answers
-  that file correctly; a cheaper test that tells the two apart needs a
-  monotonicity proof the record cannot give.
-* **W1-api5-9 — `indexmap_json`.** Per request: `nse_indices.csv` is read and
+  O(log n_valid). **Since D-2280 only in a month born without
+  `FLAG_CHECKSUMS`.** In a sealed month a landing at `n_valid` probed record
+  `n_valid - 1` last and verified its block against the sidecar; a zero-filled
+  tail fails that check and the bisection refuses, so a landing that survives
+  it proves the window empty and `[]` is answered after
+  `ceil(log2(n_valid + 1))` reads. An unsealed month has nothing that detects
+  zero-filled records, which is why it alone keeps the full read: that part
+  is inherent to the file it was born as. Proved by
+  `api::server::tests::bars_json_past_a_sealed_months_last_bar_reads_no_more_than_the_bisection`.
+* **W1-api5-9 — `indexmap_json`.** A build: `nse_indices.csv` is read and
   parsed whole (`indexmap::Published::read`), and every key of the merged
-  universe is filtered to the index symbols: O(file bytes + U).
+  universe is filtered to the index symbols: O(file bytes + U). **Since
+  D-2287 the build runs once per feed, catalogue stamp and universe parse:**
+  the answer is kept under one `stat` of the file (device, inode, length,
+  modified and status-change times, taken before the read) and
+  `Parsed::generation`, so a request on an unchanged catalogue costs that
+  `stat`, one memo probe and a copy of the answer. Any write moves the
+  status-change time, so the stamp moves with it. Proved by
+  `api::answer_memo::tests::a_file_stamp_moves_with_any_write_and_stays_without_one`.
 * **W1-api5-11 — `spot_targets` and `resolved_master_rows`.** `spot_targets`
-  walks every key of the merged universe whatever the target, so `Swept`
-  walks about 2,780 keys to return two: O(U) per pull POST and per
-  `recovery_mapping`. `resolved_master_rows` walks the merged universe and
-  sorts what it keeps: O(U log U) per `POST /universe/resolve`.
+  walked every key of the merged universe whatever the target, so `Swept`
+  walked about 2,780 keys to return two: O(U) per pull POST and per
+  `recovery_mapping`. **Since D-2288 it walks the asked target's own list,**
+  built once per parse in `Parsed::target_keys`, with one `by_key` probe each:
+  O(|target|), the set the request names (two for `Swept`). Proved by
+  `api::server::tests::spot_targets_walk_the_targets_own_list`.
+  `resolved_master_rows` walks the merged universe and sorts what it keeps:
+  O(U log U) per `POST /universe/resolve`. That is inherent to its answer: the
+  route returns one row per instrument the vendor's master resolved, U rows,
+  in sorted order, so the output alone is O(U) and its order costs the sort;
+  it runs on an operator's press, not per request of a page.
 
 ### Corrections to earlier sections
 
@@ -12002,19 +12049,35 @@ no bench row covers these routes, so each is UNVERIFIED as a measurement.
 - **`/boolean-qualified-campaign.json` has no cache (W1-api1-4).**
   `booleancampaignjson::render_qualified` opens
   `QualifiedCampaign` on every GET: O(H) snapshot reads and 2H decodes over the
-  campaign's H acknowledged checkpoints, then H more reads in
-  `require_current`. The reservation walk underneath is bounded by
-  `DIRECTORY_LIMIT` (1,000,000 directories) and every read by
-  `detail::MAX_SCAN_BYTES`. A poll of this route pays the whole history each
-  time.
-- **`/candidate-trades.json` reads the whole sealed catalog five times a page
-  (W1-api2-2).** `candidatejson::render` calls
+  campaign's H acknowledged checkpoints, then H more reads in the
+  `require_current` that ends `open`. **Since D-2284 the route no longer
+  repeats that `require_current` after building the page** (a third pass of H
+  reads that could only refuse a change made after the observation the page
+  reports), so a GET is 2H reads, not 3H. What remains is inherent to what the
+  page states: its `"history_checked":true` says every acknowledged record was
+  read and authenticated for THIS answer, and a cache keyed on file metadata
+  could not see a record that rotted in place with its metadata unchanged, so
+  holding a reader across requests would answer that field falsely. The
+  reservation walk underneath is bounded by `DIRECTORY_LIMIT` (1,000,000
+  directories) and every read by `detail::MAX_SCAN_BYTES`, so the cost is
+  bounded per request though it grows with H; there is no cache by design.
+- **`/candidate-trades.json` read the whole sealed catalog more than once a
+  page (W1-api2-2).** `candidatejson::render` called
   `candidate_trades::read_model` twice itself (open, and the "changed during
-  read" re-check), and `candidate_trades::tier` and `candidates_page` call it
-  three more times through `pinned`. Each read hashes and decodes all of
+  read" re-check); `candidate_trades::tier` and `candidates_page` reach it
+  through `pinned`, which since D-0991 is a generation check for any summary
+  `read_model` returned. Each `read_model` hashes and decodes all of
   `catalog.bin` (32 bytes per candidate side plus 40 per tier), bounded by
-  `MAX_SCAN_BYTES`. So one page of at most 256 rows costs about five times
-  O(catalog bytes). A trade page pays three, or five when its reader is cold.
+  `MAX_SCAN_BYTES`. **Since D-2283 a page of at most 256 rows reads the
+  catalog at most once, and not at all when warm:** `render` takes its summary
+  from `summary_for`, one slot held across requests and re-checked with
+  `require_unchanged` (one shared-lock open, a generation comparison and the
+  start-descriptor check, O(1) in the catalog), and the closing re-check is the
+  same generation check. The slot is dropped and the catalog read cold when
+  the capture key differs or the generation moved (any rewrite, replacement or
+  truncation of `catalog.bin`). Two clients alternating captures make every
+  request cold, as for the trade reader below: that part is the bound of a
+  one-slot cache, not of the route.
 - **The exact candidate trade page keeps one reader (W1-api2-3).**
   `candidatejson::trade_page` holds a single slot; a change of key re-runs
   `TradeReader::open`, which re-reads, re-hashes and re-sums every trade row of
@@ -14485,13 +14548,19 @@ pass over the bars at a once-per-report boundary, O(bars).
 - **`/verify.json` walks the census log and opens every held month, on the
   request's task (W1-api6-0, D-1501).** O(log length) for
   `Manifest::newest`, then one open, one header read and two record reads per
-  held entry, inline in `async fn verify_json`, so the runtime worker serving
-  it is blocked for the whole scrub. Moving it to a blocking pool was not done
-  here. Not timed.
+  held entry. **Since D-2281 it runs on the store-read pool**
+  (`detail::run_store_read` behind `verify_reading`, the same eight-slot bound
+  `/folder.json` and `/indexmap.json` share, 429 past it), so no runtime worker
+  waits on the scrub. The O(log length + E_v) itself is inherent: a scrub is
+  asked to open every month the census claims. Not timed.
 - **The conductor's row count runs on a runtime task (W1-api3-1, D-1502).**
-  The D-1382 entry above states the cost of `pullrun::rows_now`; its ticker
-  calls it inside `tokio::spawn`, so a miss (a whole-manifest read and sort)
-  blocks that runtime worker while it runs. Not timed.
+  The D-1382 entry above states the cost of `pullrun::rows_now`. **Since
+  D-2282 every async caller (the ticker, the pass loop and recovery) goes
+  through `rows_now_off_worker`, which runs the count on `spawn_blocking`**, so
+  a miss no longer holds a runtime worker. The miss's whole-manifest read is
+  the D-1382 cost and is unchanged. Proved by
+  `api::pullrun::tests::the_row_count_runs_off_the_worker_and_a_panic_is_not_a_count`.
+  Not timed.
 - **A Boolean qualification row renders every one of its folds (W1-api2-8,
   D-1502).** `booleanqualification_projection::row_detail` maps all of a
   row's folds into the page: O(F) per row and O(page x F) per page, F bounded

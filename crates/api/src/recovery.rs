@@ -885,7 +885,7 @@ async fn execute(
     attempts: &mut Journal,
     explicit: bool,
 ) -> Result<String, String> {
-    let starting_rows = crate::pullrun::rows_now(site);
+    let starting_rows = crate::pullrun::rows_now_off_worker(site).await;
     let keys: Vec<_> = journal
         .order
         .iter()
@@ -1614,7 +1614,7 @@ async fn retry_day(
             !current.retry_days.is_empty(),
         );
         append_attempt(journal, attempts, item.clone())?;
-        let stored_rows = crate::pullrun::rows_now(site);
+        let stored_rows = crate::pullrun::rows_now_off_worker(site).await;
         update(site, |progress| {
             progress.rows_now = stored_rows;
             progress.retries = progress

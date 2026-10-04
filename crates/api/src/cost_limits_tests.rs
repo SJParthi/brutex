@@ -173,9 +173,16 @@ fn w1_api5_3_the_instrument_list_walks_the_universe_and_every_census_entry() {
             "`bars_by_symbol`",
             "O(E)",
             "O(T log T)",
+            "Since D-2285",
+            "O(answer bytes)",
         ],
     );
-    let route = item(SERVER, "async fn instruments_json(");
+    assert!(
+        item(SERVER, "async fn instruments_json(")
+            .contains(".of_census(&censuses, universe.generation, feed,"),
+        "the route serves the kept answer"
+    );
+    let route = item(SERVER, "fn instruments_answer(");
     assert!(
         route.contains(".by_key\n        .iter()\n        .filter("),
         "{route}"
@@ -228,9 +235,15 @@ fn w1_api5_5_the_calendar_route_sorts_its_feed_per_request_and_its_doc_says_so()
             "O(E_v log E_v)",
             "`agree`",
             "corrected",
+            "Since D-2286",
         ],
     );
-    let route = item(SERVER, "fn calendar_json_reading(");
+    assert!(
+        item(SERVER, "fn calendar_json_reading(")
+            .contains(".of_census(&fresh, 0, (feed, symbol.clone(), stamp),"),
+        "the route serves the kept answer"
+    );
+    let route = item(SERVER, "fn calendar_answer(");
     assert_eq!(
         route
             .matches("census::held_entries(std::slice::from_ref(")
@@ -250,8 +263,17 @@ fn w1_api5_5_the_calendar_route_sorts_its_feed_per_request_and_its_doc_says_so()
 fn w1_api5_6_a_filtered_store_page_walks_and_copies_every_entry() {
     names(
         "W1-api5-6",
-        &["`store_html`", "`census::filtered`", "O(E)", "O(page)"],
+        &[
+            "`store_html`",
+            "`census::filtered`",
+            "O(E)",
+            "O(page)",
+            "Since D-2289",
+            "`STORE_FILTERS_KEPT` = 8",
+            "SUBSTRING",
+        ],
     );
+    assert!(SERVER.contains("const STORE_FILTERS_KEPT: usize = 8;"));
     let filtered = item(CENSUS, "pub fn filtered<'a>(");
     assert!(filtered.contains("Cow::Borrowed(entries)"), "{filtered}");
     assert!(filtered.contains("Cow::Owned("), "{filtered}");
@@ -272,6 +294,8 @@ fn w1_api5_7_a_scrub_walks_the_append_log_and_opens_a_file_per_entry() {
             "O(log length)",
             "O(E_v) file opens",
             "corrected",
+            "Since D-2281",
+            "inherent",
         ],
     );
     assert!(VERIFY.contains("for entry in manifest.newest() {"));
@@ -290,10 +314,23 @@ fn w1_api5_7_a_scrub_walks_the_append_log_and_opens_a_file_per_entry() {
         SERVER.contains("/// `O(log length)` in memory plus `O(E_v)` file opens."),
         "the route's own doc names the log walk"
     );
+    // The scrub runs on the store-read pool, never on the handler's own task
+    // (W1-api6-0, D-2281).
+    let handler = item(SERVER, "async fn verify_json(");
+    assert!(
+        handler.contains("run_store_read(move || verify_reading(&site, feed, &asked))"),
+        "{handler}"
+    );
+    assert!(!handler.contains("crate::verify::vendor("), "{handler}");
+    assert!(!handler.contains("census_now("), "{handler}");
+    assert!(
+        item(SERVER, "fn verify_reading(")
+            .contains("crate::verify::vendor(&site.store_root, census)")
+    );
 }
 
 #[test]
-fn w1_api5_8_a_window_past_the_last_bar_reads_the_month() {
+fn w1_api5_8_a_window_past_the_last_bar_reads_the_month_only_when_unsealed() {
     names(
         "W1-api5-8",
         &[
@@ -301,12 +338,21 @@ fn w1_api5_8_a_window_past_the_last_bar_reads_the_month() {
             "`n_valid`",
             "O(n_valid) reads",
             "zero-filled records",
+            "Since D-2280 only in a month born without `FLAG_CHECKSUMS`",
+            "`ceil(log2(n_valid + 1))` reads",
         ],
     );
     let route = item(SERVER, "async fn bars_json(");
     assert!(
-        route.contains(".filter(|&index| index < held)\n        .unwrap_or(0);"),
-        "a bisection that lands past the end falls back to the whole month: {route}"
+        route.contains(
+            "if landed == Some(held) && file.header().checksums_present() {\n        \
+             return (axum::http::StatusCode::OK, json(), \"[]\".to_owned());"
+        ),
+        "a sealed landing past the end answers from the bisection: {route}"
+    );
+    assert!(
+        route.contains("let begins = landed.filter(|&index| index < held).unwrap_or(0);"),
+        "an unsealed landing past the end still falls back to the whole month: {route}"
     );
 }
 
@@ -318,6 +364,7 @@ fn w1_api5_9_the_index_map_rereads_its_catalogue_and_walks_the_universe() {
             "`indexmap_json`",
             "`indexmap::Published::read`",
             "O(file bytes + U)",
+            "Since D-2287",
         ],
     );
     // The read moved onto the blocking pool with its walk (D-1508); the cost
@@ -327,7 +374,12 @@ fn w1_api5_9_the_index_map_rereads_its_catalogue_and_walks_the_universe() {
         handler.contains("run_store_read(move || indexmap_reading(&site, feed))"),
         "{handler}"
     );
-    let route = item(SERVER, "fn indexmap_reading(");
+    assert!(
+        item(SERVER, "fn indexmap_reading(")
+            .contains("site.indexmap_memo.get(stamp, generation, feed,"),
+        "the read serves the kept answer"
+    );
+    let route = item(SERVER, "fn indexmap_answer(");
     assert!(
         route.contains("crate::indexmap::Published::read(&path)"),
         "{route}"
@@ -345,6 +397,8 @@ fn w1_api5_11_spot_targets_and_resolve_walk_the_universe_whatever_they_return() 
             "O(U)",
             "O(U log U)",
             "`Swept`",
+            "Since D-2288",
+            "O(|target|)",
         ],
     );
     assert!(item(SERVER, "fn spot_targets(").contains(".by_key"));
