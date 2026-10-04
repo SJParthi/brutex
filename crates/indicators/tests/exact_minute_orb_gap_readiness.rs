@@ -131,7 +131,7 @@ fn expected(exact: &[Candle], day: i64, final_minute: i64, close: i64, window: i
         } else {
             truth(
                 (i128::from(close) - i128::from(level)).abs() * 1000
-                    <= i128::from(widths().fib.milli()) * range,
+                    <= i128::from(widths().fib().milli()) * range,
             )
         }
     };

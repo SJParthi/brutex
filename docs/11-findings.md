@@ -768,3 +768,16 @@ is unchanged.
 - **o1eng2-1**: documented in `docs/06-limits.md`. D-1550.
 - **hunt-runner-4**, **o1eng2-2**, **o1eng2-3** and **o1eng2-4**: stale text
   corrected (see D-1550).
+
+### Audit 2026-10-03, fix worker 6 — completions — 2026-10-03
+
+Narrative only. No row is added to the table above, so its disposition tally
+is unchanged.
+
+- **hunt-api-2** (audit-20261003): fixed. A stopping server now cancels
+  running engine work at its structural boundaries and names the
+  cancellation. D-1551, AFF-01, AFF-02.
+- **hunt-api-3** (audit-20261003): fixed. The same-origin path is rationed
+  and counted too. D-1552, AFF-03.
+- **errpaths-4** (audit-20261003): fixed. The `Widths` fields are private.
+  D-1553, AFF-04.

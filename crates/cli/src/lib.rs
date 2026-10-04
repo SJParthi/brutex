@@ -59,6 +59,8 @@ mod audit_publication_tests;
 /// Strict checksum-admitted historical range execution shared by CLI and API.
 pub mod audited_range_command;
 mod audited_stored;
+/// The cooperative stop a stopping server asks engine work to honour (D-1551).
+pub mod cancel;
 /// Independent full-file checksum audit and retained historical admission receipts.
 pub mod checksum_receipts;
 mod columns;
@@ -12100,6 +12102,12 @@ fn screen<'a>(
         .take(priced_cap)
         .enumerate()
         .filter_map(|(rank, scored)| {
+            // ONE CANDIDATE IS A BATCH BOUNDARY: a stopping server is honoured
+            // here, and the screen then refuses as a whole below rather than
+            // returning the candidates it reached (hunt-api-2, D-1551).
+            if crate::cancel::requested() {
+                return None;
+            }
             if pricing
                 .capture
                 .is_some_and(|capture| capture.check().is_err())
@@ -12240,6 +12248,7 @@ fn screen<'a>(
     if let Some(capture) = pricing.capture {
         capture.check()?;
     }
+    crate::cancel::check(|| format!("the exit-grid screen of {} candidates", by_evidence.len()))?;
 
     // PASSERS FIRST, then by net. `Reverse` and not a negation, for the reason
     // `audit::grid` gives: `pessimistic` saturates at `i64::MIN` and negating
@@ -15234,6 +15243,15 @@ pub fn range_over_for_attempt(
     )
 }
 
+/// The stop check before a range table is rendered (hunt-api-2, D-1551).
+fn rungs_not_cancelled(vendor_word: &str, underlying: &str, rungs: usize) -> Result<(), String> {
+    crate::cancel::check(|| {
+        format!(
+            "the {rungs} rung(s) of {underlying} on {vendor_word}, before their table was rendered"
+        )
+    })
+}
+
 /// Sweeps independent rungs in parallel while preserving their input order.
 ///
 /// [`SharedBy`] divides the machine candidate ceiling among exactly the rungs
@@ -15416,6 +15434,12 @@ fn range_over_inner(
         support_ppm,
         attempt,
     );
+    // A STOP ASKED FOR DURING THE RUNGS REFUSES THE WHOLE TABLE. Rungs that
+    // finished before it are real, but a table missing the rest would read as
+    // the complete comparison it is not (hunt-api-2, D-1551).
+    if let Err(why) = rungs_not_cancelled(vendor_word, underlying, rows.len()) {
+        return format!("refused: {why}\n");
+    }
     // EVERY RUNG REFUSED IS A REFUSAL, NOT A REPORT.
     //
     // MEASURED, by attacking this command: `range-all nosuchfeed NIFTY ...`,

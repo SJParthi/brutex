@@ -40,10 +40,11 @@ fn pinned() -> Tolerance {
 
 fn evaluator(tolerance: Tolerance) -> Evaluator {
     Evaluator::with_calendar(
-        Widths {
-            fib: tolerance,
-            pivot: vocab::tolerance::pinned_pivot().expect("pivot width"),
-        },
+        Widths::new(
+            tolerance,
+            vocab::tolerance::pinned_pivot().expect("pivot width"),
+        )
+        .expect("a Fibonacci width on the session range"),
         Availability::Absent,
         Thresholds::CLASSICAL,
         Calendar::all_regular(),
@@ -366,11 +367,11 @@ fn no_previous_session_and_flat_open_keep_gap_predicates_unknown() {
 
 #[test]
 fn gap_midpoint_equality_odd_rounding_wrong_family_and_zero_width_are_exact() {
+    // A wrong or missing family cannot reach an evaluator at all (D-1553).
+    refused_widths();
     for tolerance in [
         pinned(),
         Tolerance::from_milli_on(Base::SessionRange, 0).expect("exact-equality width"),
-        vocab::tolerance::pinned_pivot().expect("wrong family"),
-        Tolerance::from_milli(10).expect("width with no declared family"),
     ] {
         let mut actual = evaluator(tolerance);
         let mut prefix = Vec::new();
@@ -505,4 +506,34 @@ fn a_non_regular_completed_session_does_not_replace_the_previous_session_referen
         !truth.get(49),
         "the skipped high close must not fabricate a gap down"
     );
+}
+
+/// A wrong or missing base is refused by name before any evaluator exists.
+///
+/// The fields of `Widths` are private (errpaths-4, D-1553), so this suite can
+/// no longer hand an evaluator a mismatched width; that degraded path is
+/// proved inside the crate by
+/// `evaluator::tests::a_mismatched_width_is_withheld_as_unknown_and_never_answered`.
+fn refused_widths() {
+    let fib = vocab::tolerance::pinned_fib().expect("pinned Fibonacci width");
+    let pivot = vocab::tolerance::pinned_pivot().expect("pinned pivot width");
+    let baseless = Tolerance::from_milli(10).expect("a width with no base");
+    for wrong in [pivot, baseless] {
+        assert!(matches!(
+            Widths::new(wrong, pivot),
+            Err(vocab::VocabError::WrongBand {
+                expected: Base::SessionRange,
+                ..
+            })
+        ));
+    }
+    for wrong in [fib, baseless] {
+        assert!(matches!(
+            Widths::new(fib, wrong),
+            Err(vocab::VocabError::WrongBand {
+                expected: Base::CprWidth,
+                ..
+            })
+        ));
+    }
 }
