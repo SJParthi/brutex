@@ -17,3 +17,12 @@ Crash/edge pass 6 done: CE-47..49 medium (Rust JSON vs web validator drift, ran 
 Every angle found something new, so each runs another pass on the next zero staging head: re-verify open
 rows (FIXED / NOT FIXED / PARTIAL / WRONG FIX) and review the fix diff. Stop an angle when a pass finds nothing new.
 Note: non-root cargo via setpriv fails in the cloud box (/root, which holds the toolchain, is mode 700).
+
+## Round 2 (same head 1f4de71, new themes) — done 2026-10-04 ~08:20 UTC
+| Angle | Pass | Theme | New findings | Report |
+|---|---|---|---|---|
+| Crash/edge | 7 | calendar and session edges | CE-52 med (outage-day reopening dropped by ingest), CE-53 med (Muhurat-only holiday accepted as expiry), CE-54, CE-55 low | crash-edge-pass7.md |
+| Concurrency | 5 | side files, failed barriers | conc5-1, conc5-2 low | conc-pass5.md |
+| Numeric | 5 | denominators, refused stats shown as numbers | p5num-1 med (calendar gate only on first `top` rows), p5num-2..5 low | numeric-pass5.md |
+| Tests/docs/security | 5 | invariant rows vs code, weak tests, new inputs | P5-01 med (gate 10 fails earlier on RS-08, ZR-44), P5-02..07 low | tests-docs-security-pass5.md |
+All sent to the zero-findings thread. Round 1 + 2 total: 34 new findings. Next: round 3 when the zero head moves (re-verify all open rows), plus new themes if it does not.
