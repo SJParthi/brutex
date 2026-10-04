@@ -31,7 +31,16 @@ fn env_of(pairs: &[(&str, PathBuf)]) -> impl Fn(&str) -> Option<OsString> {
 #[test]
 fn a_day_is_exactly_yyyy_mm_dd() {
     assert_eq!(day("2024-04-01").unwrap().to_string(), "2024-04-01");
-    for bad in ["2024-4-01", "24-04-01", "2024-04-1", "2024/04/01", "2024-04", "2024-04-01-1", "2024-0a-01", "2024-02-30"] {
+    for bad in [
+        "2024-4-01",
+        "24-04-01",
+        "2024-04-1",
+        "2024/04/01",
+        "2024-04",
+        "2024-04-01-1",
+        "2024-0a-01",
+        "2024-02-30",
+    ] {
         assert!(day(bad).is_err(), "{bad}");
     }
 }
@@ -49,7 +58,11 @@ fn every_misuse_is_refused_before_anything_is_read() {
     ];
     for case in cases {
         let mut out = String::new();
-        assert_eq!(command_with(case, &env, &|| Ok(store.clone()), &mut out), MISUSED, "{case:?}");
+        assert_eq!(
+            command_with(case, &env, &|| Ok(store.clone()), &mut out),
+            MISUSED,
+            "{case:?}"
+        );
         assert!(out.starts_with("refused: "), "{out}");
     }
     let mut out = String::new();
@@ -75,7 +88,12 @@ fn a_root_variable_that_is_unset_or_empty_is_named_never_defaulted() {
     ] {
         for env in [env_of(&[]), env_of(&[(var, PathBuf::new())])] {
             let mut out = String::new();
-            let code = command_with(&[kind, source, "2024-04-01", "2024-04-01"], &env, &|| Ok(store.clone()), &mut out);
+            let code = command_with(
+                &[kind, source, "2024-04-01", "2024-04-01"],
+                &env,
+                &|| Ok(store.clone()),
+                &mut out,
+            );
             assert_eq!(code, FAILED, "{source} {kind}");
             assert!(out.contains(var) && out.contains("no default"), "{out}");
         }
@@ -98,7 +116,12 @@ fn an_empty_source_reports_every_day_it_does_not_hold() {
         (CM_ARCHIVE_VAR, cm),
         (NFO_ARCHIVES_VAR, root.join("years")),
     ]);
-    for (source, kind) in [("tickstore", "indices"), ("tickstore", "options"), ("zip", "stocks"), ("zip", "options")] {
+    for (source, kind) in [
+        ("tickstore", "indices"),
+        ("tickstore", "options"),
+        ("zip", "stocks"),
+        ("zip", "options"),
+    ] {
         let mut out = String::new();
         let code = command_with(
             &[kind, source, "2024-04-01", "2024-04-02", "NIFTY"],
@@ -107,7 +130,10 @@ fn an_empty_source_reports_every_day_it_does_not_hold() {
             &mut out,
         );
         assert_eq!(code, OK, "{out}");
-        assert!(out.contains("days not in source  2 2024-04-01 2024-04-02"), "{out}");
+        assert!(
+            out.contains("days not in source  2 2024-04-01 2024-04-02"),
+            "{out}"
+        );
         assert!(out.contains("1s only"), "{out}");
     }
     std::fs::remove_dir_all(root).unwrap();
@@ -118,18 +144,42 @@ fn a_named_failure_or_a_refused_run_exits_failed() {
     let root = scratch("failed");
     let store = root.join("store");
     std::fs::create_dir_all(&store).unwrap();
-    let env = env_of(&[(TICKSTORE_VAR, root.join("ts")), (CM_ARCHIVE_VAR, root.join("absent.zip"))]);
+    let env = env_of(&[
+        (TICKSTORE_VAR, root.join("ts")),
+        (CM_ARCHIVE_VAR, root.join("absent.zip")),
+    ]);
     // A disaster-recovery Saturday: a special session, refused by name.
     let mut out = String::new();
-    let code = command_with(&["indices", "tickstore", "2024-03-02", "2024-03-02"], &env, &|| Ok(store.clone()), &mut out);
+    let code = command_with(
+        &["indices", "tickstore", "2024-03-02", "2024-03-02"],
+        &env,
+        &|| Ok(store.clone()),
+        &mut out,
+    );
     assert_eq!(code, FAILED);
-    assert!(out.contains("failures            1") && out.contains("calendar"), "{out}");
+    assert!(
+        out.contains("failures            1") && out.contains("calendar"),
+        "{out}"
+    );
     let mut out = String::new();
-    let code = command_with(&["indices", "tickstore", "2024-04-02", "2024-04-01"], &env, &|| Ok(store.clone()), &mut out);
+    let code = command_with(
+        &["indices", "tickstore", "2024-04-02", "2024-04-01"],
+        &env,
+        &|| Ok(store.clone()),
+        &mut out,
+    );
     assert_eq!(code, FAILED);
-    assert!(out.contains("GDFL IMPORT REFUSED") && out.contains("backwards"), "{out}");
+    assert!(
+        out.contains("GDFL IMPORT REFUSED") && out.contains("backwards"),
+        "{out}"
+    );
     let mut out = String::new();
-    let code = command_with(&["indices", "zip", "2024-04-01", "2024-04-01"], &env, &|| Ok(store.clone()), &mut out);
+    let code = command_with(
+        &["indices", "zip", "2024-04-01", "2024-04-01"],
+        &env,
+        &|| Ok(store.clone()),
+        &mut out,
+    );
     assert_eq!(code, FAILED);
     assert!(out.contains("absent.zip"), "{out}");
     std::fs::remove_dir_all(root).unwrap();
@@ -138,7 +188,10 @@ fn a_named_failure_or_a_refused_run_exits_failed() {
 #[test]
 fn the_dispatched_verb_reads_the_process_environment() {
     let mut out = String::new();
-    let code = crate::run(&argv(&["gdfl-import", "futures", "zip", "2024-04-01", "2024-04-01"]), &mut out);
+    let code = crate::run(
+        &argv(&["gdfl-import", "futures", "zip", "2024-04-01", "2024-04-01"]),
+        &mut out,
+    );
     assert_eq!(code, MISUSED);
     assert!(out.contains("not a GDFL import kind"), "{out}");
     let mut out = String::new();
@@ -146,6 +199,9 @@ fn the_dispatched_verb_reads_the_process_environment() {
     // A closed day: the edge is read and nothing is written, whatever the
     // environment holds.
     let mut out = String::new();
-    let _ = command(&["indices", "tickstore", "2024-04-06", "2024-04-06"], &mut out);
+    let _ = command(
+        &["indices", "tickstore", "2024-04-06", "2024-04-06"],
+        &mut out,
+    );
     assert!(out.contains("GDFL IMPORT"), "{out}");
 }

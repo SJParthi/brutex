@@ -23,7 +23,11 @@ fn trade() -> Day {
 }
 
 fn contract(ticker: &str, on: Day) -> String {
-    decode_ticker(ticker, on).unwrap().contract.as_str().to_owned()
+    decode_ticker(ticker, on)
+        .unwrap()
+        .contract
+        .as_str()
+        .to_owned()
 }
 
 // ── the contract a ticker names (FORMAT.md §6, revised) ─────────────────────
@@ -38,24 +42,38 @@ fn a_modern_ticker_is_the_day_form_only() {
     assert_eq!(got.underlying.as_str(), "NIFTY");
     assert_eq!(got.contract.as_str(), "2024-04-04-2200000-CE");
     assert_eq!(got.form, TickerForm::Day);
-    assert_eq!(contract("BANKNIFTY10APR2451500PE", trade()), "2024-04-10-5150000-PE");
+    assert_eq!(
+        contract("BANKNIFTY10APR2451500PE", trade()),
+        "2024-04-10-5150000-PE"
+    );
     // From 2020 on every day-form name ALSO parses as YY MON STRIKE
     // (`ACC30` / APR / 201000); only the era keeps them apart.
     let on = day(2020, 4, 1);
     let got = decode_ticker("ACC30APR201000CE", on).unwrap();
-    assert_eq!((got.underlying.as_str(), got.form), ("ACC", TickerForm::Day));
+    assert_eq!(
+        (got.underlying.as_str(), got.form),
+        ("ACC", TickerForm::Day)
+    );
     assert_eq!(got.contract.as_str(), "2020-04-30-100000-CE");
 }
 
 #[test]
 fn decimal_strikes_are_paisa_exactly_and_written_canonically() {
-    for (strike, paisa) in [("2.5", 250), ("77.5", 7_750), ("1012.5", 101_250), ("107.25", 10_725), ("0.5", 50)] {
+    for (strike, paisa) in [
+        ("2.5", 250),
+        ("77.5", 7_750),
+        ("1012.5", 101_250),
+        ("107.25", 10_725),
+        ("0.5", 50),
+    ] {
         let t = format!("ABC25APR24{strike}PE");
         let got = decode_ticker(&t, trade()).unwrap();
         assert_eq!(got.strike, paisa, "{t}");
         assert_eq!(got.ticker_text(), t);
     }
-    for odd in ["100.00", "100.0", "0100", "107.50", "00.5", "1.", ".5", "1.234", "0"] {
+    for odd in [
+        "100.00", "100.0", "0100", "107.50", "00.5", "1.", ".5", "1.234", "0",
+    ] {
         let t = format!("ABC25APR24{odd}PE");
         assert!(decode_ticker(&t, trade()).is_err(), "{t}: not canonical");
     }
@@ -93,21 +111,33 @@ fn before_the_switch_a_stock_reads_monthly_and_its_expiry_is_the_last_thursday()
     assert_eq!(under("TV18BRDCST18DEC24PE", on), "TV18BRDCST");
     // The last Thursday of March 2018, the 29th, was Mahavir Jayanti: the
     // previous trading day, the 28th, is the expiry.
-    assert_eq!(contract("ACC18MAR1300CE", day(2018, 3, 1)), "2018-03-28-130000-CE");
+    assert_eq!(
+        contract("ACC18MAR1300CE", day(2018, 3, 1)),
+        "2018-03-28-130000-CE"
+    );
     // A stock name in the day form before the switch has no reading.
     assert!(matches!(
         decode_ticker("ACC28FEB191260PE", day(2019, 1, 15)),
         Err(NfoRefusal::TickerUnparsed { .. })
     ));
-    assert_eq!(contract("ACC28FEB191260PE", day(2019, 2, 1)), "2019-02-28-126000-PE");
+    assert_eq!(
+        contract("ACC28FEB191260PE", day(2019, 2, 1)),
+        "2019-02-28-126000-PE"
+    );
 }
 
 #[test]
 fn before_the_switch_an_index_weekly_reads_the_day_form_on_any_weekday() {
     // Tue 2018-11-06: a holiday-shifted weekly.
     let got = decode_ticker("BANKNIFTY06NOV1825000CE", day(2018, 11, 1)).unwrap();
-    assert_eq!((got.form, got.contract.as_str()), (TickerForm::Day, "2018-11-06-2500000-CE"));
-    assert_eq!(contract("BANKNIFTY06DEC1826000CE", day(2018, 12, 3)), "2018-12-06-2600000-CE");
+    assert_eq!(
+        (got.form, got.contract.as_str()),
+        (TickerForm::Day, "2018-11-06-2500000-CE")
+    );
+    assert_eq!(
+        contract("BANKNIFTY06DEC1826000CE", day(2018, 12, 3)),
+        "2018-12-06-2600000-CE"
+    );
 }
 
 #[test]
@@ -115,14 +145,31 @@ fn a_name_with_two_readings_or_none_is_refused_by_name() {
     // An index weekly's day reading wins over its monthly one at the same
     // split: 19 Sep 2018 (the holiday-shifted Wednesday), not Sep 2019
     // strike 18,24,800.
-    assert_eq!(contract("BANKNIFTY19SEP1824800PE", day(2018, 9, 10)), "2018-09-19-2480000-PE");
+    assert_eq!(
+        contract("BANKNIFTY19SEP1824800PE", day(2018, 9, 10)),
+        "2018-09-19-2480000-PE"
+    );
     // Two readings, or none, refuse by name.
-    let reading = |at| Ok(Reading { at, form: TickerForm::Day, expiry: trade(), strike: 1 });
+    let reading = |at| {
+        Ok(Reading {
+            at,
+            form: TickerForm::Day,
+            expiry: trade(),
+            strike: 1,
+        })
+    };
     assert_eq!(
         single(vec![reading(1), reading(2)], "T").map(|r| r.at),
-        Err(NfoRefusal::TickerAmbiguous { ticker: "T".to_owned() })
+        Err(NfoRefusal::TickerAmbiguous {
+            ticker: "T".to_owned()
+        })
     );
-    assert_eq!(single(vec![], "T").map(|r| r.at), Err(NfoRefusal::TickerUnparsed { ticker: "T".to_owned() }));
+    assert_eq!(
+        single(vec![], "T").map(|r| r.at),
+        Err(NfoRefusal::TickerUnparsed {
+            ticker: "T".to_owned()
+        })
+    );
     assert_eq!(single(vec![reading(4)], "T").map(|r| r.at), Ok(4));
     // Traded after the expiry the rule derives.
     assert_eq!(
@@ -146,7 +193,10 @@ fn a_name_with_two_readings_or_none_is_refused_by_name() {
 #[test]
 fn an_expiry_on_a_weekday_holiday_is_kept_as_the_vendor_stated_it() {
     // 2024-03-29 was Good Friday, a trading holiday; the name is the identity.
-    assert_eq!(contract("NIFTY29MAR2422000CE", day(2024, 3, 27)), "2024-03-29-2200000-CE");
+    assert_eq!(
+        contract("NIFTY29MAR2422000CE", day(2024, 3, 27)),
+        "2024-03-29-2200000-CE"
+    );
     // A weekend is no day-form reading.
     assert!(decode_ticker("NIFTY06APR2422000CE", trade()).is_err());
 }
@@ -154,7 +204,10 @@ fn an_expiry_on_a_weekday_holiday_is_kept_as_the_vendor_stated_it() {
 #[test]
 fn an_expiry_before_the_trade_day_or_past_the_horizon_is_refused() {
     assert!(decode_ticker("NIFTY28MAR2422000CE", trade()).is_err());
-    assert!(decode_ticker("NIFTY01APR2422000CE", trade()).is_ok(), "the trade day itself");
+    assert!(
+        decode_ticker("NIFTY01APR2422000CE", trade()).is_ok(),
+        "the trade day itself"
+    );
     let name = |d: Day| format!("X{:02}{}{:02}100CE", d.day(), mon(d), d.year() % 100);
     let on = (0..7)
         .map(|k| Day::from_days(trade().days_from_epoch() + k).unwrap())
@@ -164,13 +217,21 @@ fn an_expiry_before_the_trade_day_or_past_the_horizon_is_refused() {
         })
         .unwrap();
     let edge = Day::from_days(on.days_from_epoch() + EXPIRY_HORIZON_DAYS).unwrap();
-    assert!(decode_ticker(&name(edge), on).is_ok(), "{edge}: the last admitted day");
+    assert!(
+        decode_ticker(&name(edge), on).is_ok(),
+        "{edge}: the last admitted day"
+    );
     assert!(decode_ticker(&name(edge.succ().unwrap()), on).is_err());
 }
 
 #[test]
 fn every_other_shape_is_refused_by_name() {
-    for t in ["NIFTY04APR2422000XE".to_owned(), "CE".to_owned(), "NIFTY04APR24CE".to_owned(), format!("{}04APR2422000CE", "N".repeat(TICKER_CAP))] {
+    for t in [
+        "NIFTY04APR2422000XE".to_owned(),
+        "CE".to_owned(),
+        "NIFTY04APR24CE".to_owned(),
+        format!("{}04APR2422000CE", "N".repeat(TICKER_CAP)),
+    ] {
         assert_eq!(
             decode_ticker(&t, trade()),
             Err(NfoRefusal::TickerUnparsed { ticker: t.clone() }),
@@ -189,7 +250,10 @@ fn every_other_shape_is_refused_by_name() {
         decode_ticker("N04APR24100000000CE", trade()),
         Err(NfoRefusal::ContractUnrenderable { .. })
     ));
-    assert!(decode_ticker("N04APR2499999999CE", trade()).is_ok(), "ten paisa digits fit");
+    assert!(
+        decode_ticker("N04APR2499999999CE", trade()).is_ok(),
+        "ten paisa digits fit"
+    );
 }
 
 /// A small seeded generator, so the fuzz is the same run every time.
@@ -210,13 +274,35 @@ impl Rng {
 #[test]
 fn a_million_strings_decode_with_an_exact_round_trip_or_a_named_refusal() {
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
-    let unders = ["NIFTY", "BANKNIFTY", "ACC", "TV18BRDCST", "M&M", "360ONE", "X1", "ADANIENT", "NAM-INDIA", "A"];
+    let unders = [
+        "NIFTY",
+        "BANKNIFTY",
+        "ACC",
+        "TV18BRDCST",
+        "M&M",
+        "360ONE",
+        "X1",
+        "ADANIENT",
+        "NAM-INDIA",
+        "A",
+    ];
     let days = ["01", "04", "06", "18", "24", "28", "30", "31", "00", "1"];
-    let mons = ["JAN", "FEB", "MAR", "APR", "JUN", "AUG", "SEP", "DEC", "XYZ", "Dec"];
+    let mons = [
+        "JAN", "FEB", "MAR", "APR", "JUN", "AUG", "SEP", "DEC", "XYZ", "Dec",
+    ];
     let years = ["18", "19", "20", "24", "26", "30", "99", "00", "1"];
-    let strikes = ["5", "24", "195", "2.5", "77.5", "1012.5", "10500", "22000", "100.00", "0", "1.234", ""];
+    let strikes = [
+        "5", "24", "195", "2.5", "77.5", "1012.5", "10500", "22000", "100.00", "0", "1.234", "",
+    ];
     let sides = ["CE", "PE", "XE", ""];
-    let trades = [day(2018, 9, 3), day(2018, 12, 3), day(2019, 1, 31), day(2019, 2, 1), day(2024, 4, 1), day(2026, 8, 3)];
+    let trades = [
+        day(2018, 9, 3),
+        day(2018, 12, 3),
+        day(2019, 1, 31),
+        day(2019, 2, 1),
+        day(2024, 4, 1),
+        day(2026, 8, 3),
+    ];
     let alphabet = b"0123456789ACDEFJNOPRSUY.-&";
     let (mut decoded, mut refused) = (0_u32, 0_u32);
     for i in 0..1_000_000_u32 {
@@ -230,7 +316,11 @@ fn a_million_strings_decode_with_an_exact_round_trip_or_a_named_refusal() {
                 rng.pick(&strikes),
                 rng.pick(&sides),
             );
-            if monthly { format!("{u}{y}{m}{s}{side}") } else { format!("{u}{d}{m}{y}{s}{side}") }
+            if monthly {
+                format!("{u}{y}{m}{s}{side}")
+            } else {
+                format!("{u}{d}{m}{y}{s}{side}")
+            }
         } else {
             let len = 1 + rng.next() % 30;
             (0..len)
@@ -250,21 +340,40 @@ fn a_million_strings_decode_with_an_exact_round_trip_or_a_named_refusal() {
         }
     }
     assert_eq!(decoded + refused, 1_000_000);
-    assert!(decoded > 10_000, "the sweep decodes a real share: {decoded}");
+    assert!(
+        decoded > 10_000,
+        "the sweep decodes a real share: {decoded}"
+    );
 }
 
 #[test]
 fn the_monthly_rule_walks_back_over_holidays_and_refuses_the_unmeasured() {
     assert_eq!(monthly_expiry(2018, 12), Some(day(2018, 12, 27)));
-    assert_eq!(monthly_expiry(2018, 3), Some(day(2018, 3, 28)), "Thu 29 Mar was a holiday");
+    assert_eq!(
+        monthly_expiry(2018, 3),
+        Some(day(2018, 3, 28)),
+        "Thu 29 Mar was a holiday"
+    );
     // Every month of the name census's monthly expiry table
     // (state/name-census/monthly-expiry-table.txt: last Thursday, previous
     // trading day on a holiday, equal to the vendor's last trade and dated
     // twins).
     for (y, m, d) in [
-        (2018, 9, 27), (2018, 10, 25), (2018, 11, 29), (2018, 12, 27), (2019, 1, 31),
-        (2019, 2, 28), (2019, 3, 28), (2019, 6, 27), (2019, 9, 26), (2019, 12, 26),
-        (2020, 6, 25), (2020, 12, 31), (2021, 6, 24), (2021, 12, 30), (2022, 12, 29),
+        (2018, 9, 27),
+        (2018, 10, 25),
+        (2018, 11, 29),
+        (2018, 12, 27),
+        (2019, 1, 31),
+        (2019, 2, 28),
+        (2019, 3, 28),
+        (2019, 6, 27),
+        (2019, 9, 26),
+        (2019, 12, 26),
+        (2020, 6, 25),
+        (2020, 12, 31),
+        (2021, 6, 24),
+        (2021, 12, 30),
+        (2022, 12, 29),
     ] {
         assert_eq!(monthly_expiry(y, m), Some(day(y, m, d)), "{y}-{m}");
     }
@@ -272,7 +381,10 @@ fn the_monthly_rule_walks_back_over_holidays_and_refuses_the_unmeasured() {
     assert_eq!(monthly_expiry(2018, 13), None);
     assert_eq!(DAY_FORM_FROM_DAYS, day(2019, 2, 1).days_from_epoch());
     let ticker = decode_ticker("ACC18DEC1300PE", day(2018, 12, 3)).unwrap();
-    assert_eq!((ticker.expiry, ticker.side, ticker.strike), (day(2018, 12, 27), OptionSide::Put, 130_000));
+    assert_eq!(
+        (ticker.expiry, ticker.side, ticker.strike),
+        (day(2018, 12, 27), OptionSide::Put, 130_000)
+    );
 }
 
 #[test]
@@ -289,7 +401,11 @@ fn weekday_and_month_helpers_hold_their_edges() {
     assert!(is_weekday(day(2024, 4, 8)));
     assert!(is_weekday(day(2024, 4, 5)));
     for (at, name) in MONTHS.iter().enumerate() {
-        assert_eq!(month_of(name.as_bytes()), Some(u8::try_from(at + 1).unwrap()), "{name}");
+        assert_eq!(
+            month_of(name.as_bytes()),
+            Some(u8::try_from(at + 1).unwrap()),
+            "{name}"
+        );
     }
     assert_eq!(month_of(b"JAN"), Some(1));
     assert_eq!(month_of(b"DEC"), Some(12));
@@ -350,13 +466,28 @@ fn rows(spec: &[(u32, &str, u64, u64)]) -> Vec<String> {
 
 #[test]
 fn every_row_decodes_in_file_order_with_its_open_interest() {
-    let bytes = csv(&rows(&[(33_301, "9.9", 0, 260), (33_300, "10.05", 75, 300)]));
+    let bytes = csv(&rows(&[
+        (33_301, "9.9", 0, 260),
+        (33_300, "10.05", 75, 300),
+    ]));
     let got = decode(&bytes, STEM, trade()).unwrap();
     assert_eq!(
         got.rows,
         vec![
-            NfoRow { line: 2, sod: 33_301, ltp: 990, ltq: 0, oi: 260 },
-            NfoRow { line: 3, sod: 33_300, ltp: 1_005, ltq: 75, oi: 300 },
+            NfoRow {
+                line: 2,
+                sod: 33_301,
+                ltp: 990,
+                ltq: 0,
+                oi: 260
+            },
+            NfoRow {
+                line: 3,
+                sod: 33_300,
+                ltp: 1_005,
+                ltq: 75,
+                oi: 300
+            },
         ]
     );
 }
@@ -372,7 +503,12 @@ fn line_endings_headers_and_a_missing_final_newline_are_read() {
     assert_eq!(got.rows.len(), 2);
     assert_eq!(got.rows[1].ltp, 200);
     let header_only = format!("{HEADER_OPEN_INTEREST}\r\n");
-    assert!(decode(header_only.as_bytes(), STEM, trade()).unwrap().rows.is_empty());
+    assert!(
+        decode(header_only.as_bytes(), STEM, trade())
+            .unwrap()
+            .rows
+            .is_empty()
+    );
 }
 
 #[test]
@@ -382,48 +518,111 @@ fn every_row_fault_is_refused_by_name_at_its_line() {
         let bytes = csv(&[rows(&[(33_299, "10", 1, 5)])[0].clone(), line.clone()]);
         assert_eq!(decode(&bytes, STEM, trade()), Err(want), "{line}");
     };
-    check(good.replacen(STEM, "OTHER.NFO", 1), NfoRefusal::TickerMismatch { line: 3 });
-    check(good.replacen("/04/", "/05/", 1), NfoRefusal::DateMismatch { line: 3 });
-    check(good.replacen("09:15:00", "9:15:00", 1), NfoRefusal::MalformedRow { line: 3 });
-    check(good.replacen("09:15:00", "24:00:00", 1), NfoRefusal::MalformedRow { line: 3 });
-    check(good.replacen("09:15:00", "09:60:00", 1), NfoRefusal::MalformedRow { line: 3 });
-    check(good.replacen("09:15:00", "09:15:60", 1), NfoRefusal::MalformedRow { line: 3 });
-    check(good.rsplit_once(',').unwrap().0.to_owned(), NfoRefusal::MalformedRow { line: 3 });
+    check(
+        good.replacen(STEM, "OTHER.NFO", 1),
+        NfoRefusal::TickerMismatch { line: 3 },
+    );
+    check(
+        good.replacen("/04/", "/05/", 1),
+        NfoRefusal::DateMismatch { line: 3 },
+    );
+    check(
+        good.replacen("09:15:00", "9:15:00", 1),
+        NfoRefusal::MalformedRow { line: 3 },
+    );
+    check(
+        good.replacen("09:15:00", "24:00:00", 1),
+        NfoRefusal::MalformedRow { line: 3 },
+    );
+    check(
+        good.replacen("09:15:00", "09:60:00", 1),
+        NfoRefusal::MalformedRow { line: 3 },
+    );
+    check(
+        good.replacen("09:15:00", "09:15:60", 1),
+        NfoRefusal::MalformedRow { line: 3 },
+    );
+    check(
+        good.rsplit_once(',').unwrap().0.to_owned(),
+        NfoRefusal::MalformedRow { line: 3 },
+    );
     check(format!("{good},0"), NfoRefusal::MalformedRow { line: 3 });
-    check(good.replacen(",10,0,0,0,0,", ",10,x,0,0,0,", 1), NfoRefusal::MalformedRow { line: 3 });
-    check(good.replacen(",10,0,0,0,0,", ",10,0,x,0,0,", 1), NfoRefusal::MalformedRow { line: 3 });
-    check(good.replacen(",10,0,0,0,0,", ",10,0,0,x,0,", 1), NfoRefusal::MalformedRow { line: 3 });
-    check(good.replacen(",10,0,0,0,0,", ",10,0,0,0,x,", 1), NfoRefusal::MalformedRow { line: 3 });
-    check(good.replacen(",0,0,1,5", ",0,0,x,5", 1), NfoRefusal::MalformedRow { line: 3 });
+    check(
+        good.replacen(",10,0,0,0,0,", ",10,x,0,0,0,", 1),
+        NfoRefusal::MalformedRow { line: 3 },
+    );
+    check(
+        good.replacen(",10,0,0,0,0,", ",10,0,x,0,0,", 1),
+        NfoRefusal::MalformedRow { line: 3 },
+    );
+    check(
+        good.replacen(",10,0,0,0,0,", ",10,0,0,x,0,", 1),
+        NfoRefusal::MalformedRow { line: 3 },
+    );
+    check(
+        good.replacen(",10,0,0,0,0,", ",10,0,0,0,x,", 1),
+        NfoRefusal::MalformedRow { line: 3 },
+    );
+    check(
+        good.replacen(",0,0,1,5", ",0,0,x,5", 1),
+        NfoRefusal::MalformedRow { line: 3 },
+    );
     check(
         good.replacen(",0,0,1,5", ",0,0,99999999999999999999,5", 1),
         NfoRefusal::MalformedRow { line: 3 },
     );
-    check(good.replacen(",1,5", ",1,x", 1), NfoRefusal::MalformedRow { line: 3 });
+    check(
+        good.replacen(",1,5", ",1,x", 1),
+        NfoRefusal::MalformedRow { line: 3 },
+    );
     check(
         good.replacen(",1,5", ",1,9223372036854775808", 1),
         NfoRefusal::OpenInterestRefused { line: 3 },
     );
-    check(good.replacen(",10,", ",10.001,", 1), NfoRefusal::PriceRefused { line: 3 });
-    check(good.replacen(",10,", ",-10,", 1), NfoRefusal::PriceRefused { line: 3 });
-    check(good.replacen(",10,", ",0,", 1), NfoRefusal::PriceRefused { line: 3 });
-    check(good.replacen(",10,", ",0.00,", 1), NfoRefusal::PriceRefused { line: 3 });
+    check(
+        good.replacen(",10,", ",10.001,", 1),
+        NfoRefusal::PriceRefused { line: 3 },
+    );
+    check(
+        good.replacen(",10,", ",-10,", 1),
+        NfoRefusal::PriceRefused { line: 3 },
+    );
+    check(
+        good.replacen(",10,", ",0,", 1),
+        NfoRefusal::PriceRefused { line: 3 },
+    );
+    check(
+        good.replacen(",10,", ",0.00,", 1),
+        NfoRefusal::PriceRefused { line: 3 },
+    );
     let penny = csv(&[good.replacen(",10,", ",0.01,", 1)]);
-    assert_eq!(decode(&penny, STEM, trade()).unwrap().rows[0].ltp, 1, "one paisa traded is a price");
+    assert_eq!(
+        decode(&penny, STEM, trade()).unwrap().rows[0].ltp,
+        1,
+        "one paisa traded is a price"
+    );
     check(
         good.replacen(",10,", ",92233720368547758.08,", 1),
         NfoRefusal::PriceRefused { line: 3 },
     );
     let mut bad = csv(&[good.clone()]);
     bad.insert(bad.len() - 3, 0xFF);
-    assert_eq!(decode(&bad, STEM, trade()), Err(NfoRefusal::MalformedRow { line: 2 }));
+    assert_eq!(
+        decode(&bad, STEM, trade()),
+        Err(NfoRefusal::MalformedRow { line: 2 })
+    );
 }
 
 #[test]
 fn a_zero_price_is_admitted_only_on_a_row_with_no_trade() {
     let bytes = csv(&rows(&[(33_300, "0", 0, 9)]));
     assert_eq!(decode(&bytes, STEM, trade()).unwrap().rows[0].ltp, 0);
-    let at_max = csv(&rows(&[(33_300, "92233720368547758.07", 1, 9_223_372_036_854_775_807)]));
+    let at_max = csv(&rows(&[(
+        33_300,
+        "92233720368547758.07",
+        1,
+        9_223_372_036_854_775_807,
+    )]));
     let got = decode(&at_max, STEM, trade()).unwrap();
     assert_eq!((got.rows[0].ltp, got.rows[0].oi), (i64::MAX, i64::MAX));
 }
@@ -431,7 +630,10 @@ fn a_zero_price_is_admitted_only_on_a_row_with_no_trade() {
 #[test]
 fn the_header_and_the_row_bound_are_refused_by_name() {
     assert_eq!(decode(b"", STEM, trade()), Err(NfoRefusal::HeaderUnknown));
-    assert_eq!(decode(b"Ticker,Date\r\n", STEM, trade()), Err(NfoRefusal::HeaderUnknown));
+    assert_eq!(
+        decode(b"Ticker,Date\r\n", STEM, trade()),
+        Err(NfoRefusal::HeaderUnknown)
+    );
     let three = csv(&rows(&[(1, "1", 1, 0), (2, "1", 1, 0), (3, "1", 1, 0)]));
     assert!(decode_capped(&three, STEM, trade(), 3).is_ok());
     assert_eq!(
@@ -451,8 +653,14 @@ fn only_option_files_of_the_day_folder_are_filed_by_ticker() {
     let d = trade();
     let folder = day_folder_name(d);
     assert_eq!(folder, "GFDLNFO_TICK_01042024");
-    assert_eq!(entry_ticker(&folder, &entry(d, "NIFTY04APR2422000CE")), Some("NIFTY04APR2422000CE"));
-    assert_eq!(entry_ticker(&folder, &format!("{folder}/Options/A01APR241CE.NFO.CSV")), Some("A01APR241CE"));
+    assert_eq!(
+        entry_ticker(&folder, &entry(d, "NIFTY04APR2422000CE")),
+        Some("NIFTY04APR2422000CE")
+    );
+    assert_eq!(
+        entry_ticker(&folder, &format!("{folder}/Options/A01APR241CE.NFO.CSV")),
+        Some("A01APR241CE")
+    );
     for other in [
         format!("{folder}\\Futures\\NIFTY-I.NFO.csv"),
         format!("{folder}\\Options\\"),
@@ -481,7 +689,12 @@ fn a_ticker_listed_twice_is_refused_by_name() {
     let d = trade();
     let mut listing: NfoDay<u8> = NfoDay::new(d, 2);
     listing.push(&entry(d, "A01APR241CE"), 3, 4, 0);
-    listing.push(&format!("{}\\Options\\A01APR241CE.NFO.CSV", day_folder_name(d)), 3, 4, 1);
+    listing.push(
+        &format!("{}\\Options\\A01APR241CE.NFO.CSV", day_folder_name(d)),
+        3,
+        4,
+        1,
+    );
     assert_eq!(
         listing.locate("A01APR241CE"),
         Err(NfoRefusal::DuplicateTicker {
@@ -503,16 +716,30 @@ fn the_tick_store_and_the_zips_give_the_same_file() {
     let d = trade();
     let one = file_bytes("NIFTY04APR2422000CE", &[(33_300, "10", 75, 300)]);
     let two = file_bytes("NIFTY04APR2422000PE", &[(33_301, "12.5", 50, 100)]);
-    let (e1, e2) = (entry(d, "NIFTY04APR2422000CE"), entry(d, "NIFTY04APR2422000PE"));
+    let (e1, e2) = (
+        entry(d, "NIFTY04APR2422000CE"),
+        entry(d, "NIFTY04APR2422000PE"),
+    );
     let root = scratch("nfo-both");
     let store = NfoTickStore::new(&root.join("ts"));
     let path = store.day_path(d);
-    assert!(path.ends_with("options/2024/APR_2024/GFDLNFO_TICK_01042024.bts"), "{path:?}");
-    put(&root.join("ts"), "options/2024/APR_2024/GFDLNFO_TICK_01042024.bts", &bts(&[(&e1, &one), (&e2, &two)]));
+    assert!(
+        path.ends_with("options/2024/APR_2024/GFDLNFO_TICK_01042024.bts"),
+        "{path:?}"
+    );
+    put(
+        &root.join("ts"),
+        "options/2024/APR_2024/GFDLNFO_TICK_01042024.bts",
+        &bts(&[(&e1, &one), (&e2, &two)]),
+    );
     let day_zip = zip(&[(&e1, &one, Method::Deflated), (&e2, &two, Method::Stored)]);
     let year = zip(&[
         ("APR_2024/", b"", Method::Stored),
-        ("APR_2024/GFDLNFO_TICK_01042024.zip", &day_zip, Method::Stored),
+        (
+            "APR_2024/GFDLNFO_TICK_01042024.zip",
+            &day_zip,
+            Method::Stored,
+        ),
     ]);
     put(&root.join("zips"), "2024.zip", &year);
     let zips = NfoZips::new(&root.join("zips"));
@@ -533,7 +760,10 @@ fn the_tick_store_and_the_zips_give_the_same_file() {
     // A day neither holds.
     assert!(store.day(day(2024, 4, 2)).unwrap().is_none());
     assert!(zips.day(day(2024, 4, 2)).unwrap().is_none());
-    assert!(zips.day(day(2025, 4, 2)).unwrap().is_none(), "no year zip at all");
+    assert!(
+        zips.day(day(2025, 4, 2)).unwrap().is_none(),
+        "no year zip at all"
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -545,7 +775,11 @@ fn every_fault_of_a_source_is_refused_by_name() {
     let e1 = entry(d, ticker);
     let root = scratch("nfo-faults");
     // A stated CRC that is not the bytes'.
-    put(&root, "a/options/2024/APR_2024/GFDLNFO_TICK_01042024.bts", &bts_stating(&[(&e1, &one, 7)]));
+    put(
+        &root,
+        "a/options/2024/APR_2024/GFDLNFO_TICK_01042024.bts",
+        &bts_stating(&[(&e1, &one, 7)]),
+    );
     let store = NfoTickStore::new(&root.join("a"));
     let listing = store.day(d).unwrap().unwrap();
     assert!(matches!(
@@ -555,7 +789,11 @@ fn every_fault_of_a_source_is_refused_by_name() {
     // A corrupt block.
     let mut broken = bts(&[(&e1, &one)]);
     broken[9] ^= 0xFF;
-    put(&root, "b/options/2024/APR_2024/GFDLNFO_TICK_01042024.bts", &broken);
+    put(
+        &root,
+        "b/options/2024/APR_2024/GFDLNFO_TICK_01042024.bts",
+        &broken,
+    );
     let store = NfoTickStore::new(&root.join("b"));
     let listing = store.day(d).unwrap().unwrap();
     assert!(matches!(
@@ -563,7 +801,11 @@ fn every_fault_of_a_source_is_refused_by_name() {
         Err(NfoRefusal::Source(CmRefusal::TickStoreMalformed { .. }))
     ));
     // Not a day file at all.
-    put(&root, "c/options/2024/APR_2024/GFDLNFO_TICK_01042024.bts", b"nope");
+    put(
+        &root,
+        "c/options/2024/APR_2024/GFDLNFO_TICK_01042024.bts",
+        b"nope",
+    );
     assert!(matches!(
         NfoTickStore::new(&root.join("c")).day(d),
         Err(CmRefusal::TickStoreMalformed { .. })
@@ -605,7 +847,11 @@ fn every_fault_of_the_yearly_zip_is_refused_by_name() {
     };
     // Two day zips for one day.
     assert_eq!(
-        open(zip(&[(name, &day_zip, Method::Stored), (name, &day_zip, Method::Stored)])).err(),
+        open(zip(&[
+            (name, &day_zip, Method::Stored),
+            (name, &day_zip, Method::Stored)
+        ]))
+        .err(),
         Some(CmRefusal::ArchiveDuplicateDay { day: d })
     );
     // A day zip that is itself compressed in the year zip.
@@ -614,7 +860,10 @@ fn every_fault_of_the_yearly_zip_is_refused_by_name() {
         Some(CmRefusal::ArchiveMemberCompressed { .. })
     ));
     // Not a zip.
-    assert!(matches!(open(b"nope".to_vec()).err(), Some(CmRefusal::ArchiveMalformed { .. })));
+    assert!(matches!(
+        open(b"nope".to_vec()).err(),
+        Some(CmRefusal::ArchiveMalformed { .. })
+    ));
     // A member whose deflate stream is cut: corrupt or short, never accepted.
     let year = zip(&[(name, &day_zip, Method::Stored)]);
     let listing = open(year.clone()).unwrap().unwrap();

@@ -555,7 +555,11 @@ fn spread(label: &str, n: u32, mut op: impl FnMut()) {
         })
         .collect();
     ns.sort_unstable();
-    let at = |q: usize| ns.get(ns.len().saturating_sub(1) * q / 100).copied().unwrap_or(0);
+    let at = |q: usize| {
+        ns.get(ns.len().saturating_sub(1) * q / 100)
+            .copied()
+            .unwrap_or(0)
+    };
     println!(
         "  {label:<44} p50 {:>8} ns  p99 {:>8} ns  max {:>10} ns  n={n}",
         at(50),
@@ -580,11 +584,17 @@ fn option_day(n: u32) -> pull::gdfl_nfo::NfoDay<u32> {
 fn gdfl_option_lookup_is_flat() -> bool {
     let (one, ten, hundred) = (option_day(1_000), option_day(10_000), option_day(100_000));
     let probe = |l: &pull::gdfl_nfo::NfoDay<u32>| {
-        cost_ps(20_000, || black_box(l).locate(black_box("X77727AUG26100CE")).is_ok())
+        cost_ps(20_000, || {
+            black_box(l).locate(black_box("X77727AUG26100CE")).is_ok()
+        })
     };
     let base = probe(&one);
     let a = ratio("C-GI-01 option file by ticker, 10x day", base, probe(&ten));
-    let b = ratio("C-GI-01 option file by ticker, 100x day", base, probe(&hundred));
+    let b = ratio(
+        "C-GI-01 option file by ticker, 100x day",
+        base,
+        probe(&hundred),
+    );
     spread("C-GI-01 option file by ticker, 100x day", 20_000, || {
         black_box(hundred.locate(black_box("X99999827AUG26100CE")).is_ok());
     });
@@ -607,11 +617,17 @@ fn stock_day(n: u32) -> pull::gdfl_cm::DayListing<u32> {
 fn gdfl_stock_lookup_is_flat() -> bool {
     let (one, ten, hundred) = (stock_day(1_000), stock_day(10_000), stock_day(100_000));
     let probe = |l: &pull::gdfl_cm::DayListing<u32>| {
-        cost_ps(20_000, || black_box(l).locate(black_box("RELIANCE.NSE")).is_ok())
+        cost_ps(20_000, || {
+            black_box(l).locate(black_box("RELIANCE.NSE")).is_ok()
+        })
     };
     let base = probe(&one);
     let a = ratio("C-GI-02 share file by stem, 10x day", base, probe(&ten));
-    let b = ratio("C-GI-02 share file by stem, 100x day", base, probe(&hundred));
+    let b = ratio(
+        "C-GI-02 share file by stem, 100x day",
+        base,
+        probe(&hundred),
+    );
     spread("C-GI-02 share file by stem, 100x day", 20_000, || {
         black_box(hundred.locate(black_box("RELIANCE.NSE")).is_ok());
     });
@@ -661,7 +677,9 @@ fn gdfl_second_by_index_is_flat() -> bool {
     let one = second_month(&root.join("1"), 1_000);
     let ten = second_month(&root.join("10"), 10_000);
     let hundred = second_month(&root.join("100"), 100_000);
-    let read = |f: &store::file::BarFile| cost_ps(20_000, || black_box(f).read_record(black_box(500)).is_ok());
+    let read = |f: &store::file::BarFile| {
+        cost_ps(20_000, || black_box(f).read_record(black_box(500)).is_ok())
+    };
     let base = read(&one);
     let a = ratio("C-GI-03 second by index, 10x month", base, read(&ten));
     let b = ratio("C-GI-03 second by index, 100x month", base, read(&hundred));
@@ -669,14 +687,17 @@ fn gdfl_second_by_index_is_flat() -> bool {
         black_box(hundred.read_record(black_box(77_777)).is_ok());
     });
     let at = (1_785_729_900_i64 + 77_777) * 1_000_000;
-    spread("second by TIME (bisection, a limit, NOT O(1))", 20_000, || {
-        black_box(hundred.first_at_or_after(black_box(at)).is_ok());
-    });
+    spread(
+        "second by TIME (bisection, a limit, NOT O(1))",
+        20_000,
+        || {
+            black_box(hundred.first_at_or_after(black_box(at)).is_ok());
+        },
+    );
     drop((one, ten, hundred));
     let _cleanup = std::fs::remove_dir_all(&root);
     a && b
 }
-
 
 fn main() {
     println!("gate 8 — crates/pull, ceiling {CEILING_PERMILLE} permille");

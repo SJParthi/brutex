@@ -87,7 +87,9 @@ use store::format::{Bar, OI_NULL};
 
 use crate::fetch::BarRequest;
 use crate::fold::{Bucket, fold};
-use crate::gdfl_cm::{CmKind, CmRefusal, CmSource, Resolution, read_listed, resolve, session_gate, split_name};
+use crate::gdfl_cm::{
+    CmKind, CmRefusal, CmSource, Resolution, read_listed, resolve, session_gate, split_name,
+};
 use crate::gdfl_nfo::{NfoRefusal, NfoSource, decode_ticker, read_file};
 use crate::ingest::{Failure, Ingested, Plan, from_rows, record_held};
 use crate::manifest::Held;
@@ -342,10 +344,7 @@ pub fn convert(kind: ImportKind, day: Day, ticks: &[Tick]) -> Result<Converted, 
         },
     };
     let seconds = fold(&rows, Bucket::SECOND).map_err(refused)?;
-    Ok(Converted {
-        seconds,
-        placement,
-    })
+    Ok(Converted { seconds, placement })
 }
 
 /// The second of `day` a bucket starting at `ts_micros` names.
@@ -531,7 +530,8 @@ impl Journal {
             .append(true)
             .open(&self.path)
             .map_err(refused)?;
-        file.write_all(format!("{line}\n").as_bytes()).map_err(refused)?;
+        file.write_all(format!("{line}\n").as_bytes())
+            .map_err(refused)?;
         file.sync_all().map_err(refused)
     }
 }
@@ -721,9 +721,12 @@ where
             report.resumed.push(day);
             let day_text = day.to_string();
             note(
-                &telemetry::Event::warn(TARGET, "resuming a day an earlier run began and did not finish")
-                    .with("kind", run.kind.as_str())
-                    .with("day", day_text.as_str()),
+                &telemetry::Event::warn(
+                    TARGET,
+                    "resuming a day an earlier run began and did not finish",
+                )
+                .with("kind", run.kind.as_str())
+                .with("day", day_text.as_str()),
             );
         }
         let before = report.clone();
@@ -781,7 +784,10 @@ where
                 .with("files", report.files - before.files)
                 .with("rows", report.rows - before.rows)
                 .with("seconds", report.seconds - before.seconds)
-                .with("committed", report.seconds_committed - before.seconds_committed)
+                .with(
+                    "committed",
+                    report.seconds_committed - before.seconds_committed,
+                )
                 .with("failures", failures.len()),
         );
         report.failures.extend(failures);
@@ -926,7 +932,8 @@ fn nfo_day<S: NfoSource>(
     read.held = true;
     // Two tickers of the day naming one contract would file into one path:
     // counted first, and every one of them refused by name.
-    let mut named: HashMap<(String, Contract), usize> = HashMap::with_capacity(listing.entries().len());
+    let mut named: HashMap<(String, Contract), usize> =
+        HashMap::with_capacity(listing.entries().len());
     for file in listing.entries() {
         if let Some(Ok(decoded)) = listing.ticker_of(file).map(|t| decode_ticker(t, day)) {
             *named
@@ -942,7 +949,9 @@ fn nfo_day<S: NfoSource>(
         let wanted = match decode_ticker(ticker, day) {
             Ok(decoded)
                 if run.wants(decoded.underlying.as_str())
-                    && named.get(&(decoded.underlying.as_str().to_owned(), decoded.contract)) > Some(&1) => {
+                    && named.get(&(decoded.underlying.as_str().to_owned(), decoded.contract))
+                        > Some(&1) =>
+            {
                 read.refused.push(Failure {
                     instrument: ticker.to_owned(),
                     why: NfoRefusal::ContractNamedTwice {
@@ -954,7 +963,13 @@ fn nfo_day<S: NfoSource>(
             }
             Ok(decoded) => run.wants(decoded.underlying.as_str()),
             // A name that does not decode is refused when it could be wanted.
-            Err(_) => run.only.is_empty() || run.only.iter().any(|only| ticker.starts_with(only.as_str())),
+            Err(_) => {
+                run.only.is_empty()
+                    || run
+                        .only
+                        .iter()
+                        .any(|only| ticker.starts_with(only.as_str()))
+            }
         };
         if !wanted {
             read.skipped += 1;

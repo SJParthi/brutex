@@ -77,7 +77,9 @@ use brutex_core::instrument::{Contract, Expiry, Kind, OptionSide};
 use brutex_core::price::Paisa;
 use brutex_core::symbol::Symbol;
 
-use crate::gdfl_archive::{MONTHS, ReadAt, ZipEntry, ZipLocator, member_bytes, stored_span, zip_entries};
+use crate::gdfl_archive::{
+    MONTHS, ReadAt, ZipEntry, ZipLocator, member_bytes, stored_span, zip_entries,
+};
 use crate::gdfl_cm::{CmRefusal, HEADER_OPEN_INTEREST, HEADER_OPEN_INTEREST_SPACED, ListedFile};
 use crate::gdfl_tickstore::{IndexEntry, read_index, rebuild};
 use crate::session::Day;
@@ -193,7 +195,10 @@ impl core::fmt::Display for NfoRefusal {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::TickerUnparsed { ticker } => {
-                write!(f, "{ticker}: the ticker reads as neither GDFL option format")
+                write!(
+                    f,
+                    "{ticker}: the ticker reads as neither GDFL option format"
+                )
             }
             Self::TickerAmbiguous { ticker } => write!(
                 f,
@@ -212,10 +217,16 @@ impl core::fmt::Display for NfoRefusal {
                 "{ticker}: traded after the expiry NSE's last-Thursday rule derives; rule and vendor disagree"
             ),
             Self::UnderlyingRefused { ticker } => {
-                write!(f, "{ticker}: the underlying is not a symbol the store can file")
+                write!(
+                    f,
+                    "{ticker}: the underlying is not a symbol the store can file"
+                )
             }
             Self::ContractUnrenderable { ticker } => {
-                write!(f, "{ticker}: the contract does not fit the store's contract segment")
+                write!(
+                    f,
+                    "{ticker}: the contract does not fit the store's contract segment"
+                )
             }
             Self::DuplicateTicker { ticker } => {
                 write!(f, "{ticker}: two entries of one day name this ticker")
@@ -304,7 +315,10 @@ impl OptionTicker {
         };
         let under = self.underlying.as_str();
         match self.form {
-            TickerForm::Day => format!("{under}{:02}{month}{yy:02}{strike}{side}", self.expiry.day()),
+            TickerForm::Day => format!(
+                "{under}{:02}{month}{yy:02}{strike}{side}",
+                self.expiry.day()
+            ),
             TickerForm::Monthly => format!("{under}{yy:02}{month}{strike}{side}"),
         }
     }
@@ -348,7 +362,9 @@ fn two_digits(bytes: &[u8]) -> Option<u8> {
 /// to itself and `100` and `100.00` can never be two names of one contract.
 fn strike_paisa(text: &[u8]) -> Option<i64> {
     let text = core::str::from_utf8(text).ok()?;
-    let (whole, frac) = text.split_once('.').map_or((text, None), |(w, f)| (w, Some(f)));
+    let (whole, frac) = text
+        .split_once('.')
+        .map_or((text, None), |(w, f)| (w, Some(f)));
     let whole_ok = !whole.is_empty()
         && whole.bytes().all(|b| b.is_ascii_digit())
         && (whole == "0" || !whole.starts_with('0'));
@@ -436,8 +452,8 @@ fn readings_at(
             let strike = rest.get(5..).and_then(strike_paisa)?;
             let year = 2000 + u16::from(yy);
             let first = Day::new(year, mon, 1).ok()?;
-            let in_window = (year, mon) >= (trade.year(), trade.month())
-                && first.days_from_epoch() <= latest;
+            let in_window =
+                (year, mon) >= (trade.year(), trade.month()) && first.days_from_epoch() <= latest;
             in_window.then_some((year, mon, strike))
         })();
         if let Some((year, mon, strike)) = monthly {
@@ -466,7 +482,10 @@ fn readings_at(
 /// 1,218,362 tickers of the vendor's history no name has two readings under
 /// the era rule; the guard stays, because a name the vendor ships tomorrow is
 /// not in that census.
-fn single(mut readings: Vec<Result<Reading, NfoRefusal>>, ticker: &str) -> Result<Reading, NfoRefusal> {
+fn single(
+    mut readings: Vec<Result<Reading, NfoRefusal>>,
+    ticker: &str,
+) -> Result<Reading, NfoRefusal> {
     if readings.len() > 1 {
         return Err(NfoRefusal::TickerAmbiguous {
             ticker: ticker.to_owned(),
@@ -512,18 +531,22 @@ pub fn decode_ticker(ticker: &str, trade: Day) -> Result<OptionTicker, NfoRefusa
         .ok_or_else(|| NfoRefusal::UnderlyingRefused {
             ticker: ticker.to_owned(),
         })?;
-    let contract = Expiry::new(reading.expiry.year(), reading.expiry.month(), reading.expiry.day())
-        .ok()
-        .and_then(|expiry| {
-            Contract::of(Kind::Option {
-                expiry,
-                strike: Paisa::from_raw(reading.strike),
-                side,
-            })
+    let contract = Expiry::new(
+        reading.expiry.year(),
+        reading.expiry.month(),
+        reading.expiry.day(),
+    )
+    .ok()
+    .and_then(|expiry| {
+        Contract::of(Kind::Option {
+            expiry,
+            strike: Paisa::from_raw(reading.strike),
+            side,
         })
-        .ok_or_else(|| NfoRefusal::ContractUnrenderable {
-            ticker: ticker.to_owned(),
-        })?;
+    })
+    .ok_or_else(|| NfoRefusal::ContractUnrenderable {
+        ticker: ticker.to_owned(),
+    })?;
     Ok(OptionTicker {
         underlying,
         contract,
@@ -649,7 +672,10 @@ impl<L> NfoDay<L> {
                 ticker: ticker.to_owned(),
             });
         }
-        Ok(self.by_ticker.get(ticker).and_then(|&at| self.entries.get(at)))
+        Ok(self
+            .by_ticker
+            .get(ticker)
+            .and_then(|&at| self.entries.get(at)))
     }
 }
 
@@ -878,7 +904,8 @@ fn second_of_day(time: &str) -> Option<u32> {
     let hours = u32::from(two_digits(&[h1, h2])?);
     let minutes = u32::from(two_digits(&[m1, m2])?);
     let seconds = u32::from(two_digits(&[s1, s2])?);
-    (hours <= 23 && minutes <= 59 && seconds <= 59).then_some(hours * 3_600 + minutes * 60 + seconds)
+    (hours <= 23 && minutes <= 59 && seconds <= 59)
+        .then_some(hours * 3_600 + minutes * 60 + seconds)
 }
 
 /// Digits, optionally a dot and more digits.
@@ -909,8 +936,13 @@ pub(crate) fn decode(bytes: &[u8], stem: &str, day: Day) -> Result<NfoFile, NfoR
 fn decode_capped(bytes: &[u8], stem: &str, day: Day, cap: usize) -> Result<NfoFile, NfoRefusal> {
     let body = bytes.strip_suffix(b"\n").unwrap_or(bytes);
     let mut lines = body.split(|&b| b == b'\n');
-    match lines.next().map(|line| line.strip_suffix(b"\r").unwrap_or(line)) {
-        Some(h) if h == HEADER_OPEN_INTEREST.as_bytes() || h == HEADER_OPEN_INTEREST_SPACED.as_bytes() => {}
+    match lines
+        .next()
+        .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
+    {
+        Some(h)
+            if h == HEADER_OPEN_INTEREST.as_bytes()
+                || h == HEADER_OPEN_INTEREST_SPACED.as_bytes() => {}
         _ => return Err(NfoRefusal::HeaderUnknown),
     }
     let date = format!("{:02}/{:02}/{:04}", day.day(), day.month(), day.year());
@@ -924,7 +956,18 @@ fn decode_capped(bytes: &[u8], stem: &str, day: Day, cap: usize) -> Result<NfoFi
         let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
         let text = core::str::from_utf8(raw).map_err(|_| malformed.clone())?;
         let fields: Vec<&str> = text.split(',').collect();
-        let &[ticker, row_date, time, ltp, bid, bid_qty, ask, ask_qty, ltq, oi] = fields.as_slice()
+        let &[
+            ticker,
+            row_date,
+            time,
+            ltp,
+            bid,
+            bid_qty,
+            ask,
+            ask_qty,
+            ltq,
+            oi,
+        ] = fields.as_slice()
         else {
             return Err(malformed);
         };
@@ -938,13 +981,24 @@ fn decode_capped(bytes: &[u8], stem: &str, day: Day, cap: usize) -> Result<NfoFi
         if !(is_decimal(bid) && is_decimal(ask) && is_digits(bid_qty) && is_digits(ask_qty)) {
             return Err(malformed);
         }
-        let ltq: u64 = if is_digits(ltq) { ltq.parse().ok() } else { None }.ok_or_else(|| malformed.clone())?;
+        let ltq: u64 = if is_digits(ltq) {
+            ltq.parse().ok()
+        } else {
+            None
+        }
+        .ok_or_else(|| malformed.clone())?;
         if !is_digits(oi) {
             return Err(malformed);
         }
-        let oi: i64 = oi.parse().map_err(|_| NfoRefusal::OpenInterestRefused { line })?;
-        let paisa = if is_decimal(ltp) { crate::csv::paisa(ltp) } else { None }
-            .ok_or(NfoRefusal::PriceRefused { line })?;
+        let oi: i64 = oi
+            .parse()
+            .map_err(|_| NfoRefusal::OpenInterestRefused { line })?;
+        let paisa = if is_decimal(ltp) {
+            crate::csv::paisa(ltp)
+        } else {
+            None
+        }
+        .ok_or(NfoRefusal::PriceRefused { line })?;
         // A TRADED ROW AT ZERO IS REFUSED; ONE PAISA IS A PRICE. Options of
         // low-priced shares print at 0.01 to 0.04 (measured on 2026-08-03: 20
         // files, IDEA, YESBANK, IRFC and others), so the capital-market

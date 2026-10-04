@@ -59,8 +59,6 @@ mod audit_publication_tests;
 /// Strict checksum-admitted historical range execution shared by CLI and API.
 pub mod audited_range_command;
 mod audited_stored;
-/// `cli gdfl-import`: GDFL one-second bars into the store (D-2802..D-2806).
-mod gdfl_import_command;
 /// The cooperative stop a stopping server asks engine work to honour (D-1551).
 pub mod cancel;
 /// Independent full-file checksum audit and retained historical admission receipts.
@@ -68,6 +66,8 @@ pub mod checksum_receipts;
 mod columns;
 #[cfg(test)]
 mod columns_tests;
+/// `cli gdfl-import`: GDFL one-second bars into the store (D-2802..D-2806).
+mod gdfl_import_command;
 // THE BUILD-TIME VERIFIER, MOUNTED WHERE CARGO-MUTANTS WALKS (D-1119). It was
 // compiled only into `build.rs` and an integration test, and cargo-mutants
 // mutates neither, so gate 18 could never mutate it. It is test-only here for

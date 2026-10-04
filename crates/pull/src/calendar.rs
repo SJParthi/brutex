@@ -751,11 +751,23 @@ mod tests {
             }
         }
         assert!(SOURCED_HOLIDAYS.windows(2).all(|w| w[0] < w[1]));
-        assert_eq!(kind_of(at(2019, 4, 29)), DayKind::Closed, "election, NSE/CMTR/40536");
-        assert_eq!(kind_of(at(2019, 10, 21)), DayKind::Closed, "election, NSE/MSD/42319");
+        assert_eq!(
+            kind_of(at(2019, 4, 29)),
+            DayKind::Closed,
+            "election, NSE/CMTR/40536"
+        );
+        assert_eq!(
+            kind_of(at(2019, 10, 21)),
+            DayKind::Closed,
+            "election, NSE/MSD/42319"
+        );
         assert_eq!(kind_of(at(2018, 11, 7)), DayKind::OpenLengthUnmeasured);
         assert_eq!(kind_of(at(2019, 10, 27)), DayKind::OpenLengthUnmeasured);
-        assert_eq!(kind_of(at(2018, 9, 3)), DayKind::Open(Session::full()), "GDFL's first day");
+        assert_eq!(
+            kind_of(at(2018, 9, 3)),
+            DayKind::Open(Session::full()),
+            "GDFL's first day"
+        );
         assert_eq!(kind_of(at(2018, 1, 1)), DayKind::Open(Session::full()));
         assert_eq!(kind_of(at(2018, 9, 8)), DayKind::Closed, "a Saturday");
         assert_eq!(kind_of(at(2018, 9, 9)), DayKind::Closed, "a Sunday");
