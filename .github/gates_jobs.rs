@@ -494,7 +494,9 @@ fn gate_5_cmd() -> Verdict {
 // ------------------------------------------------------------- gate 6d --
 
 /// The libraries the native tests under `web/` link, by crate name.
-const WEB_EXTERNS: [&str; 9] = [
+/// `engine` is here for `web/sweep-readiness/probes/support_lanes.rs`, which
+/// no CI step compiled before D-2324.
+const WEB_EXTERNS: [&str; 10] = [
     "serde",
     "serde_json",
     "axum",
@@ -504,6 +506,7 @@ const WEB_EXTERNS: [&str; 9] = [
     "cli",
     "brutex_core",
     "vocab",
+    "engine",
 ];
 
 /// The distinct `.rlib` files cargo reported for the library crate `name`,
@@ -627,12 +630,131 @@ fn web_externs(art: &str) -> Result<(String, String), String> {
     Ok((args, api))
 }
 
-/// Gate 6d's preparation: `<dir>/externs` for rustc's `@file`, and
-/// `<dir>/sha.txt` holding the api rlib's, the inspector source's and the
-/// viewer source's SHA-256, space-separated, for the shell to `read`.
-fn gate_6d(art_path: &str, dir: &str) -> Verdict {
+/// One native root under `web/`, as `source_scan web-roots` printed it.
+#[derive(Debug, PartialEq, Eq)]
+struct WebRoot {
+    path: String,
+    test: bool,
+    main: bool,
+}
+
+/// The scanner's `PATH<TAB>test|main|test,main|none` lines (P15-17,
+/// D-2324). An `UNRESOLVED` line, a `none` root (neither a test crate nor a
+/// binary, so nothing would compile it), an unknown kind, a path that is not
+/// a `web/**.rs`, a path twice, or no root at all is a refusal: the gate's
+/// whole job is to run what is there, so an empty or doubtful list never
+/// passes as "nothing to run".
+fn web_roots(text: &str) -> Result<Vec<WebRoot>, String> {
+    let mut out: Vec<WebRoot> = Vec::new();
+    for line in records(text) {
+        let (path, kind) = line
+            .split_once('\t')
+            .ok_or_else(|| format!("GATE 6d: not a root line: {line}"))?;
+        if !(path.starts_with("web/") && path.ends_with(".rs")) {
+            return Err(format!("GATE 6d: not a native root under web/: {line}"));
+        }
+        let (test, main) = match kind {
+            "test" => (true, false),
+            "main" => (false, true),
+            "test,main" => (true, true),
+            "none" => {
+                return Err(format!(
+                    "GATE 6d: {path} has no #[test] and no fn main, so nothing compiles it"
+                ));
+            }
+            _ => return Err(format!("GATE 6d: unknown root kind: {line}")),
+        };
+        if out.iter().any(|r| r.path == path) {
+            return Err(format!("GATE 6d: root listed twice: {path}"));
+        }
+        out.push(WebRoot {
+            path: path.to_owned(),
+            test,
+            main,
+        });
+    }
+    if out.is_empty() {
+        return Err("GATE 6d READ NO ROOT under web/.".to_owned());
+    }
+    Ok(out)
+}
+
+/// What gate 6d writes for the workflow to hand rustc and run, as
+/// `(relative file, contents)`: one rustc `@file` per root under `args/`,
+/// `build.list` naming each, `tests.list` naming each test binary (run with
+/// the step's skips) and `mains.list` naming each program. A root with a
+/// `#[test]` is built with `--test` and its tests run: that build compiles
+/// its `main` too (the harness marks it `allow(dead_code)`) but never runs
+/// it, which is how the four wrappers with a `main` and `verify.rs`, a runner
+/// that executes the whole workspace suite and the browser toolchain, are
+/// treated. A root with only a `main` is built and run. Binaries go to
+/// `<dir>/bin/`, named by the root's path under `web/` with `/` read as `-`,
+/// and two roots with one name are refused.
+fn web_plan(
+    roots: &[WebRoot],
+    externs: &str,
+    deps: &str,
+    dir: &str,
+) -> Result<Vec<(String, String)>, String> {
+    let mut files = Vec::new();
+    let (mut build, mut tests, mut mains) = (String::new(), String::new(), String::new());
+    let mut names = BTreeSet::new();
+    for r in roots {
+        let name = r.path["web/".len()..r.path.len() - ".rs".len()].replace('/', "-");
+        if !names.insert(name.clone()) {
+            return Err(format!("GATE 6d: two roots build one binary name: {name}"));
+        }
+        let bin = format!("{dir}/bin/{name}");
+        let flag = if r.test { "--test\n" } else { "" };
+        let args = format!(
+            "--edition=2024\n{flag}-D\nwarnings\n{}\n-o\n{bin}\n-L\ndependency={deps}\n{externs}",
+            r.path
+        );
+        let at = format!("args/{name}");
+        build.push_str(&format!("{dir}/{at}\n"));
+        files.push((at, args));
+        if r.test {
+            tests.push_str(&format!("{bin}\n"));
+        } else {
+            mains.push_str(&format!("{bin}\n"));
+        }
+    }
+    files.push(("build.list".to_owned(), build));
+    files.push(("tests.list".to_owned(), tests));
+    files.push(("mains.list".to_owned(), mains));
+    Ok(files)
+}
+
+/// The one `deps` directory the linked rlibs sit in, for `-L dependency=`:
+/// their own dependencies are found there. cargo uplifts a workspace
+/// library's rlib to the profile directory, so the api rlib's own directory
+/// is not it. None, or two, is a refusal.
+fn deps_dir(externs: &str) -> Result<String, String> {
+    let dirs: BTreeSet<String> = records(externs)
+        .iter()
+        .filter_map(|l| l.split_once('=').map(|(_, p)| Path::new(p)))
+        .filter_map(Path::parent)
+        .filter(|d| d.file_name().is_some_and(|n| n == "deps"))
+        .map(|d| d.to_string_lossy().into_owned())
+        .collect();
+    let [one] = dirs.iter().collect::<Vec<_>>()[..] else {
+        return Err(format!(
+            "GATE 6d: the linked rlibs are not in exactly one deps directory: {dirs:?}"
+        ));
+    };
+    Ok(one.clone())
+}
+
+/// Gate 6d's preparation: `<dir>/sha.txt` holding the api rlib's, the
+/// inspector source's and the viewer source's SHA-256, space-separated, for
+/// the shell to `read`, and [`web_plan`]'s files for every root the scanner
+/// derived. Every root is linked against the same rlibs.
+fn gate_6d(art_path: &str, dir: &str, roots_path: &str) -> Verdict {
     let art = read(art_path)?;
+    let roots = web_roots(&read(roots_path)?)?;
     let (externs, api) = web_externs(&art)?;
+    let deps = deps_dir(&externs)?;
+    let plan = web_plan(&roots, &externs, &deps, dir)?;
     let sha = |p: &str| {
         std::fs::read(p)
             .map(|b| sha256_hex(&b))
@@ -644,10 +766,24 @@ fn gate_6d(art_path: &str, dir: &str) -> Verdict {
         sha("web/sweep-readiness/main-inspector.rs")?,
         sha("web/saved-backtest/viewer.rs")?
     );
-    std::fs::write(format!("{dir}/externs"), externs).map_err(|e| format!("{dir}: {e}"))?;
+    for sub in ["args", "bin"] {
+        std::fs::create_dir_all(format!("{dir}/{sub}")).map_err(|e| format!("{dir}/{sub}: {e}"))?;
+    }
     std::fs::write(format!("{dir}/sha.txt"), line).map_err(|e| format!("{dir}: {e}"))?;
+    for (rel, body) in &plan {
+        std::fs::write(format!("{dir}/{rel}"), body).map_err(|e| format!("{dir}/{rel}: {e}"))?;
+    }
+    for r in &roots {
+        let what = match (r.test, r.main) {
+            (true, true) => "built with --test, tests run, main not run",
+            (true, false) => "built with --test, tests run",
+            _ => "built and run",
+        };
+        println!("root  {}  ({what})", r.path);
+    }
     println!(
-        "linking the native web tests against {} libraries",
+        "linking {} native root(s) under web/ against {} libraries",
+        roots.len(),
         WEB_EXTERNS.len()
     );
     Ok(())
@@ -1235,6 +1371,7 @@ fn run(args: &[String]) -> Verdict {
         "gate-6d" => gate_6d(
             arg(rest, 0, "the artifact messages")?,
             arg(rest, 1, "the output directory")?,
+            arg(rest, 2, "the scanner's web roots")?,
         ),
         "gate-20" => gate_20(&read(arg(rest, 0, "the coverage report")?)?, &rest[1..]),
         "mutant-diff" => mutant_diff(arg(rest, 0, "the diff to write")?),
@@ -1562,6 +1699,70 @@ mod tests {
     }
 
     #[test]
+    fn gate_6d_builds_and_runs_every_derived_root() {
+        // P15-17, D-2324. The step used to name four files; a root it did not
+        // name, such as `probes/support_lanes.rs`, was compiled by nothing.
+        let text = "web/saved-backtest/viewer.rs\ttest,main\nweb/sweep-readiness/probes/support_lanes.rs\tmain\nweb/new/x.rs\ttest\n";
+        let roots = web_roots(text).unwrap();
+        assert_eq!(roots.len(), 3);
+        let plan = web_plan(&roots, "--extern\na=/d/liba.rlib\n", "/d", "/t").unwrap();
+        let get = |k: &str| {
+            plan.iter()
+                .find(|(p, _)| p == k)
+                .map(|(_, b)| b.as_str())
+                .unwrap()
+        };
+        assert_eq!(
+            get("build.list"),
+            "/t/args/saved-backtest-viewer\n/t/args/sweep-readiness-probes-support_lanes\n/t/args/new-x\n"
+        );
+        // A root with tests runs its tests, never its `main`.
+        assert_eq!(
+            get("tests.list"),
+            "/t/bin/saved-backtest-viewer\n/t/bin/new-x\n"
+        );
+        assert_eq!(
+            get("mains.list"),
+            "/t/bin/sweep-readiness-probes-support_lanes\n"
+        );
+        assert_eq!(
+            get("args/new-x"),
+            "--edition=2024\n--test\n-D\nwarnings\nweb/new/x.rs\n-o\n/t/bin/new-x\n-L\ndependency=/d\n--extern\na=/d/liba.rlib\n"
+        );
+        assert_eq!(
+            get("args/sweep-readiness-probes-support_lanes"),
+            "--edition=2024\n-D\nwarnings\nweb/sweep-readiness/probes/support_lanes.rs\n-o\n/t/bin/sweep-readiness-probes-support_lanes\n-L\ndependency=/d\n--extern\na=/d/liba.rlib\n"
+        );
+        // A name clash, or a doubtful list, is refused.
+        let clash = web_roots("web/a/b-c.rs\ttest\nweb/a-b/c.rs\tmain\n").unwrap();
+        assert!(
+            web_plan(&clash, "", "/d", "/t")
+                .unwrap_err()
+                .contains("a-b-c")
+        );
+        for bad in [
+            "",
+            "UNRESOLVED web/x.rs: y\n",
+            "web/a.rs\tbench\n",
+            "web/a.rs\tnone\n",
+            "crates/a.rs\ttest\n",
+            "web/a.md\ttest\n",
+            "web/a.rs\ttest\nweb/a.rs\tmain\n",
+            "web/a.rs\n",
+        ] {
+            assert!(web_roots(bad).is_err(), "{bad:?}");
+        }
+        // `-L dependency=` is the one `deps` directory, not the directory
+        // cargo uplifts a workspace rlib to.
+        let ex =
+            "--extern\napi=/t/debug/libapi.rlib\n--extern\nserde=/t/debug/deps/libserde-1.rlib\n";
+        assert_eq!(deps_dir(ex).unwrap(), "/t/debug/deps");
+        assert!(deps_dir("--extern\napi=/t/debug/libapi.rlib\n").is_err());
+        let two = format!("{ex}--extern\nx=/u/deps/libx.rlib\n");
+        assert!(deps_dir(&two).is_err());
+    }
+
+    #[test]
     fn gate_6d_finds_exactly_one_rlib_per_crate() {
         let mut all: Vec<String> = WEB_EXTERNS
             .iter()
@@ -1578,7 +1779,7 @@ mod tests {
         let (args, api) = web_externs(&joined).unwrap();
         assert_eq!(api, "/t/libapi.rlib");
         assert!(args.starts_with("--extern\nserde=/t/libserde.rlib\n--extern\nserde_json="));
-        assert_eq!(args.lines().count(), 18);
+        assert_eq!(args.lines().count(), 2 * WEB_EXTERNS.len());
         // Two distinct rlibs for one crate, or none, is refused.
         let two = format!("{joined}\n{}", art("tokio", "\"/u/libtokio.rlib\""));
         assert!(

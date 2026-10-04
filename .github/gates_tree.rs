@@ -693,17 +693,26 @@ const WRAPPERS: [&str; 11] = [
     "RUSTUP_HOME",
 ];
 
-/// `(^|[^A-Za-z0-9_])(<WRAPPERS>|CARGO_TARGET_[A-Z0-9_]+_(RUNNER|LINKER))[[:space:]]*[:=]`.
-/// `[A-Z0-9_]+` is maximal here because the character after `_RUNNER` must be
-/// a space, `:` or `=`, none of which it can absorb.
-fn sets_wrapper(c: &[char], space: &dyn Fn(char) -> bool) -> bool {
+/// `(^|[^A-Z0-9_])(<WRAPPERS>|CARGO_TARGET_[A-Z0-9_]+_(RUNNER|LINKER))([^A-Za-z0-9_]|$)`:
+/// the NAME in any position, not only before `[:=]` (P15-08, D-2322). A
+/// `printf '%s=%s\n' RUSTC_WRAPPER /tmp/z >> "$GITHUB_ENV"`, or a value
+/// assembled on one line and written to `GITHUB_ENV` by a sanctioned line
+/// later, sets the variable without the name ever being followed by `=`. No
+/// workflow line names one of these for any other reason. The left boundary
+/// is an upper-case environment-name character, so `$'x\nRUSTC=y'` (the
+/// escape's `n` before the name) is read too, and `MY_RUSTC` is still another
+/// variable. `[A-Z0-9_]+` is maximal, so the character after `_RUNNER` is
+/// never one it could absorb.
+fn names_wrapper(c: &[char]) -> bool {
+    let env_char = |x: char| x.is_ascii_uppercase() || x.is_ascii_digit() || x == '_';
+    let ends = |k: usize| !c.get(k).is_some_and(|x| ident_char(*x));
     (0..c.len()).any(|i| {
-        if i > 0 && ident_char(c[i - 1]) {
+        if i > 0 && env_char(c[i - 1]) {
             return false;
         }
         if WRAPPERS
             .iter()
-            .any(|w| at(c, i, w) && then_sets(c, i + w.chars().count(), space))
+            .any(|w| at(c, i, w) && ends(i + w.chars().count()))
         {
             return true;
         }
@@ -712,16 +721,11 @@ fn sets_wrapper(c: &[char], space: &dyn Fn(char) -> bool) -> bool {
         }
         let from = i + "CARGO_TARGET_".len();
         let mut end = from;
-        while c
-            .get(end)
-            .is_some_and(|x| x.is_ascii_uppercase() || x.is_ascii_digit() || *x == '_')
-        {
+        while c.get(end).is_some_and(|x| env_char(*x)) {
             end += 1;
         }
         let run: String = c[from..end].iter().collect();
-        run.len() >= 8
-            && (run.ends_with("_RUNNER") || run.ends_with("_LINKER"))
-            && then_sets(c, end, space)
+        run.len() >= 8 && (run.ends_with("_RUNNER") || run.ends_with("_LINKER")) && ends(end)
     })
 }
 
@@ -806,7 +810,7 @@ fn computed_name(c: &[char], space: &dyn Fn(char) -> bool) -> bool {
 /// environment name, or `cargo --config`. Read on comment lines too.
 fn wrapper_line(line: &str) -> bool {
     let c: Vec<char> = line.chars().collect();
-    either_space(|sp| sets_wrapper(&c, sp) || cargo_config(&c, sp))
+    names_wrapper(&c) || either_space(|sp| cargo_config(&c, sp))
 }
 
 /// D-1612 and D-2346: the same doors by other names. Comment lines skipped.
@@ -3489,6 +3493,39 @@ mod tests {
                 r.text()
             );
             assert!(r.text().contains("GATE 1G FAILED. See D-1105."));
+        }
+    }
+
+    #[test]
+    fn gate_1g_refuses_a_wrapper_name_in_any_position() {
+        // P15-08, D-2322. The finding's three lines, then the forms that set
+        // a listed variable with no `NAME=` and no `GITHUB_ENV` on the line:
+        // a value assembled here and written by a sanctioned line later.
+        for l in [
+            "CARGO_BUILD_RUSTDOC: /tmp/x",
+            "RUSTC_WRAPPER: /tmp/y",
+            "printf '%s=%s\\n' RUSTC_WRAPPER /tmp/z >> \"$GITHUB_ENV\"",
+            "tool=$(printf '%s=%s' RUSTC_WRAPPER /tmp/z)",
+            "tool=$'x\\nRUSTC_WRAPPER=/tmp/z'",
+            "set -- CARGO_BUILD_RUSTDOC /tmp/x",
+            "n=\"CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER\"",
+            "echo RUSTDOC",
+            "k=RUSTUP_TOOLCHAIN",
+        ] {
+            let r = gate_1g_of(&["a"], &format!("x\n{l}\n"));
+            assert!(r.refused, "passed: {l:?}");
+            assert!(names_wrapper(&l.chars().collect::<Vec<_>>()), "{l:?}");
+        }
+        for l in [
+            "RUSTC_WRAPPERS x",
+            "MY_RUSTC_WRAPPER x",
+            "echo $RUSTC_VERSION",
+            "rustc --edition=2024 x.rs",
+            "CARGO_TARGET_DIR x",
+            "CARGO_TARGET__RUNNER x",
+            "CARGO_TARGET_X_RUNNER_2 x",
+        ] {
+            assert!(!names_wrapper(&l.chars().collect::<Vec<_>>()), "{l:?}");
         }
     }
 

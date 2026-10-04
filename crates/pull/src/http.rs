@@ -2470,7 +2470,7 @@ fn trim(body: &str) -> String {
 /// # Errors
 ///
 /// [`FetchError::TransportFailed`] if a frame never arrives.
-async fn body_within(
+pub(crate) async fn body_within(
     answer: &mut reqwest::Response,
     cap: usize,
 ) -> Result<(String, usize), FetchError> {
