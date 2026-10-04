@@ -43,6 +43,9 @@ struct Args {
     pr: Option<PathBuf>,
     streams: Option<PathBuf>,
     corrections: Option<PathBuf>,
+    /// The PR head the corrections were checked against; a status commit on the current
+    /// head that this ref does not contain is newer evidence and lifts the correction.
+    checked_at: Option<String>,
     same_as: Option<PathBuf>,
     not_a_fix: Vec<String>,
     base_ref: String,
@@ -52,6 +55,7 @@ struct Args {
 
 fn parse_args() -> Result<Args, String> {
     let mut a = Args {
+        checked_at: None,
         pr_ref: "origin/final/all-fixes".into(),
         base_ref: "origin/main".into(),
         link_base: "https://github.com/SJParthi/brutex/blob/fix-queue/".into(),
@@ -73,6 +77,7 @@ fn parse_args() -> Result<Args, String> {
             "--pr" => a.pr = Some(v()?.into()),
             "--streams" => a.streams = Some(v()?.into()),
             "--corrections" => a.corrections = Some(v()?.into()),
+            "--checked-at" => a.checked_at = Some(v()?),
             "--same-as" => a.same_as = Some(v()?.into()),
             "--not-a-fix" => a.not_a_fix.push(v()?),
             "--base-ref" => a.base_ref = v()?,
@@ -1126,6 +1131,7 @@ fn run() -> Result<(), String> {
     // 4b. corrections: hand-checked states, each with its evidence in the note. They
     // win over every status line and are never re-promoted by commit-message evidence.
     let mut pinned = vec![false; rows.len()];
+    let mut later: Vec<Vec<String>> = vec![Vec::new(); rows.len()];
     if let Some(p) = &a.corrections {
         for line in tsv(p)? {
             let (Some(id), Some(st)) = (line.first(), line.get(1)) else {
@@ -1147,12 +1153,22 @@ fn run() -> Result<(), String> {
             if let Some(link) = line.get(5).filter(|t| !t.is_empty()) {
                 r.insert("link".into(), json!(link));
             }
-            commits[i] = hex_tokens(line.get(2).map_or("", String::as_str));
+            let fixed = hex_tokens(line.get(2).map_or("", String::as_str));
+            later[i] = commits[i]
+                .iter()
+                .filter(|c| {
+                    !fixed
+                        .iter()
+                        .any(|f| f.starts_with(c.as_str()) || c.starts_with(f.as_str()))
+                })
+                .cloned()
+                .collect();
+            commits[i] = fixed;
             pinned[i] = true;
         }
     }
     for c in &a.not_a_fix {
-        for list in commits.iter_mut() {
+        for list in commits.iter_mut().chain(later.iter_mut()) {
             list.retain(|x| !c.starts_with(x.as_str()) && !x.starts_with(c.as_str()));
         }
     }
@@ -1160,6 +1176,7 @@ fn run() -> Result<(), String> {
     // 5. git evidence against the PR head
     let mut evidence = 0usize;
     let mut demoted = 0usize;
+    let mut lifted = 0usize;
     let mut head_short = String::new();
     if let Some(repo) = &a.repo {
         let out = Command::new("git")
@@ -1183,6 +1200,27 @@ fn run() -> Result<(), String> {
             }
         }
         let mut cache = HashMap::new();
+        let mut then = HashMap::new();
+        for (i, r) in rows.iter_mut().enumerate() {
+            let Some(at) = a.checked_at.as_deref().filter(|_| pinned[i]) else {
+                continue;
+            };
+            let newer = later[i].iter().find(|c| {
+                on_head(repo, &a.pr_ref, c, &mut cache) == OnHead::Yes
+                    && on_head(repo, at, c, &mut then) == OnHead::No
+            });
+            if let Some(c) = newer {
+                pinned[i] = false;
+                lifted += 1;
+                let n = format!(
+                    "{}; correction lifted: status commit {} reached PR #74 after it was checked",
+                    s(r, "note"),
+                    &c[..7.min(c.len())]
+                );
+                r.insert("note".into(), json!(n));
+                commits[i].push(c.clone());
+            }
+        }
         for (i, r) in rows.iter_mut().enumerate() {
             let mut flags: Vec<Value> = Vec::new();
             let st = s(r, "state").to_string();
@@ -1518,7 +1556,7 @@ fn run() -> Result<(), String> {
     }
     eprintln!(
         "fixboard: {} rows ({catalog_rows} catalog + {added} new from sources); {applied} status lines applied, {} unmatched; \
-         {evidence} promoted by status commits on head, {by_message} by head commit messages, {demoted} demoted, {same} same-as pairs, {verdicts_applied} helper verdicts; head {head_short}; ci green: {ci_green}; states {by_state:?}",
+         {evidence} promoted by status commits on head, {by_message} by head commit messages, {demoted} demoted, {lifted} corrections lifted, {same} same-as pairs, {verdicts_applied} helper verdicts; head {head_short}; ci green: {ci_green}; states {by_state:?}",
         ledger["rows"].as_array().map_or(0, Vec::len),
         unmatched.len()
     );

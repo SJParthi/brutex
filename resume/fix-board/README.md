@@ -31,7 +31,9 @@ Republish every refresh to that same URL. The old account's board (Air7S5kQkMHWG
    over two lines (unbalanced parentheses) is joined. A finding named only in a status file gets its own row. Commit
    hashes are read from the commit column only, and a later line never lowers a state an earlier line backed with a commit.
 5. `--corrections` (`inputs/corrections.tsv.md`, id/state/commit/note/title): hand-checked states, each with its evidence
-   in the note. They win over every status line and are never promoted by step 7.
+   in the note. They win over every status line and are never promoted by step 7, until a fix really lands: with
+   `--checked-at <ref>` (the PR head they were checked against, c97ff00), a status commit that is on the current head
+   but not in that ref lifts the correction and step 6 applies as for any other row.
 6. Git: a status commit that is an ancestor of `origin/final/all-fixes` makes the row `pushed`; a `pushed` claim whose
    commits all exist and none is on the head is demoted to `branch` and flagged. `--not-a-fix` hashes (the audit bases
    331b05c, 1087e54) are never evidence.
@@ -60,7 +62,7 @@ ST=""; for f in /mnt/project-files/fix-board/status/*.tsv; do ST="$ST --status $
 resume/fix-board/builder/target/release/fixboard \
   --board resume/fix-board/brutex-fix-board.html --out resume/fix-board/brutex-fix-board.html \
   --snapshot resume/fix-board/ledger-snapshot.json.md --snapshot-out resume/fix-board/ledger-snapshot.json.md $ST \
-  --corrections resume/fix-board/inputs/corrections.tsv.md --same-as resume/fix-board/inputs/same-as.tsv.md \
+  --corrections resume/fix-board/inputs/corrections.tsv.md --checked-at c97ff00 --same-as resume/fix-board/inputs/same-as.tsv.md \
   --not-a-fix 331b05c --not-a-fix 1087e54 --base-ref 331b05c \
   --zero-dir /mnt/project-files/zero-rounds --repo . \
   --checks resume/fix-board/inputs/checks.tsv.md --pr resume/fix-board/inputs/pr.tsv.md \
