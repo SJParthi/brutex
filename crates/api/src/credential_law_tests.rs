@@ -677,3 +677,117 @@ async fn an_undone_rotation_mid_contract_walk_never_resends_a_rejected_token() {
         landed.why
     );
 }
+
+// ------------------------------------------------------------ the lanes
+
+/// A loopback vendor that accepts every request after `hold`, and records the
+/// most requests it ever held open at once.
+struct SlowVendor {
+    base: &'static str,
+    most: Arc<std::sync::atomic::AtomicUsize>,
+    seen: Arc<std::sync::atomic::AtomicUsize>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl SlowVendor {
+    async fn holding(hold: std::time::Duration) -> Self {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a loopback port");
+        let address = listener.local_addr().expect("its address");
+        let open = Arc::new(AtomicUsize::new(0));
+        let most = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::new(AtomicUsize::new(0));
+        let (open_in, most_in, seen_in) = (Arc::clone(&open), Arc::clone(&most), Arc::clone(&seen));
+        let app = axum::Router::new().fallback(move || {
+            let (open, most, seen) = (
+                Arc::clone(&open_in),
+                Arc::clone(&most_in),
+                Arc::clone(&seen_in),
+            );
+            async move {
+                let now = open.fetch_add(1, Ordering::SeqCst) + 1;
+                let _ = seen.fetch_add(1, Ordering::SeqCst);
+                let _ = most.fetch_max(now, Ordering::SeqCst);
+                tokio::time::sleep(hold).await;
+                let _ = open.fetch_sub(1, Ordering::SeqCst);
+                (axum::http::StatusCode::OK, "{}")
+            }
+        });
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("the fake serves");
+        });
+        Self {
+            base: Box::leak(format!("http://{address}").into_boxed_str()),
+            most,
+            seen,
+            task,
+        }
+    }
+}
+
+impl Drop for SlowVendor {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// **A spot run keeps up to `BROKER_LANES` instruments on the wire at once,
+/// and never more.**
+///
+/// It was serial: one instrument's whole round trip before the next was
+/// asked, so a feed's rate was set by latency rather than by its budget.
+/// Seven indices against a vendor that holds every request open: the vendor
+/// sees all seven, and at most three of them were ever open together, and at
+/// least two were. The first instrument goes out alone, because a run widens
+/// only after the vendor answered without rejecting the token. D-3002.
+#[tokio::test]
+async fn a_spot_run_keeps_up_to_three_instruments_on_the_wire_and_never_more() {
+    let vendor = SlowVendor::holding(std::time::Duration::from_millis(300)).await;
+    let script = Arc::new(Script::new(vendor.base, vec![token("live"); 7]));
+    let dir = crate::scratch::path("credential-law-lanes");
+    std::fs::create_dir_all(&dir).expect("masters dir");
+    std::fs::write(
+        dir.join("dhan_scrip.csv"),
+        "EXCH_ID,SEGMENT,ISIN,INSTRUMENT,UNDERLYING_SYMBOL,SYMBOL_NAME,INSTRUMENT_TYPE,\
+         SERIES,SM_EXPIRY_DATE,STRIKE_PRICE,OPTION_TYPE,SECURITY_ID\n\
+         NSE,I,NA,INDEX,NIFTY,NIFTY,INDEX,NA,0001-01-01,,,13\n\
+         NSE,I,NA,INDEX,BANKNIFTY,BANKNIFTY,INDEX,NA,0001-01-01,,,25\n\
+         NSE,I,NA,INDEX,FINNIFTY,FINNIFTY,INDEX,NA,0001-01-01,,,27\n\
+         NSE,I,NA,INDEX,MIDCPNIFTY,MIDCPNIFTY,INDEX,NA,0001-01-01,,,442\n\
+         NSE,I,NA,INDEX,NIFTYIT,NIFTYIT,INDEX,NA,0001-01-01,,,29\n\
+         NSE,I,NA,INDEX,NIFTYMETAL,NIFTYMETAL,INDEX,NA,0001-01-01,,,31\n\
+         NSE,I,NA,INDEX,NIFTYPHARMA,NIFTYPHARMA,INDEX,NA,0001-01-01,,,32\n",
+    )
+    .expect("dhan master");
+    let root = crate::scratch::path("credential-law-store-lanes");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("manifest")).expect("store root");
+    let mut site = Site::serving(&dir, &root);
+    site.credentials = Credentials::Scripted(Arc::clone(&script));
+    let asked = ingest::parse_spot(
+        "target=indices&vendor=dhan&granularity=1day&from=2026-08-03&to=2026-08-05",
+        Day::new(2026, 8, 10).expect("a day"),
+    )
+    .expect("a finished daily window");
+
+    let run = broker_run(&asked, &site, &[]).await;
+
+    assert!(run.blocked.is_none(), "the run reached its loop: {run:?}");
+    assert_eq!(run.attempted, 7, "seven indices were named: {run:?}");
+    let seen = vendor.seen.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(seen, 7, "every instrument was asked once: {run:?}");
+    let most = vendor.most.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        most >= 2,
+        "the run is no longer serial: at most {most} request was ever open"
+    );
+    assert!(
+        most <= BROKER_LANES,
+        "never more than {BROKER_LANES} at once, the strictest per-second cap: {most}"
+    );
+    assert_eq!(script.reads(), 7, "one credential read per instrument");
+    assert!(run.touched_wire);
+    assert_eq!(run.credential_stop, None);
+}
