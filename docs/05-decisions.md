@@ -60986,7 +60986,29 @@ the fresh reader observes (same root, identity, checkpoint, writer
 observation and interrupted count), moves it to the back of the LRU and
 serves from it; the fresh reader is dropped. Otherwise the old behaviour
 stands: same-checkpoint sessions are dropped, the fresh one held, at most
-eight.
+eight. A pinned page also moves its session to the back of the LRU, so a
+session a viewer is paging through is not the first evicted by eight first
+pages of other searches (eviction is `pop_front`).
 
 **Proof.** `an_unchanged_first_page_keeps_the_held_session_and_its_learned_cursors`
-in `crates/api/src/expressionsearchjson.rs`. FB-78.
+and `a_pinned_page_keeps_its_session_from_being_evicted_first` in
+`crates/api/src/expressionsearchjson.rs`. FB-78.
+
+### D-2778 — A finished browser task gives back the execution lease before its slot says finished — 2026-10-04
+
+**Finding (conc:runs-2, the sibling the finding names).** `TaskFinisher::finish`
+wrote the slot with `in_flight == false` and only then dropped itself, which
+is what released its execution lease. A press admitted in that gap passed the
+slot check and was refused `Busy` by `Lease::acquire`, "another sweep owns this
+store's execution lease", for a run that had ended. The abnormal-end path in
+`Drop` had the same order.
+
+**Decision.** Both paths drop the lease before taking the slot lock. Between
+the release and the publish a claimant (a CLI sweep, or the next press once the
+slot is written) may own the lease while the slot still shows the old run in
+flight; that answers a press `Busy` for one slot write, which is true, rather
+than the false "another sweep owns" for a run that ended.
+
+**Proof.** `a_finished_task_frees_the_execution_lease_before_its_slot_says_finished`
+in `crates/api/src/sweeprun.rs`, which holds the slot lock so `finish` stops at
+the publish and requires the lease to be free there. FB-79.

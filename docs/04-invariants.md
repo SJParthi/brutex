@@ -6597,7 +6597,8 @@ old line regex the same input and watched it pass.
 | FB-75 | A claimant that meets a probe's look at the execution lease owns the lease once the probe ends; a real owner still refuses it (D-2774) | `a_claim_that_meets_a_probe_mid_look_owns_the_slot_once_the_probe_ends` in `crates/cli/src/execution_lease.rs` | ✓ |
 | FB-76 | `POST /pull/run/stop` persists a recovery STOP with `site.run` free (D-2775) | `the_stop_is_persisted_with_the_pull_slot_free` in `crates/api/src/recovery_control.rs` | ✓ |
 | FB-77 | A browser sweep admission that meets another admission over the same site is refused Busy at once and never prepares (D-2776) | `admission_io_runs_with_the_slot_unlocked_and_admissions_still_exclude_each_other` in `crates/api/src/sweeprun.rs` | ✓ |
-| FB-78 | An unpinned expression-search first page over an unchanged snapshot is served from the held session, keeping every cursor it learned (D-2777) | `an_unchanged_first_page_keeps_the_held_session_and_its_learned_cursors` in `crates/api/src/expressionsearchjson.rs` | ✓ |
+| FB-78 | An unpinned expression-search first page over an unchanged snapshot is served from the held session, keeping every cursor it learned; a pinned page moves its session to the back of the LRU (D-2777) | `an_unchanged_first_page_keeps_the_held_session_and_its_learned_cursors`, `a_pinned_page_keeps_its_session_from_being_evicted_first` in `crates/api/src/expressionsearchjson.rs` | ✓ |
+| FB-79 | A browser engine task's execution lease is free before its slot is published as finished, on the normal and the abnormal path (D-2778) | `a_finished_task_frees_the_execution_lease_before_its_slot_says_finished` in `crates/api/src/sweeprun.rs` | ✓ |
 
 ### Zerodha pull order and the day check (D-3000, D-3001)
 

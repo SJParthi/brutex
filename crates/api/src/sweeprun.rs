@@ -1307,6 +1307,12 @@ impl TaskFinisher {
                 .into(),
             );
         }
+        // THE LEASE IS GIVEN BACK BEFORE THE SLOT SAYS FINISHED. The other
+        // order published `in_flight == false` while this task still owned
+        // the store's execution lease, so a press admitted in that gap passed
+        // the slot check and was refused `Busy` by a run that had ended.
+        // conc:runs-2, D-2778.
+        drop(self.lease.take());
         let mut slot = self
             .site
             .sweep
@@ -1330,6 +1336,8 @@ impl Drop for TaskFinisher {
             };
             audit.finish(phase, 0).err()
         });
+        // Given back before the slot says ended, as in `finish` (D-2778).
+        drop(self.lease.take());
         let mut slot = self
             .site
             .sweep
@@ -3764,7 +3772,7 @@ mod tests {
                 refused
             });
             let refused_at_once = answer
-                .recv_timeout(std::time::Duration::from_secs(60))
+                .recv_timeout(std::time::Duration::from_mins(1))
                 .is_ok();
             release.send(()).expect("the first admission is waiting");
             assert_eq!(first.join().expect("first").ok(), Some("first"));
@@ -3946,6 +3954,66 @@ mod tests {
         let slot = site.sweep.lock().expect("private slot");
         assert!(slot.as_ref().expect("completed").report.is_some());
         drop(slot);
+        std::fs::remove_dir_all(&site.store_root).expect("private cleanup");
+    }
+
+    /// **A finished task gives its execution lease back before its slot says
+    /// finished.** conc:runs-2, D-2778.
+    ///
+    /// The slot was written with `in_flight == false` while the finisher still
+    /// owned the lease, so a press admitted in that gap passed the slot check
+    /// and was refused `Busy` by a run that had ended. The test holds the slot
+    /// lock, so `finish` stops exactly where it publishes; the lease must
+    /// already be free there. The bound only turns a regression (a lease held
+    /// until the slot is written) into a failure rather than a hang.
+    #[test]
+    fn a_finished_task_frees_the_execution_lease_before_its_slot_says_finished() {
+        let (site, _id, guard) = durable_finisher("durable-task-lease-first");
+        let lease = cli::execution_lease::Lease::acquire(&site.store_root).expect("a free store");
+        let guard = guard.with_lease(lease);
+        guard.enter(cli::operation_audit::completed_boundary);
+        let mut done = site
+            .sweep
+            .lock()
+            .expect("private slot")
+            .clone()
+            .expect("started");
+        settle(&mut done, "private lease-order fixture".to_owned(), 10);
+        let slot = site.sweep.lock().expect("private slot");
+        std::thread::scope(|scope| {
+            let finishing = scope.spawn(move || guard.finish(done));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
+            let freed = loop {
+                match cli::execution_lease::Lease::acquire(&site.store_root) {
+                    Ok(next) => break Some(next),
+                    Err(cli::execution_lease::Refusal::Busy)
+                        if std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::yield_now();
+                    }
+                    Err(_) => break None,
+                }
+            };
+            assert!(
+                slot.as_ref().is_some_and(Progress::in_flight),
+                "the premise: the slot has not been published yet"
+            );
+            drop(slot);
+            finishing.join().expect("finish");
+            assert!(
+                freed.is_some(),
+                "the lease is free while the finished run is still being published"
+            );
+        });
+        assert!(
+            !site
+                .sweep
+                .lock()
+                .expect("private slot")
+                .as_ref()
+                .expect("published")
+                .in_flight()
+        );
         std::fs::remove_dir_all(&site.store_root).expect("private cleanup");
     }
 

@@ -15187,3 +15187,23 @@ per-candidate primitive from `CLAUDE.md` §3 rule 4.
   a run would need the attempt's origin, which the handler does not receive.
 - **Not timed.** No bench measures a log walk. The 4 MiB per half is the
   configured cap, not a measurement, and the time it takes is UNVERIFIED.
+
+## Shutdown, the audit journal and the execution lease — D-2770..D-2778, 4 October 2026
+
+- **The serve drain after the signal is bounded, not complete (D-2771).**
+  `serve_limited` waits `ConnectionLimits::drain_timeout` (`SHUTDOWN_GRACE`,
+  10 s, when served) after the signal and then returns without the requests
+  still in flight. A spot walk stops at its next instrument because the
+  signal moves the autopilot epoch. An F&O walk has no per-instrument stop
+  check, so it is cut at the end of the drain and the runtime's own bounded
+  end rather than journalling a partial run. A second Ctrl-C is not handled;
+  the exit is bounded without it. How long a spot instrument takes to reach
+  its next check is not measured.
+- **In-process journal writers wait for each other (D-2770).** The wait is one
+  record write and one fsync per writer ahead of it. The lock is taken per
+  record, so a leg appending one record per failed member does not hold it
+  across its loop; `std::sync::Mutex` is not fair, so a writer may be passed
+  by others more than once. Not timed.
+- **A claimant may wait for one probe's look at the execution lease
+  (D-2774).** The wait is one open, one lock, two stats and one unlock on the
+  store's file system: not constant-time, not timed.

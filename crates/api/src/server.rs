@@ -17734,7 +17734,7 @@ mod shutdown_tests {
             .unwrap();
         inside.recv().await.expect("the request is in flight");
         stop.send(()).unwrap();
-        let outcome = tokio::time::timeout(Duration::from_secs(60), served)
+        let outcome = tokio::time::timeout(Duration::from_mins(1), served)
             .await
             .expect("serve returned after the bounded drain, not after the request")
             .expect("the serve task joins");

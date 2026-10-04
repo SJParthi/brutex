@@ -117,14 +117,15 @@ fn render(root: &Path, asked: &Asked) -> Result<String, String> {
         .lock()
         .map_err(|_| "search snapshot cache poisoned")?;
     let index = if let Some(snapshot) = asked.snapshot {
-        sessions
+        let at = sessions
             .iter()
             .position(|held| {
                 held.root == root
                     && held.identity == asked.identity
                     && held.reader.progress().checkpoint == Some(snapshot)
             })
-            .ok_or("search snapshot is not admitted or expired; refresh its first page")?
+            .ok_or("search snapshot is not admitted or expired; refresh its first page")?;
+        most_recent(&mut sessions, at)
     } else {
         let Some(reader) = Reader::open(root, asked.identity, crate::detail::MAX_SCAN_BYTES)?
         else {
@@ -175,13 +176,8 @@ fn first_page<S>(
     unchanged: impl Fn(&S) -> bool,
     superseded: impl Fn(&S) -> bool,
 ) -> usize {
-    if let Some(kept) = sessions
-        .iter()
-        .position(&unchanged)
-        .and_then(|at| sessions.remove(at))
-    {
-        sessions.push_back(kept);
-        return sessions.len() - 1;
+    if let Some(at) = sessions.iter().position(&unchanged) {
+        return most_recent(sessions, at);
     }
     sessions.retain(|held| !superseded(held));
     if sessions.len() == 8 {
@@ -189,6 +185,19 @@ fn first_page<S>(
     }
     sessions.push_back(fresh);
     sessions.len() - 1
+}
+/// Moves the session at `at` to the back of the LRU and returns its new index.
+///
+/// Used by a pinned page as well as a reused first page: eviction is
+/// `pop_front`, so a session a viewer is actively paging through must not stay
+/// at the front by insertion order, or eight first pages of OTHER searches
+/// evict it mid-walk ("snapshot is not admitted or expired").
+/// conc:apicache-2, D-2777.
+fn most_recent<S>(sessions: &mut VecDeque<S>, at: usize) -> usize {
+    if let Some(used) = sessions.remove(at) {
+        sessions.push_back(used);
+    }
+    sessions.len().saturating_sub(1)
 }
 fn anchor_json(anchor: Option<Anchor>) -> Value {
     anchor.map_or(Value::Null,|anchor|json!({"sequence":anchor.sequence.to_string(),"seal":crate::server::hex32(anchor.seal)}))
@@ -247,6 +256,25 @@ mod tests {
             first_page(&mut sessions, (snapshot, vec![]), |_| false, |_| false);
         }
         assert_eq!(sessions.len(), 8, "still at most eight held");
+    }
+
+    /// **A session a viewer is paging through is not evicted by insertion
+    /// order.** conc:apicache-2, D-2777. A pinned page moves its session to
+    /// the back, so eight first pages of other searches evict older, idle
+    /// sessions first.
+    #[test]
+    fn a_pinned_page_keeps_its_session_from_being_evicted_first() {
+        let mut sessions: VecDeque<u32> = (0..8).collect();
+        let at = most_recent(&mut sessions, 0);
+        assert_eq!((at, sessions.get(at)), (7, Some(&0)), "moved to the back");
+        for other in 100..107 {
+            first_page(&mut sessions, other, |_| false, |_| false);
+        }
+        assert!(
+            sessions.contains(&0),
+            "seven newer first pages evict the idle sessions, not the one in use"
+        );
+        assert_eq!(sessions.len(), 8);
     }
     #[test]
     fn exact_snapshot_and_cursor_pairs_refuse_splicing_or_unbounded_queries() -> Result<(), String>
