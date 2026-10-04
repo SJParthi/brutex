@@ -605,7 +605,7 @@ fn strict_invalid_runtime_settings_refuse_before_real_source_admission_or_prepar
         ("BRUTEX_PROTECTED_EXITS", "bad"),
         ("BRUTEX_MIN_FILL_HEADROOM_BP", "bad"),
         ("BRUTEX_MIN_AVG_RR_BP", "bad"),
-        ("BRUTEX_VALIDATE", "false"),
+        ("BRUTEX_VALIDATE", "maybe"),
     ];
     if let Ok(name) = std::env::var(CHILD) {
         let fixture = Fixture::new();

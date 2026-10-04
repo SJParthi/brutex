@@ -3089,19 +3089,44 @@ pub fn install_log() -> String {
                 BRUTEX_STORE or HOME so the log can sit beside the store."
             .to_owned();
     };
-    let shown = dir.display().to_string();
+    let shown = log_banner(&dir, store_root().ok().as_deref());
     match telemetry::install(&telemetry::Config::new(dir)) {
         Err(why) => format!("events are NOT being recorded: {why}"),
         // THE DIRECTORY, NOT A TICK. "recorded successfully" would leave the
         // operator exactly where the measurement above found them: told it
         // worked, and unable to find the file.
-        Ok(_installed) => format!(
+        Ok(_installed) => shown,
+    }
+}
+
+/// The line `install_log` prints once the sink is installed at `dir`.
+///
+/// The /logs page reads the cli half at `<store>/logs/cli` and nowhere else
+/// (`api::logs::cli_half`). So the promise that these events appear there is
+/// made only when `dir` IS that directory; a `BRUTEX_LOG_DIR` elsewhere is told
+/// plainly that /logs will not show them, rather than promised a merge that
+/// never happens (CE-45, D-2652).
+fn log_banner(dir: &std::path::Path, store: Option<&std::path::Path>) -> String {
+    let shown = dir.display();
+    let page_reads = store.map(|s| s.join("logs").join("cli"));
+    if page_reads.as_deref() == Some(dir) {
+        return format!(
             "events -> {shown}\n  \
              The /logs page walks BOTH halves -- the server's directory and \
              this `cli/` beside it -- and merges them newest-first on the \
              clock, so these events appear there. D-0301."
-        ),
+        );
     }
+    let reads = page_reads.map_or_else(
+        || "no store root is set, so it has no cli half to read".to_owned(),
+        |p| format!("it reads the cli half only at {}", p.display()),
+    );
+    format!(
+        "events -> {shown}\n  \
+         The /logs page will NOT show these events: {reads}, and \
+         BRUTEX_LOG_DIR put them elsewhere. Read the file directly, or unset \
+         BRUTEX_LOG_DIR. D-2652."
+    )
 }
 
 /// One structural event about a run. **Never called per bar or per candidate.**
@@ -22429,6 +22454,26 @@ mod tests {
             log_dir_from(Some(OsString::from("/var/log/brutex")), None),
             Ok(Some(PathBuf::from("/var/log/brutex"))),
         );
+    }
+
+    /// CE-45, D-2652: the banner promises /logs only for the directory /logs
+    /// reads. A `BRUTEX_LOG_DIR` elsewhere, or no store root at all, is told
+    /// the page will not show its events.
+    #[test]
+    fn the_log_banner_promises_the_logs_page_only_for_the_directory_it_reads() {
+        let store = PathBuf::from("/srv/store");
+        let read = super::log_banner(&store.join("logs").join("cli"), Some(&store));
+        assert!(read.contains("so these events appear there"), "{read}");
+        assert!(!read.contains("will NOT show"), "{read}");
+
+        let elsewhere = super::log_banner(std::path::Path::new("/tmp/x"), Some(&store));
+        assert!(elsewhere.contains("will NOT show these events"), "{elsewhere}");
+        assert!(elsewhere.contains("/srv/store/logs/cli"), "{elsewhere}");
+        assert!(!elsewhere.contains("appear there"), "{elsewhere}");
+
+        let no_store = super::log_banner(std::path::Path::new("/tmp/x"), None);
+        assert!(no_store.contains("no store root is set"), "{no_store}");
+        assert!(!no_store.contains("appear there"), "{no_store}");
     }
 
     /// P3-02-03..05, D-1769: the help text names the optional TIMEFRAMES

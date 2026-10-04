@@ -57605,3 +57605,29 @@ a sink and reopens one on the same directory holds it for reading: 14 in
 `sink.rs` and one in `tail.rs`. Readers do not wait on each other. No production
 line changes, and the lock's refusal stays exactly as strict. Proven locally:
 4 of 60 runs failed before the change and 0 of 60 after.
+
+### D-2650 — The F&O rolling walk skips only a withdrawn cadence, and one unnamed contract no longer drops the rest of its chunk — 2026-10-04
+
+- CE-43 (high), found by the crash/edge helper's pass 5 at 1f4de71. CE-14's fix (D-1769) made `pull::rolling::expiry_of` refuse a contract whose computed expiry is a closed day. `api::server::cadence_has_contracts_on` was `expiry_of(..).is_ok()`, so that one refusal read as "this underlying has no contracts on this cadence": a NIFTY options window from 2024-08-14 asked for no weeklies at all, a window from 2023-03-29 no monthlies, and every chunk opening in a holiday week was skipped, uncounted, with `planned` shrunk to match so the walk reported complete. That is the hidden-failure fallback `CLAUDE.md` §4 bans.
+- `pull::rolling::listing_of` answers the cadence question on its own: `Listed`, `Withdrawn` (`costs::expiry`'s `WeeklyRegime::Withdrawn`), or the same named refusal `expiry_of` gives for an unserved flag, an unknown underlying or an unverified day. Both share `regime_of`, so they cannot drift on what they refuse. The walk's window and chunk filters skip only `Withdrawn`; any other refusal is asked, and `roll_one`'s preflight (now also `listing_of`) refuses it by name, counted in `failed`.
+- A row whose contract cannot be named no longer ends the whole chunk. `next_group` ends a group at the first row whose key differs OR cannot be computed, so the good rows before it are filed; `roll_one` counts the unnamed run once and resumes at the next nameable row. Before, the error propagated out of `next_group` and `break` discarded every later contract in the answer. Each row's key is computed at most three times, so the walk stays O(rows).
+- No engine answer changes: this is the F&O pull's coverage, and the contracts it now asks for are the ones a holiday week used to silently lose.
+- Proved by `pull::rolling::tests::a_closed_day_contract_is_listed_and_only_a_withdrawal_is_not`, `api::server::tests::a_holiday_week_contract_does_not_remove_its_cadence_from_the_walk` and `api::server::tests::an_unnamed_row_ends_its_group_without_discarding_the_rows_before_it` (ZX-01, ZX-02).
+
+### D-2651 — `BRUTEX_VALIDATE` has one reading in every cli path — 2026-10-04
+
+- CE-44. CE-6 (D-1769) moved `cli::validates` onto `brutex_core::knob::switch` (eight words), but `strict_range_knobs::value` still took only `0` and `1`. `BRUTEX_VALIDATE=false` therefore ran `cli screen` unvalidated and refused `cli audit-audited-range` in the same process, and a server started with `off` refused every strict browser run.
+- `value("BRUTEX_VALIDATE", ..)` is now `knob::switch(..).is_ok()`, and `request_value` no longer keeps its own word list; both take exactly the switch's words. Strict validation never parses the value itself, so the readers' meaning is unchanged: every reader goes through `knob::switch`.
+- Proved by `cli::audited_range_command::settings::tests::the_strict_validate_check_takes_the_switch_words_and_nothing_else` (ZX-03); the strict refusal tests now use a word no reader takes (`maybe`).
+
+### D-2652 — The cli log banner promises /logs only for the directory /logs reads — 2026-10-04
+
+- CE-45. `install_log` always printed that /logs merges this directory with the server's. `api::logs::cli_half` reads only `<store>/logs/cli`, so with `BRUTEX_LOG_DIR` elsewhere the banner promised events the page never showed, and the operator could not tell "none written" from "looked elsewhere".
+- `cli::log_banner` keeps the merge sentence when the directory is `<store>/logs/cli`, and otherwise says the page will NOT show these events and where it reads instead (or that no store root is set).
+- Proved by `cli::tests::the_log_banner_promises_the_logs_page_only_for_the_directory_it_reads` (ZX-04).
+
+### D-2653 — An unpriced frontier row names both unchecked rules — 2026-10-04
+
+- CE-42. `frontier::Row::verdict` returned `stop_unchecked: true` and a default (false) `protective_exits_unchecked` for an unpriced row, while the field's own doc says "Always `true`" and `web/src/lib/frontier-analytics.js` refuses any row where it is not. Every run whose TOP exceeded what `screen_cap` priced therefore had its whole frontier refused on the backtest page.
+- The unpriced arm now sets both flags. No stored byte changes: the verdict is computed on read.
+- Proved by `cli::frontier::tests::an_unpriced_row_fails_every_rule_and_is_marked_unpriced` (ZX-05).

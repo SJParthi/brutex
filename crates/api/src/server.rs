@@ -12778,9 +12778,19 @@ async fn roll_one(
     //
     // The ANSWER is not kept, because one expiry cannot name a rolling answer —
     // see the split below. This asks whether the regime exists, not what it
-    // resolves to.
-    pull::rolling::expiry_of(asked.underlying.as_str(), &rolling, flag, code, window.to())
-        .map_err(|why| format!("{label}: {why}"))?;
+    // resolves to — so it asks `listing_of`, which cannot refuse a cadence for
+    // one closed-day contract the way `expiry_of` rightly refuses that
+    // contract. That refusal is counted per run below (CE-43, D-2650).
+    match pull::rolling::listing_of(asked.underlying.as_str(), &rolling, flag, window.to()) {
+        Ok(pull::rolling::Listing::Listed) => {}
+        Ok(pull::rolling::Listing::Withdrawn) => {
+            return Err(format!(
+                "{label}: this cadence was withdrawn for the underlying by the chunk's last \
+                 day, so no contract existed"
+            ));
+        }
+        Err(why) => return Err(format!("{label}: {why}")),
+    }
 
     // THE VENDOR'S WORD FOR THE RUNG, NOT THE STORE'S — and this sent the
     // store's.
@@ -12884,7 +12894,17 @@ async fn roll_one(
                 // The reply was decoded even when a contract cannot be named.
                 // Keep its read count and any earlier acknowledged groups.
                 note_run_failure(&mut failed, &mut why_not, why);
-                break;
+                // SKIP THE UNNAMED RUN, NOT THE REST OF THE ANSWER. A holiday
+                // week's contract is refused by name (CE-14) and counted once
+                // above; the contracts after it in the same chunk are real and
+                // were dropped by the `break` this replaced (CE-43, D-2650).
+                // Each row's key is computed a bounded number of times (at
+                // most three), so the loop stays O(rows).
+                at = at.saturating_add(1);
+                while rows.get(at).is_some_and(|row| key_at(row).is_err()) {
+                    at = at.saturating_add(1);
+                }
+                continue;
             }
         };
 
@@ -13376,8 +13396,12 @@ where
             .ok_or_else(|| format!("{label}: row vanished"))?,
     )?;
     let mut end = at.saturating_add(1);
+    // A LATER ROW THAT CANNOT BE NAMED ENDS THE GROUP; IT DOES NOT TAKE THE
+    // GROUP WITH IT. The rows before it named one contract and are filed; the
+    // unnamed row is the next call's first row, where its refusal is counted.
+    // Propagating it here discarded every good row ahead of it (CE-43, D-2650).
     while let Some(row) = rows.get(end) {
-        if key_at(row)? != key {
+        if key_at(row).ok() != Some(key) {
             break;
         }
         end = end.saturating_add(1);
@@ -14469,9 +14493,16 @@ fn cadence_has_contracts_on(
     flag: &str,
     on: pull::session::Day,
 ) -> bool {
-    rolling.expiry_codes.first().is_some_and(|code| {
-        pull::rolling::expiry_of(asked.underlying.as_str(), rolling, flag, code, on).is_ok()
-    })
+    // ONLY A WITHDRAWN CADENCE IS SKIPPED. This was `expiry_of(..).is_ok()`,
+    // and after CE-14 `expiry_of` also refuses one contract whose computed
+    // expiry is a closed day — so a holiday week dropped the whole cadence (at
+    // the window's first day) or the whole chunk, uncounted, with `planned`
+    // shrunk to match. Any other refusal is ASKED, so `roll_one` refuses it by
+    // name and the walk counts it (CE-43, D-2650).
+    !matches!(
+        pull::rolling::listing_of(asked.underlying.as_str(), rolling, flag, on),
+        Ok(pull::rolling::Listing::Withdrawn)
+    )
 }
 
 /// How many vendor requests this walk will make, before it makes any of them.
@@ -19538,6 +19569,69 @@ mod tests {
             "weeklies existed before 2024-11-13, so this is a dated table and \
              not a constant that always refuses WEEK"
         );
+    }
+
+    /// CE-43, D-2650: A HOLIDAY-WEEK CONTRACT DOES NOT REMOVE ITS CADENCE.
+    ///
+    /// NIFTY's weekly computed from 2024-08-14 lands on 2024-08-15, a closed
+    /// day, so `expiry_of` refuses that ONE contract (CE-14). The cadence
+    /// filter read that refusal as "no weekly contracts" and dropped WEEK for
+    /// the whole window, and every chunk opening in a holiday week, uncounted.
+    /// Both the window-level and the per-chunk question must now say "asked".
+    #[test]
+    fn a_holiday_week_contract_does_not_remove_its_cadence_from_the_walk() {
+        let today = pull::session::Day::new(2026, 8, 20).expect("a real date");
+        let asked = ingest::parse_fno(
+            "underlying=NIFTY&series=opt&vendor=dhan&from=2024-08-14&to=2024-09-13",
+            today,
+        )
+        .expect("a NIFTY expired-option window is readable");
+        let on = asked.window.from();
+        assert!(
+            pull::rolling::expiry_of("NIFTY", &dhan_rolling(), "WEEK", "1", on).is_err(),
+            "the premise: the near weekly computed from 2024-08-14 is refused"
+        );
+        assert!(
+            cadence_has_contracts(&asked, &dhan_rolling(), "WEEK"),
+            "a refused contract is not a withdrawn cadence: WEEK must be asked"
+        );
+        assert!(cadence_has_contracts_on(&asked, &dhan_rolling(), "WEEK", on));
+        let ram_navami_month = pull::session::Day::new(2023, 3, 29).expect("a real date");
+        assert!(
+            cadence_has_contracts_on(&asked, &dhan_rolling(), "MONTH", ram_navami_month),
+            "the monthly computed from 2023-03-29 is a closed day; MONTH is still asked"
+        );
+    }
+
+    /// CE-43, D-2650: one row that cannot be named ends its group; it does not
+    /// discard the good rows before it, and the rows after it start a new group.
+    #[test]
+    fn an_unnamed_row_ends_its_group_without_discarding_the_rows_before_it() {
+        let row = |ts_micros: i64| pull::rolling::Row {
+            bar: store::format::Bar {
+                ts_micros,
+                ..store::format::Bar::default()
+            },
+            overlay: store::format::Overlay {
+                ts_micros,
+                spot: store::format::OI_NULL,
+                iv_micros: store::format::OI_NULL,
+            },
+            strike: Some(100),
+        };
+        let rows = [row(1), row(2), row(3), row(4)];
+        let day = Day::new(2024, 8, 22).expect("a real date");
+        // Row 3 is the holiday-week bar: its contract cannot be named.
+        let key_at = |r: &pull::rolling::Row| {
+            if r.bar.ts_micros == 3 {
+                Err("closed-day expiry".to_owned())
+            } else {
+                Ok((day, 100))
+            }
+        };
+        assert_eq!(next_group(&rows, 0, "t", key_at), Ok((2, (day, 100))));
+        assert!(next_group(&rows, 2, "t", key_at).is_err());
+        assert_eq!(next_group(&rows, 3, "t", key_at), Ok((4, (day, 100))));
     }
 
     /// AN UNREADABLE CENSUS REFUSES RATHER THAN GUESSING EITHER WAY.

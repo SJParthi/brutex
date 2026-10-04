@@ -95,29 +95,7 @@ pub fn expiry_of(
     code: &str,
     on: crate::session::Day,
 ) -> Result<brutex_core::instrument::Expiry, RollingError> {
-    // THE CADENCE THE ROW NAMES, RESOLVED ONCE AND BEFORE THE WALK. Two
-    // comparisons against a fixed table — constant work, and a flag the row
-    // does not carry is refused here rather than inside the loop.
-    let cadence = spec
-        .expiry_flags
-        .iter()
-        .find(|(word, _)| *word == flag)
-        .map(|(_, cadence)| *cadence)
-        .ok_or(RollingError::NoExpiry {
-            why: "the expiry cadence is not one this vendor serves",
-        })?;
-    let symbol =
-        brutex_core::symbol::Symbol::new(underlying).map_err(|_| RollingError::NoExpiry {
-            why: "the underlying is not a symbol this build knows",
-        })?;
-    let slot = costs::venue::swept_slot(symbol).map_err(|_| RollingError::NoExpiry {
-        why: "the underlying has no expiry regime recorded",
-    })?;
-    let day = costs::day::TradeDay::new(on.year(), on.month(), on.day()).map_err(|_| {
-        RollingError::NoExpiry {
-            why: "the bar's own day is not a real date",
-        }
-    })?;
+    let (cadence, slot, day) = regime_of(underlying, spec, flag, on)?;
 
     // THE ORDINAL IS THE CODE'S POSITION IN THE ROW, NOT A SECOND SPELLING OF
     // IT.
@@ -197,6 +175,102 @@ pub fn expiry_of(
             why: "the calendar produced a date this store cannot name",
         },
     )
+}
+
+/// Whether an underlying lists contracts on a cadence on one day.
+///
+/// Distinct from [`expiry_of`], and the distinction is CE-43: `expiry_of`
+/// answers "which contract", and can refuse a contract that exists (its
+/// computed expiry is a closed day, CE-14). A caller asking "is this cadence
+/// worth a request at all" must not read that refusal as "no contracts", or a
+/// holiday week silently removes a whole cadence from a walk. Only
+/// [`Listing::Withdrawn`] means the exchange listed nothing. D-2650.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Listing {
+    /// The cadence's regime lists contracts on or after that day.
+    Listed,
+    /// The cadence was withdrawn for this underlying before that day
+    /// (`costs::expiry`'s `WeeklyRegime::Withdrawn`), so no contract exists.
+    Withdrawn,
+}
+
+/// Whether `underlying` lists contracts on cadence `flag` on `on`.
+///
+/// # Errors
+///
+/// The same named refusals as [`expiry_of`] for a cadence this vendor does not
+/// serve, an unknown underlying, an unreal day or a day before the regime was
+/// verified from. A closed-day expiry is NOT an error here: it is a property of
+/// one contract, not of the cadence.
+///
+/// # Cost
+///
+/// O(1): one slot lookup and one dated-table step, the first step of
+/// [`expiry_of`]'s walk. **UNVERIFIED as a measurement**, as there.
+pub fn listing_of(
+    underlying: &str,
+    spec: &RollingSpec,
+    flag: &str,
+    on: crate::session::Day,
+) -> Result<Listing, RollingError> {
+    let (cadence, slot, day) = regime_of(underlying, spec, flag, on)?;
+    match cadence {
+        crate::vendor::ExpiryCadence::Weekly => match costs::expiry::next_weekly_expiry(slot, day)
+        {
+            Ok(Some(_)) => Ok(Listing::Listed),
+            Ok(None) => Ok(Listing::Withdrawn),
+            Err(_) => Err(RollingError::NoExpiry {
+                why: "the day is before this weekly regime was verified from",
+            }),
+        },
+        crate::vendor::ExpiryCadence::Monthly => costs::expiry::next_monthly_expiry(slot, day)
+            .map(|_| Listing::Listed)
+            .map_err(|_| RollingError::NoExpiry {
+                why: "the day is before this monthly regime was verified from",
+            }),
+    }
+}
+
+/// The cadence, the swept slot and the trade day one rolling question is
+/// asked on: the shared first half of [`expiry_of`] and [`listing_of`], so the
+/// two cannot drift on which flag, underlying or day they refuse.
+fn regime_of(
+    underlying: &str,
+    spec: &RollingSpec,
+    flag: &str,
+    on: crate::session::Day,
+) -> Result<
+    (
+        crate::vendor::ExpiryCadence,
+        costs::venue::SweptSlot,
+        costs::day::TradeDay,
+    ),
+    RollingError,
+> {
+    // THE CADENCE THE ROW NAMES, RESOLVED ONCE AND BEFORE THE WALK. Two
+    // comparisons against a fixed table — constant work, and a flag the row
+    // does not carry is refused here rather than inside the loop.
+    let cadence = spec
+        .expiry_flags
+        .iter()
+        .find(|(word, _)| *word == flag)
+        .map(|(_, cadence)| *cadence)
+        .ok_or(RollingError::NoExpiry {
+            why: "the expiry cadence is not one this vendor serves",
+        })?;
+    let symbol =
+        brutex_core::symbol::Symbol::new(underlying).map_err(|_| RollingError::NoExpiry {
+            why: "the underlying is not a symbol this build knows",
+        })?;
+    let slot = costs::venue::swept_slot(symbol).map_err(|_| RollingError::NoExpiry {
+        why: "the underlying has no expiry regime recorded",
+    })?;
+    let day = costs::day::TradeDay::new(on.year(), on.month(), on.day()).map_err(|_| {
+        RollingError::NoExpiry {
+            why: "the bar's own day is not a real date",
+        }
+    })?;
+    Ok((cadence, slot, day))
 }
 
 /// One rolling-option request: a shape, not a contract.
@@ -1388,6 +1462,40 @@ mod tests {
             monthly, near,
             "the monthly and the near weekly are not the same contract"
         );
+    }
+
+    /// CE-43, D-2650: `listing_of` separates "no contract on this cadence"
+    /// from "this contract's expiry is refused". The closed-day weeks that
+    /// `expiry_of` refuses are `Listed`; BANKNIFTY weeklies after their
+    /// 2024-11-13 withdrawal are `Withdrawn`; a cadence the row does not serve
+    /// is refused by name.
+    #[test]
+    fn a_closed_day_contract_is_listed_and_only_a_withdrawal_is_not() {
+        use crate::session::Day;
+        for (on, flag) in [
+            (Day::new(2024, 8, 14).expect("a real day"), "WEEK"),
+            (Day::new(2023, 3, 29).expect("a real day"), "MONTH"),
+        ] {
+            assert!(expiry_of("NIFTY", &spec(), flag, "1", on).is_err());
+            assert_eq!(
+                listing_of("NIFTY", &spec(), flag, on),
+                Ok(Listing::Listed),
+                "{on:?} {flag}"
+            );
+        }
+        let after = Day::new(2026, 1, 5).expect("a real day");
+        assert_eq!(
+            listing_of("BANKNIFTY", &spec(), "WEEK", after),
+            Ok(Listing::Withdrawn)
+        );
+        assert_eq!(
+            listing_of("BANKNIFTY", &spec(), "MONTH", after),
+            Ok(Listing::Listed)
+        );
+        assert!(matches!(
+            listing_of("NIFTY", &spec(), "DAILY", after),
+            Err(RollingError::NoExpiry { why }) if why.contains("not one this vendor serves")
+        ));
     }
 
     /// CE-14, D-1769: a computed expiry the exchange calendar marks CLOSED is
