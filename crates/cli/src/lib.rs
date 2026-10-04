@@ -597,7 +597,9 @@ MIN_HITS  bars a combination must fire on to be kept, 1 or more
 VENDOR    the feed that wrote them -- groww, dhan, truedata, gdfl, zerodha
 UNDERLYING  the index, e.g. NIFTY or BANKNIFTY, or one of the F&O
             underlyings that is a share, e.g. RELIANCE (its cash equity)
-RUNG      the bar length as its directory word -- 1min, 1day
+RUNG      the bar length as its directory word -- one of the eight intraday
+          rungs 1min 2min 3min 5min 10min 15min 30min 60min. 1day is stored
+          and is not a rung any sweep accepts
 
 The stored commands read a run identity off the build. They refuse unless the
 build proved that HEAD, the Git index, and every Rust/Cargo working-tree input
@@ -8115,10 +8117,13 @@ pub fn top_list(feed: Option<&str>, underlying: Option<&str>) -> String {
 /// workspace answers by splitting.
 fn no_frontier(unreadable: &str) -> String {
     if unreadable.is_empty() {
-        return "\n  This run recorded NO frontier. Rows are written by runs made \
-                after `cli frontier` landed; an older run has a ledger row and no \
-                ranked list, which is a gap in the record rather than an empty \
-                result. Re-run it to fill one in.\n"
+        // There is no `cli frontier` command, and this sentence named one
+        // (P8-05, D-2724). Frontier rows are written by every recorded run
+        // since the ranked frontier was kept (D-0287).
+        return "\n  This run recorded NO frontier. Frontier rows are written by \
+                runs recorded since the ranked frontier was kept (D-0287); an \
+                older run has a ledger row and no ranked list, which is a gap in \
+                the record rather than an empty result. Re-run it to fill one in.\n"
             .to_owned();
     }
     format!(
@@ -20909,9 +20914,9 @@ mod tests {
         parse_vendor, policy_of, root_from, run, sample_warning, side_of_evidence, streaming_note,
         support_from_knob, sweep, sweep_stored, sweep_with, validates,
     };
+    use super::{Cadence, FAILED, carries_refusal, nothing_measured, parse_cadence, untrustworthy};
     use super::{Consistency, Horizon, consistency_of, evaluator, grid, grid_step_ppm, ladder_for};
     use super::{Direction, Side};
-    use super::{Cadence, FAILED, carries_refusal, nothing_measured, parse_cadence, untrustworthy};
     use super::{
         MAX_STOP_POINTS, NIFTY_REFERENCE, PAISA_PER_POINT, STOP_FLOOR_POINTS, hundredths_of,
         points_to_ppm_at, ppm_to_points_at, reference_price, return_over_drawdown_cell,
@@ -21368,6 +21373,43 @@ mod tests {
         assert!(super::Rules::protective_exits_required());
         assert!(crate::knobs::refused().is_some());
         crate::knobs::clear_all();
+    }
+
+    /// OPERATOR TEXT NAMES ONLY RUNGS AND COMMANDS THIS BINARY ACCEPTS. P8-05, D-2724.
+    ///
+    /// The USAGE legend gave `1min, 1day` as RUNG examples and every sweep
+    /// refuses `1day`; `cli top`'s missing-frontier sentence named `cli
+    /// frontier`, which is not a command; `main.rs` headed a list "the four
+    /// commands" of thirty-five. Every backticked `cli WORD` in the three texts
+    /// must be a dispatched command, the legend must list exactly the swept
+    /// rungs, and the one stored-only rung it names must be refused by a sweep.
+    #[test]
+    fn operator_text_names_only_rungs_and_commands_this_binary_accepts() {
+        let main = include_str!("main.rs");
+        let missing = super::no_frontier("");
+        for text in [USAGE, missing.as_str(), main] {
+            for (at, _) in text.match_indices("`cli ") {
+                let word: String = text[at + 5..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                    .collect();
+                assert!(
+                    COMMANDS.contains(&word.as_str()),
+                    "`cli {word}` is not a command"
+                );
+            }
+        }
+        assert!(!missing.contains("cli frontier"), "{missing}");
+        assert!(!main.contains("# The four"), "main.rs heads a fixed count");
+        let legend = &USAGE[USAGE.find("\nRUNG ").expect("RUNG legend")..];
+        let legend = &legend[..legend.find("\n\n").expect("legend ends")];
+        assert!(legend.contains(&super::EVERY_RUNG.join(" ")), "{legend}");
+        for rung in super::EVERY_RUNG {
+            assert!(super::swept_rung(rung).is_ok(), "{rung}");
+        }
+        assert!(super::swept_rung("1day").is_err());
+        assert!(!legend.contains("1min, 1day"), "{legend}");
+        assert!(legend.contains("1day is stored"), "{legend}");
     }
 
     /// A REFUSED ARGUMENT IS REFUSED IN THE GRAMMAR ITS PARSER ACCEPTS. P8-02, D-2721.
