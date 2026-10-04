@@ -124,3 +124,12 @@ Total new across rounds 1-12: 192 (round 12 = 3 medium, 25 low). All handed to z
 2. Check `git rev-parse --short origin/final/all-fixes-zero`; if it moved from 1f4de71, re-verify every open row on the new head first.
 3. Otherwise start round 13 on new themes (see the themes already covered in the report titles under /mnt/project-files/zero-rounds/). Stop an angle when a pass finds nothing new.
 Artifact: https://claude.ai/artifact/VPrgywStff6zaUpdpFMXQL (version 13 = through round 11; round 12 rows still to add).
+
+## Round 13 (same head 1f4de71) — done 2026-10-04 ~17:30 UTC
+| Angle | Pass | Area | New | Report |
+|---|---|---|---|---|
+| Crash/edge | 18 | instrument identity and mapping | CE-91, CE-92 low | crash-edge-pass18.md |
+| Concurrency | 16 | api server start/stop lifecycle | conc16-1, conc16-2 low | conc-pass16.md |
+| Equities | 16 | corporate actions, survivorship | p16num-1 med (first-session overnight gap never measured, ran), p16num-2, p16num-3 low | numeric-pass16.md |
+| Tests | 16 | test determinism and isolation | P16-01 med (socket path too long on macOS, ran), P16-02 med (/dev/full absent on macOS), P16-03, P16-04 low | tests-docs-security-pass16.md |
+Total new across rounds 1-13: 203. Round 13 = 3 medium, 8 low. Newly fixed: CE-1, P1-02-04, hunt-api-6.
