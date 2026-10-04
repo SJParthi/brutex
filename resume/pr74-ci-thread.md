@@ -73,3 +73,10 @@ Artifacts.
 - Run 1265 (37180670656) on c97ff00 failed only Gate 6d: two web/ native tests in `deployment-preflight-tests.rs`. Cause: D-1570's workspace `arbitrary_precision` reaches web/*.rs through Gate 6d's shared serde_json rlib; `files::json` decoded `0.125` as an object and accepted `1e999`.
 - Fixed in **73441e5** (D-1463): `visit_map` decodes serde_json's number-token map into its digits, refuses nonfinite/forged numbers; new test `report_json_decimals_keep_their_digits_and_refuse_nonfinite_or_forged_numbers` + invariant row. Reproduced 3 failures on the old reader, 0 after; all four Gate 6d binaries and 29 static gates green locally.
 - Next: watch the run on 73441e5 (Gate 8, coverage, Gate 18 shards). Next D-number: D-1464.
+
+## 2026-10-04 13:35 UTC — bb6b3b4 pushed (new account, thread 5.1)
+- final/all-fixes = bb6b3b4 = sweep 8c16ba3 (ci.yml gates ported to .github/gates_*.rs) + D-1464.
+- D-1464: Gate 18 survivors killed ahead of CI (runner BlockExtremes::of x3 + outcome tests, pull number_text 12/12 caught, telemetry hold_directory unreachable arm removed); Gate 20 non-root count = clock 1, level 1, lib 6, record 1, sink 20, tail 3 (re-measured on bb6b3b4 incl. sweep's OD-4 sink lines).
+- Run 1267 (8c9313c): only Gate 20 red; 6d, tests, Gate 8 green; Gate 18 shards skipped. CI run 1269 on bb6b3b4 is the first that reaches Gate 18 shards.
+- Attack-audit runner survivors exit_grid_policy.rs:86 and research_exit_grid.rs:204 are caught by full suite (filter artifact). Local cli mutant runs (wt-a, wt-c) died on disk-full; CI Gate 18 shards are authority now.
+- Local gates: extract jobs.language-purity steps with python yaml to /tmp/claude-0/gates2, run with RUNNER_TEMP and GITHUB_ENV set, source GITHUB_ENV between steps.
