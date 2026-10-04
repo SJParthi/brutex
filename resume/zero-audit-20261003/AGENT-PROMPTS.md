@@ -58,3 +58,43 @@ Already in the ledger agent's follow-up list above.
 ## Rule for agent count
 The user allowed up to 2 fix agents at a time (coordinator, 18:37 UTC) until 93%
 weekly usage; save at 93%, stop at 98%. The main thread also fixes directly.
+
+---
+
+## 2026-10-04 agents (launched 04:20 UTC, worktree isolation, base bde50c0c)
+
+Both prompts share these sections, copied from briefs/COMMON-BRIEF.md with:
+branch `git checkout -b <branch> bde50c0c`; never push; CARGO_BUILD_JOBS=2;
+build only in the agent's own worktree target; tests only for touched modules;
+non-root for permission tests; read-only /mnt/project-files; install nothing;
+every fix gets a break-tested test; no silent fallback; decisions appended as
+`### D-NNNN — title — 2026-10-04`; invariant rows with the agent's prefix;
+gate 11 / pedantic clippy rules; api emit-site accounting; fmt + clippy per
+touched crate; mutants if installed; commit per finding with the attribution
+lines; on a stop message, finish the current edit, commit and report.
+Return: branch head, then one line per finding (FIXED / ALREADY FIXED / NOT
+FIXED + why, commit, test, break-tested?), then what was not run.
+
+### api-routes (branch zero/api-routes, D-1970..1979, prefix ZW-)
+Task: fix P3-01-02 (routes silently drop known WireBody fields: refuse by name
+any known field a route does not consume, like `strict_knobs`; keep the page
+working), P3-01-03 (client disconnect during sweep/descent/command admission
+records Cancelled/0 while the detached admission still launches: never record
+Cancelled while the handler can still dispatch), P3-01-04 (masters refresh
+runs its ladder inside the request and the page aborts at 90 s: detach like
+`recovery::start` or bound below the page ceiling; always record and reload),
+P3-02-01, P3-02-06, P3-02-07. Evidence: /mnt/project-files/zero-rounds/
+tests-docs-security.md (### headings by ID). Already fixed -> say so with
+evidence.
+
+### numeric (branch zero/numeric, D-1990..1999, prefix ZN-)
+Task: from /mnt/project-files/zero-rounds/numeric-complexity.md and numeric/:
+1. floor-then-max-gated class p2bool-1, p2inst-1, p2idx-1, run3-1, D-0743
+   pbo_ppm (round UP only max-gated fields; reuse D-1769's
+   `Cell::avg_loss_magnitude_ceil` / `Crossings::adverse_ppm_ceil_at` shape;
+   numeric/pass3/p3floor.md lists ~20 SAFE fields not to touch);
+2. D-0742 (block length > period count must refuse);
+3. mediums pst-1, grk-1, run1-1, xcut-1;
+4. then run1-2, run1-3, run2-1, run2-2, pst-2, pst-4, grk-2.
+Operator-decision items pst-3, clib-1, clib-2, gaps-7: NOT FIXED with the exact
+question. Golden fingerprints re-taken only where the test's comment allows.
