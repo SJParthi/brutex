@@ -6371,7 +6371,7 @@ jobs:
               | sed -E 's/[Ww]orst[ -][Cc]ase//g' \
               | sed -E "s/[Ff]lat +${notclaim}//g" \
               | sed -E 's/[Ff]lat +(JSON|json) object//g' \
-              | sed -E 's/(exactly|books the trade|came out|row-major and|is charged|A) [Ff]lat//g'
+              | sed -E 's/(exactly|books the trade|came out|row-major and|is charged|A|trades?( was| were)?) [Ff]lat//g'
           }
           # <<< CLAIM READER
           # A block is a maximal run of consecutive `///` or `//!` lines. Any
@@ -6405,6 +6405,12 @@ jobs:
           # carries no cost claim at all. That block was refused by this gate on
           # the tree as committed, so widening the list here takes a live red to
           # green rather than pre-empting a hypothetical one.
+          #
+          # `trades? (was |were )?flat` is a trade's OUTCOME, zero profit and
+          # zero loss, not a cost. `crates/cli/src/pool.rs` says "every pooled
+          # trade was flat" and "Every pooled trade flat" of p5num-3's
+          # never-won candidate (D-2713), and both blocks were refused on the
+          # tree as committed: a live red to green, as above. D-1930.
 
           refused="$work/refused"; : > "$refused"
           claimed=0; by_test=0; by_path=0; by_row=0; by_unverified=0
@@ -6863,7 +6869,7 @@ jobs:
               | sed -E 's/[Ww]orst[ -][Cc]ase//g' \
               | sed -E "s/[Ff]lat +${notclaim}//g" \
               | sed -E 's/[Ff]lat +(JSON|json) object//g' \
-              | sed -E 's/(exactly|books the trade|came out|row-major and|is charged|A) [Ff]lat//g'
+              | sed -E 's/(exactly|books the trade|came out|row-major and|is charged|A|trades?( was| were)?) [Ff]lat//g'
           }
           # <<< CLAIM READER
           tab=$(printf '\t')
