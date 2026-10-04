@@ -58387,9 +58387,9 @@ The landing already drops rows at or after the dated close
 
 Tests: DCC-01..05. LBD-07 still refuses with no master.
 
-**Not closed here.** The Boolean candidate universe's overlay takes a bare
-minute slice and stays venue-blind. On a CAS day it refuses, and does not
-misprice (`docs/06-limits.md`).
+**Unchanged on purpose.** The Candidate universe's overlay still asks the
+index calendar. Its families are NIFTY and BANKNIFTY only
+(`candidate_universe::require_series_family`), so no share reaches it.
 
 **Rejected.**
 

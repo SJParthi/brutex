@@ -14850,12 +14850,10 @@ per-candidate primitive from `CLAUDE.md` §3 rule 4.
   `brutex_core::universe::nse_isin`, the current table. A day whose master
   lists the share under an earlier ISIN is held UNVERIFIED rather than
   matched on the symbol alone.
-- **The Boolean candidate universe is still venue-blind.** Its overlay is
-  handed a bare minute slice and still asks `stored::nse_session_close_minute`.
-  On a CAS day an eligible share's final bucket demands 15:29 and that run
-  refuses with `MissingClosingMinute`. It refuses rather than pricing the
-  wrong minute. Threading the dated closes through its receipts is not done
-  here.
+- **The Candidate universe keeps the index calendar, and needs nothing
+  else.** Its overlay still asks `stored::nse_session_close_minute`, but its
+  families are NIFTY and BANKNIFTY only (`require_series_family` refuses any
+  other instrument), and an index's close is the calendar's.
 
 ## Ledger sizing reads a whole Candidate context per rung — D-2103, 4 October 2026
 
