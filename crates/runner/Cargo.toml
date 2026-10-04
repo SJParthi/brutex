@@ -38,12 +38,16 @@ vocab       = { path = "../vocab", version = "0.1.0" }
 indicators  = { path = "../indicators", version = "0.1.0" }
 engine      = { path = "../engine", version = "0.1.0" }
 
-# THE FILL MODEL. `crate::trade` prices every entry and exit through
-# `costs::fill::fills_at` (at `Anchor::Open` and `Anchor::PrintedExtreme`) and
-# charges through `costs::trip::price`, rather than reimplementing a fill or a
-# charge here -- a second copy of the rule would be a second thing to get
-# wrong. This named `costs::fill::worst_case_fills`, which `trade` does not
-# call, until D-1498 (ET-strategies-trades-ranking-costs-7).
+# THE FILL MODEL. `crate::trade` and `crate::grid` price every entry and exit
+# through `costs::fill::fills_at` (at `Anchor::Open` and
+# `Anchor::PrintedExtreme`) rather than reimplementing a fill here -- a second
+# copy of the rule would be a second thing to get wrong. NOTHING in this crate
+# charges: `costs::trip::price` is never called, because a spot index places
+# no order and an equity has no charter-sourced charge stack yet, so every
+# figure is gross of every charge (`trade`'s module doc). This named
+# `costs::fill::worst_case_fills`, which nothing here calls, until D-1498, and
+# said trades are charged through `costs::trip::price` until D-1646
+# (ET-strategies-trades-ranking-costs-7).
 #
 # The graph stays acyclic: `costs` declares `brutex_core` and nothing else, so
 # this adds `runner -> costs -> core` beside the `runner -> core` that already

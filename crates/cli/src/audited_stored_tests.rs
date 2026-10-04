@@ -170,6 +170,16 @@ impl Fixture {
     }
 
     fn screen(&self, rung: &str, support_ppm: u64) -> Result<String, String> {
+        self.screen_with(rung, support_ppm, runner::rank::Lens::Detectability)
+    }
+
+    /// [`Self::screen`] under the ranking lens a command names. D-1645.
+    fn screen_with(
+        &self,
+        rung: &str,
+        support_ppm: u64,
+        lens: runner::rank::Lens,
+    ) -> Result<String, String> {
         crate::screen_range_kernel(crate::StoredScreenRequest {
             root: self.root.clone(),
             vendor: Vendor::Zerodha,
@@ -179,7 +189,7 @@ impl Fixture {
             support_ppm,
             policy: crate::Policy {
                 rules: crate::Rules::BASELINE,
-                lens: runner::rank::Lens::Detectability,
+                lens,
                 validate: false,
             },
             attempt: Some(13),
@@ -402,6 +412,52 @@ fn stored_screens_scale_support_to_retained_bars_and_disclose_holed_sessions() {
             "{report}"
         );
         assert_eq!(fs::read(&source).expect("unmodified source"), source_bytes);
+    }
+    crate::knobs::clear_all();
+}
+
+/// AC-whp-tb-2, D-1645: every ranking lens a command can name reaches the
+/// stored screen, ranks by its own question and records under its own
+/// identity. `Asymmetry` -- the operator's smallest-win over largest-loss
+/// rule -- had no production caller before `elite` took a LENS.
+#[test]
+fn every_lens_reaches_the_stored_screen_and_records_its_own_identity() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    crate::knobs::set("BRUTEX_CEILING", "256");
+    let fixture = Fixture::warmed();
+    let mut identities = Vec::new();
+    for (index, (lens, label)) in [
+        (runner::rank::Lens::Payoff, "best by payoff, then |t|"),
+        (
+            runner::rank::Lens::Asymmetry,
+            "best by smallest win / largest loss, then largest win, then |t|",
+        ),
+        (
+            runner::rank::Lens::Path,
+            "best by favourable/adverse excursion, then |t|",
+        ),
+        (runner::rank::Lens::Detectability, "best by |t|"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let report = fixture
+            .screen_with("5min", 1_000_000, lens)
+            .expect("screen under a named lens");
+        assert!(report.contains("RESULT RECORDED"), "{report}");
+        assert!(
+            report.contains(label),
+            "{lens:?} must rank by {label}: {report}"
+        );
+        let mut ledger = crate::results::Results::open_read(&fixture.root).expect("ledger");
+        assert_eq!(ledger.len().expect("one row per lens"), index as u64 + 1);
+        let row = ledger.read(index as u64).expect("this lens's row");
+        assert!(
+            !identities.contains(&row.identity),
+            "{lens:?} reused an identity"
+        );
+        identities.push(row.identity);
     }
     crate::knobs::clear_all();
 }
@@ -712,8 +768,46 @@ fn generated_public_command_flow(root: &std::path::Path) -> Result<(), Box<dyn s
             assert_eq!(fs::read(path)?, saved);
         }
     }
+    elite_ranks_by_the_lens_it_is_given();
     crate::knobs::clear_all();
     Ok(())
+}
+
+/// THE LENS IS THE OPERATOR'S TO NAME AT THE COMMAND (AC-whp-tb-2, D-1645):
+fn elite_ranks_by_the_lens_it_is_given() {
+    // `elite` with an eleventh word ranks every descent step by it.
+    let elite: Vec<String> = [
+        "elite",
+        "zerodha",
+        "NIFTY",
+        "1min",
+        "2025",
+        "5",
+        "2025",
+        "5",
+        "200",
+        "1",
+        "asymmetry",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    // The default 50% win-rate rule has no confidence bound a 1,000-bar span
+    // can reach, and `elite` refuses that pair before any step; drop it.
+    crate::knobs::set("BRUTEX_MIN_WIN_RATE_BP", "0");
+    let mut report = String::new();
+    crate::dispatch(&elite, &mut report);
+    assert!(!report.contains("LENS must"), "{report}");
+    assert!(report.contains("ELITE, SELF-TUNING"), "{report}");
+    if crate::commit_stamp().is_none() {
+        assert!(report.contains("no verified commit stamp"), "{report}");
+    } else {
+        assert!(
+            report.contains("best by smallest win / largest loss, then largest win"),
+            "{report}"
+        );
+        assert!(!report.contains("best by payoff, then |t|"), "{report}");
+    }
 }
 
 #[test]
