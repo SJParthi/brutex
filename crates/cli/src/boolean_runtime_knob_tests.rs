@@ -9,7 +9,8 @@ use std::process::Command;
 
 fn valid_legacy_value(name: &str) -> &'static str {
     match name {
-        "BRUTEX_VALIDATE" => "1",
+        // A switch: exactly `0` or `1` on every reader (P8-04, D-2723).
+        "BRUTEX_VALIDATE" | "BRUTEX_PROTECTED_EXITS" => "1",
         "BRUTEX_SIZING_RATE_BP" => "5001",
         _ => "2",
     }

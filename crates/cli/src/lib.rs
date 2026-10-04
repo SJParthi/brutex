@@ -23236,8 +23236,8 @@ mod tests {
             "the arm must be reached, not fall through to the usage refusal: {out}"
         );
         assert!(
-            code == OK || code == MISUSED,
-            "it either searched or refused for a stated reason: {code}"
+            code == OK || code == FAILED,
+            "it either searched or its work refused for a stated reason: {code}"
         );
 
         // A non-numeric date is a refusal, not a parse panic.
@@ -23276,8 +23276,9 @@ mod tests {
             &mut out,
         );
         assert_eq!(
-            code, MISUSED,
-            "a month the store does not hold is a misuse, not a success: {out}"
+            code, FAILED,
+            "a month the store does not hold is a failure, not a success or a \
+             misuse (P8-03, D-2722): {out}"
         );
         assert!(
             out.starts_with("refused: "),
@@ -24682,9 +24683,15 @@ mod tests {
             ]),
             &mut out,
         );
+        // WELL FORMED, SO NOT A MISUSE: every word names something real, and
+        // what refuses is the build or the store -- the work (P8-03, D-2722).
         assert_eq!(
-            code, MISUSED,
-            "a range that cannot be run is a misuse: {out}"
+            code, FAILED,
+            "a well-formed range that cannot be run is a failure: {out}"
+        );
+        assert!(
+            !out.contains("usage:"),
+            "and is not told how to type it: {out}"
         );
         assert!(
             out.starts_with("refused: "),
@@ -25099,8 +25106,11 @@ mod tests {
                  nothing -- it is the only line separating a real sweep from a \
                  generated one:\n{out}"
             );
+            // THE WORD IS REFUSED BEFORE ANY RUNG IS TRIED (P8-03, D-2722), so
+            // the reason is the argument's own sentence and the usage follows.
+            let first = out.lines().next().unwrap_or_default();
             assert!(
-                out.contains("first reason:"),
+                first.len() > "refused: ".len() && out.contains("usage:"),
                 "and it must name WHY, not merely that it refused:\n{out}"
             );
         }
