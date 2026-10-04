@@ -376,7 +376,7 @@ fn w1_api5_9_the_index_map_rereads_its_catalogue_and_walks_the_universe() {
     );
     assert!(
         item(SERVER, "fn indexmap_reading(")
-            .contains("site.indexmap_memo.get(stamp, generation, feed,"),
+            .contains("site.indexmap_memo.get(&stamp, generation, feed,"),
         "the read serves the kept answer"
     );
     let route = item(SERVER, "fn indexmap_answer(");

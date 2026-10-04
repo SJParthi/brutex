@@ -155,7 +155,7 @@ impl<K: Eq + Hash, V: Clone> CensusMemo<K, V> {
         key: K,
         build: impl FnOnce() -> (V, bool),
     ) -> V {
-        self.get(Arc::downgrade(source), generation, key, build)
+        self.get(&Arc::downgrade(source), generation, key, build)
     }
 }
 
@@ -168,7 +168,7 @@ impl<S: Source + Clone, K: Eq + Hash, V: Clone> Memo<S, K, V> {
     /// one, because nothing is inserted until `build` has returned.
     pub(crate) fn get(
         &self,
-        observed: S,
+        observed: &S,
         generation: u64,
         key: K,
         build: impl FnOnce() -> (V, bool),
@@ -177,7 +177,7 @@ impl<S: Source + Clone, K: Eq + Hash, V: Clone> Memo<S, K, V> {
             let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
             let current = held
                 .as_ref()
-                .is_some_and(|held| held.source.same(&observed) && held.generation == generation);
+                .is_some_and(|held| held.source.same(observed) && held.generation == generation);
             if !current {
                 // EVERY ANSWER OF AN OLDER SNAPSHOT OR PARSE GOES, before the
                 // build below, so none can be served for inputs it was not
@@ -205,7 +205,7 @@ impl<S: Source + Clone, K: Eq + Hash, V: Clone> Memo<S, K, V> {
             // answer from the older one.
             if let Some(held) = held
                 .as_mut()
-                .filter(|held| held.source.same(&observed) && held.generation == generation)
+                .filter(|held| held.source.same(observed) && held.generation == generation)
             {
                 if held.answers.len() >= self.cap {
                     held.answers.clear();
@@ -305,16 +305,16 @@ mod tests {
         assert_eq!(FileStamp::of(&file).ok(), first, "untouched");
         let memo: Memo<FileStamp, u8, u8> = Memo::default();
         let stamp = |path: &std::path::Path| FileStamp::of(path).unwrap_or_else(|_| unreachable!());
-        assert_eq!(memo.get(stamp(&file), 0, 0, || (1, true)), 1);
-        assert_eq!(memo.get(stamp(&file), 0, 0, || (2, true)), 1, "a hit");
+        assert_eq!(memo.get(&stamp(&file), 0, 0, || (1, true)), 1);
+        assert_eq!(memo.get(&stamp(&file), 0, 0, || (2, true)), 1, "a hit");
         std::thread::sleep(std::time::Duration::from_millis(20));
         assert!(std::fs::write(&file, b"c,d\n").is_ok());
         assert_ne!(FileStamp::of(&file).ok(), first, "same length, new bytes");
-        assert_eq!(memo.get(stamp(&file), 0, 0, || (3, true)), 3);
+        assert_eq!(memo.get(&stamp(&file), 0, 0, || (3, true)), 3);
         let fresh = dir.join("fresh.csv");
         assert!(std::fs::write(&fresh, b"c,d\n").is_ok());
         assert!(std::fs::rename(&fresh, &file).is_ok());
-        assert_eq!(memo.get(stamp(&file), 0, 0, || (4, true)), 4, "replaced");
+        assert_eq!(memo.get(&stamp(&file), 0, 0, || (4, true)), 4, "replaced");
         assert!(FileStamp::of(&dir.join("absent")).is_err());
         let _ = std::fs::remove_dir_all(dir);
     }

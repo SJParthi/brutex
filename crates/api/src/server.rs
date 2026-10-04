@@ -15633,7 +15633,7 @@ pub fn store_html(
         let last = total.saturating_sub(1) / PAGE_ROWS;
         let page = page.min(last);
         (
-            census::held_page(&kept, &censuses, page.saturating_mul(PAGE_ROWS), PAGE_ROWS),
+            census::held_page(kept, &censuses, page.saturating_mul(PAGE_ROWS), PAGE_ROWS),
             total,
             last,
         )
@@ -34621,7 +34621,7 @@ fn indexmap_reading(site: &Site, feed: Vendor) -> (axum::http::StatusCode, Strin
         return indexmap_answer(site, feed, path);
     };
     let generation = site.universe().generation;
-    site.indexmap_memo.get(stamp, generation, feed, || {
+    site.indexmap_memo.get(&stamp, generation, feed, || {
         let answer = indexmap_answer(site, feed, path);
         let keep = answer.0 == axum::http::StatusCode::OK;
         (answer, keep)
@@ -35057,11 +35057,6 @@ fn calendar_admission_refused(why: &crate::detail::RunError) -> CalendarAnswer {
 /// read and before its calendar is kept -- the interleaving that decides
 /// whether the calendar is kept under its census's stamp or a later one -- on
 /// every run, as [`census_now_reading`]'s parameter does for the census. D-0695.
-#[expect(
-    clippy::too_many_lines,
-    reason = "one stamped census shared by both branches, refused once before either when \
-              it cannot be read; splitting the branches apart would re-take it per branch"
-)]
 fn calendar_json_reading(
     site: &Site,
     uri: &axum::http::Uri,
@@ -35129,6 +35124,11 @@ fn calendar_json_reading(
 
 /// [`calendar_json_reading`]'s answer for one feed and name, and whether it may
 /// be kept under the census snapshot `fresh` (D-2286).
+#[expect(
+    clippy::too_many_lines,
+    reason = "both branches of one answer over one stamped census, refused once before \
+              either when it cannot be read; splitting them would re-take it per branch"
+)]
 fn calendar_answer(
     site: &Site,
     feed: Vendor,
