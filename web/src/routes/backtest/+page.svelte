@@ -122,6 +122,7 @@
   import { placeIn } from '$lib/place.js';
   import { monthLabel } from '$lib/dates.js';
   import { rupee, group, exact } from '$lib/money.js';
+  import { holdPeriods as holdPeriodsOf, returnHistogram as returnHistogramOf } from '$lib/hold-series.js';
   import { chargeScope, coverScope, isSweptIndex } from '$lib/charge-scope.js';
   import {
     compareRuns,
@@ -4969,40 +4970,15 @@
   });
 
   /**
-   * The bars bucketed by the selected period, each bucket's close-to-close
-   * change in paisa.
-   *
-   * Buckets are keyed by a STRING derived from the bar's IST date, so a
-   * week that straddles a month or a year stays one bucket. Ordered by first
-   * appearance, which is chronological because the bars are.
+   * The bars bucketed by the selected period, each bucket's change from the
+   * PREVIOUS bucket's close (the first bucket's from its first open), in paisa,
+   * keyed by the IST `YYYY-MM-DD` with its year. The arithmetic lives in
+   * `$lib/hold-series.js` so `web/tests/hold-series.test.js` drives it (CE-70,
+   * D-2730): it was each bucket's last close minus its own first close, which
+   * dropped every gap between buckets, and its `d/m` key folded the same day of
+   * different years into one bucket.
    */
-  const holdPeriods = $derived.by(() => {
-    const bars = series.bars;
-    if (bars.length < 2) return [];
-    /** @param {number} t */
-    const key = (t) => {
-      // `t` is epoch seconds on the wire. Shift only for calendar projection;
-      // the stored instant remains unchanged and timezone neutral.
-      const d = new Date(t * 1000 + 19_800_000);
-      const y = d.getUTCFullYear();
-      if (periodScale === 'yearly') return `${y}`;
-      if (periodScale === 'quarterly') return `Q${Math.floor(d.getUTCMonth() / 3) + 1} '${String(y).slice(2)}`;
-      if (periodScale === 'daily') return `${d.getUTCDate()}/${d.getUTCMonth() + 1}`;
-      // Weekly: the Monday that starts the bar's week.
-      const monday = new Date(d);
-      monday.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7));
-      return `${monday.getUTCDate()}/${monday.getUTCMonth() + 1}`;
-    };
-    /** @type {Map<string, {label: string, first: number, last: number}>} */
-    const buckets = new Map();
-    for (const b of bars) {
-      const k = key(b.t);
-      const at = buckets.get(k);
-      if (at) at.last = b.c;
-      else buckets.set(k, { label: k, first: b.c, last: b.c });
-    }
-    return [...buckets.values()].map((x) => ({ label: x.label, v: x.last - x.first }));
-  });
+  const holdPeriods = $derived.by(() => holdPeriodsOf(series.bars, periodScale));
 
   /**
    * The distribution of per-bar returns, in basis points, bucketed.
@@ -5010,55 +4986,13 @@
    * Per BAR, not per trade — the ledger has no trades to distribute. Said on
    * the chart, because a histogram labelled "returns" that is silently a
    * different population is exactly the quiet substitution this page refuses.
+   *
+   * Nothing to distribute is `null`, not a histogram with half its fields. Each
+   * return is `basisPoints` — the engine's half-away-from-zero rule — not
+   * `Math.round` on a float ratio, which put a gain and its mirror-image loss in
+   * asymmetric bins and counted a sub-half-bp loss as flat (CE-73, D-2731).
    */
-  const returnHistogram = $derived.by(() => {
-    const bars = series.bars;
-    /* NOTHING TO DISTRIBUTE IS `null`, NOT A HISTOGRAM WITH HALF ITS FIELDS.
-       These two arms returned `{bins: [], max: 0, avgLoss: null, avgGain:
-       null}` — no `lo`, no `hi`, no `losers`, no `winners` — so the value's
-       type was a union in which the range was sometimes absent, and the panel
-       that reads `h.lo` was only correct because its caller happened to guard
-       on `bins.length`. An empty set of returns HAS no range: `lo: 0` would be
-       a measurement nobody took. One value for "there is no distribution" says
-       that, and the guard at the render site becomes the same question. */
-    if (bars.length < 2) return null;
-    const rets = [];
-    for (const b of bars) {
-      if (b.o > 0) rets.push(Math.round(((b.c - b.o) / b.o) * 10_000));
-    }
-    if (rets.length === 0) return null;
-    const lo = Math.min(...rets);
-    const hi = Math.max(...rets);
-    const width = Math.max(1, Math.ceil((hi - lo) / 18));
-    /** @type {Map<number, number>} */
-    const counts = new Map();
-    for (const r of rets) {
-      const slot = Math.floor((r - lo) / width);
-      counts.set(slot, (counts.get(slot) ?? 0) + 1);
-    }
-    const bins = [];
-    for (let i = 0; i <= Math.floor((hi - lo) / width); i += 1) {
-      const from = lo + i * width;
-      bins.push({ from, mid: from + width / 2, n: counts.get(i) ?? 0 });
-    }
-    const losses = rets.filter((r) => r < 0);
-    const gains = rets.filter((r) => r > 0);
-    /** @param {number[]} xs */
-    const mean = (xs) =>
-      xs.length === 0 ? null : Math.round(xs.reduce((a, b) => a + b, 0) / xs.length);
-    return {
-      bins,
-      max: Math.max(1, ...bins.map((b) => b.n)),
-      lo,
-      hi,
-      avgLoss: mean(losses),
-      avgGain: mean(gains),
-      losers: losses.length,
-      winners: gains.length,
-      flat: rets.length - losses.length - gains.length,
-      total: rets.length
-    };
-  });
+  const returnHistogram = $derived(returnHistogramOf(series.bars));
 
   /**
    * Alternating run-up and drawdown segments of the hold curve.
@@ -6222,6 +6156,9 @@
       <li class="dash"><span class="cf-sw dashed"></span>Average profit<b>{h.avgGain === null ? '—' : pctOf(h.avgGain)}</b></li>
     </ul>
     <p class="cf-note">{note}</p>
+    {#if h.overflowed > 0}
+      <p class="cf-note">{exact(h.overflowed)} {h.overflowed === 1 ? 'bar is' : 'bars are'} left out: the move scaled to basis points exceeds what a browser number holds exactly, the same overflow the engine refuses.</p>
+    {/if}
   </div>
 {/snippet}
 
