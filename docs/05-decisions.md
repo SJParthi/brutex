@@ -58425,3 +58425,71 @@ with its frontier in two ledger opens and `2 * rows + 1` row reads. After it
 flips one byte in the last row, which is never the best, `top` refuses with
 `record 7 does not match its seal`. That is the refusal a one-row answer would
 lose. Counted, not timed.
+
+### D-2810 — The risk-free rate is the RBI 91-day T-bill cut-off yield, as a dated series read by path, as of the latest release strictly before the trade day — 2026-10-04
+
+**Operator choice (4 October 2026).** GDFL option IV and greeks use the RBI
+91-day Treasury Bill yield as a dated series, with the source cited in the
+charter. Before this entry, `pull::pricing::Rate` could be built only from an
+operator-supplied figure, one per request, because no charter page recorded a
+rate. With no rate configured anywhere, no greek was ever computed.
+
+**What is locked.**
+
+1. **Source.** The source is the implicit yield at the cut-off price in RBI's
+   weekly 91-day T-bill "Auction Result: Cut-off" press release. Each row is
+   cross-checked against the same date's "Full Auction Result" release.
+   `docs/00-charter.md` §4h records the source, three sample rows with their
+   URLs, and the formula.
+2. **The values stay outside the tree.** They live in an eight-column TSV
+   (`pull::riskfree::HEADER`), passed by path to
+   `pull::riskfree::Series::read`. There is no default path, no environment
+   fallback and no built-in value. The table's SHA-256 is carried
+   (`Series::sha256`) so that a priced row can name the table it was priced
+   under (`CLAUDE.md` §3 rule 3). Fixtures in tests and benches are invented.
+3. **The existing rate path is reused, and no second pricing model is added.**
+   `Series::on(day)` returns the existing `pull::pricing::Rate`, built through
+   `Rate::measured` with `YearBasis::Calendar365` and
+   `RateSource::Charter(pull::riskfree::CHARTER_CITE)`. `Rate`, `RateSource`,
+   `solve_iv`, `greeks_at`, `price` and the store's one-byte rate provenance
+   are unchanged. The dated detail — which auction applied — is returned
+   beside the rate as `AsOf::auction`, not carried inside `RateSource`. The
+   table digest plus the day determine that auction, so `RateSource` did not
+   need a new arm.
+4. **The as-of rule is the latest release dated STRICTLY BEFORE the trade
+   day.** The brief said "on or before". RBI announces the result on the
+   auction day, after bidding closes (noon in 2018, 11:30 am later), at a time
+   the release does not state. A same-day result would therefore price that
+   session's morning trades with a figure first published that afternoon,
+   which is the look-ahead `CLAUDE.md` §3 rule 7 forbids. The table holds only
+   the release date, so it cannot show that a same-day result was out before a
+   given trade. The law outranks the brief here, and this entry records that.
+5. **The staleness bound is `MAX_AGE_DAYS = 14`.** A release older than that is
+   refused as `LookupError::Stale` and never carried forward. A day on or
+   before the first release is refused as `LookupError::BeforeSeries`. On the
+   operator's series this refuses 12 weekdays in GDFL's window: 2024-09-26 to
+   2024-10-03 after two cancelled auctions, 2025-02-27 after a 91-day "NA",
+   and 2026-04-02 to 2026-04-08 after a "NA" and a week with no auction. Some
+   of those days are holidays. Widening the bound is an operator decision.
+   The 14 was not tuned to make those days pass.
+6. **Conversion.** RBI's implicit yield is a simple yield on price,
+   annualised by 365/91. The parser checks this on every row against the
+   published price, with a tolerance of ±1 unit in the fourth decimal. It
+   becomes continuous compounding as `r = ln(1 + y·91/365)·365/91` (Hull,
+   chapter 4, "Continuous Compounding"), because `greeks::bsm` and
+   `Rate::annual` are continuous.
+7. **O(1) lookup.** The table is dense by day: one `u32` slot per calendar day
+   from the day after the first release to 14 days after the last. It is built
+   once, in O(rows + days). `TradeDay`'s 1990–2100 window bounds it at about
+   40,560 slots. Measured by Gate 8 row C-RF-01
+   (`pull::bench::rate_lookup_is_flat`) at 52, 520 and 5,200 auctions, and the
+   pull row's pin in Gate 14's cover table is raised from 6 to 8 to match.
+
+**What is not done here.** No caller is wired. `api`'s per-request
+`RateSource::Operator` path and the GDFL fill pricing still take their rate
+from the caller. The design for the next step is that a caller loads `Series`
+once per run and calls `on(trade_day)` per row. Wiring it, and recording the
+table digest in run identity, belongs to the change that first prices GDFL
+options. The series itself (419 auctions, 2018-08-01 to 2026-09-30) and its
+README, which lists sources, fetch time, SHA-256 and every gap, are outside
+the repository.

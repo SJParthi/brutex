@@ -541,6 +541,100 @@ fn append_after_load_is_flat() -> bool {
     ok
 }
 
+/// A weekly series of `weeks` invented auctions from 1990-01-03, as the text
+/// `pull::riskfree::Series::parse` reads. One invented price/yield pair, which
+/// the parser's own consistency check accepts; the VALUE is irrelevant to a
+/// lookup's cost.
+fn weekly_series(weeks: u32) -> pull::riskfree::Series {
+    let Ok(start) = pull::pricing::TradeDay::new(1990, 1, 3) else {
+        refuse("1990-01-03 is not a trade day")
+    };
+    let mut text = String::from(pull::riskfree::HEADER);
+    for week in 0..weeks {
+        let Ok(offset) = i32::try_from(week * 7) else {
+            refuse("a week offset outside i32")
+        };
+        let Ok(day) = start.plus_days(offset) else {
+            refuse("a release past 2100")
+        };
+        text.push_str("\n\t\t");
+        text.push_str(&day.to_string());
+        text.push_str("\t98.5000\t6.1081\thttps://www.rbi.org.in/bench\t\t");
+    }
+    match pull::riskfree::Series::parse(&text) {
+        Ok(series) => series,
+        Err(why) => refuse(&format!("the invented series was refused: {why}")),
+    }
+}
+
+/// 1,024 days spread over the whole table, so a lookup cycles through the
+/// dense table rather than re-reading one hot slot.
+fn spread(series: &pull::riskfree::Series) -> Vec<pull::pricing::TradeDay> {
+    let first = series.first_release().ordinal() + 1;
+    let span = series.last_release().ordinal() - first + 1;
+    (0..1_024)
+        .filter_map(|i| pull::pricing::TradeDay::from_ordinal(first + span * i / 1_024).ok())
+        .collect()
+}
+
+/// p50 / p99 / max of one lookup, in nanoseconds per call, over batches of
+/// 1,024 — printed, never gated: the gate is the ratio below.
+fn report_tail(label: &str, series: &pull::riskfree::Series, days: &[pull::pricing::TradeDay]) {
+    let mut per_call: Vec<u128> = Vec::with_capacity(400);
+    for _ in 0..400 {
+        let start = Instant::now();
+        for day in days {
+            black_box(series.on(*day).ok());
+        }
+        per_call.push(start.elapsed().as_nanos() * 1_000 / 1_024);
+    }
+    per_call.sort_unstable();
+    let at = |permille: usize| {
+        per_call
+            .get((per_call.len() * permille / 1_000).min(per_call.len() - 1))
+            .copied()
+            .unwrap_or(0)
+    };
+    println!(
+        "  {label:<44} p50 {:>6} ps  p99 {:>6} ps  max {:>6} ps",
+        at(500),
+        at(990),
+        per_call.last().copied().unwrap_or(0)
+    );
+}
+
+/// C-RF-01 — one dated-rate lookup costs the same at 1×, 10× and 100× the
+/// table: 52, 520 and 5,200 weekly auctions, a year to a century.
+///
+/// `pull::riskfree::Series::on` reads one slot of a table dense by day, so a
+/// search that walked the auctions would be flat at 1× and linear by 100×.
+fn rate_lookup_is_flat() -> bool {
+    let sizes = [52, 520, 5_200].map(weekly_series);
+    let mut costs = [0_u128; 3];
+    for (cost, series) in costs.iter_mut().zip(&sizes) {
+        let days = spread(series);
+        let mut at = 0_usize;
+        *cost = cost_ps(4_096, || {
+            at = (at + 1) % days.len();
+            days.get(at).map(|day| series.on(*day).is_ok())
+        });
+    }
+    for (label, series) in [
+        "C-RF-01 tail, 52 auctions",
+        "C-RF-01 tail, 520 auctions",
+        "C-RF-01 tail, 5,200 auctions",
+    ]
+    .iter()
+    .zip(&sizes)
+    {
+        report_tail(label, series, &spread(series));
+    }
+    let [base, ten, hundred] = costs;
+    let a = ratio("C-RF-01 rate lookup, 10x table", base, ten);
+    let b = ratio("C-RF-01 rate lookup, 100x table", base, hundred);
+    a && b
+}
+
 fn main() {
     println!("gate 8 — crates/pull, ceiling {CEILING_PERMILLE} permille");
     let mut ok = true;
@@ -548,6 +642,7 @@ fn main() {
     ok &= entry_lookup_is_flat();
     ok &= entry_lookup_stays_within_its_budget();
     ok &= append_after_load_is_flat();
+    ok &= rate_lookup_is_flat();
     if ok {
         println!("all ratios within the ceiling");
     } else {
