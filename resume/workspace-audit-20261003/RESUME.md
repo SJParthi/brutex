@@ -1,3 +1,14 @@
+# LATEST (2026-10-04 05:35 UTC): resumed on request, 2 agents running
+
+| Item | State |
+|---|---|
+| PR #74 head | b23976f (pushed by other threads overnight) |
+| Fixed | 78 of 91. 68 are on PR #74. 10 are merged onto b23976f in branch **audit-fix/integrate-20261004 @ 679fb02** (merges of w6, w7 and w8, plus one fix fitting w8's store v3 to the merged tests). The full workspace test run on it is in progress; it is NOT pushed to final/all-fixes until fmt, clippy and the test run are green. |
+| Features (gaps-5, gaps-10, gaps-11) | Being built on **audit-fix/w9 @ 3f78c29** (WIP, untested), based on b23976f |
+| Blocked (10) | Unchanged; see the table below |
+
+Next: finish the test run on integrate-20261004, coordinate with whoever drives PR #74, then push it to final/all-fixes. After that, verify and merge w9 the same way.
+
 # Workspace audit + fixes: FINAL SAVE (2026-10-03 20:12 UTC, stopped at 93% weekly usage)
 
 **Start here.** Read in this order:
