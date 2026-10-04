@@ -61151,3 +61151,23 @@ DCC-02 says so.
 **Rejected.** Deleting the guard as unreachable. The calendar gains a session
 the day NSE announces one, and the guard is what keeps that day from a full
 day's close.
+
+### D-1465 — Gate 8 builds the workspace benches two crates at a time — 2026-10-04
+
+**What was observed.** On the runs for 8f58d91 and 25bc8aa, Gate 8's
+self-test passed and then the runner was shut down about six minutes into
+`cargo bench --workspace --locked`, both times while compiling `api`, with
+exit 143 and "The runner has received a shutdown signal". Every other job on
+those runs was green. Twice in a row on the same step is not a flake. The
+release profile the bench profile inherits is `lto = "fat"`,
+`codegen-units = 1`. With the default four jobs, `api`, `cli` and `lake`
+link at once, and the runner runs out of memory. This box sees the same
+thing: a full `cargo bench --workspace` OOMs on 15 GB.
+
+**Decided.** The Gate 8 job sets `CARGO_BUILD_JOBS: 2`, and its timeout goes
+from 20 to 40 minutes to cover the slower build. The bench line Gate 14 pins,
+`cargo bench --workspace --locked`, is unchanged. The ratios are measured
+after the build finishes, so build parallelism does not reach them.
+
+**Rejected.** Re-running the job. The same step died the same way twice,
+so a third attempt would only hide the memory ceiling.
