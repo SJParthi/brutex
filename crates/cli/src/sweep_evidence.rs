@@ -673,7 +673,7 @@ impl Attempt {
                         &path.display(),
                         block,
                         &raw,
-                        std::io::Write::write_all,
+                        write_rows,
                     )
                     .map_err(io_error)?;
                     digest.update(&raw);
@@ -1359,10 +1359,8 @@ fn append_row<const N: usize>(path: &Path, magic: [u8; 8], raw: &[u8; N]) -> Res
 /// (D-1900, cli2-1).
 fn append_durable(file: &mut File, path: &Path, bytes: &[u8]) -> Result<(), String> {
     let end = crate::fixed_tail::start(file, &path.display()).map_err(io_error)?;
-    crate::fixed_tail::write_at_end(file, &path.display(), end, bytes, |file, bytes| {
-        file.write_all(bytes)
-    })
-    .map_err(io_error)?;
+    crate::fixed_tail::write_at_end(file, &path.display(), end, bytes, write_rows)
+        .map_err(io_error)?;
     crate::fixed_tail::sync_or_roll_back(file, path, end, |file| barrier(file, path))
         .map_err(io_error)
 }

@@ -62557,8 +62557,14 @@ fix is kept in each place; nothing either side proved is dropped.
 - **Appends.** `sweep_evidence` keeps D-1900's `fixed_tail` appends (a failed
   barrier poisons the path in-process); D-1741's `append_rolled_back` stays
   for the header write it alone serves. Search checkpoints keep D-1740's
-  `publish_marker`, release the payload lock before it (locks-3, D-1913), and
-  read any marker under 32 bytes as interrupted (CE-3, D-1909).
+  `publish_marker` and release the payload lock before it (locks-3, D-1913).
+  Only an EMPTY marker reads as interrupted; a short non-empty one is refused
+  as damage, because a seal that wrote some bytes and not all is not an
+  interrupted publish (`search_checkpoint_tests`' torn-marker case).
+- **Test fallout.** D-1990 refuses a bootstrap block longer than its sample, so
+  short-sample tests use a block of 1 and `end_to_end` clamps `DEFAULT_BLOCK`
+  to the fold count; D-1464's level bound gives `ilog2(len-2)+1` levels; the
+  two local-pull fixtures carry LTQ 1 because D-2688 skips zero-LTQ quotes.
 - **Masters.** OD-5's bounded compare (D-2374) now opens without following a
   link and refuses a non-regular file by name (CE-65, D-2684).
 - **Leg forms.** `/pull/run` refuses a repeated key in a leg payload (h-api-2,

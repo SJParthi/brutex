@@ -67,11 +67,10 @@ fn doc_above(source: &str, anchor: &str, item: &str) -> String {
         let line = line.trim();
         if line.starts_with("///") {
             doc.push(line);
-        } else if !(line.starts_with("#[")
-            || line.starts_with("clippy::")
-            || line.starts_with("reason")
-            || line == ")]")
-        {
+        } else if !doc.is_empty() {
+            // Every line between the item and its rustdoc is attribute text,
+            // however many lines a `cfg_attr(not(test), expect(..))` spans
+            // (CE-95, D-1956); the first non-doc line ABOVE the doc ends it.
             break;
         }
     }

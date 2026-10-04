@@ -443,8 +443,8 @@ fn render(mut pairs: Vec<(&str, &str)>) -> String {
 mod tests {
     use super::serially;
     use super::{
-        clear_all, count, count_usize_within, describe, refuse_value, refused, render, resolve, set,
-        set_here, var,
+        clear_all, count, count_usize_within, describe, refuse_value, refused, render, resolve,
+        set, set_here, var,
     };
 
     /// The whole point: a knob nobody set reads through to the environment, so
@@ -708,7 +708,11 @@ mod tests {
         let too_large = "999999999999999999999999999999999999999";
         set(name, too_large);
 
-        assert_eq!(count_usize_within(name, usize::MAX), None, "the count cannot be represented");
+        assert_eq!(
+            count_usize_within(name, usize::MAX),
+            None,
+            "the count cannot be represented"
+        );
         let block = refused().expect("the failed count must be reportable");
         assert!(
             block.contains(name) && block.contains(too_large),

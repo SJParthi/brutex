@@ -923,6 +923,19 @@ fn obstructed_group_paths_refuse_before_any_attempt_is_handed_back() -> Result<(
     Ok(())
 }
 
+/// Whether a refusal says its partial write was cut back, in either wording:
+/// D-1741's `append_rolled_back` ("rolled back to byte N") for a header, or
+/// D-1900's `fixed_tail` ("truncated back to N bytes") for rows (D-1934).
+fn rolled_back(why: &str, to: Option<u64>) -> bool {
+    match to {
+        None => why.contains("rolled back to byte") || why.contains("truncated back to"),
+        Some(at) => {
+            why.contains(&format!("rolled back to byte {at}"))
+                || why.contains(&format!("truncated back to {at} bytes"))
+        }
+    }
+}
+
 /// GAP11-1: one short write left a torn tail in a shared evidence file, and
 /// every later attempt in the store refused with "torn or short" forever. The
 /// failed write now rolls back to the length measured under the lock, so the
@@ -945,7 +958,7 @@ fn a_partial_evidence_write_rolls_back_and_never_blocks_the_next_attempt() -> Re
         .err()
         .ok_or("the injected journal write refuses")?;
     drop(fault);
-    assert!(why.contains("rolled back to byte"), "{why}");
+    assert!(rolled_back(&why, None), "{why}");
     assert_eq!(fs::metadata(&journal).map_err(text)?.len(), before);
 
     // A rerun of a known identity: journal, lifecycle start, then the start
@@ -957,7 +970,7 @@ fn a_partial_evidence_write_rolls_back_and_never_blocks_the_next_attempt() -> Re
         .err()
         .ok_or("the injected start-index write refuses")?;
     drop(fault);
-    assert!(why.contains("rolled back to byte"), "{why}");
+    assert!(rolled_back(&why, None), "{why}");
     assert_eq!(fs::metadata(&starts).map_err(text)?.len(), indexed);
     let rerun = begin(&fixture.0, [81; 32], Operation::Sweep)?;
     assert_eq!(
@@ -975,7 +988,7 @@ fn a_partial_evidence_write_rolls_back_and_never_blocks_the_next_attempt() -> Re
         .err()
         .ok_or("the torn level refuses")?;
     drop(fault);
-    assert!(why.contains("rolled back to byte"), "{why}");
+    assert!(rolled_back(&why, None), "{why}");
     assert_eq!(fs::metadata(&levels).map_err(text)?.len(), level_len);
     drop(rerun);
 
@@ -990,7 +1003,7 @@ fn a_partial_evidence_write_rolls_back_and_never_blocks_the_next_attempt() -> Re
         .err()
         .ok_or("the torn ranking refuses")?;
     drop(fault);
-    assert!(why.contains("rolled back to byte 16"), "{why}");
+    assert!(rolled_back(&why, Some(16)), "{why}");
     assert_eq!(
         fs::metadata(&path).map_err(text)?.len(),
         HEADER,
@@ -1006,7 +1019,7 @@ fn a_partial_evidence_write_rolls_back_and_never_blocks_the_next_attempt() -> Re
         .err()
         .ok_or("the torn header refuses")?;
     drop(fault);
-    assert!(why.contains("rolled back to byte 0"), "{why}");
+    assert!(rolled_back(&why, Some(0)), "{why}");
     assert_eq!(
         fs::metadata(header.detail("levels")).map_err(text)?.len(),
         0
@@ -1038,7 +1051,7 @@ fn a_rolled_back_first_write_leaves_an_empty_file_that_reads_as_no_rows() -> Res
         .err()
         .ok_or("the injected first journal write refuses")?;
     drop(fault);
-    assert!(why.contains("rolled back to byte 0"), "{why}");
+    assert!(rolled_back(&why, Some(0)), "{why}");
     let journal = base(&fixture.0).join("attempts.bin");
     assert_eq!(fs::metadata(&journal).map_err(text)?.len(), 0);
     assert_eq!(latest(&fixture.0, LIMIT)?, None);

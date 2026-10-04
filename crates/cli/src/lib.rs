@@ -24946,11 +24946,7 @@ mod tests {
 
         let scored = |bit: u32| {
             let base = Scored {
-                #[expect(
-                    clippy::default_trait_access,
-                    reason = "the named mask type belongs to runner's private dependency graph"
-                )]
-                mask: Default::default(),
+                mask: vocab::ConditionMask::default(),
                 hits: 100,
                 edge: Edge {
                     n: 100,
@@ -26753,11 +26749,7 @@ mod tests {
         use runner::rank::Scored;
 
         let row = |mismatched: u64| Scored {
-            #[expect(
-                clippy::default_trait_access,
-                reason = "the named mask type belongs to runner's private dependency graph"
-            )]
-            mask: Default::default(),
+            mask: vocab::ConditionMask::default(),
             hits: 40,
             edge: runner::outcome::Edge {
                 n: 40,

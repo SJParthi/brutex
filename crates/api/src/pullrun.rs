@@ -1483,13 +1483,7 @@ mod tests {
             "ok",
             "member=A&member=B&from=x",
         );
-        let twice = field(
-            "/pull/spot",
-            "dhan",
-            "1day",
-            "bad",
-            "from=x&vendor=a&from=y",
-        );
+        let twice = field("/pull/spot", "dhan", "1day", "bad", "from=x&to=a&from=y");
         assert_eq!(legs_from(&good).expect("a list is not a repeat").len(), 1);
         match legs_from(&format!("{good}&{twice}")) {
             Err(Refusal::Malformed(why)) => {

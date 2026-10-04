@@ -4679,10 +4679,14 @@ mod window_tests {
             );
             let pairs: usize = blocks.levels.iter().map(Vec::len).sum();
             assert!(pairs <= n, "{pairs} pairs held for {n} bars");
+            // D-1464 (kept by D-1934): one level per power of two up to the
+            // longest MIDDLE run, `blocks - 2`, the deepest a query reads.
             assert_eq!(
                 blocks.levels.len(),
-                usize::try_from(base.max(1).ilog2()).expect("small") + 1,
-                "one level per power of two up to the block count at n={n}"
+                base.checked_sub(2)
+                    .filter(|&m| m > 0)
+                    .map_or(1, |m| usize::try_from(m.ilog2()).expect("small") + 1),
+                "one level per power of two up to the longest middle run at n={n}"
             );
             assert_eq!(
                 touched,

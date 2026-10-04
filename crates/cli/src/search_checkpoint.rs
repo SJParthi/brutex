@@ -535,13 +535,13 @@ fn discover_through(directory: &Path, through: Option<u64>) -> Result<Discovered
             continue;
         }
         match fs::symlink_metadata(entry.path().join("complete")) {
-            // A SHORT MARKER IS A TORN CREATE, not an acknowledgment (CE-3,
-            // D-1909): the empty marker the pre-D-1740 protocol left when it was
-            // killed between creating `complete` and writing its seal, or any
-            // width short of 32 bytes. Counted as interrupted, so `latest` is
-            // the newest WHOLE checkpoint. A whole-width marker that disagrees
-            // with its payload is still refused by `read`.
-            Ok(metadata) if metadata.file_type().is_file() && metadata.len() < 32 => {
+            // AN EMPTY MARKER IS A TORN CREATE, not an acknowledgment (CE-3,
+            // D-1909): the pre-D-1740 protocol created `complete` and then
+            // wrote its seal, and a kill between the two left 0 bytes. Counted
+            // as interrupted, so `latest` is the newest WHOLE checkpoint. Since
+            // D-1740 a marker appears only by rename, whole, so a SHORT
+            // NON-EMPTY one is damage and `read` refuses it (D-1934).
+            Ok(metadata) if metadata.file_type().is_file() && metadata.len() == 0 => {
                 interrupted = interrupted
                     .checked_add(1)
                     .ok_or("checkpoint interruption counter exhausted")?;

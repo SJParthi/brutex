@@ -988,15 +988,16 @@ fn the_frontier_writer_refuses_a_top_the_api_cannot_serve() {
     assert!(!dir.exists(), "a refused TOP wrote under {}", dir.display());
 }
 
-/// CE-19, D-1981: the elite descent refuses the same TOP before it opens a
-/// store, a span or a rung.
+/// CE-19, D-1981: the elite descent refuses a TOP the API cannot serve before
+/// it opens a store, a span or a rung. D-1727's door bound, 1,000, is the
+/// tighter of the two and is the one named (D-1934).
 #[test]
 fn the_elite_descent_refuses_a_top_the_api_cannot_serve_before_any_read() {
     let span = ((2024, 1), (2024, 1));
     let said = crate::elite_descend("zerodha", "NIFTY", "no-such-rung", span.0, span.1, 0, 4_097);
-    assert!(said.contains("TOP is 4097 and must be 1 to 4096"), "{said}");
+    assert!(said.contains("TOP must be 1000 or fewer"), "{said}");
     let said = crate::elite_descend_in_points("zerodha", "NIFTY", "1min", span.0, span.1, 1, 4_097);
-    assert!(said.contains("TOP is 4097 and must be 1 to 4096"), "{said}");
+    assert!(said.contains("TOP must be 1000 or fewer"), "{said}");
 }
 
 /// GAP11-3: `record_unadmitted` published its frontier, receipt and ledger

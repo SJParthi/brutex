@@ -311,7 +311,10 @@ fn os_litter_is_passed_over_and_a_stranger_is_named() -> Result<(), String> {
 /// publishes the next sequence. A publication leaves no scratch marker.
 #[test]
 fn a_torn_completion_marker_is_an_interrupted_reservation() -> Result<(), String> {
-    for kept in [0_u64, 31] {
+    // 0 only: a short NON-EMPTY marker is refused, not passed over
+    // (`a_short_nonempty_marker_still_refuses`, D-1934).
+    {
+        let kept = 0_u64;
         let scratch = Scratch::new().map_err(error)?;
         let mut journal = Journal::open(&scratch.0, "expression-search-v1", [12; 32])?;
         journal.publish(b"valid old", 1024)?;
