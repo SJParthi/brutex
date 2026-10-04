@@ -450,16 +450,18 @@ mod strict_v6_fixture_tests {
             (request, &changed, "strict receipt policy"),
         ] {
             let held = strict::loads_on_this_thread();
+            let invoked = std::cell::Cell::new(false);
             let why = commit_family_sized_v6(
                 asked,
                 VerifiedBuildCommitV1(FIXTURE_COMMIT),
-                &|_, _, _| panic!("a refused sized context computes nothing"),
+                &|_, _, _| invoked.set(true),
                 policy,
                 sized()?,
             )
             .err()
             .ok_or("a foreign request must be refused")?;
             assert!(why.contains(&format!("its {term} differs")), "{why}");
+            assert!(!invoked.get(), "a refused sized context computes nothing");
             assert_eq!(strict::loads_on_this_thread() - held, 1, "only the sizing load");
         }
         Ok(())
