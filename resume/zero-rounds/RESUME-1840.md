@@ -76,3 +76,13 @@ Main thread: D-1930..D-1949 (D-1930 used). D-1771..1799 are all used. The helper
 - First step at resume: merge zero/docs-batch into zero-work, then do the PR 74 merge.
 - Flagged, not fixed: Indices form note says "never swept"; api/src/server.rs has 3 strings saying single stocks are never swept.
 - Fix Board says runs-1, recovery-1/2, apicache-1, sweep-1, pull2-1 and census-1 are on fixboard/pr74-conc-api dee61cfd, and conc18-3/4/5 and p14num-2 are on #74 8f58d915.
+
+## Update 23:40 UTC (PR 74 merge in progress)
+- zero-work 7f543914 = 0aa8daa4 + zero/docs-batch.
+- Scratch branch zero/pr74-merge (worktree /home/claude/wt/m74): merge of origin/final/all-fixes 8f58d915 = 7c7f7dfe (D-1934 lists every both-sides choice; MINUTE_GAP_POLICY = 3),
+  + zero/gate-port b7c6cc9b (D-1935..D-1939: zero-work's shell gate hardening ported into .github/gates_*.rs),
+  + vite /selection-v6.json proxy, CIG-21 proof name.
+- Local: fmt, clippy -D warnings clean; all 29 static gates pass (1e not run); web W2 866 pass (3 Node-22 cancels, P19-07), svelte-check 0 errors.
+- First test run: 18 failures from the merge; fixes uncommitted in /home/claude/wt/m74 (D-1990 short-sample tests, FB-01 level count, local-pull fixtures need LTQ>0 (D-2688), TOP text, empty-marker rule, rollback wording, crate_graph comment, ledger_scan_costs doc reader, o1cli_4 digest). Re-run in progress.
+- Open: candidate_universe a_failed_base_barrier_is_cut_and_the_rerun_writes (sync fault not hit; maybe parallel-test race).
+- Next: commit, push zero/pr74-merge, hand the tip to PR 74 CI.
