@@ -3050,3 +3050,67 @@ fn a_descent_counts_the_swept_rows_through_the_cache_its_steps_reuse() {
     );
     crate::knobs::clear_all();
 }
+
+/// The minute-gap census asks the share's dated close, so an eligible
+/// share's 14:15 bucket of a 75-minute rung, which the dated close clamps onto
+/// 15:14 on 2026-08-03 (a CAS day), is not withheld for lacking a 15:29 minute
+/// the share's continuous session never reaches (D-2102).
+#[test]
+fn the_minute_gap_census_asks_the_shares_dated_close() {
+    use std::io::Write as _;
+    const MONDAY_2026_08_03: i64 = 20_668;
+    let minute = |at: i64| indicators::Candle {
+        ts_micros: MONDAY_2026_08_03 * 86_400_000_000 - indicators::IST_OFFSET_MICROS
+            + at * 60_000_000,
+        open: 2_500_000,
+        high: 2_500_100,
+        low: 2_499_900,
+        close: 2_500_000,
+        volume: 0,
+        open_interest: i64::MIN,
+    };
+    let store =
+        std::env::temp_dir().join(format!("brutex-cli-census-dated-{}", std::process::id()));
+    let _ignored = std::fs::remove_dir_all(&store);
+    let isin = brutex_core::universe::nse_isin("RELIANCE").expect("RELIANCE has an ISIN");
+    let csv = format!(
+        "FinInstrmId,TckrSymb,SctySrs,ISIN,ElgbltyClsgAuctnSsn\n2885,RELIANCE,EQ,{},1\n",
+        isin.as_str()
+    );
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    gz.write_all(csv.as_bytes()).expect("compress fixture");
+    let day = pull::session::Day::new(2026, 8, 3).expect("a civil day");
+    pull::cash_session_cache::install(
+        &store.join("session-masters"),
+        day,
+        &gz.finish().expect("finish gzip"),
+    )
+    .expect("the fixture master installs");
+
+    let signal = [minute(855)];
+    let minutes: Vec<indicators::Candle> = (855..=914).map(minute).collect();
+    let rung = 75 * 60_000_000;
+    let share = brutex_core::instrument::InstrumentKey::cash(
+        brutex_core::instrument::Exchange::Nse,
+        "RELIANCE",
+    )
+    .expect("a share");
+    let cash = crate::stored::span_cash_closes(&store, &share, None, &signal).expect("closes");
+    assert!(
+        crate::minute_gaps::days_with_minute_holes(&signal, &minutes, rung, |day| {
+            crate::stored::session_close_for(cash.as_ref(), day)
+        })
+        .is_empty()
+    );
+    assert_eq!(
+        crate::minute_gaps::days_with_minute_holes(
+            &signal,
+            &minutes,
+            rung,
+            crate::stored::nse_session_close_minute
+        ),
+        vec![MONDAY_2026_08_03],
+        "the venue-blind close demands 15:29 and withholds the day"
+    );
+    let _ignored = std::fs::remove_dir_all(&store);
+}

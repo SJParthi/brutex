@@ -5419,40 +5419,6 @@ mod tests {
         let _ignored = std::fs::remove_dir_all(&ineligible);
     }
 
-    /// The minute-gap census asks the share's dated close, so an eligible
-    /// share's 14:15 bucket of a 75-minute rung, which the dated close clamps
-    /// onto 15:14 on a CAS day, is not withheld for lacking a 15:29 minute the
-    /// share's continuous session never reaches (D-2102).
-    #[test]
-    fn the_minute_gap_census_asks_the_shares_dated_close() {
-        let store = root("census-dated");
-        install_master(&store, OPEN_MONDAY_2026_08_03, 1);
-        let signal = [minute_on_ist_day(OPEN_MONDAY_2026_08_03, 855, 2_500_000)];
-        let minutes: Vec<Candle> = (855..=914)
-            .map(|minute| minute_on_ist_day(OPEN_MONDAY_2026_08_03, minute, 2_500_000))
-            .collect();
-        let rung = 75 * 60_000_000;
-        let share = InstrumentKey::cash(Exchange::Nse, "RELIANCE").expect("a share");
-        let cash = span_cash_closes(&store, &share, None, &signal).expect("closes load");
-        assert!(
-            crate::minute_gaps::days_with_minute_holes(&signal, &minutes, rung, |day| {
-                session_close_for(cash.as_ref(), day)
-            })
-            .is_empty()
-        );
-        assert_eq!(
-            crate::minute_gaps::days_with_minute_holes(
-                &signal,
-                &minutes,
-                rung,
-                nse_session_close_minute
-            ),
-            vec![OPEN_MONDAY_2026_08_03],
-            "the venue-blind close demands 15:29 and withholds the day"
-        );
-        let _ignored = std::fs::remove_dir_all(&store);
-    }
-
     #[test]
     fn exact_minute_context_refuses_holes_and_malformed_cadence() {
         let signal = [minute_on_ist_day(OPEN_TUESDAY_2026_08_04, 555, 2_600_000)];
