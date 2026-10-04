@@ -1235,7 +1235,7 @@ fn results_arm(out: &mut String, filter: Option<(&str, &str)>) -> u8 {
     if refused { FAILED } else { OK }
 }
 
-/// Every sentence `elite` refuses MAX_POINTS with, in the grammar the arm
+/// Every sentence `elite` refuses `MAX_POINTS` with, in the grammar the arm
 /// accepts: zero is "no ceiling beyond the derived ladder" and USAGE tells the
 /// operator to pass it. The unparsable-word refusal said "1 or more", which
 /// contradicted both (P8-02, D-2721).
@@ -21414,10 +21414,10 @@ mod tests {
 
     /// A REFUSED ARGUMENT IS REFUSED IN THE GRAMMAR ITS PARSER ACCEPTS. P8-02, D-2721.
     ///
-    /// `descend` answered every bad CADENCE with "PER_WEEK must be a whole
+    /// `descend` answered every bad CADENCE with "`PER_WEEK` must be a whole
     /// number of trades per week", discarding `parse_cadence`'s sentence, so
     /// `6/yr` was told the opposite of what USAGE says. `elite` answered an
-    /// unparsable MAX_POINTS with "1 or more" while accepting 0 and USAGE
+    /// unparsable `MAX_POINTS` with "1 or more" while accepting 0 and USAGE
     /// telling the operator to pass it. Both refusals now name every spelling
     /// the parser accepts, and `/w`, which it always accepted, is documented.
     #[test]
