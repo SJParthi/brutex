@@ -89,6 +89,7 @@
   import { denominators, denomKey, isSole, rollUpMonths } from '$lib/completeness.js';
   import { databasePreparation, instrumentMemo } from '$lib/database-preparation.js';
   import { readDatabasePage } from '$lib/database-pages.js';
+  import { SPOT_WHY, chainsFrom, optionCells, readSpots, spotKey } from '$lib/moneyness.js';
   import { pooled as readPool } from '$lib/pooled.js';
   import { basisPoints, bpsText, dirOf } from '$lib/bps.js';
   import { exact } from '$lib/money.js';
@@ -2847,7 +2848,7 @@
      tooltip AND the reason on the counted line under the row, and two spellings
      of one refusal is how one of them goes stale. */
   const NO_SPOT =
-    'a rung is a DISTANCE FROM SPOT, and no endpoint this page reads carries a price. /store.json’s chg_bps is a RATIO and a ratio has no scale, so no absolute price can be recovered from it; /instruments.json carries no price at all; /bars.json does, and reading it would be one request and about 81 bytes per bar per contract to recover a single figure — the exact trade D-0067 refused when it put the two closes in the census instead. Nothing here guesses one: every name on a ladder anchored to a guess would be wrong by however far the guess sat from the money.';
+    'a rung is a DISTANCE FROM SPOT AT ONE INSTANT, and this control filters stored instrument-MONTHS, which have no single spot: the underlying moves through every bar of the month, so one rung per month would be a guess at which instant was meant. /store.json’s chg_bps is a RATIO and carries no price at all. The Bars view names each option bar’s rung, intrinsic and extrinsic from the underlying’s stored close at that bar’s own instant (/spot.json, D-2807); this month-level control stays unanchored rather than anchored to a guess.';
 
   const moneyRefusal = $derived.by(() => {
     if (ladderRungs.length > 0) return null;
@@ -3654,10 +3655,8 @@
      --------------------------------------------------------------------- */
   const NO_PREMKT =
     'a pre-market percentage needs a pre-open session price, and the store’s bar record carries none: docs/02-store-format.md fixes the record at timestamp, open, high, low, close, volume and open interest, and /bars.json returns exactly those seven fields. There is nothing on this wire to divide.';
-  const NO_INTRINSIC =
-    'intrinsic value is the distance from SPOT to the strike, clipped at zero, and this page has no spot. /bars.json returns THIS contract’s own prices - the premium - never the underlying’s. Subtracting a strike from a premium is not intrinsic value, it is a wrong number.';
-  const NO_EXTRINSIC =
-    'extrinsic value is premium minus intrinsic, so it is unknown for exactly as long as intrinsic is, and for the same reason.';
+  const NO_SPOT_SORT =
+    'spot is read for the rows on this page only (/spot.json, D-2807), so there is no order over the whole selection to sort by.';
   const NO_GREEK =
     'no endpoint this page reads carries a Greek, and none is computed here. Black-Scholes needs a measured risk-free rate and a measured time to expiry; neither is sourced in this repository, and CLAUDE.md section 3 rule 1 forbids inventing one. A number printed in this column would be indistinguishable, on screen, from one a vendor sent.';
 
@@ -3749,9 +3748,34 @@
        value face opposite edges. Found by reading the computed styles of all
        twenty-four columns rather than by looking, which is also how the two
        "clipped" columns turned out not to be clipped at all. */
-    { key: 'mny', label: 'Moneyness', w: 106, num: true, none: NO_SPOT },
-    { key: 'intr', label: 'Intrinsic', w: 100, num: true, none: NO_INTRINSIC },
-    { key: 'extr', label: 'Extrinsic', w: 100, num: true, none: NO_EXTRINSIC },
+    /* SOURCED SINCE D-2807, PER BAR. Spot is the underlying's stored close at
+       this bar's own instant, feed and rung (`/spot.json`), read for the rows
+       on THIS PAGE only — so no order over the whole selection exists to sort
+       by, and the sort button says so rather than ordering one page. */
+    {
+      key: 'mny',
+      label: 'Moneyness',
+      w: 106,
+      num: true,
+      nosort: NO_SPOT_SORT,
+      why: 'ATM, ITM-k or OTM+k: k listed strikes of this expiry from the strike nearest the underlying’s close at this bar’s own instant'
+    },
+    {
+      key: 'intr',
+      label: 'Intrinsic',
+      w: 100,
+      num: true,
+      nosort: NO_SPOT_SORT,
+      why: 'the underlying’s close at this bar’s instant over the strike (CE) or the strike over it (PE), never below zero, in paisa'
+    },
+    {
+      key: 'extr',
+      label: 'Extrinsic',
+      w: 100,
+      num: true,
+      nosort: NO_SPOT_SORT,
+      why: 'this bar’s close less intrinsic, in paisa; not clipped, so a close below intrinsic shows negative'
+    },
     { key: 'iv', label: 'IV %', w: 86, num: true, none: NO_GREEK },
     { key: 'delta', label: 'Delta', w: 86, num: true, none: NO_GREEK },
     { key: 'gamma', label: 'Gamma', w: 90, num: true, none: NO_GREEK },
@@ -3811,7 +3835,7 @@
     return { future, option, contract: future || option };
   });
 
-  const OPTION_COLS = new Set(['side', 'strike']);
+  const OPTION_COLS = new Set(['side', 'strike', 'mny', 'intr', 'extr']);
   const FUTURE_COLS = new Set(['exp', 'dte']);
   /**
    * A DAY RUNG HAS NO MINUTE WORTH A COLUMN.
@@ -5194,7 +5218,7 @@
   /** @param {string} key */
   function barHead(key) {
     const col = BAR_COLS.find((c) => c.key === key);
-    if (!col || col.none) return; /* a column with no source has nothing to order */
+    if (!col || col.none || col.nosort) return; /* nothing to order, and the button says why */
     if (barSortKey === key) barDesc = !barDesc;
     else {
       barSortKey = key;
@@ -5375,6 +5399,46 @@
     const start = Math.max(0, first - pagePlan.base);
     return barSorted.slice(start, start + pageSize);
   });
+
+  /* ---------------------------------------------------------------------
+     SPOT FOR THE OPTION ROWS ON THIS PAGE — D-2807.
+
+     The underlying's stored close at each option bar's OWN instant, on the
+     same feed and rung, from `/spot.json`: one request per underlying, rung
+     and month on the page, each instant answered by the server in a bounded
+     bisection of one file (docs/06-limits.md). Only the rows ON SCREEN are
+     asked about, so the cost follows the page size and never the store.
+     A missing spot comes back NAMED and is drawn as its reason — never as
+     the nearest or the previous close.
+     --------------------------------------------------------------------- */
+  /** Every listed strike per underlying and expiry, from the whole census. */
+  const spotChains = $derived(chainsFrom(deco));
+  /** @type {Map<string, {close: number|null, why: string|null, detail?: string}>} */
+  let spotMap = $state(new Map());
+  $effect(() => {
+    const feed = feeds.active;
+    const rows = barPage.filter((/** @type {any} */ r) => r.side);
+    if (view !== 'bars' || !feed || rows.length === 0) {
+      spotMap = new Map();
+      return;
+    }
+    const controller = new AbortController();
+    readSpots(feed, rows, controller.signal)
+      .then((m) => {
+        if (!controller.signal.aborted) spotMap = m;
+      })
+      .catch(() => {
+        /* Aborted by a newer page: that page's own read files its answers. */
+      });
+    return () => controller.abort();
+  });
+  /**
+   * The cell's reason, and the server's own fault sentence when it sent one.
+   * @param {string|null} why
+   * @param {{detail: string|null}} cell
+   */
+  const spotWhyText = (why, cell) =>
+    `${/** @type {Record<string, string>} */ (SPOT_WHY)[why ?? ''] ?? `unknown (${why})`}${cell.detail ? ` — ${cell.detail}` : ''}`;
 
   /**
    * `HH:MM` to minutes since IST midnight, or `null` if it is not a time.
@@ -9411,7 +9475,7 @@
                     scope="col"
                     class:numh={c.num}
                     class:deadh={Boolean(c.none)}
-                    aria-sort={c.none ? undefined : barAriaSort(c.key)}
+                    aria-sort={c.none || c.nosort ? undefined : barAriaSort(c.key)}
                   >
                     <!-- A COLUMN WITH NO SOURCE DOES NOT PRETEND TO SORT. The
                          button is still here, still reachable and still
@@ -9421,10 +9485,12 @@
                     <button
                       class="sortbtn"
                       type="button"
-                      disabled={Boolean(c.none)}
+                      disabled={Boolean(c.none || c.nosort)}
                       title={c.none
                         ? `${c.label} — no source, so there is nothing to order: ${c.none}`
-                        : c.key === 'chg'
+                        : c.nosort
+                          ? `${c.label} — ${c.why}. Not sortable: ${c.nosort}`
+                          : c.key === 'chg'
                           ? `${c.label} — ${c.why}. The bar behind each figure is that figure's size against the largest move in this selection, measured PER RUNG so a minute bar is never judged against a daily one (${chgScaleText}). Scaled across every matched row rather than this page, so turning the page does not change what a full bar means. Click to sort; click again to reverse.`
                           : `${c.label} — ${c.why}. Click to sort; click again to reverse.`}
                       onclick={() => barHead(c.key)}
@@ -9432,7 +9498,7 @@
                       <span>{c.label}</span>
                       <span
                         class="caret"
-                        class:on={barSortKey === c.key && !c.none}
+                        class:on={barSortKey === c.key && !c.none && !c.nosort}
                         class:desc={barDesc}
                         aria-hidden="true"
                       ></span>
@@ -9542,6 +9608,7 @@
               {:else}
                 {#key stamp}
                   {#each barPage as b, i (b.rk)}
+                    {@const oc = optionCells(b, spotMap.get(spotKey(b)), spotChains)}
                     <tr
                       class="brow"
                       class:odd={i % 2 === 1}
@@ -9752,30 +9819,37 @@
                         {/if}
                       </td>
 
-                      <!-- MONEYNESS, INTRINSIC, EXTRINSIC and the five Greeks
-                           plus IV: no source on this wire, and each says which
-                           source it would need. -->
-                      <td class="na"
-                        ><span
-                          class="unk"
-                          title={BAR_META.mny.none}
-                          aria-label="Moneyness: no source — {BAR_META.mny.none}">no source</span
-                        ></td
-                      >
-                      <td class="bn na"
-                        ><span
-                          class="unk"
-                          title={BAR_META.intr.none}
-                          aria-label="Intrinsic: no source — {BAR_META.intr.none}">no source</span
-                        ></td
-                      >
-                      <td class="bn na"
-                        ><span
-                          class="unk"
-                          title={BAR_META.extr.none}
-                          aria-label="Extrinsic: no source — {BAR_META.extr.none}">no source</span
-                        ></td
-                      >
+                      <!-- MONEYNESS, INTRINSIC, EXTRINSIC (D-2807): from the
+                           underlying's close at THIS bar's own instant, or the
+                           named reason there is none — never a nearest close. -->
+                      <td class="bt">
+                        {#if oc === null}
+                          <span class="unk" title="not an option — moneyness belongs to an option.">—</span>
+                        {:else if oc.mny === null}
+                          <span class="unk" title={spotWhyText(oc.mnyWhy, oc)} aria-label="Moneyness unknown: {spotWhyText(oc.mnyWhy, oc)}">—</span>
+                        {:else}
+                          <span title="spot {paisaText(oc.spot)} at this bar’s instant">{oc.mny}</span>
+                        {/if}
+                      </td>
+                      <td class="bn">
+                        {#if oc === null}
+                          <span class="unk" title="not an option — intrinsic value belongs to an option.">—</span>
+                        {:else if oc.intr === null}
+                          <span class="unk" title={spotWhyText(oc.why, oc)} aria-label="Intrinsic unknown: {spotWhyText(oc.why, oc)}">—</span>
+                        {:else}
+                          <span title="{fmt(oc.intr)} paisa against spot {paisaText(oc.spot)}">{paisaText(oc.intr)}</span>
+                        {/if}
+                      </td>
+                      <td class="bn">
+                        {#if oc === null}
+                          <span class="unk" title="not an option — extrinsic value belongs to an option.">—</span>
+                        {:else if oc.extr === null}
+                          <span class="unk" title={spotWhyText(oc.why, oc)} aria-label="Extrinsic unknown: {spotWhyText(oc.why, oc)}">—</span>
+                        {:else}
+                          <span title="{fmt(oc.extr)} paisa: close less intrinsic">{paisaText(oc.extr)}</span>
+                        {/if}
+                      </td>
+                      <!-- The five Greeks plus IV: no source on this wire. -->
                       <td class="bn na"
                         ><span class="unk" title={NO_GREEK} aria-label="IV %: no source — {NO_GREEK}"
                           >no source</span
@@ -12797,9 +12871,9 @@
   .bgrid.lean > colgroup > col:nth-child(9),
   .bgrid.lean > thead > tr > th:nth-child(9),
   .bgrid.lean > tbody > tr > td:nth-child(9),
-  .bgrid.lean > colgroup > col:nth-child(n + 17),
-  .bgrid.lean > thead > tr > th:nth-child(n + 17),
-  .bgrid.lean > tbody > tr > td:nth-child(n + 17) {
+  .bgrid.lean > colgroup > col:nth-child(n + 20),
+  .bgrid.lean > thead > tr > th:nth-child(n + 20),
+  .bgrid.lean > tbody > tr > td:nth-child(n + 20) {
     display: none;
   }
 
@@ -12865,16 +12939,14 @@
     display: none;
   }
 
-  /* TYPE (15) AND STRIKE (16) belong to an OPTION only. A future has an expiry
-     and no strike, so a futures selection keeps 13 and 14 and loses these two.
-     That is the whole difference between the two contract shapes, and it is
-     the reason these are two rules rather than one range. Also +1 — see above. */
-  .bgrid.lean.nooption > colgroup > col:nth-child(15),
-  .bgrid.lean.nooption > colgroup > col:nth-child(16),
-  .bgrid.lean.nooption > thead > tr > th:nth-child(15),
-  .bgrid.lean.nooption > thead > tr > th:nth-child(16),
-  .bgrid.lean.nooption > tbody > tr > td:nth-child(15),
-  .bgrid.lean.nooption > tbody > tr > td:nth-child(16) {
+  /* TYPE (15), STRIKE (16) and — since D-2807 sourced them per bar —
+     MONEYNESS (17), INTRINSIC (18) and EXTRINSIC (19) belong to an OPTION
+     only. A future has an expiry and no strike, so a futures selection keeps
+     13 and 14 and loses 15 onward (20 onward, the greeks, are hidden above
+     for every selection). */
+  .bgrid.lean.nooption > colgroup > col:nth-child(n + 15),
+  .bgrid.lean.nooption > thead > tr > th:nth-child(n + 15),
+  .bgrid.lean.nooption > tbody > tr > td:nth-child(n + 15) {
     display: none;
   }
 
