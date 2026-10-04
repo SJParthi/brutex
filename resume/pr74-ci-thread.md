@@ -93,3 +93,4 @@ Artifacts.
 - 19:20 UTC: head is 8f58d91 (8b1e5bd + Fix Board web18 605c529). CI run 37226157475 on it; Gate W green. New Gate 6d passed locally. Local runner mutants 22/78, 0 missed so far; api next. Paused for usage at 93%; resume 22:03.
 - Pending at pause: Fix Board hand-off 3 origin/fixboard/pr74-conc-api dee61cfd (api+pull Rust, D-2760..2766, already merges 8f58d91). Merge on resume; shards will likely have started, so decide merge-now vs after the Gate 18 phase.
 - Local survivor (fix on resume): crates/runner/src/bootstrap.rs:1847:17 replace > with == in ExactPrefix::sum (see /tmp/claude-0/mp/sw/runner/mutants.out).
+- Pending at pause: sweep 446c8cd on claude/project-thread-v8j0jv (zf/store-o1 D-2329/2330, .tix time index, store benches C-TIX-01/02; already merges 8f58d91).
