@@ -13563,8 +13563,12 @@ as a measured figure; no bench covers it.
 It is `sort_unstable_by(f64::total_cmp)` and not a comparator of its own: a
 NaN p-value under a partial_cmp-based comparator is the ordering bug rule 4's
 neighbour in `rank.rs` already carries a reason about.
-`crates/pull/src/folder.rs` ONE sort, and its bound is the constant archive.rs
-is ALREADY allowed for. `census_of` sorts the instrument NAMES of an
+`crates/pull/src/folder.rs` TWO sorts (1 -> 2, D-1938), and their bound is the
+constant archive.rs is ALREADY allowed for. The second came with CE-67
+(D-1772): `census_of` now also sorts `keys`, the same names upper-cased so
+two stems differing only in case count as a collision, and `keys.len() ==
+instruments.len()` -- one key per name, the same capped list. Gate 11 rule 4
+was red on it from D-1772 until D-1938 raised the count. `census_of` sorts the instrument NAMES of an
 already-decoded walk -- one `String` per `Member`, so `instruments.len() ==
 members.len()` at the sort. Those members reach it from `archive::descend`,
 which refuses with `ArchiveError::TooManyMembers` at `out.len() >= MAX_MEMBERS`
