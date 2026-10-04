@@ -7188,6 +7188,8 @@
       said = await r.json();
     } catch (why) {
       stopAsked = false;
+      // NOTHING WAS STOPPED, so the run is not an aborted one. conc18-2.
+      aborted = false;
       pollError = `Stop could not be delivered, so the run may still be going: ${why}. Reload this page to see what it is doing.`;
       return;
     }
@@ -7198,6 +7200,7 @@
        done nothing. */
     if (said?.stopping !== true) {
       stopAsked = false;
+      aborted = false;
       pollError =
         'Nothing was stopped: the server reports no run in progress. It may have finished on its own — the status below is the reading that matters.';
       return;
@@ -7216,6 +7219,7 @@
     sent = { done: 0, of: 0, label: '' };
     askedKeys = new Set();
     netError = null;
+    pollError = null;
     outcomes = [];
     outcomeIndex = new Map();
     baseline = null;
@@ -8644,6 +8648,25 @@
               {/if}
 
             </div>
+
+            <!-- THE RUN'S OWN REFUSALS, SAID OUT LOUD. `netError` (a refused or
+                 unreachable `/pull/run`, a pre-run census that failed, a dropped
+                 leg) and `pollError` (an unreadable run status, a Stop the
+                 server never took, a census poll that failed) were written by
+                 every handler and rendered nowhere, so a press that failed
+                 looked like a press that did nothing. Shown whatever `phase`
+                 is. conc18-2, CLAUDE.md §4. -->
+            {#if netError}
+              <p class="note wrap warn" role="alert" data-run-error="net">{netError}</p>
+            {/if}
+            {#if pollError}
+              <p class="note wrap warn" role="alert" data-run-error="poll">
+                {#if phase === 'running'}The progress shown is the last reading this page took. {/if}{pollError}
+              </p>
+            {/if}
+            {#if phase === 'done' && aborted && !netError}
+              <p class="note wrap" data-run-error="stopped">Stopped at your request. What landed before the stop is counted below.</p>
+            {/if}
 
             <!-- ══════════════ HOW FAR THROUGH THE RUN IS ══════════════
 

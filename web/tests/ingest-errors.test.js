@@ -87,7 +87,7 @@ test('netError and pollError are rendered as alerts in the run card, whatever th
     const body = source.slice(n.start, n.end);
     assert.match(body, /role="alert"/);
     assert.match(body, new RegExp(`\\{${name}\\}`));
-    const gated = up.filter((a) => a.type === 'IfBlock' && /phase/.test(source.slice(a.test.start, a.test.end)));
+    const gated = up.filter((/** @type {any} */ a) => a.type === 'IfBlock' && /phase/.test(source.slice(a.test.start, a.test.end)));
     assert.deepEqual(gated, [], `${name} must not be hidden behind a phase test`);
   }
 });
