@@ -56749,3 +56749,49 @@ screen's `steady` flag), so it is not part of this verdict either. The derived
 figures the browser still cross-checks (`win_rate_bp`, the two ratios, the two
 averages) are integrity checks on the row's own arithmetic, not admission
 rules.
+
+### D-1811 — The V4 OOS replay attests its fold slice once and replays the pending candidates in parallel — 2026-10-04
+
+**What was left (W3-runner5-0, the remainder D-1143 recorded).** Each pending
+OOS candidate in the V4 anchored-search fold went through `replay_selected`,
+which re-attested the fold's series for every candidate: one BLAKE3 over
+`trade_test` (the run-identity check and `oos_data_digest`), one over the
+projected column, every bar re-validated, the acceptance verdicts recounted,
+every source rechecked and the price extremes rescanned. That is O(E + R) per
+candidate for facts that depend on no candidate, and pending holds up to two
+candidates per closed mask. The loop was serial. D-1143 held off because a
+token built before the loop would change which refusal an input with several
+faults reports.
+
+**The change.** New crate-visible `exit_grid_policy::OosReplaySliceV1`, built
+from the OOS series, the column and optionally the hoisted `SliceFacts`. It
+takes the series digest, the feed and commit digests, the bar verdict, the
+acceptance verdict, the source verdict, the price extremes and the column
+digest once, and holds each verdict as it was found, the way
+`LaterExpressionSliceV1` does for the Boolean later period (D-1188).
+`replay_selected_on` reads each verdict at the exact position the per-call
+door checked it, so the refusal order is unchanged; computing a check early
+is not reporting it early. The public `replay_selected` and
+`replay_selected_universe` now build a slice and call the same body, so there
+is one replay path. `require_matches_digested` and the
+`validate_arithmetic_envelope` wrapper had no other callers and are removed.
+`validate.rs` builds one slice per fold, replays the pending candidates with
+`par_iter`, and reads the results back in pending order, so the first refusal
+is the lowest ordinal's, as before, and `final_candidates` keeps its order.
+
+**No output changes.** Every replay value, digest and refusal is identical.
+The walk half of W3-runner5-0 was already closed by D-1186.
+
+**Tests.** `exit_grid_policy::tests::the_oos_replay_refusal_order_is_pinned_for_multi_fault_inputs`
+pins five multi-fault refusals (a torn selection, a foreign side and a foreign
+mask each over a corrupt bar; a corrupt bar; an off-minute bar before a
+corrupt one) through the public door only. It passes on the tree before this
+change and after it, and moving the bar check ahead of the mask check fails
+it. `replays_on_one_oos_slice_equal_the_per_call_replay_for_every_fault`
+crosses six series (clean, a later OOS boundary, a corrupt bar, off-minute
+plus corrupt, a price at `i64::MAX`, a series overlapping training) with four
+runs and two selections, requires the slice door to equal the per-call door
+for every pair, requires one series hash per slice however many replays run
+on it, and requires foreign hoisted facts to be refused unless an earlier
+refusal wins. `validate::tests::the_oos_replay_loop_attests_once_per_fold_and_replays_in_parallel`
+is a source-shape test that fails on the previous tree. AGB-03, AGB-04.
