@@ -56845,3 +56845,24 @@ merged tree.
 **Change.** Both texts say twelve, name `pool_oos.rs`, and say they said
 eleven until this entry. `pool_oos::run` takes its rung as a parameter, as
 the bullet says of the others.
+
+### D-2303 — `/selection-v6.json` reads one page per rung — 2026-10-04
+
+**Finding (Rust and O(1) sweep OS-5).** D-1578's reader read every block of
+every rung's file on each request and refused a file holding more than 64
+blocks outright, so a rung's 65th commit made it unreadable for good, and a
+request's cost grew with the files.
+
+**Change.** `cli::read_stored_selection_v6(root, from, limit)` seeks to block
+`from` (the stride is fixed) and reads at most `limit` blocks; the file's
+block count comes from its length. `StoredSelectionV6Rung::Records` carries
+`total`, `from` and the page. The route takes `from=N` and `limit=N` (1 to
+`PAGE_BLOCKS` = 8, each at most once, decimal digits only) beside `family`,
+and every rung reports `total_blocks` and `from`. A request reads at most 64
+blocks in all. Duplicate identities are still refused inside the page; the
+commit door refuses them across the whole file before it appends.
+
+**Tests.** `cli::selection_v6::tests::the_display_reader_decodes_the_authoritys_winners_and_refuses_any_other_family`
+now pages a three-block file (one block from 1, an empty page past the end, a
+duplicate inside a page refused) where it used to assert the whole-file
+refusal. `api::selectionv6json::tests::the_page_selectors_are_bounded_and_strict`.

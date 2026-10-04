@@ -40,9 +40,22 @@ type Response = (
     String,
 );
 
-/// Blocks shown per rung. A file holding more is refused whole by the reader,
-/// never cut to a prefix.
-pub const MAX_RECORDS_PER_RUNG: u64 = 64;
+/// The most blocks one request reads per rung, and the default page.
+///
+/// A page, not a cap on the file: `from` walks a rung with more blocks than
+/// this, and each request reads at most this many per rung, so a request is
+/// bounded whatever the files hold (D-2303). At 25 winners a block, eight
+/// rungs of eight blocks is 1,600 winners, far inside
+/// `detail::MAX_RESPONSE_BYTES`.
+pub const PAGE_BLOCKS: u64 = 8;
+
+/// What one request asks for: an optional family, and the page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Asked {
+    pub(crate) family: Option<&'static str>,
+    pub(crate) from: u64,
+    pub(crate) limit: u64,
+}
 
 const SCOPE: &str = "Sealed Selection V6 blocks as ledger-v6 committed them: version, \
      identity and completion seal verified on every read. The upstream Execution V4 and \
@@ -66,40 +79,93 @@ fn refused(status: StatusCode, why: &str) -> Response {
     )
 }
 
-/// The one selector this route takes: an optional family.
+/// The family selector alone; see [`asked`].
 ///
 /// # Errors
 ///
-/// An unknown or repeated key, an empty value, or a family that is not one
-/// of the two, with the equity sentence for an equity.
+/// As [`asked`].
+#[cfg(test)]
 pub(crate) fn asked_family(query: &str) -> Result<Option<&'static str>, String> {
+    asked(query).map(|asked| asked.family)
+}
+
+/// The selectors this route takes: an optional family, and an optional page
+/// (`from`, the first block shown per rung, and `limit`, at most
+/// [`PAGE_BLOCKS`]).
+///
+/// # Errors
+///
+/// An unknown or repeated key, an empty value, a family that is not one of
+/// the two (with the equity sentence for an equity), a page word that is not
+/// a decimal number, or a limit of zero or above [`PAGE_BLOCKS`].
+pub(crate) fn asked(query: &str) -> Result<Asked, String> {
     crate::detail::query_is_bounded(query)?;
+    let mut asked = Asked {
+        family: None,
+        from: 0,
+        limit: PAGE_BLOCKS,
+    };
     if query.is_empty() {
-        return Ok(None);
+        return Ok(asked);
     }
-    let mut family = None;
+    let mut seen = [false; 3];
     for pair in query.split('&') {
         let (key, value) = pair
             .split_once('=')
             .ok_or("selection query requires key=value")?;
-        if key != "family" || value.is_empty() || family.is_some() {
-            return Err("the only selector is one non-empty family=NIFTY|BANKNIFTY".to_owned());
+        let slot = match key {
+            "family" => 0,
+            "from" => 1,
+            "limit" => 2,
+            _ => usize::MAX,
+        };
+        let fresh = seen
+            .get_mut(slot)
+            .is_some_and(|seen| !std::mem::replace(seen, true));
+        if value.is_empty() || !fresh {
+            return Err(
+                "the selectors are one non-empty family=NIFTY|BANKNIFTY, from=N and limit=N, each \
+                 at most once"
+                    .to_owned(),
+            );
         }
-        family = Some(cli::selection_v6_family(&crate::server::param(
-            query, "family",
-        ))?);
+        match slot {
+            0 => {
+                asked.family = Some(cli::selection_v6_family(&crate::server::param(
+                    query, "family",
+                ))?);
+            }
+            1 => {
+                asked.from = page_word(value, "from")?;
+            }
+            _ => {
+                asked.limit = page_word(value, "limit")?;
+                if asked.limit == 0 || asked.limit > PAGE_BLOCKS {
+                    return Err(format!("limit must be 1 to {PAGE_BLOCKS} blocks per rung"));
+                }
+            }
+        }
     }
-    Ok(family)
+    Ok(asked)
+}
+
+fn page_word(value: &str, key: &str) -> Result<u64, String> {
+    if !value.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(format!("{key} must be a decimal block number"));
+    }
+    value
+        .parse()
+        .map_err(|_| format!("{key} must be a decimal block number"))
 }
 
 /// Reads the committed Selection V6 records under the dashboard's store root.
 pub async fn selection_v6_json(uri: Uri) -> Response {
-    let family = match asked_family(uri.query().unwrap_or_default()) {
-        Ok(family) => family,
+    let asked = match asked(uri.query().unwrap_or_default()) {
+        Ok(asked) => asked,
         Err(why) => return refused(StatusCode::BAD_REQUEST, &why),
     };
     let root = crate::server::store_dir();
-    match crate::detail::run(move || root.map(|root| render(&root, family))).await {
+    match crate::detail::run(move || root.map(|root| render_page(&root, asked))).await {
         Ok(Ok(body)) => {
             let reply = response(StatusCode::OK, &body);
             if reply.2.len() <= crate::detail::MAX_RESPONSE_BYTES {
@@ -121,20 +187,41 @@ pub async fn selection_v6_json(uri: Uri) -> Response {
     }
 }
 
-/// The whole payload for `root`, optionally narrowed to one family's winners.
+/// The first page for `root`, optionally narrowed to one family's winners.
+#[cfg(test)]
 pub(crate) fn render(root: &Path, family: Option<&'static str>) -> Value {
-    let rungs: Vec<Value> = cli::read_stored_selection_v6(root, MAX_RECORDS_PER_RUNG)
+    render_page(
+        root,
+        Asked {
+            family,
+            from: 0,
+            limit: PAGE_BLOCKS,
+        },
+    )
+}
+
+/// One page for `root`: at most `asked.limit` blocks per rung from
+/// `asked.from`, each rung naming how many blocks its file holds.
+pub(crate) fn render_page(root: &Path, asked: Asked) -> Value {
+    let family = asked.family;
+    let rungs: Vec<Value> = cli::read_stored_selection_v6(root, asked.from, asked.limit)
         .into_iter()
         .map(|(rung, read)| match read {
             cli::StoredSelectionV6Rung::Absent(path) => {
-                json!({"rung":rung,"status":"absent","path":path,"refusal":null,"records":[]})
+                json!({"rung":rung,"status":"absent","path":path,"refusal":null,
+                    "total_blocks":"0","from":asked.from.to_string(),"records":[]})
             }
             cli::StoredSelectionV6Rung::Refused(why) => {
                 json!({"rung":rung,"status":"refused","path":null,"refusal":why,"records":[]})
             }
-            cli::StoredSelectionV6Rung::Records(records) => {
+            cli::StoredSelectionV6Rung::Records {
+                total,
+                from,
+                records,
+            } => {
                 json!({"rung":rung,"status":"saved",
                 "path":null,"refusal":null,
+                "total_blocks":total.to_string(),"from":from.to_string(),
                 "records":records.iter().map(|record| project(record, family)).collect::<Vec<_>>()})
             }
         })

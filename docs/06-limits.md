@@ -14503,6 +14503,10 @@ most 100,000).
   sidecar are opened once per union, O(history) once; each instrument then
   costs one hash probe in each and its own frontier rows. Before D-2301
   every instrument cold-opened both, O(I × history).
-- **`/selection-v6.json`.** Eight files, at most 64 blocks of 16 KiB each,
-  each hashed twice (identity and seal) and decoded once: O(blocks) per
-  request, bounded by the cap. UNVERIFIED as a measured bound.
+- **`/selection-v6.json`.** Paged since D-2303: each request reads at most
+  `PAGE_BLOCKS` (8) blocks of 16 KiB per rung, from block `from`, one seek
+  away, and names each file's block count from its length. Each block read is
+  hashed twice (identity and seal) and decoded once: O(page) per request, at
+  most 64 blocks over the eight rungs, whatever the files hold. Duplicate
+  identities are refused within a page; the commit door refuses them across
+  the whole file before appending. UNVERIFIED as a measured bound.

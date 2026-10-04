@@ -376,7 +376,8 @@ fn the_display_reader_decodes_the_authoritys_winners_and_refuses_any_other_famil
             let mut selection =
                 commit_stored_selection_v6(&selection_root.0, bounds(4), execution, policy)?;
             let top = selection.top_twenty_five()?;
-            let bytes = std::fs::read(selection_root.0.join(FILE_NAME)).map_err(|e| e.to_string())?;
+            let bytes =
+                std::fs::read(selection_root.0.join(FILE_NAME)).map_err(|e| e.to_string())?;
             let block: Block = bytes.as_slice().try_into().map_err(|_| "one block")?;
             let record = read::decode_block(&block)?;
             assert_eq!(record.identity, selection.identity());
@@ -399,7 +400,11 @@ fn the_display_reader_decodes_the_authoritys_winners_and_refuses_any_other_famil
                 );
                 let m = candidate.metrics;
                 assert_eq!(
-                    (stored.drawdown, stored.worst_loss, stored.pessimistic_profit),
+                    (
+                        stored.drawdown,
+                        stored.worst_loss,
+                        stored.pessimistic_profit
+                    ),
                     (m.drawdown, m.worst_loss, m.pessimistic_profit)
                 );
                 assert_eq!(
@@ -407,27 +412,31 @@ fn the_display_reader_decodes_the_authoritys_winners_and_refuses_any_other_famil
                     (m.loss_ratio_ppm, m.reward_to_risk_ppm)
                 );
             }
-            assert_eq!(
-                record.families.map(|f| f.family),
-                ["NIFTY", "BANKNIFTY"]
-            );
+            assert_eq!(record.families.map(|f| f.family), ["NIFTY", "BANKNIFTY"]);
 
             // THE LAYOUT `ledger-v6` WRITES.
             let rung = crate::ledger_all::LEDGER_RUNGS
                 .into_iter()
                 .find(|rung| {
                     crate::stored::rung_length_micros(rung).ok()
-                        == i64::try_from(record.rung_seconds).ok().map(|s| s * 1_000_000)
+                        == i64::try_from(record.rung_seconds)
+                            .ok()
+                            .map(|s| s * 1_000_000)
                 })
                 .ok_or("the fixture's rung is a ledger rung")?;
             let ledger_root = Scratch::new();
             let directory = ledger_root.0.join("selection").join(rung);
             std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
             std::fs::write(directory.join(FILE_NAME), &bytes).map_err(|e| e.to_string())?;
-            for (name, read) in read_stored_selection_v6(&ledger_root.0, 4) {
+            for (name, read) in read_stored_selection_v6(&ledger_root.0, 0, 4) {
                 match read {
-                    StoredSelectionV6Rung::Records(records) => {
+                    StoredSelectionV6Rung::Records {
+                        total,
+                        from,
+                        records,
+                    } => {
                         assert_eq!(name, rung);
+                        assert_eq!((total, from), (1, 0));
                         assert_eq!(records, vec![record.clone()]);
                     }
                     StoredSelectionV6Rung::Absent(path) => {
@@ -437,12 +446,49 @@ fn the_display_reader_decodes_the_authoritys_winners_and_refuses_any_other_famil
                     StoredSelectionV6Rung::Refused(why) => panic!("{name}: {why}"),
                 }
             }
-            // A FILE OVER THE READER'S BOUND IS REFUSED WHOLE, NOT CUT.
-            std::fs::write(directory.join(FILE_NAME), [bytes.as_slice(), &frame(7)].concat())
-                .map_err(|e| e.to_string())?;
-            let over = read_stored_selection_v6(&ledger_root.0, 1);
-            assert!(over.iter().any(|(name, read)| *name == rung
-                && matches!(read, StoredSelectionV6Rung::Refused(why) if why.contains("above the 1"))));
+            // A FILE LONGER THAN ONE PAGE IS PAGED, NOT REFUSED: block `from`
+            // is one seek away and the count is the file's length (D-2303).
+            // Three blocks: the genuine one, a resealed variant with its own
+            // identity, then the genuine one again.
+            let mut other = block;
+            other[88] ^= 1; // the unshown Population V6 completion digest
+            let other = resealed(other);
+            std::fs::write(
+                directory.join(FILE_NAME),
+                [bytes.as_slice(), other.as_slice(), bytes.as_slice()].concat(),
+            )
+            .map_err(|e| e.to_string())?;
+            let page = |from: u64, limit: u64| {
+                read_stored_selection_v6(&ledger_root.0, from, limit)
+                    .into_iter()
+                    .find(|(name, _)| *name == rung)
+                    .map(|(_, read)| read)
+            };
+            match page(1, 1) {
+                Some(StoredSelectionV6Rung::Records {
+                    total,
+                    from,
+                    records,
+                }) => {
+                    assert_eq!((total, from, records.len()), (3, 1, 1));
+                    assert_ne!(
+                        records[0].identity, record.identity,
+                        "block 1 alone was read"
+                    );
+                }
+                other => panic!("one page of one block: {other:?}"),
+            }
+            match page(5, 2) {
+                Some(StoredSelectionV6Rung::Records { total, records, .. }) => {
+                    assert_eq!((total, records.len()), (3, 0), "past the end is empty");
+                }
+                other => panic!("an empty page: {other:?}"),
+            }
+            // A DUPLICATE IDENTITY INSIDE ONE PAGE IS STILL REFUSED.
+            assert!(
+                matches!(page(0, 3), Some(StoredSelectionV6Rung::Refused(why))
+                if why.contains("duplicate committed identities"))
+            );
 
             // ANY OTHER FAMILY CODE, RESEALED, IS REFUSED BY NAME.
             let mut envelope = block;

@@ -833,3 +833,5 @@ Narrative only. No row is added to the table above.
   D-2301, AFG-02.
 - **`cli::swept_rung` call-site count** made stale by D-1576: corrected.
   D-2302.
+- **OS-5** (`/selection-v6.json` read every block and refused past 64): fixed by
+  paging. D-2303, AFG-03.

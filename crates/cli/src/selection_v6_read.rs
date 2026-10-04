@@ -34,6 +34,7 @@
 //! an equity asked for by name with the same sentence.
 
 use std::io::Read as _;
+use std::io::Seek as _;
 use std::path::Path;
 
 use super::{BLOCK_BYTES, FILE_NAME, SEAL_AT, SELECTION_V6_BLOCK_BYTES};
@@ -175,30 +176,44 @@ pub struct StoredSelectionV6Record {
 pub enum StoredSelectionV6Rung {
     /// No Selection V6 file at the rung's path. The path is named.
     Absent(String),
-    /// Every block in the file, in append order.
-    Records(Vec<StoredSelectionV6Record>),
+    /// One page of the file's blocks, in append order.
+    Records {
+        /// Whole blocks the file holds, from its length alone.
+        total: u64,
+        /// The first block shown, counted from zero.
+        from: u64,
+        /// Blocks `from..from + records.len()`; empty past the end.
+        records: Vec<StoredSelectionV6Record>,
+    },
     /// The file exists and could not be read whole; the reason is named and
     /// no block from it is shown.
     Refused(String),
 }
 
 /// Every intraday rung's Selection V6 records beneath a `ledger-v6` ROOT, in
-/// the ledger's rung order.
+/// the ledger's rung order: one page of at most `limit` blocks per rung,
+/// starting at block `from`.
 ///
-/// `max_records` bounds the blocks read per rung; a file holding more is
-/// refused rather than truncated.
+/// **A page costs O(limit), whatever the file holds.** Blocks have a fixed
+/// stride, so block `from` is one seek away and the file's block count is its
+/// length. The reader once read every block and refused a file holding more
+/// than its cap, so a rung's 65th commit made that rung unreadable for good
+/// (Rust and O(1) sweep OS-5, D-2303). Duplicate identities are refused
+/// within the page; the commit door already refuses them across the whole
+/// file before it appends.
 #[must_use]
 pub fn read_stored_selection_v6(
     root: &Path,
-    max_records: u64,
+    from: u64,
+    limit: u64,
 ) -> Vec<(&'static str, StoredSelectionV6Rung)> {
     crate::ledger_all::LEDGER_RUNGS
         .into_iter()
-        .map(|rung| (rung, read_rung(root, rung, max_records)))
+        .map(|rung| (rung, read_rung(root, rung, from, limit)))
         .collect()
 }
 
-fn read_rung(root: &Path, rung: &'static str, max_records: u64) -> StoredSelectionV6Rung {
+fn read_rung(root: &Path, rung: &'static str, from: u64, limit: u64) -> StoredSelectionV6Rung {
     let directory = root.join("selection").join(rung);
     let file = directory.join(FILE_NAME);
     match std::fs::symlink_metadata(&file) {
@@ -210,8 +225,12 @@ fn read_rung(root: &Path, rung: &'static str, max_records: u64) -> StoredSelecti
         }
         Ok(_) => {}
     }
-    match read_blocks(&directory, rung, max_records) {
-        Ok(records) => StoredSelectionV6Rung::Records(records),
+    match read_blocks(&directory, rung, from, limit) {
+        Ok((total, records)) => StoredSelectionV6Rung::Records {
+            total,
+            from,
+            records,
+        },
         Err(why) => StoredSelectionV6Rung::Refused(format!("{}: {why}", file.display())),
     }
 }
@@ -219,8 +238,9 @@ fn read_rung(root: &Path, rung: &'static str, max_records: u64) -> StoredSelecti
 fn read_blocks(
     directory: &Path,
     rung: &str,
-    max_records: u64,
-) -> Result<Vec<StoredSelectionV6Record>, String> {
+    from: u64,
+    limit: u64,
+) -> Result<(u64, Vec<StoredSelectionV6Record>), String> {
     let rung_seconds = u64::try_from(crate::stored::rung_length_micros(rung)? / 1_000_000)
         .map_err(|why| why.to_string())?;
     let (mut file, path) = super::open(directory, false)?;
@@ -234,17 +254,19 @@ fn read_blocks(
                     .to_owned(),
             );
         }
-        let count = before.len / BLOCK_BYTES;
-        if count > max_records {
-            return Err(format!(
-                "Selection V6 holds {count} block(s), above the {max_records} this reader \
-                 shows; none is shown rather than a prefix"
-            ));
+        let total = before.len / BLOCK_BYTES;
+        let shown = total.saturating_sub(from).min(limit);
+        if shown > 0 {
+            let offset = from
+                .checked_mul(BLOCK_BYTES)
+                .ok_or("Selection V6 page offset overflow")?;
+            file.seek(std::io::SeekFrom::Start(offset))
+                .map_err(|why| why.to_string())?;
         }
         let mut records =
-            Vec::with_capacity(usize::try_from(count).map_err(|why| why.to_string())?);
+            Vec::with_capacity(usize::try_from(shown).map_err(|why| why.to_string())?);
         let mut identities = std::collections::HashSet::with_capacity(records.capacity());
-        for _ in 0..count {
+        for _ in 0..shown {
             let mut block = [0; SELECTION_V6_BLOCK_BYTES];
             file.read_exact(&mut block).map_err(|why| why.to_string())?;
             let record = decode_block(&block)?;
@@ -264,7 +286,7 @@ fn read_blocks(
             crate::result_set::file_generation(&file, &path)?,
             &path,
         )?;
-        Ok(records)
+        Ok((total, records))
     })();
     let released = file.unlock().map_err(|why| why.to_string());
     result.and_then(|records| released.map(|()| records))

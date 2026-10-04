@@ -75,6 +75,60 @@ async fn an_equity_family_is_refused_loudly_and_only_the_two_indices_select() {
     );
 }
 
+/// **The page selectors are bounded and strict.** Rust and O(1) sweep OS-5,
+/// D-2303.
+///
+/// `from` and `limit` are decimal block numbers, each at most once; `limit`
+/// is 1 to `PAGE_BLOCKS`. Absent rungs report zero blocks at the page asked
+/// for. A rung with more blocks than a page is paged through `from`, never
+/// refused (proved against genuine blocks in
+/// `cli::selection_v6::tests::the_display_reader_decodes_the_authoritys_winners_and_refuses_any_other_family`).
+#[test]
+fn the_page_selectors_are_bounded_and_strict() {
+    assert_eq!(
+        asked("").unwrap(),
+        Asked {
+            family: None,
+            from: 0,
+            limit: PAGE_BLOCKS
+        }
+    );
+    assert_eq!(
+        asked("from=64&limit=3&family=NIFTY").unwrap(),
+        Asked {
+            family: Some("NIFTY"),
+            from: 64,
+            limit: 3
+        }
+    );
+    for query in [
+        "limit=0",
+        "limit=9",
+        "from=-1",
+        "from=1e3",
+        "from=",
+        "from=1&from=2",
+        "limit=2&limit=2",
+        "page=1",
+        "from=99999999999999999999999",
+    ] {
+        assert!(asked(query).is_err(), "{query}");
+    }
+    let scratch = Scratch::new();
+    let body = render_page(
+        &scratch.0,
+        Asked {
+            family: None,
+            from: 7,
+            limit: 2,
+        },
+    );
+    for rung in body["rungs"].as_array().unwrap() {
+        assert_eq!(rung["total_blocks"], "0");
+        assert_eq!(rung["from"], "7");
+    }
+}
+
 /// Every one of the eight rungs is reported, in ledger order: absent ones by
 /// path, a damaged file as refused with the seal named, never as an empty
 /// winner list.
