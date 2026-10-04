@@ -23509,16 +23509,24 @@ mod tests {
         }
     }
 
-    /// audit-20261003 hunt-cli-b-4: a `BRUTEX_VALIDATE` value other than `0`
-    /// or `1` still leaves validation ON, and the run now SAYS so through the
-    /// `!! KNOB REFUSED` block, instead of reading `false` as `1` in silence.
+    /// audit-20261003 hunt-cli-b-4: a `BRUTEX_VALIDATE` value the switch does
+    /// not read still leaves validation ON, and the run SAYS so through the
+    /// `!! KNOB REFUSED` block. Since D-1770 the switch is `knob::switch`
+    /// (CE-6), so `false` and `off` are read as off rather than refused.
     #[test]
     fn an_unexpected_validate_value_stays_on_and_is_named_as_refused() {
         let _knobs = crate::knobs::serially();
-        for (raw, refused) in [("false", true), ("off", true), ("1", false), (" 0 ", false)] {
+        for (raw, on, refused) in [
+            ("false", false, false),
+            ("off", false, false),
+            ("1", true, false),
+            (" 0 ", false, false),
+            ("maybe", true, true),
+            ("00", true, true),
+        ] {
             crate::knobs::clear_all();
             crate::knobs::set("BRUTEX_VALIDATE", raw);
-            assert_eq!(super::validate_from_env(), raw.trim() != "0", "{raw:?}");
+            assert_eq!(super::validate_from_env(), on, "{raw:?}");
             let block = crate::knobs::refused().unwrap_or_default();
             assert_eq!(
                 block.contains("BRUTEX_VALIDATE"),
