@@ -83,7 +83,7 @@ fn an_expiry_on_a_weekend_is_no_first_form_reading() {
     // 2024-04-06 is a Saturday.
     assert!(matches!(
         decode_ticker("NIFTY06APR2422000CE", trade()),
-        Err(NfoRefusal::MonthlyExpiryUnstated { .. })
+        Err(NfoRefusal::ExpiryRefused { .. })
     ));
 }
 
@@ -128,7 +128,9 @@ fn every_other_shape_is_refused_by_name() {
         assert!(
             matches!(
                 decode_ticker(t, trade()),
-                Err(NfoRefusal::TickerUnparsed { .. } | NfoRefusal::MonthlyExpiryUnstated { .. })
+                Err(NfoRefusal::TickerUnparsed { .. }
+                    | NfoRefusal::MonthlyExpiryUnstated { .. }
+                    | NfoRefusal::ExpiryRefused { .. })
             ),
             "{t}"
         );
@@ -235,6 +237,7 @@ fn every_refusal_says_what_it_is() {
         NfoRefusal::TickerAmbiguous { ticker: "T".into() },
         NfoRefusal::MonthlyExpiryUnstated { ticker: "T".into() },
         NfoRefusal::FormsAmbiguous { ticker: "T".into() },
+        NfoRefusal::ExpiryRefused { ticker: "T".into() },
         NfoRefusal::UnderlyingRefused { ticker: "T".into() },
         NfoRefusal::ContractUnrenderable { ticker: "T".into() },
         NfoRefusal::DuplicateTicker { ticker: "T".into() },
@@ -253,7 +256,7 @@ fn every_refusal_says_what_it_is() {
     }
     let unique: std::collections::HashSet<&String> = texts.iter().collect();
     assert_eq!(unique.len(), texts.len(), "each refusal reads differently");
-    assert!(texts[8].contains("line 7"));
+    assert!(texts[9].contains("line 7"));
     assert_eq!(
         NfoRefusal::from(CmRefusal::HeaderUnknown),
         NfoRefusal::Source(CmRefusal::HeaderUnknown)

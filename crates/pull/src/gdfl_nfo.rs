@@ -32,21 +32,26 @@
 //! expiry calendar for 2018–2019 is recorded here (`docs/05-decisions.md`
 //! D-2806 names that missing fact).
 //!
-//! **The two forms overlap, and on a trade day of the monthly era the name
-//! alone cannot choose.** A monthly name whose strike begins with two digits
-//! also reads as the dated form, the month's year taken as the expiry DAY and
-//! the strike's first two digits as the YEAR: `ADANIENT18DEC195CE` traded on
-//! 2018-12-03 is December 2018, strike 195, and also 2019-12-18, strike 5 —
-//! a weekday inside the horizon. Taking the dated reading filed it under the
-//! wrong contract silently (D-3160). So on a trade day up to
-//! [`MONTHLY_FORM_LAST_YEAR`] a dated reading is kept only when no monthly
-//! reading names a month inside the same window; otherwise the name is
-//! refused as [`NfoRefusal::FormsAmbiguous`]. After that year the dated
-//! reading stands alone, which is the format's own statement that the
-//! monthly form is a 2018–2019 form; the exact cutover day is not recorded
-//! and is named as unsettled in D-3160. A strike's whole part never begins
-//! with `0` unless it is `0` itself (`0.5`), which also keeps `2005` from
-//! reading as year 20, strike 5 (D-3161). The underlying may hold any byte a
+//! **The two forms overlap, and the trade day chooses between them.** A
+//! monthly name whose strike begins with two digits also reads as the dated
+//! form, the month's year taken as the expiry DAY and the strike's first two
+//! digits as the YEAR: `ADANIENT18DEC195CE` traded on 2018-12-03 is December
+//! 2018, strike 195, and also 2019-12-18, strike 5. Taking the dated reading
+//! filed such names under a wrong contract silently (D-3160). The rule is the
+//! census of the operator's GDFL options tree ([`DATED_FORM_FROM`]): before
+//! trade day 2019-02-01 only the weeklies of the underlyings in
+//! [`DATED_BEFORE_CUTOVER`] use the dated form (from
+//! [`INDEX_WEEKLY_DATED_FROM`], 2018-09-03) and every other name is the
+//! monthly form; from 2019-02-01 every name is the dated form. So before the
+//! cutover a name of any other underlying is read as the monthly form only;
+//! a name of those two is read both ways and refused as
+//! [`NfoRefusal::FormsAmbiguous`] if both readings name a contract alive on
+//! the trade day (the census found none, and it stays loud); from the
+//! cutover only the dated form is read, and a dated shape whose date is not a
+//! weekday inside the window is [`NfoRefusal::ExpiryRefused`] (D-3164). A
+//! strike's whole part never begins with `0` unless it is `0` itself (`0.5`),
+//! which also keeps `2005` from reading as year 20, strike 5, and its
+//! fraction never ends in `0` (`107.50`): the census saw neither (D-3161). The underlying may hold any byte a
 //! `Symbol` admits (`M&M`, `NAM-INDIA`, `360ONE`); the strike may be decimal
 //! (`107.5`, 10,750 paisa). An expiry the ticker states on an exchange holiday
 //! is kept as the vendor stated it: the name is the contract's identity, and
@@ -104,12 +109,22 @@ pub const TICKER_CAP: usize = 64;
 /// How far after the trade date a stated expiry may lie (FORMAT.md §6).
 pub const EXPIRY_HORIZON_DAYS: u32 = 2_200;
 
-/// The last trade year on which a name may be the monthly form, so the last
-/// year on which a name that reads both ways is refused rather than read as
-/// the dated form (D-3160). The year is the module's own statement of the
-/// monthly form's era (FORMAT.md §6, "2018–2019"); the exact cutover DAY is
-/// not recorded, so the whole of that year is held to the stricter rule.
-pub const MONTHLY_FORM_LAST_YEAR: u16 = 2019;
+/// The first trade day `(year, month, day)` on which every GDFL option name
+/// is the dated form `DD MON YY STRIKE`; before it only the weeklies of
+/// [`DATED_BEFORE_CUTOVER`] are, and every other name is the monthly form
+/// `YY MON STRIKE` (D-3160). Source: the census of the operator's GDFL
+/// options tree relayed 2026-10-04 — all 20.9M names read under this rule,
+/// none read two ways.
+pub const DATED_FORM_FROM: (u16, u8, u8) = (2019, 2, 1);
+
+/// The underlyings whose names may be the dated form before
+/// [`DATED_FORM_FROM`] (their weeklies), by the same census (D-3160).
+pub const DATED_BEFORE_CUTOVER: [&str; 2] = ["NIFTY", "BANKNIFTY"];
+
+/// The first trade day `(year, month, day)` on which a weekly of
+/// [`DATED_BEFORE_CUTOVER`] is in the dated form; before it no name is read
+/// as dated. Source: the same census, relayed 2026-10-04 (D-3160).
+pub const INDEX_WEEKLY_DATED_FROM: (u16, u8, u8) = (2018, 9, 3);
 
 /// Why an options file, its name or a row was refused. Every refusal names
 /// itself; none is skipped.
@@ -133,10 +148,17 @@ pub enum NfoRefusal {
         /// The ticker.
         ticker: String,
     },
-    /// On a trade day of the monthly era the ticker reads both as a dated
-    /// contract and as a monthly one inside the horizon, and the name alone
-    /// cannot choose (D-3160).
+    /// Before the dated-form cutover an index ticker reads both as a dated
+    /// contract and as a monthly one alive on the trade day, and the name
+    /// alone cannot choose (D-3160).
     FormsAmbiguous {
+        /// The ticker.
+        ticker: String,
+    },
+    /// From the dated-form cutover the ticker has the dated shape, but its
+    /// `DD MON YY` is not a real weekday between the trade day and the
+    /// horizon (D-3164).
+    ExpiryRefused {
         /// The ticker.
         ticker: String,
     },
@@ -211,7 +233,11 @@ impl core::fmt::Display for NfoRefusal {
             ),
             Self::FormsAmbiguous { ticker } => write!(
                 f,
-                "{ticker}: on a trade day up to {MONTHLY_FORM_LAST_YEAR} the name reads both as a dated and as a monthly contract; refused rather than guessed (D-3160)"
+                "{ticker}: before the dated-form cutover the name reads both as a dated and as a monthly contract alive on the trade day; refused rather than guessed (D-3160)"
+            ),
+            Self::ExpiryRefused { ticker } => write!(
+                f,
+                "{ticker}: the stated expiry is not a real weekday from the trade day to {EXPIRY_HORIZON_DAYS} days after it"
             ),
             Self::UnderlyingRefused { ticker } => {
                 write!(
@@ -286,14 +312,19 @@ fn two_digits(bytes: &[u8]) -> Option<u8> {
 }
 
 /// A positive strike in paisa: digits, optionally a dot and one or two
-/// digits. The whole part never begins with `0` unless it is `0` (D-3161).
+/// digits. The whole part never begins with `0` unless it is `0`, and a
+/// fraction never ends in `0` (`100.0`, `107.50`): each is a second spelling
+/// of a strike the census never saw (D-3161).
 fn strike_paisa(text: &[u8]) -> Option<i64> {
     let text = core::str::from_utf8(text).ok()?;
     let (whole, frac) = text.split_once('.').unwrap_or((text, ""));
     let shaped = !whole.is_empty()
         && (whole == "0" || !whole.starts_with('0'))
         && whole.bytes().all(|b| b.is_ascii_digit())
-        && (!text.contains('.') || (!frac.is_empty() && frac.bytes().all(|b| b.is_ascii_digit())));
+        && (!text.contains('.')
+            || (!frac.is_empty()
+                && !frac.ends_with('0')
+                && frac.bytes().all(|b| b.is_ascii_digit())));
     if !shaped {
         return None;
     }
@@ -355,37 +386,56 @@ pub fn decode_ticker(ticker: &str, trade: Day) -> Result<OptionTicker, NfoRefusa
     // `crate::gdfl_import` (`TickerAmbiguous`).
     // `tests::no_ticker_reads_as_two_contracts` walks every split of a sweep
     // of shapes to hold this.
-    let first_form = (1..body.len()).find_map(|at| {
+    // The dated shape, its date not yet judged: (split, dd, mon, yy, strike).
+    let shaped = (1..body.len()).find_map(|at| {
         let rest = body.get(at..)?;
         let dd = rest.get(0..2).and_then(two_digits)?;
         let mon = rest.get(2..5).and_then(month_of)?;
         let yy = rest.get(5..7).and_then(two_digits)?;
         let strike = rest.get(7..).and_then(strike_paisa)?;
+        Some((at, dd, mon, yy, strike))
+    });
+    let first_form = shaped.and_then(|(at, dd, mon, yy, strike)| {
         let expiry = Day::new(2000 + u16::from(yy), mon, dd).ok()?;
         (is_weekday(expiry)
             && expiry.days_from_epoch() >= trade.days_from_epoch()
             && expiry.days_from_epoch() <= latest)
             .then_some((at, expiry, strike))
     });
-    let Some((at, expiry, strike)) = first_form else {
-        // The monthly 2018–2019 form: YY MON STRIKE, no expiry day.
-        return Err(if monthly_reading(body, None) {
+    // The era rule (D-3160): which forms the trade day admits.
+    let on = (trade.year(), trade.month(), trade.day());
+    let before = on < DATED_FORM_FROM;
+    let chosen = if before {
+        let dated = first_form.filter(|&(at, ..)| {
+            on >= INDEX_WEEKLY_DATED_FROM
+                && ticker
+                    .get(..at)
+                    .is_some_and(|under| DATED_BEFORE_CUTOVER.contains(&under))
+        });
+        if dated.is_some() && monthly_reading(body, Some((trade.days_from_epoch(), latest))) {
+            return Err(NfoRefusal::FormsAmbiguous {
+                ticker: ticker.to_owned(),
+            });
+        }
+        dated
+    } else {
+        first_form
+    };
+    let Some((at, expiry, strike)) = chosen else {
+        // Before the cutover, the monthly form: YY MON STRIKE, no expiry day.
+        // From the cutover, the dated shape with a date that is not one.
+        return Err(if before && monthly_reading(body, None) {
             NfoRefusal::MonthlyExpiryUnstated {
+                ticker: ticker.to_owned(),
+            }
+        } else if !before && shaped.is_some() {
+            NfoRefusal::ExpiryRefused {
                 ticker: ticker.to_owned(),
             }
         } else {
             unparsed()
         });
     };
-    // In the monthly era a monthly reading inside the same window is as good
-    // a reading as the dated one, and the name cannot choose (D-3160).
-    if trade.year() <= MONTHLY_FORM_LAST_YEAR
-        && monthly_reading(body, Some((trade.days_from_epoch(), latest)))
-    {
-        return Err(NfoRefusal::FormsAmbiguous {
-            ticker: ticker.to_owned(),
-        });
-    }
     let name = ticker.get(..at).unwrap_or_default();
     let underlying = Symbol::new(name)
         .ok()

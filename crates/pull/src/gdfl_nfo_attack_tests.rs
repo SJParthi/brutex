@@ -94,20 +94,10 @@ fn reencode(got: &OptionTicker) -> String {
     encode(got.underlying.as_str(), expiry, paisa, parts[4] == "CE")
 }
 
-/// Whether a decoded ticker's name is the canonical spelling of its contract
-/// except for trailing zeros in the strike's fraction (`100.0`, `107.50`).
+/// Whether a decoded ticker's name is the canonical spelling of its
+/// contract: since D-3161 refuses padded fractions, the only spelling.
 fn reencodes(ticker: &str, got: &OptionTicker) -> bool {
-    let again = reencode(got);
-    if again == ticker {
-        return true;
-    }
-    // The only admitted non-canonical spelling: a fraction padded with zeros.
-    let (a, b) = (&ticker[..ticker.len() - 2], &again[..again.len() - 2]);
-    a.starts_with(b) && {
-        let tail = &a[b.len()..];
-        let tail = tail.strip_prefix('.').unwrap_or(tail);
-        !tail.is_empty() && tail.bytes().all(|c| c == b'0')
-    }
+    reencode(got) == ticker
 }
 
 fn first_weekday_on_or_after(day: Day) -> Day {
@@ -118,108 +108,128 @@ fn first_weekday_on_or_after(day: Day) -> Day {
     at
 }
 
-// ── the two readings of one name ───────────────────────────────────────────
+// ── the two readings of one name, and the era rule (D-3160) ────────────────
 
-/// A monthly-form name (`YY MON STRIKE`) whose strike begins with two digits
-/// that, taken as a year, put a weekday inside the horizon: before the fix
-/// the dated form claimed it, with the month's YEAR read as an expiry DAY and
-/// the strike's first two digits read as the year.
+/// The first trade day of the dated form.
+fn cutover() -> Day {
+    let (y, m, dd) = DATED_FORM_FROM;
+    d(y, m, dd)
+}
+
+fn is_index(under: &str) -> bool {
+    DATED_BEFORE_CUTOVER.contains(&under)
+}
+
+/// Monthly-form names whose strike begins with two digits that, taken as a
+/// year, put a weekday inside the horizon: before D-3160 the dated form
+/// claimed them. Before the cutover a share's name is the monthly form only
+/// and an index's name that reads both ways is refused loudly.
 #[test]
 fn dpn_01_a_monthly_name_whose_strike_starts_with_a_year_is_never_a_dated_contract() {
     // 2019-12-18 is a Wednesday and 2023-12-18 a Monday, both inside
-    // 2,200 days of 2018-12-03.
+    // 2,200 days of 2018-12-03; 2021-10-18 is a Monday.
     for (ticker, on) in [
         ("ADANIENT18DEC195CE", d(2018, 12, 3)),
-        ("BANKNIFTY18DEC23500CE", d(2018, 12, 3)),
         ("ACC18OCT2150PE", d(2018, 10, 1)),
+        ("TV18BRDCST18DEC195CE", d(2018, 12, 3)),
+        ("TV18BRDCST18DEC50PE", d(2018, 12, 3)),
     ] {
         assert_eq!(
             decode_ticker(ticker, on),
-            Err(NfoRefusal::FormsAmbiguous {
+            Err(NfoRefusal::MonthlyExpiryUnstated {
                 ticker: ticker.to_owned()
             }),
             "{ticker} on {on}"
         );
     }
+    let ticker = "BANKNIFTY18DEC23500CE";
+    assert_eq!(
+        decode_ticker(ticker, d(2018, 12, 3)),
+        Err(NfoRefusal::FormsAmbiguous {
+            ticker: ticker.to_owned()
+        })
+    );
 }
 
-/// Every monthly-form name of every trade month of the monthly era, for
+/// Every monthly-form name of every trade month before the cutover, for
 /// every two-digit strike prefix: not one may decode to a contract.
 #[test]
-fn dpn_02_no_monthly_era_name_decodes_to_a_contract() {
+fn dpn_02_no_monthly_name_before_the_cutover_decodes_to_a_contract() {
     let tails = ["", "0", "5", "50", "2.5"];
-    let unders = ["ADANIENT", "NIFTYNXT50", "360ONE", "M&M", "BAJAJ-AUTO"];
+    let unders = [
+        "ADANIENT",
+        "NIFTYNXT50",
+        "360ONE",
+        "M&M",
+        "BAJAJ-AUTO",
+        "TV18BRDCST",
+        "NIFTY",
+        "BANKNIFTY",
+    ];
     let mut tried = 0_u64;
+    let (mut monthly, mut ambiguous, mut other) = (0_u64, 0_u64, 0_u64);
     let mut misread: Vec<String> = Vec::new();
     let mut check = |ticker: String, on: Day| {
         tried += 1;
-        let got = decode_ticker(&ticker, on);
-        if let Err(why) = &got {
-            assert!(
-                matches!(
-                    why,
-                    NfoRefusal::FormsAmbiguous { .. }
-                        | NfoRefusal::MonthlyExpiryUnstated { .. }
-                        | NfoRefusal::TickerUnparsed { .. }
-                        | NfoRefusal::UnderlyingRefused { .. }
-                ),
-                "{ticker} on {on}: {why:?}"
-            );
-        }
-        if let Ok(got) = got {
-            if misread.len() < 8 {
-                misread.push(format!("{ticker} on {on} -> {}", got.contract.as_str()));
-            } else {
-                misread.push(String::new());
+        match decode_ticker(&ticker, on) {
+            Err(NfoRefusal::MonthlyExpiryUnstated { .. }) => monthly += 1,
+            Err(NfoRefusal::FormsAmbiguous { .. }) => ambiguous += 1,
+            Err(
+                why @ (NfoRefusal::TickerUnparsed { .. } | NfoRefusal::UnderlyingRefused { .. }),
+            ) => {
+                assert!(why.to_string().contains(ticker.as_str()));
+                other += 1;
             }
+            Err(why) => panic!("{ticker} on {on}: {why:?}"),
+            Ok(got) => misread.push(format!("{ticker} on {on} -> {}", got.contract.as_str())),
         }
     };
-    for year in 2018_u16..=2019 {
-        for month in 1_u8..=12 {
-            let firsts = [
-                first_weekday_on_or_after(d(year, month, 1)),
-                d(year, month, 1).end_of_month(),
-            ];
-            for on in firsts {
-                for ahead in 0_u8..3 {
-                    let (cy, cm) = if month + ahead > 12 {
-                        (year + 1, month + ahead - 12)
-                    } else {
-                        (year, month + ahead)
-                    };
-                    for under in unders {
-                        for yy in 0..100 {
-                            for tail in tails {
-                                for side in ["CE", "PE"] {
-                                    check(
-                                        format!(
-                                            "{under}{:02}{}{yy:02}{tail}{side}",
-                                            cy % 100,
-                                            mon_name(cm)
-                                        ),
-                                        on,
-                                    );
-                                }
+    let mut month_start = d(2018, 1, 1);
+    while month_start < cutover() {
+        let (year, month) = (month_start.year(), month_start.month());
+        for on in [
+            first_weekday_on_or_after(month_start),
+            month_start.end_of_month(),
+        ] {
+            for ahead in 0_u8..3 {
+                let (cy, cm) = if month + ahead > 12 {
+                    (year + 1, month + ahead - 12)
+                } else {
+                    (year, month + ahead)
+                };
+                for under in unders {
+                    for yy in 0..100 {
+                        for tail in tails {
+                            for side in ["CE", "PE"] {
+                                check(
+                                    format!(
+                                        "{under}{:02}{}{yy:02}{tail}{side}",
+                                        cy % 100,
+                                        mon_name(cm)
+                                    ),
+                                    on,
+                                );
                             }
                         }
                     }
-                    for under in FNO_UNDERLYINGS {
-                        for yy in 17..=26 {
-                            check(
-                                format!("{under}{:02}{}{yy}50CE", cy % 100, mon_name(cm)),
-                                on,
-                            );
-                        }
+                }
+                for under in FNO_UNDERLYINGS {
+                    for yy in 17..=26 {
+                        check(
+                            format!("{under}{:02}{}{yy}50CE", cy % 100, mon_name(cm)),
+                            on,
+                        );
                     }
                 }
             }
         }
+        month_start = month_start.end_of_month().succ().unwrap();
     }
     eprintln!(
-        "dpn_02: {tried} monthly-era names, {} decoded to a contract",
+        "dpn_02: {tried} monthly names before the cutover: {} misread, {monthly} MonthlyExpiryUnstated, {ambiguous} FormsAmbiguous, {other} other refusals",
         misread.len()
     );
-    assert!(tried > 600_000, "{tried}");
+    assert!(tried > 500_000, "{tried}");
     assert!(
         misread.is_empty(),
         "{} of {tried} monthly names misread, e.g. {:?}",
@@ -228,44 +238,150 @@ fn dpn_02_no_monthly_era_name_decodes_to_a_contract() {
     );
 }
 
-/// The era rule at its edges: one dated name whose `DD` is also a plausible
-/// monthly year, on the last day of the monthly era and the first after it.
+/// The cutover pinned on both sides, for a share (`ADANIENT`, `TV18BRDCST`),
+/// for the index weeklies and for an index name that reads both ways.
 #[test]
-fn dpn_03_the_era_cutover_is_the_trade_day_and_nothing_else() {
-    // 2020-01-20 is a Monday; read as the monthly form it is January 2020,
-    // strike 2,032,000, which a trade on 2019-12-31 could also be.
-    let ticker = "BANKNIFTY20JAN2032000CE";
-    assert!(
-        matches!(
-            decode_ticker(ticker, d(2019, 12, 31)),
-            Err(NfoRefusal::FormsAmbiguous { .. })
-        ),
-        "inside the monthly era both readings stand"
-    );
-    let after = decode_ticker(ticker, d(2020, 1, 1)).unwrap();
-    assert_eq!(after.contract.as_str(), "2020-01-20-3200000-CE");
-    // Without a plausible monthly reading the dated form stands in the era
-    // too: `07` is no year a 2019 trade could hold.
+fn dpn_03_the_era_cutover_is_trade_day_2019_02_01() {
+    assert_eq!(DATED_FORM_FROM, (2019, 2, 1));
+    let (eve, day) = (d(2019, 1, 31), d(2019, 2, 1));
+    assert_eq!(eve.succ().unwrap(), day);
+    // A share's name read both ways: monthly (Feb 2019, strike 195) on the
+    // eve, dated (2019-02-19, a Tuesday, strike 5) from the cutover.
+    for ticker in ["ADANIENT19FEB195CE", "TV18BRDCST19FEB195CE"] {
+        assert!(
+            matches!(
+                decode_ticker(ticker, eve),
+                Err(NfoRefusal::MonthlyExpiryUnstated { .. })
+            ),
+            "{ticker} on {eve}"
+        );
+        let got = decode_ticker(ticker, day).unwrap();
+        assert_eq!(got.contract.as_str(), "2019-02-19-500-CE", "{ticker}");
+    }
     assert_eq!(
-        decode_ticker("BANKNIFTY07FEB1932000CE", d(2019, 2, 1))
+        decode_ticker("TV18BRDCST19FEB195CE", day)
+            .unwrap()
+            .underlying
+            .as_str(),
+        "TV18BRDCST"
+    );
+    // A share's dated weekly-looking name before the cutover is not dated.
+    assert!(decode_ticker("ADANIENT07FEB19195CE", eve).is_err());
+    assert_eq!(
+        decode_ticker("ADANIENT07FEB19195CE", day)
             .unwrap()
             .contract
             .as_str(),
-        "2019-02-07-3200000-CE"
+        "2019-02-07-19500-CE"
+    );
+    // An index weekly is dated on both sides: `07FEB` is no live month.
+    for on in [eve, day] {
+        assert_eq!(
+            decode_ticker("NIFTY07FEB1911000CE", on)
+                .unwrap()
+                .contract
+                .as_str(),
+            "2019-02-07-1100000-CE",
+            "{on}"
+        );
+        assert_eq!(
+            decode_ticker("BANKNIFTY07FEB1927000PE", on)
+                .unwrap()
+                .contract
+                .as_str(),
+            "2019-02-07-2700000-PE",
+            "{on}"
+        );
+    }
+    // An index name both readings fit (2019-02-19 dated; Feb 2019 monthly,
+    // strike 1,927,000): refused on the eve, dated from the cutover.
+    let both = "BANKNIFTY19FEB1927000CE";
+    assert!(matches!(
+        decode_ticker(both, eve),
+        Err(NfoRefusal::FormsAmbiguous { .. })
+    ));
+    assert_eq!(
+        decode_ticker(both, day).unwrap().contract.as_str(),
+        "2019-02-19-2700000-CE"
+    );
+    // An index monthly name before the cutover is the monthly form.
+    assert!(matches!(
+        decode_ticker("NIFTY19JAN11000CE", d(2019, 1, 2)),
+        Err(NfoRefusal::MonthlyExpiryUnstated { .. })
+    ));
+    // From the cutover only the dated form is read: a monthly name read as
+    // dated states 2012-03-19, which is refused as an expiry (D-3164).
+    assert!(matches!(
+        decode_ticker("ADANIENT19MAR1280CE", day),
+        Err(NfoRefusal::ExpiryRefused { .. })
+    ));
+    assert!(matches!(
+        decode_ticker("ADANIENT19MAR1280CE", eve),
+        Err(NfoRefusal::MonthlyExpiryUnstated { .. })
+    ));
+}
+
+/// The second edge of the era rule, and the dated shape with a date that is
+/// not one (D-3164).
+#[test]
+fn dpn_03b_the_index_weeklies_are_dated_from_2018_09_03() {
+    let day = cutover();
+    // The index weeklies are dated from 2018-09-03 and not before; the
+    // census starts there, so the day before reads them as nothing dated.
+    assert_eq!(INDEX_WEEKLY_DATED_FROM, (2018, 9, 3));
+    assert_eq!(
+        decode_ticker("NIFTY06SEP1811500CE", d(2018, 9, 3))
+            .unwrap()
+            .contract
+            .as_str(),
+        "2018-09-06-1150000-CE"
+    );
+    assert!(decode_ticker("NIFTY06SEP1811500CE", d(2018, 8, 31)).is_err());
+    assert_eq!(
+        decode_ticker("BANKNIFTY06SEP1827000PE", d(2018, 9, 3))
+            .unwrap()
+            .contract
+            .as_str(),
+        "2018-09-06-2700000-PE"
+    );
+    assert!(decode_ticker("BANKNIFTY06SEP1827000PE", d(2018, 8, 31)).is_err());
+    // From the cutover a dated shape with a weekend or impossible date is
+    // refused as such, not as a monthly name (D-3164); 2019-02-02 is a
+    // Saturday.
+    for bad in [
+        "NIFTY02FEB1911000CE",
+        "NIFTY30FEB1911000CE",
+        "NIFTY31JAN1911000CE",
+    ] {
+        assert!(
+            matches!(
+                decode_ticker(bad, day),
+                Err(NfoRefusal::ExpiryRefused { .. })
+            ),
+            "{bad}"
+        );
+    }
+    // TV18BRDCST's own digits never start a reading.
+    assert_eq!(
+        decode_ticker("TV18BRDCST27JUN1950CE", d(2019, 6, 3))
+            .unwrap()
+            .contract
+            .as_str(),
+        "2019-06-27-5000-CE"
     );
 }
 
-/// Every dated name of every underlying after the monthly era decodes to
-/// exactly its contract and re-encodes to itself; inside the era it either
-/// does so or is refused, never read as anything else.
+/// Every dated name of every underlying: from the cutover it decodes to
+/// exactly its contract and re-encodes to itself; before it, a share's name
+/// is refused and an index's is read exactly or refused as two-form. Never
+/// read as anything else.
 #[test]
 fn dpn_04_every_dated_name_round_trips_or_is_refused_by_name() {
     let offsets = [
         0_u32, 1, 3, 6, 7, 13, 30, 31, 90, 365, 366, 1_000, 2_199, 2_200,
     ];
     let strikes = [5_i64, 250, 7_750, 101_250, 2_200_000, 9_999_999_999];
-    let mut tried = 0_u64;
-    let mut refused_in_era = 0_u64;
+    let (mut tried, mut before_share, mut before_index_refused) = (0_u64, 0_u64, 0_u64);
     let mut on = d(2018, 9, 3);
     let last = d(2027, 12, 31);
     while on <= last {
@@ -281,6 +397,7 @@ fn dpn_04_every_dated_name_round_trips_or_is_refused_by_name() {
                         let name = encode(under, expiry, paisa, call);
                         match decode_ticker(&name, on) {
                             Ok(got) => {
+                                assert!(on >= cutover() || is_index(under), "{name} on {on}");
                                 assert_eq!(got.underlying.as_str(), under, "{name} on {on}");
                                 assert_eq!(
                                     got.contract.as_str(),
@@ -290,15 +407,16 @@ fn dpn_04_every_dated_name_round_trips_or_is_refused_by_name() {
                                 assert_eq!(reencode(&got), name);
                             }
                             Err(why) => {
-                                assert!(
-                                    on.year() <= MONTHLY_FORM_LAST_YEAR,
-                                    "{name} on {on}: {why}"
-                                );
-                                assert!(
-                                    matches!(why, NfoRefusal::FormsAmbiguous { .. }),
-                                    "{name} on {on}: {why}"
-                                );
-                                refused_in_era += 1;
+                                assert!(on < cutover(), "{name} on {on}: {why}");
+                                if is_index(under) {
+                                    assert!(
+                                        matches!(why, NfoRefusal::FormsAmbiguous { .. }),
+                                        "{name} on {on}: {why}"
+                                    );
+                                    before_index_refused += 1;
+                                } else {
+                                    before_share += 1;
+                                }
                             }
                         }
                     }
@@ -308,16 +426,15 @@ fn dpn_04_every_dated_name_round_trips_or_is_refused_by_name() {
         on = plus(on, 11);
     }
     eprintln!(
-        "dpn_04: {tried} dated names, {refused_in_era} refused as two-form in the monthly era"
+        "dpn_04: {tried} dated names, 0 misread; before the cutover {before_share} share names refused (the monthly era) and {before_index_refused} index names refused as two-form"
     );
     assert!(tried > 1_000_000, "{tried}");
-    assert!(refused_in_era < tried / 4, "{refused_in_era} of {tried}");
 }
 
 /// A strike with a leading zero is no exchange spelling, and before the fix
 /// it let a monthly name's strike `2005` read as year 20, strike `05`.
 #[test]
-fn dpn_05_a_strike_with_a_leading_zero_is_refused() {
+fn dpn_05_a_strike_with_a_leading_zero_or_a_padded_fraction_is_refused() {
     let on = d(2024, 4, 1);
     for ticker in ["N04APR240100CE", "N04APR2400.5CE", "N04APR2401CE"] {
         let got = decode_ticker(ticker, on);
@@ -330,6 +447,51 @@ fn dpn_05_a_strike_with_a_leading_zero_is_refused() {
     // 2020-12-18 is a Friday: `18DEC2005` must not be strike 5 of that day.
     let got = decode_ticker("ACC18DEC2005CE", d(2018, 12, 3));
     assert!(got.is_err(), "{got:?}");
+    // A fraction ending in zero is a second spelling and refused; decimal
+    // strikes that end in a non-zero digit read (D-3161).
+    for padded in [
+        "N04APR24100.0CE",
+        "N04APR24107.50PE",
+        "N04APR24100.00CE",
+        "N04APR24202.50CE",
+    ] {
+        assert!(
+            matches!(
+                decode_ticker(padded, on),
+                Err(NfoRefusal::TickerUnparsed { .. })
+            ),
+            "{padded}"
+        );
+    }
+    for (frac, paisa) in [
+        (&b"100.0"[..], None),
+        (b"107.50", None),
+        (b"100.00", None),
+        (b"0.50", None),
+    ] {
+        assert_eq!(strike_paisa(frac), paisa);
+    }
+    assert_eq!(
+        decode_ticker("N04APR24202.5CE", on)
+            .unwrap()
+            .contract
+            .as_str(),
+        "2024-04-04-20250-CE"
+    );
+    assert_eq!(
+        decode_ticker("N04APR24107.25PE", on)
+            .unwrap()
+            .contract
+            .as_str(),
+        "2024-04-04-10725-PE"
+    );
+    assert_eq!(
+        decode_ticker("N04APR241012.5CE", on)
+            .unwrap()
+            .contract
+            .as_str(),
+        "2024-04-04-101250-CE"
+    );
 }
 
 /// Expiry dates that do not exist, weekend expiries, an expired contract,
@@ -356,7 +518,9 @@ fn dpn_06_calendar_edges_of_the_stated_expiry() {
         assert!(
             matches!(
                 got,
-                Err(NfoRefusal::TickerUnparsed { .. } | NfoRefusal::MonthlyExpiryUnstated { .. })
+                Err(NfoRefusal::TickerUnparsed { .. }
+                    | NfoRefusal::MonthlyExpiryUnstated { .. }
+                    | NfoRefusal::ExpiryRefused { .. })
             ),
             "{bad}: {got:?}"
         );
@@ -548,7 +712,7 @@ fn dpn_09_a_million_random_names_never_panic_and_every_answer_is_exact_or_named(
     let mut rng = Rng(0x6764_666c_6e61_6d65);
     let lo = d(2015, 1, 1).days_from_epoch();
     let hi = d(2027, 12, 31).days_from_epoch();
-    let (mut ok, mut padded, mut err) = (0_u64, 0_u64, 0_u64);
+    let (mut ok, mut err) = (0_u64, 0_u64);
     for _ in 0..1_000_000 {
         let ticker = random_ticker(&mut rng);
         let on =
@@ -562,9 +726,6 @@ fn dpn_09_a_million_random_names_never_panic_and_every_answer_is_exact_or_named(
                     got.contract.as_str(),
                     reencode(&got)
                 );
-                if reencode(&got) != ticker {
-                    padded += 1;
-                }
                 let seg = got.contract.as_str();
                 let expiry = d(
                     seg[0..4].parse().unwrap(),
@@ -576,10 +737,18 @@ fn dpn_09_a_million_random_names_never_panic_and_every_answer_is_exact_or_named(
                         && expiry.days_from_epoch() <= on.days_from_epoch() + EXPIRY_HORIZON_DAYS
                 );
                 assert!(is_weekday(expiry));
-                if on.year() <= MONTHLY_FORM_LAST_YEAR {
+                if on < cutover() {
+                    assert!(
+                        on >= d(2018, 9, 3),
+                        "{ticker} on {on}: dated before the index weeklies"
+                    );
+                    assert!(
+                        is_index(got.underlying.as_str()),
+                        "{ticker} on {on}: a share is dated before the cutover"
+                    );
                     assert!(
                         !monthly_plausible(&ticker, on),
-                        "{ticker} on {on}: the monthly era admits a name its monthly reading also fits"
+                        "{ticker} on {on}: an index name both readings fit was read"
                     );
                 }
             }
@@ -592,7 +761,7 @@ fn dpn_09_a_million_random_names_never_panic_and_every_answer_is_exact_or_named(
     }
     assert_eq!(ok + err, 1_000_000);
     assert!(ok > 5_000, "the fuzz reaches the accepting path: {ok}");
-    eprintln!("dpn_09: ok {ok} (fraction-padded {padded}), refused {err}");
+    eprintln!("dpn_09: ok {ok}, refused {err}");
 }
 
 /// Whether the monthly form reads `ticker` as a month a trade on `on` could
@@ -1005,4 +1174,147 @@ fn dpn_16_random_entry_names_file_only_bare_names() {
         }
     }
     assert!(filed > 100, "{filed}");
+}
+
+/// The two measured headers read, CRLF or LF; any other first line is
+/// refused by name, including near misses and a byte-order mark.
+#[test]
+fn dpn_17_exactly_the_two_measured_headers_read() {
+    assert_eq!(
+        HEADER_OPEN_INTEREST,
+        "Ticker,Date,Time,LTP,BuyPrice,BuyQty,SellPrice,SellQty,LTQ,OpenInterest"
+    );
+    assert_eq!(
+        HEADER_OPEN_INTEREST_SPACED,
+        "Ticker,Date,Time,LTP,BuyPrice,BuyQty,SellPrice,SellQty,LTQ,Open Interest"
+    );
+    let on = d(2024, 4, 1);
+    let row = good_row(33_300);
+    for header in [HEADER_OPEN_INTEREST, HEADER_OPEN_INTEREST_SPACED] {
+        for sep in ["\r\n", "\n"] {
+            let text = format!("{header}{sep}{row}{sep}");
+            let got = decode(text.as_bytes(), STEM, on).unwrap();
+            assert_eq!(got.rows.len(), 1, "{header:?}");
+        }
+    }
+    for bad in [
+        format!("\u{feff}{HEADER_OPEN_INTEREST}"),
+        format!("{HEADER_OPEN_INTEREST} "),
+        format!(" {HEADER_OPEN_INTEREST}"),
+        HEADER_OPEN_INTEREST.replace("OpenInterest", "Open interest"),
+        HEADER_OPEN_INTEREST.replace("OpenInterest", "Open  Interest"),
+        HEADER_OPEN_INTEREST.replace("OpenInterest", "OI"),
+        HEADER_OPEN_INTEREST.to_lowercase(),
+        HEADER_OPEN_INTEREST.replace(',', "\t"),
+        HEADER_OPEN_INTEREST.replace(",OpenInterest", ""),
+        format!("{HEADER_OPEN_INTEREST},"),
+        "Ticker,Date,Time,LTP,BuyPrice,BuyQty,SellPrice,SellQty,LTQ".to_owned(),
+        String::new(),
+    ] {
+        let text = format!("{bad}\r\n{row}\r\n");
+        assert_eq!(
+            decode(text.as_bytes(), STEM, on),
+            Err(NfoRefusal::HeaderUnknown),
+            "{bad:?}"
+        );
+    }
+}
+
+/// Both measured extensions (`.csv` and the 2018 `.CSV`) are filed; no other
+/// case of either part is.
+#[test]
+fn dpn_18_exactly_the_two_measured_extensions_are_filed() {
+    let day = d(2018, 9, 3);
+    let folder = day_folder_name(day);
+    for ext in [".NFO.csv", ".NFO.CSV"] {
+        let entry = format!("{folder}\\Options\\NIFTY06SEP1811500CE{ext}");
+        assert_eq!(
+            entry_ticker(&folder, &entry),
+            Some("NIFTY06SEP1811500CE"),
+            "{ext}"
+        );
+    }
+    for ext in [
+        ".NFO.Csv",
+        ".NFO.cSV",
+        ".nfo.csv",
+        ".nfo.CSV",
+        ".Nfo.csv",
+        ".NFO.csv ",
+        ".NFO.CSV.",
+        ".NFO",
+        ".csv",
+    ] {
+        let entry = format!("{folder}\\Options\\NIFTY06SEP1811500CE{ext}");
+        assert_eq!(entry_ticker(&folder, &entry), None, "{ext:?}");
+    }
+    let mut listing: NfoDay<u8> = NfoDay::new(day);
+    listing.push(
+        &format!("{folder}\\Options\\NIFTY06SEP1811500CE.NFO.CSV"),
+        1,
+        1,
+        0,
+    );
+    listing.push(
+        &format!("{folder}\\Options\\NIFTY06SEP1811500PE.NFO.csv"),
+        1,
+        1,
+        1,
+    );
+    listing.push(
+        &format!("{folder}\\Options\\NIFTY06SEP1811500PE.nfo.csv"),
+        1,
+        1,
+        2,
+    );
+    assert_eq!(
+        listing
+            .locate("NIFTY06SEP1811500CE")
+            .unwrap()
+            .unwrap()
+            .locator,
+        0
+    );
+    assert_eq!(
+        listing
+            .locate("NIFTY06SEP1811500PE")
+            .unwrap()
+            .unwrap()
+            .locator,
+        1
+    );
+    assert_eq!(listing.skipped(), 1);
+}
+
+/// One pre-cutover NIFTY monthly contract spelled both ways on one day:
+/// the monthly spelling states no expiry day and is refused by name; the
+/// dated spelling reads (its monthly reading, January 2031, is outside the
+/// window). Never two contracts, and never one silently merged.
+#[test]
+fn dpn_19_a_pre_cutover_index_monthly_spelled_both_ways_on_one_day() {
+    let on = d(2019, 1, 15);
+    let (monthly, dated) = ("NIFTY19JAN10500CE", "NIFTY31JAN1910500CE");
+    assert_eq!(
+        decode_ticker(monthly, on),
+        Err(NfoRefusal::MonthlyExpiryUnstated {
+            ticker: monthly.to_owned()
+        })
+    );
+    assert!(
+        !monthly_plausible(dated, on),
+        "January 2031 is past the horizon"
+    );
+    let got = decode_ticker(dated, on).unwrap();
+    assert_eq!(got.underlying.as_str(), "NIFTY");
+    assert_eq!(got.contract.as_str(), "2019-01-31-1050000-CE");
+    // Within the horizon the dated spelling's monthly reading is live, and
+    // it is refused by name instead (`24JAN19` -> January 2024).
+    let near = "NIFTY24JAN1910500CE";
+    assert!(monthly_plausible(near, on));
+    assert_eq!(
+        decode_ticker(near, on),
+        Err(NfoRefusal::FormsAmbiguous {
+            ticker: near.to_owned()
+        })
+    );
 }
