@@ -14517,6 +14517,20 @@ most 100,000).
   most 64 blocks over the eight rungs, whatever the files hold. Duplicate
   identities are refused within a page; the commit door refuses them across
   the whole file before appending. UNVERIFIED as a measured bound.
+- **`cli top` and `cli results` (OS-7, formerly W2-cli8-5; D-2310).** Still
+  O(runs) per call, now in ONE read of each row. `newest_complete` and
+  `results_at` used to cold-open `runs.bin` (a pass that reads, seals and
+  decodes every row for the identity index) and then read every row again
+  through `Results::read`; they now fold the open's own pass through
+  `Results::open_read_visiting`, and the listing holds its newest 40 matching
+  rows rather than all of them. The pass that remains is not avoidable on
+  this format: `top` names the best complete row across every row and
+  `results` prints the matching count and that same winner, and the version-3
+  ledger is a fixed-stride array with no stored aggregate, so neither answer
+  sits at a computable offset. Persisting one would be a new store format
+  version (§3 rule 8), not made here. The open also builds an O(runs)
+  identity index that refuses a duplicate run, kept. Counted (one open, one
+  read per row), not timed: UNVERIFIED as a measured bound.
 
 ## Rust and O(1) sweep, data side — D-2370 onward, 4 October 2026
 
