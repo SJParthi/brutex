@@ -57664,3 +57664,19 @@ changed by this entry. Measured values print exactly as before.
 
 **Proof.** `runner::audit::tests::the_strategy_report_names_its_sentinels_and_empty_means_in_words`
 fails on the previous renderer. FB-13.
+
+### D-2713 — The pooled tail rule needs a winner, and a row with none prints its tail as `-` — 2026-10-04
+
+**What was observed.** p5num-3 (numeric pass 5): `cli::pool::Pooled::meets`
+was `fired > 0 && tail_bp() >= rule`. A candidate whose every pooled trade was
+flat has `worst == 0`, so `tail_bp` is `NEVER_LOST`. It met every multiple,
+sorted first (`key` leads with `meets`), and printed `wins 0, tail never lost`.
+The single-instrument rule `grid::Cell::clears` refuses the same cell by its
+`wins > 0` clause, and the pooled table's doc says it holds the same rule.
+
+**The decision.** `meets` adds `wins > 0`. The tail column prints `-` when the
+row has no win. A row with a winner ranks and prints exactly as before. Rule 0
+(the floor OFF) now marks every fired row that won as meeting it.
+
+**Proof.** `cli::pool::tests::a_candidate_that_never_won_meets_no_tail_rule`
+fails on the previous `meets`. FB-14.
