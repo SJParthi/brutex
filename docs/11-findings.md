@@ -822,3 +822,26 @@ Narrative only. No row is added to the table above.
 - **gaps-10** (no API or page for Selection V6): fixed by
   `/selection-v6.json` and `/selection`. Equities are refused with the
   `CLAUDE.md` §1 sentence. D-1578, AFF-62.
+
+### Rust and O(1) sweep, data side — dispositions — 2026-10-04
+
+Narrative only. No row is added to the table above. Found by an auditor at
+`560ce8c`; each verified against the code before it was fixed.
+
+- **OD-1** (`pull::fold`, two diagnostics per bucket on a refused venue day,
+  inflating `cli::fold_audit`'s `withheld`): fixed. One line per day, one
+  session lookup per day. D-2370, AFG-70.
+- **OD-2** (two telemetry events per request-minute gap): fixed. One event,
+  at `Error`, naming the instrument. D-2371, AFG-71.
+- **OD-3** (store-writing doors claimed O(1)): fixed in the documentation;
+  the cost is `O(rows + log n_valid + blocks touched)`, UNVERIFIED as a
+  measurement. D-2372, AFG-72.
+- **OD-4** (unbounded per-target level prefix): fixed. Refused past 48 bytes.
+  D-2373, AFG-73.
+- **OD-5** (masters read in full to compare, rewritten when unchanged): fixed.
+  Length first, bounded chunked compare, mtime touch instead of a rewrite.
+  D-2374, AFG-74.
+- **OD-6** (lake file read with no cap): fixed. 64 MiB, derived rather than
+  sourced, refused before the read. D-2375, AFG-75.
+- **OD-7** (a heap allocation per sealed block per append): fixed. One stack
+  buffer; sidecar bytes proved unchanged. D-2376, AFG-76.

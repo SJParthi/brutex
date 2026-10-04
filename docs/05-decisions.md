@@ -56781,3 +56781,150 @@ decodes a genuine committed block to the authority's own `top_twenty_five`.
 `api::selectionv6json::tests::every_rung_is_absent_saved_or_refused_by_name`,
 `api::selectionv6json::tests::a_record_projects_exactly_and_the_family_selector_narrows_winners`,
 and `web/tests/selection-v6.test.js`.
+
+### D-2370 — A day the venue cannot attest is withheld once, and its session is looked up once per day — 2026-10-04
+
+**Finding (OD-1, data-side Rust and O(1) sweep).** In
+`pull::fold::complete_minutes_with_calendar`, a day that `minute_session`
+refused (NSE cash on or after 2026-08-03 with no dated eligibility schedule,
+or a schedule that does not name the day) pushed two diagnostics for EVERY
+bucket: the refusal, then an "incomplete or invalid minute coverage" line,
+because `day_is_withheld` did not cover the `Unmeasured` session the refusal
+substituted. The calendar and the venue's dated hours were also re-derived for
+every bucket. `cli::fold_audit` reports `withheld: diagnostics.len()`, so one
+refused cash day at one minute counted 750. Measured before the fix: two
+refused days at one minute produced 1,500 lines.
+
+**Change.** `day_session` computes `(calendar, session)` once when a bucket
+opens a new IST day and the loop reuses it for the day's other buckets. A
+refusal pushes ONE line, `day <n>: <why>; derived buckets withheld`, and
+`day_is_withheld` now covers `Unmeasured`, so the day's buckets add no line.
+Nothing is certified that was not before; only the count of lines changed.
+
+**Proof.** `pull::anchor::a_day_the_venue_refuses_is_named_once_not_once_per_bucket`
+(AFG-70): two refused days, with no schedule and with a schedule naming
+another day, at 1, 2, 5, 15 and 60 minutes, are exactly two lines. Failed
+before (1,500 against 2).
+
+### D-2371 — One request-minute gap is one telemetry event — 2026-10-04
+
+**Finding (OD-2).** `pull::request_minutes::note_request_failure` emitted a
+`pull.file` "not filed" event at `Error` under the placeholder instrument
+"requested window", and `ingest::from_window` then emitted
+`pull.request_minutes` at `Warn` for the same line. Each gap was two events.
+`docs/06-limits.md` (D-1493) said one.
+
+**Change.** `request_minutes` no longer emits: its helper is `push_gap`, which
+only records the line (the unordered-rows refusal likewise). `from_window`'s
+event is the one event per line, at `Error`, the level the removed duplicate
+carried, because the gap is a receipt failure. It names the real instrument.
+Gate 19 still holds: the receipt `Failure` is pushed in `from_window` beside
+its emit. The `emit_sites` row for the removed site is deleted.
+
+**Proof.** `pull::request_gap_events::each_request_minute_gap_is_exactly_one_error_event`
+(AFG-71), its own test binary so no sibling test writes into the log: two
+interior gaps plus one empty response are exactly three log lines, each
+`pull.request_minutes`, `error` and naming NIFTY. Failed before (6 against 3).
+
+### D-2372 — The three store-writing doors state their real cost — 2026-10-04
+
+**Finding (OD-3).** `pull::ingest::from_rows` said "Two opens and two appends
+per call, both O(1). Nothing scans."; `write_overlay` said "One open and one
+append. O(1) per call."; `write_greeks` said "O(1) per call, O(rows) in the
+bytes written and nothing else." None held. `BarFile::append` locates a batch
+by bisection, at most `ceil(log2(n_valid + 1))` record reads plus O(batch)
+comparisons (D-1434); verifies the old tail block before re-sealing it
+(D-0910); and re-reads every block the batch touches to seal it. `from_rows`
+also walks every row through `keep_in_session`, O(rows), first.
+
+**Change.** Documentation only. Each `# Cost` section now states
+`O(rows + log n_valid + blocks touched)` (from_rows) or
+`O(log n_valid + rows + blocks touched)` (the other two), and cites D-1434 and
+D-0910. Still UNVERIFIED as a measurement. `docs/06-limits.md` records it.
+
+**Proof.** `pull::ingest::tests::the_store_writing_doors_state_their_real_cost`
+(AFG-72) refuses the three false sentences and requires each door's cost
+section to cite D-1434, D-0910, D-2372 and the bisection height.
+
+### D-2373 — A per-target level prefix longer than a target is refused — 2026-10-04
+
+**Finding (OD-4).** `telemetry::Sink::level_for` compares every override
+prefix against each event's target that clears the fast floor. `Config::refusal`
+bounded how many prefixes (`MAX_TARGET_LEVELS`), not how long each was, so a
+megabyte prefix made each comparison a megabyte `starts_with`.
+
+**Change.** `Config::refusal` refuses any prefix longer than
+`MAX_TARGET_BYTES` (48), by name, so `install` and `Sink::open` refuse it too.
+A target is recorded at most that long (`encode` caps it), so a longer prefix
+names nothing the sink writes faithfully. Refused, not clamped (§4). Each
+comparison is now bounded by 48 bytes and `level_for` by 8 × 48.
+
+**Proof.** `telemetry::sink::tests::an_override_prefix_past_the_target_ceiling_is_refused_by_name`
+(AFG-73): a 48-byte prefix opens and selects its level; 49 bytes through the
+builder and 1 MiB through the public field are refused by `refusal` and by
+`open` with the same sentence naming the length, the ceiling and `level_for`.
+
+### D-2374 — An unchanged master is compared bounded and not rewritten — 2026-10-04
+
+**Finding (OD-5).** `pull::masters::land_validated` called
+`fs::read_to_string` on the held target with no cap only to compute
+`changed`, and then rewrote the file (temporary, write, sync, rename, a new
+inode) even when the bytes were identical.
+
+**Change.** `holds_exactly` compares the metadata length first and, only when
+it equals the body's, reads exactly `body.len()` bytes in 8 KiB chunks
+compared in place: no allocation, no read past the body. When unchanged,
+`refresh_mtime` sets the target's mtime to now and syncs the file and the
+directory instead of rewriting. One reader depends on the rewrite's side
+effect: `api::mastersrun::status_rows` reports `modified_unix_millis` as when a
+master was last confirmed current, and the touch keeps that answer. A touch
+the host refuses is not hidden: the full replacement runs and its outcome is
+reported. The directory sync keeps a target whose earlier replacement ended
+`Landed::Uncertain` from being reported durable on the strength of a read.
+
+**Proof.** `pull::masters::tests::an_unchanged_master_keeps_its_inode_and_only_its_mtime_moves`
+(AFG-74): identical bytes keep the inode and move the mtime forward; a
+same-length edit and a longer file are found changed and replaced.
+
+### D-2375 — A lake file is read only up to 64 MiB — 2026-10-04
+
+**Finding (OD-6).** `lake::reader::LakeFile::open` did `fs::read(path)` with
+no size cap, so any path was read into memory in full before the magic check
+could refuse it.
+
+**Change.** `MAX_LAKE_BYTES = 64 MiB`. `open` checks the open handle's
+metadata length and refuses past it with the new `LakeError::TooLarge
+{ bytes, cap }` before reading a byte, then reads capped one byte past the
+bound so a file that grows between the check and the read is refused too —
+`pull::archive::read_bounded`'s pattern (D-1362). **The cap is derived, not
+sourced or measured.** No document states a lake file size; the largest
+measured is "a few megabytes". A file is one contract, timeframe and month,
+and the finest timeframe is one minute, so the widest file is the 17-column
+F&O layout at every minute of 31 days: 44,640 rows × 17 columns × 9 bytes =
+6,829,920 bytes plain. 64 MiB is about ten times that, and equals
+`page::MAX_PAGE_BYTES`, the largest single page this reader materialises.
+`from_bytes` is unchanged: its caller already holds the bytes.
+
+**Proof.** `lake::reader::tests::a_lake_file_past_the_ceiling_is_refused_before_it_is_read`
+(AFG-75): a sparse file one byte past 64 MiB is `TooLarge` through `open`; at
+a 16-byte cap a 16-byte file is read (then refused as not Parquet) and a
+15-byte cap refuses it as `TooLarge { bytes: 16, cap: 15 }`.
+
+### D-2376 — Sealing a block after an append allocates nothing — 2026-10-04
+
+**Finding (OD-7).** `store::file::BarFile::seal_committed` allocated a zeroed
+heap vector of the covered span for every block an append re-sealed.
+
+**Change.** One `[0u8; MAX_BLOCK_LEN]` stack array (4,088 bytes) is reused for
+every block of the append, entered through `slice_of`, which refuses a span
+past it by name (D-0914's door). Every geometry's block fits, by the existing
+`const` assertion. The bytes read, the CRC computed and the sidecar written
+are unchanged; store format versions are untouched (§3 rule 8).
+
+**Proof.** `store::seal_buffer::sealing_reads_every_block_into_one_stack_buffer`
+(source shape, as `cold_read.rs` does: a counting allocator needs `unsafe`)
+failed before. `store::seal_buffer::the_sealed_bytes_are_unchanged_at_every_block_edge`
+(AFG-76) appends in batches landing inside, on and across block edges, and
+proves the sidecar equals `store::block::seal` over the bar file's own bytes,
+equals the one-shot write's, and equals the FNV-1a digest pinned from the
+build before this decision (measured on that build: 4,413,894,360,075,297,543).

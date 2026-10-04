@@ -14259,7 +14259,8 @@ pass over the bars at a once-per-report boundary, O(bars).
 - **The request-minute coverage audit's output is not capped (W1-pull3-4,
   D-1493).** `pull::ingest::request_minutes::audit` walks the rows once and
   each civil day once: O(rows + days + gaps). Each gap is one `String`, one
-  `Failure` and one `pull.request_minutes` telemetry event. Gaps alternate
+  `Failure` and one `pull.request_minutes` telemetry event (exactly one since
+  D-2371; a duplicate `pull.file` event was removed). Gaps alternate
   with held minutes, so a day yields at most about half its scheduled
   minutes (188 for a 375-minute session), and a window of D sessions at most
   about 188·D. A cap was rejected because it would hide which minutes are
@@ -14492,3 +14493,34 @@ most 100,000).
 - **`/selection-v6.json`.** Eight files, at most 64 blocks of 16 KiB each,
   each hashed twice (identity and seal) and decoded once: O(blocks) per
   request, bounded by the cap. UNVERIFIED as a measured bound.
+
+## Rust and O(1) sweep, data side — D-2370 onward, 4 October 2026
+
+What these fixes left non-constant, named. None of it is timed by a bench:
+UNVERIFIED as measurements.
+
+- **Request-minute gaps (D-2371).** Still O(rows + days + gaps) and uncapped,
+  as D-1493 states above, and now exactly one telemetry event per gap. Until
+  D-2371 it was two (a `pull.file` "not filed" event as well).
+- **Minute completeness (D-2370).** `complete_minutes_with_calendar` is
+  O(buckets + minutes) with one calendar and venue-session lookup per observed
+  IST day; a day the venue refuses costs one diagnostic, not two per bucket.
+- **Store-writing doors (D-2372).** `pull::ingest::from_rows` is
+  O(rows + log n_valid + blocks touched): `keep_in_session` walks every row,
+  then each `BarFile::append` bisects what is stored (at most
+  `ceil(log2(n_valid + 1))` record reads, D-1434), verifies the old tail block
+  (D-0910) and re-reads every touched block to seal it. `write_overlay` and
+  `write_greeks` are O(log n_valid + rows + blocks touched).
+- **Sealing (D-2376).** Allocation-free now, and still one `pread` of up to
+  4,088 bytes, one CRC-32C and one 4-byte sidecar write per touched block, plus
+  one `fsync` of the sidecar per append: O(blocks touched).
+- **Master landing (D-2374).** Comparing against the held master is one
+  `fstat`, and only on an equal length a read of `body.len()` bytes (at most
+  `MAX_BODY_BYTES`, 256 MiB) in 8 KiB chunks: O(body) when the length matches,
+  O(1) otherwise. An unchanged master costs an mtime set and two `fsync`s
+  instead of a full write.
+- **Lake open (D-2375).** Still O(file bytes), now bounded by
+  `MAX_LAKE_BYTES` = 64 MiB, a ceiling DERIVED from the format (one-minute,
+  17-column, 31-day month ≈ 6.8 MB plain), not sourced and not measured.
+- **Telemetry level lookup (D-2373).** At most 8 prefixes of at most 48 bytes
+  each per event that clears the fast floor: constant.
