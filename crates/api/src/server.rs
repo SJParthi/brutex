@@ -8072,14 +8072,15 @@ async fn reread_wire(
 /// Exact recovery unit, using the existing mapping, credential, rate-limit,
 /// source-write and derivation path. The typed result precedes HTML rendering.
 /// A failed audit append is a failure, even when source bars already landed.
+///
+/// The caller takes `asked.feed`'s seat BEFORE it reserves a retry and hands
+/// it in, so a busy seat refuses before any budget is charged. D-2761.
 pub(crate) async fn recovery_spot(
     site: &Site,
     asked: &ingest::SpotRequest,
+    seat: crate::autopilot::Seat<'_>,
 ) -> Result<BrokerRun, String> {
-    let _seat = site
-        .autopilot
-        .take_seat(asked.feed)
-        .ok_or_else(|| "the selected feed already has an active pull".to_owned())?;
+    let _seat = seat;
     let now = std::time::SystemTime::now();
     let run = broker_run(asked, site, &census::read_all(&site.store_root)).await;
     let journal = site.journal();
@@ -11101,7 +11102,7 @@ pub(crate) async fn pull_run(
         }
     };
 
-    {
+    let run = {
         let mut held = site
             .run
             .lock()
@@ -11114,11 +11115,14 @@ pub(crate) async fn pull_run(
             );
         }
         // CLAIMED HERE, UNDER THE SAME TAKE THAT CHECKED IT.
-        *held = Some(crate::pullrun::Progress::claimed());
-    }
+        let claimed = crate::pullrun::Progress::claimed();
+        let run = claimed.generation;
+        *held = Some(claimed);
+        run
+    };
 
     let legs_asked = legs.len();
-    let _flying = tokio::spawn(crate::pullrun::conduct(Loaded::clone(&site), legs));
+    let _flying = tokio::spawn(crate::pullrun::conduct(Loaded::clone(&site), run, legs));
     (
         axum::http::StatusCode::ACCEPTED,
         json_headers(),

@@ -227,7 +227,25 @@ pub struct Progress {
     /// the route renders for an empty slot. So the distinction lives here
     /// rather than in a second constructor nobody is obliged to call.
     pub started: bool,
+    /// Which claim this document belongs to. `0` is the never-claimed
+    /// `Default`; every [`Progress::claimed`] takes the next number from one
+    /// process-wide counter, so two claims never share one.
+    ///
+    /// # Why a run carries a number and not just the slot
+    ///
+    /// The slot outlives the run that filled it. A run publishes its summary,
+    /// which frees the slot, and only THEN drops its [`Finisher`] and its
+    /// last ticker poll. A second press admitted in that gap installed a fresh
+    /// document, and the first run's `Finisher` saw that document's
+    /// `finished: None` and wrote "ended abnormally" onto a live run, which
+    /// freed the slot for a third press over the same store. Every edit a run
+    /// makes is now addressed to its own number and lands nowhere once the slot
+    /// holds another. Not rendered: the page has no use for it. D-2760.
+    pub generation: u64,
 }
+
+/// The last generation handed out. Starts at zero, which no claim receives.
+static GENERATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl Progress {
     /// A document for a run that has just been claimed and has not yet done
@@ -239,6 +257,9 @@ impl Progress {
     pub fn claimed() -> Self {
         Self {
             started: true,
+            generation: GENERATIONS
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                .wrapping_add(1),
             ..Self::default()
         }
     }
@@ -525,17 +546,24 @@ pub(crate) fn rows_now(site: &Site) -> u64 {
         .sum()
 }
 
-/// Edits the live progress, if a run still owns the slot.
+/// Edits the live progress, if run `run` still owns the slot.
 ///
 /// A closure rather than a returned guard, so the lock cannot be held across an
 /// `.await` by accident — which is the one way a `std::sync::Mutex` here could
 /// stall the whole fan-out.
-fn with_progress<F: FnOnce(&mut Progress)>(site: &Site, edit: F) {
+///
+/// The edit lands only on the document whose [`Progress::generation`] is
+/// `run`. Once the slot holds a later claim, a late write from this run (its
+/// `Finisher`, a ticker poll that was mid-flight at `abort`, a detached chain)
+/// is dropped rather than written into someone else's run. D-2760.
+fn with_progress<F: FnOnce(&mut Progress)>(site: &Site, run: u64, edit: F) {
     let mut held = site
         .run
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(progress) = held.as_mut() {
+    if let Some(progress) = held.as_mut()
+        && progress.generation == run
+    {
         edit(progress);
     }
 }
@@ -552,18 +580,20 @@ fn with_progress<F: FnOnce(&mut Progress)>(site: &Site, edit: F) {
 /// Read BEFORE the pass clears `finished`, because a halted feed must keep its
 /// `finished` flag: the page otherwise draws it as pending forever while nothing
 /// is ever spawned for it.
-fn halted_feeds(site: &Site) -> Vec<bool> {
+fn halted_feeds(site: &Site, run: u64) -> Vec<bool> {
     let held = site
         .run
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    held.as_ref().map_or_else(Vec::new, |progress| {
-        progress
-            .feeds
-            .iter()
-            .map(|feed| feed.credential_dead)
-            .collect()
-    })
+    held.as_ref()
+        .filter(|progress| progress.generation == run)
+        .map_or_else(Vec::new, |progress| {
+            progress
+                .feeds
+                .iter()
+                .map(|feed| feed.credential_dead)
+                .collect()
+        })
 }
 
 /// Whether the operator has asked this run to stop.
@@ -571,12 +601,17 @@ fn halted_feeds(site: &Site) -> Vec<bool> {
 /// Checked between legs rather than inside one: a leg that has already asked
 /// the vendor for bars must be allowed to write them, or a stop would throw
 /// away answers that were already paid for.
-fn stopping(site: &Site) -> bool {
+///
+/// A run whose slot now holds another claim (or nothing) is stopped too: it
+/// no longer has a document to report into, and pulling on would put a second
+/// run's writes on one store behind the first one's back. D-2760.
+fn stopping(site: &Site, run: u64) -> bool {
     let held = site
         .run
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    held.as_ref().is_some_and(|progress| progress.stopping)
+    held.as_ref()
+        .is_none_or(|progress| progress.generation != run || progress.stopping)
 }
 
 /// Marks the run finished HOWEVER the task ends.
@@ -591,15 +626,20 @@ fn stopping(site: &Site) -> bool {
 /// slot is released on every exit rather than only the happy one.
 ///
 /// It writes only when nothing else has: a run that finished normally has
-/// already put its own summary there, and this must not paint over it.
+/// already put its own summary there, and this must not paint over it. And it
+/// writes only into ITS run's document: the slot is free from the moment the
+/// summary lands, and a press admitted before this drop has a `finished: None`
+/// of its own that this must not read as ours. D-2760.
 struct Finisher {
     /// Whose slot to release.
     site: Loaded,
+    /// Which claim of that slot is ours.
+    run: u64,
 }
 
 impl Drop for Finisher {
     fn drop(&mut self) {
-        with_progress(&self.site, |progress| {
+        with_progress(&self.site, self.run, |progress| {
             if progress.finished.is_none() {
                 progress.finished = Some(
                     "The run ended without recording a summary, which means the task \
@@ -710,6 +750,7 @@ async fn request_leg(site: Loaded, leg: Leg) -> (axum::http::StatusCode, String)
 /// to resume is visible. Otherwise retain the first failure for diagnosis.
 fn note_leg_failure(
     site: &Site,
+    run: u64,
     nth: usize,
     leg: &Leg,
     status: axum::http::StatusCode,
@@ -731,7 +772,7 @@ fn note_leg_failure(
             this leg remains owed and is eligible for another pass."
         }
     };
-    with_progress(site, |progress| {
+    with_progress(site, run, |progress| {
         if let Some(feed) = progress.feeds.get_mut(nth) {
             if feed.last_error.is_none()
                 || matches!(outcome, LegOutcome::Credential | LegOutcome::Permanent)
@@ -751,6 +792,7 @@ fn note_leg_failure(
 /// advances `legs_done`; dependencies and early breaks remain unattempted.
 async fn run_chain<F, Fut>(
     site: Loaded,
+    run: u64,
     nth: usize,
     legs: Vec<Leg>,
     checkpoints: Checkpoints,
@@ -764,7 +806,7 @@ where
     let mut result = PassOutcome::Clean;
     let mut failed_spot_rank = None;
     for (leg, clean) in legs.iter().zip(checkpoints.iter()) {
-        if stopping(&site) {
+        if stopping(&site, run) {
             break;
         }
         if clean.load(std::sync::atomic::Ordering::Relaxed) {
@@ -778,14 +820,14 @@ where
         {
             continue;
         }
-        with_progress(&site, |progress| {
+        with_progress(&site, run, |progress| {
             if let Some(feed) = progress.feeds.get_mut(nth) {
                 feed.doing.clone_from(&leg.label);
             }
         });
         attempted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (status, html) = request(Loaded::clone(&site), leg.clone()).await;
-        with_progress(&site, |progress| {
+        with_progress(&site, run, |progress| {
             if let Some(feed) = progress.feeds.get_mut(nth) {
                 feed.legs_done = feed.legs_done.saturating_add(1);
             }
@@ -795,7 +837,7 @@ where
             clean.store(true, std::sync::atomic::Ordering::Relaxed);
             continue;
         }
-        note_leg_failure(&site, nth, leg, status, outcome);
+        note_leg_failure(&site, run, nth, leg, status, outcome);
         if leg.route == Route::Spot {
             failed_spot_rank = Some(ladder_rank(&leg.dir));
         }
@@ -805,7 +847,7 @@ where
         }
         result = PassOutcome::Retry;
     }
-    with_progress(&site, |progress| {
+    with_progress(&site, run, |progress| {
         if let Some(feed) = progress.feeds.get_mut(nth) {
             feed.skipped = u32::try_from(legs.len())
                 .unwrap_or(u32::MAX)
@@ -834,6 +876,7 @@ where
 /// There is no chunk checkpoint or new classification of its untyped prose.
 async fn run_pass<F, Fut>(
     site: &Loaded,
+    run: u64,
     groups: &[(String, Vec<Leg>)],
     outcomes: &mut [PassOutcome],
     checkpoints: &[Checkpoints],
@@ -842,10 +885,10 @@ async fn run_pass<F, Fut>(
     F: Fn(Loaded, Leg) -> Fut + Clone + Send + 'static,
     Fut: core::future::Future<Output = (axum::http::StatusCode, String)> + Send + 'static,
 {
-    if stopping(site) {
+    if stopping(site, run) {
         return;
     }
-    let halted = halted_feeds(site);
+    let halted = halted_feeds(site, run);
     let retry_cycle = outcomes.contains(&PassOutcome::Retry);
     let mut flying = Vec::with_capacity(groups.len());
     for (nth, (((_vendor, group), prior), clean)) in groups
@@ -866,7 +909,7 @@ async fn run_pass<F, Fut>(
             }
         }
         let again = *prior == PassOutcome::Retry;
-        with_progress(site, |progress| {
+        with_progress(site, run, |progress| {
             if let Some(feed) = progress.feeds.get_mut(nth) {
                 feed.finished = false;
                 feed.legs_done = 0;
@@ -880,6 +923,7 @@ async fn run_pass<F, Fut>(
             std::sync::Arc::clone(&attempted),
             tokio::spawn(run_chain(
                 Loaded::clone(site),
+                run,
                 nth,
                 group.clone(),
                 Checkpoints::clone(clean),
@@ -895,6 +939,7 @@ async fn run_pass<F, Fut>(
             Err(dead) => {
                 note_dead_chain(
                     site,
+                    run,
                     nth,
                     attempted.load(std::sync::atomic::Ordering::Relaxed),
                     &dead,
@@ -904,7 +949,7 @@ async fn run_pass<F, Fut>(
         };
         if again && attempted.load(std::sync::atomic::Ordering::Relaxed) > 0 {
             retrying = true;
-            with_progress(site, |progress| {
+            with_progress(site, run, |progress| {
                 if let Some(feed) = progress.feeds.get_mut(nth) {
                     feed.retries = feed.retries.saturating_add(1);
                 }
@@ -915,7 +960,7 @@ async fn run_pass<F, Fut>(
         }
     }
     if retrying {
-        with_progress(site, |progress| {
+        with_progress(site, run, |progress| {
             progress.retries = progress.retries.saturating_add(1);
         });
     }
@@ -925,23 +970,27 @@ async fn run_pass<F, Fut>(
 /// server restart. Feeds run in parallel; each feed's legs run sequentially.
 /// Fixed refusals halt that feed. Transient failures retry up to [`MAX_PASSES`].
 /// Idle termination is an observation about store growth, never full coverage.
-pub async fn conduct(site: Loaded, legs: Vec<Leg>) {
-    conduct_with(site, legs, request_leg).await;
+///
+/// `run` is the [`Progress::generation`] the caller installed when it claimed
+/// the slot; every edit this run makes is addressed to it. D-2760.
+pub async fn conduct(site: Loaded, run: u64, legs: Vec<Leg>) {
+    conduct_with(site, run, legs, request_leg).await;
 }
 
 /// The request seam permits deterministic coordinator tests without vendors,
 /// credentials, alternate production behavior, or a second pass loop.
-async fn conduct_with<F, Fut>(site: Loaded, legs: Vec<Leg>, request: F)
+async fn conduct_with<F, Fut>(site: Loaded, run: u64, legs: Vec<Leg>, request: F)
 where
     F: Fn(Loaded, Leg) -> Fut + Clone + Send + 'static,
     Fut: core::future::Future<Output = (axum::http::StatusCode, String)> + Send + 'static,
 {
     let _finisher = Finisher {
         site: Loaded::clone(&site),
+        run,
     };
     let groups = by_feed(legs);
     let started_rows = rows_now(&site);
-    with_progress(&site, |progress| {
+    with_progress(&site, run, |progress| {
         progress.rows_at_start = started_rows;
         progress.rows_now = started_rows;
         progress.feeds = groups
@@ -960,7 +1009,7 @@ where
             loop {
                 tokio::time::sleep(ROWS_TICK).await;
                 let seen = rows_now(&site);
-                with_progress(&site, |progress| progress.rows_now = seen);
+                with_progress(&site, run, |progress| progress.rows_now = seen);
             }
         })
     };
@@ -969,19 +1018,19 @@ where
     let mut passes = 0_u32;
     let mut clean_empty = 0_u32;
     while passes < MAX_PASSES {
-        if stopping(&site) {
+        if stopping(&site, run) {
             break;
         }
         let repairing = outcomes.contains(&PassOutcome::Retry);
         let before = rows_now(&site);
-        run_pass(&site, &groups, &mut outcomes, &checkpoints, &request).await;
+        run_pass(&site, run, &groups, &mut outcomes, &checkpoints, &request).await;
         passes = passes.saturating_add(1);
         let after = rows_now(&site);
-        with_progress(&site, |progress| {
+        with_progress(&site, run, |progress| {
             progress.passes = passes;
             progress.rows_now = after;
         });
-        if stopping(&site)
+        if stopping(&site, run)
             || outcomes
                 .iter()
                 .all(|outcome| *outcome == PassOutcome::Halted)
@@ -1012,9 +1061,13 @@ where
             break;
         }
     }
+    // `abort` cannot stop a poll already inside the synchronous `rows_now`;
+    // that poll would finish and write after the summary below. Awaiting the
+    // handle returns only once the task has actually stopped. D-2760.
     ticker.abort();
+    let _cancelled = ticker.await;
     let current_rows = rows_now(&site);
-    with_progress(&site, |progress| {
+    with_progress(&site, run, |progress| {
         progress.rows_now = current_rows;
         progress.finished = Some(run_summary(
             progress,
@@ -1073,8 +1126,14 @@ fn run_summary(progress: &Progress, outcomes: &[PassOutcome], landed: u64) -> St
 ///
 /// The panic itself goes to standard error through the panic hook and never
 /// reaches `telemetry`, so this is the only surface that can say it happened.
-fn note_dead_chain(site: &Site, nth: usize, attempted: usize, dead: &tokio::task::JoinError) {
-    with_progress(site, |progress| {
+fn note_dead_chain(
+    site: &Site,
+    run: u64,
+    nth: usize,
+    attempted: usize,
+    dead: &tokio::task::JoinError,
+) {
+    with_progress(site, run, |progress| {
         if let Some(feed) = progress.feeds.get_mut(nth) {
             // Labels may be empty. An explicit attempt count, not display
             // text, distinguishes a panicked request from an unattempted leg.
@@ -1461,6 +1520,7 @@ mod tests {
             stopping: true,
             finished: None,
             started: true,
+            generation: 0,
             feeds: vec![FeedReport {
                 vendor: "dhan".to_owned(),
                 legs: 4,
@@ -1604,12 +1664,38 @@ mod tests {
     /// `conduct` edits through [`with_progress`], which is a no-op when the slot
     /// is empty — so a test that skipped this would exercise the loop and
     /// observe nothing, which is the shape of a test that asserts nothing.
-    fn claim(site: &Site) {
+    fn claim(site: &Site) -> u64 {
         let mut held = site
             .run
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *held = Some(Progress::claimed());
+        let claimed = Progress::claimed();
+        let run = claimed.generation;
+        *held = Some(claimed);
+        run
+    }
+
+    /// The generation of whatever claim the slot holds, `0` when it holds none:
+    /// the number a run driven by a test addresses its edits to.
+    fn current(site: &Site) -> u64 {
+        site.run
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map_or(0, |progress| progress.generation)
+    }
+
+    /// Edits whatever document the slot holds, as an operator route does: a
+    /// stop or a test's setup is addressed to the slot, not to one run.
+    fn edit_slot<F: FnOnce(&mut Progress)>(site: &Site, edit: F) {
+        if let Some(progress) = site
+            .run
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_mut()
+        {
+            edit(progress);
+        }
     }
 
     /// Reads the live document back, as the page's poll would.
@@ -1655,10 +1741,11 @@ mod tests {
     async fn conduct_runs_the_scaffold_and_releases_the_slot_when_stopped() {
         let site = site("conductstop");
         claim(&site);
-        with_progress(&site, |progress| progress.stopping = true);
+        edit_slot(&site, |progress| progress.stopping = true);
 
         conduct(
             Loaded::clone(&site),
+            current(&site),
             vec![leg("dhan", "1day"), leg("groww", "1day")],
         )
         .await;
@@ -1761,6 +1848,7 @@ mod tests {
             bound,
             conduct(
                 Loaded::clone(&site),
+                current(&site),
                 // GDFL, BECAUSE THE FIXTURE ABOVE IS A GDFL FILE. Its own
                 // comment says so — `GFDLNFO_TICK_01072025/...`, ten columns —
                 // and it was run under `TrueData`, whose F&O row is five wide.
@@ -1859,13 +1947,108 @@ mod tests {
         // AND THE SUMMARY ENDS IT. A press that finished must not keep the
         // backfill standing off, or one hand-made pull would silence the
         // autopilot for the life of the process.
-        with_progress(&site, |progress| {
+        edit_slot(&site, |progress| {
             progress.finished = Some("done".to_owned());
         });
         assert!(
             !observed(&site).running(),
             "the summary releases the standoff"
         );
+    }
+
+    /// **A RUN'S FINISHER NEVER FINISHES THE NEXT RUN.** D-2760, runs-1.
+    ///
+    /// The production order, replayed step by step with no clock: run A writes
+    /// its summary, which frees the slot; press B is admitted and installs its
+    /// own claim; only then does A's `Finisher` drop. Before the generation,
+    /// that drop saw B's `finished: None`, stamped "ended abnormally" on a live
+    /// run and freed the slot for a third press over the same store.
+    #[test]
+    fn a_finisher_dropped_after_the_next_claim_leaves_that_run_running() {
+        let site = site("finishernext");
+
+        // Its own run, unfinished: the Finisher DOES stamp it. The abnormal-end
+        // guard still works; it is only addressed now.
+        let lost = claim(&site);
+        drop(Finisher {
+            site: Loaded::clone(&site),
+            run: lost,
+        });
+        let stamped = observed(&site);
+        assert!(!stamped.running(), "an abnormal end still frees its slot");
+        assert!(
+            stamped
+                .finished
+                .as_deref()
+                .is_some_and(|why| why.contains("stopped abnormally")),
+            "{stamped:?}"
+        );
+
+        let first = claim(&site);
+        let finisher = Finisher {
+            site: Loaded::clone(&site),
+            run: first,
+        };
+        with_progress(&site, first, |progress| {
+            progress.finished = Some("A's own summary".to_owned());
+        });
+        let second = claim(&site);
+        assert_ne!(first, second, "two claims never share a generation");
+        drop(finisher);
+
+        let seen = observed(&site);
+        assert_eq!(seen.generation, second);
+        assert!(
+            seen.running(),
+            "B is live, so its slot must still read as running: {seen:?}"
+        );
+        assert_eq!(seen.finished, None, "A's Finisher wrote into B");
+    }
+
+    /// **EVERY EDIT IS ADDRESSED.** A late write from an ended run (the ticker
+    /// poll that was mid-flight at `abort`, a detached chain) lands nowhere once
+    /// the slot holds a later claim, and that run reads itself as stopped.
+    #[test]
+    fn edits_from_an_ended_run_never_land_on_the_next_claim() {
+        assert_ne!(
+            Progress::claimed().generation,
+            0,
+            "zero is the never-claimed Default and no claim may reuse it"
+        );
+        let site = site("latetick");
+        let first = claim(&site);
+        edit_slot(&site, |progress| {
+            progress.feeds = vec![FeedReport {
+                credential_dead: true,
+                ..FeedReport::default()
+            }];
+        });
+        assert_eq!(halted_feeds(&site, first), vec![true]);
+        assert!(!stopping(&site, first), "its own live claim is not stopped");
+
+        let second = claim(&site);
+        with_progress(&site, first, |progress| progress.rows_now = 7);
+        with_progress(&site, first, |progress| progress.passes = 3);
+        let seen = observed(&site);
+        assert_eq!(seen.rows_now, 0, "A's late tick landed in B: {seen:?}");
+        assert_eq!(seen.passes, 0, "A's late write landed in B: {seen:?}");
+        assert!(
+            stopping(&site, first),
+            "a run that no longer owns the slot must stop pulling"
+        );
+        assert!(!stopping(&site, second));
+        edit_slot(&site, |progress| {
+            progress.feeds = vec![FeedReport {
+                credential_dead: true,
+                ..FeedReport::default()
+            }];
+        });
+        assert!(
+            halted_feeds(&site, first).is_empty(),
+            "A must not read B's halted feeds as its own"
+        );
+        with_progress(&site, second, |progress| progress.rows_now = 9);
+        assert_eq!(observed(&site).rows_now, 9, "B's own edits still land");
     }
 
     /// **THE SKIP LIST IS READ FROM THE LIVE DOCUMENT, PER FEED.**
@@ -1894,7 +2077,7 @@ mod tests {
     fn a_halted_feed_is_reported_to_the_spawn_loop_and_a_healthy_one_is_not() {
         let held = site("haltedlist");
         claim(&held);
-        with_progress(&held, |progress| {
+        edit_slot(&held, |progress| {
             progress.feeds = vec![
                 FeedReport {
                     vendor: "dhan".to_owned(),
@@ -1910,7 +2093,7 @@ mod tests {
         });
 
         assert_eq!(
-            halted_feeds(&held),
+            halted_feeds(&held, current(&held)),
             vec![true, false],
             "the skip list is BY POSITION, because that is how the spawn loop \
              indexes `groups` — a list that lost the order would skip the wrong \
@@ -1923,7 +2106,7 @@ mod tests {
         // first pass — a run that asks for nothing and reports finishing.
         let fresh = site("haltedlistempty");
         assert!(
-            halted_feeds(&fresh).is_empty(),
+            halted_feeds(&fresh, current(&fresh)).is_empty(),
             "no run claimed, nothing halted"
         );
     }
@@ -1951,7 +2134,7 @@ mod tests {
         claim(&held);
         tokio::time::timeout(
             core::time::Duration::from_secs(5),
-            conduct_with(Loaded::clone(&held), legs, request),
+            conduct_with(Loaded::clone(&held), current(&held), legs, request),
         )
         .await
         .expect("the synthetic run must finish without retry sleeps");
@@ -2106,7 +2289,7 @@ mod tests {
                     "in-flight is not done"
                 );
                 capture.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                with_progress(&site, |progress| progress.stopping = true);
+                edit_slot(&site, |progress| progress.stopping = true);
                 std::future::ready(receipt(200, "STORED"))
             },
         )
@@ -2124,7 +2307,7 @@ mod tests {
         let held = site(name);
         claim(&held);
         let groups = by_feed(legs);
-        with_progress(&held, |progress| {
+        edit_slot(&held, |progress| {
             progress.feeds = groups
                 .iter()
                 .map(|(vendor, legs)| FeedReport {
@@ -2167,6 +2350,7 @@ mod tests {
         {
             run_pass(
                 &self.site,
+                current(&self.site),
                 &self.groups,
                 &mut self.outcomes,
                 &self.checkpoints,
@@ -2384,7 +2568,7 @@ mod tests {
             .run(move |site, requested| {
                 assert_eq!(requested, minute);
                 assert_eq!(observed(&site).feeds[0].legs_done, 0);
-                with_progress(&site, |p| p.stopping = true);
+                edit_slot(&site, |p| p.stopping = true);
                 std::future::ready(receipt(200, "STORED"))
             })
             .await;
@@ -2455,7 +2639,7 @@ mod tests {
         // requests: whichever task starts first sets stop before it returns.
         passes
             .run(|site, _leg| {
-                with_progress(&site, |p| p.stopping = true);
+                edit_slot(&site, |p| p.stopping = true);
                 std::future::ready(receipt(200, "STORED"))
             })
             .await;
@@ -2627,6 +2811,7 @@ mod tests {
         let checkpoints = checkpoints_for(&groups);
         run_pass(
             &held,
+            current(&held),
             &groups,
             &mut outcomes,
             &checkpoints,
@@ -2647,6 +2832,7 @@ mod tests {
         for _ in 0..2 {
             run_pass(
                 &held,
+                current(&held),
                 &groups,
                 &mut outcomes,
                 &checkpoints,
@@ -2668,6 +2854,7 @@ mod tests {
         let checkpoints = checkpoints_for(&groups);
         run_pass(
             &held,
+            current(&held),
             &groups,
             &mut outcomes,
             &checkpoints,
@@ -2676,6 +2863,7 @@ mod tests {
         .await;
         run_pass(
             &held,
+            current(&held),
             &groups,
             &mut outcomes,
             &checkpoints,
@@ -2684,6 +2872,7 @@ mod tests {
         .await;
         run_pass(
             &held,
+            current(&held),
             &groups,
             &mut outcomes,
             &checkpoints,
@@ -2721,6 +2910,7 @@ mod tests {
         let checkpoints = checkpoints_for(&groups);
         run_pass(
             &held,
+            current(&held),
             &groups,
             &mut outcomes,
             &checkpoints,
@@ -2735,6 +2925,7 @@ mod tests {
         .await;
         run_pass(
             &held,
+            current(&held),
             &groups,
             &mut outcomes,
             &checkpoints,
@@ -2770,6 +2961,7 @@ mod tests {
         let capture = std::sync::Arc::clone(&calls);
         run_pass(
             &held,
+            current(&held),
             &groups,
             &mut outcomes,
             &checkpoints,
@@ -2968,6 +3160,7 @@ mod tests {
             stopping: false,
             finished: None,
             started: true,
+            generation: 0,
             feeds: vec![
                 FeedReport {
                     vendor: "dhan".to_owned(),
@@ -3048,7 +3241,7 @@ mod tests {
 
         // ONE FEED REPORT, because `run_chain` writes into `feeds[nth]` and
         // `conduct` is what normally builds that list.
-        with_progress(&site, |progress| {
+        edit_slot(&site, |progress| {
             progress.feeds = vec![FeedReport {
                 vendor: pull::vendor::Feed::TrueData.wire().to_owned(),
                 legs: 2,
@@ -3061,6 +3254,7 @@ mod tests {
             bound,
             run_chain(
                 Loaded::clone(&site),
+                current(&site),
                 0,
                 vec![
                     Leg {

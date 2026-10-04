@@ -1851,12 +1851,10 @@ fn claim_execution(
         }
     })?;
     if let Some(dir) = crate::logs::cli_log_dir() {
-        let observed = observe_elsewhere(&dir, now_micros() / 1_000);
-        if !observed.launch_clear {
-            return Err(Refusal::Unobservable(
-                "the external command evidence still reports activity or is damaged/unconfirmed; inspect the execution-status note before starting another run".to_owned(),
-            ));
-        }
+        admit_external(
+            &site.store_root,
+            &observe_elsewhere(&dir, now_micros() / 1_000),
+        )?;
     }
     Ok(lease)
 }
@@ -2292,7 +2290,7 @@ fn browser_attempt_unknown(attempt: Option<u64>, why: &str) -> String {
 
 fn external_observation(dir: Option<&std::path::Path>, now: i64) -> ExternalObservation {
     dir.map_or_else(
-        || ExternalObservation { at_millis: None, uncertain: true, in_flight: false, launch_clear: false, body: unknown_status("the CLI telemetry directory is not configured; external execution state is unknown") },
+        || ExternalObservation { at_millis: None, uncertain: true, in_flight: false, launch_clear: false, unterminated: None, body: unknown_status("the CLI telemetry directory is not configured; external execution state is unknown") },
         |dir| observe_elsewhere(dir, now),
     )
 }
@@ -2319,7 +2317,10 @@ fn observed_status_with_admission(
     let external = external_observation(dir, now);
     let (available, why) = match cli::execution_lease::probe(root) {
         Err(why) => (false, why.to_string()),
-        Ok(()) if !external.launch_clear => (false, "External activity or damaged execution evidence remains unresolved. A new sweep has not been admitted.".to_owned()),
+        Ok(()) if !external.launch_clear => match ended_without_terminal(root, &external) {
+            None => (false, "External activity or damaged execution evidence remains unresolved. A new sweep has not been admitted.".to_owned()),
+            Some(ended) => (true, format!("The store execution lease is currently free, and the newest external sweep marker names CLI invocation {ended}, which ended without its terminal marker: it held this lease while it ran, so it is not running now. How it ended is not known. A launch rechecks and claims the lease atomically.")),
+        },
         Ok(()) => (true, "The store execution lease is currently free. A launch rechecks and claims it atomically. Historical status is separate; this does not establish that older binaries or bypassing callers are idle.".to_owned()),
     };
     let mut body = observed_status(local, external);
@@ -2340,6 +2341,11 @@ struct ExternalObservation {
     in_flight: bool,
     /// Healthy history without an unresolved sweep marker does not own a lease.
     launch_clear: bool,
+    /// The newest marker is a named sweep's `command started` under a durable
+    /// invocation id (`cli::operation_audit::ID_BASE` and above), with no
+    /// terminal marker after it: that id and the command word. Only a caller
+    /// HOLDING the store's execution lease may act on it. D-2764.
+    unterminated: Option<(u64, String)>,
     body: String,
 }
 
@@ -2449,6 +2455,18 @@ fn tail_fault_unless_answered(tail: &telemetry::Tail, answered: bool) -> Option<
     }
 }
 
+/// Damaged or unanswerable evidence: never clears a launch.
+fn uncertain_observation(at_millis: Option<i64>, why: &str) -> ExternalObservation {
+    ExternalObservation {
+        at_millis,
+        uncertain: true,
+        in_flight: false,
+        launch_clear: false,
+        unterminated: None,
+        body: unknown_status(why),
+    }
+}
+
 fn observe_elsewhere(dir: &std::path::Path, now: i64) -> ExternalObservation {
     // Durable run/probe evidence uses this same target. Its completion cannot
     // replace a whole-command marker, nor can its uncorrelated token refresh
@@ -2470,13 +2488,7 @@ fn observe_elsewhere(dir: &std::path::Path, now: i64) -> ExternalObservation {
     // cap cannot hide a newer one. With no marker found the cap is still the
     // answer: the latest sweep's marker may lie in the bytes it left unread.
     if let Some(why) = tail_fault_unless_answered(&lifecycle, marker.is_some()) {
-        return ExternalObservation {
-            at_millis: None,
-            uncertain: true,
-            in_flight: false,
-            launch_clear: false,
-            body: unknown_status(&why),
-        };
+        return uncertain_observation(None, &why);
     }
     let Some(marker) = marker else {
         let legacy = status_tail(dir, CLI_SWEEP_TARGET, None, 1);
@@ -2490,6 +2502,7 @@ fn observe_elsewhere(dir: &std::path::Path, now: i64) -> ExternalObservation {
             uncertain: why.is_some(),
             in_flight: false,
             launch_clear,
+            unterminated: None,
             body: why.map_or_else(|| NO_SWEEP.to_owned(), |why| unknown_status(&why)),
         };
     };
@@ -2500,13 +2513,7 @@ fn observe_elsewhere(dir: &std::path::Path, now: i64) -> ExternalObservation {
     // marker is found before the cap. Reaching the cap empty-handed means none
     // is newer, and `last` falls back to the marker, the newest fact there is.
     if let Some(why) = tail_fault_unless_answered(&activity, true) {
-        return ExternalObservation {
-            at_millis: Some(marker.at_unix_millis),
-            uncertain: true,
-            in_flight: false,
-            launch_clear: false,
-            body: unknown_status(&why),
-        };
+        return uncertain_observation(Some(marker.at_unix_millis), &why);
     }
     let last = activity.records.first().unwrap_or(marker);
     let phase = match marker.field("phase") {
@@ -2554,13 +2561,77 @@ fn observe_elsewhere(dir: &std::path::Path, now: i64) -> ExternalObservation {
             "null".to_owned()
         }
     );
+    let unterminated = unterminated_marker(marker, named_sweep);
     ExternalObservation {
         at_millis: Some(last.at_unix_millis),
         uncertain: status == "unknown",
         in_flight: status == "running",
         launch_clear: matches!(status, "completed" | "refused"),
+        unterminated,
         body,
     }
+}
+
+/// A named sweep's newest `command started` under a durable invocation id,
+/// as `(id, command)`; anything else is `None`. D-2764.
+fn unterminated_marker(marker: &telemetry::Record, named_sweep: bool) -> Option<(u64, String)> {
+    match marker.field("command") {
+        Some(telemetry::OwnedValue::Str(command))
+            if marker.message == "command started"
+                && named_sweep
+                && marker.run > cli::operation_audit::ID_BASE =>
+        {
+            Some((marker.run, command.clone()))
+        }
+        _ => None,
+    }
+}
+
+/// The durable invocation a lease holder may prove is not running, if any.
+///
+/// # Why holding the lease is the proof
+///
+/// `cli::run_durable` takes the store's execution lease BEFORE it begins its
+/// durable invocation, writes `command started` inside it, and releases the
+/// lease only after the invocation's terminal is written. The kernel releases
+/// the flock when its holder dies. So a caller that holds THIS store's lease,
+/// and finds the newest marker to be a `command started` whose durable id names
+/// a CLI invocation of the same command in THIS store's audit, has found a
+/// command that cannot be running here: a Ctrl-C, a kill, an OOM or a panic
+/// ended it without its `command finished`. Before D-2764 that marker refused
+/// every browser launch forever, while the lease the refusal guarded was free.
+///
+/// Everything short of that proof keeps refusing: a legacy run id outside the
+/// durable namespace (older binaries, bypassing callers), an id this store's
+/// audit does not hold, a different origin or command word, and any audit read
+/// that fails. It claims nothing about HOW the command ended and rewrites no
+/// history: the status document still reports what the log shows. D-2764.
+fn ended_without_terminal(root: &std::path::Path, observed: &ExternalObservation) -> Option<u64> {
+    let (run, command) = observed.unterminated.as_ref()?;
+    match cli::operation_audit::read(root, *run) {
+        Ok(Some(record))
+            if record.origin == cli::operation_audit::Origin::Cli && record.label == *command =>
+        {
+            Some(*run)
+        }
+        _ => None,
+    }
+}
+
+/// The external-evidence half of admission, for a caller that HOLDS `root`'s
+/// execution lease. D-2764.
+fn admit_external(root: &std::path::Path, observed: &ExternalObservation) -> Result<(), Refusal> {
+    if observed.launch_clear {
+        return Ok(());
+    }
+    // NOT SILENT: the status poll's `admission.why` names the invocation it
+    // found ended, and the log and the invocation audit are left as they are.
+    if ended_without_terminal(root, observed).is_none() {
+        return Err(Refusal::Unobservable(
+            "the external command evidence still reports activity or is damaged/unconfirmed; inspect the execution-status note before starting another run".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 /* ==================================================================

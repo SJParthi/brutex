@@ -304,6 +304,25 @@ fn trade_page(
         .get_or_init(|| Mutex::new(None))
         .lock()
         .map_err(|_| "candidate trade reader cache poisoned")?;
+    page_through(&mut cached, root, summary, key, offset, limit)
+}
+/// One page through the slot, opening a reader when the slot holds another.
+///
+/// A page that fails EVICTS the reader. The slot is keyed on content only, and
+/// the reader also pins its trade file's filesystem generation, so a file
+/// relinked, restored or merely `chmod`ed under the same content left a
+/// reader that refused every request for that candidate until a restart, while
+/// its own refusal said to reopen. The refusal still answers this request; the
+/// next one cold-opens and re-verifies every row and the seal, as every sibling
+/// cache does. D-2763, apicache-1.
+fn page_through(
+    cached: &mut Option<Cached>,
+    root: &Path,
+    summary: &Summary,
+    key: Key,
+    offset: u64,
+    limit: usize,
+) -> Result<(Candidate, Vec<cli::trades::Row>), String> {
     if cached.as_ref().is_none_or(|held| {
         held.model != summary.model
             || held.root != root
@@ -324,8 +343,13 @@ fn trade_page(
         });
     }
     let held = cached.as_mut().ok_or("candidate reader cache missing")?;
-    let rows = held.reader.page(offset, limit)?;
-    Ok((held.reader.candidate().clone(), rows))
+    match held.reader.page(offset, limit) {
+        Ok(rows) => Ok((held.reader.candidate().clone(), rows)),
+        Err(why) => {
+            *cached = None;
+            Err(why)
+        }
+    }
 }
 fn tier_json(tier: &Tier) -> Value {
     let rules = tier.rules;
@@ -566,6 +590,69 @@ mod tests {
         );
         Ok(())
     }
+    /// **A trade page whose reader went stale is refused once, not until a
+    /// restart.** D-2763, apicache-1.
+    ///
+    /// Every trade file is replaced by a byte-identical copy under a new
+    /// inode, which is what a restore, an rsync or a rerun of a deterministic
+    /// capture does. The content key is unchanged, so the slot keeps its
+    /// reader, and that reader's pinned generation no longer matches. The
+    /// request that meets it is refused; the one after it must cold-open and
+    /// answer. Before D-2763 the stale reader stayed in the slot and every
+    /// later request was refused the same way.
+    #[test]
+    fn a_trade_reader_whose_file_generation_moved_is_evicted_by_its_refusal() -> Result<(), String>
+    {
+        let root = crate::scratch::path("candidate-api-stale-reader");
+        let _ = std::fs::remove_dir_all(&root);
+        let query = and_capture(&root, [77; 32], true)?;
+        let asked = Asked::parse(&query)?;
+        let summary = candidate_trades::read_model(
+            &root,
+            asked.identity,
+            asked.attempt,
+            asked.model,
+            crate::detail::MAX_SCAN_BYTES,
+        )?
+        .ok_or("the capture is sealed")?;
+        let key = Key {
+            tier: 0,
+            rank: 1,
+            direction: Direction::Long,
+        };
+        let mut slot = None;
+        page_through(&mut slot, &root, &summary, key, 0, 16)?;
+        assert!(slot.is_some(), "the first page caches its reader");
+
+        let directory = root
+            .join("results/candidate-trades-v1")
+            .join(crate::server::hex32([77; 32]))
+            .join(asked.attempt.to_string());
+        let mut replaced = 0;
+        for entry in std::fs::read_dir(&directory).map_err(|why| why.to_string())? {
+            let path = entry.map_err(|why| why.to_string())?.path();
+            if !path.to_string_lossy().ends_with("-trades.bin") {
+                continue;
+            }
+            let copy = path.with_extension("copy");
+            std::fs::copy(&path, &copy).map_err(|why| why.to_string())?;
+            std::fs::rename(&copy, &path).map_err(|why| why.to_string())?;
+            replaced += 1;
+        }
+        assert!(replaced > 0, "the fixture has trade files to replace");
+
+        assert!(
+            page_through(&mut slot, &root, &summary, key, 0, 16).is_err(),
+            "the stale reader refuses the request that meets it"
+        );
+        assert!(slot.is_none(), "and that refusal evicts it");
+        page_through(&mut slot, &root, &summary, key, 0, 16)
+            .map_err(|why| format!("the next request must cold-open and answer: {why}"))?;
+        assert!(slot.is_some(), "the fresh reader is cached");
+        std::fs::remove_dir_all(root).map_err(|why| why.to_string())?;
+        Ok(())
+    }
+
     /// **A stock audit's AND-mask capture says what its figures are made of;
     /// an index's, an unrecorded one's and an expression capture's are the
     /// bytes they were.** D-0694, AF-19.
@@ -823,8 +910,8 @@ mod tests {
     fn a_trade_pages_single_slot_and_cold_reread_are_stated() {
         let api = include_str!("candidatejson.rs");
         let cli = include_str!("../../cli/src/candidate_trades.rs");
-        let page = body(api, "trade_page");
-        assert!(page.contains("static CACHE: OnceLock<Mutex<Option<Cached>>>"));
+        assert!(body(api, "trade_page").contains("static CACHE: OnceLock<Mutex<Option<Cached>>>"));
+        let page = body(api, "page_through");
         assert!(page.contains("|| held.key != key"));
         assert!(
             page.contains("TradeReader::open(root, summary, key, crate::detail::MAX_SCAN_BYTES)")
