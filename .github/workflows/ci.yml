@@ -1728,6 +1728,15 @@ jobs:
           census-ceiling census-not-regular masters-not-regular 1234 mkfifo
           folds'
 
+          # ---- D-1931: telemetry field keys this repository chose for the
+          # P-03 closed-day drop (`on_closed_day`, `kept_unclassified_day` on
+          # the fetch census line, D-2673); the JSON number texts P10-07a's
+          # test reads (`5e-1`, `2.5e-1`, `-5e-1`); and the word `length` from
+          # three refusal messages. None names an account, an environment or a
+          # vendor field.
+          late_pieces='on_closed_day kept_unclassified_day 5e-1 2.5e-1 -5e-1
+          length'
+
           allowed="${seg_shape} ${vendor_wire} ${claim_standing} ${config_fixture}
           ${secret_fixture} ${scaffold} ${timeframe} ${governor}
           ${record_field} ${header_name} ${bound_number}
@@ -1740,7 +1749,7 @@ jobs:
           ${vendor_error} ${event_field} ${pull_scratch} ${bare_number}
           ${capture_field} ${pull_scratch_2} ${pull_assert} ${pull_asserted_number}
           ${ssm_region_fixture} ${inner_literal} ${signed_number} ${fold_literal} ${audit_literal}
-          ${late_fixture} ${joined_piece} ${data_edges}"
+          ${late_fixture} ${joined_piece} ${data_edges} ${late_pieces}"
           # MATERIALISED ONCE, AND NOT PIPED. `printf '%s\n' $allowed |
           # grep -qxF` was the shape here, and under `set -euo pipefail` it is
           # unsound in the direction that fails a green build: `grep -q` exits

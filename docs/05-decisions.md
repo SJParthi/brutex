@@ -58286,3 +58286,7 @@ The check cannot tell a test function from a production one, and it cannot judge
 ### D-1930 — Gate 12 reads "a trade was flat" as an outcome, not a cost claim — 2026-10-04
 
 Found on the staging gate run. Gate 12 triggers on the bare word `flat`, and `crates/cli/src/pool.rs` says "every pooled trade was flat" (the doc of `meets`) and "Every pooled trade flat" (the doc of `a_candidate_that_never_won_meets_no_tail_rule`), both from p5num-3 (D-2713). Both describe a trade that made and lost nothing. Neither says anything about cost, so writing UNVERIFIED beside them would be a false statement. The gate's existing scrub of non-cost senses (`came out flat`, `exactly flat`, `books the trade flat`) gains `trades? (was |were )?flat` in both copies of `claim_scrub`, with the reason in the gate's own comment. Gate 12 then passes on the tree as committed.
+
+### D-1931 — Gate 1d declares the P-03 census keys, the P10-07a number texts and the word `length` — 2026-10-04
+
+Found on the staging gate run after merging zero/calendar and fixboard/zero-p10. `on_closed_day` and `kept_unclassified_day` are telemetry field keys this repository chose for the closed-day drop (D-2673); `5e-1`, `2.5e-1` and `-5e-1` are JSON number texts a P10-07a test reads; `length` is a word in three refusal messages. None names an account, an environment or a vendor field. They are declared as `late_pieces` with that reason in the gate's own comment.
