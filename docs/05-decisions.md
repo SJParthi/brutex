@@ -57309,6 +57309,14 @@ and Finalization V4 already cut a failed barrier (D-1900).
 - The bound is by bytes present, not a constant: after the walk every list `parquet` allocates holds at most (footer bytes) x (one element's in-memory size), and the footer sits inside a file already read whole. The schema cap is what bounds the recursion: at most 18 levels.
 - No lake file the crate could open before is refused: both lake shapes are under the cap, and a real footer nests about nine frames.
 
+### D-1981 — A frontier `TOP` is bounded by the rows the api serves for one run — 2026-10-04
+
+- CE-19. `record_frontier` wrote the top `TOP` rows with no upper bound, while `api::detail` verifies and serves at most `MAX_RESULT_ROWS` (4,096) rows of one run and refuses a run past it whole. A run with `BRUTEX_TOP` above 4,096 therefore committed a frontier `/frontier.json` and `/top` could never show: work done, nothing readable, no refusal at the time it could still be avoided.
+- `cli::frontier::MAX_ROWS` is 4,096 and `api::detail` asserts at compile time that it equals `MAX_RESULT_ROWS`, so the two bounds cannot drift apart. `frontier::admit_top` refuses `TOP` = 0 or above `MAX_ROWS` by name ("TOP is N and must be 1 to 4096 ... nothing was swept").
+- It is checked before any work at every entry point that takes a `TOP` (`audit_stored_kernel`, `audit_range_kernel`, `screen_range_kernel_cached`, both elite descents, and the strict `BRUTEX_TOP` knob check), and again inside `record_frontier`, so the bound is a property of the writer and not of each caller remembering it.
+- Chosen over paging `/trades` past 4,096: the default `TOP` is 25, and a run above the bound already produced a frontier no reader could open, so refusing it before the sweep removes no result anyone could see. Paging stays possible later as its own decision.
+- Proved by `cli::frontier::tests::a_top_is_admitted_up_to_the_reader_bound_and_refused_past_it`, `cli::sweep_wiring_tests::the_frontier_writer_refuses_a_top_the_api_cannot_serve` and `cli::sweep_wiring_tests::the_elite_descent_refuses_a_top_the_api_cannot_serve_before_any_read` (ZE-02).
+
 ### D-1990 — A field a maximum gates is rounded up, and a series shorter than its bootstrap block is refused — 2026-10-04
 
 - run3-1: the runner's `losing_trade_rate_ppm` gate now reads the rate rounded UP from the exact counts the evidence carries (`losing_rate_ceil`). The stored rate stays the canonical floor `validate_count_rate` reconciles, so evidence bytes do not move; a true 1/3 on a 333,333 cap now fails.
