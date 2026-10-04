@@ -4815,7 +4815,7 @@ mod tests {
             i64::from(context.rung_seconds).saturating_mul(1_000_000),
             request.widths,
             Calendar::charter(),
-            crate::stored::nse_session_close_minute,
+            |day| context.minute.session_close_minute(day),
             &mut column,
         )
         .map_err(|why| format!("fixture exact-minute overlay refused: {why:?}"))?;

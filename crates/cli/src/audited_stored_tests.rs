@@ -414,14 +414,15 @@ impl Drop for Fixture {
 }
 
 #[test]
-fn stored_screens_scale_support_to_retained_bars_and_disclose_holed_sessions() {
+fn stored_screens_scale_support_to_swept_bars_and_disclose_holed_sessions() {
     let _knobs = crate::knobs::serially();
     crate::knobs::clear_all();
     // An explicit finite operator budget also keeps a generated constant-price
     // vocabulary from consuming a machine if new always-true bits are added.
     crate::knobs::set("BRUTEX_CEILING", "256");
     // `swept` is the ledger's `bars`: what the column folded past warm-up, as
-    // every door records it since D-1661. Support stays scaled to `retained`.
+    // every door records it since D-1661. Support is scaled to the same rows
+    // since D-2101: the warm-up bars of `retained` can carry no hit.
     for (rung, retained, withheld, swept) in [("1min", 2_625, 374, 1_500), ("5min", 525, 75, 300)] {
         let fixture = Fixture::warmed();
         fixture.omit_owned_minutes(&[5]);
@@ -434,8 +435,15 @@ fn stored_screens_scale_support_to_retained_bars_and_disclose_holed_sessions() {
         let row = ledger.read(0).expect("screen parent");
         assert_eq!(row.bars, swept, "{rung}");
         assert_eq!(
-            row.min_hits, retained,
-            "100% support must use the retained sample"
+            row.min_hits, swept,
+            "100% support must ask a hit of every swept row, not of the warm-up"
+        );
+        assert!(row.min_hits < retained, "{rung}");
+        assert!(
+            report.contains(&format!(
+                "Support uses the {swept} swept bar(s) of the remaining {retained} signal bars."
+            )),
+            "{report}"
         );
         assert_eq!(crate::results::read_field(&row.timeframe), rung);
         assert!(report.contains("MINUTE-GAP SESSIONS WITHHELD"), "{report}");
@@ -454,8 +462,8 @@ fn stored_screen_support_and_exact_retries_bind_the_actual_sample() {
     let _knobs = crate::knobs::serially();
     crate::knobs::clear_all();
     crate::knobs::set("BRUTEX_CEILING", "256");
-    // `bars` is the retained sample support scales to; `swept` the ledger's
-    // count past warm-up (D-1661).
+    // `bars` is the retained sample; `swept` the ledger's count past warm-up
+    // (D-1661), and the rows support is scaled to since D-2101.
     for (rung, bars, swept) in [("1min", 3_000, 1_500), ("5min", 600, 300)] {
         let fixture = Fixture::warmed();
         let mut identities = Vec::new();
@@ -473,7 +481,8 @@ fn stored_screen_support_and_exact_retries_bind_the_actual_sample() {
             );
             let row = ledger.read(index as u64).expect("exact screen parent");
             assert_eq!(row.bars, swept, "{rung}");
-            assert_eq!(row.min_hits, bars * support / 1_000_000);
+            assert_eq!(row.min_hits, swept * support / 1_000_000);
+            assert!(row.min_hits <= row.bars && swept < bars, "{rung}");
             assert_eq!((row.months_asked, row.months_found), (1, 1));
             assert!(!identities.contains(&row.identity));
             identities.push(row.identity);
@@ -739,14 +748,15 @@ fn generated_public_command_flow(root: &std::path::Path) -> Result<(), Box<dyn s
             let mut ledger = crate::results::Results::open_read(root)?;
             assert_eq!(ledger.len()?, 1);
             let row = ledger.read(0)?;
-            // 999,999 ppm of 3,000 bars is 2,999 hits: a million is refused
-            // at both support doors since D-1722.
+            // 999,999 ppm of the 1,500 swept rows is 1,499 hits: a million is
+            // refused at both support doors since D-1722.
             assert_eq!(
                 (row.bars, row.min_hits, row.months_asked, row.months_found),
                 // `bars` is the column's swept count, warm-up excluded
                 // (AC-whp-law-2, D-1661): 1,500 of the 3,000 loaded bars.
-                // `min_hits` is still scaled to all 3,000 (D-1661 note).
-                (1_500, 2_999, 1, 1)
+                // `min_hits` is scaled to the same 1,500 since D-2101; it
+                // was 2,999, more hits than rows that can hit.
+                (1_500, 1_499, 1, 1)
             );
             assert_eq!(row.halted, 0);
             let attempt =
@@ -2645,13 +2655,23 @@ fn sessions_missing_their_closing_minutes_are_withheld_up_front() {
         "the interior walk cannot see a session that stops early"
     );
     assert_eq!(
-        crate::minute_gaps::days_with_minute_holes(&signal.bars, &minutes.bars, signal_length),
+        crate::minute_gaps::days_with_minute_holes(
+            &signal.bars,
+            &minutes.bars,
+            signal_length,
+            crate::stored::nse_session_close_minute
+        ),
         days
     );
     // On `1min` no signal bar demands the missing minutes, so none is withheld.
     assert!(
-        crate::minute_gaps::days_with_minute_holes(&minutes.bars, &minutes.bars, 60_000_000)
-            .is_empty()
+        crate::minute_gaps::days_with_minute_holes(
+            &minutes.bars,
+            &minutes.bars,
+            60_000_000,
+            crate::stored::nse_session_close_minute
+        )
+        .is_empty()
     );
     // A day with signal bars and no minutes at all is flagged too.
     let no_minutes: Vec<_> = minutes
@@ -2661,8 +2681,13 @@ fn sessions_missing_their_closing_minutes_are_withheld_up_front() {
         .filter(|bar| indicators::ist_day(bar.ts_micros) != days[0])
         .collect();
     assert!(
-        crate::minute_gaps::days_with_minute_holes(&signal.bars, &no_minutes, signal_length)
-            .contains(&days[0])
+        crate::minute_gaps::days_with_minute_holes(
+            &signal.bars,
+            &no_minutes,
+            signal_length,
+            crate::stored::nse_session_close_minute
+        )
+        .contains(&days[0])
     );
 
     let screen = fixture.screen("5min", 1);
@@ -2853,5 +2878,175 @@ fn a_range_descent_prepares_its_stored_inputs_once() {
         .expect("1min audit");
     assert_eq!(crate::AUDIT_INPUT_LOADS.with(std::cell::Cell::get), 5);
     assert!(other.contains("1min"), "{other}");
+    crate::knobs::clear_all();
+}
+
+/// A NAMED range support asks its hits of the rows the column SWEPT, the bars
+/// that can hit, not of the retained slice whose warm-up the column folds
+/// without sweeping (D-2101). Before, 600,000 ppm of the 3,000 one-minute bars
+/// this fixture retains asked for 1,800 hits from 1,500 swept rows, so nothing
+/// could ever be frequent, and the rung recorded an empty search as an answer.
+/// The swept count is read from the audit's own cached column, so the rung
+/// still prepares its inputs once.
+#[test]
+fn a_named_range_support_is_scaled_to_the_swept_rows_not_the_warm_up() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    crate::knobs::set("BRUTEX_VALIDATE", "0");
+    for (rung, retained, swept) in [("1min", 3_000_u64, 1_500_u64), ("5min", 600, 300)] {
+        for support in [600_000_u64, 999_999, 1] {
+            let fixture = Fixture::warmed();
+            crate::AUDIT_INPUT_LOADS.with(|loads| loads.set(0));
+            let row = crate::one_rung_cached(
+                crate::RungAsk {
+                    vendor_word: "zerodha",
+                    underlying: fixture.symbol,
+                    rung,
+                    from: (2025, 5),
+                    to: (2025, 5),
+                    support_ppm: Some(support),
+                    attempt: Some(11),
+                },
+                crate::RungStore {
+                    root: Ok(fixture.root.clone()),
+                    commit: Some("generated-swept-support-fixture"),
+                },
+                &mut crate::AuditCache::default(),
+            );
+            let record = row
+                .outcome
+                .map_err(|why| format!("{rung} {support}: {why}"))
+                .expect("the named range support sizes");
+            assert_eq!(record.bars, swept, "{rung} {support}");
+            assert_eq!(
+                record.min_hits,
+                (swept * support / 1_000_000).max(1),
+                "{rung} {support}"
+            );
+            assert!(
+                record.min_hits <= swept && swept < retained,
+                "{rung} {support}: {} hits of {swept} swept rows",
+                record.min_hits
+            );
+            assert_eq!(
+                crate::AUDIT_INPUT_LOADS.with(std::cell::Cell::get),
+                1,
+                "{rung} {support}: the count and the audit share one preparation"
+            );
+        }
+    }
+    crate::knobs::clear_all();
+}
+
+/// An unstamped build reads no input to size a named support: the audit
+/// refuses before any load, so neither does the derivation. D-2101.
+#[test]
+fn an_unstamped_named_range_support_loads_nothing_to_size_itself() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    let fixture = Fixture::warmed();
+    crate::AUDIT_INPUT_LOADS.with(|loads| loads.set(0));
+    let row = crate::one_rung_cached(
+        crate::RungAsk {
+            vendor_word: "zerodha",
+            underlying: fixture.symbol,
+            rung: "5min",
+            from: (2025, 5),
+            to: (2025, 5),
+            support_ppm: Some(600_000),
+            attempt: Some(12),
+        },
+        crate::RungStore {
+            root: Ok(fixture.root.clone()),
+            commit: None,
+        },
+        &mut crate::AuditCache::default(),
+    );
+    assert!(row.outcome.is_err(), "an unstamped build records nothing");
+    assert_eq!(crate::AUDIT_INPUT_LOADS.with(std::cell::Cell::get), 0);
+    assert!(!crate::results::Results::path(&fixture.root).exists());
+    crate::knobs::clear_all();
+}
+
+/// A descent sizes its floor on the rows its steps' column swept, read
+/// through the cache the steps then reuse, so the count costs no second load;
+/// a question a step would refuse yields no count. D-2101.
+#[test]
+fn a_descent_counts_the_swept_rows_through_the_cache_its_steps_reuse() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    let fixture = Fixture::warmed();
+    let span = ((2025, 5), (2025, 5));
+    for (rung, swept) in [("1min", 1_500_u64), ("5min", 300)] {
+        crate::SCREEN_SPAN_LOADS.with(|loads| loads.set(0));
+        let mut cache = crate::ScreenCache::default();
+        let counted = crate::screen_swept_in(
+            &fixture.root,
+            "zerodha",
+            fixture.symbol,
+            rung,
+            span,
+            &mut cache,
+        );
+        assert_eq!(counted, Some(swept), "{rung}");
+        let page = crate::screen_range_kernel_cached(
+            crate::StoredScreenRequest {
+                root: fixture.root.clone(),
+                vendor: Vendor::Zerodha,
+                underlying: fixture.symbol,
+                rung,
+                span,
+                support_ppm: 20_000,
+                policy: crate::Policy {
+                    rules: crate::Rules::BASELINE,
+                    lens: runner::rank::Lens::Detectability,
+                    validate: false,
+                },
+                attempt: Some(14),
+                commit: "generated-swept-descent-fixture",
+            },
+            &mut cache,
+        )
+        .expect("a step");
+        assert!(page.contains("RESULT RECORDED"), "{page}");
+        assert_eq!(
+            crate::SCREEN_SPAN_LOADS.with(std::cell::Cell::get),
+            1,
+            "{rung}: the count and the step share one load"
+        );
+    }
+    let mut cache = crate::ScreenCache::default();
+    for (vendor, rung, months) in [
+        ("zerodha", "7min", span),
+        ("nobody", "5min", span),
+        // A span the store does not hold refuses at the load.
+        ("zerodha", "5min", ((2019, 1), (2019, 1))),
+    ] {
+        assert_eq!(
+            crate::screen_swept_in(
+                &fixture.root,
+                vendor,
+                fixture.symbol,
+                rung,
+                months,
+                &mut cache
+            ),
+            None,
+            "{vendor} {rung} {months:?}"
+        );
+    }
+    crate::knobs::set("BRUTEX_SCREEN_BUDGET_MS", "5");
+    assert_eq!(
+        crate::screen_swept_in(
+            &fixture.root,
+            "zerodha",
+            fixture.symbol,
+            "5min",
+            span,
+            &mut cache
+        ),
+        None,
+        "a spent screen budget refuses every step before its load"
+    );
     crate::knobs::clear_all();
 }

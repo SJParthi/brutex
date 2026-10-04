@@ -2651,7 +2651,7 @@ fn stored_anchored_column(
         signal_length_micros,
         widths,
         indicators::evaluator::Calendar::charter(),
-        stored::nse_session_close_minute,
+        |day| exact_minute.session_close_minute(day),
         &mut column,
     )
     .map_err(|why| {
@@ -2703,7 +2703,23 @@ fn stored_anchored_digest(
             swept_series_calendar_policy: stored::SWEPT_SERIES_CALENDAR_POLICY,
         },
     )
+    .map(|anchored| bind_cash_closes(anchored, exact_minute.cash_digest()))
     .map_err(|why| format!("the daily-reference identity binding was refused: {why:?}"))
+}
+
+/// Fold a share's dated cash-session closes into the stored identity (D-2102).
+/// `None` (an index) returns `anchored` unchanged, so no index run's identity
+/// moves; a share's identity changes with every dated answer and every reason
+/// a date went unverified, because both decide which minutes were joined.
+fn bind_cash_closes(anchored: [u8; 32], cash: Option<[u8; 32]>) -> [u8; 32] {
+    let Some(cash) = cash else {
+        return anchored;
+    };
+    let mut hash = brutex_core::blake3::Hasher::new();
+    hash.update(b"brutex-stored-cash-closes-v1\0");
+    hash.update(&anchored);
+    hash.update(&cash);
+    hash.finalize()
 }
 
 /// Human-readable evidence receipt placed above every stored anchored result.
@@ -3508,10 +3524,12 @@ fn stored_sweep_inputs(request: &StoredSweepRequest<'_>) -> Result<StoredMonthIn
             "the {EXECUTION_RUNG} execution series for {year}-{month:02} is malformed: {why}. Nothing was swept; repair or repull that exact feed/instrument/month"
         )
     })?;
+    let cash = stored::span_cash_closes(root, &loaded.key, None, &loaded.bars)?;
     let holed_days = crate::minute_gaps::days_with_minute_holes(
         &loaded.bars,
         execution_slice,
         stored::rung_length_micros(rung)?,
+        |day| stored::session_close_for(cash.as_ref(), day),
     );
     let withheld = if holed_days.is_empty() {
         0
@@ -4059,8 +4077,11 @@ fn auto_stored_kernel(
     // against a refusal that stops the run dead. See `crate::minute_gaps` for
     // what is withheld and why it is measured rather than listed.
     let minutes = stored::load_span(root, vendor, underlying, EXECUTION_RUNG, from, to)?.bars;
+    let cash = stored::span_cash_closes(root, &span.key, None, &span.bars)?;
     let holed_days =
-        crate::minute_gaps::days_with_minute_holes(&span.bars, &minutes, signal_length);
+        crate::minute_gaps::days_with_minute_holes(&span.bars, &minutes, signal_length, |day| {
+            stored::session_close_for(cash.as_ref(), day)
+        });
     if !holed_days.is_empty() {
         let (kept, _withheld) = crate::minute_gaps::withhold(&span.bars, &holed_days);
         span.bars = kept;
@@ -7015,10 +7036,12 @@ fn load_audit_inputs(
     // siblings -- all still hold: a hole still refuses when its day IS swept.
     // What changed is that the day is not swept. Substituting would answer a
     // question with the wrong bar; withholding declines to answer it, out loud.
+    let cash = stored::span_cash_closes(root, &span.key, None, &span.bars)?;
     let holed_days = crate::minute_gaps::days_with_minute_holes(
         &span.bars,
         execution_slice,
         stored::rung_length_micros(rung)?,
+        |day| stored::session_close_for(cash.as_ref(), day),
     );
     if !holed_days.is_empty() {
         let (kept, _withheld) = crate::minute_gaps::withhold(&span.bars, &holed_days);
@@ -8711,7 +8734,22 @@ fn listing_equity_note(
 /// extinction entirely, which is the defect `engine::Ladder::with_min_hits`
 /// raises zero to one to prevent.
 const fn min_hits_for(bars: usize, support_ppm: u64) -> u64 {
-    let hits = (bars as u64).saturating_mul(support_ppm) / 1_000_000;
+    min_hits_for_swept(bars as u64, support_ppm)
+}
+
+/// [`min_hits_for`] over the rows a column SWEPT, the bars that can hit.
+///
+/// # Why the denominator is the column's and not the slice's (D-2101)
+///
+/// A screen scaled support to `span.bars.len()`, the retained slice, and that
+/// slice includes the warm-up bars the column folds and never sweeps: no mask
+/// is ever recorded for them, so no combination can hit on one. The fixture
+/// that measured it keeps 3,000 one-minute bars and sweeps 1,500, so 60%
+/// support asked for 1,800 hits from 1,500 rows that could hit, and nothing
+/// could ever be frequent. The ledger's `bars` has been the swept count since
+/// D-1661; support is now a fraction of the same rows.
+const fn min_hits_for_swept(swept: u64, support_ppm: u64) -> u64 {
+    let hits = swept.saturating_mul(support_ppm) / 1_000_000;
     if hits == 0 { 1 } else { hits }
 }
 
@@ -11487,7 +11525,7 @@ fn descent_banner(
     let _ = writeln!(
         out,
         "ELITE, SELF-TUNING\n  feed {vendor_word} · {underlying} · {rung} · \
-         {fy}-{fm:02}..{ty}-{tm:02}\n  {bars} bars · floor {floor} ppm is about \
+         {fy}-{fm:02}..{ty}-{tm:02}\n  {bars} swept bars · floor {floor} ppm is about \
          {trades} round trip(s) — the fewest at which these rules can be \
          satisfied\n  by anything, so below it no combination passes however \
          good it is\n  {steps} step(s) from {DESCENT_CEILING_PPM} ppm down. NO \
@@ -14501,11 +14539,7 @@ fn one_rung_cached(ask: RungAsk<'_>, store: RungStore, cache: &mut AuditCache) -
     // process knob. Recording a malformed value that this run did not use would
     // make the warning itself false.
     let named_ppm = support_ppm.or_else(support_from_knob);
-    let statistical = min_hits_for(
-        bars,
-        named_ppm
-            .unwrap_or_else(|| statistical_support_floor(u64::try_from(bars).unwrap_or(u64::MAX))),
-    );
+    let retained = u64::try_from(bars).unwrap_or(u64::MAX);
 
     // TWO FLOORS, AND THE SEARCH TAKES WHICHEVER BINDS. Neither is a constant
     // and neither is typed; both are read off this rung's own bars at runtime.
@@ -14540,8 +14574,35 @@ fn one_rung_cached(ask: RungAsk<'_>, store: RungStore, cache: &mut AuditCache) -
     // An operator who NAMES a support still gets exactly what they named --
     // `Some(_)` skips this entirely. The probe exists because `None` means
     // "derive it", and deriving it from the data alone was half an answer.
-    let min_hits = if named_ppm.is_some() {
-        statistical
+    // BOTH FLOORS ARE FRACTIONS OF THE ROWS THAT CAN HIT, the column's swept
+    // count, not of the retained slice: the warm-up bars the column folds and
+    // never sweeps can carry no hit (D-2101). `can_hit` is also what the
+    // progress events report as `bars`, so their `support_ppm` is the support
+    // actually asked of the sweep.
+    let (min_hits, can_hit) = if let Some(ppm) = named_ppm {
+        // THE AUDIT'S OWN COLUMN, read through the cache `audit_range_cached`
+        // consults next, so it is built once either way (D-1557). An
+        // unstamped build refuses in `audit_range_cached` before any load, and
+        // a load that refuses is held and refused there with its own reason,
+        // so neither reaches the ladder; both keep the retained count rather
+        // than writing a preparation attempt the audit would not have written.
+        let can_hit = match store.commit {
+            Some(commit) => cache
+                .inputs(
+                    AuditKey {
+                        root: root.clone(),
+                        vendor,
+                        underlying: underlying.to_owned(),
+                        rung: rung.to_owned(),
+                        span: (from, to),
+                        commit: commit.to_owned(),
+                    },
+                    || load_audit_inputs(&root, vendor, underlying, rung, (from, to), commit),
+                )
+                .map_or(retained, |inputs| inputs.column.census().swept),
+            None => retained,
+        };
+        (min_hits_for_swept(can_hit, ppm), can_hit)
     } else {
         // A NAMED SUPPORT READS ONLY THE THREE FACTS ABOVE, so a descent's held
         // span is never copied; the derivation withholds days from its own
@@ -14605,8 +14666,10 @@ fn one_rung_cached(ask: RungAsk<'_>, store: RungStore, cache: &mut AuditCache) -
                 };
             }
         };
+        let can_hit = column.census().swept;
+        let statistical = min_hits_for_swept(can_hit, statistical_support_floor(can_hit));
         match affordable_min_hits(&column, &root, &span, digest) {
-            Ok(affordable) => affordable.max(statistical),
+            Ok(affordable) => (affordable.max(statistical), can_hit),
             Err(why) => {
                 return RungRow {
                     rung,
@@ -14647,7 +14710,7 @@ fn one_rung_cached(ask: RungAsk<'_>, store: RungStore, cache: &mut AuditCache) -
         feed: vendor_word,
         underlying,
         rung,
-        bars: u64::try_from(bars).unwrap_or(u64::MAX),
+        bars: can_hit,
         min_hits,
         from,
         to,
@@ -15075,6 +15138,21 @@ fn descent_bar_count(
     Ok((bars, rules))
 }
 
+/// A descent's floor in ppm of the `can_hit` rows its steps' column swept, or
+/// the refusal a column that swept nothing earns: no combination can hit an
+/// unswept span, and a floor over zero rows is a division by zero rather than
+/// a threshold. D-2101.
+fn descent_floor(rules: &Rules, can_hit: u64, bar_count: u64) -> Result<u64, String> {
+    if can_hit == 0 {
+        return Err(format!(
+            "refused: the column swept none of this span's {bar_count} bar(s): it never warmed \
+             up, so no combination can hit and a support floor is a division by zero rather \
+             than a threshold.\n"
+        ));
+    }
+    Ok(statistical_floor_ppm(rules, can_hit))
+}
+
 /// The refusal a `(rate, bound)` pair earns when no sample size can satisfy it,
 /// or `None` when the descent may proceed.
 ///
@@ -15225,7 +15303,20 @@ fn elite_descend_with_attempt(
     if let Some(why) = unsatisfiable_confidence_pair(&rules) {
         return why;
     }
-    let floor = statistical_floor_ppm(&rules, bar_count);
+    // LOADED ONCE, HERE, AND HELD FOR EVERY STEP: nothing a step loads
+    // depends on its support. D-0997, o1cli-1.
+    let mut cache = ScreenCache::default();
+    // THE FLOOR IS A FRACTION OF THE ROWS THAT CAN HIT. Each step scales its
+    // support to the column's swept rows (D-2101), so a floor in ppm of the
+    // retained count, warm-up included, would ask the step for fewer hits
+    // than the round trips the rules need. A span whose load or column
+    // refuses keeps the retained count: every step refuses with that reason.
+    let can_hit =
+        screen_swept(vendor_word, underlying, known, span, &mut cache).unwrap_or(bar_count);
+    let floor = match descent_floor(&rules, can_hit, bar_count) {
+        Ok(floor) => floor,
+        Err(why) => return why,
+    };
 
     let ladder = support_ladder(DESCENT_CEILING_PPM, floor);
     let policy = Policy {
@@ -15242,7 +15333,7 @@ fn elite_descend_with_attempt(
         underlying,
         rung: known,
         span: (from, to),
-        bars: bar_count,
+        bars: can_hit,
         attempt,
     };
 
@@ -15251,7 +15342,7 @@ fn elite_descend_with_attempt(
         underlying,
         known,
         (from, to),
-        bar_count,
+        can_hit,
         floor,
         ladder.len(),
     );
@@ -15260,9 +15351,6 @@ fn elite_descend_with_attempt(
     // THE FIRST REFUSAL, KEPT, because a walk where every step refused has no
     // page to show and `exhausted_walk` would otherwise report the market.
     let mut first_refusal: Option<String> = None;
-    // LOADED ONCE, ON THE FIRST STEP, AND HELD FOR EVERY LATER ONE: nothing a
-    // step loads depends on its support. D-0997, o1cli-1.
-    let mut cache = ScreenCache::default();
     for (step, support) in ladder.iter().enumerate() {
         // PROGRESS TO STDERR as each step lands, for the reason `descend`
         // records: a walk that buffers its whole output prints nothing for
@@ -17044,6 +17132,83 @@ struct ScreenCache {
     loaded: Option<(ScreenKey, Result<ScreenInputs, stored::Refusal>)>,
 }
 
+impl ScreenCache {
+    /// The held inputs for this question, loading them first unless they are
+    /// the ones held.
+    fn inputs(
+        &mut self,
+        root: &std::path::Path,
+        vendor: Vendor,
+        underlying: &str,
+        rung: &str,
+        span: ((u16, u8), (u16, u8)),
+    ) -> Result<&ScreenInputs, stored::Refusal> {
+        let key = ScreenKey {
+            root: root.to_path_buf(),
+            vendor,
+            underlying: underlying.to_owned(),
+            rung: rung.to_owned(),
+            span,
+        };
+        if self.loaded.as_ref().is_none_or(|(held, _)| *held != key) {
+            self.loaded = Some((
+                key,
+                load_screen_inputs(root, vendor, underlying, rung, span),
+            ));
+        }
+        match &self.loaded {
+            Some((_, Ok(inputs))) => Ok(inputs),
+            Some((_, Err(why))) => Err(why.clone()),
+            None => Err("the screen input cache holds nothing after a load".to_owned()),
+        }
+    }
+}
+
+/// The rows the screen's column swept, the bars a combination can hit, read
+/// through `cache` exactly as the first screen step will load them. D-2101.
+///
+/// `None` wherever the step itself would refuse before reading the span (an
+/// unknown feed, no store, a spent screen budget), or where the load (a word
+/// that is no stored rung included) or the anchored column refused: each step
+/// then refuses with that reason, so no support derived from this is ever
+/// swept. An unstamped build
+/// still loads here, as nothing in the load writes; its first step refuses
+/// for the stamp and the inputs go unused.
+fn screen_swept(
+    vendor_word: &str,
+    underlying: &str,
+    rung: &str,
+    span: ((u16, u8), (u16, u8)),
+    cache: &mut ScreenCache,
+) -> Option<u64> {
+    screen_swept_in(
+        &store_root().ok()?,
+        vendor_word,
+        underlying,
+        rung,
+        span,
+        cache,
+    )
+}
+
+/// [`screen_swept`] over a store root already resolved.
+fn screen_swept_in(
+    root: &std::path::Path,
+    vendor_word: &str,
+    underlying: &str,
+    rung: &str,
+    span: ((u16, u8), (u16, u8)),
+    cache: &mut ScreenCache,
+) -> Option<u64> {
+    // No rung check of its own: the descent hands this the rung it already
+    // resolved from `EVERY_RUNG`, and a word that is no stored rung refuses at
+    // the load below, so a second membership test would answer nothing new.
+    let vendor = parse_vendor(vendor_word).ok()?;
+    recorded_budget_refusal().ok()?;
+    let inputs = cache.inputs(root, vendor, underlying, rung, span).ok()?;
+    Some(inputs.column.as_ref()?.census().swept)
+}
+
 /// Load the support-independent half of a stored screen, in its original order.
 fn load_screen_inputs(
     root: &std::path::Path,
@@ -17112,10 +17277,12 @@ fn load_screen_inputs(
     // siblings -- all still hold: a hole still refuses when its day IS swept.
     // What changed is that the day is not swept. Substituting would answer a
     // question with the wrong bar; withholding declines to answer it, out loud.
+    let cash = stored::span_cash_closes(root, &span.key, None, &span.bars)?;
     let holed_days = crate::minute_gaps::days_with_minute_holes(
         &span.bars,
         execution_slice,
         stored::rung_length_micros(rung)?,
+        |day| stored::session_close_for(cash.as_ref(), day),
     );
     let withheld = if holed_days.is_empty() {
         0
@@ -17183,20 +17350,7 @@ fn screen_range_kernel_cached(
     // of an `elite` descent arrives here, and is still refused here on every
     // step even when the span is already held. D-0685.
     recorded_budget_refusal()?;
-    let key = ScreenKey {
-        root: root.clone(),
-        vendor,
-        underlying: underlying.to_owned(),
-        rung: rung.to_owned(),
-        span: (from, to),
-    };
-    let loaded = match &mut cache.loaded {
-        Some((held, loaded)) if *held == key => loaded,
-        slot => {
-            let loaded = load_screen_inputs(&root, vendor, underlying, rung, (from, to));
-            &mut slot.insert((key, loaded)).1
-        }
-    };
+    let loaded = cache.inputs(&root, vendor, underlying, rung, (from, to));
     let ScreenInputs {
         span,
         signal_length,
@@ -17208,14 +17362,22 @@ fn screen_range_kernel_cached(
         availability,
         cost,
         column,
-    } = loaded.as_ref().map_err(Clone::clone)?;
+    } = loaded?;
     let (signal_length, withheld, availability) = (*signal_length, *withheld, *availability);
     let execution = execution_bars.as_ref().map(|exec| Execution {
         bars: &exec.bars,
         signal_length_micros: signal_length,
     });
-    // Support is a fraction of the admitted sample, which excludes holed days.
-    let min_hits = min_hits_for(span.bars.len(), support_ppm);
+    // Support is a fraction of the bars that can hit: the column's swept
+    // rows, which exclude holed days and the warm-up the column folds without
+    // sweeping (D-2101). A column the anchored build refused leaves the
+    // retained count in place: `audit_bars` rebuilds that column and refuses
+    // with its reason before `min_hits` reaches the ladder or the ledger.
+    let can_hit = column.as_ref().map_or_else(
+        || u64::try_from(span.bars.len()).unwrap_or(u64::MAX),
+        |column| column.census().swept,
+    );
+    let min_hits = min_hits_for_swept(can_hit, support_ppm);
     let ladder = ladder_for(min_hits)?;
     let horizon = horizon_for(&span.bars, rung != EXECUTION_RUNG);
     let rungs = grid_rungs(&span.bars);
@@ -17246,7 +17408,7 @@ fn screen_range_kernel_cached(
             .join(" ");
         let _ = writeln!(
             header,
-            "MINUTE-GAP SESSIONS WITHHELD: {withheld} signal bar(s); IST dates: {dates}. Support uses the remaining {} signal bars.",
+            "MINUTE-GAP SESSIONS WITHHELD: {withheld} signal bar(s); IST dates: {dates}. Support uses the {can_hit} swept bar(s) of the remaining {} signal bars.",
             span.bars.len(),
         );
     }

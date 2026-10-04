@@ -14753,9 +14753,10 @@ per-candidate primitive from `CLAUDE.md` §3 rule 4.
   test below (D-1731's "960 to 4,800" was low).
   MEASURED on the debug test
   `tests::the_audit_renders_every_stage_of_the_institutional_stack` (18,480
-  tiers, one key, 98 candidates, nothing admits): 6.0 s at `8cdac60` (the
-  unsound probe), not finished after 2,960 s at `02e13b3` (one full screen per
-  tier, killed), and 3.2 s with D-1734 (one grid pass for the walk, plus one
+  tiers, one key, 98 candidates, nothing admits): 6.0 s with D-1720's
+  mildest-first probe in place (the unsound probe), not finished after
+  2,960 s with D-1731's walk (one full screen per tier, killed), and 3.2 s
+  with D-1734 (one grid pass for the walk, plus one
   for the operator's own rules). The pass count is proven by
   `the_tier_walk_builds_one_grid_pass_per_distinct_forced_stop` (SCB-13) and
   the answer by `the_cached_tier_walk_equals_the_full_walk_on_real_screens`.
@@ -14830,3 +14831,28 @@ per-candidate primitive from `CLAUDE.md` §3 rule 4.
   `proving` table once per token, O(table) per lookup in `awk`. Measured: the
   gate ran in 3 min 8 s against 4 min 0 s before on the same machine; not a
   bound.
+
+## Dated cash-session closes on the stored path — D-2102, 4 October 2026
+
+- **Masters are read per CAS day, and a share's span reads them twice.** For
+  a cash share, every distinct signal day on or after 2026-08-03 that the
+  calendar marks a full session reads that day's receipted master from
+  `<store>/session-masters` and parses it once: O(D) masters for D such days,
+  each O(its CSV, at most 32 MiB expanded). The minute-gap census and the
+  exact-minute context each load their own set, so a span pays the reads
+  twice. Not measured; read off the source. An index reads none.
+- **A missing master withholds, it does not refuse the span.** A day whose
+  master is absent, corrupt, or does not name the exact share and ISIN
+  answers no close, so the overlay keeps the bucket's own last minute and the
+  census withholds the day as a minute gap. Only the prior session that seeds
+  `GapFib` refuses, by name, because no later day can stand in for it.
+- **The ISIN is today's.** The share's ISIN comes from
+  `brutex_core::universe::nse_isin`, the current table. A day whose master
+  lists the share under an earlier ISIN is held UNVERIFIED rather than
+  matched on the symbol alone.
+- **The Boolean candidate universe is still venue-blind.** Its overlay is
+  handed a bare minute slice and still asks `stored::nse_session_close_minute`.
+  On a CAS day an eligible share's final bucket demands 15:29 and that run
+  refuses with `MissingClosingMinute`. It refuses rather than pricing the
+  wrong minute. Threading the dated closes through its receipts is not done
+  here.

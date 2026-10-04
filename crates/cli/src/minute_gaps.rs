@@ -247,8 +247,10 @@ pub fn days_with_interior_gaps(minutes: &[Candle]) -> Vec<i64> {
 ///
 /// For each signal bar this computes the minute
 /// [`indicators::anchored::exact_closing_minute`] says the overlay will demand,
-/// with [`crate::stored::nse_session_close_minute`], the session close the
-/// stored column passes it, and checks that exact stamp is held. So the census
+/// with `session_close`, which every caller takes from
+/// [`crate::stored::session_close_for`] -- the same close the stored column
+/// passes the overlay, dated per day for a cash share (D-2102) -- and checks
+/// that exact stamp is held. So the census
 /// and the join cannot disagree about which day is unsourceable, the retry
 /// loops behind it become a defence, and a day the overlay would not refuse is
 /// not withheld: a `1min` rung whose session ends early has no signal bar
@@ -268,6 +270,7 @@ pub fn days_with_minute_holes(
     signal: &[Candle],
     minutes: &[Candle],
     signal_length_micros: i64,
+    session_close: impl Fn(i64) -> Option<u16>,
 ) -> Vec<i64> {
     let interior = days_with_interior_gaps(minutes);
     let mut edges: Vec<i64> = Vec::new();
@@ -277,7 +280,7 @@ pub fn days_with_minute_holes(
         let expected = indicators::anchored::exact_closing_minute(
             bar.ts_micros,
             signal_length_micros,
-            crate::stored::nse_session_close_minute(day),
+            session_close(day),
         );
         while minutes
             .get(cursor)

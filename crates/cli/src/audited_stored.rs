@@ -76,8 +76,11 @@ impl Inputs {
         let (current_daily, current_daily_id) = collector.one(Timeframe::DAY_1, current)?;
         let daily =
             stored::daily_context_from_span(join(prior_daily, current_daily)?, &loaded.bars)?;
-        let exact_minute =
-            stored::exact_minute_context_from_span(join(prior_minute, minute)?, &loaded.bars)?;
+        let exact_minute = stored::exact_minute_context_from_span(
+            join(prior_minute, minute)?,
+            &loaded.bars,
+            request.store_root,
+        )?;
         let roles = [
             signal_id,
             minute_id,

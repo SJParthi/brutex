@@ -967,8 +967,13 @@ fn price_all(
             crate::EXECUTION_RUNG
         )
     })?;
-    let holed_days =
-        crate::minute_gaps::days_with_minute_holes(&span.bars, execution_slice, signal_length);
+    let cash = stored::span_cash_closes(root, &span.key, None, &span.bars)?;
+    let holed_days = crate::minute_gaps::days_with_minute_holes(
+        &span.bars,
+        execution_slice,
+        signal_length,
+        |day| stored::session_close_for(cash.as_ref(), day),
+    );
     if !holed_days.is_empty() {
         let (kept, _withheld) = crate::minute_gaps::withhold(&span.bars, &holed_days);
         span.bars = kept;

@@ -58271,3 +58271,130 @@ stated in `docs/06-limits.md`.
   (`bench`) are not in the declaration table. Exactness would refuse rows
   that are right without the scanner growing a full module tree, and that
   is not built here.
+
+### D-2101 — Support is a fraction of the rows a column swept, not of the retained slice — 2026-10-04
+
+**What was wrong.** D-1661 made every door record the column's swept rows as
+the ledger's `bars`. It left the screens' `min_hits` scaled to the retained
+slice, warm-up included, and named that as open. The lane 1-b redo carried it
+as "screen min_hits scaled to retained bars incl. warm-up". Measured on the
+warmed stored fixture (`Fixture::warmed`): 3,000 one-minute bars are retained
+and 1,500 are swept; on 5min it is 600 and 300.
+
+- The column folds the warm-up bars and never sweeps them, so no mask is
+  recorded for them and no combination can hit one.
+- At 999,999 ppm a screen asked for 2,999 hits from 1,500 rows that can hit.
+- At 600,000 ppm a named range rung asked for 1,800. Nothing could ever be
+  frequent, and the rung recorded an empty search as its answer.
+
+The same denominator sized `range-all`, `pool` pass 1 and `descend` (their
+named support and the derived statistical floor), and the elite descent's
+floor and per-step progress.
+
+**Decision.** `min_hits_for_swept(swept, ppm)` is the rule. `min_hits_for` is
+the same rule over a `usize`.
+
+- **Stored screen.** It scales to `column.census().swept` from the screen
+  cache's own column. A column the anchored build refused keeps the retained
+  count. `audit_bars` rebuilds that column and refuses with the same reason
+  before `min_hits` reaches the ladder or the ledger. The minute-gap note now
+  names both counts.
+- **`one_rung_cached`, named support.** It reads the swept count from the
+  audit's own cached inputs (`AuditCache::inputs`, the same key
+  `audit_range_cached` uses next), so the rung still prepares its inputs once.
+  An unstamped build, or a load that refuses, keeps the retained count and
+  loads nothing extra. Either refuses in the audit before the ladder.
+- **`one_rung_cached`, derived support.** The statistical floor and its ppm
+  are both read from the derivation's own column.
+- **Both.** The progress events' `bars` is the swept count, so their
+  `support_ppm` is the support actually asked.
+- **Elite descent.** It reads the swept count through the `ScreenCache` its
+  steps reuse (`screen_swept`), so it still loads once. It sizes its floor and
+  banner on that count, and refuses by name when the column swept nothing.
+  A span whose load or column refuses keeps the retained count, and every
+  step then refuses with that reason.
+
+**Result-changing, and recorded as such.** `min_hits` is a run-identity term
+(`Params::of(ladder)`), so these runs record new identities. Three tests
+pinned the old value as correct, because it was the defect:
+
+- `stored_screens_scale_support_to_retained_bars_and_disclose_holed_sessions`
+  is renamed `..._to_swept_bars_...` and pins `min_hits == swept`.
+- `stored_screen_support_and_exact_retries_bind_the_actual_sample`.
+- The 999,999 ppm screen row: 2,999 becomes 1,499.
+
+Each was run against the old code and failed there:
+
+- `left == right failed: 100% support must ask a hit of every swept row`
+- the `min_hits` assertion at line 484
+- `a_named_range_support_is_scaled_to_the_swept_rows_not_the_warm_up`:
+  `1min 600000`
+
+A ledger row written before this change keeps its old identity. It cannot
+meet a rerun from this build under one identity, because the commit is an
+identity term. SWS-01..04.
+
+**Not in this entry.** `ledger-all` and `ledger-v6` size one sweeper per rung
+on NIFTY's retained bar count before any column is built
+(`ledger_all::build_sweepers`, `strict_v6_inputs`). That is the same
+denominator defect on the Population V5 path. It needs the population chain
+to size from its own column, and it is fixed as its own decision rather than
+folded in here.
+
+**Rejected.**
+
+- Subtracting a fixed warm-up length. Warmth is read from the evaluator
+  (EMA200, the prior five bars, yesterday) and can be lost again, so only
+  the fold knows the swept count.
+- Building a second column to count it. The cached column is the one the
+  sweep uses.
+
+### D-2102 — A cash share's session close on a CAS day comes from its dated master on the stored path — 2026-10-04
+
+**Finding.** GAP12-6, the remainder D-1663 left open. From 2026-08-03 an NSE
+cash share's continuous session ends at 15:15 when that day's master marks
+it eligible for the closing auction, and at 15:30 when it does not
+(`docs/00-charter.md` §9: NSE/CMTR/73845 and 74466). The stored read asked
+only the index calendar, `stored::nse_session_close_minute`, in three places:
+
+- The `GapFib` prior session. D-1663 made it refuse every equity CAS day.
+- The exact-minute overlay. It demanded 15:29 of an eligible share.
+- The minute-gap census. It withheld that share's CAS days as minute gaps.
+
+The landing already drops rows at or after the dated close
+(`fetch::cash_close_verdict`), so an eligible share's stored minutes end at
+15:14.
+
+**Decision.**
+
+- `stored::load_cash_closes` builds a `pull::cash_auction::Schedule` from the
+  receipted local masters: one `read_local_lifecycle` per distinct CAS full
+  session day, then the share's exact symbol and ISIN through the new public
+  `VerifiedLifecycleMaster::eligibility`. The pull fold uses the same
+  authority, so there is no second one.
+- Nothing is downloaded. No flag is carried from one day or one share to
+  another.
+- `ExactMinuteContext` now holds the closes for a cash share. Its
+  `session_close_minute` is what the overlay and the census ask, through
+  `stored::session_close_for`.
+- The `GapFib` prior session is judged against the share's own close. It
+  refuses by name only when that day's flag cannot be read.
+- `days_with_minute_holes` now takes the close as a parameter. Every
+  production caller passes the share's dated closes.
+- The closes' digest binds every day, flag, master hash and unverified
+  reason. `bind_cash_closes` folds it into the stored anchored identity. An
+  index has no closes, so its identity is unchanged.
+
+Tests: DCC-01..05. LBD-07 still refuses with no master.
+
+**Not closed here.** The Boolean candidate universe's overlay takes a bare
+minute slice and stays venue-blind. On a CAS day it refuses, and does not
+misprice (`docs/06-limits.md`).
+
+**Rejected.**
+
+- Treating every F&O share as eligible. The list is dated, and NSE/CMTR/74466
+  names the rule, not each day's membership.
+- Refusing a whole span when one master is missing. Only the prior session
+  has no stand-in. A signal day without its flag is withheld as a minute gap,
+  which the report already names.
