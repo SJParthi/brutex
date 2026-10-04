@@ -57384,3 +57384,97 @@ dump of `reality_check`, `spa`, `romano_wolf`, both receipts,
 configurations (periods 2--225, magnitudes 1 to 2^52 so both paths run, blocks
 1--300, three seeds) was byte-identical before and after this change; that dump
 was a temporary test and is not committed.
+
+### D-2311 — The tree-reading gates decide in Rust, not in shell text processing — 2026-10-04
+
+**Finding.** Thirteen steps of the `language-purity` job -- gates 0, 1, 1e, 1b,
+1g, 1f, 1c, 1d, 2, 9, 9b, 10b and 7 -- decided with shell text processing
+written inline in `.github/workflows/ci.yml`: two inline programs for a
+text-processing language (gate 2's manifest comment strip, gate 7's
+dependency reader), eight stream edits, and 42 `grep`, 5 `tr`, 4 `sort`, one
+`cut`, one `uniq` and one `mapfile` inside five loops and six `case`
+statements. CLAUDE.md section 2 makes Rust the only language outside `web/`;
+a program written inline in a tracked workflow is a second one. Gate 1d also
+kept its 613 declared words, and the reason for each group, in shell
+variables.
+
+**Decision.** Every listing, pattern and verdict of those steps is
+`.github/gates_tree.rs`: one std-only tool, `#![forbid(unsafe_code)]`, with a
+subcommand per gate, built and tested by `rustc` in gate 0 exactly as
+`source_scan.rs` is, and run by each later step from
+`${RUNNER_TEMP}/gates-tree`. The step names, ids, conditions, environment and
+the comments that justify each gate are kept; gate 1d's word groups moved
+into the tool unchanged, each beside the comment that argues it, and the word
+sets were compared equal (613 words). Every pattern is matched by hand and
+names the expression it replaces; where the old answer depended on the
+runner's locale (a word boundary, a case-blind match, which characters are
+space, binary-file detection), the matcher takes the reading that refuses
+more. Every listing is `git ls-files -z`.
+
+What stays in a step, and why. Gate 0's spawn rule (D-2344) lets a
+`.github/*.rs` tool start `git` and nothing else by name, so the tool cannot
+run `source_scan`: where a gate needs the scanner, the step runs it between a
+`prepare` call that writes its NUL listing and a `verdict` call that reads the
+scanner's output file and its exit status (`st=0; "$scan" .. > out ||
+st=$?`), and any non-zero status is refused. Gate 1e keeps its two `cargo`
+captures, which D-0911 and `c4_cli_02_limits` pin by text; its stubs are now
+copies of the tool binary, which log their own name beside themselves and
+exit 127, so no shell program is written to make one. Gate 0 keeps the one
+`GITHUB_ENV` write gate 1g sanctions by its exact text.
+
+Where the port refuses more than the shell did, deliberately: a name holding a
+newline is no longer accepted on any one of its lines (gate 1's extension);
+a path git would have quoted is read as itself (gates 1b, 1c, 1g, 2, 9b); a
+tracked file that cannot be read is refused rather than skipped (gates 1c, 1d,
+2, 9b); a binary or non-UTF-8 file is scanned rather than reported to standard
+error and skipped (gates 1c, 1d); `source_scan strings` failing is refused by
+name rather than stopping the step with no message of the gate's own (gate
+1d); a missing `docs/04-invariants.md`, or one in which no identifier is
+read, is refused where the pipeline printed OK (gate 10b); `web` existing as
+any kind of entry after removal is refused (gate 1e). Gate 7 keeps its old
+reading exactly, flat `[dependencies]` table only, because the crate does not
+exist and the gate skips.
+
+The ratchet `AWK_IN_CI` in `.github/source_scan.rs` pins 71 inline programs;
+this port removes two, so it must read 69 when this lands. That constant was
+not edited here.
+
+**Proof.** `rustc --test` of `.github/gates_tree.rs` (40 tests) covers every
+refusal branch of every gate and the edge cases the old expressions decided:
+comment lines, CRLF, Unicode spaces and case folds, names with spaces and
+newlines, quoted and escaped literals, the 32-character segment bound, word
+boundaries and the `printf`/guard lines gate 1g sanctions. Run on this tree,
+every ported step printed output byte-identical to the step it replaced, and
+gate 0 differs only by the ratchet count. Forty-seven mutated trees were run
+through the old step on a clone of the old tree and the new step on a clone of
+the new one. Forty-five were refused by both: gate 1 (a `.ts` under
+`crates/`, an executable `.rs`, a nested `LICENSE`, a `.json` under
+`.github/`, a name with a space and no allowed extension, an uncompiled
+`.rs`, a NUL byte, a symlink), gate 1b (root `.json`, `.yml` under `crates/`,
+a nested `.github/`), gate 1g (a tracked `.cargo` config, a nested
+`rust-toolchain`, `toolchain.path`, a nextest setup script, a wrapper, a
+`GITHUB_ENV` write, a computed `export`, the guard line with CRLF, `cargo
+--config`), gate 1f (a script body, an inline handler in a file named with a
+space), gate 1c (a literal path, an underscore org with a capital
+environment, a tracked `credentials.toml`, a path in a file named with a
+space), gate 1d (an undeclared literal, an escaped inner one, a quoted word in
+the manifest), gate 2 (a spawning build script, `build =`, `links =` with a
+trailing comment, an unresolved module), gate 9 (a dev-dependency, unreadable
+TOML), gate 9b (a dotted-table dependency, a workspace type in a comment, a
+re-export), gate 10b (a duplicated id, a duplicated suffixed id), gate 7 (two
+extra dependencies) and gate 0 (a `continue-on-error`, a crate spawning `sh`
+from a file named with a space, a crate spawning `node`). The messages were
+the same except in two places: gate 1d's remedy line now names this file
+where it said "above", and for the file named with a space the old gate 0
+refused because the scanner was handed half a name and could not open it,
+where the new step names the spawn. Of the other two trees, an untracked
+`crates/core/Cargo.toml` passed gate 9 under both steps, and a deleted
+`docs/04-invariants.md` passed the old gate 10b and stops the new one with an
+error. Gate 1e was run DRY, not built: the two `cargo` commands of both the
+old and the new step were replaced by fake commands and everything else ran
+-- the worktree with `web/` deleted, the stubs on PATH, every verdict --
+through nine scenarios (clean, a stub invoked and its failure ignored, a
+failed build, package metadata in the output, `sh`, `perl`, a stub invoked by
+a test, a failed test run, metadata in the test output), with the same
+outcome and message from both. The full workspace build and test under the
+new step was not run here.
