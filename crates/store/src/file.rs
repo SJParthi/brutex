@@ -3624,21 +3624,28 @@ static FAILED_BARRIERS: Mutex<std::collections::BTreeSet<PathBuf>> =
 /// The durability barrier of an append. A failure is remembered for `path`
 /// before it is returned, so no later append confirms it with a second one.
 fn barrier(file: &File, path: &Path) -> Result<(), StoreError> {
-    #[cfg(test)]
-    let synced = if tests::sync_fault_fires() {
-        Err(io::Error::other("injected sync fault"))
-    } else {
-        file.sync_all()
-    };
-    #[cfg(not(test))]
-    let synced = file.sync_all();
-    synced.map_err(|refusal| {
+    sync_hooked(file).map_err(|refusal| {
         FAILED_BARRIERS
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(path.to_path_buf());
         classify(path, Action::Sync, &refusal)
     })
+}
+
+/// `sync_all`, through the thread-local test fault injector.
+///
+/// The injector is compiled out of production and ADDS a branch under test
+/// rather than replacing one, so the `sync_all` line that ships is the line
+/// every test runs. It used to be a `cfg(test)`/`cfg(not(test))` fork whose
+/// production arm no test compiled (P10-07, D-2740); this is the shape of
+/// `cli::fixed_tail::sync_all_hooked` (D-1902).
+fn sync_hooked(file: &File) -> io::Result<()> {
+    #[cfg(test)]
+    if tests::sync_fault_fires() {
+        return Err(io::Error::other("injected sync fault"));
+    }
+    file.sync_all()
 }
 
 /// Refuses an append to a month whose barrier already failed in this process.
