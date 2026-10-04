@@ -60687,3 +60687,24 @@ unchanged.
 
 **Proof.** `web/tests/rank-rows-unmeasurable.test.js`, which runs the page's
 own `rankRows` and pins the `cli::ranked` rule it mirrors. Gate W2 runs it.
+
+### D-2106 — An irregular session on a CAS day is refused a dated close, and a test now says so — 2026-10-04
+
+**Finding.** Lane 1-b's local mutant pass on 31f1619. The match guard
+`session == Session::full()` in `CashCloses::session_close_minute`, replaced
+with `true`, survived. No irregular session falls in the CAS era (from
+2026-08-03), so `kind_of` never handed the guard anything but a full session,
+and no test could reach the other arm. A future special session on a CAS day,
+such as a Muhurat hour, would then have been given a full day's close less one
+minute, and the minute census would have judged it against that close.
+
+**Decision.** The match moves into `CashCloses::dated_close_on(kind, dated)`,
+which takes the calendar's answer as a parameter. `session_close_minute`
+passes `kind_of(day)` unchanged, so behaviour is identical. The test hands it
+the 2025-10-21 Muhurat session on a CAS-era day and requires `None`, and a full
+session the dated 15:14. With the guard replaced by `true`, the test fails.
+DCC-02 says so.
+
+**Rejected.** Deleting the guard as unreachable. The calendar gains a session
+the day NSE announces one, and the guard is what keeps that day from a full
+day's close.
