@@ -48,3 +48,9 @@ resume/fix-board/builder/target/release/fixboard \
 Threads in the new project write per-item status to `/mnt/project-files/fix-board/status/<thread>.tsv`
 (header `id	state	commit	note`; states found, fixing, branch, partial, pushed, green, doc). Those files were seeded
 from the copies above on 2026-10-04 and are passed last, so they win.
+
+## First rebuild, counted
+
+886 rows = the v20 page's 779 + 40 the v24 snapshot already had + 67 that no earlier board listed
+(44 zero-loop round-1 slice findings, 9 numeric pass 2/3, 9 crash-edge CE-18..22 and CE-36..39, 5 named only in a
+status file). Correction to commit 51e5e72a's message, which called all 107 additions new to v24; 67 were.
