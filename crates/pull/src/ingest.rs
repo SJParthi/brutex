@@ -1489,7 +1489,14 @@ fn keep_in_session(
         // the same value is a bar this engine declines — counted, never stored,
         // and never silently kept.
         match verdict(bar.ts_micros) {
-            Ok(None) => kept.push(*bar),
+            Ok(None) => {
+                // Kept on a day the calendar cannot classify: counted by name
+                // (P-03, D-2673), never a silent keep.
+                if crate::session::on_unclassified_day(bar.ts_micros.div_euclid(1_000_000)) {
+                    census.count_unclassified_kept();
+                }
+                kept.push(*bar);
+            }
             Ok(Some(reason)) => census.count(reason),
             Err(_) => census.count(crate::session::DropReason::BeforeWindow),
         }

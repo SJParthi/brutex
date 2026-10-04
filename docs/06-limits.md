@@ -1457,6 +1457,15 @@ because that rule is not recorded in `docs/00-charter.md`. An expiry after
 2026-09-04 is outside the calendar's measured range and cannot be checked; it
 is passed through unchanged until the calendar is extended.
 
+**A day open only for a Muhurat hour is refused the same way (D-2671, CE-53).**
+Refusing only `Closed` accepted 2021-11-04 (a Muhurat of unmeasured length) and
+2025-10-21 (13:45–14:44) as weekly expiries, and their bars were filed under
+that key and priced to a 15:30 close. `expiry_of` now accepts only a day the
+calendar records as a full regular session, and refuses a Muhurat-only or other
+irregular day by name. `pull::rolling::listing_of` still reports such a week's
+cadence `Listed`, so the api's walk asks it and counts the refusal rather than
+dropping the cadence.
+
 **How often that bites is UNVERIFIED and is not estimated here.** It depends on
 the NSE holiday calendar, which this repository does not hold and which
 `docs/00-charter.md` records no source for; putting a number on it would be
@@ -6533,6 +6542,20 @@ the 15:45 reopening; that is the safe direction until instrument-specific
 primary evidence exists. Calling all 166 absent normal-market slots vendor
 holes would be the opposite and unsupported claim. CASH and derivative audits
 continue to use the verified 220-minute exchange session.
+
+**Ingest now uses the same session (D-2670, CE-52).** Until then
+`pull::session::Window::verdict` read only each venue's regular 09:15–15:30
+hours, so `fetch::land` and `ingest::keep_in_session` dropped every 15:45–16:59
+bar a vendor served for 2021-02-24 as `AtOrAfterSessionClose`, while the cash
+and derivative gap audit above, asking `pull::calendar::kind_of`, counted those
+75 minutes as vendor holes no re-pull could fill. The verdict now asks
+`kind_of` first: on a day the calendar records as an irregular session it keeps
+exactly that session's windows on every venue, and on a Muhurat whose length
+was never measured it refuses with `SessionError::SessionLengthUnmeasured`
+rather than judging the bar against hours that day did not have. A full day, a
+closed day and a day outside the calendar's measured range still use the
+venue's dated table. Bars already dropped before this change are not
+recovered: the store is append-only.
 
 The fixed-date subject check is O(1) time and O(1) space per day. The complete
 month audit remains linear in month minutes and stored bars as §102 and P-70
