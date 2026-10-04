@@ -57648,3 +57648,9 @@ line changes, and the lock's refusal stays exactly as strict. Proven locally:
 - CE-49. `note_grid_progress` sent only `feed` and `underlying`, never the span or an `attempt`, and `web/src/lib/live-progress.ts` refuses the whole fold for a live event without an exact attempt, so live progress was refused the moment pricing began, another run's progress line included. The grid-entered, grid-finished and validation-stage events took their attempt only from a browser-started run, so a terminal sweep's events carried none; the rung events already fell back to `binding_attempt`.
 - `cli::with_live_context` adds feed, underlying, the four span fields and the attempt (browser attempt, else `binding_attempt`) to all four builders, written once. `grid_progress_event` is split from its emitter so its shape is asserted with the others; it carries 10 of telemetry's 12 fields.
 - Proved by `cli::tests::every_live_boundary_carries_the_exact_question_inside_the_field_ceiling` (now including the progress line) and `cli::tests::a_live_event_without_a_browser_attempt_still_carries_one_when_a_sink_runs` (ZX-07).
+
+### D-2657 — Two invariant rows say what their proofs actually test — 2026-10-04
+
+- P5-01. RS-08 said a stale chosen-trade handle refuses a ragged tail, and cited a test by that name; the code cuts the ragged tail under the writer lock, exactly as the frontier does (D-1901, ZL-04), and the test is `cli::trades::tests::a_stale_handle_cuts_a_ragged_chosen_trade_tail_before_appending`. The row now separates the two behaviours: frontier and chosen-trade handles cut, a stale receipt handle refuses.
+- P5-02. ZR-44 cited its proof under the package name `brutex_core::knob::tests`; invariant rows name crates by directory, so the path is `core::knob::tests`.
+- No code changed; the rows now name tests that exist and the behaviour those tests assert.
