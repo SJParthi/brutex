@@ -14726,3 +14726,23 @@ UNVERIFIED as measurements.
   exit record that cannot be priced; each still blocks to its time exit, the
   conservative extent, because nothing before a hole was what made them
   unpriceable.
+
+## `/logs.json` and `/logs` still read up to 8 MiB per admitted request — D-2327, 4 October 2026
+
+- **What D-2327 bounded.** The two-half tail walk no longer runs on a Tokio
+  worker. It runs in `detail::run_log_read`'s pool of
+  `MAX_LOG_READ_CONCURRENT` = 4 blocking slots, and a fifth request is
+  refused with a named 429 before it reads anything. At most 4 × 2 ×
+  `logs::SCAN_BYTES` = 32 MiB of log is being read and decoded at once, and
+  none of it holds an async worker.
+- **What it did not bound: the cost of one admitted request is O(file), not
+  O(1).** Each request still walks each half newest-first until it has
+  `limit` matches or has read `SCAN_BYTES` (4 MiB), and decodes every line it
+  reads. A `run=` filter whose events are all in the other half, or a
+  `target=` nothing logs, reads that half to its cap on every call. The
+  backtest page's 2-second poll is such a call for one half. It was not cut
+  further because a cut changes what a successful answer contains: its
+  records, `bytes_read` and `hit_scan_cap`. Skipping the half that cannot hold
+  a run would need the attempt's origin, which the handler does not receive.
+- **Not timed.** No bench measures a log walk. The 4 MiB per half is the
+  configured cap, not a measurement, and the time it takes is UNVERIFIED.

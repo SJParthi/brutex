@@ -44,9 +44,22 @@ pub const MAX_CALENDAR_CONCURRENT: usize = 8;
 /// reads or calendar derivations are busy. W1-api2-11, D-1508.
 pub const MAX_STORE_READ_CONCURRENT: usize = 8;
 
+/// Log tail reads (`/logs.json`, `/logs`) that may be queued or running at
+/// once on the blocking pool.
+///
+/// A pool of its own for the reason [`MAX_CALENDAR_CONCURRENT`] has one: the
+/// backtest page polls `/logs.json` every two seconds per running sweep, and
+/// that poll must neither be refused because a folder read is busy nor fill
+/// the pool a folder read needs. Each admitted read walks at most
+/// `2 × crate::logs::SCAN_BYTES` of NDJSON (`docs/06-limits.md`, D-2327), so this
+/// count is what bounds the log bytes being decoded at once. log-3, P1-04-02,
+/// D-2327.
+pub const MAX_LOG_READ_CONCURRENT: usize = 4;
+
 static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 static CALENDAR_ACTIVE: AtomicUsize = AtomicUsize::new(0);
 static STORE_READ_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+static LOG_READ_ACTIVE: AtomicUsize = AtomicUsize::new(0);
 
 /// One admitted request in one pool.  Dropping it always returns the slot.
 pub(crate) struct Permit(&'static AtomicUsize);
@@ -137,6 +150,23 @@ where
     F: FnOnce() -> T + Send + 'static,
 {
     let permit = Permit::try_take_from(&STORE_READ_ACTIVE, MAX_STORE_READ_CONCURRENT)
+        .ok_or(RunError::Saturated)?;
+    admitted(permit, work).await
+}
+
+/// Runs a `/logs.json` or `/logs` tail walk outside Tokio's worker pool, in
+/// its own pool of [`MAX_LOG_READ_CONCURRENT`] slots. log-3, P1-04-02, D-2327.
+///
+/// # Errors
+///
+/// [`RunError::Saturated`] before queueing when every slot is occupied, or
+/// [`RunError::Join`] when Tokio cannot join the blocking task.
+pub async fn run_log_read<T, F>(work: F) -> Result<T, RunError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let permit = Permit::try_take_from(&LOG_READ_ACTIVE, MAX_LOG_READ_CONCURRENT)
         .ok_or(RunError::Saturated)?;
     admitted(permit, work).await
 }
@@ -491,6 +521,18 @@ pub(crate) async fn hold_every_slot() -> Result<HeldSlots, &'static str> {
     })
 }
 
+/// Takes every log-read slot that is free, for a test that must see
+/// `/logs.json` and `/logs` refused at admission. Asks for the serial guard,
+/// and every test that sends a log read holds that guard too, so while it is
+/// held this takes all [`MAX_LOG_READ_CONCURRENT`] and nothing else can.
+#[cfg(test)]
+pub(crate) fn take_every_log_read_slot(
+    _apart: &tokio::sync::MutexGuard<'static, ()>,
+) -> Vec<Permit> {
+    std::iter::from_fn(|| Permit::try_take_from(&LOG_READ_ACTIVE, MAX_LOG_READ_CONCURRENT))
+        .collect()
+}
+
 /// One long-lived read handle on a results file, refreshed per request.
 ///
 /// # Why a cached handle, and what it changes
@@ -811,10 +853,11 @@ pub(crate) fn must_admit(held: bool, pinned: bool, current: impl FnOnce() -> boo
 )]
 mod tests {
     use super::{
-        Cached, IDENTITY_REFUSAL, MAX_PAGE, MAX_PAGE_ROWS, MAX_QUERY_BYTES, MAX_RESULT_ROWS,
-        MAX_SCAN_BYTES, MAX_STORE_READ_CONCURRENT, Ordering, Page, Permit, RunError,
-        STORE_READ_ACTIVE, Selector, admission_refused, must_admit, preflight, run, run_calendar,
-        run_store_read, seek_window, window,
+        Cached, IDENTITY_REFUSAL, LOG_READ_ACTIVE, MAX_LOG_READ_CONCURRENT, MAX_PAGE,
+        MAX_PAGE_ROWS, MAX_QUERY_BYTES, MAX_RESULT_ROWS, MAX_SCAN_BYTES, MAX_STORE_READ_CONCURRENT,
+        Ordering, Page, Permit, RunError, STORE_READ_ACTIVE, Selector, admission_refused,
+        must_admit, preflight, run, run_calendar, run_log_read, run_store_read, seek_window,
+        window,
     };
 
     /// THE ADMISSION DECISION, EVERY INPUT. W1-api1-5, D-1444.
@@ -1304,6 +1347,28 @@ mod tests {
         drop(held);
         assert_eq!(run_store_read(|| 9).await, Ok(9));
         assert_eq!(STORE_READ_ACTIVE.load(Ordering::Acquire), 0);
+    }
+
+    /// A log read runs on a blocking thread, and past
+    /// [`MAX_LOG_READ_CONCURRENT`] it is refused before it queues, without
+    /// touching the other pools. log-3, P1-04-02, D-2327.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_log_read_runs_off_the_worker_and_refuses_past_its_bound() {
+        let apart = super::apart_from_slot_owners().await;
+        let worker = std::thread::current().id();
+        let blocking = run_log_read(|| std::thread::current().id())
+            .await
+            .expect("admitted log read");
+        assert_ne!(blocking, worker, "spawn_blocking owns a different thread");
+        let held = super::take_every_log_read_slot(&apart);
+        assert_eq!(held.len(), 4, "this test owns every log-read slot");
+        assert_eq!(MAX_LOG_READ_CONCURRENT, 4);
+        assert_eq!(run_log_read(|| ()).await, Err(RunError::Saturated));
+        // The other pools are not this one's.
+        assert_eq!(run_calendar(|| 7).await, Ok(7));
+        drop(held);
+        assert_eq!(run_log_read(|| 9).await, Ok(9));
+        assert_eq!(LOG_READ_ACTIVE.load(Ordering::Acquire), 0);
     }
 
     #[test]
