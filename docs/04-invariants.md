@@ -6512,3 +6512,18 @@ old line regex the same input and watched it pass.
 | AFF-42 | A version-2 month still opens, appends and reads back verified at version 2 and is never rewritten as version 3; an unflagged version-2 month still reads (D-1571) | `store::file::tests::a_version_two_month_still_reads_and_appends_at_version_two`, `store::file::tests::a_month_born_without_the_checksum_flag_still_reads_and_gains_no_sidecar` | ✓ |
 | AFF-43 | `WindowExtremes::over` answers every query, including a right end that steps back, exactly as a full scan does, and reads at most `3n + 130` bars per query over a slice of `n` bars when every other right end steps back half a 2,000-bar window (D-1572) | `runner::outcome::window_tests::a_backward_right_end_is_answered_in_constant_reads`, `runner::outcome::window_tests::the_sliding_window_agrees_with_a_full_scan_on_every_query` | ✓ |
 | AFF-44 | `OverlapWindow` retires each hit at `min(exit, o + H)` in any exit order: its live count is exactly the hits whose windows are open, and its long-run sum equals the pair-by-pair Newey-West definition when exits step back (D-1572) | `runner::outcome::overlap_window_tests::a_backward_exit_leaves_the_window_when_its_own_window_closes`, `runner::outcome::overlap_window_tests::the_running_sums_reproduce_every_pair` | ✓ |
+
+### Zero-findings concurrency, api (D-2500 onward)
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| ZC-01 | In-process pull-journal appenders wait for each other and none is refused (D-2500; server1-1, recovery-4, recauto-2) | `api::audit::tests::in_process_appenders_wait_for_each_other_instead_of_refusing` | ✓ |
+| ZC-02 | A first pull-journal append syncs the directory entries it created before it writes the record (D-2500; press-2) | `api::audit::tests::a_first_append_syncs_the_new_directory_entries_before_writing` | ✓ |
+| ZC-03 | Recovery waits for a busy feed seat before reserving, and a seat held past the bound charges no attempt (D-2501; recovery-1, recauto-1) | `api::recovery::tests::a_held_feed_seat_is_waited_for_and_never_charged_as_an_attempt` | ✓ |
+| ZC-04 | A first recovery activation never leaves an empty pointer file (D-2502; recovery-2) | `api::recovery::tests::a_first_activation_publishes_a_whole_pointer_or_nothing` | ✓ |
+| ZC-05 | A refused terminal control append keeps the error that ended the run (D-2503; recovery-6) | `api::recovery::tests::a_refused_terminal_append_keeps_the_root_cause` | ✓ |
+| ZC-06 | Pending recovery rows are reconciled in the ledger's first-seen order (D-2503; recovery-3) | `api::recovery::tests::pending_rows_come_back_in_first_seen_order` | ✓ |
+| ZC-07 | An explicit recovery claim persists its STOP clear before taking the run guard (D-2504; recovery-5, runs-3) | `api::recovery::tests::an_explicit_claim_persists_its_clear_outside_the_run_lock` | ✓ |
+| ZC-08 | A finished pull run's Finisher and ticker never write into the next run (D-2505; runs-1) | `api::pullrun::tests::a_finished_runs_guards_never_write_into_the_next_run` | ✓ |
+| ZC-09 | A pause after the autopilot's check stops its run before any instrument (D-2506; autopilot-1) | `api::server::tests::a_pause_after_the_autopilots_check_stops_the_run_before_any_instrument` | ✓ |
+| ZC-10 | A vendor-down breaker stop costs an attempt and waits; only the operator's pause is free (D-2507; autopilot-2) | `api::autopilot::tests::a_vendor_down_breaker_stop_costs_an_attempt_and_waits` | ✓ |

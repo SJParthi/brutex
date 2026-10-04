@@ -6827,8 +6827,15 @@ pub(crate) struct BrokerRun {
     /// Distinct from an empty `reached`: nothing was attempted, so nothing can
     /// be concluded about the vendor from it.
     pub blocked: Option<Blocked>,
-    /// Set when the operator stopped the sweep part-way, with the reason.
+    /// Set when the sweep stopped part-way, with the reason: the operator's
+    /// pause, the vendor-down breaker, or a credential stop.
     pub stopped: Option<String>,
+    /// Whether `stopped` was the OPERATOR's pause (the stop generation moved),
+    /// and nothing else. The vendor-down breaker also sets `stopped`, and the
+    /// autopilot read every stop as a pause: no attempt counted, no backoff,
+    /// an immediate retry against a vendor answering 5xx, without bound.
+    /// autopilot-2, D-2507.
+    pub cancelled: bool,
     /// How long it took, in microseconds.
     pub took: u64,
     /// Whether the retry ladder judged the CREDENTIAL dead, structurally.
@@ -7832,10 +7839,19 @@ fn zerodha_isin_cross_check(
     Ok(())
 }
 
-pub(crate) async fn broker_run(
+///
+/// `epoch` is the stop generation the caller captured. A hand pull captures it
+/// on entry through [`broker_run`]; the autopilot captures it BEFORE its own
+/// pause check, at the top of the loop, so a pause that lands while its round
+/// reads the census and surveys the feeds has already moved the epoch past the
+/// captured value and stops the run at its first instrument. Captured here, the
+/// pause had bumped the epoch before the capture and a whole month was fetched
+/// against it. autopilot-1, D-2506.
+pub(crate) async fn broker_run_at(
     asked: &ingest::SpotRequest,
     site: &Site,
     censuses: &[census::VendorCensus],
+    epoch: u64,
 ) -> BrokerRun {
     let started = std::time::Instant::now();
     // BEFORE ANY SOCKET. See `Broker` for what this is guarding against and how
@@ -7911,10 +7927,9 @@ pub(crate) async fn broker_run(
         attempted: targets.len(),
         ..BrokerRun::default()
     };
-    // THE STOP GENERATION, CAPTURED ONCE. A run compares against the value it
-    // started with, so a pause that arrives after this run began stops it and a
-    // pause that happened before it began does not.
-    let epoch = site.autopilot.epoch();
+    // THE STOP GENERATION, CAPTURED ONCE, BY THE CALLER. A run compares against
+    // the value its caller captured, so a pause that arrives after that stops
+    // it and a pause that happened before it does not. See `broker_run_at`.
 
     // The month these bars are for, named once rather than per instrument.
     let month = asked
@@ -7936,6 +7951,7 @@ pub(crate) async fn broker_run(
         // who presses Pause must not wait out the other seven hundred
         // instruments to be obeyed.
         if site.autopilot.stopped(epoch) {
+            out.cancelled = true;
             out.stopped = Some(format!(
                 "{} — stopped after {} of {} instruments. The partial month is \
                  refilled on resume, because the resume point is the store's own.",
@@ -8046,6 +8062,16 @@ pub(crate) async fn broker_run(
     out
 }
 
+/// [`broker_run_at`] for a caller with no earlier stop check of its own: the
+/// hand and recovery pulls, which capture the stop generation on entry.
+pub(crate) async fn broker_run(
+    asked: &ingest::SpotRequest,
+    site: &Site,
+    censuses: &[census::VendorCensus],
+) -> BrokerRun {
+    broker_run_at(asked, site, censuses, site.autopilot.epoch()).await
+}
+
 /// `CLAUDE.md` §8 for one spot instrument: re-read once after a rejection, and
 /// say whether the run must stop.
 ///
@@ -8113,14 +8139,15 @@ async fn reread_wire(
 /// Exact recovery unit, using the existing mapping, credential, rate-limit,
 /// source-write and derivation path. The typed result precedes HTML rendering.
 /// A failed audit append is a failure, even when source bars already landed.
+///
+/// The caller hands in the feed's seat, already held: recovery takes it before
+/// it reserves the attempt, so a busy seat can never be charged as a used
+/// vendor attempt. recovery-1, D-2501.
 pub(crate) async fn recovery_spot(
     site: &Site,
     asked: &ingest::SpotRequest,
+    _seat: crate::autopilot::Seat<'_>,
 ) -> Result<BrokerRun, String> {
-    let _seat = site
-        .autopilot
-        .take_seat(asked.feed)
-        .ok_or_else(|| "the selected feed already has an active pull".to_owned())?;
     let now = std::time::SystemTime::now();
     let run = broker_run(asked, site, &census::read_all(&site.store_root)).await;
     let journal = site.journal();
@@ -11140,7 +11167,21 @@ pub(crate) async fn pull_run_stop(
         }
         _ => false,
     };
-    if stopping && let Err(why) = crate::recovery_control::stop(&site) {
+    // THE FLAG UNDER THE SLOT, THE FSYNCS OUTSIDE IT. The active plan is read
+    // under `site.run` (lock order run, then active) and the guard is released
+    // before the STOP journal is opened, appended and synced, off the async
+    // workers. Under the guard, every slot reader (the run poll, each chain's
+    // progress write, the autopilot round) blocked its Tokio worker for the
+    // whole fsync chain. runs-3, recovery-5, D-2504.
+    let plan = if stopping {
+        crate::recovery_control::active(&site)
+    } else {
+        None
+    };
+    drop(held);
+    if let Some(id) = plan
+        && let Err(why) = off_the_workers(|| crate::recovery_control::stop_plan(&site, id))
+    {
         return (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             json_headers(),
@@ -31724,6 +31765,51 @@ mod tests {
     /// which is exactly why this event exists. The `why` field carries the
     /// vendor's own sentence, and the assertion below reads it back out of the
     /// file rather than trusting that it was passed in.
+    /// A PAUSE BEFORE THE RUN BEGINS, AFTER THE AUTOPILOT CHECKED, STOPS IT.
+    /// autopilot-1, D-2506.
+    ///
+    /// The autopilot checks its pause flag, then reads the census and surveys
+    /// the feeds for seconds before the run starts. `broker_run` captured the
+    /// stop generation itself, after a pause in that gap had already bumped
+    /// it, so the run never saw the pause and fetched the whole month. The
+    /// generation captured before the check is now what the run compares
+    /// against: the pause lands between the capture and the run, and the run
+    /// stops before its first instrument. No socket is opened either way: the
+    /// one instrument's rung is unserved on this feed.
+    #[tokio::test]
+    async fn a_pause_after_the_autopilots_check_stops_the_run_before_any_instrument() {
+        let dir = masters(
+            "pause-gap",
+            Some(&format!(
+                "{GROWW_HEAD}NSE,CASH,,NIFTY,IDX,,NIFTY,,,NSE-NIFTY\n"
+            )),
+            Some(&format!(
+                "{DHAN_HEAD}NSE,I,NA,INDEX,NIFTY,NIFTY,INDEX,NA,0001-01-01,,,1333\n"
+            )),
+        );
+        let site = Site::serving(&dir, &store_root("pause-gap"));
+        let censuses = vec![day_pass_held(Vendor::Dhan, "NIFTY", month_of(2026, 8))];
+        let asked = ingest::parse_spot(
+            "target=swept&from=2026-08-03&to=2026-08-05&granularity=5min",
+            day(2026, 8, 10),
+        )
+        .expect("a real target and a window in the past");
+        site.autopilot.resume();
+        let at = site.autopilot.epoch();
+        assert!(!site.autopilot.is_paused(), "the loop's check saw no pause");
+        site.autopilot.pause();
+        let out = broker_run_at(&asked, &site, &censuses, at).await;
+        assert!(
+            out.stopped.is_some(),
+            "the pause in the gap was ignored: {out:?}"
+        );
+        assert_eq!(out.reached, 0, "{out:?}");
+        assert!(
+            out.refused.is_empty(),
+            "no instrument was even tried: {out:?}"
+        );
+    }
+
     #[tokio::test]
     async fn the_refused_instrument_site_is_driven_over_a_real_universe() {
         let _sink = crate::emitted::sink();

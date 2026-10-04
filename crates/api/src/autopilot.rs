@@ -2064,13 +2064,17 @@ impl Control {
     /// Whether the operator has stopped it. One relaxed load.
     #[must_use]
     pub fn is_paused(&self) -> bool {
-        self.paused.load(Ordering::Relaxed)
+        self.paused.load(Ordering::SeqCst)
     }
 
     /// Stop, and ask any sweep in flight to stop at its next instrument.
     pub fn pause(&self) {
-        self.paused.store(true, Ordering::Relaxed);
-        let epoch = self.epoch.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+        // SEQUENTIALLY CONSISTENT, flag first and epoch second: a loop that
+        // reads the epoch and then the flag sees either the old epoch (and
+        // its run stops at the first instrument) or the pause. autopilot-1,
+        // D-2506.
+        self.paused.store(true, Ordering::SeqCst);
+        let epoch = self.epoch.fetch_add(1, Ordering::SeqCst).saturating_add(1);
         // A PAUSE IS AN OPERATOR DECISION AND IT STOPS A BACKFILL. Left
         // unlogged, a run that halted because somebody pressed pause and one
         // that halted because the vendor stopped answering read the same on
@@ -2121,7 +2125,7 @@ impl Control {
     /// The current stop generation, captured by a run when it starts.
     #[must_use]
     pub fn epoch(&self) -> u64 {
-        self.epoch.load(Ordering::Relaxed)
+        self.epoch.load(Ordering::SeqCst)
     }
 
     /// Whether a run that captured `at` has been asked to stop. One relaxed
@@ -2700,6 +2704,14 @@ pub async fn fly(site: Loaded) {
     });
     grace(&site).await;
     loop {
+        // THE STOP GENERATION BEFORE THE PAUSE CHECK. `pause` sets the flag and
+        // then bumps the epoch (both sequentially consistent), so either this
+        // read sees the old epoch and the run below stops at its first
+        // instrument, or it sees the new one and the flag read after it sees
+        // the pause. `broker_run` used to capture the epoch itself, seconds of
+        // census reading later, and a pause in that gap was absorbed into the
+        // captured value: the month was fetched anyway. autopilot-1, D-2506.
+        let at = site.autopilot.epoch();
         if site.autopilot.is_paused() {
             dwell_paused(&site.autopilot).await;
             continue;
@@ -2719,7 +2731,7 @@ pub async fn fly(site: Loaded) {
             continue;
         };
         let rung_series = cache.get(&site, rung_timeframe);
-        let waited = round(&site, &mut feeds, rung_series, rung).await;
+        let waited = round(&site, &mut feeds, rung_series, rung, at).await;
         // BETWEEN UNITS, ALWAYS. The sweep itself awaits on every request, so
         // this is belt and braces for the one path that might not — a tick that
         // decides there is nothing to do and loops.
@@ -3199,6 +3211,7 @@ async fn round(
     feeds: &mut [FeedState],
     series: &[Series],
     granularity: pull::vendor::Granularity,
+    at: u64,
 ) -> u64 {
     // THIS RUNG'S PLACE, NOT THE OTHER ONE'S. One swap of four fields per feed;
     // see `Place` for the months the shared frontier used to skip. D-0949.
@@ -3364,7 +3377,7 @@ async fn round(
         status.feeds = reports;
     });
 
-    let out = tick(site, state, &unit, granularity, series).await;
+    let out = tick(site, state, &unit, granularity, series, at).await;
     let stored = u64::try_from(out.stored).unwrap_or(u64::MAX);
     // THE JOURNAL'S ANSWER TRAVELS WITH THE BARS. Published beside
     // `bars_stored` because it is a fact about the same tick, and cleared on a
@@ -3444,6 +3457,7 @@ async fn tick(
     unit: &Unit,
     granularity: pull::vendor::Granularity,
     series: &[Series],
+    at: u64,
 ) -> TickOutcome {
     let asked = ingest::SpotRequest {
         cash_identity: ingest::CashIdentity::Isin,
@@ -3520,10 +3534,11 @@ async fn tick(
     // the census only through `ladder_refusal`, which looks up the asked
     // feed's own store vendor and no other; `read_all` read and CRC-checked
     // every vendor's whole manifest to answer that, twice a tick.
-    let run = crate::server::broker_run(
+    let run = crate::server::broker_run_at(
         &asked,
         site,
         &[census::read_vendor(&site.store_root, state.vendor)],
+        at,
     )
     .await;
     let took = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
@@ -3616,7 +3631,15 @@ pub(crate) fn outcome_of(
                 .first()
                 .map(|f| format!("{} — {}", f.instrument, f.why))
         })
-        .or_else(|| run.refused.first().cloned());
+        .or_else(|| run.refused.first().cloned())
+        // A BREAKER STOP CARRIES ITS OWN SENTENCE as the reason, so it reaches
+        // the attempt count and the backoff like any other vendor failure.
+        // autopilot-2, D-2507.
+        .or_else(|| {
+            run.stopped
+                .clone()
+                .filter(|_| !run.cancelled && run.credential_stop.is_none())
+        });
 
     TickOutcome {
         attempted: run.attempted,
@@ -3628,7 +3651,12 @@ pub(crate) fn outcome_of(
         // failure, ask again at once"; a run that stopped over its credential
         // carries its own verdict below, and when that verdict is transport it
         // must reach the backoff rather than an immediate retry.
-        stopped: run.stopped.is_some() && run.credential_stop.is_none(),
+        //
+        // AND NEITHER IS THE VENDOR-DOWN BREAKER. Only the operator's pause
+        // (`cancelled`) is "not a failure, ask again at once"; the breaker's
+        // stop is a transport failure and is bounded by the backoff and the
+        // stall. autopilot-2, D-2507.
+        stopped: run.cancelled && run.credential_stop.is_none(),
         journal_error,
         credential: run.credential_stop,
     }
@@ -5237,7 +5265,14 @@ mod tests {
         let axis = [series("NIFTY")];
         let mut feeds = drivable(yesterday);
 
-        let waited = round(&site, &mut feeds, &axis, pull::vendor::Granularity::Minute1).await;
+        let waited = round(
+            &site,
+            &mut feeds,
+            &axis,
+            pull::vendor::Granularity::Minute1,
+            site.autopilot.epoch(),
+        )
+        .await;
 
         // A transport-shaped refusal, so it backs off rather than halting.
         assert_eq!(waited, BACKOFF_FLOOR_SECS);
@@ -5309,7 +5344,14 @@ mod tests {
         let axis = [series("NIFTY")];
         let mut feeds = drivable(yesterday);
 
-        let _waited = round(&site, &mut feeds, &axis, pull::vendor::Granularity::Minute1).await;
+        let _waited = round(
+            &site,
+            &mut feeds,
+            &axis,
+            pull::vendor::Granularity::Minute1,
+            site.autopilot.epoch(),
+        )
+        .await;
 
         let json = site.autopilot.json();
         assert!(
@@ -5349,7 +5391,14 @@ mod tests {
         let axis = [series("NIFTY")];
         let mut feeds = drivable(yesterday);
 
-        let waited = round(&site, &mut feeds, &axis, pull::vendor::Granularity::Minute1).await;
+        let waited = round(
+            &site,
+            &mut feeds,
+            &axis,
+            pull::vendor::Granularity::Minute1,
+            site.autopilot.epoch(),
+        )
+        .await;
         assert_eq!(waited, SEAT_WAIT_SECS, "it waits rather than spinning");
         let json = site.autopilot.json();
         assert!(json.contains("holds the pull seat"), "{json}");
@@ -5362,7 +5411,14 @@ mod tests {
 
         // AND THE SEAT COMES BACK. The next round proceeds normally.
         drop(held);
-        let after = round(&site, &mut feeds, &axis, pull::vendor::Granularity::Minute1).await;
+        let after = round(
+            &site,
+            &mut feeds,
+            &axis,
+            pull::vendor::Granularity::Minute1,
+            site.autopilot.epoch(),
+        )
+        .await;
         assert_ne!(
             after, SEAT_WAIT_SECS,
             "the standoff ended with the manual pull"
@@ -5575,6 +5631,42 @@ mod tests {
 
     /// A pause costs no attempt: stopping is the operator's decision, not a
     /// failure of the month.
+    /// THE VENDOR-DOWN BREAKER IS A FAILURE, NOT A PAUSE. autopilot-2, D-2507.
+    ///
+    /// `broker_run` sets `stopped` both for the operator's pause and for the
+    /// breaker (three consecutive 5xx instruments). `outcome_of` read both as
+    /// a pause, so a down vendor was asked again at once, forever, with no
+    /// attempt counted. A breaker-stopped run must cost an attempt and wait;
+    /// a cancelled one still costs nothing.
+    #[test]
+    fn a_vendor_down_breaker_stop_costs_an_attempt_and_waits() {
+        let mut state = FeedState::new(
+            pull::vendor::Feed::Groww,
+            brutex_core::vendor::Vendor::Groww,
+            month(2020, 5),
+        );
+        let breaker = crate::server::BrokerRun {
+            attempted: 773,
+            stopped: Some("the vendor answered 5xx on 3 instruments in a row".to_owned()),
+            ..crate::server::BrokerRun::default()
+        };
+        let out = outcome_of(&breaker, false, None);
+        assert!(!out.stopped, "a breaker stop is not the operator's pause");
+        assert!(matches!(state.observe(&out), Next::Wait { .. }));
+        assert_eq!(state.attempts, 1, "the failure is counted");
+
+        let cancelled = crate::server::BrokerRun {
+            attempted: 773,
+            stopped: Some("stopped".to_owned()),
+            cancelled: true,
+            ..crate::server::BrokerRun::default()
+        };
+        let out = outcome_of(&cancelled, false, None);
+        assert!(out.stopped);
+        assert_eq!(state.observe(&out), Next::Retry);
+        assert_eq!(state.attempts, 1, "a pause costs nothing");
+    }
+
     #[test]
     fn being_stopped_by_the_operator_costs_no_attempt() {
         let mut state = FeedState::new(
@@ -6745,7 +6837,14 @@ mod tests {
             "a store halt arms a probe due immediately"
         );
 
-        let waited = round(&site, &mut feeds, &[], pull::vendor::Granularity::Minute1).await;
+        let waited = round(
+            &site,
+            &mut feeds,
+            &[],
+            pull::vendor::Granularity::Minute1,
+            site.autopilot.epoch(),
+        )
+        .await;
         assert_eq!(
             waited, IDLE_POLL_SECS,
             "nothing was fetched: the axis is empty"
@@ -7051,7 +7150,14 @@ mod tests {
         let yesterday = yesterday_ist(std::time::SystemTime::now()).expect("a usable clock");
         let mut feeds = drivable(yesterday);
 
-        let waited = round(&site, &mut feeds, &[], pull::vendor::Granularity::Minute1).await;
+        let waited = round(
+            &site,
+            &mut feeds,
+            &[],
+            pull::vendor::Granularity::Minute1,
+            site.autopilot.epoch(),
+        )
+        .await;
         assert_eq!(waited, IDLE_POLL_SECS, "nothing to carry on to");
 
         let (phase, detail) = site
@@ -7105,7 +7211,14 @@ mod tests {
             rung: pull::vendor::Granularity::Minute1,
         });
 
-        let waited = round(&site, &mut feeds, &[], pull::vendor::Granularity::Minute1).await;
+        let waited = round(
+            &site,
+            &mut feeds,
+            &[],
+            pull::vendor::Granularity::Minute1,
+            site.autopilot.epoch(),
+        )
+        .await;
         assert_eq!(
             waited, 0,
             "a reconsidered month is work, so the next pass is immediate rather than idle"
@@ -7130,7 +7243,14 @@ mod tests {
 
         // AND A SECOND ROUND DOES NOT ASK AGAIN, because the stall was stamped.
         feeds.first_mut().expect("a feed").frontier = frontier_before;
-        let again = round(&site, &mut feeds, &[], pull::vendor::Granularity::Minute1).await;
+        let again = round(
+            &site,
+            &mut feeds,
+            &[],
+            pull::vendor::Granularity::Minute1,
+            site.autopilot.epoch(),
+        )
+        .await;
         assert_eq!(
             again, IDLE_POLL_SECS,
             "the same month must not be reconsidered twice in one interval"

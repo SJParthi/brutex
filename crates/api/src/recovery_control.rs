@@ -87,6 +87,40 @@ pub(crate) fn stop(site: &Site) -> Result<(), String> {
     }
 }
 
+/// The active recovery's ID, read under the active-plan lock and released.
+///
+/// `pull_run_stop` reads it while it holds `site.run` (lock order run, then
+/// active) and persists the STOP after releasing both, through
+/// [`stop_plan`]. runs-3, recovery-5, D-2504.
+pub(crate) fn active(site: &Site) -> Option<[u8; 32]> {
+    *site
+        .recovery_active
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Durably stop plan `id`, if it is still the active recovery.
+///
+/// Called with no `site.run` guard held, so its fsyncs block nothing that
+/// reads the run slot. A plan that ended between the read and this call has
+/// nothing left to stop, and a plan claimed since is not the one the operator
+/// stopped, so neither is written. runs-3, recovery-5, D-2504.
+///
+/// # Errors
+///
+/// As [`stop`].
+pub(crate) fn stop_plan(site: &Site, id: [u8; 32]) -> Result<(), String> {
+    let active = site
+        .recovery_active
+        .lock()
+        .map_err(|_| "recovery active-plan lock is poisoned".to_owned())?;
+    if *active == Some(id) {
+        persist(site, id, Status::Blocked)
+    } else {
+        Ok(())
+    }
+}
+
 fn hex(id: [u8; 32]) -> String {
     use core::fmt::Write as _;
     id.iter().fold(String::with_capacity(64), |mut out, byte| {

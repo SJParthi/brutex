@@ -255,7 +255,21 @@ pub struct Progress {
     /// the route renders for an empty slot. So the distinction lives here
     /// rather than in a second constructor nobody is obliged to call.
     pub started: bool,
+    /// Which claim this document belongs to: unique per [`Progress::claimed`]
+    /// in this process, zero for a document that was never claimed.
+    ///
+    /// The conductor's `Finisher` and its ticker write only into the run whose
+    /// generation they captured. They used to write into whatever run held
+    /// the slot, so a `Finisher` dropping just after its own summary was
+    /// published stamped "ended abnormally" on the NEXT run, which then read
+    /// as not running while its chains were live, and a third press was
+    /// admitted beside it. runs-1, D-2505.
+    pub generation: u64,
 }
+
+/// The source of [`Progress::generation`]. Starts at one, so zero is never a
+/// claimed run. runs-1, D-2505.
+static GENERATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl Progress {
     /// A document for a run that has just been claimed and has not yet done
@@ -267,6 +281,7 @@ impl Progress {
     pub fn claimed() -> Self {
         Self {
             started: true,
+            generation: GENERATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             ..Self::default()
         }
     }
@@ -629,6 +644,29 @@ fn with_progress<F: FnOnce(&mut Progress)>(site: &Site, edit: F) {
     }
 }
 
+/// Edits the live progress only if the slot still holds run `mine`.
+///
+/// For the writers that can outlive their own run's summary: the conductor's
+/// ticker, whose poll `abort` cannot stop once it is inside `rows_now`, and
+/// the `Finisher`, which drops after the summary has released the slot.
+/// runs-1, D-2505.
+fn with_own_progress<F: FnOnce(&mut Progress)>(site: &Site, mine: u64, edit: F) {
+    with_progress(site, |progress| {
+        if progress.generation == mine {
+            edit(progress);
+        }
+    });
+}
+
+/// The generation of the run that holds the slot now, or zero for none.
+fn current_generation(site: &Site) -> u64 {
+    site.run
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .map_or(0, |progress| progress.generation)
+}
+
 /// Which feeds have halted on a dead credential, by position.
 ///
 /// # Why a snapshot and not a probe per feed
@@ -684,11 +722,14 @@ fn stopping(site: &Site) -> bool {
 struct Finisher {
     /// Whose slot to release.
     site: Loaded,
+    /// Which run in that slot is this one's: a later run's `None` summary is
+    /// not this run's to fill. runs-1, D-2505.
+    generation: u64,
 }
 
 impl Drop for Finisher {
     fn drop(&mut self) {
-        with_progress(&self.site, |progress| {
+        with_own_progress(&self.site, self.generation, |progress| {
             if progress.finished.is_none() {
                 progress.finished = Some(
                     "The run ended without recording a summary, which means the task \
@@ -1025,8 +1066,10 @@ where
     F: Fn(Loaded, Leg) -> Fut + Clone + Send + 'static,
     Fut: core::future::Future<Output = (axum::http::StatusCode, String)> + Send + 'static,
 {
+    let mine = current_generation(&site);
     let _finisher = Finisher {
         site: Loaded::clone(&site),
+        generation: mine,
     };
     let groups = by_feed(legs);
     let started_rows = rows_now(&site);
@@ -1049,7 +1092,7 @@ where
             loop {
                 tokio::time::sleep(ROWS_TICK).await;
                 let seen = rows_now(&site);
-                with_progress(&site, |progress| progress.rows_now = seen);
+                with_own_progress(&site, mine, |progress| progress.rows_now = seen);
             }
         })
     };
@@ -1103,7 +1146,7 @@ where
     }
     ticker.abort();
     let current_rows = rows_now(&site);
-    with_progress(&site, |progress| {
+    with_own_progress(&site, mine, |progress| {
         progress.rows_now = current_rows;
         progress.finished = Some(run_summary(
             progress,
@@ -1695,6 +1738,7 @@ mod tests {
             rows_at_start: 10,
             rows_now: 99,
             stopping: true,
+            generation: 0,
             finished: None,
             started: true,
             feeds: vec![FeedReport {
@@ -1887,6 +1931,35 @@ mod tests {
     /// the groups are built from the legs; the ticker is spawned and aborted
     /// rather than leaked; the summary is written; and the slot is released so a
     /// second press is not refused forever by a run that has ended.
+    /// A FINISHED RUN'S GUARDS NEVER WRITE INTO THE NEXT RUN. runs-1, D-2505.
+    ///
+    /// The conductor publishes its summary, which frees the slot, and only
+    /// then drops its `Finisher`; its ticker can land one more write after
+    /// `abort`. Both wrote into whatever run held the slot. Here run B claims
+    /// in exactly that gap: A's `Finisher` and A's late ticker write must
+    /// leave B running and untouched.
+    #[test]
+    fn a_finished_runs_guards_never_write_into_the_next_run() {
+        let site = site("nextrun");
+        claim(&site);
+        let first = current_generation(&site);
+        let finisher = Finisher {
+            site: Loaded::clone(&site),
+            generation: first,
+        };
+        with_own_progress(&site, first, |progress| {
+            progress.finished = Some("A's summary".to_owned());
+        });
+        claim(&site);
+        let second = current_generation(&site);
+        assert_ne!(first, second, "each claim is its own generation");
+        drop(finisher);
+        with_own_progress(&site, first, |progress| progress.rows_now = 999);
+        let seen = observed(&site);
+        assert!(seen.running(), "A's guard ended B: {:?}", seen.finished);
+        assert_eq!(seen.rows_now, 0, "A's late ticker wrote into B");
+    }
+
     #[tokio::test]
     async fn conduct_runs_the_scaffold_and_releases_the_slot_when_stopped() {
         let site = site("conductstop");
@@ -3204,6 +3277,7 @@ mod tests {
             stopping: false,
             finished: None,
             started: true,
+            generation: 0,
             feeds: vec![
                 FeedReport {
                     vendor: "dhan".to_owned(),

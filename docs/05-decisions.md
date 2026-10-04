@@ -57605,3 +57605,92 @@ a sink and reopens one on the same directory holds it for reading: 14 in
 `sink.rs` and one in `tail.rs`. Readers do not wait on each other. No production
 line changes, and the lock's refusal stays exactly as strict. Proven locally:
 4 of 60 runs failed before the change and 0 of 60 after.
+
+### D-2500 — In-process pull-journal appenders wait for each other; the first record's directory entries are synced — 2026-10-04
+
+`audit::Journal::appended` took a non-blocking `flock` on a freshly opened
+description. Two descriptions of one file conflict under `flock` inside one
+process too, so two parallel feed legs of one press, a recovery receipt, the
+recovery member-failure record and the autopilot's tick record refused each
+other by plain scheduling, and the loser's run was "NOT in the journal" with its
+bars on disk (server1-1, recovery-4, recauto-2). A process-wide
+`APPEND_SERIAL` mutex now queues in-process appenders for one write and one
+fsync; the flock stays as the cross-process guard only. The append also syncs
+the store root after it creates `audit/`, and syncs `audit/` when the journal is
+empty, before writing the record, so a store's first "Recorded: yes" no longer
+rests on unsynced directory entries (press-2). Proven by ZC-01 and ZC-02.
+
+### D-2501 — Recovery takes the feed seat before it reserves an attempt — 2026-10-04
+
+`retry_day` made the InFlight reservation durable and only then let
+`recovery_spot` try the feed seat, which the autopilot (it never claims the run
+slot) or a hand pull routinely holds. A refused seat cost one of the day's three
+shared, never-refunded attempts with no vendor request; three collisions
+exhausted the day (recovery-1, recauto-1). `seated` now waits for the seat, one
+look per second for up to an hour, before `reserve`, and hands the held seat to
+`recovery_spot`. A STOP or a seat still held at the bound refuses with "no
+attempt was charged". Not done: bumping the autopilot's stop generation on a
+recovery claim (recauto-1's fix (a)), because that generation is shared by every
+`broker_run`, so it would also stop unrelated hand pulls on other feeds; the
+wait closes the budget loss without it. Proven by ZC-03.
+
+### D-2502 — The first recovery activation publishes a whole pointer file or none — 2026-10-04
+
+`seeded` created `active.bin` empty through `Journal::open` and appended the
+pointer second, so a kill or a refused append between them left a 0-byte file
+that `active_history` refuses for every later start, prepare and boot resume
+(recovery-2). The first pointer is now written and synced as
+`active.bin.staging` and hard-linked into place (a link never replaces); a stale
+staging file was never published and is removed first. An existing pointer file
+is opened with `open_existing`. A store already wedged by an older build still
+refuses and needs the empty file removed by hand. Proven by ZC-04.
+
+### D-2503 — Recovery keeps the root cause past a refused terminal append, and reconciles in ledger order — 2026-10-04
+
+`drive` returned the terminal control append's error ("poisoned") in place of
+the error that ended the run (recovery-6); `with_terminal` now reports both.
+`reconcile_pending` walked `HashMap::values`, so two runs over one ledger wrote
+different bytes (§3 rule 5, recovery-3); it walks the journal's first-seen
+`order`. Proven by ZC-05 and ZC-06.
+
+### D-2504 — STOP and clear persistence run outside the `site.run` guard — 2026-10-04
+
+`pull_run_stop` and recovery's `claim` held the `site.run` std mutex across the
+STOP journal's open, append and up to four fsyncs, on a Tokio worker, stalling
+every slot reader (runs-3, recovery-5). `pull_run_stop` now sets the flag and
+reads the active plan under the guard, releases it, and persists through
+`recovery_control::stop_plan` off the workers; `stop_plan` writes only if that
+plan is still the active one. `claim` reads the slot (released at once),
+persists the explicit clear, and only then takes the guard to install the claim;
+the plan is not active until then, so no STOP can target it in the gap. Proven
+by ZC-07.
+
+### D-2505 — A pull run's Finisher and ticker write only into their own run — 2026-10-04
+
+`pullrun::Progress` gains `generation`, unique per `Progress::claimed()`. The
+conductor captures it, and its `Finisher`, ticker and final summary write
+through `with_own_progress`, so a Finisher dropping after its summary freed the
+slot can no longer mark the NEXT run finished (which admitted a third
+concurrent press) and a late ticker poll cannot write into it (runs-1). Proven
+by ZC-08.
+
+### D-2506 — The autopilot captures its stop generation before its pause check — 2026-10-04
+
+`broker_run` captured the stop generation itself, seconds of census reading
+after `fly` had checked the pause flag; a pause in that gap bumped the epoch
+before the capture and a whole month was fetched (autopilot-1). `fly` now reads
+the epoch, then the flag, and hands the epoch through `round` and `tick` to
+`broker_run_at`; `pause` stores the flag then bumps the epoch, and the flag and
+epoch loads are `SeqCst`, so the loop sees either the pause or the old epoch.
+Hand and recovery pulls keep capturing on entry through `broker_run`. Proven by
+ZC-09.
+
+### D-2507 — The vendor-down breaker's stop is a failure, not a pause — 2026-10-04
+
+`BrokerRun::stopped` is set by the operator's pause and by the vendor-down
+breaker, and `autopilot::outcome_of` read both as a pause: no attempt, no
+backoff, an immediate unbounded retry against a vendor answering 5xx
+(autopilot-2). `BrokerRun::cancelled` is set only by the stop-generation check;
+`outcome_of` treats only that as a pause and gives a breaker stop its own
+sentence as the reason, so it reaches the attempt count, the backoff and the
+stall. Proven by ZC-10.
