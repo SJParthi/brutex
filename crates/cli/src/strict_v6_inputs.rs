@@ -144,6 +144,7 @@ pub(crate) fn size_sweeper(
     rung: &str,
     bounds: super::StoredCandidatePreAdmissionBoundsV1,
     config: &StrictConfig,
+    evaluation: &crate::candidate_universe::CandidateEvaluationInputsV1,
 ) -> Result<(runner::Sweeper, Arc<Inputs>, SizedNifty), String> {
     let root = AdmittedRootV1::admit(root)?;
     let context = load(
@@ -160,7 +161,8 @@ pub(crate) fn size_sweeper(
         &root,
         config,
     )?;
-    let count = context.signal.bars.len();
+    // The rows the Candidate column sweeps, warm-up excluded (D-2103).
+    let count = context.candidate_swept_v1(evaluation)?;
     let inputs = Arc::clone(
         context
             .strict
@@ -168,7 +170,7 @@ pub(crate) fn size_sweeper(
             .ok_or("strict institutional sizing lost its input authority")?,
     );
     inputs.require_current()?;
-    let min_hits = crate::min_hits_for(count, request.support_ppm);
+    let min_hits = crate::min_hits_for_swept(count, request.support_ppm);
     let sweeper = runner::Sweeper::new(crate::ladder_for(min_hits)?);
     crate::note(&crate::ledger_all::rung_sized_event(
         "ledger-v6",

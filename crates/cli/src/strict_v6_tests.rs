@@ -486,6 +486,7 @@ mod strict_v6_fixture_tests {
             "1min",
             fixture_bounds()?,
             &config,
+            &sizing_evaluation()?,
         )?;
         assert_eq!(strict::STRICT_LOADS.with(std::cell::Cell::get), 1);
         let nifty = commit_family_from_v6(
@@ -521,6 +522,59 @@ mod strict_v6_fixture_tests {
     }
 
     #[test]
+    fn strict_v6_and_ledger_all_size_support_on_the_candidate_columns_swept_rows()
+    -> Result<(), String> {
+        // D-2103: both ledgers sized each rung's threshold on NIFTY's retained
+        // bar count, warm-up rows included, which no combination can hit. At
+        // 100% support that asked a hit of rows the column never sweeps.
+        let fixture = StoredSuccessFixture::new()?;
+        let config = strict_fixture_config(&fixture)?;
+        let swept = crate::step3_orchestrator::stored_candidate_swept_v1(
+            &fixture.source,
+            Vendor::Zerodha,
+            ("NIFTY", "1min"),
+            (FIXTURE_FROM, FIXTURE_TO),
+            fixture_bounds()?,
+            &sizing_evaluation()?,
+        )?;
+        let retained = crate::stored::load_span(
+            &fixture.source,
+            Vendor::Zerodha,
+            "NIFTY",
+            "1min",
+            FIXTURE_FROM,
+            FIXTURE_TO,
+        )?
+        .bars
+        .len();
+        assert!(
+            swept > 0 && usize::try_from(swept).is_ok_and(|swept| swept < retained),
+            "premise: the fixture's column skips warm-up rows ({swept} of {retained})"
+        );
+        for (support_ppm, expected) in [(1_000_000, swept), (500_000, swept / 2), (1, 1)] {
+            let ledger_request = crate::ledger_all::LedgerAllRequest {
+                vendor: "zerodha",
+                from: FIXTURE_FROM,
+                to: FIXTURE_TO,
+                support_ppm,
+                max_points: 1,
+                root: &fixture.base,
+            };
+            let (sweeper, _, _) = strict::size_sweeper(
+                &fixture.source,
+                Vendor::Zerodha,
+                &ledger_request,
+                "1min",
+                fixture_bounds()?,
+                &config,
+                &sizing_evaluation()?,
+            )?;
+            assert_eq!(sweeper.ladder().min_hits(), expected.max(1), "{support_ppm}");
+        }
+        Ok(())
+    }
+
+    #[test]
     fn strict_v6_a_sized_context_refuses_every_other_request()
     -> Result<(), String> {
         let fixture = StoredSuccessFixture::new()?;
@@ -543,6 +597,7 @@ mod strict_v6_fixture_tests {
             "1min",
             fixture_bounds()?,
             &config,
+            &sizing_evaluation()?,
         )?;
         let exact = fixture_request(&fixture.source, "NIFTY", &sweeper, &long, &short)?;
         let source = AdmittedRootV1::admit(&fixture.source)?;
@@ -634,6 +689,7 @@ mod strict_v6_fixture_tests {
             "1min",
             fixture_bounds()?,
             &config,
+            &sizing_evaluation()?,
         )?;
         let key = crate::stored::swept_index("NIFTY")?;
         let path = StorePath::for_key(

@@ -1646,6 +1646,34 @@ pub(crate) fn build_candidate_columns(
     Ok((signal_column, execution_column))
 }
 
+/// The rows Candidate production's signal column sweeps over these inputs,
+/// read from that column's own census, warm-up excluded (D-2103).
+///
+/// This runs the one builder below, so a ledger sizing its support on it asks
+/// exactly the fold its Candidate commit will sweep; there is no second count.
+/// O(signal + daily + minute), one column build. **UNVERIFIED as a measured
+/// bound**; read off the source.
+///
+/// # Errors
+///
+/// Every refusal of that build.
+pub(crate) fn candidate_signal_swept_v1(
+    signal_bars: &[Candle],
+    daily_references: &[DailyReference],
+    reference_minute_context: &[Candle],
+    rung_seconds: u32,
+    evaluation: &CandidateEvaluationInputsV1,
+) -> Result<u64, CandidateUniverseRefusal> {
+    build_candidate_signal_column(
+        signal_bars,
+        daily_references,
+        reference_minute_context,
+        rung_seconds,
+        evaluation,
+    )
+    .map(|column| column.census().swept)
+}
+
 /// Builds one exact anchored signal column from the typed daily reference and
 /// exact-minute ORB/`GapFib` context accepted by Candidate production.
 ///

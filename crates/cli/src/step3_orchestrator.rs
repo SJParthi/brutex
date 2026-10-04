@@ -497,6 +497,60 @@ pub(crate) struct BoundedStoredContextV1 {
     pub(crate) strict: Option<Arc<strict::Inputs>>,
 }
 
+impl BoundedStoredContextV1 {
+    /// Rows this context's Candidate signal column sweeps: the support
+    /// denominator a ledger sizes its threshold on (D-2103).
+    ///
+    /// # Errors
+    ///
+    /// Every refusal of the Candidate column build.
+    pub(crate) fn candidate_swept_v1(
+        &self,
+        evaluation: &crate::candidate_universe::CandidateEvaluationInputsV1,
+    ) -> Result<u64, Step3OrchestratorRefusal> {
+        crate::candidate_universe::candidate_signal_swept_v1(
+            &self.signal.bars,
+            &self.daily.references,
+            &self.minute.bars,
+            self.rung_seconds,
+            evaluation,
+        )
+    }
+}
+
+/// Load one stored context exactly as a Candidate commit does and count the
+/// rows its signal column sweeps (D-2103). `ledger-all` sizes each rung's
+/// threshold on this for its sizing underlying.
+///
+/// # Errors
+///
+/// Every loader and column-build refusal, named by the stage that raised it.
+pub(crate) fn stored_candidate_swept_v1(
+    root: &Path,
+    vendor: Vendor,
+    (underlying, rung_name): (&str, &str),
+    (from, to): ((u16, u8), (u16, u8)),
+    bounds: StoredCandidatePreAdmissionBoundsV1,
+    evaluation: &crate::candidate_universe::CandidateEvaluationInputsV1,
+) -> Result<u64, Step3OrchestratorRefusal> {
+    let root = AdmittedRootV1::admit(root)?;
+    load_bounded_stored_context_from_spec_v1(
+        StoredContextLoadSpecV1 {
+            vendor,
+            underlying,
+            rung_name,
+            from,
+            to,
+            signal_bound: bounds.signal_records,
+            minute_bound: bounds.minute_records,
+            daily_bound: bounds.daily_records,
+        },
+        &root,
+        None,
+    )?
+    .candidate_swept_v1(evaluation)
+}
+
 #[path = "stored_family_v6.rs"]
 pub(crate) mod family_v6;
 #[path = "strict_v6_inputs.rs"]
@@ -4766,6 +4820,17 @@ mod tests {
             daily_records: StoredSpanLoadBoundV1::new(128)?,
             candidate: CandidateUniverseBoundsV1::new(1_000_000, 8)?,
             pre_admission: PreAdmissionDataBoundsV1::new(8, 2 * 1_024 * 1_024)?,
+        })
+    }
+
+    /// The evaluation inputs `fixture_request` sweeps under, for sizing.
+    pub(super) fn sizing_evaluation()
+    -> Result<crate::candidate_universe::CandidateEvaluationInputsV1, Step3OrchestratorRefusal>
+    {
+        Ok(crate::candidate_universe::CandidateEvaluationInputsV1 {
+            widths: Widths::pinned().map_err(|why| format!("fixture widths refused: {why:?}"))?,
+            availability: Availability::Absent,
+            thresholds: Thresholds::CLASSICAL,
         })
     }
 

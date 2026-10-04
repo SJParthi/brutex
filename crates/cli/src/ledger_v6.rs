@@ -330,6 +330,11 @@ fn run_route(
             rung,
             bounds,
             &strict,
+            &crate::candidate_universe::CandidateEvaluationInputsV1 {
+                widths,
+                availability: Availability::Absent,
+                thresholds: Thresholds::CLASSICAL,
+            },
         )?;
         crate::note(&rung_started_event(rung, index));
         let roots = RungRoots::create(request.root, rung).inspect_err(|why| {

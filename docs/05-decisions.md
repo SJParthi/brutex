@@ -58429,3 +58429,24 @@ limit; one extra key read per object.
 `report_json_decimals_keep_their_digits_and_refuse_nonfinite_or_forged_numbers`
 pins the digits of `100.12499999999999999`, refuses `-1e999` and `1E+309`, and
 refuses a token map with extra fields or non-number digits.
+### D-2103 — The ledgers size support on the rows NIFTY's Candidate column sweeps — 2026-10-04
+
+**Finding.** D-2101 left this open. `ledger-all` (`ledger_all::build_sweepers`)
+and `ledger-v6` (`strict::size_sweeper`) sized each rung's `min_hits` on
+NIFTY's retained bar count. That count includes the warm-up rows no
+combination can hit. On the strict fixture at 100% support, the old sizing
+asked for 8,250 hits against 8,050 swept rows, so the ladder could never meet
+its own threshold.
+
+**Decision.** Both ledgers size on the swept count of NIFTY's Candidate signal
+column. `candidate_universe::candidate_signal_swept_v1` runs the one column
+builder the Candidate commit runs and reads that column's census. `ledger-v6`
+reads it from the context it already holds
+(`BoundedStoredContextV1::candidate_swept_v1`). `ledger-all` loads the context
+through the same loader (`step3_orchestrator::stored_candidate_swept_v1`). The
+rule is `min_hits_for_swept`, as in D-2101. The sized event's `bars` field
+now carries the swept count. SWS-05; it failed against the old sizing
+(`left: 8250, right: 8050`).
+
+**Rejected.** Sizing on retained bars less a fixed warm-up. Only the column's
+fold knows which rows it swept.

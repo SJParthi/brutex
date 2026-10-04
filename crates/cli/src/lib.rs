@@ -8748,7 +8748,7 @@ const fn min_hits_for(bars: usize, support_ppm: u64) -> u64 {
 /// support asked for 1,800 hits from 1,500 rows that could hit, and nothing
 /// could ever be frequent. The ledger's `bars` has been the swept count since
 /// D-1661; support is now a fraction of the same rows.
-const fn min_hits_for_swept(swept: u64, support_ppm: u64) -> u64 {
+pub(crate) const fn min_hits_for_swept(swept: u64, support_ppm: u64) -> u64 {
     let hits = swept.saturating_mul(support_ppm) / 1_000_000;
     if hits == 0 { 1 } else { hits }
 }

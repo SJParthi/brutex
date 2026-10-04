@@ -14856,3 +14856,13 @@ per-candidate primitive from `CLAUDE.md` §3 rule 4.
   refuses with `MissingClosingMinute`. It refuses rather than pricing the
   wrong minute. Threading the dated closes through its receipts is not done
   here.
+
+## Ledger sizing reads a whole Candidate context per rung — D-2103, 4 October 2026
+
+- **`ledger-all` sizing now builds NIFTY's Candidate column for each rung.**
+  It used to read one signal span per rung for its length. It now loads the
+  signal, one-minute and daily context exactly as the Candidate commit does,
+  and builds that column once to read its swept count. Per command, that is
+  eight extra context loads and column builds. The commit then loads its own
+  copy again. `ledger-v6` already held that context, so it only adds the
+  column build. Not measured; read off the source.
