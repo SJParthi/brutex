@@ -3714,6 +3714,33 @@ mod tests {
         })
     }
 
+    /// STO-1, D-2607: an overlay with a negative spot or a negative IV is
+    /// refused at the write boundary before a byte is written; the absent
+    /// marker and zero are legal readings.
+    #[test]
+    fn an_overlay_with_a_negative_spot_or_iv_is_refused_before_a_byte_is_written() {
+        use crate::format::{OI_NULL, Overlay};
+        let at = |spot: i64, iv_micros: i64| Overlay {
+            ts_micros: 1_000_000,
+            spot,
+            iv_micros,
+        };
+        for bad in [
+            at(-5, 125_000),
+            at(2_500_000, -125_000),
+            at(-5, -125_000),
+            at(i64::MIN + 1, OI_NULL),
+        ] {
+            assert!(
+                matches!(super::survey(&[bad]), Err(super::StoreError::ImpossibleBar { at: 0 })),
+                "{bad:?}"
+            );
+        }
+        for good in [at(OI_NULL, OI_NULL), at(0, 0), at(2_500_000, 125_000)] {
+            assert!(super::survey(&[good]).is_ok(), "{good:?}");
+        }
+    }
+
     /// store1-2, D-1907: a failed append barrier is never confirmed. The
     /// same handle, a reopened handle, and the duplicate check all refuse the
     /// month by name rather than "committing" or answering `AlreadyPresent`

@@ -969,9 +969,9 @@ pub trait Row: Copy + PartialEq {
     ///
     /// A [`Bar`] has four prices that must bracket each other. An [`Overlay`]
     /// has no such relation — a spot and a volatility constrain nothing about
-    /// one another, and an all-zero overlay is a legal reading — so it answers
-    /// `true` because there is genuinely nothing to violate, not because the
-    /// check was skipped.
+    /// one another, and an all-zero overlay is a legal reading — but neither
+    /// field may be negative unless it is the [`OI_NULL`] absent marker
+    /// (STO-1, D-2607).
     fn is_sane(&self) -> bool;
 
     /// The two counts, when one of them is impossible.
@@ -1043,8 +1043,11 @@ impl Row for Overlay {
         Self::decode(bytes)
     }
 
+    /// Neither a spot price nor a volatility is ever negative, so each field
+    /// is [`OI_NULL`] (absent) or at least zero. A negative spot or IV was
+    /// committed before this check (STO-1, D-2607).
     fn is_sane(&self) -> bool {
-        true
+        (self.spot == OI_NULL || self.spot >= 0) && (self.iv_micros == OI_NULL || self.iv_micros >= 0)
     }
 
     fn bad_counts(&self) -> Option<(i64, i64)> {

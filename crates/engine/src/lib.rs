@@ -1665,7 +1665,15 @@ impl Ladder {
             // stopped it, and that is the one the `break` below would skip.
             progress.halted = halt;
             sink.report(&current, progress.admitted, progress.pairs);
-            sink.checkpoint(&current, &progress)?;
+            // A HOST HALT IS NOT CHECKPOINTED (CE-9, D-2614). Candidate and
+            // pair budgets are part of the run's identity, so their halt is the
+            // run's answer and is saved. A Memory or Workers halt is a fact
+            // about THIS machine: saved, a rerun on a bigger host would resume
+            // the halt and never retry the level. The last durable boundary
+            // stays the complete level below, which a resume rebuilds from.
+            if is_durable(halt) {
+                sink.checkpoint(&current, &progress)?;
+            }
             // A HALTED LEVEL IS PARTIAL, so climbing off it would build k+1 from
             // an incomplete frontier and label the result complete. Anti-monotonicity
             // only licenses the prune when the previous level is the WHOLE frequent
@@ -2394,6 +2402,20 @@ fn drain(
     }
     batch.clear();
     Ok(())
+}
+
+/// Whether a level boundary with this halt may be saved as a checkpoint
+/// (CE-9, D-2614): an unhalted level or a budget halt, which belongs to the
+/// run's identity, yes; a Memory or Workers halt, which belongs to the host,
+/// no.
+const fn is_durable(halt: Option<Halt>) -> bool {
+    match halt {
+        Some(Halt {
+            breach: Breach::Memory | Breach::Workers,
+            ..
+        }) => false,
+        Some(_) | None => true,
+    }
 }
 
 /// True when every (k-1)-subset of a join candidate, other than its two
@@ -3226,6 +3248,27 @@ mod tests {
             retired.levels.capacity(),
         ] {
             assert!(capacity > LIVE_POSITIONS, "metadata capacity {capacity}");
+        }
+    }
+
+    /// CE-9, D-2614: a budget halt is the run's answer and is checkpointed; a
+    /// Memory or Workers halt belongs to the host and is not, so a rerun on a
+    /// larger machine resumes from the complete level below and retries.
+    #[test]
+    fn only_a_host_independent_halt_is_checkpointed() {
+        let ladder = Ladder::with_min_hits(1);
+        assert!(is_durable(None));
+        for (breach, durable) in [
+            (Breach::Candidates, true),
+            (Breach::Pairs, true),
+            (Breach::Memory, false),
+            (Breach::Workers, false),
+        ] {
+            assert_eq!(
+                is_durable(Some(ladder.halt(3, 1, 1, breach))),
+                durable,
+                "{breach:?}"
+            );
         }
     }
 

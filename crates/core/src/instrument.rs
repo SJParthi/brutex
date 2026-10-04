@@ -390,9 +390,10 @@ impl InstrumentKey {
 impl fmt::Display for InstrumentKey {
     /// Renders the canonical name used as a store path segment.
     ///
-    /// The format is chosen so that sorting the names sorts by underlying,
-    /// then expiry, then strike — which is the order a human reads an option
-    /// chain in.
+    /// Sorting the names as TEXT sorts by underlying and then expiry, but NOT
+    /// by strike: the strike is unpadded paisa, so `500000` sorts after
+    /// `1500000` (core-1, D-2609). Order contracts with [`Contract`]'s [`Ord`],
+    /// which compares the strike numerically.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}-{}", self.exchange.as_str(), self.underlying)?;
         match self.kind {
@@ -438,10 +439,52 @@ pub const CONTRACT_CAPACITY: usize = 24;
 /// as `24650.00` puts a `.` in a path segment and invites a reader to parse it
 /// back as a float; rendered as `2465000` it is the integer the store already
 /// holds, and it round-trips exactly.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// # Ordering is by strike NUMERICALLY (core-1, D-2609)
+///
+/// The strike is unpadded text, so a derived byte order put the ₹5,000 strike
+/// (`500000`) after the ₹15,000 one (`1500000`). [`Ord`] compares the
+/// `-`-separated parts in turn, an all-digit part by its value and any other
+/// part by its bytes, then breaks a remaining tie on the whole text so the
+/// order agrees with [`Eq`]. The path format is unchanged.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Contract {
     bytes: [u8; CONTRACT_CAPACITY],
     len: u8,
+}
+
+impl Ord for Contract {
+    /// O(1): at most [`CONTRACT_CAPACITY`] bytes on each side.
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        fn digits(part: &str) -> bool {
+            !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit())
+        }
+        let (left, right) = (self.as_str(), other.as_str());
+        let mut ours = left.split('-');
+        let mut theirs = right.split('-');
+        loop {
+            let order = match (ours.next(), theirs.next()) {
+                (None, None) => return left.cmp(right),
+                (None, Some(_)) => std::cmp::Ordering::Less,
+                (Some(_), None) => std::cmp::Ordering::Greater,
+                (Some(a), Some(b)) if digits(a) && digits(b) => {
+                    let a = a.trim_start_matches('0');
+                    let b = b.trim_start_matches('0');
+                    a.len().cmp(&b.len()).then_with(|| a.cmp(b))
+                }
+                (Some(a), Some(b)) => a.cmp(b),
+            };
+            if order != std::cmp::Ordering::Equal {
+                return order;
+            }
+        }
+    }
+}
+
+impl PartialOrd for Contract {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl Contract {
@@ -590,6 +633,53 @@ impl fmt::Display for Contract {
     clippy::panic
 )]
 mod tests {
+
+    #[test]
+    fn contracts_order_by_strike_numerically_and_agree_with_equality() {
+        // core-1, D-2609: the audit's pair, ₹5,000 against ₹15,000.
+        let option = |strike: i64, side: OptionSide| {
+            Contract::of(Kind::Option {
+                expiry: Expiry::new(2025, 9, 30).expect("a real expiry"),
+                strike: Paisa::from_raw(strike),
+                side,
+            })
+            .expect("fits")
+        };
+        let five = option(500_000, OptionSide::Call);
+        let fifteen = option(1_500_000, OptionSide::Call);
+        assert_eq!(five.cmp(&fifteen), std::cmp::Ordering::Less);
+        assert_eq!(fifteen.cmp(&five), std::cmp::Ordering::Greater);
+        assert_eq!(five.cmp(&five), std::cmp::Ordering::Equal);
+        let mut chain = [
+            option(1_500_000, OptionSide::Put),
+            option(5_000, OptionSide::Call),
+            option(1_500_000, OptionSide::Call),
+            option(500_000, OptionSide::Call),
+        ];
+        chain.sort();
+        assert_eq!(
+            chain.map(|contract| contract.as_str().to_owned()),
+            [
+                "2025-09-30-5000-CE",
+                "2025-09-30-500000-CE",
+                "2025-09-30-1500000-CE",
+                "2025-09-30-1500000-PE",
+            ]
+            .map(str::to_owned)
+        );
+        // Two spellings of one value stay distinct and ordered, never Equal.
+        let padded = Contract::parse("2025-09-30-0500000-CE").expect("parses");
+        assert_ne!(padded.cmp(&five), std::cmp::Ordering::Equal);
+        assert_eq!(padded.cmp(&five), five.cmp(&padded).reverse());
+        // Expiry still leads the strike.
+        let later = Contract::of(Kind::Option {
+            expiry: Expiry::new(2025, 10, 28).expect("a real expiry"),
+            strike: Paisa::from_raw(5_000),
+            side: OptionSide::Call,
+        })
+        .expect("fits");
+        assert_eq!(fifteen.cmp(&later), std::cmp::Ordering::Less);
+    }
 
     #[test]
     fn contract_rendering_accepts_the_exact_capacity_and_refuses_the_next_digit() {
