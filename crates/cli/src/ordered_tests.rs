@@ -127,26 +127,41 @@ fn body<'a>(source: &'a str, name: &str) -> &'a str {
     &rest[..end]
 }
 
-/// **Every whole-command fan-out that writes the shared journal or ledger is an
-/// ordered lane, not an indexed parallel map.** D-1556.
+/// **Every whole-command fan-out that writes the shared journal or ledger
+/// writes in input order: the Boolean family pools as ordered lanes (D-1556),
+/// `range-all` and pool pass 1 one call at a time through `in_input_order`
+/// (D-1701, kept over D-1556 for those two by D-1709).** None is an indexed
+/// parallel map or a private thread pool.
 #[test]
-fn every_whole_command_fan_out_is_an_ordered_lane() {
-    for (file, source, name) in [
-        ("lib.rs", include_str!("lib.rs"), "fn sweep_rungs("),
-        ("pool.rs", include_str!("pool.rs"), "fn run_under("),
+fn every_whole_command_fan_out_writes_in_input_order() {
+    for (file, source, name, shape) in [
+        (
+            "lib.rs",
+            include_str!("lib.rs"),
+            "fn sweep_rungs(",
+            "in_input_order(rungs,",
+        ),
+        (
+            "pool.rs",
+            include_str!("pool.rs"),
+            "fn run_under(",
+            "crate::in_input_order(&surface,",
+        ),
         (
             "boolean_catalog_prepared.rs",
             include_str!("boolean_catalog_prepared.rs"),
             "pub(crate) fn run(",
+            "ordered::map(",
         ),
         (
             "boolean_oos_command.rs",
             include_str!("boolean_oos_command.rs"),
             "fn execute(",
+            "ordered::map(",
         ),
     ] {
         let body = body(source, name);
-        assert!(body.contains("ordered::map("), "{file} {name}");
+        assert!(body.contains(shape), "{file} {name}");
         assert!(!body.contains("ThreadPoolBuilder"), "{file} {name}");
         let pass_one = body.split("PASS 2").next().unwrap_or(body);
         assert!(!pass_one.contains("par_iter"), "{file} {name}");

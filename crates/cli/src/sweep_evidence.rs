@@ -50,6 +50,44 @@ fn barrier(
     file.sync_all()
 }
 
+/// Every evidence row write in this module passes here, so a test can make it
+/// write a prefix and then fail exactly as a full filesystem does.
+fn write_rows(file: &mut File, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(test)]
+    if let Some(result) = tests::write_rows(file, bytes) {
+        return result;
+    }
+    file.write_all(bytes)
+}
+
+/// Append `bytes` at the end of `file`, measured under the caller's held
+/// lock, and make them durable; return the offset they start at.
+///
+/// A write that fails part-way (a full filesystem extends the file and then
+/// errors) or a barrier that fails leaves bytes that are not a whole row. Left
+/// behind they make `shape` refuse the file -- for the shared journal and
+/// start index, every later attempt in the store. They are truncated back to
+/// that measured end, which removes only this call's bytes, and the refusal
+/// says whether the rollback held (the D-0426 wording, D-1741).
+fn append_rolled_back(file: &mut File, path: &Path, bytes: &[u8]) -> Result<u64, String> {
+    let end = file.seek(SeekFrom::End(0)).map_err(io_error)?;
+    write_rows(file, bytes)
+        .and_then(|()| barrier(file, path))
+        .map_err(|why| {
+            io_error(match file.set_len(end).and_then(|()| file.sync_all()) {
+                Ok(()) => format!(
+                    "{} could not be appended: {why}. The partial write was rolled back to byte {end}, so every older whole row remains readable",
+                    path.display()
+                ),
+                Err(and) => format!(
+                    "{} could not be appended: {why}. Rolling the partial write back to byte {end} ALSO failed: {and}. The file may now end mid-row and is refused until its tail is repaired",
+                    path.display()
+                ),
+            })
+        })?;
+    Ok(end)
+}
+
 /// The computation this attempt actually performs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Operation {
@@ -623,19 +661,18 @@ impl Attempt {
                             .to_owned(),
                     );
                 }
-                // EVERY ROW OR NONE (D-1854): a write or encoding failure after
-                // some rows truncates the file back to its header, so no torn
-                // or partial ranking is left for a reader to refuse or misread.
-                crate::append_rollback::append_all(&mut file, "ranked sweep evidence", |file| {
-                    for row in rows {
-                        let raw = encode_words::<19, RANK_BYTES>(self.evidence, row.words())?;
-                        write_evidence(file, &raw).map_err(|why| why.to_string())?;
-                        digest.update(&raw);
-                    }
-                    Ok(())
-                })
-                .map_err(io_error)?;
-                barrier(&file, &path).map_err(io_error)
+                // ONE WRITE FOR THE WHOLE BLOCK, so a failure rolls back to the
+                // header and no prefix of the ranking can survive it.
+                let mut block = Vec::new();
+                block
+                    .try_reserve_exact(rows.len().saturating_mul(RANK_BYTES))
+                    .map_err(io_error)?;
+                for row in rows {
+                    let raw = encode_words::<19, RANK_BYTES>(self.evidence, row.words())?;
+                    block.extend_from_slice(&raw);
+                    digest.update(&raw);
+                }
+                append_rolled_back(&mut file, &path, &block).map(|_| ())
             })();
             let released = file.unlock().map_err(io_error);
             result.and(released)
@@ -1066,18 +1103,18 @@ fn reserve_start(root: &Path, evidence: Evidence) -> Result<(), String> {
     let mut raw = [0_u8; 16 + EVENT_BYTES];
     raw[..16].copy_from_slice(&EVENT_HEADER);
     raw[16..].copy_from_slice(&event_bytes(evidence)?);
-    // A FAILED RESERVATION LEAVES NO FILE (D-1854). The file is this token's
-    // own and was created just above, so the state before the attempt is "no
-    // file": a short write is rolled back and the file removed, rather than
-    // left torn for `require_start` to refuse.
-    if let Err(why) = append_evidence(&mut file, &raw, "sweep attempt reservation") {
+    // A FAILED RESERVATION LEAVES NO FILE (h-cli-4, D-1854). The file is this
+    // token's own and was created just above, so the state before the attempt
+    // is "no file": a failed or short write is rolled back and the file
+    // removed, rather than left torn for `require_start` to refuse.
+    if let Err(why) = append_rolled_back(&mut file, &path, &raw) {
         drop(file);
         return Err(match fs::remove_file(&path) {
             Ok(()) => format!("{why}; the reservation file was removed"),
             Err(and) => format!("{why}; removing the reservation file also failed: {and}"),
         });
     }
-    barrier(&file, &path).map_err(io_error)
+    Ok(())
 }
 
 fn require_start(root: &Path, evidence: Evidence, max_bytes: u64) -> Result<(), String> {
@@ -1159,24 +1196,6 @@ fn forget_flushed() {
     FORGOTTEN.fetch_add(1, Ordering::AcqRel);
     remembered.clear();
 }
-/// Appends `raw` at the end through the shared rollback (D-1850, D-1854): a
-/// failed or short write truncates the file back to its length before the
-/// attempt and refuses, naming `label`, the write error and the rollback.
-fn append_evidence(file: &mut File, raw: &[u8], label: &str) -> Result<(), String> {
-    crate::append_rollback::append_with(file, raw, label, write_evidence).map_err(io_error)
-}
-
-/// The one evidence write. Under test, an armed fault lands part of the bytes
-/// and fails, the shape of `ENOSPC` part-way through.
-fn write_evidence(file: &mut File, raw: &[u8]) -> std::io::Result<()> {
-    #[cfg(test)]
-    if let Some(kept) = tests::take_write_fault() {
-        file.write_all(raw.get(..kept).unwrap_or(raw))?;
-        return Err(std::io::Error::other("injected short write"));
-    }
-    file.write_all(raw)
-}
-
 fn open_append(path: &Path) -> Result<File, String> {
     OpenOptions::new()
         .read(true)
@@ -1210,6 +1229,13 @@ fn shape<const N: usize>(
     create: bool,
 ) -> Result<u64, String> {
     let mut len = file.metadata().map_err(io_error)?.len();
+    // AN EMPTY FILE HOLDS NO ROWS, exactly like an absent one (D-1741). It is
+    // what `open_append` leaves before its first write and what a rolled-back
+    // first write leaves; reading it as torn would turn one refused append
+    // into a refusal of every later read of that identity.
+    if len == 0 && !create {
+        return Ok(0);
+    }
     if len == 0 && create {
         let mut header = [0_u8; 16];
         header[..8].copy_from_slice(&magic);
@@ -1219,10 +1245,7 @@ fn shape<const N: usize>(
                 .map_err(|why| why.to_string())?
                 .to_le_bytes(),
         );
-        // Truncated back to zero bytes on a short write (D-1854), so the next
-        // writer creates the header again instead of refusing a torn one.
-        append_evidence(file, &header, "sweep evidence header")?;
-        barrier(file, path).map_err(io_error)?;
+        append_rolled_back(file, path, &header)?;
         if let Some(parent) = path.parent() {
             flush_directory(parent)?;
         }
@@ -1319,8 +1342,7 @@ fn append_row<const N: usize>(path: &Path, magic: [u8; 8], raw: &[u8; N]) -> Res
     file.lock().map_err(io_error)?;
     let result = (|| {
         let at = shape::<N>(&mut file, path, magic, true)?;
-        append_evidence(&mut file, raw, "sweep evidence row")?;
-        barrier(&file, path).map_err(io_error)?;
+        append_rolled_back(&mut file, path, raw)?;
         Ok(at)
     })();
     let released = file.unlock().map_err(io_error);
@@ -1413,8 +1435,7 @@ fn append_events(
         } else {
             rows
         };
-        append_evidence(&mut file, &bytes, "sweep lifecycle events")?;
-        barrier(&file, path).map_err(io_error)?;
+        append_rolled_back(&mut file, path, &bytes)?;
         if started && let Some(parent) = path.parent() {
             flush_directory(parent)?;
         }

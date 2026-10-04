@@ -733,6 +733,20 @@ fn fn_names(src: &str) -> Result<Vec<(usize, String)>, String> {
         .collect())
 }
 
+/// Every inline module a file declares, `mod name {`, by line and name. A
+/// module declared `mod name;` lives in its own file and is named by that
+/// file's path or by the MODULES table, so only the braced form is listed.
+/// Gate 10 reads these so a crate-first proof's middle segments can be
+/// checked against the module that declares its test (D-2100).
+fn inline_mods(src: &str) -> Result<Vec<(usize, String)>, String> {
+    let tokens = lex(src)?.tokens;
+    Ok(tokens
+        .windows(3)
+        .filter(|w| is_ident(Some(&w[0]), "mod") && is_punct(Some(&w[2]), '{'))
+        .filter_map(|w| ident(&w[1]).map(|n| (w[0].line, n.to_owned())))
+        .collect())
+}
+
 /// Every string literal in a file, test code included, by line and DECODED value:
 /// escapes resolved, raw and byte strings read as what they hold, and each
 /// `concat!` reported once more as the one literal the compiler sees. A literal in
@@ -2340,8 +2354,8 @@ enum Family {
     Shell,
     /// A text-processing language whose first operand IS its program.
     Awk,
-    /// A JSON query language whose first operand is its program; a bare
-    /// field path (`.sha`) is a path, not a program.
+    /// A JSON query language whose first operand is its program. A bare
+    /// field path is an expression too (D-2320).
     Jq,
 }
 
@@ -2412,20 +2426,6 @@ fn inline_flag(prog: &str, flag: &str) -> bool {
     }
 }
 
-/// A `--jq`/`jq` operand that only reads a field path (`.sha`, `.a.b`).
-fn is_field_path(p: &str) -> bool {
-    let p = p
-        .trim_end_matches(')')
-        .trim_matches(|c| c == '\'' || c == '"');
-    p.starts_with('.')
-        && p[1..].split('.').all(|seg| {
-            seg.chars()
-                .next()
-                .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
-                && seg.chars().all(|c| c == '_' || c.is_ascii_alphanumeric())
-        })
-}
-
 /// One quoted shell word that may span several whitespace-split words:
 /// its text and how many words it took.
 fn operand(words: &[&str]) -> (String, usize) {
@@ -2483,10 +2483,10 @@ fn inline_programs(l: &str) -> Vec<(String, &'static str, Family)> {
                 } else {
                     ("", String::new())
                 };
-                if !flag.is_empty() && (flag == "--template" || !is_field_path(&prog)) {
+                if !flag.is_empty() {
                     out.push((
                         format!("gh {flag} {prog}"),
-                        "runs a query program written inline; a field path is all a workflow may pass",
+                        "runs a jq or template expression; read the field with .github/gh_json.rs (D-2320)",
                         Family::Jq,
                     ));
                 }
@@ -2563,8 +2563,7 @@ fn inline_programs(l: &str) -> Vec<(String, &'static str, Family)> {
                     let (program, _) = operand(&rest[k.min(rest.len())..]);
                     let inline = !from_file
                         && !program.is_empty()
-                        && program.starts_with(['\'', '"', '$', '{', '/', '.'])
-                        && !(family == Family::Jq && is_field_path(&program));
+                        && program.starts_with(['\'', '"', '$', '{', '/', '.']);
                     if inline {
                         out.push((
                             format!("{w} {program}"),
@@ -2900,7 +2899,7 @@ fn content_findings(path: &str, bytes: &[u8]) -> Vec<String> {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: source_scan <code|code-prod|browser|build|unsafe|spawns|strings|fns|modules|paths|paths-prod|closure|orphans|toml|deps|step-runs|aggregator|workflow> ARGS"
+        "usage: source_scan <code|code-prod|browser|build|unsafe|spawns|strings|fns|inline-mods|modules|paths|paths-prod|closure|orphans|toml|deps|step-runs|aggregator|workflow> ARGS"
     );
     ExitCode::from(2)
 }
@@ -2940,6 +2939,13 @@ fn run(args: &[String]) -> Result<bool, String> {
             for f in rest {
                 for (line, name) in fn_names(&read_file(f)?).map_err(|e| format!("{f}: {e}"))? {
                     println!("{f}:{line}:{name}");
+                }
+            }
+        }
+        "inline-mods" => {
+            for f in rest {
+                for (_, name) in inline_mods(&read_file(f)?).map_err(|e| format!("{f}: {e}"))? {
+                    println!("{f}\t{name}");
                 }
             }
         }
@@ -3551,6 +3557,20 @@ mod tests {
     }
 
     #[test]
+    fn only_a_braced_mod_is_an_inline_module() {
+        let src = "mod on_disk;\n#[cfg(test)]\nmod tests {\n    mod inner_tests {}\n}\n// mod commented {\nconst S: &str = \"mod quoted {\";\npub(crate) mod r#type { }\n";
+        let got = inline_mods(src).unwrap();
+        assert_eq!(
+            got,
+            [
+                (3, "tests".to_owned()),
+                (4, "inner_tests".to_owned()),
+                (8, "type".to_owned())
+            ]
+        );
+    }
+
+    #[test]
     fn every_literal_is_read_and_no_comment_is() {
         let src = "fn f(slot: &mut &str) {\n    *slot = \"acmeorg\";\n    // let a = \"commented\";\n    /* \"blocked\" */ let b = r#\"raw\"q\"#;\n    let c = concat!(\"acme\", \"org2\");\n    let d = b\"bytes\";\n    let e = \"\\x61cme\";\n}\n";
         let got = string_literals(src).unwrap();
@@ -4064,6 +4084,10 @@ mod tests {
             "          gh api x --jq '.[] | .a'\n",
             "          gh pr view 1 --json a --jq='[.a]'\n",
             "          gh pr view 1 --template '{{.a}}'\n",
+            "          gh api x --jq .sha\n",
+            "          n=$(gh api x --jq '.behind_by')\n",
+            "          gh pr view 1 --json state -q .state\n",
+            "          jq .sha f\n",
             "          pwsh -Command 'x'\n",
             "          Rscript -e 'x'\n",
             "          osascript -e 'x'\n",
@@ -4074,13 +4098,12 @@ mod tests {
             assert!(!workflow_findings("w", bad).is_empty(), "passed: {bad}");
         }
         for good in [
-            "          gh api x --jq .sha\n",
-            "          n=$(gh api x --jq '.behind_by')\n",
             "          bash -c 'echo hi'\n",
             "          x=$(command -v node || true)\n",
             "          echo \"use awk here\"\n",
             "          sed -e 's/a/b/' f\n",
             "          gh pr merge 1 --auto --squash\n",
+            "          sha=$(gh api x | \"$j\" field sha)\n",
         ] {
             assert!(workflow_findings("w", good).is_empty(), "refused: {good}");
         }

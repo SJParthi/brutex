@@ -46,7 +46,7 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          sha=$(gh api "repos/${REPO}/commits/main" --jq .sha)
+          sha=$(gh api "repos/${REPO}/commits/main" | "$RUNNER_TEMP/gh-json" field sha)
           [ -n "$sha" ] || { echo "main's head could not be read."; exit 1; }
           n=$(gh api "repos/${REPO}/actions/workflows/ci.yml/runs?branch=main&head_sha=${sha}" \
                 | "$RUNNER_TEMP/gh-json" ci-run-count)

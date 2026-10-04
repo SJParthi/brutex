@@ -260,7 +260,7 @@ jobs:
           # about the merge result. Linear history is required on main, so a
           # behind branch could not fast-forward anyway. Quiet: a rebase is a
           # push, and a push is a new event.
-          behind=$(gh api "repos/${REPO}/compare/${BASE_BRANCH}...${head}" --jq '.behind_by')
+          behind=$(gh api "repos/${REPO}/compare/${BASE_BRANCH}...${head}" | "$j" field behind_by)
           say "Commits behind ${BASE_BRANCH}: ${behind}"
           [ "$behind" -eq 0 ] || not_yet "the branch is ${behind} commit(s) behind ${BASE_BRANCH}; rebase it."
 
@@ -355,7 +355,7 @@ jobs:
             # `--auto` merges outright when the pull request is already
             # mergeable, and a second invocation then errors. That is not a
             # failure worth surfacing.
-            now=$(gh pr view "$pr" --repo "$REPO" --json state --jq .state)
+            now=$(gh pr view "$pr" --repo "$REPO" --json state | "$j" field state)
             [ "$now" = "MERGED" ] || \
               stopped "could not enable auto-merge on #${pr}; its state is ${now}."
             say "Already merged."

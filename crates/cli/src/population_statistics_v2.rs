@@ -2219,9 +2219,17 @@ impl PopulationStatisticsV2Ledger {
             }
             let lock_generation = file_generation(&held_lock, &lock_path, LOCK_FILE_MAX_BYTES)?;
             let data_generation = file_generation(&data_file, &data_path, bounds.file_bytes)?;
+            // Every stored audit occupies at least one record, so the records
+            // the file holds bound the audits it can hold. Reserving the
+            // configured ceiling instead allocated O(bounds.audits) slots on
+            // every open, before anything was counted (W2-cli12-2, D-1682).
+            let stored_records = data_generation
+                .len
+                .saturating_sub(POPULATION_STATISTICS_V2_HEADER_BYTES)
+                / POPULATION_STATISTICS_V2_RECORD_STRIDE;
             let mut audits = HashMap::new();
             audits
-                .try_reserve(usize_of(bounds.audits, "audit bound")?)
+                .try_reserve(usize_of(bounds.audits.min(stored_records), "audit bound")?)
                 .map_err(|why| format!("cannot reserve population-statistics index: {why}"))?;
             let mut ledger = Self {
                 lock_path: lock_path.clone(),
@@ -2250,6 +2258,8 @@ impl PopulationStatisticsV2Ledger {
     }
 
     fn scan(&mut self) -> Result<(), PopulationStatisticsV2Refusal> {
+        #[cfg(test)]
+        STATISTICS_SCANS.with(|count| count.set(count.get().saturating_add(1)));
         verify_header(&mut self.data_file, &self.data_path)?;
         let file_len = self
             .data_file
@@ -3636,6 +3646,59 @@ fn build_raw_splits(
     Ok(splits)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only count of full-ledger scans (one per open) on this thread.
+    static STATISTICS_SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only count of rows [`candidate_column`] visited on this thread.
+    static CANDIDATE_COLUMN_VISITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// One candidate's rows from a candidate-minor (period-major or split-major)
+/// vector: rows `sequence`, `sequence + width`, `sequence + 2 x width`, ...
+///
+/// `build_raw_periods` and `build_raw_splits` write row `outer x width +
+/// candidate`, so this is the same rows in the same order as filtering the
+/// whole vector by candidate sequence, at O(rows of this candidate) instead of
+/// O(all rows). Before D-1682 the filter made preparation O(C^2 x (P + S))
+/// (W2-cli12-0). A vector whose length is not a multiple of `width`, or a row
+/// whose candidate sequence is not the one its position names, is refused, so
+/// a layout change cannot silently select other rows.
+fn candidate_column<T: Copy>(
+    rows: &[T],
+    sequence: usize,
+    width: usize,
+    candidate_of: impl Fn(&T) -> u64,
+) -> Result<Vec<T>, PopulationStatisticsV2Refusal> {
+    if width == 0 || sequence >= width || !rows.len().is_multiple_of(width) {
+        return Err(format!(
+            "population-statistics candidate {sequence} cannot be read from {} rows of width {width}",
+            rows.len()
+        ));
+    }
+    let expected = u64_of(sequence, "candidate sequence")?;
+    let mut column = Vec::new();
+    column
+        .try_reserve_exact(rows.len() / width)
+        .map_err(|why| format!("cannot reserve candidate column: {why}"))?;
+    for row in rows.iter().skip(sequence).step_by(width) {
+        #[cfg(test)]
+        CANDIDATE_COLUMN_VISITS.with(|count| count.set(count.get().saturating_add(1)));
+        if candidate_of(row) != expected {
+            return Err(format!(
+                "population-statistics row for candidate {} sits in candidate {sequence}'s column",
+                candidate_of(row)
+            ));
+        }
+        column.push(*row);
+    }
+    Ok(column)
+}
+
 fn build_raw_candidates(
     nifty: &PreAdmissionSourceV2,
     banknifty: &PreAdmissionSourceV2,
@@ -3670,16 +3733,13 @@ fn build_raw_candidates(
         let measured = romano
             .candidate(sequence)
             .ok_or_else(|| "raw Romano-Wolf candidate is absent".to_owned())?;
-        let candidate_periods: Vec<_> = periods
-            .iter()
-            .copied()
-            .filter(|period| period.candidate_sequence == sequence_u64)
-            .collect();
-        let candidate_splits: Vec<_> = splits
-            .iter()
-            .copied()
-            .filter(|split| split.candidate_sequence == sequence_u64)
-            .collect();
+        let candidate_periods =
+            candidate_column(periods, sequence, raw_candidates.len(), |period| {
+                period.candidate_sequence
+            })?;
+        let candidate_splits = candidate_column(splits, sequence, raw_candidates.len(), |split| {
+            split.candidate_sequence
+        })?;
         candidates.push(PopulationStatisticsCandidateV2 {
             audit_id: [0; 32],
             sequence: sequence_u64,
@@ -4626,10 +4686,31 @@ impl PopulationStatisticsV2Ledger {
             .checked_sub(1)
             .ok_or_else(|| "orphan retry plan lacks Completion".to_owned())?;
         let present = usize_of(orphan.present_records, "orphan present records")?;
-        for raw in planned
+        let suffix = planned
             .get(present..completion)
-            .ok_or_else(|| "orphan retry Data suffix is outside plan".to_owned())?
-        {
+            .ok_or_else(|| "orphan retry Data suffix is outside plan".to_owned())?;
+        // THE CEILING BEFORE THE FIRST BYTE, as the new-write path checks it:
+        // the rest of the planned Data plus its Completion. Measured after the
+        // writes, a refusal came only once the file had already grown past
+        // the operator's explicit maximum (D-1744).
+        let added_bytes = u64_of(suffix.len(), "orphan retry records")?
+            .checked_add(1)
+            .and_then(|records| records.checked_mul(POPULATION_STATISTICS_V2_RECORD_STRIDE))
+            .ok_or_else(|| "orphan retry byte count overflowed".to_owned())?;
+        let desired = self
+            .data_file
+            .metadata()
+            .map_err(|why| format!("cannot stat orphan append file: {why}"))?
+            .len()
+            .checked_add(added_bytes)
+            .ok_or_else(|| "orphan retry file size overflowed".to_owned())?;
+        if desired > self.bounds.file_bytes {
+            return Err(format!(
+                "population-statistics orphan retry would produce {desired} bytes above explicit maximum {}",
+                self.bounds.file_bytes
+            ));
+        }
+        for raw in suffix {
             append_raw_record(&mut self.data_file, raw)?;
         }
         self.data_file
@@ -6218,6 +6299,154 @@ mod tests {
     }
 
     #[test]
+    fn candidate_columns_equal_the_whole_vector_filter_and_visit_only_their_rows() {
+        // W2-cli12-0 / D-1682: 50 candidates, 4 periods, 3 splits, compared
+        // with the filter the per-candidate loop used before.
+        let candidates: Vec<RawCandidateV2> = (0..50_u8)
+            .map(|tag| {
+                let family = if tag < 25 {
+                    InstrumentFamilyV1::Nifty
+                } else {
+                    InstrumentFamilyV1::BankNifty
+                };
+                let base = i64::from(tag);
+                raw_candidate(family, tag, [base, -base, base * 2, 7 - base])
+            })
+            .collect();
+        let raw_splits: Vec<RawSplitV2> = (0..3_i64)
+            .map(|split| RawSplitV2 {
+                train_mask: 1,
+                test_mask: 2,
+                train_scores: (0..50).map(|c| c * 3 + split).collect(),
+                test_scores: (0..50).map(|c| split - c).collect(),
+            })
+            .collect();
+        let periods = build_raw_periods(&candidates, 50, 4).expect("period-major rows build");
+        let splits =
+            build_raw_splits(&candidates, &raw_splits, 50, 3, 2).expect("split-major rows build");
+        CANDIDATE_COLUMN_VISITS.with(|count| count.set(0));
+        for sequence in 0..50_usize {
+            let key = u64::try_from(sequence).expect("small sequence");
+            let filtered_periods: Vec<_> = periods
+                .iter()
+                .copied()
+                .filter(|period| period.candidate_sequence == key)
+                .collect();
+            let filtered_splits: Vec<_> = splits
+                .iter()
+                .copied()
+                .filter(|split| split.candidate_sequence == key)
+                .collect();
+            let column_periods =
+                candidate_column(&periods, sequence, 50, |period| period.candidate_sequence)
+                    .expect("a period column reads");
+            let column_splits =
+                candidate_column(&splits, sequence, 50, |split| split.candidate_sequence)
+                    .expect("a split column reads");
+            assert_eq!(column_periods, filtered_periods);
+            assert_eq!(column_splits, filtered_splits);
+            assert_eq!(column_periods.len(), 4);
+            assert_eq!(column_splits.len(), 3);
+            assert_eq!(
+                ordered_period_digest_for(key, &column_periods),
+                ordered_period_digest_for(key, &filtered_periods)
+            );
+        }
+        assert_eq!(
+            CANDIDATE_COLUMN_VISITS.with(std::cell::Cell::get),
+            50 * (4 + 3),
+            "C x (P + S) rows visited, not C^2 x (P + S)"
+        );
+    }
+
+    #[test]
+    fn a_candidate_column_refuses_a_layout_it_cannot_index() {
+        let candidates = [
+            raw_candidate(InstrumentFamilyV1::Nifty, 1, [1, 2, 3, 4]),
+            raw_candidate(InstrumentFamilyV1::BankNifty, 2, [5, 6, 7, 8]),
+        ];
+        let periods = build_raw_periods(&candidates, 2, 4).expect("rows build");
+        let key = |period: &PopulationStatisticsPeriodSourceV2| period.candidate_sequence;
+        assert!(
+            candidate_column(&periods, 0, 0, key)
+                .expect_err("zero width refuses")
+                .contains("of width 0")
+        );
+        assert!(
+            candidate_column(&periods, 2, 2, key)
+                .expect_err("a sequence outside the width refuses")
+                .contains("candidate 2 cannot be read")
+        );
+        assert!(
+            candidate_column(&periods[..7], 0, 2, key)
+                .expect_err("a ragged vector refuses")
+                .contains("from 7 rows")
+        );
+        let mut swapped = periods.clone();
+        swapped.swap(0, 1);
+        assert!(
+            candidate_column(&swapped, 0, 2, key)
+                .expect_err("a candidate-major or reordered vector refuses")
+                .contains("row for candidate 1 sits in candidate 0's column")
+        );
+        assert_eq!(
+            candidate_column(&periods[..0], 0, 2, key).expect("an empty vector is P = 0"),
+            Vec::new()
+        );
+        assert_eq!(
+            candidate_column(&periods, 1, 2, key)
+                .expect("the last candidate reads")
+                .iter()
+                .map(|period| period.period_sequence)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn preparation_visits_each_candidate_row_once() {
+        CANDIDATE_COLUMN_VISITS.with(|count| count.set(0));
+        let _prepared = fixture(3);
+        assert_eq!(
+            CANDIDATE_COLUMN_VISITS.with(std::cell::Cell::get),
+            2 * (4 + 1),
+            "two candidates, four periods and one split each"
+        );
+    }
+
+    #[test]
+    fn an_open_reserves_for_stored_records_not_the_audit_ceiling() {
+        // W2-cli12-2 / D-1682: the ceiling used to be reserved on every open.
+        let root = TempRoot::new("ceiling-reserve");
+        let ceiling = PopulationStatisticsV2Bounds::new(u64::MAX, 64, 64, 64, 2 * 1_024 * 1_024)
+            .expect("an unbounded audit ceiling is a legal bound");
+        let mut ledger = PopulationStatisticsV2Ledger::open_writer(root.path(), ceiling)
+            .expect("an empty ledger opens under a u64::MAX audit ceiling");
+        assert!(ledger.audits.capacity() < 1_024);
+        ledger.append(&fixture(4)).expect("an append still writes");
+        drop(ledger);
+        let reader = PopulationStatisticsV2Ledger::open_read(root.path(), ceiling)
+            .expect("a one-audit ledger reopens under the same ceiling");
+        assert_eq!(reader.completed_audits(), 1);
+        assert!(reader.audits.capacity() >= 1);
+        assert!(reader.audits.capacity() < 1_024);
+    }
+
+    #[test]
+    fn one_append_runs_two_full_scans_as_section_154_states() {
+        // W2-cli12-1 / D-1682: the cost is documented, not removed.
+        let root = TempRoot::new("two-scans");
+        STATISTICS_SCANS.with(|count| count.set(0));
+        append_population_statistics_v2(root.path(), bounds(), &fixture(5))
+            .expect("the first append writes");
+        assert_eq!(STATISTICS_SCANS.with(std::cell::Cell::get), 2);
+        STATISTICS_SCANS.with(|count| count.set(0));
+        append_population_statistics_v2(root.path(), bounds(), &fixture(5))
+            .expect("the retry is reused");
+        assert_eq!(STATISTICS_SCANS.with(std::cell::Cell::get), 2);
+    }
+
+    #[test]
     fn complete_pair_recomputes_reopens_pages_and_exactly_reuses() {
         let root = TempRoot::new("reopen");
         let prepared = fixture(1);
@@ -6760,6 +6989,72 @@ mod tests {
         drop(orphaned);
         PopulationStatisticsV2Ledger::open_read(root.path(), bounds())
             .expect("completed orphan reopens");
+    }
+
+    /// W2-cli12-5: retrying a receipt-less orphan wrote and synced the rest of
+    /// its planned block and only then measured the byte ceiling, so a refused
+    /// retry had already grown the file past the operator's explicit maximum.
+    /// The ceiling is now checked before the first byte: one byte short of the
+    /// completed block refuses with the file untouched, and exactly the
+    /// completed block's size is admitted. D-1744.
+    #[test]
+    fn an_orphan_retry_above_the_byte_ceiling_refuses_before_writing() {
+        let root = TempRoot::new("orphan-ceiling");
+        let prepared = fixture(2);
+        let ledger = PopulationStatisticsV2Ledger::open_writer(root.path(), bounds())
+            .expect("empty fixture ledger opens");
+        let planned = prepared.records(0, 0).expect("planned bytes build");
+        drop(ledger);
+        let data_path = root.path().join(DATA_FILE);
+        let prefix_len = planned.len() / 2;
+        for raw in planned
+            .get(..prefix_len)
+            .expect("fixture prefix is inside plan")
+        {
+            write_bytes(&data_path, raw);
+        }
+        let orphan_len = std::fs::metadata(&data_path)
+            .expect("orphan measures")
+            .len();
+        let missing = u64::try_from(planned.len() - prefix_len).expect("fits u64");
+        let full = orphan_len + missing * POPULATION_STATISTICS_V2_RECORD_STRIDE;
+        let short = PopulationStatisticsV2Bounds::new(8, 64, 64, 64, full - 1)
+            .expect("explicit short ceiling");
+        let mut orphaned = PopulationStatisticsV2Ledger::open_writer(root.path(), short)
+            .expect("the orphan itself fits the short ceiling");
+        let why = orphaned
+            .append(&prepared)
+            .expect_err("a retry that would exceed the ceiling refuses");
+        assert!(
+            why.contains(&format!(
+                "would produce {full} bytes above explicit maximum {}",
+                full - 1
+            )),
+            "{why}"
+        );
+        assert_eq!(
+            std::fs::metadata(&data_path)
+                .expect("orphan measures")
+                .len(),
+            orphan_len,
+            "the refused retry wrote nothing"
+        );
+        assert_eq!(orphaned.completed_audits(), 0);
+        drop(orphaned);
+        let exact =
+            PopulationStatisticsV2Bounds::new(8, 64, 64, 64, full).expect("explicit exact ceiling");
+        let mut orphaned = PopulationStatisticsV2Ledger::open_writer(root.path(), exact)
+            .expect("the untouched orphan reopens");
+        assert!(matches!(
+            orphaned
+                .append(&prepared)
+                .expect("exactly the ceiling completes"),
+            PopulationStatisticsV2Append::Written(_)
+        ));
+        assert_eq!(
+            std::fs::metadata(&data_path).expect("block measures").len(),
+            full
+        );
     }
 
     #[test]

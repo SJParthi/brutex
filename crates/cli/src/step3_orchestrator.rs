@@ -497,6 +497,60 @@ pub(crate) struct BoundedStoredContextV1 {
     pub(crate) strict: Option<Arc<strict::Inputs>>,
 }
 
+impl BoundedStoredContextV1 {
+    /// Rows this context's Candidate signal column sweeps: the support
+    /// denominator a ledger sizes its threshold on (D-2103).
+    ///
+    /// # Errors
+    ///
+    /// Every refusal of the Candidate column build.
+    pub(crate) fn candidate_swept_v1(
+        &self,
+        evaluation: &crate::candidate_universe::CandidateEvaluationInputsV1,
+    ) -> Result<u64, Step3OrchestratorRefusal> {
+        crate::candidate_universe::candidate_signal_swept_v1(
+            &self.signal.bars,
+            &self.daily.references,
+            &self.minute.bars,
+            self.rung_seconds,
+            evaluation,
+        )
+    }
+}
+
+/// Load one stored context exactly as a Candidate commit does and count the
+/// rows its signal column sweeps (D-2103). `ledger-all` sizes each rung's
+/// threshold on this for its sizing underlying.
+///
+/// # Errors
+///
+/// Every loader and column-build refusal, named by the stage that raised it.
+pub(crate) fn stored_candidate_swept_v1(
+    root: &Path,
+    vendor: Vendor,
+    (underlying, rung_name): (&str, &str),
+    (from, to): ((u16, u8), (u16, u8)),
+    bounds: StoredCandidatePreAdmissionBoundsV1,
+    evaluation: &crate::candidate_universe::CandidateEvaluationInputsV1,
+) -> Result<u64, Step3OrchestratorRefusal> {
+    let root = AdmittedRootV1::admit(root)?;
+    load_bounded_stored_context_from_spec_v1(
+        StoredContextLoadSpecV1 {
+            vendor,
+            underlying,
+            rung_name,
+            from,
+            to,
+            signal_bound: bounds.signal_records,
+            minute_bound: bounds.minute_records,
+            daily_bound: bounds.daily_records,
+        },
+        &root,
+        None,
+    )?
+    .candidate_swept_v1(evaluation)
+}
+
 #[path = "stored_family_v6.rs"]
 pub(crate) mod family_v6;
 #[path = "strict_v6_inputs.rs"]
@@ -3028,12 +3082,24 @@ pub(crate) fn commit_stored_candidate_pre_admission_authority_v1(
 }
 
 /// Strict institutional door; ordinary callers retain the historical contract.
-pub(crate) fn commit_strict_candidate_pre_admission_authority_v1(
+///
+/// It consumes the strict context the rung's sizing census already loaded
+/// when one is offered (D-1683), and loads one when given `None`. Before
+/// D-1683 this door was `commit_strict_candidate_pre_admission_authority_v1`
+/// and always loaded.
+///
+/// # Errors
+///
+/// Every load, admission and commit refusal, plus a sized context that names another
+/// root, vendor, family, rung, span, bound or configuration, or whose sources
+/// changed since sizing.
+pub(crate) fn commit_strict_candidate_pre_admission_authority_sized_v1(
     request: StoredCandidatePreAdmissionRequestV1<'_>,
     config: &crate::audited_range_command::StrictConfig,
+    sized: Option<strict::SizedNifty>,
 ) -> Result<family_v6::StoredFamilyV6, String> {
     let commit = VerifiedBuildCommitV1::current()?;
-    commit_family_with_inputs_v6(request, commit, &|_, _, _| {}, Some(config), true)
+    commit_family_from_v6(request, commit, &|_, _, _| {}, Some(config), true, sized)
 }
 
 fn commit_stored_with_verified_build_v1(
@@ -3064,8 +3130,29 @@ fn commit_family_with_inputs_v6(
     config: Option<&crate::audited_range_command::StrictConfig>,
     allow_extinct: bool,
 ) -> Result<family_v6::StoredFamilyV6, String> {
+    commit_family_from_v6(
+        request,
+        verified_commit,
+        on_level,
+        config,
+        allow_extinct,
+        None,
+    )
+}
+
+fn commit_family_from_v6(
+    request: StoredCandidatePreAdmissionRequestV1<'_>,
+    verified_commit: VerifiedBuildCommitV1<'_>,
+    on_level: &dyn Fn(&engine::Frontier, usize, u64),
+    config: Option<&crate::audited_range_command::StrictConfig>,
+    allow_extinct: bool,
+    sized: Option<strict::SizedNifty>,
+) -> Result<family_v6::StoredFamilyV6, String> {
     let mut root = AdmittedRootV1::admit(request.root)?;
-    let context = load_bounded_stored_context_v1(&request, &root, config)?;
+    let context = match sized {
+        Some(sized) => sized.into_context_for(&request, &root, config)?,
+        None => load_bounded_stored_context_v1(&request, &root, config)?,
+    };
     root.strict.clone_from(&context.strict);
     let attempt = strict::begin(&context, &request, verified_commit.0)?;
     let result = commit_loaded_stored_v1(
@@ -4736,6 +4823,17 @@ mod tests {
         })
     }
 
+    /// The evaluation inputs `fixture_request` sweeps under, for sizing.
+    pub(super) fn sizing_evaluation()
+    -> Result<crate::candidate_universe::CandidateEvaluationInputsV1, Step3OrchestratorRefusal>
+    {
+        Ok(crate::candidate_universe::CandidateEvaluationInputsV1 {
+            widths: Widths::pinned().map_err(|why| format!("fixture widths refused: {why:?}"))?,
+            availability: Availability::Absent,
+            thresholds: Thresholds::CLASSICAL,
+        })
+    }
+
     pub(super) fn fixture_request<'a>(
         root: &'a Path,
         underlying: &'a str,
@@ -4782,7 +4880,7 @@ mod tests {
             i64::from(context.rung_seconds).saturating_mul(1_000_000),
             request.widths,
             Calendar::charter(),
-            crate::stored::nse_session_close_minute,
+            |day| context.minute.session_close_minute(day),
             &mut column,
         )
         .map_err(|why| format!("fixture exact-minute overlay refused: {why:?}"))?;

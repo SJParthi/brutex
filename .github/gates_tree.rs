@@ -1601,7 +1601,12 @@ const TELEMETRY_FIELD: &str = "
     at
     unreadable_volume unreadable_oi
     timeframe
+    agreed differed day_absent minute_absent
 ";
+
+// `agreed differed day_absent minute_absent` — `ingest.rs`'s
+// `pull.daycheck` line (D-3001): four COUNTS of days, the pulled day bar
+// against the days its minute bars fold to. Integers on the right.
 
 // THE SECOND BATCH, and why each is not a path segment. The emit
 // sites in `secret.rs`, `totp.rs`, `work.rs` and `config.rs` landed

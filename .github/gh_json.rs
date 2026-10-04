@@ -5,9 +5,10 @@
 //! approval rule among them: a second language in a tracked file outside
 //! `web/`, which CLAUDE.md section 2 forbids. The rules live here now, in Rust,
 //! built by rustc from the checkout of `main` (never of the pull request), and
-//! pinned by the tests below, which gate 0 runs. A workflow may still pass
-//! `--jq` a bare field path such as `.sha`; that reads a value and computes
-//! nothing.
+//! pinned by the tests below, which gate 0 runs. A bare field path is read
+//! here too (`field KEY`), not by `--jq`: a path is still a jq expression,
+//! evaluated by the jq engine inside gh, and gate 0 refuses every `--jq`
+//! operand (D-2320).
 //!
 //! Every reader fails closed: a document that does not parse, or lacks a field
 //! a rule needs, is an error on stderr and exit status 1, never an empty
@@ -390,6 +391,24 @@ fn ci_run_count(text: &str) -> Result<Vec<String>, String> {
     Ok(vec![n.to_string()])
 }
 
+/// One top-level field of one document, as the line a workflow compares:
+/// `compare` gives `.behind_by`, `commits/main` gives `.sha`, `pr view --json
+/// state` gives `.state` (D-2320). A string comes back as its text and a
+/// number as its digits; anything else, a missing field, or a string a shell
+/// line could not carry whole is refused, never an empty answer.
+fn field(text: &str, key: &str) -> Result<Vec<String>, String> {
+    let doc = one(text)?;
+    match doc.get(key) {
+        Some(Json::Str(s)) if !s.is_empty() && !s.chars().any(char::is_control) => {
+            Ok(vec![s.clone()])
+        }
+        Some(Json::Num(n)) => Ok(vec![n.clone()]),
+        other => Err(format!(
+            "`.{key}` is not a one-line string or a number: {other:?}"
+        )),
+    }
+}
+
 fn answer(args: &[String], text: &str) -> Result<Vec<String>, String> {
     let arg = |k: usize| {
         args.get(k)
@@ -404,8 +423,9 @@ fn answer(args: &[String], text: &str) -> Result<Vec<String>, String> {
         Some("filenames") => filenames(text),
         Some("approvers") => approvers(text, arg(1)?),
         Some("ci-run-count") => ci_run_count(text),
+        Some("field") => field(text, arg(1)?),
         _ => Err(
-            "usage: gh_json <armed|pr-for-head SHA|pr-fields|check-runs|filenames|approvers SHA|ci-run-count> < json"
+            "usage: gh_json <armed|pr-for-head SHA|pr-fields|check-runs|filenames|approvers SHA|ci-run-count|field KEY> < json"
                 .to_owned(),
         ),
     }
@@ -569,6 +589,35 @@ mod tests {
         assert!(run(&["approvers"], "[]").is_err());
     }
 
+    #[test]
+    fn field_reads_one_string_or_number_and_refuses_everything_else() {
+        assert_eq!(
+            run(&["field", "sha"], "{\"sha\":\"abc\"}").unwrap(),
+            ["abc"]
+        );
+        assert_eq!(
+            run(&["field", "behind_by"], "{\"behind_by\":0}").unwrap(),
+            ["0"]
+        );
+        assert_eq!(
+            run(&["field", "state"], "{\"state\":\"MERGED\",\"x\":1}").unwrap(),
+            ["MERGED"]
+        );
+        for (args, doc) in [
+            (&["field", "sha"][..], "{}"),
+            (&["field", "sha"], "{\"sha\":null}"),
+            (&["field", "sha"], "{\"sha\":\"\"}"),
+            (&["field", "sha"], "{\"sha\":\"a\\nb\"}"),
+            (&["field", "sha"], "{\"sha\":true}"),
+            (&["field", "sha"], "{\"sha\":[\"a\"]}"),
+            (&["field", "sha"], "{\"sha\":\"a\"}{\"sha\":\"b\"}"),
+            (&["field", "sha"], "[]"),
+            (&["field"], "{\"sha\":\"a\"}"),
+            (&["field", ""], "{\"\":\"a\"}"),
+        ] {
+            assert!(run(args, doc).is_err(), "answered: {args:?} {doc}");
+        }
+    }
     #[test]
     fn ci_run_count_counts_push_dispatch_and_schedule_only() {
         let page = "{\"workflow_runs\":[{\"event\":\"push\"},{\"event\":\"pull_request\"},{\"event\":\"workflow_dispatch\"},{\"event\":\"schedule\"}]}";

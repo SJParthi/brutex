@@ -9,33 +9,50 @@ use std::ffi::OsString;
 use std::rc::Rc;
 
 type Hook = Box<dyn FnMut(&Path) -> std::io::Result<()>>;
+/// A replacement for one evidence row write: given the file and the bytes.
+type WriteHook = Box<dyn FnMut(&mut File, &[u8]) -> std::io::Result<()>>;
 
 std::thread_local! {
     static BARRIERS: Cell<u64> = const { Cell::new(0) };
     static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
     static MODELLED: Cell<bool> = const { Cell::new(false) };
-    static WRITE_FAULT: Cell<Option<(u32, usize)>> = const { Cell::new(None) };
+    static WRITE: RefCell<Option<WriteHook>> = const { RefCell::new(None) };
 }
 
-/// Arm one injected short write on this thread: after `skip` whole evidence
-/// writes succeed, the next lands only `kept` bytes and fails.
-fn arm_write_fault(skip: u32, kept: usize) {
-    WRITE_FAULT.with(|slot| slot.set(Some((skip, kept))));
+/// Run the write hook a test armed on this thread instead of the production
+/// `write_all`; `None` when no hook is armed.
+pub(super) fn write_rows(file: &mut File, bytes: &[u8]) -> Option<std::io::Result<()>> {
+    WRITE.with(|slot| slot.borrow_mut().as_mut().map(|hook| hook(file, bytes)))
 }
 
-/// Consumed by `write_evidence`: `Some(kept)` when this write must fail.
-pub(super) fn take_write_fault() -> Option<usize> {
-    WRITE_FAULT.with(|slot| match slot.get() {
-        Some((0, kept)) => {
-            slot.set(None);
-            Some(kept)
-        }
-        Some((skip, kept)) => {
-            slot.set(Some((skip - 1, kept)));
-            None
-        }
-        None => None,
-    })
+/// Arm this thread's row writes: the `nth` (one-based) writes only `prefix`
+/// bytes and then fails with `ENOSPC`, as a filesystem that filled mid-append
+/// does; every other write is whole. Disarmed when the guard drops.
+fn fail_write(nth: u32, prefix: usize) -> WriteFault {
+    let mut seen = 0_u32;
+    WRITE.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move |file: &mut File, bytes: &[u8]| {
+            seen += 1;
+            if seen != nth {
+                return file.write_all(bytes);
+            }
+            file.write_all(bytes.get(..prefix).unwrap_or(bytes))?;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::StorageFull,
+                "injected full filesystem after a partial row",
+            ))
+        }));
+    });
+    WriteFault
+}
+
+/// Disarms [`fail_write`] on drop.
+struct WriteFault;
+
+impl Drop for WriteFault {
+    fn drop(&mut self) {
+        WRITE.with(|slot| *slot.borrow_mut() = None);
+    }
 }
 
 /// Durability barriers this module issued on the calling thread.
@@ -844,115 +861,140 @@ fn obstructed_group_paths_refuse_before_any_attempt_is_handed_back() -> Result<(
     Ok(())
 }
 
-/// AHA-06 (h-cli-4, D-1854). Every evidence writer rolls a failed or short
-/// write back: a depth row, a lifecycle append, a file header. The file is
-/// byte-identical afterwards, the refusal names the write and the rollback,
-/// and the next write lands whole on the old boundary.
+/// GAP11-1: one short write left a torn tail in a shared evidence file, and
+/// every later attempt in the store refused with "torn or short" forever. The
+/// failed write now rolls back to the length measured under the lock, so the
+/// next attempt -- of any identity -- starts. Each file kind is driven through
+/// its real public path: the global journal, the per-identity start index, a
+/// level row, the ranked block, and a fresh file's header. D-1741.
 #[test]
-fn a_failed_evidence_write_truncates_back_and_the_next_write_lands_whole() -> Result<(), String> {
+fn a_partial_evidence_write_rolls_back_and_never_blocks_the_next_attempt() -> Result<(), String> {
     let fixture = Fixture::new()?;
     let _quiet = BarrierWatch::modelled(|_| Ok(()));
-    let attempt = begin(&fixture.0, [0x51; 32], Operation::Sweep)?;
+    let first = begin(&fixture.0, [81; 32], Operation::Sweep)?;
+    first.level(depth(1))?;
+    first.finish(Completion::Completed)?;
+    let journal = base(&fixture.0).join("attempts.bin");
+    let before = fs::metadata(&journal).map_err(text)?.len();
+
+    // The global journal: the allocation write tears after 16 bytes.
+    let fault = fail_write(1, 16);
+    let why = begin(&fixture.0, [82; 32], Operation::Sweep)
+        .err()
+        .ok_or("the injected journal write refuses")?;
+    drop(fault);
+    assert!(why.contains("rolled back to byte"), "{why}");
+    assert_eq!(fs::metadata(&journal).map_err(text)?.len(), before);
+
+    // A rerun of a known identity: journal, lifecycle start, then the start
+    // index, which tears.
+    let starts = directory(&fixture.0, &[81; 32]).join("starts.bin");
+    let indexed = fs::metadata(&starts).map_err(text)?.len();
+    let fault = fail_write(3, 9);
+    let why = begin(&fixture.0, [81; 32], Operation::Sweep)
+        .err()
+        .ok_or("the injected start-index write refuses")?;
+    drop(fault);
+    assert!(why.contains("rolled back to byte"), "{why}");
+    assert_eq!(fs::metadata(&starts).map_err(text)?.len(), indexed);
+    let rerun = begin(&fixture.0, [81; 32], Operation::Sweep)?;
+    assert_eq!(
+        fs::metadata(&starts).map_err(text)?.len(),
+        indexed + EVENT_BYTES as u64
+    );
+
+    // A level row tears; the attempt refuses and its level file keeps no tail.
+    rerun.level(depth(1))?;
+    let levels = rerun.detail("levels");
+    let level_len = fs::metadata(&levels).map_err(text)?.len();
+    let fault = fail_write(1, 5);
+    let why = rerun
+        .level(depth(2))
+        .err()
+        .ok_or("the torn level refuses")?;
+    drop(fault);
+    assert!(why.contains("rolled back to byte"), "{why}");
+    assert_eq!(fs::metadata(&levels).map_err(text)?.len(), level_len);
+    drop(rerun);
+
+    // A ranked block tears after one whole row and part of the next: the
+    // whole block is one write, so nothing of it survives.
+    let ranked = begin(&fixture.0, [83; 32], Operation::Sweep)?;
+    ranked.level(depth(1))?;
+    let path = ranked.detail("ranked");
+    let fault = fail_write(2, RANK_BYTES + 7);
+    let why = ranked
+        .ranked(&[rank(1), rank(2)])
+        .err()
+        .ok_or("the torn ranking refuses")?;
+    drop(fault);
+    assert!(why.contains("rolled back to byte 16"), "{why}");
+    assert_eq!(
+        fs::metadata(&path).map_err(text)?.len(),
+        HEADER,
+        "only the header this call started remains"
+    );
+    drop(ranked);
+
+    // A fresh file's header tears: rolled back to empty.
+    let header = begin(&fixture.0, [84; 32], Operation::Sweep)?;
+    let fault = fail_write(1, 3);
+    let why = header
+        .level(depth(1))
+        .err()
+        .ok_or("the torn header refuses")?;
+    drop(fault);
+    assert!(why.contains("rolled back to byte 0"), "{why}");
+    assert_eq!(
+        fs::metadata(header.detail("levels")).map_err(text)?.len(),
+        0
+    );
+    drop(header);
+
+    // Every later attempt of a new identity starts and completes.
+    let next = begin(&fixture.0, [85; 32], Operation::Sweep)?;
+    next.level(depth(1))?;
+    next.ranked(&[rank(1)])?;
+    next.finish(Completion::Completed)?;
+    assert_eq!(
+        read(&fixture.0, [85; 32], LIMIT)?.map(|e| e.completion),
+        Some(Completion::Completed)
+    );
+    Ok(())
+}
+
+/// A store's very first journal write tears and is rolled back to an empty
+/// file. An empty evidence file holds no rows, exactly like an absent one, so
+/// readers report nothing rather than "torn or short", and the next attempt
+/// starts the file afresh. D-1741.
+#[test]
+fn a_rolled_back_first_write_leaves_an_empty_file_that_reads_as_no_rows() -> Result<(), String> {
+    let fixture = Fixture::new()?;
+    let _quiet = BarrierWatch::modelled(|_| Ok(()));
+    let fault = fail_write(1, 40);
+    let why = begin(&fixture.0, [91; 32], Operation::Sweep)
+        .err()
+        .ok_or("the injected first journal write refuses")?;
+    drop(fault);
+    assert!(why.contains("rolled back to byte 0"), "{why}");
+    let journal = base(&fixture.0).join("attempts.bin");
+    assert_eq!(fs::metadata(&journal).map_err(text)?.len(), 0);
+    assert_eq!(latest(&fixture.0, LIMIT)?, None);
+    assert_eq!(read(&fixture.0, [91; 32], LIMIT)?, None);
+    let attempt = begin(&fixture.0, [91; 32], Operation::Sweep)?;
+    assert_eq!(attempt.token(), 1, "the empty journal allocated nothing");
     attempt.level(depth(1))?;
-    let levels = attempt.detail("levels");
-    let before = fs::read(&levels).map_err(text)?;
-    let raw = encode_words::<10, DEPTH_BYTES>(attempt.evidence, depth(2).words())?;
-
-    arm_write_fault(0, 7);
-    let refusal = append_row(&levels, DEPTHS, &raw).err().unwrap_or_default();
-    assert!(
-        refusal.contains("sweep evidence row")
-            && refusal.contains("injected short write")
-            && refusal.contains(&format!("truncated back to {} bytes", before.len())),
-        "{refusal}"
-    );
+    attempt.finish(Completion::Completed)?;
     assert_eq!(
-        fs::read(&levels).map_err(text)?,
-        before,
-        "the row file is untouched"
-    );
-    assert_eq!(
-        append_row(&levels, DEPTHS, &raw)?,
-        1,
-        "the next row lands at index 1"
-    );
-    assert_eq!(
-        fs::metadata(&levels).map_err(text)?.len(),
-        HEADER + 2 * DEPTH_BYTES as u64
-    );
-
-    // Through the attempt: the failed level is refused loudly, poisons the
-    // attempt, and leaves whole rows a reader still counts.
-    let second = begin(&fixture.0, [0x52; 32], Operation::Sweep)?;
-    second.level(depth(1))?;
-    arm_write_fault(0, 100);
-    assert!(second.level(depth(2)).is_err(), "a failed level refuses");
-    assert!(
-        second.level(depth(3)).is_err(),
-        "and the attempt stays refused"
-    );
-    assert_eq!(
-        count_optional::<DEPTH_BYTES>(&second.detail("levels"), DEPTHS, LIMIT)?,
-        1,
-        "the one whole row is all the file holds"
-    );
-
-    // A lifecycle file this call starts: header and rows roll back to empty,
-    // and the next call writes the header again.
-    let events = fixture.0.join("events.bin");
-    let row = event_bytes(attempt.evidence)?;
-    arm_write_fault(0, 20);
-    assert!(append_events(&events, |_, _| Ok(row.to_vec())).is_err());
-    assert_eq!(fs::metadata(&events).map_err(text)?.len(), 0);
-    assert_eq!(append_events(&events, |_, _| Ok(row.to_vec()))?, 0);
-    assert_eq!(append_events(&events, |_, _| Ok(row.to_vec()))?, 1);
-    let grown = fs::read(&events).map_err(text)?;
-    arm_write_fault(0, EVENT_BYTES - 1);
-    assert!(append_events(&events, |_, _| Ok(row.to_vec())).is_err());
-    assert_eq!(fs::read(&events).map_err(text)?, grown);
-
-    // A header shape creates: rolled back to zero bytes, then created whole.
-    let fresh = fixture.0.join("fresh.bin");
-    let mut file = open_append(&fresh)?;
-    arm_write_fault(0, 3);
-    assert!(shape::<EVENT_BYTES>(&mut file, &fresh, EVENTS, true).is_err());
-    assert_eq!(fs::metadata(&fresh).map_err(text)?.len(), 0);
-    assert_eq!(shape::<EVENT_BYTES>(&mut file, &fresh, EVENTS, true)?, 0);
-    assert_eq!(fs::read(&fresh).map_err(text)?, EVENT_HEADER);
-    Ok(())
-}
-
-/// AHA-06 (D-1854). A ranking is published whole or not at all: a write that
-/// fails after some rows truncates the file back to its header, so a reader
-/// counts zero rows instead of refusing a torn file or showing part of a
-/// ranking.
-#[test]
-fn a_ranking_that_fails_part_way_leaves_no_row_behind() -> Result<(), String> {
-    let fixture = Fixture::new()?;
-    let _quiet = BarrierWatch::modelled(|_| Ok(()));
-    let attempt = begin(&fixture.0, [0x53; 32], Operation::Sweep)?;
-    let rows: Vec<RankedRow> = (1..=3).map(rank).collect();
-    // The header is written whole, then the first row; the second row is cut.
-    arm_write_fault(2, 11);
-    let refusal = attempt.ranked(&rows).err().unwrap_or_default();
-    assert!(
-        refusal.contains("ranked sweep evidence")
-            && refusal.contains("injected short write")
-            && refusal.contains(&format!("truncated back to {HEADER} bytes")),
-        "{refusal}"
-    );
-    let ranked = attempt.detail("ranked");
-    assert_eq!(fs::metadata(&ranked).map_err(text)?.len(), HEADER);
-    assert_eq!(count_optional::<RANK_BYTES>(&ranked, RANKS, LIMIT)?, 0);
-    assert!(
-        attempt.ranked(&rows).is_err(),
-        "published once, refused after"
+        read(&fixture.0, [91; 32], LIMIT)?.map(|e| e.completion),
+        Some(Completion::Completed)
     );
     Ok(())
 }
 
-/// AHA-06 (D-1854). A reservation whose write fails leaves no file, the state
-/// before `create_new`, so the token reserves cleanly afterwards.
+/// AHA-06 (h-cli-4, D-1854): a reservation whose write tears is rolled back
+/// and its file removed, because the file was created by this call and "no
+/// file" is the state before it; the same token then reserves whole.
 #[test]
 fn a_failed_reservation_leaves_no_file() -> Result<(), String> {
     let fixture = Fixture::new()?;
@@ -962,13 +1004,13 @@ fn a_failed_reservation_leaves_no_file() -> Result<(), String> {
         attempt: 9_999,
         ..attempt.evidence
     };
-    arm_write_fault(0, 40);
+    let fault = fail_write(1, 40);
     let refusal = reserve_start(&fixture.0, evidence)
         .err()
-        .unwrap_or_default();
+        .ok_or("the torn reservation refuses")?;
+    drop(fault);
     assert!(
-        refusal.contains("sweep attempt reservation")
-            && refusal.contains("truncated back to 0 bytes")
+        refusal.contains("rolled back to byte 0")
             && refusal.contains("the reservation file was removed"),
         "{refusal}"
     );

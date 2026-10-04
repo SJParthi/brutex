@@ -137,6 +137,7 @@
   import { impliedConditions } from '$lib/condition-groups.js';
   import { createRequestGate } from '$lib/request-gate.js';
   import { liveAttemptKey, reduceLiveProgress } from '$lib/live-progress';
+  import { liveWinShare } from '$lib/live-win.js';
   import {
     TIME_GRAINS,
     equityMaxDrawdown,
@@ -7251,6 +7252,7 @@
            the markup they describe failed the build outright. -->
       {@const lead = liveTop.rows[0]}
       {@const leadT = Math.abs(lead?.t_milli ?? 0) / 1000}
+      {@const leadWin = liveWinShare(lead)}
       <div class="livetop">
         <!-- THE PLAIN-ENGLISH ANSWER FIRST, THEN THE EVIDENCE.
              This block first rendered a nine-column table of |t|, mean paisa and
@@ -7287,11 +7289,17 @@
           </div>
           <div class="keystat">
             <p class="k">Winning trades</p>
-            <p class="v">
-              {lead?.n > 0 ? ((lead.edge_wins / lead.n) * 100).toFixed(2) : '0.00'}%<span class="u">
-                {exact(lead?.edge_wins ?? 0)}/{exact(lead?.n ?? 0)}</span
-              >
-            </p>
+            <!-- SIDE-AWARE, OR NOT SHOWN. `edge_wins` counts UP moves, which
+                 are a sell's losing trades; see `$lib/live-win.js` (p14num-1). -->
+            {#if leadWin.known}
+              <p class="v">
+                {(leadWin.share * 100).toFixed(2)}%<span class="u">
+                  {exact(leadWin.wins)}/{exact(leadWin.n)}</span
+                >
+              </p>
+            {:else}
+              <p class="v" title={leadWin.why}>—<span class="u"> not served for a sell</span></p>
+            {/if}
           </div>
           <div class="keystat">
             <p class="k">Evidence</p>
@@ -7333,7 +7341,7 @@
             {@const t = Math.abs(Number(row.t_milli) || 0) / 1000}
             {@const move = Math.abs(Number(row.mean_milli_paisa) || 0) / 1000}
             {@const n = Number(row.n) || 0}
-            {@const wins = Number(row.edge_wins) || 0}
+            {@const win = liveWinShare(row)}
             <!-- Declared here and not beside the markup they describe: Svelte
                  requires `{@const}` to be the immediate child of a block. -->
             {@const decoded = decodeMaskWords(row.mask_words)}
@@ -7377,7 +7385,11 @@
               </div>
               <div class="liverow-facts">
                 <span><b>{exact(n)}</b> trades</span>
-                <span><b>{n > 0 ? Math.round((wins / n) * 100) : 0}%</b> won</span>
+                {#if win.known}
+                  <span><b>{Math.round(win.share * 100)}%</b> won</span>
+                {:else}
+                  <span title={win.why}>won: <b>not served</b></span>
+                {/if}
                 <span>fires on <b>{exact(row.hits)}</b> bars</span>
                 <span>evidence <b>{t.toFixed(2)}</b> of {bar.toFixed(2)}</span>
               </div>
