@@ -14515,3 +14515,34 @@ inner route admits, percent-encoded twice more. That is the worst case, held in
 memory once per request; a real press is a few kilobytes per leg. One leg past
 the bound is refused by name (`Refusal::TooManyLegs`) rather than read further.
 The figure is arithmetic from the constants, not a measurement.
+
+## Kill-torn ledger tails and failed barriers: what the writers recover, and what still refuses — D-1910, D-1915, D-2550, 4 October 2026
+
+ledgers-3 asked for this list; D-1910 fixed the code and did not add it.
+
+* **Healed by the next writer.** A kill or power loss inside `write(2)` can
+  leave a sub-record tail (a record that straddles a page is copied page by
+  page). Pre-Admission V1/V2, Base Evidence V2 and Candidate Universe (all in
+  the STORE root), and Execution V4, Observation V1/V2 and Search Lineage V4
+  (per rung root) now cut bytes past the last whole record in their writable
+  open, under the exclusive lock, sync the cut, and emit a `cli.ledger` warn
+  event naming the file and both lengths (D-1910). The result chain and the
+  sweep-evidence journals do the same (D-1901).
+* **Still refused.** A READ-ONLY open still refuses a torn tail until a writer
+  has healed it, so a reader on a store no writer has opened since the crash
+  is refused. A whole record whose seal does not verify is never cut; it may be
+  damaged history. Statistics V3, Admission V4, Finalization V4 and Population
+  V6 refuse a sub-record tail on every open (their writes were reported only
+  for the write-error case and now roll back, D-1900), as does Admission V3,
+  whose 2,048- and 4,096-byte records at aligned offsets cannot be torn by a
+  kill on a 4 KiB page.
+* **Failed barriers.** Every live ledger now cuts a block whose barrier failed
+  and remembers the path for the rest of the process; a retried prefix is
+  rewritten, not re-synced (D-1900, D-1915, D-2550). The memory is per process.
+  If a barrier fails AND the rollback's own `set_len` fails, the refusal names
+  both and the bytes stay; a later process cannot know the barrier failed and
+  may vouch for them. That double fault is not handled.
+* **Not measured.** Kills, power loss and EIO are modelled by hand-written
+  partial files and by the `fixed_tail::fault` injector; no test kills a
+  process or fails a real device, and whether a given filesystem marks failed
+  pages clean (K2) is UNVERIFIED here.

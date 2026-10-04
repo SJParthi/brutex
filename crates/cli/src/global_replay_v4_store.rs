@@ -58,17 +58,31 @@ pub(super) fn persist(
             crate::result_set::file_generation(&file, &path)?,
             &path,
         )?;
-        file.seek(SeekFrom::Start(before.len))
-            .map_err(|why| why.to_string())?;
-        append_range(&mut file, records, before.len, expected_bytes - 32)?;
-        file.sync_all().map_err(|why| why.to_string())?;
-        append_range(
-            &mut file,
-            records,
-            before.len.max(expected_bytes - 32),
-            expected_bytes,
-        )?;
-        file.sync_all().map_err(|why| why.to_string())?;
+        if before.len == expected_bytes {
+            // A path whose barrier failed in this process is never confirmed
+            // by a second one (ledgers-2, D-2550).
+            crate::fixed_tail::refuse_after_failed_barrier(&path)?;
+            file.sync_all().map_err(|why| why.to_string())?;
+        } else {
+            // REWRITTEN, NOT VOUCHED FOR (ledgers-2, D-2550). An exact prefix
+            // left by an interrupted publisher may be the bytes of a run whose
+            // barrier failed; a barrier on this descriptor cannot prove them
+            // durable, so the file is cut and written again whole. The bytes
+            // are identical. Any write or barrier failure cuts it back to
+            // empty, and a failed barrier is remembered for this process.
+            if before.len != 0 {
+                file.set_len(0)
+                    .and_then(|()| file.sync_all())
+                    .map_err(|why| format!("Global Replay V4 retry prefix cut: {why}"))?;
+            }
+            for (first, end) in [(0, expected_bytes - 32), (expected_bytes - 32, expected_bytes)] {
+                file.seek(SeekFrom::Start(first))
+                    .map_err(|why| why.to_string())
+                    .and_then(|_| append_range(&mut file, records, first, end))
+                    .map_err(|why| crate::fixed_tail::roll_back(&file, &path.display(), 0, &why))?;
+                crate::fixed_tail::sync_all_or_roll_back(&file, &path, 0)?;
+            }
+        }
         File::open(&root)
             .and_then(|directory| directory.sync_all())
             .map_err(|why| why.to_string())?;

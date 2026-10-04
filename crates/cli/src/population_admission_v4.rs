@@ -2711,6 +2711,9 @@ impl PopulationAdmissionV4Ledger {
                 prepared,
                 receipt.sequence,
             )?;
+            // A path whose barrier failed in this process is never confirmed
+            // by a second one (ledgers-2, D-2550).
+            crate::fixed_tail::refuse_after_failed_barrier(&self.data_path)?;
             self.data_file
                 .sync_all()
                 .map_err(|why| format!("cannot sync reused Admission V4 data: {why}"))?;
@@ -2744,8 +2747,17 @@ impl PopulationAdmissionV4Ledger {
                     == Some(&stored);
                 index += 1;
             }
+            let at = record_offset(first_record)?;
             if exact {
-                record_count
+                // REWRITTEN, NOT VOUCHED FOR (ledgers-2, D-2550). This exact
+                // retry's own receipt-less prefix may be the bytes of a run
+                // whose barrier failed; a barrier on this descriptor cannot
+                // prove them durable, so they are cut and the whole block is
+                // written again below. The bytes are identical.
+                self.data_file
+                    .set_len(at)
+                    .and_then(|()| self.data_file.sync_all())
+                    .map_err(|why| format!("cannot cut Admission V4 retry prefix: {why}"))?;
             } else {
                 // A RECEIPT-LESS PREFIX THAT IS NOT THIS EXACT RETRY IS SCRATCH
                 // (D-1905, pop2-4): no Completion acknowledged it, and refusing
@@ -2753,15 +2765,15 @@ impl PopulationAdmissionV4Ledger {
                 crate::fixed_tail::discard_orphan(
                     &self.data_file,
                     &self.data_path,
-                    record_offset(first_record)?,
+                    at,
                     "an Admission V4 block that is not this exact retry",
                 )?;
-                self.record_count = first_record;
-                self.trailing = None;
-                self.data_generation =
-                    file_generation(&self.data_file, &self.data_path, self.bounds.file_bytes)?;
-                0
             }
+            self.record_count = first_record;
+            self.trailing = None;
+            self.data_generation =
+                file_generation(&self.data_file, &self.data_path, self.bounds.file_bytes)?;
+            0
         } else {
             0
         };
@@ -3655,6 +3667,46 @@ mod tests {
         let reused = commit_population_admission_v4(root.path(), bounds(), value)
             .expect("reuse Admission V4");
         assert!(matches!(&reused, PopulationAdmissionV4Commit::Reused(_)));
+    }
+
+    /// ledgers-2, D-2550: the exact retry over its own receipt-less prefix
+    /// writes the whole block behind a barrier of its own, so a failure of
+    /// that barrier cuts the prefix too: it was never vouched for in place.
+    #[test]
+    fn an_exact_admission_v4_retry_rewrites_its_prefix_rather_than_resyncing_it() {
+        let root = TestRoot::new("prefix-rewrite");
+        let value = prepared(
+            AdmissionV4FamilyTerminal::Evaluated,
+            AdmissionV4FamilyTerminal::NaturallyExtinct,
+            3,
+        );
+        let records = encoded_block(&value, 0).expect("encode fixture block");
+        let mut file = File::create(root.path().join(DATA_FILE)).expect("create prefix data");
+        file.write_all(&header()).expect("write header");
+        for raw in &records[..3] {
+            file.write_all(raw).expect("write exact prefix");
+        }
+        file.sync_all().expect("sync exact prefix");
+        drop(file);
+        {
+            let _armed = crate::fixed_tail::fault::Armed::arm(
+                DATA_FILE,
+                crate::fixed_tail::fault::Kind::Sync,
+            );
+            assert!(commit_population_admission_v4(root.path(), bounds(), value.clone()).is_err());
+        }
+        assert_eq!(
+            std::fs::metadata(root.path().join(DATA_FILE))
+                .expect("measure data")
+                .len(),
+            HEADER_BYTES as u64,
+            "the retried prefix is cut with the block whose barrier failed"
+        );
+        assert!(matches!(
+            commit_population_admission_v4(root.path(), bounds(), value)
+                .expect("the exact rerun writes"),
+            PopulationAdmissionV4Commit::Written(_)
+        ));
     }
 
     #[test]

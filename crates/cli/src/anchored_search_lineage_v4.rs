@@ -938,6 +938,10 @@ impl AnchoredSearchLineageV4Ledger {
         self.require_unchanged()?;
         if let Some(receipt) = self.receipts.get(&prepared.pair_id).copied() {
             self.require_exact_existing(prepared, receipt)?;
+            // A path whose barrier failed in this process is never confirmed
+            // by a second one (ledgers-2, D-2550).
+            crate::fixed_tail::refuse_after_failed_barrier(&self.member_path)?;
+            crate::fixed_tail::refuse_after_failed_barrier(&self.completion_path)?;
             self.member_file
                 .sync_data()
                 .map_err(|why| format!("cannot sync reused search-lineage V4 members: {why}"))?;
@@ -948,58 +952,65 @@ impl AnchoredSearchLineageV4Ledger {
             self.require_unchanged()?;
             return Ok((false, receipt));
         }
-        if let Some(trailing) = self.trailing {
-            if trailing.first_member_record != self.member_records.saturating_sub(2)
-                || trailing.pair != *prepared
-            {
-                return Err(format!(
-                    "anchored search-lineage V4 trailing pair {} is not exact retry {}",
-                    hex32(trailing.pair.pair_id),
-                    hex32(prepared.pair_id)
-                ));
-            }
-            self.member_file
-                .sync_data()
-                .map_err(|why| format!("cannot sync retry search-lineage V4 members: {why}"))?;
-            self.append_completion(prepared)?;
-            let receipt = self
-                .receipts
-                .get(&prepared.pair_id)
-                .copied()
-                .ok_or_else(|| "retried search-lineage V4 pair was not indexed".to_owned())?;
-            return Ok((true, receipt));
+        if let Some(trailing) = self.trailing
+            && (trailing.first_member_record != self.member_records.saturating_sub(2)
+                || trailing.pair != *prepared)
+        {
+            return Err(format!(
+                "anchored search-lineage V4 trailing pair {} is not exact retry {}",
+                hex32(trailing.pair.pair_id),
+                hex32(prepared.pair_id)
+            ));
         }
-        self.require_append_capacity()?;
+        if let Some(orphan) = self.orphan_nifty
+            && orphan != prepared.nifty
+        {
+            return Err(format!(
+                "anchored search-lineage V4 trailing NIFTY member {} is not exact retry {}",
+                hex32(orphan.member_id),
+                hex32(prepared.pair_id)
+            ));
+        }
+        if self.trailing.is_none() {
+            self.require_append_capacity()?;
+        }
+        // Every pair starts right after the last Completion's two members.
+        let block_start = self
+            .completion_records
+            .checked_mul(2 * ANCHORED_SEARCH_LINEAGE_V4_MEMBER_BYTES as u64)
+            .ok_or_else(|| "search-lineage V4 member offset overflowed".to_owned())?;
+        if self.trailing.is_some() || self.orphan_nifty.is_some() {
+            // REWRITTEN, NOT VOUCHED FOR (ledgers-2, D-2550). A receipt-less
+            // trailing pair or NIFTY member that is this exact retry may be
+            // the bytes of a run whose barrier failed; a barrier on this
+            // descriptor cannot prove them durable, so they are cut back and
+            // the pair is written again whole. The bytes are identical.
+            self.member_file
+                .set_len(block_start)
+                .and_then(|()| self.member_file.sync_all())
+                .map_err(|why| {
+                    format!("cannot cut search-lineage V4 retry members for rewrite: {why}")
+                })?;
+        }
         let members = prepared.members(self.completion_records);
         // Both members go down in one write, so the only whole-record prefix a
         // crash can leave is the NIFTY member that `scan` retains as an
-        // orphan. A write error truncates back (D-1620).
-        let (bytes, written) = match self.orphan_nifty {
-            Some(orphan) if orphan == prepared.nifty => (
-                encode_member(
-                    members
-                        .get(1)
-                        .ok_or_else(|| "cannot encode absent V4 BANKNIFTY member".to_owned())?,
-                )?
-                .to_vec(),
-                1,
-            ),
-            Some(orphan) => {
-                return Err(format!(
-                    "anchored search-lineage V4 trailing NIFTY member {} is not exact retry {}",
-                    hex32(orphan.member_id),
-                    hex32(prepared.pair_id)
-                ));
-            }
-            None => (encode_members(&members)?, 2),
-        };
-        append_raw(&mut self.member_file, &bytes)?;
-        self.member_file
-            .sync_data()
-            .map_err(|why| format!("cannot sync search-lineage V4 members: {why}"))?;
+        // orphan. A write error truncates back (D-1620); a failed barrier cuts
+        // the pair back and is remembered for this process (D-2550).
+        append_raw(&mut self.member_file, &encode_members(&members)?)?;
+        crate::fixed_tail::sync_or_roll_back(
+            &self.member_file,
+            &self.member_path,
+            block_start,
+            File::sync_data,
+        )
+        .map_err(|why| format!("cannot sync search-lineage V4 members: {why}"))?;
+        self.trailing = None;
+        self.orphan_nifty = None;
         self.member_records = self
-            .member_records
-            .checked_add(written)
+            .completion_records
+            .checked_mul(2)
+            .and_then(|covered| covered.checked_add(2))
             .ok_or_else(|| "search-lineage V4 member count overflowed".to_owned())?;
         self.member_generation = file_generation(
             &self.member_file,
@@ -1020,10 +1031,18 @@ impl AnchoredSearchLineageV4Ledger {
         prepared: &PreparedPairV4,
     ) -> Result<(), AnchoredSearchLineageV4Refusal> {
         let completion = prepared.completion(self.completion_records)?;
+        let completion_start = self
+            .completion_records
+            .checked_mul(ANCHORED_SEARCH_LINEAGE_V4_COMPLETION_BYTES as u64)
+            .ok_or_else(|| "search-lineage V4 Completion offset overflowed".to_owned())?;
         append_raw(&mut self.completion_file, &encode_completion(&completion)?)?;
-        self.completion_file
-            .sync_data()
-            .map_err(|why| format!("cannot sync search-lineage V4 Completion: {why}"))?;
+        crate::fixed_tail::sync_or_roll_back(
+            &self.completion_file,
+            &self.completion_path,
+            completion_start,
+            File::sync_data,
+        )
+        .map_err(|why| format!("cannot sync search-lineage V4 Completion: {why}"))?;
         sync_directory(&self.root_file, &self.root)?;
         self.completion_records = self
             .completion_records
@@ -2437,6 +2456,74 @@ mod tests {
         );
     }
 
+    /// ledgers-2, D-2550: a failed member or Completion barrier is cut back,
+    /// so no later barrier on a fresh descriptor vouches for it, and the exact
+    /// retry over a receipt-less trailing pair puts the members behind a new
+    /// barrier of its own whose failure cuts them, rather than re-syncing
+    /// them in place.
+    #[test]
+    fn a_failed_lineage_v4_barrier_is_cut_and_the_retry_rewrites_its_members() {
+        use crate::fixed_tail::fault::{Armed, Kind};
+        let (nifty, banknifty) = projections();
+        let pair = 2 * ANCHORED_SEARCH_LINEAGE_V4_MEMBER_BYTES as u64;
+        let completion = ANCHORED_SEARCH_LINEAGE_V4_COMPLETION_BYTES as u64;
+
+        let members = TestRoot::new("failed-member-barrier");
+        {
+            let _armed = Armed::arm(MEMBER_FILE, Kind::Sync);
+            assert_refuses(
+                persist_anchored_search_lineage_v4(members.path(), bounds(), &nifty, &banknifty),
+                "could not be made durable",
+            );
+        }
+        assert_eq!(lengths(members.path()), (0, 0), "the pair is cut back");
+        assert!(matches!(
+            persist_anchored_search_lineage_v4(members.path(), bounds(), &nifty, &banknifty)
+                .expect("the exact rerun writes"),
+            AnchoredSearchLineageV4AuthenticatedCommit::Written(_)
+        ));
+
+        let completions = TestRoot::new("failed-completion-barrier");
+        {
+            let _armed = Armed::arm(COMPLETION_FILE, Kind::Sync);
+            assert_refuses(
+                persist_anchored_search_lineage_v4(
+                    completions.path(),
+                    bounds(),
+                    &nifty,
+                    &banknifty,
+                ),
+                "could not be made durable",
+            );
+        }
+        assert_eq!(
+            lengths(completions.path()),
+            (pair, 0),
+            "the Completion is cut back and the pair is a receipt-less tail"
+        );
+        {
+            // The retry issues its own hooked member barrier, which fails and
+            // cuts the receipt-less pair: it was never vouched for in place.
+            let _armed = Armed::arm(MEMBER_FILE, Kind::Sync);
+            assert_refuses(
+                persist_anchored_search_lineage_v4(
+                    completions.path(),
+                    bounds(),
+                    &nifty,
+                    &banknifty,
+                ),
+                "could not be made durable",
+            );
+        }
+        assert_eq!(lengths(completions.path()), (0, 0));
+        assert!(matches!(
+            persist_anchored_search_lineage_v4(completions.path(), bounds(), &nifty, &banknifty)
+                .expect("the exact rerun completes the pair"),
+            AnchoredSearchLineageV4AuthenticatedCommit::Written(_)
+        ));
+        assert_eq!(lengths(completions.path()), (pair, completion));
+    }
+
     #[test]
     #[expect(
         clippy::too_many_lines,
@@ -2485,7 +2572,7 @@ mod tests {
         drop(member);
         // D-1620: one whole NIFTY member is a crash prefix. A reader keeps it
         // byte-identical, a foreign retry is refused without touching it, and
-        // the exact retry completes the pair by writing only BANKNIFTY.
+        // the exact retry cuts it and writes the whole pair again (D-2550).
         let orphan_bytes = std::fs::read(partial.path().join(MEMBER_FILE)).expect("orphan bytes");
         let reader = AnchoredSearchLineageV4Ledger::open_read(partial.path(), bounds())
             .expect("a single NIFTY orphan is readable");
@@ -2660,7 +2747,10 @@ mod tests {
             "a pair's members are written in one call: {locked}"
         );
         assert!(
-            locked.contains(concat!("None => (encode_", "members(&members)?, 2),")),
+            locked.contains(concat!(
+                "append_raw(&mut self.member_file, &encode_",
+                "members(&members)?)?;"
+            )),
             "and that one call carries both members: {locked}"
         );
     }

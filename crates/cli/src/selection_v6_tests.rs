@@ -325,3 +325,39 @@ fn an_abandoned_partial_tail_neither_hides_committed_history_nor_wedges_a_new_so
         [first.as_slice(), second.as_slice()].concat()
     );
 }
+
+/// ledgers-2, D-2550: a failed payload or seal barrier cuts the whole block
+/// back, so no later barrier vouches for it; the exact retry over its own
+/// unsealed prefix writes the block again behind a barrier of its own (an
+/// armed barrier fault on that retry cuts it, which a re-sync in place never
+/// did); and the exact rerun then commits.
+#[test]
+fn a_failed_selection_v6_barrier_is_cut_and_the_retry_rewrites() {
+    use crate::fixed_tail::fault::{Armed, Kind};
+    let expected = frame(9);
+    for skip in [0, 1] {
+        let scratch = Scratch::new();
+        let path = scratch.0.join(FILE_NAME);
+        {
+            let _armed = Armed::arm_after(FILE_NAME, Kind::Sync, skip);
+            let refused = persist(&scratch.0, bounds(1), &expected).expect_err("barrier fails");
+            assert!(refused.contains("could not be made durable"), "{refused}");
+        }
+        assert_eq!(
+            std::fs::metadata(&path).expect("measure").len(),
+            0,
+            "{skip}"
+        );
+    }
+    let scratch = Scratch::new();
+    let path = scratch.0.join(FILE_NAME);
+    std::fs::write(&path, &expected[..SEAL_AT]).expect("unsealed own prefix");
+    {
+        let _armed = Armed::arm(FILE_NAME, Kind::Sync);
+        assert!(persist(&scratch.0, bounds(1), &expected).is_err());
+        assert!(!Armed::pending(), "the retry issued a barrier of its own");
+    }
+    assert_eq!(std::fs::metadata(&path).expect("measure").len(), 0);
+    assert!(persist(&scratch.0, bounds(1), &expected).expect("the exact rerun writes"));
+    assert_eq!(std::fs::read(&path).expect("committed"), expected);
+}

@@ -57605,3 +57605,40 @@ a sink and reopens one on the same directory holds it for reading: 14 in
 `sink.rs` and one in `tail.rs`. Readers do not wait on each other. No production
 line changes, and the lock's refusal stays exactly as strict. Proven locally:
 4 of 60 runs failed before the change and 0 of 60 after.
+
+### D-2550 — Lineage V4, Selection V6, Global Replay V4 and Admission V4 withdraw a failed barrier and rewrite, never re-sync, a retried prefix — 2026-10-04
+
+**The finding.** ledgers-2, the half D-1915 left open. After a failed `fsync`
+the pages are clean and still readable (K2), so a later barrier on a fresh
+descriptor returns success without writing them. Four live writers still
+vouched for such bytes: Search Lineage V4 re-synced a receipt-less trailing
+pair (and kept a lone NIFTY member) in place; Selection V6 resumed an exact
+unsealed prefix and re-synced a found block; Global Replay V4 resumed an exact
+byte prefix and re-synced a complete file; Admission V4 kept an exact
+receipt-less prefix of its own block and synced only what it appended.
+
+**The decision.** The D-1915 rule, applied to each:
+
+- Every barrier these writers issue goes through `fixed_tail::sync_or_roll_back`
+  (or `sync_all_or_roll_back`): a failure cuts the block back to where it began
+  and remembers the path for this process.
+- An exact retry over its own receipt-less prefix (Lineage V4 pair or NIFTY
+  member, Selection V6 unsealed prefix, Global Replay V4 byte prefix,
+  Admission V4 record prefix) is CUT and the whole block is written again
+  behind its own barrier. The bytes are identical, so nothing an earlier run
+  could have acknowledged changes.
+- A reuse path that re-syncs committed bytes (Lineage V4 receipt, Selection V6
+  found block, Global Replay V4 complete file, Admission V4 receipt) first
+  refuses a path whose barrier failed in this process
+  (`fixed_tail::refuse_after_failed_barrier`).
+
+**Not covered.** The failed-barrier memory is per process. A complete,
+receipted block whose barrier failed in ANOTHER process that then died before
+its rollback ran is still re-synced by a reuse path; nothing on disk records
+that the earlier barrier failed. `docs/06-limits.md` says so.
+
+**Evidence.** ZK-01: each test arms a barrier fault in the writer's own commit
+path and proves the block is cut and the exact rerun commits, and that the
+retry over a prefix issues a barrier of its own (a fault armed on that retry
+cuts the prefix too, which an in-place re-sync never did). The Selection V6
+and Global Replay V4 tests were run against the previous code and failed.

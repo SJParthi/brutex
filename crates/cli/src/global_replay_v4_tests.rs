@@ -483,6 +483,41 @@ fn interrupted_publication_resumes_only_exact_prefix_and_never_accepts_missing_f
     }
 }
 
+/// ledgers-2, D-2550: a failed body or footer barrier cuts the publication
+/// back to empty, so no later barrier vouches for it; the exact retry over a
+/// prefix writes the file again behind a barrier of its own (an armed barrier
+/// fault on that retry cuts it, which a re-sync in place never did); and a
+/// complete file whose barrier failed in this process is not reused.
+#[test]
+fn a_failed_global_replay_v4_barrier_is_cut_and_never_reused() {
+    use crate::fixed_tail::fault::{Armed, Kind};
+    let rows = empty_records();
+    let bytes = flatten(&rows);
+    let name = "03".repeat(32);
+    for skip in [0, 1] {
+        let root = Scratch::new();
+        let path = root.0.join(format!("{name}.bin"));
+        {
+            let _armed = Armed::arm_after(&name, Kind::Sync, skip);
+            let refused =
+                storage::persist(&root.0, bounds(), &rows, [3; 32]).expect_err("barrier fails");
+            assert!(refused.contains("could not be made durable"), "{refused}");
+        }
+        assert_eq!(std::fs::metadata(&path).expect("measure").len(), 0, "{skip}");
+        std::fs::write(&path, &bytes[..1024]).expect("exact prefix");
+        {
+            let _armed = Armed::arm(&name, Kind::Sync);
+            assert!(storage::persist(&root.0, bounds(), &rows, [3; 32]).is_err());
+            assert!(!Armed::pending(), "the retry issued a barrier of its own");
+        }
+        assert_eq!(std::fs::metadata(&path).expect("measure").len(), 0);
+        // Whole bytes on a path whose barrier failed here are not reused.
+        std::fs::write(&path, &bytes).expect("whole bytes");
+        let refused = storage::persist(&root.0, bounds(), &rows, [3; 32]).expect_err("refused");
+        assert!(refused.contains("already failed in this process"), "{refused}");
+    }
+}
+
 #[test]
 fn genuine_stored_oos_witness_reaches_private_projection_and_chronological_scheduler() {
     crate::step3_orchestrator::with_stored_oos_replay_fixture(|held| {

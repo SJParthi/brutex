@@ -312,6 +312,9 @@ fn persist(root: &Path, bounds: SelectionV6Bounds, expected: &Block) -> Result<b
             if len % BLOCK_BYTES != 0 {
                 set_aside_abandoned_tail(&mut file, root, first, len)?;
             }
+            // A path whose barrier failed in this process is never confirmed
+            // by a second one (ledgers-2, D-2550).
+            crate::fixed_tail::refuse_after_failed_barrier(&path)?;
             file.sync_all().map_err(|why| why.to_string())?;
             sync_directory(root)?;
             return Ok(false);
@@ -323,8 +326,7 @@ fn persist(root: &Path, bounds: SelectionV6Bounds, expected: &Block) -> Result<b
         {
             return Err("Selection V6 has no space inside declared record bounds".to_owned());
         }
-        let mut partial = usize::try_from(len % BLOCK_BYTES).map_err(|why| why.to_string())?;
-        let mut len = len;
+        let partial = usize::try_from(len % BLOCK_BYTES).map_err(|why| why.to_string())?;
         if partial != 0 {
             let mut prefix = [0; SELECTION_V6_BLOCK_BYTES];
             file.seek(SeekFrom::Start(first))
@@ -333,34 +335,38 @@ fn persist(root: &Path, bounds: SelectionV6Bounds, expected: &Block) -> Result<b
                 .get_mut(..partial)
                 .ok_or("Selection V6 prefix bound")?;
             file.read_exact(prefix).map_err(|why| why.to_string())?;
-            if Some(&*prefix) != expected.get(..partial) {
+            if Some(&*prefix) == expected.get(..partial) {
+                // THIS EXACT RETRY'S OWN UNSEALED PREFIX is rewritten, never
+                // vouched for (ledgers-2, D-2550). It may be the bytes of a
+                // run whose barrier failed; a barrier on this descriptor
+                // cannot prove them durable, so they are cut and the whole
+                // block is written again. The bytes are identical.
+                file.set_len(first)
+                    .and_then(|()| file.sync_all())
+                    .map_err(|why| format!("Selection V6 retry prefix cut: {why}"))?;
+            } else {
                 // ANOTHER SOURCE'S UNSEALED TAIL. It was never authority, and
                 // leaving it in place wedged the rung for every other source.
                 // It is moved aside whole, under this exclusive lock, before
                 // anything is appended (D-1569).
                 set_aside_abandoned_tail(&mut file, root, first, len)?;
-                partial = 0;
-                len = first;
             }
         }
-        // Reuse only the exact acknowledged prefix; a foreign unsealed tail was
-        // moved aside above, and committed blocks are never touched.
-        file.seek(SeekFrom::Start(len))
-            .map_err(|why| why.to_string())?;
-        if partial < SEAL_AT {
-            let payload = expected
-                .get(partial..SEAL_AT)
-                .ok_or("Selection V6 payload bound")?;
-            file.write_all(payload).map_err(|why| why.to_string())?;
+        // Committed blocks are never touched. Payload and seal each pass a
+        // barrier; any write or barrier failure cuts the block back to
+        // `first` and a failed barrier is remembered (D-1900, D-2550).
+        let payload = expected.get(..SEAL_AT).ok_or("Selection V6 payload bound")?;
+        let seal = expected.get(SEAL_AT..).ok_or("Selection V6 seal bound")?;
+        for part in [payload, seal] {
+            crate::fixed_tail::write_at_end(
+                &mut file,
+                &path.display(),
+                first,
+                part,
+                std::io::Write::write_all,
+            )?;
+            crate::fixed_tail::sync_all_or_roll_back(&file, &path, first)?;
         }
-        file.sync_all().map_err(|why| why.to_string())?;
-        file.write_all(
-            expected
-                .get(partial.max(SEAL_AT)..)
-                .ok_or("Selection V6 seal bound")?,
-        )
-        .map_err(|why| why.to_string())?;
-        file.sync_all().map_err(|why| why.to_string())?;
         sync_directory(root)?;
         Ok(true)
     })();
