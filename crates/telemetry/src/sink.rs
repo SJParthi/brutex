@@ -1942,6 +1942,8 @@ mod tests {
     /// silently: §4 bans a fallback that hides a failure.
     #[test]
     fn a_config_past_the_override_ceiling_is_refused_by_name() {
+        // A sink is dropped and reopened here: see `FORK_GATE` (D-1462).
+        let _gate = crate::tests::no_fork_in_flight();
         let dir = scratch("too-many-overrides");
 
         // EXACTLY at the ceiling is fine — the boundary is `>`, not `>=`, and a
@@ -2103,6 +2105,8 @@ mod tests {
 
     #[test]
     fn a_configuration_that_could_not_work_is_refused_by_name_rather_than_clamped() {
+        // A sink is dropped and reopened here: see `FORK_GATE` (D-1462).
+        let _gate = crate::tests::no_fork_in_flight();
         let dir = scratch("refuse");
         let too_small = Config::new(&dir).with_max_file_bytes(MIN_FILE_BYTES - 1);
         let said = Sink::open(&too_small).expect_err("a bound below one line is refused");
@@ -2125,6 +2129,8 @@ mod tests {
     /// AN UNWRITABLE PATH IS REPORTED BEFORE ANYTHING DEPENDS ON THE LOGGER.
     #[test]
     fn opening_where_a_directory_cannot_exist_says_so_and_names_the_path() {
+        // A sink is dropped and reopened here: see `FORK_GATE` (D-1462).
+        let _gate = crate::tests::no_fork_in_flight();
         let dir = scratch("blocked");
         std::fs::create_dir_all(&dir).expect("a directory");
         // A FILE where the telemetry directory has to be. `create_dir_all`
@@ -2390,6 +2396,8 @@ mod tests {
     /// format that this test has no business knowing.
     #[test]
     fn an_event_that_fills_the_file_exactly_to_its_bound_does_not_roll() {
+        // A sink is dropped and reopened here: see `FORK_GATE` (D-1462).
+        let _gate = crate::tests::no_fork_in_flight();
         // Five padded fields, so one line comfortably clears MIN_FILE_BYTES / 2
         // and the derived bound is legal.
         let pad = "y".repeat(100);
@@ -2502,6 +2510,8 @@ mod tests {
     /// while `min_level()` reported the new value.
     #[test]
     fn no_overrides_is_the_old_behaviour_and_the_floor_still_moves_at_runtime() {
+        // A sink is dropped and reopened here: see `FORK_GATE` (D-1462).
+        let _gate = crate::tests::no_fork_in_flight();
         let dir = scratch("nooverride");
         let sink = Sink::open(&Config::new(&dir).with_min_level(Level::Warn)).expect("opens");
         assert_eq!(sink.level_for("anything"), Level::Warn);
@@ -3098,6 +3108,8 @@ mod tests {
     /// operator process.
     #[test]
     fn a_reopened_sink_resumes_the_byte_count_of_the_file_it_found() {
+        // A sink is dropped and reopened here: see `FORK_GATE` (D-1462).
+        let _gate = crate::tests::no_fork_in_flight();
         let dir = scratch("resume-bytes");
         let before = {
             let sink = Sink::open(&Config::new(&dir)).expect("opens");
@@ -3285,6 +3297,8 @@ mod tests {
     /// exists to prevent.
     #[test]
     fn a_restart_resumes_the_sequence_after_a_line_of_the_widest_legal_shape() {
+        // A sink is dropped and reopened here: see `FORK_GATE` (D-1462).
+        let _gate = crate::tests::no_fork_in_flight();
         let dir = scratch("resume-wide");
         let wide = "w".repeat(MAX_STR_VALUE_BYTES);
         let message = "m".repeat(MAX_MESSAGE_BYTES);
@@ -3511,6 +3525,8 @@ mod tests {
     /// the log.
     #[test]
     fn a_restart_never_reserves_a_run_id_an_event_in_the_log_carries() {
+        // A sink is dropped and reopened here: see `FORK_GATE` (D-1462).
+        let _gate = crate::tests::no_fork_in_flight();
         let dir = scratch("reserved-run-skip");
         let second = {
             let sink = Sink::open(&Config::new(&dir)).expect("opens");
@@ -3542,6 +3558,8 @@ mod tests {
     /// cross-process case without spawning one.
     #[test]
     fn a_second_sink_on_a_held_directory_is_refused_by_name() {
+        // A sink is dropped and reopened here: see `FORK_GATE` (D-1462).
+        let _gate = crate::tests::no_fork_in_flight();
         let dir = scratch("two-sinks");
         let held = Sink::open(&Config::new(&dir)).expect("the first sink opens");
         let refused = Sink::open(&Config::new(&dir));
@@ -3569,6 +3587,8 @@ mod tests {
     /// event whose clock reading was held up to the floor is counted.
     #[test]
     fn a_resumed_floor_ahead_of_the_clock_is_named_and_counted() {
+        // A sink is dropped and reopened here: see `FORK_GATE` (D-1462).
+        let _gate = crate::tests::no_fork_in_flight();
         let dir = scratch("future-floor");
         {
             let sink = Sink::open(&Config::new(&dir)).expect("opens");
@@ -3683,6 +3703,8 @@ mod tests {
 
     #[test]
     fn reserved_run_ids_resume_strictly_above_every_id_that_reached_the_log() {
+        // A sink is dropped and reopened here: see `FORK_GATE` (D-1462).
+        let _gate = crate::tests::no_fork_in_flight();
         let dir = scratch("reserved-run");
         let first = {
             let sink = Sink::open(&Config::new(&dir)).expect("opens");
@@ -3881,6 +3903,8 @@ mod tests {
     /// A RESTART CONTINUES THE STREAM RATHER THAN STARTING A SECOND ONE.
     #[test]
     fn a_reopened_sink_carries_on_from_the_last_line_it_can_read() {
+        // A sink is dropped and reopened here: see `FORK_GATE` (D-1462).
+        let _gate = crate::tests::no_fork_in_flight();
         let dir = scratch("resume");
         {
             let sink = Sink::open(&Config::new(&dir)).expect("opens");
@@ -4050,6 +4074,8 @@ mod tests {
     /// first event, and no assertion above would notice.
     #[test]
     fn a_file_that_ends_mid_line_is_terminated_at_open_and_not_appended_onto() {
+        // A sink is dropped and reopened here: see `FORK_GATE` (D-1462).
+        let _gate = crate::tests::no_fork_in_flight();
         let dir = scratch("torn-tail-on-open");
         {
             let sink = Sink::open(&Config::new(&dir)).expect("opens");
@@ -4431,6 +4457,8 @@ mod tests {
     /// not. D-1326.
     #[test]
     fn an_empty_current_file_resumes_from_the_rolled_one_beneath_it() {
+        // A sink is dropped and reopened here: see `FORK_GATE` (D-1462).
+        let _gate = crate::tests::no_fork_in_flight();
         let dir = scratch("resume-rolled");
         let config = Config::new(&dir).with_keep_files(4);
         let (last_seq, run) = {

@@ -1171,6 +1171,8 @@ mod tests {
     /// `chmod`, it behaves the same when the suite runs as root.
     #[test]
     fn a_file_that_exists_and_refuses_to_be_read_is_named_in_errors() {
+        // A sink is dropped and reopened here: see `FORK_GATE` (D-1462).
+        let _gate = crate::tests::no_fork_in_flight();
         let dir = scratch("stat-refuses");
         std::fs::create_dir_all(&dir).expect("a scratch directory");
 
