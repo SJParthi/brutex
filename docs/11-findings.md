@@ -812,3 +812,5 @@ is unchanged.
 - **h-pull-1**: fixed. The lake reader reads the converted type as well as
   the logical type; a legacy `TIMESTAMP_MILLIS` timestamp and a non-signed
   integer annotation are refused by name. D-2270, AHC-01.
+- **h-pull-2**: fixed. The TOTP base32 decoder refuses an impossible length
+  and non-zero bits past the last whole byte. D-2271, AHC-02.

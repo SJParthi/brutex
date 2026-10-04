@@ -56845,3 +56845,26 @@ file: two more reads of a schema leaf per column, over a fixed 7 or 17
 columns.
 
 **What it proves.** AHC-01.
+
+### D-2271 — The TOTP base32 decoder refuses bits that do not end on a whole byte — 2026-10-04
+
+**What was wrong (h-pull-2).** `pull::totp::decode_alphabet` dropped the bits
+left over after the last whole byte. So it accepted lengths RFC 4648 base32
+cannot produce (1, 3 or 6 characters past a group of 8) and non-zero bits past
+the last byte. `GEZDGNBV`, `GEZDGNBVA` and `GEZDGNBV7` decoded to one key and
+minted one code: an extra or mis-keyed last character produced a
+valid-looking code from a secret that was wrong, which the vendor then
+rejects with nothing here to say why. D-1373 closed this class for `=` and
+left this door open.
+
+**The change.** After the loop, five or more leftover bits (a whole spare
+character) or any non-zero leftover bit is the new
+`TotpError::TrailingBits { data_chars }`, a count and never a value. Its
+message says which of the two it was, and the telemetry fault word is
+`trailing-bits`, declared in CI gate 1d. A single character is now this
+refusal rather than `Empty`. Separators and a tail of `=` are still skipped
+and do not count. A secret that decoded before and still decodes yields the
+same key; only secrets that were being misread are refused. O(1): one compare
+and one mask after a loop bounded by `MAX_SECRET_LEN`.
+
+**What it proves.** AHC-02.
