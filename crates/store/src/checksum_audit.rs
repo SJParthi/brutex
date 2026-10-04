@@ -291,7 +291,11 @@ fn audit(
     // extents only -- but it says which state it met and the byte counts,
     // rather than one sentence covering five causes. Only a later append at
     // least as long as the dead tail clears it; docs/06-limits.md. D-2791.
-    if header.checksums_present()
+    let supported = header.checksums_present()
+        && layout.record_stride() == Bar::LEN as u64
+        && layout.header_len() == HEADER_BYTES as u64
+        && layout.block_len() <= BUFFER_BYTES as u64;
+    if supported
         && (before.data.len > data_bytes || before.sidecar.len > sidecar_bytes)
         && before.data.len >= data_bytes
         && before.sidecar.len >= sidecar_bytes
@@ -305,10 +309,7 @@ fn audit(
             before.data.len, before.sidecar.len
         ));
     }
-    if !header.checksums_present()
-        || layout.record_stride() != Bar::LEN as u64
-        || layout.header_len() != HEADER_BYTES as u64
-        || layout.block_len() > BUFFER_BYTES as u64
+    if !supported
         || before.data.len != data_bytes
         || before.sidecar.len != sidecar_bytes
         || data_bytes

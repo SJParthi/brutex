@@ -126,3 +126,12 @@ test('a stock crowned over an index is labelled gross by the same helper', async
   assert.match(crowned.serverNote ?? crowned.note, /GROSS OF EVERY CHARGE/);
   assert.match(chargeScope({ underlying: 'RELIANCE' }).note, /gross of every charge/);
 });
+
+// CE-94: the rung leaders and the ledger table rank and list stock totals too,
+// so each carries the gross statement where a stock appears.
+test('the rung leaders and the ledger table state charges for a stock', () => {
+  assert.match(page, /charges: chargeScope\(present\[0\]\)/);
+  assert.match(page, /\{#if g\.charges\.gross\}\s*<span class="pill warn" data-rung-charges/);
+  assert.match(page, /runs\.some\(\(run\) => chargeScope\(run\)\.gross\)/);
+  assert.match(page, /data-ledger-charges>\s*Rows that are not a swept spot index: \{ledgerChargeNote\}/);
+});

@@ -19881,7 +19881,7 @@ mod tests {
     /// A minute request over a window inside one month.
     fn minute_ask() -> ingest::SpotRequest {
         ingest::parse_spot(
-            "target=swept&from=2026-08-03&to=2026-08-05&granularity=1min",
+            "target=swept&member=NIFTY&from=2026-08-03&to=2026-08-05&granularity=1min",
             day(2026, 8, 10),
         )
         .expect("a real target and a window in the past")
@@ -24317,9 +24317,10 @@ mod tests {
             // one feed, and D-0120 put that on the receipt beside it.
             assert!(
                 swept.contains(
-                    "<th>This feed can name</th><td>2 — every name this target holds, by Dhan id</td>"
+                    "<th>This feed can name</th><td>2 of 210 — 208 cannot be named by Dhan"
                 ),
-                "the receipt says what THIS feed reaches, not what the universe holds: {swept}"
+                "the receipt says what THIS feed reaches, not what the universe holds; since \
+                 D-2759 the swept surface is counted against its 210-name roster: {swept}"
             );
         })
         .await;
@@ -25390,7 +25391,7 @@ mod tests {
             "swept",
             "Swept surface",
             2,
-            "2 — every name this target holds, by Dhan id",
+            "2 of 210 — 208 cannot be named by Dhan",
         ),
         (
             "indices",
@@ -29491,8 +29492,22 @@ mod tests {
         // fraction of, and "2 of 2" invites the reader to look for the zero.
         // Two since D-0506: the fixture's RELIANCE is an F&O underlying and
         // is swept beside the index.
+        // SINCE D-2759 the swept surface is counted against its own 210-name
+        // roster, so a fixture that lists two of them reaches two of 210.
         let whole = reach_text(ingest::SpotTarget::Swept, pull::vendor::Feed::Groww, &built);
-        assert_eq!(whole, "2 — every name this target holds, by Groww id");
+        assert!(
+            whole.starts_with("2 of 210 — 208 cannot be named by Groww: "),
+            "{whole}"
+        );
+        let whole = reach_text(
+            ingest::SpotTarget::Indices,
+            pull::vendor::Feed::Groww,
+            &built,
+        );
+        assert!(
+            whole.ends_with("— every name this target holds, by Groww id"),
+            "{whole}"
+        );
 
         // SHORT: both numbers, the first names, the remainder, and the route
         // that carries the rest.
@@ -32152,7 +32167,7 @@ mod tests {
             // undeclared on this feed, pinned by
             // `vendor::a_feed_serves_only_the_rungs_its_row_declares`, so the
             // SUBJECT is unchanged and only the rung exhibiting it moved.
-            "target=swept&from=2026-08-03&to=2026-08-05&granularity=5min",
+            "target=swept&member=NIFTY&from=2026-08-03&to=2026-08-05&granularity=5min",
             day(2026, 8, 10),
         )
         .expect("a real target and a window in the past");
@@ -32260,7 +32275,10 @@ mod tests {
             "the premise: no instrument, so nothing is asked of any vendor"
         );
         let asked = ingest::parse_spot(
-            "target=swept&from=2026-08-03&to=2026-08-05",
+            // `indices`, not `swept`: since D-2759 a whole swept pull over a
+            // universe that lists none of its 210 names refuses them by name
+            // before the loop, and this test is about the loop's events.
+            "target=indices&from=2026-08-03&to=2026-08-05",
             day(2026, 8, 10),
         )
         .expect("a real target and a window in the past");

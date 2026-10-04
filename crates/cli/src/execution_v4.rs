@@ -6563,6 +6563,14 @@ mod tests {
         file.write_all(&[1]).expect("append ragged byte");
         file.sync_data().expect("sync ragged byte");
         assert!(ExecutionV4Ledger::open_read(&ragged.path, bounds()).is_err());
+        // CE-89: the WRITABLE open refuses too, and cuts nothing.
+        let held = std::fs::read(ragged.path.join(DISPOSITION_FILE)).expect("ragged bytes");
+        assert!(ExecutionV4Ledger::open_write(&ragged.path, bounds()).is_err());
+        assert_eq!(
+            std::fs::read(ragged.path.join(DISPOSITION_FILE)).expect("ragged bytes kept"),
+            held,
+            "the writable open cut nothing"
+        );
 
         #[cfg(unix)]
         {

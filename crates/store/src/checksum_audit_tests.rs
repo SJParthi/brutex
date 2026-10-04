@@ -539,7 +539,6 @@ fn bytes_past_the_commit_are_refused_as_an_interrupted_append_by_name() {
     let mut shorter = data.clone();
     shorter.truncate(data.len() - 1);
     fs::write(fixture.named(FileKind::Bars), &shorter).expect("short extent");
-    if let Err(why) = fixture.audited() {
-        assert!(!why.contains("interrupted append"), "{why}");
-    }
+    let why = fixture.audited().err().expect("a short extent is refused");
+    assert!(!why.contains("interrupted append"), "{why}");
 }

@@ -946,7 +946,7 @@ mod tests {
         assert_eq!(status, axum::http::StatusCode::OK, "{body}");
         assert!(
             body.starts_with(&format!(
-                r#"{{"identity":"{}"{member},"rows":[],"#,
+                r#"{{"identity":"{}"{member}{in_sample},"rows":[],"#,
                 "98".repeat(32)
             )),
             "{body}"

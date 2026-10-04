@@ -2639,6 +2639,26 @@ mod tests {
                 AnchoredSearchLineageV4Ledger::open_read(root.path(), bounds()),
                 "ragged",
             );
+            // CE-89: the WRITABLE open refuses the same ragged file and cuts
+            // nothing -- a renamed or foreign file is never truncated before
+            // it is refused.
+            let held = std::fs::read(root.path().join(file_name)).expect("ragged bytes");
+            let (nifty_again, banknifty_again) = projections();
+            assert!(
+                persist_anchored_search_lineage_v4(
+                    root.path(),
+                    bounds(),
+                    &nifty_again,
+                    &banknifty_again
+                )
+                .is_err(),
+                "a writable open over a ragged {label} file refuses"
+            );
+            assert_eq!(
+                std::fs::read(root.path().join(file_name)).expect("ragged bytes kept"),
+                held,
+                "the writable open cut nothing"
+            );
         }
 
         let prepared = PreparedPairV4::from_opaque(&nifty, &banknifty).expect("prepare V4 pair");

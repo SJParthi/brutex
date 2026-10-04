@@ -60992,7 +60992,13 @@ refuses such a name by name, as `fno` already did. `members()` is unchanged.
 The stale "`swept` is 2 of 2" sentence in `docs/06-limits.md` is corrected.
 
 **Proof.** `the_swept_surface_is_counted_per_feed_like_everything_else` in
-`crates/api/src/coverage.rs`. FB-99.
+`crates/api/src/coverage.rs`. FB-99. The receipt tests over two-name fixtures
+(`the_receipt_reports_reach_for_the_feed_and_never_a_number_it_did_not_measure`,
+`each_spot_target_reports_its_own_population_and_not_a_neighbours`,
+`a_valid_window_is_echoed_with_the_wire_date_and_still_starts_nothing`) now
+read "2 of 210", and the run tests that pulled the whole swept target over
+those fixtures name their members (or use `indices`), because a whole swept
+pull over them now refuses the 208 unlisted names before the loop.
 
 ### D-2790 — Selection V6 quarantines are named by offset and content — 2026-10-04
 
@@ -61048,3 +61054,44 @@ in `crates/cli/src/columns_tests.rs`, `no_complete_run_is_none_rather_than_a_fab
 in `crates/api/src/backtest.rs` and
 `a_stock_runs_frontier_carries_the_equity_note_and_an_index_runs_is_unchanged`
 in `crates/api/src/frontierjson.rs`. FB-103.
+
+### D-2793 — Every ranked or listed stock total on `/backtest` says it is gross — 2026-10-04
+
+**Finding (CE-94).** The page rendered a run's `equity_note` only in the
+drill-down. The crown ("The answer"), the comparison board, the rung leaders
+and the ledger table printed a cash equity's totals with no gross-of-every-
+charge statement, although `CLAUDE.md` §1 requires one on every ranked equity
+report and `/backtest.json` already sends it.
+
+**Decision.** The crown renders `chargeScope(best)`'s statement (the server's
+note verbatim when sent); the comparison board renders the first gross
+statement among the rows it ranks; each rung-leader group carries the short
+gross label when its instrument is not a swept spot index; and the ledger
+table carries one gross line above it when any listed run is. All four read
+the one `chargeScope` helper the drill-down uses, so no second wording exists.
+Web only; `web/build` regenerated.
+
+**Proof.** `the crown and the comparison board state charges and the in-sample
+limit`, `a stock crowned over an index is labelled gross by the same helper`
+and `the rung leaders and the ledger table state charges for a stock` in
+`web/tests/charge-scope.test.js`. FB-104.
+
+### D-2794 — A writable open of Execution V4 and Anchored Search Lineage V4 cuts nothing it refuses — 2026-10-04
+
+**Finding (CE-89).** Reported at `1f4de71` (`final/all-fixes-zero`): both
+writers called `fixed_tail::heal_torn_tail` with an empty magic before any
+decode, so a renamed or foreign file was cut before it was refused, against
+D-1901.
+
+**Decision.** Not reproducible on this branch's base (`dee61cfd`): neither
+`fixed_tail` nor D-1901 exists here (`1f4de71` is not an ancestor), and both
+writable opens go straight to their scans, which refuse a length that is not a
+whole number of records ("ragged") without writing. Nothing in the writers is
+changed. The existing ragged-file tests are extended to the WRITABLE open and
+assert the bytes are unchanged, so a later merge that brings a pre-decode cut
+onto either path fails them rather than passing silently.
+
+**Proof.** `member_completion_ragged_and_canonical_order_attacks_fail_closed`
+in `crates/cli/src/anchored_search_lineage_v4.rs` and
+`retained_generation_symlink_hardlink_and_ragged_files_fail_closed` in
+`crates/cli/src/execution_v4.rs`. FB-105.

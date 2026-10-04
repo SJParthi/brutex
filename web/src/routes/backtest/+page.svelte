@@ -3960,6 +3960,9 @@
           // COUNTED APART, because they disqualify a rung for different
           // reasons and the operator's next move differs: a halted rung
           // wants a larger budget, an unsealed one wants the run repeated.
+          // ONE INSTRUMENT PER GROUP, so one charge statement: a stock's rung
+          // leader is a ranked equity total and says it is gross (CE-94).
+          charges: chargeScope(present[0]),
           haltedCount: present.filter((r) => r.halted).length,
           unsealedCount: present.filter((r) => !trustworthy(r)).length
         };
@@ -4159,6 +4162,13 @@
    * report, not only after "Drill in". Same `chargeScope` the drill-down uses.
    */
   const bestCharges = $derived(chargeScope(best));
+  /**
+   * The ledger table lists every run, and a stock row's totals are gross
+   * (CE-94): one statement above the table when any listed run is.
+   */
+  const ledgerChargeNote = $derived(
+    runs.some((run) => chargeScope(run).gross) ? chargeScope(null).note : null
+  );
   /** The first gross statement among the rows the comparison board ranks. */
   const boardChargeNote = $derived.by(() => {
     for (const run of rankableRuns) {
@@ -8293,6 +8303,11 @@
               {#if g.haltedCount > 0}
                 <span class="pill warn">{g.haltedCount} halted</span>
               {/if}
+              {#if g.charges.gross}
+                <span class="pill warn" data-rung-charges
+                  >{g.charges.note}</span
+                >
+              {/if}
               {#if g.unsealedCount > 0}
                 <span class="pill seal">{g.unsealedCount} unsealed</span>
               {/if}
@@ -8576,6 +8591,11 @@
           />
           <span class="count">{exact(sorted.length)} of {exact(runs.length)} shown</span>
         </div>
+        {#if ledgerChargeNote}
+          <p class="inline-note equity-note" data-ledger-charges>
+            Rows that are not a swept spot index: {ledgerChargeNote}
+          </p>
+        {/if}
 
         {#if sorted.length === 0}
           <p class="inline-note">
