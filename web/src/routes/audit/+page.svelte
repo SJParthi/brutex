@@ -96,8 +96,12 @@
 
   /** `docs/07-plan.md` R-2: the backfill window opens here. */
   const TARGET_FROM = '2020-01';
-  /** `crates/api/src/audit.rs`: the note field is 68 bytes. */
+  /** `crates/api/src/audit.rs`: a version-1 record's note was 68 bytes and a
+   *  version-2 record's is 60 (D-2673). Each record now states its own as
+   *  `note_capacity`; this is only the fallback for a reply that predates it. */
   const NOTE_BYTES = 68;
+  /** @param {any} r @returns {number} */
+  const noteCap = (r) => (typeof r.note_capacity === 'number' ? r.note_capacity : NOTE_BYTES);
   /** `crates/api/src/audit.rs`: `MAX_PAGE_RECORDS`. */
   const PAGE_ROWS = 200;
   /**
@@ -784,7 +788,7 @@
       g.members += weight;
       g.first = Math.min(g.first, r.at);
       g.last = Math.max(g.last, r.at);
-      if (r.note_bytes > NOTE_BYTES) g.cut = true;
+      if (r.note_bytes > noteCap(r)) g.cut = true;
       const dash = (r.note ?? '').indexOf(' — ');
       if (dash > 0 && dash <= 24) g.examples.add(r.note.slice(0, dash));
       /* A MEMBER ROW NAMES ITS INSTRUMENT IN `source`, NOT IN `note`, so the
@@ -1346,7 +1350,7 @@
             {n0(faults.reasonsLost)} reasons were never written. This is not a rendering gap and no
             page can recover them: <code>crates/api/src/audit.rs</code> stores the failure COUNT and
             keeps <code>failures.first()</code> — one name, the alphabetically first — in a
-            {NOTE_BYTES}-byte field. The rest reach the POST's HTML reply
+            60-byte field (68 before record version 2). The rest reach the POST's HTML reply
             (<code>take(5)</code>) and are dropped when the run returns.
           </p>
         {/if}
@@ -1377,7 +1381,7 @@
                     </span>
                   {/if}
                   {#if g.cut}
-                    <span class="tag warn" title="The server cut this note at {NOTE_BYTES} bytes. Two long reasons sharing a prefix are indistinguishable here.">
+                    <span class="tag warn" title="The server cut this note to the record's note field (60 bytes; 68 in version-1 records). Two long reasons sharing a prefix are indistinguishable here.">
                       truncated at source
                     </span>
                   {/if}
@@ -1641,10 +1645,10 @@
           </div>
           <h3>What it says</h3>
           <p class="note">{picked.note || '(no note)'}</p>
-          {#if picked.note_bytes > NOTE_BYTES}
+          {#if picked.note_bytes > noteCap(picked)}
             <p class="why">
-              The server had {n0(picked.note_bytes)} bytes to say and the record holds {NOTE_BYTES}.
-              The remaining {n0(picked.note_bytes - NOTE_BYTES)} bytes were never written to disk and
+              The server had {n0(picked.note_bytes)} bytes to say and the record holds {noteCap(picked)}.
+              The remaining {n0(picked.note_bytes - noteCap(picked))} bytes were never written to disk and
               cannot be recovered from here.
             </p>
           {/if}
@@ -1654,9 +1658,25 @@
           {:else}
             <ul class="drops">
               {#each picked.drops as d}
-                <li class:zero={d.rows === 0}><b>{n0(d.rows)}</b> <span>{d.reason}</span></li>
+                {#if d.rows === null}
+                  <!-- A version-1 record predates this reason: unknown, never a claimed zero. -->
+                  <li class="zero"><b>not counted</b> <span>{d.reason} (record version 1)</span></li>
+                {:else}
+                  <li class:zero={d.rows === 0}><b>{n0(d.rows)}</b> <span>{d.reason}</span></li>
+                {/if}
               {/each}
             </ul>
+          {/if}
+          {#if picked.kept_unclassified_day === null}
+            <p class="fine">
+              Rows kept on a day the exchange calendar has not measured: not counted (record version 1).
+            </p>
+          {:else if typeof picked.kept_unclassified_day === 'number' && picked.kept_unclassified_day > 0}
+            <p class="fine">
+              <b>{n0(picked.kept_unclassified_day)}</b> row(s) were KEPT on a day the exchange calendar
+              has not measured, so whether the exchange traded that day is unknown. They are stored,
+              not dropped, and counted here so the keep is not silent.
+            </p>
           {/if}
           <p class="fine">
             Asked for <code>{picked.source}</code>{picked.source_bytes > picked.source.length

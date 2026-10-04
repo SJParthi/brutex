@@ -44,27 +44,25 @@
 //! is_not_minute_aligned_is_kept_and_its_offset_is_visible` pins the current
 //! behaviour so that changing it has to be deliberate.
 //!
-//! # What this module deliberately does **not** know
+//! # The trading calendar this module reads, and what it still does not know
 //!
-//! **There is no trading calendar here.** It does not know a holiday, a Muhurat
-//! session or a Saturday budget session, and it therefore never claims a bar is
-//! on a non-trading date. `docs/00-charter.md` §3 records special-session shapes
-//! and **no holiday list**, so a weekend rule would be *wrong* — it records
-//! 2025-02-01 as a Saturday and a full 375-bar session, alongside 2020-02-01
-//! (Sat) and 2026-02-01 (Sun). Nothing in this module computes a day of the
-//! week; there is no `% 7` in it, and
-//! `pull::unit::a_saturday_is_a_full_session_because_there_is_no_weekend_rule`
-//! walks all seven days of one week and asserts the same 375 for each.
+//! **This module computes no day of the week and holds no holiday list of its
+//! own.** There is no `% 7` in it. A weekend rule would be *wrong*: 2025-02-01
+//! was a Saturday and a full 375-bar session, as were 2020-02-01 (Sat) and
+//! 2026-02-01 (Sun).
 //!
+//! It reads [`crate::calendar::kind_of`], the measured NSE calendar whose
+//! sources that module states, and nothing else. A bar on a day the calendar
+//! records `Closed` is dropped and counted as [`DropReason::OnClosedDay`];
+//! irregular sessions keep exactly their own windows; a day the calendar has
+//! not measured is kept and counted by name
+//! ([`DropCensus::count_unclassified_kept`]) rather than guessed either way.
 //! Invariant `P-03` — "a bar on a non-trading date is dropped and counted" —
-//! therefore stays `—` in `docs/04-invariants.md`, and is **not** advanced by
-//! this module. That status was checked against the table rather than asserted.
-//! An earlier draft of this header pointed at `docs/06-limits.md` §20 for the
-//! explanation; that section does not exist — `docs/06-limits.md` runs §19 then
-//! §21 — so the reason is written out here instead of cited to nothing.
+//! is proved by `pull::unit::calendar_filter` (D-2673). This header said the
+//! opposite until then, when no calendar existed.
 //!
-//! What is filtered here is the **window**: the operator's date range, and the
-//! intraday session bounds.
+//! What is filtered here is the **window**: the operator's date range, the
+//! closed days, and the intraday session bounds.
 //!
 //! # Cost
 //!
@@ -866,6 +864,14 @@ pub enum DropReason {
     /// brings back a bar from the extra day. The bar is dropped, counted, and
     /// visible — `CLAUDE.md` §4, degrade loudly and name the reason.
     AfterWindow,
+    /// The date is one [`crate::calendar::kind_of`] records as
+    /// [`crate::calendar::DayKind::Closed`]: the exchange did not trade, so a
+    /// bar stamped on it is not a session bar. Invariant P-03, D-2673.
+    ///
+    /// Only the calendar's own answer drops a bar here. A day the calendar has
+    /// not measured is never dropped for being "probably" closed; it is kept
+    /// and counted by name instead ([`DropCensus::unclassified_kept`]).
+    OnClosedDay,
 }
 
 impl DropReason {
@@ -877,6 +883,7 @@ impl DropReason {
             Self::AtOrAfterSessionClose => "at or after the session close",
             Self::BeforeWindow => "before the requested window",
             Self::AfterWindow => "after the requested window",
+            Self::OnClosedDay => "on a day the exchange calendar records closed",
         }
     }
 }
@@ -897,6 +904,8 @@ pub struct DropCensus {
     after_close: u32,
     before_window: u32,
     after_window: u32,
+    closed_day: u32,
+    unclassified_kept: u32,
 }
 
 impl DropCensus {
@@ -908,6 +917,8 @@ impl DropCensus {
             after_close: 0,
             before_window: 0,
             after_window: 0,
+            closed_day: 0,
+            unclassified_kept: 0,
         }
     }
 
@@ -937,6 +948,10 @@ impl DropCensus {
         self.after_close = self.after_close.saturating_add(other.after_close);
         self.before_window = self.before_window.saturating_add(other.before_window);
         self.after_window = self.after_window.saturating_add(other.after_window);
+        self.closed_day = self.closed_day.saturating_add(other.closed_day);
+        self.unclassified_kept = self
+            .unclassified_kept
+            .saturating_add(other.unclassified_kept);
     }
 
     /// Counts one drop. Saturating, because a census that wrapped would report
@@ -948,6 +963,7 @@ impl DropCensus {
             DropReason::AtOrAfterSessionClose => &mut self.after_close,
             DropReason::BeforeWindow => &mut self.before_window,
             DropReason::AfterWindow => &mut self.after_window,
+            DropReason::OnClosedDay => &mut self.closed_day,
         };
         *slot = slot.saturating_add(1);
     }
@@ -960,7 +976,26 @@ impl DropCensus {
             DropReason::AtOrAfterSessionClose => self.after_close,
             DropReason::BeforeWindow => self.before_window,
             DropReason::AfterWindow => self.after_window,
+            DropReason::OnClosedDay => self.closed_day,
         }
+    }
+
+    /// Counts one bar that was KEPT on a day the exchange calendar cannot
+    /// classify ([`crate::calendar::DayKind::Unmeasured`]: outside the
+    /// calendar's measured range).
+    ///
+    /// Not a drop, and not part of [`Self::total`]: dropping it would claim the
+    /// exchange was shut on a day nobody measured, which is an invented
+    /// calendar fact. Counting it by name is what keeps the keep from being
+    /// silent. D-2673.
+    pub const fn count_unclassified_kept(&mut self) {
+        self.unclassified_kept = self.unclassified_kept.saturating_add(1);
+    }
+
+    /// How many bars were kept on a day the exchange calendar cannot classify.
+    #[must_use]
+    pub const fn unclassified_kept(&self) -> u32 {
+        self.unclassified_kept
     }
 
     /// How many were dropped in total.
@@ -984,6 +1019,7 @@ impl DropCensus {
             .saturating_add(self.after_close)
             .saturating_add(self.before_window)
             .saturating_add(self.after_window)
+            .saturating_add(self.closed_day)
     }
 
     /// Whether nothing was dropped.
@@ -1132,6 +1168,17 @@ impl Window {
         if day > self.to.days_from_epoch() {
             return Ok(Some(DropReason::AfterWindow));
         }
+        // A CLOSED DAY HOLDS NO SESSION, AT ANY CADENCE (P-03, D-2673). The
+        // exchange calendar's own answer, never a weekday rule: 2025-02-01 was
+        // a Saturday and a full session, and `kind_of` says so. A daily bar is
+        // NOT exempt here — its exemption is from intraday hours, and a closed
+        // day has none. A day outside the calendar's measured range is not
+        // `Closed` and is not dropped; `on_unclassified_day` lets a caller
+        // count it by name.
+        let kind = crate::calendar::kind_of(i64::from(day));
+        if matches!(kind, crate::calendar::DayKind::Closed) {
+            return Ok(Some(DropReason::OnClosedDay));
+        }
         // A DAILY BAR HAS NO INTRADAY TIME AND IS EXEMPT. See the module
         // header: vendors stamp it at midnight, at the open or at the close,
         // and an intraday window would drop every one of them.
@@ -1179,7 +1226,7 @@ impl Window {
         // fall through to the venue's table unchanged, which is what keeps the
         // dated 2026-08-03 derivatives row in force. One fixed-table lookup
         // per bar; `kind_of` states its own bound.
-        match crate::calendar::kind_of(i64::from(day)) {
+        match kind {
             crate::calendar::DayKind::Open(session)
                 if session != crate::calendar::Session::full() =>
             {
@@ -1228,6 +1275,22 @@ fn irregular_verdict(session: crate::calendar::Session, minute: u32) -> Option<D
         return Some(DropReason::BeforeSessionOpen);
     }
     Some(DropReason::AtOrAfterSessionClose)
+}
+
+/// Whether `epoch_secs` falls on a day the exchange calendar cannot classify
+/// ([`crate::calendar::DayKind::Unmeasured`]), so a bar kept on it must be
+/// counted by name with [`DropCensus::count_unclassified_kept`].
+///
+/// `false` for a timestamp that is not one: [`Window::verdict`] refuses that
+/// first, so no caller reaches this with it.
+#[must_use]
+pub fn on_unclassified_day(epoch_secs: i64) -> bool {
+    IstMoment::from_epoch_secs(epoch_secs).is_ok_and(|at| {
+        matches!(
+            crate::calendar::kind_of(i64::from(at.day().days_from_epoch())),
+            crate::calendar::DayKind::Unmeasured
+        )
+    })
 }
 
 impl fmt::Display for Window {
@@ -1411,6 +1474,8 @@ mod tests {
             after_close: 0,
             before_window: 0,
             after_window: 0,
+            closed_day: 0,
+            unclassified_kept: 0,
         };
         census.count(DropReason::BeforeSessionOpen);
         assert_eq!(
@@ -1427,6 +1492,7 @@ mod tests {
             DropReason::AtOrAfterSessionClose,
             DropReason::BeforeWindow,
             DropReason::AfterWindow,
+            DropReason::OnClosedDay,
         ] {
             let mut one = DropCensus::new();
             let slot = match reason {
@@ -1434,11 +1500,29 @@ mod tests {
                 DropReason::AtOrAfterSessionClose => &mut one.after_close,
                 DropReason::BeforeWindow => &mut one.before_window,
                 DropReason::AfterWindow => &mut one.after_window,
+                DropReason::OnClosedDay => &mut one.closed_day,
             };
             *slot = u32::MAX;
             one.count(reason);
             assert_eq!(one.of(reason), u32::MAX, "{reason} wrapped");
         }
+        // The kept-unclassified counter saturates too, and never joins the
+        // drop total: those bars were kept.
+        let mut kept = DropCensus::new();
+        kept.unclassified_kept = u32::MAX;
+        kept.count_unclassified_kept();
+        assert_eq!(kept.unclassified_kept(), u32::MAX);
+        assert_eq!(kept.total(), 0);
+        assert!(kept.is_empty());
+        let mut sum = DropCensus::new();
+        sum.closed_day = 2;
+        sum.unclassified_kept = 3;
+        let mut into = DropCensus::new();
+        into.absorb(sum);
+        into.absorb(sum);
+        assert_eq!(into.of(DropReason::OnClosedDay), 4);
+        assert_eq!(into.unclassified_kept(), 6);
+        assert_eq!(into.total(), 4);
     }
 
     /// `total` is the sum until it cannot be, and then it is the ceiling —
@@ -1451,6 +1535,8 @@ mod tests {
             after_close: 1,
             before_window: 1,
             after_window: 1,
+            closed_day: 0,
+            unclassified_kept: 0,
         };
         // The true sum is 4,294,967,298. It does not fit, so the answer is the
         // ceiling — and emphatically not the wrapped 2.
@@ -1463,6 +1549,8 @@ mod tests {
             after_close: 2_000_000_000,
             before_window: 0,
             after_window: 0,
+            closed_day: 0,
+            unclassified_kept: 0,
         };
         assert_eq!(half.total(), u32::MAX, "5e9 does not fit u32");
 
@@ -1472,6 +1560,8 @@ mod tests {
             after_close: 1,
             before_window: 1,
             after_window: 1,
+            closed_day: 0,
+            unclassified_kept: 0,
         };
         assert_eq!(exact.total(), u32::MAX);
         assert_eq!(

@@ -34799,7 +34799,7 @@ fn calendar_json_reading(
     // this — `/ingest`, computing how many bars a month owed — is asking an
     // EXCHANGE question, and refusing it left the browser holding four
     // hardcoded tables of the same facts, which is the duplication D-0274
-    // recorded and P-03 is still open on.
+    // recorded (P-03 itself was closed by D-2673).
     //
     // The honest answer is not to pick an instrument. It is to derive every
     // instrument this feed holds and agree them, and to ship the agreement's

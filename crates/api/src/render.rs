@@ -307,6 +307,7 @@ svg.share rect.r0{fill:var(--acc)}\
 svg.share rect.r1{fill:var(--acc2)}\
 svg.share rect.r2{fill:var(--warn)}\
 svg.share rect.r3{fill:var(--bad)}\
+svg.share rect.r4{fill:var(--dim)}\
 svg.share rect.none{fill:var(--line)}\
 .legend{display:flex;gap:15px;flex-wrap:wrap;align-items:center;color:var(--dim);\
 font-size:11.5px;margin:12px 0 0}\
@@ -314,6 +315,7 @@ font-size:11.5px;margin:12px 0 0}\
 .key{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:6px}\
 .key.r0{background:var(--acc)}.key.r1{background:var(--acc2)}\
 .key.r2{background:var(--warn)}.key.r3{background:var(--bad)}\
+.key.r4{background:var(--dim)}\
 td.when{font-variant-numeric:tabular-nums;color:var(--dim);font-size:12.5px}\
 td.verdict{font-weight:820;font-size:11px;letter-spacing:.7px}\
 td.verdict.loud{color:var(--bad)}\
@@ -2001,7 +2003,9 @@ fn capture_panel(capture: Option<Capture<'_>>, absent: &str) -> String {
         "<table><thead><tr><th>Dropped because</th><th>Rows</th><th>Share</th></tr></thead><tbody>",
     );
     for reason in DROP_REASONS {
-        let n = drops.map(|d| d.of(reason));
+        // `recorded`, not `of`: a version-1 record never counted the
+        // closed-day reason, and its row says "not measured" rather than 0.
+        let n = drops.and_then(|d| d.recorded(reason));
         let bar = n.map_or_else(String::new, |v| {
             format!(
                 "<div class=\"cbar\"><span style=\"width:{}%\"></span></div>",
@@ -2379,8 +2383,9 @@ fn census_cards(censuses: &[&VendorCensus]) -> String {
 ///
 /// The swatch shades are quartiles of **the page**, not of an invented ideal.
 /// Nobody knows how many one-minute bars a month "should" hold without a
-/// trading calendar, and `crates/pull/src/session.rs` says the calendar filter
-/// does not exist yet (`docs/04-invariants.md` P-03). Shading against a made-up
+/// trading calendar. One now exists (`pull::calendar`, and the closed-day filter
+/// of `docs/04-invariants.md` P-03, D-2673), but this page does not read it yet.
+/// Shading against a made-up
 /// denominator would be exactly the invention `CLAUDE.md` §3 rule 1 forbids, so
 /// the scale is stated on the page as what it is: relative to the fullest month
 /// shown.
@@ -4190,8 +4195,8 @@ mod tests {
         }
         assert_eq!(
             DROP_REASONS.len(),
-            4,
-            "a fifth reason must be added to the panel, not silently counted"
+            5,
+            "a sixth reason must be added to the panel, not silently counted"
         );
 
         for forbidden in ["<script", "javascript:", "onclick", "onload", "onerror"] {
@@ -4303,6 +4308,7 @@ mod tests {
             after_window: 1,
             before_open: 1,
             after_close: 0,
+            ..Drops::default()
         };
         let svg = share_bar(drops);
         let total: u64 = svg
@@ -4366,6 +4372,7 @@ mod tests {
                 after_close: 170,
                 before_window: 0,
                 after_window: 0,
+                ..Drops::default()
             },
             failures: u64::from(loud),
             took_micros: 4_512_903,

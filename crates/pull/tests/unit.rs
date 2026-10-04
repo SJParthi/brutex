@@ -4640,8 +4640,18 @@ fn the_four_seconds_that_define_the_session_window() {
 
 /// The whole Saturday, second by second: exactly 375 minute-bars survive, and
 /// the count is the charter's number rather than a coincidence.
+///
+/// # What this replaced (D-2673)
+///
+/// It was `a_saturday_is_a_full_session_because_there_is_no_weekend_rule`, and
+/// it asserted that EVERY day of the week of 2025-01-26..31 held 375 bars —
+/// the absence of any calendar, Sunday 2025-01-26 (Republic Day) included.
+/// That absence is gone: `pull::calendar::kind_of` records 2025-01-26 closed,
+/// and `Window::verdict` drops a bar on it (P-03, `calendar_filter` below). The
+/// half that still holds is kept and is the point: the WEEKDAY decides nothing.
+/// 2025-02-01 is a Saturday the calendar records open, so it is a full session.
 #[test]
-fn a_saturday_is_a_full_session_because_there_is_no_weekend_rule() {
+fn a_saturday_session_is_full_because_the_calendar_not_the_weekday_decides() {
     let saturday = d(2025, 2, 1);
     let window = Window::new(saturday, saturday).expect("one day");
     let midnight = ist_epoch(2025, 2, 1, 0, 0, 0);
@@ -4666,12 +4676,13 @@ fn a_saturday_is_a_full_session_because_there_is_no_weekend_rule() {
     );
     assert_eq!(census.of(DropReason::BeforeSessionOpen), 555);
     assert_eq!(census.of(DropReason::AtOrAfterSessionClose), 1_440 - 930);
+    assert_eq!(census.of(DropReason::OnClosedDay), 0);
     assert_eq!(census.total(), 1_440 - 375);
     assert_eq!(census.total() + kept_minutes, 1_440);
 
-    // And every day of that week behaves identically — Sunday included. If a
-    // weekday were consulted anywhere, these seven would not agree.
-    for day_of_month in 26..=31_u8 {
+    // And the five weekdays before it are the same shape — the weekday is
+    // not consulted, the calendar is, and it records all five open.
+    for day_of_month in 27..=31_u8 {
         let day = d(2025, 1, day_of_month);
         let one = Window::new(day, day).expect("one day");
         let base = ist_epoch(2025, 1, day_of_month, 0, 0, 0);
@@ -4687,6 +4698,106 @@ fn a_saturday_is_a_full_session_because_there_is_no_weekend_rule() {
             "2025-01-{day_of_month:02} is not the same shape as every other day"
         );
     }
+}
+
+/// **P-03: A BAR ON A NON-TRADING DATE IS DROPPED AND COUNTED** (D-2673).
+///
+/// The filter is `Window::verdict` reading `pull::calendar::kind_of`, the
+/// measured NSE calendar. A bar on a day it records closed — a weekend or a
+/// holiday — is dropped as `OnClosedDay` and counted, at minute AND daily
+/// cadence, on every venue; a bar on a trading day is kept, Saturday budget
+/// session included; and a bar on a day the calendar has not measured is
+/// neither dropped nor silently kept: it is kept and counted by name.
+#[test]
+fn calendar_filter() {
+    let closed = [
+        (2025, 1, 25), // Saturday
+        (2025, 1, 26), // Sunday, Republic Day
+        (2024, 8, 15), // Thursday, Independence Day
+        (2024, 1, 22), // Monday, a one-off closure
+    ];
+    for (y, m, dd) in closed {
+        let day = d(y, m, dd);
+        assert_eq!(
+            pull::calendar::kind_of(i64::from(day.days_from_epoch())),
+            pull::calendar::DayKind::Closed,
+            "the premise: {day} is closed in the calendar"
+        );
+        let window = Window::new(day, day).expect("one day");
+        for venue in Venue::ALL {
+            let mut census = DropCensus::new();
+            let mut stored = 0_u32;
+            // A whole session's worth of minute bars plus one daily bar.
+            for minute in 0..375_i64 {
+                let secs = ist_epoch(y, m, dd, 9, 15, 0) + minute * SECS_PER_MINUTE;
+                match window.verdict(secs, Cadence::Minute, venue).expect("real") {
+                    None => stored += 1,
+                    Some(why) => census.count(why),
+                }
+            }
+            match window
+                .verdict(ist_epoch(y, m, dd, 0, 0, 0), Cadence::Daily, venue)
+                .expect("real")
+            {
+                None => stored += 1,
+                Some(why) => census.count(why),
+            }
+            assert_eq!(stored, 0, "{venue} {day}: a closed day stores nothing");
+            assert_eq!(census.of(DropReason::OnClosedDay), 376, "{venue} {day}");
+            assert_eq!(census.total(), 376, "{venue} {day}: every drop is counted");
+            assert_eq!(census.unclassified_kept(), 0);
+        }
+    }
+    assert_eq!(
+        DropReason::OnClosedDay.to_string(),
+        "on a day the exchange calendar records closed"
+    );
+
+    // A trading day is kept: an ordinary weekday and a Saturday session.
+    for (y, m, dd) in [(2024, 8, 14), (2025, 2, 1)] {
+        let day = d(y, m, dd);
+        let window = Window::new(day, day).expect("one day");
+        let at = ist_epoch(y, m, dd, 10, 0, 0);
+        assert_eq!(
+            window.verdict(at, Cadence::Minute, Venue::NseIndex),
+            Ok(None),
+            "{day} traded"
+        );
+        assert!(!pull::session::on_unclassified_day(at), "{day} is measured");
+    }
+
+    // The window is still asked first: a closed day outside the window is
+    // `BeforeWindow`, not `OnClosedDay`.
+    let later = Window::new(d(2024, 8, 16), d(2024, 8, 16)).expect("one day");
+    assert_eq!(
+        later.verdict(
+            ist_epoch(2024, 8, 15, 10, 0, 0),
+            Cadence::Minute,
+            Venue::NseIndex
+        ),
+        Ok(Some(DropReason::BeforeWindow))
+    );
+
+    // A day past the calendar's measured range: kept, never guessed closed,
+    // and flagged so the caller counts it by name.
+    let unmeasured = d(2026, 9, 7);
+    assert_eq!(
+        pull::calendar::kind_of(i64::from(unmeasured.days_from_epoch())),
+        pull::calendar::DayKind::Unmeasured
+    );
+    let at = ist_epoch(2026, 9, 7, 10, 0, 0);
+    assert_eq!(
+        Window::new(unmeasured, unmeasured)
+            .expect("one day")
+            .verdict(at, Cadence::Minute, Venue::NseIndex),
+        Ok(None)
+    );
+    assert!(pull::session::on_unclassified_day(at));
+    assert!(!pull::session::on_unclassified_day(i64::MIN));
+    let mut census = DropCensus::new();
+    census.count_unclassified_kept();
+    assert_eq!(census.unclassified_kept(), 1);
+    assert_eq!(census.total(), 0, "a kept bar is not a drop");
 }
 
 /// Every second of one day is classified, and the classification changes at
