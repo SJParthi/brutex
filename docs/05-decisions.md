@@ -57269,3 +57269,10 @@ and Finalization V4 already cut a failed barrier (D-1900).
 - `api::emitted`: the lib emit-site count is 65 (D-1765's two driven sites plus D-1582/D-1583's two unreachable ones) and `UNREACHABLE` is 10 (P1-17-02 moved one out, D-1582/D-1583 added two).
 
 - Merge fallout: #74's `one_value_per_form_field` middleware (D-1587) reads every form body within `form_read_bound` before any route layer, so `/pull/run` and `/pull/recovery` answered 413 again past 8 KiB. `form_read_bound` now gives both `pullrun::MAX_RUN_FORM_BYTES`; `form_read_bound_is_wide_only_on_the_member_routes` and the body-limit test in `http_admission_tests` pin it.
+
+### D-1980 — The lake pre-walks every parquet footer before `parquet` may parse it — 2026-10-04
+
+- CE-12 and CE-13: `parquet` 59.2 reserves a declared list length before reading one element, and rebuilds the schema tree recursively with no depth limit. A 21-byte file asked the allocator for 206 GB and a million one-child groups overflowed the stack; both abort the process, so `LakeError::FooterUnreadable` never returned.
+- `lake::footer::check` now runs in `LakeFile::from_bytes` after the magic checks and before `ParquetMetaDataReader`. It walks the compact-protocol footer with an explicit stack and refuses, as `FooterUnreadable` with a reason beginning "refused before parsing": a footer length that does not fit between the magics; a list, set, map or string whose declared length exceeds the unread footer bytes; a varint past ten bytes; an unknown thrift type; nesting past 32 frames; and a top-level schema list longer than 18 elements (the root plus the F&O shape's 17 columns, the widest the lake holds).
+- The bound is by bytes present, not a constant: after the walk every list `parquet` allocates holds at most (footer bytes) x (one element's in-memory size), and the footer sits inside a file already read whole. The schema cap is what bounds the recursion: at most 18 levels.
+- No lake file the crate could open before is refused: both lake shapes are under the cap, and a real footer nests about nine frames.
