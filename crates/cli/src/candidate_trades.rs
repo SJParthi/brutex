@@ -888,9 +888,10 @@ fn pinned(root: &Path, summary: &Summary, max_bytes: u64) -> Result<PathBuf, Str
 ///
 /// For a `Summary` that [`read_model`] returned this is [`pinned`]'s warm
 /// check: one shared-lock open, a generation comparison and the bounded
-/// start-descriptor check, O(1) in the catalog. It is the check a page already
-/// trusts between its own reads, offered to a caller that holds a `Summary`
-/// across requests or re-checks one at the end of a page. D-2283 (W1-api2-2).
+/// start-descriptor check; it reads no catalog record. It is the check a page
+/// already trusts between its own reads, offered to a caller that holds a
+/// `Summary` across requests or re-checks one at the end of a page. Proved
+/// warm by AHD-04. D-2283 (W1-api2-2).
 ///
 /// # Errors
 /// Refuses a catalog whose generation moved, a start descriptor that no longer

@@ -95,6 +95,9 @@ impl FileStamp {
     }
 }
 
+/// The reservation a fresh snapshot's map starts with, below a smaller cap.
+const INITIAL_ANSWERS: usize = 16;
+
 /// What the memo is keyed under besides the caller's own key.
 struct Held<S, K, V> {
     source: S,
@@ -182,7 +185,9 @@ impl<S: Source + Clone, K: Eq + Hash, V: Clone> Memo<S, K, V> {
                 *held = Some(Held {
                     source: observed.clone(),
                     generation,
-                    answers: HashMap::new(),
+                    // PRE-SIZED: a feed per vendor, a held name per series,
+                    // or the cap, whichever the caller bounds it by.
+                    answers: HashMap::with_capacity(self.cap.min(INITIAL_ANSWERS)),
                 });
             }
             if let Some(answer) = held.as_ref().and_then(|held| held.answers.get(&key)) {

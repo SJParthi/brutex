@@ -5829,8 +5829,8 @@ pub struct Parsed {
     pub at: std::time::SystemTime,
     /// How many instruments each spot target names, counted from [`Self::read`].
     pub targets: [usize; ingest::SpotTarget::ALL.len()],
-    /// The tracked keys each spot target names, from [`Self::read`], indexed as
-    /// [`ingest::SpotTarget::ALL`].
+    /// The tracked keys each spot target names, from [`Self::read`], indexed by
+    /// the target's discriminant (`target as usize`).
     ///
     /// Built once per parse by [`tracked_target_keys`], beside [`Self::targets`]
     /// and replaced with it by [`Site::reparse`], so [`spot_targets`] walks the
@@ -5855,7 +5855,7 @@ pub struct Parsed {
 /// arithmetic: a reload that recomputed this differently would put a form's
 /// count out of step with the run it launches, which is the defect
 /// `SpotTarget::names` exists to prevent.
-/// The tracked keys each spot target names, indexed as [`ingest::SpotTarget::ALL`].
+/// The tracked keys each spot target names, indexed by `target as usize`.
 ///
 /// One walk of the merged universe per PARSE, at startup and on each accepted
 /// [`Site::reparse`], instead of one per pull POST in [`spot_targets`]. Each list
@@ -5864,16 +5864,25 @@ pub struct Parsed {
 fn tracked_target_keys(
     read: &Read,
 ) -> [Vec<brutex_core::instrument::InstrumentKey>; ingest::SpotTarget::ALL.len()] {
-    ingest::SpotTarget::ALL.map(|target| {
-        read.merged
-            .by_key
-            .iter()
-            .filter(|(key, entry)| {
-                crate::catalog::tracked(entry.universe) && target.names(key, entry.universe)
-            })
-            .map(|(key, _)| *key)
-            .collect()
-    })
+    // INDEXED BY THE TARGET'S OWN DISCRIMINANT, the way `ids` is indexed by
+    // the vendor's, so `spot_targets` finds its list with one array index and
+    // no search. `ALL` names every variant once, so every slot is filled.
+    let mut lists: [Vec<brutex_core::instrument::InstrumentKey>; ingest::SpotTarget::ALL.len()] =
+        Default::default();
+    for target in ingest::SpotTarget::ALL {
+        if let Some(list) = lists.get_mut(target as usize) {
+            *list = read
+                .merged
+                .by_key
+                .iter()
+                .filter(|(key, entry)| {
+                    crate::catalog::tracked(entry.universe) && target.names(key, entry.universe)
+                })
+                .map(|(key, _)| *key)
+                .collect();
+        }
+    }
+    lists
 }
 
 fn count_targets(read: &Read) -> [usize; ingest::SpotTarget::ALL.len()] {
@@ -7444,11 +7453,9 @@ fn spot_targets(
     // target's own keys and one `by_key` probe each, O(|target|), the size of
     // the set the request names. W1-api5-11, D-2288.
     let universe = site.universe();
-    let slot = ingest::SpotTarget::ALL
-        .iter()
-        .position(|target| *target == asked.target);
-    let targets: Vec<brutex_core::instrument::InstrumentKey> = slot
-        .and_then(|slot| universe.target_keys.get(slot))
+    let targets: Vec<brutex_core::instrument::InstrumentKey> = universe
+        .target_keys
+        .get(asked.target as usize)
         .map_or(&[][..], Vec::as_slice)
         .iter()
         .filter_map(|key| universe.read.merged.by_key.get_key_value(key))
@@ -19838,15 +19845,20 @@ mod tests {
     fn spot_targets_walk_the_targets_own_list() {
         let dir = agreeing("spottargetlists");
         let built = site("spottargetlists", &dir);
-        // EVERY TARGET HAS A SLOT, so no target can fall to an empty list.
-        for (slot, target) in ingest::SpotTarget::ALL.into_iter().enumerate() {
-            assert_eq!(
-                ingest::SpotTarget::ALL.iter().position(|t| *t == target),
-                Some(slot)
-            );
-        }
+        // EVERY TARGET HAS ITS OWN SLOT, so no target can fall to an empty
+        // list or read another's: the discriminants are exactly 0..ALL.len().
+        let mut slots: Vec<usize> = ingest::SpotTarget::ALL
+            .into_iter()
+            .map(|target| target as usize)
+            .collect();
+        slots.sort_unstable();
+        assert_eq!(
+            slots,
+            (0..ingest::SpotTarget::ALL.len()).collect::<Vec<_>>()
+        );
         let universe = built.universe();
-        for (slot, target) in ingest::SpotTarget::ALL.into_iter().enumerate() {
+        for target in ingest::SpotTarget::ALL {
+            let slot = target as usize;
             let mut walked: Vec<_> = universe
                 .read
                 .merged
@@ -19875,7 +19887,7 @@ mod tests {
             .split_once("\n}\n")
             .expect("its end")
             .0;
-        assert!(body.contains("universe.target_keys.get(slot)"), "{body}");
+        assert!(body.contains(".get(asked.target as usize)"), "{body}");
         assert!(!body.contains(".by_key\n        .iter()"), "{body}");
     }
     use std::io::Write as _;
@@ -32960,8 +32972,7 @@ mod broker_target_tests {
         // selection walks the chosen target's list, and the list is built by
         // the target's own predicate.
         assert!(
-            select.contains("*target == asked.target")
-                && select.contains("universe.target_keys.get(slot)"),
+            select.contains(".get(asked.target as usize)"),
             "the selection is built from the chosen target"
         );
         assert!(
