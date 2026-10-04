@@ -201,8 +201,8 @@ async fn malformed_questions_are_refused_by_name_before_any_file_is_read() {
     let at_cap = vec!["1"; MAX_SPOT_TIMES].join(",");
     for (query, word) in [
         (base.replace("feed=dhan", "feed=nobody"), "feed"),
-        (base.replace("exchange=NSE", "exchange="), "exchange"),
-        (base.replace("symbol=NIFTY", "symbol="), "symbol"),
+        (base.replace("exchange=NSE", "exchange="), "both required"),
+        (base.replace("symbol=NIFTY", "symbol="), "both required"),
         (base.replace("timeframe=1min", "timeframe="), "timeframe"),
         (base.replace("timeframe=1min", "timeframe=1hour"), "rung"),
         (base.replace("month=2025-05", "month=2025-13"), "month"),
