@@ -57605,3 +57605,147 @@ a sink and reopens one on the same directory holds it for reading: 14 in
 `sink.rs` and one in `tail.rs`. Readers do not wait on each other. No production
 line changes, and the lock's refusal stays exactly as strict. Proven locally:
 4 of 60 runs failed before the change and 0 of 60 after.
+
+### D-2660 — CI gates read keys, names and packages, not lines: thirteen bypasses closed (P1-07-01..04, P1-08-01..05, P1-09-01) — 2026-10-04
+
+**What was found.** The tests/docs/security audit (rows P1-07-*, P1-08-*,
+P1-09-01) showed CI gates that a valid spelling walked past, each re-verified
+against 1f4de71 before the change:
+
+- P1-07-01: gates 2 and 13 layer 3 refused a `build`/`links` manifest key with
+  the line grep `:[[:space:]]*(build|links)[[:space:]]*=`, which a quoted
+  `"build" = ..`, a dotted `package.build = ..` or an inline
+  `package = { build = .. }` does not match.
+- P1-07-02: gate 1c grepped source bytes, so `\x70rod` hid `prod`; gate 1d kept
+  a decoded literal only when the whole literal was segment-shaped, so a joined
+  credential path was never split. docs/06-limits.md section 18 credited gate
+  1d with that case.
+- P1-07-03: gate 1 matched names with `grep <<< "$base"`, true if ANY line of a
+  name matched, so a newline in a tracked name passed the allowlist; gate 1b
+  read `git ls-files` without `-z`.
+- P1-07-04: gate 1g (and gate 13 layer 3) read `git ls-files` without `-z`, so
+  a C-quoted name (`"crates/\303\251/rust-toolchain.toml"`) escaped the `$`
+  anchor.
+- P1-08-01: `#[cfg_attr(miri, mutants::skip)]` compiles to nothing and hides a
+  function from cargo-mutants; nothing looked for it.
+- P1-08-02: `bench = false` or `required-features` on a `[[bench]]` makes
+  `cargo bench --workspace` skip it while gate 8 still counted the file.
+- P1-08-03: gates 17 and 22 recognised `store`/`telemetry`/... by the
+  dependency KEY, so a `package =` rename in `runner` passed both, and gate
+  22's comment said the capability was still refused.
+- P1-08-04: gates 11, 19, 14 picked files by a `/src/` glob and exempted a test
+  module by its file STEM; gate 23 also never opened `crates/cli/commit_stamp.rs`,
+  which `#[path]` mounts into every `cli` build.
+- P1-08-05: gate 7 still used the flat `[dependencies]` awk D-1107 removed from
+  gates 9 and 9b.
+- P1-09-01: auto-merge.yml credited a read-only fork token; on `workflow_run`
+  and `pull_request_target` the token can write, so its `isCrossRepository`
+  refusal is the one control and nothing pinned it.
+
+**The decision.** Each check now reads the structure, through
+`.github/source_scan.rs` where a reader is needed:
+
+- `source_scan build-keys` prints `package.build`/`package.links` from the TOML
+  walker; gates 2 and 13 layer 3 use it.
+- Gate 1c also runs its pattern over `source_scan strings` (decoded literals) of
+  every tracked `.rs` outside `web/`; gate 1d splits every decoded `crates/pull`
+  literal holding `/` and no whitespace and checks each piece. The pieces that
+  split produced at 1f4de71 (public URL components, filesystem fixtures, test
+  placeholders) are declared as `joined_piece`, and seven words gate 1d was
+  already refusing at 1f4de71 (`late_fixture`) are declared beside them.
+- `source_scan content` refuses, outside `web/`, a path with a control
+  character, a non-ASCII byte, `"` or `\`, and any `mutants :: skip` token in a
+  `crates/**/*.rs`. Gate 1 matches names with `[[ =~ ]]` on the whole string.
+  Gates 1b, 1g and 13 layer 3 read `git ls-files -z`.
+- `source_scan bench-keys` refuses `bench` other than `true`,
+  `required-features`, and an inline bench array; gate 14 layer 2c runs it over
+  every crate manifest.
+- Gate 22 clause A2 walks Cargo.lock from the four SWEEP crates and refuses any
+  linked package named `store`, `pull`, `lake`, `api`, `telemetry`, `log` or
+  `tracing*`, whatever key a manifest uses. The lock does not separate
+  dev-dependencies, so this is stricter than the build graph, deliberately. The
+  false sentence in gate 22 is replaced, and gate 17 points to clause A2.
+- `source_scan prod-files` is the production closure from each crate's
+  lib/main/bin root: it follows `mod`, `#[path]` and `include!`, skips what sits
+  under `#[cfg(test)]` or `#[cfg(all(test, ..))]`, and refuses what it cannot
+  resolve. Gates 11, 19 and 14 read that list; gate 23 adds its files outside
+  `src/` to its glob. At 1f4de71 the new list differs from the old by exactly
+  `crates/cli/commit_stamp.rs` (added) and `crates/cli/src/strict_v6_tests.rs`
+  (an `include!` inside a test module, dropped).
+- Gate 7 reads `source_scan deps` and refuses any package other than `core`.
+- `source_scan fork-refusal` (gate 0) fails unless auto-merge.yml reads
+  `isCrossRepository` and refuses a fork before its first `gh pr merge --auto`;
+  the comments and the stop message now say the token can write.
+
+**Not done, stated.** Gate 8 still trusts `cargo bench`'s exit status rather
+than counting `Running benches/...` lines; with every skip key refused in the
+manifest, the remaining way to drop a bench is deleting its file, which gate
+14's table refuses. Every workflow listing other than gates 1b, 1g and 13
+layer 3 still reads `git ls-files` without `-z`; gate 1 now refuses every name
+git would quote outside `web/`, so those listings cannot be misread there.
+
+**Proof.** The unit tests below fail on the pre-change scanner logic (checked
+by reverting each function's rule and re-running): ZB-01..ZB-06. Every changed
+gate body was run on the real tree (green) and on the tree with the audit's
+own repros injected (red where the old body was green).
+
+### D-2661 — /autopilot reads `journal_error`, and calls the journal the durable record only when the last append succeeded (P1-06-01) — 2026-10-04
+
+**What was found.** `crates/api/src/autopilot.rs` publishes the journal
+append's answer as `journal_error` because "a path is not a proof". The page's
+`readState` never read it (`grep journal_error web/src` was empty) and told the
+operator the journal was the durable record while appends were failing.
+
+**The decision.** `web/src/lib/autopilot-journal.js` is the one reader: an
+empty string is `ok`, a non-empty string is `failed` with the server's text, and
+an absent or non-string field is `unknown` (never good news, CLAUDE.md
+section 4). `readState` carries it as `journal_status`; both "durable record"
+sentences on the page render only for `ok`, and otherwise show the loud
+banner. ZB-07.
+
+### D-2662 — Live sweep progress carries its fold between polls instead of re-requiring the start marker in every window (P1-06-02) — 2026-10-04
+
+**What was found.** `/logs.json?run=` serves at most the newest 200 events
+(`api::logs::PAGE_LIMIT`), and a validated rung emits about 36, so around rung
+six the `sweep attempt started` marker left the only window the page can ask
+for and `reduceLiveProgress` refused every later poll of a healthy run.
+
+**The decision.** `foldLiveProgress(carry, run, payload)` requires the marker
+once. After that it folds only the events newer than the last one it folded,
+onto a deep copy of the carried state, and refuses by name if the new window no
+longer contains that event (more events arrived between two polls than one
+window holds). A refusal returns no carry. `reduceLiveProgress` is the
+carry-less case and keeps its old contract. The backtest page keeps one carry
+per run key. No server change: a `message=` filter or cursor on `/logs.json`
+would also work and is not needed for this. ZB-08.
+
+### D-2663 — /audit merges journal pages by ordinal and names every hole (P1-06-03) — 2026-10-04
+
+**What was found.** `/audit.json` pages are offsets from the newest end of an
+append-only journal. The page refreshed page 0 on every poll, kept older pages,
+and concatenated them by position: while a pull appended, records slid between
+page 0 and the older pages (a silent hole), or two reads overlapped and one
+ordinal was listed twice and used twice as a keyed-each key.
+
+**The decision.** `web/src/lib/audit-pages.js`: `mergePages` de-duplicates by
+the absolute ordinal (page 0's copy wins), orders newest first and returns every
+missing range; `nextOrdinal` is the newest missing ordinal, else the one below
+the oldest held; `pageFor` maps it to the page that holds it for the total the
+server last reported. The page renders the gaps as an alert and its load button
+fills them first. ZB-09.
+
+### D-2664 — The backtest ledger reader agrees with the server on a ragged tail and on a damaged unsealed row (CE-47, CE-48) — 2026-10-04
+
+**What was found.** `web/src/lib/comparison.js` checked
+`appendable === (version === writes_version && refusal === null)`, while the
+server also requires `!partial_tail` (D-1762), so an interrupted append blanked
+the whole ledger (CE-47). And every row went through the full schema check, so
+one unsealed row with a flipped byte refused the envelope, although the server
+serves such a row beside `"sealed":false` precisely so it does not empty the
+page (CE-48).
+
+**The decision.** The `appendable` rule carries `partial_tail === false`. A row
+that fails the full check is kept when it is unsealed and still carries a
+canonical identity, a safe index and its two state booleans; it is never
+computed (`compareRuns` requires the seal, and `best` requires `sealed`). A
+sealed row that fails still refuses the envelope. ZB-10.
