@@ -634,6 +634,8 @@ struct WindowExtremes {
     next: usize,
     /// Bars read so far, deque pushes and block scans alike: the cost a test
     /// holds to O(1) amortised per query (o1eng2-1, D-1572).
+    /// Proved by
+    /// `runner::window_tests::a_backward_right_end_is_answered_in_constant_reads`.
     touched: u64,
     /// The left end the deques were last popped to. A query left of it cannot
     /// be served from them.
@@ -763,7 +765,9 @@ fn scan_extremes(bars: &[Candle], lo: usize, hi: usize, touched: &mut u64) -> Op
 /// `(n / 64)·log₂(n / 64)` pairs, under `n` for any slice that fits in memory --
 /// and every query after it is O(1). It is not the per-BAR sparse table D-1185
 /// removed, whose two `n·log₂ n` tables were 21 levels deep at 1,222,791 bars;
-/// this one is 15 levels of 19,107 pairs there, about 4.6 MB.
+/// this one is 15 levels of 19,107 pairs there, about 4.6 MB. The 4.6 MB is
+/// arithmetic, not a measurement; the O(1) query is proved by
+/// `runner::window_tests::a_backward_right_end_is_answered_in_constant_reads`.
 struct BlockExtremes {
     /// `levels[k][b]`: the extremes of blocks `b ..= b + 2^k - 1`.
     levels: Vec<Vec<(i64, i64)>>,
@@ -799,6 +803,8 @@ impl BlockExtremes {
     }
 
     /// The extremes of blocks `first ..= last`: two overlapping runs, O(1).
+    /// Proved by
+    /// `runner::window_tests::a_backward_right_end_is_answered_in_constant_reads`.
     fn over(&self, first: usize, last: usize) -> Option<(i64, i64)> {
         let count = last.checked_sub(first)?.checked_add(1)?;
         let depth = count.ilog2();
@@ -4414,28 +4420,50 @@ mod window_tests {
             assert!(window.highs.len() <= held, "the deque outgrew [{lo}, {hi}]");
             assert!(window.lows.len() <= held, "the deque outgrew [{lo}, {hi}]");
         }
-        // Backwards, then a repeat, then a jump past everything held. A jump
-        // skips to `lo` rather than resetting (D-1455), so the indices held
-        // before it must still be gone: the deques fit the window afterwards.
+        // Backwards, then a repeat, then far backwards, each answered by the
+        // block table (D-1572): the deques keep what they held, and every
+        // index they hold is still inside the window they hold,
+        // `popped_to..next`.
         for (lo, hi) in [(10, 20), (5, 9), (5, 9), (300, 310), (0, 0), (399, 399)] {
             assert_eq!(
                 window.over(&bars, lo, hi),
                 scan(&bars, lo, hi),
                 "[{lo}, {hi}]"
             );
-            assert!(
-                window.highs.len() <= hi - lo + 1 && window.lows.len() <= hi - lo + 1,
-                "a stale index survived into [{lo}, {hi}]"
-            );
+            let (from, to) = (window.popped_to, window.next);
             assert!(
                 window
                     .highs
                     .iter()
                     .chain(&window.lows)
-                    .all(|&(at, _)| (lo..=hi).contains(&at)),
-                "a held index lies outside [{lo}, {hi}]"
+                    .all(|&(at, _)| (from..to).contains(&at)),
+                "a held index lies outside the held window after [{lo}, {hi}]"
             );
         }
+        // A jump past everything held, served by the deques. A jump skips to
+        // `lo` rather than resetting (D-1455): it reads exactly the bars of the
+        // new window, and the indices held before it must be gone, so the
+        // deques fit the window afterwards.
+        let mut jump = WindowExtremes::new();
+        assert_eq!(jump.over(&bars, 0, 5), scan(&bars, 0, 5));
+        let before = jump.touched;
+        assert_eq!(jump.over(&bars, 300, 310), scan(&bars, 300, 310));
+        assert_eq!(
+            jump.touched - before,
+            11,
+            "only the new window's bars are read"
+        );
+        assert!(
+            jump.highs.len() <= 11 && jump.lows.len() <= 11,
+            "a stale index survived into [300, 310]"
+        );
+        assert!(
+            jump.highs
+                .iter()
+                .chain(&jump.lows)
+                .all(|&(at, _)| (300..=310).contains(&at)),
+            "a held index lies outside [300, 310]"
+        );
         // Empty and out of range are absent, never a stale maximum.
         assert_eq!(window.over(&bars, 7, 6), None);
         assert_eq!(window.over(&bars, 398, 400), None);
@@ -4456,7 +4484,8 @@ mod window_tests {
     /// 2,000-bar window, the shape of a flipping cadence; each answer must equal
     /// the scan, and the bars read must stay within a constant per query plus
     /// one pass over the slice. Rebuilding the deques on every backward query
-    /// read ~1,000 bars per query.
+    /// read ~1,000 bars per query. This test is
+    /// `runner::window_tests::a_backward_right_end_is_answered_in_constant_reads`.
     #[test]
     fn a_backward_right_end_is_answered_in_constant_reads() {
         let n = 20_000_usize;

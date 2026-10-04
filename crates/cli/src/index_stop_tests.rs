@@ -78,10 +78,17 @@ impl Drop for Group {
 /// classical candlestick shapes. With `trend.rs` and `pattern.rs` restored to
 /// their previous bytes this test passed on the previous pins, so nothing else
 /// moved them. The grouped and ungrouped producers still agree.
+///
+/// Re-taken again for D-1571: the fixture's bar months are now born at store
+/// format version 3, and the cold checksum audit's full-file digest hashes the
+/// header image, whose `magic` and `format_version` changed. Evaluated
+/// conditions and terminals did not move; the identity that names the source
+/// bytes did. At the tree before D-1571 was merged this test passed on the
+/// previous pins.
 const PINS: [&str; 3] = [
-    "789752930d76edd64452a594b00a12beb964f5e27786a396041d94ee6063a5de",
-    "90d4e939bb80383e0921207e6da2834951ae30ef3e24069eb91455aa09183795",
-    "4ca1e9cc7a1127c19fa221be0249b0d42a2afad60788be18b34e62dfa3fbb804",
+    "d155210e870779530659e7ce44fee9f43e4a0b09aafa271c383b23890cadd45a",
+    "733a085e817912c7f85d98d9618b8c115ceb8a955fb4a247e29b88578dacd2e6",
+    "7065fe2916044f03cd4f513e9c6f66cae8be6b968f7d4c4c9fe6bbf446a5be99",
 ];
 
 fn body_hex(fixture: &Fixture, identity: [u8; 32]) -> Result<String, String> {
