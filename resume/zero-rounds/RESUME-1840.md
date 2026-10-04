@@ -86,3 +86,10 @@ Main thread: D-1930..D-1949 (D-1930 used). D-1771..1799 are all used. The helper
 - First test run: 18 failures from the merge; fixes uncommitted in /home/claude/wt/m74 (D-1990 short-sample tests, FB-01 level count, local-pull fixtures need LTQ>0 (D-2688), TOP text, empty-marker rule, rollback wording, crate_graph comment, ledger_scan_costs doc reader, o1cli_4 digest). Re-run in progress.
 - Open: candidate_universe a_failed_base_barrier_is_cut_and_the_rerun_writes (sync fault not hit; maybe parallel-test race).
 - Next: commit, push zero/pr74-merge, hand the tip to PR 74 CI.
+
+## Update (after container restart, 2026-10-04 late)
+- Fixes committed as 1ccdac5f. PR 74 moved to 25bc8aa0 (19 commits); merged it as 05beb2f2 (pushed to zero/pr74-merge).
+  Conflicts: sweeprun.rs (kept newest_sweep_marker + D-2764 uncertain_observation), population_observations_v1.rs (D-1854 append_synced + D-1900 barrier rollback), column.rs comments (theirs, D-1860), docs/04, docs/05 unioned; pullrun test rows_now is Option now. Recorded in D-1934.
+- fmt, clippy, 29 gates green on 05beb2f2. Gotcha: run gates only after `git add` (unmerged index stages triple-count files in gate 23).
+- Running runner, api, indicators, vocab, cli suites as uid 65534 (/home/claude/scratch-rr/summary).
+- Next: check summary, run candidate_universe barrier test alone, hand 05beb2f2 (or later) to PR 74 CI.
