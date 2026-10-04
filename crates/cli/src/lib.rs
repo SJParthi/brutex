@@ -10896,6 +10896,18 @@ struct Screened<'a> {
     /// this from the calendar afterwards. Kept so `why_refused` can name which
     /// of the two refused the row.
     steady: bool,
+    /// The calendar rule is ON and was never evaluated for this row, so the row
+    /// is NOT admitted on it.
+    ///
+    /// Set only by [`calendar_gate`], only on a row the five cell rules
+    /// admitted, and only when `Rules::min_weakest_bp > 0`. A row outside
+    /// `measured_band(top)`, or one whose variant could not be re-walked, has no
+    /// `consistency`; the gate used to run over the first `top` rows only and
+    /// left every such row admitted, so it was counted in "N of M satisfy every
+    /// rule", could be the selected subject and printed `YOUR RULES: MET` while
+    /// rule 5 had never run on it (p5num-1, D-2714). Kept apart from `steady`
+    /// so the `rule` column names "not measured" rather than "inconsistent".
+    calendar_unmeasured: bool,
 }
 
 /// The one row the final screen actually admitted and ranked first.
@@ -10937,9 +10949,11 @@ impl Screened<'_> {
     /// Whether this row's chosen variant met the consistency rule.
     ///
     /// A row whose consistency could NOT be measured counts as steady, and that
-    /// is deliberate: an unmeasured row must not be refused for failing a rule
-    /// nothing checked. The consistency table says "not measured" for it in so
-    /// many words, so the gap is visible rather than dressed up as a verdict.
+    /// is deliberate: an unmeasured row must not be called INCONSISTENT for a
+    /// rule nothing checked. The consistency table says "not measured" for it in
+    /// so many words. Steady is not admitted, though: with the calendar rule ON
+    /// such a row is refused as `calendar_unmeasured`, because a rule that never
+    /// ran was not met either (p5num-1, D-2714).
     fn steady(&self) -> bool {
         self.steady
     }
@@ -12428,6 +12442,7 @@ fn screen<'a>(
                 // Until measured, a row is steady: a rule that has not run yet
                 // cannot have been broken.
                 steady: true,
+                calendar_unmeasured: false,
             })
         })
         .collect();
@@ -12610,20 +12625,7 @@ fn screen<'a>(
         ))
     });
 
-    // THE CALENDAR GATE, AFTER THE CELL GATES.
-    //
-    // A row that was admitted on its five cell rules and is inconsistent across
-    // the calendar is refused HERE, because a cell has no calendar to check --
-    // see `Rules::min_weakest_bp`. An unmeasured row is left alone: refusing it
-    // would be refusing it for a rule that never ran.
-    for row in rows.iter_mut().take(rules.top) {
-        if let Some(ref c) = row.consistency {
-            row.steady = c.weakest_bp() >= rules.min_weakest_bp;
-            if !row.steady {
-                row.admitted = false;
-            }
-        }
-    }
+    calendar_gate(&mut rows, rules);
     // THE RE-SORT THAT STOOD HERE IS GONE, and its absence is the point. It
     // existed because the loop above flips `admitted`, which the old key read.
     // The key no longer reads it, and `measure_top` mutates in place without
@@ -12646,6 +12648,50 @@ fn screen<'a>(
         priced,
         admitted_any,
     })
+}
+
+/// THE CALENDAR GATE, AFTER THE CELL GATES, over EVERY row.
+///
+/// A row that was admitted on its five cell rules and is inconsistent across
+/// the calendar is refused here, because a cell has no calendar to check -- see
+/// `Rules::min_weakest_bp`.
+///
+/// # Every row, not the first `top` (p5num-1, D-2714)
+///
+/// This ran over `rows.iter_mut().take(rules.top)`. `passed`, `admitted_any`
+/// and `final_selection` all read EVERY row, so once more than `top` rows
+/// cleared the cell rules and the best of them failed the calendar, row
+/// `top + 1` was still admitted: counted as satisfying every rule, selected as
+/// the run's subject, and bannered `YOUR RULES: MET` with rule 5 never applied
+/// to it.
+///
+/// # A row the rule never ran on does not pass it
+///
+/// A row with no `consistency` -- outside `measured_band(top)`, or not
+/// re-walkable -- cannot be shown to meet `min_weakest_bp`. When that rule is
+/// ON such a row is not admitted and is marked `calendar_unmeasured`, so the
+/// `rule` column says why. When it is OFF (`0`) nothing is required of the
+/// calendar and the row is untouched, which is what OFF means.
+///
+/// One comparison per row over rows already bounded by the screen's priced
+/// cap, after a pass that priced each of them twice.
+fn calendar_gate(rows: &mut [Screened<'_>], rules: Rules) {
+    let calendar_on = rules.min_weakest_bp > 0;
+    for row in rows.iter_mut() {
+        match row.consistency {
+            Some(ref c) => {
+                row.steady = c.weakest_bp() >= rules.min_weakest_bp;
+                if !row.steady {
+                    row.admitted = false;
+                }
+            }
+            None if calendar_on && row.admitted => {
+                row.admitted = false;
+                row.calendar_unmeasured = true;
+            }
+            None => {}
+        }
+    }
 }
 
 /// The rules banner: every rule that is on, and `off` for every one that is not.
@@ -13024,6 +13070,11 @@ fn screen_table(out: &mut String, rows: &[Screened<'_>], rules: Rules, reference
                 exit_label(&row.cell),
                 if row.admitted {
                     "PASS"
+                } else if row.calendar_unmeasured {
+                    // The cell rules passed and the calendar rule never ran:
+                    // not "steady", which would claim it ran and failed
+                    // (p5num-1, D-2714).
+                    "unmeasured"
                 } else {
                     why_refused(&row.cell, rules, row.steady())
                 }
@@ -22210,6 +22261,7 @@ mod tests {
                 admitted: false,
                 consistency: None,
                 steady: true,
+                calendar_unmeasured: false,
             },
             super::Screened {
                 side: Direction::Short,
@@ -22224,6 +22276,7 @@ mod tests {
                 admitted: true,
                 consistency: None,
                 steady: true,
+                calendar_unmeasured: false,
             },
         ];
         let mut rules = crate::Rules::operator();
@@ -22232,6 +22285,112 @@ mod tests {
         assert_eq!(chosen.scored.mask, admitted_b.mask, "rank two is committed");
         assert_eq!(chosen.direction, Direction::Short, "B's side travels too");
         assert_eq!(chosen.cell, rows[1].cell, "B's exact cell travels too");
+    }
+
+    /// THE CALENDAR GATE JUDGES EVERY ROW, NOT THE PRINTED ONES (p5num-1,
+    /// D-2714).
+    ///
+    /// `top + 1` rows clear the cell rules and every measured one fails
+    /// `min_weakest_bp`. The gate ran over the first `top` only, so row
+    /// `top + 1` stayed admitted: counted as passing, selected as the run's
+    /// subject and bannered `YOUR RULES: MET`. A row the rule never ran on
+    /// (no `consistency`) is not admitted while the rule is on either.
+    #[test]
+    fn the_calendar_gate_refuses_an_inconsistent_row_past_the_printed_top() {
+        use runner::outcome::Edge;
+        use runner::rank::Scored;
+
+        fn consistency(weakest: i64) -> super::Consistency {
+            super::Consistency {
+                shares_bp: [weakest; crate::stability::GRAINS.len()],
+                worst_day: 0,
+                years: 1,
+            }
+        }
+        fn row(at: &Scored, measured: Option<i64>) -> super::Screened<'_> {
+            super::Screened {
+                side: Direction::Long,
+                scored: at,
+                rank: 1,
+                cell: grid::Cell {
+                    trades: 10,
+                    wins: 9,
+                    pessimistic: 1_000,
+                    ..grid::Cell::default()
+                },
+                tightest: None,
+                admitted: true,
+                consistency: measured.map(consistency),
+                steady: true,
+                calendar_unmeasured: false,
+            }
+        }
+
+        let scored = |bit: u32| {
+            let base = Scored {
+                #[expect(
+                    clippy::default_trait_access,
+                    reason = "the named mask type belongs to runner's private dependency graph"
+                )]
+                mask: Default::default(),
+                hits: 100,
+                edge: Edge {
+                    n: 100,
+                    mean_paisa: 1.0,
+                    t: 1.0,
+                    ..Edge::default()
+                },
+            };
+            Scored {
+                mask: base.mask.with_bit(bit),
+                ..base
+            }
+        };
+        let evidence = [scored(1), scored(2), scored(3), scored(4), scored(5)];
+        let mut rules = crate::Rules::operator();
+        rules.top = 2;
+        rules.min_weakest_bp = 5_000;
+        // Rows 0..=2 inconsistent (row 2 is `top + 1`), row 3 steady, row 4
+        // never measured.
+        let fresh = || {
+            [
+                row(&evidence[0], Some(4_000)),
+                row(&evidence[1], Some(3_000)),
+                row(&evidence[2], Some(2_000)),
+                row(&evidence[3], Some(6_000)),
+                row(&evidence[4], None),
+            ]
+        };
+        let mut rows = fresh();
+        super::calendar_gate(&mut rows, rules);
+        let admitted: Vec<bool> = rows.iter().map(|r| r.admitted).collect();
+        assert_eq!(admitted, [false, false, false, true, false]);
+        assert!(!rows[2].steady, "row top + 1 is judged and refused");
+        assert!(!rows[2].calendar_unmeasured);
+        assert!(
+            rows[4].steady,
+            "an unmeasured row is not called inconsistent"
+        );
+        assert!(rows[4].calendar_unmeasured, "it is refused as unmeasured");
+        let chosen = super::final_selection(&rows, rules).expect("row 3 passes");
+        assert_eq!(
+            chosen.scored.mask, evidence[3].mask,
+            "the steady row is chosen"
+        );
+
+        // With no steady row at all, nothing passes and the fallback subject is
+        // reported as such: `admitted_any` reads false.
+        let mut none_steady = fresh();
+        none_steady[3].consistency = Some(consistency(1_000));
+        super::calendar_gate(&mut none_steady, rules);
+        assert!(none_steady.iter().all(|r| !r.admitted), "0 passed");
+
+        // With the calendar rule OFF nothing is required of it: every row keeps
+        // its cell verdict, measured or not.
+        rules.min_weakest_bp = 0;
+        let mut off = fresh();
+        super::calendar_gate(&mut off, rules);
+        assert!(off.iter().all(|r| r.admitted && !r.calendar_unmeasured));
     }
 
     /// A broader earlier tier may price more masks than the final tier. The
@@ -23820,6 +23979,7 @@ mod tests {
             admitted: true,
             consistency: None,
             steady: true,
+            calendar_unmeasured: false,
         };
         let mut rows = [row(flawless), row(tested)];
         rows.sort_by_key(|r| super::money_key(&r.cell));

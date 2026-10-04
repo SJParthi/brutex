@@ -57680,3 +57680,22 @@ row has no win. A row with a winner ranks and prints exactly as before. Rule 0
 
 **Proof.** `cli::pool::tests::a_candidate_that_never_won_meets_no_tail_rule`
 fails on the previous `meets`. FB-14.
+
+### D-2714 — The calendar gate judges every screened row, and a row it never measured does not pass it — 2026-10-04
+
+**What was observed.** p5num-1 (numeric pass 5): `cli::screen` applied
+`min_weakest_bp` to `rows.iter_mut().take(rules.top)` only, while `passed`,
+`admitted_any` and `final_selection` read every row. With more than `top` rows
+admitted by the cell rules and the best failing the calendar rule, row
+`top + 1` stayed admitted, was counted as passing, could be selected, and
+`YOUR RULES: MET` was printed.
+
+**The decision.** `cli::calendar_gate` runs over every row. A measured row is
+refused when its weakest grain is below the floor, as before. When the rule is
+on (`min_weakest_bp > 0`), an admitted row with no consistency measurement is
+not admitted and is marked `calendar_unmeasured`; its `rule` column reads
+`unmeasured`. With the rule off nothing changes. The run's selected subject can
+change.
+
+**Proof.** `cli::tests::the_calendar_gate_refuses_an_inconsistent_row_past_the_printed_top`
+fails on the previous gate. FB-15.
