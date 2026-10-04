@@ -59416,15 +59416,15 @@ merges; the exit code is `FAILED` whenever any failure was named. The
 
 **Proven by** GI-08.
 
-### D-2805 — The trading calendar answers 2018-01-01 to 2026-10-04: the measured bitset unchanged, the spans either side from NSE's own holiday circulars — 2026-10-05
+### D-2805 — The GDFL readers' calendar answers 2018-01-01 to 2026-10-04: the measured calendar unchanged, the spans either side from NSE's own holiday circulars — 2026-10-05
 
 **Context.** GDFL's first trading day is 2018-09-03, the operator pulls
 Zerodha warm-up from 2018-01-01, and `pull::calendar` answered only
 2019-12-02..2026-09-04, so every earlier GDFL day refused `CalendarUnmeasured`.
 
-**Decision.** `FIRST_DAY` is 2018-01-01 and `LAST_DAY` 2026-10-04. The
-store-measured bitset keeps its span (`MEASURED_FIRST_DAY..MEASURED_LAST_DAY`)
-byte for byte. Outside it a weekday is a regular session unless it is in
+**Decision.** `pull::calendar::sourced_kind_of` answers 2018-01-01
+(`SOURCED_FIRST_DAY`) to 2026-10-04 (`SOURCED_LAST_DAY`): inside the measured
+window it IS `kind_of`; outside it a weekday is a regular session unless it is in
 `SOURCED_HOLIDAYS`, a weekend is closed, and the two Muhurat sessions of the
 span (2018-11-07, 2019-10-27) are `OpenLengthUnmeasured`, never regular days.
 Sources, each fetched and read on 2026-10-04: NSE/CMTR/36475 (2018),
@@ -59436,6 +59436,15 @@ Muhurats (303 GDFL days); 2026-09-05..2026-09-30 likewise, 17 days. Jan-Aug
 2018 is sourced from the circular and not corroborated by any local data; GDFL
 holds nothing before 2018-09-03 (a named gap, not a block). Days before
 2018-01-01 stay `Unmeasured`.
+
+**Why not `kind_of` itself.** `cli::stored::calendar_policy_digest_v2` hashes
+`FIRST_DAY`, `LAST_DAY` and `kind_of` of every day into the identity of every
+stored sweep (and `index_stop` catalogs, the fold's completeness guards and
+their tests read the window), so widening the global calendar re-keys every
+recorded run. That is the operator's decision, recorded as open; until it is
+taken only the GDFL readers (`gdfl_cm::session_gate`, the options monthly
+expiry) read the sourced spans, and Zerodha dates before 2019-12-02 stay
+`Unmeasured` on every other path.
 
 **Proven by** GI-09.
 

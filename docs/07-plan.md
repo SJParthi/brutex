@@ -1035,7 +1035,7 @@ the code. Each stays open here so a recorded limit is not read as a closed one.
 | `cli gdfl-import KIND SOURCE FROM TO [SYMBOL ...]`: indices, stocks and option contracts at `1s`, one runtime (`pull::gdfl_import`), both sources, through `ingest::from_rows`; no coarser GDFL rung on any door | Done on `feat/gdfl-import`; real days 2026-08-03 and 2018-12-03 imported into a scratch store from both sources, byte-identical stores, 16 of 16 raw-tick spot checks equal per day (PROOF.md, scratch state) |
 | Incremental, idempotent, resumable (journal, store dedupe, crash resume) | Done (GI-05, GI-06) |
 | Options as contracts, era-aware names, monthly expiry from NSE's rule | Done; all 1,218,362 vendor tickers decode, 0 refused, 0 disagreements |
-| Calendar 2018-01-01..2026-10-04 from NSE circulars | Done (D-2805); before 2018-01-01 and after 2026-10-04 stays Unmeasured |
+| Calendar 2018-01-01..2026-10-04 from NSE circulars | Done for the GDFL readers (D-2805); widening the global calendar re-keys every stored run (calendar policy digest), so it waits on the operator |
 | Import into the app's own store | Waiting on the operator's word; never run by this branch |
 | `.grk` greeks per contract-second (spot same second, IV, rate) | Not started: needs the RBI 91-day T-bill rate of `feat/rate-tbill` (D-2810); no rate is defaulted |
 | `/db` spot read, `/ticks.json`, futures | `/db` spot is `feat/db-spot` (D-2807); no futures exist in the GDFL data |

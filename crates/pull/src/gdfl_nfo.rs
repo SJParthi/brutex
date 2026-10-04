@@ -41,7 +41,7 @@
 //! for equity derivatives, "Last Thursday of the expiry month. If the last
 //! Thursday is a trading holiday, then the expiry day is the previous trading
 //! day" (NSE contract specifications, archived 2019-08-16; charter GDFL
-//! options section), walked back on [`crate::calendar::kind_of`]. A day the
+//! options section), walked back on [`crate::calendar::sourced_kind_of`]. A day the
 //! calendar has not measured refuses (`MonthlyExpiryUnmeasured`), and a file
 //! traded AFTER its derived expiry refuses (`ExpiryPassed`): that is the
 //! per-day half of the cross-check against the vendor's own appearances.
@@ -386,7 +386,7 @@ fn monthly_expiry(year: u16, month: u8) -> Option<Day> {
     // Back from the month's end to its last Thursday: day 0 was a Thursday.
     let mut day = end.days_from_epoch() - end.days_from_epoch() % 7;
     for _ in 0..31 {
-        match crate::calendar::kind_of(i64::from(day)) {
+        match crate::calendar::sourced_kind_of(i64::from(day)) {
             crate::calendar::DayKind::Open(_) => return Day::from_days(day).ok(),
             crate::calendar::DayKind::Unmeasured => return None,
             _ => day -= 1,

@@ -107,131 +107,20 @@
 //! `CLAUDE.md` §3 rule 6: a structural argument is not a
 //! measurement, however sound it is.
 
-/// First day this calendar knows: **2018-01-01**, as days since the epoch.
-///
-/// Widened from 2019-12-02 by D-2805: the span before [`MEASURED_FIRST_DAY`]
-/// is answered from NSE's own capital-market trading-holiday circulars
-/// ([`SOURCED_HOLIDAYS`]), cross-checked both ways against the GDFL day list.
-pub const FIRST_DAY: i64 = 17_532;
+/// First day this calendar knows: **2019-12-02**, as days since the epoch.
+pub const FIRST_DAY: i64 = 18_232;
 
-/// Last day this calendar knows: **2026-10-04**, as days since the epoch.
-/// Widened from 2026-09-04 by D-2805, from NSE/CMTR/71775.
-pub const LAST_DAY: i64 = 20_730;
-
-/// How many days the calendar answers for.
-pub const DAYS: usize = 3_199;
-
-/// First day the store-measured bitset [`TRADED`] covers: **2019-12-02**.
-pub const MEASURED_FIRST_DAY: i64 = 18_232;
-
-/// Last day the store-measured bitset covers: **2026-09-04**.
-pub const MEASURED_LAST_DAY: i64 = 20_700;
+/// Last day this calendar knows: **2026-09-04**, as days since the epoch.
+pub const LAST_DAY: i64 = 20_700;
 
 /// How many days the bitset covers.
-pub const MEASURED_DAYS: usize = 2_469;
+pub const DAYS: usize = 2_469;
 
 // TWO ASSERTIONS AND NO CAST. One `DAYS as i64` would say the same thing and
 // would be the workspace's only sign-losing cast on a path that never needs
 // one; both sides are compared against the literal instead.
-const _: () = assert!(MEASURED_LAST_DAY - MEASURED_FIRST_DAY + 1 == 2_469);
-const _: () = assert!(MEASURED_DAYS == 2_469);
-const _: () = assert!(LAST_DAY - FIRST_DAY + 1 == 3_199);
-const _: () = assert!(DAYS == 3_199);
-const _: () = assert!(FIRST_DAY < MEASURED_FIRST_DAY && MEASURED_LAST_DAY < LAST_DAY);
-
-/// Every weekday trading holiday NSE notified for the capital-market segment
-/// outside the measured span, as days since the epoch (D-2805). Sources,
-/// each fetched and read on 2026-10-04 (recorded in `docs/00-charter.md`):
-/// NSE/CMTR/36475 (12 Dec 2017, calendar year 2018), NSE/CMTR/39612 (7 Dec
-/// 2018, calendar year 2019), NSE/CMTR/40536 (26 Mar 2019, 29 Apr 2019,
-/// Parliamentary Elections in Mumbai), NSE/MSD/42319 (7 Oct 2019, 21 Oct
-/// 2019, Assembly Elections in Maharashtra) and NSE/CMTR/71775 (12 Dec 2025,
-/// calendar year 2026). Holidays those circulars list on a Saturday or a
-/// Sunday are closed by the weekday rule and are not repeated here.
-///
-/// Cross-checked against the vendor's GDFL capital-market day zips over
-/// 2018-09-03..=2019-12-01 and 2026-09-05..=2026-09-30: every weekday that
-/// is not in this table has an index and a stock day zip (0 missing), and
-/// the only day zips on a day this table or the weekend closes are the two
-/// Muhurat sessions of [`SOURCED_SPECIAL`].
-pub const SOURCED_HOLIDAYS: [i64; 34] = [
-    17_557, // 2018-01-26 Fri Republic Day
-    17_575, // 2018-02-13 Tue Mahashivratri
-    17_592, // 2018-03-02 Fri Holi
-    17_619, // 2018-03-29 Thu Mahavir Jayanti
-    17_620, // 2018-03-30 Fri Good Friday
-    17_652, // 2018-05-01 Tue Maharashtra Day
-    17_758, // 2018-08-15 Wed Independence Day
-    17_765, // 2018-08-22 Wed Bakri ID
-    17_787, // 2018-09-13 Thu Ganesh Chaturthi
-    17_794, // 2018-09-20 Thu Moharram
-    17_806, // 2018-10-02 Tue Mahatma Gandhi Jayanti
-    17_822, // 2018-10-18 Thu Dasera
-    17_842, // 2018-11-07 Wed Diwali-Laxmi Pujan (Muhurat: SOURCED_SPECIAL)
-    17_843, // 2018-11-08 Thu Diwali-Balipratipada
-    17_858, // 2018-11-23 Fri Gurunanak Jayanti
-    17_890, // 2018-12-25 Tue Christmas
-    17_959, // 2019-03-04 Mon Mahashivratri
-    17_976, // 2019-03-21 Thu Holi
-    18_003, // 2019-04-17 Wed Mahavir Jayanti
-    18_005, // 2019-04-19 Fri Good Friday
-    18_015, // 2019-04-29 Mon Parliamentary Elections (NSE/CMTR/40536)
-    18_017, // 2019-05-01 Wed Maharashtra Day
-    18_052, // 2019-06-05 Wed Id-Ul-Fitr
-    18_120, // 2019-08-12 Mon Bakri Id
-    18_123, // 2019-08-15 Thu Independence Day
-    18_141, // 2019-09-02 Mon Ganesh Chaturthi
-    18_149, // 2019-09-10 Tue Moharram
-    18_171, // 2019-10-02 Wed Mahatma Gandhi Jayanti
-    18_177, // 2019-10-08 Tue Dasera
-    18_190, // 2019-10-21 Mon Assembly Elections (NSE/MSD/42319)
-    18_197, // 2019-10-28 Mon Diwali-Balipratipada
-    18_212, // 2019-11-12 Tue Gurunanak Jayanti
-    20_710, // 2026-09-14 Mon Ganesh Chaturthi
-    20_728, // 2026-10-02 Fri Mahatma Gandhi Jayanti
-];
-
-/// The Muhurat sessions in the sourced spans: each circular names the day
-/// and says the timings "shall be notified subsequently", so the LENGTH is
-/// not sourced here and the day is [`DayKind::OpenLengthUnmeasured`], never a
-/// regular day: 2018-11-07 (a Wednesday holiday) and 2019-10-27 (a Sunday).
-pub const SOURCED_SPECIAL: [i64; 2] = [17_842, 18_196];
-
-/// Whether `day` is one of a compile-time table's entries: a walk bounded by
-/// the table's own constant length, never by the data (the shape `kind_of`
-/// already uses for its two tables).
-fn listed(table: &[i64], day: i64) -> bool {
-    let mut at = 0_usize;
-    while at < table.len() {
-        match table.get(at) {
-            Some(&held) if held == day => return true,
-            _ => at += 1,
-        }
-    }
-    false
-}
-
-/// A day of the sourced spans: a Muhurat is open with no length, a weekend
-/// or a listed holiday is closed, every other weekday is a regular session.
-/// Two bounded walks over compile-time tables (2 and 34 entries) and one
-/// remainder, no allocation.
-///
-/// **UNVERIFIED as a measurement.** The bound is argued from the
-/// shape of the code and no bench in this workspace times it.
-/// `CLAUDE.md` §3 rule 6: a structural argument is not a
-/// measurement, however sound it is.
-fn sourced_kind(epoch_day: i64) -> DayKind {
-    if listed(&SOURCED_SPECIAL, epoch_day) {
-        return DayKind::OpenLengthUnmeasured;
-    }
-    // 1970-01-01, day 0, was a Thursday: Monday..Friday are 0..=4 here.
-    let weekday = (epoch_day + 3).rem_euclid(7) < 5;
-    if weekday && !listed(&SOURCED_HOLIDAYS, epoch_day) {
-        DayKind::Open(Session::full())
-    } else {
-        DayKind::Closed
-    }
-}
+const _: () = assert!(LAST_DAY - FIRST_DAY + 1 == 2_469);
+const _: () = assert!(DAYS == 2_469);
 
 /// Minute-of-day a standard NSE equity session opens: **09:15**.
 pub const OPEN_MINUTE: u16 = 9 * 60 + 15;
@@ -475,7 +364,7 @@ static TRADED: [u8; 309] = [
     0xF3, 0xF9, 0x7C, 0x3E, 0x1F,
 ];
 
-const _: () = assert!(TRADED.len() == MEASURED_DAYS.div_ceil(8));
+const _: () = assert!(TRADED.len() == DAYS.div_ceil(8));
 
 // THE TWO WALK LENGTHS `kind_of`'s cost note states. o1api-39, D-1203.
 const _: () = assert!(LENGTH_UNMEASURED.len() == 5 && IRREGULAR.len() == 4);
@@ -504,16 +393,11 @@ pub fn kind_of(epoch_day: i64) -> DayKind {
     if !(FIRST_DAY..=LAST_DAY).contains(&epoch_day) {
         return DayKind::Unmeasured;
     }
-    // OUTSIDE THE MEASURED BITSET, INSIDE THE CALENDAR: the circular-sourced
-    // spans of D-2805.
-    let (MEASURED_FIRST_DAY..=MEASURED_LAST_DAY) = epoch_day else {
-        return sourced_kind(epoch_day);
-    };
     // `try_from` RATHER THAN `as`, and the failure arm is honest rather than a
     // panic. The range check above already makes the difference 0..=2468, so
     // this cannot fail; if a future edit breaks that, saying "I have not
     // measured this day" is the safe answer and `expect` is banned outright.
-    let Ok(offset) = usize::try_from(epoch_day - MEASURED_FIRST_DAY) else {
+    let Ok(offset) = usize::try_from(epoch_day - FIRST_DAY) else {
         return DayKind::Unmeasured;
     };
     let byte = TRADED.get(offset / 8).copied().unwrap_or(0);
@@ -584,10 +468,229 @@ pub fn sessions_between(first: i64, last: i64) -> Option<u32> {
     Some(count)
 }
 
+// ══ The circular-sourced spans either side of the measured window (D-2805) ══
+//
+// NOT folded into `kind_of`. That function is the calendar every stored sweep
+// is identified by: `cli::stored::calendar_policy_digest_v2` hashes
+// `FIRST_DAY`, `LAST_DAY` and `kind_of` of every day in between into run
+// identity, so widening it would re-key every recorded run, which is the
+// operator's decision and not an importer's. The GDFL readers ask
+// `sourced_kind_of` instead; every other reader is unchanged.
+
+/// First day [`sourced_kind_of`] answers: **2018-01-01**.
+pub const SOURCED_FIRST_DAY: i64 = 17_532;
+
+/// Last day [`sourced_kind_of`] answers: **2026-10-04**.
+pub const SOURCED_LAST_DAY: i64 = 20_730;
+
+/// Every weekday trading holiday NSE notified for the capital-market segment
+/// outside the measured span, as days since the epoch (D-2805). Sources,
+/// each fetched and read on 2026-10-04 (recorded in `docs/00-charter.md`):
+/// NSE/CMTR/36475 (12 Dec 2017, calendar year 2018), NSE/CMTR/39612 (7 Dec
+/// 2018, calendar year 2019), NSE/CMTR/40536 (26 Mar 2019, 29 Apr 2019,
+/// Parliamentary Elections in Mumbai), NSE/MSD/42319 (7 Oct 2019, 21 Oct
+/// 2019, Assembly Elections in Maharashtra) and NSE/CMTR/71775 (12 Dec 2025,
+/// calendar year 2026). Holidays those circulars list on a Saturday or a
+/// Sunday are closed by the weekday rule and are not repeated here.
+///
+/// Cross-checked against the vendor's GDFL capital-market day zips over
+/// 2018-09-03..=2019-12-01 and 2026-09-05..=2026-09-30: every weekday that
+/// is not in this table has an index and a stock day zip (0 missing), and
+/// the only day zips on a day this table or the weekend closes are the two
+/// Muhurat sessions of [`SOURCED_SPECIAL`].
+pub const SOURCED_HOLIDAYS: [i64; 34] = [
+    17_557, // 2018-01-26 Fri Republic Day
+    17_575, // 2018-02-13 Tue Mahashivratri
+    17_592, // 2018-03-02 Fri Holi
+    17_619, // 2018-03-29 Thu Mahavir Jayanti
+    17_620, // 2018-03-30 Fri Good Friday
+    17_652, // 2018-05-01 Tue Maharashtra Day
+    17_758, // 2018-08-15 Wed Independence Day
+    17_765, // 2018-08-22 Wed Bakri ID
+    17_787, // 2018-09-13 Thu Ganesh Chaturthi
+    17_794, // 2018-09-20 Thu Moharram
+    17_806, // 2018-10-02 Tue Mahatma Gandhi Jayanti
+    17_822, // 2018-10-18 Thu Dasera
+    17_842, // 2018-11-07 Wed Diwali-Laxmi Pujan (Muhurat: SOURCED_SPECIAL)
+    17_843, // 2018-11-08 Thu Diwali-Balipratipada
+    17_858, // 2018-11-23 Fri Gurunanak Jayanti
+    17_890, // 2018-12-25 Tue Christmas
+    17_959, // 2019-03-04 Mon Mahashivratri
+    17_976, // 2019-03-21 Thu Holi
+    18_003, // 2019-04-17 Wed Mahavir Jayanti
+    18_005, // 2019-04-19 Fri Good Friday
+    18_015, // 2019-04-29 Mon Parliamentary Elections (NSE/CMTR/40536)
+    18_017, // 2019-05-01 Wed Maharashtra Day
+    18_052, // 2019-06-05 Wed Id-Ul-Fitr
+    18_120, // 2019-08-12 Mon Bakri Id
+    18_123, // 2019-08-15 Thu Independence Day
+    18_141, // 2019-09-02 Mon Ganesh Chaturthi
+    18_149, // 2019-09-10 Tue Moharram
+    18_171, // 2019-10-02 Wed Mahatma Gandhi Jayanti
+    18_177, // 2019-10-08 Tue Dasera
+    18_190, // 2019-10-21 Mon Assembly Elections (NSE/MSD/42319)
+    18_197, // 2019-10-28 Mon Diwali-Balipratipada
+    18_212, // 2019-11-12 Tue Gurunanak Jayanti
+    20_710, // 2026-09-14 Mon Ganesh Chaturthi
+    20_728, // 2026-10-02 Fri Mahatma Gandhi Jayanti
+];
+
+/// The Muhurat sessions in the sourced spans: each circular names the day
+/// and says the timings "shall be notified subsequently", so the LENGTH is
+/// not sourced here and the day is [`DayKind::OpenLengthUnmeasured`], never a
+/// regular day: 2018-11-07 (a Wednesday holiday) and 2019-10-27 (a Sunday).
+pub const SOURCED_SPECIAL: [i64; 2] = [17_842, 18_196];
+
+/// Whether `day` is one of a compile-time table's entries: a walk bounded by
+/// the table's own constant length, never by the data (the shape `kind_of`
+/// already uses for its two tables).
+fn listed(table: &[i64], day: i64) -> bool {
+    let mut at = 0_usize;
+    while at < table.len() {
+        match table.get(at) {
+            Some(&held) if held == day => return true,
+            _ => at += 1,
+        }
+    }
+    false
+}
+
+/// A day of the sourced spans: a Muhurat is open with no length, a weekend
+/// or a listed holiday is closed, every other weekday is a regular session.
+/// Two bounded walks over compile-time tables (2 and 34 entries) and one
+/// remainder, no allocation.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
+fn sourced_kind(epoch_day: i64) -> DayKind {
+    if listed(&SOURCED_SPECIAL, epoch_day) {
+        return DayKind::OpenLengthUnmeasured;
+    }
+    // 1970-01-01, day 0, was a Thursday: Monday..Friday are 0..=4 here.
+    let weekday = (epoch_day + 3).rem_euclid(7) < 5;
+    if weekday && !listed(&SOURCED_HOLIDAYS, epoch_day) {
+        DayKind::Open(Session::full())
+    } else {
+        DayKind::Closed
+    }
+}
+
+/// [`kind_of`] inside the measured window, the circular-sourced spans of
+/// D-2805 from [`SOURCED_FIRST_DAY`] to [`SOURCED_LAST_DAY`] outside it, and
+/// `Unmeasured` beyond them. The GDFL readers' calendar.
+#[must_use]
+pub fn sourced_kind_of(epoch_day: i64) -> DayKind {
+    let (FIRST_DAY..=LAST_DAY) = epoch_day else {
+        let (SOURCED_FIRST_DAY..=SOURCED_LAST_DAY) = epoch_day else {
+            return DayKind::Unmeasured;
+        };
+        return sourced_kind(epoch_day);
+    };
+    kind_of(epoch_day)
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic, reason = "test-only assertions")]
 mod tests {
     use super::*;
+
+    /// D-2805: the circular-sourced spans either side of the measured window.
+    #[test]
+    fn the_sourced_spans_follow_the_circulars_and_name_each_muhurat() {
+        let at = |y, m, d| {
+            i64::from(
+                crate::session::Day::new(y, m, d)
+                    .expect("a real day")
+                    .days_from_epoch(),
+            )
+        };
+        assert_eq!(
+            (SOURCED_FIRST_DAY, SOURCED_LAST_DAY),
+            (at(2018, 1, 1), at(2026, 10, 4))
+        );
+        assert_eq!((FIRST_DAY, LAST_DAY), (at(2019, 12, 2), at(2026, 9, 4)));
+        // Every listed holiday is a weekday inside a sourced span, and closed.
+        for day in SOURCED_HOLIDAYS {
+            assert!((day + 3).rem_euclid(7) < 5, "{day} is a weekday");
+            assert!(!(FIRST_DAY..=LAST_DAY).contains(&day), "{day}");
+            if !SOURCED_SPECIAL.contains(&day) {
+                assert_eq!(sourced_kind_of(day), DayKind::Closed, "{day}");
+            }
+        }
+        assert!(SOURCED_HOLIDAYS.windows(2).all(|w| w.first() < w.last()));
+        assert_eq!(
+            sourced_kind_of(at(2019, 4, 29)),
+            DayKind::Closed,
+            "election, NSE/CMTR/40536"
+        );
+        assert_eq!(
+            sourced_kind_of(at(2019, 10, 21)),
+            DayKind::Closed,
+            "election, NSE/MSD/42319"
+        );
+        assert_eq!(
+            sourced_kind_of(at(2018, 11, 7)),
+            DayKind::OpenLengthUnmeasured
+        );
+        assert_eq!(
+            sourced_kind_of(at(2019, 10, 27)),
+            DayKind::OpenLengthUnmeasured
+        );
+        assert_eq!(
+            sourced_kind_of(at(2018, 9, 3)),
+            DayKind::Open(Session::full()),
+            "GDFL's first day"
+        );
+        assert_eq!(
+            sourced_kind_of(at(2018, 1, 1)),
+            DayKind::Open(Session::full())
+        );
+        assert_eq!(
+            sourced_kind_of(at(2018, 9, 8)),
+            DayKind::Closed,
+            "a Saturday"
+        );
+        assert_eq!(sourced_kind_of(at(2018, 9, 9)), DayKind::Closed, "a Sunday");
+        assert_eq!(sourced_kind_of(at(2026, 9, 14)), DayKind::Closed);
+        assert_eq!(
+            sourced_kind_of(at(2026, 9, 30)),
+            DayKind::Open(Session::full())
+        );
+        assert_eq!(sourced_kind_of(at(2026, 10, 2)), DayKind::Closed);
+        assert_eq!(sourced_kind_of(at(2026, 10, 4)), DayKind::Closed);
+        assert_eq!(sourced_kind_of(at(2017, 12, 29)), DayKind::Unmeasured);
+        // 2018-09-03..=2019-12-01: 301 regular sessions and the two Muhurats,
+        // the 303 GDFL day zips of that span.
+        assert_eq!(sourced_sessions(at(2018, 9, 3), at(2019, 12, 1)), Some(303));
+        assert_eq!(sourced_sessions(at(2026, 9, 5), at(2026, 9, 30)), Some(17));
+    }
+
+    /// Sessions `sourced_kind_of` counts in `first..=last`.
+    fn sourced_sessions(first: i64, last: i64) -> Option<u32> {
+        let open = (first..=last)
+            .filter(|&d| {
+                matches!(
+                    sourced_kind_of(d),
+                    DayKind::Open(_) | DayKind::OpenLengthUnmeasured
+                )
+            })
+            .count();
+        u32::try_from(open).ok()
+    }
+
+    /// The global calendar, which run identity hashes, is untouched by D-2805.
+    #[test]
+    fn the_global_calendar_is_not_widened_by_the_sourced_spans() {
+        assert_eq!(kind_of(FIRST_DAY - 1), DayKind::Unmeasured);
+        assert_eq!(kind_of(LAST_DAY + 1), DayKind::Unmeasured);
+        for day in [FIRST_DAY, 19_000, LAST_DAY] {
+            assert_eq!(sourced_kind_of(day), kind_of(day), "{day}");
+        }
+        assert_eq!(sourced_kind_of(SOURCED_LAST_DAY + 1), DayKind::Unmeasured);
+        assert_eq!(sourced_kind_of(SOURCED_FIRST_DAY - 1), DayKind::Unmeasured);
+    }
 
     /// audit-20261003 attackdata-6 (D-1532). A Muhurat whose LENGTH was never
     /// measured is still a day the exchange traded, so it is a session in the
@@ -654,7 +757,7 @@ mod tests {
         let mut weekend_sessions = 0_u32;
         let mut weekday_total = 0_u32;
 
-        for day in MEASURED_FIRST_DAY..=MEASURED_LAST_DAY {
+        for day in FIRST_DAY..=LAST_DAY {
             // 1970-01-01 was a Thursday, so day 0 is weekday index 3 and
             // Saturday/Sunday are 2 and 3 in this rotation.
             let dow = (day + 4).rem_euclid(7); // 0 = Sunday
@@ -727,64 +830,6 @@ mod tests {
         assert!(sessions_between(FIRST_DAY, LAST_DAY).is_some());
     }
 
-    /// D-2805: the circular-sourced spans either side of the measured bitset.
-    #[test]
-    fn the_sourced_spans_follow_the_circulars_and_name_each_muhurat() {
-        let at = |y, m, d| {
-            i64::from(
-                crate::session::Day::new(y, m, d)
-                    .expect("a real day")
-                    .days_from_epoch(),
-            )
-        };
-        assert_eq!((FIRST_DAY, LAST_DAY), (at(2018, 1, 1), at(2026, 10, 4)));
-        assert_eq!(
-            (MEASURED_FIRST_DAY, MEASURED_LAST_DAY),
-            (at(2019, 12, 2), at(2026, 9, 4))
-        );
-        // Every listed holiday is a weekday inside a sourced span, and closed.
-        for day in SOURCED_HOLIDAYS {
-            assert!((day + 3).rem_euclid(7) < 5, "{day} is a weekday");
-            assert!(
-                !(MEASURED_FIRST_DAY..=MEASURED_LAST_DAY).contains(&day),
-                "{day}"
-            );
-            if !SOURCED_SPECIAL.contains(&day) {
-                assert_eq!(kind_of(day), DayKind::Closed, "{day}");
-            }
-        }
-        assert!(SOURCED_HOLIDAYS.windows(2).all(|w| w.first() < w.last()));
-        assert_eq!(
-            kind_of(at(2019, 4, 29)),
-            DayKind::Closed,
-            "election, NSE/CMTR/40536"
-        );
-        assert_eq!(
-            kind_of(at(2019, 10, 21)),
-            DayKind::Closed,
-            "election, NSE/MSD/42319"
-        );
-        assert_eq!(kind_of(at(2018, 11, 7)), DayKind::OpenLengthUnmeasured);
-        assert_eq!(kind_of(at(2019, 10, 27)), DayKind::OpenLengthUnmeasured);
-        assert_eq!(
-            kind_of(at(2018, 9, 3)),
-            DayKind::Open(Session::full()),
-            "GDFL's first day"
-        );
-        assert_eq!(kind_of(at(2018, 1, 1)), DayKind::Open(Session::full()));
-        assert_eq!(kind_of(at(2018, 9, 8)), DayKind::Closed, "a Saturday");
-        assert_eq!(kind_of(at(2018, 9, 9)), DayKind::Closed, "a Sunday");
-        assert_eq!(kind_of(at(2026, 9, 14)), DayKind::Closed);
-        assert_eq!(kind_of(at(2026, 9, 30)), DayKind::Open(Session::full()));
-        assert_eq!(kind_of(at(2026, 10, 2)), DayKind::Closed);
-        assert_eq!(kind_of(at(2026, 10, 4)), DayKind::Closed);
-        assert_eq!(kind_of(at(2017, 12, 29)), DayKind::Unmeasured);
-        // 2018-09-03..=2019-12-01: 301 regular sessions and the two Muhurats,
-        // the 303 GDFL day zips of that span.
-        assert_eq!(sessions_between(at(2018, 9, 3), at(2019, 12, 1)), Some(303));
-        assert_eq!(sessions_between(at(2026, 9, 5), at(2026, 9, 30)), Some(17));
-    }
-
     #[test]
     fn bounded_extension_has_exactly_ten_open_and_four_closed_dates() {
         let opens = [
@@ -803,11 +848,11 @@ mod tests {
         }
         assert_eq!(sessions_between(20_687, 20_700), Some(10));
         assert_eq!(kind_of(20_686), DayKind::Open(Session::full()));
-        for day in [FIRST_DAY - 1, LAST_DAY + 1, 21_000] {
+        for day in [FIRST_DAY - 1, 20_701, 20_702, 20_703, 21_000] {
             assert_eq!(kind_of(day), DayKind::Unmeasured);
             assert_eq!(expected_bars(day), None);
         }
-        assert_eq!(sessions_between(20_700, LAST_DAY + 1), None);
+        assert_eq!(sessions_between(20_700, 20_701), None);
     }
 
     #[test]
@@ -820,8 +865,8 @@ mod tests {
             });
         assert_eq!(fingerprint, 0x25a6_d5dd_6f29_f488);
         assert_eq!(&TRADED[306..], &[0x7C, 0x3E, 0x1F]);
-        for day in MEASURED_FIRST_DAY..=20_686 {
-            let offset = usize::try_from(day - MEASURED_FIRST_DAY).expect("baseline offset");
+        for day in FIRST_DAY..=20_686 {
+            let offset = usize::try_from(day - FIRST_DAY).expect("baseline offset");
             let was_open =
                 TRADED.get(offset / 8).expect("baseline byte") & (1 << (offset % 8)) != 0;
             let expected = if LENGTH_UNMEASURED.contains(&day) {

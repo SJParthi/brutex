@@ -153,6 +153,7 @@ fn only_actual_computation_verbs_can_establish_sweep_status() {
             word,
             "checksum-audit-stored"
                 | "fold-audit"
+                | "gdfl-import"
                 | "research-plan"
                 | "policy-check"
                 | "results"

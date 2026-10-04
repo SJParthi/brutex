@@ -584,8 +584,12 @@ fn the_dependency_set_has_not_moved_without_review() {
     // body in its deadline. The package was already in the lock under `axum` and
     // `hyper`, the count is still 192, and its registry source was scanned: only
     // `.rs`, `.md`, `.toml`, the lock and LICENSE, and no `build.rs`.
+    // 0xAAD0_3620_6F60_10EA -> 0x8ACF_7E51_E4A6_F150 IS ONE NEW ARROW, NOT A NEW
+    // PACKAGE (D-2801): `pull` names `ruzstd` 0.8.2 to read the GDFL tick store.
+    // The package was already in the lock under `lake` with the same features,
+    // the count is unchanged, and it is pure Rust with no `build.rs` (D-0056).
     assert_eq!(
-        h, 0xAAD0_3620_6F60_10EA,
+        h, 0x8ACF_7E51_E4A6_F150,
         "the dependency SET or GRAPH changed — a package was added, removed, \
          renamed or re-versioned, or a `dependencies` list in Cargo.lock moved (a feature flip \
          that turns an optional native crate on shows up only there). \

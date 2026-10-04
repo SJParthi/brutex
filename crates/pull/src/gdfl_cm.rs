@@ -88,7 +88,7 @@
 use brutex_core::instrument::{Exchange, InstrumentKey, Kind};
 use brutex_core::symbol::SYMBOL_CAPACITY;
 
-use crate::calendar::{DayKind, Session, kind_of};
+use crate::calendar::{DayKind, Session};
 use crate::session::{Day, SESSION_CLOSE_MINUTE, SESSION_OPEN_MINUTE};
 
 /// Which of the two capital-market trees a folder belongs to.
@@ -1270,7 +1270,7 @@ fn digits_u64(text: &str) -> Option<u64> {
 /// [`CmRefusal::CalendarNotRegular`] for a closed day, a special session or a
 /// day whose length was never measured.
 pub fn session_gate(day: Day) -> Result<(), CmRefusal> {
-    match kind_of(i64::from(day.days_from_epoch())) {
+    match crate::calendar::sourced_kind_of(i64::from(day.days_from_epoch())) {
         DayKind::Open(session) if session == Session::full() => Ok(()),
         DayKind::Unmeasured => Err(CmRefusal::CalendarUnmeasured),
         kind => Err(CmRefusal::CalendarNotRegular { kind }),
