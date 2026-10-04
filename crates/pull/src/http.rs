@@ -4400,8 +4400,9 @@ mod tests {
             "the point exactly the bound right of the digits"
         );
         assert_eq!(text(format!("1e{}", bound + 1)), None, "one further right");
-        assert_eq!(text("1e999999999".to_owned()), None);
-        assert_eq!(text("1e-999999999".to_owned()), None);
+        let huge = "9".repeat(9);
+        assert_eq!(text(format!("1e{huge}")), None, "an exponent far right");
+        assert_eq!(text(format!("1e-{huge}")), None, "an exponent far left");
     }
 
     /// **THE FOUR VALUES THAT COST FORTY-TWO RUNS**, each landing on the
