@@ -57646,3 +57646,21 @@ keeps its own start and citation. Lookup cost is unchanged: at most
 **Proof.** `costs::regime::tests::the_day_a_regime_refusal_names_is_a_day_that_answers`
 checks every representable day: a refusal's `verified_from` is a day that
 prices. It fails if either half of the fix is reverted. FB-12.
+
+### D-2712 — STRATEGY REPORT prints the zero-drawdown sentinel and an empty mean in words — 2026-10-04
+
+**What was observed.** p5num-4 (numeric pass 5): `runner::audit::strategy_report`
+printed `Cell::return_over_drawdown` through `hundredths`, so the `i64::MAX`
+sentinel of an all-winner variant read `92233720368547758.07`, a measured ratio
+that never happened. The grid's `ret_dd` cell in the same file already printed
+it as `no DD`. The same report printed `avg_win()` and `avg_loss()` as `0.00`
+when their side had no trade, which reads as a measured mean.
+
+**The decision.** The report prints `no DD` for the sentinel, the same words as
+`ret_dd`. It prints `-` with the note `no winning trade` or `no losing trade`
+when that side has no trade. A losing side here still means `trades - wins`,
+the report's own `losing trades` row; p5num-2 (flats counted as losers) is not
+changed by this entry. Measured values print exactly as before.
+
+**Proof.** `runner::audit::tests::the_strategy_report_names_its_sentinels_and_empty_means_in_words`
+fails on the previous renderer. FB-13.

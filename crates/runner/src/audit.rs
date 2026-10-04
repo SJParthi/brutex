@@ -946,8 +946,18 @@ pub fn strategy_report(out: &mut String, cell: &Cell, name: &str, scope: CostSco
             format!("{}%", hundredths(cell.win_rate_bp())),
             "winners / trades",
         ),
-        ("avg winning trade", money(cell.avg_win()), ""),
-        ("avg losing trade", money(cell.avg_loss()), ""),
+        mean_row(
+            "avg winning trade",
+            cell.wins == 0,
+            cell.avg_win(),
+            "no winning trade",
+        ),
+        mean_row(
+            "avg losing trade",
+            losers == 0,
+            cell.avg_loss(),
+            "no losing trade",
+        ),
         (
             "largest winning trade",
             money(cell.best_trade),
@@ -965,7 +975,7 @@ pub fn strategy_report(out: &mut String, cell: &Cell, name: &str, scope: CostSco
         ),
         (
             "return over drawdown",
-            hundredths(cell.return_over_drawdown()),
+            ratio_or_no_dd(cell.return_over_drawdown()),
             "profit per unit of pain",
         ),
         (
@@ -988,6 +998,39 @@ pub fn strategy_report(out: &mut String, cell: &Cell, name: &str, scope: CostSco
     }
 
     excursion_block(out, cell);
+}
+
+/// One average row of the STRATEGY REPORT, or a dash when its side is empty.
+///
+/// A MEAN OVER NO TRADES IS NOT `0.00` (p5num-4, D-2712). `avg_win` and
+/// `avg_loss` return 0 when their side is empty, and printed through [`money`]
+/// that read as a measured mean. The dash says nothing was averaged and the note
+/// says why, as the PROFIT FACTOR row already does.
+fn mean_row(
+    label: &'static str,
+    empty: bool,
+    mean: i64,
+    why: &'static str,
+) -> (&'static str, String, &'static str) {
+    if empty {
+        (label, "-".to_owned(), why)
+    } else {
+        (label, money(mean), "")
+    }
+}
+
+/// A return-over-drawdown in hundredths, or `no DD` for the zero-drawdown
+/// sentinel.
+///
+/// The sentinel is [`i64::MAX`], which [`hundredths`] printed as
+/// `92233720368547758.07` in the STRATEGY REPORT — a measured ratio that never
+/// happened. Same words as the grid's [`ret_dd`] cell (p5num-4, D-2712).
+fn ratio_or_no_dd(ratio: i64) -> String {
+    if ratio == i64::MAX {
+        "no DD".to_owned()
+    } else {
+        hundredths(ratio)
+    }
 }
 
 /// An integer in hundredths, rendered with its decimal point. `250` is `2.50`.
@@ -1543,7 +1586,7 @@ mod tests {
     }
     use super::{
         CASH_EQUITY_GROSS, CORPORATE_ACTIONS_UNCHECKED, CostScope, bootstrap, grid, overfitting,
-        render_selected, trades, walk_forward,
+        render_selected, strategy_report, trades, walk_forward,
     };
     use crate::pbo::{Placement, probability_of_overfitting};
     use crate::trade::{Trade, Trades};
@@ -1968,6 +2011,67 @@ mod tests {
             index_body, equity_body,
             "every other byte below the header must be identical across scopes"
         );
+    }
+
+    /// A SENTINEL OR AN EMPTY MEAN IS NEVER PRINTED AS A MEASUREMENT IN THE
+    /// STRATEGY REPORT (p5num-4, D-2712).
+    ///
+    /// An all-winner variant has no drawdown, so `return_over_drawdown` is the
+    /// `i64::MAX` sentinel; it has no loser, so `avg_loss` is 0. A variant that
+    /// never won has `avg_win` 0. All three printed as numbers.
+    #[test]
+    fn the_strategy_report_names_its_sentinels_and_empty_means_in_words() {
+        let row = |out: &str, label: &str| -> String {
+            out.lines()
+                .find(|line| line.starts_with(&format!("  {label}")))
+                .map(str::to_owned)
+                .expect("the report carries the row")
+        };
+        let all_won = crate::grid::Cell {
+            trades: 3,
+            wins: 3,
+            pessimistic: 300,
+            optimistic: 450,
+            gross_win: 300,
+            best_trade: 150,
+            min_win: 50,
+            ..crate::grid::Cell::default()
+        };
+        assert_eq!(all_won.return_over_drawdown(), i64::MAX);
+        let mut out = String::new();
+        strategy_report(&mut out, &all_won, "SL·TP", CostScope::IndexSpot);
+        assert!(!out.contains("92233720368547758"), "{out}");
+        let ret = row(&out, "return over drawdown");
+        assert!(ret.contains("no DD"), "{ret}");
+        let loss = row(&out, "avg losing trade");
+        assert!(loss.contains("no losing trade"), "{loss}");
+        assert!(!loss.contains("0.00"), "{loss}");
+        assert!(row(&out, "avg winning trade").contains("1.00"), "{out}");
+
+        let never_won = crate::grid::Cell {
+            trades: 2,
+            wins: 0,
+            pessimistic: -200,
+            optimistic: -100,
+            gross_loss: -200,
+            worst_trade: -150,
+            max_drawdown: 200,
+            ..crate::grid::Cell::default()
+        };
+        let mut out = String::new();
+        strategy_report(&mut out, &never_won, "SL·TP", CostScope::IndexSpot);
+        let win = row(&out, "avg winning trade");
+        assert!(win.contains("no winning trade"), "{win}");
+        assert!(!win.contains("0.00"), "{win}");
+        assert!(row(&out, "avg losing trade").contains("-₹1.00"), "{out}");
+        // A measured ratio still prints as one.
+        let measured = crate::grid::Cell {
+            max_drawdown: 100,
+            ..all_won
+        };
+        let mut out = String::new();
+        strategy_report(&mut out, &measured, "SL·TP", CostScope::IndexSpot);
+        assert!(row(&out, "return over drawdown").contains("3.00"), "{out}");
     }
 
     /// A STOCK'S STRATEGY REPORT NEVER CALLS A TOTAL NET PROFIT, AND SAYS THE
