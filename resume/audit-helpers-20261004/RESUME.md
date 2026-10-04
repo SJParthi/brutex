@@ -91,3 +91,12 @@ Total new across rounds 1-8: 112. Round 8 = 2 medium, 10 low. P10-02 confirmed b
 | O(1) | 12 | cost of each op outside the engine | p12num-1 low (frontier/detail ledgers re-indexed every run) | numeric-pass12.md |
 | Invariants | 12 | docs/04 rows vs tests | P12-01..08 low | tests-docs-security-pass12.md |
 Total new across rounds 1-9: 124. Round 9 = 2 medium, 10 low. Newly fixed: CE-3, CE-23, W2-cli16-2 (as docs).
+
+## Round 10 (same head 1f4de71) — done 2026-10-04 ~14:45 UTC
+| Angle | Pass | Area | New | Report |
+|---|---|---|---|---|
+| Crash/edge | 15 | api to web JSON contract | CE-77 med (census-degraded header ignored), CE-78 med (autopilot journal_error never shown), CE-79..83 low | crash-edge-pass15.md |
+| Concurrency | 13 | logging/monitoring coverage of failures | conc13-4 med (autopilot/pull halts never logged), conc13-5 med (store trace events name only a hash), conc13-1..3, 6..8 low | conc-pass13.md |
+| Costs | 13 | cost rates vs charter | p13num-1..5 low (all rates UNVERIFIED = hunt-costs-5) | numeric-pass13.md |
+| Rust-only | 13 | §2 every corner | P13-01 med (committed web/build stale; W1 red), P13-02..05 low | tests-docs-security-pass13.md |
+Total new across rounds 1-10: 149. Round 10 = 5 medium, 20 low. CI tools list for owner question D-1602 is in tests-docs-security-pass13.md.
