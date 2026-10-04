@@ -30,7 +30,23 @@
 //! refused as ambiguous, and none falls to the second form, which is refused
 //! by name because its expiry day is not in the name and no sourced monthly
 //! expiry calendar for 2018–2019 is recorded here (`docs/05-decisions.md`
-//! D-2806 names that missing fact). The underlying may hold any byte a
+//! D-2806 names that missing fact).
+//!
+//! **The two forms overlap, and on a trade day of the monthly era the name
+//! alone cannot choose.** A monthly name whose strike begins with two digits
+//! also reads as the dated form, the month's year taken as the expiry DAY and
+//! the strike's first two digits as the YEAR: `ADANIENT18DEC195CE` traded on
+//! 2018-12-03 is December 2018, strike 195, and also 2019-12-18, strike 5 —
+//! a weekday inside the horizon. Taking the dated reading filed it under the
+//! wrong contract silently (D-3160). So on a trade day up to
+//! [`MONTHLY_FORM_LAST_YEAR`] a dated reading is kept only when no monthly
+//! reading names a month inside the same window; otherwise the name is
+//! refused as [`NfoRefusal::FormsAmbiguous`]. After that year the dated
+//! reading stands alone, which is the format's own statement that the
+//! monthly form is a 2018–2019 form; the exact cutover day is not recorded
+//! and is named as unsettled in D-3160. A strike's whole part never begins
+//! with `0` unless it is `0` itself (`0.5`), which also keeps `2005` from
+//! reading as year 20, strike 5 (D-3161). The underlying may hold any byte a
 //! `Symbol` admits (`M&M`, `NAM-INDIA`, `360ONE`); the strike may be decimal
 //! (`107.5`, 10,750 paisa). An expiry the ticker states on an exchange holiday
 //! is kept as the vendor stated it: the name is the contract's identity, and
@@ -46,13 +62,13 @@
 //! # Cost
 //!
 //! A day listing is O(entries) once per day; after it [`NfoDay::locate`] is
-//! one hash probe (expected O(1), measured by `C-GI-02` in
+//! two hash probes (expected O(1), measured by `C-GI-02` in
 //! `crates/pull/benches/ratio.rs`). [`decode_ticker`] is O(ticker length),
 //! bounded by the 64-byte cap it refuses past. [`decode`] is O(bytes).
 //! Fetching a file is O(its compressed and rebuilt bytes). The listing and
 //! the fetch are limits in `docs/06-limits.md`, not constant-time claims.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -60,7 +76,9 @@ use brutex_core::instrument::{Contract, Expiry, Kind, OptionSide};
 use brutex_core::price::Paisa;
 use brutex_core::symbol::Symbol;
 
-use crate::gdfl_archive::{MONTHS, ReadAt, ZipEntry, ZipLocator, member_bytes, stored_span, zip_entries};
+use crate::gdfl_archive::{
+    MONTHS, ReadAt, ZipEntry, ZipLocator, member_bytes, stored_span, zip_entries,
+};
 use crate::gdfl_cm::{CmRefusal, HEADER_OPEN_INTEREST, HEADER_OPEN_INTEREST_SPACED, ListedFile};
 use crate::gdfl_tickstore::{IndexEntry, read_index, rebuild};
 use crate::session::Day;
@@ -86,6 +104,13 @@ pub const TICKER_CAP: usize = 64;
 /// How far after the trade date a stated expiry may lie (FORMAT.md §6).
 pub const EXPIRY_HORIZON_DAYS: u32 = 2_200;
 
+/// The last trade year on which a name may be the monthly form, so the last
+/// year on which a name that reads both ways is refused rather than read as
+/// the dated form (D-3160). The year is the module's own statement of the
+/// monthly form's era (FORMAT.md §6, "2018–2019"); the exact cutover DAY is
+/// not recorded, so the whole of that year is held to the stricter rule.
+pub const MONTHLY_FORM_LAST_YEAR: u16 = 2019;
+
 /// Why an options file, its name or a row was refused. Every refusal names
 /// itself; none is skipped.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,6 +130,13 @@ pub enum NfoRefusal {
     /// The ticker is the monthly 2018–2019 form, whose expiry day is not in
     /// the name; no sourced monthly expiry calendar is recorded (D-2806).
     MonthlyExpiryUnstated {
+        /// The ticker.
+        ticker: String,
+    },
+    /// On a trade day of the monthly era the ticker reads both as a dated
+    /// contract and as a monthly one inside the horizon, and the name alone
+    /// cannot choose (D-3160).
+    FormsAmbiguous {
         /// The ticker.
         ticker: String,
     },
@@ -164,7 +196,10 @@ impl core::fmt::Display for NfoRefusal {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::TickerUnparsed { ticker } => {
-                write!(f, "{ticker}: the ticker reads as neither GDFL option format")
+                write!(
+                    f,
+                    "{ticker}: the ticker reads as neither GDFL option format"
+                )
             }
             Self::TickerAmbiguous { ticker } => write!(
                 f,
@@ -174,11 +209,21 @@ impl core::fmt::Display for NfoRefusal {
                 f,
                 "{ticker}: the monthly form states no expiry day and no sourced monthly expiry calendar is recorded (D-2806)"
             ),
+            Self::FormsAmbiguous { ticker } => write!(
+                f,
+                "{ticker}: on a trade day up to {MONTHLY_FORM_LAST_YEAR} the name reads both as a dated and as a monthly contract; refused rather than guessed (D-3160)"
+            ),
             Self::UnderlyingRefused { ticker } => {
-                write!(f, "{ticker}: the underlying is not a symbol the store can file")
+                write!(
+                    f,
+                    "{ticker}: the underlying is not a symbol the store can file"
+                )
             }
             Self::ContractUnrenderable { ticker } => {
-                write!(f, "{ticker}: the contract does not fit the store's contract segment")
+                write!(
+                    f,
+                    "{ticker}: the contract does not fit the store's contract segment"
+                )
             }
             Self::DuplicateTicker { ticker } => {
                 write!(f, "{ticker}: two entries of one day name this ticker")
@@ -241,11 +286,12 @@ fn two_digits(bytes: &[u8]) -> Option<u8> {
 }
 
 /// A positive strike in paisa: digits, optionally a dot and one or two
-/// digits.
+/// digits. The whole part never begins with `0` unless it is `0` (D-3161).
 fn strike_paisa(text: &[u8]) -> Option<i64> {
     let text = core::str::from_utf8(text).ok()?;
     let (whole, frac) = text.split_once('.').unwrap_or((text, ""));
     let shaped = !whole.is_empty()
+        && (whole == "0" || !whole.starts_with('0'))
         && whole.bytes().all(|b| b.is_ascii_digit())
         && (!text.contains('.') || (!frac.is_empty() && frac.bytes().all(|b| b.is_ascii_digit())));
     if !shaped {
@@ -254,14 +300,38 @@ fn strike_paisa(text: &[u8]) -> Option<i64> {
     crate::csv::paisa(text).filter(|&paisa| paisa > 0)
 }
 
+/// Whether `body` (a ticker without its side) reads as the monthly form
+/// `YY MON STRIKE` at some split; with `window`, only a month holding at
+/// least one day of `[from, to]` (days from the epoch) counts.
+fn monthly_reading(body: &[u8], window: Option<(u32, u32)>) -> bool {
+    (1..body.len()).any(|at| {
+        let Some(rest) = body.get(at..) else {
+            return false;
+        };
+        let (Some(yy), Some(month)) = (
+            rest.get(0..2).and_then(two_digits),
+            rest.get(2..5).and_then(month_of),
+        ) else {
+            return false;
+        };
+        rest.get(5..).and_then(strike_paisa).is_some()
+            && window.is_none_or(|(from, to)| {
+                Day::new(2000 + u16::from(yy), month, 1).is_ok_and(|first| {
+                    first.end_of_month().days_from_epoch() >= from && first.days_from_epoch() <= to
+                })
+            })
+    })
+}
+
 /// The contract `ticker`, a file stem without `.NFO`, names for a file of
-/// trade day `trade`, by FORMAT.md §6.
+/// trade day `trade`, by FORMAT.md §6 and the monthly-era rule (D-3160).
 ///
 /// # Errors
 ///
 /// [`NfoRefusal::TickerUnparsed`],
-/// [`NfoRefusal::MonthlyExpiryUnstated`], [`NfoRefusal::UnderlyingRefused`]
-/// and [`NfoRefusal::ContractUnrenderable`].
+/// [`NfoRefusal::MonthlyExpiryUnstated`], [`NfoRefusal::FormsAmbiguous`],
+/// [`NfoRefusal::UnderlyingRefused`] and
+/// [`NfoRefusal::ContractUnrenderable`].
 pub fn decode_ticker(ticker: &str, trade: Day) -> Result<OptionTicker, NfoRefusal> {
     let unparsed = || NfoRefusal::TickerUnparsed {
         ticker: ticker.to_owned(),
@@ -299,14 +369,7 @@ pub fn decode_ticker(ticker: &str, trade: Day) -> Result<OptionTicker, NfoRefusa
     });
     let Some((at, expiry, strike)) = first_form else {
         // The monthly 2018–2019 form: YY MON STRIKE, no expiry day.
-        let monthly = (1..body.len()).any(|at| {
-            body.get(at..).is_some_and(|rest| {
-                rest.get(0..2).and_then(two_digits).is_some()
-                    && rest.get(2..5).and_then(month_of).is_some()
-                    && rest.get(5..).and_then(strike_paisa).is_some()
-            })
-        });
-        return Err(if monthly {
+        return Err(if monthly_reading(body, None) {
             NfoRefusal::MonthlyExpiryUnstated {
                 ticker: ticker.to_owned(),
             }
@@ -314,6 +377,15 @@ pub fn decode_ticker(ticker: &str, trade: Day) -> Result<OptionTicker, NfoRefusa
             unparsed()
         });
     };
+    // In the monthly era a monthly reading inside the same window is as good
+    // a reading as the dated one, and the name cannot choose (D-3160).
+    if trade.year() <= MONTHLY_FORM_LAST_YEAR
+        && monthly_reading(body, Some((trade.days_from_epoch(), latest)))
+    {
+        return Err(NfoRefusal::FormsAmbiguous {
+            ticker: ticker.to_owned(),
+        });
+    }
     let name = ticker.get(..at).unwrap_or_default();
     let underlying = Symbol::new(name)
         .ok()
@@ -382,7 +454,9 @@ pub struct NfoDay<L> {
     folder: String,
     entries: Vec<ListedFile<L>>,
     by_ticker: HashMap<Box<str>, usize>,
-    duplicates: Vec<String>,
+    /// Every ticker named by more than one entry: a set, so [`Self::locate`]
+    /// stays one probe however many duplicates a day holds (D-3162).
+    duplicates: HashSet<Box<str>>,
     skipped: usize,
 }
 
@@ -395,7 +469,7 @@ impl<L> NfoDay<L> {
             folder: day_folder_name(day),
             entries: Vec::new(),
             by_ticker: HashMap::new(),
-            duplicates: Vec::new(),
+            duplicates: HashSet::new(),
             skipped: 0,
         }
     }
@@ -407,7 +481,7 @@ impl<L> NfoDay<L> {
         match entry_ticker(&self.folder, entry) {
             Some(ticker) => {
                 if self.by_ticker.insert(ticker.into(), at).is_some() {
-                    self.duplicates.push(ticker.to_owned());
+                    self.duplicates.insert(ticker.into());
                 }
             }
             None => self.skipped += 1,
@@ -444,18 +518,22 @@ impl<L> NfoDay<L> {
         entry_ticker(&self.folder, &file.entry)
     }
 
-    /// The file holding `ticker`, if the day has one: one hash probe.
+    /// The file holding `ticker`, if the day has one: two hash probes, the
+    /// duplicate set and the ticker map.
     ///
     /// # Errors
     ///
     /// [`NfoRefusal::DuplicateTicker`] when two entries name it.
     pub fn locate(&self, ticker: &str) -> Result<Option<&ListedFile<L>>, NfoRefusal> {
-        if self.duplicates.iter().any(|held| held == ticker) {
+        if self.duplicates.contains(ticker) {
             return Err(NfoRefusal::DuplicateTicker {
                 ticker: ticker.to_owned(),
             });
         }
-        Ok(self.by_ticker.get(ticker).and_then(|&at| self.entries.get(at)))
+        Ok(self
+            .by_ticker
+            .get(ticker)
+            .and_then(|&at| self.entries.get(at)))
     }
 }
 
@@ -602,7 +680,7 @@ impl NfoSource for NfoZips {
             Err(why) => return Err(unavailable(why)),
         };
         let len = file.metadata().map_err(unavailable)?.len();
-        listing_in(Arc::new(file), len, day)
+        listing_in(&Arc::new(file), len, day)
     }
 
     fn fetch(&self, file: &ListedFile<ZipFileLocator>) -> Result<Vec<u8>, CmRefusal> {
@@ -619,13 +697,13 @@ impl NfoSource for NfoZips {
 /// The zip refusals of [`zip_entries`] and [`stored_span`], and
 /// [`CmRefusal::ArchiveDuplicateDay`] for two day zips of one day.
 pub fn listing_in<B: ReadAt>(
-    file: Arc<B>,
+    file: &Arc<B>,
     len: u64,
     day: Day,
 ) -> Result<Option<NfoDay<ZipFileLocator<B>>>, CmRefusal> {
     let want = format!("{}/{}.zip", month_folder(day), day_folder_name(day));
     let mut inner: Option<ZipEntry> = None;
-    for entry in zip_entries(&*file, 0, len)? {
+    for entry in zip_entries(&**file, 0, len)? {
         if entry.name == want {
             if inner.is_some() {
                 return Err(CmRefusal::ArchiveDuplicateDay { day });
@@ -636,15 +714,15 @@ pub fn listing_in<B: ReadAt>(
     let Some(inner) = inner else {
         return Ok(None);
     };
-    let (base, span) = stored_span(&*file, &inner)?;
+    let (base, span) = stored_span(&**file, &inner)?;
     let mut listing = NfoDay::new(day);
-    for entry in zip_entries(&*file, base, span)? {
+    for entry in zip_entries(&**file, base, span)? {
         listing.push(
             &entry.name,
             entry.len,
             entry.crc32,
             ZipFileLocator {
-                file: Arc::clone(&file),
+                file: Arc::clone(file),
                 at: entry.locator,
             },
         );
@@ -683,7 +761,8 @@ fn second_of_day(time: &str) -> Option<u32> {
     let hours = u32::from(two_digits(&[h1, h2])?);
     let minutes = u32::from(two_digits(&[m1, m2])?);
     let seconds = u32::from(two_digits(&[s1, s2])?);
-    (hours <= 23 && minutes <= 59 && seconds <= 59).then_some(hours * 3_600 + minutes * 60 + seconds)
+    (hours <= 23 && minutes <= 59 && seconds <= 59)
+        .then_some(hours * 3_600 + minutes * 60 + seconds)
 }
 
 /// Digits, optionally a dot and more digits.
@@ -714,8 +793,13 @@ pub(crate) fn decode(bytes: &[u8], stem: &str, day: Day) -> Result<NfoFile, NfoR
 fn decode_capped(bytes: &[u8], stem: &str, day: Day, cap: usize) -> Result<NfoFile, NfoRefusal> {
     let body = bytes.strip_suffix(b"\n").unwrap_or(bytes);
     let mut lines = body.split(|&b| b == b'\n');
-    match lines.next().map(|line| line.strip_suffix(b"\r").unwrap_or(line)) {
-        Some(h) if h == HEADER_OPEN_INTEREST.as_bytes() || h == HEADER_OPEN_INTEREST_SPACED.as_bytes() => {}
+    match lines
+        .next()
+        .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
+    {
+        Some(h)
+            if h == HEADER_OPEN_INTEREST.as_bytes()
+                || h == HEADER_OPEN_INTEREST_SPACED.as_bytes() => {}
         _ => return Err(NfoRefusal::HeaderUnknown),
     }
     let date = format!("{:02}/{:02}/{:04}", day.day(), day.month(), day.year());
@@ -729,7 +813,18 @@ fn decode_capped(bytes: &[u8], stem: &str, day: Day, cap: usize) -> Result<NfoFi
         let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
         let text = core::str::from_utf8(raw).map_err(|_| malformed.clone())?;
         let fields: Vec<&str> = text.split(',').collect();
-        let &[ticker, row_date, time, ltp, bid, bid_qty, ask, ask_qty, ltq, oi] = fields.as_slice()
+        let &[
+            ticker,
+            row_date,
+            time,
+            ltp,
+            bid,
+            bid_qty,
+            ask,
+            ask_qty,
+            ltq,
+            oi,
+        ] = fields.as_slice()
         else {
             return Err(malformed);
         };
@@ -743,13 +838,24 @@ fn decode_capped(bytes: &[u8], stem: &str, day: Day, cap: usize) -> Result<NfoFi
         if !(is_decimal(bid) && is_decimal(ask) && is_digits(bid_qty) && is_digits(ask_qty)) {
             return Err(malformed);
         }
-        let ltq: u64 = if is_digits(ltq) { ltq.parse().ok() } else { None }.ok_or_else(|| malformed.clone())?;
+        let ltq: u64 = if is_digits(ltq) {
+            ltq.parse().ok()
+        } else {
+            None
+        }
+        .ok_or_else(|| malformed.clone())?;
         if !is_digits(oi) {
             return Err(malformed);
         }
-        let oi: i64 = oi.parse().map_err(|_| NfoRefusal::OpenInterestRefused { line })?;
-        let paisa = if is_decimal(ltp) { crate::csv::paisa(ltp) } else { None }
-            .ok_or(NfoRefusal::PriceRefused { line })?;
+        let oi: i64 = oi
+            .parse()
+            .map_err(|_| NfoRefusal::OpenInterestRefused { line })?;
+        let paisa = if is_decimal(ltp) {
+            crate::csv::paisa(ltp)
+        } else {
+            None
+        }
+        .ok_or(NfoRefusal::PriceRefused { line })?;
         if ltq > 0 && paisa < costs::rate::TICK.raw() {
             return Err(NfoRefusal::PriceRefused { line });
         }
@@ -811,3 +917,7 @@ pub fn read_file<S: NfoSource>(
 #[cfg(test)]
 #[path = "gdfl_nfo_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "gdfl_nfo_attack_tests.rs"]
+mod attack_tests;
