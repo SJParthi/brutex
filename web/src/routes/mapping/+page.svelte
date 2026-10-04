@@ -66,6 +66,8 @@
   import { group } from '$lib/money.js';
   import { stampLabel } from '$lib/dates.js';
   import * as prefix from '$lib/prefix.js';
+  import { refusalFrom } from '$lib/refusal.js';
+  import { mastersStatusRefused } from '$lib/masters-status.js';
 
   /* ====================================================================
      THE PAYLOAD
@@ -105,7 +107,16 @@
    * `masters.restart` because that object describes ONE refresh press, while
    * this is a standing fact about the server and is true on arrival.
    */
-  let restartNeeded = $state(false);
+  let restartNeeded = $state(/** @type {boolean | null} */ (false));
+  /**
+   * WHY THE MASTER FILES COULD NOT BE LISTED, or ''. CE-82, D-1788: a 503
+   * from `/masters/status.json` names its reason in `refusal`, and this page
+   * returned without reading it -- the four-file table vanished with no
+   * sentence, and a restart banner from an earlier read stayed up. A failed
+   * read now clears the list, sets the restart flag to UNKNOWN (`null`), and
+   * shows the server's words.
+   */
+  let statusWhy = $state('');
   const masterRequests = createPageRequests();
   const joinRequests = createPageRequests();
   onDestroy(() => { masterRequests.dispose(); joinRequests.dispose(); });
@@ -115,9 +126,15 @@
     try {
       const response = await ask('/masters/status.json', { signal: ticket.signal });
       if (!ticket.current()) return;
-      if (!response.ok) return;
+      if (!response.ok) {
+        const why = await refusalFrom('/masters/status.json', response);
+        if (!ticket.current()) return;
+        ({ onDisk, restartNeeded, statusWhy } = mastersStatusRefused(why));
+        return;
+      }
       const body = await response.json();
       if (!ticket.current()) return;
+      statusWhy = '';
       onDisk = body.masters ?? [];
       /* THE RESTART FLAG COMES FROM HERE, AND IT WAS BEING THROWN AWAY.
          Two routes carry a `restart_required` and only one of them means
@@ -132,13 +149,16 @@
          the two front ends disagreed about whether a stale master was visible.
          They now agree. */
       restartNeeded = Boolean(body.restart_required);
-    } catch {
+    } catch (error) {
       if (!ticket.current()) return;
-      // A STATUS READ THAT FAILS IS NOT THIS PAGE'S SUBJECT. The join's own
-      // refusal already says what is missing; a second red banner about the
-      // same absence would be noise, and inventing a state for it would be
-      // worse than saying nothing.
-      onDisk = [];
+      // A FAILED STATUS READ IS NAMED, AND THE RESTART FLAG IT FED BECOMES
+      // UNKNOWN. This used to clear the list silently and keep the previous
+      // `restartNeeded`, so a stale "restart required" could outlive the
+      // server's answer (CE-82). Keeping an old answer is the stale value §4
+      // bans; the honest state is "not known", said in words.
+      ({ onDisk, restartNeeded, statusWhy } = mastersStatusRefused(
+        `/masters/status.json could not be read: ${error instanceof Error ? error.message : String(error)}`
+      ));
     }
   }
 
@@ -333,13 +353,9 @@
         // absent, and the server puts its path in the message. Throwing that
         // away and printing the status code would turn a one-line fix into a
         // search.
-        let why = `/indexmap.json answered ${response.status}.`;
-        try {
-          const body = await response.json();
-          if (body?.error) why = String(body.error);
-        } catch {
-          /* Not JSON. The status line above is all there is to say. */
-        }
+        // `refusalFrom` reads `error`, `refused` and `refusal`: the unknown-
+        // feed 400 sends `refused`, which `body.error` never saw (CE-83).
+        const why = await refusalFrom('/indexmap.json', response);
         if (!ticket.current() || feeds.active !== feed) return;
         load = { phase: 'failed', body: null, why };
         return;
@@ -661,6 +677,13 @@
       </div>
     {/if}
 
+    {#if statusWhy}
+      <div class="refusal" role="alert">
+        <span class="rlabel">The master files could not be listed</span>
+        <p>{statusWhy}</p>
+        <p>Whether a restart is needed to pick up newer masters is unknown until this route answers.</p>
+      </div>
+    {/if}
     {#if masters.why}
       <p class="mwhy">{masters.why}</p>
     {/if}

@@ -57,7 +57,7 @@ export function monthVerdict(month) {
  *   months: number,
  *   months_absent: number,
  *   truncated: boolean,
- *   calendar?: { covers_span: boolean, stale?: boolean },
+ *   calendar?: { covers_span: boolean, stale?: boolean, unreadable?: unknown },
  *   month: MonthEvidence[]
  * }} answer
  */
@@ -70,6 +70,11 @@ export function isWholeAudit(answer) {
     answer.months_absent === 0 &&
     answer.truncated === false &&
     answer.calendar?.covers_span === true &&
+    // A PEER THAT COULD NOT BE READ IS NOT A PEER THAT AGREED (CE-80, D-1787).
+    // `calendar.unreadable` names every peer census or bar file the server
+    // could not open; such a peer did not vote, so the calendar lacks what it
+    // would have proved. An absent list is unknown, never empty.
+    peersAllRead(answer.calendar) &&
     Array.isArray(answer.month) &&
     answer.month.length > 0 &&
     answer.month.length === answer.months &&
@@ -78,4 +83,27 @@ export function isWholeAudit(answer) {
       return kind === 'ok' || kind === 'quiet';
     })
   );
+}
+
+/**
+ * Whether every peer the calendar could have drawn on was read. True only for
+ * an explicit empty `unreadable` list: a missing or malformed field is an
+ * answer that did not say, and is not taken as "none".
+ * @param {{ unreadable?: unknown } | undefined | null} calendar
+ * @returns {boolean}
+ */
+export function peersAllRead(calendar) {
+  return Array.isArray(calendar?.unreadable) && calendar.unreadable.length === 0;
+}
+
+/**
+ * The peers named unreadable, as strings, or null when the field is absent or
+ * malformed (which the page must say rather than show as none).
+ * @param {{ unreadable?: unknown } | undefined | null} calendar
+ * @returns {string[] | null}
+ */
+export function unreadablePeers(calendar) {
+  const list = calendar?.unreadable;
+  if (!Array.isArray(list) || !list.every((name) => typeof name === 'string')) return null;
+  return list;
 }

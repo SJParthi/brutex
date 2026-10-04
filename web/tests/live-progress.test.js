@@ -710,7 +710,7 @@ test('a window that no longer reaches the last folded event is refused, not gues
 test('a carry for another attempt does not stand in for this attempt\'s start marker', () => {
   const all = [marker(), ...validatedRung('1min')];
   const first = foldLiveProgress(null, RUN, envelope(newestFirst(all), { limit: 200 }));
-  const other = { ...first.carry, attempt: '999' };
+  const other = /** @type {import('../src/lib/live-progress.ts').LiveCarry} */ ({ ...first.carry, attempt: '999' });
   const noMarker = newestFirst(all).slice(0, 10);
   const answer = foldLiveProgress(other, RUN, envelope(noMarker, { limit: 200 }));
   assert.equal(answer.progress.phase, 'failed');

@@ -1,3 +1,4 @@
+import { refusalFrom } from './refusal.js';
 /**
  * Fold per-day exchange and spot-index minute denominators to month grain.
  *
@@ -142,7 +143,9 @@ export async function readCalendar(feed, request, signal) {
       cache: 'no-store',
       signal
     });
-    if (!response.ok) return emptyCalendar(`/calendar.json answered ${response.status}`);
+    // THE REASON IS READ, NOT DROPPED (CE-83, D-1789): a 429 names the
+    // derivation ceiling and a 400 the unknown feed, and both say what to do.
+    if (!response.ok) return emptyCalendar(await refusalFrom('/calendar.json', response));
     const body = await response.json();
     /** @type {Map<string, number|null>} */
     const owed = new Map();

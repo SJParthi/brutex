@@ -42,3 +42,10 @@ test('the autopilot page reads journal_error and conditions the durable-record s
   const guarded = page.split('journalIsRecord(').length - 1;
   assert.ok(sentences > 0 && guarded >= 2, `${sentences} sentence(s), ${guarded} guard(s)`);
 });
+
+test('a failed append is a bad-tone alert at the top, and no unguarded sentence calls the journal the record (CE-78)', () => {
+  const page = readFileSync(new URL('../src/routes/autopilot/+page.svelte', import.meta.url), 'utf8');
+  assert.match(page, /\{#if ap && ap\.journal_status\.state === 'failed'\}\s*<div class="beam bad" role="alert">[\s\S]{0,300}journalBanner\(ap\.journal_status/);
+  assert.doesNotMatch(page, /The durable record is the journal at \$\{JOURNAL\}/);
+  assert.doesNotMatch(page, /answer\. The durable record is <code>\{JOURNAL\}<\/code>/);
+});
