@@ -55,6 +55,10 @@ const ROUTES = [
 	// it reports one gap per run, so a green suite after adding an entry is not
 	// evidence the list is complete.
 	'/indexmap.json',
+	// THE SELECTION V6 READER `web/src/lib/selection-v6.js` calls. Served by
+	// `crates/api/src/server.rs` and missing here, so `npm run dev` answered
+	// it with the HTML fallback; `tests/proxy.test.js` caught it (D-1934).
+	'/selection-v6.json',
 	'/store.json',
 	'/audit.json',
 	// THE IN-FLIGHT TOP-N HEAP the backtest page polls while a sweep runs.
