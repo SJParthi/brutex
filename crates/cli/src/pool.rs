@@ -2888,7 +2888,7 @@ mod tests {
     /// `price_all`.
     #[test]
     fn the_pool_prepares_projects_and_prices_in_order_inside_price_all() {
-        const PREPARE: [&str; 10] = [
+        const PREPARE: [&str; 11] = [
             "stored::load_span(",
             "stored::rung_length_micros(",
             "validate_one_minute_execution(",
@@ -2898,7 +2898,8 @@ mod tests {
             "crate::StoredPreparationBuild { rung, commit: None }",
             "horizon_for(",
             "floors_measured_on(",
-            "project_onto_execution(&span.bars, &column,",
+            "crate::project_onto_execution(",
+            "&span.bars, &column, execution, native, horizon,",
         ];
         const PRICE: [&str; 3] = [
             "prepare_span(root, vendor, underlying, rung, from, to)?",
