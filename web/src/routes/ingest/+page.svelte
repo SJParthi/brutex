@@ -5442,7 +5442,7 @@
    */
   /** @param {CensusRow} row */
   async function pullRow(row) {
-    if (phase === 'running') return;
+    if (phase === 'running' || pressing) return;
     const span = shortSpan(row);
     if (!span) return;
     await runPull(
@@ -5458,6 +5458,15 @@
   // decides what the right-hand column shows.
 
   let phase = $state('idle');
+  /**
+   * HELD FROM THE PRESS UNTIL `phase` IS SET, synchronously, before the first
+   * `await`. `phase` turns `running` only after the pre-run census, which takes
+   * hundreds of milliseconds, so a guard on `phase` alone let a second press
+   * through: two snapshots and either a false pre-run error or two
+   * `POST /pull/run`, the loser of which set `done` over a live run and hid
+   * Stop. conc18-1.
+   */
+  let pressing = $state(false);
   let startedAt = $state(0);
   let finishedAt = $state(0);
   /**
@@ -6667,7 +6676,7 @@
   async function start(e) {
     e?.preventDefault?.();
     showProblems = true;
-    if (problems.length > 0 || phase === 'running') return;
+    if (problems.length > 0 || phase === 'running' || pressing) return;
 
     /* THE SAME LIST THE PAGE COUNTS, AND THAT IS THE WHOLE POINT.
      *
@@ -6715,6 +6724,9 @@
 
     // THE BEFORE READING IS TAKEN FIRST AND IS NOT OPTIONAL. Every count the
     // card shows is a difference against it.
+    // THE LATCH IS TAKEN BEFORE THE FIRST AWAIT AND RELEASED IN THE SAME
+    // SYNCHRONOUS CONTINUATION THAT SETS `phase`, so no press lands between.
+    pressing = true;
     try {
       baseline = await snapshot();
       live = baseline;
@@ -6723,6 +6735,8 @@
       live = null;
       netError = `The store could not be read before starting, so nothing this run does could be measured against it: ${why}`;
       return;
+    } finally {
+      pressing = false;
     }
 
     startedAt = Date.now();
@@ -6753,6 +6767,12 @@
           `The run was refused and gave no reason, which is itself the fault: HTTP ${r.status}.`;
         phase = 'done';
         finishedAt = Date.now();
+        releaseWatch?.();
+        releaseWatch = null;
+        /* 409 IS "A RUN IS ALREADY IN FLIGHT". That run is real and this page
+           must show it, not a finished card with Stop gone: pick it up exactly
+           as a page load does. The refusal stays in `netError`. conc18-1. */
+        if (r.status === 409) await resumeRun();
         return;
       }
     } catch (why) {
@@ -6897,7 +6917,7 @@
    * @param {Set<string>} asked
    */
   async function runPull(bodies, asked) {
-    if (bodies.length === 0 || phase === 'running') return;
+    if (bodies.length === 0 || phase === 'running' || pressing) return;
 
     receipt = null;
     receipts = [];
@@ -6913,6 +6933,9 @@
     // THE BEFORE READING IS TAKEN FIRST AND IS NOT OPTIONAL. Every outcome
     // below is a difference against it; without one there is nothing to
     // subtract and the page would have to guess.
+    // THE LATCH IS TAKEN BEFORE THE FIRST AWAIT AND RELEASED IN THE SAME
+    // SYNCHRONOUS CONTINUATION THAT SETS `phase`, so no press lands between.
+    pressing = true;
     try {
       baseline = await snapshot();
       live = baseline;
@@ -6921,6 +6944,8 @@
       live = null;
       netError = `The store could not be read before starting, so nothing this run does could be measured against it: ${why}`;
       return;
+    } finally {
+      pressing = false;
     }
 
     startedAt = Date.now();
@@ -8556,7 +8581,7 @@
             {/if}
 
             <div class="actions">
-              <button class="btn primary" type="submit" disabled={phase === 'running'}>
+              <button class="btn primary" type="submit" disabled={phase === 'running' || pressing}>
                 {#if phase === 'running'}
                   <span class="spin ring" aria-hidden="true"></span> Running…
                 {:else}
@@ -9621,7 +9646,7 @@
                           <button
                             class="btn sm"
                             type="button"
-                            disabled={phase === 'running' || problems.length > 0 || sp === null}
+                            disabled={phase === 'running' || pressing || problems.length > 0 || sp === null}
                             title={phase === 'running'
                               ? 'A pull is already on the wire — /pull/spot is synchronous and this page sends one at a time.'
                               : problems.length > 0
