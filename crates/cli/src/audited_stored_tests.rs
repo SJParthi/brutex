@@ -156,12 +156,16 @@ impl Fixture {
     }
 
     fn audit_range(&self, rung: &str, to: (u16, u8)) -> Result<String, String> {
+        self.audit_span(rung, (2025, 5), to)
+    }
+
+    fn audit_span(&self, rung: &str, from: (u16, u8), to: (u16, u8)) -> Result<String, String> {
         crate::audit_range_kernel(crate::StoredRangeAuditRequest {
             root: self.root.clone(),
             vendor: Vendor::Zerodha,
             underlying: self.symbol,
             rung,
-            from: (2025, 5),
+            from,
             to,
             min_hits: u64::MAX,
             attempt: Some(7),
@@ -845,6 +849,46 @@ fn monthly_audit_missing_execution_or_prior_context_refuses_before_an_attempt() 
         assert_eq!(
             crate::sweep_evidence::latest(&fixture.root, 1_048_576).expect("no attempt ledger"),
             None
+        );
+    }
+}
+
+/// conc7-1, D-2667: a span widened by a month that holds nothing computes the
+/// same bars and digest, and used to take the same identity, so its row was
+/// refused as a differing rerun. The requested span is in the identity now:
+/// each span records its own row and each rerun verifies its own.
+#[test]
+fn a_range_widened_by_an_empty_month_records_its_own_row() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    let fixture = Fixture::warmed();
+    let narrow = fixture
+        .audit_span("1min", (2025, 5), (2025, 5))
+        .expect("the stored month audits");
+    assert!(narrow.contains("RESULT RECORDED"), "{narrow}");
+    let wide = fixture
+        .audit_span("1min", (2025, 4), (2025, 5))
+        .expect("an empty leading month is named, not refused");
+    assert!(
+        wide.contains("MONTHS MISSING FROM THIS SPAN (1): 2025-04"),
+        "{wide}"
+    );
+    assert!(wide.contains("RESULT RECORDED"), "{wide}");
+    assert!(!wide.contains(crate::NOT_RECORDED), "{wide}");
+    let mut ledger = crate::results::Results::open_read(&fixture.root).expect("ledger");
+    assert_eq!(ledger.len().expect("two rows"), 2);
+    let (first, second) = (
+        ledger.read(0).expect("narrow"),
+        ledger.read(1).expect("wide"),
+    );
+    assert_ne!(first.identity, second.identity);
+    assert_eq!((second.from_year, second.from_month), (2025, 4));
+    drop(ledger);
+    for (from, report) in [((2025, 5), "narrow"), ((2025, 4), "wide")] {
+        let retry = fixture.audit_span("1min", from, (2025, 5)).expect("rerun");
+        assert!(
+            retry.contains("RESULT ALREADY RECORDED AND VERIFIED"),
+            "{report}: {retry}"
         );
     }
 }

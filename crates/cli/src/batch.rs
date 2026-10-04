@@ -665,9 +665,16 @@ fn prepare(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> 
     //
     // Built from the ladder that ACTUALLY RAN rather than from `min_hits` as
     // typed — `Params::of` reads the ladder, so a zero the ladder raised to one
-    // is recorded as the one that ran. Same construction as `sweep_stored`, so
-    // sweeping a month here and sweeping it alone produce the same 64 hex
-    // characters, which is the only thing that makes the two reports comparable.
+    // is recorded as the one that ran.
+    //
+    // NOT `sweep_stored`'s identity, and deliberately so (conc7-2, D-2667). This
+    // keys the ANCHORED, non-withheld computation: the bare
+    // `stored_anchored_digest` and `Params::of`. `sweep_stored` keys what it
+    // actually executed: `stored_executed_digest`, which always binds the
+    // execution series, and `stored_month_params`, which adds the minute-gap
+    // policy. The two never produce the same 64 hex characters for a month, so
+    // a batch row and a `sweep-stored` row for one month are two rows, not one
+    // computation seen twice. This comment used to say they were equal.
     let id = runner::identity::identity(&runner::identity::Run {
         // `Default::default()` and not the named path, for the reason
         // `crate::sweep_stored` gives at its own call site: spelling
@@ -798,12 +805,10 @@ fn file(root: &std::path::Path, held: &Held, swept: Swept, min_hits: u64) -> Row
 
     // AND THE LEDGER, WHICH IS THE HALF THE EVENT ABOVE COULD NOT BE.
     //
-    // The comment on `id` says this identity is built "same construction as
-    // `sweep_stored`, so sweeping a month here and sweeping it alone produce the
-    // same 64 hex characters, which is the only thing that makes the two
-    // reports comparable." They were comparable in the REPORT and nowhere else:
-    // the row was never appended, so nothing could put the two side by side,
-    // which is what comparable is for.
+    // The row was never appended, so nothing could put a batch month beside
+    // anything else in the ledger. It is appended under the anchored identity
+    // the comment on `id` describes, which is NOT `sweep_stored`'s (conc7-2,
+    // D-2667): the two verbs record one month as two rows.
     //
     // THIS NEEDED THE STREAMED WALK FIRST, and that is why it is landing now
     // rather than with the other three verbs. `Sweep` carries no count of

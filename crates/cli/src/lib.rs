@@ -7197,8 +7197,10 @@ fn audit_range_kernel_cached(
         // Same `policy_of` and the same argument order as
         // `screen_range_inner`'s call, so the two paths key identically and a
         // knob added to one cannot be missed by the other.
-        params: Params::of(ladder).with_policy(&policy_of(
-            &span.bars, rules, lens, validate, horizon, rungs,
+        params: Params::of(ladder).with_policy(&span_policy(
+            policy_of(&span.bars, rules, lens, validate, horizon, rungs),
+            from,
+            to,
         )),
         // ONE DATA TERM, BOTH SERIES THAT DECIDE THE ANSWER. On a coarse rung
         // `execution` names the separately loaded one-minute path used for every
@@ -10651,6 +10653,29 @@ fn validates(raw: Option<&str>) -> Option<bool> {
 /// separating them.
 const UNVALIDATED: &str = "!! NOT VALIDATED -- walk-forward, PBO and the bootstrap did NOT run.\n\
    These are CANDIDATES, not findings. Unset BRUTEX_VALIDATE to price them in full.";
+
+/// A range run's policy with the REQUESTED span appended.
+///
+/// `load_span` tolerates months that hold nothing, so widening a span by an
+/// empty month leaves the bars, the digest and [`policy_of`] unchanged, and the
+/// `RunId` with them. The `Record` carries `from`, `to` and `months_asked` and
+/// `same_run_answer` compares them, so the second, byte-identical computation
+/// found its identity taken by a different span and was refused as "its
+/// deterministic fields differ" -- and the asked span then had no row for
+/// `latest_for` to find (conc7-1, D-2667). The span is what the record is keyed
+/// by, so it is folded into the identity, after the twenty policy terms; a
+/// single-month run keeps the twenty and its identity is unchanged.
+fn span_policy(policy: [u64; 20], from: (u16, u8), to: (u16, u8)) -> [u64; 22] {
+    let month = |(year, month): (u16, u8)| u64::from(year) * 100 + u64::from(month);
+    let mut out = [0_u64; 22];
+    for (slot, term) in out
+        .iter_mut()
+        .zip(policy.into_iter().chain([month(from), month(to)]))
+    {
+        *slot = term;
+    }
+    out
+}
 
 /// Everything outside the `Ladder` that changes what this run records.
 ///
@@ -16455,8 +16480,10 @@ fn screen_range_kernel_cached(
         direction: RunDirection::Undirected,
         instrument: &span.key,
         timeframe: span.timeframe,
-        params: Params::of(ladder).with_policy(&policy_of(
-            &span.bars, rules, lens, validate, horizon, rungs,
+        params: Params::of(ladder).with_policy(&span_policy(
+            policy_of(&span.bars, rules, lens, validate, horizon, rungs),
+            from,
+            to,
         )),
         data_digest: stored_executed_digest(&span.bars, exact_minute, daily, execution_slice)?,
         commit,

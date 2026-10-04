@@ -2927,12 +2927,16 @@ mod stepdown_partition_tests {
         );
     }
 
-    /// EVERY ROUND REMOVES AT LEAST ONE, OR THE LOOP STOPS.
+    /// EVERY ROUND REMOVES AT LEAST ONE, OR THE LOOP STOPS, and no strategy is
+    /// rejected twice.
     ///
-    /// The `while !alive.is_empty()` bound rests on it. Under the old `retain`
-    /// this was guaranteed by the predicate; under a hand-written partition a
-    /// survivor pushed on both branches would loop forever, and a test that
-    /// merely finished would not say so. This one asserts the count.
+    /// Termination is STRUCTURAL: a round runs only when `end > start`, and
+    /// `start = end` after it, so the walk over the ordered strategies cannot
+    /// revisit one. A round number exists only after a non-empty round, so a
+    /// per-round count could not fail (P7-02, D-2667). What this asserts is
+    /// what a broken partition would change: the fixture must reject something,
+    /// each strategy appears at most once, and the rounds are numbered in order
+    /// without a gap.
     #[test]
     fn the_surviving_set_strictly_shrinks_every_round_that_rejects() {
         let set: Vec<Vec<i64>> = (0..12)
@@ -2944,21 +2948,30 @@ mod stepdown_partition_tests {
             })
             .collect();
         let rejected = romano_wolf(&set, 150, 5, DEFAULT_BLOCK, 50_000);
-        if rejected.is_empty() {
-            return;
+        assert!(
+            !rejected.is_empty(),
+            "means from 0.75 to 121.75 against an SE near 0.7 must reject"
+        );
+        let mut seen = vec![false; set.len()];
+        let mut expected_round = 0_usize;
+        for r in &rejected {
+            let slot = seen.get_mut(r.strategy).expect("a strategy of the input");
+            assert!(!*slot, "strategy {} rejected twice", r.strategy);
+            *slot = true;
+            assert!(
+                r.round == expected_round || r.round == expected_round + 1,
+                "round {} after round {expected_round}: a gap or a step back",
+                r.round
+            );
+            expected_round = r.round;
         }
         let rounds = rejected.last().map_or(0, |r| r.round);
-        for round in 0..=rounds {
-            let n = rejected.iter().filter(|r| r.round == round).count();
-            assert!(
-                n > 0,
-                "round {round} emitted nothing, so the loop ran a round without \
-                 shrinking the surviving set"
-            );
-        }
         assert!(
-            rejected.len() <= set.len(),
-            "the total rejected can never exceed the input"
+            rounds < rejected.len() && rejected.len() <= set.len(),
+            "{} rounds for {} rejections of {} strategies",
+            rounds + 1,
+            rejected.len(),
+            set.len()
         );
     }
 
