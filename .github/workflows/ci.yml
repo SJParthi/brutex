@@ -6101,9 +6101,6 @@ jobs:
           crates/costs/src/trip.rs charge_stack_legs
           '
 
-          inv=docs/04-invariants.md
-          work=$(mktemp -d)
-
           # TWO TABLES, AND THE SECOND ONE IS THE REPAIR.
           #
           # `fns` is (crate, fn) for every tracked crate. A fixed-string lookup
@@ -6143,120 +6140,35 @@ jobs:
           # Comment lines are dropped before either table is read, for the reason
           # gate 10 states at length above its own copy of this: a `fn` name that
           # exists only in prose was entering the table.
-          fns="$work/fns"; : > "$fns"
-          proving="$work/proving"; : > "$proving"
-          for c in $(git ls-files 'crates/*/Cargo.toml' \
-                     | sed 's|^crates/||; s|/Cargo.toml$||'); do
-            while IFS= read -r one; do
-              [ -n "$one" ] || continue
-              case "$one" in */tests/*|*/benches/*) harness=1 ;; *) harness=0 ;; esac
-              code=$( { grep -vE '^[[:space:]]*(//|\*)' "$one" || true; } )
-              printf '%s\n' "$code" \
-                | { grep -ohE '\bfn [a-z_][a-z_0-9]*' || true; } \
-                | sed "s|^fn |${c} |" >> "$fns"
-              # The attribute run is tracked forward rather than looked back at:
-              # an attribute sets the flag, a `fn` consumes it, and any other
-              # non-blank line clears it. So `#[cfg(test)]` above a `mod tests {`
-              # does NOT mark the functions inside that module -- the `mod` line
-              # clears the flag, and each `#[test]` inside sets it again for
-              # itself. A test-module HELPER with no attribute of its own is
-              # therefore not proof, which is right: it is not a test.
-              printf '%s\n' "$code" | awk -v P="$harness" '
-                BEGIN { tf = 0 }
-                { t = $0; sub(/^[ \t]+/, "", t)
-                  if (t ~ /^#\[/) { if (t ~ /test|bench/) tf = 1; next }
-                  if (t ~ /(^|[^A-Za-z0-9_])fn [a-z_]/) { if (tf || P) print $0; tf = 0; next }
-                  if (t != "") tf = 0 }' \
-                | { grep -ohE '\bfn [a-z_][a-z_0-9]*' || true; } \
-                | sed "s|^fn |${c} |" >> "$proving"
-            done < <(git ls-files "crates/$c/*.rs")
-          done
-          sort -u -o "$fns" "$fns"
-          sort -u -o "$proving" "$proving"
+          # The attribute run is tracked forward rather than looked back at:
+          # an attribute sets the flag, a `fn` consumes it, and any other
+          # non-blank line clears it. So `#[cfg(test)]` above a `mod tests {`
+          # does NOT mark the functions inside that module -- the `mod` line
+          # clears the flag, and each `#[test]` inside sets it again for
+          # itself. A test-module HELPER with no attribute of its own is
+          # therefore not proof, which is right: it is not a test.
 
-          # >>> CLAIM READER (D-1116). Byte-identical in gates 12 and 14, and
-          # gate 14 refuses if the two copies differ: one definition of "a
-          # cost claim", or a hole between the gate that asks for a proof and
-          # the gate that asks for a bench.
+          # THE CLAIM READER (D-1116, D-2314) is one function pair in
+          # `.github/gates_bounds.rs`, `claim_blocks` and `is_claim`, and gates
+          # 12 and 14 both call it: one definition of "a cost claim", so there
+          # is no hole between the gate that asks for a proof and the gate that
+          # asks for a bench. It used to be two marked copies in this file that
+          # gate 14 compared byte for byte; one function cannot diverge.
           #
-          # `claim_blocks FILE` prints one TAB-separated record per maximal run
-          # of `///` or `//!` lines: FILE, first line, the ITEM it documents,
-          # the joined text. The item is the name after the first `fn`, else
-          # after the first `struct`/`enum`/`trait`/`const`/`static`/`type`/
-          # `mod`/`union`/`macro_rules!`, on the first code line below the
-          # block (attributes bracket-counted and skipped whole, blanks and
-          # `//` lines passed over); `impl` for an impl, `//!` for an inner
-          # block, `-` otherwise.
-          claim_blocks() {
-            awk -v F="$1" '
-              function item(t,   m) {
-                if (match(t, /(^|[^A-Za-z0-9_])fn[ \t]+[A-Za-z_][A-Za-z0-9_]*/)) {
-                  m = substr(t, RSTART, RLENGTH); sub(/^.*fn[ \t]+/, "", m); return m
-                }
-                if (match(t, /(^|[^A-Za-z0-9_])(struct|enum|trait|const|static|type|mod|union|macro_rules!)[ \t]+[A-Za-z_][A-Za-z0-9_]*/)) {
-                  m = substr(t, RSTART, RLENGTH); sub(/^.*[ \t]/, "", m); return m
-                }
-                if (t ~ /(^|[^A-Za-z0-9_])impl([^A-Za-z0-9_]|$)/) return "impl"
-                return "-"
-              }
-              function emit(name) {
-                printf "%s\t%d\t%s\t%s\n", F, start, name, text
-                n = 0; text = ""; pending = 0; depth = 0
-              }
-              { l = $0; sub(/^[ \t]+/, "", l); gsub(/\t/, " ", l)
-                if (l ~ /^\/\/[\/!]/ && depth == 0) {
-                  if (pending) emit(inner ? "//!" : "-")
-                  if (n == 0) { start = NR; inner = (l ~ /^\/\/!/) }
-                  sub(/^\/\/[\/!]/, "", l)
-                  n++; text = text " " l
-                  next
-                }
-                if (n == 0) next
-                if (inner) { emit("//!"); next }
-                pending = 1
-                if (depth > 0) { depth += gsub(/\[/, "[", l) - gsub(/\]/, "]", l); next }
-                if (l ~ /^#!?\[/) { depth = gsub(/\[/, "[", l) - gsub(/\]/, "]", l); next }
-                if (l == "" || l ~ /^\/\//) next
-                emit(item(l)) }
-              END { if (n > 0) emit(inner ? "//!" : "-") }
-            ' "$1"
-          }
-          trigger='[Oo]\(1\)|constant[ -]time|never scans?|worst[ -]case|\bflat\b'
-          notclaim='(struct|table|bar|file|field|list|array|layout|namespace|case|month|day|session|price|close|director(y|ies))s?'
-          # The non-cost senses of `flat` and `worst case`, removed before the
-          # trigger runs. Gate 12 carries the measurement behind each line.
-          claim_scrub() {
-            printf '%s' "$1" \
-              | sed -E 's/[A-Za-z0-9_]::flat/ /g; s/[Ff]lat[ ]*\(/ (/g' \
-              | sed -E 's/[Ww]orst[ -][Cc]ase//g' \
-              | sed -E "s/[Ff]lat +${notclaim}//g" \
-              | sed -E 's/[Ff]lat +(JSON|json) object//g' \
-              | sed -E 's/(exactly|books the trade|came out|row-major and|is charged|A) [Ff]lat//g'
-          }
-          # <<< CLAIM READER
-          # A block is a maximal run of consecutive `///` or `//!` lines. Any
-          # other line ends it. One tab-separated record per block, so the
+          # A block is a maximal run of consecutive `///` or `//!` lines: its
+          # first line, the ITEM it documents, and the joined text, so the
           # whole block can be searched as one string -- "within its own doc
-          # block" is the unit the rule is stated in.
-          blocks="$work/blocks"; : > "$blocks"
-          walked=0
-          while IFS= read -r f; do
-            [ -n "$f" ] || continue
-            walked=$((walked + 1))
-            claim_blocks "$f" >> "$blocks"
-          done < <(git ls-files 'crates/*.rs')
+          # block" is the unit the rule is stated in. The item is the name
+          # after the first `fn`, else after the first `struct`/`enum`/`trait`/
+          # `const`/`static`/`type`/`mod`/`union`/`macro_rules!`, on the first
+          # code line below the block (attributes bracket-counted and skipped
+          # whole, blanks and `//` lines passed over); `impl` for an impl, `//!`
+          # for an inner block, `-` otherwise. The non-cost senses of `flat`
+          # and `worst case` are removed before the trigger runs; this step
+          # carries the measurement behind each one.
 
-          nb=$(awk 'END{print NR}' "$blocks")
-          echo "walked ${walked} tracked .rs file(s) under crates/"
-          echo "  $(awk 'END{print NR}' "$fns") (crate, fn) pair(s) in the workspace,"
-          echo "  $(awk 'END{print NR}' "$proving") of them a test or a bench — only those prove a claim"
-          echo "  ${nb} doc block(s)"
           # A glob that matches nothing is the failure mode gate 8 shipped with
           # for the whole life of the repository, reporting success throughout.
-          if [ "$walked" -eq 0 ] || [ "$nb" -eq 0 ]; then
-            echo "GATE 12 WALKED NOTHING. A gate that reads no doc block is not a gate."
-            exit 1
-          fi
 
           # `director(y|ies)` joins `notclaim` (in the claim reader above, so
           # gate 14 reads it too) for the same reason every other noun on it
@@ -6266,147 +6178,87 @@ jobs:
           # the tree as committed, so widening the list here takes a live red to
           # green rather than pre-empting a hypothetical one.
 
-          refused="$work/refused"; : > "$refused"
-          claimed=0; by_test=0; by_path=0; by_row=0; by_unverified=0
+          # `[A-Z]+(-[A-Z]+)?-nn` AND NOT `[A-Z]-nn`, WHICH RESOLVED THE WRONG
+          # ROW. docs/04-invariants.md carries two families of id: `E-07` is an
+          # ENGINE CORRECTNESS row and `C-E-07` is the COST row for the same
+          # area, and there are 11 `C-E-`, 12 `C-K-`, 5 `C-V-`, 4 `C-T-`, 4
+          # `C-I-` and 9 more across `C-R-`, `C-L-` and `C-G-`. Under the old
+          # pattern a block citing `C-E-07` matched the substring `E-07` --
+          # `-` is not a word character, so `\b` sits happily before the `E` --
+          # and this gate then went and read the CORRECTNESS row's "Proven by"
+          # cell. Every cost claim in the workspace was validated against a row
+          # about something else, and deleting a cost bench left the gate green.
+          # It also meant the 12 multi-letter prefixes (`AU-`, `IC-`, `CV-`,
+          # `SS-`, `SK-`, `SF-`, `HF-`, `GF-`, `GW-`, `ST-`, `CJ-`, `AJ-`,
+          # `NP-`) matched nothing at all and could never satisfy rule 3.
+          #
+          # `D-0095` still does not match, and that is deliberate: a decision id
+          # carries four digits, so `-[0-9][0-9]\b` fails on it. Decisions are
+          # not proofs.
+          #
+          # Measured on this tree: the fix moved exactly one block from REFUSED
+          # to proven-by-row (crates/engine/benches/ratio.rs:399) and moved none
+          # the other way.
 
-          # Echoes the KIND of proof found, or nothing. Always returns 0: a
-          # bare `[ ... ] && break` as the last command of a loop makes the
-          # enclosing `if` exit 1, and under `set -e` that kills the gate on
-          # the ordinary path. Gate 5 records the same class of bug.
-          prove() {
-            text="$1"
-            for t in $( { printf '%s' "$text" \
-                          | grep -oE '\b[a-z_]+::[a-z_]+::[a-z_0-9]+\b' || true; } ); do
-              if grep -qxF "${t%%::*} ${t##*::}" "$proving"; then echo test; return 0; fi
-            done
-            for p in $( { printf '%s' "$text" \
-                          | grep -oE 'crates/[A-Za-z0-9_./-]*/(tests|benches)/[A-Za-z0-9_.-]+\.rs' \
-                          || true; } ); do
-              if git ls-files --error-unmatch "$p" >/dev/null 2>&1; then echo path; return 0; fi
-            done
-            # `[A-Z]+(-[A-Z]+)?-nn` AND NOT `[A-Z]-nn`, WHICH RESOLVED THE WRONG
-            # ROW. docs/04-invariants.md carries two families of id: `E-07` is an
-            # ENGINE CORRECTNESS row and `C-E-07` is the COST row for the same
-            # area, and there are 11 `C-E-`, 12 `C-K-`, 5 `C-V-`, 4 `C-T-`, 4
-            # `C-I-` and 9 more across `C-R-`, `C-L-` and `C-G-`. Under the old
-            # pattern a block citing `C-E-07` matched the substring `E-07` --
-            # `-` is not a word character, so `\b` sits happily before the `E` --
-            # and this gate then went and read the CORRECTNESS row's "Proven by"
-            # cell. Every cost claim in the workspace was validated against a row
-            # about something else, and deleting a cost bench left the gate green.
-            # It also meant the 12 multi-letter prefixes (`AU-`, `IC-`, `CV-`,
-            # `SS-`, `SK-`, `SF-`, `HF-`, `GF-`, `GW-`, `ST-`, `CJ-`, `AJ-`,
-            # `NP-`) matched nothing at all and could never satisfy rule 3.
-            #
-            # `D-0095` still does not match, and that is deliberate: a decision id
-            # carries four digits, so `-[0-9][0-9]\b` fails on it. Decisions are
-            # not proofs.
-            #
-            # Measured on this tree: the fix moved exactly one block from REFUSED
-            # to proven-by-row (crates/engine/benches/ratio.rs:399) and moved none
-            # the other way.
-            for r in $( { printf '%s' "$text" | grep -oE '\b[A-Z]+(-[A-Z]+)?-[0-9][0-9]\b' || true; } ); do
-              row=$( { grep -E "^\| *${r} *\|" "$inv" || true; } | head -1)
-              [ -n "$row" ] || continue
-              for t in $( { printf '%s' "$row" \
-                            | grep -oE '`[a-z_]+::[a-z_]+::[a-z_0-9]+`' | tr -d '`' || true; } ); do
-                if grep -qxF "${t%%::*} ${t##*::}" "$proving"; then echo row; return 0; fi
-              done
-            done
-            return 0
-          }
+          # `flat` is stripped of its non-cost senses BEFORE the trigger runs,
+          # so the exclusion cannot accidentally swallow a real claim in the
+          # same block -- only the words it names.
+          # AN IDENTIFIER SPELLED `flat` IS NOT THE ENGLISH WORD, and this
+          # sed runs BEFORE the noun list because it is a different kind of
+          # exclusion: the noun list says "flat table is not a cost claim",
+          # this says "`Bar::flat(...)` is not the word at all". Measured
+          # cause: `crates/costs/src/trip.rs` carries FOUR doctests calling
+          # `Bar::flat(Paisa::from_raw(100_00))`, and `crates/runner/src/trade.rs`
+          # links `[`costs::fill::Bar::flat`]` in prose. All five read as cost
+          # claims here and were then "proven" by whatever `a::b::c` token the
+          # doctest's `use` lines happened to contain -- two heuristics
+          # cancelling, which is the worst way for a gate to be green.
+          #
+          # Two forms only, both unambiguous: `flat` immediately after a path
+          # separator, and `flat` immediately before an open parenthesis.
+          # "the fee is flat" and "flat 20 rupees" are untouched.
+          # AND `worst case` IS A FINANCIAL TERM IN THIS REPOSITORY, which is
+          # the same class of collision `flat` already has a list for.
+          #
+          # MEASURED, not guessed. Every block this gate refused on the tree
+          # was opened. Twenty-five of them trigger on `worst[ -]case` or
+          # `flat` and on NOTHING else, and not one is a statement about cost:
+          # `pessimistic` is the total under worst-case FILLS, `trades.rs`
+          # counts trades whose worst-case TOTAL was positive, `grid.rs`
+          # prices a worst-case EXIT and books a trade FLAT, `costs/fill.rs`
+          # argues the honest worst CASE from one-minute bars, and
+          # `sweeprun.rs` reads a field out of a flat JSON OBJECT.
+          #
+          # WHY THE TRIGGER STAYS AND ONLY THE NOUNS GO. `worst case` IS a
+          # complexity term here too -- `docs/06-limits.md` §23 turns on
+          # "amortised O(1), not O(1) worst case" -- so removing it would
+          # blind the gate to the distinction that section exists to make.
+          # But in every complexity use it sits BESIDE `O(1)`, which triggers
+          # on its own. Scrubbing the financial nouns therefore costs the gate
+          # nothing it was catching and removes twenty-five refusals that no
+          # honest edit could clear: writing UNVERIFIED on a block that makes
+          # no claim about cost is a false statement, and rewording accurate
+          # prose to dodge a grep is what this file already refuses.
+          # A NOUN LIST WAS TRIED FIRST AND IT IS THE WRONG INSTRUMENT. The
+          # phrase appears as `worst-case fills`, `worst case FROM one-minute
+          # bars`, `worst-case 1:2`, `the worst case", the` and `worst-case
+          # EXIT` -- three cases, a number, a quotation mark and a preposition.
+          # Every list is one sentence behind the next author, and a gate whose
+          # correctness depends on enumerating English is a gate that goes red
+          # for a reason nobody can act on.
+          #
+          # So the phrase is scrubbed WHOLE, and what makes that safe is
+          # measured rather than assumed: every complexity use of it in this
+          # repository sits beside `O(1)`, which triggers on its own.
+          # `docs/06-limits.md` §23 is the load-bearing example -- "amortised
+          # O(1), not O(1) worst case" -- and it keeps triggering through the
+          # `O(1)`. Thirty-two blocks were opened and read; not one used the
+          # phrase as a cost claim without `O(1)` beside it.
+          #
+          # `-i` on the substitution, because `FROM ONE-MINUTE BARS` and
+          # `worst-case EXIT` are both real and a case-sensitive list caught
+          # neither.
 
-          tab=$(printf '\t')
-          while IFS="$tab" read -r f ln item text; do
-            [ -n "${text-}" ] || continue
-            # `flat` is stripped of its non-cost senses BEFORE the trigger runs,
-            # so the exclusion cannot accidentally swallow a real claim in the
-            # same block -- only the words it names.
-            # AN IDENTIFIER SPELLED `flat` IS NOT THE ENGLISH WORD, and this
-            # sed runs BEFORE the noun list because it is a different kind of
-            # exclusion: the noun list says "flat table is not a cost claim",
-            # this says "`Bar::flat(...)` is not the word at all". Measured
-            # cause: `crates/costs/src/trip.rs` carries FOUR doctests calling
-            # `Bar::flat(Paisa::from_raw(100_00))`, and `crates/runner/src/trade.rs`
-            # links `[`costs::fill::Bar::flat`]` in prose. All five read as cost
-            # claims here and were then "proven" by whatever `a::b::c` token the
-            # doctest's `use` lines happened to contain -- two heuristics
-            # cancelling, which is the worst way for a gate to be green.
-            #
-            # Two forms only, both unambiguous: `flat` immediately after a path
-            # separator, and `flat` immediately before an open parenthesis.
-            # "the fee is flat" and "flat 20 rupees" are untouched.
-            # AND `worst case` IS A FINANCIAL TERM IN THIS REPOSITORY, which is
-            # the same class of collision `flat` already has a list for.
-            #
-            # MEASURED, not guessed. Every block this gate refused on the tree
-            # was opened. Twenty-five of them trigger on `worst[ -]case` or
-            # `flat` and on NOTHING else, and not one is a statement about cost:
-            # `pessimistic` is the total under worst-case FILLS, `trades.rs`
-            # counts trades whose worst-case TOTAL was positive, `grid.rs`
-            # prices a worst-case EXIT and books a trade FLAT, `costs/fill.rs`
-            # argues the honest worst CASE from one-minute bars, and
-            # `sweeprun.rs` reads a field out of a flat JSON OBJECT.
-            #
-            # WHY THE TRIGGER STAYS AND ONLY THE NOUNS GO. `worst case` IS a
-            # complexity term here too -- `docs/06-limits.md` §23 turns on
-            # "amortised O(1), not O(1) worst case" -- so removing it would
-            # blind the gate to the distinction that section exists to make.
-            # But in every complexity use it sits BESIDE `O(1)`, which triggers
-            # on its own. Scrubbing the financial nouns therefore costs the gate
-            # nothing it was catching and removes twenty-five refusals that no
-            # honest edit could clear: writing UNVERIFIED on a block that makes
-            # no claim about cost is a false statement, and rewording accurate
-            # prose to dodge a grep is what this file already refuses.
-            # A NOUN LIST WAS TRIED FIRST AND IT IS THE WRONG INSTRUMENT. The
-            # phrase appears as `worst-case fills`, `worst case FROM one-minute
-            # bars`, `worst-case 1:2`, `the worst case", the` and `worst-case
-            # EXIT` -- three cases, a number, a quotation mark and a preposition.
-            # Every list is one sentence behind the next author, and a gate whose
-            # correctness depends on enumerating English is a gate that goes red
-            # for a reason nobody can act on.
-            #
-            # So the phrase is scrubbed WHOLE, and what makes that safe is
-            # measured rather than assumed: every complexity use of it in this
-            # repository sits beside `O(1)`, which triggers on its own.
-            # `docs/06-limits.md` §23 is the load-bearing example -- "amortised
-            # O(1), not O(1) worst case" -- and it keeps triggering through the
-            # `O(1)`. Thirty-two blocks were opened and read; not one used the
-            # phrase as a cost claim without `O(1)` beside it.
-            #
-            # `-i` on the substitution, because `FROM ONE-MINUTE BARS` and
-            # `worst-case EXIT` are both real and a case-sensitive list caught
-            # neither.
-            grep -qE "$trigger" <<< "$(claim_scrub "$text")" || continue
-            claimed=$((claimed + 1))
-            if grep -q 'UNVERIFIED' <<< "$text"; then
-              by_unverified=$((by_unverified + 1))
-              continue
-            fi
-            case "$(prove "$text")" in
-              test) by_test=$((by_test + 1)) ;;
-              path) by_path=$((by_path + 1)) ;;
-              row)  by_row=$((by_row + 1)) ;;
-              *)    printf '%s\t%s\t%s\n' "$f" "$ln" "$item" >> "$refused" ;;
-            esac
-          done < "$blocks"
-
-          echo "  ${claimed} block(s) make a cost claim"
-          echo "    ${by_test} name a test that exists"
-          echo "    ${by_row} name an invariant row whose test exists"
-          echo "    ${by_path} name a tracked test or bench file"
-          echo "    ${by_unverified} say UNVERIFIED"
-          echo "    $(awk 'END{print NR}' "$refused") name nothing"
-          if [ "$claimed" -eq 0 ]; then
-            echo
-            echo "GATE 12 FOUND NO CLAIM AT ALL in ${nb} doc blocks. Either every"
-            echo "comment stopped saying O(1) in the same commit, or the trigger"
-            echo "stopped matching. Both need a human; a silent zero does not."
-            exit 1
-          fi
-
-          bad=0
-          echo
           # KEYED BY ITEM, NOT BY COUNT (D-1116, AC-gates-o1-2). The entry was
           # `FILE COUNT`, so when one declared block stopped refusing, its slot
           # silently went to the next unproven claim in the same file: the
@@ -6415,44 +6267,20 @@ jobs:
           # with every line of this log unchanged. Each entry now names the
           # item its block documents, every allowed block is printed with its
           # location, and an entry may not name `-` (a block with no item).
-          while IFS="$tab" read -r f ln it; do
-            [ -n "$f" ] || continue
-            if [ "$it" != "-" ] && printf '%s\n' "$allow_claim" \
-                 | awk -v F="$f" -v I="$it" '$1==F && $2==I {k=1} END {exit !k}'; then
-              printf '  allowed  %s:%s (%s) — declared above\n' "$f" "$ln" "$it"
-            else
-              printf '  REFUSED  %s:%s (%s) — a cost claim that names no proof\n' "$f" "$ln" "$it"
-              bad=1
-            fi
-          done < "$refused"
           # Same two self-audits gate 11 carries. An entry naming a file that
           # is gone makes this gate read stronger than it is, so it is a
           # failure; an entry that no longer matches is only loose, and says so.
-          while read -r p it extra; do
-            [ -n "${p-}" ] || continue
-            if [ -z "${it-}" ] || [ -n "${extra-}" ] || [ "$it" = "-" ]; then
-              printf '  MALFORMED ALLOWLIST ENTRY — "%s %s %s" is not FILE ITEM\n' "$p" "${it-}" "${extra-}"
-              bad=1
-            elif ! git ls-files --error-unmatch "$p" >/dev/null 2>&1; then
-              printf '  STALE ALLOWLIST ENTRY — %s is not a tracked file\n' "$p"
-              bad=1
-            elif ! awk -F'\t' -v F="$p" -v I="$it" '$1==F && $3==I {k=1} END {exit !k}' "$refused"; then
-              printf '  ::warning title=Gate 12 allowlist is loose::'
-              printf '%s %s claims nothing unproven any more — drop the entry\n' "$p" "$it"
-            fi
-          done <<< "$allow_claim"
-
-          echo
-          if [ "$bad" -ne 0 ]; then
-            echo "GATE 12 FAILED."
-            echo
-            echo 'A cost claim with no proof beside it is the defect this gate'
-            echo 'was written for. Name the test — crate::module::name, an'
-            echo 'invariant row id, or the bench file — or write UNVERIFIED and'
-            echo 'record it in docs/06-limits.md. CLAUDE.md section 3 rule 6.'
-            exit 1
-          fi
-          echo "OK — every cost claim names its proof or says UNVERIFIED."
+          #
+          # EVERY RULE ABOVE IS `gates_bounds gate12` (D-2314): a dependency-free
+          # Rust tool, built and self-tested here as gate 0 builds its scanner,
+          # reading `git ls-files`, the tracked sources and docs/04-invariants.md.
+          # The allowlist above is handed to it as data; gate 14 reuses the
+          # binary.
+          tool="${RUNNER_TEMP:-/tmp}/gates-bounds"
+          rustc --edition=2024 --test -D warnings .github/gates_bounds.rs -o "${tool}-tests"
+          "${tool}-tests"
+          rustc --edition=2024 -D warnings .github/gates_bounds.rs -o "$tool"
+          "$tool" gate12 "$allow_claim"
 
       - name: Gate 14 — every crate that claims a bound re-measures it
         run: |
@@ -6653,298 +6481,73 @@ jobs:
           cli       crates/cli/benches/ratio.rs       4  C-CLI-01 C-CLI-02 C-CLI-03 C-CLI-04 C-CLI-05 C-CLI-06
           '
 
-          inv=docs/04-invariants.md
-          wf=.github/workflows/ci.yml
-          work=$(mktemp -d)
-          bad=0
-          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
-
           # ---- discovery: which crates claim a bound. -----------------------
           # Gate 12's block scanner and gate 12's trigger. A block is a maximal
-          # run of `///` or `//!` lines; any other line ends it. Records are
-          # TAB separated and read back on tabs, so a path containing a space
+          # run of `///` or `//!` lines; any other line ends it. Paths are read
+          # NUL-separated from `git ls-files -z`, so a path containing a space
           # is attributed to the right file — gates 11, 12 and 13 all
           # word-split their paths and gate 15 was fixed for it; this gate is
           # written the fixed way from the start.
-          # >>> CLAIM READER (D-1116). Byte-identical in gates 12 and 14, and
-          # gate 14 refuses if the two copies differ: one definition of "a
-          # cost claim", or a hole between the gate that asks for a proof and
-          # the gate that asks for a bench.
           #
-          # `claim_blocks FILE` prints one TAB-separated record per maximal run
-          # of `///` or `//!` lines: FILE, first line, the ITEM it documents,
-          # the joined text. The item is the name after the first `fn`, else
-          # after the first `struct`/`enum`/`trait`/`const`/`static`/`type`/
-          # `mod`/`union`/`macro_rules!`, on the first code line below the
-          # block (attributes bracket-counted and skipped whole, blanks and
-          # `//` lines passed over); `impl` for an impl, `//!` for an inner
-          # block, `-` otherwise.
-          claim_blocks() {
-            awk -v F="$1" '
-              function item(t,   m) {
-                if (match(t, /(^|[^A-Za-z0-9_])fn[ \t]+[A-Za-z_][A-Za-z0-9_]*/)) {
-                  m = substr(t, RSTART, RLENGTH); sub(/^.*fn[ \t]+/, "", m); return m
-                }
-                if (match(t, /(^|[^A-Za-z0-9_])(struct|enum|trait|const|static|type|mod|union|macro_rules!)[ \t]+[A-Za-z_][A-Za-z0-9_]*/)) {
-                  m = substr(t, RSTART, RLENGTH); sub(/^.*[ \t]/, "", m); return m
-                }
-                if (t ~ /(^|[^A-Za-z0-9_])impl([^A-Za-z0-9_]|$)/) return "impl"
-                return "-"
-              }
-              function emit(name) {
-                printf "%s\t%d\t%s\t%s\n", F, start, name, text
-                n = 0; text = ""; pending = 0; depth = 0
-              }
-              { l = $0; sub(/^[ \t]+/, "", l); gsub(/\t/, " ", l)
-                if (l ~ /^\/\/[\/!]/ && depth == 0) {
-                  if (pending) emit(inner ? "//!" : "-")
-                  if (n == 0) { start = NR; inner = (l ~ /^\/\/!/) }
-                  sub(/^\/\/[\/!]/, "", l)
-                  n++; text = text " " l
-                  next
-                }
-                if (n == 0) next
-                if (inner) { emit("//!"); next }
-                pending = 1
-                if (depth > 0) { depth += gsub(/\[/, "[", l) - gsub(/\]/, "]", l); next }
-                if (l ~ /^#!?\[/) { depth = gsub(/\[/, "[", l) - gsub(/\]/, "]", l); next }
-                if (l == "" || l ~ /^\/\//) next
-                emit(item(l)) }
-              END { if (n > 0) emit(inner ? "//!" : "-") }
-            ' "$1"
-          }
-          trigger='[Oo]\(1\)|constant[ -]time|never scans?|worst[ -]case|\bflat\b'
-          notclaim='(struct|table|bar|file|field|list|array|layout|namespace|case|month|day|session|price|close|director(y|ies))s?'
-          # The non-cost senses of `flat` and `worst case`, removed before the
-          # trigger runs. Gate 12 carries the measurement behind each line.
-          claim_scrub() {
-            printf '%s' "$1" \
-              | sed -E 's/[A-Za-z0-9_]::flat/ /g; s/[Ff]lat[ ]*\(/ (/g' \
-              | sed -E 's/[Ww]orst[ -][Cc]ase//g' \
-              | sed -E "s/[Ff]lat +${notclaim}//g" \
-              | sed -E 's/[Ff]lat +(JSON|json) object//g' \
-              | sed -E 's/(exactly|books the trade|came out|row-major and|is charged|A) [Ff]lat//g'
-          }
-          # <<< CLAIM READER
-          tab=$(printf '\t')
           # THE TWO READERS ARE ONE (D-1116, LATE tests-bite #8). This step said
           # it used gate 12's trigger "character for character" and scrubbed
           # with one `sed` where gate 12 ran five, so a block gate 12 excused
           # as a financial `worst case` was a claim here, and the two gates
-          # disagreed about what a claim is. Both now carry the region between
-          # the `>>> CLAIM READER` and `<<< CLAIM READER` markers, and this step
-          # refuses unless there are exactly two and they are the same bytes.
-          awk -v W="$work" '
-            /^[ \t]*# >>> CLAIM READER/ { n++; on = 1 }
-            on { print > (W "/reader." n) }
-            /^[ \t]*# <<< CLAIM READER/ { on = 0 }
-            END { print n + 0 > (W "/readers") }' "$wf"
-          if [ "$(cat "$work/readers")" != 2 ] \
-             || ! cmp -s "$work/reader.1" "$work/reader.2"; then
-            echo "GATE 14: the claim reader is not one region shared by gates 12 and 14"
-            echo "  ($(cat "$work/readers") marked copies in ${wf})."
-            if [ -f "$work/reader.2" ]; then diff "$work/reader.1" "$work/reader.2" || true; fi
-            exit 1
-          fi
-          echo "the claim reader is byte-identical in gates 12 and 14"
+          # disagreed about what a claim is. Both then carried a marked copy of
+          # one reader, and this step refused unless the two were the same
+          # bytes. Since D-2314 the reader is one function pair,
+          # `claim_blocks` and `is_claim` in `.github/gates_bounds.rs`, and
+          # both gates call it, so there is no second copy to compare.
 
-          blocks="$work/blocks"; : > "$blocks"
-          walked=0
-          while IFS= read -r f; do
-            [ -n "$f" ] || continue
-            walked=$((walked + 1))
-            claim_blocks "$f" >> "$blocks"
-          done < <(git ls-files 'crates/*.rs' \
-                   | grep '/src/' | grep -vE '/(tests|benches)/' || true)
-
-          claims="$work/claims"; : > "$claims"
-          while IFS="$tab" read -r f ln item text; do
-            [ -n "${text-}" ] || continue
-            grep -qE "$trigger" <<< "$(claim_scrub "$text")" || continue
-            printf '%s\t%s\t%s\n' "$(printf '%s' "$f" | cut -d/ -f2)" "$f" "$ln" \
-              >> "$claims"
-          done < "$blocks"
-
-          nc=$(awk 'END{print NR}' "$claims")
-          nb=$(awk 'END{print NR}' "$blocks")
-          ncr=$(git ls-files 'crates/*/Cargo.toml' | awk 'END{print NR}')
-          echo "walked ${walked} tracked source file(s) under crates/*/src/"
-          echo "  ${nb} doc block(s), ${nc} of them make a cost claim"
-          echo "  ${ncr} tracked crate manifest(s)"
-          echo "  $( { printf '%s\n' "$cover" | awk 'NF{n++} END{print n+0}'; } ) row(s) in the coverage table"
           # A glob that matches nothing is the failure mode gate 8 shipped with
           # for the whole life of the repository, reporting success throughout.
-          if [ "$walked" -eq 0 ] || [ "$ncr" -eq 0 ]; then
-            echo "GATE 14 WALKED NOTHING. A gate that reads no source file and"
-            echo "no manifest is not a gate."
-            exit 1
-          fi
-          if [ "$nc" -eq 0 ]; then
-            echo "GATE 14 FOUND NO COST CLAIM AT ALL in ${nb} doc blocks. Either"
-            echo "every crate stopped claiming a bound in the same commit, or"
-            echo "the trigger stopped matching gate 12's. Both need a human."
-            exit 1
-          fi
 
           # ---- layer 1: every claiming crate has a row. ---------------------
-          echo
-          echo "layer 1: a crate that claims a bound is named in the table"
-          while IFS= read -r c; do
-            [ -n "$c" ] || continue
-            n=$( { grep -c "^${c}${tab}" "$claims" || true; } | tr -d ' ')
-            row=$( { printf '%s\n' "$cover" | awk -v C="$c" '$1==C{print; exit}'; } || true)
-            if [ -z "$row" ]; then
-              printf '  REFUSED  crates/%s — %s cost claim(s), no row in the table\n' "$c" "$n"
-              { grep "^${c}${tab}" "$claims" \
-                  | awk -F'\t' '{printf "             doc block at %s:%s\n", $2, $3}' \
-                  | head -8; } || true
-              bad=1
-            else
-              printf '  covered  crates/%s — %s cost claim(s)\n' "$c" "$n"
-            fi
-          done < <(cut -f1 "$claims" | sort -u)
 
           # ---- layers 2, 3 and 4, one table row at a time. ------------------
-          echo
-          echo "layer 2: the named bench is tracked and its exit code reaches cargo"
-          echo "layer 3: it has the shape of a ratio measurement"
-          echo "layer 4: the invariant rows it claims to print are real and present"
-          nrow=0
-          while IFS= read -r line; do
-            [ -n "$line" ] || continue
-            nrow=$((nrow + 1))
-            c=$(printf '%s\n' "$line" | awk '{print $1}')
-            b=$(printf '%s\n' "$line" | awk '{print $2}')
-            pts=$(printf '%s\n' "$line" | awk '{print $3}')
-            rows=$(printf '%s\n' "$line" | awk '{for (i = 4; i <= NF; i++) printf "%s ", $i}')
-            m="crates/${c}/Cargo.toml"
 
-            # A row naming a crate or a bench that is not tracked makes this
-            # gate read stronger than it is, so it is a FAILURE and not a note.
-            if ! git ls-files --error-unmatch "$m" >/dev/null 2>&1; then
-              printf '  STALE TABLE ROW — crates/%s has no tracked manifest\n' "$c"
-              bad=1
-              continue
-            fi
-            if ! git ls-files --error-unmatch "$b" >/dev/null 2>&1; then
-              printf '  REFUSED  %s is not tracked — the row promises a bench that\n' "$b"
-              printf '           does not exist in this checkout\n'
-              bad=1
-              continue
-            fi
-            # A row for a crate that no longer claims anything is only loose.
-            if ! grep -q "^${c}${tab}" "$claims"; then
-              printf '  ::warning title=Gate 14 table row is loose::'
-              printf 'crates/%s claims no bound any more — drop the row\n' "$c"
-            fi
+          # A row naming a crate or a bench that is not tracked makes this
+          # gate read stronger than it is, so it is a FAILURE and not a note.
+          # A row for a crate that no longer claims anything is only loose.
 
-            # layer 2b. `harness = false` IS LOAD-BEARING, not decoration.
-            # Cargo auto-discovers benches/*.rs with harness = TRUE, which
-            # links libtest, which supplies its own `main` — and the bench's
-            # own exit(1) on a breached ratio never reaches cargo. The
-            # assertion would still be written, still be compiled, and still
-            # be unable to fail the build. The bench NAME is checked against
-            # the file stem for the same reason: a [[bench]] table that names
-            # a different file leaves this one running under the default.
-            stem=$(printf '%s\n' "${b##*/}" | sed 's/\.rs$//')
-            decl=$(awk '
-              /^\[\[bench\]\]/ { inb = 1; nm = ""; hz = ""; next }
-              /^\[/            { if (inb) { print nm " " hz; inb = 0 } }
-              inb {
-                if ($0 ~ /^[[:space:]]*name[[:space:]]*=/) {
-                  nm = $0; sub(/.*=[[:space:]]*"/, "", nm); sub(/".*/, "", nm)
-                }
-                if ($0 ~ /^[[:space:]]*harness[[:space:]]*=/) {
-                  hz = $0; sub(/.*=[[:space:]]*/, "", hz); sub(/[[:space:]#].*/, "", hz)
-                }
-              }
-              END { if (inb) print nm " " hz }
-            ' "$m")
-            printf '%s\n' "$decl" > /tmp/gate-bench-decl.txt
-            if grep -qxF "${stem} false" /tmp/gate-bench-decl.txt; then
-              printf '  ok       %s — [[bench]] %s, harness = false\n' "$b" "$stem"
-            else
-              printf '  REFUSED  %s — %s declares no [[bench]] named %s with\n' "$b" "$m" "$stem"
-              printf '           harness = false. Under the default harness the\n'
-              printf '           bench cannot fail the build at all.\n'
-              bad=1
-            fi
+          # layer 2b. `harness = false` IS LOAD-BEARING, not decoration.
+          # Cargo auto-discovers benches/*.rs with harness = TRUE, which
+          # links libtest, which supplies its own `main` — and the bench's
+          # own exit(1) on a breached ratio never reaches cargo. The
+          # assertion would still be written, still be compiled, and still
+          # be unable to fail the build. The bench NAME is checked against
+          # the file stem for the same reason: a [[bench]] table that names
+          # a different file leaves this one running under the default.
 
-            # layer 3. THE SHAPE, not the truth. Each of these refuses the
-            # cheapest way to satisfy the table — a file called ratio.rs
-            # containing `fn main() {}`. None of them proves the measurement
-            # is correct, and the comment at the top says so.
-            #   CEILING     a named ceiling exists AND is referenced again,
-            #               so it is compared and not merely declared
-            #   ratio(      how many measurement points, against min_points.
-            #               The helper's own definition line is subtracted, so
-            #               a file that only DEFINES `fn ratio` and calls it
-            #               nowhere counts zero rather than one.
-            #   Instant     something is actually timed
-            #   black_box   the timed work cannot be optimised away
-            #   println!    the numbers are printed, not just judged — the
-            #               mask-evaluation bench's rule, so a human reads the
-            #               shape rather than only the verdict
-            #   exit        a breach leaves a non-zero status
-            # Call sites only (D-1117): `source_scan code` blanks every comment,
-            # and a line that DECLARES a `...ratio` helper is not a measurement.
-            if ! "$scan" code "$b" > "$work/bench.code"; then
-              printf '  REFUSED  %s could not be lexed\n' "$b"
-              bad=1
-              continue
-            fi
-            npt=$(awk '/ratio[ \t]*\(/ && !/(^|[^A-Za-z0-9_])fn[ \t]+[A-Za-z0-9_]*ratio[ \t]*[(<]/ { n++ } END { print n+0 }' "$work/bench.code")
-            # Layer 4's input: the first word of every decoded string literal.
-            if ! "$scan" strings "$b" > "$work/bench.strings"; then
-              printf '  REFUSED  %s: its string literals could not be read\n' "$b"
-              bad=1
-              continue
-            fi
-            cut -d: -f3- "$work/bench.strings" | awk '{print $1}' > "$work/bench.heads"
-            nce=$( { grep -c 'CEILING' "$b" || true; } | tr -d ' ')
-            miss=''
-            [ "$nce" -ge 2 ] || miss="${miss} a-named-ceiling-compared-against"
-            [ "$npt" -eq "$pts" ] || miss="${miss} ${npt}-measurement-points-but-pinned-at-${pts}"
-            grep -q 'Instant' "$b"      || miss="${miss} nothing-is-timed"
-            grep -q 'black_box' "$b"    || miss="${miss} no-black_box"
-            grep -q 'println!' "$b"     || miss="${miss} prints-nothing"
-            grep -qE 'process::exit' "$b" || miss="${miss} cannot-exit-non-zero"
-            if [ -z "$miss" ]; then
-              printf '  ok       %s — %s point(s) = pin %s, ceiling compared, prints, exits\n' \
-                     "$b" "$npt" "$pts"
-            else
-              printf '  REFUSED  %s is not a ratio bench:%s\n' "$b" "$miss"
-              bad=1
-            fi
+          # layer 3. THE SHAPE, not the truth. Each of these refuses the
+          # cheapest way to satisfy the table — a file called ratio.rs
+          # containing `fn main() {}`. None of them proves the measurement
+          # is correct, and the comment at the top says so.
+          #   CEILING     a named ceiling exists AND is referenced again,
+          #               so it is compared and not merely declared
+          #   ratio(      how many measurement points, against min_points.
+          #               The helper's own definition line is subtracted, so
+          #               a file that only DEFINES `fn ratio` and calls it
+          #               nowhere counts zero rather than one.
+          #   Instant     something is actually timed
+          #   black_box   the timed work cannot be optimised away
+          #   println!    the numbers are printed, not just judged — the
+          #               mask-evaluation bench's rule, so a human reads the
+          #               shape rather than only the verdict
+          #   exit        a breach leaves a non-zero status
+          # Call sites only (D-1117): `source_scan code` blanks every comment,
+          # and a line that DECLARES a `...ratio` helper is not a measurement.
+          # Layer 4's input: the first word of every decoded string literal.
 
-            # layer 4. The rows the table asserts. Checked BOTH ways: the id
-            # is a real row in docs/04-invariants.md, and the bench really
-            # prints it. Either half alone is forgeable — an id invented here,
-            # or an id in the bench that names no invariant.
-            for r in $rows; do
-              inrow=0; inbench=0
-              grep -qE "^\| *${r} *\|" "$inv" && inrow=1 || true
-              # PRINTED means the first word of a string literal in the bench
-              # (D-1117), the rule `core/tests/cost_invariants.rs` already
-              # applies. A substring of the file was satisfied by any `///`
-              # line that mentioned the id, and every C-E id is mentioned in
-              # another row's doc.
-              grep -qxF -- "$r" "$work/bench.heads" && inbench=1 || true
-              if [ "$inrow" -eq 1 ] && [ "$inbench" -eq 1 ]; then
-                printf '  ok       %s — %s is a row in %s and is printed\n' "$b" "$r" "$inv"
-              else
-                printf '  REFUSED  %s — %s: in-invariants=%s in-bench=%s\n' \
-                       "$b" "$r" "$inrow" "$inbench"
-                bad=1
-              fi
-            done
-          done < <(printf '%s\n' "$cover" | grep -v '^[[:space:]]*$' || true)
-
-          if [ "$nrow" -eq 0 ]; then
-            echo "  THE COVERAGE TABLE IS EMPTY. Layer 1 above then passes only"
-            echo "  when no crate claims a bound, and that is not this repository."
-            bad=1
-          fi
+          # layer 4. The rows the table asserts. Checked BOTH ways: the id
+          # is a real row in docs/04-invariants.md, and the bench really
+          # prints it. Either half alone is forgeable — an id invented here,
+          # or an id in the bench that names no invariant.
+          # PRINTED means the first word of a string literal in the bench
+          # (D-1117), the rule `core/tests/cost_invariants.rs` already
+          # applies. A substring of the file was satisfied by any `///`
+          # line that mentioned the id, and every C-E id is mentioned in
+          # another row's doc.
 
           # ---- layer 5: the step that RUNS them is still armed. -------------
           # This gate proves the numbers exist. Gate 8 is what executes them,
@@ -6954,10 +6557,8 @@ jobs:
           # reason, and gate 13 layer 4 guards deny.toml.
           #
           # Both needles match only a line that BEGINS with them, which is
-          # what stops them being satisfied by the `if "$scan"` lines you are
-          # reading: those begin with `if`.
-          echo
-          echo "layer 5: gate 8 still runs what this gate counted"
+          # what stops them being satisfied by the `"$scan" step-runs` lines
+          # below that name them: those begin with `"$scan"`.
           # A line's PRESENCE is not a line's EXECUTION. The first repair here
           # was an awk DENYLIST of always-skip `if:` forms (`false`, `0`,
           # `failure()`, `cancelled()`), and D-1102 recorded it as replaced
@@ -6977,44 +6578,26 @@ jobs:
           # --locked || true` would satisfy it. The whole-line grep beside it
           # closes that: an exact line must exist, and since every line with
           # the prefix is in a step step-runs accepted, the exact one is too.
-          wf=.github/workflows/ci.yml
-          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
-          if "$scan" step-runs "$wf" 'cargo bench --workspace --locked' | sed 's/^/  /' \
-             && grep -qE '^[[:space:]]+cargo bench --workspace --locked[[:space:]]*$' "$wf"; then
-            echo "  present  gate 8 invokes cargo bench --workspace --locked, unconditionally"
-          else
-            echo "  REFUSED  nothing in this workflow RUNS the benches so that their"
-            echo "           failure fails the run. Every ceiling above is then an"
-            echo "           assertion no machine makes. Reasons above."
-            bad=1
-          fi
           # D-1460: the proof is the top-level `git ls-files --error-unmatch`
           # line, not the `echo` inside gate 8's `if`, which D-1601's
           # `step-runs` refuses as a line that may never run.
-          if "$scan" step-runs "$wf" "git ls-files --error-unmatch 'crates/*/benches/*.rs'" | sed 's/^/  /' \
-             && grep -qE "^[[:space:]]+git ls-files --error-unmatch 'crates/\\*/benches/\\*\\.rs' > /dev/null[[:space:]]*$" "$wf"; then
-            echo "  present  gate 8 still refuses an empty bench set"
-          else
-            echo "  REFUSED  gate 8 no longer fails when no bench exists. A skip"
-            echo "           that reports success is the fallback CLAUDE.md"
-            echo "           section 4 bans, and it is what gate 8 shipped with."
-            bad=1
-          fi
-
-          echo
-          if [ "$bad" -ne 0 ]; then
-            echo "GATE 14 FAILED."
-            echo
-            echo "A crate that promises a constant bound and never re-measures it"
-            echo "is the defect this gate was written for — the manifest append"
-            echo "and the page render both regressed inside a green build. Write"
-            echo "the bench, wire it with harness = false, and add its row to the"
-            echo "table above. If the bound is being abandoned, say so in"
-            echo "docs/05-decisions.md and delete the claim; do not delete the"
-            echo "row and keep the sentence. CLAUDE.md section 3 rules 4 and 6."
-            exit 1
-          fi
-          echo "OK — every crate that claims a bound names a bench that measures it."
+          #
+          # EVERY LAYER ABOVE IS `gates_bounds gate14` (D-2314), the binary gate
+          # 12 built and tested. The table above is handed to it as data. Gate
+          # 0's `spawns` check lets a tool start `git` and no other program, so
+          # the tool cannot run the source scanner itself: the lines below hand
+          # it the scanner's comment-blanked view and decoded string literals
+          # of every tracked bench, and the two `step-runs` reports. A report
+          # is read for its one `present` line, so `|| true` here hides
+          # nothing: a refusal or a crash leaves no such line and is REFUSED.
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
+          work=$(mktemp -d)
+          git ls-files -z 'crates/*/benches/*.rs' > "$work/benches"
+          xargs -0 -r "$scan" code < "$work/benches" > "$work/benches.code"
+          xargs -0 -r "$scan" strings < "$work/benches" > "$work/benches.strings"
+          "$scan" step-runs .github/workflows/ci.yml 'cargo bench --workspace --locked' > "$work/runs-bench" || true
+          "$scan" step-runs .github/workflows/ci.yml "git ls-files --error-unmatch 'crates/*/benches/*.rs'" > "$work/runs-empty" || true
+          "${RUNNER_TEMP:-/tmp}/gates-bounds" gate14 "$cover" "$work"
 
   build:
     name: Gates 3-6 — fmt, clippy, deny, test

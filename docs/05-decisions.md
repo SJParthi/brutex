@@ -57247,3 +57247,84 @@ the bar loop.
 **Decision.** At most `n - 1` gaps exist and each heap holds at most half of
 them plus one transient push, so both are created with capacity `ceil(n / 2)`.
 Output is unchanged; every prefix-cadence test is the proof that it is.
+
+### D-2314 — Gates 12 and 14 are one Rust tool, `.github/gates_bounds.rs` — 2026-10-04
+
+**Finding.** Gate 12 (every O(1) claim names the test that proves it) and gate
+14 (every crate that claims a bound re-measures it) were the two heaviest
+inline text programs in `.github/workflows/ci.yml`: 23 inline `awk` programs
+(8 and 15), 16 `sed`, 29 `grep`, 3 `cut`, 3 `sort`, 3 `tr` and 17 loops. The
+standing rule is Rust in every corner but `web/`, and CI is a corner. The two
+steps also carried two marked copies of one claim reader that gate 14 compared
+byte for byte (D-1116), which is a check that exists only because the reader
+was text in two places.
+
+**Decision.** Both gates are subcommands of one dependency-free tool,
+`.github/gates_bounds.rs` (`#![forbid(unsafe_code)]`, std only), built and
+self-tested in gate 12's step exactly as gate 0 builds `source_scan.rs`
+(`rustc --edition=2024 --test -D warnings`, run, then the plain build); gate 14
+reuses the binary from `$RUNNER_TEMP`. Every rule is ported unchanged, each
+pattern matched with the leftmost-longest reading the old `awk`/`sed`/`grep`
+gave it, byte by byte, with `[A-Za-z0-9_]` as the word characters (the C
+locale the local harness ran in). The steps keep their names, their
+explanatory comments and their data: gate 12's `allow_claim` and gate 14's
+`cover` table stay in the workflow and are passed to the tool as arguments, so
+widening either is still a visible diff on the workflow.
+
+- The claim reader is one function pair, `claim_blocks` and `is_claim`, that
+  both subcommands call. The byte-identity check and its `>>> CLAIM READER`
+  markers are gone because there is no second copy to compare.
+- Gate 0's `spawns` check lets a tool start `git` and no other program, so the
+  tool cannot run the source scanner. Gate 14's step keeps five lines of glue:
+  `git ls-files -z 'crates/*/benches/*.rs'`, the scanner's `code` and `strings`
+  over that list through `xargs -0`, and its two `step-runs` reports, written
+  with `|| true` to files the tool reads. A report counts only when it is one
+  `present` line, so a refusal or a crash is still REFUSED. The tool splits the
+  concatenated `code` view back per file by newline count (the scanner keeps
+  every newline) and refuses a stream that does not line up.
+- Stricter than before, by design: a tracked `.rs` that is not UTF-8 or holds
+  a NUL is an error (the old `grep` dropped it as binary); a missing
+  `docs/04-invariants.md` is an error in gate 12 (rule 3 used to switch off
+  silently); every tracked bench is lexed, so a cover row naming a path outside
+  `crates/*/benches/*.rs` is refused as not lexed, and a non-final bench with
+  no trailing newline is refused; a scanner failure stops the step at once
+  instead of after the other rows. Looser only where the old step crashed or
+  misread: a path git must quote no longer kills the step, and a crate
+  directory holding whitespace is no longer word-split.
+- Gate 0's inline-awk ratchet falls from 71 to 48 programs in `ci.yml`; the
+  constant in `source_scan.rs` is the integrator's to set.
+- `crates/core/tests/claim_reader.rs` asserted the two marked shell copies
+  (CIG-20). Two of its three tests fail against this workflow by construction;
+  they must be rewritten to assert the single function pair and the two
+  subcommand calls, and the CIG-20 row's wording follows. `allow_claim`'s
+  `FILE ITEM` test still passes unchanged.
+
+**Proof.** `.github/gates_bounds.rs`'s own tests, run by the step before the
+tool is trusted: every refusal branch of both gates, the reader's items, inner
+blocks, attribute bracket counting, CRLF and non-ASCII lines, each of the six
+scrub substitutions (including that a global substitution does not rescan its
+output), the trigger's word boundaries, the four proof-token patterns
+(`C-E-07` not `E-07`, `D-0095` and `C-09b` not ids, longest test/bench path),
+the attribute-tracked `proving` table, the `[[bench]]` reader (a second table
+discarding the first, CRLF, comments), call sites against declarations, the
+`cut -d: -f3-` string heads, the per-file split of the lexed view, and the
+`step-runs` and exact-line checks.
+
+Measured against the old step bodies on the tree at 6e4c262: gate 12's report
+is byte-identical (599 files, 15,842 `(crate, fn)` pairs, 7,395 proving, 21,274
+blocks, 468 claims, the same nine refusals and two allowances, so both FAIL
+there identically), and its `fns`, `proving` and block tables are identical
+record for record, block text included; gate 14's report and its 440 claims
+are identical apart from the reader line. A differential run of 80,000 random
+lines against the original `sed`/`grep` pipelines matched every scrubbed
+string, trigger verdict and extracted token. Adversarial trees, each refused by
+both with the same lines: `g12-adv` (a CRLF claim with non-ASCII text naming a
+production function, a proof token split across two doc lines, a multi-line
+attribute holding brackets in a string, an inner block whose only trigger is
+the predicate `flat`, an untracked bench path, row ids that do not exist,
+`XC-E-07`), `g12-proof` (a cited test demoted to production code, a cited test
+file untracked), `g12-stale` (the allowlisted file untracked); `g14-harness`
+(`harness = true`, a CRLF manifest that still reads, a new crate claiming a
+bound with no row), `g14-shape` (a measurement deleted, an id moved into a
+comment, an invariant row deleted), `g14-gate8` (`|| true` on gate 8's bench
+line, its empty-set refusal moved inside an `if`).
