@@ -45,3 +45,19 @@ open /dev/null, fifos or spawn with Stdio::null fail as uid 65534.
 - 13:58Z: b97b2ca pushed to final/all-fixes after workspace clippy clean and cli lib 1736/1737 (only the /dev/null environmental failure). Remaining: republish the board artifact.
 
 - 14:15Z paused at 93% session usage. Next: .github/workflows/auto-merge.yml:263 and :358 still pass `--jq` to gh; port them to the Rust gh_json tool (D-2343) under a new D-23xx. CI on b97b2ca belongs to the PR 74 CI thread.
+
+## Update 2026-10-04 18:50Z (saving ahead of the 93% pause; resume 22:03Z)
+
+- On PR #74: 913b9dc (D-2320, no gh --jq), via 956424c.
+- Handed to the PR 74 CI thread (not yet on PR #74): batch c863e92 on claude/project-thread-v8j0jv. It contains:
+  - D-2321..D-2325: gate holes P15-07/08/09/17 and P13-05.
+  - D-2326: P1-19-03, bounded credential reads.
+  - D-2327: log-3 and P1-04-02, /logs reads behind admission.
+  - D-2328: P13-04, docs only.
+  - D-2331: bench scratch leak fix plus log-contention measurements; no design adopted, because it needs an idle machine with 8 or more cores, e.g. the Mac.
+  - Checks: all 29 gates, fmt and clippy clean; pull, api, telemetry and core tests 2707/0.
+- Still running: the store O(1) time-to-row agent, in worktree /home/claude/wt-zfs on branch zf/store-o1 (based on 4bb242b), D-2329/D-2330 and AFG-28/29.
+  - The Mac's before numbers (1071b51): by time, p50 20.7 µs and p99 104 µs on a 1-minute month; p50 38 µs and p99 562 µs on a 1-second month. By row, p50 41 ns and p99 about 200 ns.
+  - The agent was asked to report a writer contract for the GDFL importer.
+  - If the container was reclaimed, restart this work from the finding: crates/store/src/file.rs first_at_or_after is a bisection.
+- Tracker: /mnt/project-files/fix-board/status/zero-findings.tsv; my rows are marked "[batch c863e92 handed to PR 74 CI]".
