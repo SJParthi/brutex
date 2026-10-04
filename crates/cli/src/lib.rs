@@ -975,7 +975,7 @@ fn column_withholding_unsourceable_days(
     vendor: brutex_core::vendor::Vendor,
     underlying: &str,
     span: ((u16, u8), (u16, u8)),
-    bars: &mut Vec<indicators::Candle>,
+    series: FoldedSeries<'_>,
     signal_length: i64,
     // `&str`, NOT `&'static str`. `audit_range_inner` takes its rung from the
     // command line, so it is borrowed rather than one of `EVERY_RUNG`'s
@@ -991,7 +991,7 @@ fn column_withholding_unsourceable_days(
         vendor,
         underlying,
         span,
-        bars,
+        series,
         signal_length,
         StoredPreparationBuild { rung, commit },
     )
@@ -1003,30 +1003,63 @@ struct StoredPreparationBuild<'a> {
     commit: &'a str,
 }
 
+/// A signal span as a retrying door holds it: the whole series it FOLDS, the
+/// days withheld so far, and the swept bars. p11num-1, D-1781.
+///
+/// The retry loops below add a day to `days` and recompute `bars` from
+/// `folded`, never from the previous `bars`, so each rebuild folds every bar
+/// the store holds and withholds only rows.
+struct FoldedSeries<'a> {
+    folded: &'a [indicators::Candle],
+    days: &'a mut Vec<i64>,
+    bars: &'a mut Vec<indicators::Candle>,
+}
+
 fn column_withholding_at_build(
     root: &std::path::Path,
     vendor: brutex_core::vendor::Vendor,
     underlying: &str,
     span: ((u16, u8), (u16, u8)),
-    bars: &mut Vec<indicators::Candle>,
+    series: FoldedSeries<'_>,
     signal_length: i64,
     build: StoredPreparationBuild<'_>,
 ) -> Result<(indicators::column::Column, [u8; 32]), String> {
     /// A span needing more than this withheld is a different defect.
     const ATTEMPTS: usize = 64;
     let StoredPreparationBuild { rung, commit } = build;
+    let FoldedSeries {
+        folded: whole,
+        days: withheld,
+        bars,
+    } = series;
     let (from, to) = span;
     let mut dropped: Vec<i64> = Vec::new();
     // ONCE, outside the retry loop: the verdict is a property of the key and
     // does not change when a day is withheld.
     let availability = stored::vwap_availability(&stored::swept_index(underlying)?);
     for _ in 0..ATTEMPTS {
-        let daily = stored::load_daily_context(root, vendor, underlying, (from, to), bars)?;
+        // THE DAILY CONTEXT ANCHORS EVERY BAR THE FOLD STEPS, so it is derived
+        // from the whole series; the overlay context from the swept bars it
+        // overlays. D-1781.
+        let daily = stored::load_daily_context(root, vendor, underlying, (from, to), whole)?;
         let exact = stored::load_exact_minute_context(root, vendor, underlying, (from, to), bars)?;
-        let digest = stored_anchored_digest(bars, &exact, &daily)?;
+        let digest = crate::minute_gaps::bind_withheld(
+            stored_anchored_digest(whole, &exact, &daily)?,
+            withheld,
+        );
         let attempt =
             preparation_attempt_with_commit(root, vendor, underlying, rung, digest, commit)?;
-        let folded = stored_anchored_column(bars, &daily, &exact, signal_length, availability);
+        let folded = stored_anchored_column_withholding(
+            Withholding {
+                folded: whole,
+                days: withheld,
+                swept: bars,
+            },
+            &daily,
+            &exact,
+            signal_length,
+            availability,
+        );
         attempt.finish(if folded.is_ok() {
             sweep_evidence::Completion::Completed
         } else {
@@ -1050,14 +1083,17 @@ fn column_withholding_at_build(
                     return Err(why);
                 };
                 let day = indicators::ist_day(ts);
-                if dropped.contains(&day) {
+                if withheld.contains(&day) {
                     return Err(format!(
                         "IST day {day} recurred after being withheld, so this is not \
                          a missing-minute hole. Nothing was swept. Underlying: {why}"
                     ));
                 }
                 dropped.push(day);
-                let (kept, _removed) = crate::minute_gaps::withhold(bars, &[day]);
+                withheld.push(day);
+                // FROM THE WHOLE SERIES, so the rebuild folds every bar and
+                // withholds only rows. D-1781.
+                let (kept, _removed) = crate::minute_gaps::withhold(whole, withheld);
                 if kept.len() == bars.len() {
                     return Err(format!(
                         "withholding IST day {day} removed no signal bar, so the \
@@ -2733,6 +2769,93 @@ fn stored_anchored_column(
     // bar is read to decide it. D-0507.
     availability: Availability,
 ) -> Result<Column, String> {
+    stored_anchored_column_withholding(
+        Withholding::none(signal),
+        daily,
+        exact_minute,
+        signal_length_micros,
+        availability,
+    )
+}
+
+/// A stored signal series FOLDED whole and SWEPT without its withheld days.
+/// p11num-1, D-1781.
+///
+/// `folded` is every signal bar the store holds for the span, holed days
+/// included; `swept` is `folded` with every bar on a `days` IST day removed,
+/// which is what the sweep, the overlay, the forward and the report read.
+/// The two travel together so no door can fold one series and execute on a
+/// slice that is not its withholding.
+#[derive(Clone, Copy)]
+struct Withholding<'a> {
+    folded: &'a [indicators::Candle],
+    days: &'a [i64],
+    swept: &'a [indicators::Candle],
+}
+
+impl<'a> Withholding<'a> {
+    /// Nothing withheld: the folded series is the swept one.
+    const fn none(signal: &'a [indicators::Candle]) -> Self {
+        Self {
+            folded: signal,
+            days: &[],
+            swept: signal,
+        }
+    }
+}
+
+/// [`stored_anchored_column`] over a series whose withheld days are folded
+/// through the evaluator and given no row. p11num-1, D-1781.
+///
+/// # Why the day is folded, not cut
+///
+/// Every door that withholds a holed day used to remove it from the signal
+/// bars BEFORE this build, so the evaluator saw day D-1 joined directly to
+/// D+1 and every family carrying state across sessions -- EMA20/200 (0-5),
+/// ATR and `SuperTrend` (64-65), swings, BOS and `CHoCH` (56-59, 72-73) and
+/// structure (278-279) -- reached later, SWEPT days in a state no unspliced
+/// run has. `indicators::column::Column::build_withholding` documents the
+/// measurement. Now the whole series is folded and only the withheld days'
+/// rows are left out, so a later row is the row of the true fold.
+///
+/// # What the withheld day still never does
+///
+/// It is never swept and never overlaid. The exact-minute ORB/`GapFib`
+/// overlay runs over `swept` only, so a holed day's signal bar never asks for
+/// the minute it lacks, and the four `exact_minute_overlay_never_substitutes…`
+/// tests are untouched: a hole still refuses when its day IS swept. Folding
+/// it needs no minute it lacks -- the evaluator steps the bars the store
+/// holds, so the state carried forward is the fold of what the vendor served,
+/// hole included, never a reconstruction of the missing minute.
+///
+/// # Errors
+///
+/// Every [`stored_anchored_column`] refusal, and a `swept` slice that is not
+/// exactly `folded` less its withheld days, which is a caller defect and
+/// refuses rather than executing on a mis-indexed column.
+fn stored_anchored_column_withholding(
+    withholding: Withholding<'_>,
+    daily: &stored::DailyContext,
+    exact_minute: &stored::ExactMinuteContext,
+    signal_length_micros: i64,
+    availability: Availability,
+) -> Result<Column, String> {
+    let Withholding {
+        folded,
+        days,
+        swept: signal,
+    } = withholding;
+    let held: std::collections::HashSet<i64> = days.iter().copied().collect();
+    if !folded
+        .iter()
+        .filter(|bar| !held.contains(&indicators::ist_day(bar.ts_micros)))
+        .eq(signal.iter())
+    {
+        return Err(
+            "the swept signal bars are not the folded series less its withheld days; no column was built"
+                .to_owned(),
+        );
+    }
     let widths =
         Widths::pinned().map_err(|why| format!("the pinned tolerances are not valid: {why}"))?;
     let mut evaluator = AnchoredEvaluator::new(
@@ -2742,12 +2865,13 @@ fn stored_anchored_column(
         &daily.references,
     )
     .map_err(|why| format!("the stored 1day reference order was refused: {why:?}"))?;
-    let anchored = AnchoredColumn::build_required(signal, &mut evaluator).map_err(|missing| {
-        format!(
-            "{} signal bar(s) across {} IST day(s) have no eligible stored 1day record strictly before them. Same-day OHLCV and signal-rung reconstruction were not substituted",
-            missing.signal_bars, missing.signal_days
-        )
-    })?;
+    let anchored = AnchoredColumn::build_required_withholding(folded, &mut evaluator, days)
+        .map_err(|missing| {
+            format!(
+                "{} signal bar(s) across {} IST day(s) have no eligible stored 1day record strictly before them. Same-day OHLCV and signal-rung reconstruction were not substituted",
+                missing.signal_bars, missing.signal_days
+            )
+        })?;
     if !anchored.reference_census().reconciles() {
         return Err(
             "the daily-reference census does not reconcile; no partial anchored column was swept"
@@ -2782,6 +2906,24 @@ fn stored_executed_digest(
     Ok(bind_execution_digest(
         stored_anchored_digest(signal, exact_minute, daily)?,
         runner::identity::data_digest(execution),
+    ))
+}
+
+/// [`stored_executed_digest`] over a withholding door's WHOLE folded signal
+/// series, with the withheld days bound beside it. p11num-1, D-1781.
+///
+/// A withheld day's bars move every later mask since D-1781, so they belong
+/// in the data term; [`crate::minute_gaps::bind_withheld`] then names which
+/// days were left out of the sweep, which the folded bars alone cannot say.
+fn stored_withheld_executed_digest(
+    withholding: Withholding<'_>,
+    exact_minute: &stored::ExactMinuteContext,
+    daily: &stored::DailyContext,
+    execution: &[indicators::Candle],
+) -> Result<[u8; 32], String> {
+    Ok(crate::minute_gaps::bind_withheld(
+        stored_executed_digest(withholding.folded, exact_minute, daily, execution)?,
+        withholding.days,
     ))
 }
 
@@ -3529,6 +3671,26 @@ pub(crate) struct StoredMonthInputs {
     /// the operator's answer did not reach; it withholds nothing and keeps the
     /// identity it has always had.
     pub(crate) minute_gaps: Option<crate::minute_gaps::GapExclusion>,
+    /// The whole signal month, holed days included, when a day was withheld;
+    /// `None` when `loaded.bars` is already the whole month. p11num-1, D-1781.
+    ///
+    /// The column is FOLDED over this and SWEPT over `loaded.bars`, so a
+    /// withheld day still moves the indicator state every later day reads.
+    pub(crate) folded: Option<Vec<indicators::Candle>>,
+}
+
+impl StoredMonthInputs {
+    /// The folded series, the withheld days and the swept slice, together.
+    fn withholding(&self) -> Withholding<'_> {
+        Withholding {
+            folded: self.folded.as_deref().unwrap_or(&self.loaded.bars),
+            days: self
+                .minute_gaps
+                .as_ref()
+                .map_or(&[], crate::minute_gaps::GapExclusion::day_numbers),
+            swept: &self.loaded.bars,
+        }
+    }
 }
 
 struct StoredSweepRequest<'a> {
@@ -3718,12 +3880,14 @@ fn stored_sweep_inputs(request: &StoredSweepRequest<'_>) -> Result<StoredMonthIn
         )
     })?;
     let holed_days = crate::minute_gaps::days_with_interior_gaps(execution_slice);
-    let withheld = if holed_days.is_empty() {
-        0
+    // FOLDED WHOLE, SWEPT WITHOUT THE HOLED DAYS. p11num-1, D-1781: the whole
+    // month is kept beside the swept slice, because the column is folded over
+    // it and the daily context must anchor every bar the fold steps.
+    let (withheld, folded) = if holed_days.is_empty() {
+        (0, None)
     } else {
         let (kept, withheld) = crate::minute_gaps::withhold(&loaded.bars, &holed_days);
-        loaded.bars = kept;
-        withheld
+        (withheld, Some(std::mem::replace(&mut loaded.bars, kept)))
     };
     if loaded.bars.is_empty() {
         return Err("every signal session has a minute gap; no sweepable bars remain".to_owned());
@@ -3733,7 +3897,7 @@ fn stored_sweep_inputs(request: &StoredSweepRequest<'_>) -> Result<StoredMonthIn
         vendor,
         underlying,
         ((year, month), (year, month)),
-        &loaded.bars,
+        folded.as_deref().unwrap_or(&loaded.bars),
     )?;
     let exact_minute = stored::load_exact_minute_context(
         root,
@@ -3756,6 +3920,7 @@ fn stored_sweep_inputs(request: &StoredSweepRequest<'_>) -> Result<StoredMonthIn
         daily,
         exact_minute,
         minute_gaps: Some(minute_gaps),
+        folded,
     })
 }
 
@@ -3789,6 +3954,22 @@ fn stored_month_params(
     })
 }
 
+/// The column a stored month sweeps: folded over the whole month, rows only
+/// for the days not withheld. p11num-1, D-1781.
+fn stored_month_column(
+    inputs: &StoredMonthInputs,
+    signal_length: i64,
+    availability: Availability,
+) -> Result<Column, String> {
+    stored_anchored_column_withholding(
+        inputs.withholding(),
+        &inputs.daily,
+        &inputs.exact_minute,
+        signal_length,
+        availability,
+    )
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "one stored month transaction keeps causal overlays, exact execution, identity, evidence publication, and rendering together"
@@ -3808,12 +3989,14 @@ fn stored_month_kernel(
         min_hits,
         commit,
     } = request;
+    let withholding = inputs.withholding();
     let StoredMonthInputs {
         loaded,
         execution_bars,
         daily,
         exact_minute,
         minute_gaps,
+        folded: _,
     } = inputs;
     if let Some(guard) = integrity {
         guard.require_current()?;
@@ -3826,7 +4009,11 @@ fn stored_month_kernel(
         });
     validate_one_minute_execution(execution_slice)?;
     let ladder = ladder_for(min_hits)?;
-    let digest = stored_executed_digest(&loaded.bars, exact_minute, daily, execution_slice)?;
+    // THE WHOLE FOLDED MONTH AND THE DAYS LEFT OUT OF IT. D-1781: a withheld
+    // day's bars now move later masks, so they are digested, and the days
+    // themselves are bound beside them.
+    let digest =
+        stored_withheld_executed_digest(withholding, exact_minute, daily, execution_slice)?;
     let digest = integrity.map_or(digest, |guard| guard.bind_digest(digest));
     // The identity, over the bars actually swept and the ladder actually
     // applied. `Params::of` reads the ladder rather than the argument, so a
@@ -3867,13 +4054,7 @@ fn stored_month_kernel(
         guard.require_current()?;
     }
     let availability = stored::vwap_availability(&loaded.key);
-    let column = stored_anchored_column(
-        &loaded.bars,
-        daily,
-        exact_minute,
-        signal_length,
-        availability,
-    )?;
+    let column = stored_month_column(inputs, signal_length, availability)?;
 
     // THE FILE WAS OPENED AND THIS IS WHERE AN OPERATOR LEARNS IT. The question
     // after a sweep that found nothing is "did it even read my month?", and
@@ -4272,13 +4453,21 @@ fn auto_stored_kernel(
     // what is withheld and why it is measured rather than listed.
     let minutes = stored::load_span(root, vendor, underlying, EXECUTION_RUNG, from, to)?.bars;
     let holed_days = crate::minute_gaps::days_with_interior_gaps(&minutes);
+    // FOLDED WHOLE, SWEPT WITHOUT THE HOLED DAYS (p11num-1, D-1781): the
+    // whole span is kept for the fold and the daily context that anchors it.
+    let folded = span.bars.clone();
     if !holed_days.is_empty() {
         let (kept, _withheld) = crate::minute_gaps::withhold(&span.bars, &holed_days);
         span.bars = kept;
     }
-    let daily = stored::load_daily_context(root, vendor, underlying, (from, to), &span.bars)?;
+    let daily = stored::load_daily_context(root, vendor, underlying, (from, to), &folded)?;
     let exact_minute =
         stored::load_exact_minute_context(root, vendor, underlying, (from, to), &span.bars)?;
+    let withholding = Withholding {
+        folded: &folded,
+        days: &holed_days,
+        swept: &span.bars,
+    };
     let (probe_ceiling, named) = match crate::knobs::var("BRUTEX_CEILING") {
         None => (SEARCH_CEILING, false),
         Some(_) => (ceiling_from_env()?, true),
@@ -4289,14 +4478,17 @@ fn auto_stored_kernel(
     let run = auto_search_run(
         &span,
         search_ladder,
-        stored_anchored_digest(&span.bars, &exact_minute, &daily)?,
+        crate::minute_gaps::bind_withheld(
+            stored_anchored_digest(&folded, &exact_minute, &daily)?,
+            &holed_days,
+        ),
         commit,
     );
     let id = identity(&run);
     let attempt = sweep_evidence::begin(root, id.bytes(), sweep_evidence::Operation::AutoSearch)?;
     let availability = stored::vwap_availability(&span.key);
-    let column = stored_anchored_column(
-        &span.bars,
+    let column = stored_anchored_column_withholding(
+        withholding,
         &daily,
         &exact_minute,
         signal_length,
@@ -6556,6 +6748,8 @@ fn audit_stored_kernel(request: StoredSweepRequest<'_>) -> Result<String, stored
                 exact_minute: &exact_minute,
                 signal_length_micros: signal_length,
                 availability,
+                // `audit-stored` applies no minute-gap rule: nothing withheld.
+                withheld: None,
             }),
             execution,
             native_minute_execution: loaded.timeframe == EXECUTION_RUNG,
@@ -7034,6 +7228,11 @@ struct AuditInputs {
     unsourceable: Vec<i64>,
     daily: stored::DailyContext,
     executed_digest: [u8; 32],
+    /// The whole signal span the column was folded over. p11num-1, D-1781.
+    folded: Vec<indicators::Candle>,
+    /// Every day withheld from the sweep: the holed days, then any day the
+    /// overlay could not source.
+    withheld_days: Vec<i64>,
 }
 
 /// The inputs of the last stored range audit, or its refusal, and the raw
@@ -7195,10 +7394,13 @@ fn load_audit_inputs(
     // What changed is that the day is not swept. Substituting would answer a
     // question with the wrong bar; withholding declines to answer it, out loud.
     let holed_days = crate::minute_gaps::days_with_interior_gaps(execution_slice);
+    // FOLDED WHOLE, SWEPT WITHOUT THE WITHHELD DAYS. p11num-1, D-1781.
+    let folded = span.bars.clone();
     if !holed_days.is_empty() {
         let (kept, _withheld) = crate::minute_gaps::withhold(&span.bars, &holed_days);
         span.bars = kept;
     }
+    let mut withheld_days = holed_days;
     // THE COLUMN BUILD IS WHAT REFUSES, so the withholding wraps THAT.
     //
     // `one_rung` guards its own support-derivation build, and this is the
@@ -7211,7 +7413,11 @@ fn load_audit_inputs(
         vendor,
         underlying,
         (from, to),
-        &mut span.bars,
+        FoldedSeries {
+            folded: &folded,
+            days: &mut withheld_days,
+            bars: &mut span.bars,
+        },
         signal_length,
         StoredPreparationBuild { rung, commit },
     )?;
@@ -7225,17 +7431,33 @@ fn load_audit_inputs(
         (from, to),
         &mut span.bars,
     )?;
-    let daily = stored::load_daily_context(root, vendor, underlying, (from, to), &span.bars)?;
+    let daily = stored::load_daily_context(root, vendor, underlying, (from, to), &folded)?;
 
-    if stored_anchored_digest(&span.bars, &exact_minute, &daily)? != preparation_digest {
+    // A DAY THE OVERLAY LOAD WITHHELD AFTER THE COLUMN WAS BUILT changes the
+    // swept bars and not the folded series, so it is refused by name here as
+    // well as by the digest: the column above has rows for that day. D-1781.
+    if !unsourceable.is_empty()
+        || crate::minute_gaps::bind_withheld(
+            stored_anchored_digest(&folded, &exact_minute, &daily)?,
+            &withheld_days,
+        ) != preparation_digest
+    {
         return Err(
             "stored preparation inputs changed before audit identity publication; no search ran"
                 .to_owned(),
         );
     }
     let execution_slice = execution.map_or(span.bars.as_slice(), |exec| exec.bars);
-    let executed_digest =
-        stored_executed_digest(&span.bars, &exact_minute, &daily, execution_slice)?;
+    let executed_digest = stored_withheld_executed_digest(
+        Withholding {
+            folded: &folded,
+            days: &withheld_days,
+            swept: &span.bars,
+        },
+        &exact_minute,
+        &daily,
+        execution_slice,
+    )?;
     Ok(AuditInputs {
         span,
         loaded_bars,
@@ -7246,6 +7468,8 @@ fn load_audit_inputs(
         unsourceable,
         daily,
         executed_digest,
+        folded,
+        withheld_days,
     })
 }
 
@@ -7283,6 +7507,8 @@ fn audit_range_kernel_cached(
         unsourceable,
         daily,
         executed_digest,
+        folded,
+        withheld_days,
     } = cache.inputs(
         AuditKey {
             root: root.clone(),
@@ -7446,6 +7672,7 @@ fn audit_range_kernel_cached(
                 exact_minute,
                 signal_length_micros: signal_length,
                 availability,
+                withheld: Some((folded.as_slice(), withheld_days.as_slice())),
             }),
             execution,
             native_minute_execution: span.timeframe == EXECUTION_RUNG,
@@ -14208,12 +14435,20 @@ fn one_rung_cached(ask: RungAsk<'_>, store: RungStore, cache: &mut AuditCache) -
         // overlay and the daily context are rebuilt too, because both are keyed
         // to the surviving bars — reusing them would describe a span the column
         // no longer has.
+        // FOLDED WHOLE: a day withheld below leaves the sweep, not the fold.
+        // D-1781.
+        let folded = span.bars.clone();
+        let mut withheld_days: Vec<i64> = Vec::new();
         let (column, digest) = match column_withholding_unsourceable_days(
             &root,
             vendor,
             underlying,
             (from, to),
-            &mut span.bars,
+            FoldedSeries {
+                folded: &folded,
+                days: &mut withheld_days,
+                bars: &mut span.bars,
+            },
             signal_length,
             rung,
         ) {
@@ -16539,6 +16774,9 @@ struct ScreenInputs {
     execution_bars: Option<stored::Span>,
     holed_days: Vec<i64>,
     withheld: u64,
+    /// The whole signal span the column was folded over, holed days included.
+    /// p11num-1, D-1781.
+    folded: Vec<indicators::Candle>,
     daily: stored::DailyContext,
     exact_minute: stored::ExactMinuteContext,
     availability: Availability,
@@ -16629,6 +16867,8 @@ fn load_screen_inputs(
     // What changed is that the day is not swept. Substituting would answer a
     // question with the wrong bar; withholding declines to answer it, out loud.
     let holed_days = crate::minute_gaps::days_with_interior_gaps(execution_slice);
+    // FOLDED WHOLE, SWEPT WITHOUT THE HOLED DAYS. p11num-1, D-1781.
+    let folded = span.bars.clone();
     let withheld = if holed_days.is_empty() {
         0
     } else {
@@ -16639,13 +16879,17 @@ fn load_screen_inputs(
     if span.bars.is_empty() {
         return Err("every signal session has a minute gap; no screenable bars remain".to_owned());
     }
-    let daily = stored::load_daily_context(root, vendor, underlying, (from, to), &span.bars)?;
+    let daily = stored::load_daily_context(root, vendor, underlying, (from, to), &folded)?;
     let exact_minute =
         stored::load_exact_minute_context(root, vendor, underlying, (from, to), &span.bars)?;
     let availability = stored::vwap_availability(&span.key);
     let cost = stored::audit_cost_scope(&span.key)?;
-    let column = stored_anchored_column(
-        &span.bars,
+    let column = stored_anchored_column_withholding(
+        Withholding {
+            folded: &folded,
+            days: &holed_days,
+            swept: &span.bars,
+        },
         &daily,
         &exact_minute,
         signal_length,
@@ -16658,6 +16902,7 @@ fn load_screen_inputs(
         execution_bars,
         holed_days,
         withheld,
+        folded,
         daily,
         exact_minute,
         availability,
@@ -16716,12 +16961,18 @@ fn screen_range_kernel_cached(
         execution_bars,
         holed_days,
         withheld,
+        folded,
         daily,
         exact_minute,
         availability,
         cost,
         column,
     } = loaded.as_ref().map_err(Clone::clone)?;
+    let withholding = Withholding {
+        folded,
+        days: holed_days,
+        swept: &span.bars,
+    };
     let (signal_length, withheld, availability) = (*signal_length, *withheld, *availability);
     let execution = execution_bars.as_ref().map(|exec| Execution {
         bars: &exec.bars,
@@ -16747,7 +16998,12 @@ fn screen_range_kernel_cached(
             from,
             to,
         )),
-        data_digest: stored_executed_digest(&span.bars, exact_minute, daily, execution_slice)?,
+        data_digest: stored_withheld_executed_digest(
+            withholding,
+            exact_minute,
+            daily,
+            execution_slice,
+        )?,
         commit,
         feed: span.vendor.as_str(),
     });
@@ -16783,6 +17039,7 @@ fn screen_range_kernel_cached(
                 exact_minute,
                 signal_length_micros: signal_length,
                 availability,
+                withheld: Some((withholding.folded, withholding.days)),
             }),
             execution,
             native_minute_execution: span.timeframe == EXECUTION_RUNG,
@@ -17041,6 +17298,78 @@ struct StoredReplay<'a> {
     /// The instrument's VWAP verdict, carried so that every fold's column is
     /// built with the same one the whole-span column was. D-0507.
     availability: Availability,
+    /// The whole folded signal series and the days withheld from its sweep,
+    /// or `None` for a door that withheld nothing. p11num-1, D-1781.
+    ///
+    /// Carried so a walk-forward window's column is folded as the whole-span
+    /// column was: through every withheld bar, with rows only for the
+    /// window's own swept bars. Rebuilding a window from the swept slice alone
+    /// would splice its withheld days back out, and only inside validation.
+    withheld: Option<(&'a [indicators::Candle], &'a [i64])>,
+}
+
+impl StoredReplay<'_> {
+    /// The anchored column of `slice`, a contiguous window of the swept
+    /// series, folded through every withheld bar inside it. D-1781.
+    fn column_of(&self, slice: &[indicators::Candle]) -> Result<Column, String> {
+        let withholding = self.withheld.map_or_else(
+            || Withholding::none(slice),
+            |(folded, days)| window_withholding(folded, days, slice),
+        );
+        stored_anchored_column_withholding(
+            withholding,
+            self.daily,
+            self.exact_minute,
+            self.signal_length_micros,
+            self.availability,
+        )
+    }
+}
+
+/// The part of `folded` a window `slice` of its swept series covers, with the
+/// withheld days. D-1781.
+///
+/// From the first folded bar after the swept bar preceding the window -- so the
+/// withheld bars directly before its first bar are folded into it, as the
+/// whole-span fold folded them -- through the window's last bar. A `slice`
+/// that is not a window of `folded`'s withholding is refused by
+/// [`stored_anchored_column_withholding`]'s own check, never mis-indexed.
+///
+/// One forward pass over `folded` with one hash probe per bar, stopping at
+/// the window's last bar: the same order as the fold the window then runs.
+/// **UNVERIFIED as a measured bound**; read off the source (`CLAUDE.md` §3
+/// rule 6).
+fn window_withholding<'a>(
+    folded: &'a [indicators::Candle],
+    days: &'a [i64],
+    slice: &'a [indicators::Candle],
+) -> Withholding<'a> {
+    let (Some(first), Some(last)) = (slice.first(), slice.last()) else {
+        return Withholding::none(slice);
+    };
+    let held: std::collections::HashSet<i64> = days.iter().copied().collect();
+    // `after_kept` is one past the last swept bar seen before the window, so
+    // the withheld bars between it and the window's first bar are folded in.
+    let (mut after_kept, mut start, mut end) = (0_usize, None, 0_usize);
+    for (index, bar) in folded.iter().enumerate() {
+        if held.contains(&indicators::ist_day(bar.ts_micros)) {
+            continue;
+        }
+        if bar.ts_micros > last.ts_micros {
+            break;
+        }
+        if bar.ts_micros < first.ts_micros {
+            after_kept = index.saturating_add(1);
+            continue;
+        }
+        start.get_or_insert(after_kept);
+        end = index.saturating_add(1);
+    }
+    Withholding {
+        folded: folded.get(start.unwrap_or(end)..end).unwrap_or(&[]),
+        days,
+        swept: slice,
+    }
 }
 
 /// The series a position is actually opened and closed on.
@@ -19981,13 +20310,7 @@ fn audit_bars_work(
         cost,
     } = opts;
     let prepared_column = match (prepared_column, replay) {
-        (None, Some(replay)) => match stored_anchored_column(
-            &bars,
-            replay.daily,
-            replay.exact_minute,
-            replay.signal_length_micros,
-            replay.availability,
-        ) {
+        (None, Some(replay)) => match replay.column_of(&bars) {
             Ok(column) => Some(column),
             Err(why) => return format!("refused: {why}\n"),
         },
@@ -20723,15 +21046,7 @@ fn both_shapes(
         signal_length_micros: execution.signal_length_micros,
     };
     if let Some(replay) = replay {
-        let mut builder = |slice: &[indicators::Candle]| {
-            stored_anchored_column(
-                slice,
-                replay.daily,
-                replay.exact_minute,
-                replay.signal_length_micros,
-                replay.availability,
-            )
-        };
+        let mut builder = |slice: &[indicators::Candle]| replay.column_of(slice);
         let anchored = runner::validate::walk_forward_projected_prepared_with_rungs(
             bars,
             execution,
@@ -22045,10 +22360,35 @@ mod tests {
         );
         // And every stored column is built from a verdict, not a literal: the
         // definition names the parameter and every call passes one.
+        // BOTH BUILDERS, since D-1781 split the withholding fold out of the
+        // plain one, and each call's argument list to its MATCHING paren: the
+        // withholding builder's first argument is itself a call, so the first
+        // `)` would end the list before the verdict.
         let mut calls = 0;
-        for (at, _) in production.match_indices("stored_anchored_column(") {
+        for (at, _) in production.match_indices("stored_anchored_column") {
             let after = &production[at..];
-            let close = after.find(')').expect("a call closes");
+            let Some(open) = [
+                "stored_anchored_column(",
+                "stored_anchored_column_withholding(",
+            ]
+            .iter()
+            .find(|name| after.starts_with(**name))
+            .map(|name| name.len()) else {
+                continue;
+            };
+            let mut depth = 1_usize;
+            let close = after[open..]
+                .char_indices()
+                .find(|&(_, c)| {
+                    match c {
+                        '(' => depth += 1,
+                        ')' => depth -= 1,
+                        _ => {}
+                    }
+                    depth == 0
+                })
+                .map(|(i, _)| open + i)
+                .expect("a call closes");
             let args = &after[..close];
             assert!(
                 args.contains("availability"),
@@ -22058,7 +22398,7 @@ mod tests {
         }
         assert!(
             calls >= 6,
-            "the definition and five shared stored fold doors, at least; found {calls}"
+            "the two definitions and the shared stored fold doors, at least; found {calls}"
         );
     }
 
@@ -28829,13 +29169,22 @@ mod derived_floor_tests {
                     "only the range audit may take a held digest"
                 );
                 let loader = compact_source(stored_function(source, "load_audit_inputs"));
+                // D-1781: over the whole FOLDED span, with its withheld days.
                 assert!(
                     loader.contains(concat!(
-                        "letexecuted_digest=stored_executed_",
-                        "digest(&span.bars,&exact_minute,&daily,execution_slice)?"
+                        "letexecuted_digest=stored_withheld_executed_",
+                        "digest(Withholding{folded:&folded,days:&withheld_days,swept:&span.bars,},",
+                        "&exact_minute,&daily,execution_slice,)?"
                     )),
                     "the held digest is the two-series composition"
                 );
+                assert_withheld_composition(source);
+                continue;
+            }
+            // D-1781: a withholding door digests its whole folded series and
+            // binds the withheld days; the composition underneath is the same.
+            if before_end.contains("data_digest: stored_withheld_executed_digest(") {
+                assert_withheld_composition(source);
                 continue;
             }
             assert!(
@@ -28877,14 +29226,29 @@ mod derived_floor_tests {
         let kernel = compact_source(stored_function(source, "stored_month_kernel"));
         assert!(
             kernel.contains(concat!(
-                "letdigest=stored_executed_",
-                "digest(&loaded.bars,exact_minute,daily,execution_slice)?;",
+                "letdigest=stored_withheld_executed_",
+                "digest(withholding,exact_minute,daily,execution_slice)?;",
                 "letdigest=integrity.map_or(digest,|guard|guard.bind_digest(digest));",
                 "letid=identity(&Run{"
             )),
             "the shared kernel must preserve all input bytes and add the strict receipt binding only when present"
         );
         assert_eq!(kernel.matches("data_digest:digest,").count(), 1);
+        assert_withheld_composition(source);
+    }
+
+    /// The withholding doors' data term is the two-series composition over the
+    /// whole folded series, with the withheld days bound after it. D-1781.
+    fn assert_withheld_composition(source: &str) {
+        let composed = compact_source(stored_function(source, "stored_withheld_executed_digest"));
+        assert!(
+            composed.contains(concat!(
+                "Ok(crate::minute_gaps::bind_withheld(stored_executed_",
+                "digest(withholding.folded,exact_minute,daily,execution)?,",
+                "withholding.days,))"
+            )),
+            "a withholding door's data term must be the composition over its folded series"
+        );
     }
 
     /// 09:15 IST on 2024-01-01, in epoch microseconds.
@@ -29405,15 +29769,18 @@ mod derived_floor_tests {
 
         // The screen kernel holds its loaded inputs by reference since
         // D-0997 (one load per descent), so it passes them without the `&`.
+        // D-1781: over its whole folded span, with the withheld days bound.
         let screen_bound = concat!(
-            "data_digest:stored_executed_",
-            "digest(&span.bars,exact_minute,daily,execution_slice)?"
+            "data_digest:stored_withheld_executed_",
+            "digest(withholding,exact_minute,daily,execution_slice,)?"
         );
         // D-1557: the range audit holds its digest beside its inputs, so its
-        // binding is the held one in `load_audit_inputs`.
+        // binding is the held one in `load_audit_inputs`. D-1781: over the
+        // whole folded span, with every withheld day bound.
         let held_bound = concat!(
-            "letexecuted_digest=stored_executed_",
-            "digest(&span.bars,&exact_minute,&daily,execution_slice)?"
+            "letexecuted_digest=stored_withheld_executed_",
+            "digest(Withholding{folded:&folded,days:&withheld_days,swept:&span.bars,},",
+            "&exact_minute,&daily,execution_slice,)?"
         );
         assert_eq!(
             (

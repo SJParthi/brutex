@@ -2171,8 +2171,9 @@ fn month_digest(inputs: &crate::StoredMonthInputs) -> [u8; 32] {
         .map_or(inputs.loaded.bars.as_slice(), |minute| {
             minute.bars.as_slice()
         });
-    crate::stored_executed_digest(
-        &inputs.loaded.bars,
+    // D-1781: the whole folded month, with any withheld days bound.
+    crate::stored_withheld_executed_digest(
+        inputs.withholding(),
         &inputs.exact_minute,
         &inputs.daily,
         execution,
@@ -2197,10 +2198,14 @@ fn the_minute_gap_rule_is_bound_by_value_and_the_audited_door_records_the_ladder
     let _knobs = crate::knobs::serially();
     crate::knobs::clear_all();
     crate::knobs::set("BRUTEX_CEILING", "256");
+    // 2 SINCE D-1781 (p11num-1): version 1 cut a holed day out of the
+    // indicator fold, version 2 folds it and withholds only its rows. That
+    // change re-keyed every ordinary stored sweep on purpose; any further
+    // renumbering must be another decision, and fails here until it is.
     assert_eq!(
         crate::minute_gaps::MINUTE_GAP_POLICY,
-        1,
-        "renumbering the rule re-keys every ordinary stored sweep recorded since D-0694"
+        2,
+        "renumbering the rule re-keys every ordinary stored sweep recorded since D-1781"
     );
     for rung in ["1min", "5min"] {
         let fixture = Fixture::warmed();
@@ -2225,8 +2230,8 @@ fn the_minute_gap_rule_is_bound_by_value_and_the_audited_door_records_the_ladder
         drop(ledger);
         assert_eq!(
             ordinary_row.identity,
-            month_identity(&ordinary, month_digest(&ordinary), legacy.with_policy(&[1])),
-            "{rung}: the ordinary door binds minute-gap rule 1"
+            month_identity(&ordinary, month_digest(&ordinary), legacy.with_policy(&[2])),
+            "{rung}: the ordinary door binds minute-gap rule 2"
         );
         let bound = audited.bind_digest(month_digest(audited.data()));
         assert_eq!(
@@ -2236,7 +2241,7 @@ fn the_minute_gap_rule_is_bound_by_value_and_the_audited_door_records_the_ladder
         );
         assert_ne!(
             audited_row.identity,
-            month_identity(audited.data(), bound, legacy.with_policy(&[1])),
+            month_identity(audited.data(), bound, legacy.with_policy(&[2])),
             "{rung}: the rule did not reach the audited door"
         );
     }
@@ -2626,4 +2631,249 @@ fn an_auto_stored_search_exits_as_its_sweep_evidence_records() {
         assert_eq!(crate::untrustworthy(&report), !completed, "{report}");
     }
     crate::knobs::clear_all();
+}
+
+/// The finding's repro shape on the stored path: fourteen open sessions of
+/// moving one-minute bars (April 30 as warm-up, then May 2025), each with its
+/// own day record and exact `5min` aggregates. With `hole`, the eleventh
+/// session's one-minute file loses one interior minute; its `5min` bars, as a
+/// vendor printed them, stay whole. p11num-1, D-1781.
+fn fourteen_sessions(hole: bool) -> (Traded, i64) {
+    let root = std::env::temp_dir().join(format!(
+        "brutex-withheld-fold-fixture-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir(&root).expect("scratch");
+    let fixture = Traded {
+        root,
+        underlying: "NIFTY",
+    };
+    let warm = moving_session(4, 30, 0);
+    fixture.write(4, Timeframe::MINUTE_1, &warm);
+    fixture.write(4, Timeframe::DAY_1, &[aggregate(&warm)]);
+    let open: Vec<u8> = (2..=31)
+        .filter(|date| !moving_session(5, *date, 0).is_empty())
+        .take(14)
+        .collect();
+    assert_eq!(open.len(), 14, "premise: May 2025 holds fourteen sessions");
+    let holed_date = open[10];
+    for (index, date) in (1_i64..).zip(open) {
+        let rows = moving_session(5, date, index);
+        let mut minutes = rows.clone();
+        if hole && date == holed_date {
+            minutes.remove(150);
+        }
+        fixture.write(5, Timeframe::MINUTE_1, &minutes);
+        fixture.write(5, Timeframe::DAY_1, &[aggregate(&rows)]);
+        fixture.write(
+            5,
+            Timeframe::MINUTE_5,
+            &rows.chunks(5).map(aggregate).collect::<Vec<_>>(),
+        );
+    }
+    let holed = i64::from(
+        pull::session::Day::new(2025, 5, holed_date)
+            .expect("date")
+            .days_from_epoch(),
+    );
+    (fixture, holed)
+}
+
+/// `request` for the fourteen-session fixture's May.
+fn fourteen_request<'a>(fixture: &Traded, rung: &'a str) -> crate::StoredSweepRequest<'a> {
+    crate::StoredSweepRequest {
+        root: fixture.root.clone(),
+        vendor: Vendor::Zerodha,
+        underlying: fixture.underlying,
+        rung,
+        year: 2025,
+        month: 5,
+        min_hits: u64::MAX,
+        commit: "generated-withheld-fold-fixture",
+    }
+}
+
+/// Each row of `column` keyed by the timestamp of its source bar in `bars`.
+fn rows_by_stamp(
+    column: &indicators::column::Column,
+    bars: &[indicators::Candle],
+) -> Vec<(i64, vocab::ConditionMask, vocab::ConditionMask)> {
+    column
+        .bits()
+        .iter()
+        .zip(column.known())
+        .zip(column.sources())
+        .map(|((bits, known), &source)| (bars[source].ts_micros, *bits, *known))
+        .collect()
+}
+
+/// **A withheld holed day is folded, not spliced: every later swept row is
+/// the row of the fold that kept the day, and the day's own rows are not
+/// swept.** p11num-1, D-1781.
+///
+/// `5min`: the hole is in the one-minute file only, so the signal bars are
+/// the same with and without it, and the withholding run's column must equal
+/// the unholed month's column with the holed day's rows removed -- every bit
+/// and every availability bit, overlay families included. Before D-1781 the
+/// door built the column from the spliced slice; that column is built here
+/// too and must differ on a later row, or this test could not see the defect.
+///
+/// `1min`: the signal series itself lacks the minute, so the reference is the
+/// whole holed series folded by the plain anchored build, compared on every
+/// position outside the exact-minute ORB (86..=105) and `GapFib` (132..=142)
+/// families the overlay replaces from the minute stream.
+#[test]
+fn a_withheld_holed_day_is_folded_so_every_later_swept_row_is_the_true_fold() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    let (clean, _) = fourteen_sessions(false);
+    let (holed, day) = fourteen_sessions(true);
+
+    the_5min_fold_is_the_unholed_months_less_the_held_day(&clean, &holed, day);
+    the_1min_fold_is_the_whole_holed_series_outside_the_overlay(&holed, day);
+    crate::knobs::clear_all();
+}
+
+/// The `5min` half of the D-1781 stored-path proof: the withholding run's
+/// column is the unholed month's less the held day, and the splice differs.
+fn the_5min_fold_is_the_unholed_months_less_the_held_day(clean: &Traded, holed: &Traded, day: i64) {
+    // ── 5min: equal to the unholed month, row for row. ──
+    let rung = "5min";
+    let signal = stored::rung_length_micros(rung).expect("a swept rung");
+    let whole_inputs = crate::stored_sweep_inputs(&fourteen_request(clean, rung)).expect("clean");
+    let inputs = crate::stored_sweep_inputs(&fourteen_request(holed, rung)).expect("holed");
+    let gaps = inputs.minute_gaps.as_ref().expect("the rule is applied");
+    assert_eq!(gaps.day_numbers(), &[day], "premise: the hole is measured");
+    assert_eq!(
+        gaps.signal_bars(),
+        75,
+        "premise: the day's 75 bars are withheld"
+    );
+    assert_eq!(
+        inputs.folded.as_deref(),
+        Some(whole_inputs.loaded.bars.as_slice()),
+        "the folded series is the whole month"
+    );
+    assert!(
+        inputs
+            .loaded
+            .bars
+            .iter()
+            .all(|bar| indicators::ist_day(bar.ts_micros) != day),
+        "the swept slice holds no bar of the holed day"
+    );
+    let availability = stored::vwap_availability(&inputs.loaded.key);
+    let whole = crate::stored_month_column(&whole_inputs, signal, availability).expect("whole");
+    let folded = crate::stored_month_column(&inputs, signal, availability).expect("folded");
+    let expected: Vec<_> = rows_by_stamp(&whole, &whole_inputs.loaded.bars)
+        .into_iter()
+        .filter(|(stamp, _, _)| indicators::ist_day(*stamp) != day)
+        .collect();
+    let actual = rows_by_stamp(&folded, &inputs.loaded.bars);
+    assert!(actual.len() > 600, "premise: the fixture is warm");
+    assert_eq!(
+        actual, expected,
+        "every swept row is the unholed fold's row, and no row is on the holed day"
+    );
+
+    // THE DEFECT THIS REPLACES, MEASURED: the column built from the spliced
+    // slice, as every door did before D-1781.
+    let spliced = crate::stored_anchored_column(
+        &inputs.loaded.bars,
+        &inputs.daily,
+        &inputs.exact_minute,
+        signal,
+        availability,
+    )
+    .expect("the spliced build still succeeds");
+    let spliced = rows_by_stamp(&spliced, &inputs.loaded.bars);
+    let later = |rows: &[(i64, vocab::ConditionMask, vocab::ConditionMask)]| -> Vec<_> {
+        rows.iter()
+            .filter(|(stamp, _, _)| indicators::ist_day(*stamp) > day)
+            .copied()
+            .collect()
+    };
+    let (true_later, spliced_later) = (later(&actual), later(&spliced));
+    assert_eq!(
+        true_later.len(),
+        spliced_later.len(),
+        "the same later bars are swept"
+    );
+    let differing = true_later
+        .iter()
+        .zip(&spliced_later)
+        .filter(|(fold, splice)| fold.1 != splice.1)
+        .count();
+    let trend: Vec<(u32, usize)> = [
+        0_u32, 1, 2, 3, 4, 5, 56, 57, 58, 59, 64, 65, 72, 73, 278, 279,
+    ]
+    .iter()
+    .map(|&bit| {
+        let moved = true_later
+            .iter()
+            .zip(&spliced_later)
+            .filter(|(fold, splice)| fold.1.get(bit) != splice.1.get(bit))
+            .count();
+        (bit, moved)
+    })
+    .filter(|(_, moved)| *moved > 0)
+    .collect();
+    assert!(
+        differing > 0,
+        "the splice must be visible on this fixture, or the equality above proves nothing: \
+         {differing} of {} later rows differ; by bit {trend:?}",
+        true_later.len()
+    );
+}
+
+/// The `1min` half of the D-1781 stored-path proof: the withholding run's
+/// column is the plain fold of the whole holed series outside ORB and `GapFib`.
+fn the_1min_fold_is_the_whole_holed_series_outside_the_overlay(holed: &Traded, day: i64) {
+    // ── 1min: the whole holed series folded, outside the overlay families. ──
+    let rung = "1min";
+    let signal = stored::rung_length_micros(rung).expect("a swept rung");
+    let inputs = crate::stored_sweep_inputs(&fourteen_request(holed, rung)).expect("holed 1min");
+    let availability = stored::vwap_availability(&inputs.loaded.key);
+    let whole_series = inputs.folded.as_deref().expect("a day was withheld");
+    assert_eq!(
+        whole_series.len() - inputs.loaded.bars.len(),
+        374,
+        "premise: the holed day keeps 374 of its minutes, folded and not swept"
+    );
+    let folded = crate::stored_month_column(&inputs, signal, availability).expect("folded 1min");
+    let widths = indicators::evaluator::Widths::pinned().expect("pinned widths");
+    let mut evaluator = indicators::anchored::AnchoredEvaluator::new(
+        widths,
+        availability,
+        indicators::pattern::Thresholds::CLASSICAL,
+        &inputs.daily.references,
+    )
+    .expect("ordered references");
+    let reference =
+        indicators::column::AnchoredColumn::build_required(whole_series, &mut evaluator)
+            .expect("the whole holed series folds")
+            .into_column();
+    let strip = |mask: vocab::ConditionMask| {
+        (86_u32..=105)
+            .chain(132..=142)
+            .fold(mask, vocab::ConditionMask::without_bit)
+    };
+    let outside = |rows: Vec<(i64, vocab::ConditionMask, vocab::ConditionMask)>| -> Vec<_> {
+        rows.into_iter()
+            .filter(|(stamp, _, _)| indicators::ist_day(*stamp) != day)
+            .map(|(stamp, bits, known)| (stamp, strip(bits), strip(known)))
+            .collect()
+    };
+    let expected = outside(rows_by_stamp(&reference, whole_series));
+    let actual = outside(rows_by_stamp(&folded, &inputs.loaded.bars));
+    assert_eq!(
+        actual.len(),
+        folded.len(),
+        "no 1min row is on the holed day"
+    );
+    assert_eq!(
+        actual, expected,
+        "every 1min swept row is the whole fold's row"
+    );
 }

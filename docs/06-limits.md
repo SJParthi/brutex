@@ -9425,6 +9425,9 @@ by `File::unlock`. What that does not cover, stated rather than implied away:
   hash cannot be read back for the term. The other four doors bind no such
   version: their identity moves only through the data digest over the bars
   they kept, so a gap-free month keys the same under their rule as without it.
+  (Since D-1782 their data term digests the whole folded series and binds the
+  withheld days with `MINUTE_GAP_POLICY` 2. A gap-free month still keys as
+  before.)
 
 - **Corrected 2026-09-24, AF-19.** Four statements above were wrong or have
   changed, and they are corrected here rather than edited:
@@ -14138,6 +14141,18 @@ bounds are all nonzero.
     probes named above), `sweeprun.rs` stays 5 (the rung-array probes
     named above), `footer.rs` stays unlisted. Rule 6's `sweeprun.rs 1`
     no longer matched and is removed.
+  D-1781 -- TWO HASH PROBES IN cli/src/lib.rs (5 -> 7) AND ONE IN
+    indicators/src/column.rs (new, 1). All three probe a
+    `HashSet<i64>` of withheld IST days built once from the caller's
+    day list: `held` in `stored_anchored_column_withholding` (the check
+    that the swept slice is the folded series less its withheld days),
+    `held` in `window_withholding` (a walk-forward window's folded
+    bounds), and `withheld_set` in `Column::build_withholding_from`
+    (which bars of the fold get no row). One probe per folded bar, the
+    order of the fold itself; the column probe is skipped entirely when
+    no day is withheld. The window bounds were first written with two
+    `partition_point` searches, which rule 1 refuses; they are a forward
+    pass now.
 ~~~~
 
 ## Audit fixes of 2026-10-03 — what they leave unbounded — D-1528, D-1535, D-1536, D-1537
@@ -14624,3 +14639,34 @@ makes; the whole column test module ran in 6.4 s here, so every cut is
 EXTRAPOLATED at minutes, not measured. A look-ahead that only reads across a
 cut the stride skips, and only within that cut, would pass it. The stride is
 the stated bound.
+
+## A withheld holed day is folded with its hole, and the fold costs one set probe per bar — D-1781, 4 October 2026
+
+Since D-1781 (p11num-1) a day withheld for an interior one-minute hole is
+stepped through the evaluator and only its rows leave the sweep. What that does
+not buy:
+
+- **The state carried past the day is the fold of the bars the vendor served,
+  not of a complete session.** The missing minute stays missing. On `1min` the
+  two bars around the hole are folded as neighbours; on a coarse rung the
+  vendor's own bucket over the hole is folded as stored. Neither is
+  reconstructed. The difference from a complete session is one or a few bars'
+  contribution to the carried EMA, ATR and structure state. The splice it
+  replaced dropped a whole session. Neither difference is measured on the
+  operator's store.
+- **Charter non-regular sessions are not changed by this.** The days
+  `SWEPT_SERIES_CALENDAR_POLICY` withholds are removed by the loader before
+  any fold, as before. D-1781 addresses the minute-gap rule alone, and whether
+  a non-regular session should move indicator state is a separate question no
+  decision has answered.
+- **Walk-forward windows over a holed span have no test of their own.**
+  `window_withholding` (D-1783) is read off the source. The builder it calls
+  is the one `crates/indicators/tests/withheld_fold.rs` and
+  `a_withheld_holed_day_is_folded_so_every_later_swept_row_is_the_true_fold`
+  prove.
+- **Cost.** `Column::build_withholding` adds one hash-set probe per folded bar
+  when a day is withheld, and none otherwise.
+  `stored_anchored_column_withholding` adds one O(bars) comparison of the
+  swept slice against the whole series less its withheld days, and the
+  withholding doors hold one extra copy of the signal series. UNVERIFIED as
+  measured figures. No bench row times any of them.

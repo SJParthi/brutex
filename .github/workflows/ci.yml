@@ -5796,7 +5796,7 @@ jobs:
           crates/cli/src/global_replay_v3.rs 1
           crates/cli/src/institutional_evidence.rs 2
           crates/cli/src/institutional_statistics.rs 1
-          crates/cli/src/lib.rs 5
+          crates/cli/src/lib.rs 7
           crates/cli/src/population.rs 3
           crates/cli/src/population_admission_v2.rs 2
           crates/cli/src/population_admission_v3.rs 2
@@ -5864,6 +5864,7 @@ jobs:
           crates/api/src/expressionsearchjson.rs 1
           crates/engine/src/resume.rs 1
           crates/cli/src/index_stop_store.rs 1
+          crates/indicators/src/column.rs 1
           '
 
           check 1 '\.(binary_search|partition_point)' \
