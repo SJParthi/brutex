@@ -111,13 +111,18 @@ fn before_the_switch_an_index_weekly_reads_the_day_form_on_any_weekday() {
 
 #[test]
 fn a_name_with_two_readings_or_none_is_refused_by_name() {
-    // 18 Dec 2018 strike 10500, or the Dec 2018 monthly strike 1,810,500.
+    // An index weekly's day reading wins over its monthly one at the same
+    // split: 19 Sep 2018 (the holiday-shifted Wednesday), not Sep 2019
+    // strike 18,24,800.
+    assert_eq!(contract("BANKNIFTY19SEP1824800PE", day(2018, 9, 10)), "2018-09-19-2480000-PE");
+    // Two readings, or none, refuse by name.
+    let reading = |at| Ok(Reading { at, form: TickerForm::Day, expiry: trade(), strike: 1 });
     assert_eq!(
-        decode_ticker("NIFTY18DEC1810500CE", day(2018, 12, 3)),
-        Err(NfoRefusal::TickerAmbiguous {
-            ticker: "NIFTY18DEC1810500CE".to_owned()
-        })
+        single(vec![reading(1), reading(2)], "T").map(|r| r.at),
+        Err(NfoRefusal::TickerAmbiguous { ticker: "T".to_owned() })
     );
+    assert_eq!(single(vec![], "T").map(|r| r.at), Err(NfoRefusal::TickerUnparsed { ticker: "T".to_owned() }));
+    assert_eq!(single(vec![reading(4)], "T").map(|r| r.at), Ok(4));
     // Traded after the expiry the rule derives.
     assert_eq!(
         decode_ticker("ACC18DEC1300CE", day(2018, 12, 28)),

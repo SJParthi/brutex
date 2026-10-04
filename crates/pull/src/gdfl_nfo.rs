@@ -391,6 +391,7 @@ fn readings_at(
     let latest = trade.days_from_epoch().saturating_add(EXPIRY_HORIZON_DAYS);
     let modern = trade.days_from_epoch() >= DAY_FORM_FROM_DAYS;
     let index_weekly = EARLY_DAY_FORM.iter().any(|name| name.as_bytes() == under);
+    let mut had_day = false;
     if modern || index_weekly {
         let day_form = (|| {
             let dd = rest.get(0..2).and_then(two_digits)?;
@@ -408,9 +409,16 @@ fn readings_at(
                     strike,
                 })
         })();
+        had_day = day_form.is_some();
         out.extend(day_form.map(Ok));
     }
-    if !modern {
+    // AN INDEX WEEKLY'S DAY READING WINS over its monthly reading at the same
+    // split (`BANKNIFTY19SEP1824800PE`: Wed 19 Sep 2018, the holiday-shifted
+    // weekly, never the Sep 2019 monthly strike 18,24,800). Measured over
+    // every one of the 1,218,362 tickers: this is the tick store's reading
+    // for all 2,240 pre-switch index weeklies, each last traded on or before
+    // that day; an index MONTHLY has no day reading and stays monthly.
+    if !modern && !(index_weekly && had_day) {
         let monthly = (|| {
             let yy = rest.get(0..2).and_then(two_digits)?;
             let mon = rest.get(2..5).and_then(month_of)?;
@@ -442,6 +450,24 @@ fn readings_at(
     }
 }
 
+/// The one reading of `ticker`, or its refusal: none is `TickerUnparsed`, two
+/// or more `TickerAmbiguous` (FORMAT.md §6 rule 4). Over every one of the
+/// 1,218,362 tickers of the vendor's history no name has two readings under
+/// the era rule; the guard stays, because a name the vendor ships tomorrow is
+/// not in that census.
+fn single(mut readings: Vec<Result<Reading, NfoRefusal>>, ticker: &str) -> Result<Reading, NfoRefusal> {
+    if readings.len() > 1 {
+        return Err(NfoRefusal::TickerAmbiguous {
+            ticker: ticker.to_owned(),
+        });
+    }
+    readings.pop().unwrap_or_else(|| {
+        Err(NfoRefusal::TickerUnparsed {
+            ticker: ticker.to_owned(),
+        })
+    })
+}
+
 /// The contract `ticker`, a file stem without `.NFO`, names for a file of
 /// trade day `trade`, by FORMAT.md §6 (module doc).
 ///
@@ -467,15 +493,7 @@ pub fn decode_ticker(ticker: &str, trade: Day) -> Result<OptionTicker, NfoRefusa
     for at in 1..body.len() {
         readings_at(body, at, trade, &mut readings, ticker);
     }
-    let reading = match readings.len() {
-        0 => return Err(unparsed()),
-        1 => readings.pop().unwrap_or_else(|| Err(unparsed()))?,
-        _ => {
-            return Err(NfoRefusal::TickerAmbiguous {
-                ticker: ticker.to_owned(),
-            });
-        }
-    };
+    let reading = single(readings, ticker)?;
     let name = ticker.get(..reading.at).unwrap_or_default();
     let underlying = Symbol::new(name)
         .ok()
