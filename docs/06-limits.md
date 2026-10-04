@@ -12735,6 +12735,12 @@ row at all accumulated.
     years-to-expiry, both dimensionless ratios feeding Black-Scholes.
     `Rate::annual` and `Tenor::years` are what `greeks` takes; a
     paisa `i64` cannot express 0.0675.
+  pull/riskfree.rs 2 -- `continuous`, which converts the RBI 91-day
+    T-bill implicit yield (an integer count of ten-thousandths of a
+    percent) into the continuously compounded `f64` that
+    `Rate::measured` and `greeks` take: the return type and one
+    `f64::from`. The yield and the price stay integers, and the
+    price/yield check is integer arithmetic. D-2810.
   api/ingest.rs 1 -- `text.parse::<f64>()` on the `rate` PARAMETER,
     the operator-supplied annual rate, refused by name through
     `Refusal::UnreadableRate` when it will not parse or leaves

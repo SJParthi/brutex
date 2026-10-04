@@ -327,7 +327,7 @@ fn implied_yield_e4(price_e4: u32) -> u64 {
 #[expect(
     clippy::float_arithmetic,
     reason = "a rate is not a price. CLAUDE.md §7 keeps floats out of prices; \
-              greeks::bsm takes the rate as f64 and the conversion is a \
+              greeks::bsm takes the rate as a float and the conversion is a \
               logarithm, which has no integer form"
 )]
 fn continuous(yield_e4: u32) -> f64 {
