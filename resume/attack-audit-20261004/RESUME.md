@@ -59,3 +59,10 @@ heads with the same prompts (in the thread's transcript; rules in resume/audit-2
 - F8b (new) wip/audit-fixes-8c = fc6dbb9 base, 14 uncommitted files of WIP at save (not pushed). Owns api, pull, store,
   engine rows (D-2280..2299, AHD-).
 - Tracker: /mnt/project-files/fix-board/status/attack-audit.tsv (64 rows fixing, owner in note).
+
+## RESTART 2026-10-04 (container restart after batch 2 landed in PR #74 as merge 9e11023, head 25bc8aa)
+- Batch 2 tracker rows set to pushed/9e11023.
+- Worktrees survived. Snapshots: wip/audit-fixes-6b = ed6a7bf (F6, clean), wip/audit-fixes-8d = e9ac205 (F8 head
+  17bf742 + D-1839 WIP as a stash commit; apply with `git stash apply e9ac205`), wip/audit-fixes-8e = 5a42e58 (F8b,
+  D-2280..2290, clean). Fixers relaunched; they snapshot to wip/audit-fixes-6c / -8f / -8g as they commit.
+- NEXT: batch 3 = merge F6 + F8 + F8b onto newest final/all-fixes, validate, hand to PR #74 CI thread.
