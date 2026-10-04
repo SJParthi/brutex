@@ -92,3 +92,4 @@ Artifacts.
 - Watch CI via public API through proxy: curl https://api.github.com/repos/SJParthi/brutex/actions/runs?branch=final/all-fixes (15000/hr).
 - 19:20 UTC: head is 8f58d91 (8b1e5bd + Fix Board web18 605c529). CI run 37226157475 on it; Gate W green. New Gate 6d passed locally. Local runner mutants 22/78, 0 missed so far; api next. Paused for usage at 93%; resume 22:03.
 - Pending at pause: Fix Board hand-off 3 origin/fixboard/pr74-conc-api dee61cfd (api+pull Rust, D-2760..2766, already merges 8f58d91). Merge on resume; shards will likely have started, so decide merge-now vs after the Gate 18 phase.
+- Local survivor (fix on resume): crates/runner/src/bootstrap.rs:1847:17 replace > with == in ExactPrefix::sum (see /tmp/claude-0/mp/sw/runner/mutants.out).
