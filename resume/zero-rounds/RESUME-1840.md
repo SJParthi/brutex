@@ -42,3 +42,29 @@ Main thread: D-1930..D-1949 (D-1930 used). D-1771..1799 are all used. The helper
   - Hand the PR 74 CI thread ONE validated commit with a note of its contents.
   - Do NOT push to final/all-fixes ourselves.
 - Pause at 93% of the 5-hour limit; resume is scheduled for 22:03 UTC.
+
+## Update 19:15 UTC (pausing at the usage limit)
+
+- zero-work is at **0aa8daa4**, pushed. It now also holds zero/withheld-splice (p11num-1, D-1781..1783), zero/edges-3 (D-1771..1780 plus the e004faa1 test fixes), D-1930..D-1933 (gates 12, 1d, 11 and 23), and a rebuilt web/build (P13-01).
+  - Every static gate passes locally; 1e was not run.
+  - W2: 842 pass and 3 cancelled. The cancellations are ask.test.js on Node 22, which is P19-07; CI uses Node 24.
+  - W3: 0 errors. `cargo fmt --check` is clean.
+  - Workspace clippy and the full suites have NOT been run on this exact head.
+- **Merge onto PR #74 (8f58d915): not done yet.** A trial merge showed 59 conflicts in 61 files. The 31 outside web/build are:
+  - `.github`: invariant_paths.rs, source_scan.rs, workflows/ci.yml.
+  - api: pullrun.rs, server.rs, strict_sweep_tests.rs.
+  - cli: audited_stored_tests.rs, batch.rs, execution_capability.rs, global_replay_v4_tests.rs, lib.rs, minute_gaps.rs, pool.rs, population_base_evidence_v2.rs, population_statistics_v2.rs, search_checkpoint.rs, search_checkpoint_tests.rs, selection_v6_tests.rs, strict_range_knobs.rs, sweep_evidence.rs, sweep_wiring_tests.rs.
+  - indicators: tests/invariants.rs.
+  - pull: http.rs, ingest.rs, masters.rs, ssm.rs.
+  - runner: admission.rs, outcome.rs.
+  - docs: 04, 05, 06.
+  - web: routes/backtest/+page.svelte.
+- **How to do it next session:**
+  1. Merge on a scratch branch.
+  2. For web/build, take either side, then rebuild after resolving web/src.
+  3. Union the append-only docs.
+  4. Resolve the code conflicts one by one.
+  5. Run `cargo clippy --workspace --all-targets -D warnings`, all the gates, and the affected suites as uid 65534 (one crate at a time, because of memory).
+  6. Hand the one commit to the PR 74 CI thread. Do not push final/all-fixes.
+- The docs-batch helper (D-1950..1969) is still running on zero/docs-batch.
+- Disk: about 5 GB free. Delete /home/claude/target-net and the agent worktree targets if more is needed.
