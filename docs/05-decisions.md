@@ -58425,3 +58425,194 @@ with its frontier in two ledger opens and `2 * rows + 1` row reads. After it
 flips one byte in the last row, which is never the best, `top` refuses with
 `record 7 does not match its seal`. That is the refusal a one-row answer would
 lose. Counted, not timed.
+
+### D-1860 — The column docs state the exact-close alignment rule — 2026-10-04
+
+**What was wrong (h-eng-1).** Three doc blocks in `indicators::column` (the
+`Sourced` type doc, the duplicate guard and the fill-bar note in `reproject`,
+and the doc of `two_signals_resolving_to_one_fill_bar_produce_one_row`) still
+said `align::onto_execution` returns "the first execution bar stamped at or
+after" a signal's close. They said an execution hole therefore maps two
+signals to one bar, cited an `align` test asserting `[Some(10), Some(10)]`, and
+gave a measured 1.32% hole rate as the reason collisions happen. D-0401
+replaced that rule: a signal maps only to the bar stamped exactly at its close
+instant on the same IST day, and is `None` otherwise. No such `align` test
+exists.
+
+**The change.** The four comments now state the exact-close rule: a hole drops
+a signal, and a collision through `align` needs duplicate or overlapping
+signal stamps. The `collided` guard stays, as defence for any direct caller of
+the public `reproject` door. No code path, output or version changes.
+
+**What it proves.** `runner::align::tests::an_execution_hole_drops_a_signal_and_never_collides_two`
+shows a one-bar hole under 2-minute signals gives one `None` and strictly
+increasing fill bars, and that only a repeated signal stamp shares a bar.
+`vocab`'s `stale_claims` test `the_column_docs_state_the_exact_close_alignment_rule`
+fails if the retired sentences return or if `align` stops comparing for
+equality (AHB-01).
+
+### D-1861 — Fibonacci rung exclusivity is stated with its whole-paisa range floor; nothing prunes on it — 2026-10-04
+
+**What was wrong (h-eng-2).** `vocab::tolerance` asserted at compile time that
+two Fibonacci rungs never fire on the same bar, and `vocab::implication` called
+the rungs "mutually exclusive". The proof used exact numerators. Every ladder
+floors its level to a whole paisa, and at a range of at most 10 paisa the band
+`R/100` is zero paisa. So two rungs that floor to one paisa fire together on a
+close at that price: a 1-paisa gap leg fires six rungs at once.
+
+**Does anything rely on it? No, checked.** The only pair screen in the sweep is
+`vocab::implication::pair_is_informative`, called once in `engine`. It removes
+pivot-chain pairs only, and `positions_off_the_chain_are_never_pruned` already
+held every other pair open. No other code reads the property. So no sweep lost
+a combination, and no result changes.
+
+**The change.** The claim is corrected, not the evaluation. Suppressing the
+bits by a tie rule would set FALSE on a close that sits exactly on both levels,
+which is the hidden fallback `CLAUDE.md` §4 bans, and it would change results
+and `vocab_version` for no gain. `vocab::tolerance::RUNG_EXCLUSIVE_MIN_RANGE`
+(11 paisa) is new. It is derived from `SMALLEST_LADDER_GAP` and `TOL_FIB_MILLI`
+and its proof (`(g - 2t)·R > 999`) is checked at compile time, together with
+the check that it is the smallest range the proof covers. The module doc, the
+const-assert comment and the implication doc state the floor. They also state
+a fact the old text did not: the two previous-day ladders (down 23.6% against
+up 78.6%, and down 78.6% against up 23.6%) share a close up to 1,000 paisa.
+`docs/06-limits.md` records both. No bit, format, digest, evidence or vocabulary
+version changes; stored masks and run identities are unchanged.
+
+**What it proves (AHB-02).** A brute force over every ladder pair and range
+1..=20,000 paisa confirms the floor. An indicators test walks every range
+1..=2,000 paisa plus three near `i64::MAX / 8` on all four ladder families
+through their production doors. It pins co-firing at exactly 1-6 and 8 paisa,
+and the cross-ladder pairs and their ranges. Gap legs of 1, 5 and 10 paisa fire
+six, two and at most one rung. A runner test walks `engine::Ladder` over
+columns built from those legs and from previous-day ranges 9, 100 and 902. The
+result equals a brute-force enumeration of every subset with no screen, and
+the co-firing pairs are among the combinations found. With a Fibonacci pair
+injected into the screen, the runner test fails.
+
+### D-1854 — Every remaining append writer rolls a failed write back — 2026-10-04
+
+**What was wrong (h-cli-4).** D-1850 gave sixteen `cli` ledgers the D-1622
+rollback. The same `seek(End) + write_all` shape, with no truncation after a
+failed or short write, remained in seven writers. Each of them refuses a torn
+file when it next opens or appends, so one ENOSPC or EIO wedged it for good:
+
+- `cli::anchored_search_lineage_v2` and `_v3`: `append_raw`. They also wrote a
+  pair's two members as two appends, so a failed second write left a lone
+  first member, which every open refuses as a partial trailing pair.
+- `cli::population_observations_v1`: V1 and V2 Data and Completion appends,
+  and both file headers.
+- `cli::sweep_evidence`: depth rows, lifecycle and journal events, file
+  headers, the ranking (one write per row, so an encoding or write failure
+  could leave part of a ranking), and the attempt reservation.
+- `cli::operation_audit`: the invocation index and each invocation file.
+- `api::audit`: the pull audit journal.
+- `api::recovery_journal`: single appends and seed batches. Its own test
+  pinned the wedge: after a short write, reopen refused.
+
+**The change.** Each writer now records its end and truncates back to it when
+a write fails, naming the write error and the rollback; when the truncation
+also fails both errors are named and the torn tail stays loud. The `cli`
+writers go through `cli::append_rollback`, which gains `append_all`: a
+multi-write body (the ranking) that rolls back whole on any I/O or encoding
+error. A lineage pair is one append. A failed sweep reservation also removes
+its file: it was created by `create_new` in the same call, so "no file" is the
+state before the attempt. The observation ledgers refresh their snapshot after
+a rollback that held, so the same handle can append again, as D-1850 did for
+Selection. The recovery journal still poisons its handle. A failed sync after
+a whole write is still never rolled back: that record is whole, and each
+ledger's exact-retry rule continues it. Only bytes the failing call itself
+wrote are ever removed, under the writer's lock. Stored bytes of a successful
+append, formats, digests and versions are unchanged. The added cost is one
+`seek`/`fstat` per append and one `set_len` on failure only.
+
+**Dead code, said with evidence.** Lineage V2 and V3 have no production
+caller: `lib.rs` declares them with `allow(dead_code)` / `expect(dead_code)`
+outside tests, and no other source names them. So no stored V2 or V3 file can
+exist from this binary. They are fixed anyway rather than deleted, because
+they are readers of a stored format.
+
+**Not this shape.** `telemetry::sink` appends newline-terminated lines, not
+fixed-stride records, and already terminates a line its own write tore, so a
+reader skips it. `api::backtest`'s `SeekFrom::End` measures a length for a
+read. The remaining `append(true)` and `SeekFrom::End` hits are in test code
+or already roll back (Global Replay, Admission V3/V4, Selection V5,
+institutional statistics, frontier, trades, results, result set, population,
+candidate universe, Base Evidence V2, execution capability and disposition V2,
+stored-data completeness, Search Lineage V4).
+
+**What it proves.** AHA-05 to AHA-10. Each writer has a fault-injection test
+through its own write path. The test injects a short write (or a failure that
+wrote nothing), requires the file to be byte-identical (or, for a cut
+Completion, to hold only the whole Data), and requires the next append to
+land whole. The recovery-journal test now requires the reopened crash image
+to hold the old prefix.
+
+### D-2270 — The lake reader reads the converted type as well as the logical type — 2026-10-04
+
+**What was wrong (h-pull-1).** D-1528 refused a `timestamp` leaf whose
+LOGICAL type is not UTC microseconds. A legacy writer (parquet-mr, older
+pyarrow) declares the unit with the CONVERTED type alone, and `parquet` 59.2
+keeps the two apart on read (`schema/types.rs` 1346-1349): it never turns a
+converted type into a logical type. So a leaf carrying only
+`TIMESTAMP_MILLIS` reached the check as "no logical type", was accepted, and
+its milliseconds decoded as microseconds: every stamp 1000x too small, in
+January 1970, with no refusal. The integer columns (`volume`,
+`open_interest`, `greeks_provenance_id`) had no annotation check at all: an
+unsigned 64-bit annotation reads a value past `i64::MAX` as negative, and a
+DECIMAL, DATE, TIME or TIMESTAMP annotation is another quantity under the
+right name.
+
+**The change.** `lake::schema::detect` reads `converted_type()` beside the
+logical type. A `timestamp` leaf is accepted only with converted type `NONE`
+or `TIMESTAMP_MICROS` (the legacy spelling of UTC microseconds) on top of
+D-1528's logical rule; anything else is `LakeError::UnsupportedTimestamp`,
+naming the converted type. An integer column is accepted only with no
+logical type or a signed `Integer`, and converted type `NONE` or a signed
+`INT_*`; anything else is the new `LakeError::UnsupportedIntegerAnnotation`,
+naming the column and both annotations. Each refusal also writes one
+`note_shape` line, once per file. Double columns are unchanged: `parquet`
+refuses every converted type on a DOUBLE when it builds the schema, and the
+only logical types it lets annotate one (`Unknown` and an unrecognised one)
+change no decode.
+
+**Disagreeing annotations and INT96.** A logical type and a converted type
+that disagree (logical MICROS UTC, converted MILLIS) are refused by `parquet`
+itself when it builds the schema, so the file never opens; the test pins that.
+Were that to change, the converted check here still refuses anything but
+`NONE` or `TIMESTAMP_MICROS`. INT96, the other physical encoding of a
+timestamp, is not INT64 and was already `ColumnTypeMismatch`; now pinned.
+
+**What changes.** A file that opened before and is now refused is one that
+was being misread. A file with no annotation, or with the annotations a
+current writer emits for UTC microseconds and signed integers, opens exactly
+as before and decodes to the same bars. Whether the real lake declares any
+legacy converted type is UNVERIFIED in this tree; the ignored real-lake scan
+`no_real_lake_file_triggers_either_defect` is where it would show. O(1) per
+file: two more reads of a schema leaf per column, over a fixed 7 or 17
+columns.
+
+**What it proves.** AHC-01.
+
+### D-2271 — The TOTP base32 decoder refuses bits that do not end on a whole byte — 2026-10-04
+
+**What was wrong (h-pull-2).** `pull::totp::decode_alphabet` dropped the bits
+left over after the last whole byte. So it accepted lengths RFC 4648 base32
+cannot produce (1, 3 or 6 characters past a group of 8) and non-zero bits past
+the last byte. `GEZDGNBV`, `GEZDGNBVA` and `GEZDGNBV7` decoded to one key and
+minted one code: an extra or mis-keyed last character produced a
+valid-looking code from a secret that was wrong, which the vendor then
+rejects with nothing here to say why. D-1373 closed this class for `=` and
+left this door open.
+
+**The change.** After the loop, five or more leftover bits (a whole spare
+character) or any non-zero leftover bit is the new
+`TotpError::TrailingBits { data_chars }`, a count and never a value. Its
+message says which of the two it was, and the telemetry fault word is
+`trailing-bits`, declared in CI gate 1d. A single character is now this
+refusal rather than `Empty`. Separators and a tail of `=` are still skipped
+and do not count. A secret that decoded before and still decodes yields the
+same key; only secrets that were being misread are refused. O(1): one compare
+and one mask after a loop bounded by `MAX_SECRET_LEN`.
+
+**What it proves.** AHC-02.

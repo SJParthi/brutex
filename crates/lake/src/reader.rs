@@ -138,6 +138,9 @@ impl LakeFile {
     /// * [`LakeError::UnexpectedSchema`], [`LakeError::MissingColumn`] or
     ///   [`LakeError::ColumnTypeMismatch`] if the columns are not one of the
     ///   two shapes the lake contains.
+    /// * [`LakeError::UnsupportedTimestamp`] or
+    ///   [`LakeError::UnsupportedIntegerAnnotation`] if a column declares a
+    ///   logical or converted type this reader would misread (D-1528, D-2270).
     pub fn open(path: &Path) -> Result<Self, LakeError> {
         Self::open_capped(path, MAX_LAKE_BYTES)
     }

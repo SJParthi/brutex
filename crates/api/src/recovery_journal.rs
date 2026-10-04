@@ -29,7 +29,10 @@
 //!
 //! Opening takes an exclusive advisory lock for the handle's entire lifetime,
 //! replays with a bounded read buffer, and refuses corruption or a torn tail
-//! without truncation. The containing directory must already exist. Appending
+//! without truncation. The containing directory must already exist. The one
+//! truncation is an append's own: a failed or short write is cut back to the
+//! length verified under the lock before it, so this writer never leaves the
+//! torn tail an open would refuse (D-1854). Appending
 //! publishes to the index only after `sync_all` succeeds. Any uncertain I/O
 //! poisons the handle; dropping and reopening is required. In particular, a
 //! failed sync does NOT prove that the record is absent on disk. Reopen checks
@@ -409,9 +412,10 @@ impl Journal {
     /// An invalid body, a key already present (in the journal or earlier in
     /// the batch) refuses the whole batch before any I/O and does not poison
     /// the handle. Any length/write/sync uncertainty poisons it and publishes
-    /// nothing. Complete records written before a failure may survive on disk;
-    /// they are new queued units, and reopening replays them as such, exactly
-    /// as it would a single append whose sync failed.
+    /// nothing. A failed write truncates the whole batch back (D-1854); after a
+    /// failed SYNC the complete records may survive on disk, they are new
+    /// queued units, and reopening replays them as such, exactly as it would a
+    /// single append whose sync failed.
     pub(crate) fn append_new(&mut self, records: Vec<Record>) -> io::Result<()> {
         if self.poisoned {
             return Err(io::Error::other(
@@ -471,13 +475,29 @@ impl Journal {
                 "locked recovery journal length changed; refused to append after foreign bytes",
             ));
         }
+        // A FAILED WRITE IS CUT BACK TO THE VERIFIED END (D-1854). `self.bytes`
+        // was just checked against the locked file, so truncating to it removes
+        // only this call's partial bytes and never a committed record. Left in
+        // place they would be a torn tail every later open refuses. The handle
+        // is still poisoned: an error is never permission to retry blindly.
         for image in images {
-            self.io.write_all(image).map_err(|error| {
-                io::Error::new(
-                    error.kind(),
-                    format!("recovery append may be partial: {error}"),
-                )
-            })?;
+            if let Err(error) = self.io.write_all(image) {
+                let at = self.bytes;
+                return Err(match self.io.truncate_to(at) {
+                    Ok(()) => io::Error::new(
+                        error.kind(),
+                        format!(
+                            "recovery append failed: {error}; its partial bytes were truncated back to {at} bytes"
+                        ),
+                    ),
+                    Err(and) => io::Error::new(
+                        error.kind(),
+                        format!(
+                            "recovery append may be partial: {error}; truncation back to {at} bytes also failed: {and}"
+                        ),
+                    ),
+                });
+            }
         }
         self.io.durable_sync().map_err(|error| {
             io::Error::new(
@@ -592,11 +612,17 @@ fn whole_records(bytes: u64) -> io::Result<u64> {
 trait JournalIo: Write + Send + Sync + std::fmt::Debug {
     fn length(&self) -> io::Result<u64>;
     fn durable_sync(&mut self) -> io::Result<()>;
+    /// Cut the journal back to `len` bytes after a failed write (D-1854).
+    fn truncate_to(&mut self, len: u64) -> io::Result<()>;
 }
 
 impl JournalIo for File {
     fn length(&self) -> io::Result<u64> {
         self.metadata().map(|metadata| metadata.len())
+    }
+
+    fn truncate_to(&mut self, len: u64) -> io::Result<()> {
+        self.set_len(len)
     }
 
     fn durable_sync(&mut self) -> io::Result<()> {
@@ -1486,6 +1512,7 @@ mod tests {
         write_budget: Option<usize>,
         fail_sync: bool,
         fail_length: bool,
+        fail_truncate: bool,
         writes: usize,
         syncs: usize,
     }
@@ -1528,6 +1555,17 @@ mod tests {
             if memory.fail_sync {
                 return Err(io::Error::other("injected sync failure"));
             }
+            Ok(())
+        }
+
+        fn truncate_to(&mut self, len: u64) -> io::Result<()> {
+            let mut memory = self.0.lock().expect("fixture lock");
+            if memory.fail_truncate {
+                return Err(io::Error::other("injected truncation failure"));
+            }
+            memory
+                .bytes
+                .truncate(usize::try_from(len).expect("fixture length"));
             Ok(())
         }
     }
@@ -1611,27 +1649,59 @@ mod tests {
         );
     }
 
+    /// AHA-10 (h-cli-4, D-1854). A failed or short write publishes nothing,
+    /// poisons the handle, and is truncated back to the verified end, so the
+    /// crash image reopens with the old prefix instead of refusing a torn tail.
+    /// When the truncation itself fails both errors are named and the torn
+    /// tail is refused on reopen, loudly.
     #[test]
     fn partial_and_zero_byte_write_failures_do_not_publish_and_poison_the_handle() {
-        for budget in [0, 1, 31, RECORD_LEN - 1] {
+        for (budget, fail_truncate) in [
+            (0, false),
+            (1, false),
+            (31, false),
+            (RECORD_LEN - 1, false),
+            (31, true),
+        ] {
             let (mut journal, memory) = faulty();
             let old = record(1);
             journal.append(old.clone()).expect("committed first event");
             let mut next = record(2);
             next.status = Status::InFlight;
             next.attempts = 1;
-            memory.lock().expect("fixture").write_budget = Some(budget);
+            {
+                let mut state = memory.lock().expect("fixture");
+                state.write_budget = Some(budget);
+                state.fail_truncate = fail_truncate;
+            }
             let error = journal
                 .append(next.clone())
-                .expect_err("injected write failure");
-            assert!(error.to_string().contains("partial"));
+                .expect_err("injected write failure")
+                .to_string();
+            if fail_truncate {
+                assert!(
+                    error.contains("may be partial")
+                        && error.contains("truncation back to 1024 bytes also failed"),
+                    "{error}"
+                );
+            } else {
+                assert!(
+                    error.contains("its partial bytes were truncated back to 1024 bytes"),
+                    "{error}"
+                );
+            }
             assert_eq!(journal.latest.len(), 1);
             assert_eq!(journal.latest.get(&old.key), Some(&old));
             assert_eq!(journal.order, vec![old.key]);
             assert_eq!(journal.bytes, RECORD_LEN_U64);
             assert!(journal.poisoned);
             let mut state = memory.lock().expect("fixture");
-            assert_eq!(state.bytes.len(), RECORD_LEN + budget);
+            let left = if fail_truncate {
+                RECORD_LEN + budget
+            } else {
+                RECORD_LEN
+            };
+            assert_eq!(state.bytes.len(), left);
             assert_eq!(state.syncs, 1);
             state.write_budget = None;
             let writes = state.writes;
@@ -1647,7 +1717,14 @@ mod tests {
             let scratch = Scratch::new();
             std::fs::write(scratch.path(), &memory.lock().expect("fixture").bytes)
                 .expect("persist crash image");
-            if budget == 0 {
+            if fail_truncate {
+                assert_eq!(
+                    Journal::open(&scratch.path())
+                        .expect_err("partial tail")
+                        .kind(),
+                    io::ErrorKind::InvalidData
+                );
+            } else {
                 assert_eq!(
                     Journal::open(&scratch.path())
                         .expect("valid old prefix")
@@ -1655,15 +1732,44 @@ mod tests {
                         .len(),
                     1
                 );
-            } else {
-                assert_eq!(
-                    Journal::open(&scratch.path())
-                        .expect_err("partial tail")
-                        .kind(),
-                    io::ErrorKind::InvalidData
-                );
             }
         }
+    }
+
+    /// AHA-10 (D-1854). The real file's truncation cuts a writable journal
+    /// and is refused on a handle that cannot write, so the rollback the
+    /// fault fixture proves is the one a real journal runs.
+    #[test]
+    fn the_real_file_truncation_cuts_and_refuses_on_a_read_only_handle() {
+        let scratch = Scratch::new();
+        std::fs::write(scratch.path(), [3_u8; 40]).expect("seed bytes");
+        let mut read_only = File::open(scratch.path()).expect("read-only handle");
+        assert!(JournalIo::truncate_to(&mut read_only, 10).is_err());
+        assert_eq!(std::fs::read(scratch.path()).expect("read").len(), 40);
+        let mut writable = OpenOptions::new()
+            .append(true)
+            .open(scratch.path())
+            .expect("append handle");
+        JournalIo::truncate_to(&mut writable, 10).expect("truncates");
+        assert_eq!(std::fs::read(scratch.path()).expect("read"), [3_u8; 10]);
+    }
+
+    /// AHA-10 (D-1854). A seed batch cut after whole records is truncated
+    /// back as a whole: no record of the failed batch survives on disk.
+    #[test]
+    fn a_seed_batch_cut_after_whole_records_is_truncated_back_whole() {
+        let (mut journal, memory) = faulty();
+        journal.append(record(1)).expect("committed first event");
+        memory.lock().expect("fixture").write_budget = Some(2 * RECORD_LEN + 5);
+        assert!(
+            journal
+                .append_new(vec![record(2), record(3), record(4)])
+                .expect_err("cut batch")
+                .to_string()
+                .contains("truncated back to 1024 bytes")
+        );
+        assert_eq!(memory.lock().expect("fixture").bytes.len(), RECORD_LEN);
+        assert_eq!(journal.order, vec![[1; 32]]);
     }
 
     #[test]

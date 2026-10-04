@@ -1597,7 +1597,7 @@ const TELEMETRY_FIELD: &str = "
     field file kept loaded max rotated vendors
     asked blank byte_len chars duplicate fault
     about census rows_read slices
-    not-base32 too-long hmac-refused
+    not-base32 too-long hmac-refused trailing-bits
     at
     unreadable_volume unreadable_oi
     timeframe
@@ -1620,6 +1620,8 @@ const TELEMETRY_FIELD: &str = "
 //     that gate 11 names in this file became a refusal: it says the
 //     BUILD is wrong, not the operator's secret, which is why it is a
 //     separate word rather than folded into one of the other three.
+//   trailing-bits               — `totp.rs`: a secret whose bits do not
+//     end on a whole byte (h-pull-2, D-2271). A failure, not a place.
 //   file loaded vendors         — `config.rs`, reporting that the
 //     untracked local configuration was read and how many vendors it
 //     named. The count, never the contents.

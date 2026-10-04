@@ -489,8 +489,9 @@ impl AnchoredColumn {
 /// [`Column::build`] fills `source` with the bar whose CLOSE carried the mask, so
 /// a position opens on the bar AFTER it. [`Column::reproject`] overwrites the
 /// same field with the execution bar a position can actually be OPENED on —
-/// `align::onto_execution` returns the first execution bar stamped at or after
-/// the signal's close, which is already the fill bar.
+/// `align::onto_execution` returns the execution bar stamped EXACTLY at the
+/// signal's close instant, on the same IST day, which is already the fill bar;
+/// a missing bar there is `None`, never a later bar (D-0401).
 ///
 /// Nothing recorded which convention a given `Column` was under, and
 /// `runner::trade::walk` read every column under the first: it added `+1` to a
@@ -888,21 +889,22 @@ impl Column {
                 // ONE FILL BAR, ONE ROW. A SECOND SIGNAL ON IT IS NOT A SECOND
                 // OBSERVATION.
                 //
-                // `align::onto_execution` is forward-only and returns the FIRST
-                // execution bar stamped at or after each signal's close, so when
-                // the execution series has a hole two consecutive signals resolve
-                // to the same bar -- `align`'s own test asserts `[Some(10),
-                // Some(10)]` as the correct output. Both rows were then pushed
-                // with the same `source`, and `outcome::edge` zips `bits` with
-                // `sources` and accumulates one observation per ROW: the same
-                // forward return entered the mean twice. `n` inflates, the
-                // standard error understates, `|t|` inflates -- and `|t|` is what
-                // picks the combination that gets traded.
+                // `align::onto_execution` maps each signal ONLY to the execution
+                // bar stamped exactly at its close instant on the same IST day,
+                // and records `None` when that bar is missing (D-0401). An
+                // execution hole therefore DROPS a signal; it can no longer
+                // resolve two signals to one bar. Through `align`, a collision
+                // needs two signal rows with the same or overlapping close
+                // instant (duplicate or overlapping signal stamps), which a
+                // well-formed signal series does not have.
                 //
-                // MEASURED, not hypothetical: the 81 months of one-minute zerodha
-                // NIFTY this store holds are 618,296 bars against roughly 626,625
-                // for 1,671 sessions of 375 -- about 8,329 missing, 1.32%. A hole
-                // of one bar is enough to collide two 2-minute signals.
+                // The guard stays as defence for every direct caller of this
+                // public door, which may hand any non-decreasing map. Two rows
+                // pushed with the same `source` would let `outcome::edge`, which
+                // zips `bits` with `sources` and accumulates one observation per
+                // ROW, count one forward return twice: `n` inflates, the standard
+                // error understates, `|t|` inflates -- and `|t|` is what picks the
+                // combination that gets traded.
                 //
                 // The FIRST signal keeps the bar, and that is the physical answer
                 // rather than a tiebreak: it is the earliest signal that could
@@ -954,8 +956,8 @@ impl Column {
                 known,
                 source,
                 // `onto` HOLDS FILL BARS, not signal bars: `align::onto_execution`
-                // returns the first execution bar stamped at or after the
-                // signal's close, which is the earliest bar a position can be
+                // returns the execution bar stamped exactly at the signal's
+                // close instant (D-0401), which is the bar a position is
                 // opened on. Recording that is what stops `trade::walk` adding
                 // a second `+1` to a bar that already is the fill.
                 sourced: Sourced::Fill,
@@ -2280,12 +2282,14 @@ mod reproject_tests {
     ///
     /// # The number this changes
     ///
-    /// `align::onto_execution` is forward-only and returns the first execution
-    /// bar stamped at or after each signal's close, so a hole in the execution
-    /// series resolves two consecutive signals to the same bar; `align`'s own
-    /// test asserts `[Some(10), Some(10)]` as the correct output. Both rows used
-    /// to be pushed with that same source, and `outcome::edge` accumulates one
-    /// observation per ROW -- so one forward return entered the mean twice.
+    /// `align::onto_execution` maps a signal only to the execution bar stamped
+    /// exactly at its close instant (D-0401), so an execution hole drops the
+    /// signal rather than colliding it with the next one. A collision reaches
+    /// this door through duplicate or overlapping signal stamps, or from a
+    /// direct caller handing any non-decreasing map, as this fixture does. Both
+    /// rows used to be pushed with that same source, and `outcome::edge`
+    /// accumulates one observation per ROW -- so one forward return would enter
+    /// the mean twice.
     ///
     /// That inflates `n`, understates the standard error and inflates `|t|`, and
     /// `|t|` is what selects the combination that gets traded. A duplicated
@@ -2300,9 +2304,10 @@ mod reproject_tests {
         let column = Column::build(&bars, &mut ev);
         assert!(column.len() >= 4, "the fixture must give enough rows");
 
-        // A hole in the execution series: rows 1 and 2 both resolve to bar 22,
-        // and rows 3 and 4 both resolve to bar 24. Everything else is distinct,
-        // and the map stays non-decreasing as `align::onto_execution` returns it.
+        // A direct caller's map (duplicate signal stamps would give the same
+        // shape): rows 1 and 2 both resolve to bar 22, and rows 3 and 4 both
+        // resolve to bar 24. Everything else is distinct, and the map stays
+        // non-decreasing, which is the precondition this door checks.
         let mut onto: Vec<Option<usize>> = (0..column.len()).map(|i| Some(i + 20)).collect();
         if let Some(slot) = onto.get_mut(1) {
             *slot = Some(22);
