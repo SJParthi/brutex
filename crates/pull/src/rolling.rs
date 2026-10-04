@@ -317,6 +317,14 @@ pub struct Ask {
 pub enum RollingError {
     /// The body was not JSON.
     NotJson,
+    /// A key appears twice inside one object, so the body carries two values
+    /// for one field. `serde_json` keeps the last and says nothing; this is
+    /// refused by name instead, as `http::decode_body` refuses it (D-1531).
+    /// CE-56, D-2680.
+    RepeatedKey {
+        /// The repeated key, decoded.
+        key: String,
+    },
     /// The side's object was absent. `CALL` asked and no `ce` returned.
     NoSide {
         /// Which key was looked for — `ce` or `pe`.
@@ -399,6 +407,12 @@ impl core::fmt::Display for RollingError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::NotJson => f.write_str("the rolling answer is not JSON"),
+            Self::RepeatedKey { key } => write!(
+                f,
+                "the rolling answer repeats the key {key:?} inside one object, \
+                 so it carries two values for one field; refused rather than \
+                 silently keeping the last"
+            ),
             Self::UnknownSide => write!(
                 f,
                 "that is not a side this feed's descriptor names, so there is no \
@@ -618,6 +632,11 @@ pub fn read(
     scale: PriceScale,
 ) -> Result<Vec<Row>, RollingError> {
     let root: serde_json::Value = serde_json::from_str(body).map_err(|_| RollingError::NotJson)?;
+    // A KEY REPEATED INSIDE ONE OBJECT IS TWO ANSWERS IN ONE BODY, refused
+    // here exactly as `http::decode_body` refuses it (CE-56, D-2680).
+    if let Some(key) = crate::http::repeated_key(body) {
+        return Err(RollingError::RepeatedKey { key });
+    }
     // THE ENVELOPE IS OPTIONAL, exactly as `fno::names` treats it, and for the
     // same reason: one reader for a vendor that wraps and one that does not.
     let held = root.get("data").unwrap_or(&root);
@@ -1766,5 +1785,31 @@ mod tests {
             .expect_err("refused")
             .to_string();
         assert!(said.contains("`close`") && said.contains("-5"), "{said}");
+    }
+
+    /// **CE-56. A KEY REPEATED INSIDE ONE OBJECT IS TWO ANSWERS FOR ONE FIELD.**
+    ///
+    /// `serde_json` keeps the last of a repeated key without saying so, so
+    /// `"close":[100.00],"close":[200.00]` read as a close of 200. D-1531
+    /// refused this in `http::decode_body`; this reader parses on its own and
+    /// never called that check.
+    #[test]
+    fn a_rolling_answer_repeating_a_key_in_one_object_is_refused_by_name() {
+        let body = r#"{"data":{"ce":{"timestamp":[1700000000],"open":[100.00],"high":[100.00],
+            "low":[100.00],"close":[100.00],"close":[200.00],"volume":[7]}}}"#;
+        let why = read(body, &spec(), "CALL", PriceScale::Rupees)
+            .map(|rows| rows.len())
+            .expect_err("two closes for one bar is two answers");
+        assert!(why.to_string().contains(r#""close""#), "{why}");
+
+        // THE SAME KEY IN TWO OBJECTS IS NOT A REPEAT: both sides carry every
+        // field name once each, and that is the vendor's ordinary answer.
+        let both = r#"{"data":{"ce":{"timestamp":[1700000000],"open":[1],"high":[1],"low":[1],
+            "close":[1],"volume":[1]},"pe":{"timestamp":[1700000000],"open":[1],"high":[1],
+            "low":[1],"close":[1],"volume":[1]}}}"#;
+        assert_eq!(
+            read(both, &spec(), "CALL", PriceScale::Rupees).map(|rows| rows.len()),
+            Ok(1)
+        );
     }
 }

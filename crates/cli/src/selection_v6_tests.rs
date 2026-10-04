@@ -325,3 +325,45 @@ fn an_abandoned_partial_tail_neither_hides_committed_history_nor_wedges_a_new_so
         [first.as_slice(), second.as_slice()].concat()
     );
 }
+
+/// **CE-65. AN EXISTING QUARANTINE THAT IS NOT A REGULAR FILE IS REFUSED, AND
+/// A FIFO THERE NEVER HOLDS THE REPAIR.** The comparison read the
+/// `.abandoned-<n>` name whole with `fs::read`, so a FIFO blocked the ledger's
+/// repair under its exclusive lock and a device was read without a bound. Its
+/// only legal content is shorter than one block, the tail it is compared with.
+#[test]
+fn an_abandoned_tail_quarantine_that_is_not_a_regular_file_is_refused_and_never_waits() {
+    let expected = frame(7);
+    let scratch = Scratch::new();
+    let path = scratch.0.join(FILE_NAME);
+    std::fs::write(&path, &frame(8)[..4096]).expect("foreign prefix");
+    let quarantine = scratch.0.join(format!("{FILE_NAME}.abandoned-0"));
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&quarantine)
+            .status()
+            .expect("mkfifo runs")
+            .success()
+    );
+    let (sent, answer) = std::sync::mpsc::channel();
+    let repair = {
+        let root = scratch.0.clone();
+        std::thread::spawn(move || {
+            let _ = sent.send(persist(&root, bounds(1), &expected));
+        })
+    };
+    let repaired = answer.recv_timeout(std::time::Duration::from_secs(2));
+    if repaired.is_err() {
+        let _ = std::fs::OpenOptions::new().write(true).open(&quarantine);
+    }
+    let _ = repair.join();
+    let why = repaired
+        .expect("a FIFO at the quarantine must not hold the repair")
+        .expect_err("refused, nothing repaired");
+    assert!(why.contains("not a regular file"), "{why}");
+    assert_eq!(
+        std::fs::read(&path).expect("ledger").len(),
+        4096,
+        "the ledger is not cut"
+    );
+}

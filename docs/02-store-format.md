@@ -450,7 +450,7 @@ ext4 and one file on APFS.
 | Page fault on a network mount that has gone away | Uninterruptible. Keep the store on local disk. This is an operational rule, not an architectural fix. |
 | Two writers on one file | Not supported. One writer per file, enforced by an advisory lock on the `.lock` sibling, and the lock is a leaf — never held while acquiring another. Nothing in `crates/store` can check it. |
 | A failure coarser than 16384 bytes | Takes both header slots. No arrangement inside one file survives a dead device. |
-| A symlink at a path component | Defeats vendor-prefix isolation, which is a **lexical** property of `StorePath`, not a filesystem one. The writer must open with `openat` + `O_NOFOLLOW` per component and halt naming the linked component. |
+| A symlink at a path component | Defeats vendor-prefix isolation, which is a **lexical** property of `StorePath`, not a filesystem one. The writer asks every existing component below the store root with `symlink_metadata` before it creates anything, opens the month file, its `.lock` and its `.crc` with `O_NOFOLLOW`, and halts with `StoreError::Symlinked` naming the linked component (CE-62, D-2686). The remaining window: a directory link swapped in between that walk and the open is followed, because per-component `openat` is not available in `std` without `unsafe`. The store root itself may be a link; it is the operator's to place. |
 | A wrong value that is well-formed | Out of scope here. Range validation happens at the ingest boundary, before a byte is written. |
 
 ---

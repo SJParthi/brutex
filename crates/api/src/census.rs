@@ -476,7 +476,7 @@ const NONBLOCK: Option<i32> = Some(0x4);
 const NONBLOCK: Option<i32> = None;
 
 /// Opens `path` for reading without waiting for a FIFO's writer.
-fn open_without_waiting(path: &Path) -> std::io::Result<std::fs::File> {
+pub(crate) fn open_without_waiting(path: &Path) -> std::io::Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -488,7 +488,7 @@ fn open_without_waiting(path: &Path) -> std::io::Result<std::fs::File> {
 }
 
 /// What a path that is not a regular file is, in the refusal's words.
-fn kind_of(kind: std::fs::FileType) -> &'static str {
+pub(crate) fn kind_of(kind: std::fs::FileType) -> &'static str {
     #[cfg(unix)]
     {
         use std::os::unix::fs::FileTypeExt as _;

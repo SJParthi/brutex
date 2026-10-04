@@ -2064,14 +2064,24 @@ fn empty_bars_page(
 /// Extracted from [`bars_json`] because that function is at clippy's line
 /// ceiling, and because the emit is the part worth reading on its own: it is
 /// the only place a bar becomes bytes on this route.
-fn bars_array(rows: &[store::format::Bar], from: Option<i64>, to: Option<i64>) -> String {
+fn bars_array(
+    rows: &[store::format::Bar],
+    from: Option<i64>,
+    to: Option<i64>,
+) -> (String, Vec<String>) {
     let inside = |bar: &store::format::Bar| {
         from.is_none_or(|at| bar.ts_micros >= at) && to.is_none_or(|at| bar.ts_micros < at)
     };
     let mut out = String::with_capacity(rows.len() * 96 + 32);
+    let mut withheld = Vec::new();
     out.push('[');
     let mut written = 0usize;
     for bar in rows.iter().filter(|bar| inside(bar)) {
+        // A VALUE A BROWSER CANNOT HOLD IS WITHHELD BY NAME (CE-60, D-2687).
+        if let Some(why) = inexact_bar(bar) {
+            withheld.push(why);
+            continue;
+        }
         if written > 0 {
             out.push(',');
         }
@@ -2094,7 +2104,51 @@ fn bars_array(rows: &[store::format::Bar], from: Option<i64>, to: Option<i64>) -
         );
     }
     out.push(']');
-    out
+    (out, withheld)
+}
+
+/// The largest magnitude a browser's JSON number holds exactly: 2^53 − 1.
+const BROWSER_EXACT: i64 = (1 << 53) - 1;
+
+/// Whether `value` survives `JSON.parse` as itself.
+const fn browser_exact(value: i64) -> bool {
+    value.unsigned_abs() <= BROWSER_EXACT.unsigned_abs()
+}
+
+/// The fault naming the first field of `bar` a browser's JSON number cannot
+/// hold exactly, or `None` when every field is exact.
+///
+/// The store admits any non-negative `i64` count and price, and both bar
+/// routes write them as bare numbers: `9007199254740993` would reach a page as
+/// `9007199254740992`, and `/db` and `/markets` check nothing. The other routes
+/// either quote such values or refuse them; these two keep their wire shape and
+/// withhold the bar, named in the `faults` they already carry, so every page is
+/// covered by one rule at the server (CE-60, D-2687).
+fn inexact_bar(bar: &store::format::Bar) -> Option<String> {
+    let interest = (bar.open_interest != store::format::OI_NULL).then_some(bar.open_interest);
+    [
+        ("o", Some(bar.open)),
+        ("h", Some(bar.high)),
+        ("l", Some(bar.low)),
+        ("c", Some(bar.close)),
+        ("v", Some(bar.volume)),
+        ("oi", interest),
+    ]
+    .into_iter()
+    .find_map(|(field, value)| {
+        value
+            .filter(|&held| !browser_exact(held))
+            .map(|held| inexact_fault(bar.ts_micros, field, held))
+    })
+}
+
+/// [`inexact_bar`]'s sentence, shared with the window's change fields.
+fn inexact_fault(ts_micros: i64, field: &str, value: i64) -> String {
+    format!(
+        "the bar at {ts_micros} UTC micros carries `{field}` = {value}, outside \
+         ±(2^53 − 1), which a browser's JSON number cannot hold exactly; the bar \
+         is withheld rather than sent to be rounded"
+    )
 }
 
 /// An optional ISO day as midnight IST in UTC microseconds.
@@ -2468,9 +2522,10 @@ async fn bars_json(
         .and_then(|at| file.first_at_or_after(at).ok())
         .and_then(|index| usize::try_from(index).ok())
         .map_or(held, |index| index.clamp(begins, held));
-    let (rows, faults) = bars::page(&file, begins, ends.saturating_sub(begins));
+    let (rows, mut faults) = bars::page(&file, begins, ends.saturating_sub(begins));
 
-    let out = bars_array(&rows, from_micros, to_micros);
+    let (out, mut withheld) = bars_array(&rows, from_micros, to_micros);
+    faults.append(&mut withheld);
 
     // A FAULTY RECORD IS NOT SILENTLY SKIPPED. `page` returns what it could
     // read and what it could not; dropping the second half would draw a chart
@@ -3451,11 +3506,11 @@ async fn bars_window_json(
     };
     let (sort, want_extremes) = (asked.sort, asked.want_extremes);
 
-    let body = render_window(&window, sort.scans() || want_extremes);
+    let (body, withheld) = render_window(&window, sort.scans() || want_extremes);
     // PARTIAL CONTENT WHEN A RECORD WOULD NOT READ, the same status
     // `/bars.json` answers with, for the same reason: the rows are real and
     // the set is not whole, and one status must not mean both.
-    let status = if window.faults.is_empty() {
+    let status = if window.faults.is_empty() && withheld == 0 {
         axum::http::StatusCode::OK
     } else {
         axum::http::StatusCode::PARTIAL_CONTENT
@@ -3471,14 +3526,32 @@ async fn bars_window_json(
 ///
 /// `months_missing` is on it for the same reason: a sparse store is legal, and
 /// a reader must be able to tell a gap from a refusal — `CLAUDE.md` §4.
-fn render_window(window: &bars::Window, scanned: bool) -> String {
+///
+/// Returns the body and how many bars or extremes were withheld because a
+/// browser's JSON number cannot hold one of their values (CE-60, D-2687); the
+/// caller answers 206 when that is not zero, as for a record that would not
+/// read. Each is named in `faults`.
+fn render_window(window: &bars::Window, scanned: bool) -> (String, usize) {
     let mut rows = String::with_capacity(window.bars.len() * 128 + 32);
+    let mut withheld: Vec<String> = Vec::new();
     rows.push('[');
-    for (n, row) in window.bars.iter().enumerate() {
-        if n > 0 {
+    let mut written = 0usize;
+    for row in &window.bars {
+        let bar = &row.bar;
+        let change = [("chg", row.chg), ("oichg", row.oichg)]
+            .into_iter()
+            .find_map(|(field, bps)| {
+                bps.filter(|&held| !browser_exact(held))
+                    .map(|held| inexact_fault(bar.ts_micros, field, held))
+            });
+        if let Some(why) = inexact_bar(bar).or(change) {
+            withheld.push(why);
+            continue;
+        }
+        if written > 0 {
             rows.push(',');
         }
-        let bar = &row.bar;
+        written = written.saturating_add(1);
         // EXACTLY ONE OF EACH PAIR IS NON-NULL, on every row, the same contract
         // `/store.json`'s `chg_bps`/`chg_why` already keeps. An unknown change
         // is never `0` — zero is a real bar that closed where the last one did.
@@ -3514,19 +3587,34 @@ fn render_window(window: &bars::Window, scanned: bool) -> String {
 
     let extremes = window.extremes.map_or_else(
         || "null".to_owned(),
-        |top| format!(r#"{{"range":{},"volume":{}}}"#, top.range, top.volume),
+        |top| {
+            if browser_exact(top.range) && browser_exact(top.volume) {
+                format!(r#"{{"range":{},"volume":{}}}"#, top.range, top.volume)
+            } else {
+                withheld.push(format!(
+                    "the window's extremes (range {}, volume {}) lie outside \
+                     ±(2^53 − 1), which a browser's JSON number cannot hold \
+                     exactly; withheld as null",
+                    top.range, top.volume
+                ));
+                "null".to_owned()
+            }
+        },
     );
-    format!(
+    let mut faults: Vec<&str> = window.faults.iter().map(String::as_str).collect();
+    faults.extend(withheld.iter().map(String::as_str));
+    let body = format!(
         r#"{{"total":{},"months_read":{},"months_missing":{},"scanned":{scanned},"extremes":{extremes},"faults":{},"bars":{rows}}}"#,
         window.total,
         window.months_read,
         window.months_missing,
-        if window.faults.is_empty() {
+        if faults.is_empty() {
             "null".to_owned()
         } else {
-            render::json_string(&window.faults.join("; "))
+            render::json_string(&faults.join("; "))
         }
-    )
+    );
+    (body, withheld.len())
 }
 
 /// The census as it is on disk RIGHT NOW, not as it was at startup.

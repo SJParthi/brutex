@@ -2869,22 +2869,6 @@ fn count(census: &mut Manifest, held: Held) -> Result<Option<Append>, String> {
         .map_err(|why| why.to_string())
 }
 
-/// Whether a file of `len` bytes is larger than this build could have written.
-///
-/// A named predicate rather than the comparison written inline, because the
-/// boundary is the whole content of the check and **a file of exactly
-/// [`MAX_CENSUS_BYTES`] is legal**: it is a census at [`MAX_ENTRIES`], which
-/// `ManifestHeader::advance` accepts and refuses only one past. Written as
-/// `>=` it would refuse the largest legal census, and no test that could
-/// afford to build one would ever notice — materialising that file means a
-/// 134 MB allocation, which is not a thing a unit test should do. So the
-/// ceiling is verified as **arithmetic** here, exactly as `pull::manifest`
-/// verifies its own, and `pull::ingest::tests` is the only place that can
-/// reach it without one.
-const fn beyond_ceiling(len: u64) -> bool {
-    len > MAX_CENSUS_BYTES
-}
-
 /// The vendor's census, or why this run must not write.
 ///
 /// # An absent file is a first ingest, and only an absent file
@@ -2907,21 +2891,22 @@ const fn beyond_ceiling(len: u64) -> bool {
 /// measured, is larger than this build could have written, cannot be read, or
 /// is not a census this build accepts.
 fn read_census(path: &Path, vendor: Vendor) -> Result<Manifest, String> {
-    let bytes = match fs::metadata(path) {
-        // THE SIZE IS CHECKED BEFORE THE READ. `read` on a file this process
-        // cannot hold is not an error it can report — it is an allocator
-        // failure or an OOM kill, and neither reaches the operator as "that
-        // census is too big".
-        Ok(found) if beyond_ceiling(found.len()) => {
+    // ONE OPEN, ONE `fstat` OF THAT HANDLE, ONE CAPPED READ (CE-64, D-2684).
+    //
+    // This took `fs::metadata(path).len()` and then `fs::read(path)`. The length
+    // `stat` gives a FIFO or a device is 0, so the ceiling passed, and the read
+    // then blocked for ever on a FIFO with no writer, while this run held the
+    // census lock and the vendor's seat, or read `/dev/zero` until memory ran
+    // out. A file swapped or grown between the two calls was read whole. The
+    // api's reader of this same file refuses all three by name (P-19).
+    let bytes = match read_regular_capped(path, MAX_CENSUS_BYTES) {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(why)) => {
             return Err(format!(
-                "{} is {} bytes; the largest census this build can write is \
-                 {MAX_CENSUS_BYTES} and this reader refuses more",
-                path.display(),
-                found.len()
+                "{} {why}; the largest census this build can write is \
+                 {MAX_CENSUS_BYTES} bytes, and a census is a regular file",
+                path.display()
             ));
-        }
-        Ok(_) => {
-            fs::read(path).map_err(|why| format!("{} could not be read: {why}", path.display()))?
         }
         Err(ref absent)
             if matches!(
@@ -2933,7 +2918,7 @@ fn read_census(path: &Path, vendor: Vendor) -> Result<Manifest, String> {
         }
         Err(why) => {
             return Err(format!(
-                "{} could not be measured: {why}. A census that exists and \
+                "{} could not be measured or read: {why}. A census that exists and \
                  cannot be read is not one that does not exist, and this run \
                  will not start a second census over it",
                 path.display()
@@ -2941,6 +2926,83 @@ fn read_census(path: &Path, vendor: Vendor) -> Result<Manifest, String> {
         }
     };
     Manifest::open_image(vendor, &bytes).map_err(|why| format!("{}: {why}", path.display()))
+}
+
+/// At most `cap` bytes of a **regular** file, read through one handle.
+///
+/// The path is opened once with no-follow and non-blocking flags, so a FIFO
+/// with no writer opens at once instead of waiting and a final symlink is
+/// refused by the host. That handle's `fstat` decides whether it is a regular
+/// file, so nothing can be swapped in between the check and the read, and the
+/// read is capped at one byte past `cap`, so a file that grows under it is
+/// refused rather than held. The shape `api::census::sized` already has (P-19).
+/// CE-64 and CE-65, D-2684; proved by
+/// `pull::ingest::tests::a_census_path_that_is_not_a_regular_file_is_refused_unread_and_never_waits`.
+///
+/// # Errors
+///
+/// The host's own error for an open or `fstat` that fails (an absent path is
+/// `NotFound`, a final symlink `FilesystemLoop`); `Ok(Err(sentence))` for a
+/// path that is not a regular file or holds more than `cap` bytes.
+pub(crate) fn read_regular_capped(
+    path: &Path,
+    cap: u64,
+) -> std::io::Result<Result<Vec<u8>, Unbounded>> {
+    use std::io::Read as _;
+    let file = store::open_flags::open_read_no_follow(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Ok(Err(Unbounded::NotRegular));
+    }
+    // THE HANDLE'S OWN LENGTH FIRST, so a file already past the cap is refused
+    // with nothing read; the capped read below catches one that grows.
+    if meta.len() > cap {
+        return Ok(Err(Unbounded::PastCap {
+            cap,
+            size: meta.len(),
+        }));
+    }
+    let mut bytes = Vec::new();
+    let _ = file.take(cap.saturating_add(1)).read_to_end(&mut bytes)?;
+    let size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    if size > cap {
+        return Ok(Err(Unbounded::PastCap { cap, size }));
+    }
+    Ok(Ok(bytes))
+}
+
+/// Why [`read_regular_capped`] read nothing it would return.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Unbounded {
+    /// The handle's `fstat` is not a regular file: a FIFO, a device or a
+    /// directory. Nothing was read.
+    NotRegular,
+    /// The file holds more than the cap: its length said so before any byte
+    /// was read, or it grew past the cap under a read that stopped one byte
+    /// beyond it.
+    PastCap {
+        /// The cap.
+        cap: u64,
+        /// The bytes the handle's length, or the read, found.
+        size: u64,
+    },
+}
+
+impl std::fmt::Display for Unbounded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotRegular => f.write_str(
+                "is not a regular file (a FIFO, a device or a directory); refused \
+                 unread, because this reader neither waits on a FIFO nor reads a device",
+            ),
+            Self::PastCap { cap, size } => {
+                write!(
+                    f,
+                    "holds {size} bytes, more than the {cap} this reader takes"
+                )
+            }
+        }
+    }
 }
 
 /// Publishes a whole census: write a temporary, flush it, rename it into place.
@@ -3390,8 +3452,8 @@ mod tests {
     use store::header::Header;
 
     use super::{
-        CensusLock, EntryKey, MAX_CENSUS_BYTES, beyond_ceiling, closes_in_hand, install_locked,
-        lock_refusal, write_and_count,
+        CensusLock, EntryKey, MAX_CENSUS_BYTES, closes_in_hand, install_locked, lock_refusal,
+        write_and_count,
     };
 
     /// **A MEMBER'S ROWS ARE LANDED BORROWED, NOT CLONED.** o1api-36, D-1203.
@@ -3888,23 +3950,86 @@ mod tests {
 
     /// The largest census this build can write is accepted; one byte more is
     /// not.
+    ///
+    /// **A file of exactly the cap is legal**: [`MAX_CENSUS_BYTES`] is a census
+    /// at `MAX_ENTRIES`, which `ManifestHeader::advance` accepts and refuses
+    /// only one past. Written as `>=` the bounded read would refuse the
+    /// largest legal census, and materialising that file means a 268 MB
+    /// allocation, so the boundary is proved on a small cap through the same
+    /// reader the census uses (D-2684).
     #[test]
     fn the_ceiling_admits_the_largest_census_this_build_can_write() {
         assert_eq!(
             MAX_CENSUS_BYTES, 268_468_224,
             "32,768 bytes of header region and 2,097,152 entries of 128 bytes"
         );
-        assert!(
-            !beyond_ceiling(MAX_CENSUS_BYTES),
-            "a census at exactly MAX_ENTRIES is one this build writes, and \
-             refusing it would refuse a legal file"
+        let dir = scratch("census-ceiling");
+        let path = dir.join("manifest").join("four.man");
+        std::fs::write(&path, b"1234").expect("a four-byte file");
+        assert_eq!(
+            super::read_regular_capped(&path, 4).expect("it opens"),
+            Ok(b"1234".to_vec()),
+            "a file of exactly the cap is read whole"
         );
-        assert!(!beyond_ceiling(MAX_CENSUS_BYTES - 1));
-        assert!(
-            beyond_ceiling(MAX_CENSUS_BYTES + 1),
-            "and one byte past it is not a census this build could have made"
+        assert_eq!(
+            super::read_regular_capped(&path, 3).expect("it opens"),
+            Err(super::Unbounded::PastCap { cap: 3, size: 4 }),
+            "and one byte past it is refused"
         );
-        assert!(beyond_ceiling(u64::MAX));
-        assert!(!beyond_ceiling(0), "an empty file is a first ingest");
+        std::fs::write(&path, b"").expect("an empty file");
+        assert_eq!(
+            super::read_regular_capped(&path, 0).expect("it opens"),
+            Ok(Vec::new()),
+            "an empty file is a first ingest"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **CE-64. A CENSUS PATH THAT IS NOT A REGULAR FILE IS REFUSED UNREAD,
+    /// AND A FIFO THERE NEVER HOLDS THE PULL.**
+    ///
+    /// `read_census` took `fs::metadata(path).len()`, which is 0 for a FIFO or
+    /// a device, and then `fs::read` by path: a FIFO with no writer blocked the
+    /// open for ever while this run held the census lock and the vendor's
+    /// seat, and `/dev/zero` read until memory ran out. The api's reader of the
+    /// same file already refuses both by name (P-19, R9-api-cx-1).
+    #[test]
+    fn a_census_path_that_is_not_a_regular_file_is_refused_unread_and_never_waits() {
+        let dir = scratch("census-not-regular");
+        let device = dir.join("manifest").join("device.man");
+        std::os::unix::fs::symlink("/dev/null", &device).expect("a link to a device");
+        let why = super::read_census(&device, brutex_core::vendor::Vendor::Groww)
+            .map(|_| ())
+            .expect_err("a device is not a census, and not an absent one either");
+        assert!(why.contains(&device.display().to_string()), "{why}");
+
+        let fifo = dir.join("manifest").join("fifo.man");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .expect("the test host runs its FIFO fixture")
+                .success()
+        );
+        let (sent, answer) = std::sync::mpsc::channel();
+        let reader = {
+            let fifo = fifo.clone();
+            std::thread::spawn(move || {
+                let _ = sent.send(
+                    super::read_census(&fifo, brutex_core::vendor::Vendor::Groww).map(|_| ()),
+                );
+            })
+        };
+        let read = answer.recv_timeout(std::time::Duration::from_secs(2));
+        if read.is_err() {
+            // Release the stuck open so the suite does not hang, then fail.
+            let _ = std::fs::OpenOptions::new().write(true).open(&fifo);
+        }
+        let _ = reader.join();
+        let why = read
+            .expect("a FIFO at the census path must not hold the read")
+            .expect_err("and it is refused rather than read as a census");
+        assert!(why.contains(&fifo.display().to_string()), "{why}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

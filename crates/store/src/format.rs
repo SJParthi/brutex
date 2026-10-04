@@ -1160,6 +1160,31 @@ pub enum FormatError {
     /// Trusting the counter over the file length would read past the end and
     /// return whatever bytes happened to be there.
     CounterExceedsFile,
+    /// `n_valid` claims more records than the file's month can hold on its
+    /// rung's grid, so no writer could have committed it.
+    ///
+    /// The file-length bound alone let a sparse file and a CRC-valid slot open
+    /// with a counter in the billions, and every reader that sized a vector or
+    /// a loop from it did so from a number the writer can never reach: the api
+    /// aborted on the allocation (CE-61, D-2685).
+    CounterExceedsMonth {
+        /// The counter the header claims.
+        n_valid: u64,
+        /// The most records the month holds on the rung's grid.
+        slots: u64,
+    },
+    /// A non-empty header's timestamp range leaves the file's month.
+    ///
+    /// The writer admits no bar outside the month (D-0915), so a header that
+    /// says otherwise is a header fault. Refused here, it is named as one,
+    /// rather than surfacing later as an overlap that names the wrong batch
+    /// (CE-63, D-2685).
+    RangeOutsideMonth {
+        /// The header's first timestamp.
+        first_ts_micros: i64,
+        /// The header's last timestamp.
+        last_ts_micros: i64,
+    },
     /// Appending would push `n_valid` past `u64::MAX`.
     CounterOverflow,
     /// The generation counter cannot be advanced again.
@@ -1299,6 +1324,19 @@ impl std::fmt::Display for FormatError {
             Self::CounterExceedsFile => {
                 f.write_str("n_valid claims more records than the file holds")
             }
+            Self::CounterExceedsMonth { n_valid, slots } => write!(
+                f,
+                "n_valid claims {n_valid} records and the file's month holds at \
+                 most {slots} on its rung's grid"
+            ),
+            Self::RangeOutsideMonth {
+                first_ts_micros,
+                last_ts_micros,
+            } => write!(
+                f,
+                "the header's range {first_ts_micros}..={last_ts_micros} (UTC \
+                 micros) leaves the file's month"
+            ),
             Self::CounterOverflow => f.write_str("n_valid would overflow u64"),
             Self::GenerationExhausted => f.write_str("header generation cannot advance past u64"),
             Self::TimestampsOutOfOrder { previous, next } => {

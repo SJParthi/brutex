@@ -212,7 +212,7 @@ fn single_day_window_checks_both_ist_midnights_at_microsecond_precision() {
         })
         .collect();
     let response: Value =
-        serde_json::from_str(&bars_array(&rows, bounds.0, bounds.1)).expect("exact window");
+        serde_json::from_str(&bars_array(&rows, bounds.0, bounds.1).0).expect("exact window");
     assert_eq!(response.as_array().expect("bars").len(), 2);
     assert_eq!(response[0]["t"], first / 1_000_000);
     assert_eq!(response[1]["t"], (end - 1) / 1_000_000);
@@ -450,4 +450,75 @@ fn an_unknown_direction_or_extremes_flag_is_refused_not_defaulted() {
             .expect("an unknown value must be refused");
         assert!(why.contains(named), "{extra}: {why}");
     }
+}
+
+/// **CE-60. A BAR VALUE A BROWSER'S JSON NUMBER CANNOT HOLD IS WITHHELD BY
+/// NAME, NEVER SENT TO BE ROUNDED.**
+///
+/// The store admits any non-negative `i64` count and price, and both bar
+/// routes wrote them as bare JSON numbers: `9007199254740993` parses in a
+/// browser as `9007199254740992`, and `/db` and `/markets` drew the rounded
+/// value with no refusal.
+#[test]
+fn a_bar_value_past_two_to_the_fifty_three_is_withheld_by_name_not_rounded() {
+    let past = (1_i64 << 53) + 1;
+    let at = 1_746_157_500_000_000;
+    let bar = |ts_micros: i64, volume: i64| Bar {
+        ts_micros,
+        open: 100,
+        high: 110,
+        low: 90,
+        close: 100,
+        volume,
+        open_interest: OI_NULL,
+    };
+    let rows = [bar(at, 1), bar(at + 60_000_000, past)];
+    let (out, withheld) = bars_array(&rows, None, None);
+    assert!(
+        !out.contains(&past.to_string()),
+        "never sent as a number: {out}"
+    );
+    let sent: Value = serde_json::from_str(&out).expect("the exact bar is still sent");
+    assert_eq!(sent.as_array().expect("bars").len(), 1);
+    assert_eq!(withheld.len(), 1, "{withheld:?}");
+    assert!(
+        withheld[0].contains("`v`") && withheld[0].contains(&past.to_string()),
+        "named by field and value: {withheld:?}"
+    );
+    // EXACTLY 2^53 − 1 IS EXACT, and is sent.
+    let (edge, none) = bars_array(&[bar(at, (1_i64 << 53) - 1)], None, None);
+    assert!(
+        none.is_empty() && edge.contains("9007199254740991"),
+        "{edge}"
+    );
+
+    let window = bars::Window {
+        total: 2,
+        months_read: 1,
+        months_missing: 0,
+        bars: rows
+            .iter()
+            .map(|row| bars::WindowBar {
+                bar: *row,
+                chg: None,
+                chg_why: "first bar",
+                oichg: None,
+                oichg_why: "first bar",
+            })
+            .collect(),
+        faults: Vec::new(),
+        extremes: Some(bars::Extremes {
+            range: past,
+            volume: 1,
+        }),
+    };
+    let (body, withheld) = render_window(&window, false);
+    let sent: Value = serde_json::from_str(&body).expect("a window body");
+    assert_eq!(sent["bars"].as_array().expect("bars").len(), 1);
+    assert!(sent["extremes"].is_null(), "{body}");
+    assert_eq!(withheld, 2, "one bar and the extremes");
+    assert!(
+        sent["faults"].as_str().expect("named").contains("`v`"),
+        "{body}"
+    );
 }

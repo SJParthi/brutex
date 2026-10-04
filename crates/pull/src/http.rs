@@ -979,7 +979,7 @@ pub fn decode_body(
 /// by `serde_json` so an escaped spelling of a held key is the same key. The
 /// cost is linear in the body, which the parse above already paid; the sets
 /// hold at most every key of the body once.
-fn repeated_key(body: &str) -> Option<String> {
+pub(crate) fn repeated_key(body: &str) -> Option<String> {
     let bytes = body.as_bytes();
     let mut open: Vec<Option<std::collections::HashSet<String>>> = Vec::new();
     let mut at = 0usize;

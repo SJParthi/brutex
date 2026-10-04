@@ -79,6 +79,13 @@ pub enum FnoError {
         /// The field that was looked for.
         field: &'static str,
     },
+    /// A key appears twice inside one object of the answer, so it carries two
+    /// values for one field. Refused by name, as `http::decode_body` refuses
+    /// it (D-1531). CE-56, D-2680.
+    RepeatedKey {
+        /// The repeated key, decoded.
+        key: String,
+    },
 }
 
 impl core::fmt::Display for FnoError {
@@ -109,6 +116,12 @@ impl core::fmt::Display for FnoError {
                  descriptor says the names are. Nothing was read rather than a \
                  partial list: a short list of contracts reads exactly like a \
                  month that had fewer."
+            ),
+            Self::RepeatedKey { ref key } => write!(
+                f,
+                "the answer repeats the key {key:?} inside one object, so it \
+                 carries two values for one field; refused rather than \
+                 silently keeping the last"
             ),
         }
     }
@@ -173,6 +186,10 @@ pub fn contracts_url(spec: &HttpSpec, ask: &Ask) -> Result<String, FnoError> {
 pub fn names(body: &str, field: &'static str) -> Result<Vec<String>, FnoError> {
     let root: serde_json::Value =
         serde_json::from_str(body).map_err(|_| FnoError::Unreadable { field })?;
+    // TWO VALUES FOR ONE KEY ARE TWO ANSWERS (CE-56, D-2680).
+    if let Some(key) = crate::http::repeated_key(body) {
+        return Err(FnoError::RepeatedKey { key });
+    }
     // THE ENVELOPE IS OPTIONAL AND THE FIELD IS NOT. Groww wraps its answers in
     // `payload`; looking there first and at the root second means a vendor that
     // does not wrap is read by the same code rather than by a second copy of it.
@@ -1005,6 +1022,16 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **CE-56. A REPEATED KEY IN THE LOOKUP ANSWER IS REFUSED, NOT RESOLVED
+    /// TO ITS LAST VALUE.** Two `expiries` arrays in one object are two
+    /// answers, and keeping the second silently drops every name in the first.
+    #[test]
+    fn a_lookup_answer_repeating_a_key_in_one_object_is_refused_by_name() {
+        let body = r#"{"payload":{"expiries":["2024-01-25"],"expiries":["2024-02-29"]}}"#;
+        let why = names(body, "expiries").expect_err("two lists for one field");
+        assert!(why.to_string().contains(r#""expiries""#), "{why}");
     }
 }
 
