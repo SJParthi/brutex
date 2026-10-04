@@ -58425,3 +58425,117 @@ with its frontier in two ledger opens and `2 * rows + 1` row reads. After it
 flips one byte in the last row, which is never the best, `top` refuses with
 `record 7 does not match its seal`. That is the refusal a one-row answer would
 lose. Counted, not timed.
+
+### D-3000 — The autopilot pulls the day rung over the whole span before any minute rung — 2026-10-04
+
+**The rule.** The operator, 4 Oct 2026: *"zerodha will always pull one day as
+the first point for the entire dates and only then one min will be pulled."*
+
+**What the build did.** `api::ladder::gate` already refused a minute request
+whose window's day months were not held, so a hand-made pull over a window was
+day-first over that window. The autopilot was not. `fly` alternated the two
+pulled rungs tick by tick through `rung_for(tick)` (D-1454), and the gate is
+asked per month, so minute bars for an early month were fetched as soon as that
+month's day file landed, while the day pass was still years short of
+yesterday.
+
+**Decision.** `fly` drives the day rung until a day pass finds nothing chosen
+and nothing reconsidered, then the minute rung. `round` now answers a `Pass`
+carrying `owed` beside the wait. The proof that the day rung is clear is
+stamped with the last finished IST day and the masters generation it was taken
+for (`DayClear`). Either one moving sends the next tick back to the day rung,
+because a new finished day is a day bar nobody has asked for and a re-parse can
+add an instrument whose whole day history is owed. The choice is two integer
+compares per tick and reads no census.
+
+**What cannot wedge it.** A day month that will not land is passed over after
+`MAX_MONTH_ATTEMPTS` and reconsidered `STALL_RETRIES` times (D-0949). After
+that the day pass finds nothing chosen and the minute rung starts. The per-month
+ladder gate still refuses any minute month whose day month is missing.
+
+**Scope.** One proof covers every drivable feed together, so a feed's minute
+pass also waits for the other feeds' day passes. The rule names Zerodha and
+the autopilot drives all REST feeds through one loop, so the stricter reading
+is applied to all of them rather than inventing a per-feed handover.
+
+**Proof.** `api::autopilot::tests::the_day_pass_runs_over_the_whole_span_before_any_minute`
+walks `rung_for` and `after_pass` as `fly` does: day while owed, minute once
+proven, day again on a new day or a re-parse, day with no clock.
+`api::autopilot::tests::a_round_with_nothing_missing_reconsiders_a_stalled_month_and_says_which_attempt`
+asserts a reconsidering pass is `owed` and the following empty pass is not.
+`api::autopilot::tests::the_backfill_drives_the_day_rung_as_well_as_the_minute_rung`
+pins that `fly` chooses through `rung_for(day_clear, now)` and records through
+`after_pass` before `round` runs.
+
+### D-3001 — Zerodha's pulled day bar is checked against the days its minute bars fold to, and never replaced — 2026-10-04
+
+**The rule.** The operator, 4 Oct 2026, after the pull order above: *"and then
+entirely rederive internal calculation also should happen."* Every intraday
+rung is already folded from the minute bars (`pull::ingest::derive_all`), and
+the day rung stays served, never derived (D-0077).
+
+**What was missing.** Two answers exist for one day once both passes have run:
+the day bar the vendor served and the day its own minute bars add up to.
+Nothing compared them, so a missing minute inside a session, or a day the
+vendor corrected after serving the minutes, was invisible.
+
+**Decision.** `pull::daycheck::compare` folds the month's committed minute bars
+to IST days and merges them against the pulled day file on the IST calendar
+day. It counts agreed days, differing days, minute days with no pulled day, and
+pulled days the minute pass has not reached yet. That last count is not a
+fault, because the day pass runs first. The first disagreement is named field
+by field with both values. `pull::ingest::check_day` runs it once per
+instrument-month after Zerodha minute bars land and writes one `pull.daycheck`
+line: `info` when clean, `warn` when anything differs or the day file cannot be
+read. It writes no bar and fails nothing.
+
+**Zerodha only.** Groww's day bar opens at the previous session's close,
+measured 181 points from Dhan's on one instrument on one day (D-0077). Checking
+Groww would log every day as different and hide a real gap.
+
+**Cost.** `O(minutes + days)` per instrument-month, once, after the minute
+bars are already read for derivation. Argued from the shape of the code and not
+measured; `docs/06-limits.md`.
+
+**Proof.** `pull::daycheck::tests::*` cover agreement, every field named with
+both values, a day pass ahead of the minute pass at either end, minutes with no
+pulled day in the middle and at the end, which disagreement is named first,
+out-of-order minutes refused by the fold, and two empty sides.
+
+### D-3002 — A spot run keeps up to three instruments on the wire at once — 2026-10-04
+
+**What the build did.** `api::server::broker_run` awaited one instrument's
+whole fetch before asking for the next. Feeds ran concurrently with each other,
+but within one feed the request rate was set by network latency and store
+landing time, not by the feed's budget. Zerodha's historical cap is 3 requests
+a second (`pull::rate::ZERODHA_PER_SECOND`, `docs/00-charter.md` §4z), so any
+round trip slower than a third of a second left part of it unused on every
+instrument.
+
+**Decision.** `BROKER_LANES = 3` instruments are fetched together through
+`Lanes::next`, which joins three `broker_lane` calls. Three is the strictest
+per-second cap of the REST feeds, so no feed has more instruments in flight
+than it may send in one second. The rate is still held by the feed's one shared
+governor, which every lane waits on. Lanes add concurrency, never permits.
+
+**What stays serial.** Landing: answers are filed one instrument at a time in
+target order, so the store, the census, the vendor-down breaker and the
+credential check see the sequence they always did. The credential: a run
+starts with one lane and widens only after the vendor answered without
+rejecting the token. A rejection drops every lane fetched ahead and narrows
+back to one, so `CLAUDE.md` §8's single re-read still holds and a token that
+dies mid-run costs at most two extra requests carrying it. A stop (pause,
+breaker or credential halt) can leave up to two fetched lanes unlanded. They are
+asked again on the next run, because the resume point is the store's own.
+
+**Proof.** `api::server::credential_law_tests::a_spot_run_keeps_up_to_three_instruments_on_the_wire_and_never_more`
+runs seven indices against a loopback vendor that holds every request open
+for 300 ms. The vendor sees all seven, at least two were open together and
+never more than three, and each instrument read its credential once. The five
+existing §8 tests in the same file still pass unchanged: one request after a
+first-request rejection, the rotated token on the next instrument, a flapped
+value never sent, a failed re-read halting, and a configuration fault sending
+nothing.
+
+**Not measured.** The throughput gain against Zerodha itself. It depends on
+the real round trip, which this box cannot reach.
