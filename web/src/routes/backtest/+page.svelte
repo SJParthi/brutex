@@ -824,12 +824,19 @@
    *
    * `gross_win` and `gross_loss` are the two sums `/frontier.json` began sending
    * when v3 stored them; before that this criterion was not computable at all.
-   * `null` when nothing was won, because a ratio with no base is undefined —
-   * never `0`, which `norm` would read as "measured, and best".
+   * NOTHING WON AND SOMETHING LOST IS THE WORST RATIO THERE IS, NOT AN
+   * UNKNOWN ONE. This returned `null` whenever `gross_win` was 0, and `norm`
+   * scores `null` as the midpoint, so a row that only ever lost beat every
+   * measured row in the lower half on "less losing ratio". It is `Infinity`
+   * now, which `norm` places at the top of the range and the inverted term
+   * scores 0. `null` remains only when neither side moved: then the ratio
+   * really has no reading. p14num-2, D-2750.
    *
    * @param {any} r
+   * @returns {number|null}
    */
-  const lossRatio = (r) => (r.gross_win > 0 ? -r.gross_loss / r.gross_win : null);
+  const lossRatio = (r) =>
+    r.gross_win > 0 ? -r.gross_loss / r.gross_win : r.gross_loss < 0 ? Infinity : null;
 
   /**
    * Which measurements separate nothing across this set of rows.
@@ -952,8 +959,14 @@
     // An unmeasurable value takes the same 0.5: it is neither evidence for the
     // row nor against it, and any other number would be an opinion the data
     // does not support. `lo === Infinity` means NOTHING was measurable.
+    //
+    // AN UNBOUNDED VALUE IS NOT UNMEASURED. `+Infinity` is past every measured
+    // value, so it sits at the top of the range (1) and `-Infinity` at the
+    // bottom (0); only `null`, `undefined` and `NaN` take the midpoint. D-2750.
     /** @param {number|null|undefined} v @param {{ lo: number, hi: number }} range */
     const norm = (v, { lo, hi }) => {
+      if (v === Infinity) return 1;
+      if (v === -Infinity) return 0;
       if (v === null || v === undefined || !Number.isFinite(v)) return 0.5;
       if (!Number.isFinite(lo) || hi === lo) return 0.5;
       return (v - lo) / (hi - lo);
@@ -987,7 +1000,12 @@
         w.profit * norm(r.pessimistic, ranges.profit) +
         w.winningTrades * norm(r.wins, ranges.winningTrades) +
         w.winRate * norm(r.win_rate_bp, ranges.winRate) +
-        w.rewardRisk * norm(r.reward_to_risk_bp, ranges.rewardRisk) +
+        // A NEVER-LOST ROW IS UNTESTED, NOT MIDDLING. `/frontier.json` sends
+        // `null` here only for `i64::MAX`, the cell with no losing trade, and
+        // `cli::ranked` demotes exactly that sentinel to last in all four
+        // server ranking keys. The midpoint put it above every measured row in
+        // the lower half, against the `rank` this sort breaks ties on. D-2750.
+        w.rewardRisk * (r.reward_to_risk_bp === null ? 0 : norm(r.reward_to_risk_bp, ranges.rewardRisk)) +
         w.avgWin * norm(r.avg_win, ranges.avgWin) +
         w.avgLoss * norm(r.avg_loss, ranges.avgLoss);
       return { ...r, score };
