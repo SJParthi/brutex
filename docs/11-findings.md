@@ -809,3 +809,6 @@ is unchanged.
   for the superseded Step-3 V1-V4 modules or a place for Benjamini-Hochberg,
   the V1 walk-forward overfit rate, the V3 walk-forward door or the V2/V3
   admission projections in the live chain (D-1568, D-1544 stand).
+- **h-pull-1**: fixed. The lake reader reads the converted type as well as
+  the logical type; a legacy `TIMESTAMP_MILLIS` timestamp and a non-signed
+  integer annotation are refused by name. D-2270, AHC-01.

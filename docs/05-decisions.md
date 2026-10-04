@@ -56799,3 +56799,49 @@ wrote nothing), requires the file to be byte-identical (or, for a cut
 Completion, to hold only the whole Data), and requires the next append to
 land whole. The recovery-journal test now requires the reopened crash image
 to hold the old prefix.
+
+### D-2270 — The lake reader reads the converted type as well as the logical type — 2026-10-04
+
+**What was wrong (h-pull-1).** D-1528 refused a `timestamp` leaf whose
+LOGICAL type is not UTC microseconds. A legacy writer (parquet-mr, older
+pyarrow) declares the unit with the CONVERTED type alone, and `parquet` 59.2
+keeps the two apart on read (`schema/types.rs` 1346-1349): it never turns a
+converted type into a logical type. So a leaf carrying only
+`TIMESTAMP_MILLIS` reached the check as "no logical type", was accepted, and
+its milliseconds decoded as microseconds: every stamp 1000x too small, in
+January 1970, with no refusal. The integer columns (`volume`,
+`open_interest`, `greeks_provenance_id`) had no annotation check at all: an
+unsigned 64-bit annotation reads a value past `i64::MAX` as negative, and a
+DECIMAL, DATE, TIME or TIMESTAMP annotation is another quantity under the
+right name.
+
+**The change.** `lake::schema::detect` reads `converted_type()` beside the
+logical type. A `timestamp` leaf is accepted only with converted type `NONE`
+or `TIMESTAMP_MICROS` (the legacy spelling of UTC microseconds) on top of
+D-1528's logical rule; anything else is `LakeError::UnsupportedTimestamp`,
+naming the converted type. An integer column is accepted only with no
+logical type or a signed `Integer`, and converted type `NONE` or a signed
+`INT_*`; anything else is the new `LakeError::UnsupportedIntegerAnnotation`,
+naming the column and both annotations. Each refusal also writes one
+`note_shape` line, once per file. Double columns are unchanged: `parquet`
+refuses every converted type on a DOUBLE when it builds the schema, and the
+only logical types it lets annotate one (`Unknown` and an unrecognised one)
+change no decode.
+
+**Disagreeing annotations and INT96.** A logical type and a converted type
+that disagree (logical MICROS UTC, converted MILLIS) are refused by `parquet`
+itself when it builds the schema, so the file never opens; the test pins that.
+Were that to change, the converted check here still refuses anything but
+`NONE` or `TIMESTAMP_MICROS`. INT96, the other physical encoding of a
+timestamp, is not INT64 and was already `ColumnTypeMismatch`; now pinned.
+
+**What changes.** A file that opened before and is now refused is one that
+was being misread. A file with no annotation, or with the annotations a
+current writer emits for UTC microseconds and signed integers, opens exactly
+as before and decodes to the same bars. Whether the real lake declares any
+legacy converted type is UNVERIFIED in this tree; the ignored real-lake scan
+`no_real_lake_file_triggers_either_defect` is where it would show. O(1) per
+file: two more reads of a schema leaf per column, over a fixed 7 or 17
+columns.
+
+**What it proves.** AHC-01.

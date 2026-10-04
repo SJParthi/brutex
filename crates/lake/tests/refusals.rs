@@ -1512,3 +1512,246 @@ fn a_timestamp_in_another_unit_or_not_in_utc_is_refused_by_name() {
         );
     }
 }
+
+/// One cash file whose leaf `leaf` is declared with `physical`, `converted`
+/// and `logical`, three rows. Every other leaf is plain.
+///
+/// The parquet writer records exactly what it is handed: a leaf given only a
+/// converted type is written with no logical type, which is what a legacy
+/// writer (parquet-mr, older pyarrow) emits.
+fn cash_file_annotated(
+    leaf: &str,
+    physical: PhysicalType,
+    converted: parquet::basic::ConvertedType,
+    mut logical: Option<parquet::basic::LogicalType>,
+) -> Vec<u8> {
+    let mut fields: Vec<Arc<Type>> = Vec::new();
+    for (name, ty) in CASH {
+        let mut built =
+            Type::primitive_type_builder(name, ty).with_repetition(Repetition::OPTIONAL);
+        if name == leaf {
+            built = Type::primitive_type_builder(name, physical)
+                .with_repetition(Repetition::OPTIONAL)
+                .with_converted_type(converted)
+                .with_logical_type(logical.take());
+        }
+        fields.push(Arc::new(built.build().expect("leaf")));
+    }
+    let schema = Arc::new(
+        Type::group_type_builder("schema")
+            .with_fields(fields)
+            .build()
+            .expect("schema"),
+    );
+    let props = Arc::new(
+        WriterProperties::builder()
+            .set_compression(Compression::UNCOMPRESSED)
+            .build(),
+    );
+    let mut out: Vec<u8> = Vec::new();
+    {
+        let mut writer = SerializedFileWriter::new(&mut out, schema, props).expect("writer");
+        let mut group = writer.next_row_group().expect("row group");
+        while let Some(mut column) = group.next_column().expect("column") {
+            match column.untyped() {
+                ColumnWriter::Int64ColumnWriter(typed) => {
+                    // 2024-01-01 09:15 IST in MILLISECONDS, then two more.
+                    typed
+                        .write_batch(
+                            &[1_704_080_700_000_i64, 1_704_080_760_000, 1_704_080_820_000],
+                            Some(&[1, 1, 1]),
+                            None,
+                        )
+                        .expect("i64");
+                }
+                ColumnWriter::DoubleColumnWriter(typed) => {
+                    typed
+                        .write_batch(&[1.0_f64, 2.0, 3.0], Some(&[1, 1, 1]), None)
+                        .expect("f64");
+                }
+                ColumnWriter::Int96ColumnWriter(typed) => {
+                    let one = parquet::data_type::Int96::from(vec![1_u32, 2, 3]);
+                    typed
+                        .write_batch(&[one, one, one], Some(&[1, 1, 1]), None)
+                        .expect("i96");
+                }
+                ColumnWriter::Int32ColumnWriter(typed) => {
+                    typed
+                        .write_batch(&[1_i32, 2, 3], Some(&[1, 1, 1]), None)
+                        .expect("i32");
+                }
+                _ => panic!("this fixture writes no other physical type"),
+            }
+            column.close().expect("close column");
+        }
+        group.close().expect("close row group");
+        writer.close().expect("close writer");
+    }
+    out
+}
+
+/// audit-20261004 h-pull-1 (D-2270). D-1528 read only the LOGICAL type, so a
+/// `timestamp` leaf carrying only the legacy CONVERTED type `TIMESTAMP_MILLIS`
+/// opened, and its milliseconds decoded as microseconds: 1000x too small,
+/// January 1970, no refusal. Every converted type but `NONE` and
+/// `TIMESTAMP_MICROS` is now refused by name, a logical type that disagrees
+/// with its converted type is refused, and an INT96 timestamp still fails the
+/// physical-type check.
+#[test]
+fn a_timestamp_declared_only_by_a_legacy_converted_type_is_refused_unless_it_is_micros() {
+    use parquet::basic::{ConvertedType, LogicalType, TimeUnit};
+
+    let millis = cash_file_annotated(
+        "timestamp",
+        PhysicalType::INT64,
+        ConvertedType::TIMESTAMP_MILLIS,
+        None,
+    );
+    match LakeFile::from_bytes(millis) {
+        Err(LakeError::UnsupportedTimestamp { declared }) => {
+            assert!(declared.contains("TIMESTAMP_MILLIS"), "{declared}");
+        }
+        Err(other) => panic!("refused as the wrong thing: {other:?}"),
+        Ok(_) => panic!("a MILLIS timestamp opened and would decode as micros"),
+    }
+    // Every other converted type parquet lets annotate an INT64 means
+    // something this reader does not decode as a UTC microsecond.
+    for other in [
+        ConvertedType::INT_64,
+        ConvertedType::UINT_64,
+        ConvertedType::TIME_MICROS,
+    ] {
+        match LakeFile::from_bytes(cash_file_annotated(
+            "timestamp",
+            PhysicalType::INT64,
+            other,
+            None,
+        )) {
+            Err(LakeError::UnsupportedTimestamp { declared }) => {
+                assert!(declared.contains(&other.to_string()), "{declared}");
+            }
+            Err(wrong) => panic!("{other}: refused as the wrong thing: {wrong:?}"),
+            Ok(_) => panic!("{other}: a timestamp this reader would misread was opened"),
+        }
+    }
+    // The legacy spelling of what the reader decodes still opens, and so do
+    // the two spellings D-1528 already accepted.
+    for (converted, logical) in [
+        (ConvertedType::TIMESTAMP_MICROS, None),
+        (ConvertedType::NONE, None),
+        (
+            ConvertedType::TIMESTAMP_MICROS,
+            Some(LogicalType::timestamp(true, TimeUnit::MICROS)),
+        ),
+    ] {
+        assert!(
+            LakeFile::from_bytes(cash_file_annotated(
+                "timestamp",
+                PhysicalType::INT64,
+                converted,
+                logical.clone(),
+            ))
+            .is_ok(),
+            "{converted} {logical:?} is what this reader decodes"
+        );
+    }
+    // A logical MICROS (UTC) leaf whose converted type was rewritten to
+    // MILLIS: the two disagree, and the file never opens.
+    let disagreeing = patch_footer(
+        &cash_file_annotated(
+            "timestamp",
+            PhysicalType::INT64,
+            ConvertedType::NONE,
+            Some(LogicalType::timestamp(true, TimeUnit::MICROS)),
+        ),
+        |meta| {
+            meta.schema[1].converted_type =
+                Some(parquet_format_safe::ConvertedType::TIMESTAMP_MILLIS);
+        },
+    );
+    assert!(
+        LakeFile::from_bytes(disagreeing).is_err(),
+        "a logical MICROS with a converted MILLIS is refused"
+    );
+    // INT96, the other physical encoding of a timestamp, is not INT64.
+    match LakeFile::from_bytes(cash_file_annotated(
+        "timestamp",
+        PhysicalType::INT96,
+        ConvertedType::NONE,
+        None,
+    )) {
+        Err(LakeError::ColumnTypeMismatch { name, .. }) => assert_eq!(name, "timestamp"),
+        Err(other) => panic!("INT96 refused as the wrong thing: {other:?}"),
+        Ok(_) => panic!("an INT96 timestamp opened"),
+    }
+}
+
+/// audit-20261004 h-pull-1 (D-2270). The integer count columns had no
+/// annotation check at all: an unsigned 64-bit `volume` reads values past
+/// `i64::MAX` as negative, and a DECIMAL or TIME annotation is a different
+/// quantity under the right name. Only a signed integer annotation, or none,
+/// decodes as the plain integer the reader returns.
+#[test]
+fn an_integer_column_annotated_as_anything_but_a_signed_integer_is_refused_by_name() {
+    use parquet::basic::{ConvertedType, LogicalType};
+
+    for (leaf, converted, logical, said) in [
+        ("volume", ConvertedType::UINT_64, None, "UINT_64"),
+        (
+            "open_interest",
+            ConvertedType::TIME_MICROS,
+            None,
+            "TIME_MICROS",
+        ),
+        (
+            "volume",
+            ConvertedType::TIMESTAMP_MICROS,
+            None,
+            "TIMESTAMP_MICROS",
+        ),
+        (
+            "open_interest",
+            ConvertedType::NONE,
+            Some(LogicalType::integer(64, false)),
+            "is_signed: false",
+        ),
+        (
+            "volume",
+            ConvertedType::NONE,
+            Some(LogicalType::Unknown),
+            "Unknown",
+        ),
+    ] {
+        match LakeFile::from_bytes(cash_file_annotated(
+            leaf,
+            PhysicalType::INT64,
+            converted,
+            logical.clone(),
+        )) {
+            Err(LakeError::UnsupportedIntegerAnnotation { name, declared }) => {
+                assert_eq!(name, leaf, "{said}");
+                assert!(declared.contains(said), "{said}: {declared}");
+            }
+            Err(other) => panic!("{said}: refused as the wrong thing: {other:?}"),
+            Ok(_) => panic!("{said}: an integer column this reader would misread was opened"),
+        }
+    }
+    for (converted, logical) in [
+        (ConvertedType::NONE, None),
+        (ConvertedType::INT_64, None),
+        (ConvertedType::NONE, Some(LogicalType::integer(64, true))),
+    ] {
+        for leaf in ["volume", "open_interest"] {
+            assert!(
+                LakeFile::from_bytes(cash_file_annotated(
+                    leaf,
+                    PhysicalType::INT64,
+                    converted,
+                    logical.clone(),
+                ))
+                .is_ok(),
+                "{leaf} {converted} {logical:?} decodes as a signed integer"
+            );
+        }
+    }
+}
