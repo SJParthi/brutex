@@ -1175,9 +1175,12 @@ fn auto_stored_arm(
         to_m.parse::<u8>(),
     );
     let (Ok(fy), Ok(fm), Ok(ty), Ok(tm)) = parsed else {
-        out.push_str("refused: FROM_Y FROM_M TO_Y TO_M must all be whole numbers\n");
-        return MISUSED;
+        return refuse(out, "FROM_Y FROM_M TO_Y TO_M must all be whole numbers");
     };
+    let span = ((fy, fm), (ty, tm));
+    if let Err(why) = stored_words(vendor, Some(underlying), Some(rung), Some(span)) {
+        return refuse(out, &why);
+    }
     let text = auto_stored(vendor, underlying, rung, (fy, fm), (ty, tm));
     let code = auto_stored_exit(&text);
     out.push_str(&text);
@@ -1191,11 +1194,11 @@ fn auto_stored_arm(
 /// [`carries_refusal`] alone and exited 0 on it, so `run_durable` wrote
 /// `Phase::Completed` for the same invocation and two durable records of one
 /// run disagreed. [`untrustworthy`] reads the verdict row the evidence's own
-/// predicate prints (P8-01, D-2720).
+/// predicate prints (P8-01, D-2720). A refusal is the work's, because the
+/// arguments were checked before it ran, so it is [`FAILED`] too (P8-03,
+/// D-2722).
 fn auto_stored_exit(text: &str) -> u8 {
-    if carries_refusal(text) {
-        MISUSED
-    } else if untrustworthy(text) {
+    if carries_refusal(text) || untrustworthy(text) {
         FAILED
     } else {
         OK
@@ -1337,11 +1340,15 @@ fn elite_arm(
             // parser was the one caller left on the constant. It reads the
             // reference off the span it is about to sweep, so nothing here
             // needs to know a price.
+            let span = ((fy, fm), (ty, tm));
+            if let Err(why) = stored_words(vendor, Some(underlying), Some(rung), Some(span)) {
+                return refuse(out, &why);
+            }
             let text =
                 elite_descend_in_points(vendor, underlying, rung, (fy, fm), (ty, tm), pts, n);
-            let refused = carries_refusal(&text);
+            let code = work_exit(&text);
             out.push_str(&text);
-            if refused { MISUSED } else { OK }
+            code
         }
         ((Err(_), _, _, _) | (_, _, Err(_), _), _) => {
             refuse(out, "FROM_YEAR and TO_YEAR must be whole years")
@@ -1411,10 +1418,14 @@ fn screen_arm(
             // already does. This read `points_to_ppm(pts)` -- a hardcoded
             // 25,000 -- so `screen NIFTY 20` and `screen SOMESTOCK 20` printed
             // the same number and asked for stops 167 times apart.
-            let reference = match reference_of_span(vendor, underlying, rung, ((fy, fm), (ty, tm)))
-            {
+            let span = ((fy, fm), (ty, tm));
+            if let Err(why) = stored_words(vendor, Some(underlying), Some(rung), Some(span)) {
+                return refuse(out, &why);
+            }
+            // The bars this reads are the WORK's, so a refusal here is too.
+            let reference = match reference_of_span(vendor, underlying, rung, span) {
                 Ok(price) => price,
-                Err(why) => return refuse(out, why.trim_start_matches("refused: ").trim_end()),
+                Err(why) => return fail(out, why.trim_start_matches("refused: ").trim_end()),
             };
             let ceiling_ppm = match ceiling_in_ppm(pts, reference) {
                 Ok(ppm) => ppm,
@@ -1472,9 +1483,9 @@ fn screen_arm(
                     validate: validate_from_env(),
                 },
             );
-            let refused = carries_refusal(&text);
+            let code = work_exit(&text);
             out.push_str(&text);
-            if refused { MISUSED } else { OK }
+            code
         }
         ((Err(_), _, _, _, _) | (_, _, Err(_), _, _), _) => {
             refuse(out, "YEAR must be a number like 2026")
@@ -1663,10 +1674,13 @@ fn pool_arm(
         parse_support_choice(support_ppm),
     ) {
         (Ok(fy), Ok(fm), Ok(ty), Ok(tm), Ok(h)) if (fy, fm) <= (ty, tm) => {
+            if let Err(why) = stored_words(vendor, None, Some(known), Some(((fy, fm), (ty, tm)))) {
+                return refuse(out, &why);
+            }
             let text = pool::pool(vendor, known, (fy, fm), (ty, tm), h);
-            let refused = carries_refusal(&text);
+            let code = work_exit(&text);
             out.push_str(&text);
-            if refused { MISUSED } else { OK }
+            code
         }
         (Ok(fy), Ok(fm), Ok(ty), Ok(tm), Ok(_)) => refuse(
             out,
@@ -1686,10 +1700,13 @@ fn pool_arm(
 fn sweep_all_arm(out: &mut String, vendor: &str, rung: &str, min_hits: &str) -> u8 {
     match parse_min_hits(min_hits) {
         Ok(h) => {
+            if let Err(why) = stored_words(vendor, None, Some(rung), None) {
+                return refuse(out, &why);
+            }
             let text = batch::sweep_all(vendor, rung, h);
-            let refused = carries_refusal(&text);
+            let code = work_exit(&text);
             out.push_str(&text);
-            if refused { MISUSED } else { OK }
+            code
         }
         Err(why) => refuse(out, why),
     }
@@ -1738,10 +1755,14 @@ fn descend_arm(
                      would sweep every combination that fires even once.",
                 );
             }
+            let span = ((fy, fm), (ty, tm));
+            if let Err(why) = stored_words(vendor, Some(underlying), Some(rung), Some(span)) {
+                return refuse(out, &why);
+            }
             let text = descend(vendor, underlying, rung, (fy, fm), (ty, tm), h, w);
-            let refused = carries_refusal(&text);
+            let code = work_exit(&text);
             out.push_str(&text);
-            if refused { MISUSED } else { OK }
+            code
         }
         // `parse_cadence`'s own sentence, which names every spelling it
         // accepts. This arm discarded it and said PER_WEEK must be a whole
@@ -1816,10 +1837,14 @@ fn range_rung_arm(
         parse_support_choice(support_ppm),
     ) {
         (Ok(fy), Ok(fm), Ok(ty), Ok(tm), Ok(h)) => {
+            let span = ((fy, fm), (ty, tm));
+            if let Err(why) = stored_words(vendor, Some(underlying), Some(known), Some(span)) {
+                return refuse(out, &why);
+            }
             let text = range_over(vendor, underlying, &[known], (fy, fm), (ty, tm), h);
-            let refused = carries_refusal(&text);
+            let code = work_exit(&text);
             out.push_str(&text);
-            if refused { MISUSED } else { OK }
+            code
         }
         (Err(_), _, _, _, _) | (_, _, Err(_), _, _) => {
             refuse(out, "YEAR must be a number like 2026")
@@ -1849,10 +1874,14 @@ fn range_all_arm(
             // `None`, which `one_rung` reads as "derive this rung's threshold
             // from its own bars" -- the path that was live on the HTTP surface
             // and unreachable from the command line.
+            let span = ((fy, fm), (ty, tm));
+            if let Err(why) = stored_words(vendor, Some(underlying), None, Some(span)) {
+                return refuse(out, &why);
+            }
             let text = range_all(vendor, underlying, (fy, fm), (ty, tm), h);
-            let refused = carries_refusal(&text);
+            let code = work_exit(&text);
             out.push_str(&text);
-            if refused { MISUSED } else { OK }
+            code
         }
         (Err(_), _, _, _, _) | (_, _, Err(_), _, _) => {
             refuse(out, "YEAR must be a number like 2026")
@@ -1888,10 +1917,15 @@ fn stored_month_arm(
         parse_min_hits(min_hits),
     ) {
         (Ok(y), Ok(m), Ok(h)) => {
+            if let Err(why) =
+                stored_words(vendor, Some(underlying), Some(rung), Some(((y, m), (y, m))))
+            {
+                return refuse(out, &why);
+            }
             let text = command(vendor, underlying, rung, y, m, h);
-            let refused = carries_refusal(&text);
+            let code = work_exit(&text);
             out.push_str(&text);
-            if refused { MISUSED } else { OK }
+            code
         }
         (Err(_), _, _) => refuse(out, "YEAR must be a number like 2026"),
         (_, Err(_), _) => refuse(out, "MONTH must be 1..=12"),
@@ -1933,6 +1967,9 @@ fn ledger_all_arm(
         limits.1.parse::<u64>(),
     ) {
         (Ok(fy), Ok(fm), Ok(ty), Ok(tm), Ok(support_ppm), Ok(max_points)) if max_points > 0 => {
+            if let Err(why) = stored_words(vendor, None, None, Some(((fy, fm), (ty, tm)))) {
+                return refuse(out, &why);
+            }
             let request = ledger_all::LedgerAllRequest {
                 vendor,
                 from: (fy, fm),
@@ -1946,9 +1983,9 @@ fn ledger_all_arm(
             } else {
                 ledger_all::ledger_all(&request)
             };
-            let refused = carries_refusal(&text);
+            let code = work_exit(&text);
             out.push_str(&text);
-            if refused { MISUSED } else { OK }
+            code
         }
         (Err(_), _, _, _, _, _) | (_, _, Err(_), _, _, _) => {
             refuse(out, "YEAR must be a number like 2026")
@@ -2012,14 +2049,15 @@ fn ledger_replay_arm(out: &mut String, args: &[&str]) -> u8 {
             (year(oty)?, month(otm)?),
         ))
     })();
+    let parsed = parsed.and_then(|(request, from, to)| {
+        stored_words(vendor, None, None, Some((request.from, request.to)))?;
+        stored_words(vendor, None, None, Some((from, to)))?;
+        Ok((request, from, to))
+    });
     match parsed {
         Ok((request, from, to)) => {
             let report = ledger_v6::ledger_v6_replay(&request, from, to);
-            let status = if carries_refusal(&report) {
-                MISUSED
-            } else {
-                OK
-            };
+            let status = work_exit(&report);
             out.push_str(&report);
             status
         }
@@ -2056,10 +2094,14 @@ fn audit_range_arm(
         parse_min_hits(min_hits),
     ) {
         (Ok(fy), Ok(fm), Ok(ty), Ok(tm), Ok(h)) => {
+            let span = ((fy, fm), (ty, tm));
+            if let Err(why) = stored_words(vendor, Some(underlying), Some(rung), Some(span)) {
+                return refuse(out, &why);
+            }
             let text = audit_range(vendor, underlying, rung, (fy, fm), (ty, tm), h);
-            let refused = carries_refusal(&text);
+            let code = work_exit(&text);
             out.push_str(&text);
-            if refused { MISUSED } else { OK }
+            code
         }
         (Err(_), _, _, _, _) | (_, _, Err(_), _, _) => {
             refuse(out, "YEAR must be a number like 2026")
@@ -2474,6 +2516,65 @@ fn refuse(out: &mut String, why: &str) -> u8 {
     out.push('\n');
     out.push_str(USAGE);
     MISUSED
+}
+
+/// Writes a named refusal of the WORK, without the usage, and returns
+/// [`FAILED`].
+///
+/// # Which of the two codes, and why most commands had it backwards
+///
+/// [`MISUSED`] is "asked for something it does not understand": an unknown
+/// word, a malformed argument. [`FAILED`] is "asked for something reasonable
+/// and could not do it". Most stored commands exited `MISUSED` for every
+/// refusal their work produced -- a month absent from the store, an unstamped
+/// build, a ledger write that failed -- and the boolean and expression commands
+/// printed the whole usage under an I/O failure, while `command_report`
+/// exited `FAILED` for a malformed number. A script could not tell "fix your
+/// arguments" from "the store or the build could not do it", which is the one
+/// distinction the two codes exist to make (P8-03, D-2722).
+///
+/// So every argument is checked first, by [`refuse`]; what is refused after
+/// that is the work's, and it comes here.
+pub(crate) fn fail(out: &mut String, why: &str) -> u8 {
+    out.push_str("refused: ");
+    out.push_str(why);
+    out.push('\n');
+    FAILED
+}
+
+/// The exit code of a page produced by work whose arguments were understood:
+/// [`FAILED`] when it carries a refusal, [`OK`] otherwise (P8-03, D-2722).
+fn work_exit(text: &str) -> u8 {
+    if carries_refusal(text) { FAILED } else { OK }
+}
+
+/// The words of a stored request, checked before the build, the store or the
+/// clock is consulted: a feed this build knows, an instrument the engine
+/// sweeps, a rung it sweeps, and a span of real months in order.
+///
+/// Each check is the one the command's own work applies -- [`parse_vendor`],
+/// [`stored::swept_index`], [`swept_rung`] and [`stored::months_between`] --
+/// so nothing new is refused. What changes is WHEN, and therefore the code: a
+/// word that names nothing is the operator's to fix and exits [`MISUSED`] with
+/// the usage, before any work can refuse for a reason of its own (P8-03,
+/// D-2722).
+pub(crate) fn stored_words(
+    vendor: &str,
+    underlying: Option<&str>,
+    rung: Option<&str>,
+    span: Option<((u16, u8), (u16, u8))>,
+) -> Result<(), stored::Refusal> {
+    parse_vendor(vendor)?;
+    if let Some(underlying) = underlying {
+        stored::swept_index(underlying)?;
+    }
+    if let Some(rung) = rung {
+        swept_rung(rung)?;
+    }
+    if let Some((from, to)) = span {
+        stored::months_between(from, to)?;
+    }
+    Ok(())
 }
 
 /// Sessions must be at least one and at most ten years of them.
@@ -3303,15 +3404,52 @@ pub fn sweep_stored(
     }
 }
 
-fn command_report(out: &mut String, result: Result<String, String>, label: &str) -> u8 {
+/// Why a command that renders one report did not, and whose it is to fix.
+///
+/// `command_report` exited [`FAILED`] for every refusal, so a malformed number
+/// in `checksum-audit-stored` read as a store that could not do the work. The
+/// producers now say which it was (P8-03, D-2722).
+#[derive(Debug, PartialEq, Eq)]
+pub enum Refused {
+    /// An argument this build does not understand: [`MISUSED`], with the usage.
+    Arguments(String),
+    /// The arguments were understood and the work could not be done: [`FAILED`].
+    Work(String),
+}
+
+/// A refusal of the work is the default, so `?` on a work step needs no
+/// mapping and only an argument check has to say so.
+impl From<String> for Refused {
+    fn from(why: String) -> Self {
+        Self::Work(why)
+    }
+}
+
+impl From<&str> for Refused {
+    fn from(why: &str) -> Self {
+        Self::Work(why.to_owned())
+    }
+}
+
+/// An argument check's refusal, for `map_err`.
+pub(crate) fn misused(why: impl std::fmt::Display) -> Refused {
+    Refused::Arguments(why.to_string())
+}
+
+fn command_report(out: &mut String, result: Result<String, Refused>, label: &str) -> u8 {
     match result {
         Ok(report) => {
             out.push_str(&report);
             OK
         }
-        Err(why) => {
+        Err(Refused::Work(why)) => {
             let _ = writeln!(out, "{label} REFUSED: {why}");
             FAILED
+        }
+        Err(Refused::Arguments(why)) => {
+            let _ = writeln!(out, "{label} REFUSED: {why}");
+            out.push_str(USAGE);
+            MISUSED
         }
     }
 }
@@ -3344,7 +3482,7 @@ struct StoredSweepRequest<'a> {
     commit: &'static str,
 }
 
-fn sweep_audited_stored(arguments: &[&str]) -> Result<String, String> {
+fn sweep_audited_stored(arguments: &[&str]) -> Result<String, Refused> {
     let [
         feed,
         underlying,
@@ -3357,15 +3495,25 @@ fn sweep_audited_stored(arguments: &[&str]) -> Result<String, String> {
         max_records,
     ] = arguments
     else {
-        return Err("audited sweep requires nine arguments".to_owned());
+        return Err(misused("audited sweep requires nine arguments"));
     };
-    swept_rung(rung)?;
+    // EVERY ARGUMENT BEFORE THE BUILD OR THE STORE, so a malformed one is
+    // `MISUSED` and a refusal after them is the work's (P8-03, D-2722).
+    let year = year.parse::<u16>().map_err(misused)?;
+    let month = month.parse::<u8>().map_err(misused)?;
+    let min_hits = parse_min_hits(min_hits).map_err(misused)?;
+    let max_bytes = max_bytes.parse::<u64>().map_err(misused)?;
+    let max_records = max_records.parse::<u64>().map_err(misused)?;
+    stored_words(
+        feed,
+        Some(underlying),
+        Some(rung),
+        Some(((year, month), (year, month))),
+    )
+    .map_err(misused)?;
+    let vendor = parse_vendor(feed).map_err(misused)?;
     let commit = commit_stamp().ok_or("audited sweep requires verified clean build provenance")?;
-    let vendor = parse_vendor(feed)?;
     let root = store_root()?;
-    let year = year.parse::<u16>().map_err(|why| why.to_string())?;
-    let month = month.parse::<u8>().map_err(|why| why.to_string())?;
-    let min_hits = parse_min_hits(min_hits)?;
     let inputs = audited_stored::Inputs::load(audited_stored::Request {
         store_root: &root,
         vendor,
@@ -3374,10 +3522,10 @@ fn sweep_audited_stored(arguments: &[&str]) -> Result<String, String> {
         year,
         month,
         receipt_root: std::path::Path::new(receipt_root),
-        max_bytes: max_bytes.parse::<u64>().map_err(|why| why.to_string())?,
-        max_records: max_records.parse::<u64>().map_err(|why| why.to_string())?,
+        max_bytes,
+        max_records,
     })?;
-    stored_month_kernel(
+    Ok(stored_month_kernel(
         StoredSweepRequest {
             root,
             vendor,
@@ -3390,7 +3538,7 @@ fn sweep_audited_stored(arguments: &[&str]) -> Result<String, String> {
         },
         inputs.data(),
         Some(&inputs),
-    )
+    )?)
 }
 
 /// [`sweep_stored`]'s ordinary input loader, retaining the legacy identity.
@@ -21373,6 +21521,204 @@ mod tests {
         assert!(super::Rules::protective_exits_required());
         assert!(crate::knobs::refused().is_some());
         crate::knobs::clear_all();
+    }
+
+    /// A MALFORMED ARGUMENT EXITS 2 WITH THE USAGE; A REFUSED JOB EXITS 1 WITHOUT IT.
+    /// P8-03, D-2722.
+    ///
+    /// `MISUSED` is documented as "does not understand" and `FAILED` as "could
+    /// not do it". The stored, boolean, expression and research commands
+    /// exited `MISUSED` (most with the whole usage) for every refusal their work
+    /// produced, and `checksum-audit-stored` exited `FAILED` for `x` as a year.
+    /// Each case below is one command's argument refusal and one of its work
+    /// refusals. Year 1999 is a month no feed holds, so the work refuses
+    /// whatever the build or the store: an unstamped build, an absent store
+    /// root and an absent month are all the work's.
+    #[test]
+    fn a_malformed_argument_exits_misused_and_a_refused_job_exits_failed() {
+        let scratch = std::env::temp_dir().join(format!("brutex-p8-03-{}", std::process::id()));
+        let output = scratch.join("out");
+        let catalog = scratch.join("absent-catalog.txt");
+        let (output, catalog) = (
+            output.to_string_lossy().into_owned(),
+            catalog.to_string_lossy().into_owned(),
+        );
+        let misused: &[&[&str]] = &[
+            &[
+                "sweep-stored",
+                "nosuchfeed",
+                "NIFTY",
+                "1min",
+                "2026",
+                "1",
+                "10",
+            ],
+            &[
+                "audit-stored",
+                "zerodha",
+                "NOSUCH",
+                "1min",
+                "2026",
+                "1",
+                "10",
+            ],
+            &[
+                "sweep-stored",
+                "zerodha",
+                "NIFTY",
+                "1day",
+                "2026",
+                "1",
+                "10",
+            ],
+            &[
+                "audit-range",
+                "zerodha",
+                "NIFTY",
+                "60min",
+                "2026",
+                "8",
+                "2019",
+                "12",
+                "10",
+            ],
+            &[
+                "checksum-audit-stored",
+                "zerodha",
+                "NIFTY",
+                "1min",
+                "x",
+                "1",
+                "/r",
+                "10",
+            ],
+            &[
+                "sweep-audited-stored",
+                "zerodha",
+                "NIFTY",
+                "1min",
+                "2026",
+                "13",
+                "10",
+                "/r",
+                "1",
+                "1",
+            ],
+            &[
+                "expression-stored",
+                "nosuchfeed",
+                "NIFTY",
+                "1min",
+                "2026",
+                "1",
+                "0",
+            ],
+            &["research-plan", "nosuchfeed"],
+            &[
+                "boolean-catalog-stored",
+                "nosuchfeed",
+                "NIFTY",
+                "60min",
+                "2025",
+                "1",
+                "2025",
+                "2",
+                &catalog,
+                "60",
+                "100",
+                &output,
+            ],
+        ];
+        for words in misused {
+            let mut out = String::new();
+            let code = super::dispatch(&argv(words), &mut out);
+            assert_eq!(code, MISUSED, "{words:?}:\n{out}");
+            assert!(
+                out.contains(USAGE),
+                "a malformed argument gets the usage: {words:?}"
+            );
+        }
+        let failed: &[&[&str]] = &[
+            &[
+                "sweep-stored",
+                "zerodha",
+                "NIFTY",
+                "1min",
+                "1999",
+                "1",
+                "10",
+            ],
+            &[
+                "audit-range",
+                "zerodha",
+                "NIFTY",
+                "60min",
+                "1999",
+                "1",
+                "1999",
+                "2",
+                "10",
+            ],
+            &[
+                "checksum-audit-stored",
+                "zerodha",
+                "NIFTY",
+                "1min",
+                "1999",
+                "1",
+                &output,
+                "10",
+            ],
+            &[
+                "expression-stored",
+                "zerodha",
+                "NIFTY",
+                "1min",
+                "1999",
+                "1",
+                "0",
+            ],
+            &[
+                "expression-search-stored",
+                "zerodha",
+                "NIFTY",
+                "1min",
+                "1999",
+                "1",
+                "all",
+                "1",
+                "1",
+                "1",
+            ],
+            &[
+                "boolean-catalog-stored",
+                "zerodha",
+                "NIFTY",
+                "60min",
+                "1999",
+                "1",
+                "1999",
+                "2",
+                &catalog,
+                "60",
+                "100",
+                &output,
+            ],
+        ];
+        for words in failed {
+            let mut out = String::new();
+            let code = super::dispatch(&argv(words), &mut out);
+            assert_eq!(code, FAILED, "{words:?}:\n{out}");
+            assert!(
+                !out.contains(USAGE),
+                "a refused job is not a usage error: {words:?}\n{out}"
+            );
+            assert!(
+                out.contains("REFUSED") || carries_refusal(&out),
+                "{words:?}:\n{out}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 
     /// OPERATOR TEXT NAMES ONLY RUNGS AND COMMANDS THIS BINARY ACCEPTS. P8-05, D-2724.

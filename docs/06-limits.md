@@ -9530,13 +9530,15 @@ by `File::unlock`. What that does not cover, stated rather than implied away:
   reaches it only through `pool_arm`, which hands `pool::pool` a rung only
   after finding it among `EVERY_RUNG`'s entries, and `swept_rung` accepts
   every one of those, so the verb never reaches that refusal. The other ten
-  are `sweep_audited_stored`, `sweep_stored_inner`, `auto_stored_inner`,
+  are `stored_words`, `sweep_stored_inner`, `auto_stored_inner`,
   `audit_stored_inner`, `audit_range_inner` and `screen_range_inner` in
   `lib.rs`, and one each in `audited_stored.rs`, `audited_range.rs`,
   `expression.rs` and `expression_search.rs`. Each of those takes the rung it
-  checks as a parameter or a field of one, except `sweep_audited_stored`,
-  which takes it from the `sweep-audited-stored` command's own argument
-  list; the chains above them were not all followed to their end. `batch.rs`
+  checks as a parameter or a field of one; `stored_words` takes it as an
+  optional parameter, and `sweep_audited_stored`, which called `swept_rung`
+  on the `sweep-audited-stored` command's own rung word until D-2722, now
+  hands that word to `stored_words` instead. The chains above them were not
+  all followed to their end. `batch.rs`
   has a `swept_rung` of its own that quotes raw too, but only a word
   `stored::rung` has already accepted as a stored rung reaches that quote.
 

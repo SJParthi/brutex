@@ -668,7 +668,7 @@ fn generated_public_command_flow(root: &std::path::Path) -> Result<(), Box<dyn s
         let mut report = String::new();
         let status = crate::dispatch(&args, &mut report);
         if crate::commit_stamp().is_none() {
-            assert_eq!(status, crate::MISUSED, "{report}");
+            assert_eq!(status, crate::FAILED, "{report}");
             assert!(report.contains("no verified commit stamp"), "{report}");
             assert!(!report.contains(crate::STORED_PROVENANCE), "{report}");
             assert!(!crate::results::Results::path(root).exists());

@@ -615,7 +615,7 @@ fn the_raw_quote_limit_counts_and_names_every_call_of_swept_rung() {
             "rung" if call.function == "sweep_audited_stored" => {
                 call.lead.contains("        rung,\n") && call.lead.contains("] = arguments\n")
             }
-            "rung" => signature.contains("rung: &"),
+            "rung" => signature.contains("rung: &") || signature.contains("rung: Option<&"),
             "request.rung" => signature.contains("(request: "),
             "args.rung" => signature.contains("(args: &"),
             _ => false,

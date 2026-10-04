@@ -2408,10 +2408,13 @@ mod tests {
         assert!(
             arm.contains(concat!(
                 "        (Ok(fy), Ok(fm), Ok(ty), Ok(tm), Ok(h)) if (fy, fm) <= (ty, tm) => {\n",
+                "            if let Err(why) = stored_words(vendor, None, Some(known), Some(((fy, fm), (ty, tm)))) {\n",
+                "                return refuse(out, &why);\n",
+                "            }\n",
                 "            let text = pool::pool(vendor, known, (fy, fm), (ty, tm), h);\n",
-                "            let refused = carries_refusal(&text);\n",
+                "            let code = work_exit(&text);\n",
                 "            out.push_str(&text);\n",
-                "            if refused { MISUSED } else { OK }\n",
+                "            code\n",
                 "        }\n",
             )),
             "`pool_arm` appends `pool`'s page whole, and exits on what it says:\n{arm}"
@@ -2477,7 +2480,7 @@ mod tests {
     ///   pass 1's refused row and the nothing-to-pool line, and exited OK
     ///   (D-0696).
     ///
-    /// The first exits OK and is not a refusal; the second exits MISUSED. An
+    /// The first exits OK and is not a refusal; the second exits FAILED. An
     /// unstamped build refuses both before a bar is read, and there the child
     /// requires the stamp refusal and that nothing was recorded.
     #[test]
@@ -2545,7 +2548,7 @@ mod tests {
         let emptied = dispatch(&["pool", "zerodha", "60min", "2026", "7", "2026", "7", "auto"]);
         if crate::commit_stamp().is_none() {
             for (status, page) in [&priced, &emptied] {
-                assert_eq!(*status, crate::MISUSED, "{page}");
+                assert_eq!(*status, crate::FAILED, "{page}");
                 assert!(
                     page.starts_with("refused: this build carries no verified commit stamp"),
                     "{page}"
@@ -2649,7 +2652,7 @@ mod tests {
         assert!(crate::carries_refusal(page), "{page}");
         assert_eq!(
             status,
-            crate::MISUSED,
+            crate::FAILED,
             "a pool whose every instrument refused is a refusal of the pool"
         );
         Ok(())
