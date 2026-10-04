@@ -6129,8 +6129,9 @@ and (D-1603) cargo-configuration paths, link arguments and spawning crates -- an
 layer 3 refuses every tracked build script its allowlist does not name. **Both read
 `git ls-files`.** Neither has ever looked at a dependency.
 
-**Measured, 2026-08-26**, by walking every package in `Cargo.lock` and grepping
-its vendored build script:
+**Measured, 2026-08-26, and re-measured 2026-10-04 (D-2328)** by walking every
+package in `Cargo.lock`, grepping its vendored build script and keeping only
+the packages `cargo tree -e normal,build -i` finds in the native host graph:
 
 | Package | Spawns |
 |---|---|
@@ -6138,9 +6139,15 @@ its vendored build script:
 | `libc` | `Command::new` `std::process` |
 | `proc-macro2` `quote` | `Command::new` `std::process` |
 | `httparse` | `Command::new` `std::process` |
-| `zmij` `wasm-bindgen-shared` | `Command::new` `std::process` |
+| `zmij` | `Command::new` `std::process` |
 | `crc32fast` `getrandom` `zerocopy` | `Command::new` |
 | `ahash` `generic-array` | `version_check` (which runs `rustc`) |
+| `num-traits` | `autocfg` (`emit_expression_cfg` compiles probes with `rustc`) |
+
+Thirteen packages. The 2026-08-26 table listed `wasm-bindgen-shared`, which is
+in `Cargo.lock` but not in the native graph, and missed `num-traits`. `ring`,
+`rustversion` and `wasm-bindgen-shared` also spawn, and are in `Cargo.lock` for
+other targets only; `cargo tree -i` on the host finds none of them.
 
 Almost all of these are the same thing: a probe that runs `rustc --version` to
 decide which language features to enable. `serde` and `libc` are not removable
@@ -6148,8 +6155,8 @@ from this workspace, so **the ban as written cannot be held at the dependency
 level**, and the sentence in §2 is stronger than the tree.
 
 **Why this is recorded rather than fixed.** A gate banning dependency build
-scripts would fail on `serde`. A gate with an allowlist of the fourteen would
-pass everything on the list forever and say nothing about the fifteenth. Neither
+scripts would fail on `serde`. A gate with an allowlist of the thirteen would
+pass everything on the list forever and say nothing about the fourteenth. Neither
 is worth the ceremony, and inventing a narrower rule here would be `CLAUDE.md`'s
 own warning about a gate that widens the law to match the tree, run in reverse.
 
@@ -6167,7 +6174,7 @@ named binding libraries.
 
 **What is not held**: the literal sentence, against dependencies. A reader
 finding a `build.rs` that runs `rustc` in `~/.cargo/registry` has found
-something true and something this workspace already contains fourteen of. See
+something true and something this workspace already contains thirteen of. See
 D-0311, where that rule was invoked against one crate before it was measured
 against the rest.
 

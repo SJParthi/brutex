@@ -58451,3 +58451,28 @@ lines and the new subcommand take effect together once main carries both.
 `.github/gh_json.rs`; `every_widened_inline_program_form_is_refused` in
 `.github/source_scan.rs` now lists `--jq .sha`, `--jq '.behind_by'`, `-q
 .state` and `jq .sha f` as refusals. AFG-20.
+
+### D-2328 — The dependency build-script inventory is re-measured, and the plan stops calling `rustix`'s probe a violation — 2026-10-04
+
+**Finding (zero-findings P13-04).** `docs/06-limits.md` §96 records that §2's
+build-script ban is held against this repository and not its dependencies.
+`docs/07-plan.md` nonetheless refused `rustix` because its `build.rs` launches
+`rustc`, the ground §96 and D-0311 call selective. §96's own table was also
+wrong: it listed `wasm-bindgen-shared`, which is not in the native graph,
+omitted `num-traits` (whose `autocfg` probe compiles with `rustc`), and its text
+said "fourteen" against thirteen rows.
+
+**Decision.** §96 is re-measured on the current `Cargo.lock` against the native
+host graph (`cargo tree -e normal,build -i`). Thirteen packages spawn:
+`serde`, `serde_core`, `libc`, `proc-macro2`, `quote`, `httparse`, `zmij`,
+`crc32fast`, `getrandom`, `zerocopy`, `ahash` and `generic-array` (via
+`version_check`), and `num-traits` (via `autocfg`). `ring`, `rustversion` and
+`wasm-bindgen-shared` spawn but are locked for other targets only. The plan's
+`rustix` paragraph now cites §96 instead of asserting a violation. `CLAUDE.md`
+§2 is not edited here: whether its build-script sentence should reach
+dependencies is the owner's call, and stays named as an open owner question
+beside D-0555 and D-1602.
+
+**Proof.** The inventory was taken from `cargo metadata --locked` and
+`cargo tree -e normal,build -i <package>` on this tree; the commands and the
+thirteen names are in §96. No code changes.
