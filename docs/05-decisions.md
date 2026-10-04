@@ -57478,3 +57478,90 @@ failed build, package metadata in the output, `sh`, `perl`, a stub invoked by
 a test, a failed test run, metadata in the test output), with the same
 outcome and message from both. The full workspace build and test under the
 new step was not run here.
+
+### D-2312 — The language-purity gates run as one compiled tool — 2026-10-04
+
+**Finding.** Gates 13, 15, 16, 17, 23, 21, 22 and 24 enforced §2 with shell,
+`awk`, `sed` and `grep` inside `ci.yml`: 22 of the workflow's 71 inline `awk`
+programs, 27 `sed` calls and 60 `grep` calls (0 `jq`). Four of those readings
+were looser than the gates claimed. Gate 13 word-split `git ls-files` output,
+so a manifest whose path holds a space was never read and the gate passed
+("allowed … 0 of 0"). Gate 22 discarded `grep`'s stderr, where GNU grep 3.5+
+reports a match in a binary file, so a tracked binary file holding `File::open`
+passed. Gate 16 layer 1b ended its scanner call with `|| true`, so a scanner
+error passed silently. Gate 22 let an unknown pinned crate inherit the last
+`want`. Gates 16, 21 and 23 also wrote fixed `/tmp/*.txt` files, and while
+this port was being measured a concurrent run on the same machine overwrote
+one of gate 23's.
+
+**Decision.** `.github/gates_runtime.rs` is one std-only tool with
+`#![forbid(unsafe_code)]` and one subcommand per gate (`gate13`, `gate15`,
+`gate16`, `gate17`, `gate23`, `gate21`, `gate22`, `gate24`). Gate 13's step
+builds it once with `rustc --edition=2024 -D warnings`, builds and runs its
+`--test` binary (51 tests, one or more per refusal branch), and leaves it in
+`$RUNNER_TEMP`. Each later step runs one line. Step names, ids, `if:`
+conditions, env and the explanatory comments are unchanged.
+
+- **The data stays in YAML.** The declared lists (`banned`, every `allow_*`,
+  `swept`, `declared`, `declared_handles`, `tmp_window`, `PINNED`, `SWEEP`,
+  `BANNED`) stay as shell assignments and reach the tool as `--name value`.
+  `crates/core/tests/banned_lists.rs`, `crates/cli/tests/limits_doc_drift.rs`
+  and VS-03 in `docs/04-invariants.md` read them there. Gate 15's word is
+  assembled in Rust (`WORD`, `WORD_LEN`), so the tool never spells it.
+- **The scanner is bound at compile time. This is the one integration choice
+  that needs review.** The tool tokenises Rust with gate 0's
+  `.github/source_scan.rs`. Its functions are private, and `include!` fails on
+  its inner doc comments, so the tool runs it as a process. Gate 0's spawn rule
+  admits `Command::new` only on a fixed literal, `current_exe`, or a
+  `CARGO_BIN_EXE_*` literal. The tool uses
+  `option_env!("CARGO_BIN_EXE_source_scan")`, and the step exports that
+  variable from gate 0's `$SOURCE_SCAN` before calling `rustc`. This stretches
+  "a binary cargo built" to "a binary rustc built from tracked source in the
+  same job". A build without the variable, such as gate 6c's clippy, still
+  compiles, and every scan in that build refuses rather than passes.
+- **Four readings are stricter than before, each a refusal where the old step
+  passed:**
+  - paths come from `git ls-files -z`, so they are never word-split;
+  - files are read as bytes, so binary content is searched, not skipped;
+  - a scanner error or a non-integer allowlist count refuses;
+  - an unknown pinned crate, or an include word holding glob characters,
+    refuses.
+
+  Allowlist entries must name exact tracked files. Each file is scanned in its
+  own run, so one file's lex failure cannot hide another's. The scratch files
+  are gone; scratch lives in a per-process directory under `$RUNNER_TEMP`.
+- **Not changed:** a multi-line `include_str!(` with the path on the next line
+  still escapes gate 22 clause D, exactly as it did before. The Rust diff
+  output omits `diff`'s hunk headers (`15a16`) and keeps the `<` and `>` lines.
+- **Gate 0's `AWK_IN_CI` must drop from 71 to 49.** This change leaves
+  `.github/source_scan.rs` untouched, so gate 0 fails on the ratchet until the
+  number is lowered.
+
+**Proof.** The method:
+- The tool and its tests build clean under `rustc -D warnings` and under
+  clippy, and are rustfmt-clean.
+- On the tree, every one of the eight gates passes old and new with
+  byte-identical output; the new run only adds the test lines.
+- Adversarial trees were built in scratch copies only.
+
+Old and new both **refuse** these trees:
+
+| Gate | Trees refused by both |
+|---|---|
+| 13 | `inline`, `crlf-devtable`, `quoted-renamed`, `lock`, `buildkey`, `buildmod`, `deny-jni`, `deny-wild`, `deny-unpinned` |
+| 15 | `mixedcase-md`, `nul-binary`, `space-name`, `crlf-unicode`, `allowlisted-over`, `stale-entry` |
+| 16 | `no-forbid`, `word-boundary`, `after-bracket`, `test-unsafe`, `lints-gone`, `alloc-extern`, `ci-tool` |
+| 17 | `alias`, `star-statement`, `path-module` |
+| 23 | `new-eprintln`, `handle`, `fixed-temp`, `window-edge`, `declared-drop` |
+| 21 | `write`, `glob`, `dep` |
+| 22 | `dep-table`, `alias-fs`, `computed-include`, `bar-include`, `tests-home`, `pub-use`, `space-include` |
+| 24 | `star-anon`, `comment-vs-string`, `crlf-raw` |
+
+Old and new both **pass** these controls: 13 `comment-only`, 17
+`in-comment`, 23 `window-ok`, 21 `test-only`, 24 `comment-only`.
+
+The refusal messages match line for line, apart from the omitted hunk headers.
+
+Two trees separate old from new, and they are the holes described above: 13
+`spacepath` and 22 `binary-file` pass the old step and are refused by the new
+tool.
