@@ -13,8 +13,8 @@ GAP13-16	branch	2674e5c
 GAP15-21	branch	2674e5c
 R9-cli-law-3	branch	2674e5c
 R9-cli-law-1	branch	2674e5c
-W2-cli8-8	fixing	02e13b3
-W2-cli8-0	fixing	02e13b3
+W2-cli8-8	branch	f6f7af1
+W2-cli8-0	branch	f6f7af1
 W2-cli8-10	branch	22f0310
 W2-cli8-11	branch	a49038b
 GAP16-25	branch	a4c44c0
