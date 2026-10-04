@@ -790,3 +790,22 @@ Narrative only. No row is added to the table above.
 - **audit-20261003 hunt-conc-2** (Boolean family pools): fixed. D-1556, AFF-20, AFF-21.
 - **audit-20261003 hunt-cli-a-5**: fixed. D-1569, AFF-24.
 - **audit-20261003 o1surface2-1**: fixed. D-1557, AFF-23.
+
+### Audit 2026-10-03, fix worker 8 — dispositions — 2026-10-03
+
+Narrative only. No row is added to the table above, so its disposition tally
+is unchanged.
+
+- **attackdata-4**: fixed. `serde_json` gains `arbitrary_precision`; a JSON
+  price is snapped from the vendor's own digits. D-1570, AFF-40.
+- **attackdata-8**: fixed for every month created from now on. Store format
+  version 3 makes block checksums mandatory; version 2 stays readable and is
+  never rewritten. D-1571, AFF-41, AFF-42.
+- **o1eng2-1**: fixed. Backward window queries are O(1) through a lazily built
+  block table, and Newey-West hits retire by death on a timing wheel in any
+  exit order. The effect on earlier runs' t-statistics stays UNVERIFIED.
+  D-1572, AFF-43, AFF-44.
+- **gaps-1** and **gaps-3**: BLOCKED, not wired. No decision names a command
+  for the superseded Step-3 V1-V4 modules or a place for Benjamini-Hochberg,
+  the V1 walk-forward overfit rate, the V3 walk-forward door or the V2/V3
+  admission projections in the live chain (D-1568, D-1544 stand).

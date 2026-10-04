@@ -56564,3 +56564,91 @@ length, then the write proceeds; a quarantine already holding different bytes
 refuses with nothing changed. The move is logged as a warning naming the
 file. Committed blocks are never rewritten. O(tail), at most one block, once
 per recovery. Invariant AFF-24.
+
+### D-1570 — A JSON price is snapped from the vendor's own digits: `serde_json` gains `arbitrary_precision` — 2026-10-03
+
+**What was observed.** audit-20261003 attackdata-4. `http::one_price` (and
+`rolling`'s `paisa`) snapped `Number::to_string()`, which without
+`arbitrary_precision` is the shortest rendering of an `f64`. Past about
+seventeen significant digits the float had already rounded, so
+`100.12499999999999999` stored 10013 paisa where its own text says 10012, and
+`92233720368547758.07` was refused although it fits. D-1494 and D-1528's
+neighbour entry recorded this as a limit only.
+
+**The decision.** The workspace builds `serde_json` with
+`arbitrary_precision` (one feature, no new crate; `cargo deny` is unaffected
+because licences, advisories and bans are per crate, not per feature). A
+number keeps the digits the body carried. `http::number_text` returns them,
+shifting an exponent form (`2.450075E4`) into a plain decimal exactly, and
+every reader that used the f64 text — `one_price`, `one_number`, and
+`rolling`'s `stamp`, `count` and `paisa` — now reads it. A text whose exponent
+puts the point more than `MAX_PRICE_TEXT` places away is refused by name, as
+is a price text over 64 bytes; the f64 path had rounded those silently.
+
+**Cost.** Each number node owns its digits on the heap, so the decode tree's
+argued peak is about twice D-1203's ~16x; stated on `decode_body` and in
+`docs/06-limits.md`, still unmeasured. `Value` stays 32 bytes.
+
+**Proof.** `pull::http::tests::a_json_price_is_snapped_from_the_vendors_own_text`
+and `pull::rolling::tests::a_rolling_price_is_snapped_from_the_vendors_own_text`
+(on the previous tree: 10013 for 10012, and 35413 for 35412). AFF-40.
+
+### D-1571 — Store format version 3: block checksums are mandatory; version 2 stays readable — 2026-10-03
+
+**What was observed.** audit-20261003 attackdata-8, recorded as a limit by
+D-1528. Block verification follows the header's `FLAG_CHECKSUMS`. Clearing it
+in both slots and recomputing their CRCs turned verification off for a sealed
+month, and the `.crc` beside it was ignored: a flipped price and a
+`ts = i64::MIN` record were served. D-1528 left it because closing it needs
+"sealed" recorded in a way the flag cannot undo, which is a new format version.
+
+**The decision.** Version 3 is minted (`MAGIC = b"BRUTEXB3"`,
+`FORMAT_VERSION = 3`, `Layout::V3`). Its geometry is version 2's byte for
+byte; its one rule is that block checksums are mandatory
+(`Layout::requires_checksums`). `Header::decode` refuses a version-3 slot
+without the flag as `FormatError::ChecksumsRequired(3)`, and `Header::commit`
+refuses to write one. `Layout::CURRENT` is version 3, so every new month is
+born at it. `BAR_TABLE` holds `[V2, V3]`: a version-2 month is opened,
+appended to and read at version 2 for its whole life, flag optional as before,
+and is never rewritten (§3 rule 8). Version 2's magic is now `MAGIC_V2`.
+
+**Not closed, and stated.** Version 2's optional flag is its meaning and is
+kept. An actor who rewrites a version-3 month's magic and version to 2 in both
+slots and recomputes the CRCs presents an unsealed version-2 month; the CRC is
+integrity, not authentication, and that actor can rewrite the `.crc` too.
+`docs/06-limits.md` says so. The read path still does no month or order check
+on records (format.rs: checked at the write boundary).
+
+**Proof.** `store::file::tests::a_new_month_is_version_three_and_a_cleared_checksum_flag_is_refused`
+(on the previous tree it does not compile: no `ChecksumsRequired`, and a new
+month was version 2), `store::file::tests::a_version_two_month_still_reads_and_appends_at_version_two`,
+and the updated constant pins in `store/tests/unit.rs` and `write.rs`.
+Recorded in `docs/02-store-format.md` §2.1. AFF-41, AFF-42.
+
+### D-1572 — `forward`'s window extremes and the Newey-West window are O(1) in any exit order — 2026-10-03
+
+**What was observed.** audit-20261003 o1eng2-1, documented only by D-1550.
+Since D-1410 an exit can move backwards when the prefix median cadence steps
+down. `WindowExtremes::over` then cleared and rebuilt its deques, Θ(window)
+per such query, and `OverlapWindow` drained only from the front, so a hit
+whose window had closed stayed queued behind an older one and its pairs were
+counted as overlapping.
+
+**The decision.** `WindowExtremes` keeps its two deques for queries whose ends
+advance and answers any other query from `BlockExtremes`: per-64-bar-block
+extremes plus a power-of-two table over blocks, built once per `forward` on
+the first such query (O(n)), each query then at most two partial blocks of
+reads and one lookup. `OverlapWindow` files each hit on a timing wheel of
+`min(H, bars + 1)` slots by its death `min(exit, o + H)` and retires exactly the
+hits dead by each new entry; its exact `i128` running sums are unchanged. Both
+are O(1) amortised per bar; the excursion answers equal a full scan and the
+cross-sums equal the pair-by-pair definition. With monotone exits the results
+are the previous ones (the existing full-scan and pairwise tests pass
+unchanged). The effect the old drain had on earlier runs' t-statistics stays
+UNVERIFIED.
+
+**Proof.** `runner::outcome::window_tests::a_backward_right_end_is_answered_in_constant_reads`
+(previous tree: 18,008,999 bars read for 17,999 queries over 20,000 bars) and
+`runner::outcome::overlap_window_tests::a_backward_exit_leaves_the_window_when_its_own_window_closes`
+(previous tree: 4 live hits where 3 windows were open at H=4). AFF-43, AFF-44.
+`docs/06-limits.md` restates the bounds.

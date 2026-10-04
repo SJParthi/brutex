@@ -611,15 +611,15 @@ impl Forward {
 ///
 /// # A query that moves backwards is still answered, at the cost it really has
 ///
-/// [`Self::over`] does not TRUST the monotonicity above. A right end earlier
-/// than the last bar already pushed cannot be served from the deques, so they
-/// are cleared and rebuilt from the query's left end -- Θ(window) for that one
-/// query, and correct. **`forward` does issue one** (o1eng2-1): since D-1410
-/// the deadline is `ts(i) + step_at(i)·H` and `step_at` is a prefix median
-/// that can step DOWN, so on a slice whose median cadence flips the exit
-/// moves backwards and the deques are rebuilt. The monotone argument above
-/// holds while the cadence is constant; `docs/06-limits.md` names the rebuild
-/// cost (D-1550).
+/// [`Self::over`] does not TRUST the monotonicity above. **`forward` does issue
+/// a backward query** (o1eng2-1): since D-1410 the deadline is
+/// `ts(i) + step_at(i)·H` and `step_at` is a prefix median that can step DOWN,
+/// so on a slice whose median cadence flips the exit moves backwards. Such a
+/// query is answered by [`BlockExtremes`], built once per `forward` on the
+/// first one (O(n)), in at most two partial blocks of reads plus one table
+/// lookup -- O(1) -- and the deques are left as they were for the next forward
+/// query. Until D-1572 the deques were cleared and rebuilt, Θ(window) per
+/// backward query (D-1550 stated it).
 ///
 /// **UNVERIFIED as a measured bound.** No bench row times `forward`; the
 /// O(bars) total is argued from the shape above. `CLAUDE.md` §3 rule 6.
@@ -632,6 +632,14 @@ struct WindowExtremes {
     lows: std::collections::VecDeque<(usize, i64)>,
     /// The first slice index not yet pushed.
     next: usize,
+    /// Bars read so far, deque pushes and block scans alike: the cost a test
+    /// holds to O(1) amortised per query (o1eng2-1, D-1572).
+    touched: u64,
+    /// The left end the deques were last popped to. A query left of it cannot
+    /// be served from them.
+    popped_to: usize,
+    /// Built on the first query the deques cannot serve. See [`BlockExtremes`].
+    blocks: Option<BlockExtremes>,
 }
 
 impl WindowExtremes {
@@ -640,6 +648,9 @@ impl WindowExtremes {
             highs: std::collections::VecDeque::new(),
             lows: std::collections::VecDeque::new(),
             next: 0,
+            touched: 0,
+            popped_to: 0,
+            blocks: None,
         }
     }
 
@@ -655,17 +666,19 @@ impl WindowExtremes {
         if bars.get(lo..=hi).is_none_or(<[Candle]>::is_empty) {
             return None;
         }
-        // BACKWARDS: start again at `lo`. A right end before the last pushed
-        // bar, `next - 1`, cannot be served by popping. The test is
-        // `next >= hi + 2` as a `checked_sub` (D-1455): spelled
-        // `hi + 1 < next`, its `<` could become `<=` unobserved, because at
-        // `hi == next - 1` a rebuild from `lo` and no rebuild give the same
-        // extremes, at different cost. `hi + 2` cannot saturate: a `hi` past
-        // the slice was refused above.
-        if self.next.checked_sub(hi.saturating_add(2)).is_some() {
-            self.highs.clear();
-            self.lows.clear();
-            self.next = lo;
+        // BACKWARDS: ANSWERED BY THE BLOCK TABLE, AND THE DEQUES ARE KEPT. A
+        // right end before the last pushed bar, `next - 1`, cannot be served
+        // by popping, and a left end before one already popped cannot either.
+        // Rebuilding the deques from `lo` cost Θ(window) per such query
+        // (o1eng2-1); the block table answers it in at most 2·EXTREME_BLOCK bar
+        // reads and one table lookup, and the deques stay valid for the next
+        // forward query. D-1572. The right-end test is `next >= hi + 2` as a
+        // `checked_sub` (D-1455): spelled `hi + 1 < next`, its `<` could
+        // become `<=` unobserved, because at `hi == next - 1` the block table
+        // and the deques give the same extremes, at different cost. `hi + 2`
+        // cannot saturate: a `hi` past the slice was refused above.
+        if self.next.checked_sub(hi.saturating_add(2)).is_some() || lo < self.popped_to {
+            return self.over_blocks(bars, lo, hi);
         }
         // A JUMP PAST EVERYTHING HELD: skip the bars before `lo` (D-1455).
         // Every held index is below `next`, so below `lo`, and the front pops
@@ -677,6 +690,7 @@ impl WindowExtremes {
         self.next = self.next.max(lo);
         while self.next <= hi {
             let bar = bars.get(self.next)?;
+            self.touched = self.touched.saturating_add(1);
             while self.highs.back().is_some_and(|&(_, h)| h <= bar.high) {
                 self.highs.pop_back();
             }
@@ -693,10 +707,108 @@ impl WindowExtremes {
         while self.lows.front().is_some_and(|&(at, _)| at < lo) {
             self.lows.pop_front();
         }
+        self.popped_to = lo;
         self.highs
             .front()
             .zip(self.lows.front())
             .map(|(&(_, high), &(_, low))| (high, low))
+    }
+
+    /// [`Self::over`] for a query the deques cannot serve, through
+    /// [`BlockExtremes`], built once on the first such query.
+    fn over_blocks(&mut self, bars: &[Candle], lo: usize, hi: usize) -> Option<(i64, i64)> {
+        if self.blocks.is_none() {
+            self.blocks = Some(BlockExtremes::of(bars, &mut self.touched));
+        }
+        let table = self.blocks.as_ref()?;
+        let (first, last) = (lo / EXTREME_BLOCK, hi / EXTREME_BLOCK);
+        if last <= first.saturating_add(1) {
+            return scan_extremes(bars, lo, hi, &mut self.touched);
+        }
+        let left_end = first
+            .saturating_add(1)
+            .saturating_mul(EXTREME_BLOCK)
+            .saturating_sub(1);
+        let right_start = last.saturating_mul(EXTREME_BLOCK);
+        let middle = table.over(first.saturating_add(1), last.saturating_sub(1))?;
+        let left = scan_extremes(bars, lo, left_end, &mut self.touched)?;
+        let right = scan_extremes(bars, right_start, hi, &mut self.touched)?;
+        Some((
+            left.0.max(middle.0).max(right.0),
+            left.1.min(middle.1).min(right.1),
+        ))
+    }
+}
+
+/// Bars per block of [`BlockExtremes`]. A partial block is scanned, so a
+/// backward query reads at most two of them: a constant, not the window.
+const EXTREME_BLOCK: usize = 64;
+
+/// The highest high and lowest low of `bars[lo..=hi]` by direct scan, counting
+/// the bars read. Only ever handed a range inside at most two blocks.
+fn scan_extremes(bars: &[Candle], lo: usize, hi: usize, touched: &mut u64) -> Option<(i64, i64)> {
+    let window = bars.get(lo..=hi)?;
+    *touched = touched.saturating_add(u64::try_from(window.len()).unwrap_or(u64::MAX));
+    let high = window.iter().map(|bar| bar.high).max()?;
+    let low = window.iter().map(|bar| bar.low).min()?;
+    Some((high, low))
+}
+
+/// Each block's extremes, and those of every power-of-two run of blocks
+/// (o1eng2-1, D-1572).
+///
+/// Built only when [`WindowExtremes`] meets a query its deques cannot serve,
+/// once per `forward`: one pass over the bars, then `levels` over
+/// `n / EXTREME_BLOCK` blocks. That is O(n) time and memory -- the levels hold
+/// `(n / 64)·log₂(n / 64)` pairs, under `n` for any slice that fits in memory --
+/// and every query after it is O(1). It is not the per-BAR sparse table D-1185
+/// removed, whose two `n·log₂ n` tables were 21 levels deep at 1,222,791 bars;
+/// this one is 15 levels of 19,107 pairs there, about 4.6 MB.
+struct BlockExtremes {
+    /// `levels[k][b]`: the extremes of blocks `b ..= b + 2^k - 1`.
+    levels: Vec<Vec<(i64, i64)>>,
+}
+
+impl BlockExtremes {
+    fn of(bars: &[Candle], touched: &mut u64) -> Self {
+        *touched = touched.saturating_add(u64::try_from(bars.len()).unwrap_or(u64::MAX));
+        let base: Vec<(i64, i64)> = bars
+            .chunks(EXTREME_BLOCK)
+            .map(|chunk| {
+                let high = chunk.iter().map(|bar| bar.high).max().unwrap_or(i64::MIN);
+                let low = chunk.iter().map(|bar| bar.low).min().unwrap_or(i64::MAX);
+                (high, low)
+            })
+            .collect();
+        let mut levels = vec![base];
+        let mut span = 1_usize;
+        while let Some(below) = levels.last() {
+            let doubled = span.saturating_mul(2);
+            if doubled > below.len() {
+                break;
+            }
+            let level: Vec<(i64, i64)> = below
+                .iter()
+                .zip(below.iter().skip(span))
+                .map(|(&(h1, l1), &(h2, l2))| (h1.max(h2), l1.min(l2)))
+                .collect();
+            levels.push(level);
+            span = doubled;
+        }
+        Self { levels }
+    }
+
+    /// The extremes of blocks `first ..= last`: two overlapping runs, O(1).
+    fn over(&self, first: usize, last: usize) -> Option<(i64, i64)> {
+        let count = last.checked_sub(first)?.checked_add(1)?;
+        let depth = count.ilog2();
+        let level = self.levels.get(usize::try_from(depth).ok()?)?;
+        let run = 1_usize.checked_shl(depth)?;
+        let (a, b) = (
+            level.get(first)?,
+            level.get(last.checked_add(1)?.checked_sub(run)?)?,
+        );
+        Some((a.0.max(b.0), a.1.min(b.1)))
     }
 }
 
@@ -1790,6 +1902,19 @@ fn long_run_sum_squares(m2: f64, mean: f64, cross_a: f64, cross_b: f64, cross_c:
 /// cancellation the `m2 <= 0` guard in `edge` documents. The uncentred sums are
 /// formed at the scale of the SPREAD, not of the price.
 ///
+/// # Each hit leaves when ITS window closes, whatever order exits come in
+///
+/// A hit `o` stops pairing at its death `d_o = min(exit_o, o + H)`: from then
+/// on no new entry shares a bar with it. The queue used to drain from the
+/// FRONT only, which is right while exits advance with entries. Since D-1410
+/// they need not (o1eng2-1): a flipping median cadence moves an exit back, and
+/// a hit whose window had closed stayed queued behind an older one whose window
+/// had not, so its pairs were counted as overlapping. Hits are now filed on a
+/// timing wheel by death, and every observation retires exactly the hits that
+/// died since the last one -- O(1) amortised per bar of the walk, since the
+/// wheel's tick only moves forward and a gap of a whole turn empties it in one
+/// sweep. D-1572.
+///
 /// **UNVERIFIED as a measured bound.** No bench row covers `edge`. The O(1)
 /// claim is argued from the code (§3 rule 6).
 struct OverlapWindow {
@@ -1799,13 +1924,38 @@ struct OverlapWindow {
     shift: Option<i64>,
     /// The hit that opened the current cluster. Offsets are taken from it.
     anchor: usize,
-    /// `(offset from anchor, y, exit bar)` per queued hit, oldest first.
-    queue: std::collections::VecDeque<(i128, i128, usize)>,
-    /// `k`, `Σ y`, `Σ o` and `Σ o·y` over the queue, exact.
+    /// Live and retired hits. A retired slot is reused through `free`.
+    slab: Vec<Queued>,
+    /// The first reusable slot, or `NONE`.
+    free: usize,
+    /// `wheel[d % len]`: the first live hit whose death is `d`, chained by
+    /// `Queued::next`. Never empty, so `%` is defined.
+    wheel: Vec<usize>,
+    /// The last entry observed: every hit dead by it has been retired.
+    tick: usize,
+    /// How many hits are live.
+    live: usize,
+    /// `k`, `Σ y`, `Σ o` and `Σ o·y` over the live hits, exact.
     sums: [i128; 4],
     /// `Σ w·y_i·y_j`, `Σ w·(y_i + y_j)` and `Σ w` over every overlapping pair.
     cross: [f64; 3],
 }
+
+/// One hit on [`OverlapWindow`]'s wheel.
+#[derive(Clone, Copy)]
+struct Queued {
+    /// Offset from the cluster's anchor.
+    offset: i128,
+    /// `y = x - x₀`.
+    lifted: i128,
+    /// The first entry this hit no longer pairs with: `min(exit, o + H)`.
+    death: usize,
+    /// The next hit filed in the same wheel slot, or the next free slot.
+    next: usize,
+}
+
+/// The end of a chain in [`OverlapWindow`].
+const NONE: usize = usize::MAX;
 
 impl OverlapWindow {
     fn new(horizon: usize, capacity: usize) -> Self {
@@ -1813,14 +1963,18 @@ impl OverlapWindow {
             horizon,
             shift: None,
             anchor: 0,
-            queue: std::collections::VecDeque::with_capacity(capacity),
+            slab: Vec::with_capacity(capacity),
+            free: NONE,
+            wheel: vec![NONE; capacity.max(1)],
+            tick: 0,
+            live: 0,
             sums: [0; 4],
             cross: [0.0; 3],
         }
     }
 
-    /// Fold one measured hit: drop the hits it shares no bar with, add its
-    /// pairs with every hit that remains, and queue it.
+    /// Fold one measured hit: retire the hits whose windows closed by this
+    /// entry, add its pairs with every hit still live, and file it.
     fn observe(&mut self, source: usize, moved: i64, exit: usize) {
         let first = *self.shift.get_or_insert(moved);
         let lifted = i128::from(moved).saturating_sub(i128::from(first));
@@ -1829,29 +1983,16 @@ impl OverlapWindow {
         // whose OLDER window had already EXITED by this entry: `forward` ends
         // every window at the earlier of the horizon and that day's forced
         // close, so a 15:08 hit and the next day's 09:15 hit are some 22 bars
-        // apart and share nothing at any horizon. `sources` strictly increase,
-        // and exits advance with the entry WHILE THE CADENCE IS CONSTANT (see
-        // `WindowExtremes`). When the prefix median cadence steps down an exit
-        // can move backwards, and a queued hit whose exit precedes the front's
-        // stays queued until the front drains: its pairs are then counted as
-        // overlapping. `docs/06-limits.md` states that bound (D-1550).
-        while let Some(&(offset, y_old, old_exit)) = self.queue.front() {
-            let older = self
-                .anchor
-                .saturating_add(usize::try_from(offset).unwrap_or(usize::MAX));
-            if source.saturating_sub(older) < self.horizon && old_exit > source {
-                break;
-            }
-            self.queue.pop_front();
-            self.add(offset, y_old, -1);
-        }
-        if self.queue.is_empty() {
+        // apart and share nothing at any horizon. Both are one death time,
+        // and the wheel retires by it in any exit order (D-1572).
+        self.retire_through(source);
+        if self.live == 0 {
             self.anchor = source;
         }
         let offset = i128::try_from(source.saturating_sub(self.anchor)).unwrap_or(i128::MAX);
         let span = i128::try_from(self.horizon).unwrap_or(i128::MAX);
         let [held, total_lifted, total_offset, total_product] = self.sums;
-        // `a_o = H - (s - o)` is in `1..H` for every queued hit, by the drain.
+        // `a_o = H - (s - o)` is in `1..H` for every live hit, by the death.
         let lead = span.saturating_sub(offset);
         let weighted = lead
             .saturating_mul(total_lifted)
@@ -1863,8 +2004,87 @@ impl OverlapWindow {
         *products += wide(lifted) * wide(weighted) / horizon;
         *pair_sums += wide(both) / horizon;
         *weight_sum += wide(weights) / horizon;
-        self.queue.push_back((offset, lifted, exit));
+        // DEATH AFTER THE ENTRY. An exit at or before the entry (`edge` passes
+        // the entry itself when `forward` has none) pairs with no later hit,
+        // which is a death at the next bar.
+        let death = exit
+            .min(source.saturating_add(self.horizon))
+            .max(source.saturating_add(1));
+        self.file(Queued {
+            offset,
+            lifted,
+            death,
+            next: NONE,
+        });
         self.add(offset, lifted, 1);
+    }
+
+    /// Retires every live hit whose death is at or before `source`.
+    ///
+    /// Walks the wheel slots of the ticks since the last entry, at most one
+    /// whole turn: a gap of a turn or more retires everything in one sweep. The
+    /// tick never moves back, so across a walk the slots visited are bounded by
+    /// the bars walked.
+    fn retire_through(&mut self, source: usize) {
+        if self.live == 0 {
+            self.tick = source;
+            return;
+        }
+        let turn = self.wheel.len();
+        let ticks = source.saturating_sub(self.tick).min(turn);
+        for step in 1..=ticks {
+            if self.live == 0 {
+                break;
+            }
+            let slot = self.tick.saturating_add(step) % turn;
+            self.retire_slot(slot, source);
+        }
+        self.tick = self.tick.max(source);
+    }
+
+    /// Retires the dead hits filed in one wheel slot and keeps the rest there.
+    fn retire_slot(&mut self, slot: usize, source: usize) {
+        let mut at = self.wheel.get(slot).copied().unwrap_or(NONE);
+        let mut kept = NONE;
+        while let Some(&hit) = self.slab.get(at) {
+            let next = hit.next;
+            if hit.death <= source {
+                self.add(hit.offset, hit.lifted, -1);
+                self.live = self.live.saturating_sub(1);
+                if let Some(freed) = self.slab.get_mut(at) {
+                    freed.next = self.free;
+                }
+                self.free = at;
+            } else {
+                if let Some(staying) = self.slab.get_mut(at) {
+                    staying.next = kept;
+                }
+                kept = at;
+            }
+            at = next;
+        }
+        if let Some(head) = self.wheel.get_mut(slot) {
+            *head = kept;
+        }
+    }
+
+    /// Files one hit in the wheel slot of its death.
+    fn file(&mut self, mut hit: Queued) {
+        let slot = hit.death % self.wheel.len();
+        hit.next = self.wheel.get(slot).copied().unwrap_or(NONE);
+        let at = if let Some(reused) = self.slab.get_mut(self.free) {
+            let at = self.free;
+            self.free = reused.next;
+            *reused = hit;
+            at
+        } else {
+            self.slab.push(hit);
+            self.slab.len().saturating_sub(1)
+        };
+        if let Some(head) = self.wheel.get_mut(slot) {
+            *head = at;
+        }
+        self.live = self.live.saturating_add(1);
     }
 
     /// Add (`sign = 1`) or remove (`sign = -1`) one hit's terms, exactly.
@@ -1877,9 +2097,9 @@ impl OverlapWindow {
             total_product.saturating_add(sign.saturating_mul(offset.saturating_mul(lifted)));
     }
 
-    /// How many hits are still queued.
+    /// How many hits are still live.
     fn held(&self) -> usize {
-        self.queue.len()
+        self.live
     }
 
     /// `long_run_sum_squares` over these cross-sums, for a sample whose
@@ -4178,7 +4398,11 @@ mod window_tests {
     fn the_sliding_window_agrees_with_a_full_scan_on_every_query() {
         let bars = wobble(400);
         let mut window = WindowExtremes::new();
-        // Monotone ends, variable width: the shape `forward` produces.
+        // A rising left end and a right end that mostly rises and sometimes
+        // steps back -- the shape `forward` produces since D-1410. A backward
+        // query is served by the block table and leaves the deques as they
+        // were, so the bound they keep is the window they HOLD,
+        // `popped_to..next`, not the one just asked (D-1572).
         for lo in 1..390_usize {
             let hi = (lo + (lo * 7) % 15).min(399);
             assert_eq!(
@@ -4186,14 +4410,9 @@ mod window_tests {
                 scan(&bars, lo, hi),
                 "[{lo}, {hi}]"
             );
-            assert!(
-                window.highs.len() <= hi - lo + 1,
-                "the deque outgrew [{lo}, {hi}]"
-            );
-            assert!(
-                window.lows.len() <= hi - lo + 1,
-                "the deque outgrew [{lo}, {hi}]"
-            );
+            let held = window.next - window.popped_to;
+            assert!(window.highs.len() <= held, "the deque outgrew [{lo}, {hi}]");
+            assert!(window.lows.len() <= held, "the deque outgrew [{lo}, {hi}]");
         }
         // Backwards, then a repeat, then a jump past everything held. A jump
         // skips to `lo` rather than resetting (D-1455), so the indices held
@@ -4229,6 +4448,38 @@ mod window_tests {
         assert_eq!(window.over(&bars, 2, 5), scan(&bars, 2, 5));
     }
 
+    /// **A RIGHT END THAT MOVES BACKWARDS COSTS O(1), NOT Θ(WINDOW)
+    /// (audit-20261003 o1eng2-1, D-1572).**
+    ///
+    /// Since D-1410 `forward`'s exit can step back when the prefix median
+    /// cadence does. Every other query here moves the right end back by half a
+    /// 2,000-bar window, the shape of a flipping cadence; each answer must equal
+    /// the scan, and the bars read must stay within a constant per query plus
+    /// one pass over the slice. Rebuilding the deques on every backward query
+    /// read ~1,000 bars per query.
+    #[test]
+    fn a_backward_right_end_is_answered_in_constant_reads() {
+        let n = 20_000_usize;
+        let bars = wobble(n);
+        let mut window = WindowExtremes::new();
+        let mut queries = 0_u64;
+        for i in 0..n - 2_001 {
+            let hi = i + if i % 2 == 0 { 2_000 } else { 1_000 };
+            assert_eq!(
+                window.over(&bars, i + 1, hi),
+                scan(&bars, i + 1, hi),
+                "[{}, {hi}]",
+                i + 1
+            );
+            queries += 1;
+        }
+        let n = u64::try_from(n).expect("small");
+        assert!(
+            window.touched <= 3 * n + 130 * queries,
+            "{} bars read for {queries} queries over {n} bars",
+            window.touched
+        );
+    }
     /// And through `forward` itself: every measured excursion equals the scan
     /// over the bars the position was exposed to, `[i + 1, exit]`.
     #[test]
@@ -4597,6 +4848,47 @@ mod overlap_window_tests {
             }
             // The window works on y = x - x0; recentre the pairwise reference
             // with the same algebra the walk uses and compare the long-run sum.
+            let want = pairwise(&hits, horizon);
+            #[allow(clippy::cast_precision_loss, reason = "test values")]
+            let mean = hits.iter().map(|h| h.1 as f64).sum::<f64>() / hits.len() as f64;
+            let got = window.sum_squares(1_000.0, mean);
+            let expected = long_run_sum_squares(1_000.0, mean, want[0], want[1], want[2]);
+            assert!(
+                (got - expected).abs() <= 1e-6 * expected.abs().max(1.0),
+                "H={horizon}: running {got}, pairwise {expected}"
+            );
+        }
+    }
+
+    /// **A HIT WHOSE EXIT PRECEDES AN OLDER ONE'S STILL LEAVES ON TIME
+    /// (audit-20261003 o1eng2-1, D-1572).**
+    ///
+    /// Exits that step back -- a flipping median cadence -- left a hit whose
+    /// window had closed queued behind an older hit whose window had not, and
+    /// its pairs were counted as overlapping. Here every odd hit's window is
+    /// far shorter than its even neighbour's; the running sums must equal the
+    /// pair-by-pair definition at every horizon, and the live count must be
+    /// the hits whose windows are still open.
+    #[test]
+    fn a_backward_exit_leaves_the_window_when_its_own_window_closes() {
+        for horizon in [4_usize, 15, 30, 400] {
+            let hits: Vec<(usize, i64, usize)> = (0..600_usize)
+                .map(|s| {
+                    let k = i64::try_from(s).expect("small");
+                    let exit = s + if s % 2 == 0 { horizon } else { 1 + s % 3 };
+                    (s, (k * 7_919) % 211 - 100, exit)
+                })
+                .collect();
+            let mut window = OverlapWindow::new(horizon, 16);
+            for &(s, x, exit) in &hits {
+                window.observe(s, x, exit);
+                let open = hits
+                    .iter()
+                    .take_while(|h| h.0 <= s)
+                    .filter(|&&(o, _, e)| o == s || (s - o < horizon && e > s))
+                    .count();
+                assert_eq!(window.held(), open, "H={horizon}, live hits at {s}");
+            }
             let want = pairwise(&hits, horizon);
             #[allow(clippy::cast_precision_loss, reason = "test values")]
             let mean = hits.iter().map(|h| h.1 as f64).sum::<f64>() / hits.len() as f64;

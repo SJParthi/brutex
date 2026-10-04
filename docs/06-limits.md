@@ -14067,25 +14067,29 @@ bounds are all nonzero.
 
 ## Audit fixes of 2026-10-03 — what they leave unbounded — D-1528, D-1535, D-1536, D-1537
 
-* **A cleared header checksum flag is not detected (D-1528, audit-20261003
-  attackdata-8).** Block verification follows the header's `FLAG_CHECKSUMS`.
-  Clearing it in both slots and recomputing their CRCs turns verification off
-  for a sealed month, and the `.crc` beside it is ignored. Random rot cannot do
-  this, because the slot CRC covers the flag. The CRC is integrity, not
-  authentication. Closing it would need "sealed" recorded outside the header,
-  which is a new store format version, not an in-place change.
+* **A cleared header checksum flag is refused at version 3 (D-1528, closed for
+  new months by D-1571; audit-20261003 attackdata-8).** Every month created
+  since D-1571 is version 3, whose checksums are mandatory: a slot with
+  `FLAG_CHECKSUMS` cleared is refused as `ChecksumsRequired(3)`. What remains:
+  a version-2 month written before D-1571 keeps the optional flag (it is never
+  rewritten in place), and an actor who rewrites a version-3 month's `magic`
+  and `format_version` to version 2 in both slots and recomputes their CRCs
+  presents an unsealed version-2 month. The CRC is integrity, not
+  authentication; that actor can equally rewrite the `.crc`.
 * **A deleted month file is not detected (D-1520).** The writer refuses to
   re-initialise a month file truncated or zeroed in place when its `.crc`
   proves records were committed. A `.bin` deleted whole, sidecar left behind,
   is created again empty, as before: a deletion is an explicit act, and the
   lost records are not named.
-* **A JSON rupee price is snapped from serde's re-rendering, not the vendor's
-  text (audit-20261003 attackdata-4).** `http` reads the number as an f64 and
-  snaps `Number::to_string()` half-up. Past about 17 significant digits the
-  f64 has already rounded, so `100.12499999999999999` snaps to 100.13 where its
-  own text says 100.12. A 2,000,000-case differential found 0 differences for
-  2- and 3-decimal prices. Closing it needs `serde_json`'s
-  `arbitrary_precision`, a dependency feature change not made here.
+* **A JSON rupee price is snapped from the vendor's own text (audit-20261003
+  attackdata-4, closed by D-1570).** `serde_json` is built with
+  `arbitrary_precision`, so a number keeps its digits and `http::number_text`
+  hands them to the half-up reader unchanged (an exponent is shifted exactly).
+  What remains bounded: a price text longer than
+  `brutex_core::price::MAX_PRICE_TEXT` (64 bytes) is refused by name, where the
+  f64 path had rounded it silently; and each number node now owns its digits on
+  the heap, so the decode tree's argued peak is about twice the earlier ~16x
+  (UNMEASURED).
 * **Run-id resumption reads one block (D-1536).** `reserve_run_id` resumes above
   the largest `run` in the last 64 KiB of the newest non-empty log file. A run id
   carried only by lines further back, and above every later `seq`, is not seen.
@@ -14196,24 +14200,34 @@ bounds are all nonzero.
 
 ### a flipping cadence makes `forward`'s window rebuild and leaves Newey-West pairs queued — D-1550
 
-`runner::outcome::WindowExtremes` and `OverlapWindow` were documented as
-amortised O(1) per query because both window ends only advance. Since D-1410
-the exit of bar `i` is `ts(i) + step_at(i)·H`, and `step_at` is a prefix
-running median that can step DOWN. Measured by the audit (o1eng2-1) on twenty
-generated sessions with every third minute dropped: at H=9, 111 of 227 priced
-bars had an exit earlier than the previous priced bar's. Each such query
-clears and rebuilds the deques from its left end, Θ(window) for that query,
-so the per-query bound is Θ(H) in the worst case and the amortised O(1) holds
-only while the cadence is constant. The audit's timing showed no measurable
-cost at that size (279 ns/bar at H=9, 261 ns/bar at H=144), because the
-flips stop once the prefix median settles; that is one fixture, not a bound.
+**Superseded by D-1572; kept for the record.** `runner::outcome::WindowExtremes`
+and `OverlapWindow` were documented as amortised O(1) per query because both
+window ends only advance. Since D-1410 the exit of bar `i` is
+`ts(i) + step_at(i)·H`, and `step_at` is a prefix running median that can step
+DOWN (the audit measured 111 backward exits among 227 priced bars at H=9 on a
+fixture with every third minute dropped). Until D-1572 each such query cleared
+and rebuilt the deques, Θ(window), and the Newey-West drain popped only from
+the front, so a queued hit whose exit preceded the front's was counted as
+overlapping with later hits.
 
-The Newey-West drain in `OverlapWindow::observe` pops only from the front. A
-queued hit whose exit precedes the front's stays queued until the front
-drains, and its pairs with later hits are counted as overlapping although
-the two windows share no bar. Its effect on `edge`'s t-statistic is
-UNVERIFIED: nothing has measured it. A drain independent of exit order needs
-an exit-ordered structure, O(log H) per hit; it is not done here.
+**What holds now (D-1572).**
+
+- `WindowExtremes`: a backward query is answered by `BlockExtremes` in at most
+  two partial 64-bar blocks of reads plus one lookup, O(1). The table is built
+  once per `forward`, on its first backward query: O(n) time, and
+  `(n/64)·log₂(n/64)` pairs of memory, about 4.6 MB at 1,222,791 bars. A
+  `forward` whose exits never step back never builds it. Proven by
+  `runner::outcome::window_tests::a_backward_right_end_is_answered_in_constant_reads`
+  (18,008,999 bars read for 17,999 queries over 20,000 bars before; held to
+  `3n + 130·queries` now). Not timed: no bench row covers `forward`.
+- `OverlapWindow`: each hit is filed on a timing wheel by its death
+  `min(exit, o + H)` and retired when an entry reaches it, in any exit order.
+  The wheel has `min(H, bars + 1)` slots; its tick only advances, so across one
+  `edge` walk the slots visited are bounded by the bars walked, O(1) amortised
+  per bar. Proven equal to the pair-by-pair definition by
+  `runner::outcome::overlap_window_tests::a_backward_exit_leaves_the_window_when_its_own_window_closes`.
+- UNVERIFIED: how much the over-counted pairs moved `edge`'s t-statistic on
+  runs made before D-1572. Nothing measured it.
 
 ### SPA and Romano-Wolf studentize by an i.i.d. standard error — D-1549
 
@@ -14250,18 +14264,13 @@ pass over the bars at a once-per-report boundary, O(bars).
   minutes (188 for a 375-minute session), and a window of D sessions at most
   about 188·D. A cap was rejected because it would hide which minutes are
   missing. Not timed: no bench covers it.
-- **A JSON rupee price is parsed through an `f64` before its half-up snap
-  (GAP16-24, D-1494).** `serde_json` is built without `arbitrary_precision`,
-  so `http::one_price` and `rolling`'s `paisa` read the shortest
-  round-tripping text of an `f64`, not the vendor's bytes. That is exact,
-  one rounding in all, for a text of at most fifteen significant digits,
-  which covers every NSE price and every measured Dhan float. Past fifteen
-  digits the parse is a second rounding: a value within one `f64` step of a
-  half-paisa boundary can snap the other way, and the widest `i64` paisa
-  price, `92233720368547758.07`, is refused through JSON though it reads as
-  text. Checked over 160,000 texts by
-  `pull::http::tests::the_json_parse_is_exact_for_price_text_up_to_fifteen_digits`;
-  not proved for every fifteen-digit text.
+- **A JSON rupee price was parsed through an `f64` before its half-up snap
+  (GAP16-24, D-1494). Closed by D-1570:** `serde_json` is now built with
+  `arbitrary_precision`, so `http::one_price` and `rolling`'s `paisa` read the
+  vendor's own digits and the widest `i64` paisa price,
+  `92233720368547758.07`, reads through JSON exactly as it reads as text.
+  `pull::http::tests::the_json_parse_is_exact_for_price_text_up_to_fifteen_digits`
+  now asserts that equality.
 - **The closure check is O(k) per itemset and copies a level per call (c4a-6,
   D-1496).** `runner::closed::redundant_between` builds a
   `HashMap<ConditionMask, u64>` of the whole lower level, O(|F_k|) time and
