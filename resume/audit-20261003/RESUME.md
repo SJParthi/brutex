@@ -61,3 +61,9 @@ Scope: verify all 547 earlier findings (250 batch-2 in fix-queue/lane{1,2,3}{,-b
 - 20:40 UTC: full workspace test on b23976fc: 6,726 passed, 0 failed. PUSHED to final/all-fixes (fast-forward 8a59ff4e -> b23976fc). F9 items now pushed; wip/audit-combined-f9 is merged, ignore it.
 
 - 21:15 UTC: CI on b23976fc red in Gate 1+2 (run 37151036264): telemetry sink::tests::a_file_that_ends_mid_line_is_terminated_at_open_and_not_appended_onto, reopen refused by the directory lock. b23976fc does not touch crates/telemetry (F9 diff is cli + docs + runner test); passed locally in the 6,726-test run, so likely a lock-release race from the telemetry lock change already on 8a59ff4e. CI thread is told. NEXT: reproduce with repeated runs, fix the lock release in the test or sink.
+
+## PROGRESS 2026-10-04 05:35 UTC (restarted 03:45 UTC after user "Go", 2 agents)
+- final/all-fixes = b23976fc (F9 + D-1853). CI on it red in Gate 1+2: telemetry sink lock test (not from this merge; CI thread told).
+- F5b running in /home/claude/wt-fix5, pushed snapshot `wip/audit-fixes-5b` (supersedes wip/audit-fixes-5): 88cbe235 GAP15-19; 7ca675af GAP15-17 Base Evidence V3 (D-1644); dfd15112 AC-whp-tb-2 cli half, elite takes the ranking lens (D-1645); 50a61190 ET-...-costs-7 cli half (D-1646); 36d05985 GAP15-19 follow-up (D-1643). Final checks/mutation running.
+- F7b running in /home/claude/wt-fix7 on `wip/audit-fixes-7b` (56d6d14f WIP): fixing the cli exit_policy test failure, then full checks, mutants, per-item split.
+- Still queued: F6 (approved), F8, F10 + h-cli-4, 3 unlanded branches (fix/cloud-GAP13-15, fix/cloud-GAP4-46, fix/cloud-W2-cli8-9), pull/store/lake hunter. Agent briefs: prompts/agent-briefs.md (F5b/F7b briefs appended).

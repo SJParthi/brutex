@@ -1,8 +1,8 @@
 id	state	commit	note
 GAP15-19	branch	88cbe235	
-GAP15-17	fixing		
-AC-whp-tb-2	fixing		
-ET-strategies-trades-ranking-costs-7	fixing		
+GAP15-17	branch	7ca675af	D-1644 Base Evidence V3; wip/audit-fixes-5b; checks running
+AC-whp-tb-2	fixing		 | cli half dfd15112 D-1645 on wip/audit-fixes-5b
+ET-strategies-trades-ranking-costs-7	fixing		 | cli half 50a61190 D-1646 on wip/audit-fixes-5b
 gate8	branch	3afa02c3	
 lookahead	fixing		
 docs-web-01	branch	56d6d14f	WIP on wip/audit-fixes-7b, unvalidated

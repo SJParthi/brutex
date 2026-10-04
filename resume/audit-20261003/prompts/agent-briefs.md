@@ -285,3 +285,37 @@ Decision numbers: D-1510..D-1519 and D-1820..D-1829 only. Invariant id prefix: A
 Run everything FIXRULES requires (fmt, clippy, tests of touched crates, the named gates, cargo-mutants on your diff vs 331b05c6 killing every missed mutant). Final message per FIXRULES: table item | verdict | decision | test | commit, plus every check and its result, under 400 words.
 ````
 
+## F7b (2026-10-04T03:41:48.560Z)
+
+````text
+You are fixer F7 (continuation) on the brutex Rust repo. First read /tmp/claude-0/-home-claude-brutex/094f3b54-bc05-531d-a585-043bf006dddc/scratchpad/audit/FIXRULES.md completely and follow it exactly (binding: no push, no PRs, no mcp__hearthbot__ tools; commit locally only).
+
+Worktree: /home/claude/wt-fix7. HEAD is 56d6d14f "WIP (unvalidated): F7 paused for usage limit, 20:10 UTC" on top of 3afa02c3 (gate8, D-1509, done). Read the WIP commit message: it lists the 7 items and each one's state. A previous run of you wrote /tmp/claude-0/-home-claude-brutex/094f3b54-bc05-531d-a585-043bf006dddc/scratchpad/split.py, which rebuilds per-item commits (its stages 0-7 reproduce the tree); use it or split by hand.
+CARGO_TARGET_DIR=/home/claude/t-fix7, CARGO_BUILD_JOBS=2. Disk ~16 GB free shared with one other fixer; if it gets low, delete your target's incremental dir.
+
+Items (decisions already assigned: D-1510 probeapi-1 body deadline, D-1511 h-api-1, D-1512 h-api-2, D-1513 h-api-3, D-1514 excursion look-ahead with grid cost model v2, D-1515 GAP17-33 / W3-store1-9 landing, D-1516 docs-web-01; invariants AGC-02..08). Remaining work, all required:
+1. Fix the failing cli test `ledger_all::exit_policy_tests::every_admitted_runtime_resolution_binds_exact_axes_without_changing_risk` (likely the grid cost-model id v1->v2 change). Find the real cause; fix properly, never by weakening the test's intent.
+2. Run the full tests of every touched crate (api, store, runner, cli, vocab, core and any other) with --locked; root-only permission failures re-run via setpriv per FIXRULES.
+3. cargo fmt --check, cargo clippy --workspace --all-targets -- -D warnings.
+4. Gates 0, 1c, 1d, 10, 11, 12, 14, 23, 27, 27b (Gate 14's "Gates: command not found" after OK is an extraction artifact).
+5. cargo-mutants on the diff vs 331b05c6 (124 mutants were listed). You may speed it as the F9 fixer did: opt-level 0 + incremental via env in a scratch target dir, --in-place, nextest filtered to the touched modules' tests. Kill every MISSED mutant with a real test.
+6. Split into one commit per item (plus any test-fix commit), each message ending with the two attribution lines in FIXRULES.
+Decision numbers left for anything new: D-1517..D-1519, D-1820..D-1829. Invariant prefix AGC- only.
+Also note (do NOT land, just report whether still unlanded by checking commit content against HEAD): fix/cloud-GAP13-15, fix/cloud-GAP4-46, fix/cloud-W2-cli8-9 on origin.
+Final message per FIXRULES: table item | verdict | decision | test | commit, plus every check run and its result, under 400 words.
+````
+
+## F5b (2026-10-04T03:41:57.744Z)
+
+````text
+You are audit fixer F5 (continuation) for SJParthi/brutex. Read /tmp/claude-0/-home-claude-brutex/094f3b54-bc05-531d-a585-043bf006dddc/scratchpad/audit/FIXRULES.md fully and follow it (binding: no push, no PRs, no mcp__hearthbot__ tools; commit locally only). Worktree: /home/claude/wt-fix5, N=5. CARGO_TARGET_DIR=/home/claude/t-fix5, CARGO_BUILD_JOBS=2 (disk ~16 GB free shared with one other fixer; delete your incremental dir if low). Decision numbers ONLY D-1643..D-1649 and D-1800..D-1809 (check which are already used in your branch). Invariant id prefix ONLY AGA-.
+
+State: HEAD 4c891ba1 "WIP (unvalidated): F5 paused for usage limit" on top of 88cbe235 (GAP15-19 Global Replay V4 ceilings, done). Inspect the WIP with git show; keep what is correct, finish or rewrite the rest; `git reset --soft HEAD~1` to rework it into proper per-item commits is fine (local, unpushed rewrite of the WIP only; keep 88cbe235).
+
+Fix fully (original text in /tmp/claude-0/-home-claude-brutex/094f3b54-bc05-531d-a585-043bf006dddc/scratchpad/audit/c4-missing-findings.md; prior analysis in .../audit/out/c4b.md, .../audit/out/c4a-verdicts.md and docs/05-decisions.md D-1638 and D-1640):
+1. GAP15-17 (cli population_base_evidence_v2.rs / ledger): max-gated rates are rounded the wrong way. Fix with a NEW Base Evidence version (V3 or the repo's naming) that rounds correctly; old V2 ledgers stay readable as V2 (or are refused by name, never silently reinterpreted); new writes use the new version; wire Selection V6 / its callers to it; the decision records exactly which results change.
+2. The cli half of AC-whp-tb-2: no command can choose the Asymmetry lens. Add command-line selection end to end with tests.
+3. The cli half of ET-strategies-trades-ranking-costs-7: runner/Cargo.toml and cli still naming worst_case_fills. Fix fully.
+Attack each fix adversarially. Then all checks per FIXRULES: fmt, clippy, tests of every touched crate, gates 0, 1c, 1d, 10, 11, 12, 14, 23, 27, 27b, and cargo-mutants on your diff vs 331b05c6 killing every missed mutant (you may speed mutation with opt-level 0 + incremental in a scratch target dir, --in-place, nextest filtered to touched modules). Final message per FIXRULES (table item | verdict | decision | test | commit, plus every check and its result, under 400 words).
+````
+
