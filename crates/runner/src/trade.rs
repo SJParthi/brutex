@@ -3454,4 +3454,51 @@ mod tests {
         assert!(!code.contains("Anchor::AdverseExtreme"));
         assert!(!code.contains("worst_case_fills("));
     }
+
+    /// The manifest's fill-model paragraph names the one fill call the crate
+    /// makes and claims no charge, and the production code agrees. It said
+    /// `trade` prices through `worst_case_fills` until D-1498 and charges
+    /// through `costs::trip::price` until D-1646; neither is called.
+    #[test]
+    fn the_manifest_fill_model_names_the_calls_the_crate_makes() {
+        let manifest = include_str!("../Cargo.toml");
+        let paragraph = manifest
+            .split_once("# THE FILL MODEL.")
+            .and_then(|(_, rest)| rest.split_once("costs       ="))
+            .map(|(paragraph, _)| paragraph)
+            .expect("the manifest keeps its fill-model paragraph");
+        let prose = paragraph
+            .lines()
+            .map(|line| line.trim_start_matches('#').trim())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            prose.contains("price every entry and exit through `costs::fill::fills_at`"),
+            "{prose}"
+        );
+        assert!(
+            prose.contains("`costs::trip::price` is never called"),
+            "{prose}"
+        );
+        assert!(!prose.contains("charges through `costs::trip::price`, rather"));
+        assert!(!prose.contains("exit through `costs::fill::worst_case_fills`"));
+        let trip = ["costs", "::trip::"].concat();
+        let worst = ["worst_case", "_fills("].concat();
+        for (name, source) in [
+            ("trade.rs", include_str!("trade.rs")),
+            ("grid.rs", include_str!("grid.rs")),
+        ] {
+            // Comments and string literals are prose, not calls; this test's own
+            // needles are built from pieces so they never match themselves.
+            let code = source
+                .lines()
+                .map(str::trim_start)
+                .filter(|line| !line.starts_with("//") && !line.contains('"'))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(!code.contains(&trip), "{name} charges through costs::trip");
+            assert!(!code.contains(&worst), "{name} calls the adverse-tick fill");
+            assert!(code.contains("fills_at("), "{name} prices through fills_at");
+        }
+    }
 }

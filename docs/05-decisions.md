@@ -56991,3 +56991,179 @@ limit; one extra key read per object.
 `report_json_decimals_keep_their_digits_and_refuse_nonfinite_or_forged_numbers`
 pins the digits of `100.12499999999999999`, refuses `-1e999` and `1E+309`, and
 refuses a token map with extra fields or non-number digits.
+### D-1643 — Global Replay V4 enforces each stream's frozen exit-quality ceilings, as V1 did — 2026-10-03
+
+**What was wrong (GAP15-19).** Global Replay V1 summed the ambiguous bars and
+gap fills of every trade the global scheduler admitted for a stream and
+refused the replay when either sum passed the frozen exit policy's
+`max_ambiguous_bars` / `max_gap_fills`. V4 checked each row only
+(`ambiguous_bars() > 1 || gap_fills() > 1`) and kept no sum, so a replay could
+publish a stream with more ambiguous or gap-filled trades than the policy it
+was selected under allows. D-1638 stated the gap and left it open for this
+decision.
+
+**The rule chosen.** V1's: the replay refuses, naming the stream, its sums and
+its ceilings. Rejecting only later trades of the stream was the alternative
+D-1638 named; it was not chosen because the shared scheduler has already
+given the trade global occupancy when its quality is known, so dropping it
+afterwards would leave occupancy and money disagreeing — the same reason V1
+refused.
+
+**The change.**
+
+- `runner::exit_grid_policy::GlobalReplayWitnessUniverseV1` carries the two
+  ceilings, taken from the same resolved grid's policy that replays the
+  universe, with accessors, and seals them: the witness seal domain is now
+  `global-replay-witness-universe.v2`. That seal is in memory only, never
+  persisted, so no stored byte changes with it.
+- `cli::global_replay_v4` keeps one `StreamQuality` per stream, indexed by
+  the stream number every `Attempt` already carries. `account_decision`
+  adds each admitted priceable trade in O(1) with checked arithmetic and
+  refuses past either ceiling. Blocked trades and admitted price-refused
+  holds add nothing, as in V1.
+- The plan identity domain is `brutex-global-replay-v4-plan-v2`. The plan
+  identity names the durable `sweep_evidence` attempt, so an attempt run
+  under the old rule and one run under this rule never share an identity
+  while possibly ending differently.
+
+**Which results change.** A replay in which some stream's admitted trades sum
+past either frozen ceiling, which published before, now refuses with no
+publication. Every replay that does not reach a ceiling publishes the same
+bytes as before: the header, roster, witness, candidate, decision, VIX and
+completion records, the economic `replay_id` and the `publication_id` are all
+unchanged, because the ceilings gate the replay and are not written into it.
+A V4 publication already on disk is never read without recomputation (the
+store only verifies a fresh commit's own bytes), so a file published under
+the old rule is not reinterpreted; rerunning it either reproduces it or
+refuses. Global Replay V3 still checks per row only; it has no caller
+(`expect(dead_code)`) and is not a production path.
+
+**What it proves.** AGA-01, AGA-02 in `docs/04-invariants.md`:
+`cli::global_replay_v4::tests::admitted_quality_is_summed_per_stream_and_refused_past_its_frozen_ceilings`,
+`cli::global_replay_v4::tests::admitted_quality_counts_refuse_on_overflow_instead_of_wrapping`
+and the extended
+`runner::exit_grid_policy::tests::global_replay_witness_mints_every_identity_at_the_authenticated_replay_door`.
+The stored-origin test now schedules under the real ceilings its witness was
+sealed with.
+
+### D-1644 — Base Evidence V3 rounds its four max-gated rates up, and Runner gates the losing rate exactly from its counts — 2026-10-04
+
+**What was wrong (GAP15-17).** D-1640 stated it and left it open: Base
+Evidence V2 projected `ambiguous_fill_rate_ppm`, `gap_affected_rate_ppm`,
+`session_concentration_ppm` and `largest_trade_profit_share_ppm` by floor,
+Runner projected `losing_trade_rate_ppm` by its canonical floor, and every
+one is gated `value > ceiling`. An exact rate strictly between a ceiling and
+the next ppm floored onto the ceiling and passed: one in three trades is
+333,333.33 ppm, floors to 333,333 and was admitted under a 333,333 ceiling,
+and from Admission V4 that candidate reached Selection V6.
+
+**The rule chosen.** A max gate compares the exact rate. For the four Base
+rates the projection is the ceiling `⌈part × 1,000,000 / total⌉` (in `u128`,
+refusing what does not fit `u64`): `⌈x⌉ > c` holds for an integer `c`
+exactly when `x > c`, and an exact rate on the ceiling is not rounded past
+it. The losing rate keeps its canonical floor, because Runner validates that
+floor against the trade counts and every Admission V1/V2/V3 byte carries it;
+`AdmissionPolicyV1::evaluate` instead gates it as
+`losses × 1,000,000 > ceiling × trades` in `u128` (no overflow is
+possible), which validated evidence always allows because a measured rate is
+refused without both counts and a nonzero total. The min-gated win rate is
+already exact under a floor (`⌊x⌋ ≥ c` iff `x ≥ c`), and the Statistics
+probabilities already refuse a floor that hides a ceiling
+(`floor_hidden_ceiling_v3`).
+
+**A new format, never a reinterpretation.** The Base Evidence record is laid
+out as before but is format 3: magic `BTX-BASE-EV-V3`, version 3, and new
+record-seal, evidence-id, policy and ordered-records domains. The ledger's
+record, completion and completion-record magics, its header, completion-id,
+completion-seal and pair domains, and its three file names
+(`base-evidence-{records,completions}-v3.bin`, `base-evidence-write-v3.lock`)
+all move. The Candidate-row and TradeRows digests keep their V2 domains:
+they identify the inputs, which this does not change. A V2 record is refused
+by name before its seal is checked, and a ledger root that still holds
+either V2 file — present, a dangling link, or unprobeable — is refused by
+name on both the write and the read open, before any V3 file is created
+beside it, so a Population chain recorded against V2 evidence cannot carry
+on as if its Base evidence had never been written. Selection V6 and every
+caller reach Base Evidence only through this one module, so they read and
+write V3 with no other change. The Rust type names keep their `V2` suffix;
+they name the module family, not the format.
+
+**Which results change.**
+
+- Every Base Evidence `evidence_id`, base-policy digest, ordered-record
+  digest, completion id and NIFTY/BANKNIFTY pair id, so every identity
+  downstream that embeds one (Admission V4 decisions, Finalization V4,
+  Population V6, Execution V4, Selection V6) differs from a V2-era run on
+  the same inputs. No V2 ledger is opened; rerun the chain in a fresh root.
+- The four Base rates rise by one ppm whenever the division is inexact, so
+  the Admission evidence bytes and digests carrying them change, and a
+  candidate whose exact rate lies strictly in `(ceiling, ceiling + 1 ppm)`
+  now fails `AmbiguousFills`, `GapAffected`, `SessionConcentration` or
+  `LargestTradeProfitShare` where it passed; it leaves Admission V4 and
+  therefore Selection V6.
+- In every Runner admission evaluation (V1, V2, V3; every caller), a
+  candidate whose `losses / trades` lies strictly in that interval now fails
+  `LosingTradeRate`. No evidence byte changes for it. A stored V1/V2/V3
+  decision sealed under the old rule with such a rate now refuses on decode
+  with `VerdictMismatch`, loudly; every other stored decision decodes
+  byte-for-byte as before.
+
+**Not changed here.** `boolean_admission_v1`, `index_stop_qualification_metrics`
+and `institutional_evidence` floor their own ambiguous and gap rates (and the
+latter two the concentration and profit-share rates) into the same four
+fields. Those are separately versioned producers outside this finding's Base
+Evidence → Admission V4 → Selection V6 chain; the losing-rate half reaches
+them through Runner, the other four do not, and each needs its own version.
+
+**What it proves.** AGA-03 to AGA-05 in `docs/04-invariants.md`.
+
+### D-1645 — `elite` takes the ranking lens on the command line — 2026-10-04
+
+**What was wrong (cli half of AC-whp-tb-2).** `Lens::Asymmetry` is the only
+lens that ranks by the operator's own rule, the smallest win against the
+largest loss, and no command could choose it: `elite` built `Payoff` as a
+constant and every other production lens is a fixed constant too. D-1498
+fixed Runner's half and left this open. `cli`'s identity test also compared
+only two lenses, so mapping `Asymmetry` onto another lens's term would have
+passed.
+
+**The change.** `cli elite … MAX_POINTS TOP [LENS]` takes an optional
+eleventh word: `payoff`, `asymmetry`, `path` or `detectability`. Anything
+else is refused by name before a number or the store is read; it is never
+read as the default. Absent keeps `Payoff`, so every existing invocation is
+the same run with the same identity. The lens is threaded through
+`elite_descend_in_points_inner` and `elite_descend_with_attempt` into every
+descent step's `Policy` and the validated re-run, and the run identity
+already carries it (`policy_of` term 1: 0, 1, 2, 3). The public library
+entries and the browser's attempt entry keep `Payoff`.
+
+**Which results change.** None unless a LENS word is given. A run naming a
+lens other than `payoff` ranks by it and records under that lens's identity.
+
+**What it proves.** AGA-06.
+
+### D-1646 — The thin-sample note prints the fold count the walk-forward uses, and runner's manifest stops claiming a charge — 2026-10-04
+
+**What was wrong (cli half of ET-strategies-trades-ranking-costs-7).**
+`cli::sample_warning` printed `walk-forward folds 5` from
+`WALK_FORWARD_SPLITS` and divided by it, while every walk-forward splits by
+`walk_forward_splits(bars)` — two to twenty, derived from the bar count — so
+a thin 12-session audit that ran two folds said five. Four cost comments
+still sized the validation stack by that constant. `crates/runner/Cargo.toml`
+said `trade` charges through `costs::trip::price`; nothing in `runner` calls
+it, and every figure is gross of every charge. Its `worst_case_fills`
+sentence had already been corrected by D-1498, and no `cli` source names
+`worst_case_fills`.
+
+**The change.** `WALK_FORWARD_SPLITS` is removed. `sample_warning` takes the
+fold count, its caller passes `walk_forward_splits(bars.len())`, and the
+per-fold test window is `sessions / (folds + 1)`, the anchored shape
+`walk_forward_splits` documents. The cost comments name the derived count.
+The manifest's fill-model paragraph names `fills_at` in `trade` and `grid`
+and says nothing charges.
+
+**Which results change.** The `SAMPLE` note of a below-50-session audit: the
+fold count and per-fold day estimate it prints. No identity, digest or
+selection moves.
+
+**What it proves.** AGA-07.
