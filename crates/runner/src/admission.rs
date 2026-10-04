@@ -1021,8 +1021,10 @@ impl AdmissionPolicyV1 {
             &mut unmeasured,
             &mut refused,
         );
-        check_max_u64(
+        check_max_count_rate(
             e.losing_trade_rate_ppm,
+            e.trades,
+            e.losing_trades,
             p.max_losing_trade_rate_ppm,
             AdmissionReasonV1::LosingTradeRate,
             &mut failed,
@@ -2889,6 +2891,45 @@ fn check_max_u64(
     refused: &mut ReasonBits,
 ) {
     let violates = matches!(observation, ObservedU64V1::Measured(value) if value > ceiling);
+    record_observation(observation, reason, violates, failed, unmeasured, refused);
+}
+
+/// A max-gated count rate compared exactly, not through its floor projection.
+///
+/// The evidence carries the losing rate as the canonical floor
+/// `count * 1_000_000 / total`, and a floor can sit on the ceiling while the
+/// exact rate is above it: one loss in three trades is 333,333.33 ppm, floors
+/// to 333,333, and passed a 333,333 ceiling (GAP15-17). Validated evidence
+/// always carries both counts beside a measured rate, so the gate compares
+/// `count * 1_000_000 > ceiling * total` in `u128`, which cannot overflow.
+/// Only the comparison changes: the stored rate stays the canonical floor.
+/// Evidence built without the counts (no validated constructor allows it)
+/// keeps the projected comparison. D-1644.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the same three reason partitions every sibling check writes, plus the two counts the exact comparison needs"
+)]
+fn check_max_count_rate(
+    observation: ObservedU64V1,
+    total: ObservedU64V1,
+    count: ObservedU64V1,
+    ceiling: u64,
+    reason: AdmissionReasonV1,
+    failed: &mut ReasonBits,
+    unmeasured: &mut ReasonBits,
+    refused: &mut ReasonBits,
+) {
+    let violates = match (observation, total, count) {
+        (
+            ObservedU64V1::Measured(_),
+            ObservedU64V1::Measured(total),
+            ObservedU64V1::Measured(count),
+        ) if total > 0 => {
+            u128::from(count) * u128::from(PPM) > u128::from(ceiling) * u128::from(total)
+        }
+        (ObservedU64V1::Measured(value), _, _) => value > ceiling,
+        _ => false,
+    };
     record_observation(observation, reason, violates, failed, unmeasured, refused);
 }
 
@@ -6661,6 +6702,108 @@ mod tests {
         // fully sourced PBO value, but no production caller can take this path:
         // `values` is private and the public constructor/decoder reject it.
         AdmissionEvidenceV1 { values: *values }
+    }
+
+    /// GAP15-17, D-1644: the losing-rate ceiling is compared exactly from the
+    /// counts, never through the floored ppm. One loss in three trades is
+    /// 333,333.33 ppm; it floors onto a 333,333 ceiling and used to pass.
+    #[test]
+    fn a_losing_rate_whose_floor_sits_on_the_ceiling_fails_when_the_exact_rate_is_above() {
+        let gated = |ceiling: u64, trades: u64, losses: u64| {
+            let mut draft = draft();
+            draft.max_losing_trade_rate_ppm = Some(ceiling);
+            let policy = AdmissionPolicyV1::new(draft).expect("valid ceiling");
+            let mut values = constructible_values();
+            values.trades = ObservedU64V1::Measured(trades);
+            values.winning_trades = ObservedU64V1::Measured(trades - losses);
+            values.losing_trades = ObservedU64V1::Measured(losses);
+            let floor = |part: u64| {
+                u64::try_from(u128::from(part) * u128::from(PPM) / u128::from(trades))
+                    .expect("a rate of at most one fits u64")
+            };
+            values.win_rate_ppm = ObservedU64V1::Measured(floor(trades - losses));
+            values.losing_trade_rate_ppm = ObservedU64V1::Measured(floor(losses));
+            values.consecutive_winning_streak = ObservedU64V1::Measured(0);
+            values.consecutive_losing_streak = ObservedU64V1::Measured(0);
+            let evidence = AdmissionEvidenceV1::new(values).expect("canonical floor evidence");
+            policy
+                .evaluate(&evidence)
+                .failed()
+                .contains(AdmissionReasonV1::LosingTradeRate)
+        };
+        // The audit probe: floor 333,333 on a 333,333 ceiling, exact above it.
+        assert!(gated(333_333, 3, 1));
+        // Exact below the next ppm passes; an exact equality passes.
+        assert!(!gated(333_334, 3, 1));
+        assert!(!gated(250_000, 4, 1));
+        assert!(gated(249_999, 4, 1));
+        // Large counts: the u128 product cannot overflow.
+        assert!(gated(PPM - 1, u64::MAX, u64::MAX));
+        assert!(!gated(PPM, u64::MAX, u64::MAX));
+        assert!(gated(0, u64::MAX, 1));
+        assert!(!gated(1, u64::MAX, 1));
+
+        // Evidence without counts (unreachable through the validated
+        // constructor) keeps the projected comparison; zero trades too.
+        let policy = policy_for_failure(AdmissionReasonV1::LosingTradeRate);
+        for (trades, losses, rate, fails) in [
+            (
+                ObservedU64V1::Unmeasured,
+                ObservedU64V1::Unmeasured,
+                400_001,
+                true,
+            ),
+            (
+                ObservedU64V1::Unmeasured,
+                ObservedU64V1::Unmeasured,
+                400_000,
+                false,
+            ),
+            (
+                ObservedU64V1::Measured(0),
+                ObservedU64V1::Measured(0),
+                400_001,
+                true,
+            ),
+            (
+                ObservedU64V1::Measured(0),
+                ObservedU64V1::Measured(0),
+                400_000,
+                false,
+            ),
+            (
+                ObservedU64V1::Measured(3),
+                ObservedU64V1::Unmeasured,
+                400_001,
+                true,
+            ),
+        ] {
+            let mut values = passing_values();
+            values.trades = trades;
+            values.losing_trades = losses;
+            values.losing_trade_rate_ppm = ObservedU64V1::Measured(rate);
+            assert_eq!(
+                policy
+                    .evaluate(&evidence(&values))
+                    .failed()
+                    .contains(AdmissionReasonV1::LosingTradeRate),
+                fails,
+                "{trades:?} {losses:?} {rate}"
+            );
+        }
+        let mut values = passing_values();
+        values.losing_trade_rate_ppm = ObservedU64V1::Unmeasured;
+        let verdict = policy.evaluate(&evidence(&values));
+        assert!(
+            !verdict
+                .failed()
+                .contains(AdmissionReasonV1::LosingTradeRate)
+        );
+        assert!(
+            verdict
+                .unmeasured()
+                .contains(AdmissionReasonV1::LosingTradeRate)
+        );
     }
 
     #[expect(
