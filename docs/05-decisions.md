@@ -57281,3 +57281,56 @@ the handle it opened. `docs/06-limits.md` states both.
 serves another root from inside a cold `open`, which deadlocked before.
 `api::topjson::tests::a_persistent_refusal_reopens_on_every_request_and_the_cost_is_stated`
 pins the new shape of the refused-handle clear. AFG-09.
+
+### D-2310 — `cli top` and `cli results` read each ledger row once — 2026-10-04
+
+**Finding (Rust and O(1) sweep OS-7, formerly W2-cli8-5).** `newest_complete`
+(behind `cli top` and `/engine/top.json`) and `results_at` (behind
+`cli results`) cold-opened `results/runs.bin`, whose identity pass already
+reads, seals and decodes every row, and then read every row a second time
+through `Results::read`: a shared lock, an unlock, a seek, a read and the
+seal hash again per row. Each call read the file twice, and the listing held
+every matching record in memory.
+
+**What could not be made O(1).** `runs.bin` (version 3) is a fixed-stride
+array with a 16-byte header and no aggregate. `top` names the best complete
+row across ALL rows, and `results` prints how many rows match and the best
+complete row across all of them; neither is at a computable offset, and no
+existing index holds it. Storing one is a new format version, which §3 rule
+8 forbids doing in place and this entry does not do. The cold open is itself
+O(runs): it builds the identity index that refuses a duplicate run and checks
+every seal. Both commands stay O(runs) per call, and `docs/06-limits.md`
+says so.
+
+**Change.** `Results::open_read_visiting` lends each row of the open's own
+pass to a visitor, in append order: a sealed row as its `Record`, decoded
+once and shared with the identity index; a damaged row as the exact refusal
+`Results::read` makes for it (now one function, `unsealed`). `newest_complete`
+folds it with `keep_best` and names the FIRST damaged row, as its forward
+walk did; `results_at` folds it with `ListingFold`, keeping the row count,
+the matching count, the newest 40 matching rows, the best row and the LAST
+damaged row, as its newest-first walk did. An open refusal still wins over
+any of them. `best_complete_newest_first` became the append-order
+`keep_best`, the one ranking rule for both commands. Per call: one open, one
+read of each row, O(40) records held by the listing. The rows are the
+snapshot the open indexed under its one shared lock, where the old reads
+could also see a row appended after the open.
+
+**Proof.** `cli::results_report_tests::top_and_results_read_each_row_once_in_one_open`
+counts, with the test-only `results::ROW_READS` and `OPENS`, exactly one open
+and 90 row reads per call on a 90-row ledger, for six filters, intact and
+with two damaged rows (the old walk made 180), and that the listing names
+row 50 and `top` row 10. `cli::results_report_tests::the_one_pass_listing_matches_the_removed_newest_first_walk`
+rebuilds the removed walk through `Results::read` and requires the counts,
+equity note, table, omitted-row line, winner and quality block byte for byte.
+Before commit, both commands' full output for seven filters over a 90-row
+ledger, intact, with two damaged rows, with a duplicate identity and with
+both, was captured from the base tree and from this change and compared:
+identical. Counted, not timed.
+
+**Also fixed (found on the way).** `results::tests::the_ledger_is_fsynced_and_never_merely_flushed`
+reads `results.rs` up to the first `#[cfg(test)]` as its shipping half, and
+D-2301 put that attribute inside `open_with` to bump `OPENS`, so the guard
+saw one `sync_all` of three and failed on the base tree. Both counters are
+now bumped through `count_open` and `count_row_read`, defined beside them
+below the line with no-op shipping twins, and the guard passes.
