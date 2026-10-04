@@ -3,7 +3,7 @@
 Saved ahead of a 5-hour usage pause. GitHub state wins over this file.
 
 ## The board
-- Artifact (republish to this same URL every refresh): https://claude.ai/artifact/5Jr1kKxEUEmzZF9f19YfTi (version 16 at 22:0x UTC).
+- Artifact (republish to this same URL every refresh): https://claude.ai/artifact/5Jr1kKxEUEmzZF9f19YfTi (version 17 at 22:2x UTC).
 - Hourly routine trig_01BEoTSneJLtU8Rb1PLXNhWe fires at :19.
 - Builder: `resume/fix-board/builder` (Rust, standalone). Steps and the refresh command: `resume/fix-board/README.md`.
 - Last refresh 18:2x UTC: 1,183 rows (495 pushed, 285 branch, 132 fixing, 5 partial, 17 doc, 249 found). PR #74 head fc6dbb9d, run 37223441970. Since then head is 1f588aae (web batch 1 merged).
@@ -33,7 +33,9 @@ All on branches from final/all-fixes-zero 1f4de71a; hashes sent to zero-findings
 - fixboard/zero-p8 c26d8db5: P8-01..05 and p8num-1 all done (D-2720..2725, FB-21..27), handed to zero-findings 17:3x UTC. Base failure found: api sweeprun::strict_tests::strict_out_of_domain_request_settings_refuse_before_configuration_slot_or_start (reported to zero-findings).
 
 - fixboard/pr74-web18 (worktree /tmp/claude-0/wt-pr74-web18): batch 1 P17-01, p14num-1, conc18-1, conc18-2 (tip 891d8f8d) MERGED into PR #74 as 1f588aae. Batch 2 conc18-3 5620eae8, conc18-4 e4a6158d, conc18-5 ed207d0e, p14num-2 f460a400 (D-2750), merged with final/all-fixes at 605c5299, handed to PR 74 CI 18:45 UTC. Not merged with origin/zero-work (it does not contain PR #74 head; 58 conflict hunks; PR 74 CI owns that integration). CE-77 left to zero-findings 356b15ae.
-- fixboard/pr74-conc-api dee61cfd (pushed): all 7 fixed (D-2760..2766, FB-61..67), merged with 8f58d915, fmt/clippy/api+pull+core tests green (8 nobody re-exec tests pass from a world-readable dir). Handed to PR 74 CI and zero-findings 19:3x UTC. On resume: check it landed on final/all-fixes and flip fixboard.tsv rows to pushed. fixboard/pr74-conc-api-merged-wip is a stale save copy (delete got 403).
+- fixboard/pr74-conc-api dee61cfd: all 7 merged into PR #74 as 25bc8aa (PR 74 CI declared the 2 Gate 1d scratch roots).
+- fixboard/pr74-api2 (wt /tmp/claude-0/wt-pr74-api2, tgt-conc, D-2770..2779, FB-71..79): conc server1-1/2, server2-1/2, runs-2/3/4, apicache-2. Agent running from 22:05 UTC.
+- fixboard/pr74-ce2 (wt /tmp/claude-0/wt-pr74-ce2, tgt-ce2, D-2751..2759 then D-2790.., FB-91..99): CE-84..94, CE-98..101 (CE-95..97 are zero/docs-batch 768d742d). Agent running from 22:05 UTC. Zero-findings confirmed both batches are ours.
 
 ## Next
 1. On resume (22:03 UTC): fetch, check fixboard/pr74-conc-api and 605c5299 status on head; update fixboard.tsv.
