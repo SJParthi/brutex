@@ -826,6 +826,17 @@ workflow. That turns "every segment written down here is invented" from a
 comment into a check, and makes adding one a deliberate act. It says nothing
 about the rest of the repository.
 
+**Until D-2660 it did not cover the joined path either** (P1-07-02). Gate 1d
+kept a decoded literal only when the WHOLE literal was segment-shaped, so
+`"/acmeorg/prd/vendor/field"` was never split and its segments were never
+compared with the list; and gate 1c read source bytes, so one Rust escape
+(`\x70rod`) hid a standard environment word from it. Now gate 1d splits every
+decoded `crates/pull` literal that holds `/` and no whitespace on `/` and checks
+each segment-shaped piece, and gate 1c runs its pattern over the decoded
+literals of every tracked `.rs` outside `web/` as well as over raw bytes. What
+remains: a joined path with an environment outside the ten words, in a crate
+other than `crates/pull`, or with an upper-case segment.
+
 **What neither can do is know the operator's real segments**, because the file
 that holds them is untracked and a CI runner has never seen it. That check is a
 local one, and D-0036 ran it: of the four segment roles, `org` appears in no
