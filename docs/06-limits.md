@@ -15197,3 +15197,45 @@ per-candidate primitive from `CLAUDE.md` §3 rule 4.
   minute bars land, on bars `derive_all` has already read. Argued from the
   shape of the code and not timed. The autopilot's day-then-minute choice
   (D-3000) is two integer compares per tick and reads no census.
+
+## Documented costs re-examined: removed, or inherent and measured — D-2290, 4 October 2026
+
+Every cost below was re-checked against the source at fc6dbb9. Ten were
+removed (D-2280 to D-2289, in the bullets of their own sections above). The
+rest stay, and each one says why removing it would remove a guarantee or
+change the answer, not only the cost. **The figures are one machine's, taken
+on 2026-10-04 by a scratch release harness that is not committed** (four
+vCPUs shared with three other builds, page cache warm): they are measurements
+of this build on this box, labelled as such, not budgets a gate holds.
+
+| Finding | Cost that stays | Why it is inherent | Measured (p50 / p99 / max) |
+|---|---|---|---|
+| W3-store1-0, W3-store1-1 | `first_at_or_after` is a bisection, at most `ceil(log2(n_valid + 1))` = 14 probes at the one-minute month ceiling; `already_stored` adds the batch | Records are not dense on the minute grid (holidays, Muhurat, vendor holes), so a stamp has no computable index, and an index file would be a new store format version; 14 is a constant of the format | 28.5 µs / 64.3 µs / 6.2 ms per lookup over 11,625 sealed records (each probe pays its block's verify) |
+| R9-csr-o1-0 | one `fstat` per tail-block verification | It is how records past the commit are found (D-0688); skipping it refuses a sealed-past-commit tail an interrupted append leaves | `fstat` 386 ns / 488 ns; a cold tail-block read with it 1.56 µs / 2.05 µs, an interior block without it 3.47 µs / 4.39 µs |
+| W1-pull2-5 | `committed_cash_days` reads every committed record of each month asked | Its contract is that a corrupt month refuses; only reading every block verifies every block, and the days come from the records because the bar format holds no per-day index | whole verified month, fresh handle, 11,625 records: 1.03 ms / 5.12 ms / 5.13 ms |
+| W1-pull2-3 | `derive_all` re-reads and re-folds the month on a rerun that wrote nothing | The rerun is how a derivation blocked by missing schedule evidence is retried, and `reconcile_derived`'s full re-proof is the only check that finds a derived conflict; skipping it needs a per-rung resume point the format does not record | same month walk as above |
+| W1-api2-1 | a calendar derivation reads every daily record and every walked minute record | A calendar derived from bars reads the bars; it runs once per manifest stamp (`calendar_of::cached`), and since D-2286 the served answer is kept too | same month walk as above, per month walked |
+| W1-api5-1, W1-pull2-0, W1-pull2-6 | `read_census` per body and per rolling answer: the whole census read, decoded and checksummed under the lock | D-0036: every committed entry is re-verified before the census is appended to. No metadata test tells an append from a rewrite plus an append (both move length and clocks), so a decoded census held across calls would append to a census that rotted in place as if it were sound | `Manifest::load` 15,857 entries (2.06 MB): 5.64 ms / 15.4 ms; 93,776 entries (12.0 MB, §34's projection): 70.7 ms / 95.6 ms |
+| W1-api5-2 | `census_now` on a miss reads every manifest | A miss is caused by a moved stamp, and for the reason above a moved stamp cannot be served by re-reading only the tail; a hit stays five `stat` calls | per manifest as the row above |
+| W1-pull1-0 | `prepare_observed_with` revalidates each day's receipt per body, O(D x B) | Per-day receipt revalidation is D-0519's guarantee; a body is accepted only against receipts proven for that body | not timed here |
+| W1-api1-6 | O(C) currency checks per page, C linked catalogs | Each check is the page's proof that catalog is still the one the statistics were computed over; C is fixed when the statistics artifact is written, nothing in a request widens it | not timed here |
+| W1-api2-3 | one trade-reader slot; a change of candidate re-reads its trades | Any bounded cache can be made to miss by alternating keys; warm pages are O(page) | not timed here |
+| W1-api6-3 | a persisting `/engine/top.json` refusal repeats its cold walk | A cached refusal would keep refusing after a repair that leaves the file's generation where it was | not timed here |
+| W1-api3-0 | one journal file per audited request | Per request it is O(1) (two 256-byte appends and one create); the growth is the append-only audit record itself (§3 rule 8, D-1445) | not timed here |
+| o1api-4 | `param` scans the query once per field | Bounded by the 8,192-byte query cap and the route's fixed field count, so constant per request | not timed here |
+| W3-engine1-0, ET-o1-proof-coverage-2 | the subset prune is Θ(k) per candidate | Apriori's prune must test the k-2 subsets that are not the join's two parents; C-E-12 times one probe | C-E-12 (engine bench) |
+| W3-engine1-1 | each level is sorted, O(F log F) | Canonical order is what makes a sweep's output byte-identical across runs (§3 rule 5) and what the prefix join walks; the sort is per level, not one of rule 4's five per-operation primitives | not timed here |
+| W3-engine1-2, o1engine-20 | `keep::Best::offer` admits in O(log cap) | It has no production caller (`engine/tests/production_callers.rs` fails the day one appears), so no run pays it | none: no caller |
+
+**Not removed and not inherent: o1api-33.** `decode_body` builds a whole
+`serde_json::Value` tree. Its time is O(body), which is inherent (every byte
+is read), but its memory is a constant multiple of the body (argued up to
+about 32×) that a typed or streaming decode would remove. That decode is not
+built in this change; the finding stays open, stated in the section above.
+
+**Not costs.** ET-bars-candles-store-3 (an off-session bar is admitted by
+`store` because `store` may not depend on `pull`'s calendar, §5; S-30-session
+states it). GAP16-26 is closed by D-1173 (money accumulated in `i64`/`i128`,
+one conversion to `f64` at the edge). ET-strategies-trades-ranking-costs-9 is
+the §72 text corrected by D-1448. rustonly-4 is `xdg-open` as the operating
+system's URL handler, kept by D-1202 and off with `BRUTEX_NO_OPEN`.

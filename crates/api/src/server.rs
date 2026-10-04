@@ -32956,9 +32956,17 @@ mod broker_target_tests {
         };
         let select = body_of("fn spot_targets(");
         let run = body_of("pub(crate) async fn broker_run");
+        // The target's own list is built once per parse (D-2288); the
+        // selection walks the chosen target's list, and the list is built by
+        // the target's own predicate.
         assert!(
-            select.contains("asked.target.names(key, entry.universe)"),
+            select.contains("*target == asked.target")
+                && select.contains("universe.target_keys.get(slot)"),
             "the selection is built from the chosen target"
+        );
+        assert!(
+            body_of("fn tracked_target_keys(").contains("target.names(key, entry.universe)"),
+            "and each target's list from that target's predicate"
         );
         assert!(
             select.contains("feed_can_name(asked.feed, entry)"),

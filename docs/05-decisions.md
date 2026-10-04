@@ -60537,3 +60537,16 @@ entry. Pages are unchanged.
 
 **Proof.** `api::server::tests::a_store_filter_is_walked_once_per_snapshot`,
 `api::answer_memo::tests::a_capped_memo_never_holds_more_than_its_cap`. AHD-10.
+
+### D-2290 — Every documented API, pull, store and engine cost re-examined; what stays is measured or argued inherent — 2026-10-04
+
+**Finding (F8b re-check).** Thirty-eight audit rows had been closed as
+DOCUMENTED. The user's rule is that none stays documented only: remove it, or
+show it is inherent to what was asked.
+
+**Decision.** Ten are removed (D-2280 to D-2289). The rest are recorded in
+`docs/06-limits.md`'s D-2290 section, each with the guarantee its removal
+would break, and with a measurement where the cost is a read the store makes
+(scratch release harness, not committed, labelled one machine's figures).
+o1api-33's memory remains open: not inherent, not built here. No stored
+format, digest or result changes.
