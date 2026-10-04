@@ -15120,3 +15120,11 @@ per-candidate primitive from `CLAUDE.md` §3 rule 4.
   eight extra context loads and column builds. The commit then loads its own
   copy again. `ledger-v6` already held that context, so it only adds the
   column build. Not measured; read off the source.
+
+- **The Zerodha day check (D-3001).** `pull::daycheck::compare` folds one
+  instrument-month of minute bars to days, O(minutes), and merges two
+  ascending day lists, O(days); `pull::ingest::check_day` reads the month's
+  day file once, O(days). It runs once per instrument-month after Zerodha
+  minute bars land, on bars `derive_all` has already read. Argued from the
+  shape of the code and not timed. The autopilot's day-then-minute choice
+  (D-3000) is two integer compares per tick and reads no census.
