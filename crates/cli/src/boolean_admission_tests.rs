@@ -77,7 +77,7 @@ fn statistics(
     )
 }
 
-/// Three priced trades on two IST days: +10, -4 and a flat 0.
+/// Three priced trades on two IST days: +10, -4 and a break-even 0.
 fn three_trade_coordinate() -> Result<BooleanCoordinateV1, String> {
     let trades = [10_i64, -4, 0]
         .into_iter()

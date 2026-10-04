@@ -1072,7 +1072,7 @@ fn asked_from_wire(body: &WireBody) -> Result<Asked, Refusal> {
     let to_year = num("to_year")?;
     let to_month = num("to_month")?;
 
-    let month_ok = |m: u64| (1..=12).contains(&m);
+    let month_ok = |m: u64| matches!(m, 1..=12);
     if !month_ok(from_month) || !month_ok(to_month) {
         return Err(Refusal::Span(format!(
             "months must be 1..=12; this asked for {from_month} and {to_month}."

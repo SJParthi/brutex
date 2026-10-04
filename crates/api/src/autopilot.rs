@@ -4258,7 +4258,7 @@ mod tests {
     /// A caught-up feed stays on the month still being written, so the next
     /// day of it is fetched by the same process. The frontier used to return
     /// the month AFTER yesterday's, the place only moves forward, and every
-    /// later day of the current month was never scanned (CE-23, D-1767).
+    /// later day of the current month went unfetched (CE-23, D-1767).
     #[test]
     fn a_caught_up_feed_stays_on_the_month_still_being_written() {
         let axis = [series("NIFTY")];

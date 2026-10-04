@@ -14082,6 +14082,17 @@ bounds are all nonzero.
     cells or requests. It is asked once per credential read or re-read.
     O(d) in the run's rotations; "Audit fixes -- D-1480 onward" above
     states it.
+  D-2658 -- FIVE RANGE SITES LEAVE THE RULE RATHER THAN JOIN IT. Gate
+    11 was red on `api/server.rs` 5 of 4, `api/sweeprun.rs` 6 of 5 and
+    `lake/footer.rs` 1 of 0. Each range-shaped site in those files is now
+    a range PATTERN, `matches!(code, 500..=599)` and its two siblings in
+    `server.rs`, `matches!(m, 1..=12)` in `sweeprun.rs` and
+    `matches!(kind, BOOL_TRUE..=UUID)` in `footer.rs`, which compiles to
+    the same two comparisons and is not the ambiguous spelling. Counts:
+    `server.rs` 4 -> 2 (the `asked.members` and `Vendor::MASTERED` hash
+    probes named above), `sweeprun.rs` stays 5 (the rung-array probes
+    named above), `footer.rs` stays unlisted. Rule 6's `sweeprun.rs 1`
+    no longer matched and is removed.
 ~~~~
 
 ## Audit fixes of 2026-10-03 — what they leave unbounded — D-1528, D-1535, D-1536, D-1537
@@ -14145,10 +14156,18 @@ bounds are all nonzero.
   retained log in about seven hours; it can no longer do so in seconds. The
   ration is one process-wide mutex take per failed request: O(1).
 - **Every non-GET request body is read once before its handler (D-1587)** to
-  refuse a form field named twice: O(body), bounded by `MAX_FORM_BYTES`
-  (8 KiB), the same bound `DefaultBodyLimit` already put on every handler. A
-  JSON body (by `Content-Type` or a leading `{`/`[`) is passed through
-  unchecked. `member` and `leg` are list fields and may repeat.
+  refuse a form field named twice: O(body), bounded by `form_read_bound` --
+  `MAX_FORM_BYTES` on most routes, the larger `ingest::MAX_MEMBER_FORM_BYTES`
+  on the two member routes and `pullrun::MAX_RUN_FORM_BYTES` on the two leg
+  routes, so it is NOT 8 KiB everywhere. Its memory does not follow the body:
+  the key set is reserved once at `MAX_DISTINCT_FORM_KEYS` (256) entries and a
+  body naming more distinct single-valued keys is refused; it used to reserve
+  one entry per `&`, and a 27 MB body of bare `&` allocated about 570 MB
+  (P5-05, D-2659). Only the three strict-JSON routes (`/backtest/run`,
+  `/backtest/descend`, `/engine/command`) pass their body through, and they
+  refuse a duplicate key themselves; any other route's body is checked
+  whatever its `Content-Type` says (P5-06, D-2659). `member` and `leg` are
+  list fields and may repeat and are not counted.
 - **Shutdown waits at most `server::SHUTDOWN_GRACE` (10 s) for engine tasks
   (D-1582).** A sweep, descent or command still running then is abandoned
   with the process — named on stderr and in the log — and its invocation
