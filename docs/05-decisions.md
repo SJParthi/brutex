@@ -57605,3 +57605,9 @@ a sink and reopens one on the same directory holds it for reading: 14 in
 `sink.rs` and one in `tail.rs`. Readers do not wait on each other. No production
 line changes, and the lock's refusal stays exactly as strict. Proven locally:
 4 of 60 runs failed before the change and 0 of 60 after.
+
+### D-2700 — RS-08 cites the renamed chosen-trade test and says what D-1901 made writers do; ZR-44 names its crate — 2026-10-04
+
+- P5-01. Gate 10's `invariant_paths` step refused two rows and, under `set -euo pipefail`, ended the step before its row loop ran. RS-08 cited `a_stale_handle_refuses_to_extend_a_ragged_chosen_trade_tail`, which D-1901 renamed to `cli::trades::tests::a_stale_handle_cuts_a_ragged_chosen_trade_tail_before_appending`. ZR-44 cited `brutex_core::knob::tests::...`: `brutex_core` is the library name, not a crate directory, so no tracked file mounts a module of that name. It now reads `core::knob::tests::an_empty_or_blank_folder_is_refused_by_name_and_unset_is_none`, which the row loop checks against `crates/core`.
+- P5-02. RS-08 said "stale handles and fresh reopens refuse a ragged tail". Since D-1901 every writer's open (`Frontier::open`, `Trades::open`, `Receipts::open`) and the frontier and chosen-trade stale-handle appends cut a sub-record tail under the exclusive lock; ZL-04 in the same file says so. Only a stale receipt handle still refuses one (`cli::result_set::tests::a_stale_handle_refuses_a_new_ragged_tail_before_appending`). The row now says exactly that. Re-pointing the citation without the rewording would have put a passing test beside a false sentence.
+- No code changed. Proof: the gate-10 step replayed locally (`source_scan fns`, `source_scan modules`, `invariant_paths`) exits 0 at the `invariant_paths` step with this change and refused both rows without it.
