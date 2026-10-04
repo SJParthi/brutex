@@ -6523,6 +6523,20 @@ primary evidence exists. Calling all 166 absent normal-market slots vendor
 holes would be the opposite and unsupported claim. CASH and derivative audits
 continue to use the verified 220-minute exchange session.
 
+**Ingest now uses the same session (D-2670, CE-52).** Until then
+`pull::session::Window::verdict` read only each venue's regular 09:15–15:30
+hours, so `fetch::land` and `ingest::keep_in_session` dropped every 15:45–16:59
+bar a vendor served for 2021-02-24 as `AtOrAfterSessionClose`, while the cash
+and derivative gap audit above, asking `pull::calendar::kind_of`, counted those
+75 minutes as vendor holes no re-pull could fill. The verdict now asks
+`kind_of` first: on a day the calendar records as an irregular session it keeps
+exactly that session's windows on every venue, and on a Muhurat whose length
+was never measured it refuses with `SessionError::SessionLengthUnmeasured`
+rather than judging the bar against hours that day did not have. A full day, a
+closed day and a day outside the calendar's measured range still use the
+venue's dated table. Bars already dropped before this change are not
+recovered: the store is append-only.
+
 The fixed-date subject check is O(1) time and O(1) space per day. The complete
 month audit remains linear in month minutes and stored bars as §102 and P-70
 already state. Neither the calendar nor this refusal authenticates vendor

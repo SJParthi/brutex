@@ -173,6 +173,19 @@ pub enum SessionError {
         /// The day, as days from the epoch.
         days: u32,
     },
+    /// A minute bar falls on a day the exchange calendar records as traded
+    /// but whose session length was never measured
+    /// ([`crate::calendar::DayKind::OpenLengthUnmeasured`], the five Muhurat
+    /// sessions before 2025).
+    ///
+    /// A REFUSAL, named, rather than a drop against the regular hours or a keep
+    /// against them: either would be a claim about which minutes that session
+    /// owed, and nothing here measured it. The remedy is to measure the session
+    /// and record it in the calendar's irregular table. CE-52, D-2670.
+    SessionLengthUnmeasured {
+        /// The day, as days from the epoch.
+        days: u32,
+    },
     /// The timestamp does not name a date this build can render.
     ///
     /// Reached three ways, all of which are the same fault to an operator —
@@ -254,6 +267,14 @@ impl fmt::Display for SessionError {
                  whether a bar at that time is inside the session is unknown. \
                  Refused rather than assumed: applying another day's hours \
                  would admit or drop bars against a session nobody confirmed"
+            ),
+            Self::SessionLengthUnmeasured { days } => write!(
+                f,
+                "day {days} traded a session whose length was never measured \
+                 (a Muhurat with no minute series), so whether a minute bar on \
+                 it was inside that session is unknown. Refused rather than \
+                 judged against the regular hours; measure the session and \
+                 record it in the calendar's irregular table"
             ),
             Self::BeforeEpoch { secs } => {
                 write!(f, "timestamp {secs} is before the Unix epoch")
@@ -1081,6 +1102,19 @@ impl Window {
     /// a timestamp is a refusal, never a drop: a drop is a bar this engine
     /// declined, and a bar it could not read is the vendor or the decoder being
     /// wrong.
+    ///
+    /// [`SessionError::SessionLengthUnmeasured`] for a minute bar on a day the
+    /// exchange calendar records as a session of unmeasured length, and
+    /// [`SessionError::VenueHoursUnknown`] for a day the venue's table carries
+    /// no verified hours for.
+    ///
+    /// # Which session a minute is judged against
+    ///
+    /// On a day [`crate::calendar::kind_of`] records as an irregular session
+    /// (the 2021-02-24 outage day, the two disaster-recovery Saturdays, the
+    /// 2025 Muhurat hour) the calendar's own windows, on every venue. On every
+    /// other day the venue's dated table. One session authority, so ingest
+    /// never drops a minute the gap audit then calls a vendor hole. D-2670.
     pub fn verdict(
         self,
         epoch_secs: i64,
@@ -1129,6 +1163,35 @@ impl Window {
         // Reading the table also removes the second source of truth. The
         // constants remain as the ANCHOR row's value — every table names them
         // — so there is one number, in one place, cited once.
+        //
+        // AN EXCEPTIONAL DAY ASKS THE EXCHANGE CALENDAR FIRST (CE-52, D-2670).
+        // `crate::calendar::kind_of` is the session authority the gap audit,
+        // `fold::minute_session` and the stored-run boundary all read. This
+        // function used to read only the venue's regular hours, so on
+        // 2021-02-24 it dropped the 15:45–16:59 reopening the calendar owes —
+        // and the gap audit then reported those 75 minutes as a vendor hole no
+        // re-pull could fill. Two authorities, one day, opposite answers.
+        //
+        // Only a day the calendar records as NOT a full regular session is
+        // overridden: an irregular `Open` keeps exactly its own windows, and a
+        // Muhurat whose length was never measured is refused by name. A full
+        // day, a closed day and a day outside the calendar's measured range
+        // fall through to the venue's table unchanged, which is what keeps the
+        // dated 2026-08-03 derivatives row in force. One fixed-table lookup
+        // per bar; `kind_of` states its own bound.
+        match crate::calendar::kind_of(i64::from(day)) {
+            crate::calendar::DayKind::Open(session)
+                if session != crate::calendar::Session::full() =>
+            {
+                return Ok(irregular_verdict(session, at.minute_of_day()));
+            }
+            crate::calendar::DayKind::OpenLengthUnmeasured => {
+                return Err(SessionError::SessionLengthUnmeasured { days: day });
+            }
+            crate::calendar::DayKind::Open(_)
+            | crate::calendar::DayKind::Closed
+            | crate::calendar::DayKind::Unmeasured => {}
+        }
         let session = venue
             .hours_on(at.day())
             .map_err(|why| SessionError::VenueHoursUnknown {
@@ -1143,6 +1206,28 @@ impl Window {
         }
         Ok(None)
     }
+}
+
+/// The verdict on one minute of a day the exchange calendar records as an
+/// irregular session: kept exactly when the calendar says the session owed it.
+///
+/// A minute before the first window opens is [`DropReason::BeforeSessionOpen`].
+/// Any other minute outside every window — after the last window, or in the
+/// halt between two — is [`DropReason::AtOrAfterSessionClose`]: it is at or
+/// after the close of the window it follows. No third reason is minted, so the
+/// census, the receipt and the audit page keep their four named counters.
+fn irregular_verdict(session: crate::calendar::Session, minute: u32) -> Option<DropReason> {
+    // A minute of the day is below 1,440 and always fits; one that did not
+    // would saturate to a minute outside every window and after the first
+    // open, which is the after-close answer.
+    let minute = u16::try_from(minute).unwrap_or(u16::MAX);
+    if session.expects(minute) {
+        return None;
+    }
+    if session.windows.first().is_some_and(|w| minute < w.from) {
+        return Some(DropReason::BeforeSessionOpen);
+    }
+    Some(DropReason::AtOrAfterSessionClose)
 }
 
 impl fmt::Display for Window {
@@ -1314,7 +1399,7 @@ pub fn split_window(window: Window, cap_days: Option<u32>) -> Result<Vec<Window>
 /// This paragraph sat above `split_window` and rendered as the first lines of
 /// THAT function's documentation (D-1370).
 mod tests {
-    use super::{DropCensus, DropReason};
+    use super::{Cadence, Day, DropCensus, DropReason, SessionError, Window};
 
     /// A counter at the ceiling stops there. It never wraps to a number
     /// smaller than the truth, which is the one direction a census must never
@@ -1397,6 +1482,120 @@ mod tests {
             u64::from(u32::MAX),
             "this case is the boundary: the true sum is exactly u32::MAX"
         );
+    }
+
+    /// The IST epoch second at which `minute` of `epoch_day` opens.
+    fn at(epoch_day: i64, minute: i64) -> i64 {
+        epoch_day * 86_400 - super::IST_OFFSET_SECS + minute * 60
+    }
+
+    /// One minute verdict, for a one-day window on `epoch_day`.
+    fn minute_verdict(
+        epoch_day: i64,
+        minute: i64,
+        venue: crate::vendor::Venue,
+    ) -> Result<Option<DropReason>, SessionError> {
+        let day = Day::from_days(u32::try_from(epoch_day).unwrap()).unwrap();
+        Window::new(day, day)
+            .unwrap()
+            .verdict(at(epoch_day, minute), Cadence::Minute, venue)
+    }
+
+    /// **ONE SESSION AUTHORITY (CE-52).** On every day the exchange calendar
+    /// records as irregular, ingest keeps exactly the minutes the calendar says
+    /// the session owed — no more and no fewer — on every NSE venue.
+    ///
+    /// Before this, `verdict` read only the venue's regular hours, so the
+    /// 2021-02-24 reopening 15:45–16:59 (75 bars `calendar::kind_of` owes) was
+    /// dropped as `AtOrAfterSessionClose` while the gap audit, asking the
+    /// calendar, then reported the same 75 minutes as a vendor hole no re-pull
+    /// could ever fill.
+    #[test]
+    fn the_ingest_verdict_keeps_exactly_what_the_calendar_owes_on_irregular_days() {
+        let irregular = [
+            crate::calendar::SYSTEMS_OUTAGE_DAY,
+            19_784, // 2024-03-02 disaster-recovery Saturday
+            19_861, // 2024-05-18 disaster-recovery Saturday
+            20_382, // 2025-10-21 Muhurat, 13:45-14:44
+        ];
+        for epoch_day in irregular {
+            let crate::calendar::DayKind::Open(session) = crate::calendar::kind_of(epoch_day)
+            else {
+                panic!("{epoch_day} is an open day in the calendar");
+            };
+            assert_ne!(session, crate::calendar::Session::full(), "{epoch_day}");
+            for venue in crate::vendor::Venue::ALL {
+                let mut kept = 0_u16;
+                for minute in 0..1_440_u16 {
+                    let verdict = minute_verdict(epoch_day, i64::from(minute), venue)
+                        .expect("a calendar-measured day is never refused");
+                    assert_eq!(
+                        verdict.is_none(),
+                        session.expects(minute),
+                        "{venue} day {epoch_day} minute {minute}: the ingest verdict \
+                         and the calendar disagree"
+                    );
+                    if verdict.is_none() {
+                        kept += 1;
+                    }
+                }
+                assert_eq!(kept, session.bars(), "{venue} day {epoch_day}");
+            }
+        }
+        // The outage day's reopening by name: 15:45 and 16:59 kept, 17:00 not.
+        let outage = crate::calendar::SYSTEMS_OUTAGE_DAY;
+        let venue = crate::vendor::Venue::NseIndex;
+        assert_eq!(minute_verdict(outage, 945, venue), Ok(None));
+        assert_eq!(minute_verdict(outage, 1_019, venue), Ok(None));
+        assert_eq!(
+            minute_verdict(outage, 1_020, venue),
+            Ok(Some(DropReason::AtOrAfterSessionClose))
+        );
+        assert_eq!(
+            minute_verdict(outage, 554, venue),
+            Ok(Some(DropReason::BeforeSessionOpen))
+        );
+        // And a regular day is still the venue's own table, untouched.
+        assert_eq!(
+            minute_verdict(outage + 1, 945, venue),
+            Ok(Some(DropReason::AtOrAfterSessionClose))
+        );
+    }
+
+    /// A Muhurat whose session length was never measured is REFUSED by name,
+    /// never silently dropped against the regular hours and never admitted
+    /// against them: nobody knows which minutes that session owed.
+    #[test]
+    fn an_unmeasured_muhurat_minute_is_refused_by_name_not_dropped() {
+        for epoch_day in [18_580_i64, 18_935, 19_289, 19_673, 20_028] {
+            assert_eq!(
+                crate::calendar::kind_of(epoch_day),
+                crate::calendar::DayKind::OpenLengthUnmeasured
+            );
+            for minute in [600_i64, 1_095] {
+                for venue in crate::vendor::Venue::ALL {
+                    assert_eq!(
+                        minute_verdict(epoch_day, minute, venue),
+                        Err(SessionError::SessionLengthUnmeasured {
+                            days: u32::try_from(epoch_day).unwrap(),
+                        }),
+                        "{venue} {epoch_day} {minute}"
+                    );
+                }
+            }
+            // A daily bar has no intraday time and stays exempt.
+            let day = Day::from_days(u32::try_from(epoch_day).unwrap()).unwrap();
+            assert_eq!(
+                Window::new(day, day).unwrap().verdict(
+                    at(epoch_day, 0),
+                    Cadence::Daily,
+                    crate::vendor::Venue::NseIndex
+                ),
+                Ok(None)
+            );
+        }
+        let text = SessionError::SessionLengthUnmeasured { days: 18_935 }.to_string();
+        assert!(text.contains("18935") && text.contains("length"), "{text}");
     }
 }
 
