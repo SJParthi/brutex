@@ -1,6 +1,6 @@
 {
-  "as_of": "2026-10-04 08:24 UTC",
-  "prev_as_of": "2026-10-04 08:20 UTC",
+  "as_of": "2026-10-04 08:30 UTC",
+  "prev_as_of": "2026-10-04 08:24 UTC",
   "states": {
     "Lane 1|W3-store1-3": "pushed",
     "Lane 1|W3-store1-0": "found",
@@ -926,6 +926,12 @@
     "Zero-rounds: crashes and edge inputs|CE-57": "found",
     "Zero-rounds: crashes and edge inputs|CE-58": "found",
     "Zero-rounds: crashes and edge inputs|CE-59": "found",
-    "Zero-rounds: crashes and edge inputs|CE-60": "found"
+    "Zero-rounds: crashes and edge inputs|CE-60": "found",
+    "Zero-rounds: concurrency|conc:conc5-1": "found",
+    "Zero-rounds: concurrency|conc:conc5-2": "found",
+    "Zero-rounds: concurrency|conc:conc6-1": "found",
+    "Zero-rounds: concurrency|conc:conc6-2": "found",
+    "Zero-rounds: concurrency|conc:conc6-3": "found",
+    "Zero-rounds: concurrency|conc:conc6-4": "found"
   }
 }

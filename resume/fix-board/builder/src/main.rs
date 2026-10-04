@@ -461,18 +461,21 @@ fn zero_sources(dir: &Path, link_base: &str, rel: &str) -> Result<Vec<Found>, St
             area,
         })
     };
-    // concurrency helper: summary file, then every pass directory
+    // concurrency helper: summary file, then every pass, as a directory or a single file
     let mut conc = vec![dir.join("concurrency.md")];
     for p in files_in(dir).into_iter().filter(|p| {
-        p.is_dir()
-            && p.file_name()
-                .is_some_and(|n| n.to_string_lossy().starts_with("conc-pass"))
+        p.file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with("conc-pass"))
     }) {
-        conc.extend(
-            files_in(&p)
-                .into_iter()
-                .filter(|f| f.extension().is_some_and(|e| e == "md")),
-        );
+        if p.is_dir() {
+            conc.extend(
+                files_in(&p)
+                    .into_iter()
+                    .filter(|f| f.extension().is_some_and(|e| e == "md")),
+            );
+        } else if p.extension().is_some_and(|e| e == "md") {
+            conc.push(p);
+        }
     }
     for f in conc.iter().filter(|f| f.exists()) {
         let rel_f = f.strip_prefix(dir).unwrap_or(f).display().to_string();
