@@ -58598,3 +58598,29 @@ README.
 `web/sweep-readiness/verify.rs`, run by gate 6d (D-2324). The file carries
 `#![cfg_attr(test, allow(dead_code))]` because its `--test` build leaves the
 audit functions unreached. AFG-25.
+
+### D-2331 — Log emit keeps its lock: the lock-free designs measured here did not beat it without weakening `Written`, and the telemetry bench stops leaking its scratch sinks — 2026-10-04
+
+**Finding.** `docs/06-limits.md` reports emit p99 rising from 3,125 ns at one
+thread to 503,083 ns at eight on the operator's Mac, because every emit takes
+one `Mutex` and writes under it. Separately, `crates/telemetry/benches/ratio.rs`
+`loaded()` returned a bare `PathBuf` that most callers never removed, so each
+bench run left about 60 MB of preloaded sinks in the temp directory; repeated
+runs filled this container's disk.
+
+**Decision.** Emit's contract stays: `Written` means the line is in the page
+cache when emit returns, `seq` order is file order, and a failed append is
+counted and named. Two designs that keep it were built and measured (render
+outside the lock; flat combining). Neither improved the tail on this machine
+without a cost elsewhere, so neither is adopted; the numbers are in
+`docs/06-limits.md`. An asynchronous writer would remove the wait but turns
+`Written` into "queued" and loses events on a release panic, which the sink's
+own documentation promises survive; that is a contract change for the owner,
+not this sweep. `loaded()` now returns a `Scratch` guard that removes its
+directory on drop.
+
+**Proof.** A bench run with a private `TMPDIR` leaves 0 entries behind (it
+left one directory per `loaded()` call before). The contention figures are
+measurements on a 4-core shared container, labelled as such; a contention-free
+emit under today's contract stays UNVERIFIED until it is measured on an idle
+machine with at least 8 cores.
