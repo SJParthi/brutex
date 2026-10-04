@@ -558,6 +558,14 @@ fn every_row_fault_is_refused_by_name_at_its_line() {
         NfoRefusal::MalformedRow { line: 3 },
     );
     check(
+        good.replacen(",10,0,0,0,0,", ",10,x.5,0,0,0,", 1),
+        NfoRefusal::MalformedRow { line: 3 },
+    );
+    check(
+        good.replacen(",10,0,0,0,0,", ",10,0,,0,0,", 1),
+        NfoRefusal::MalformedRow { line: 3 },
+    );
+    check(
         good.replacen(",10,0,0,0,0,", ",10,0,x,0,0,", 1),
         NfoRefusal::MalformedRow { line: 3 },
     );

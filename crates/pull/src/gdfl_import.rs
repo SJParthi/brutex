@@ -289,15 +289,14 @@ fn place(kind: ImportKind, ticks: &[Tick], placement: &mut Placement) -> Vec<(u3
     }
     // Backward: a late row lands at the next in-order row's stamp.
     let mut next: Option<u32> = None;
-    let mut placed: Vec<Option<u32>> = vec![None; kept.len()];
-    for (at, tick) in kept.iter().enumerate().rev() {
-        if in_order.get(at).copied().unwrap_or(true) {
+    let mut placed: Vec<Option<u32>> = Vec::with_capacity(kept.len());
+    for (tick, &ordered) in kept.iter().zip(&in_order).rev() {
+        if ordered {
             next = Some(tick.sod);
         }
-        if let Some(slot) = placed.get_mut(at) {
-            *slot = next;
-        }
+        placed.push(next);
     }
+    placed.reverse();
     let mut out = Vec::with_capacity(kept.len());
     for (tick, second) in kept.into_iter().zip(placed) {
         match second {
