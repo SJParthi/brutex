@@ -139,9 +139,18 @@ fn section<'a>(text: &'a str, id: &str) -> Vec<&'a str> {
         .collect()
 }
 
-/// The first source path (`crates/x/src/f.rs:12` or `x/src/f.rs`) in a finding's section.
+/// The first source path (`crates/x/src/f.rs:12` or `x/src/f.rs`) in a finding's section,
+/// else the first bare file (`autopilot.rs:2642`), which the caller places in its crate.
 fn area_for(text: &str, id: &str) -> String {
-    for l in section(text, id) {
+    area_in(section(text, id))
+}
+
+/// The first crate path in `lines`; else a bare `name.rs:line` (placed later from the
+/// tree); else the first repository document or workflow the lines name.
+fn area_in<'a>(lines: impl IntoIterator<Item = &'a str>) -> String {
+    let mut bare = String::new();
+    let mut doc = String::new();
+    for l in lines {
         for tok in l.split(|c: char| {
             c.is_whitespace() || matches!(c, '`' | ',' | '(' | ')' | ';' | '*' | '[' | ']')
         }) {
@@ -149,9 +158,73 @@ fn area_for(text: &str, id: &str) -> String {
             if tok.contains("/src/") || (tok.starts_with("crates/") && tok.len() > 7) {
                 return tok.trim_start_matches("crates/").to_string();
             }
+            let file = tok.split(':').next().unwrap_or("");
+            if bare.is_empty()
+                && file.len() > 3
+                && file.ends_with(".rs")
+                && !file.contains('/')
+                && file[..file.len() - 3]
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
+                bare = tok.to_string();
+            }
+            if doc.is_empty()
+                && (tok.starts_with("docs/") && tok.len() > 5
+                    || tok.starts_with(".github/") && tok.len() > 8
+                    || matches!(file, "CLAUDE.md" | "AGENTS.md")
+                    || file.ends_with(".yml") && !file.contains(char::is_whitespace))
+            {
+                doc = tok.to_string();
+            }
         }
     }
-    String::new()
+    if bare.is_empty() {
+        doc
+    } else {
+        bare
+    }
+}
+
+/// `name.rs` -> `crate/src/.../name.rs` for every file name that exists exactly once
+/// under `crates/` on the PR head.
+fn unique_files(repo: &Path, head: &str) -> HashMap<String, String> {
+    let Ok(out) = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["ls-tree", "-r", "--name-only", head, "crates"])
+        .output()
+    else {
+        return HashMap::new();
+    };
+    let mut seen: HashMap<String, Option<String>> = HashMap::new();
+    for path in String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|p| p.ends_with(".rs"))
+    {
+        let name = path.rsplit('/').next().unwrap_or(path).to_string();
+        let rel = path.trim_start_matches("crates/").to_string();
+        seen.entry(name)
+            .and_modify(|v| *v = None)
+            .or_insert(Some(rel));
+    }
+    seen.into_iter()
+        .filter_map(|(k, v)| v.map(|v| (k, v)))
+        .collect()
+}
+
+/// A bare `name.rs:12` area placed in its crate when the name is unique on the head.
+fn place(area: &str, files: &HashMap<String, String>) -> Option<String> {
+    let (file, rest) = area.split_once(':').unwrap_or((area, ""));
+    if file.contains('/') {
+        return None;
+    }
+    let full = files.get(file)?;
+    Some(if rest.is_empty() {
+        full.clone()
+    } else {
+        format!("{full}:{rest}")
+    })
 }
 
 /// A `Severity: high` line inside a finding's own section.
@@ -324,6 +397,19 @@ fn sev_tables(text: &str) -> Vec<(String, String, String, String)> {
     out
 }
 
+/// The pass a helper file belongs to: the number after the last `pass` in its path, else 1.
+fn pass_of(name: &str) -> u32 {
+    name.rmatch_indices("pass")
+        .find_map(|(at, _)| {
+            let digits: String = name[at + 4..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            digits.parse().ok()
+        })
+        .unwrap_or(1)
+}
+
 fn files_in(dir: &Path) -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = fs::read_dir(dir)
         .map(|r| r.filter_map(|e| e.ok().map(|e| e.path())).collect())
@@ -334,7 +420,28 @@ fn files_in(dir: &Path) -> Vec<PathBuf> {
 
 fn zero_sources(dir: &Path, link_base: &str, rel: &str) -> Result<Vec<Found>, String> {
     let mut out = Vec::new();
-    let link = |f: &str| format!("{link_base}{rel}/{f}");
+    // a live folder outside the repo is linked by its own path
+    let link = |f: &str| {
+        if rel.is_empty() {
+            dir.join(f).display().to_string()
+        } else {
+            format!("{link_base}{rel}/{f}")
+        }
+    };
+    // every file of a family: `crash-edge.md`, then `crash-edge-pass5.md`, ... in name order
+    let family = |stem: &str| -> Vec<PathBuf> {
+        files_in(dir)
+            .into_iter()
+            .filter(|f| {
+                let n = f
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                n == format!("{stem}.md")
+                    || (n.starts_with(&format!("{stem}-")) && n.ends_with(".md"))
+            })
+            .collect()
+    };
     let push = |out: &mut Vec<Found>,
                 group,
                 (id, sev, title): (String, String, String),
@@ -351,15 +458,13 @@ fn zero_sources(dir: &Path, link_base: &str, rel: &str) -> Result<Vec<Found>, St
     };
     // concurrency helper: summary file, then every pass directory
     let mut conc = vec![dir.join("concurrency.md")];
-    for p in [
-        "conc-pass1",
-        "conc-pass2",
-        "conc-pass3",
-        "conc-pass4",
-        "conc-pass5",
-    ] {
+    for p in files_in(dir).into_iter().filter(|p| {
+        p.is_dir()
+            && p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("conc-pass"))
+    }) {
         conc.extend(
-            files_in(&dir.join(p))
+            files_in(&p)
                 .into_iter()
                 .filter(|f| f.extension().is_some_and(|e| e == "md")),
         );
@@ -384,8 +489,11 @@ fn zero_sources(dir: &Path, link_base: &str, rel: &str) -> Result<Vec<Found>, St
             );
         }
     }
-    let ce = dir.join("crash-edge.md");
-    if ce.exists() {
+    for ce in family("crash-edge") {
+        let name = ce
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
         let t = read(&ce)?;
         for h in headings(&t, |id| id.starts_with("CE-") && id_like(id))
             .into_iter()
@@ -400,15 +508,20 @@ fn zero_sources(dir: &Path, link_base: &str, rel: &str) -> Result<Vec<Found>, St
                 &mut out,
                 "Zero-rounds: crashes and edge inputs",
                 h,
-                link("crash-edge.md"),
+                link(&name),
                 area,
             );
         }
     }
-    let td = dir.join("tests-docs-security.md");
-    if td.exists() {
+    for td in family("tests-docs-security") {
+        let name = td
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
         let t = read(&td)?;
-        let accept = |id: &str| id.starts_with('P') && id_like(id) && id.split('-').count() == 3;
+        let accept = |id: &str| {
+            id.starts_with('P') && id_like(id) && (2..=3).contains(&id.split('-').count())
+        };
         for h in headings(&t, accept) {
             let area = area_for(&t, &h.0);
             let mut h = h;
@@ -419,7 +532,33 @@ fn zero_sources(dir: &Path, link_base: &str, rel: &str) -> Result<Vec<Found>, St
                 &mut out,
                 "Zero-rounds: tests, docs, security",
                 h,
-                link("tests-docs-security.md"),
+                link(&name),
+                area,
+            );
+        }
+    }
+    for np in family("numeric")
+        .into_iter()
+        .filter(|f| !f.ends_with("numeric-complexity.md"))
+    {
+        let name = np
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let t = read(&np)?;
+        for h in headings(&t, |id| {
+            id_like(id) && id.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+        }) {
+            let area = area_for(&t, &h.0);
+            let mut h = h;
+            if h.1.is_empty() {
+                h.1 = section_severity(&t, &h.0);
+            }
+            push(
+                &mut out,
+                "Zero-rounds: numbers and complexity",
+                (format!("num:{}", h.0), h.1, h.2),
+                link(&name),
                 area,
             );
         }
@@ -467,6 +606,58 @@ fn zero_sources(dir: &Path, link_base: &str, rel: &str) -> Result<Vec<Found>, St
         }
     }
     Ok(out)
+}
+
+/// A helper's verification verdict on one finding at a named head.
+#[derive(Debug, PartialEq, Clone, Copy)]
+enum Verdict {
+    Fixed,
+    Partial,
+    NotFixed,
+}
+
+/// Rows of every verification table (`| id | state | evidence |`, `| CE | state | ...`,
+/// `| id | claimed by | verdict | evidence |`) in the helpers' pass files.
+fn verdict_rows(text: &str) -> Vec<(String, Verdict, String)> {
+    let mut out = Vec::new();
+    let mut col: Option<usize> = None;
+    for line in text.lines() {
+        let l = line.trim();
+        if !l.starts_with('|') {
+            col = None;
+            continue;
+        }
+        let cells: Vec<&str> = l.trim_matches('|').split('|').map(str::trim).collect();
+        let first = cells
+            .first()
+            .map(|c| c.to_ascii_lowercase())
+            .unwrap_or_default();
+        if first == "id" || first == "ce" {
+            col = cells.iter().position(|c| {
+                let c = c.to_ascii_lowercase();
+                c == "state" || c == "verdict"
+            });
+            continue;
+        }
+        let Some(k) = col else { continue };
+        let (Some(id), Some(v)) = (cells.first(), cells.get(k)) else {
+            continue;
+        };
+        let up = v.to_ascii_uppercase();
+        let verdict =
+            if up.starts_with("NOT FIXED") || up.starts_with("OPEN") || up.starts_with("STILL") {
+                Verdict::NotFixed
+            } else if up.starts_with("PARTIAL") {
+                Verdict::Partial
+            } else if up.starts_with("FIXED") {
+                Verdict::Fixed
+            } else {
+                continue;
+            };
+        let evidence = cells.get(k + 1).map_or(String::new(), |e| clean_title(e));
+        out.push((id.to_string(), verdict, evidence));
+    }
+    out
 }
 
 /// Ids a status line names: `A`, `A / -8`, `D-1631 (W2-cli1-2/-3)`, `W2-cli14-1/2/3`.
@@ -981,6 +1172,16 @@ fn run() -> Result<(), String> {
             return Err(format!("git cannot resolve {}", a.pr_ref));
         }
         head_short = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let files = unique_files(repo, &a.pr_ref);
+        for r in rows.iter_mut() {
+            if s(r, "area").is_empty() {
+                let found = area_in([s(r, "title"), s(r, "base_note")]);
+                r.insert("area".into(), json!(found));
+            }
+            if let Some(full) = place(s(r, "area"), &files) {
+                r.insert("area".into(), json!(full));
+            }
+        }
         let mut cache = HashMap::new();
         for (i, r) in rows.iter_mut().enumerate() {
             let mut flags: Vec<Value> = Vec::new();
@@ -1114,6 +1315,71 @@ fn run() -> Result<(), String> {
             rows[d].insert("note".into(), json!(n));
             same += 1;
         }
+    }
+
+    // 5d. the helpers' verification tables: a dated, file-and-line verdict per finding
+    let mut verdicts_applied = 0usize;
+    let mut found_verdicts: Vec<(usize, u32, String, Verdict, String)> = Vec::new();
+    if let Some(dir) = &a.zero_dir {
+        let mut files: Vec<PathBuf> = files_in(dir).into_iter().filter(|f| f.is_file()).collect();
+        for d in files_in(dir).into_iter().filter(|d| d.is_dir()) {
+            files.extend(files_in(&d).into_iter().filter(|f| f.is_file()));
+        }
+        for f in files
+            .iter()
+            .filter(|f| f.extension().is_some_and(|e| e == "md"))
+        {
+            let name = f.strip_prefix(dir).unwrap_or(f).display().to_string();
+            for (id, v, ev) in verdict_rows(&read(f)?) {
+                let Some(i) = [id.clone(), format!("conc:{id}"), format!("num:{id}")]
+                    .iter()
+                    .find_map(|c| index.get(c).copied())
+                else {
+                    continue;
+                };
+                found_verdicts.push((i, pass_of(&name), name.clone(), v, ev));
+            }
+        }
+    }
+    // Two passes can check one finding at different heads. The highest pass decides the
+    // state and the flag; every pass is still quoted in the note, oldest first.
+    found_verdicts.sort_by(|x, y| (x.0, x.1, &x.2).cmp(&(y.0, y.1, &y.2)));
+    for (k, (i, _, name, v, ev)) in found_verdicts.iter().enumerate() {
+        let (i, v) = (*i, *v);
+        verdicts_applied += 1;
+        let r = &mut rows[i];
+        let said = match v {
+            Verdict::Fixed => "FIXED",
+            Verdict::Partial => "PARTIAL",
+            Verdict::NotFixed => "NOT FIXED",
+        };
+        let mut n = format!("{}; helper check {name}: {said} ({ev})", s(r, "note"));
+        let latest = found_verdicts.get(k + 1).is_none_or(|next| next.0 != i);
+        if latest {
+            let st = s(r, "state").to_string();
+            if !pinned[i] {
+                match v {
+                    Verdict::Fixed if rank(&st) < rank("branch") => {
+                        r.insert("state".into(), json!("branch"));
+                    }
+                    Verdict::Partial if st == "found" => {
+                        r.insert("state".into(), json!("partial"));
+                    }
+                    _ => {}
+                }
+            }
+            if v == Verdict::NotFixed && DONE.contains(&st.as_str()) && st != "doc" {
+                n += " [the helper's latest check contradicts the on-PR state]";
+                let mut flags = r
+                    .get("flags")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                flags.push(json!("audit-disagrees"));
+                r.insert("flags".into(), Value::Array(flags));
+            }
+        }
+        r.insert("note".into(), json!(n));
     }
 
     // 6. CI
@@ -1252,7 +1518,7 @@ fn run() -> Result<(), String> {
     }
     eprintln!(
         "fixboard: {} rows ({catalog_rows} catalog + {added} new from sources); {applied} status lines applied, {} unmatched; \
-         {evidence} promoted by status commits on head, {by_message} by head commit messages, {demoted} demoted, {same} same-as pairs; head {head_short}; ci green: {ci_green}; states {by_state:?}",
+         {evidence} promoted by status commits on head, {by_message} by head commit messages, {demoted} demoted, {same} same-as pairs, {verdicts_applied} helper verdicts; head {head_short}; ci green: {ci_green}; states {by_state:?}",
         ledger["rows"].as_array().map_or(0, Vec::len),
         unmatched.len()
     );
@@ -1319,6 +1585,28 @@ mod tests {
         assert_eq!(area_for(t, "a-2"), "");
         assert_eq!(area_for(t, "CE-9"), "cli/src/lib.rs:4");
         assert_eq!(area_for(t, "a-3"), "");
+        let b = "## b-1 (low): x\nin autopilot.rs:2642 and lib.rs\n";
+        assert_eq!(area_for(b, "b-1"), "autopilot.rs:2642");
+        let files = HashMap::from([(
+            "autopilot.rs".to_string(),
+            "api/src/autopilot.rs".to_string(),
+        )]);
+        assert_eq!(
+            place("autopilot.rs:2642", &files).as_deref(),
+            Some("api/src/autopilot.rs:2642")
+        );
+        assert_eq!(place("lib.rs", &files), None);
+        assert_eq!(
+            area_in(["gate 1 in .github/workflows/ci.yml:40"]),
+            ".github/workflows/ci.yml:40"
+        );
+        assert_eq!(area_in(["CLAUDE.md §10 and docs/07-plan.md"]), "CLAUDE.md");
+        assert_eq!(area_in(["docs/x.md then sweep.rs:9"]), "sweep.rs:9");
+        assert_eq!(
+            area_in(["shape in population_observations_v1, sweep_evidence"]),
+            ""
+        );
+        assert_eq!(place("cli/src/lib.rs:4", &files), None);
     }
 
     #[test]
@@ -1387,6 +1675,20 @@ mod tests {
         assert!(m.contains_key("W2-cli13-5"));
         assert!(!m.contains_key("W2-cli1-2"));
         assert!(!m.contains_key("W9-x-1"));
+    }
+
+    #[test]
+    fn verification_tables_are_read_by_their_state_column() {
+        let t = "| CE | state | evidence |\n|---|---|---|\n| CE-1 | FIXED | 3f22aed8 folds it |\n| CE-9 | NOT FIXED | lib.rs:2371 |\n\n| id | claimed by | verdict | evidence |\n| pop1-4 | x | PARTIAL | half |\n| foo | x | maybe | y |\n";
+        let v = verdict_rows(t);
+        assert_eq!(v.len(), 3);
+        assert_eq!((v[0].0.as_str(), &v[0].1), ("CE-1", &Verdict::Fixed));
+        assert_eq!(v[1].1, Verdict::NotFixed);
+        assert_eq!(pass_of("tests-docs-security.md"), 1);
+        assert_eq!(pass_of("tests-docs-security-pass4.md"), 4);
+        assert_eq!(pass_of("conc-pass4/ledgers-locks.md"), 4);
+        assert_eq!(pass_of("crash-edge-pass12.md"), 12);
+        assert_eq!((v[2].0.as_str(), &v[2].1), ("pop1-4", &Verdict::Partial));
     }
 
     #[test]

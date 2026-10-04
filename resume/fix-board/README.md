@@ -16,11 +16,15 @@ Republish every refresh to that same URL. The old account's board (Air7S5kQkMHWG
 
 1. Catalog = the page's own ledger rows. Rows are never dropped. Each row keeps `base_note`, the note it first came
    with, and every run rebuilds `note` from it, so a run over its own output changes nothing.
-2. Re-reads the growing finding files under `resume/project-files-20261004/zero-rounds/` (concurrency + every conc-pass dir,
-   crash-edge headings and `- **CE-n**` bullets, tests-docs-security `P*-nn-nn`, numeric tables with a `sev` column,
+2. Re-reads the growing finding files under `--zero-dir` (the live `/mnt/project-files/zero-rounds/` when it exists, else
+   the copy in `resume/project-files-20261004/zero-rounds/`): concurrency + every conc-pass dir, every `crash-edge*.md`
+   (headings and `- **CE-n**` bullets), every `tests-docs-security*.md` (`P*-nn-nn` and `P4-nn`), `numeric-pass*.md`
+   headings as `num:` ids, numeric tables with a `sev` column,
    round-1 slice files `sliceNN.md` as `Z1-sliceNN-Fn`) and appends any id the catalog lacks. Severity is a whole word
    from the heading, else the section's `Severity:` line, else (bullets) the range heading's; `area` is the first
-   source path in the finding's own section. Blank catalog fields are filled, set ones never overwritten.
+   source path in the finding's own section; a bare `name.rs:line` is placed in its crate when exactly one file of that
+   name exists under `crates/` on the PR head; failing both, the first `docs/`, `.github/`, `CLAUDE.md` or `AGENTS.md`
+   path in the section, then in the title or first note. Blank catalog fields are filled, set ones never overwritten.
 3. Starts every row from `base_state`, the state it had on the old board's last snapshot (v24, 2026-10-03 22:44 UTC), never from a state an earlier run derived. The snapshot passed with `--snapshot` only supplies `prev` ("moved since last refresh").
 4. Applies each `--status` TSV (`id<TAB>state<TAB>commit<TAB>note`), in the order given. Compound ids
    (`A / -8`, `D-1631 (W2-cli1-2/-3)`, `W2-cli14-1/2/3`) expand; `conc:` and `num:` prefixes are tried; an entry wrapped
@@ -36,9 +40,15 @@ Republish every refresh to that same URL. The old account's board (Air7S5kQkMHWG
    decision titles with a not-a-fix phrase (`NOT_A_FIX` in main.rs: stated, documented, blocked, still open, ...) do not count.
 8. `--same-as` (`inputs/same-as.tsv.md`): the same defect filed twice. Both rows take the further state, the duplicate
    gets `same_as`, and the page counts the pair once.
-9. If the `ci-ok` row of `inputs/checks.tsv.md` passed, `pushed` becomes `green`.
+9. The helpers' verification tables (any table under `--zero-dir` whose first column is `id`/`ce` and which has a
+   `state` or `verdict` column, each a file-and-line check at a named head) are quoted in the note. When two passes
+   checked one finding, the highest pass number in the file or directory name decides: FIXED moves `found`/`fixing` to
+   `branch`, PARTIAL moves `found` to `partial`, NOT FIXED on a `pushed`/`green` row adds the `audit-disagrees` flag.
+   Corrected rows keep their state.
+10. If the `ci-ok` row of `inputs/checks.tsv.md` passed, `pushed` becomes `green`.
 
-Checked: 11 unit tests, clippy `-D warnings`; a second run over its own output gives identical states, notes and counts (only `prev` moves, as it should). Two adversarial audits of every row against the sources and git found 17 defects in total; all are fixed in this version except that 37 zero-round rows have no `area` because their source names a bare file such as `autopilot.rs:2642`.
+Checked: 12 unit tests, clippy `-D warnings`; a second run over its own output gives identical states, notes and counts (only `prev` moves, as it should). Two adversarial audits of every row against the sources and git found 17 defects in total; all are fixed. Since then the bare-file and document fallbacks leave 2 of 893 findings with no `area` (D-0742-block and
+h-cli-4 name no file at all).
 
 ## Refresh
 
@@ -52,7 +62,7 @@ resume/fix-board/builder/target/release/fixboard \
   --snapshot resume/fix-board/ledger-snapshot.json.md --snapshot-out resume/fix-board/ledger-snapshot.json.md $ST \
   --corrections resume/fix-board/inputs/corrections.tsv.md --same-as resume/fix-board/inputs/same-as.tsv.md \
   --not-a-fix 331b05c --not-a-fix 1087e54 --base-ref 331b05c \
-  --zero-dir $P/zero-rounds --repo . \
+  --zero-dir /mnt/project-files/zero-rounds --repo . \
   --checks resume/fix-board/inputs/checks.tsv.md --pr resume/fix-board/inputs/pr.tsv.md \
   --streams resume/fix-board/inputs/streams.tsv.md --as-of "$(date -u '+%Y-%m-%d %H:%M UTC')"
 ```
