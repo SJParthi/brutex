@@ -63118,3 +63118,24 @@ after the build finishes, so build parallelism does not reach them.
 
 **Rejected.** Re-running the job. The same step died the same way twice,
 so a third attempt would only hide the memory ceiling.
+
+### D-2001 — The elite descent names the 1,000 TOP door bound, like its points twin — 2026-10-05
+
+**What was observed.** After the zero-findings merge (D-1934), Gate 1e
+failed one `cli` test,
+`the_elite_descent_refuses_a_top_the_api_cannot_serve_before_any_read`.
+The test expects both descent entry points to refuse a TOP of 4,097 by
+naming D-1727's door bound, 1,000. `elite_descend_in_points_inner`
+already checked `top_refusal` first. `elite_descend_with_attempt`
+checked only `frontier::admit_top` (D-1981, 4,096), so it named the
+looser bound.
+
+**Decided.** `elite_descend_with_attempt` checks `top_refusal` first,
+the same as its points twin. A module-level `const` assertion proves
+`TOP_CEILING <= frontier::MAX_ROWS`, so every TOP the door admits is one
+the frontier can serve. The second `admit_top` call at that site could no
+longer be reached, so it was removed. The frontier writer keeps its own
+`admit_top` check.
+
+**Rejected.** Changing the test to expect the 4,096 text. That would
+leave the two descent doors with different bounds.

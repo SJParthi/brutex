@@ -14341,6 +14341,9 @@ fn top_from_knob() -> usize {
     })
 }
 
+// Every TOP the door admits is one the frontier can serve (D-1981).
+const _: () = assert!(TOP_CEILING <= frontier::MAX_ROWS);
+
 /// The refusal for a `TOP` outside `1..=TOP_CEILING`, or `None`.
 pub(crate) const fn top_refusal(top: usize) -> Option<&'static str> {
     if top == 0 {
@@ -16050,8 +16053,12 @@ fn elite_descend_with_attempt(
     attempt: Option<u64>,
 ) -> String {
     let (max_mae_ppm, top) = limits;
-    if let Err(why) = frontier::admit_top(top) {
-        return format!("refused: {why}\n");
+    // D-1727's door bound is the tighter of the two and is the one named, as
+    // `elite_descend_in_points_inner` names it (D-1934). The assertion beside
+    // `top_refusal` proves every TOP it admits is one the frontier can serve
+    // (D-1981), so a second, unreachable `admit_top` check is not kept here.
+    if let Some(why) = top_refusal(top) {
+        return format!("refused: {why}.\n");
     }
     let (from, to) = span;
     let Some(known) = EVERY_RUNG.iter().find(|r| **r == rung) else {
