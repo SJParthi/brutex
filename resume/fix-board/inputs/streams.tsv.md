@@ -1,9 +1,9 @@
 job	state	pill	head	done	next	waits
-PR #74 CI	CI running	p-run	final/all-fixes a3f6e8aa	Gate 8 runner loss fixed (D-1465); static gates green	Workspace tests, Gate 8, coverage, mutation shards, then ci-ok	CI
+PR #74 CI	CI red	p-run	final/all-fixes 6db4dfb8	Zero-findings work merged into PR #74	Fix the failing cli elite-descent test, then the full run again	CI
 Lane 1-b	Working	p-run	43c5fe8 (GAP12-6, D-2100..2102)	GAP13-13 and GAP13-16 on PR #74; GAP12-6, min-hits warmup, gate 10/12 segments and merge rivals fixed on branches	Finish mutation tests, then one push to PR #74	Its own mutation tests
 Attack audit	Working	p-run	F5 and F7 on PR #74 (8c9313c)	F5 and F7 merged into PR #74; F6, F8 (the 12 documented-only items) and F10 running	Finish F6, F8, F10 and the pull/store/lake hunter	Its own fixes
 Codebase sweep	Working	p-run	audit-fix/w9 9e829f4 plus 5 local commits	78 of 91 on PR #74; the rest fixed on branches (status file has 123 rows)	OS-6, OS-7, OE-1 and the ci.yml shell-to-Rust port, then one push through the PR #74 thread	10 findings need a fact only you can give
 Zero-findings loop	Restarting	p-run	final/all-fixes-zero 1f4de71	Batch D-1769 plus test-teeth and ledger-tails merged; api-routes fixed (D-1970..D-1974)	Full test on staging, merge zero/api-routes, zero/numeric and zero/cli-edges-2, mutants, hand to PR #74	Its own fixes
 Audit helpers (4)	Waiting	p-wait	read-only	Concurrency 4 passes, crash/edge 4 passes, numbers 3 passes, tests/docs/security 3 passes	Next pass on the zero loop's new staging head	A new zero-loop staging head
 GDFL build (your Mac)	Restarting	p-run	local only, never pushed	All 4 parts built; census r2 repair, core-second r3 review, store-grid r3 review, gdfl-cm r2 repair	Regenerate state, relaunch the continue script, then join into feat/gdfl-1s	Your Mac being online
-Fix Board	Working	p-run	fix-queue resume/fix-board	15 findings on PR #74; 8 api server/runs/cache fixes done (f7239784); 15 crash/edge fixes done locally	Test the api batch on head and hand it over	Your word to push the crash/edge batch
+Fix Board	Working	p-run	fix-queue resume/fix-board	15 findings on PR #74; 8 api server/runs/cache fixes done (f7239784); 15 crash/edge fixes done locally	Reconcile the api batch with the new head (serve-lock overlap), then hand it over	Your word to push the crash/edge batch
