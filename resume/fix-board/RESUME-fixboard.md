@@ -1,4 +1,4 @@
-# Fix Board thread: resume state (2026-10-04 18:50 UTC; pausing for the 5-hour limit, resume 22:03 UTC)
+# Fix Board thread: resume state (2026-10-05 01:58 UTC; STOPPED at 95% weekly usage)
 
 Saved ahead of a 5-hour usage pause. GitHub state wins over this file.
 
@@ -36,6 +36,14 @@ All on branches from final/all-fixes-zero 1f4de71a; hashes sent to zero-findings
 - fixboard/pr74-conc-api dee61cfd: all 7 merged into PR #74 as 25bc8aa (PR 74 CI declared the 2 Gate 1d scratch roots).
 - fixboard/pr74-api2 (wt /tmp/claude-0/wt-pr74-api2, tgt-conc, D-2770..2779, FB-71..79): conc server1-1/2, server2-1/2, runs-2/3/4, apicache-2. Container restart 22:3x killed the first agent; all 8 FIXED and pushed f7239784 (D-2770..2778, FB-71..79). Merged locally with head a3f6e8aa as 8c7e4baa (decisions tail conflict, kept both); full api/cli test run on it started 00:1x (log /tmp/claude-0/api2-val.log). Then push 8c7e4baa and hand to PR 74 CI.
 - fixboard/pr74-ce2 (wt /tmp/claude-0/wt-pr74-ce2, tgt-ce2, D-2751..2759 then D-2790.., FB-91..99): CE-84..94, CE-98..101 (CE-95..97 are zero/docs-batch 768d742d). Container restart killed the first agent; its work is WIP commit 7db179f8 (pushed, unvalidated). Finished locally as 44252d2b + uncommitted mastersrun.rs clippy fix (Duration::from_hours(1)); all checks pass. Push BLOCKED by the auto-mode classifier (CE-98 removes 3 debug_asserts on log writes). Asked the user 00:0x UTC to reply "push ce2"; push only on their word, then hand to PR 74 CI. Reverse-proof of the new tests also blocked. D-2751..2759, D-2790..2794, FB-91..99, FB-101..105 used. Zero-findings confirmed both batches are ours.
+
+## STOP STATE 2026-10-05 01:58 UTC (read this first)
+
+- PR #74 head 6db4dfb8 (zero-findings work merged; board v20: 823 of 1,193 on PR #74). Run 37247966399 RED: Gate 1e, cli test `sweep_wiring_tests::the_elite_descent_refuses_a_top_the_api_cannot_serve_before_any_read` (PR 74 CI thread's to fix).
+- fixboard/pr74-api2 at 8c7e4baa (pushed): 8 api concurrency findings fixed (server1-1/2, server2-1/2, runs-2/3/4, apicache-2; D-2770..2778, FB-71..79), merged with head a3f6e8aa, fmt/clippy/api+cli tests green (4 nobody-re-exec tests pass from a world-readable dir). NOT yet merged with 6db4dfb8: conflicts in crates/api/src/server.rs take_serve_lock (both sides added an in-process ROOTS registry: ours D-2773, theirs D-1920 release_root/serve_lock_refusal; make ONE mechanism, record D-2779) and crates/api/src/emitted.rs counts (lib sites and REACHED_IN_SERVER_TESTS: keep both histories, recount). An unvalidated attempt at that merge is on fixboard/pr74-api2-merge-wip 253f9c95 (no conflict markers; untested). Next: finish/validate that merge, push to fixboard/pr74-api2, hand to the PR 74 CI thread.
+- fixboard/pr74-ce2: GitHub has only WIP 7db179f8. The finished work (commit 44252d2b + a one-line clippy fix in crates/api/src/mastersrun.rs, Duration::from_hours(1)) is saved as patches in /mnt/project-files/fix-board/ce2-local/ (not pushed). The push was BLOCKED by the auto-mode safety check (CE-98 removes 3 debug_asserts on log writes). WAITING ON THE USER: push only after the user replies "push ce2". Then `git am` the patch on 7db179f8, apply the diff, commit, merge PR #74 head, validate, push, hand over. Reverse-proof of the new tests was also blocked.
+- Status rows: /mnt/project-files/fix-board/status/fixboard.tsv.
+- Unclaimed found rows remain (mostly conc-pass rows: autopilot-1..4, recovery-3..6, recauto-1/2, store/pull/cli/ledger/clock...). Free numbers: D-2779 (reserved for the serve-lock reconciliation), D-2795..2799; FB-80, FB-106..109.
 
 ## Next
 1. On resume (22:03 UTC): fetch, check fixboard/pr74-conc-api and 605c5299 status on head; update fixboard.tsv.
