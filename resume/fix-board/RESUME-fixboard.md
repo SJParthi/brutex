@@ -3,7 +3,7 @@
 Saved ahead of a 5-hour usage pause. GitHub state wins over this file.
 
 ## The board
-- Artifact (republish to this same URL every refresh): https://claude.ai/artifact/5Jr1kKxEUEmzZF9f19YfTi (version 18 at 23:2x UTC).
+- Artifact (republish to this same URL every refresh): https://claude.ai/artifact/5Jr1kKxEUEmzZF9f19YfTi (version 19 at 00:2x UTC).
 - Hourly routine trig_01BEoTSneJLtU8Rb1PLXNhWe fires at :19.
 - Builder: `resume/fix-board/builder` (Rust, standalone). Steps and the refresh command: `resume/fix-board/README.md`.
 - Last refresh 18:2x UTC: 1,183 rows (495 pushed, 285 branch, 132 fixing, 5 partial, 17 doc, 249 found). PR #74 head fc6dbb9d, run 37223441970. Since then head is 1f588aae (web batch 1 merged).
@@ -34,7 +34,7 @@ All on branches from final/all-fixes-zero 1f4de71a; hashes sent to zero-findings
 
 - fixboard/pr74-web18 (worktree /tmp/claude-0/wt-pr74-web18): batch 1 P17-01, p14num-1, conc18-1, conc18-2 (tip 891d8f8d) MERGED into PR #74 as 1f588aae. Batch 2 conc18-3 5620eae8, conc18-4 e4a6158d, conc18-5 ed207d0e, p14num-2 f460a400 (D-2750), merged with final/all-fixes at 605c5299, handed to PR 74 CI 18:45 UTC. Not merged with origin/zero-work (it does not contain PR #74 head; 58 conflict hunks; PR 74 CI owns that integration). CE-77 left to zero-findings 356b15ae.
 - fixboard/pr74-conc-api dee61cfd: all 7 merged into PR #74 as 25bc8aa (PR 74 CI declared the 2 Gate 1d scratch roots).
-- fixboard/pr74-api2 (wt /tmp/claude-0/wt-pr74-api2, tgt-conc, D-2770..2779, FB-71..79): conc server1-1/2, server2-1/2, runs-2/3/4, apicache-2. Container restart 22:3x killed the first agent; its work is WIP commit b018bc9a (pushed); a new agent is finishing it.
+- fixboard/pr74-api2 (wt /tmp/claude-0/wt-pr74-api2, tgt-conc, D-2770..2779, FB-71..79): conc server1-1/2, server2-1/2, runs-2/3/4, apicache-2. Container restart 22:3x killed the first agent; all 8 FIXED and pushed f7239784 (D-2770..2778, FB-71..79). Merged locally with head a3f6e8aa as 8c7e4baa (decisions tail conflict, kept both); full api/cli test run on it started 00:1x (log /tmp/claude-0/api2-val.log). Then push 8c7e4baa and hand to PR 74 CI.
 - fixboard/pr74-ce2 (wt /tmp/claude-0/wt-pr74-ce2, tgt-ce2, D-2751..2759 then D-2790.., FB-91..99): CE-84..94, CE-98..101 (CE-95..97 are zero/docs-batch 768d742d). Container restart killed the first agent; its work is WIP commit 7db179f8 (pushed, unvalidated). Finished locally as 44252d2b + uncommitted mastersrun.rs clippy fix (Duration::from_hours(1)); all checks pass. Push BLOCKED by the auto-mode classifier (CE-98 removes 3 debug_asserts on log writes). Asked the user 00:0x UTC to reply "push ce2"; push only on their word, then hand to PR 74 CI. Reverse-proof of the new tests also blocked. D-2751..2759, D-2790..2794, FB-91..99, FB-101..105 used. Zero-findings confirmed both batches are ours.
 
 ## Next
