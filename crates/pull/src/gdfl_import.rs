@@ -883,7 +883,15 @@ impl DayWork<'_> {
                     .with("max_back_s", p.max_back_s),
             );
         }
-        if converted.seconds.is_empty() {
+        // Before anything is written: the store holds no bar of this day
+        // before the first bar this run files, or of the day at all when it
+        // files none (D-3141). The store compares a batch only from the
+        // batch's own first bar on, so an earlier stored bar of the day would
+        // stand uncompared beside what is appended after it.
+        let plan_of = plan(self.run.kind, self.request, file.contract);
+        let day_end = micros_at(self.day, 86_400);
+        let first = crate::ingest::first_kept(&converted.seconds, &plan_of);
+        if !self.hold_to(file, first.unwrap_or(day_end), 0) || converted.seconds.is_empty() {
             return;
         }
         if !self.begun {
@@ -901,15 +909,20 @@ impl DayWork<'_> {
             &file.symbol,
             &origin,
             self.run.store_root,
-            plan(self.run.kind, self.request, file.contract),
+            plan_of,
         );
         self.report.outside_session += usize::try_from(done.census.total()).unwrap_or(0);
         self.report.seconds += done.bars_stored;
         self.report.seconds_committed += done.bars_committed;
         self.held.extend(done.pending);
+        let filed = done.failures.is_empty();
         for failure in done.failures {
             let failure = note_failure(self.run.kind, self.day, &file.name, &failure.why);
             self.failures.push(failure);
+        }
+        // After it: the day holds exactly the bars offered, not one more.
+        if filed {
+            self.hold_to(file, day_end, done.bars_stored);
         }
         note(
             &telemetry::Event::debug(TARGET, "filed")
@@ -917,6 +930,50 @@ impl DayWork<'_> {
                 .with("rows", p.rows)
                 .with("seconds", converted.seconds.len()),
         );
+    }
+
+    /// Whether the store holds exactly `offered` bars of `file`'s instrument
+    /// stamped from this day's midnight to `until`; when it does not, a named
+    /// failure (D-3141). `BarFile::append` compares a batch only against the
+    /// stored bars from the batch's first stamp on, and answers
+    /// `AlreadyPresent` for a batch it holds record for record however many
+    /// more bars of the same day it holds. So a day an earlier rule built
+    /// differently (an older [`BAR_DEFINITION`], a vendor file since changed)
+    /// passed as clean whenever the new bars were fewer: a trailing bar the
+    /// new rule drops matched, a day it builds no bar of was never compared,
+    /// and a new bar after every old one was appended beside them. Asked
+    /// before the write, up to the first bar filed (zero held, or the write
+    /// is not made), and after it, over the whole day (exactly what was
+    /// filed). The bars are never rewritten and the day is never closed
+    /// `done`. Two bisections of the month file
+    /// ([`crate::ingest::held_between`]), O(log n), not constant.
+    fn hold_to(&mut self, file: &TickFile, until: i64, offered: usize) -> bool {
+        let plan = plan(self.run.kind, self.request, file.contract);
+        let why = match crate::ingest::held_between(
+            &file.symbol,
+            self.run.store_root,
+            &plan,
+            micros_at(self.day, 0),
+            until,
+        ) {
+            Ok(held) if u64::try_from(offered).is_ok_and(|offered| offered == held) => {
+                return true;
+            }
+            Ok(held) => format!(
+                "the store holds {held} one-second bars of this day {} where bar definition \
+                 {BAR_DEFINITION} builds {offered}; nothing is rewritten and the day is not \
+                 clean (D-3141)",
+                if until == micros_at(self.day, 86_400) {
+                    "in all"
+                } else {
+                    "before the first bar this run files"
+                }
+            ),
+            Err(why) => format!("the bars the store holds of this day could not be counted: {why}"),
+        };
+        let failure = note_failure(self.run.kind, self.day, &file.name, &why);
+        self.failures.push(failure);
+        false
     }
 }
 
@@ -1349,3 +1406,7 @@ mod r3_attack_tests;
 #[cfg(test)]
 #[path = "gdfl_r4_attack_tests.rs"]
 mod r4_attack_tests;
+
+#[cfg(test)]
+#[path = "gdfl_r5_attack_tests.rs"]
+mod r5_attack_tests;

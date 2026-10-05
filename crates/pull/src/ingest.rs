@@ -1436,6 +1436,73 @@ pub fn from_rows(
     done
 }
 
+/// How many bars the store holds of `instrument` under `plan` stamped in
+/// `[from, to)` (UTC microseconds, both inside the month of `from`): the
+/// month file addressed exactly as [`from_rows`] addresses it, opened
+/// read-only, and two bisections of it. `0` when the month file does not
+/// exist; nothing is created.
+///
+/// # Why this exists (D-3141)
+///
+/// `BarFile::append` compares only the bars it is OFFERED: a batch it holds
+/// record for record is `AlreadyPresent` even when the month holds more bars
+/// inside the batch's own day. A caller that rebuilds a day under a changed
+/// rule and offers FEWER bars than an earlier rule stored is answered as if
+/// the two agreed. The GDFL import asks this after every file, and a count
+/// that is not what it offered is a named refusal, never a clean day.
+///
+/// # Cost
+///
+/// One open and at most `2 * ceil(log2(n_valid + 1))` record reads
+/// (`BarFile::first_at_or_after`), not constant; `docs/06-limits.md`.
+///
+/// # Errors
+///
+/// The address's refusal, or the store's, as text naming the instrument.
+pub fn held_between(
+    instrument: &str,
+    store_root: &Path,
+    plan: &Plan<'_>,
+    from: i64,
+    to: i64,
+) -> Result<u64, String> {
+    let month = crate::session::IstMoment::from_epoch_secs(from.div_euclid(1_000_000))
+        .map_err(|why| why.to_string())?
+        .day()
+        .year_month()
+        .map_err(|why| why.to_string())?;
+    let timeframe = plan.timeframe()?;
+    let Identity {
+        symbol,
+        exchange,
+        segment,
+        symbol_id,
+    } = identify(instrument, plan.exchange, plan.segment)?;
+    let path = StorePath::new(PathParts {
+        vendor: plan.vendor,
+        exchange: exchange.as_str(),
+        segment: segment.as_str(),
+        symbol: symbol.as_str(),
+        contract: plan.contract,
+        timeframe,
+        month,
+        file: FileKind::Bars,
+    })
+    .map_err(|why| why.to_string())?;
+    let file = match BarFile::open_existing(store_root, path, symbol_id) {
+        Ok(file) => file,
+        Err(store::file::StoreError::Missing { .. }) => return Ok(0),
+        Err(why) => return Err(format!("{instrument}: {why}")),
+    };
+    let first = file
+        .first_at_or_after(from)
+        .map_err(|why| format!("{instrument}: {why}"))?;
+    let end = file
+        .first_at_or_after(to)
+        .map_err(|why| format!("{instrument}: {why}"))?;
+    Ok(end.saturating_sub(first))
+}
+
 /// Drops the bars this engine declines, and counts why.
 ///
 /// The same question `fetch::land` asks of a raw vendor row, asked of a bar
@@ -1486,14 +1553,6 @@ fn keep_in_session(
     DropCensus,
 ) {
     let mut census = DropCensus::default();
-    let cadence = plan.request.granularity.cadence();
-    let venue = plan.request.listing.venue();
-    let verdict = |ts_micros: i64| {
-        plan.request
-            .window
-            .verdict(ts_micros.div_euclid(1_000_000), cadence, venue)
-    };
-
     let mut kept = Vec::with_capacity(bars.len());
     for bar in bars {
         // A TIMESTAMP THE CALENDAR CANNOT READ IS A DROP, NOT A HALT. `land`
@@ -1501,18 +1560,43 @@ fn keep_in_session(
         // read means the DECODER is wrong. Here the bar is already built, so
         // the same value is a bar this engine declines — counted, never stored,
         // and never silently kept.
-        match verdict(bar.ts_micros) {
-            Ok(None) => kept.push(*bar),
-            Ok(Some(reason)) => census.count(reason),
-            Err(_) => census.count(crate::session::DropReason::BeforeWindow),
+        match declined(plan, bar.ts_micros) {
+            None => kept.push(*bar),
+            Some(reason) => census.count(reason),
         }
     }
     let overlays = overlays
         .iter()
-        .filter(|o| matches!(verdict(o.ts_micros), Ok(None)))
+        .filter(|o| declined(plan, o.ts_micros).is_none())
         .copied()
         .collect();
     (kept, overlays, census)
+}
+
+/// Why [`keep_in_session`] declines a stamp under `plan`, or `None` when it
+/// keeps it: the window's and the venue's verdict, a stamp the calendar
+/// cannot read counted as before the window. The one rule, asked by
+/// [`keep_in_session`] and [`first_kept`] alike.
+fn declined(plan: &Plan<'_>, ts_micros: i64) -> Option<crate::session::DropReason> {
+    plan.request
+        .window
+        .verdict(
+            ts_micros.div_euclid(1_000_000),
+            plan.request.granularity.cadence(),
+            plan.request.listing.venue(),
+        )
+        .unwrap_or(Some(crate::session::DropReason::BeforeWindow))
+}
+
+/// The stamp of the first of `bars` that [`from_rows`] would keep under
+/// `plan`, by the same rule, or `None` when it keeps none. O(the bars before
+/// it). The GDFL import asks it before a write so that no stored bar of the
+/// day earlier than the batch goes uncompared (D-3141).
+#[must_use]
+pub fn first_kept(bars: &[store::format::Bar], plan: &Plan<'_>) -> Option<i64> {
+    bars.iter()
+        .find(|bar| declined(plan, bar.ts_micros).is_none())
+        .map(|bar| bar.ts_micros)
 }
 
 /// Puts the endpoint that produced these rows onto every refusal they caused.
