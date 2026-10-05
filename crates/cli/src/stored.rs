@@ -578,7 +578,16 @@ impl CashCloses {
         let Some(dated) = cas_dated_day(day) else {
             return calendar;
         };
-        match pull::calendar::kind_of(day) {
+        self.dated_close_on(pull::calendar::kind_of(day), dated)
+    }
+
+    /// The dated answer for a CAS-era day the calendar calls `kind`: the
+    /// master's close less one minute on a full session, and `None` on any
+    /// other. No irregular session falls in the CAS era yet, so `kind` is a
+    /// parameter: a test hands it one, and a future special session on a CAS
+    /// day is refused rather than given a full day's close.
+    fn dated_close_on(&self, kind: DayKind, dated: pull::session::Day) -> Option<u16> {
+        match kind {
             DayKind::Open(session) if session == Session::full() => self
                 .schedule
                 .close(dated)
@@ -5429,6 +5438,19 @@ mod tests {
         assert_eq!((none.dated_days(), none.unverified_days()), (0, 1));
         assert!(none.unverified_reason(OPEN_MONDAY_2026_08_03).is_some());
         assert_eq!(yes.session_close_minute(OPEN_MONDAY_2026_08_03), Some(914));
+        // An irregular session on a CAS day is never given the dated close:
+        // the 2025-10-21 Muhurat hour stands in for one, since none falls in
+        // the CAS era yet.
+        let DayKind::Open(muhurat) = pull::calendar::kind_of(20_382) else {
+            panic!("2025-10-21 is the Muhurat session");
+        };
+        assert_ne!(muhurat, Session::full());
+        let cas_day = cas_dated_day(OPEN_MONDAY_2026_08_03).expect("a CAS-era day");
+        assert_eq!(yes.dated_close_on(DayKind::Open(muhurat), cas_day), None);
+        assert_eq!(
+            yes.dated_close_on(DayKind::Open(Session::full()), cas_day),
+            Some(914)
+        );
         assert_eq!(no.session_close_minute(OPEN_MONDAY_2026_08_03), Some(929));
         assert_eq!(none.session_close_minute(OPEN_MONDAY_2026_08_03), None);
         for closes in [&yes, &no, &none] {

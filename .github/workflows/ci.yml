@@ -4345,7 +4345,16 @@ jobs:
     name: Gate 8 — O(1) ratio
     runs-on: ubuntu-24.04
     needs: build
-    timeout-minutes: 20
+    timeout-minutes: 40
+    # D-1465: twice in a row (runs on 8f58d91 and 25bc8aa) the runner was
+    # shut down six minutes in, while `cargo bench --workspace` compiled api
+    # beside cli and lake: four fat-LTO, codegen-units=1 links at once
+    # outgrow the runner's memory, and a killed runner reads as a lost
+    # machine rather than an out-of-memory. Two at a time keeps the build
+    # inside it; the timings the gate compares are taken after the build,
+    # so they are unchanged. The longer build is why the timeout is 40.
+    env:
+      CARGO_BUILD_JOBS: 2
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable branch; toolchain input defaults to stable
