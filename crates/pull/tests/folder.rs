@@ -410,6 +410,7 @@ fn a_row_whose_timestamp_is_not_a_moment_refuses_the_whole_reach() {
             volume: 0,
             open_interest: None,
         }],
+        skipped: pull::fetch::DecodeSkips::default(),
     };
     let why = folder::reach_of(std::slice::from_ref(&member))
         .expect_err("i64::MIN is not a moment on any calendar");
@@ -444,11 +445,13 @@ fn the_reach_of_a_walk_is_one_pass_over_its_rows() {
             path: PathBuf::from("/bought/A.csv"),
             instrument: "A".to_owned(),
             rows: rows(&[later]),
+            skipped: pull::fetch::DecodeSkips::default(),
         },
         Member {
             path: PathBuf::from("/bought/B.csv"),
             instrument: "B".to_owned(),
             rows: rows(&[earlier]),
+            skipped: pull::fetch::DecodeSkips::default(),
         },
     ];
     let reach = folder::reach_of(&members).expect("both are moments");
@@ -740,6 +743,7 @@ fn member(instrument: &str, stamp: i64) -> Member {
             volume: 0,
             open_interest: None,
         }],
+        skipped: pull::fetch::DecodeSkips::default(),
     }
 }
 

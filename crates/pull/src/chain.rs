@@ -294,8 +294,14 @@ pub async fn month<D: Discovery>(feed: Feed, ask: &Ask, from: &D) -> Result<Chai
     let asked_exchange = asked_exchange(&spec);
     // ONE FILING PER DECODED CONTRACT across the whole walk, keyed on what
     // `read_contract` decoded rather than on the vendor's spelling. D-3116.
-    let mut filed: std::collections::HashMap<(String, brutex_core::instrument::Contract), String> =
-        std::collections::HashMap::new();
+    // Keyed `(underlying, Contract)`, valued with the vendor name filed.
+    let mut filed = std::collections::HashMap::new();
+    // ONE FILING PER VENDOR NAME across the whole walk, and the expiry it was
+    // first listed under. A monthly name (`Mar25`) carries no day, so
+    // `read_contract` accepts it under ANY expiry of its month: listed beside
+    // two dates it decoded to two contracts and the same series was fetched
+    // twice and stored once under an expiry that is not its own. D-3126.
+    let mut listed: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
     let url = fno::expiries_url(&spec, ask).map_err(ChainError::Lookup)?;
     let body = from.get(&url).await.map_err(|why| ChainError::Transport {
@@ -351,18 +357,27 @@ pub async fn month<D: Discovery>(feed: Feed, ask: &Ask, from: &D) -> Result<Chai
         };
         let names = fno::names(&body, contracts_field).map_err(ChainError::Lookup)?;
         // ROOM FOR THIS ANSWER BEFORE IT IS FILED (gate 11 rule 3, D-3189):
-        // `filed` cannot be sized when the walk starts, because the contract
+        // `filed` and `listed` cannot be sized when the walk starts, because the contract
         // count is known one expiry at a time; it is grown once per expiry by
         // the size of that answer, so no insert below reallocates.
         filed.reserve(names.len());
+        listed.reserve(names.len());
         // A repeated name WITHIN THIS EXPIRY'S ANSWER is filed once: one
         // contract held as two inflates the count and builds its bars request
-        // twice. Scoped to the one answer on purpose — the same name under a
-        // second expiry still reaches `read_contract`, whose token check
-        // refuses it by name rather than letting a dedup hide the disagreement.
+        // twice. Scoped to the one answer on purpose: the same name under a
+        // second expiry is a disagreement, not a repeat, and is refused by name
+        // — by `read_contract`'s token check when the name carries a day, and
+        // by `listed` below when it does not (a monthly name; D-3126).
         let mut seen_names = std::collections::HashSet::with_capacity(names.len());
         for name in names {
             if !seen_names.insert(name.clone()) {
+                continue;
+            }
+            // THE SAME NAME UNDER AN EARLIER EXPIRY (D-3126). Refused by name,
+            // naming the expiry it was filed under; one vendor name is one
+            // series, whatever date the vendor listed it beside.
+            if let Some(why) = relisted(&listed, &name, &keyed.expiry) {
+                chain.unreadable.push(why);
                 continue;
             }
             // THE EXCHANGE TOKEN AGAINST THE ASK. `read_contract` binds it to
@@ -431,6 +446,7 @@ pub async fn month<D: Discovery>(feed: Feed, ask: &Ask, from: &D) -> Result<Chai
                         ));
                     }
                     std::collections::hash_map::Entry::Vacant(slot) => {
+                        listed.insert(name.clone(), keyed.expiry.clone());
                         slot.insert(name);
                         chain.contracts.push(found);
                     }
@@ -441,6 +457,22 @@ pub async fn month<D: Discovery>(feed: Feed, ask: &Ask, from: &D) -> Result<Chai
         }
     }
     Ok(chain)
+}
+
+/// Why `name` is refused when an earlier expiry of this walk already filed it,
+/// or `None` when it is new. One probe of `listed`. D-3126.
+fn relisted(
+    listed: &std::collections::HashMap<String, String>,
+    name: &str,
+    expiry: &str,
+) -> Option<String> {
+    listed.get(name).map(|first| {
+        format!(
+            "{name}: already filed under expiry {first}, and expiry {expiry} \
+             lists it again. One vendor name is one series; it was refused \
+             rather than filed under two expiries."
+        )
+    })
 }
 
 /// The value of the request's fixed `exchange` parameter, or `None` when the

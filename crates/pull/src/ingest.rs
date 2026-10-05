@@ -855,7 +855,11 @@ fn from_members_inner(members: &[Member], store_root: &Path, plan: Plan<'_>) -> 
     let mut appends: Vec<Append> = Vec::new();
 
     for member in members {
-        done.rows_read += member.rows.len();
+        // THE ROWS THE FILE OFFERED, NOT ONLY THE ONES THAT DECODED (D-3125):
+        // a row the CSV decoder skipped is read and named by reason, as the
+        // HTTP doors' skips have been since D-3122.
+        done.rows_read += member.rows.len() + member.skipped.total();
+        done.decoder_skips.absorb(member.skipped);
         match one(member, store_root, plan) {
             Ok(landed) => {
                 // ONE EVENT PER MEMBER, WHICH IS THE GRANULARITY THAT WAS
@@ -971,7 +975,14 @@ fn from_members_inner(members: &[Member], store_root: &Path, plan: Plan<'_>) -> 
 /// perfectly. Three arms of [`from_members`] end this way and they were three
 /// copies of it, which is three places for one of them to start reporting zero.
 fn refused_whole(members: &[Member], about: &Path, why: String) -> Ingested {
-    let rows_read = members.iter().map(|member| member.rows.len()).sum();
+    let mut decoder_skips = crate::fetch::DecodeSkips::default();
+    let mut rows_read = 0usize;
+    for member in members {
+        decoder_skips.absorb(member.skipped);
+        rows_read = rows_read
+            .saturating_add(member.rows.len())
+            .saturating_add(member.skipped.total());
+    }
     // THE WHOLE RUN REFUSED, AND UNTIL NOW THE LOG SAID NOTHING.
     //
     // The receipt carried this and the log did not, so an operator reading
@@ -991,6 +1002,7 @@ fn refused_whole(members: &[Member], about: &Path, why: String) -> Ingested {
     Ingested {
         members: members.len(),
         rows_read,
+        decoder_skips,
         failures: vec![Failure {
             instrument: about.display().to_string(),
             why,
@@ -1124,6 +1136,10 @@ pub fn from_window(
         path: std::path::PathBuf::from(origin),
         instrument: instrument.to_owned(),
         rows,
+        // ADDED BELOW, NOT HERE: this function counts `raw.skipped` itself
+        // after `from_members`, beside the duplicates, so the member carries
+        // none and nothing is counted twice.
+        skipped: crate::fetch::DecodeSkips::default(),
     };
     let mut done = from_members(std::slice::from_ref(&member), store_root, plan);
     // THE ONE EVENT PER GAP (OD-2, D-2371): `request_minutes` no longer logs,

@@ -66,6 +66,7 @@ fn session_member() -> Member {
         path: PathBuf::from("/bought/NIFTY.csv"),
         instrument: "NIFTY".to_owned(),
         rows,
+        skipped: pull::fetch::DecodeSkips::default(),
     }
 }
 

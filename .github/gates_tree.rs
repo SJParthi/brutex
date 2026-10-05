@@ -2190,6 +2190,8 @@ const AUDIT_LITERAL: &str = "-354 -7 repeats";
 //   above below alive cited derived disagree impossible intrinsic leap
 //   midnight repeated solved swept withheld -- assertion labels and
 //     substrings a refusal or a receipt must contain.
+//   clean -- a round-3 scratch-directory name in attack_r3_ingest.rs
+//     (D-3125).
 const ATTACK_LITERAL: &str = "
     - -- n nse 019200 99999999999 00
     10 11 12 5 1_000 0x10 1e30 1e308 9223372036854775808 18446744073709551615
@@ -2199,6 +2201,7 @@ const ATTACK_LITERAL: &str = "
     off-grid offgrid order rows-edges window weekend ohlc
     above below alive cited derived disagree impossible intrinsic leap
     midnight repeated solved swept withheld
+    clean
 ";
 
 /// Every declared group, in the order the step joined them.

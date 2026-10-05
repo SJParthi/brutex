@@ -12058,15 +12058,39 @@ fn chain_quotes(
         if day < from || day > to {
             continue;
         }
-        let Some(spot) = book.at(bar.ts_micros) else {
-            out.refused = out.refused.saturating_add(1);
-            note_price_refusal(
-                out,
-                "no index bar is stored at this option bar's stamp, so it has \
-                 no underlying level to price against. Nothing was borrowed \
-                 from a neighbouring minute",
-            );
-            continue;
+        // `lookup`, NOT `at` (D-3123): a stamp two index bars contradict
+        // (D-3110) is a different refusal from a stamp with no index bar, and
+        // calling it missing sends the operator to fetch a minute already held.
+        let spot = match book.lookup(bar.ts_micros) {
+            Ok(spot) => spot,
+            Err(pull::pricing::PricingError::NoSpotAtStamp { .. }) => {
+                out.refused = out.refused.saturating_add(1);
+                note_price_refusal(
+                    out,
+                    "no index bar is stored at this option bar's stamp, so it has \
+                     no underlying level to price against. Nothing was borrowed \
+                     from a neighbouring minute",
+                );
+                continue;
+            }
+            // One fixed sentence, not `why`'s Display: that carries the stamp,
+            // so a month of contradicted minutes would fill every reason slot
+            // with one class of refusal (the D-3111 defect, one layer up).
+            Err(pull::pricing::PricingError::SpotAmbiguous { .. }) => {
+                out.refused = out.refused.saturating_add(1);
+                note_price_refusal(
+                    out,
+                    "two index bars stored at this option bar's stamp disagree \
+                     on the close, so the underlying level is unknown. Nothing \
+                     was priced rather than one of the two being picked",
+                );
+                continue;
+            }
+            Err(why) => {
+                out.refused = out.refused.saturating_add(1);
+                note_price_refusal(out, &why.to_string());
+                continue;
+            }
         };
         let Ok(tenor) = pull::tenor::Tenor::between(bar.ts_micros, month_of.inputs.expiry) else {
             out.refused = out.refused.saturating_add(1);
@@ -13581,9 +13605,67 @@ fn millionths_to_decimal(millionths: i64) -> f64 {
 /// de-duplication are `pull::pricing::price_all`'s own rule, applied to the
 /// refusals this function raises before a quote could even be built.
 fn note_price_refusal(out: &mut pull::pricing::PricedAll, why: &str) {
-    if out.why.len() < pull::pricing::REASONS_KEPT && !out.why.iter().any(|kept| kept == why) {
-        out.why.push(why.to_owned());
+    keep_reason(&mut out.why, why);
+}
+
+/// Keeps `why` when there is room and no kept reason has its SHAPE.
+///
+/// # A reason is its shape, not its sentence (D-3124)
+///
+/// D-3111 made `price_all` keep one sentence per class of refusal, because a
+/// sentence carries the row's own numbers. This module then folded one
+/// `PricedAll` per contract-month into the receipt deduplicating by the whole
+/// sentence again, so five months refused below intrinsic — five sentences
+/// differing only in their intrinsic value — filled every slot, and a month
+/// refused for a different reason was counted and never named. The class
+/// itself does not survive into the text, so the receipt compares the
+/// sentence with every number in it erased: the words of a refusal are its
+/// kind, the numbers are the row's. The first sentence of each shape is kept
+/// verbatim.
+///
+/// # Cost
+///
+/// Bounded by `REASONS_KEPT` shapes of at most a few hundred bytes each, per
+/// reason offered — never by rows, contracts or months.
+fn keep_reason(kept: &mut Vec<String>, why: &str) {
+    if kept.len() >= pull::pricing::REASONS_KEPT {
+        return;
     }
+    let shape = reason_shape(why);
+    for held in kept.iter() {
+        if reason_shape(held) == shape {
+            return;
+        }
+    }
+    kept.push(why.to_owned());
+}
+
+/// `why` with every number replaced by `#`: a maximal run of digits, `.`,
+/// `e`, `E`, `+` and `-` that holds at least one digit. `price 100 is at or
+/// below the discounted intrinsic value 112885.1497` and the same sentence
+/// at `122885.1497` have one shape; words, including hyphenated ones, are
+/// untouched.
+fn reason_shape(why: &str) -> String {
+    let mut out = String::with_capacity(why.len());
+    let mut run = String::new();
+    let flush = |run: &mut String, out: &mut String| {
+        if run.bytes().any(|b| b.is_ascii_digit()) {
+            out.push('#');
+        } else {
+            out.push_str(run);
+        }
+        run.clear();
+    };
+    for c in why.chars() {
+        if c.is_ascii_digit() || matches!(c, '.' | 'e' | 'E' | '+' | '-') {
+            run.push(c);
+        } else {
+            flush(&mut run, &mut out);
+            out.push(c);
+        }
+    }
+    flush(&mut run, &mut out);
+    out
 }
 
 /// What one rolling-option run did, as counts an operator can add up.
@@ -13697,10 +13779,9 @@ impl PricedCount {
         self.refused = self.refused.saturating_add(from.refused);
         self.solved = self.solved.saturating_add(from.solved());
         self.below_band = self.below_band.saturating_add(from.below_validated_band());
+        // BY SHAPE, NOT BY SENTENCE (D-3124). See `keep_reason`.
         for why in &from.why {
-            if self.why.len() < pull::pricing::REASONS_KEPT && !self.why.contains(why) {
-                self.why.push(why.clone());
-            }
+            keep_reason(&mut self.why, why);
         }
     }
 
@@ -13712,9 +13793,7 @@ impl PricedCount {
         self.solved = self.solved.saturating_add(from.solved);
         self.below_band = self.below_band.saturating_add(from.below_band);
         for why in &from.why {
-            if self.why.len() < pull::pricing::REASONS_KEPT && !self.why.contains(why) {
-                self.why.push(why.clone());
-            }
+            keep_reason(&mut self.why, why);
         }
     }
 
@@ -35019,3 +35098,7 @@ mod http_admission_tests;
 #[cfg(test)]
 #[path = "attack_r2_receipt_tests.rs"]
 mod attack_r2_receipt_tests;
+
+#[cfg(test)]
+#[path = "attack_r3_tests.rs"]
+mod attack_r3_tests;

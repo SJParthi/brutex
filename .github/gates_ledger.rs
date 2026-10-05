@@ -1357,7 +1357,7 @@ const ALLOW_FLOAT: Allow = &[
 const ALLOW_UNSIZED: Allow = &[
     ("crates/api/src/catalog.rs", 1),
     ("crates/pull/src/manifest.rs", 1),
-    ("crates/pull/src/chain.rs", 1),
+    ("crates/pull/src/chain.rs", 2),
     ("crates/pull/src/pricing.rs", 1),
     ("crates/api/src/autopilot.rs", 1),
     ("crates/api/src/ladder.rs", 1),
