@@ -59538,3 +59538,78 @@ gate 23 the measurement prints in two attack test files.
 `.github/gates_tree.rs`, `failed` is renamed `note_failure`, and the two
 files' `eprintln!` counts are declared in gate 23 as test-only measurements.
 No behaviour changed.
+
+### D-3196 — A torn close of a torn journal line is still a torn line — 2026-10-05
+
+**Finding.** A crash tore a journal line to `d`; the next load closed it with
+` (torn)`, and a second crash cut that close to ` (t`. The tail `d (t` was
+judged foreign by D-3169's rule, so every later run was refused for ever, the
+outcome D-3173 exists to prevent. A random crash history found `begi (tor`
+the same way.
+
+**Decision.** `torn_fragment` first takes off every trailing piece of the
+mark, whole or cut, and then asks D-3169's verb rule of what is left, which
+must not be empty. The mark's seven bytes are all different, so the last byte
+names the one piece a fragment can end in. A piece with nothing the journal
+writes before it stays foreign. DPT-18.
+
+### D-3197 — An undecodable options name is the underlying its shape spells — 2026-10-05
+
+**Finding.** `LTI06APR24100CE` (a Saturday expiry) does not decode. `LTI` and
+`NIFTYIT` are not in today's F&O list, and `LT` and `NIFTY` are, so
+D-3175's longest-prefix rule gave such a name to `LT` or `NIFTY`. An `LT` run
+refused another underlying's broken file as its own, and five filtered runs
+claimed one more file than the unfiltered run. DPT-07 says an undecodable name
+belongs to its whole underlying.
+
+**Decision.** `gdfl_nfo::shaped_underlying` returns the text before a name's
+dated `DD MON YY STRIKE` shape, or else before its monthly `YY MON STRIKE`
+shape. The two shapes split at one place. The run claims a shaped name only
+when a filter names that text exactly. A name with neither shape keeps
+D-3175's and D-3167's prefix rule. Whether NSE listed `LTI` or `NIFTYIT`
+options on any day this import reaches is UNVERIFIED; the rule does not
+depend on it. DPT-19.
+
+### D-3198 — A columnar tick-store block builds nothing past its stated size — 2026-10-05
+
+**Finding.** A raw block is decoded to at most one byte past its entry's
+size, but a columnar block was rebuilt whatever the entry stated. Only
+`verify`, after the rebuild, compared the length. A 173-byte block stating 64
+bytes built 18,000,002 bytes: one numeric column of a million one-byte
+shapes, each rendering seventeen bytes. A block of many empty text columns
+grows as rows times columns.
+
+**Decision.** `columnar` takes the entry's size and refuses with
+`TickStoreMalformed` before anything is built past it. The checks are:
+
+- rows above the size;
+- a header above the size;
+- a column whose stated text is above the size;
+- a text column whose payload is longer than its text;
+- a numeric column whose payload is longer than `9 * rows + 2`;
+- a numeric column whose rendered text passes its stated length;
+- a file that grows past the size field by field.
+
+A block that rebuilds to exactly its size is unchanged. The unit test
+`a_column_that_is_not_its_rows_refuses` stated a 1-byte size for 3-row
+blocks. It now states 64 bytes, so each refusal it checks is still the
+column's own. DPT-20.
+
+### D-3199 — GDFL round 3: what was tried and found sound — 2026-10-05
+
+**Finding.** Round 3 also checked three things against slow references:
+
+- 400 random index worlds and 400 random stock worlds, half under a filter,
+  through the tick store and the zips;
+- 120 options worlds imported by one filter per underlying and then
+  unfiltered, against an unfiltered store;
+- `NfoDay::locate`'s per-probe cost, measured by DPN-04's tests.
+
+The only failure was D-3197's double claim.
+
+**Decision.** These are recorded as DPT-21 and DPT-22. The measured probe
+times are test-profile timings: p50 85 ns at 10^3 entries, 195 ns at 10^4,
+379 ns at 10^5 and 702 ns at 10^6. They are not flat in absolute time. One
+probe per lookup holds by shape, and the growth is consistent with cache
+misses on a larger table; that cause is UNVERIFIED and is not a bench-gate
+claim.

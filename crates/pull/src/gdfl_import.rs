@@ -541,10 +541,31 @@ const TORN: &str = " (torn)";
 /// line the journal writes: a prefix of one of its three verbs and the space
 /// after it, or text that starts with one (D-3169). Anything else at the end
 /// of the file is not a torn journal line but a foreign one.
+///
+/// The close a load writes can itself be cut by a second crash, leaving `d`
+/// followed by part of [`TORN`] (`d (t`), and the next load closes that
+/// again. So every trailing piece of the mark, whole or cut, is taken off
+/// before the verb rule is asked: each is a byte the journal wrote, and
+/// judging `d (t` foreign refused every later run for ever (D-3196). The
+/// mark's seven bytes are all different, so its last byte names the one
+/// piece a fragment can end in. What is left is never empty: a close follows
+/// only a fragment of at least a verb's first letter, which no piece of the
+/// mark ends in. O(fragment length).
 fn torn_fragment(fragment: &str) -> bool {
-    ["begin ", "done ", "incomplete "]
-        .into_iter()
-        .any(|verb| verb.starts_with(fragment) || fragment.starts_with(verb))
+    let mut rest = fragment;
+    'strip: loop {
+        for cut in (1..=TORN.len()).rev() {
+            if let Some(shorter) = TORN.get(..cut).and_then(|piece| rest.strip_suffix(piece)) {
+                rest = shorter;
+                continue 'strip;
+            }
+        }
+        break;
+    }
+    !rest.is_empty()
+        && ["begin ", "done ", "incomplete "]
+            .into_iter()
+            .any(|verb| verb.starts_with(rest) || rest.starts_with(verb))
 }
 
 /// The journal, read once per run: the keys done, and the keys begun and not
@@ -1064,8 +1085,17 @@ fn longest_prefix<'a>(ticker: &str, names: impl IntoIterator<Item = &'a str>) ->
 /// filter's own names, is a filter name. `NIFTYNXT50…` is `NIFTYNXT50`'s,
 /// never `NIFTY`'s (D-3175); `TV18BRDCST…`, a share outside today's F&O
 /// list, is a `TV18BRDCST` filter's, which asked for it by name (D-3167).
+///
+/// A name whose own shape spells its underlying (a dated or monthly reading
+/// with a date that is no contract's) is that underlying's alone, by exact
+/// bytes: `LTI06APR24…` is `LTI`'s, never `LT`'s, though `LTI` is no longer
+/// in the F&O list and `LT` is (D-3197). The longest-prefix rule is only for
+/// a name with no such shape.
 /// O(213 + filter names) per undecodable name, on the refusal path only.
 fn claims_undecodable(run: &Run<'_>, ticker: &str) -> bool {
+    if let Some(underlying) = crate::gdfl_nfo::shaped_underlying(ticker) {
+        return run.wants(underlying);
+    }
     let fno = longest_prefix(ticker, brutex_core::universe::FNO_UNDERLYINGS);
     let asked = longest_prefix(ticker, run.only.iter().map(String::as_str));
     match (asked, fno) {
@@ -1174,3 +1204,7 @@ mod attack_gdfl_seconds;
 #[cfg(test)]
 #[path = "gdfl_r2_attack_tests.rs"]
 mod r2_attack_tests;
+
+#[cfg(test)]
+#[path = "gdfl_r3_attack_tests.rs"]
+mod r3_attack_tests;

@@ -2201,7 +2201,12 @@ const AUDIT_LITERAL: &str = "-354 -7 repeats";
 //     strike texts of invented option names, `2012-` the expiry-year
 //     prefix a monthly name read as dated must carry, and `d` `inc`
 //     prefixes of journal verbs a torn line may stop at.
+//   ROUND 3 (gdfl_r3_attack_tests.rs). The `r3-*` words are scratch
+//     roots, as above; `22` and `333` are the fields of an invented
+//     columnar text column.
 const GDFL_LITERAL: &str = "
+    r3-journal-hand r3-journal-fuzz r3-shape r3-shape-store r3-cm-world
+    r3-filters 22 333
     r2-era r2-filter-claim r2-filter-claim-store r2-fold-count r2-journal
     r2-race r2-stocks r2-world 195 1260 10500 27000 1927000 2012- d inc
     indices stocks imports begin done late_rows late_unresolved max_back_s

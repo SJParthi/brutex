@@ -408,6 +408,46 @@ fn monthly_shape(body: &[u8]) -> Option<(usize, u16, u8, i64)> {
     })
 }
 
+/// The dated-form shape of `body` (a ticker without its side),
+/// `DD MON YY STRIKE`, its date not yet judged: `(split, dd, mon, yy,
+/// strike)`. AT MOST ONE split has it ([`decode_ticker`] states why).
+fn dated_shape(body: &[u8]) -> Option<(usize, u8, u8, u8, i64)> {
+    (1..body.len()).find_map(|at| {
+        let rest = body.get(at..)?;
+        let dd = rest.get(0..2).and_then(two_digits)?;
+        let mon = rest.get(2..5).and_then(month_of)?;
+        let yy = rest.get(5..7).and_then(two_digits)?;
+        let strike = rest.get(7..).and_then(strike_paisa)?;
+        Some((at, dd, mon, yy, strike))
+    })
+}
+
+/// The underlying a name's own shape spells, whether or not the name decodes:
+/// the text before its dated `DD MON YY STRIKE` reading, else before its
+/// monthly `YY MON STRIKE` one. Both shapes put two digits and a month at
+/// their split, and a strike holds no letter, so where both exist they split
+/// at one place. `None` when the name has neither shape, no `CE`/`PE` side,
+/// or is past the length cap.
+///
+/// `LTI06APR24100CE` (a Saturday expiry) does not decode, and its shape still
+/// says it is `LTI`'s, never `LT`'s: `crate::gdfl_import` asks this before it
+/// falls back to the longest underlying a shapeless name starts with
+/// (D-3197). O(ticker length).
+#[must_use]
+pub(crate) fn shaped_underlying(ticker: &str) -> Option<&str> {
+    if ticker.len() > TICKER_CAP {
+        return None;
+    }
+    let body = ticker
+        .strip_suffix("CE")
+        .or_else(|| ticker.strip_suffix("PE"))?;
+    let bytes = body.as_bytes();
+    let at = dated_shape(bytes)
+        .map(|(at, ..)| at)
+        .or_else(|| monthly_shape(bytes).map(|(at, ..)| at))?;
+    body.get(..at)
+}
+
 /// Whether contract month `year`/`month` holds any day of `[from, to]`
 /// (days from the epoch): the monthly reading could name a contract alive in
 /// the window. The sourced table does NOT narrow this to the month's own
@@ -455,14 +495,7 @@ pub fn decode_ticker(ticker: &str, trade: Day) -> Result<OptionTicker, NfoRefusa
     // `tests::no_ticker_reads_as_two_contracts` walks every split of a sweep
     // of shapes to hold this.
     // The dated shape, its date not yet judged: (split, dd, mon, yy, strike).
-    let shaped = (1..body.len()).find_map(|at| {
-        let rest = body.get(at..)?;
-        let dd = rest.get(0..2).and_then(two_digits)?;
-        let mon = rest.get(2..5).and_then(month_of)?;
-        let yy = rest.get(5..7).and_then(two_digits)?;
-        let strike = rest.get(7..).and_then(strike_paisa)?;
-        Some((at, dd, mon, yy, strike))
-    });
+    let shaped = dated_shape(body);
     let first_form = shaped.and_then(|(at, dd, mon, yy, strike)| {
         let expiry = Day::new(2000 + u16::from(yy), mon, dd).ok()?;
         (is_weekday(expiry)

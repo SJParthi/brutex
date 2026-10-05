@@ -926,6 +926,15 @@ that failed on the unmodified code.
   D-3169, DPT-15.
 - **Static gates 1d, 11, 19 and 23 refused the GDFL files**: fixed. D-3166,
   D-3178, D-3179.
+- **Round 3: a journal whose torn close was itself torn (`d (t`) refused every
+  later run**: fixed. D-3196, DPT-18.
+- **Round 3: an undecodable name of a retired underlying (`LTI…`,
+  `NIFTYIT…`) claimed by a shorter filter (`LT`, `NIFTY`)**: fixed. D-3197,
+  DPT-19.
+- **Round 3: a 173-byte columnar tick-store block stating 64 bytes rebuilt
+  18 MB before the size check**: fixed. D-3198, DPT-20.
+- **Round 3: random index worlds, filtered stock worlds and a run of filters
+  over one store**: no failure beyond D-3197. D-3199, DPT-21, DPT-22.
 - **Open.** D-2802 to D-2807 are cited in the GDFL code and head no entry in
   `docs/05-decisions.md`. Whether the long-dated months 2022-06, 2023-06 and
   2023-12 exist, and whether monthly names persist after the cutover, needs the

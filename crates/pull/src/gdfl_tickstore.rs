@@ -71,6 +71,9 @@ const NUMERIC: &str = "a numeric column's payload is not its stated shape";
 /// A time field outside `0..=359_999` seconds, which no two-digit-hour `HH:MM:SS`
 /// can show.
 const TIME_RANGE: &str = "a numeric time field is out of range";
+/// A columnar block that states, or would rebuild, more than its entry's
+/// stated size (D-3198).
+const PAST_SIZE: &str = "a columnar block rebuilds past its entry's stated size";
 
 /// Where one entry's block lies in its day file, for [`CmSource::fetch`].
 #[derive(Debug, Clone)]
@@ -260,8 +263,13 @@ pub fn read_index<B: ReadAt>(src: &B, len: u64) -> Result<Vec<IndexEntry>, CmRef
 /// The original file an entry's block holds, rebuilt as §4 states. A
 /// directory entry is empty; a raw block is its zstd frame decoded to the
 /// entry's `size`; a columnar block is rebuilt row by row from its columns.
-/// The result is NOT checked here against `size` and `crc`:
-/// [`crate::gdfl_cm::read_listed`] does that for every source.
+/// The result is NOT checked here against `crc`, nor a columnar result for
+/// being SHORT of `size`: [`crate::gdfl_cm::read_listed`] does that for
+/// every source. What IS held here is that nothing is built past `size`, a
+/// raw frame decoded one byte past it at most and a columnar block refused
+/// as soon as a row count, a column or the file rebuilt so far is past it:
+/// a 173-byte block stating 64 bytes rebuilt 18 MB before the length check
+/// saw it (D-3198).
 ///
 /// # Errors
 ///
@@ -279,11 +287,15 @@ pub fn rebuild<B: ReadAt>(src: &B, entry: &IndexEntry) -> Result<Vec<u8>, CmRefu
     if kind == 2 {
         return unzstd(body, entry.size);
     }
-    columnar(body, entry.rows)
+    columnar(body, entry.rows, entry.size)
 }
 
-/// A columnar block's body after its kind byte (§4, kind 1), rebuilt.
-fn columnar(body: &[u8], index_rows: u64) -> Result<Vec<u8>, CmRefusal> {
+/// A columnar block's body after its kind byte (§4, kind 1), rebuilt, and
+/// refused once anything it states or builds is past `size` bytes (D-3198):
+/// every row ends in a terminator, so rows are at most `size`; a column's
+/// text is at most `size`; a text column's payload is its text; a numeric
+/// column's payload is `rows + 2 + w * rows` with `w` at most 8.
+fn columnar(body: &[u8], index_rows: u64, size: u64) -> Result<Vec<u8>, CmRefusal> {
     let mut c = Cursor::new(body, COLUMNAR);
     let terminator: &[u8] = match c.u8()? {
         0 => b"\n",
@@ -306,15 +318,25 @@ fn columnar(body: &[u8], index_rows: u64) -> Result<Vec<u8>, CmRefusal> {
     if rows != index_rows {
         return Err(bad(ROW_COUNT));
     }
+    if rows > size || u64::from(header_len) > size {
+        return Err(bad(PAST_SIZE));
+    }
     let mut columns = Vec::new();
     for _ in 0..ncols {
         let tag = c.u8()?;
         let (payload_len, text_len, zlen) = (c.u64()?, c.u64()?, c.u64()?);
+        let most = match tag {
+            0 => text_len,
+            1 => rows.saturating_mul(9).saturating_add(2),
+            _ => return Err(bad(COLUMNAR)),
+        };
+        if text_len > size || payload_len > most {
+            return Err(bad(PAST_SIZE));
+        }
         let payload = unzstd(c.take(zlen)?, payload_len)?;
         let column = match tag {
             0 => Column::text(payload, rows)?,
-            1 => Column::numeric(&payload, rows)?,
-            _ => return Err(bad(COLUMNAR)),
+            _ => Column::numeric(&payload, rows, text_len)?,
         };
         if column.text_len() != text_len {
             return Err(bad(COLUMN_TEXT));
@@ -325,6 +347,7 @@ fn columnar(body: &[u8], index_rows: u64) -> Result<Vec<u8>, CmRefusal> {
         return Err(bad(COLUMNAR));
     }
     let mut out = header.to_vec();
+    let past = |out: &Vec<u8>| !u64::try_from(out.len()).is_ok_and(|len| len <= size);
     for row in 0..usize::try_from(rows).unwrap_or(usize::MAX) {
         out.extend_from_slice(terminator);
         for (at, column) in columns.iter().enumerate() {
@@ -332,6 +355,11 @@ fn columnar(body: &[u8], index_rows: u64) -> Result<Vec<u8>, CmRefusal> {
                 out.push(b',');
             }
             out.extend_from_slice(column.field(row));
+            // Each column's text is at most `size`, so one field adds at most
+            // that much before this check sees it.
+            if past(&out) {
+                return Err(bad(PAST_SIZE));
+            }
         }
     }
     if trailing {
@@ -380,8 +408,11 @@ impl Column {
 
     /// A numeric column (tag 1): `shape[rows]`, `delta`, `w`, then `w` byte
     /// planes of `rows` bytes, each value zigzag-decoded, summed when `delta`
-    /// is 1, and rendered from its shape (§4).
-    fn numeric(payload: &[u8], rows: u64) -> Result<Self, CmRefusal> {
+    /// is 1, and rendered from its shape (§4). Refused as soon as the text is
+    /// past `text_len`, the length the block states for it, which the caller
+    /// holds to the entry's size: one shape byte renders up to seventeen
+    /// bytes, so this is what keeps a numeric column inside it (D-3198).
+    fn numeric(payload: &[u8], rows: u64, text_len: u64) -> Result<Self, CmRefusal> {
         let count = usize::try_from(rows).map_err(|_| bad(NUMERIC))?;
         let mut cursor = Cursor::new(payload, NUMERIC);
         let shapes = cursor.take(rows)?;
@@ -415,6 +446,9 @@ impl Column {
                 text.push(b'\n');
             }
             render(shape, v, &mut text)?;
+            if !u64::try_from(text.len()).is_ok_and(|len| len <= text_len) {
+                return Err(bad(COLUMN_TEXT));
+            }
             ends.push(text.len());
         }
         Ok(Self { text, ends })
@@ -1128,9 +1162,11 @@ mod tests {
     /// of its stated shape, refuses (§4).
     #[test]
     fn a_column_that_is_not_its_rows_refuses() {
+        // The entry states a size room enough for the rows, so each refusal
+        // below is the column's own, never D-3198's size bound.
         let one = |col: Col<'_>, rows: u64| {
             let block = columnar_block(false, false, "V", rows, &[col]);
-            let file = day_file(&[put("F/v.csv", 1, block, b"V", rows)]);
+            let file = day_file(&[put("F/v.csv", 1, block, &[b'V'; 64], rows)]);
             rebuilt(&file, 0).unwrap_err()
         };
         assert_eq!(one(Col::Text(vec!["a", "b"]), 3), bad(COLUMN_TEXT));
@@ -1162,10 +1198,14 @@ mod tests {
             (payload(0, 1, 2), "a plane too long"),
             (payload(0, 2, 1), "a plane too short"),
         ] {
-            assert_eq!(Column::numeric(&p, 1).err(), Some(bad(NUMERIC)), "{why}");
+            assert_eq!(
+                Column::numeric(&p, 1, u64::MAX).err(),
+                Some(bad(NUMERIC)),
+                "{why}"
+            );
         }
         assert_eq!(
-            Column::numeric(&[0, 0], u64::MAX).err(),
+            Column::numeric(&[0, 0], u64::MAX, u64::MAX).err(),
             Some(bad(NUMERIC)),
             "more rows than any payload"
         );
