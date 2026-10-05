@@ -93,3 +93,9 @@ Main thread: D-1930..D-1949 (D-1930 used). D-1771..1799 are all used. The helper
 - fmt, clippy, 29 gates green on 05beb2f2. Gotcha: run gates only after `git add` (unmerged index stages triple-count files in gate 23).
 - Running runner, api, indicators, vocab, cli suites as uid 65534 (/home/claude/scratch-rr/summary).
 - Next: check summary, run candidate_universe barrier test alone, hand 05beb2f2 (or later) to PR 74 CI.
+
+## Update 2026-10-05 ~00:40 UTC (handed off)
+- zero/pr74-merge 6db4dfb8 = PR 74 a3f6e8aa + everything; handed to PR 74 CI via send_message (fast-forward).
+- All 7 merge-fallout failures fixed (ba2e0da3); D-2690 sweep-scope texts. api 1481 green, runner/indicators/vocab green, cli touched modules 270 green, 29 gates green.
+- Gotcha: cli lib tests that arm fixed_tail faults must use the CURRENT file names (D-1644 moved Base ledger to -v3).
+- Next: remaining logged rows (see zero-findings.tsv), at most two helpers; owner items stay named.
