@@ -60573,5 +60573,6 @@ a test can name the file without the environment. No answer changes.
 
 **Proof.** `a_json_decodes_peak_memory_is_measured_against_its_body`
 (`crates/pull/tests/allocation.rs`),
-`api::server::tests::indexmap_json_is_built_once_per_catalogue_stamp_and_parse`.
+`api::server::tests::indexmap_json_is_built_once_per_catalogue_stamp_and_parse`,
+`api::server::tests::indexmap_json_answers_the_environments_catalogue`.
 AHD-11, AHD-12.

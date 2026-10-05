@@ -19807,6 +19807,38 @@ mod tests {
         assert_eq!(memo.len(), 1, "and the older answers are gone");
     }
 
+    /// **`/indexmap.json` answers what [`indexmap_reading_at`] answers for
+    /// the environment's catalogue, as JSON, and refuses an unknown feed by
+    /// name.** The route and its environment wrapper add nothing but the path
+    /// and the pool. W1-api5-9, D-2287, D-2291.
+    #[tokio::test]
+    async fn indexmap_json_answers_the_environments_catalogue() {
+        let dir = agreeing("indexmaproute");
+        let loaded = std::sync::Arc::new(site("indexmaproute", &dir));
+        let expected = indexmap_reading_at(
+            &loaded,
+            Vendor::Dhan,
+            masters_dir().map(|dir| dir.join("nse_indices.csv")),
+        );
+        assert!(expected.1.starts_with('{'), "{expected:?}");
+        assert_eq!(indexmap_reading(&loaded, Vendor::Dhan), expected);
+        let (code, [(name, kind)], body) = indexmap_json(
+            axum::extract::State(std::sync::Arc::clone(&loaded)),
+            "/indexmap.json?feed=dhan".parse().expect("a uri"),
+        )
+        .await;
+        assert_eq!((code, body), expected);
+        assert_eq!(name, axum::http::header::CONTENT_TYPE);
+        assert_eq!(kind, "application/json; charset=utf-8");
+        let (code, _, body) = indexmap_json(
+            axum::extract::State(loaded),
+            "/indexmap.json?feed=nope".parse().expect("a uri"),
+        )
+        .await;
+        assert_eq!(code, axum::http::StatusCode::BAD_REQUEST);
+        assert!(body.contains("nope"), "{body}");
+    }
+
     /// **`/indexmap.json` reads the catalogue once per stamp and parse.** A
     /// repeat on an untouched file builds nothing; a rewrite of the same
     /// length, a reparse and another feed each build again; a missing file is
