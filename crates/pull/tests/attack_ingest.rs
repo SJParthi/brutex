@@ -102,7 +102,10 @@ fn plan(request: &BarRequest) -> Plan<'_> {
         columns: pull::csv::Columns::TrueDataIndex,
         request,
         encoding: TimestampEncoding::IsoDateTimeOffset,
-        scale: PriceScale::Rupees,
+        // THE PRODUCTION CONSTANT, NOT THE DESCRIPTOR'S SCALE (D-3184). The
+        // decoder has already converted rupees to paisa; this said `Rupees`
+        // and stored every decoded bar x100.
+        scale: pull::http::DECODED_PRICE_SCALE,
         vendor: Vendor::Zerodha,
         exchange: "NSE",
         segment: "INDEX",
@@ -394,6 +397,19 @@ fn the_session_edges_are_kept_or_dropped_by_name_and_the_tally_balances() {
     assert_eq!(
         census_has(&scratch.0, Timeframe::MINUTE_1, 2025, 7),
         Some(375)
+    );
+    // ABSOLUTE, NOT RELATIVE (D-3184): the 09:15 candle reads `24000.05`,
+    // `24004.75`, `23997.10`, `24001.40` rupees and must be on disk as exactly
+    // those paisa. Every other assertion in this file compares counts or one
+    // landing with another, so a fixture that scaled the decoder's paisa by a
+    // hundred a second time stored every bar x100 and still passed.
+    let bars = committed(&scratch.0, Timeframe::MINUTE_1, 2025, 7);
+    let first = bars.first().expect("the 09:15 bar is on disk");
+    assert_eq!(first.ts_micros, OPEN_UTC * 1_000_000);
+    assert_eq!(
+        (first.open, first.high, first.low, first.close),
+        (2_400_005, 2_400_475, 2_399_710, 2_400_140),
+        "stored prices are the vendor's rupees in exact paisa, scaled once"
     );
 }
 

@@ -7624,9 +7624,21 @@ async fn land_spot(
                     &telemetry::Event::error("api.pull", "cash schedule refused")
                         .with("why", telemetry::Value::Str(&why)),
                 );
+                // THE VENDOR'S COUNT ON THE REFUSED BRANCH TOO (D-3183): the
+                // rows the decoder kept plus the candles it skipped, by reason,
+                // exactly as `pull::ingest::from_window` counts them.
+                let mut decoder_skips = pull::fetch::DecodeSkips::default();
+                let mut rows_read = 0usize;
+                for (_, body) in bodies {
+                    decoder_skips.absorb(body.skipped);
+                    rows_read = rows_read
+                        .saturating_add(body.rows.len())
+                        .saturating_add(body.skipped.total());
+                }
                 done.absorb(pull::ingest::Ingested {
                     members: bodies.len(),
-                    rows_read: bodies.iter().map(|(_, body)| body.rows.len()).sum(),
+                    rows_read,
+                    decoder_skips,
                     failures: vec![pull::ingest::Failure {
                         instrument: instrument.underlying.to_string(),
                         why,
@@ -11420,8 +11432,15 @@ struct Wire {
 // and is compared only in assertions. Nothing keys a map on this.
 #[derive(Debug, Default, PartialEq)]
 struct FnoLanded {
-    /// Successfully decoded rows, including chunks abandoned by a later fault.
+    /// Candles the vendor sent: the rows the decoder kept plus the ones it
+    /// skipped, including chunks abandoned by a later fault. The vendor's
+    /// count, as `pull::ingest::Ingested::rows_read` is on the spot path
+    /// (D-3122, D-3182).
     rows_read: usize,
+    /// The candles the decoder skipped, by reason, out of [`Self::rows_read`].
+    /// On the page as its own row so the gap between rows read and bars
+    /// stored is never unexplained (D-3182).
+    decoder_skips: pull::fetch::DecodeSkips,
     /// Bars written to disk by this run.
     stored: usize,
     /// Contracts that asked for bars and did not get them.
@@ -11673,6 +11692,7 @@ async fn fno_land(
 
         let fetched = fetch_chain_chunks(found, &chunks, asked, site, wire).await;
         out.rows_read = out.rows_read.saturating_add(fetched.rows_read);
+        out.decoder_skips.absorb(fetched.decoder_skips);
         let bodies = match fetched.result {
             Fetched::Bodies(bodies) => bodies,
             Fetched::ContractRefused(refusal) => {
@@ -11853,7 +11873,10 @@ enum Fetched {
 
 /// A later chunk refusal cannot erase the rows decoded from earlier answers.
 struct FetchedBatch {
+    /// Candles the vendor sent: kept rows plus decoder skips (D-3182).
     rows_read: usize,
+    /// The decoder's skips out of `rows_read`, by reason (D-3182).
+    decoder_skips: pull::fetch::DecodeSkips,
     result: Fetched,
 }
 
@@ -11908,10 +11931,12 @@ async fn fetch_chain_chunks(
 ) -> FetchedBatch {
     let mut bodies = Vec::with_capacity(chunks.len());
     let mut rows_read = 0usize;
+    let mut decoder_skips = pull::fetch::DecodeSkips::default();
     for chunk in chunks {
         if let Err(halt) = await_budget(asked.feed, site).await {
             return FetchedBatch {
                 rows_read,
+                decoder_skips,
                 result: Fetched::RunHalted(halt),
             };
         }
@@ -11921,7 +11946,13 @@ async fn fetch_chain_chunks(
             // spot path carries it — a body filed under the whole range would
             // claim months it does not hold.
             Ok(body) => {
-                rows_read = rows_read.saturating_add(body.rows.len());
+                // THE VENDOR'S COUNT, NOT THE DECODER'S (D-3182): a candle the
+                // decoder skipped was sent, and is counted and named here as
+                // the spot path has done since D-3122.
+                rows_read = rows_read
+                    .saturating_add(body.rows.len())
+                    .saturating_add(body.skipped.total());
+                decoder_skips.absorb(body.skipped);
                 bodies.push((*chunk, body));
             }
             Err(refusal) => {
@@ -11933,6 +11964,7 @@ async fn fetch_chain_chunks(
                 let refusal = refusal.trim_start_matches(CREDENTIAL_DEAD);
                 return FetchedBatch {
                     rows_read,
+                    decoder_skips,
                     result: Fetched::ContractRefused(format!(
                         "{}{}: {refusal}",
                         if dead { CREDENTIAL_DEAD } else { "" },
@@ -11944,6 +11976,7 @@ async fn fetch_chain_chunks(
     }
     FetchedBatch {
         rows_read,
+        decoder_skips,
         result: Fetched::Bodies(bodies),
     }
 }
@@ -14845,6 +14878,7 @@ async fn fno_report(
     // fetches what they did and files it.
     let FnoLanded {
         rows_read,
+        decoder_skips,
         stored,
         failed,
         settled,
@@ -14853,6 +14887,13 @@ async fn fno_report(
         credential_stop,
     } = fno_land(&wanted, asked, site, wire).await;
     facts.push(("Bars stored", stored.to_string()));
+    // THE SAME ROW THE SPOT RECEIPT CARRIES (D-3180), on the chain receipt
+    // (D-3182): the journal's `rows_read` counts these candles, so the page
+    // names them rather than leaving the gap to bars stored unexplained.
+    facts.push((
+        "Candles the decoder skipped",
+        decoder_skips_said(decoder_skips),
+    ));
     credential_stop_facts(&mut facts, credential_stop);
     // WHAT WAS NOT ASKED FOR, AND WHY THE NUMBER MUST BE ON THE PAGE. A run
     // that resumes stores fewer bars than one that starts cold, and without
@@ -21505,6 +21546,38 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// ROUND 3, D-3183: a refused cash schedule counted `body.rows.len()` as
+    /// the rows read and left `decoder_skips` zero, so candles the vendor sent
+    /// and the decoder skipped vanished from the receipt on exactly the branch
+    /// that already says the run failed. The vendor's count is decoded plus
+    /// skipped, by reason, on every branch.
+    #[tokio::test]
+    async fn a_refused_cash_schedule_still_counts_the_candles_the_decoder_skipped() {
+        let (site, mut landed, key) = cash_month_replay_fixture("cash-month-skips").await;
+        let mut dated = std::collections::HashMap::new();
+        super::prepare_cash_schedule(&landed, &landed.bodies, &key, &site, &mut dated)
+            .await
+            .unwrap();
+        let receipt = site
+            .store_root
+            .join("session-masters/NSE_CM_security_03082026.csv.gz.receipt");
+        std::fs::remove_file(&receipt).unwrap();
+        landed.bodies[0].1.skipped = pull::fetch::DecodeSkips {
+            null_price: 2,
+            negative_volume: 0,
+            negative_open_interest: 0,
+            impossible_ohlc: 3,
+        };
+        let done = super::land_spot(&landed, &key, &site, &mut dated).await;
+        assert_eq!(done.bars_committed, 0);
+        assert_eq!(done.failures.len(), 1, "{:?}", done.failures);
+        assert_eq!(
+            done.rows_read, 365,
+            "360 decoded + 5 skipped by the decoder"
+        );
+        assert_eq!(done.decoder_skips, landed.bodies[0].1.skipped);
     }
 
     #[test]

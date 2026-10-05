@@ -1444,3 +1444,85 @@ async fn named_pricing_receipt_matches_the_greek_file_commit_or_its_refusal() {
         assert_eq!(transport.seen.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 }
+
+/// `complete_session` plus three after-close candles whose prices are `null`,
+/// which the decoder skips (D-3122) and which never become a row.
+fn session_with_null_candles() -> String {
+    let mut rows = Vec::new();
+    for minute in 9 * 60 + 15..15 * 60 + 40 {
+        rows.push(format!(
+            r#"["2025-07-01T{:02}:{:02}:00",100,110,90,105,1]"#,
+            minute / 60,
+            minute % 60
+        ));
+    }
+    for minute in 15 * 60 + 40..15 * 60 + 43 {
+        rows.push(format!(
+            r#"["2025-07-01T{:02}:{:02}:00",null,null,null,null,0]"#,
+            minute / 60,
+            minute % 60
+        ));
+    }
+    format!(r#"{{"payload":{{"candles":[{}]}}}}"#, rows.join(","))
+}
+
+/// ROUND 3, D-3182: the F&O chain receipt counted only the rows the decoder
+/// kept, so three candles the vendor sent and the decoder skipped were on
+/// neither the journal's `rows_read` nor the page. The spot path has counted
+/// them since D-3122 and named them since D-3180; the chain path is the same
+/// vendor answer read by the same decoder and must say the same thing.
+#[tokio::test]
+async fn a_named_chain_receipt_counts_and_names_the_candles_the_decoder_skipped() {
+    let mut fixture = Fixture::new(1);
+    let transport = fixture.serve(session_with_null_candles()).await;
+    let (status, body, record) = fixture.report().await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(record.outcome, audit::Outcome::Stored);
+    assert_eq!(record.bars_stored, 375);
+    assert_eq!(
+        record.rows_read, 388,
+        "the vendor sent 388 candles: 375 stored, 10 after close, 3 skipped"
+    );
+    assert!(
+        body.contains("Candles the decoder skipped"),
+        "the page names the skipped candles: {body}"
+    );
+    assert!(body.contains("3 — 3 null price"), "{body}");
+    assert_eq!(transport.seen.load(std::sync::atomic::Ordering::Relaxed), 1);
+}
+
+/// A later chunk refusal keeps the rows read before it (see
+/// `a_later_named_chunk_refusal_preserves_read_counts_without_filing_a_partial_contract`);
+/// it must keep the skipped candles of those answered chunks the same way.
+#[tokio::test]
+async fn a_refused_contract_keeps_the_skipped_candles_of_its_answered_chunks() {
+    let mut fixture = Fixture::new(1);
+    fixture.asked.window = pull::session::Window::new(
+        Day::new(2025, 7, 1).expect("from day"),
+        Day::new(2025, 7, 2).expect("through day"),
+    )
+    .expect("two generated days");
+    fixture.wire.spec.window_caps = &[(pull::vendor::Granularity::Minute1, 1)];
+    let transport = fixture
+        .serve_replies(
+            vec![
+                (StatusCode::OK, session_with_null_candles()),
+                (
+                    StatusCode::BAD_REQUEST,
+                    "generated permanent refusal".to_owned(),
+                ),
+            ],
+            None,
+        )
+        .await;
+    let (status, body, record) = fixture.report().await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(record.outcome, audit::Outcome::Failed);
+    assert_eq!(record.bars_stored, 0, "a partial contract is not filed");
+    assert_eq!(
+        record.rows_read, 388,
+        "the first chunk's 385 kept and 3 skipped candles were read"
+    );
+    assert!(body.contains("3 — 3 null price"), "{body}");
+    assert_eq!(transport.seen.load(std::sync::atomic::Ordering::Relaxed), 2);
+}
