@@ -790,7 +790,8 @@ fn percentile(sorted: &[f64], p: usize) -> f64 {
 /// PER-INPUT-BAR FOLD COST at 10^3..10^6 bars. Each sample is one whole fold
 /// divided by its input length; samples are repeated so every size has at
 /// least 30. Printed for the report, and asserted flat within a generous
-/// factor so a scan introduced into the loop fails here.
+/// factor so a scan introduced into the loop fails here. The claim's proof is
+/// this measurement itself, in `crates/pull/tests/attack_fold.rs` (D-3187).
 #[test]
 fn fold_cost_per_input_bar_is_flat() {
     let mut rng = SplitMix(0x0001_0000_0000);

@@ -7620,21 +7620,12 @@ async fn land_spot(
                 )
             })),
             Err(why) => {
+                // THE VENDOR'S COUNT ON THE REFUSED BRANCH TOO (D-3183).
+                let (rows_read, decoder_skips) = vendor_count(bodies);
                 let _noted = telemetry::emit(
                     &telemetry::Event::error("api.pull", "cash schedule refused")
                         .with("why", telemetry::Value::Str(&why)),
                 );
-                // THE VENDOR'S COUNT ON THE REFUSED BRANCH TOO (D-3183): the
-                // rows the decoder kept plus the candles it skipped, by reason,
-                // exactly as `pull::ingest::from_window` counts them.
-                let mut decoder_skips = pull::fetch::DecodeSkips::default();
-                let mut rows_read = 0usize;
-                for (_, body) in bodies {
-                    decoder_skips.absorb(body.skipped);
-                    rows_read = rows_read
-                        .saturating_add(body.rows.len())
-                        .saturating_add(body.skipped.total());
-                }
                 done.absorb(pull::ingest::Ingested {
                     members: bodies.len(),
                     rows_read,
@@ -7649,6 +7640,24 @@ async fn land_spot(
         }
     }
     done
+}
+
+/// The candles a vendor sent across these bodies: the rows the decoder kept
+/// plus the ones it skipped, and the skips by reason — exactly as
+/// `pull::ingest::from_window` counts them (D-3122). A branch that refuses
+/// before landing reports the same count the landing would have (D-3183).
+fn vendor_count(
+    bodies: &[(pull::session::Window, pull::fetch::RawWindow)],
+) -> (usize, pull::fetch::DecodeSkips) {
+    let mut decoder_skips = pull::fetch::DecodeSkips::default();
+    let mut rows_read = 0usize;
+    for (_, body) in bodies {
+        decoder_skips.absorb(body.skipped);
+        rows_read = rows_read
+            .saturating_add(body.rows.len())
+            .saturating_add(body.skipped.total());
+    }
+    (rows_read, decoder_skips)
 }
 
 fn note_cash_schedule_verified(days: usize, instruments: usize) {

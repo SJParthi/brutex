@@ -2166,9 +2166,43 @@ const FOLD_LITERAL: &str = "-0 -5 -0945 -1400 -token --exact --nocapture";
 // fno.rs. `repeats` is a refusal word asserted in http.rs and prose
 // in a session.rs reason string. None is a path segment.
 const AUDIT_LITERAL: &str = "-354 -7 repeats";
+// Met when the data-path attack rounds 1 and 2 landed (D-3100..D-3181)
+// and declared in round 3 (D-3185). Every word was read where it sits
+// (`source_scan strings`, 2026-10-05); all but two are in the new
+// `crates/pull/tests/attack_*.rs` files, the other two in a
+// `#[cfg(test)]` module of chain.rs. None is a path segment:
+//   - -- n nse 019200 99999999999 00 -- malformed contract names
+//     `attack_decoder.rs` must refuse (empty dashes, a lone letter, a
+//     lower-case exchange, a zero-padded or overlong strike).
+//   10 11 12 5 1_000 0x10 1e30 1e308 9223372036854775808
+//   18446744073709551615 -- price, volume and OHLC cells the ingest
+//     attack feeds the decoder: an impossible bar, an integer with an
+//     underscore or a hex prefix, a float past `f64`, one past `i64`
+//     and `u64`, each refused or held exactly.
+//   2024-01-2 2024-01-251 -- malformed dates the chain expiry reader
+//     must refuse. 2025-06 -- the year-month stem of a store month file
+//     a test asserts is absent, the spelling group YEAR_MONTH's are.
+//   attack attack-r2 absorb-a commute-a commute-b decoder-skip dup-clean
+//   dup-conflict dup-twin edges ladder lock month-refused month-span
+//   off-grid offgrid order rows-edges window weekend ohlc -- scratch-
+//     directory names, the instrument origin label and the store's own
+//     lock-file extension the attack tests filter out.
+//   above below alive cited derived disagree impossible intrinsic leap
+//   midnight repeated solved swept withheld -- assertion labels and
+//     substrings a refusal or a receipt must contain.
+const ATTACK_LITERAL: &str = "
+    - -- n nse 019200 99999999999 00
+    10 11 12 5 1_000 0x10 1e30 1e308 9223372036854775808 18446744073709551615
+    2024-01-2 2024-01-251 2025-06
+    attack attack-r2 absorb-a commute-a commute-b decoder-skip dup-clean
+    dup-conflict dup-twin edges ladder lock month-refused month-span
+    off-grid offgrid order rows-edges window weekend ohlc
+    above below alive cited derived disagree impossible intrinsic leap
+    midnight repeated solved swept withheld
+";
 
 /// Every declared group, in the order the step joined them.
-const DECLARED: [&str; 49] = [
+const DECLARED: [&str; 50] = [
     SEG_SHAPE,
     VENDOR_WIRE,
     CLAIM_STANDING,
@@ -2218,6 +2252,7 @@ const DECLARED: [&str; 49] = [
     SIGNED_NUMBER,
     FOLD_LITERAL,
     AUDIT_LITERAL,
+    ATTACK_LITERAL,
 ];
 
 fn declared() -> BTreeSet<&'static str> {

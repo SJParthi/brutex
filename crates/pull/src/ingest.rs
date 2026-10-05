@@ -1876,9 +1876,15 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
         // the outcome this module's header calls worse than refusing outright.
         // The refused month is named in `failures`; every other month is
         // written and counted on its own, because each is its own file.
-        let Ok((pulled, wrote)) =
-            written.map_err(|why| failures.push(month_refused(member, *ym, &why)))
-        else {
+        //
+        // LOGGED AS WELL AS RECEIPTED (gate 19, D-3186): the refused month is
+        // on `/logs` at `Error` beside the failure, so an operator reading the
+        // log after the run does not see a quiet file for a month that did not
+        // land.
+        let Ok((pulled, wrote)) = written.map_err(|why| {
+            note_not_filed(&member.instrument, "month append", &why);
+            failures.push(month_refused(member, *ym, &why));
+        }) else {
             continue;
         };
         entries.push(pulled);

@@ -790,12 +790,12 @@ pub struct Priced {
 /// # Cost
 ///
 /// **O(1) time, O(1) space, no allocation.** One dated table lookup bounded by a
-///
-/// **UNVERIFIED as a measurement** -- see the module note; the bound is a
-/// property of the shape, not a timing.
 /// compile-time constant, one closed-form at-the-money rounding, one closed-form
 /// greeks evaluation, and — only when solving — an iteration count bounded by
 /// `greeks::solver::MAX_ITERATIONS` and returned so the bound is observable.
+///
+/// **UNVERIFIED as a measurement** -- see the module note; the bound is a
+/// property of the shape, not a timing.
 pub fn price(
     quote: Quote,
     volatility: Option<f64>,
@@ -818,6 +818,14 @@ pub fn price(
             }
         })?;
 
+    // ONE WIDENING FOR BOTH PATHS: the solver reads the premium, and the vendor
+    // path screens it (D-3117). Two copies of this cast were two copies of one
+    // fact, and gate 11 rule 2 counted both (D-3189).
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "see contract_of — paisa is exact in f64 at this magnitude"
+    )]
+    let premium = quote.premium as f64;
     let (volatility, vol_from) = if let Some(sent) = volatility {
         // THE VENDOR'S OWN NUMBER, UNCHANGED. Dhan's `iv` off the rolling
         // overlay, which makes this a CHECK of the vendor rather than a
@@ -825,11 +833,6 @@ pub fn price(
         (sent, VolSource::Vendor(quote.vendor))
     } else {
         {
-            #[expect(
-                clippy::cast_precision_loss,
-                reason = "see contract_of — paisa is exact in f64 at this magnitude"
-            )]
-            let premium = quote.premium as f64;
             let solved = contract.implied_volatility(premium, kind)?;
             (
                 solved.volatility,
@@ -848,11 +851,6 @@ pub fn price(
     // read it. Refused here by the solver's own screen (D-3117), so the two
     // paths cannot hold two copies of one bound.
     if matches!(vol_from, VolSource::Vendor(_)) {
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "see contract_of — paisa is exact in f64 at this magnitude"
-        )]
-        let premium = quote.premium as f64;
         contract.screen_premium(premium, kind)?;
     }
 

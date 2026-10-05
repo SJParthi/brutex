@@ -350,6 +350,11 @@ pub async fn month<D: Discovery>(feed: Feed, ask: &Ask, from: &D) -> Result<Chai
             continue;
         };
         let names = fno::names(&body, contracts_field).map_err(ChainError::Lookup)?;
+        // ROOM FOR THIS ANSWER BEFORE IT IS FILED (gate 11 rule 3, D-3189):
+        // `filed` cannot be sized when the walk starts, because the contract
+        // count is known one expiry at a time; it is grown once per expiry by
+        // the size of that answer, so no insert below reallocates.
+        filed.reserve(names.len());
         // A repeated name WITHIN THIS EXPIRY'S ANSWER is filed once: one
         // contract held as two inflates the count and builds its bars request
         // twice. Scoped to the one answer on purpose — the same name under a

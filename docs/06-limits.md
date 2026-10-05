@@ -12958,6 +12958,27 @@ site below was opened and read against that test, and not one of the
     2^53. The float is again the input discarded for an integer, the
     direction of travel `runner/report.rs` is allowed for, and the ppm
     and the decision are now integer arithmetic on that fraction.
+  DATA-PATH ATTACK, ROUNDS 1 AND 2 (D-3100..D-3181), DECLARED IN ROUND 3
+  (D-3189). Five float sites arrived with those fixes and the counts were
+  not raised with them; each was read against the same price-or-statistic
+  test:
+    greeks/bsm.rs 36 -> 37 -- `Checked::screen_premium(market_price: f64,
+      kind)`, the no-arbitrage premium screen the vendor path and the
+      solver now share (D-3117). Its input is the same Black-Scholes
+      market price `implied_volatility` already takes as `f64`, widened
+      once from paisa at `pull::pricing`'s boundary; nothing is stored.
+    greeks/moneyness.rs 6 -> 9 -- `REPRESENTATION_ULPS`,
+      `MAX_LEVEL_TO_INTERVAL` and the scaled step tolerance (D-3100): a
+      count of ULPs and two dimensionless RATIOS of a level to a strike
+      interval that decide whether a strike is on its grid. No paisa
+      figure is produced.
+    greeks/solver.rs 14 -> 15 -- `SUBNORMAL_GAP`, the floor of the
+      implied-volatility uncertainty (D-3101). A volatility uncertainty is
+      a statistic with no paisa representation.
+    pull/pricing.rs stays 22 -- D-3117 had added two more copies of the
+      `quote.premium as f64` widening (and its `#[expect]` reason), and
+      round 3 hoisted them into one shared by both paths, so the count is
+      back where it was rather than raised.
 ~~~~
 
 ### Gate 11 — rule 3. docs/07 law 2: pre-size every map.
@@ -13165,6 +13186,21 @@ per vendor answer, after `serde_json` has already parsed the same body,
 over a body capped at `MAX_RESPONSE_BYTES`; every set together holds at
 most every key of that body once, so growth is amortised O(1) per key
 and bounded by the response cap, never by the store.
+DATA-PATH ATTACK, DECLARED IN ROUND 3 (D-3189). Two maps arrived with the
+round-1 fixes unsized, and neither can be sized where it is built:
+  pull/chain.rs 1 -- `filed` in `walk` (D-3116), one entry per decoded
+  contract across the whole chain walk. The contract count is known one
+  expiry at a time, so the map starts empty and `filed.reserve(names.len())`
+  grows it once per expiry answer before any insert of that answer: no
+  insert reallocates, and the total is bounded by the vendor's chain,
+  each answer capped at `MAX_RESPONSE_BYTES`, never by the store.
+  pull/pricing.rs 1 -- `ambiguous` in `SpotBook::of` (D-3110), the stamps
+  where two index bars disagree. `store::file::BarFile` keeps a month
+  strictly ascending, so on every well-formed month the set stays empty
+  and an empty `HashSet::new()` never allocates; sizing it for the worst
+  case (half the month's bars) would allocate on every month for a set
+  that is empty on all of them. On a malformed month it holds at most
+  bars/2 stamps, built once per month in O(bars), amortised O(1) per insert.
 ~~~~
 
 ### Gate 11 — rule 4. docs/07 layer 12: bounded page, never O(universe).
@@ -13927,7 +13963,10 @@ exception is a per-bar, per-candidate or per-cell lookup:
     which is why it is declared rather than respelt.
   pull/vendor.rs -- `rung_routes`, `layouts` and the granularity rows
     are the descriptor's own `&'static` arrays, units long.
-  pull/fno.rs -- `MONTHS`, twelve.
+  pull/fno.rs -- `MONTHS`, twelve. REMOVED FROM THE LIST in round 3
+    (D-3189): D-3155 rewrote the contract token reader as fixed byte
+    places, so the `MONTHS.iter().position` scan is gone, the file no
+    longer matches rule 6, and CI warned the entry was loose. A loose allowance is room for a scan nobody has read.
   pull/manifest.rs -- the NUL terminator inside a FIXED-WIDTH field;
     the bound is the field, a compile-time constant.
   pull/ssm.rs -- `AWS_FAULTS`, a `const` table.
@@ -14239,6 +14278,15 @@ bounds are all nonzero.
     cells or requests. It is asked once per credential read or re-read.
     O(d) in the run's rotations; "Audit fixes -- D-1480 onward" above
     states it.
+  pull/pricing.rs 2 -> 4 (D-3189, declaring D-3110 and D-3111). The two
+    added are HASH PROBES: `ambiguous.contains(&bar.ts_micros)` in
+    `SpotBook::of` and `self.ambiguous.contains(&ts_micros)` in
+    `SpotBook::lookup`, each one probe of a `HashSet<i64>`. The bounded
+    `Vec` scan this list already named moved: it is now
+    `!kept.contains(&class)` in `price_all`, a scan of the reason CLASSES
+    kept so far, still guarded by `kept.len() < REASONS_KEPT` on the same
+    line, so it can never exceed five. The fourth is the rate band, a
+    `RangeInclusive`.
 ~~~~
 
 ## Audit fixes of 2026-10-03 — what they leave unbounded — D-1528, D-1535, D-1536, D-1537
