@@ -464,13 +464,14 @@ impl Run<'_> {
     /// Refuses a filter name that is not a symbol as the store files it
     /// (D-2811): the journal key and the match are both by exact bytes.
     fn check_filter(&self) -> Result<(), ImportRefusal> {
-        match self.only.iter().find(|name| {
-            !brutex_core::symbol::Symbol::new(name)
-                .is_ok_and(|symbol| symbol.as_str() == name.as_str())
-        }) {
-            Some(name) => Err(ImportRefusal::FilterName { name: name.clone() }),
-            None => Ok(()),
+        for name in self.only {
+            let filed = brutex_core::symbol::Symbol::new(name)
+                .is_ok_and(|symbol| symbol.as_str() == name.as_str());
+            if !filed {
+                return Err(ImportRefusal::FilterName { name: name.clone() });
+            }
         }
+        Ok(())
     }
 
     /// Whether `symbol` passes the filter.
