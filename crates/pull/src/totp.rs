@@ -95,6 +95,18 @@ pub enum TotpError {
         /// The offending byte, as it was written.
         byte: u8,
     },
+    /// The secret's bits do not end on a whole byte. h-pull-2, D-2271.
+    ///
+    /// RFC 4648 base32 packs 5 bits per character, so a secret of 1, 3 or 6
+    /// characters past a group of 8 is no base32 length at all, and in a legal
+    /// length the bits past the last whole byte must be zero. Either was
+    /// dropped, so a secret with an extra or mis-keyed last character decoded
+    /// to the same key as the right one and minted a valid-looking code.
+    TrailingBits {
+        /// How many base32 characters arrived, separators and padding not
+        /// counted. A count, not a value.
+        data_chars: usize,
+    },
     /// The HMAC construction refused the decoded key.
     ///
     /// # Why this exists when no input can produce it
@@ -129,6 +141,19 @@ impl core::fmt::Display for TotpError {
                 f,
                 "the shared secret holds byte {byte:#04x}, outside RFC 4648 base32 (A-Z, 2-7)"
             ),
+            Self::TrailingBits { data_chars } => {
+                if matches!(data_chars % 8, 1 | 3 | 6) {
+                    write!(
+                        f,
+                        "the shared secret is {data_chars} base32 characters, which is no base32 length (RFC 4648: 1, 3 or 6 past a group of 8 cannot occur)"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "the shared secret's last base32 character carries non-zero bits past its last whole byte; RFC 4648 requires them to be zero"
+                    )
+                }
+            }
             Self::HmacRefusedTheKey => f.write_str(
                 "the HMAC construction refused the decoded secret, which RFC 2104 \
                  says it cannot do for any key length — treat this as a broken \
@@ -158,8 +183,10 @@ impl core::error::Error for TotpError {}
 ///
 /// # Errors
 ///
-/// [`TotpError`] for an empty secret, one past [`MAX_SECRET_LEN`], or one
-/// holding a character the alphabet does not contain.
+/// [`TotpError`] for an empty secret, one past [`MAX_SECRET_LEN`], one
+/// holding a character the alphabet does not contain, or one whose bits do not
+/// end on a whole byte: a length RFC 4648 cannot produce, or non-zero bits past
+/// the last whole byte (D-2271).
 pub fn base32_decode(secret: &str) -> Result<Vec<u8>, TotpError> {
     let decoded = decode_alphabet(secret);
     if let Err(why) = &decoded {
@@ -199,6 +226,7 @@ fn note_refusal(why: &TotpError, len: usize) {
         TotpError::Empty => "empty",
         TotpError::TooLong { .. } => "too-long",
         TotpError::NotBase32 { .. } => "not-base32",
+        TotpError::TrailingBits { .. } => "trailing-bits",
         // NOT A SECRET FAULT AT ALL, and the word says so. The other three name
         // something the operator can fix in their own configuration; this one
         // says the build is wrong, and sending an operator to re-read their
@@ -233,6 +261,8 @@ fn decode_alphabet(secret: &str) -> Result<Vec<u8>, TotpError> {
     // Whether padding has begun. RFC 4648 §6 padding is a TAIL: once a `=` has
     // been read, only more `=` (or a display separator) may follow.
     let mut padded = false;
+    // Base32 characters read, separators and padding not counted.
+    let mut data_chars: usize = 0;
 
     for byte in secret.bytes() {
         // Separators as displayed.
@@ -260,6 +290,7 @@ fn decode_alphabet(secret: &str) -> Result<Vec<u8>, TotpError> {
         };
         acc = (acc << 5) | u32::from(value);
         bits += 5;
+        data_chars += 1;
         if bits >= 8 {
             bits -= 8;
             // The cast is safe: the shift leaves exactly the low 8 bits.
@@ -267,6 +298,15 @@ fn decode_alphabet(secret: &str) -> Result<Vec<u8>, TotpError> {
         }
     }
 
+    // THE BITS PAST THE LAST WHOLE BYTE. They were dropped, so `GEZDGNBVA`
+    // and `GEZDGNBV7` decoded to the key of `GEZDGNBV`: an extra or mis-keyed
+    // last character minted a valid-looking code, the class D-1373 closed for
+    // `=`. Five or more left over is a whole spare character, which RFC 4648
+    // makes impossible (1, 3 or 6 past a group of 8); fewer must all be zero.
+    // `bits` is at most 7 here, so the mask cannot overflow. h-pull-2, D-2271.
+    if bits >= 5 || acc & ((1 << bits) - 1) != 0 {
+        return Err(TotpError::TrailingBits { data_chars });
+    }
     if out.is_empty() {
         return Err(TotpError::Empty);
     }
@@ -580,6 +620,89 @@ mod tests {
         }
         // And a secret that is ALL padding carries no key.
         assert_eq!(base32_decode("===="), Err(TotpError::Empty));
+    }
+
+    /// The bits left over after the last whole byte are refused unless they
+    /// are a legal RFC 4648 tail of zeros. h-pull-2, D-2271.
+    ///
+    /// They used to be dropped, so a secret one character too long, or with a
+    /// last character mis-keyed in its spare bits, decoded to the SAME key as
+    /// the right one: `GEZDGNBV`, `GEZDGNBVA` and `GEZDGNBV7` all produced
+    /// one key and one code. The class D-1373 closed for `=`.
+    ///
+    /// Every length class is walked on an all-`A` secret (whose spare bits are
+    /// zero): 1, 3 and 6 characters past a group of 8 cannot be base32 at any
+    /// value, and 0, 2, 4, 5 and 7 can. Each legal class is then walked with
+    /// its last character carrying a spare bit (`B`) and carrying none.
+    #[test]
+    fn leftover_bits_past_the_last_whole_byte_are_refused_not_dropped() {
+        for (bad, data_chars) in [("GEZDGNBVA", 9), ("GEZDGNBV7", 9), ("GEZD GNBV A=", 9)] {
+            assert_eq!(
+                base32_decode(bad),
+                Err(TotpError::TrailingBits { data_chars }),
+                "{bad:?} is not the secret GEZDGNBV"
+            );
+            assert!(code_at(bad, 59).is_err(), "{bad:?} mints no code");
+        }
+        assert_eq!(
+            base32_decode("GEZDGNBV").expect("legal"),
+            b"12345".to_vec(),
+            "the control still decodes"
+        );
+
+        for n in 1..=24_usize {
+            let all_a = "A".repeat(n);
+            let got = base32_decode(&all_a);
+            if matches!(n % 8, 1 | 3 | 6) {
+                assert_eq!(
+                    got,
+                    Err(TotpError::TrailingBits { data_chars: n }),
+                    "{n} characters is no base32 length"
+                );
+            } else {
+                assert_eq!(
+                    got.expect("a legal length of zeros").len(),
+                    n * 5 / 8,
+                    "{n} characters"
+                );
+            }
+        }
+
+        // Per legal class: `B` (value 1) sets the lowest spare bit; the zero
+        // spelling sets every key bit of the last character and no spare one.
+        for (n, zero_tail) in [(2_usize, 'E'), (4, 'Q'), (5, 'C'), (7, 'I')] {
+            for prefix in ["", "GEZDGNBV"] {
+                let head = format!("{prefix}{}", "A".repeat(n - 1));
+                let spare = format!("{head}B");
+                assert_eq!(
+                    base32_decode(&spare),
+                    Err(TotpError::TrailingBits {
+                        data_chars: prefix.len() + n
+                    }),
+                    "{spare:?} carries a non-zero bit past its last byte"
+                );
+                let clean = format!("{head}{zero_tail}");
+                assert!(base32_decode(&clean).is_ok(), "{clean:?} is legal");
+            }
+        }
+
+        // The two messages say which of the two faults it was, and neither
+        // reads like another refusal.
+        let length = TotpError::TrailingBits { data_chars: 9 }.to_string();
+        let spare = TotpError::TrailingBits { data_chars: 10 }.to_string();
+        assert!(length.contains("9 base32 characters"), "{length}");
+        assert!(length.contains("no base32 length"), "{length}");
+        assert!(spare.contains("non-zero"), "{spare}");
+        for other in [
+            TotpError::Empty,
+            TotpError::TooLong { len: 9 },
+            TotpError::NotBase32 { byte: b'A' },
+            TotpError::HmacRefusedTheKey,
+        ] {
+            assert_ne!(other.to_string(), length);
+            assert_ne!(other.to_string(), spare);
+        }
+        assert_ne!(length, spare);
     }
 
     /// The length bound is checked BEFORE a character is decoded, which is what

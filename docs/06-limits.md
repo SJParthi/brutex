@@ -12276,6 +12276,96 @@ available without new behaviour. A per-month index or a multi-block cache
 could reduce the cold verifies, but either would be a format or memory
 decision, and neither is made here.
 
+**Superseded for every indexed month — D-2329.** The per-month index this
+paragraph declined is the `.tix` sidecar (`docs/02-store-format.md` §8.1), and
+the section below states its cost. The bisection above is unchanged code and
+remains the LEGACY path: a month with no usable `.tix` (written before D-2329,
+by a writer outside `BarFile::append`, or with a damaged index) is still
+answered by it, with one `store.tix` warning per handle naming why, and an
+overlay or Greek stream's append still locates a re-offered batch by it.
+
+## Timestamp lookup through the time index — D-2329 and D-2330, 4 October 2026
+
+`BarFile::first_at_or_after` on a month whose `.tix` describes its committed
+bars costs **at most one 16-byte index-entry read**, plus **one bar read on the
+daily rung only**, whatever `n_valid` is. A timestamp at or before the first
+bar or after the last is answered from the bar header with no read. An
+intraday bar is its slot's first instant, so an intraday lookup never reads a
+bar. `store::time_index::every_lookup_reads_at_most_one_entry_and_one_bar`
+counts the reads at month sizes from 0 to the one-second ceiling of 2,678,400
+bars, and `store::tix::the_index_answers_every_timestamp_exactly_as_the_bisection_does`
+checks every answer against the bisection on real files at the 1min, 5min and
+1s rungs.
+
+**What a handle pays once.** A read handle decides at its FIRST lookup whether
+the index is usable: one `open`, one 64-byte header read and two 16-byte entry
+reads (the entries holding the first and last committed bars). A writer
+decides at open: the same three reads, or, for a month with records and no
+index it can confirm, a REBUILD — every committed record read through the
+verified path, O(`n_valid`), once per month, logged as `store.tix` info.
+
+**What an append pays.** One entry read and one positional write covering the
+buckets the batch reaches: a gap of `g` empty slots costs `g / 64` sixteen-byte
+entries. An overnight gap on the one-second rung is about 64,000 slots, so
+about 1,000 entries, 16 KB, once per session. Then one `fsync` of the `.tix`,
+before the header slot (`docs/02-store-format.md` §5 step 3b). The extra
+`fsync` per append is measured by nothing.
+
+**Measured — `x86_64` shared host, 4 cores, load average 5 to 7 from other
+builds, release profile, 2026-10-04.** `crates/store/tests/tix_latency.rs`
+(`#[ignore]`d; run with `--release -- --ignored --nocapture`), 200,000 lookups
+per row, one freshly reopened handle per row, the first lookup's one-time work
+inside the sample. 1min: 31 days × 375 = 11,625 bars. 1s: 23 weekdays ×
+22,500 = 517,500 bars. "random µs" is uniform over the bars' span in
+microseconds; "on grid" is the same instants floored to the rung's grid.
+BEFORE is the parent of the D-2329 commit running the same file.
+
+| Month | Lookup | BEFORE p50 / p99 | AFTER p50 / p99 |
+|---|---|---|---|
+| 1min | by time, random µs | 28,758 / 52,858 ns | 322 / 520 ns |
+| 1min | by time, on grid | 28,725 / 58,282 ns | 321 / 518 ns |
+| 1min | by row, random rows (cold block) | 3,618 / 6,999 ns | 3,619 / 6,373 ns |
+| 1min | by row, one row (warm block) | 52 / 73 ns | 52 / 70 ns |
+| 1s | by time, random µs | 51,647 / 88,964 ns | 362 / 603 ns |
+| 1s | by time, on grid | 51,865 / 90,436 ns | 362 / 602 ns |
+| 1s | by row, random rows (cold block) | 3,949 / 7,444 ns | 4,134 / 9,521 ns |
+| 1s | by row, one row (warm block) | 52 / 65 ns | 52 / 69 ns |
+
+The maxima on this host ran from 30 µs to 12.8 ms in both columns and are
+scheduler noise from the concurrent builds, not the lookup; they are not a
+bound. A time lookup now costs one `pread` of 16 bytes, less than a random-row
+`read_record`, which pays a cold block verify (a `pread` of up to 4,088 bytes
+and a CRC-32C). It does not reach the WARM row read (52 ns), which is a copy
+out of the handle's verified block with no syscall. Gate 8 rows: C-TIX-01
+(flat at 1×, 10× and 100× the file) and C-TIX-02 (139 floors against an
+800-floor budget on the same host).
+
+**UNVERIFIED:** a cold DEVICE, the page cache dropped; the daily rung's
+bar-read case, which is counted (at most one) but not timed; the writer's
+rebuild of a large month, which is O(`n_valid`) by construction and timed by
+nothing.
+
+**What the confirmation cannot see.** A reader checks the `.tix` header against
+the month's geometry and the two entries holding the first and last committed
+bars, not every entry between: that is what keeps it constant. An index
+corrupted in a way that keeps every entry's position-bound CRC-32C valid, or
+left beside bars that another writer replaced with different bars beginning
+and ending in the same slots at the same rows, passes it and answers wrong.
+Each entry's checksum catches rot in the entry a lookup reads, and a failing
+entry sends that one lookup to the bisection with a warning. A writer that
+changes a `.bin` other than through `BarFile::append` must delete its `.tix`.
+
+**One bar per slot (D-2330).** The index holds at most one bar per slot. The
+daily rung admits any whole second, and it still does. A daily month with a
+second bar on one IST day therefore keeps NO index. The `.tix` is removed
+before the append that adds that bar writes anything, and every lookup in that
+month is the D-1434 bisection, `ceil(log2(n_valid + 1))` record reads, with the
+`store.tix` warning on every handle and on every writer open. That is not O(1),
+and it is stated here rather than hidden. Nothing bounds such a month's size,
+since the daily rung admits any whole second. A real daily month holds one bar
+per session, a few dozen, and so never reaches this path. Every intraday rung holds one bar per slot, so this
+never applies to it.
+
 ## Engine join costs that are not O(1) — D-1438 to D-1440, 2 October 2026
 
 Three per-level and per-candidate costs of the prefix join were stated
@@ -14873,6 +14963,25 @@ UNVERIFIED as measurements.
   exit record that cannot be priced; each still blocks to its time exit, the
   conservative extent, because nothing before a hole was what made them
   unpriceable.
+## Two Fibonacci rungs can fire on one bar below an 11-paisa range — D-1861, 4 October 2026
+
+This is a limit on a stated property, not on a cost. On exact levels two rungs
+of one Fibonacci ladder never fire on one bar (`2 * TOL_FIB_MILLI <
+SMALLEST_LADDER_GAP`). Levels are whole paisa, so the property holds only from
+a range of `vocab::tolerance::RUNG_EXCLUSIVE_MIN_RANGE` = 11 paisa, which is
+proven at compile time. Below it two rungs that floor to one paisa fire
+together; measured on all four ladder families, at ranges 1-6 and 8 paisa. The
+realistic case is a gap leg of a few paisa on an index.
+
+The two previous-day ladders are two ladders on one range, and the bound never
+covered them. Positions 20 and 70, and 24 and 69, fire together at ranges 9 to
+902 paisa (bounded by 1,000), because their levels are 22 thousandths apart
+against bands summing to 20.
+
+Every such bit is true: the close is within the band of each level. Nothing
+prunes a Fibonacci pair, so the sweep enumerates each combination that fires.
+`indicators/tests/fib_rung_rounding.rs` and `runner/tests/fib_rung_sweep.rs`
+pin both facts.
 
 - **`cli::latest_for` (D-1567).** The function is gone (D-1700, kept by
   D-1708); its O(runs) per call rested on the audit's measurement (14.13x

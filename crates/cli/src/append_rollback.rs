@@ -40,10 +40,29 @@ pub(crate) fn append_with(
     label: &str,
     write: impl FnOnce(&mut File, &[u8]) -> std::io::Result<()>,
 ) -> Result<(), String> {
+    append_all(file, label, |file| {
+        write(file, raw).map_err(|why| why.to_string())
+    })
+}
+
+/// [`append`] for an append made of several writes, or of writes with
+/// encoding between them (D-1854): `body` writes at the end of `file`, and any
+/// error it returns, an I/O error or an encoding refusal after some rows were
+/// written, truncates the file back to its length before `body` ran.
+///
+/// # Errors
+///
+/// Names `label` and the seek error, `body`'s error, or both `body`'s error
+/// and the truncation error.
+pub(crate) fn append_all(
+    file: &mut File,
+    label: &str,
+    body: impl FnOnce(&mut File) -> Result<(), String>,
+) -> Result<(), String> {
     let end = file
         .seek(SeekFrom::End(0))
         .map_err(|why| format!("cannot seek {label} append: {why}"))?;
-    let Err(why) = write(file, raw) else {
+    let Err(why) = body(file) else {
         return Ok(());
     };
     match file.set_len(end) {
@@ -59,7 +78,7 @@ pub(crate) fn append_with(
 #[cfg(test)]
 #[allow(clippy::expect_used, reason = "a failed fixture must fail its test")]
 pub(crate) mod tests {
-    use super::{append, append_with};
+    use super::{append, append_all, append_with};
     use std::io::{Seek, SeekFrom, Write};
     use std::path::PathBuf;
 
@@ -149,6 +168,33 @@ pub(crate) mod tests {
         // still land exactly on the old end, with no hole and no overwrite.
         append(&mut file, &[7, 7], "Test V1 record").expect("next append succeeds");
         assert_eq!(std::fs::read(&path).expect("read"), [1, 2, 3, 4, 7, 7]);
+    }
+
+    /// AHA-05 (D-1854). Several writes are one append: an error after whole
+    /// rows, an encoding refusal as much as an I/O error, truncates every
+    /// row back, and a body that succeeds keeps all of them.
+    #[test]
+    fn a_multi_write_append_is_rolled_back_whole_on_any_error() {
+        let scratch = Scratch::new("all");
+        let path = scratch.file(&[1, 2, 3]);
+        let mut file = open_rw(&path);
+        let refusal = append_all(&mut file, "Test rows", |file| {
+            file.write_all(&[4, 4]).map_err(|why| why.to_string())?;
+            file.write_all(&[5, 5]).map_err(|why| why.to_string())?;
+            Err("row 3 does not encode".to_owned())
+        })
+        .expect_err("an encoding refusal refuses");
+        assert_eq!(
+            refusal,
+            "cannot append Test rows: row 3 does not encode; truncated back to 3 bytes"
+        );
+        assert_eq!(std::fs::read(&path).expect("read"), [1, 2, 3]);
+        append_all(&mut file, "Test rows", |file| {
+            file.write_all(&[6]).map_err(|why| why.to_string())?;
+            file.write_all(&[7]).map_err(|why| why.to_string())
+        })
+        .expect("a whole body appends");
+        assert_eq!(std::fs::read(&path).expect("read"), [1, 2, 3, 6, 7]);
     }
 
     #[test]

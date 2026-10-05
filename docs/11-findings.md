@@ -899,3 +899,8 @@ Narrative only. No row is added to the table above.
 - **rustonly2-5** (nested `.gitignore`/`.gitattributes`): fixed. D-2348.
 - **`.github/*.rs` without `#![forbid(unsafe_code)]`**: fixed, gate 16 layer
   1c. D-2349.
+- **h-pull-1**: fixed. The lake reader reads the converted type as well as
+  the logical type; a legacy `TIMESTAMP_MILLIS` timestamp and a non-signed
+  integer annotation are refused by name. D-2270, AHC-01.
+- **h-pull-2**: fixed. The TOTP base32 decoder refuses an impossible length
+  and non-zero bits past the last whole byte. D-2271, AHC-02.
