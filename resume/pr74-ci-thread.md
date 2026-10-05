@@ -95,3 +95,14 @@ Artifacts.
 - Local survivor (fix on resume): crates/runner/src/bootstrap.rs:1847:17 replace > with == in ExactPrefix::sum (see /tmp/claude-0/mp/sw/runner/mutants.out).
 - Pending at pause: sweep 446c8cd on claude/project-thread-v8j0jv (zf/store-o1 D-2329/2330, .tix time index, store benches C-TIX-01/02; already merges 8f58d91).
 - Pending at pause: attack audit batch 2 wip/audit-batch2 6cf0582 (D-1854/1860/1861/2270/2271; on fc6dbb9, merges cleanly with 8f58d91). Reply SHA to session_016tvv63ByrRGE6qoEFR5ctD after merge.
+
+## 2026-10-05 02:00 UTC pause point (weekly usage 95%)
+- final/all-fixes = 969493e1 (also on claude/project-thread-jkytmf). Contents since 8f58d91: Fix Board dee61cfd (D-2760..2766), sweep 446c8cd (D-2329/2330), attack audit 6cf0582, runner ExactPrefix::sum mutant test, Gate 1d PULL_FIXTURE literals, Gate 8 CARGO_BUILD_JOBS 2 + timeout 40 (D-1465), lane 1-b ac0802f (D-2106), zero-findings hand-off 6db4dfb8 (all of zero-work, D-1934..1939, D-1969, D-2660..2690), and D-2001 (cli elite_descend checks top_refusal 1000 before frontier 4096; fixed the one Gate 1e test failure on 6db4dfb).
+- Every hand-off received has been merged. Nothing pending from other threads.
+- CI on 969493e: just started at pause. Not yet proven on this head: Gate 1e full build, gates 3-6, Gate 8 with D-1465 (it OOMed twice before), coverage + Gate 20, Gate 18 shards, ci-ok. Gates W, 1+2 static, and 3-6 tests were green on 25bc8aa/a3f6e8a; static gates pass locally on 969493e.
+- Local api mutant pre-run output was lost (disk cleanup); never rerun. Gate 18 in CI covers it.
+- Next steps: (1) find the run for 969493e via curl https://api.github.com/repos/SJParthi/brutex/actions/runs?branch=final/all-fixes&per_page=1 ; (2) on any red job read logs with mcp__github__get_job_logs (job id from /actions/runs/<id>/jobs), fix, validate (fmt, rustfmt --edition 2024 --check .github/*.rs, clippy -D warnings, the affected tests as uid 65534, static gates from ci.yml language-purity steps skipping 1e), push to final/all-fixes and claude/project-thread-jkytmf ONLY before Gate 18 shards start; (3) after shards start, do not push until the run ends; collect all survivors from shard logs and fix them in one push; (4) ci-ok green = auto-merge of PR 74.
+- Next free decision numbers for this thread: D-2002 onward (block 2000).
+
+### Prompt for a new session (paste as is)
+Read CLAUDE.md, then the fix-queue branch file resume/pr74-ci-thread.md (last section) in sjparthi/brutex. You are the PR 74 CI thread: drive PR #74 (head final/all-fixes) to ci-ok green. Find the latest CI run on final/all-fixes, fix every red job and every Gate 18 mutation survivor, validate locally before each push, and push only before Gate 18 shards start. Append progress to resume/pr74-ci-thread.md on fix-queue. Do not merge other branches unless a thread hands one over as validated.
