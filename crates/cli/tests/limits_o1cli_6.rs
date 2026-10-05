@@ -5,6 +5,8 @@
 //! sort was documented as a cost. This file holds `docs/06-limits.md` to the
 //! code: the section must state both sorts and why the full order is needed,
 //! and the code must still sort and read the whole order where it says.
+//!
+//! Since D-1842 the screen sorts only what it keeps: this file now holds the fix.
 
 #![allow(
     clippy::expect_used,
@@ -47,45 +49,40 @@ fn body(head: &str) -> &'static str {
         .expect("its body")
 }
 
-/// THE SCREEN'S TWO FULL SORTS ARE STATED, AND THE FULL ORDER IS STILL READ.
+/// THE SCREEN SORTS ONLY WHAT IT KEEPS. D-1842.
+///
+/// The screen sorted every priced row twice; it now selects its measured band
+/// and its printed top, sorts only those, and finds the final selection in
+/// the unordered rest by key.
 #[test]
-fn the_screens_two_full_sorts_are_stated_and_the_full_order_still_read() {
+fn the_screen_sorts_only_what_it_keeps() {
     let limit = limit("## The screen sorts every priced row twice (audit o1cli-6)");
     for sentence in [
-        "`screen` sorts every priced row twice with a stable `sort_by_key`",
-        "once on `money_key`, then on the calendar key",
-        "O(n log n) for n priced rows, up to `SCREEN_CAP_CEILING` (10,000,000)",
-        "`final_selection` falls back past the top rows",
-        "an unmeasured row that passed the rules can rise above measured rows that did not",
-        "once per screen, not per candidate or per bar",
+        "Fixed by D-1842",
+        "O(n + band log band + top log top)",
+        "`the_screens_selections_give_exactly_what_its_two_full_sorts_gave`",
     ] {
         assert!(
             limit.contains(sentence),
             "the limit must say: {sentence}\n{limit}"
         );
     }
-    assert!(LIB.contains("const SCREEN_CAP_CEILING: usize = 10_000_000;"));
     let screen = body("\nfn screen<'a>(");
-    assert_eq!(
-        screen.matches("rows.sort_by_key(").count(),
-        2,
-        "the screen no longer sorts every row twice: update the limit"
-    );
-    let (_, after_money) = screen
-        .split_once("rows.sort_by_key(|r| money_key(&r.cell));")
-        .expect("the money sort");
-    assert!(after_money.contains("measure_top(&mut rows"));
-    let (_, after_calendar) = after_money
-        .split_once("rows.sort_by_key(|r| {")
-        .expect("the calendar sort");
     assert!(
-        after_calendar.contains("r.admitted,"),
-        "the calendar key leads with `admitted`"
+        !screen.contains("sort_by_key("),
+        "the screen sorts every row again"
     );
-    assert!(after_calendar.contains("final_selection(&rows, rules)"));
-    let selection = body("\nfn final_selection<'a>(");
+    assert!(screen.contains("rank_screened(") && screen.contains("final_selection_split("));
+    let ranked = body("\nfn rank_screened(");
+    assert_eq!(ranked.matches("least_first(").count(), 2);
+    assert!(ranked.contains("(money_key(&r.cell), r.rank)"));
+    assert!(ranked.contains("least_first(rows, shown, screen_order_key);"));
+    let least = body("\nfn least_first<");
     assert!(
-        selection.contains(".or_else(|| rows.iter().find(|row| row.cell.trades > 0))"),
-        "the selection no longer falls back past the top: update the limit"
+        least.contains("select_nth_unstable_by_key(")
+            && least.contains("head.sort_unstable_by_key(")
     );
+    let split = body("\nfn final_selection_split<'a>(");
+    assert!(split.contains(".min_by_key(|row| screen_order_key(row))"));
+    assert!(body("\nfn screen_order_key(").contains("r.rank,"));
 }

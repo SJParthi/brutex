@@ -2398,6 +2398,67 @@ fn a_seeded_descent_refuses_an_unknown_rung_before_reading() {
     assert_eq!(crate::SIGNAL_SPAN_READS.with(std::cell::Cell::get), before);
 }
 
+/// **The `screen` arm's reference read is the span it hands the screen.**
+/// o1cli-5, D-1839.
+///
+/// `reference_of_span` resolves the store from `BRUTEX_STORE`, so it runs in a
+/// child that names the warmed fixture: the price is the midpoint of the
+/// span's own extremes, and the cache it returns holds exactly that span under
+/// the screen's key.
+#[test]
+fn the_screen_reference_seeds_the_span_it_priced() -> Result<(), Box<dyn std::error::Error>> {
+    const CHILD: &str = "BRUTEX_TEST_SCREEN_REFERENCE_SEED";
+    let months = ((2025, 5), (2025, 5));
+    if std::env::var_os(CHILD).is_some() {
+        let root = crate::store_root()?;
+        let (reference, cache) = crate::reference_of_span("zerodha", "NIFTY", "5min", months)?;
+        let span = stored::load_span(&root, Vendor::Zerodha, "NIFTY", "5min", months.0, months.1)?;
+        assert_eq!(reference, crate::reference_price(&span.bars));
+        assert!(
+            reference > 1,
+            "a real price, not a placeholder: {reference}"
+        );
+        let (key, held) = cache
+            .seed
+            .as_ref()
+            .ok_or("the reference seeds the screen")?;
+        assert_eq!(
+            *key,
+            crate::screen_key(&root, Vendor::Zerodha, "NIFTY", "5min", months)
+        );
+        assert_eq!(held.bars, span.bars);
+        assert!(cache.loaded.is_none());
+        let refused = crate::reference_of_span("zerodha", "NIFTY", "5min", ((2025, 1), (2025, 1)))
+            .err()
+            .ok_or("an absent month refuses")?;
+        assert!(
+            refused.starts_with("refused before the ceiling could be converted"),
+            "{refused}"
+        );
+        return Ok(());
+    }
+    with_warmed_store(|root| {
+        let result = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "audited_stored::tests::the_screen_reference_seeds_the_span_it_priced",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "generated")
+            .env("BRUTEX_STORE", root)
+            .output()?;
+        assert!(
+            result.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"));
+        Ok(())
+    })
+}
+
 /// **A span read for one number is the span the screen reads.** o1cli-5,
 /// D-1839.
 ///
