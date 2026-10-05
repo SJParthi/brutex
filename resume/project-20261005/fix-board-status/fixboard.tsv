@@ -1,0 +1,39 @@
+id	state	commit	note
+P17-01	pushed	9eb0579a	Fix Board: fixboard/pr74-web18; ingest reads Failure diagnostics; merged into PR #74 as 1f588aa
+p14num-1	pushed	1e847f44	Fix Board: fixboard/pr74-web18; sell rows show win share not served; merged into PR #74 as 1f588aa
+conc18-1	pushed	386f4598	Fix Board: fixboard/pr74-web18; pressing latch, 409 resumes run; merged into PR #74 as 1f588aa
+conc18-2	pushed	891d8f8d	Fix Board: fixboard/pr74-web18; netError/pollError rendered as alerts; merged into PR #74 as 1f588aa
+conc18-3	pushed	5620eae8	Fix Board: fixboard/pr74-web18 605c5299; autopilot POST revokes in-flight poll; merged into PR #74 as 8f58d91
+conc18-4	pushed	e4a6158d	Fix Board: fixboard/pr74-web18 605c5299; live top panel bound to request and sweep; merged into PR #74 as 8f58d91
+conc18-5	pushed	ed207d0e	Fix Board: fixboard/pr74-web18 605c5299; feed change retires mapping crawl; merged into PR #74 as 8f58d91
+p14num-2	pushed	f460a400	Fix Board: fixboard/pr74-web18 605c5299; rankRows unbounded ratio scores worst (D-2750); merged into PR #74 as 8f58d91
+runs-1	pushed	3a7515c6	Fix Board: fixboard/pr74-conc-api dee61cfd; slot claim generation; merged into PR #74 as 25bc8aa
+recovery-1	pushed	3a7515c6	Fix Board: fixboard/pr74-conc-api dee61cfd; feed seat before attempt reserve; merged into PR #74 as 25bc8aa
+recovery-2	pushed	3a7515c6	Fix Board: fixboard/pr74-conc-api dee61cfd; first activation pointer via link; merged into PR #74 as 25bc8aa
+apicache-1	pushed	3a7515c6	Fix Board: fixboard/pr74-conc-api dee61cfd; stale trade reader evicted; merged into PR #74 as 25bc8aa
+sweep-1	pushed	de6f1a6d	Fix Board: fixboard/pr74-conc-api dee61cfd; dead CLI sweep no longer blocks lease holder; merged into PR #74 as 25bc8aa
+pull2-1	pushed	e0958d18	Fix Board: fixboard/pr74-conc-api dee61cfd; census lock refuses transient open failures; merged into PR #74 as 25bc8aa
+census-1	pushed	e0958d18	Fix Board: fixboard/pr74-conc-api dee61cfd; manifest mtime past own writes; merged into PR #74 as 25bc8aa
+server1-1	branch	f7239784	Fix Board: fixboard/pr74-api2 f7239784 (D-2770); merge with head being tested
+server1-2	branch	f7239784	Fix Board: fixboard/pr74-api2 f7239784 (D-2771); merge with head being tested
+server2-1	branch	f7239784	Fix Board: fixboard/pr74-api2 f7239784 (D-2772); merge with head being tested
+server2-2	branch	f7239784	Fix Board: fixboard/pr74-api2 f7239784 (D-2773); merge with head being tested
+runs-2	branch	f7239784	Fix Board: fixboard/pr74-api2 f7239784 (D-2774/D-2778); merge with head being tested
+runs-3	branch	f7239784	Fix Board: fixboard/pr74-api2 f7239784 (D-2775); merge with head being tested
+runs-4	branch	f7239784	Fix Board: fixboard/pr74-api2 f7239784 (D-2776); merge with head being tested
+apicache-2	branch	f7239784	Fix Board: fixboard/pr74-api2 f7239784 (D-2777); merge with head being tested
+CE-84	fixing	-	Fix Board: fixed locally on fixboard/pr74-ce2 44252d2b; push waits on the user (safety check)
+CE-85	fixing	-	Fix Board: fixed locally on fixboard/pr74-ce2 44252d2b; push waits on the user (safety check)
+CE-86	fixing	-	Fix Board: fixed locally on fixboard/pr74-ce2 44252d2b; push waits on the user (safety check)
+CE-87	fixing	-	Fix Board: fixed locally on fixboard/pr74-ce2 44252d2b; push waits on the user (safety check)
+CE-88	fixing	-	Fix Board: fixed locally on fixboard/pr74-ce2 44252d2b; push waits on the user (safety check)
+CE-90	fixing	-	Fix Board: fixed locally on fixboard/pr74-ce2 44252d2b; push waits on the user (safety check)
+CE-91	fixing	-	Fix Board: fixed locally on fixboard/pr74-ce2 44252d2b; push waits on the user (safety check)
+CE-92	fixing	-	Fix Board: fixed locally on fixboard/pr74-ce2 44252d2b; push waits on the user (safety check)
+CE-94	fixing	-	Fix Board: fixed locally on fixboard/pr74-ce2 44252d2b; push waits on the user (safety check)
+CE-98	fixing	-	Fix Board: fixed locally on fixboard/pr74-ce2 44252d2b; push waits on the user (safety check)
+CE-99	fixing	-	Fix Board: fixed locally on fixboard/pr74-ce2 44252d2b; push waits on the user (safety check)
+CE-100	fixing	-	Fix Board: fixed locally on fixboard/pr74-ce2 44252d2b; push waits on the user (safety check)
+CE-101	fixing	-	Fix Board: fixed locally on fixboard/pr74-ce2 44252d2b; push waits on the user (safety check)
+CE-93	partial	-	Fix Board: ledger readers state in-sample; per-run validated byte not added (D-2792); local, push waits on the user
+CE-89	fixing	-	Fix Board: false on PR #74 code (no cutting call); guard tests added locally

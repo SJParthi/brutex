@@ -1,0 +1,260 @@
+id	state	commit	note
+CE-42	found	-	audit helpers at 1f4de71: unpriced frontier row blanks page; handed to zero-findings
+CE-43	found	-	audit helpers at 1f4de71: HIGH rolling F&O pull silently skips cadences; handed to zero-findings
+CE-44	found	-	audit helpers at 1f4de71: BRUTEX_VALIDATE readers disagree; handed to zero-findings
+CE-45	found	-	audit helpers at 1f4de71: cli banner promises /logs; handed to zero-findings
+CE-46	found	-	audit helpers at 1f4de71: autopilot Halted while alive; handed to zero-findings
+CE-47	found	-	audit helpers at 1f4de71: ragged runs.bin tail blanks ledger page; handed to zero-findings
+CE-48	found	-	audit helpers at 1f4de71: one damaged ledger record empties page; handed to zero-findings
+CE-49	found	-	audit helpers at 1f4de71: live progress refused once pricing starts; handed to zero-findings
+CE-50	found	-	audit helpers at 1f4de71: pre-1970 clock clamped silently; handed to zero-findings
+CE-51	found	-	audit helpers at 1f4de71: unreadable newest log resets ids silently; handed to zero-findings
+CE-52	found	-	audit helpers at 1f4de71: outage-day reopening dropped by ingest; handed to zero-findings
+CE-53	found	-	audit helpers at 1f4de71: Muhurat-only holiday accepted as expiry; handed to zero-findings
+CE-54	found	-	audit helpers at 1f4de71: chunk-end preflight refuses whole chunk; handed to zero-findings
+CE-55	found	-	audit helpers at 1f4de71: second non-regular-day list unpinned; handed to zero-findings
+CE-56	found	-	audit helpers at 1f4de71: duplicate JSON key in Dhan rolling read; handed to zero-findings
+CE-57	found	-	audit helpers at 1f4de71: CSV degrades logged at Debug only; handed to zero-findings
+CE-58	found	-	audit helpers at 1f4de71: nse_index_csv skips bad categories; handed to zero-findings
+CE-59	found	-	audit helpers at 1f4de71: negative OI kills CSV member; handed to zero-findings
+CE-60	found	-	audit helpers at 1f4de71: bars routes send i64 beyond 2^53; handed to zero-findings
+P4-01	found	-	audit helpers at 1f4de71: gate 10 red: 3 renamed tests; handed to zero-findings
+P4-02	found	-	audit helpers at 1f4de71: RS-03/PS-02 text stale; handed to zero-findings
+P5-01	found	-	audit helpers at 1f4de71: gate 10 red: RS-08, ZR-44; handed to zero-findings
+P5-02	found	-	audit helpers at 1f4de71: RS-08 text stale; handed to zero-findings
+P5-03	found	-	audit helpers at 1f4de71: forward row/test vs BlockExtremes; handed to zero-findings
+P5-04	found	-	audit helpers at 1f4de71: AFF-43 per-query vs total; handed to zero-findings
+P5-05	found	-	audit helpers at 1f4de71: form & reserve 570 MB; handed to zero-findings
+P5-06	found	-	audit helpers at 1f4de71: duplicate-field guard bypass via json; handed to zero-findings
+P5-07	found	-	audit helpers at 1f4de71: wall-clock tests; handed to zero-findings
+P6-01	found	-	audit helpers at 1f4de71: gate 1d red: 7 literals; handed to zero-findings
+P6-02	found	-	audit helpers at 1f4de71: gate 11 red: 3 contains; handed to zero-findings
+P6-03	found	-	audit helpers at 1f4de71: gate 12 red: 2 claims; handed to zero-findings
+P6-04	found	-	audit helpers at 1f4de71: gates 27/10b miss 49 ids; handed to zero-findings
+conc4-1	found	-	audit helpers at 1f4de71: Selection V6 quarantine wedge; handed to zero-findings
+conc4-2	found	-	audit helpers at 1f4de71: Pop V5 second barrier; handed to zero-findings
+conc5-1	found	-	audit helpers at 1f4de71: zeroed header refuses forever; handed to zero-findings
+conc5-2	found	-	audit helpers at 1f4de71: Selection V5 second barrier; handed to zero-findings
+conc6-1	found	-	audit helpers at 1f4de71: halt hidden / resume 200; handed to zero-findings
+conc6-2	found	-	audit helpers at 1f4de71: autopilot Stop kills hand pulls; handed to zero-findings
+conc6-3	found	-	audit helpers at 1f4de71: masters refresh queue grows; handed to zero-findings
+conc6-4	found	-	audit helpers at 1f4de71: recovery misnamed hand pull; handed to zero-findings
+p4num-1	found	-	audit helpers at 1f4de71: refused Romano-Wolf printed 0; handed to zero-findings
+p4num-2	found	-	audit helpers at 1f4de71: flat trades shrink avg loss; handed to zero-findings
+p5num-1	found	-	audit helpers at 1f4de71: calendar gate only top rows; handed to zero-findings
+p5num-2	found	-	audit helpers at 1f4de71: avg payoff flats as losers; handed to zero-findings
+p5num-3	found	-	audit helpers at 1f4de71: pooled all-flat never lost; handed to zero-findings
+p5num-4	found	-	audit helpers at 1f4de71: no-DD ratio prints i64 max; handed to zero-findings
+p5num-5	found	-	audit helpers at 1f4de71: payoff_bp raw blanks panel; handed to zero-findings
+p6num-1	found	-	audit helpers at 1f4de71: STT regime doc entry vs exit; handed to zero-findings
+p6num-2	found	-	audit helpers at 1f4de71: verified_from names unverified row; handed to zero-findings
+CE-61	found	-	audit helpers at 1f4de71: forged header count aborts api server; handed to zero-findings
+CE-62	found	-	audit helpers at 1f4de71: bar writer follows symlinks; handed to zero-findings
+CE-63	found	-	audit helpers at 1f4de71: header timestamps not checked against month; handed to zero-findings
+conc7-1	found	-	audit helpers at 1f4de71: range audit span outside identity; handed to zero-findings
+conc7-2	found	-	audit helpers at 1f4de71: batch identity comment false; handed to zero-findings
+p7num-1	found	-	audit helpers at 1f4de71: stale engine comment; handed to zero-findings
+p7num-2	found	-	audit helpers at 1f4de71: stale walk cost doc; handed to zero-findings
+p7num-3	found	-	audit helpers at 1f4de71: k=1 reserve from caller length; handed to zero-findings
+P7-01	found	-	audit helpers at 1f4de71: lake log test early return; handed to zero-findings
+P7-02	found	-	audit helpers at 1f4de71: Romano-Wolf shrink test cannot fail; handed to zero-findings
+CE-64	found	-	audit helpers at 1f4de71: FIFO or device census read hangs/OOMs api; handed to zero-findings
+CE-65	found	-	audit helpers at 1f4de71: three whole-file reads without regular-file check; handed to zero-findings
+CE-66	found	-	audit helpers at 1f4de71: boolean search re-verifies all batches O(B^2); handed to zero-findings
+conc8-1	found	-	audit helpers at 1f4de71: vendor 5xx breaker never trips; handed to zero-findings
+conc8-2	found	-	audit helpers at 1f4de71: \u2 marker leaks into operator text; handed to zero-findings
+conc8-3	found	-	audit helpers at 1f4de71: SSM faults misclassified as transport; handed to zero-findings
+conc8-4	found	-	audit helpers at 1f4de71: SSM body read unbounded; handed to zero-findings
+p8num-1	found	-	audit helpers at 1f4de71: n>=30 normal bar overspends Bonferroni alpha; handed to zero-findings
+P8-01	found	-	audit helpers at 1f4de71: cli auto exits 0 on halt; handed to zero-findings
+P8-02	found	-	audit helpers at 1f4de71: descend/elite messages contradict parser; handed to zero-findings
+P8-03	found	-	audit helpers at 1f4de71: exit codes 1 and 2 swapped; handed to zero-findings
+P8-04	found	-	audit helpers at 1f4de71: policy knobs parsed twice differently; handed to zero-findings
+P8-05	found	-	audit helpers at 1f4de71: usage names refused rung and missing command; handed to zero-findings
+CE-67	found	-	audit helpers at 1f4de71: case-folded file names collide silently; handed to zero-findings
+CE-68	found	-	audit helpers at 1f4de71: rolling POST body not fully JSON-escaped; handed to zero-findings
+CE-69	found	-	audit helpers at 1f4de71: non-UTF-8 AWS env treated as unset; handed to zero-findings
+conc9-1	found	-	audit helpers at 1f4de71: out-of-order grid progress marks run failed; handed to zero-findings
+conc9-2	found	-	audit helpers at 1f4de71: second cli command runs unlogged silently; handed to zero-findings
+conc9-3	found	-	audit helpers at 1f4de71: clock_held hidden from /logs; handed to zero-findings
+p9num-1	found	-	audit helpers at 1f4de71: stop owns exit after time exit filled; handed to zero-findings
+p9num-2	found	-	audit helpers at 1f4de71: 15:10 forced exit priced two ways; handed to zero-findings
+p9num-3	found	-	audit helpers at 1f4de71: sub-tick low charges entry at 0; handed to zero-findings
+P9-01	found	-	audit helpers at 1f4de71: frontier stores rounded statistics; handed to zero-findings
+P9-02	found	-	audit helpers at 1f4de71: lot/strike/expiry facts cite missing source; handed to zero-findings
+P9-03	found	-	audit helpers at 1f4de71: Groww cap encoded though charter says absent; handed to zero-findings
+P9-04	found	-	audit helpers at 1f4de71: stale seen-set rustdoc; handed to zero-findings
+CE-70	found	-	audit helpers at 1f4de71: holding chart wrong interval; daily key lacks year (medium); handed to zero-findings
+CE-71	found	-	audit helpers at 1f4de71: /ingest calendar reply has no request token; handed to zero-findings
+CE-72	found	-	audit helpers at 1f4de71: four render sites use browser locale/time zone; handed to zero-findings
+CE-73	found	-	audit helpers at 1f4de71: histogram rounds half toward +Infinity; handed to zero-findings
+conc10-1	found	-	audit helpers at 1f4de71: store-root ledgers: lifetime 2^24-row cap (medium); handed to zero-findings
+conc10-2	found	-	audit helpers at 1f4de71: store-root writers drop lock between open and append; handed to zero-findings
+p10num-1	found	-	audit helpers at 1f4de71: GDFL LTQ=0 quote rows folded into bar prices (medium); handed to zero-findings
+p10num-2	found	-	audit helpers at 1f4de71: archive index rows store OI 0 not null sentinel; handed to zero-findings
+P10-01	found	-	audit helpers at 1f4de71: GST-rate mutant in charge_stack_legs survives (medium); handed to zero-findings
+P10-02	found	-	audit helpers at 1f4de71: lane-order mutant in ordered.rs not killed (medium); handed to zero-findings
+P10-03	found	-	audit helpers at 1f4de71: empty .crc boundary in refuse_if_sealed untested; handed to zero-findings
+P10-04	found	-	audit helpers at 1f4de71: clock_held same-ms over-count uncaught; handed to zero-findings
+P10-05	found	-	audit helpers at 1f4de71: PrefixDigest short-read refusal untested; handed to zero-findings
+P10-06	found	-	audit helpers at 1f4de71: Admission V3 exact-retry prefix unpinned; handed to zero-findings
+P10-07	found	-	audit helpers at 1f4de71: number_text point==0 untested; barrier cfg(test) fork undocumented; handed to zero-findings
+CE-74	found	-	audit helpers at 1f4de71: api rows_now cross-vendor u64 sum overflow aborts api; handed to zero-findings
+conc11-1	found	-	audit helpers at 1f4de71: Candidate Universe V1 / Pre-Admission never fsync store-root dir; handed to zero-findings
+conc11-2	found	-	audit helpers at 1f4de71: autopilot classifies disk errors as transport blips by text match; handed to zero-findings
+conc11-3	found	-	audit helpers at 1f4de71: EMFILE at accept logged only to absent tracing subscriber; handed to zero-findings
+p11num-1	found	-	audit helpers at 1f4de71: gapped day withheld before evaluator shifts later trend bits (medium); handed to zero-findings
+p11num-2	found	-	audit helpers at 1f4de71: pat_in_neck bit 211 uses wrong shape vs Nison/TA-Lib; handed to zero-findings
+p11num-3	found	-	audit helpers at 1f4de71: daily.rs/pattern.rs claim bits 63/71 never set; they are; handed to zero-findings
+p11num-4	found	-	audit helpers at 1f4de71: docs/03 three stale statements; handed to zero-findings
+P11-01	found	-	audit helpers at 1f4de71: cross-site bar GETs hold month lock; pull write fails Locked (medium); handed to zero-findings
+P11-02	found	-	audit helpers at 1f4de71: ssm Signable derives Debug with token and path; handed to zero-findings
+P11-03	found	-	audit helpers at 1f4de71: credentials never zeroized; auth header not sensitive; handed to zero-findings
+P11-04	found	-	audit helpers at 1f4de71: personal paths/emails in docs and history (owner item); handed to zero-findings
+CE-75	found	-	audit helpers at 1f4de71: BRUTEX_GRID_RUNGS clamped silently; handed to zero-findings
+CE-76	found	-	audit helpers at 1f4de71: instrument case stored raw; rerun refused, filters miss (medium); handed to zero-findings
+conc12-1	found	-	audit helpers at 1f4de71: weekend/holiday month ends never complete; restarts refetch (medium); handed to zero-findings
+p12num-1	found	-	audit helpers at 1f4de71: frontier/detail-sets reopened and re-indexed every run; handed to zero-findings
+P12-01	found	-	audit helpers at 1f4de71: V-02..05 test a test-local union, not production; handed to zero-findings
+P12-02	found	-	audit helpers at 1f4de71: about 30 ticked rows name no test; handed to zero-findings
+P12-03	found	-	audit helpers at 1f4de71: HZ-01 describes old horizon rule; handed to zero-findings
+P12-04	found	-	audit helpers at 1f4de71: AS-09 selector tags not all pinned; handed to zero-findings
+P12-05	found	-	audit helpers at 1f4de71: S-29 geometry count/version stale; handed to zero-findings
+P12-06	found	-	audit helpers at 1f4de71: BA-05 telemetry claim false; handed to zero-findings
+P12-07	found	-	audit helpers at 1f4de71: gate 6d skip caveat missing at docs/04:4939; handed to zero-findings
+P12-08	found	-	audit helpers at 1f4de71: four CLAUDE.md invariants have no docs/04 row; handed to zero-findings
+CE-77	found	-	audit helpers at 1f4de71: census-degraded header ignored by census readers (medium); handed to zero-findings
+CE-78	found	-	audit helpers at 1f4de71: autopilot journal_error never shown (medium); handed to zero-findings
+CE-79	found	-	audit helpers at 1f4de71: /ingest drops refusals and keeps stale state; handed to zero-findings
+CE-80	found	-	audit helpers at 1f4de71: /gaps ignores calendar.unreadable; handed to zero-findings
+CE-81	found	-	audit helpers at 1f4de71: ingest run card halted shown as success; negative bar; handed to zero-findings
+CE-82	found	-	audit helpers at 1f4de71: /mapping swallows masters 503; handed to zero-findings
+CE-83	found	-	audit helpers at 1f4de71: four readers drop api refusal reason; handed to zero-findings
+conc13-1	found	-	audit helpers at 1f4de71: refused cli command and Recovery BLOCKED logged at Info; handed to zero-findings
+conc13-2	found	-	audit helpers at 1f4de71: retried connection failures never logged or counted; handed to zero-findings
+conc13-3	found	-	audit helpers at 1f4de71: sweep-launch refusals not logged; handed to zero-findings
+conc13-4	found	-	audit helpers at 1f4de71: autopilot/pull halt decisions never logged (medium); handed to zero-findings
+conc13-5	found	-	audit helpers at 1f4de71: store trace events name only symbol hash (medium); handed to zero-findings
+conc13-6	found	-	audit helpers at 1f4de71: budget-halted ladder exits 0 as completed; handed to zero-findings
+conc13-7	found	-	audit helpers at 1f4de71: sweep-all exits 0 with refused months; handed to zero-findings
+conc13-8	found	-	audit helpers at 1f4de71: no failure rate over a window; handed to zero-findings
+p13num-1	found	-	audit helpers at 1f4de71: IPFT source covers no day it is used; handed to zero-findings
+p13num-2	found	-	audit helpers at 1f4de71: charter says strike step not in code; it is; handed to zero-findings
+p13num-3	found	-	audit helpers at 1f4de71: equity gross label lists charges without source; handed to zero-findings
+p13num-4	found	-	audit helpers at 1f4de71: 2026 STT row VERIFIED on Finance Bill + blogs; handed to zero-findings
+p13num-5	found	-	audit helpers at 1f4de71: docs/06 STT 25% claim contradicts refusal; handed to zero-findings
+P13-01	found	-	audit helpers at 1f4de71: committed web/build stale; gate W1 red (medium); handed to zero-findings
+P13-02	found	-	audit helpers at 1f4de71: gates accept any .json under .claude/; handed to zero-findings
+P13-03	found	-	audit helpers at 1f4de71: launch.json still uses sh -c; handed to zero-findings
+P13-04	found	-	audit helpers at 1f4de71: dependency build-script docs contradict; handed to zero-findings
+P13-05	found	-	audit helpers at 1f4de71: verify.rs --purity looser than gate 1; handed to zero-findings
+CE-84	found	-	audit helpers at 1f4de71: autopilot recheck/retry timers on wall clock; handed to zero-findings
+CE-85	found	-	audit helpers at 1f4de71: masters status compares mtime with wall clock; handed to zero-findings
+CE-86	found	-	audit helpers at 1f4de71: elapsed_micros wall clock clamped to 0; handed to zero-findings
+CE-87	found	-	audit helpers at 1f4de71: dead cli sweep shown running after clock step; handed to zero-findings
+conc14-1	found	-	audit helpers at 1f4de71: /verify reports live append as disk mismatch; handed to zero-findings
+conc14-2	found	-	audit helpers at 1f4de71: archive ingest blocks a Tokio worker; no stop; handed to zero-findings
+p14num-1	found	-	audit helpers at 1f4de71: live won% inverted for sell rows (medium); handed to zero-findings
+p14num-2	found	-	audit helpers at 1f4de71: web rankRows scores unmeasurable ratio as middle; handed to zero-findings
+p14num-3	found	-	audit helpers at 1f4de71: two definitions of losing trades; handed to zero-findings
+P14-01	found	-	audit helpers at 1f4de71: docs/02 census header vendor bytes wrong (medium); handed to zero-findings
+P14-02	found	-	audit helpers at 1f4de71: CRC sidecar layout undocumented (medium); handed to zero-findings
+P14-03	found	-	audit helpers at 1f4de71: endianness and ovl/grk layouts undocumented; handed to zero-findings
+P14-04	found	-	audit helpers at 1f4de71: docs/02 says nothing checks single writer; handed to zero-findings
+P14-05	found	-	audit helpers at 1f4de71: REPAIR.md says repaired file stays V2; handed to zero-findings
+P14-06	found	-	audit helpers at 1f4de71: docs say results pipeline unbuilt; it is wired; handed to zero-findings
+CE-88	found	-	audit helpers at 1f4de71: selection_v6 quarantine named by offset only; handed to zero-findings
+CE-89	found	-	audit helpers at 1f4de71: V4 ledgers cut foreign file tail before magic check; handed to zero-findings
+CE-90	found	-	audit helpers at 1f4de71: strict checksum audit refuses benign past-commit state; handed to zero-findings
+conc15-1	found	-	audit helpers at 1f4de71: day rung idle marks feed complete, naps minute rung (medium); handed to zero-findings
+conc15-2	found	-	audit helpers at 1f4de71: per-rung retry, global nap; handed to zero-findings
+conc15-3	found	-	audit helpers at 1f4de71: revive resets only live rung; false refused-twice; handed to zero-findings
+conc15-4	found	-	audit helpers at 1f4de71: journal_error overwritten by next landed record; handed to zero-findings
+conc15-5	found	-	audit helpers at 1f4de71: admit_resume ignores global halts; handed to zero-findings
+conc15-6	found	-	audit helpers at 1f4de71: months_done counts per rung and daily; handed to zero-findings
+p15num-1	found	-	audit helpers at 1f4de71: zero dividend yield hard-coded; IVs biased (medium); handed to zero-findings
+p15num-2	found	-	audit helpers at 1f4de71: grk overlap byte-compare refuses new days; handed to zero-findings
+P15-01	found	-	audit helpers at 1f4de71: unsafe_code forbid bypass passes gates 5 and 16 (medium); handed to zero-findings
+P15-02	found	-	audit helpers at 1f4de71: CI gate bypass, see tests-docs-security-pass15.md; handed to zero-findings
+P15-03	found	-	audit helpers at 1f4de71: CI gate bypass, see tests-docs-security-pass15.md; handed to zero-findings
+P15-04	found	-	audit helpers at 1f4de71: CI gate bypass, see tests-docs-security-pass15.md; handed to zero-findings
+P15-05	found	-	audit helpers at 1f4de71: CI gate bypass, see tests-docs-security-pass15.md; handed to zero-findings
+P15-06	found	-	audit helpers at 1f4de71: CI gate bypass, see tests-docs-security-pass15.md; handed to zero-findings
+P15-07	found	-	audit helpers at 1f4de71: CI gate bypass, see tests-docs-security-pass15.md; handed to zero-findings
+P15-08	found	-	audit helpers at 1f4de71: CI gate bypass, see tests-docs-security-pass15.md; handed to zero-findings
+P15-09	found	-	audit helpers at 1f4de71: CI gate bypass, see tests-docs-security-pass15.md; handed to zero-findings
+P15-10	found	-	audit helpers at 1f4de71: CI gate bypass, see tests-docs-security-pass15.md; handed to zero-findings
+P15-11	found	-	audit helpers at 1f4de71: CI gate bypass, see tests-docs-security-pass15.md; handed to zero-findings
+P15-12	found	-	audit helpers at 1f4de71: CI gate bypass, see tests-docs-security-pass15.md; handed to zero-findings
+P15-13	found	-	audit helpers at 1f4de71: CI gate bypass, see tests-docs-security-pass15.md; handed to zero-findings
+P15-14	found	-	audit helpers at 1f4de71: CI gate bypass, see tests-docs-security-pass15.md; handed to zero-findings
+P15-15	found	-	audit helpers at 1f4de71: CI gate bypass, see tests-docs-security-pass15.md; handed to zero-findings
+P15-16	found	-	audit helpers at 1f4de71: CI gate bypass, see tests-docs-security-pass15.md; handed to zero-findings
+P15-17	found	-	audit helpers at 1f4de71: CI gate bypass, see tests-docs-security-pass15.md; handed to zero-findings
+CE-91	found	-	audit helpers at 1f4de71: Dhan id collision across segments drops witness; handed to zero-findings
+CE-92	found	-	audit helpers at 1f4de71: swept target has no member list; missing instrument unnamed; handed to zero-findings
+conc16-1	found	-	audit helpers at 1f4de71: startup refusals emitted before log opens; handed to zero-findings
+conc16-2	found	-	audit helpers at 1f4de71: exit 0 after abandoning sweeps on stop; handed to zero-findings
+p16num-1	found	-	audit helpers at 1f4de71: first-session overnight gap never measured (medium); handed to zero-findings
+p16num-2	found	-	audit helpers at 1f4de71: vendor split-adjustment basis undocumented; handed to zero-findings
+p16num-3	found	-	audit helpers at 1f4de71: dividends/rights/face value not named; handed to zero-findings
+P16-01	found	-	audit helpers at 1f4de71: ingest socket test path too long on macOS (medium); handed to zero-findings
+P16-02	found	-	audit helpers at 1f4de71: serve-lock test needs /dev/full; fails on macOS (medium); handed to zero-findings
+P16-03	found	-	audit helpers at 1f4de71: cli test predicts shared counter; handed to zero-findings
+P16-04	found	-	audit helpers at 1f4de71: api tests share failed-request log limit; handed to zero-findings
+CE-93	found	-	audit helpers at 1f4de71: validated flag not saved; unvalidated runs shown as finished; handed to zero-findings
+CE-94	found	-	audit helpers at 1f4de71: web headline drops gross label for stocks; handed to zero-findings
+conc17-1	found	-	audit helpers at 1f4de71: refused rung leaves live file; 128 cap blocks /live.json; handed to zero-findings
+conc17-2	found	-	audit helpers at 1f4de71: backtest poll journals every 2 s with no visibility gate; handed to zero-findings
+p17num-1	found	-	audit helpers at 1f4de71: raising read ceiling restarts alpha budget (medium); handed to zero-findings
+P17-01	found	-	audit helpers at 1f4de71: Ingest page reads renamed failure key; count always 0 (medium); handed to zero-findings
+P17-02	found	-	audit helpers at 1f4de71: docs/06 or docs/07 stale vs code; see tests-docs-security-pass17.md; handed to zero-findings
+P17-03	found	-	audit helpers at 1f4de71: docs/06 or docs/07 stale vs code; see tests-docs-security-pass17.md; handed to zero-findings
+P17-04	found	-	audit helpers at 1f4de71: docs/06 or docs/07 stale vs code; see tests-docs-security-pass17.md; handed to zero-findings
+P17-05	found	-	audit helpers at 1f4de71: docs/06 or docs/07 stale vs code; see tests-docs-security-pass17.md; handed to zero-findings
+P17-06	found	-	audit helpers at 1f4de71: docs/06 or docs/07 stale vs code; see tests-docs-security-pass17.md; handed to zero-findings
+P17-07	found	-	audit helpers at 1f4de71: docs/06 or docs/07 stale vs code; see tests-docs-security-pass17.md; handed to zero-findings
+P17-08	found	-	audit helpers at 1f4de71: docs/06 or docs/07 stale vs code; see tests-docs-security-pass17.md; handed to zero-findings
+P17-09	found	-	audit helpers at 1f4de71: docs/06 or docs/07 stale vs code; see tests-docs-security-pass17.md; handed to zero-findings
+P17-10	found	-	audit helpers at 1f4de71: docs/06 or docs/07 stale vs code; see tests-docs-security-pass17.md; handed to zero-findings
+P17-11	found	-	audit helpers at 1f4de71: docs/06 or docs/07 stale vs code; see tests-docs-security-pass17.md; handed to zero-findings
+P17-12	found	-	audit helpers at 1f4de71: docs/06 or docs/07 stale vs code; see tests-docs-security-pass17.md; handed to zero-findings
+P17-13	found	-	audit helpers at 1f4de71: docs/06 or docs/07 stale vs code; see tests-docs-security-pass17.md; handed to zero-findings
+P17-14	found	-	audit helpers at 1f4de71: docs/06 or docs/07 stale vs code; see tests-docs-security-pass17.md; handed to zero-findings
+P17-15	found	-	audit helpers at 1f4de71: docs/06 or docs/07 stale vs code; see tests-docs-security-pass17.md; handed to zero-findings
+P17-16	found	-	audit helpers at 1f4de71: docs/06 or docs/07 stale vs code; see tests-docs-security-pass17.md; handed to zero-findings
+P17-17	found	-	audit helpers at 1f4de71: docs/06 or docs/07 stale vs code; see tests-docs-security-pass17.md; handed to zero-findings
+P17-18	found	-	audit helpers at 1f4de71: docs/06 or docs/07 stale vs code; see tests-docs-security-pass17.md; handed to zero-findings
+P17-19	found	-	audit helpers at 1f4de71: docs/06 or docs/07 stale vs code; see tests-docs-security-pass17.md; handed to zero-findings
+P17-20	found	-	audit helpers at 1f4de71: docs/06 or docs/07 stale vs code; see tests-docs-security-pass17.md; handed to zero-findings
+P17-21	found	-	audit helpers at 1f4de71: docs/06 or docs/07 stale vs code; see tests-docs-security-pass17.md; handed to zero-findings
+CE-95	found	-	audit helpers at 1f4de71: module-wide dead_code expects stale; handed to zero-findings
+CE-96	found	-	audit helpers at 1f4de71: outcome.rs float allow claim false; handed to zero-findings
+CE-97	found	-	audit helpers at 1f4de71: tenor.rs 'one float boundary' false; handed to zero-findings
+CE-98	found	-	audit helpers at 1f4de71: debug_assert on log write panics dev api; handed to zero-findings
+conc18-1	found	-	audit helpers at 1f4de71: /ingest double Pull; Stop lost (medium); handed to zero-findings
+conc18-2	found	-	audit helpers at 1f4de71: /ingest error states never rendered (medium); handed to zero-findings
+conc18-3	found	-	audit helpers at 1f4de71: autopilot pause reverted by late poll; handed to zero-findings
+conc18-4	found	-	audit helpers at 1f4de71: live top panel not bound to run; handed to zero-findings
+conc18-5	found	-	audit helpers at 1f4de71: mapping crawl stays after feed change; handed to zero-findings
+p18num-1	found	-	audit helpers at 1f4de71: purged_folds width h not h+1 (latent); handed to zero-findings
+P18-01	found	-	audit helpers at 1f4de71: AS-11/AS-14 state reversed min_win rule; handed to zero-findings
+P18-02	found	-	audit helpers at 1f4de71: boot-default-flies argument reversed; handed to zero-findings
+P18-03	found	-	audit helpers at 1f4de71: Groww request counts per old month rule; handed to zero-findings
+P18-04	found	-	audit helpers at 1f4de71: BT-26 superseded; cited tests missing; handed to zero-findings
+P18-05	found	-	audit helpers at 1f4de71: universes notes say F&O shares never swept; handed to zero-findings
+CE-99	found	-	audit helpers at 1f4de71: 405 without Allow for unrouted path; handed to zero-findings
+CE-100	found	-	audit helpers at 1f4de71: /health/ variants answer 200 HTML; handed to zero-findings
+CE-101	found	-	audit helpers at 1f4de71: any body read error reported as 413; handed to zero-findings
+conc19-1	found	-	audit helpers at 1f4de71: refused pull legs leave no record; handed to zero-findings
+conc19-2	found	-	audit helpers at 1f4de71: autopilot records count not per-member failures; handed to zero-findings
+conc19-3	found	-	audit helpers at 1f4de71: recovery journal not readable after restart; handed to zero-findings
+p19num-1	found	-	audit helpers at 1f4de71: docs/02 says VIX never changes money identity; it does; handed to zero-findings
+p19num-2	found	-	audit helpers at 1f4de71: VIX JSON fields named _paisa; handed to zero-findings
+P19-01	found	-	audit helpers at 1f4de71: rankRows untested (medium); handed to zero-findings
+P19-02	found	-	audit helpers at 1f4de71: impliedConditions untested; handed to zero-findings
+P19-03	found	-	audit helpers at 1f4de71: six frontier-validator mutants survive; handed to zero-findings
+P19-04	found	-	audit helpers at 1f4de71: gap-verdict evidence_error kind unpinned; handed to zero-findings
+P19-05	found	-	audit helpers at 1f4de71: source-regex tests satisfied by comments; handed to zero-findings
+P19-06	found	-	audit helpers at 1f4de71: tests check copies of page code; handed to zero-findings
+P19-07	found	-	audit helpers at 1f4de71: ask.test.js hangs on Node 20-22; handed to zero-findings

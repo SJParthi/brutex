@@ -1,0 +1,62 @@
+id	state	commit	note
+W2-cli8-9	pushed	2674e5c	on final/all-fixes 31f1619 (PR #74 head)
+W2-cli8-4	pushed	2674e5c	on final/all-fixes 31f1619 (PR #74 head)
+GAP13-13	pushed	16186acd	on PR #74 head (D-1564), per Fix Board
+R9-cli-o1-0	pushed	2674e5c	on final/all-fixes 31f1619 (PR #74 head)
+W2-cli1-5	pushed	2674e5c	on final/all-fixes 31f1619 (PR #74 head)
+GAP13-15	pushed	8ff4345	on final/all-fixes 31f1619 (PR #74 head)
+W2-cli9-4	pushed	2674e5c	on final/all-fixes 31f1619 (PR #74 head)
+R9-cli-o1-1	pushed	de3dcc7	on final/all-fixes 31f1619 (PR #74 head)
+W2-cli9-0	pushed	2674e5c	on final/all-fixes 31f1619 (PR #74 head)
+W2-cli9-7	pushed	2674e5c	on final/all-fixes 31f1619 (PR #74 head)
+GAP13-16	pushed	7c069758	on PR #74 head (D-1487); D-1708 keeps one fix
+GAP15-21	pushed	2674e5c	on final/all-fixes 31f1619 (PR #74 head)
+R9-cli-law-3	pushed	2674e5c	on final/all-fixes 31f1619 (PR #74 head)
+R9-cli-law-1	pushed	2674e5c	on final/all-fixes 31f1619 (PR #74 head)
+W2-cli8-8	pushed	f6f7af1	on final/all-fixes 31f1619 (PR #74 head); D-1734 closes D-1731 (grid priced once per forced stop); reaches PR #74 with the lane 1-b push
+W2-cli8-0	pushed	f6f7af1	on final/all-fixes 31f1619 (PR #74 head); D-1734 closes D-1731 (grid priced once per forced stop); reaches PR #74 with the lane 1-b push
+W2-cli8-10	pushed	22f0310	on final/all-fixes 31f1619 (PR #74 head)
+W2-cli8-11	pushed	a49038b	on final/all-fixes 31f1619 (PR #74 head)
+GAP16-25	pushed	a4c44c0	on final/all-fixes 31f1619 (PR #74 head)
+ET-strategies-trades-ranking-costs-3	pushed	458446b	on final/all-fixes 31f1619 (PR #74 head)
+ET-strategies-trades-ranking-costs-2	pushed	c4c0d89	on final/all-fixes 31f1619 (PR #74 head)
+W2-cli8-1	pushed	982fd5f	on final/all-fixes 31f1619 (PR #74 head)
+W2-cli8-7	pushed	b489169	on final/all-fixes 31f1619 (PR #74 head)
+W2-cli8-3	pushed	dc6b533	on final/all-fixes 31f1619 (PR #74 head)
+GAP13-14	pushed	dc6b533	on final/all-fixes 31f1619 (PR #74 head)
+W2-cli8-5	pushed	8cdac60	on final/all-fixes 31f1619 (PR #74 head)
+AC-whp-o1-2	pushed	6af8b05	on final/all-fixes 31f1619 (PR #74 head)
+GAP11-0	pushed	a0f6f2d	on final/all-fixes 31f1619 (PR #74 head); on PR #74 head (D-1563), per Fix Board
+W2-cli13-5	pushed	63ace52	on final/all-fixes 31f1619 (PR #74 head); on PR #74 head (D-1563), per Fix Board
+GAP11-1	pushed	b371913	on final/all-fixes 31f1619 (PR #74 head)
+W2-cli9-5	pushed	265e664	on final/all-fixes 31f1619 (PR #74 head)
+W2-cli13-4	pushed	9bd9cbc	on final/all-fixes 31f1619 (PR #74 head)
+W2-cli12-5	pushed	a6409d9	on final/all-fixes 31f1619 (PR #74 head)
+GAP11-3	pushed	938513a	on final/all-fixes 31f1619 (PR #74 head)
+W2-cli3-4	pushed	97a6a07	on final/all-fixes 31f1619 (PR #74 head)
+W2-cli3-8	pushed	97a6a07	on final/all-fixes 31f1619 (PR #74 head)
+W2-cli13-0	pushed	d35f261	on final/all-fixes 31f1619 (PR #74 head)
+W2-cli11-2	pushed	d35f261	on final/all-fixes 31f1619 (PR #74 head)
+W2-cli11-3	pushed	d35f261	on final/all-fixes 31f1619 (PR #74 head)
+W2-cli12-0	pushed	6e6dd13	on final/all-fixes 31f1619 (PR #74 head)
+W2-cli12-1	pushed	6e6dd13	on final/all-fixes 31f1619 (PR #74 head)
+W2-cli12-2	pushed	6e6dd13	on final/all-fixes 31f1619 (PR #74 head)
+W2-cli7-3	pushed	be01adc	on final/all-fixes 31f1619 (PR #74 head)
+W2-cli7-2	pushed	0b59b27	on final/all-fixes 31f1619 (PR #74 head)
+W2-cli3-3	pushed	e0f2c19	on final/all-fixes 31f1619 (PR #74 head)
+GAP4-46	pushed	8332abd	on final/all-fixes 31f1619 (PR #74 head)
+AC-whp-law-0	pushed	f735bd1	on final/all-fixes 31f1619 (PR #74 head)
+AC-whp-law-2	pushed	f735bd1	on final/all-fixes 31f1619 (PR #74 head)
+W2-cli9-3	pushed	49b498e	on final/all-fixes 31f1619 (PR #74 head)
+W2-cli8-6	pushed	49b498e	on final/all-fixes 31f1619 (PR #74 head)
+GAP12-6	pushed	43c5fe8	on final/all-fixes 31f1619 (PR #74 head); D-2102: dated cash close from session masters on the stored path
+GAP4-48	pushed	f81fad1	on final/all-fixes 31f1619 (PR #74 head)
+W3-indicators2-0	pushed	6bffdb2	on final/all-fixes 31f1619 (PR #74 head)
+W3-indicators2-1	pushed	6bffdb2	on final/all-fixes 31f1619 (PR #74 head)
+AC-whp-tb-9	pushed	21b9cd0	on final/all-fixes 31f1619 (PR #74 head)
+R9-csr-cx-4	pushed	8685fb5	on final/all-fixes 31f1619 (PR #74 head)
+L1B-min-hits-warmup	pushed	64ca284	on final/all-fixes 31f1619 (PR #74 head); D-2101 screens and descents, D-2103 ledger-all and ledger-v6: support sized on swept rows
+L1B-gate10-12-segments	pushed	31f1619	on final/all-fixes 31f1619 (PR #74 head); D-2100 (245c6bb) carried onto the Rust gate tools gates_ledger and gates_bounds by D-2105
+L1B-merge-rivals	pushed	0ee5e22	on final/all-fixes 31f1619 (PR #74 head); D-1709: D-1701 serial kept for range-all and pool pass 1
+L1B-merge-bb6b3b4	pushed	31f1619	on final/all-fixes 31f1619; D-2105: base kept for pool union, listing fold, open counter; prepare_span carries the execution projection so pool-oos walks fill bars
+L1B-mutant-cas-guard	pushed	ac0802f	on final/all-fixes a3f6e8a (PR #74 head); D-2106: irregular CAS-day session refused a dated close; kills the one survivor of 33 mutants

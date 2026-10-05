@@ -1,0 +1,127 @@
+id	state	commit	note
+gaps-6	found		owner-blocked: needs a corporate-action source
+hunt-runner-1	pushed	a21d031	
+hunt-indicators-1	pushed	a21d031	
+hunt-pull-1	pushed	a21d031	
+hunt-pull-2	pushed	a21d031	
+attackdata-1	pushed	a21d031	
+hunt-store-1	pushed	a21d031	
+hunt-cli-a-1	pushed	a21d031	
+hunt-cli-a-2	pushed	a21d031	
+hunt-api-1	pushed	a21d031	
+hunt-api-2	pushed	700e644	
+attacksweep-1	pushed	a21d031	
+hunt-api-3	pushed	700e644	
+hunt-api-4	pushed	a21d031	
+webcontract-1	pushed	a21d031	
+errpaths-1	pushed	a21d031	
+hunt-costs-1	pushed	a21d031	
+hunt-costs-3	pushed	a21d031	
+hunt-ci-1	partial	6d03a68e	code half on head (D-1604/D-1605); branch protection is the owner setting
+hunt-ci-2	pushed	a21d031	
+testgaps-1	pushed	a21d031	
+testgaps-6	pushed	a21d031	
+o1surface2-1	pushed	858c8bb	
+hunt-conc-1	pushed	858c8bb	
+hunt-cli-a-3	pushed	a21d031	
+hunt-cli-b-1	pushed	a21d031	
+hunt-pull-3	pushed	a21d031	
+hunt-indicators-2	pushed	a21d031	
+hunt-indicators-3	pushed	a21d031	
+hunt-runner-2	pushed	a21d031	
+hunt-costs-2	pushed	a21d031	
+hunt-costs-4	pushed	a21d031	
+attacksweep-2	pushed	a21d031	
+attacksweep-3	pushed	a21d031	
+hunt-store-2	pushed	a21d031	
+hunt-store-3	pushed	a21d031	
+hunt-store-4	pushed	a21d031	
+hunt-store-5	pushed	a21d031	
+hunt-store-7	pushed	a21d031	
+webcontract-2	pushed	a21d031	
+webcontract-3	pushed	a21d031	
+errpaths-2	pushed	a21d031	
+errpaths-3	pushed	a21d031	
+errpaths-4	pushed	700e644	
+hunt-conc-2	pushed	858c8bb	
+hunt-conc-3	pushed	a21d031	
+attackdata-2	pushed	a21d031	
+attackdata-3	pushed	a21d031	
+attackdata-4	pushed	c6d03c6	
+attackdata-5	pushed	a21d031	
+attackdata-7	pushed	a21d031	
+attackdata-8	pushed	c6d03c6	
+o1store2-1	pushed	a21d031	
+o1surface2-2	pushed	a21d031	
+o1surface2-3	pushed	a21d031	
+o1eng2-1	pushed	c6d03c6	
+hunt-ci-3	pushed	a21d031	
+hunt-ci-4	pushed	a21d031	
+hunt-ci-5	pushed	a21d031	
+hunt-ci-6	pushed	a21d031	
+hunt-ci-7	pushed	a21d031	
+hunt-ci-8	pushed	a21d031	
+rustonly2-1	pushed	a21d031	
+rustonly2-2	pushed	a21d031	
+rustonly2-3	pushed	a21d031	
+rustonly2-4	pushed	a21d031	
+rustonly2-6	pushed	a21d031	
+rustonly2-7	pushed	a21d031	
+testgaps-11	pushed	a21d031	
+hunt-ci-10	pushed	a21d031	
+hunt-ci-12	pushed	0cab319	
+rustonly2-10	doc		info only: core-foundation-sys is an OS FFI declaration crate (macOS only, via chrono), same class as libc; vendors no C, so §2 is not breached
+webcontract-5	pushed	a21d031	
+hunt-api-6	pushed	a21d031	
+hunt-cli-a-5	pushed	858c8bb	
+hunt-conc-4	pushed	a21d031	
+o1eng2-3	pushed	a21d031	
+o1store2-2	pushed	a21d031	
+hunt-runner-4	pushed	a21d031	
+hunt-costs-6	pushed	a21d031	
+hunt-store-6	pushed	a21d031	
+gaps-5	pushed	9e829f4	pool-oos out-of-sample judging (D-1576), not yet pushed to PR #74
+gaps-11	pushed	9e829f4	pool-oos catalog handoff (D-1577)
+gaps-10	pushed	9e829f4	/selection-v6.json and /selection page (D-1578)
+OS-1	pushed	d28e902	pool-oos streams spans (D-2300)
+OS-2	pushed	d28e902	no training series held (D-2300)
+OS-3	pushed	d28e902	parallel lane walk (D-2300)
+OS-4	pushed	d28e902	union opens parent ledger once (D-2301)
+OS-5	pushed	8b71255	selection-v6 paged reads (D-2303)
+OS-6	pushed	2d47cca	slot lock held only for lookup; open and refresh outside it (D-2309)
+OS-7	doc	b97b2ca	one-row index would drop the refusal of a damaged row it does not name; reads counted and pinned (D-2319, AFG-19); on PR #74
+OS-8	pushed	6e4c262	recovery borrows windows (D-2306)
+OE-1	pushed	b7c07a1	exact prefix sums over resample runs, bit-identical receipts (D-2316)
+OE-2	pushed	6e4c262	one bootstrap index buffer (D-2305)
+OE-3	pushed	943a9d8	per-day tables, no search (D-2307)
+OE-4	pushed	6e4c262	median heaps sized once (D-2308)
+OE-5	pushed	6e4c262	O(1) sweep depth (D-2304)
+OD-1	pushed	cab1d37	D-2370
+OD-2	pushed	cab1d37	D-2371
+OD-3	pushed	cab1d37	D-2372
+OD-4	pushed	cab1d37	D-2373
+OD-5	pushed	cab1d37	D-2374
+OD-6	pushed	cab1d37	D-2375
+OD-7	pushed	cab1d37	D-2376
+RO-1	pushed	53cf3e0	D-2340
+RO-2	pushed	53cf3e0	D-2341
+RO-3	pushed	53cf3e0	D-2341
+RO-4	pushed	53cf3e0	D-2342 (awk ratchet 71, being ported to Rust)
+RO-5	pushed	53cf3e0	D-2344
+RO-6	pushed	53cf3e0	D-2345
+RO-7	pushed	53cf3e0	D-2346
+RO-8	pushed	53cf3e0	D-2347
+RO-9	pushed	53cf3e0	D-2350
+RO-10	pushed	53cf3e0	D-2343 gh_json.rs replaces jq
+rustonly2-5	pushed	53cf3e0	D-2348
+ci-awk-sed-jq	pushed	8c16ba3	all ci.yml awk/sed/jq moved to .github/gates_*.rs; ratchet 0 (D-2311..D-2318)
+gaps-1	found		owner-blocked: no decision names where the modules belong (D-1568)
+gaps-3	found		owner-blocked (D-1544)
+gaps-7	found		owner-blocked: needs historical F&O membership source
+gaps-8	found		owner-blocked: a fact only the owner has
+hunt-costs-5	found		owner-blocked: charter sources missing
+hunt-runner-5	doc		documented deviation (D-1549); fix needs a sourced method and changes stored receipts
+testgaps-7	found		owner-blocked: operator data not in the repo
+auto-merge-jq	pushed	913b9dc	last 3 gh --jq field reads moved to gh_json field KEY; Gate 0 no longer exempts field paths (D-2320, AFG-20); on PR #74 via 956424c
+store-tix	pushed	446c8cd	O(1) time-to-row via .tix (D-2329, D-2330); on PR #74 via 25bc8aa
+log-p99	found	7c9dbde	no design adopted; needs idle >=8-core measurement (D-2331)
