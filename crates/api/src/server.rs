@@ -15961,9 +15961,10 @@ fn bars_vendor(query: &str) -> Result<Vendor, &'static str> {
 ///
 /// `param_or(query, "segment", "INDEX")`, justified in its own doc as *"the
 /// only values the engine surface has (`CLAUDE.md` §1)"*. §1 keeps two sets
-/// apart in consecutive sentences: the engine SWEEPS two instruments, and
-/// *"futures, options and single stocks may be stored. They are never swept."*
-/// This route reads the store.
+/// apart: the engine SWEEPS the two spot indices and the cash equities of the
+/// F&O shares (D-0506), while contracts and single stocks outside the F&O
+/// universe *"may be stored and are never swept"*. This route reads the store.
+/// (This quoted §1 as it read before D-0506 widened the sweep.)
 ///
 /// D-0335 fixed the same defect on `/calendar.json`, where the literal was
 /// LIVE: `ADANIENT` is filed at `NSE/CASH/ADANIENT/` and was probed at
@@ -16219,9 +16220,10 @@ fn unlocatable(site: &Site, symbol: &str, why: &Unlocated) -> (axum::http::Statu
 /// defaults this route no longer takes. Its own doc justified them: an absent
 /// `?segment=` means INDEX *"because those are the only values the engine
 /// surface has (`CLAUDE.md` §1)"*. That conflates two sets §1 keeps apart in
-/// consecutive sentences: the engine SWEEPS two instruments, and *"futures,
-/// options and single stocks may be stored. They are never swept."* This route
-/// reads the store. D-0339 removed the helper and [`locate_series`] replaced
+/// consecutive sentences: the engine SWEEPS the two spot indices and the F&O
+/// shares' cash equities (D-0506), and contracts and single stocks outside the
+/// F&O universe *"may be stored and are never swept"*. This route reads the
+/// store. D-0339 removed the helper and [`locate_series`] replaced
 /// it, placed ABOVE this paragraph rather than inside it — which is the mistake
 /// that split it in the first place.
 #[must_use]
@@ -26434,10 +26436,11 @@ mod tests {
     ///
     /// This route read `param_or(query, "segment", "INDEX")`, whose own doc
     /// justified the default: those are *"the only values the engine surface
-    /// has"*. `CLAUDE.md` §1 keeps two sets apart in consecutive sentences —
-    /// the engine SWEEPS two instruments, and *"futures, options and single
-    /// stocks may be stored. They are never swept."* This route reads the
-    /// store, so the sweep surface is the wrong set to default from.
+    /// has"*. `CLAUDE.md` §1 keeps two sets apart: the engine SWEEPS the two
+    /// spot indices and the F&O shares' cash equities (D-0506), and contracts
+    /// and single stocks outside the F&O universe *"may be stored and are never
+    /// swept"*. This route reads the store, so the sweep surface is the wrong
+    /// set to default from.
     ///
     /// It was latent rather than live: `render` always writes `&segment=` from
     /// the census, so only a hand-typed URL reached it. D-0335 fixed the same
@@ -31167,18 +31170,20 @@ mod tests {
         let site = site("localfailed", &dir);
         // File order is the only order there is, and this file's order
         // descends — the fold refuses it rather than sorting it, and the
-        // member fails before any bar file is opened.
+        // member fails before any bar file is opened. A trading Monday: a
+        // Saturday's rows are dropped as a closed day (D-2673) before the
+        // fold could see their order (D-1934).
         let folder = vendor_folder(
             "localfailed",
             &format!(
                 "{GDFL_MEMBER_HEAD}\
-                 NIFTY,08/01/2022,10:00:00,100.00,0,0,0,0,1,0\n\
-                 NIFTY,08/01/2022,09:30:00,100.50,0,0,0,0,1,0\n"
+                 NIFTY,10/01/2022,10:00:00,100.00,0,0,0,0,1,0\n\
+                 NIFTY,10/01/2022,09:30:00,100.50,0,0,0,0,1,0\n"
             ),
         );
 
         let (code, html) = spot_answer(
-            &spot_form(&folder, "2022-01-08", "2022-01-08"),
+            &spot_form(&folder, "2022-01-10", "2022-01-10"),
             day(2026, 8, 7),
             moment(),
             &site,

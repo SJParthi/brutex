@@ -59571,6 +59571,12 @@ and the fault tests still fire through the new function.
 - Index bars already stored with open interest 0 stay as written (§3 rule 8); `docs/06-limits.md` says so.
 - Proved by `pull::csv::tests::an_index_row_decodes_its_open_interest_as_absent` and `pull::csv::tests::the_sentinel_guard_reads_each_layouts_own_open_interest_column` (ZX-39).
 
+### D-2690 — Three operator-facing texts stop saying the engine sweeps two instruments — 2026-10-04
+
+- The `/pull` form's `Reference indices` note said every member is "never swept", but the set is every series a vendor master calls an index, so it holds NSE-NIFTY and NSE-BANKNIFTY, which are on the sweep surface (`CLAUDE.md` §1). It now names those two as swept and every other index as stored, stamped onto trades and never swept. `api::ingest::tests::only_the_reference_set_says_never_swept` still requires the words, and `a_spot_request_names_its_target_or_is_refused` pins the new text.
+- The `/markets` Exchange tooltip said the engine surface is "exactly two instruments". It now names the two spot indices and the cash equities of the 208 F&O shares (D-0506, D-0682).
+- Three `api::server` doc comments quoted §1 as "the engine SWEEPS two instruments" in the present tense. They now state the current surface and keep the quoted half that is still law. No behaviour changes: `is_sweepable` already decided per member.
+
 ### D-1786 — A degraded census is refused on every selected-feed page, and a failed journal append is a top-of-page alert — 2026-10-04
 
 Found by the audit helpers' crash pass 15 (`/mnt/project-files/zero-rounds/crash-edge-pass15.md`), the api-to-`web/` contract pass.
@@ -62757,7 +62763,9 @@ fix is kept in each place; nothing either side proved is dropped.
 - **Test fallout.** D-1990 refuses a bootstrap block longer than its sample, so
   short-sample tests use a block of 1 and `end_to_end` clamps `DEFAULT_BLOCK`
   to the fold count; D-1464's level bound gives `ilog2(len-2)+1` levels; the
-  two local-pull fixtures carry LTQ 1 because D-2688 skips zero-LTQ quotes.
+  two local-pull fixtures carry LTQ 1 because D-2688 skips zero-LTQ quotes,
+  and the failed-member fixture moves to a trading Monday because D-2673 drops
+  a Saturday's rows before the fold can refuse their order.
 - **Masters.** OD-5's bounded compare (D-2374) now opens without following a
   link and refuses a non-regular file by name (CE-65, D-2684).
 - **Leg forms.** `/pull/run` refuses a repeated key in a leg payload (h-api-2,

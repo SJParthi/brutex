@@ -2382,7 +2382,20 @@ impl ObservationAuthorityLedgerV1 {
             .metadata()
             .map_err(|why| format!("cannot stat {label} append: {why}"))?
             .len();
-        if let Err(why) = crate::append_rollback::append_with(&mut self.file, raw, label, write) {
+        // Written through `fixed_tail` so a short write is cut back exactly as
+        // a failed barrier is below, and its fault hook reaches this path.
+        let written = crate::fixed_tail::start(&mut self.file, &self.file_path.display())
+            .and_then(|start| {
+                crate::fixed_tail::write_at_end(
+                    &mut self.file,
+                    &self.file_path.display(),
+                    start,
+                    raw,
+                    |file, bytes| write(file, bytes),
+                )
+            })
+            .map_err(|why| format!("cannot append {label}: {why}"));
+        if let Err(why) = written {
             if self.file.metadata().is_ok_and(|now| now.len() == before)
                 && let Err(stale) = self.refresh_snapshot()
             {
@@ -3637,7 +3650,20 @@ impl ObservationAuthorityLedgerV2 {
             .metadata()
             .map_err(|why| format!("cannot stat {label} append: {why}"))?
             .len();
-        if let Err(why) = crate::append_rollback::append_with(&mut self.file, raw, label, write) {
+        // Written through `fixed_tail` so a short write is cut back exactly as
+        // a failed barrier is below, and its fault hook reaches this path.
+        let written = crate::fixed_tail::start(&mut self.file, &self.file_path.display())
+            .and_then(|start| {
+                crate::fixed_tail::write_at_end(
+                    &mut self.file,
+                    &self.file_path.display(),
+                    start,
+                    raw,
+                    |file, bytes| write(file, bytes),
+                )
+            })
+            .map_err(|why| format!("cannot append {label}: {why}"));
+        if let Err(why) = written {
             if self.file.metadata().is_ok_and(|now| now.len() == before)
                 && let Err(stale) = self.refresh_snapshot()
             {
@@ -4274,7 +4300,8 @@ mod tests {
         let shipping = src.split("\nmod tests {").next().unwrap_or(src);
         for header in ["&authority_header()", "&observation_v2_header()"] {
             let (_, after) = shipping
-                .split_once(&format!("file.write_all({header})"))
+                // The header goes through the shared rollback since D-1854.
+                .split_once(&format!("&mut file,\n                {header},"))
                 .expect("the header write exists");
             let block = after
                 .split_once("let bytes = ")

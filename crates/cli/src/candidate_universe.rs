@@ -7101,8 +7101,8 @@ mod tests {
     #[test]
     fn a_failed_base_barrier_is_cut_and_the_rerun_writes() {
         for name in [
-            "base-evidence-records-v2.bin",
-            "base-evidence-completions-v2.bin",
+            "base-evidence-records-v3.bin",
+            "base-evidence-completions-v3.bin",
         ] {
             let root = test_dir();
             let bounds = BaseEvidenceLedgerBoundsV2::new(32, 8).expect("nonzero Base bounds");
@@ -7119,7 +7119,7 @@ mod tests {
                 );
             }
             let completions =
-                std::fs::metadata(root.path().join("base-evidence-completions-v2.bin"))
+                std::fs::metadata(root.path().join("base-evidence-completions-v3.bin"))
                     .expect("measure completions")
                     .len();
             assert_eq!(

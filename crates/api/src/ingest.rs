@@ -422,7 +422,14 @@ impl SpotTarget {
             Self::Swept => {
                 "NSE-NIFTY, NSE-BANKNIFTY and the F&O underlyings this feed lists — the sweep surface, D-0506"
             }
-            Self::Indices => "stored and stamped onto trades; never swept",
+            // THE TWO SWEPT INDICES ARE IN THIS SET. It is every series the
+            // vendor master calls an index, so it holds NSE-NIFTY and
+            // NSE-BANKNIFTY; "never swept" alone denied them (zero-findings
+            // flag, D-2690). Every other index is reference only.
+            Self::Indices => {
+                "NSE-NIFTY and NSE-BANKNIFTY are swept; every other index is stored and \
+                 stamped onto trades, never swept"
+            }
             // EVERY EQUITY SET SAYS WHICH OF ITS MEMBERS ARE SWEPT, IN THE SAME
             // BREATH AS ITS COUNT. These said "stored, never swept" until
             // P18-05 (D-1965), which told an operator that RELIANCE, HDFCBANK
@@ -2668,7 +2675,7 @@ mod tests {
             (
                 SpotTarget::Indices,
                 "Reference indices",
-                "stored and stamped onto trades; never swept",
+                "NSE-NIFTY and NSE-BANKNIFTY are swept; every other index is stored and stamped onto trades, never swept",
             ),
             (
                 SpotTarget::Equities,
