@@ -1605,7 +1605,7 @@ mod tests {
         let dir = scratch("status-changed");
         let path = masters::path_of(&dir, &masters::SOURCES[0]);
         std::fs::write(&path, a_master()).expect("a master on disk");
-        let ahead = std::time::SystemTime::now() + std::time::Duration::from_secs(3_600);
+        let ahead = std::time::SystemTime::now() + std::time::Duration::from_hours(1);
         std::fs::File::options()
             .write(true)
             .open(&path)
