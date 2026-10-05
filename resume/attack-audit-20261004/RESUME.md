@@ -66,3 +66,15 @@ heads with the same prompts (in the thread's transcript; rules in resume/audit-2
   17bf742 + D-1839 WIP as a stash commit; apply with `git stash apply e9ac205`), wip/audit-fixes-8e = 5a42e58 (F8b,
   D-2280..2290, clean). Fixers relaunched; they snapshot to wip/audit-fixes-6c / -8f / -8g as they commit.
 - NEXT: batch 3 = merge F6 + F8 + F8b onto newest final/all-fixes, validate, hand to PR #74 CI thread.
+
+## STOP 2026-10-05 01:56 UTC (weekly usage 95%; user moves to a new account)
+All agents and cargo jobs stopped. Every branch below is on GitHub; nothing lives only on the cloud box.
+| Fixer | Branch (resume from) | Head | Done | Left |
+|---|---|---|---|---|
+| F6 | wip/audit-fixes-6c | ed6a7bf | D-1810 W2-cli5-4, D-1811 W3-runner5-0, D-1812 W3-runner2-8 | W3-runner2-7: confirm closed by D-1514 (else fix as D-1813); copy-mode mutation of changed fns |
+| F8 | wip/audit-fixes-8f | 7293587 + stash c249ffc (o1cli-6 WIP: `git stash apply c249ffc` or cherry-pick -n) | D-1831..1841 (latest: D-1839 o1cli-5, D-1840 o1cli-2/3/4, D-1841 W2-cli16-2) | o1cli-6 (WIP), AC-whp-o1-1, W2-cli8-6, cli-14 (W2-cli11-0/-1, W2-cli12-3/-4), W2-cli6-0, D-1638, W2-cli2-5, W2-cli14-1/2/3, ET-bars-candles-store-1/-8, rederive. Range D-1842..1849 |
+| F8b | wip/audit-fixes-8g | 3e0ce95 | D-2280..2291 (all api/pull/store/engine rows re-examined, D-2290; /indexmap.json memo D-2291) | verify each row's evidence, full api/pull/store/engine/lake tests, allgates, copy-mode mutation. Range D-2292..2299 |
+Batch 3 NOT yet handed to PR #74: merge all three onto newest final/all-fixes, fmt + clippy -D warnings + full tests + allgates, then hand the merged wip branch to the PR #74 CI thread (only that thread pushes final/all-fixes). Tracker: /mnt/project-files/fix-board/status/attack-audit.tsv (64 rows "fixing").
+
+### Prompt for the new account (paste into a fresh Claude Code session on github.com/SJParthi/brutex)
+Resume the brutex attack-audit fix queue. Read CLAUDE.md fully, then resume/attack-audit-20261004/RESUME.md on branch fix-queue, section "STOP 2026-10-05". GitHub state wins over the file. Finish the three fixers' remaining rows from their wip branches (F6, F8, F8b) with the same rules: Rust only, every cost fixed or measured (p50/p99/max) or argued inherent, nothing documented-only, a test for every change, decision + invariant entries in their stated D-ranges. Then merge all three onto the newest final/all-fixes into one branch wip/audit-batch3, run cargo fmt --check, cargo clippy --workspace --all-targets -- -D warnings, cargo test --workspace --locked and the CI language-purity gates, fix any failure, and push only wip/audit-batch3 for merging into PR #74 (final/all-fixes). Do not open any other PR, never force-push shared branches, never push GDFL data. At 93% usage save state back to this file and stop.
