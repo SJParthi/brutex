@@ -84,6 +84,16 @@ pub(crate) fn sink() -> &'static telemetry::Sink {
         let _ignored = std::fs::remove_dir_all(&dir);
     });
     let config = telemetry::Config::new(&dir).with_min_level(telemetry::Level::Trace);
+    // ONE INSTALL AT A TIME. Two tests calling this at once both passed
+    // `install`'s emptiness check; the second's `Sink::open` of the same file
+    // was refused while the first had not yet published its sink, so
+    // `global()` was still empty and the `expect` below fired. Seen when
+    // `server::shutdown_tests` joined the `emitted` tests as a reader of this
+    // sink (D-2771).
+    static INSTALLING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one = INSTALLING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let installed = match telemetry::install(&config) {
         Ok(installed) => installed,
         Err(_refused) => telemetry::global()
@@ -1586,7 +1596,10 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // 19 -> 20 at D-0948: `pull.credential re-read returned the SAME value`,
     // driven and read back by `server::credential_law_tests::
     // a_rejected_token_whose_re_read_is_unchanged_halts_the_spot_run_with_no_further_request`.
-    const REACHED_IN_SERVER_TESTS: usize = 20;
+    // 20 -> 21 at D-2771: `api.serve shutdown drain ended with requests
+    // still in flight`, driven and read back by `server::shutdown_tests::
+    // a_request_still_running_after_the_signal_does_not_hold_the_server_open`.
+    const REACHED_IN_SERVER_TESTS: usize = 21;
     // Both production recovery boundaries are emitted and read back through
     // this installed sink by recovery::tests::
     // recovery_boundary_events_are_read_back_from_the_installed_sink.
@@ -1705,9 +1718,12 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // unreachable list above.
     //
     // 61 -> 63 at D-1582 and D-1583: the two unreachable sites named above.
+    //
+    // 63 -> 64 at D-2771: the bounded shutdown drain's WARN, driven in
+    // `server::shutdown_tests`.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 63,
+        lib_sites, 64,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"

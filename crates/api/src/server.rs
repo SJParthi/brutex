@@ -17700,6 +17700,8 @@ mod shutdown_tests {
     /// than a hang.
     #[tokio::test]
     async fn a_request_still_running_after_the_signal_does_not_hold_the_server_open() {
+        let _shared = crate::emitted::sink();
+        let from = crate::emitted::mark();
         let (entered, mut inside) = tokio::sync::mpsc::unbounded_channel::<()>();
         let app = axum::Router::new().route(
             "/forever",
@@ -17740,6 +17742,20 @@ mod shutdown_tests {
             .expect("the serve task joins");
         assert!(outcome.is_ok(), "{outcome:?}");
         drop(client);
+        // THE ABANDONED DRAIN IS ON THE ROLLING LOG. This is the proof
+        // `emitted` counts for `api.serve shutdown drain ended ...`.
+        let said = crate::emitted::landed(
+            from,
+            "api.serve",
+            "shutdown drain ended with requests still in flight",
+        );
+        assert!(
+            said.iter().any(|record| {
+                record.level == telemetry::Level::Warn
+                    && crate::emitted::counts(record, "grace_ms", 50)
+            }),
+            "the bounded drain names its grace: {said:?}"
+        );
     }
 }
 
