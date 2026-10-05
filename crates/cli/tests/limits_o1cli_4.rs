@@ -5,6 +5,8 @@
 //! digests them and drops them; the kernel then loads both again and
 //! recomputes the digest to prove nothing changed. Nothing stated that cost.
 //! This file holds `docs/06-limits.md` to the code.
+//!
+//! Since D-1840 the build hands its contexts back: this file now holds the fix.
 
 #![allow(
     clippy::expect_used,
@@ -47,18 +49,19 @@ fn body(head: &str) -> &'static str {
         .expect("its body")
 }
 
-/// THE KERNEL'S SECOND CONTEXT READ AND DIGEST ARE STATED, AND STILL PAID.
+/// THE KERNEL SWEEPS THE CONTEXTS ITS COLUMN WAS BUILT FROM. D-1840.
+///
+/// The build loaded, digested and dropped both contexts, and the kernel read
+/// them again and compared digests. The build now hands back the contexts of
+/// the pass that built, and the kernel reads neither again.
 #[test]
-fn the_kernels_second_context_read_is_stated_and_still_paid() {
+fn the_kernel_sweeps_the_contexts_its_column_was_built_from() {
     let limit =
         limit("## The audit kernel reads its daily and minute contexts twice (audit o1cli-4)");
     for sentence in [
-        "`column_withholding_at_build` loads the daily context and the exact-minute context",
-        "digests them with `stored_anchored_digest`, and drops them",
-        "`exact_minute_withholding_unsourceable_days` and `stored::load_daily_context` then load both again",
-        "recomputes the digest and compares it with the preparation digest",
-        "one extra read of the rung's one-minute span (from the month before the span) and of its daily context",
-        "O(minute bars + signal bars)",
+        "Fixed by D-1840",
+        "hands back the contexts of the pass that built",
+        "`a_build_that_withholds_a_day_reads_nothing_more`",
     ] {
         assert!(
             limit.contains(sentence),
@@ -66,34 +69,25 @@ fn the_kernels_second_context_read_is_stated_and_still_paid() {
         );
     }
     let build = body("\nfn column_withholding_at_build(");
-    for call in [
-        "stored::load_daily_context(",
-        "stored::load_exact_minute_context(",
-        "stored_anchored_digest(",
-    ] {
-        assert!(
-            build.contains(call),
-            "the build no longer calls {call}: update the limit"
-        );
-    }
     assert!(
-        build.contains("return Ok((column, digest));"),
-        "the build hands back the column and digest, not the contexts: update the limit"
+        build.contains("Ok(PreparedColumn {")
+            && build.contains("exact,\n                    daily,")
     );
-    // D-1557: the kernel's loads moved into its cached loader.
     let kernel = body("\nfn load_audit_inputs(");
     let after = kernel
         .split_once("column_withholding_at_build(")
         .expect("the kernel builds its column")
         .1;
-    for call in [
+    for gone in [
         "exact_minute_withholding_unsourceable_days(",
         "stored::load_daily_context(",
-        "stored_anchored_digest(&span.bars, &exact_minute, &daily)? != preparation_digest",
+        "stored::load_exact_minute_context(",
+        "!= preparation_digest",
     ] {
         assert!(
-            after.contains(call),
-            "the kernel no longer calls {call} after the build: update the limit"
+            !after.contains(gone),
+            "the kernel still calls {gone} after the build"
         );
     }
+    assert!(kernel.contains("exact: exact_minute,") && kernel.contains("withheld: unsourceable,"));
 }

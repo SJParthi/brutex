@@ -817,111 +817,6 @@ fn verify_arm(out: &mut String, feed: &str, underlying: &str) -> u8 {
     out.push_str(&report);
     if failed { FAILED } else { OK }
 }
-/// Loads the exact-minute overlay, WITHHOLDING each day it cannot source.
-///
-/// # One missing minute killed seven of eight timeframes
-///
-/// The overlay refuses `MissingClosingMinute` when no stored 1-minute bar ends
-/// at a signal bar's close, and that refusal ends the run. MEASURED on the
-/// operator's store: a single absent minute — 2020-02-13 10:32 IST, one of
-/// 609,722 — refused `15min`, `10min`, `5min`, `3min`, `2min` and `1min`, each
-/// in under half a second, on every run all day. `60min` was the only rung that
-/// ever recorded, and it survived only because no 60-minute bar happened to
-/// close on that minute.
-///
-/// [`crate::minute_gaps::days_with_interior_gaps`] was written for this and
-/// GUESSES: it walks the minute series looking for a step wider than a minute.
-/// The overlay does not need "a day with a gap somewhere" — it needs, for each
-/// signal bar, the exact minute its close lands on. Those are different
-/// questions, and the gap walk answered the wrong one: the day survived its
-/// filter and the overlay refused it anyway.
-///
-/// # Asking the thing that knows
-///
-/// The refusal names `expected_ts_micros` — the precise minute it wanted. So
-/// this withholds THAT day and retries. Each pass removes at least one day, so
-/// the loop is bounded by the number of days in the span; `ATTEMPTS` bounds it
-/// again far below that, because a span that needs hundreds of days withheld is
-/// not a span with holes, it is a span with a different defect, and grinding
-/// through it one day at a time would hide that.
-///
-/// # This DECLINES to answer; it does not substitute
-///
-/// The four tests that forbid minute substitution still hold — a hole still
-/// refuses when its day is swept. What changes is that the day is not swept.
-/// Substituting a neighbouring minute would answer the question with the wrong
-/// bar; withholding declines to answer it, and the caller is handed the list so
-/// the report can say which days were dropped and why. §4: degrade loudly.
-fn exact_minute_withholding_unsourceable_days(
-    root: &std::path::Path,
-    vendor: brutex_core::vendor::Vendor,
-    underlying: &str,
-    span: ((u16, u8), (u16, u8)),
-    bars: &mut Vec<indicators::Candle>,
-) -> Result<(stored::ExactMinuteContext, Vec<i64>), String> {
-    /// A span needing more than this withheld is a different defect.
-    const ATTEMPTS: usize = 64;
-    let (from, to) = span;
-    let mut dropped: Vec<i64> = Vec::new();
-    for _ in 0..ATTEMPTS {
-        match stored::load_exact_minute_context(root, vendor, underlying, (from, to), bars) {
-            Ok(context) => return Ok((context, dropped)),
-            Err(why) => {
-                // THE TIMESTAMP THE REFUSAL ALREADY CARRIES. Read from the
-                // rendered refusal rather than a typed field because
-                // `load_exact_minute_context` returns a `String` and widening
-                // that signature reaches every caller; the marker is the
-                // variant's own field name, which is part of the message this
-                // function exists to answer.
-                let Some(ts) = unsourceable_minute(&why) else {
-                    return Err(why);
-                };
-                let day = indicators::ist_day(ts);
-                // EVERY DIAGNOSIS LEADS ITS MESSAGE, because `one_rung` reports
-                // `first_line(why)` and the overlay's own refusal already
-                // contains a newline. Appending the reason put it on line two,
-                // where the report drops it -- so the operator saw the raw
-                // `MissingClosingMinute` and no word of what this loop decided.
-                if dropped.contains(&day) {
-                    // The same day twice means withholding it did not remove the
-                    // bar that needed it -- a different defect wearing this one's
-                    // message, and looping on it would spin.
-                    return Err(format!(
-                        "IST day {day} recurred after being withheld, so this is not \
-                         a missing-minute hole: the overlay still cannot source a \
-                         close on a day whose bars were removed. Nothing was swept. \
-                         Underlying: {why}"
-                    ));
-                }
-                dropped.push(day);
-                let (kept, _removed) = crate::minute_gaps::withhold(bars, &[day]);
-                if kept.len() == bars.len() {
-                    return Err(format!(
-                        "withholding IST day {day} removed no signal bar, so the \
-                         minute the overlay wants is not on a day this rung sweeps \
-                         -- the two are counting days differently. Nothing was \
-                         swept. Underlying: {why}"
-                    ));
-                }
-                *bars = kept;
-                if bars.is_empty() {
-                    return Err(format!(
-                        "withholding every unsourceable day left no bars at all \
-                         after {} day(s), so there is nothing to sweep. \
-                         Underlying: {why}",
-                        dropped.len()
-                    ));
-                }
-            }
-        }
-    }
-    Err(format!(
-        "the exact-minute overlay still could not be sourced after withholding \
-         {ATTEMPTS} day(s). A span needing more than that is not a span with \
-         holes. Nothing was swept."
-    ))
-}
-
 /// Builds the anchored column, WITHHOLDING each day whose close cannot be
 /// sourced.
 ///
@@ -942,62 +837,54 @@ fn exact_minute_withholding_unsourceable_days(
 ///
 /// It DECLINES rather than substitutes: the tests forbidding minute
 /// substitution still hold, and a hole still refuses when its day is swept.
-/// What changes is that the day is not swept, and every withheld day is emitted
-/// as telemetry so a smaller sample is never a silent one.
-fn column_withholding_unsourceable_days(
-    root: &std::path::Path,
-    vendor: brutex_core::vendor::Vendor,
-    underlying: &str,
-    span: ((u16, u8), (u16, u8)),
-    bars: &mut Vec<indicators::Candle>,
-    signal_length: i64,
-    // `&str`, NOT `&'static str`. `audit_range_inner` takes its rung from the
-    // command line, so it is borrowed rather than one of `EVERY_RUNG`'s
-    // literals — and this only ever reads it to label an event.
-    rung: &str,
-) -> Result<(indicators::column::Column, [u8; 32]), String> {
-    let commit = commit_stamp().ok_or_else(|| {
-        "the build has no verified commit stamp; no stored condition preparation will run"
-            .to_owned()
-    })?;
-    column_withholding_at_build(
-        root,
-        vendor,
-        underlying,
-        span,
-        bars,
-        signal_length,
-        StoredPreparationBuild { rung, commit },
-    )
-}
-
-#[derive(Clone, Copy)]
-struct StoredPreparationBuild<'a> {
-    rung: &'a str,
-    commit: &'a str,
-}
-
+/// What changes is that the day is not swept, and every withheld day is handed
+/// back so the caller names it: a smaller sample is never a silent one.
+///
+/// # One read of each context span, whatever the passes (D-1840)
+///
+/// The daily and one-minute context SPANS do not depend on which days are
+/// withheld; only the contexts derived from them do. Both spans are read once,
+/// through `share`, and every pass derives its contexts from those held bars.
+/// The contexts of the pass that built are handed back with the column, so the
+/// caller sweeps exactly the bytes the preparation digest names and reads
+/// neither span again. o1cli-3, o1cli-4.
 fn column_withholding_at_build(
-    root: &std::path::Path,
-    vendor: brutex_core::vendor::Vendor,
-    underlying: &str,
-    span: ((u16, u8), (u16, u8)),
+    at: StoredSpanAt<'_>,
     bars: &mut Vec<indicators::Candle>,
     signal_length: i64,
     build: StoredPreparationBuild<'_>,
-) -> Result<(indicators::column::Column, [u8; 32]), String> {
+    share: &SpanShare,
+) -> Result<PreparedColumn, String> {
     /// A span needing more than this withheld is a different defect.
     const ATTEMPTS: usize = 64;
+    let StoredSpanAt {
+        root,
+        vendor,
+        underlying,
+        span: (from, to),
+    } = at;
     let StoredPreparationBuild { rung, commit } = build;
-    let (from, to) = span;
-    let mut dropped: Vec<i64> = Vec::new();
+    let warm = (stored::previous_month(from)?, to);
+    let mut withheld: Vec<i64> = Vec::new();
     // ONCE, outside the retry loop: the verdict is a property of the key and
     // does not change when a day is withheld.
     let availability = stored::vwap_availability(&stored::swept_index(underlying)?);
     for _ in 0..ATTEMPTS {
-        let daily = stored::load_daily_context(root, vendor, underlying, (from, to), bars)?;
-        let exact = stored::load_exact_minute_context(root, vendor, underlying, (from, to), bars)?;
+        // THE DAILY SPAN, THEN ITS CONTEXT, THEN THE MINUTE SPAN AND ITS
+        // CONTEXT: the order the two whole loads refused in before D-1840.
+        // The share reads each span on its first request and answers every
+        // later pass from the held bars.
+        let daily = stored::daily_context_from_span(
+            share.span(at.of("1day", warm))?.as_ref().clone(),
+            bars,
+        )?;
+        let exact = stored::exact_minute_context_from_span(
+            share.span(at.of("1min", warm))?.as_ref().clone(),
+            bars,
+        )?;
         let digest = stored_anchored_digest(bars, &exact, &daily)?;
+        #[cfg(test)]
+        COLUMN_BUILDS.with(|builds| builds.set(builds.get().saturating_add(1)));
         let attempt =
             preparation_attempt_with_commit(root, vendor, underlying, rung, digest, commit)?;
         let folded = stored_anchored_column(bars, &daily, &exact, signal_length, availability);
@@ -1008,29 +895,26 @@ fn column_withholding_at_build(
         })?;
         match folded {
             Ok(column) => {
-                if !dropped.is_empty() {
-                    note(
-                        &telemetry::Event::info("cli.audit", "exact-minute days withheld")
-                            .with("rung", rung)
-                            .with("days", u64::try_from(dropped.len()).unwrap_or(u64::MAX))
-                            .with("feed", vendor.as_str())
-                            .with("underlying", underlying),
-                    );
-                }
-                return Ok((column, digest));
+                return Ok(PreparedColumn {
+                    column,
+                    digest,
+                    exact,
+                    daily,
+                    withheld,
+                });
             }
             Err(why) => {
                 let Some(ts) = unsourceable_minute(&why) else {
                     return Err(why);
                 };
                 let day = indicators::ist_day(ts);
-                if dropped.contains(&day) {
+                if withheld.contains(&day) {
                     return Err(format!(
                         "IST day {day} recurred after being withheld, so this is not \
                          a missing-minute hole. Nothing was swept. Underlying: {why}"
                     ));
                 }
-                dropped.push(day);
+                withheld.push(day);
                 let (kept, _removed) = crate::minute_gaps::withhold(bars, &[day]);
                 if kept.len() == bars.len() {
                     return Err(format!(
@@ -1044,7 +928,7 @@ fn column_withholding_at_build(
                     return Err(format!(
                         "withholding {} unsourceable day(s) left no bars at all, so \
                          there is nothing to sweep. Underlying: {why}",
-                        dropped.len()
+                        withheld.len()
                     ));
                 }
             }
@@ -1052,9 +936,109 @@ fn column_withholding_at_build(
     }
     Err(format!(
         "the anchored column still could not be built after withholding \
-         {ATTEMPTS} day(s): {dropped:?}. A span needing more than that is not a \
+         {ATTEMPTS} day(s): {withheld:?}. A span needing more than that is not a \
          span with holes. Nothing was swept."
     ))
+}
+
+#[derive(Clone, Copy)]
+struct StoredPreparationBuild<'a> {
+    rung: &'a str,
+    commit: &'a str,
+}
+
+/// Where a stored preparation reads: the store, the feed, the instrument and
+/// the signal months.
+#[derive(Clone, Copy)]
+struct StoredSpanAt<'a> {
+    root: &'a std::path::Path,
+    vendor: Vendor,
+    underlying: &'a str,
+    span: ((u16, u8), (u16, u8)),
+}
+
+impl StoredSpanAt<'_> {
+    /// The share key of `rung` over `months` of this store, feed and instrument.
+    fn of(&self, rung: &'static str, (from, to): ((u16, u8), (u16, u8))) -> SpanAt {
+        SpanAt {
+            root: self.root.to_path_buf(),
+            vendor: self.vendor,
+            underlying: self.underlying.to_owned(),
+            rung,
+            from,
+            to,
+        }
+    }
+}
+
+/// What [`column_withholding_at_build`] hands back: the column, the digest of
+/// the inputs it was built from, those inputs themselves, and the IST days it
+/// withheld to build it. D-1840.
+struct PreparedColumn {
+    column: indicators::column::Column,
+    digest: [u8; 32],
+    exact: stored::ExactMinuteContext,
+    daily: stored::DailyContext,
+    withheld: Vec<i64>,
+}
+
+/// One stored span read: which store, feed, instrument, rung and months.
+#[derive(Clone, PartialEq, Eq)]
+struct SpanAt {
+    root: std::path::PathBuf,
+    vendor: Vendor,
+    underlying: String,
+    rung: &'static str,
+    from: (u16, u8),
+    to: (u16, u8),
+}
+
+/// The stored spans one command reads that do not depend on the signal rung:
+/// the one-minute execution series and the one-day and one-minute context
+/// spans. D-1840, o1cli-3.
+///
+/// Every rung of an all-rungs command executes on the same one-minute series
+/// and derives its contexts from the same daily and minute months, so each was
+/// read once per rung, and the minute ones once per build pass besides. A
+/// share reads each span the first time any rung asks and hands every later
+/// ask the same bytes, refusal included. It holds at most the three spans one
+/// command names, so its lookup is a scan of at most three keys.
+#[derive(Default)]
+struct SpanShare {
+    held: std::sync::Mutex<Vec<(SpanAt, SharedSpan)>>,
+}
+
+/// One span a [`SpanShare`] read, or why it could not be read.
+type SharedSpan = Result<std::sync::Arc<stored::Span>, stored::Refusal>;
+
+impl SpanShare {
+    /// The span at `at`, read on the first ask and held for every later one.
+    ///
+    /// The lock is held across the read, so two rungs asking at once read it
+    /// once: the second waits for the bytes it would otherwise read itself.
+    fn span(&self, at: SpanAt) -> SharedSpan {
+        let mut held = self
+            .held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((_, span)) = held.iter().find(|(key, _)| *key == at) {
+            return span.clone();
+        }
+        #[cfg(test)]
+        SHARED_SPAN_READS.with(|reads| reads.set(reads.get().saturating_add(1)));
+        let span = stored::load_span(&at.root, at.vendor, &at.underlying, at.rung, at.from, at.to)
+            .map(std::sync::Arc::new);
+        held.push((at, span.clone()));
+        span
+    }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// Test-only: stored spans a [`SpanShare`] read on this thread. D-1840.
+    static SHARED_SPAN_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Test-only: passes of [`column_withholding_at_build`] on this thread. D-1840.
+    static COLUMN_BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// Records preparation under the same admitted build identity as its caller.
@@ -6748,55 +6732,57 @@ struct AuditInputs {
     /// Signal bars as loaded, before any day was withheld: the event reports it.
     loaded_bars: usize,
     signal_length: i64,
-    execution_bars: Option<stored::Span>,
+    /// Read through the command's [`SpanShare`], so every rung holds the one
+    /// copy. D-1840.
+    execution_bars: Option<std::sync::Arc<stored::Span>>,
     column: Column,
+    /// The digest the column's preparation evidence names; the support probe
+    /// of a derived rung records under it. D-1840.
+    preparation_digest: [u8; 32],
     exact_minute: stored::ExactMinuteContext,
+    /// The IST days the column build withheld because no stored minute ended
+    /// at a signal bar's close on them. D-1840.
     unsourceable: Vec<i64>,
     daily: stored::DailyContext,
     executed_digest: [u8; 32],
 }
 
-/// The inputs of the last stored range audit, or its refusal, and the raw
-/// signal span `one_rung` reads first. D-1557.
+/// The inputs of the last stored range audit, or its refusal, and the spans
+/// its command shares across rungs. D-1557, D-1840.
 ///
 /// A refusal is held too, as [`ScreenCache`] holds one: every step over a span
 /// that cannot be prepared refuses with the same reason each step's own load
 /// gave before.
+///
+/// `one_rung` read the raw signal span into a second slot before the kernel
+/// read it again; it now asks [`AuditCache::inputs`] for the one preparation
+/// both use, so that slot is gone. o1cli-2, D-1840.
 #[derive(Default)]
 struct AuditCache {
     held: Option<(AuditKey, Result<AuditInputs, stored::Refusal>)>,
-    raw: Option<(AuditKey, Result<stored::Span, stored::Refusal>)>,
+    share: std::sync::Arc<SpanShare>,
 }
 
 impl AuditCache {
+    /// A cache whose rung-independent spans come from `share`, which the
+    /// other rungs of the same command hold too. D-1840.
+    fn sharing(share: std::sync::Arc<SpanShare>) -> Self {
+        Self { held: None, share }
+    }
+
     /// The held inputs for `key`, loading them first unless `key` is the one held.
     fn inputs(
         &mut self,
         key: AuditKey,
-        load: impl FnOnce() -> Result<AuditInputs, stored::Refusal>,
+        load: impl FnOnce(&SpanShare) -> Result<AuditInputs, stored::Refusal>,
     ) -> Result<&AuditInputs, stored::Refusal> {
         if self.held.as_ref().is_none_or(|(held, _)| *held != key) {
-            self.held = Some((key, load()));
+            self.held = Some((key, load(&self.share)));
         }
         match &self.held {
             Some((_, Ok(inputs))) => Ok(inputs),
             Some((_, Err(why))) => Err(why.clone()),
             None => Err("the audit input cache holds nothing after a load".to_owned()),
-        }
-    }
-    /// The raw signal span for `key`, loading it first unless `key` is held.
-    fn raw(
-        &mut self,
-        key: AuditKey,
-        load: impl FnOnce() -> Result<stored::Span, stored::Refusal>,
-    ) -> Result<&stored::Span, stored::Refusal> {
-        if self.raw.as_ref().is_none_or(|(held, _)| *held != key) {
-            self.raw = Some((key, load()));
-        }
-        match &self.raw {
-            Some((_, Ok(span))) => Ok(span),
-            Some((_, Err(why))) => Err(why.clone()),
-            None => Err("the raw span cache holds nothing after a load".to_owned()),
         }
     }
 }
@@ -6805,8 +6791,6 @@ impl AuditCache {
 std::thread_local! {
     /// Test-only: how many times this thread prepared a range audit's inputs. D-1557.
     static AUDIT_INPUT_LOADS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-    /// Test-only: how many times this thread loaded `one_rung`'s raw span. D-1557.
-    static RUNG_SPAN_LOADS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// [`audit_range_kernel_cached`] with a fresh cache: one audit, one load.
@@ -6825,10 +6809,26 @@ fn load_audit_inputs(
     rung: &str,
     (from, to): ((u16, u8), (u16, u8)),
     commit: &'static str,
+    share: &SpanShare,
 ) -> Result<AuditInputs, stored::Refusal> {
     #[cfg(test)]
     AUDIT_INPUT_LOADS.with(|loads| loads.set(loads.get().saturating_add(1)));
-    let mut span = stored::load_span(root, vendor, underlying, rung, from, to)?;
+    let at = StoredSpanAt {
+        root,
+        vendor,
+        underlying,
+        span: (from, to),
+    };
+    // A `1min` SIGNAL IS THE EXECUTION SERIES EVERY OTHER RUNG READS, so it
+    // comes through the share too; it is copied because withholding edits it.
+    let mut span = if rung == EXECUTION_RUNG {
+        share
+            .span(at.of(EXECUTION_RUNG, (from, to)))?
+            .as_ref()
+            .clone()
+    } else {
+        stored::load_span(root, vendor, underlying, rung, from, to)?
+    };
     let loaded_bars = span.bars.len();
 
     let signal_length = stored::rung_length_micros(rung)?;
@@ -6853,7 +6853,9 @@ fn load_audit_inputs(
     let execution_bars = if rung == EXECUTION_RUNG {
         None
     } else {
-        match stored::load_span(root, vendor, underlying, EXECUTION_RUNG, from, to) {
+        // THE SAME SERIES FOR EVERY RUNG, so it is read through the share: an
+        // all-rungs command reads it once, not once per rung. D-1840, o1cli-3.
+        match share.span(at.of(EXECUTION_RUNG, (from, to))) {
             Ok(exec) => Some(exec),
             // A REFUSAL HERE STOPS THE RUN. It would be easy to fall back to
             // executing on the signal rung and print a note, and that is exactly
@@ -6926,33 +6928,28 @@ fn load_audit_inputs(
     // identical `MissingClosingMinute`. Guarding only the first left the
     // symptom exactly as it was, which is how a correct fix looked like no fix
     // at all.
-    let (column, preparation_digest) = column_withholding_at_build(
-        root,
-        vendor,
-        underlying,
-        (from, to),
+    let PreparedColumn {
+        column,
+        digest: preparation_digest,
+        exact: exact_minute,
+        daily,
+        withheld: unsourceable,
+    } = column_withholding_at_build(
+        at,
         &mut span.bars,
         signal_length,
         StoredPreparationBuild { rung, commit },
+        share,
     )?;
-    // REBUILT FROM THE SURVIVING BARS. The helper above may have withheld days,
-    // and both of these are keyed to the bars -- reading them from before it ran
-    // would describe a span the column no longer has.
-    let (exact_minute, unsourceable) = exact_minute_withholding_unsourceable_days(
-        root,
-        vendor,
-        underlying,
-        (from, to),
-        &mut span.bars,
-    )?;
-    let daily = stored::load_daily_context(root, vendor, underlying, (from, to), &span.bars)?;
-
-    if stored_anchored_digest(&span.bars, &exact_minute, &daily)? != preparation_digest {
-        return Err(
-            "stored preparation inputs changed before audit identity publication; no search ran"
-                .to_owned(),
-        );
-    }
+    // THE CONTEXTS THE COLUMN WAS BUILT FROM, NOT A SECOND READ OF THEM.
+    //
+    // Both contexts were read again here, re-digested, and compared with the
+    // preparation digest. That compare could only catch a store that changed
+    // between the two reads, and the second read was what the sweep then used.
+    // Now the sweep uses the very contexts the preparation digest names, so
+    // the identity published below binds the bytes swept by construction, and
+    // the days the build withheld are the days this page names. D-1840,
+    // o1cli-4.
     let execution_slice = execution.map_or(span.bars.as_slice(), |exec| exec.bars);
     let executed_digest =
         stored_executed_digest(&span.bars, &exact_minute, &daily, execution_slice)?;
@@ -6962,6 +6959,7 @@ fn load_audit_inputs(
         signal_length,
         execution_bars,
         column,
+        preparation_digest,
         exact_minute,
         unsourceable,
         daily,
@@ -7003,6 +7001,7 @@ fn audit_range_kernel_cached(
         unsourceable,
         daily,
         executed_digest,
+        ..
     } = cache.inputs(
         AuditKey {
             root: root.clone(),
@@ -7012,7 +7011,7 @@ fn audit_range_kernel_cached(
             span: (from, to),
             commit: commit.to_owned(),
         },
-        || load_audit_inputs(&root, vendor, underlying, rung, (from, to), commit),
+        |share| load_audit_inputs(&root, vendor, underlying, rung, (from, to), commit, share),
     )?;
     let signal_length = *signal_length;
     note(
@@ -13683,20 +13682,50 @@ fn one_rung_cached(ask: RungAsk<'_>, store: RungStore, cache: &mut AuditCache) -
             };
         }
     };
+    // THE KERNEL'S OWN PREPARATION, ASKED FOR HERE AND HELD FOR IT. D-1840,
+    // o1cli-2.
+    //
+    // This read the raw signal span into a slot of its own, and, when no
+    // support was named, built a second anchored column from it to size the
+    // probe; the kernel then read the span and built the column again. Both
+    // halves now ask the one cache for the one preparation: the facts below,
+    // the probe's column and the sweep all read the same held inputs, so a
+    // rung reads its span and builds its column once.
+    let Some(commit) = store.commit else {
+        // AN UNSTAMPED BUILD CANNOT RECORD, but a damaged or missing source is
+        // still named first, as the raw read named it before D-1840: the span
+        // is read for its refusal and its holes, and nothing is prepared.
+        return match stored::load_span(&root, vendor, underlying, rung, from, to) {
+            Ok(span) => RungRow {
+                rung,
+                outcome: Err(first_line(unstamped_audit_refusal())),
+                missing: span.missing,
+                excluded: span.excluded,
+                retention: None,
+                validation: None,
+            },
+            Err(why) => RungRow {
+                rung,
+                outcome: Err(first_line(why)),
+                missing: Vec::new(),
+                excluded: stored::CalendarExclusion::none(),
+                retention: None,
+                validation: None,
+            },
+        };
+    };
     let key = AuditKey {
         root: root.clone(),
         vendor,
         underlying: underlying.to_owned(),
         rung: rung.to_owned(),
         span: (from, to),
-        commit: store.commit.unwrap_or_default().to_owned(),
+        commit: commit.to_owned(),
     };
-    let span = match cache.raw(key, || {
-        #[cfg(test)]
-        RUNG_SPAN_LOADS.with(|loads| loads.set(loads.get().saturating_add(1)));
-        stored::load_span(&root, vendor, underlying, rung, from, to)
+    let inputs = match cache.inputs(key, |share| {
+        load_audit_inputs(&root, vendor, underlying, rung, (from, to), commit, share)
     }) {
-        Ok(span) => span,
+        Ok(inputs) => inputs,
         Err(why) => {
             return RungRow {
                 rung,
@@ -13710,12 +13739,14 @@ fn one_rung_cached(ask: RungAsk<'_>, store: RungStore, cache: &mut AuditCache) -
             };
         }
     };
-    let bars = span.bars.len();
-    // KEPT BEFORE THE SPAN IS CONSUMED, so the table can name the holes.
-    let missing = span.missing.clone();
+    // THE SIGNAL BARS AS READ, before any day was withheld: what the raw read
+    // counted before D-1840.
+    let bars = inputs.loaded_bars;
+    // KEPT SO THE TABLE CAN NAME THE HOLES.
+    let missing = inputs.span.missing.clone();
     // KEPT FOR THE SAME REASON, and it is `Copy`, so this costs a memcpy of a
     // nine-bool array and a u64 rather than a clone.
-    let excluded = span.excluded;
+    let excluded = inputs.span.excluded;
     // DERIVED FROM THIS RUNG'S OWN BARS WHEN NOBODY NAMES A SUPPORT.
     //
     // `None` is not a default hiding in an `Option`; it is the ABSENCE of a
@@ -13806,69 +13837,17 @@ fn one_rung_cached(ask: RungAsk<'_>, store: RungStore, cache: &mut AuditCache) -
     let min_hits = if named_ppm.is_some() {
         statistical
     } else {
-        // A NAMED SUPPORT READS ONLY THE THREE FACTS ABOVE, so a descent's held
-        // span is never copied; the derivation withholds days from its own
-        // copy, as it always withheld them from its own load. D-1557.
-        let mut span = span.clone();
-        // THE DAILY CONTEXT AND THE OVERLAY ARE LOADED INSIDE
-        // `column_withholding_unsourceable_days`, not here.
-        //
-        // Both are keyed to the SURVIVING bars, so a day withheld between
-        // attempts changes both. Loading them once out here and reusing them
-        // across rebuilds would describe a span the column no longer has — and
-        // would pay for a full minute-series load twice besides.
-        let signal_length = match stored::rung_length_micros(rung) {
-            Ok(length) => length,
-            Err(why) => {
-                return RungRow {
-                    rung,
-                    outcome: Err(first_line(why)),
-                    missing: Vec::new(),
-                    excluded: stored::CalendarExclusion::none(),
-                    retention: None,
-                    validation: None,
-                };
-            }
-        };
-        // THE REFUSAL IS HERE, NOT AT THE LOAD, and that distinction cost two
-        // wrong fixes.
-        //
-        // `MissingClosingMinute` is raised by `overlay_exact_minute_orb_and_gapfib`
-        // INSIDE `stored_anchored_column` — the overlay LOADS fine and the
-        // column build is what cannot source a signal bar's close. Withholding
-        // around `load_exact_minute_context` therefore changed nothing: that
-        // call had already succeeded.
-        //
-        // MEASURED: one absent minute refused 15min, 10min, 5min, 3min, 2min and
-        // 1min in under half a second each, on every run today. 60min survived
-        // only because no 60-minute bar happened to close on that minute.
-        //
-        // So the day the refusal NAMES is withheld and the column rebuilt. The
-        // overlay and the daily context are rebuilt too, because both are keyed
-        // to the surviving bars — reusing them would describe a span the column
-        // no longer has.
-        let (column, digest) = match column_withholding_unsourceable_days(
+        // THE PROBE SIZES THE COLUMN THE SWEEP WILL READ. It built its own
+        // from the raw span, before the kernel withheld any holed day, and
+        // recorded under that column's digest; it now reads the kernel's held
+        // column, span and preparation digest, so the threshold is measured on
+        // exactly the bars the sweep runs over. D-1840, o1cli-2.
+        match affordable_min_hits(
+            &inputs.column,
             &root,
-            vendor,
-            underlying,
-            (from, to),
-            &mut span.bars,
-            signal_length,
-            rung,
+            &inputs.span,
+            inputs.preparation_digest,
         ) {
-            Ok(column) => column,
-            Err(why) => {
-                return RungRow {
-                    rung,
-                    outcome: Err(first_line(why)),
-                    missing: Vec::new(),
-                    excluded: stored::CalendarExclusion::none(),
-                    retention: None,
-                    validation: None,
-                };
-            }
-        };
-        match affordable_min_hits(&column, &root, &span, digest) {
             Ok(affordable) => affordable.max(statistical),
             Err(why) => {
                 return RungRow {
@@ -15589,15 +15568,27 @@ fn sweep_rungs(
 ) -> Vec<RungRow> {
     let (from, to) = span;
     let _sharing = SharedBy::these(rungs.len());
+    // ONE SHARE FOR EVERY RUNG OF THE COMMAND: the one-minute execution series
+    // and the daily and minute context spans are the same months for each, so
+    // the first rung to ask reads them and the rest are handed the same
+    // bytes. D-1840, o1cli-3.
+    let share = std::sync::Arc::new(SpanShare::default());
     ordered::map(rungs, |&rung| {
-        one_rung(
-            vendor_word,
-            underlying,
-            rung,
-            from,
-            to,
-            support_ppm,
-            attempt,
+        one_rung_cached(
+            RungAsk {
+                vendor_word,
+                underlying,
+                rung,
+                from,
+                to,
+                support_ppm,
+                attempt,
+            },
+            RungStore {
+                root: store_root(),
+                commit: commit_stamp(),
+            },
+            &mut AuditCache::sharing(std::sync::Arc::clone(&share)),
         )
     })
     .unwrap_or_else(|why| {

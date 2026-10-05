@@ -7,6 +7,8 @@
 //! holds `docs/06-limits.md` to the code: the section must state both costs,
 //! and the calls it describes must still be where it says, so the day the
 //! span is threaded through, this fails and the limit is withdrawn with it.
+//!
+//! Since D-1840 the span is threaded through: this file now holds the fix.
 
 #![allow(
     clippy::expect_used,
@@ -49,47 +51,45 @@ fn body(head: &str) -> &'static str {
         .expect("its body")
 }
 
-/// THE SECOND LOAD AND BUILD PER RUNG ARE STATED, AND STILL TRUE.
+/// A RUNG READS ITS SPAN AND BUILDS ITS COLUMN ONCE. D-1840.
+///
+/// `one_rung` read the raw span and, for a derived support, built its own
+/// column; the kernel then read and built again. `one_rung_cached` now asks
+/// the kernel's cached preparation and sizes the probe on its column.
 #[test]
-fn a_rungs_second_load_and_build_are_stated_and_still_paid() {
+fn a_rung_reads_its_span_and_builds_its_column_once() {
     let limit =
         limit("## A rung loads its span twice and may build its column twice (audit o1cli-2)");
     for sentence in [
-        "`one_rung` loads the rung's span with `stored::load_span`",
-        "the audit kernel `audit_range_kernel` then loads the same span again",
-        "When no support is named, the column is also built twice",
-        "`column_withholding_unsourceable_days` for `affordable_min_hits`, then `column_withholding_at_build`",
-        "two span loads per rung always, and two column builds",
-        "O(rung bars) each",
+        "Fixed by D-1840",
+        "asks the kernel's own preparation through `AuditCache::inputs`",
+        "`rungs_share_their_reads_and_build_their_column_once`",
     ] {
         assert!(
             limit.contains(sentence),
             "the limit must say: {sentence}\n{limit}"
         );
     }
-    // D-1557: `one_rung` is `one_rung_cached` with a fresh cache.
     let rung = body("\nfn one_rung_cached(");
-    for call in [
-        "stored::load_span(",
-        "column_withholding_unsourceable_days(",
-        "affordable_min_hits(",
-        "audit_range_cached(",
-    ] {
-        assert!(
-            rung.contains(call),
-            "`one_rung` no longer calls {call}: update the limit"
-        );
-    }
     assert!(
-        rung.find("stored::load_span(") < rung.find("named_ppm.is_some()"),
-        "the span is loaded before the named-support branch, so even a named support pays the first load"
+        !rung.contains("stored::load_span("),
+        "the rung reads its own span again"
     );
-    // D-1557: the kernel's loads moved into its cached loader.
-    let kernel = body("\nfn load_audit_inputs(");
-    for call in ["stored::load_span(", "column_withholding_at_build("] {
-        assert!(
-            kernel.contains(call),
-            "the kernel no longer calls {call}: update the limit"
-        );
-    }
+    assert!(
+        !rung.contains("column_withholding"),
+        "the rung builds its own column again"
+    );
+    assert!(rung.contains("cache.inputs(") && rung.contains("load_audit_inputs("));
+    let probe = rung
+        .split_once("affordable_min_hits(")
+        .expect("the derived support is still probed")
+        .1;
+    assert!(probe.trim_start().starts_with("&inputs.column,"));
+    assert!(probe.contains("inputs.preparation_digest"));
+    assert!(
+        rung.find("cache.inputs(") < rung.find("named_ppm.is_some()"),
+        "both supports read the one preparation"
+    );
+    assert!(!LIB.contains("\nfn column_withholding_unsourceable_days("));
+    assert!(!LIB.contains("raw: Option<(AuditKey"));
 }

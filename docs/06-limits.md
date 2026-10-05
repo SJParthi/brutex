@@ -11359,9 +11359,22 @@ remains per command is the one read the work itself needs. Held to the code by
   build's contexts back and replacing the re-read with a cheaper
   file-generation check would remove the cost, and is a change to that
   check's guarantee, so it is not made here. Stated from the code's shape;
-  not timed. Held to the code by
-  `the_kernels_second_context_read_is_stated_and_still_paid` in
-  `crates/cli/tests/limits_o1cli_4.rs`.
+  not timed. Its former test was replaced with the fix.
+
+
+**Fixed by D-1840 (2026-10-04).** `column_withholding_at_build` now hands
+back the contexts of the pass that built, with the IST days it withheld, and
+`load_audit_inputs` sweeps exactly those: neither context is read a second
+time and no second digest is taken or compared. The compare could only catch
+a store changed between two reads, and the second read was what the sweep
+used; now the identity binds the bytes swept by construction, as a held
+descent step already did since D-1557. The days the build withheld are named
+on the page's `EXACT-MINUTE HOLES` line, which the removed second loop could
+never fill once the build had succeeded. Counted, not timed:
+`a_build_that_withholds_a_day_reads_nothing_more`. Held to the code by
+`the_kernel_sweeps_the_contexts_its_column_was_built_from` in
+`crates/cli/tests/limits_o1cli_4.rs`; the bullet above describes the code
+before the fix.
 
 ## Parallel rungs each re-read the same one-minute span (audit o1cli-3)
 
@@ -11380,9 +11393,30 @@ remains per command is the one read the work itself needs. Held to the code by
   the read itself does not depend on the rung, and is not done: each context
   is derived from that rung's surviving bars and digested into its
   preparation identity, and sharing the read is a change to that path.
-  Stated from the code's shape; not timed. Held to the code by
-  `the_parallel_rungs_repeated_minute_reads_are_stated_and_still_paid` in
-  `crates/cli/tests/limits_o1cli_3.rs`.
+  Stated from the code's shape; not timed. Its former test was replaced with the fix.
+
+
+**Fixed by D-1840 (2026-10-04).** `sweep_rungs` hands every rung one
+`SpanShare`, and the spans that do not depend on the rung -- the `1min`
+execution series (which is also the `1min` rung's signal), and the `1day` and
+`1min` context spans from the month before -- are read through it: the first
+rung to ask reads each, every later ask is handed the same bytes, refusal
+included. A build pass derives its contexts from the held spans, so a retry
+reads nothing. That is three reads per command of rung-independent
+spans, whatever the rung count or the passes, where it was some 24 to 32.
+Counted, not timed, on the generated month: one derived `5min` rung three
+reads and one build (seven reads and two builds before); `5min` and `1min`
+unshared six reads, shared three, with equal rows; an edge-holed day withheld
+on a second pass and still three reads
+(`rungs_share_their_reads_and_build_their_column_once`,
+`a_build_that_withholds_a_day_reads_nothing_more`). What remains is
+inherent to the question: each coarse rung reads its own signal span once, and the
+`from..to` minute months are read twice per command, once as the execution
+series and once inside the warm context span, which begins a month earlier
+and must exist in full where the execution series may name a hole. Held to
+the code by `the_rungs_of_one_command_read_the_shared_spans_once` in
+`crates/cli/tests/limits_o1cli_3.rs`; the bullet above describes the code
+before the fix.
 
 ## A rung loads its span twice and may build its column twice (audit o1cli-2)
 
@@ -11400,9 +11434,23 @@ remains per command is the one read the work itself needs. Held to the code by
   digest. Since D-1557 both loads go through one `AuditCache` per command
   (`one_rung_cached`, and `load_audit_inputs` for the kernel), so a `descend`
   pays the pair once for its whole ladder, not once per step; a single rung
-  still pays both. Stated from the code's shape; not timed. Held to the code
-  by `a_rungs_second_load_and_build_are_stated_and_still_paid` in
-  `crates/cli/tests/limits_o1cli_2.rs`.
+  still pays both. Stated from the code's shape; not timed. Its former test was replaced with the fix.
+
+
+**Fixed by D-1840 (2026-10-04).** `one_rung_cached` reads no span and builds
+no column of its own: it asks the kernel's own preparation through
+`AuditCache::inputs`, takes the bar count, missing months and calendar
+exclusion from it, and sizes a derived support's probe on the kernel's
+column, span and preparation digest. The kernel then finds the preparation
+held. A rung reads its span once and builds its column once, named or derived
+support alike. The probe now measures the column the sweep runs over, which
+withholds the measured holed days first; before, it measured an unwithheld
+copy. An unstamped build, which cannot record, reads the signal span alone so
+a damaged or missing source is still named first, and prepares nothing.
+Counted, not timed: `rungs_share_their_reads_and_build_their_column_once`.
+Held to the code by `a_rung_reads_its_span_and_builds_its_column_once` in
+`crates/cli/tests/limits_o1cli_2.rs`; the bullet above describes the code
+before the fix.
 
 ## Condition names resolve through a compile-time index (audit o1engine-24)
 
