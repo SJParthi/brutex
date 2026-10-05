@@ -11817,7 +11817,7 @@ rule 6); every bound is read from the source.
   answer is a function of the snapshot), and a repeat request is one memo
   probe and a copy. Refusals are never kept, and a name the feed's census does
   not hold is never kept, so request text cannot grow the memo. Proved by
-  `api::server::tests::calendar_json_is_built_once_per_snapshot`.
+  `api::server::census_request_tests::calendar_json_is_built_once_per_snapshot`.
 * **W1-api5-6 — `store_html` with a filter.** With `kind=`, `symbol=`,
   `from=` or `to=`, `census::filtered` walks every entry and copies the kept
   ones: O(E). Unfiltered it borrows and pays O(page). **Since D-2289 the walk
@@ -12666,15 +12666,22 @@ not:
 
 ## Pull decode memory, CSV reservation and rate reservations — D-1203, 2 October 2026
 
-- **`http::decode_body` builds a whole `serde_json::Value` tree, and its peak
-  memory is UNMEASURED.** o1api-33. The tree, the body and the decoded columns
-  are alive together. A `Value` node is 32 bytes on this build
+- **`http::decode_body` builds a whole `serde_json::Value` tree; its peak
+  memory is MEASURED since D-2291.** o1api-33. The tree, the body and the
+  decoded columns are alive together. A `Value` node is 32 bytes on this build
   (`the_json_tree_is_thirty_two_bytes_a_node` pins it) against as few as two
-  bytes of text per array element, so the tree can reach about 16× the body,
-  more while an array's vector doubles, under the 64 MiB `MAX_RESPONSE_BYTES`
-  cap. That is an argued bound and a labelled one: no allocator was counted and
-  no peak was taken. The typed or streaming decode that would remove the tree
-  is not built; the finding stays open on that.
+  bytes of text per array element. A counting allocator
+  (`a_json_decodes_peak_memory_is_measured_against_its_body`,
+  `crates/pull/tests/allocation.rs`) takes the decoding thread's high-water
+  mark above the body: 20,489,303 bytes for a 1,666,062-byte Dhan 34,000-bar
+  chunk (12x), 18,036,440 for a 2,270,041-byte Zerodha answer of the same
+  size (7x), and 34,555,384 for 2,000,010 bytes of one array of zeros, the
+  cheapest text per node (17x), so about 1.1 GiB at the 64 MiB
+  `MAX_RESPONSE_BYTES` cap. Allocation sizes are the same on every machine and
+  in debug and release, so the test holds ceilings one step above each figure.
+  Bytes asked of the allocator: its per-block overhead is not counted. The
+  typed or streaming decode that would remove the tree is not built; the
+  finding is measured, not removed.
 - **`csv::decode` counts the body's newlines once before decoding.** o1api-34.
   One extra linear pass over bytes already in memory, the same order as the
   decode pass, buys one reservation of `min(newlines + 1, MAX_ROWS)` rows and
@@ -15200,7 +15207,7 @@ per-candidate primitive from `CLAUDE.md` §3 rule 4.
 
 ## Documented costs re-examined: removed, or inherent and measured — D-2290, 4 October 2026
 
-Every cost below was re-checked against the source at fc6dbb9. Ten were
+Every cost below was re-checked against the source this change started from. Ten were
 removed (D-2280 to D-2289, in the bullets of their own sections above). The
 rest stay, and each one says why removing it would remove a guarantee or
 change the answer, not only the cost. **The figures are one machine's, taken
@@ -15227,11 +15234,22 @@ of this build on this box, labelled as such, not budgets a gate holds.
 | W3-engine1-1 | each level is sorted, O(F log F) | Canonical order is what makes a sweep's output byte-identical across runs (§3 rule 5) and what the prefix join walks; the sort is per level, not one of rule 4's five per-operation primitives | not timed here |
 | W3-engine1-2, o1engine-20 | `keep::Best::offer` admits in O(log cap) | It has no production caller (`engine/tests/production_callers.rs` fails the day one appears), so no run pays it | none: no caller |
 
-**Not removed and not inherent: o1api-33.** `decode_body` builds a whole
-`serde_json::Value` tree. Its time is O(body), which is inherent (every byte
-is read), but its memory is a constant multiple of the body (argued up to
-about 32×) that a typed or streaming decode would remove. That decode is not
-built in this change; the finding stays open, stated in the section above.
+**Not removed and not inherent, now measured: o1api-33 (D-2291).**
+`decode_body` builds a whole `serde_json::Value` tree. Its time is O(body),
+which is inherent (every byte is read). Its memory is a constant multiple of
+the body that a typed or streaming decode would remove, and that decode is not
+built here; the multiple is now counted by an allocator rather than argued:
+12x for a Dhan chunk, 7x for a Zerodha answer, 17x for the hostile worst case
+(D-1203 section above, `a_json_decodes_peak_memory_is_measured_against_its_body`).
+
+**Re-run after a container restart (D-2291).** The two release harnesses were
+run again from their built binaries on 2026-10-04, same box, other builds
+running: `first_at_or_after` 24.0 µs / 55.4 µs / 12.1 ms; `fstat` 245 ns /
+336 ns / 40.3 µs; cold tail-block read 1.39 µs / 1.87 µs / 105 µs; interior
+block 2.91 µs / 3.70 µs / 132 µs; whole verified month 0.73 ms / 4.81 ms /
+4.81 ms; `Manifest::load` 15,857 entries 5.68 ms / 32.4 ms / 32.4 ms and
+93,776 entries 61.4 ms / 231 ms / 231 ms (n = 60, so p99 is the max). The
+p50s agree with the table; the tails are wider under the heavier load.
 
 **Not costs.** ET-bars-candles-store-3 (an off-session bar is admitted by
 `store` because `store` may not depend on `pull`'s calendar, §5; S-30-session

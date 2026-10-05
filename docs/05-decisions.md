@@ -60550,3 +60550,28 @@ would break, and with a measurement where the cost is a read the store makes
 (scratch release harness, not committed, labelled one machine's figures).
 o1api-33's memory remains open: not inherent, not built here. No stored
 format, digest or result changes.
+
+### D-2291 — A JSON decode's peak memory is counted, and `/indexmap.json`'s memo is proved at the route — 2026-10-04
+
+**Finding (o1api-33, F8b re-check of D-2290).** D-2290 left o1api-33 as the
+one cost neither removed nor shown inherent: `pull::http::decode_body`'s peak
+memory was an argued multiple of the body ("~16x, ~32x with digits") that no
+allocator had counted, and the rule is that a cost that stays is measured.
+The same re-check found D-2287's proof was a file-stamp unit test only;
+nothing drove `/indexmap.json` itself through its memo.
+
+**Decision.** `crates/pull/tests/allocation.rs`'s counting allocator (the one
+unsafe exception, D-0724; no new `unsafe` site) also keeps the bytes live on
+the decoding thread and their peak. The decode's high-water mark above the
+body is 12x for a Dhan 34,000-bar chunk, 7x for a Zerodha answer of the same
+size and 17x for one array of a million zeros, the cheapest text per node; the
+test holds a ceiling one step above each, and `decode_body`'s doc and
+`docs/06-limits.md` state the figures. The tree is still built: a typed or
+streaming decode is not in this change, so o1api-33 is measured, not removed.
+`indexmap_reading` takes the catalogue's path through `indexmap_reading_at` so
+a test can name the file without the environment. No answer changes.
+
+**Proof.** `a_json_decodes_peak_memory_is_measured_against_its_body`
+(`crates/pull/tests/allocation.rs`),
+`api::server::tests::indexmap_json_is_built_once_per_catalogue_stamp_and_parse`.
+AHD-11, AHD-12.

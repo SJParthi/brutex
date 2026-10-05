@@ -19807,6 +19807,53 @@ mod tests {
         assert_eq!(memo.len(), 1, "and the older answers are gone");
     }
 
+    /// **`/indexmap.json` reads the catalogue once per stamp and parse.** A
+    /// repeat on an untouched file builds nothing; a rewrite of the same
+    /// length, a reparse and another feed each build again; a missing file is
+    /// answered 500 every time and never kept. W1-api5-9, W1-api2-7, D-2287.
+    #[test]
+    fn indexmap_json_is_built_once_per_catalogue_stamp_and_parse() {
+        let dir = agreeing("indexmapmemo");
+        let built = site("indexmapmemo", &dir);
+        let memo = &built.indexmap_memo;
+        let file = dir.join("nse_indices.csv");
+        std::fs::write(&file, "index_name,category\nNIFTY 50,broad\n").expect("write");
+        let ask = |feed| indexmap_reading_at(&built, feed, Ok(file.clone()));
+        let first = ask(Vendor::Dhan);
+        assert_eq!(first.0, axum::http::StatusCode::OK, "{first:?}");
+        assert_eq!(ask(Vendor::Dhan), first);
+        assert_eq!(memo.builds(), 1, "the repeat read nothing");
+        let groww = ask(Vendor::Groww);
+        assert_eq!(groww.0, axum::http::StatusCode::OK);
+        assert_eq!(memo.builds(), 2, "another feed is its own answer");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let same_length = "index_name,category\nA,b\nC,d\nEFGH,i\n";
+        assert_eq!(
+            same_length.len(),
+            "index_name,category\nNIFTY 50,broad\n".len()
+        );
+        std::fs::write(&file, same_length).expect("rewrite");
+        let rewritten = ask(Vendor::Dhan);
+        assert_eq!(memo.builds(), 3, "a same-length rewrite reads again");
+        assert_ne!(rewritten, first, "the new bytes are the new answer");
+        assert!(built.reparse(&dir).is_ok(), "the same masters reparse");
+        assert_eq!(ask(Vendor::Dhan), rewritten);
+        assert_eq!(memo.builds(), 4, "a new parse reads again");
+        assert_eq!(memo.len(), 1, "and the older answers are gone");
+        let absent = dir.join("absent.csv");
+        let missing = indexmap_reading_at(&built, Vendor::Dhan, Ok(absent.clone()));
+        assert_eq!(missing.0, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            indexmap_reading_at(&built, Vendor::Dhan, Ok(absent)),
+            missing
+        );
+        assert_eq!(memo.builds(), 4, "an unstamped file is read uncached");
+        assert_eq!(
+            indexmap_reading_at(&built, Vendor::Dhan, Err("no home".to_owned())).0,
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
     /// **A `/store` filter is walked once per census snapshot, and the
     /// unfiltered page never builds a list.** W1-api5-6, D-2289.
     #[test]
@@ -34581,8 +34628,9 @@ async fn indexmap_json(
             no_such_feed_json(&asked),
         );
     };
-    // OFF THE ASYNC WORKERS, AND ADMITTED: the catalogue is read from disk on
-    // every request. W1-api2-11, D-1508.
+    // OFF THE ASYNC WORKERS, AND ADMITTED: a request stamps the catalogue
+    // with one `stat` and reads it from disk only when that stamp or the parse
+    // moved (D-2287). W1-api2-11, D-1508.
     match crate::detail::run_store_read(move || indexmap_reading(&site, feed)).await {
         Ok((status, body)) => (status, [(axum::http::header::CONTENT_TYPE, json)], body),
         Err(why) => {
@@ -34599,6 +34647,21 @@ async fn indexmap_json(
 /// Everything [`indexmap_json`] does once the feed is parsed, on the blocking
 /// pool. D-1508.
 fn indexmap_reading(site: &Site, feed: Vendor) -> (axum::http::StatusCode, String) {
+    indexmap_reading_at(
+        site,
+        feed,
+        masters_dir().map(|dir| dir.join("nse_indices.csv")),
+    )
+}
+
+/// [`indexmap_reading`] over the catalogue at `path`, so a test can name the
+/// file without setting `BRUTEX_MASTERS` in a process running tests in
+/// parallel.
+fn indexmap_reading_at(
+    site: &Site,
+    feed: Vendor,
+    path: Result<std::path::PathBuf, String>,
+) -> (axum::http::StatusCode, String) {
     // THE ANSWER IS KEPT FOR ONE STAMP OF THE CATALOGUE AND ONE PARSE. The read
     // below parses `nse_indices.csv` whole (up to `MAX_CATALOGUE_BYTES`), walks
     // the merged universe (O(U)) and resolves every index symbol against the
@@ -34612,7 +34675,6 @@ fn indexmap_reading(site: &Site, feed: Vendor) -> (axum::http::StatusCode, Strin
     // longer matches, so it is stale for no request. A file that cannot be
     // stamped is read uncached, and a refusal is never kept. W1-api5-9,
     // W1-api2-7, D-2287.
-    let path = masters_dir().map(|dir| dir.join("nse_indices.csv"));
     let stamp = path
         .as_ref()
         .ok()

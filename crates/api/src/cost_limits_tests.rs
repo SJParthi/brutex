@@ -375,7 +375,7 @@ fn w1_api5_9_the_index_map_rereads_its_catalogue_and_walks_the_universe() {
         "{handler}"
     );
     assert!(
-        item(SERVER, "fn indexmap_reading(")
+        item(SERVER, "fn indexmap_reading_at(")
             .contains("site.indexmap_memo.get(&stamp, generation, feed,"),
         "the read serves the kept answer"
     );
