@@ -928,3 +928,26 @@ DPS and DPD.
   text with several spellings (D-3151, D-3155, D-3157); case-sensitive marker
   and alias (D-3152, D-3153); unchecked underlying (D-3156); a drifted index
   document partly skipped (D-3158). Fixed.
+
+Rounds 2 and 3 (2026-10-04 and 2026-10-05) attacked the round 1 fixes and how
+they meet. Each finding failed a test on the commit before it was fixed; the
+tests are named in `docs/04-invariants.md` rows DPR.
+
+- **Receipts and the journal (round 2):** a balanced spot receipt printed a
+  false equation that left out decoder skips, and the journal note did the
+  same (D-3180). Fixed.
+- **Store (round 2):** a rotted last record was blamed on the header (D-3181).
+  Fixed.
+- **Round 2 open items, closed in round 3:** the F&O chain receipt dropped
+  decoder skips (D-3182); a refused cash schedule under-counted the vendor's
+  rows (D-3183); the ingest attack fixture stored every bar x100 and no
+  assertion noticed (D-3184, test only). Fixed.
+- **Static gates (round 3):** undeclared test literals (D-3185), a refused month
+  with no log event (D-3186), a cost claim with no proof (D-3187), MR-04 naming
+  a renamed test (D-3188), and undeclared gate 11 sites (D-3189). Fixed.
+- **Interactions (round 3):** chain pricing called a contradicted index stamp
+  "no index bar" (D-3123); the receipt deduplicated pricing reasons by sentence
+  across contract-months, so one kind hid another (D-3124); a CSV row skipped
+  for negative volume was on no line of a balanced receipt (D-3125); a monthly
+  vendor name listed under two expiries was filed as two contracts (D-3126).
+  Fixed.

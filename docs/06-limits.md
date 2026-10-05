@@ -13188,12 +13188,14 @@ most every key of that body once, so growth is amortised O(1) per key
 and bounded by the response cap, never by the store.
 DATA-PATH ATTACK, DECLARED IN ROUND 3 (D-3189). Two maps arrived with the
 round-1 fixes unsized, and neither can be sized where it is built:
-  pull/chain.rs 1 -- `filed` in `walk` (D-3116), one entry per decoded
-  contract across the whole chain walk. The contract count is known one
-  expiry at a time, so the map starts empty and `filed.reserve(names.len())`
-  grows it once per expiry answer before any insert of that answer: no
-  insert reallocates, and the total is bounded by the vendor's chain,
-  each answer capped at `MAX_RESPONSE_BYTES`, never by the store.
+  pull/chain.rs 1 -> 2 -- `filed` in `month` (D-3116), one entry per
+  decoded contract across the whole chain walk, and `named` (D-3126), one
+  entry per vendor name filed, with the expiry it was first listed under.
+  The contract count is known one expiry at a time, so both maps start
+  empty and `reserve(names.len())` grows each once per expiry answer before
+  any insert of that answer: no insert reallocates, and the total is
+  bounded by the vendor's chain, each answer capped at
+  `MAX_RESPONSE_BYTES`, never by the store.
   pull/pricing.rs 1 -- `ambiguous` in `SpotBook::of` (D-3110), the stamps
   where two index bars disagree. `store::file::BarFile` keeps a month
   strictly ascending, so on every well-formed month the set stays empty

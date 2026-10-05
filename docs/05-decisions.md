@@ -60511,3 +60511,187 @@ calendar, so a Saturday expiry gets a 15:40 close and two extra days of tenor.
 NSE has held Saturday special sessions, and `calendar::kind_of`'s Closed is
 observed, not proven. Pinned in `dpp_tenor_edges` so a change is visible.
 UNVERIFIED until a source is recorded.
+
+### D-3180 — The receipt and the journal name the candles the decoder skipped — 2026-10-04
+
+**Finding.** D-3122 counted decoder-skipped candles into `Ingested::rows_read`
+and made `balances` account for them, but the spot receipt
+(`api::server::landed_answer`) still printed `yes — R read = S stored + F
+folded + D dropped` with no skip term, so a balanced run with skips printed a
+false equation (measured: `480 read = 466 stored + 0 folded + 0 dropped`). The
+journal note from `audit::Record::of_run` said every row was "stored, folded
+or dropped" over a candle that was none of those.
+
+**Decision.** The receipt has a "Candles the decoder skipped" row (the total
+and each reason that fired), and both Balances lines carry `+ N skipped by
+the decoder`. The 256-byte record has no spare field, so a balanced run with
+skips gets the note `every row accounted for; N skipped by the decoder`, which
+fits `NOTE_CAPACITY` for any count. One existing assertion
+(`several_diagnostics_for_one_instrument_are_not_failed_member_counts`) was
+updated to the new wording. DPR-01, DPR-02.
+
+### D-3181 — A rotted last stamp is refused as rot, not as a lying header — 2026-10-04
+
+**Finding.** D-3140 compared the header's `last_ts_micros` with record
+`n_valid - 1`, read without the block verify, and refused a mismatch as
+`LastStampDisagrees`. When the record had rotted and the header was right,
+that named the wrong culprit, and it ran before D-0910's verify of a partly
+covered tail block, so a flipped stamp bit answered "header" in all 320 cases
+tried.
+
+**Decision.** On a mismatch only, the record's block is verified against the
+sidecar first: a failure is `BlockChecksum`, and `LastStampDisagrees` is
+returned only when the block verifies. The extra read is on the refusal path
+only, so for every append that would have committed D-0910's "a full tail
+block is not read" still holds. DPR-03, DPR-04.
+
+### D-3182 — The F&O chain receipt counts and names the candles the decoder skipped — 2026-10-05
+
+**Finding.** `fetch_chain_chunks` summed `body.rows.len()` into
+`FetchedBatch::rows_read`, so the chain receipt and its journal record counted
+only the rows the decoder kept. A contract window with three null candles read
+`rows_read 385` where the vendor sent 388, and the page named no skip. This is
+the class D-3122 and D-3180 closed on the spot path, left open on the chain
+path (round 2 open item 1).
+
+**Decision.** `FetchedBatch` and `FnoLanded` carry the vendor's count (kept
+rows plus skips) and the skips by reason, including for chunks answered before
+a later refusal abandoned the contract. The chain receipt carries the same
+"Candles the decoder skipped" row as the spot receipt. DPR-11, DPR-12.
+
+### D-3183 — A refused cash schedule still counts the candles the decoder skipped — 2026-10-05
+
+**Finding.** When `prepare_cash_schedule` refused, `land_spot` reported
+`rows_read` as the sum of `body.rows.len()` and left `decoder_skips` at zero.
+No receipt claimed balance there, because a failure is pushed, but the
+vendor's row count was low (measured: 360 for 365 offered).
+
+**Decision.** That branch counts through `vendor_count`, kept rows plus skips
+and the skips by reason, the same count `pull::ingest::from_window` makes.
+DPR-13.
+
+### D-3184 — The ingest attack fixture scales prices once — 2026-10-05
+
+**Finding.** `crates/pull/tests/attack_ingest.rs::plan` passed
+`PriceScale::Rupees` over decoder output that is already paisa, so every bar
+those tests stored was x100 (measured: 240000500 stored for a 24000.05 open).
+Every assertion in the file was relative, so all of them passed. Test defect
+only: production uses `pull::http::DECODED_PRICE_SCALE`.
+
+**Decision.** The fixture uses `pull::http::DECODED_PRICE_SCALE`, and
+`the_session_edges_are_kept_or_dropped_by_name_and_the_tally_balances` asserts
+the exact paisa of the 09:15 bar, so the double scale fails a test. DPR-14.
+
+### D-3185 — The attack tests' literals are declared to gate 1d — 2026-10-05
+
+**Finding.** Gate 1d refused 55 segment-shaped literals that arrived with the
+round 1 and round 2 attack tests and two in a `#[cfg(test)]` module of
+`chain.rs`.
+
+**Decision.** Each was read where it sits and declared in
+`.github/gates_tree.rs` as group `ATTACK_LITERAL`, with the reason per kind:
+malformed contract names, hostile price and volume cells, malformed dates,
+scratch names, and assertion substrings. None is a path segment.
+
+### D-3186 — A month the store refuses is logged beside its failure — 2026-10-05
+
+**Finding.** Gate 19: D-3120's per-month refusal in `pull::ingest` pushed a
+`Failure` and emitted no event, so `/logs` was quiet for a month that did not
+land.
+
+**Decision.** The refusal calls `note_not_filed` at `Error` with stage `month
+append` before the failure is pushed.
+
+### D-3187 — The fold cost test names its own file as proof — 2026-10-05
+
+**Finding.** Gate 12: `fold_cost_per_input_bar_is_flat` makes a cost claim
+("flat") and named no proof.
+
+**Decision.** The doc names `crates/pull/tests/attack_fold.rs`, the
+measurement itself.
+
+### D-3188 — MR-04 is restated as reversed by D-3158 — 2026-10-05
+
+**Finding.** Gate 10: invariant MR-04 named
+`an_index_document_with_a_non_string_name_skips_it_rather_than_refusing`,
+which D-3158 renamed when it reversed the behaviour.
+
+**Decision.** The row is kept with its old statement struck through, the
+reversal stated, and the proof pointed at
+`an_index_document_with_a_non_string_name_or_a_non_list_value_refuses`. No row
+was deleted.
+
+### D-3189 — Gate 11's allowlists declare the round 1 and round 2 sites — 2026-10-05
+
+**Finding.** Gate 11 refused five new float sites in `greeks` (bsm 37,
+moneyness 9, solver 15), two in `pull::pricing` (24), two unsized maps
+(`chain.rs` `filed`, `pricing.rs` `ambiguous`), two hash-probe membership
+tests in `pricing.rs`, and warned that `fno.rs`'s rule 6 entry was loose.
+
+**Decision.** `pull::pricing::price` widens the premium once for both paths,
+so that file stays at 22. The greeks counts are raised, each site read as a
+statistic or a dimensionless ratio and never a price. `filed` (and D-3126's
+`named`) reserve per expiry answer; `ambiguous` stays unsized because it is
+empty on every well-formed month. The member count for `pricing.rs` is raised
+to 4 for the two hash probes. The `fno.rs` rule 6 entry is removed, since
+D-3155 removed its scan. Each reason is in `docs/06-limits.md` under the
+rule's heading.
+
+### D-3123 — A contradicted index stamp is refused as a disagreement, not as a missing bar — 2026-10-05
+
+**Finding.** D-3110 made `SpotBook` answer nothing at a stamp where two index
+bars disagree and gave `SpotBook::lookup` a refusal that says so. The only
+production consumer, `api::server::chain_quotes`, called `SpotBook::at` and
+reported every `None` as "no index bar is stored at this option bar's stamp",
+which is false when two are stored there. Round 2 recorded that the ambiguity
+reached the receipt through `SpotAmbiguous`; it did not.
+
+**Decision.** `chain_quotes` calls `lookup`. A missing stamp keeps its
+sentence; a contradicted stamp gets one fixed sentence naming the
+disagreement. The sentence is fixed rather than the error's Display, which
+carries the stamp and would fill every reason slot with one class. DPR-15.
+
+### D-3124 — The receipt keeps one reason per shape across contract-months — 2026-10-05
+
+**Finding.** D-3111 made `price_all` keep one sentence per class of refusal.
+`PricedCount::absorb` and `absorb_count` then folded one `PricedAll` per
+contract-month, deduplicating by whole sentence again, so five months refused
+below intrinsic (five sentences differing only in the intrinsic value) filled
+every slot, and a later month refused for another reason was counted and never
+named. Measured: six below-intrinsic months kept five reasons and dropped the
+`supremum` refusal.
+
+**Decision.** `keep_reason` compares sentences by shape: every number (a run of
+digits, `.`, `e`, `E`, `+`, `-` holding a digit) is erased before comparing.
+The first sentence of each shape is kept verbatim. `note_price_refusal` uses it
+too. The cost is bounded by `REASONS_KEPT` shapes per offered reason. DPR-16.
+
+### D-3125 — A CSV row the decoder skips is on the receipt — 2026-10-05
+
+**Finding.** `csv::decode` skips a row whose volume parses negative and counted
+it only into one log event. The archive member reached `from_members` short,
+`rows_read` was the decoded count, and the run balanced over a row that was on
+no line of the receipt (measured: 378 offered, `rows_read 375`, `balances()`
+true). This is D-3122's defect on the local-archive door, which round 1 did
+not walk.
+
+**Decision.** `csv::decode_counted` returns the skips with the rows,
+`archive::Member` carries them as `skipped`, and `ingest::from_members` (and
+`refused_whole`) add them to `rows_read` and `decoder_skips`. `from_window`
+builds its member with no skips because it already counts `raw.skipped`
+itself, so nothing is counted twice. DPR-17.
+
+### D-3126 — One vendor name is filed once across the chain walk — 2026-10-05
+
+**Finding.** `chain::month` deduplicated a repeated name within one expiry's
+answer and a second spelling of one decoded contract (D-3116). Its comment said
+the same name under a second expiry is refused by `read_contract`'s token
+check. That holds for a dated name. A monthly name (`Mar25`) carries no day, so
+listed beside 2025-03-26 and 2025-03-27 it decoded to two contracts: the same
+series would be fetched twice and one copy stored under an expiry that is not
+its own.
+
+**Decision.** The walk keeps `named`, each filed vendor name with the expiry it
+was first listed under. A later listing of the same name is refused by name,
+naming both expiries. A dated name under the wrong expiry is still refused by
+`read_contract`. DPR-18.
