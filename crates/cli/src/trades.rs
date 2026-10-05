@@ -59,12 +59,15 @@
 //! `results` and `frontier` pay, for the same reason: an index that is not on
 //! disk must be rebuilt from what is.
 //!
-//! **It is paid per open, not once per process.** This table said "once per
-//! process", and the writer is not held for a process: `ensure_trade_rows`
-//! opens it for every recorded run (and reopens it to verify), so recording a
-//! run costs O(H + T) for H rows every earlier run recorded plus the run's own
-//! T, and N recorded runs cost Θ(N·H) cumulatively. The writer open has no byte
-//! ceiling. `docs/06-limits.md` (D-1634).
+//! **It is paid once per root per process while nothing else writes.**
+//! D-1634 found `ensure_trade_rows` opening the writer for every recorded
+//! run, so N recorded runs cost Θ(N·H) for H rows already stored. Since D-1841
+//! the writer is held across runs (`crate::held_trade_writer`) and reused
+//! while the file's device, inode, length, modification and change times are
+//! exactly as it was left, one `symlink_metadata`: a recorded run then costs
+//! O(T). Any write since, by any process, changes one of them, and that run
+//! opens afresh and re-verifies every row as before. The writer open has no
+//! byte ceiling. `docs/06-limits.md`.
 //!
 //! A read-only [`Trades::of_run`] also opens/indexes `runs.bin` and
 //! `detail-sets.bin` to prove the parent and exact cardinality. A fresh HTTP
@@ -526,6 +529,12 @@ impl Trades {
             scanned,
             write_refusal,
         })
+    }
+
+    /// The store root this handle was opened under. D-1841.
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        &self.root
     }
 
     /// Where a run's rows are, or `None`. **O(1)** — one hash probe.

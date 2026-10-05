@@ -14464,6 +14464,18 @@ new durable authority, and none exists.
   O(H + T) per recorded run for H rows already stored and T of this run,
   Θ(N·H) over N runs. The writer open has no byte ceiling. The module
   rustdoc said "once per process" until D-1634.
+  **Fixed by D-1841.** The writer is held across recorded runs, one per
+  store root, and reused while `chosen-trades.bin`'s device, inode, length,
+  modification and change times are exactly as it was handed back (one
+  `symlink_metadata`); a recorded run then costs O(T). Any write since, by any
+  process, changes one of them, and that run opens afresh and re-verifies
+  every row as every run did before, so an in-place change still refuses the
+  next append. Counted, not timed: five runs opened the writer five times
+  before and once after
+  (`recorded_runs_reuse_one_trade_writer_until_the_file_changes`). What a
+  held writer does not re-read is a change no write made (media or page-cache
+  corruption between runs); a fresh open was the only check for that, and is
+  still made by every other process and by this one after any write.
 - **`strict::size_sweeper` per rung (W2-cli16-3).** `ledger_v6` calls it once
   for each of the eight rungs. Each call loads the whole NIFTY signal, daily
   and exact-minute span (with prior context) under the strict checksum

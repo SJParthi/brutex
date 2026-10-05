@@ -17505,9 +17505,121 @@ fn ensure_frontier_rows(
     }
 }
 
+/// Chosen-trade writers this process has used, one per store root, held
+/// across recorded runs with what their file looked like when last handed
+/// back. D-1841, W2-cli16-2.
+///
+/// `ensure_trade_rows` opened the writer for every recorded run, and every
+/// open walks every row in `chosen-trades.bin` to rebuild the identity index
+/// and re-verify each row: O(H + T) per run for H rows already stored, Θ(N·H)
+/// over N runs. A held writer is reused only while the file is exactly as it
+/// was left: the same device, inode, length, modification and change time,
+/// read in one `symlink_metadata`. Any write since, by any process, changes
+/// one of them, and the run then opens the file afresh and re-verifies every
+/// row, as every run did before. At most [`HELD_TRADE_ROOTS`] roots are held;
+/// a process records under one.
+static HELD_TRADE_WRITERS: std::sync::Mutex<Vec<(trades::Trades, TradeFileSeen)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// How many store roots' chosen-trade writers one process holds at once.
+const HELD_TRADE_ROOTS: usize = 16;
+
+/// What a held chosen-trade writer's file looked like when it was handed back:
+/// device, inode, length, and modification and change times to the
+/// nanosecond. D-1841.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct TradeFileSeen([i64; 7]);
+
+impl TradeFileSeen {
+    /// The chosen-trade file under `root` as its path names it now.
+    fn now(root: &std::path::Path) -> Option<Self> {
+        use std::os::unix::fs::MetadataExt as _;
+        let seen = std::fs::symlink_metadata(trades::Trades::path(root)).ok()?;
+        let wide = |value: u64| i64::try_from(value).unwrap_or(i64::MAX);
+        Some(Self([
+            wide(seen.dev()),
+            wide(seen.ino()),
+            wide(seen.len()),
+            seen.mtime(),
+            seen.mtime_nsec(),
+            seen.ctime(),
+            seen.ctime_nsec(),
+        ]))
+    }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// Test-only: chosen-trade writer opens by `held_trade_writer` on this
+    /// thread. D-1841.
+    static TRADE_WRITER_OPENS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The held writer for `root` when its file is exactly as it was left, or a
+/// fresh open that re-verifies every row. D-1841.
+fn held_trade_writer(root: &std::path::Path) -> Result<trades::Trades, String> {
+    let held = {
+        let mut writers = HELD_TRADE_WRITERS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        writers
+            .iter()
+            .position(|(store, _)| store.root() == root)
+            .map(|at| writers.remove(at))
+    };
+    if let Some((store, seen)) = held
+        && TradeFileSeen::now(root) == Some(seen)
+    {
+        return Ok(store);
+    }
+    #[cfg(test)]
+    TRADE_WRITER_OPENS.with(|opens| opens.set(opens.get().saturating_add(1)));
+    trades::Trades::open(root)
+}
+
+/// Hands `store` back for the next recorded run under its root, stamped with
+/// what its file looks like now, dropping the longest-held writer when
+/// [`HELD_TRADE_ROOTS`] are already held. A handle whose file cannot be
+/// measured, or no longer names what the handle holds, is not kept.
+fn hold_trade_writer(mut store: trades::Trades) {
+    if store.refresh().is_err() {
+        return;
+    }
+    let Some(seen) = TradeFileSeen::now(store.root()) else {
+        return;
+    };
+    let mut writers = HELD_TRADE_WRITERS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    writers.retain(|(held, _)| held.root() != store.root());
+    if writers.len() >= HELD_TRADE_ROOTS {
+        writers.remove(0);
+    }
+    writers.push((store, seen));
+}
+
 /// Makes one exact trade block durable, with the same resume rule as
 /// [`ensure_frontier_rows`].
+///
+/// The writer is the one [`held_trade_writer`] holds for `root`, and it is
+/// handed back after an answer; only the verifying reopen after a refused
+/// append is a fresh open. D-1841.
 fn ensure_trade_rows(
+    root: &std::path::Path,
+    identity: &[u8; 32],
+    rows: &[trades::Row],
+) -> Result<Prepared, String> {
+    let mut store = held_trade_writer(root)?;
+    let answer = ensure_trade_rows_in(&mut store, root, identity, rows);
+    if answer.is_ok() {
+        hold_trade_writer(store);
+    }
+    answer
+}
+
+/// [`ensure_trade_rows`] over an open writer.
+fn ensure_trade_rows_in(
+    store: &mut trades::Trades,
     root: &std::path::Path,
     identity: &[u8; 32],
     rows: &[trades::Row],
@@ -17526,9 +17638,8 @@ fn ensure_trade_rows(
         ))
     };
 
-    let mut store = trades::Trades::open(root)?;
     if store.holds(identity) {
-        return verify(&mut store);
+        return verify(store);
     }
     if rows.is_empty() {
         store.confirm_durable()?;
@@ -25064,6 +25175,70 @@ mod tests {
                 .expect("one trade is explicit"),
             vec![trade]
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **Recorded runs reuse one held chosen-trade writer while its file is as
+    /// they left it, and reopen it the moment anything else wrote.**
+    /// W2-cli16-2, D-1841.
+    ///
+    /// Counted: five recorded runs opened the writer five times before, each
+    /// open walking every stored row; now once. A run another writer appended
+    /// is seen through a reopen, and an earlier row damaged in place is
+    /// re-verified by that reopen and refuses the next append, exactly as a
+    /// fresh open did.
+    #[test]
+    fn recorded_runs_reuse_one_trade_writer_until_the_file_changes() {
+        use std::cell::Cell;
+        let root = result_commit_root("held-trade-writer");
+        let _ = std::fs::remove_dir_all(&root);
+        let opens = || super::TRADE_WRITER_OPENS.with(Cell::get);
+        let before = opens();
+        for n in 0..5_u8 {
+            let identity = [100 + n; 32];
+            let written =
+                super::ensure_trade_rows(&root, &identity, &[result_commit_trade(identity)]);
+            assert!(matches!(written, Ok(super::Prepared::Written(1))));
+        }
+        assert_eq!(
+            opens() - before,
+            1,
+            "five runs, one open (five before D-1841)"
+        );
+
+        let other = [120; 32];
+        crate::trades::Trades::open(&root)
+            .expect("a second writer")
+            .append_all(&[result_commit_trade(other)])
+            .expect("another writer's run");
+        let before = opens();
+        let reused = super::ensure_trade_rows(&root, &other, &[result_commit_trade(other)]);
+        assert!(matches!(reused, Ok(super::Prepared::Reused(1))));
+        assert_eq!(opens() - before, 1, "another writer's row forces a reopen");
+        let again = [121; 32];
+        let before = opens();
+        let written = super::ensure_trade_rows(&root, &again, &[result_commit_trade(again)]);
+        assert!(matches!(written, Ok(super::Prepared::Written(1))));
+        assert_eq!(opens(), before, "an untouched file is not reopened");
+
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(crate::trades::Trades::path(&root))
+            .expect("trade file");
+        std::io::Seek::seek(
+            &mut file,
+            std::io::SeekFrom::Start(16 + crate::trades::STRIDE),
+        )
+        .expect("second trade row");
+        std::io::Write::write_all(&mut file, &[0xff]).expect("damage in place");
+        file.sync_all().expect("durable damage");
+        let last = [122; 32];
+        let before = opens();
+        let Err(why) = super::ensure_trade_rows(&root, &last, &[result_commit_trade(last)]) else {
+            panic!("damage refuses the next append");
+        };
+        assert_eq!(opens() - before, 1, "an in-place write forces a reopen");
+        assert!(why.contains("Append-only history is damaged"), "{why}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

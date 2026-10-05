@@ -57010,3 +57010,33 @@ twice per command, as the execution series and inside the warm context span:
 the warm span starts a month earlier and refuses a hole the execution series
 may name, so deriving one from the other would change which refusal a
 partial store meets first.
+
+### D-1841 — Recorded runs hold one chosen-trade writer while its file is unchanged — 2026-10-04
+
+**What was found (W2-cli16-2; stated by D-1634).** `ensure_trade_rows`
+opened the chosen-trade writer for every recorded run, and every open reads
+every row of `chosen-trades.bin` to rebuild and re-verify the identity index:
+O(H + T) per recorded run, Θ(N·H) over the N runs of one command.
+
+**The change.** The writer is held across runs, at most sixteen roots per
+process, each stamped when handed back with its file's device, inode, length
+and modification and change times to the nanosecond. A run reuses the held
+writer only when one `symlink_metadata` of the path reads the same stamp, and
+costs O(T); otherwise it opens afresh, which re-reads and re-verifies every
+row exactly as before. A write by any process, appending or in place, moves
+the change time, so it always forces that reopen; a handle that fails to
+refresh, or whose run refused, is not kept. The verifying reopen after a
+refused append is unchanged.
+
+**What is narrower, and stated.** A change that no write made (media or
+page-cache corruption between two runs of one process) is not re-read by a
+reused writer; it is found by the next fresh open, by every reader's seal
+check, and by any other process. The row-level seals are still checked
+wherever a row is read.
+
+**What it proves.**
+`cli::tests::recorded_runs_reuse_one_trade_writer_until_the_file_changes`
+counts one open for five runs (five before), one reopen after another
+writer's append, none for an untouched file, and a reopen that refuses the
+next append after an in-place write to an earlier row.
+
