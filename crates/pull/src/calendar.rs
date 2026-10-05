@@ -545,11 +545,9 @@ pub const SOURCED_SPECIAL: [i64; 2] = [17_842, 18_196];
 /// the table's own constant length, never by the data (the shape `kind_of`
 /// already uses for its two tables).
 fn listed(table: &[i64], day: i64) -> bool {
-    let mut at = 0_usize;
-    while at < table.len() {
-        match table.get(at) {
-            Some(&held) if held == day => return true,
-            _ => at += 1,
+    for held in table {
+        if *held == day {
+            return true;
         }
     }
     false

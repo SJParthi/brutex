@@ -59485,3 +59485,75 @@ expiry. Real days 2026-08-03 (11,524 files) and 2018-12-03 (4,719 files,
 4,512 monthly) decode with 0 refused.
 
 **Proven by** GI-10 to GI-12.
+
+### D-2811 — A GDFL import filter name must be a symbol as the store files it; the run's largest back-step is reported and journalled — 2026-10-05
+
+**Context.** The cloud attack of `claude/attack-gdfl` (its D-3171, D-3172),
+ported as behaviour tests. **Decision.** Every `SYMBOL` of `cli gdfl-import`
+must be a `Symbol` spelled exactly as itself (A-Z, 0-9, `-`, `_`, `&`, at most
+24); any other (`*`, a space, a comma, lower case, empty) refuses the run
+`FilterName` before the journal is read, because the journal keys a day by
+the filter. `Report::max_back_s` carries the run's largest back-step, and each
+`done`/`incomplete` journal line states `late`, `late_unresolved` and the
+day's `max_back_s`. **Proven by** GI-13.
+
+### D-2812 — The clock of the one-second placement is every row; the bar is the kept rows — 2026-10-05
+
+**Context.** Attack D-3170: filtering LTQ = 0 rows BEFORE placement discarded
+the file's evidence of time, so a trade written after an untraded row stamped
+10:00:05 could be filed at its own earlier stamp, a print in a bar before the
+file had shown it (`CLAUDE.md` §3 rule 7). **Decision.** The running maximum
+and the next in-order stamp are taken over every row; only then is the row
+rule applied. `late_rows`, `late_unresolved` and `max_back_s` count kept rows
+only. Supersedes item 2 of D-2802 in that one respect (the ledger is
+append-only). On the real 2026-08-03 trial no stock or option row was late,
+so its stored bytes are unchanged by this rule (PROOF.md). **Proven by** GI-02.
+
+### D-2813 — Before 2019-02-01 a dated index name is read only inside the three-month cycle and only from GDFL's first day — 2026-10-05
+
+**Context.** Attack D-3160/D-3164: a monthly index name whose strike begins
+with year digits (`BANKNIFTY18DEC23500CE`) also reads as a dated contract years
+away (2023-12-18, strike 500). **Decision.** Before the switch the day form of
+NIFTY and BANKNIFTY is read only on trade days from 2018-09-03 (GDFL's first;
+no earlier name exists in the census) and only when its expiry month is at
+most three months after the trade month: NSE's specification states "3 month
+trading cycle - the near month (one), the next month (two) and the far month
+(three)" (contract specifications, web.archive.org snapshot of 2019-08-16;
+charter GDFL options section). Measured over the 2,240 real pre-switch dated
+index names: the largest gap is 97 days, inside the cycle. When an index name
+then still reads both ways, the dated weekly reading is taken (D-2806); the
+attack branch refused such names, which would refuse 337 real weeklies such
+as `BANKNIFTY19SEP1824800PE`, so this branch keeps its rule and the ported
+tests were adapted where they expected that refusal. Re-run over all
+1,218,362 tickers: 0 refused, the class counts unchanged. **Proven by** GI-10.
+
+### D-2814 — Every entry of a GDFL day is one file, one skip or one refusal; a torn journal line is closed with a mark and a foreign journal is never written — 2026-10-05
+
+**Context.** Attacks D-3168, D-3169, D-3173, D-3174. **Decision.** A file the
+fold refuses is counted refused and never also read; a second name for one
+capital-market ticker is a skip. The journal's torn last line, which must be
+the start of a line the journal writes, is closed with ` (torn)` and skipped
+on every later load; any other last line, or any whole line that is not the
+journal's, refuses the run on every attempt and the journal is not written.
+**Proven by** GI-06, GI-14.
+
+### D-2815 — A filter claims an undecodable option name only for its whole underlying — 2026-10-05
+
+**Context.** Attacks D-3167, D-3175: a `NIFTY` filter claimed `NIFTYNXT50...`
+names. **Decision.** An undecodable name is refused under a filter only when
+the longest underlying it starts with, among today's F&O underlyings and the
+filter's own names, is a filter name (so `TV18BRDCST`, outside today's list,
+is a `TV18BRDCST` filter's). O(213 + filter names), refusal path only.
+**Proven by** GI-12.
+
+### D-2816 — Ported attack tests and the test scratch directory — 2026-10-05
+
+**Decision.** The three attack test files of `claude/attack-gdfl` (head
+`64fcdbb2`) are carried as `gdfl_nfo_attack_tests.rs`,
+`gdfl_seconds_attack_tests.rs` and `gdfl_r2_attack_tests.rs`, with every
+adaptation marked `ADAPTED` and its reason; its 15-month expiry table (its
+D-3165) is NOT taken into the reader, only kept as test data that the
+last-Thursday rule must reproduce. A test scratch directory carries a
+per-process serial beside the clock (attack D-3177). The day-listing's
+duplicate set is a hash set, so `locate` does not grow with duplicates
+(attack D-3162). **Proven by** GI-15.

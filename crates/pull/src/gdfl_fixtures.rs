@@ -187,8 +187,12 @@ pub(crate) fn csv(rows: &[String]) -> Vec<u8> {
 
 /// A scratch directory unique to `tag`, empty, under the system temp dir.
 pub(crate) fn scratch(tag: &str) -> PathBuf {
+    // A per-process serial as well as the clock: two threads in one
+    // nanosecond took one directory before it (D-2816).
+    static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let serial = SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
-        "brutex-gdfl-{tag}-{}-{}",
+        "brutex-gdfl-{tag}-{}-{serial}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

@@ -69,7 +69,7 @@
 //! Fetching a file is O(its compressed and rebuilt bytes). The listing and
 //! the fetch are limits in `docs/06-limits.md`, not constant-time claims.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -263,6 +263,11 @@ impl From<CmRefusal> for NfoRefusal {
 /// date with a monthly-only name is 2019-01-31).
 pub const DAY_FORM_FROM_DAYS: u32 = 17_928;
 
+/// The first trade day the index weeklies are read in the day form,
+/// 2018-09-03, GDFL's first day: the name census has no earlier name, so
+/// before it nothing is read as dated (D-2813).
+pub const INDEX_WEEKLY_FROM_DAYS: u32 = 17_777;
+
 /// The underlyings whose weeklies use the day form before
 /// [`DAY_FORM_FROM_DAYS`] (FORMAT.md §6 rule 2).
 pub const EARLY_DAY_FORM: [&str; 2] = ["NIFTY", "BANKNIFTY"];
@@ -417,7 +422,8 @@ fn readings_at(
     };
     let latest = trade.days_from_epoch().saturating_add(EXPIRY_HORIZON_DAYS);
     let modern = trade.days_from_epoch() >= DAY_FORM_FROM_DAYS;
-    let index_weekly = EARLY_DAY_FORM.iter().any(|name| name.as_bytes() == under);
+    let index_weekly = trade.days_from_epoch() >= INDEX_WEEKLY_FROM_DAYS
+        && EARLY_DAY_FORM.iter().any(|name| name.as_bytes() == under);
     let mut had_day = false;
     if modern || index_weekly {
         let day_form = (|| {
@@ -426,9 +432,16 @@ fn readings_at(
             let yy = rest.get(5..7).and_then(two_digits)?;
             let strike = rest.get(7..).and_then(strike_paisa)?;
             let expiry = Day::new(2000 + u16::from(yy), mon, dd).ok()?;
+            // Before the switch a dated index name is a contract of the three-
+            // month cycle ("3 month trading cycle - the near month, the next
+            // month and the far month", NSE contract specifications, archived
+            // 2019-08-16; D-2813): its expiry month is at most three months on.
+            let months_on = (u32::from(expiry.year()) * 12 + u32::from(expiry.month()))
+                .saturating_sub(u32::from(trade.year()) * 12 + u32::from(trade.month()));
             (is_weekday(expiry)
                 && expiry.days_from_epoch() >= trade.days_from_epoch()
-                && expiry.days_from_epoch() <= latest)
+                && expiry.days_from_epoch() <= latest
+                && (modern || months_on <= 3))
                 .then_some(Reading {
                     at,
                     form: TickerForm::Day,
@@ -599,7 +612,7 @@ pub struct NfoDay<L> {
     folder: String,
     entries: Vec<ListedFile<L>>,
     by_ticker: HashMap<Box<str>, usize>,
-    duplicates: Vec<String>,
+    duplicates: HashSet<Box<str>>,
     skipped: usize,
 }
 
@@ -612,7 +625,7 @@ impl<L> NfoDay<L> {
             folder: day_folder_name(day),
             entries: Vec::with_capacity(entries),
             by_ticker: HashMap::with_capacity(entries),
-            duplicates: Vec::new(),
+            duplicates: HashSet::with_capacity(1),
             skipped: 0,
         }
     }
@@ -624,7 +637,7 @@ impl<L> NfoDay<L> {
         match entry_ticker(&self.folder, entry) {
             Some(ticker) => {
                 if self.by_ticker.insert(ticker.into(), at).is_some() {
-                    self.duplicates.push(ticker.to_owned());
+                    self.duplicates.insert(ticker.into());
                 }
             }
             None => self.skipped += 1,
@@ -667,7 +680,7 @@ impl<L> NfoDay<L> {
     ///
     /// [`NfoRefusal::DuplicateTicker`] when two entries name it.
     pub fn locate(&self, ticker: &str) -> Result<Option<&ListedFile<L>>, NfoRefusal> {
-        if self.duplicates.iter().any(|held| held == ticker) {
+        if self.duplicates.contains(ticker) {
             return Err(NfoRefusal::DuplicateTicker {
                 ticker: ticker.to_owned(),
             });
@@ -1055,3 +1068,7 @@ pub fn read_file<S: NfoSource>(
 #[cfg(test)]
 #[path = "gdfl_nfo_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "gdfl_nfo_attack_tests.rs"]
+mod attack_tests;

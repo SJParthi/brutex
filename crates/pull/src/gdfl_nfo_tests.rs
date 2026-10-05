@@ -905,3 +905,29 @@ fn every_fault_of_the_yearly_zip_is_refused_by_name() {
         other => panic!("{other:?}"),
     }
 }
+
+#[test]
+fn the_edges_mutation_found_hold() {
+    // A monthly traded ON its derived expiry day is read (2018-12-27).
+    assert_eq!(
+        contract("ACC18DEC1300CE", day(2018, 12, 27)),
+        "2018-12-27-130000-CE"
+    );
+    // A ticker of exactly the cap is read; one byte more is not.
+    let at_cap = format!("{}04APR2422000CE", "N".repeat(TICKER_CAP - 14));
+    let past = format!("N{at_cap}");
+    assert!(matches!(
+        decode_ticker(&past, trade()),
+        Err(NfoRefusal::TickerUnparsed { .. })
+    ));
+    assert_eq!(at_cap.len(), TICKER_CAP);
+    assert!(!matches!(
+        decode_ticker(&at_cap, trade()),
+        Err(NfoRefusal::TickerUnparsed { .. })
+    ));
+    // Two entries that are not option files are counted as two skips.
+    let mut listing: NfoDay<u8> = NfoDay::new(trade(), 2);
+    listing.push("x", 1, 1, 0);
+    listing.push("y", 1, 1, 1);
+    assert_eq!(listing.skipped(), 2);
+}

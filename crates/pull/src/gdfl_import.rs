@@ -196,6 +196,15 @@ pub enum ImportRefusal {
         /// Why.
         why: String,
     },
+    /// A filter name that is not a symbol as the store files it: the journal
+    /// keys a day by the names, joined by `,` and split on ` `, and `*` is the
+    /// whole tree, so a name with a space, a comma, a `*`, a lowercase letter
+    /// or nothing would match no file and still record the day `done` under a
+    /// key another filter shares (D-2811).
+    FilterName {
+        /// The name as given.
+        name: String,
+    },
 }
 
 impl core::fmt::Display for ImportRefusal {
@@ -212,6 +221,11 @@ impl core::fmt::Display for ImportRefusal {
             ),
             Self::Fold { why } => write!(f, "the fold refused: {why}"),
             Self::Journal { why } => write!(f, "the import journal: {why}"),
+            Self::FilterName { name } => write!(
+                f,
+                "{name:?} is not a symbol as the store files it (A-Z, 0-9, -, _, &, at most 24); \
+                 refused before the journal keys a day by it"
+            ),
         }
     }
 }
@@ -264,21 +278,24 @@ fn micros_at(day: Day, sod: u32) -> i64 {
 /// The rows of one file, filtered by the row rule and placed (module doc).
 /// Returns each kept row with its placed second, in file order.
 fn place(kind: ImportKind, ticks: &[Tick], placement: &mut Placement) -> Vec<(u32, Tick)> {
+    // THE CLOCK IS EVERY ROW, THE BAR IS THE KEPT ROWS (D-2812). The running
+    // maximum and the next in-order stamp are taken over every row, untraded
+    // ones included: a trade written after a row stamped 10:00:05 was known
+    // no earlier than 10:00:05 whatever that row's LTQ, so filtering first
+    // would file it before the file had shown that time (CLAUDE.md §3 rule
+    // 7). The counts are about kept rows only.
     placement.rows = ticks.len();
-    let kept: Vec<Tick> = ticks
-        .iter()
-        .copied()
-        .filter(|tick| kind.every_row_counts() || tick.ltq > 0)
-        .collect();
-    placement.ltq_zero_dropped = ticks.len() - kept.len();
-    // Forward: in order when at or above the running maximum.
+    let counts = |tick: &Tick| kind.every_row_counts() || tick.ltq > 0;
+    // Forward: in order when at or above the running maximum of every row.
     let mut high: Option<u32> = None;
-    let mut in_order = Vec::with_capacity(kept.len());
-    for tick in &kept {
+    let mut in_order = Vec::with_capacity(ticks.len());
+    for tick in ticks {
         match high {
             Some(max) if tick.sod < max => {
-                placement.late_rows += 1;
-                placement.max_back_s = placement.max_back_s.max(max - tick.sod);
+                if counts(tick) {
+                    placement.late_rows += 1;
+                    placement.max_back_s = placement.max_back_s.max(max - tick.sod);
+                }
                 in_order.push(false);
             }
             _ => {
@@ -289,19 +306,20 @@ fn place(kind: ImportKind, ticks: &[Tick], placement: &mut Placement) -> Vec<(u3
     }
     // Backward: a late row lands at the next in-order row's stamp.
     let mut next: Option<u32> = None;
-    let mut placed: Vec<Option<u32>> = Vec::with_capacity(kept.len());
-    for (tick, &ordered) in kept.iter().zip(&in_order).rev() {
+    let mut placed: Vec<Option<u32>> = Vec::with_capacity(ticks.len());
+    for (tick, &ordered) in ticks.iter().zip(&in_order).rev() {
         if ordered {
             next = Some(tick.sod);
         }
         placed.push(next);
     }
     placed.reverse();
-    let mut out = Vec::with_capacity(kept.len());
-    for (tick, second) in kept.into_iter().zip(placed) {
-        match second {
-            Some(second) => out.push((second, tick)),
-            None => placement.late_unresolved += 1,
+    let mut out = Vec::with_capacity(ticks.len());
+    for (tick, second) in ticks.iter().copied().zip(placed) {
+        match (counts(&tick), second) {
+            (false, _) => placement.ltq_zero_dropped += 1,
+            (true, Some(second)) => out.push((second, tick)),
+            (true, None) => placement.late_unresolved += 1,
         }
     }
     out
@@ -414,6 +432,9 @@ pub struct Report {
     pub late_rows: usize,
     /// Late rows dropped with nothing after them.
     pub late_unresolved: usize,
+    /// The largest back-step of any kept row, in seconds (D-2811): a forward
+    /// spike collapses hours into one second, and this says how far.
+    pub max_back_s: u32,
     /// One-second bars offered to the store.
     pub seconds: usize,
     /// One-second bars the store wrote this run.
@@ -440,6 +461,18 @@ pub struct Run<'a> {
 }
 
 impl Run<'_> {
+    /// Refuses a filter name that is not a symbol as the store files it
+    /// (D-2811): the journal key and the match are both by exact bytes.
+    fn check_filter(&self) -> Result<(), ImportRefusal> {
+        match self.only.iter().find(|name| {
+            !brutex_core::symbol::Symbol::new(name)
+                .is_ok_and(|symbol| symbol.as_str() == name.as_str())
+        }) {
+            Some(name) => Err(ImportRefusal::FilterName { name: name.clone() }),
+            None => Ok(()),
+        }
+    }
+
     /// Whether `symbol` passes the filter.
     fn wants(&self, symbol: &str) -> bool {
         self.only.is_empty() || self.only.iter().any(|only| only == symbol)
@@ -464,6 +497,21 @@ impl Run<'_> {
 #[must_use]
 pub fn journal_path(store_root: &Path) -> PathBuf {
     store_root.join("imports").join("gdfl.journal")
+}
+
+/// What closes a torn journal line, so every later load knows it for one
+/// (D-3173). A line ending in it is skipped; no line the journal writes
+/// whole can end in it, because a key is a kind, a day and symbol names.
+const TORN: &str = " (torn)";
+
+/// Whether `fragment`, a line cut short by a crash, can be the start of a
+/// line the journal writes: a prefix of one of its three verbs and the space
+/// after it, or text that starts with one (D-3169). Anything else at the end
+/// of the file is not a torn journal line but a foreign one.
+fn torn_fragment(fragment: &str) -> bool {
+    ["begin ", "done ", "incomplete "]
+        .into_iter()
+        .any(|verb| verb.starts_with(fragment) || fragment.starts_with(verb))
 }
 
 /// The journal, read once per run: the keys done, and the keys begun and not
@@ -494,11 +542,26 @@ impl Journal {
             path,
             ..Self::default()
         };
-        let whole = text.rsplit_once('\n').map_or("", |(whole, _)| whole);
-        if !text.is_empty() && !text.ends_with('\n') {
-            journal.append("")?;
+        let (whole, tail) = text.rsplit_once('\n').unwrap_or(("", text.as_str()));
+        let shown = journal.path.display().to_string();
+        let foreign = |line: &str| ImportRefusal::Journal {
+            why: format!("{shown}: not a journal line: {line:?}"),
+        };
+        // Every whole line is judged BEFORE anything is written, and a torn
+        // tail must be the start of a line the journal writes: a foreign file
+        // is refused on every run and never touched. Closing first let a
+        // one-line foreign file be refused once and then, its line now
+        // "torn", read as an empty journal by every later run (D-3169).
+        if !tail.is_empty() && !torn_fragment(tail) {
+            return Err(foreign(tail));
         }
         for line in whole.split('\n').filter(|line| !line.is_empty()) {
+            if let Some(fragment) = line.strip_suffix(TORN) {
+                if torn_fragment(fragment) {
+                    continue;
+                }
+                return Err(foreign(line));
+            }
             let fields: Vec<&str> = line.split(' ').collect();
             match fields.as_slice() {
                 ["begin", kind, day, only] => {
@@ -512,12 +575,15 @@ impl Journal {
                 ["incomplete", kind, day, only, ..] => {
                     journal.open.remove(&format!("{kind} {day} {only}"));
                 }
-                _ => {
-                    return Err(ImportRefusal::Journal {
-                        why: format!("{}: not a journal line: {line:?}", journal.path.display()),
-                    });
-                }
+                _ => return Err(foreign(line)),
             }
+        }
+        if !tail.is_empty() {
+            // Closed with a mark, never a bare newline: a bare one made the
+            // torn fragment a whole line that the NEXT load refused as
+            // foreign, so one crash mid-write stopped every later run
+            // (D-3173).
+            journal.append(TORN)?;
         }
         Ok(journal)
     }
@@ -547,16 +613,10 @@ fn days(from: Day, to: Day) -> Vec<Day> {
         .collect()
 }
 
-/// Emits one event, discarding whether the sink kept it (a filtered level is
-/// not a failure; see `crate::ingest`'s note on the same choice).
-fn note(event: &telemetry::Event<'_>) {
-    let _dropped_when_filtered = telemetry::emit(event);
-}
-
 /// A failure about `about`, logged at `Error` and returned for the report.
 fn note_failure(kind: ImportKind, day: Day, about: &str, why: &str) -> Failure {
     let day_text = day.to_string();
-    note(
+    let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::error(TARGET, "refused")
             .with("kind", kind.as_str())
             .with("day", day_text.as_str())
@@ -598,14 +658,20 @@ struct DayWork<'a> {
     held: Vec<Held>,
     report: &'a mut Report,
     failures: Vec<Failure>,
+    /// The day's largest back-step, for its journal line.
+    max_back_s: u32,
 }
 
 impl DayWork<'_> {
     /// Converts and files one instrument file.
     fn file(&mut self, file: &TickFile) {
-        self.report.files += 1;
+        // A file the fold refuses is counted refused and never also read
+        // (D-2814): files, skips and refusals add up to the day's entries.
         let converted = match convert(self.run.kind, self.day, &file.ticks) {
-            Ok(converted) => converted,
+            Ok(converted) => {
+                self.report.files += 1;
+                converted
+            }
             Err(why) => {
                 self.report.files_refused += 1;
                 let failure = note_failure(self.run.kind, self.day, &file.name, &why.to_string());
@@ -618,6 +684,8 @@ impl DayWork<'_> {
         self.report.ltq_zero_dropped += p.ltq_zero_dropped;
         self.report.late_rows += p.late_rows;
         self.report.late_unresolved += p.late_unresolved;
+        self.report.max_back_s = self.report.max_back_s.max(p.max_back_s);
+        self.max_back_s = self.max_back_s.max(p.max_back_s);
         if converted.seconds.is_empty() {
             return;
         }
@@ -646,7 +714,7 @@ impl DayWork<'_> {
             let failure = note_failure(self.run.kind, self.day, &file.name, &failure.why);
             self.failures.push(failure);
         }
-        note(
+        let _dropped_when_filtered = telemetry::emit(
             &telemetry::Event::debug(TARGET, "filed")
                 .with("file", file.name.as_str())
                 .with("rows", p.rows)
@@ -661,7 +729,7 @@ fn close_day(
     journal: &Journal,
     key: &str,
     begun: bool,
-    (before, report): (&Report, &Report),
+    (before, report, max_back_s): (&Report, &Report, u32),
     failures: &mut Vec<Failure>,
     (kind, day): (ImportKind, Day),
 ) {
@@ -670,10 +738,12 @@ fn close_day(
         return;
     }
     let stats = format!(
-        "files={} seconds={} failures={}",
+        "files={} seconds={} failures={} late={} late_unresolved={} max_back_s={max_back_s}",
         report.files - before.files,
         report.seconds - before.seconds,
-        failures.len()
+        failures.len(),
+        report.late_rows - before.late_rows,
+        report.late_unresolved - before.late_unresolved,
     );
     let verdict = if clean { "done" } else { "incomplete" };
     if let Err(why) = journal.append(&format!("{verdict} {key} {stats}")) {
@@ -708,7 +778,7 @@ fn admit(run: &Run<'_>, journal: &Journal, key: &str, day: Day, report: &mut Rep
     if journal.open.contains(key) {
         report.resumed.push(day);
         let day_text = day.to_string();
-        note(
+        let _dropped_when_filtered = telemetry::emit(
             &telemetry::Event::warn(
                 TARGET,
                 "resuming a day an earlier run began and did not finish",
@@ -747,10 +817,11 @@ where
         window,
         granularity: Granularity::Second1,
     };
+    run.check_filter()?;
     let journal = Journal::load(journal_path(run.store_root))?;
     let filter = run.filter_key();
     let (from_text, to_text) = (run.from.to_string(), run.to.to_string());
-    note(
+    let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::info(TARGET, "run started")
             .with("kind", run.kind.as_str())
             .with("from", from_text.as_str())
@@ -774,9 +845,11 @@ where
             held: Vec::new(),
             report: &mut report,
             failures: Vec::new(),
+            max_back_s: 0,
         };
         let read = read_day(day, &mut |file| work.file(&file));
-        let (begun, held, mut failures) = (work.begun, work.held, work.failures);
+        let (begun, held, mut failures, day_back) =
+            (work.begun, work.held, work.failures, work.max_back_s);
         report.files_skipped += read.skipped;
         report.files_refused += read.refused.len();
         for refusal in read.refused {
@@ -786,7 +859,7 @@ where
         if !read.held {
             report.days_missing.push(day);
             let day_text = day.to_string();
-            note(
+            let _dropped_when_filtered = telemetry::emit(
                 &telemetry::Event::warn(TARGET, "the source holds no file of this trading day")
                     .with("kind", run.kind.as_str())
                     .with("day", day_text.as_str()),
@@ -803,12 +876,12 @@ where
             &journal,
             &key,
             begun,
-            (&before, &report),
+            (&before, &report, day_back),
             &mut failures,
             (run.kind, day),
         );
         let day_text = day.to_string();
-        note(
+        let _dropped_when_filtered = telemetry::emit(
             &telemetry::Event::info(TARGET, "day imported")
                 .with("kind", run.kind.as_str())
                 .with("day", day_text.as_str())
@@ -823,7 +896,7 @@ where
         );
         report.failures.extend(failures);
     }
-    note(
+    let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::info(TARGET, "run finished")
             .with("kind", run.kind.as_str())
             .with("days", report.days_imported)
@@ -891,7 +964,10 @@ fn cm_day<S: CmSource>(
             read.skipped += 1;
             continue;
         };
+        // A second name for one ticker is a skip: its first name was refused
+        // as twins, so every entry is a file, a skip or a refusal (D-2814).
         if !seen.insert(key) {
+            read.skipped += 1;
             continue;
         }
         let symbol = key.underlying.as_str().to_owned();
@@ -939,6 +1015,29 @@ pub fn run_nfo<S: NfoSource>(source: &S, run: &Run<'_>) -> Result<Report, Import
         });
     }
     drive(run, |day, sink| nfo_day(source, run, day, sink))
+}
+
+/// The longest name of `names` that `ticker` starts with.
+fn longest_prefix<'a>(ticker: &str, names: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
+    let mut best: Option<&'a str> = None;
+    for name in names {
+        if ticker.starts_with(name) && best.is_none_or(|b| name.len() > b.len()) {
+            best = Some(name);
+        }
+    }
+    best
+}
+
+/// Whether a filtered run wants a name that does not decode (D-2815): when
+/// the longest underlying it starts with, among the F&O underlyings AND the
+/// filter's own names, is a filter name. `NIFTYNXT50...` is `NIFTYNXT50`'s,
+/// never `NIFTY`'s; `TV18BRDCST...`, a share outside today's F&O list, is a
+/// `TV18BRDCST` filter's, which asked for it by name. O(213 + filter names)
+/// per undecodable name, on the refusal path only.
+fn claims_undecodable(run: &Run<'_>, ticker: &str) -> bool {
+    let fno = longest_prefix(ticker, brutex_core::universe::FNO_UNDERLYINGS);
+    let asked = longest_prefix(ticker, run.only.iter().map(String::as_str));
+    asked.is_some_and(|asked| fno.is_none_or(|fno| asked.len() >= fno.len()))
 }
 
 /// One options day: every option file whose underlying passes the filter.
@@ -995,13 +1094,7 @@ fn nfo_day<S: NfoSource>(
             }
             Ok(decoded) => run.wants(decoded.underlying.as_str()),
             // A name that does not decode is refused when it could be wanted.
-            Err(_) => {
-                run.only.is_empty()
-                    || run
-                        .only
-                        .iter()
-                        .any(|only| ticker.starts_with(only.as_str()))
-            }
+            Err(_) => run.only.is_empty() || claims_undecodable(run, ticker),
         };
         if !wanted {
             read.skipped += 1;
@@ -1036,3 +1129,11 @@ fn nfo_day<S: NfoSource>(
 #[cfg(test)]
 #[path = "gdfl_import_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "gdfl_seconds_attack_tests.rs"]
+mod seconds_attack_tests;
+
+#[cfg(test)]
+#[path = "gdfl_r2_attack_tests.rs"]
+mod r2_attack_tests;

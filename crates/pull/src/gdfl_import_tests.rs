@@ -671,8 +671,8 @@ fn a_torn_journal_line_is_ignored_and_a_foreign_one_refuses_the_run() {
     assert_eq!(got.days_skipped, 1);
     let text = std::fs::read_to_string(journal_path(&store)).unwrap();
     assert!(
-        text.ends_with("done ind\n"),
-        "the torn line is closed, not rewritten"
+        text.ends_with("done ind (torn)\n"),
+        "the torn line is closed with its mark, not rewritten (D-2814)"
     );
     put(&store, "imports/gdfl.journal", b"something else\n");
     let run = Run {
@@ -1131,11 +1131,8 @@ impl Rng {
 /// drop late rows with none after them, then per placed second: first,
 /// max, min, last, sum, last OI.
 fn reference(kind: ImportKind, day: Day, ticks: &[Tick]) -> Vec<Bar> {
-    let kept: Vec<Tick> = ticks
-        .iter()
-        .copied()
-        .filter(|t| kind.every_row_counts() || t.ltq > 0)
-        .collect();
+    // The clock is every row; the bar is the kept rows (D-2812).
+    let kept = ticks;
     let mut placed: Vec<(u32, Tick)> = Vec::new();
     for (i, t) in kept.iter().enumerate() {
         let max_before = kept[..i].iter().map(|x| x.sod).max();
@@ -1155,7 +1152,7 @@ fn reference(kind: ImportKind, day: Day, ticks: &[Tick]) -> Vec<Bar> {
         } else {
             Some(t.sod)
         };
-        if let Some(s) = second {
+        if let Some(s) = second.filter(|_| kind.every_row_counts() || t.ltq > 0) {
             placed.push((s, *t));
         }
     }
@@ -1384,7 +1381,27 @@ fn a_quantity_past_i64_in_a_real_file_refuses_that_file_by_name() {
         d1(),
         &root.join("U"),
     );
-    assert_eq!((big.files, big.files_refused), (1, 1), "{:?}", big.failures);
+    assert_eq!((big.files, big.files_refused), (0, 1), "{:?}", big.failures);
     assert!(big.failures[0].why.contains("does not fit an i64"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn the_done_line_states_the_days_exact_counts() {
+    let root = scratch("import-done-line");
+    world(&root, &[d1()]);
+    let store = root.join("S");
+    let got = import(&root, Src::Store, ImportKind::Indices, d1(), d1(), &store);
+    let text = std::fs::read_to_string(journal_path(&store)).unwrap();
+    let want = format!(
+        "done indices 2024-04-01 * files={} seconds={} failures=0 late={} late_unresolved={} max_back_s={}",
+        got.files, got.seconds, got.late_rows, got.late_unresolved, got.max_back_s
+    );
+    assert!(text.contains(&want), "{text} lacks {want}");
+    assert_eq!(
+        (got.files, got.late_rows),
+        (2, 2),
+        "two files, one late row each"
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
