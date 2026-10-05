@@ -476,7 +476,14 @@ fn lifecycle_corruption_missing_start_and_torn_global_history_are_explicit_refus
     global.write_all(&[0x80]).expect("one torn suffix byte");
     global.sync_all().expect("persist test fault");
     assert!(evidence::latest(&fixture.0, LIMIT).is_err());
-    assert!(evidence::begin(&fixture.0, [11; 32], Operation::Sweep).is_err());
+    // sweep-2, D-1901: the torn byte names no token, so the next writer cuts
+    // it under its lock and starts; a reader still refused it above.
+    let attempt = evidence::begin(&fixture.0, [11; 32], Operation::Sweep)
+        .expect("the writer cuts the torn suffix and starts");
+    attempt
+        .finish(Completion::Completed)
+        .expect("the healed history records");
+    assert!(evidence::latest(&fixture.0, LIMIT).is_ok());
 }
 
 #[test]

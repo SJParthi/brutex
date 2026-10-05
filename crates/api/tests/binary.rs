@@ -107,13 +107,13 @@ fn the_binary_reports_what_it_read_and_exits_zero() {
             "{GROWW_HEAD}\
              NSE,CASH,,NIFTY,IDX,,NIFTY,,,NSE-NIFTY\n\
              NSE,CASH,,RELIANCE,EQ,EQ,INE002A01018,,,NSE-RELIANCE\n\
-             NSE,CASH,,SOMEBOND,EQ,N2,INE121A08PJ0,,\n"
+             NSE,CASH,,SOMEBOND,EQ,N2,INE121A08PJ0,,,NSE-SOMEBOND\n"
         )),
         Some(&format!(
             "{DHAN_HEAD}\
              NSE,I,NA,INDEX,NIFTY,NIFTY,NA,0001-01-01,,,1333\n\
              NSE,E,INE002A01018,EQUITY,RELIANCE,RELIANCE INDUSTRIES LTD,EQ,,,,1333\n\
-             NSE,E,INE121A08PJ0,EQUITY,SOMEBOND,SOME BOND,N2,,,\n"
+             NSE,E,INE121A08PJ0,EQUITY,SOMEBOND,SOME BOND,N2,,,,9998\n"
         )),
     );
     let (code, text, _) = run(&dir, "report");

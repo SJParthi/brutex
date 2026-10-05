@@ -61,6 +61,16 @@ use crate::candidate_universe::{
 use crate::population::{CompletionReconciliationV2, InstrumentFamilyV1, RequestedSpanIdentityV1};
 use crate::stored::{CompleteCalendarReceiptV2, StoredSpanLoadBoundV1};
 
+/// The label #74's short-write test injects with. Appends to this ledger go
+/// through `fixed_tail`, which names the file instead (D-1770).
+#[cfg(test)]
+const APPEND_LABEL: &str = "pre-admission record";
+
+/// The label #74's short-write test injects with. Appends to this ledger go
+/// through `fixed_tail`, which names the file instead (D-1770).
+#[cfg(test)]
+const APPEND_LABEL_V2: &str = "pre-admission V2 record";
+
 /// Operator-facing refusal from the Pre-Admission Data V1 boundary.
 pub type PreAdmissionDataRefusal = String;
 
@@ -1339,9 +1349,7 @@ impl PreAdmissionDataLedgerV1 {
             }
             let completion = orphan.value.record(RecordKindV1::Completion)?;
             self.require_append_bytes(1)?;
-            append_record(&mut self.data_file, &completion)?;
-            self.data_file
-                .sync_data()
+            append_synced(&mut self.data_file, &self.data_path, &completion)
                 .map_err(|why| format!("cannot sync pre-admission completion: {why}"))?;
             let audit = PreAdmissionDataReopenAuditV1 {
                 data_record_index: orphan.record_index,
@@ -1380,18 +1388,14 @@ impl PreAdmissionDataLedgerV1 {
             .completed_rows
             .checked_mul(2)
             .ok_or_else(|| "pre-admission data-record index overflowed u64".to_owned())?;
-        append_record(&mut self.data_file, &data_record)?;
-        self.data_file
-            .sync_data()
+        append_synced(&mut self.data_file, &self.data_path, &data_record)
             .map_err(|why| format!("cannot sync pre-admission Data record: {why}"))?;
         self.orphan = Some(OrphanDataV1 {
             record_index: data_record_index,
             value,
         });
         self.data_generation = file_generation(&self.data_file, &self.data_path)?;
-        append_record(&mut self.data_file, &completion_record)?;
-        self.data_file
-            .sync_data()
+        append_synced(&mut self.data_file, &self.data_path, &completion_record)
             .map_err(|why| format!("cannot sync pre-admission completion: {why}"))?;
         let audit = PreAdmissionDataReopenAuditV1 {
             data_record_index,
@@ -2561,9 +2565,7 @@ impl PreAdmissionDataLedgerV2 {
             }
             self.require_append_bytes(1)?;
             let completion = orphan.value.record(RecordKindV2::Completion)?;
-            append_record_v2(&mut self.data_file, &completion)?;
-            self.data_file
-                .sync_data()
+            append_synced(&mut self.data_file, &self.data_path, &completion)
                 .map_err(|why| format!("cannot sync pre-admission V2 completion: {why}"))?;
             let audit = PreAdmissionDataReopenAuditV2 {
                 data_record_index: orphan.record_index,
@@ -2602,18 +2604,14 @@ impl PreAdmissionDataLedgerV2 {
             .completed_rows
             .checked_mul(2)
             .ok_or_else(|| "pre-admission V2 data-record index overflowed u64".to_owned())?;
-        append_record_v2(&mut self.data_file, &data_record)?;
-        self.data_file
-            .sync_data()
+        append_synced(&mut self.data_file, &self.data_path, &data_record)
             .map_err(|why| format!("cannot sync pre-admission V2 Data record: {why}"))?;
         self.orphan = Some(OrphanDataV2 {
             record_index: data_record_index,
             value,
         });
         self.data_generation = file_generation_v2(&self.data_file, &self.data_path)?;
-        append_record_v2(&mut self.data_file, &completion_record)?;
-        self.data_file
-            .sync_data()
+        append_synced(&mut self.data_file, &self.data_path, &completion_record)
             .map_err(|why| format!("cannot sync pre-admission V2 completion: {why}"))?;
         let audit = PreAdmissionDataReopenAuditV2 {
             data_record_index,
@@ -3539,7 +3537,17 @@ fn ensure_header(file: &mut File, path: &Path) -> Result<(), PreAdmissionDataRef
             .map_err(|why| format!("cannot initialize {}: {why}", path.display()))?;
         return Ok(());
     }
-    verify_header(file, path)
+    verify_header(file, path)?;
+    // ledgers-3, D-1910: the writer cuts a kill-torn tail under its exclusive
+    // lock; the bytes past the last whole record were never acknowledged.
+    crate::fixed_tail::heal_torn_tail(
+        file,
+        path,
+        PRE_ADMISSION_HEADER_BYTES_V1,
+        PRE_ADMISSION_RECORD_STRIDE_V1,
+        &[],
+    )
+    .map(drop)
 }
 
 fn verify_header(file: &mut File, path: &Path) -> Result<(), PreAdmissionDataRefusal> {
@@ -3599,11 +3607,12 @@ fn read_record(
     PreAdmissionDataV1::decode(&raw)
 }
 
-/// Label every V1 append names, and its rollback test injects with.
-const APPEND_LABEL: &str = "pre-admission record";
-
-fn append_record(file: &mut File, raw: &[u8; RECORD_BYTES]) -> Result<(), PreAdmissionDataRefusal> {
-    crate::append_rollback::append(file, raw, APPEND_LABEL)
+/// Appends one fixed record and makes it durable. A short write or a failed
+/// barrier cuts the record back to where the file ended, so one ENOSPC or EIO
+/// no longer leaves a ragged tail that refuses every committed authority on
+/// every later open, read-only included (D-1900, search-2).
+fn append_synced(file: &mut File, path: &Path, raw: &[u8]) -> Result<(), PreAdmissionDataRefusal> {
+    crate::fixed_tail::append_block(file, path, [Ok::<_, String>(raw)], File::sync_data).map(|_| ())
 }
 
 /// Every pre-admission lock and data open: never waits on a FIFO and admits
@@ -3813,7 +3822,17 @@ fn ensure_header_v2(file: &mut File, path: &Path) -> Result<(), PreAdmissionData
             .map_err(|why| format!("cannot initialize {}: {why}", path.display()))?;
         return Ok(());
     }
-    verify_header_v2(file, path)
+    verify_header_v2(file, path)?;
+    // ledgers-3, D-1910: the writer cuts a kill-torn tail under its exclusive
+    // lock; the bytes past the last whole record were never acknowledged.
+    crate::fixed_tail::heal_torn_tail(
+        file,
+        path,
+        PRE_ADMISSION_HEADER_BYTES_V2,
+        PRE_ADMISSION_RECORD_STRIDE_V2,
+        &[],
+    )
+    .map(drop)
 }
 
 fn verify_header_v2(file: &mut File, path: &Path) -> Result<(), PreAdmissionDataRefusal> {
@@ -3870,16 +3889,6 @@ fn read_record_v2(
         .and_then(|_| file.read_exact(&mut raw))
         .map_err(|why| format!("cannot read pre-admission V2 record {index}: {why}"))?;
     PreAdmissionDataV2::decode(&raw)
-}
-
-/// Label every V2 append names, and its rollback test injects with.
-const APPEND_LABEL_V2: &str = "pre-admission V2 record";
-
-fn append_record_v2(
-    file: &mut File,
-    raw: &[u8; RECORD_BYTES_V2],
-) -> Result<(), PreAdmissionDataRefusal> {
-    crate::append_rollback::append(file, raw, APPEND_LABEL_V2)
 }
 
 fn file_generation_v2(
@@ -3994,9 +4003,65 @@ pub(crate) use tests::{
               nothing -- an unreachable arm is one."
 )]
 mod tests {
+    /// Fixture writer: one raw record at the end, no barrier, no rollback.
+    fn append_record(
+        file: &mut File,
+        raw: &[u8; RECORD_BYTES],
+    ) -> Result<(), PreAdmissionDataRefusal> {
+        file.seek(SeekFrom::End(0))
+            .and_then(|_| file.write_all(raw))
+            .map_err(|why| format!("cannot append pre-admission record: {why}"))
+    }
+
+    /// Fixture writer for V2 records.
+    fn append_record_v2(
+        file: &mut File,
+        raw: &[u8; RECORD_BYTES_V2],
+    ) -> Result<(), PreAdmissionDataRefusal> {
+        file.seek(SeekFrom::End(0))
+            .and_then(|_| file.write_all(raw))
+            .map_err(|why| format!("cannot append pre-admission V2 record: {why}"))
+    }
+
     use super::*;
 
     type TestResult<T = ()> = Result<T, String>;
+
+    /// `docs/02-store-format.md` §30 states the Pre-Admission Data V2 bytes
+    /// this build writes: magic, header version and kind, stride, payload
+    /// width, the reconciliation block and the seal row. P1-16-04, D-1940.
+    #[test]
+    fn the_store_format_doc_states_the_pre_admission_v2_this_build_writes() {
+        let doc = include_str!("../../../docs/02-store-format.md");
+        let section = doc
+            .split_once("## 30. Pre-Admission Data audit ledger")
+            .map_or("", |(_, rest)| rest);
+        let section = section.split_once("\n## ").map_or(section, |(own, _)| own);
+        assert!(section.starts_with(&format!(" — version {HEADER_VERSION_V2}\n")));
+        let section = section.split_whitespace().collect::<Vec<_>>().join(" ");
+        let magic = String::from_utf8_lossy(&HEADER_MAGIC_V2).replace('\0', "\\0");
+        assert!(section.contains(&format!("`{DATA_FILE_V2}` and `{LOCK_FILE_V2}`")));
+        assert!(section.contains(&format!(
+            "The {HEADER_BYTES_V2}-byte header is `{magic}` at `0..16`, version \
+             `{HEADER_VERSION_V2}` at `16..20`, kind `{HEADER_KIND_V2}` at `20..24`, stride \
+             `{PRE_ADMISSION_RECORD_STRIDE_V2}`"
+        )));
+        assert!(section.contains(&format!(
+            "Each {RECORD_BYTES_V2}-byte record is a {PAYLOAD_BYTES_V2}-byte payload and a \
+             {SEAL_BYTES}-byte"
+        )));
+        assert!(section.contains(&format!(
+            "| 0 | 4 | record version `{RECORD_VERSION_V2}`, `u32` |"
+        )));
+        assert!(section.contains(&format!("| {CORE_PAYLOAD_BYTES_V2} | 64 | reconciliation:")));
+        assert!(section.contains(&format!(
+            "| {PAYLOAD_BYTES_V2} | {SEAL_BYTES} | seal over payload `0..{PAYLOAD_BYTES_V2}`"
+        )));
+        assert_eq!(
+            CORE_PAYLOAD_BYTES_V2 + RECONCILIATION_BYTES_V2,
+            PAYLOAD_BYTES_V2
+        );
+    }
 
     fn must<T, E: std::fmt::Debug>(result: Result<T, E>, context: &str) -> TestResult<T> {
         match result {
@@ -4619,6 +4684,110 @@ mod tests {
         Ok(())
     }
 
+    /// search-2, D-1900: a short write or failed barrier on the Data or the
+    /// Completion record is cut back; committed authority stays readable and
+    /// the exact retry commits. Faults fire through the ledger's own path.
+    #[test]
+    fn a_failed_append_is_cut_back_and_committed_authority_stays_readable() -> TestResult {
+        use crate::fixed_tail::fault::{Armed, Kind};
+        for nth in 0..2_u8 {
+            for kind in [
+                Kind::Write {
+                    keep: RECORD_BYTES / 2,
+                },
+                Kind::Sync,
+            ] {
+                let root = test_dir()?;
+                let configured = bounds(4)?;
+                let committed = fixture(40)?;
+                let next = fixture(41)?;
+                let mut ledger = must(
+                    PreAdmissionDataLedgerV1::open(root.path(), configured),
+                    "ledger initializes",
+                )?;
+                must(ledger.append_complete(&committed), "committed pair writes")?;
+                // `nth` 0 faults the Data record, 1 its Completion.
+                let armed = Armed::arm_after(DATA_FILE, kind, usize::from(nth));
+                let refusal =
+                    must_refuse(ledger.append_complete(&next), "the faulted append refuses")?;
+                assert!(!Armed::pending(), "{nth} {kind:?} fired");
+                drop(armed);
+                assert!(refusal.contains("injected"), "{nth} {kind:?}: {refusal}");
+                drop(ledger);
+                let len = must(
+                    std::fs::metadata(root.path().join(DATA_FILE)),
+                    "data metadata",
+                )?
+                .len();
+                assert_eq!(
+                    len.saturating_sub(HEADER_BYTES as u64) % RECORD_BYTES as u64,
+                    0,
+                    "{nth} {kind:?}: the file ends on a whole record"
+                );
+                let reader = must(
+                    PreAdmissionDataLedgerV1::open_read(root.path(), configured),
+                    "committed authority stays readable",
+                )?;
+                assert!(must(reader.reopen_audit(&committed.authority_id()), "audit")?.is_some());
+                drop(reader);
+                let mut rerun = must(
+                    PreAdmissionDataLedgerV1::open(root.path(), configured),
+                    "the writer reopens",
+                )?;
+                assert!(matches!(
+                    must(rerun.append_complete(&next), "the exact retry commits")?,
+                    PreAdmissionProductionCommitV1::Written(_)
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_failed_v2_append_is_cut_back_and_committed_authority_stays_readable() -> TestResult {
+        use crate::fixed_tail::fault::{Armed, Kind};
+        for kind in [
+            Kind::Write {
+                keep: RECORD_BYTES_V2 / 2,
+            },
+            Kind::Sync,
+        ] {
+            let root = test_dir()?;
+            let configured = bounds_v2(4)?;
+            let committed = zero_fixture_v2(190)?;
+            let next = zero_fixture_v2(191)?;
+            let mut ledger = must(
+                PreAdmissionDataLedgerV2::open(root.path(), configured),
+                "V2 ledger initializes",
+            )?;
+            must(
+                ledger.append_complete(&committed),
+                "committed V2 pair writes",
+            )?;
+            let armed = Armed::arm(DATA_FILE_V2, kind);
+            let refusal = must_refuse(ledger.append_complete(&next), "the faulted append refuses")?;
+            assert!(!Armed::pending());
+            drop(armed);
+            assert!(refusal.contains("injected"), "{kind:?}: {refusal}");
+            drop(ledger);
+            let reader = must(
+                PreAdmissionDataLedgerV2::open_read(root.path(), configured),
+                "committed V2 authority stays readable",
+            )?;
+            assert!(must(reader.reopen_audit(&committed.authority_id()), "audit")?.is_some());
+            drop(reader);
+            let mut rerun = must(
+                PreAdmissionDataLedgerV2::open(root.path(), configured),
+                "the V2 writer reopens",
+            )?;
+            assert!(matches!(
+                must(rerun.append_complete(&next), "the exact V2 retry commits")?,
+                PreAdmissionProductionCommitV2::Written(_)
+            ));
+        }
+        Ok(())
+    }
+
     #[test]
     fn exact_trailing_data_orphan_resumes_and_foreign_retry_refuses() -> TestResult {
         let root = test_dir()?;
@@ -4660,6 +4829,74 @@ mod tests {
             must(reopened.page(0, 1), "completed pair reads")?.rows(),
             &[value]
         );
+        Ok(())
+    }
+
+    /// ledgers-3, D-1910: a kill-torn tail is refused by a reader and cut by
+    /// the next writer, after which both open.
+    #[test]
+    fn a_kill_torn_tail_is_cut_by_the_writer_and_refused_by_a_reader() -> TestResult {
+        let configured = bounds(4)?;
+        let root = test_dir()?;
+        drop(must(
+            PreAdmissionDataLedgerV1::open(root.path(), configured),
+            "header initializes",
+        )?);
+        let path = root.path().join(DATA_FILE);
+        let mut torn = must(open_file(&path, true, false), "file reopens")?;
+        must(torn.seek(SeekFrom::End(0)), "seek")?;
+        must(torn.write_all(&[7; 5]), "torn bytes write")?;
+        drop(torn);
+        assert!(
+            must_refuse(
+                PreAdmissionDataLedgerV1::open_read(root.path(), configured),
+                "reader refuses",
+            )?
+            .contains("ragged")
+        );
+        drop(must(
+            PreAdmissionDataLedgerV1::open(root.path(), configured),
+            "writer heals",
+        )?);
+        assert_eq!(
+            must(std::fs::metadata(&path), "measure")?.len(),
+            PRE_ADMISSION_HEADER_BYTES_V1
+        );
+        drop(must(
+            PreAdmissionDataLedgerV1::open_read(root.path(), configured),
+            "reader opens",
+        )?);
+
+        let configured = bounds_v2(3)?;
+        let root = test_dir()?;
+        drop(must(
+            PreAdmissionDataLedgerV2::open(root.path(), configured),
+            "V2 header initializes",
+        )?);
+        let path = root.path().join(DATA_FILE_V2);
+        let mut torn = must(open_file(&path, true, false), "V2 file reopens")?;
+        must(torn.seek(SeekFrom::End(0)), "V2 seek")?;
+        must(torn.write_all(&[7; 5]), "V2 torn bytes write")?;
+        drop(torn);
+        assert!(
+            must_refuse(
+                PreAdmissionDataLedgerV2::open_read(root.path(), configured),
+                "V2 reader refuses",
+            )?
+            .contains("ragged")
+        );
+        drop(must(
+            PreAdmissionDataLedgerV2::open(root.path(), configured),
+            "V2 writer heals",
+        )?);
+        assert_eq!(
+            must(std::fs::metadata(&path), "V2 measure")?.len(),
+            PRE_ADMISSION_HEADER_BYTES_V2
+        );
+        drop(must(
+            PreAdmissionDataLedgerV2::open_read(root.path(), configured),
+            "V2 reader opens",
+        )?);
         Ok(())
     }
 

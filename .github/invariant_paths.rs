@@ -473,20 +473,7 @@ const STATUS: [&str; 5] = ["✓", "◐", "—", "✗", "~"];
 /// the status glyph): snake case, at least three underscores (a test name,
 /// not a field or a variable), not a prefix ending in `_`. D-1606.
 fn bare_proof_names(line: &str) -> Vec<&str> {
-    let cells: Vec<&str> = {
-        let mut cells = Vec::new();
-        let mut start = 0;
-        let bytes = line.as_bytes();
-        for (at, byte) in bytes.iter().enumerate() {
-            if *byte == b'|' && (at == 0 || bytes[at - 1] != b'\\') {
-                if at > 0 {
-                    cells.push(&line[start..at]);
-                }
-                start = at + 1;
-            }
-        }
-        cells
-    };
+    let cells = row_cells(line);
     let [.., proof, status] = cells.as_slice() else {
         return Vec::new();
     };
@@ -595,6 +582,84 @@ fn verify_with(document: &str, declarations: &str, modules: &str) -> Result<usiz
     }
 }
 
+/// The cells of a table row, split on every `|` not escaped as `\|`. D-1606's
+/// splitting, shared by [`bare_proof_names`]'s rule and [`unproven_ticks`].
+fn row_cells(line: &str) -> Vec<&str> {
+    let mut cells = Vec::new();
+    let mut start = 0;
+    let bytes = line.as_bytes();
+    for (at, byte) in bytes.iter().enumerate() {
+        if *byte == b'|' && (at == 0 || bytes[at - 1] != b'\\') {
+            if at > 0 {
+                cells.push(&line[start..at]);
+            }
+            start = at + 1;
+        }
+    }
+    cells
+}
+
+/// Does a `✓` row's proof cell NAME something that can prove it? P12-02, D-1799.
+///
+/// Accepted: a backticked token whose last segment is a function some tracked
+/// source declares, either at the end of a `crate::module::name` path or with
+/// at least two underscores in a bare or two-segment name (a test name, not a
+/// field or a one-word helper); a CI gate by number (`gate 17`); or a
+/// front-end test file (`.test.js`). Everything else -- a code pointer, "the
+/// same test", a test count, a decision id -- is refused, because a row whose
+/// proof is invisible to gate 10 can go false with the gate green (P12-03).
+///
+/// WHAT IT CANNOT SEE, stated in `docs/06-limits.md`: whether the named
+/// function is a TEST (the declaration table does not say), and whether a
+/// named gate or file proves this row. It refuses an unnamed proof; it does
+/// not certify a named one.
+fn names_a_proof(proof: &str, functions: &HashSet<&str>) -> bool {
+    let lower = proof.to_ascii_lowercase();
+    let gate = lower
+        .match_indices("gate ")
+        .any(|(at, word)| lower[at + word.len()..].starts_with(|c: char| c.is_ascii_digit()));
+    gate || lower.contains(".test.js")
+        || proof.split('`').skip(1).step_by(2).any(|value| {
+            let value = value.strip_suffix("()").unwrap_or(value);
+            let last = value.rsplit("::").next().unwrap_or(value);
+            functions.contains(last)
+                && (value.split("::").count() >= 3
+                    || last.bytes().filter(|byte| *byte == b'_').count() >= 2)
+        })
+}
+
+/// Every `✓` row whose proof cell names nothing [`names_a_proof`] accepts.
+/// A header row (the line after it is the `|---` separator) is not a row.
+fn unproven_ticks(document: &str, declarations: &str) -> Vec<String> {
+    let functions: HashSet<&str> = declarations
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .map(|(_, function)| function)
+        .collect();
+    let lines: Vec<&str> = document.lines().collect();
+    let mut refused = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let header = lines
+            .get(index + 1)
+            .is_some_and(|next| next.starts_with("|---"));
+        let cells = row_cells(line);
+        if !line.starts_with('|') || header || cells.len() < 3 {
+            continue;
+        }
+        if let [.., proof, status] = cells.as_slice()
+            && status.trim() == "✓"
+            && !names_a_proof(proof, &functions)
+        {
+            refused.push(format!(
+                "line {}: a ✓ row names no test, gate or front-end test file: {}",
+                index + 1,
+                cells.first().map_or("", |id| id.trim())
+            ));
+        }
+    }
+    refused
+}
+
 /// `Some(checked)` for a verification, `None` for a `--middles` or `--resolve`
 /// listing.
 fn run() -> Result<Option<usize>, String> {
@@ -646,6 +711,10 @@ fn run() -> Result<Option<usize>, String> {
         None => String::new(),
     };
     let checked = verify_with(&document, &declarations, &modules)?;
+    let unproven = unproven_ticks(&document, &declarations);
+    if !unproven.is_empty() {
+        return Err(unproven.join("\n"));
+    }
     if checked == 0 {
         return Err("no path-qualified invariant proofs were checked".to_owned());
     }
@@ -863,6 +932,48 @@ mod tests {
             "| X-01 | p | `allow_scan_unread`, `close_above_level_` | ✓ |",
         ] {
             assert!(verify(unchecked, LONG).is_ok(), "{unchecked}");
+        }
+    }
+
+    /// P12-02, D-1799: a `✓` row must name something that can prove it.
+    #[test]
+    fn a_tick_row_must_name_a_test_a_gate_or_a_front_end_test_file() {
+        const TESTS: &str = "crates/api/src/a.rs\tthe_long_test\ncrates/api/src/a.rs\tshort\n";
+        for named in [
+            "| X-01 | a property | `api::a::the_long_test` | ✓ |",
+            "| X-01 | a property | `api::bench::short`, the bench lines | ✓ |",
+            "| X-01 | a property | `the_long_test()`, and prose | ✓ |",
+            "| X-01 | a property | CI gate 24 | ✓ |",
+            "| X-01 | a property | Gate 17, the swept crates | ✓ |",
+            "| X-01 | a property | `web/tests/live.test.js` | ✓ |",
+            "| X-01 | a \\| piped property | `the_long_test` | ✓ |",
+        ] {
+            assert!(unproven_ticks(named, TESTS).is_empty(), "{named}");
+        }
+        for unnamed in [
+            "| X-01 | a property | the same test's second half | ✓ |",
+            "| X-01 | a property | `short`, a production helper | ✓ |",
+            "| X-01 | a property | `the_renamed_test` | ✓ |",
+            "| X-01 | a property | the aggregate count | ✓ |",
+            "| X-01 | a property | gate keeping | ✓ |",
+            "| X-01 | a property | D-0593 | ✓ |",
+        ] {
+            let refused = unproven_ticks(unnamed, TESTS);
+            assert_eq!(refused.len(), 1, "{unnamed}");
+            assert!(
+                refused.iter().all(|why| why.contains("X-01")),
+                "{refused:?}"
+            );
+        }
+        // Other glyphs, header rows and prose are not this rule's to judge.
+        for skipped in [
+            "| X-01 | a property | the same test | ✗ |",
+            "| X-01 | a property | the same test | ◐ |",
+            "| ID | Invariant | Proof | ✓ |\n|---|---|---|---|",
+            "prose that ends | ✓ |",
+            "| ✓ |",
+        ] {
+            assert!(unproven_ticks(skipped, TESTS).is_empty(), "{skipped}");
         }
     }
 

@@ -212,7 +212,7 @@ fn single_day_window_checks_both_ist_midnights_at_microsecond_precision() {
         })
         .collect();
     let response: Value =
-        serde_json::from_str(&bars_array(&rows, bounds.0, bounds.1)).expect("exact window");
+        serde_json::from_str(&bars_array(&rows, bounds.0, bounds.1).0).expect("exact window");
     assert_eq!(response.as_array().expect("bars").len(), 2);
     assert_eq!(response[0]["t"], first / 1_000_000);
     assert_eq!(response[1]["t"], (end - 1) / 1_000_000);
@@ -241,8 +241,19 @@ async fn window_pages_preserve_integer_values_month_gaps_and_change_provenance()
     assert!(page["bars"][0]["chg_why"].is_null());
     assert_eq!(page["bars"][0]["oichg_why"], "oi_null_before");
     assert_eq!(page["bars"][1]["c"], 200);
-    assert!(page["bars"][1]["chg"].is_null());
-    assert_eq!(page["bars"][1]["chg_why"], "first_bar_in_file");
+    // June's first bar stands behind May's last, read in the same request
+    // (Z1-slice11-F4, D-1762), so it has a change and May's zero OI names why
+    // the OI change has none.
+    assert_eq!(
+        page["bars"][1]["chg"],
+        crate::server::basis_points(110, 200).expect("a change")
+    );
+    assert!(page["bars"][1]["chg_why"].is_null());
+    assert_eq!(page["bars"][1]["oichg_why"], "previous_oi_zero");
+    let (_, opening) = fixture.get("dir=asc&offset=0&limit=1").await;
+    assert_eq!(opening["bars"][0]["c"], 100);
+    assert!(opening["bars"][0]["chg"].is_null());
+    assert_eq!(opening["bars"][0]["chg_why"], "first_bar_in_file");
     let (_, scan) = fixture.get("sort=c&extremes=true&limit=2").await;
     assert_eq!(scan["scanned"], true);
     assert_eq!(scan["extremes"]["range"], 80);
@@ -267,7 +278,8 @@ async fn window_pages_preserve_integer_values_month_gaps_and_change_provenance()
     let (_, first) = fixture.get("dir=asc&limit=1").await;
     assert!(first["bars"][0]["oi"].is_null());
     assert_eq!(first["bars"][0]["oichg_why"], "oi_null");
-    for options in ["offset=4", "limit=0", "sort=v&offset=99"] {
+    // `limit=0` is refused since D-1765 and is pinned with the other refusals.
+    for options in ["offset=4", "sort=v&offset=99"] {
         let (status, empty) = fixture.get(options).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(empty["bars"], serde_json::json!([]));
@@ -399,4 +411,114 @@ async fn window_malformed_inputs_refuse_instead_of_answering_another_page() {
                 .is_some_and(|reason| !reason.is_empty())
         );
     }
+}
+
+/// An unknown `dir` or `extremes` is refused and named, never read as the
+/// default: `dir=ASC` once answered newest first with 200, and `extremes=yes`
+/// dropped the extremes silently (Z1-slice14-F3, D-1762).
+#[test]
+fn an_unknown_direction_or_extremes_flag_is_refused_not_defaulted() {
+    let base = "feed=zerodha&from=2025-01&to=2025-02&timeframe=1min&sort=ts";
+    for (extra, desc, extremes) in [
+        ("", true, false),
+        ("&dir=desc", true, false),
+        ("&dir=asc", false, false),
+        ("&extremes=0", true, false),
+        ("&extremes=false", true, false),
+        ("&extremes=1", true, true),
+        ("&extremes=true", true, true),
+    ] {
+        let ask = WindowAsk::parse(&format!("{base}{extra}")).expect(extra);
+        assert_eq!((ask.desc, ask.want_extremes), (desc, extremes), "{extra}");
+    }
+    // The page size is served as asked at both ends of its range (P1-01-01).
+    for (extra, limit) in [("", 200), ("&limit=1", 1), ("&limit=1000", 1_000)] {
+        let ask = WindowAsk::parse(&format!("{base}{extra}")).expect(extra);
+        assert_eq!(ask.limit, limit, "{extra}");
+    }
+    for (extra, named) in [
+        ("&dir=ASC", "\"ASC\" is not a direction"),
+        ("&dir=ascending", "\"ascending\" is not a direction"),
+        ("&extremes=yes", "\"yes\" is not an extremes flag"),
+        ("&extremes=2", "\"2\" is not an extremes flag"),
+        ("&limit=0", "0 is not a page size"),
+        ("&limit=1001", "1001 is not a page size"),
+        ("&limit=5000", "Accepted: 1 to 1000"),
+    ] {
+        let why = WindowAsk::parse(&format!("{base}{extra}"))
+            .err()
+            .expect("an unknown value must be refused");
+        assert!(why.contains(named), "{extra}: {why}");
+    }
+}
+
+/// **CE-60. A BAR VALUE A BROWSER'S JSON NUMBER CANNOT HOLD IS WITHHELD BY
+/// NAME, NEVER SENT TO BE ROUNDED.**
+///
+/// The store admits any non-negative `i64` count and price, and both bar
+/// routes wrote them as bare JSON numbers: `9007199254740993` parses in a
+/// browser as `9007199254740992`, and `/db` and `/markets` drew the rounded
+/// value with no refusal.
+#[test]
+fn a_bar_value_past_two_to_the_fifty_three_is_withheld_by_name_not_rounded() {
+    let past = (1_i64 << 53) + 1;
+    let at = 1_746_157_500_000_000;
+    let bar = |ts_micros: i64, volume: i64| Bar {
+        ts_micros,
+        open: 100,
+        high: 110,
+        low: 90,
+        close: 100,
+        volume,
+        open_interest: OI_NULL,
+    };
+    let rows = [bar(at, 1), bar(at + 60_000_000, past)];
+    let (out, withheld) = bars_array(&rows, None, None);
+    assert!(
+        !out.contains(&past.to_string()),
+        "never sent as a number: {out}"
+    );
+    let sent: Value = serde_json::from_str(&out).expect("the exact bar is still sent");
+    assert_eq!(sent.as_array().expect("bars").len(), 1);
+    assert_eq!(withheld.len(), 1, "{withheld:?}");
+    assert!(
+        withheld[0].contains("`v`") && withheld[0].contains(&past.to_string()),
+        "named by field and value: {withheld:?}"
+    );
+    // EXACTLY 2^53 − 1 IS EXACT, and is sent.
+    let (edge, none) = bars_array(&[bar(at, (1_i64 << 53) - 1)], None, None);
+    assert!(
+        none.is_empty() && edge.contains("9007199254740991"),
+        "{edge}"
+    );
+
+    let window = bars::Window {
+        total: 2,
+        months_read: 1,
+        months_missing: 0,
+        bars: rows
+            .iter()
+            .map(|row| bars::WindowBar {
+                bar: *row,
+                chg: None,
+                chg_why: "first bar",
+                oichg: None,
+                oichg_why: "first bar",
+            })
+            .collect(),
+        faults: Vec::new(),
+        extremes: Some(bars::Extremes {
+            range: past,
+            volume: 1,
+        }),
+    };
+    let (body, withheld) = render_window(&window, false);
+    let sent: Value = serde_json::from_str(&body).expect("a window body");
+    assert_eq!(sent["bars"].as_array().expect("bars").len(), 1);
+    assert!(sent["extremes"].is_null(), "{body}");
+    assert_eq!(withheld, 2, "one bar and the extremes");
+    assert!(
+        sent["faults"].as_str().expect("named").contains("`v`"),
+        "{body}"
+    );
 }

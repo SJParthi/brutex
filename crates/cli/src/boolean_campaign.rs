@@ -789,16 +789,38 @@ fn verify_catalog_request(
 }
 
 pub(crate) fn command(args: &[&str], out: &mut String) -> u8 {
-    match command_inner(args, out) {
+    // Arguments, then work, each with its own code: an argument this build
+    // does not understand is `MISUSED` with the usage; a refusal once they
+    // parsed, including an incomplete receipt, is the work's and is `FAILED`
+    // without it (P8-03, D-2722).
+    let words = match parse(args) {
+        Ok(words) => words,
+        Err(why) => return crate::refuse(out, &why),
+    };
+    match execute(&words, out) {
         Ok(receipt) => match receipt.require_complete() {
             Ok(()) => crate::OK,
-            Err(why) => crate::refuse(out, &why),
+            Err(why) => crate::fail(out, &why),
         },
-        Err(why) => crate::refuse(out, &why),
+        Err(why) => crate::fail(out, &why),
     }
 }
-fn command_inner(args: &[&str], out: &mut String) -> Result<CampaignReceipt, String> {
-    let commit = crate::commit_stamp().ok_or("Boolean campaign requires a clean build identity")?;
+
+/// The eleven arguments, parsed and checked before the build, the store or
+/// the catalog is consulted.
+struct Words<'a> {
+    vendor: &'a str,
+    symbols: &'a str,
+    from: (u16, u8),
+    to: (u16, u8),
+    catalog: &'a str,
+    horizon: runner::outcome::Horizon,
+    max_points: u64,
+    jobs: usize,
+    output: &'a str,
+}
+
+fn parse<'a>(args: &[&'a str]) -> Result<Words<'a>, String> {
     let [
         vendor,
         symbols,
@@ -815,40 +837,60 @@ fn command_inner(args: &[&str], out: &mut String) -> Result<CampaignReceipt, Str
     else {
         return Err("boolean-campaign-stored requires its 11 explicit arguments".into());
     };
+    crate::boolean_catalog_command::words(vendor, symbols)?;
     let parse_month = |y: &str, m: &str| -> Result<(u16, u8), String> {
         Ok((
             y.parse().map_err(|_| "invalid year")?,
             m.parse().map_err(|_| "invalid month")?,
         ))
     };
-    let horizon =
-        crate::knobs::horizon_count(horizon).ok_or("positive one-minute HORIZON required")?;
+    let from = parse_month(fy, fm)?;
+    let to = parse_month(ty, tm)?;
+    crate::stored::months_between(from, to)?;
+    Ok(Words {
+        vendor,
+        symbols,
+        from,
+        to,
+        catalog,
+        horizon: crate::knobs::horizon_count(horizon)
+            .ok_or("positive one-minute HORIZON required")?,
+        max_points: points.parse().map_err(|_| "invalid MAX_POINTS")?,
+        jobs: jobs.parse().map_err(|_| "invalid MAX_RUNG_JOBS")?,
+        output,
+    })
+}
+
+fn execute(words: &Words<'_>, out: &mut String) -> Result<CampaignReceipt, String> {
+    let commit = crate::commit_stamp().ok_or("Boolean campaign requires a clean build identity")?;
     // Resolve policy and all physical limits before opening the text catalog.
     let common = prepared::Prepared::new(
         prepared::Input {
-            vendor,
-            symbols,
-            from: parse_month(fy, fm)?,
-            to: parse_month(ty, tm)?,
-            horizon,
-            max_points: points.parse().map_err(|_| "invalid MAX_POINTS")?,
-            output: Path::new(output),
+            vendor: words.vendor,
+            symbols: words.symbols,
+            from: words.from,
+            to: words.to,
+            horizon: words.horizon,
+            max_points: words.max_points,
+            output: Path::new(words.output),
         },
         out,
     )?;
-    let programs =
-        crate::boolean_catalog_command::catalog(Path::new(catalog), common.strict.max_bytes())?;
+    let programs = crate::boolean_catalog_command::catalog(
+        Path::new(words.catalog),
+        common.strict.max_bytes(),
+    )?;
     let request = Request {
         rungs: RungScope::ALL,
-        vendor,
-        symbols,
+        vendor: words.vendor,
+        symbols: words.symbols,
         from: common.from,
         to: common.to,
         programs: &programs,
-        horizon,
-        max_points: points.parse().map_err(|_| "invalid MAX_POINTS")?,
-        output: Path::new(output),
-        max_rung_jobs: jobs.parse().map_err(|_| "invalid MAX_RUNG_JOBS")?,
+        horizon: words.horizon,
+        max_points: words.max_points,
+        output: Path::new(words.output),
+        max_rung_jobs: words.jobs,
     };
     run_prepared(prepare_resolved(&request, common, commit)?, out)
 }

@@ -90,6 +90,7 @@ pub mod bar;
 pub mod batch;
 pub mod contract;
 pub mod error;
+mod footer;
 mod page;
 pub mod reader;
 pub mod schema;

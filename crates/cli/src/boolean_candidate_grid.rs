@@ -371,4 +371,41 @@ mod tests {
         assert_eq!(refused.as_deref(), Some("Boolean selector unknown"));
         Ok(())
     }
+
+    /// AS-09 (P12-04, D-1793). All four selector words are pinned by VALUE,
+    /// on both sides of the codec. The round trip above still passes if the
+    /// encoder and the decoder shift together, and §3 rule 8 is about the
+    /// numbers on disk staying put: each encoded word must be its literal, and
+    /// each literal written into a saved encoding must decode to its selector.
+    #[test]
+    fn every_selector_word_is_pinned_by_value_on_both_sides() -> Result<(), String> {
+        for (selector, tag) in [
+            (ExitGridSelectorV1::PessimisticTotal, 0_u64),
+            (ExitGridSelectorV1::EdgeThenPessimistic, 1),
+            (ExitGridSelectorV1::GuaranteedFloor, 2),
+            (ExitGridSelectorV1::OperatorRule, 3),
+        ] {
+            let mut raw = Vec::new();
+            policy(&mut raw, &with_selector(selector)?);
+            let at = raw.len() - 8 - 32 - 32;
+            assert_eq!(
+                raw.get(at..at + 8),
+                Some(tag.to_le_bytes().as_slice()),
+                "{selector:?} encodes as {tag}"
+            );
+
+            let mut other = Vec::new();
+            policy(
+                &mut other,
+                &with_selector(ExitGridSelectorV1::OperatorRule)?,
+            );
+            other
+                .get_mut(at..at + 8)
+                .ok_or("the selector word is inside the encoding")?
+                .copy_from_slice(&tag.to_le_bytes());
+            let read = decode_policy(&mut Decode::new(&other))?;
+            assert_eq!(read.selector(), selector, "{tag} decodes as {selector:?}");
+        }
+        Ok(())
+    }
 }

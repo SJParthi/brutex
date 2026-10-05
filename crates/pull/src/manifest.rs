@@ -43,8 +43,9 @@
 //! nothing straddles a cache line, and every byte of an entry is covered by
 //! exactly one checksum.
 //!
-//! Version 1 is read and never written. Version 2 is what this build writes,
-//! and D-0067 says why the closes are in the census at all: `/store.json` must
+//! Version 1 is read and never written. Version 3 is what this build writes:
+//! version 2's geometry with the derivative contract in the closes half's
+//! reserved bytes. D-0067 says why the closes are in the census at all: `/store.json` must
 //! serve a month's percentage change, and deriving it from the bars costs
 //! ~17.5 GB to extract 492 KB.
 //!
@@ -184,7 +185,9 @@ pub const MANIFEST_EXTENSION: &str = ".man";
 /// argument `store::layout::FORMAT_VERSION_2` makes one crate away.
 pub const MAGIC: [u8; 8] = *b"BRUTEXM1";
 
-/// Identifies a version-2 manifest — the one this build writes.
+/// Identifies the version-2 GEOMETRY, which versions 2 and 3 share. Version 3
+/// is the one this build writes; the version field, not the magic, separates
+/// them.
 pub const MAGIC_V2: [u8; 8] = *b"BRUTEXM2";
 
 /// The seven bytes shared by every manifest version.
@@ -192,7 +195,7 @@ pub const MAGIC_FAMILY: [u8; 7] = *b"BRUTEXM";
 
 /// The format version this build **writes**. Version 1 is read, never written.
 ///
-/// `Layout::KNOWN` is what this build **reads**, and it holds both.
+/// `Layout::KNOWN` is what this build **reads**, and it holds all three.
 pub const FORMAT_VERSION: u16 = 3;
 
 /// Bytes per header slot, and per checksummed image unit.
@@ -508,9 +511,9 @@ const C_CONTRACT_N: usize = C_CONTRACT + C_CONTRACT_LEN;
 
 const _: () = assert!(C_LAST_CLOSE + 8 <= C_CONTRACT);
 const _: () = assert!(C_CONTRACT_N < OFF_CRC);
-// 16..60 is reserved and stays zero. `docs/02-store-format.md` §2: a future
-// field takes reserved space in a NEW VERSION, never by reinterpreting this
-// one.
+// 41..60 is reserved and stays zero at version 3 (16..60 was, at version 2).
+// `docs/02-store-format.md` §2 and §11.5a: a future field takes reserved space
+// in a NEW VERSION, never by reinterpreting this one.
 const _: () = assert!(C_LAST_CLOSE + 8 < OFF_CRC);
 
 /// The path of one vendor's manifest under `root`.

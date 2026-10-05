@@ -982,6 +982,29 @@ impl InstitutionalStatisticsLedgerV1 {
                 COMPLETION_KIND_V1,
                 COMPLETION_STRIDE_BYTES,
             )?;
+            // The writer cuts a torn tail under its lock (D-1901, cli3-3).
+            for (file, path, magic, stride) in [
+                (
+                    &files.statistics,
+                    &paths.statistics,
+                    STATISTICS_MAGIC_V1,
+                    STATISTICS_STRIDE_BYTES,
+                ),
+                (
+                    &files.completions,
+                    &paths.completions,
+                    COMPLETION_MAGIC_V1,
+                    COMPLETION_STRIDE_BYTES,
+                ),
+            ] {
+                crate::fixed_tail::heal_torn_tail(
+                    file,
+                    path,
+                    HEADER_BYTES as u64,
+                    stride as u64,
+                    &magic,
+                )?;
+            }
             Self::from_files(
                 files,
                 paths.clone(),
@@ -1696,6 +1719,42 @@ mod tests {
     use super::*;
     use runner::bootstrap::romano_wolf_adjusted_p_values_v1;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// cli3-3, D-1901: a sub-record tail is refused by a reader and cut by
+    /// the next writer under its exclusive lock; committed bytes stay.
+    #[test]
+    fn a_torn_tail_is_cut_by_the_writer_and_refused_by_a_reader() {
+        let root = root("torn-tail");
+        let _ = std::fs::remove_dir_all(&root);
+        drop(InstitutionalStatisticsLedgerV1::open(&root, 8).expect("the writer opens"));
+        for path in [
+            InstitutionalStatisticsLedgerV1::statistics_path(&root),
+            InstitutionalStatisticsLedgerV1::completion_path(&root),
+        ] {
+            let whole = std::fs::metadata(&path).expect("metadata").len();
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .expect("reopen for the torn fixture");
+            std::io::Write::write_all(&mut file, &[7_u8; 3]).expect("torn tail");
+            drop(file);
+            assert!(
+                InstitutionalStatisticsLedgerV1::open_read(&root, 8).is_err(),
+                "a reader refuses the torn tail"
+            );
+            drop(InstitutionalStatisticsLedgerV1::open(&root, 8).expect("the writer opens"));
+            assert_eq!(
+                std::fs::metadata(&path).expect("metadata").len(),
+                whole,
+                "the writer cut exactly the torn bytes"
+            );
+            drop(
+                InstitutionalStatisticsLedgerV1::open_read(&root, 8)
+                    .expect("a reader opens the cut file"),
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
 

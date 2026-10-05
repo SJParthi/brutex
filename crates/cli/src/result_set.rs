@@ -324,6 +324,17 @@ impl Receipts {
         )
         .map_err(|why| format!("{} could not be opened: {why}", path.display()))?;
         let lock = validation_lock(&file, &path, true)?;
+        // THE WRITER'S DOOR CUTS A TORN TAIL under its exclusive validation
+        // lock (D-1901, sweep-2). A receipt is exposed only under a later
+        // committed ledger row, so bytes past the last whole receipt were never
+        // a receipt. Read-only doors still refuse them.
+        crate::fixed_tail::heal_torn_tail(
+            &file,
+            &path,
+            HEADER,
+            STRIDE,
+            &crate::fixed_tail::magic_and_version(MAGIC, VERSION),
+        )?;
         if file
             .metadata()
             .map_err(|why| format!("{} could not be measured: {why}", path.display()))?
@@ -471,6 +482,9 @@ impl Receipts {
                     receipt.trade_policy.as_str()
                 ));
             }
+            // A barrier that already failed on this file in this process is
+            // never confirmed by a second one (resources-1, D-1900).
+            crate::fixed_tail::refuse_after_failed_barrier(&self.path)?;
             self.file
                 .sync_all()
                 .map_err(|why| format!("the existing detail receipt could not be synced: {why}"))?;
@@ -482,18 +496,16 @@ impl Receipts {
             .file
             .seek(SeekFrom::End(0))
             .map_err(|why| format!("the receipt file could not be extended: {why}"))?;
-        self.file
-            .write_all(&receipt.to_bytes())
-            .map_err(|why| match self.file.set_len(at) {
-                Ok(()) => format!(
-                    "the detail receipt could not be written: {why}. Its partial bytes were rolled back"
-                ),
-                Err(and) => format!(
-                    "the detail receipt could not be written: {why}. Rolling its partial bytes back also failed: {and}; the file may now end mid-record"
-                ),
-            })?;
-        self.file
-            .sync_all()
+        // A partial write, or a failed barrier, cuts back to `at` (D-1900).
+        crate::fixed_tail::write_at_end(
+            &mut self.file,
+            &self.path.display(),
+            at,
+            &receipt.to_bytes(),
+            std::io::Write::write_all,
+        )
+        .map_err(|why| format!("the detail receipt could not be written: {why}"))?;
+        crate::fixed_tail::sync_all_or_roll_back(&self.file, &self.path, at)
             .map_err(|why| format!("the new detail receipt could not be synced: {why}"))?;
         let scanned = at.saturating_add(STRIDE);
         let generation = self.validated_generation(scanned)?;
@@ -1245,6 +1257,15 @@ mod tests {
                 .expect_err("ragged")
                 .contains("whole")
         );
+        // sweep-2, D-1901: the writer's door cuts the byte that was never a
+        // receipt; a reader then opens the healed file. A whole receipt with a
+        // bad seal (below) is never cut.
+        Receipts::open(&torn).expect("the writer cuts the torn tail");
+        assert_eq!(
+            std::fs::metadata(Receipts::path(&torn)).expect("len").len(),
+            super::HEADER
+        );
+        Receipts::open_read(&torn).expect("the healed file reads");
 
         let corrupt = root("corrupt");
         let _ = std::fs::remove_dir_all(&corrupt);
@@ -1689,6 +1710,40 @@ mod tests {
         ] {
             assert!(why.contains("could not be inspected"), "{why}");
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A file that ends short of the validated prefix being hashed is refused,
+    /// and the digest does not claim the bytes it never read. Without the
+    /// refusal a peer truncating the manifest between the receipt scan and the
+    /// hash would leave a digest of `[0, 10)` labelled `[0, 20)`, and the next
+    /// `require_unchanged` would compare against a different range. P10-05.
+    #[test]
+    fn a_prefix_hash_that_runs_off_the_end_of_the_file_is_refused() {
+        let root = root("prefix-short");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("root");
+        let path = root.join("short.bin");
+        std::fs::write(&path, [7_u8; 10]).expect("ten bytes");
+        let mut file = std::fs::File::open(&path).expect("open");
+
+        let why = super::PrefixDigest::over(&mut file, &path, 20)
+            .expect_err("ten bytes cannot cover a twenty-byte prefix");
+        assert!(
+            why.contains("ended at byte 10 while its validated prefix up to byte 20"),
+            "{why}"
+        );
+
+        // Extending an honest digest past the end refuses too, and leaves what
+        // it covered where it was: the ten bytes still verify.
+        let mut digest = super::PrefixDigest::over(&mut file, &path, 10).expect("ten bytes");
+        let why = digest
+            .extend_from(&mut file, &path, 15)
+            .expect_err("five bytes past the end");
+        assert!(why.contains("ended at byte 10"), "{why}");
+        digest
+            .require_unchanged(&mut file, &path)
+            .expect("the covered prefix is unchanged");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

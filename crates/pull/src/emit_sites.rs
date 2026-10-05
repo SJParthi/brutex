@@ -848,6 +848,15 @@ static SITES: &[Site] = &[
         drive: drive_csv_refused,
     },
     Site {
+        at: "crates/pull/src/masters.rs — note_index_skips",
+        target: "pull.masters",
+        message: "index entries skipped",
+        // THE CATEGORY BY NAME (CE-58): a category whose value is not a list
+        // of names is skipped under MR-04, and the skip is the line.
+        says: ("category", Says::Holds("Thematic")),
+        drive: drive_index_skipped,
+    },
+    Site {
         at: "crates/pull/src/archive.rs:278",
         target: "pull.archive",
         message: "folder walked",
@@ -1220,6 +1229,14 @@ fn drive_census_imaged(scratch: &Scratch) {
 fn drive_csv_decoded(_scratch: &Scratch) {
     let rows = crate::csv::decode(BODY, Columns::TrueDataIndex).expect("five fields, no header");
     assert_eq!(rows.len(), 3, "three rows in, three rows out");
+}
+
+/// An index document with one category that is not a list and one element
+/// that is not a name. Both are skipped (MR-04) and the good name converts.
+fn drive_index_skipped(_scratch: &Scratch) {
+    let csv = crate::masters::nse_index_csv(r#"{"Broad":["NIFTY 50",42],"Thematic":"NIFTY X"}"#)
+        .expect("the good name still converts");
+    assert!(csv.contains("NIFTY 50,Broad\n"), "{csv}");
 }
 
 /// A CSV row that is two fields where five are required.

@@ -14,6 +14,24 @@ type Response = (
 );
 const PAGE_ROWS: u64 = 256;
 
+/// The unit of the four `*_paisa` candle fields this route serves.
+///
+/// India VIX is a volatility index in POINTS, not a price. It is stored ×100
+/// only because it shares the price write path, and the wire names its OHLC
+/// `open_paisa` .. `close_paisa` after that path. The names are frozen (the
+/// browser checks the exact key set), so the unit is stated here instead and
+/// appended to the served `policy`. `cli::index_stop_vix::POLICY` itself is not
+/// edited: its bytes are hashed into the saved companion's reference-policy
+/// digest, and changing them would change a persisted identity (§3 rule 8).
+/// numeric-pass19 p19num-2, D-1968.
+pub const CANDLE_UNIT: &str = "candle open_paisa, high_paisa, low_paisa and close_paisa are India VIX \
+     index points x 100 (hundredths of a point), not money: 1345 is VIX 13.45, not Rs 13.45";
+
+/// The `policy` text served: the hashed policy, then [`CANDLE_UNIT`].
+fn served_policy() -> String {
+    format!("{}; {CANDLE_UNIT}", cli::index_stop_vix::POLICY)
+}
+
 #[cfg(test)]
 #[path = "indexstopvix_projection_tests.rs"]
 mod projection_tests;
@@ -125,10 +143,9 @@ fn render(root: &Path, asked: &Asked) -> Result<Value, String> {
         memory_bytes: bytes,
         page_records: PAGE_ROWS,
     };
-    let mut held = CACHE
-        .get_or_init(|| Mutex::new(None))
-        .try_lock()
-        .map_err(|_| "saved-VIX reader busy; nothing queued")?;
+    // Taken out for this request and put back afterwards; never held
+    // across the cold open (locks-2, D-1912).
+    let mut held = crate::detail::Checkout::take(CACHE.get_or_init(|| Mutex::new(None)));
     if !held.as_ref().is_some_and(|cached| {
         cached.root == root
             && cached.identity == asked.identity
@@ -197,7 +214,7 @@ fn project(view: &View<'_>, asked: &Asked) -> Result<Value, String> {
         "reference":{"identity":hex(meta.lookup_identity),"publication_id":hex(meta.publication_id),"completion":hex(meta.completion_digest)},
         "selected":crate::indexstopjson::setting(asked.setting,selected),"feed":meta.feed,
         "reference_symbol":"NSE-INDIAVIX","reference_timeframe":"1min","reference_only":true,
-        "entry_basis":"entry_minute","exit_basis":"exit_minute_candle","policy":cli::index_stop_vix::POLICY,
+        "entry_basis":"entry_minute","exit_basis":"exit_minute_candle","policy":served_policy(),
         "summary":{"settings":meta.settings.to_string(),"trades":meta.trades.to_string(),
             "exact_stamps":meta.exact_stamps.to_string(),"absent_stamps":meta.absent_stamps.to_string(),"unavailable_stamps":meta.unavailable_stamps.to_string()},
         "total":page.total.to_string(),"offset":page.offset.to_string(),"limit":asked.limit,
@@ -224,6 +241,23 @@ fn hex(value: [u8; 32]) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// The served policy keeps the hashed policy byte for byte as its prefix
+    /// and states the candle unit, so a reader of `close_paisa` is told it is
+    /// VIX points ×100 and not rupees. numeric-pass19 p19num-2, D-1968.
+    #[test]
+    fn the_served_policy_states_that_vix_candles_are_points_not_money() {
+        let served = super::served_policy();
+        assert!(served.starts_with(cli::index_stop_vix::POLICY));
+        assert!(served.ends_with(super::CANDLE_UNIT));
+        assert!(served.contains("index points x 100"));
+        assert!(served.contains("not money"));
+        assert!(served.len() <= 4096, "the browser refuses a longer policy");
+        assert!(
+            !cli::index_stop_vix::POLICY.contains("points"),
+            "the hashed policy is unchanged; the unit is appended, not edited in"
+        );
+    }
+
     use super::*;
     const ID: &str = "1111111111111111111111111111111111111111111111111111111111111111";
     const PIN: &str = "2222222222222222222222222222222222222222222222222222222222222222";

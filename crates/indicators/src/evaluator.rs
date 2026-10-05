@@ -282,9 +282,13 @@ pub const CHARTER_NON_REGULAR_IST_DAYS: [i64; 9] = [
     // 2021-02-24 was an ordinary Wednesday that STOPPED. `docs/00-charter.md`
     // §3 records the exchange's own account: all segments halted, a 15-minute
     // pre-open from 15:30, normal trading resumed 15:45 and the extended
-    // session closed 17:00. The reopening is entirely outside the pull's
-    // [09:15, 15:30) window, so ingest drops it -- correctly, and permanently:
-    // re-pulling cannot recover a bar the window excludes.
+    // session closed 17:00. Ingest's session verdict now reads the exchange
+    // calendar on this day and KEEPS the 15:45-16:59 reopening a vendor serves
+    // (D-2670). It used to drop it against the regular [09:15, 15:30) hours,
+    // which this comment called correct; the gap audit meanwhile owed those
+    // same 75 minutes, so the two disagreed. What follows is unchanged by that
+    // fix: the bars already on disk end at 10:08, and the day is still not a
+    // regular session.
     //
     // WHAT IS ACTUALLY ON DISK, measured by decoding
     // `zerodha/NSE/INDEX/NIFTY/1min/2021-02.bin` (n_valid 7179 = 19 x 375 + 54):
@@ -2164,6 +2168,21 @@ mod tests {
             };
             assert_eq!(again, once, "a rerun disagreed with the first run");
         }
+        // THE EQUALITY ABOVE HOLDS FOR ANY DETERMINISTIC BODY (P1-13-01), a
+        // constant `ConditionMask::ZERO` included, and `filter_map(.ok())`
+        // made an evaluator that refused every bar compare `[] == []`. D-0373
+        // closed that shape elsewhere in this crate and its census missed this
+        // spelling. So every bar must have stepped, and the run must not be
+        // constant.
+        assert_eq!(once.len(), bars.len(), "every fixture bar must step");
+        assert!(
+            once.iter()
+                .skip(1)
+                .zip(once.iter())
+                .any(|(later, earlier)| later != earlier),
+            "every bar produced an identical mask, so this test would pass on a \
+             body that ignores its input entirely"
+        );
     }
 
     /// With `Availability::Absent`, not one of the twenty VWAP positions is set.

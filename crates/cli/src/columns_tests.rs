@@ -177,6 +177,7 @@ fn the_screen_table_keeps_extreme_cells_apart_and_under_their_headers() {
         admitted: true,
         consistency: None,
         steady: true,
+        calendar_unmeasured: false,
     };
     let rows = [
         row(i64::MIN, u64::MAX, usize::MAX),
@@ -213,6 +214,7 @@ fn the_consistency_table_keeps_extreme_shares_and_the_worst_day_apart() {
             years,
         }),
         steady: true,
+        calendar_unmeasured: false,
     };
     let rows = [
         row(i64::MIN, i128::from(i64::MIN), usize::MAX, usize::MAX),

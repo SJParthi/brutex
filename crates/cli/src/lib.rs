@@ -85,6 +85,9 @@ mod build_provenance;
 mod commit_stamp;
 #[cfg(test)]
 mod equity_statement_tests;
+/// Fixed-stride ledger tails: rollback of a failed append and the writer-side
+/// cut of a torn tail (D-1900, D-1901, D-1902).
+mod fixed_tail;
 #[cfg(test)]
 mod operator_boundary_tests;
 mod readonly_file;
@@ -388,11 +391,13 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    qualify a predeclared finite catalog on later
                                    real OHLCV across all eight intraday timeframes;
                                    retain every failed check and fixed-training fold.
-       cli boolean-qualified-search-stored VENDOR SYMBOLS FROM_Y FROM_M TO_Y TO_M BITS HORIZON MAX_POINTS BATCH_PROGRAMS NODE_ALLOWANCE BATCH_ALLOWANCE OUTPUT_ROOT LATER_FROM_Y LATER_FROM_M LATER_TO_Y LATER_TO_M
+       cli boolean-qualified-search-stored VENDOR SYMBOLS FROM_Y FROM_M TO_Y TO_M BITS HORIZON MAX_POINTS BATCH_PROGRAMS NODE_ALLOWANCE BATCH_ALLOWANCE OUTPUT_ROOT LATER_FROM_Y LATER_FROM_M LATER_TO_Y LATER_TO_M [TIMEFRAMES]
                                    continue the complete fixed AND/OR/NOT grammar
                                    with one immutable search-wide testing allowance;
-                                   automatically process bounded batches across all
-                                   eight intraday rungs and retain later qualification.
+                                   automatically process bounded batches across the
+                                   comma-separated TIMEFRAMES, or all eight intraday
+                                   rungs when it is omitted, and retain later
+                                   qualification.
                                    Work limits pause; they never claim exhaustion.
        cli auto-stored VENDOR UNDERLYING RUNG FROM_Y FROM_M TO_Y TO_M
                                    the same search, over REAL stored bars. There
@@ -484,8 +489,8 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    cheap ceiling toward the floor one trade a week
                                    implies, stopping at the first support that
                                    admits a row. Cheap answers arrive first.
-                                   Every rule is on: 80%% of trades won AND 80%% on
-                                   the 95%% lower bound, the smallest win at least
+                                   Every rule is on: 80% of trades won AND 80% on
+                                   the 95% lower bound, the smallest win at least
                                    3x the largest loss, total profit at least 5x
                                    the worst peak-to-trough fall, and the weakest
                                    calendar grain still half positive. There is NO
@@ -516,8 +521,8 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    setup is pruned by a high support before it is
                                    ever priced, so a fixed threshold cannot find
                                    one -- this walks it.
-                                   CADENCE is `3` for three trades a WEEK, or
-                                   `6/y` for six a YEAR. A bare number keeps its
+                                   CADENCE is `3` (or `3/w`) for three trades a
+                                   WEEK, or `6/y` for six a YEAR. A bare number keeps its
                                    old meaning, so nothing you have typed before
                                    changes; `/y` is what makes a setup rarer than
                                    one a week sayable at all -- `1` is 52 a year.
@@ -611,8 +616,11 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
 SESSIONS  how many generated trading days to sweep, 1..=3650
 MIN_HITS  bars a combination must fire on to be kept, 1 or more
 VENDOR    the feed that wrote them -- groww, dhan, truedata, gdfl, zerodha
-UNDERLYING  the index, e.g. NIFTY or BANKNIFTY
-RUNG      the bar length as its directory word -- 1min, 1day
+UNDERLYING  the index, e.g. NIFTY or BANKNIFTY, or one of the F&O
+            underlyings that is a share, e.g. RELIANCE (its cash equity)
+RUNG      the bar length as its directory word -- one of the eight intraday
+          rungs 1min 2min 3min 5min 10min 15min 30min 60min. 1day is stored
+          and is not a rung any sweep accepts
 
 The stored commands read a run identity off the build. They refuse unless the
 build proved that HEAD, the Git index, and every Rust/Cargo working-tree input
@@ -989,7 +997,7 @@ fn column_withholding_unsourceable_days(
     vendor: brutex_core::vendor::Vendor,
     underlying: &str,
     span: ((u16, u8), (u16, u8)),
-    bars: &mut Vec<indicators::Candle>,
+    series: FoldedSeries<'_>,
     signal_length: i64,
     // `&str`, NOT `&'static str`. `audit_range_inner` takes its rung from the
     // command line, so it is borrowed rather than one of `EVERY_RUNG`'s
@@ -1005,7 +1013,7 @@ fn column_withholding_unsourceable_days(
         vendor,
         underlying,
         span,
-        bars,
+        series,
         signal_length,
         StoredPreparationBuild {
             rung,
@@ -1024,18 +1032,35 @@ struct StoredPreparationBuild<'a> {
     commit: Option<&'a str>,
 }
 
+/// A signal span as a retrying door holds it: the whole series it FOLDS, the
+/// days withheld so far, and the swept bars. p11num-1, D-1781.
+///
+/// The retry loops below add a day to `days` and recompute `bars` from
+/// `folded`, never from the previous `bars`, so each rebuild folds every bar
+/// the store holds and withholds only rows.
+struct FoldedSeries<'a> {
+    folded: &'a [indicators::Candle],
+    days: &'a mut Vec<i64>,
+    bars: &'a mut Vec<indicators::Candle>,
+}
+
 fn column_withholding_at_build(
     root: &std::path::Path,
     vendor: brutex_core::vendor::Vendor,
     underlying: &str,
     span: ((u16, u8), (u16, u8)),
-    bars: &mut Vec<indicators::Candle>,
+    series: FoldedSeries<'_>,
     signal_length: i64,
     build: StoredPreparationBuild<'_>,
 ) -> Result<(indicators::column::Column, [u8; 32]), String> {
     /// A span needing more than this withheld is a different defect.
     const ATTEMPTS: usize = 64;
     let StoredPreparationBuild { rung, commit } = build;
+    let FoldedSeries {
+        folded: whole,
+        days: withheld,
+        bars,
+    } = series;
     let (from, to) = span;
     let mut dropped: Vec<i64> = Vec::new();
     // ONCE, outside the retry loop: the verdict is a property of the key and
@@ -1044,15 +1069,31 @@ fn column_withholding_at_build(
     for _ in 0..ATTEMPTS {
         #[cfg(test)]
         COLUMN_BUILD_ATTEMPTS.with(|count| count.set(count.get().saturating_add(1)));
-        let daily = stored::load_daily_context(root, vendor, underlying, (from, to), bars)?;
+        // THE DAILY CONTEXT ANCHORS EVERY BAR THE FOLD STEPS, so it is derived
+        // from the whole series; the overlay context from the swept bars it
+        // overlays. D-1781.
+        let daily = stored::load_daily_context(root, vendor, underlying, (from, to), whole)?;
         let exact = stored::load_exact_minute_context(root, vendor, underlying, (from, to), bars)?;
-        let digest = stored_anchored_digest(bars, &exact, &daily)?;
+        let digest = crate::minute_gaps::bind_withheld(
+            stored_anchored_digest(whole, &exact, &daily)?,
+            withheld,
+        );
         let attempt = commit
             .map(|commit| {
                 preparation_attempt_with_commit(root, vendor, underlying, rung, digest, commit)
             })
             .transpose()?;
-        let folded = stored_anchored_column(bars, &daily, &exact, signal_length, availability);
+        let folded = stored_anchored_column_withholding(
+            Withholding {
+                folded: whole,
+                days: withheld,
+                swept: bars,
+            },
+            &daily,
+            &exact,
+            signal_length,
+            availability,
+        );
         if let Some(attempt) = attempt {
             attempt.finish(if folded.is_ok() {
                 sweep_evidence::Completion::Completed
@@ -1078,14 +1119,17 @@ fn column_withholding_at_build(
                     return Err(why);
                 };
                 let day = indicators::ist_day(ts);
-                if dropped.contains(&day) {
+                if withheld.contains(&day) {
                     return Err(format!(
                         "IST day {day} recurred after being withheld, so this is not \
                          a missing-minute hole. Nothing was swept. Underlying: {why}"
                     ));
                 }
                 dropped.push(day);
-                let (kept, _removed) = crate::minute_gaps::withhold(bars, &[day]);
+                withheld.push(day);
+                // FROM THE WHOLE SERIES, so the rebuild folds every bar and
+                // withholds only rows. D-1781.
+                let (kept, _removed) = crate::minute_gaps::withhold(whole, withheld);
                 if kept.len() == bars.len() {
                     return Err(format!(
                         "withholding IST day {day} removed no signal bar, so the \
@@ -1208,13 +1252,34 @@ fn auto_stored_arm(
         to_m.parse::<u8>(),
     );
     let (Ok(fy), Ok(fm), Ok(ty), Ok(tm)) = parsed else {
-        out.push_str("refused: FROM_Y FROM_M TO_Y TO_M must all be whole numbers\n");
-        return MISUSED;
+        return refuse(out, "FROM_Y FROM_M TO_Y TO_M must all be whole numbers");
     };
+    let span = ((fy, fm), (ty, tm));
+    if let Err(why) = stored_words(vendor, Some(underlying), Some(rung), Some(span)) {
+        return refuse(out, &why);
+    }
     let text = auto_stored(vendor, underlying, rung, (fy, fm), (ty, tm));
-    let refused = carries_refusal(&text);
+    let code = auto_stored_exit(&text);
     out.push_str(&text);
-    if refused { MISUSED } else { OK }
+    code
+}
+
+/// The exit code of one rendered `auto-stored` page.
+///
+/// A search that settled on nothing, or whose sweep halted, records
+/// `Completion::Refused` / `Halted` in its sweep evidence. This arm tested
+/// [`carries_refusal`] alone and exited 0 on it, so `run_durable` wrote
+/// `Phase::Completed` for the same invocation and two durable records of one
+/// run disagreed. [`untrustworthy`] reads the verdict row the evidence's own
+/// predicate prints (P8-01, D-2720). A refusal is the work's, because the
+/// arguments were checked before it ran, so it is [`FAILED`] too (P8-03,
+/// D-2722).
+fn auto_stored_exit(text: &str) -> u8 {
+    if carries_refusal(text) || untrustworthy(text) {
+        FAILED
+    } else {
+        OK
+    }
 }
 
 /// The `top` arm, beside [`results_arm`] because it reads the same store.
@@ -1249,6 +1314,13 @@ fn results_arm(out: &mut String, filter: Option<(&str, &str)>) -> u8 {
     out.push_str(&listing);
     if refused { FAILED } else { OK }
 }
+
+/// Every sentence `elite` refuses `MAX_POINTS` with, in the grammar the arm
+/// accepts: zero is "no ceiling beyond the derived ladder" and USAGE tells the
+/// operator to pass it. The unparsable-word refusal said "1 or more", which
+/// contradicted both (P8-02, D-2721).
+const ELITE_MAX_POINTS: &str = "MAX_POINTS is a whole number of index points: 1 or more for a \
+                                ceiling, or 0 for no ceiling beyond the ladder the bars derive";
 
 /// The `screen` arm, lifted out of [`run`] for the reason [`audit_range_arm`]
 /// gives.
@@ -1326,9 +1398,10 @@ fn elite_arm(
             if pts < 0 {
                 return refuse(
                     out,
-                    "MAX_POINTS is a whole number of index points: 1 or more for a \
-                     ceiling, or 0 for no ceiling beyond the ladder the bars derive. \
-                     A negative ceiling is unsatisfiable, not a looser one",
+                    &format!(
+                        "{ELITE_MAX_POINTS}. A negative ceiling is unsatisfiable, \
+                         not a looser one"
+                    ),
                 );
             }
             // `1..=TOP_CEILING`, one refusal for every door (D-1727).
@@ -1354,18 +1427,15 @@ fn elite_arm(
             // parser was the one caller left on the constant. It reads the
             // reference off the span it is about to sweep, so nothing here
             // needs to know a price.
-            let text = elite_descend_in_points_inner(
-                vendor,
-                underlying,
-                rung,
-                ((fy, fm), (ty, tm)),
-                (pts, n),
-                lens,
-                None,
-            );
-            let refused = carries_refusal(&text);
+            let span = ((fy, fm), (ty, tm));
+            if let Err(why) = stored_words(vendor, Some(underlying), Some(rung), Some(span)) {
+                return refuse(out, &why);
+            }
+            let text =
+                elite_descend_in_points_inner(vendor, underlying, rung, span, (pts, n), lens, None);
+            let code = work_exit(&text);
             out.push_str(&text);
-            if refused { MISUSED } else { OK }
+            code
         }
         ((Err(_), _, _, _) | (_, _, Err(_), _), _) => {
             refuse(out, "FROM_YEAR and TO_YEAR must be whole years")
@@ -1373,11 +1443,7 @@ fn elite_arm(
         ((_, Err(_), _, _) | (_, _, _, Err(_)), _) => {
             refuse(out, "FROM_MONTH and TO_MONTH must be 1 to 12")
         }
-        (_, (Err(_), _)) => refuse(
-            out,
-            "MAX_POINTS must be a whole number of index points: 1 or more for a \
-             ceiling, or 0 for no ceiling beyond the ladder the bars derive",
-        ),
+        (_, (Err(_), _)) => refuse(out, ELITE_MAX_POINTS),
         (_, (_, Err(_))) => refuse(out, "TOP must be a whole number, 1 or more"),
     }
 }
@@ -1454,10 +1520,14 @@ fn screen_arm(
             // already does. This read `points_to_ppm(pts)` -- a hardcoded
             // 25,000 -- so `screen NIFTY 20` and `screen SOMESTOCK 20` printed
             // the same number and asked for stops 167 times apart.
-            let reference = match reference_of_span(vendor, underlying, rung, ((fy, fm), (ty, tm)))
-            {
+            let span = ((fy, fm), (ty, tm));
+            if let Err(why) = stored_words(vendor, Some(underlying), Some(rung), Some(span)) {
+                return refuse(out, &why);
+            }
+            // The bars this reads are the WORK's, so a refusal here is too.
+            let reference = match reference_of_span(vendor, underlying, rung, span) {
                 Ok(price) => price,
-                Err(why) => return refuse(out, why.trim_start_matches("refused: ").trim_end()),
+                Err(why) => return fail(out, why.trim_start_matches("refused: ").trim_end()),
             };
             let ceiling_ppm = match ceiling_in_ppm(pts, reference) {
                 Ok(ppm) => ppm,
@@ -1515,9 +1585,9 @@ fn screen_arm(
                     validate: validate_from_env(),
                 },
             );
-            let refused = carries_refusal(&text);
+            let code = work_exit(&text);
             out.push_str(&text);
-            if refused { MISUSED } else { OK }
+            code
         }
         ((Err(_), _, _, _, _) | (_, _, Err(_), _, _), _) => {
             refuse(out, "YEAR must be a number like 2026")
@@ -1706,10 +1776,13 @@ fn pool_arm(
         parse_support_choice(support_ppm),
     ) {
         (Ok(fy), Ok(fm), Ok(ty), Ok(tm), Ok(h)) if (fy, fm) <= (ty, tm) => {
+            if let Err(why) = stored_words(vendor, None, Some(known), Some(((fy, fm), (ty, tm)))) {
+                return refuse(out, &why);
+            }
             let text = pool::pool(vendor, known, (fy, fm), (ty, tm), h);
-            let refused = carries_refusal(&text);
+            let code = work_exit(&text);
             out.push_str(&text);
-            if refused { MISUSED } else { OK }
+            code
         }
         (Ok(fy), Ok(fm), Ok(ty), Ok(tm), Ok(_)) => refuse(
             out,
@@ -1800,10 +1873,13 @@ fn pool_oos_arm(
 fn sweep_all_arm(out: &mut String, vendor: &str, rung: &str, min_hits: &str) -> u8 {
     match parse_min_hits(min_hits) {
         Ok(h) => {
+            if let Err(why) = stored_words(vendor, None, Some(rung), None) {
+                return refuse(out, &why);
+            }
             let text = batch::sweep_all(vendor, rung, h);
-            let refused = carries_refusal(&text);
+            let code = work_exit(&text);
             out.push_str(&text);
-            if refused { MISUSED } else { OK }
+            code
         }
         Err(why) => refuse(out, why),
     }
@@ -1852,15 +1928,20 @@ fn descend_arm(
                      would sweep every combination that fires even once.",
                 );
             }
+            let span = ((fy, fm), (ty, tm));
+            if let Err(why) = stored_words(vendor, Some(underlying), Some(rung), Some(span)) {
+                return refuse(out, &why);
+            }
             let text = descend(vendor, underlying, rung, (fy, fm), (ty, tm), h, w);
-            let refused = carries_refusal(&text);
+            let code = work_exit(&text);
             out.push_str(&text);
-            if refused { MISUSED } else { OK }
+            code
         }
-        (_, _, _, _, _, Err(_)) => refuse(
-            out,
-            "PER_WEEK must be a whole number of trades per week, at least 1.",
-        ),
+        // `parse_cadence`'s own sentence, which names every spelling it
+        // accepts. This arm discarded it and said PER_WEEK must be a whole
+        // number, so `6/yr` was told the opposite of what USAGE says CADENCE
+        // is (P8-02, D-2721).
+        (_, _, _, _, _, Err(why)) => refuse(out, why),
         (Err(_), _, _, _, _, _) | (_, _, Err(_), _, _, _) => {
             refuse(out, "YEAR must be a number like 2026")
         }
@@ -1930,10 +2011,14 @@ fn range_rung_arm(
         parse_support_choice(support_ppm),
     ) {
         (Ok(fy), Ok(fm), Ok(ty), Ok(tm), Ok(h)) => {
+            let span = ((fy, fm), (ty, tm));
+            if let Err(why) = stored_words(vendor, Some(underlying), Some(known), Some(span)) {
+                return refuse(out, &why);
+            }
             let text = range_over(vendor, underlying, &[known], (fy, fm), (ty, tm), h);
-            let refused = carries_refusal(&text);
+            let code = work_exit(&text);
             out.push_str(&text);
-            if refused { MISUSED } else { OK }
+            code
         }
         (Err(_), _, _, _, _) | (_, _, Err(_), _, _) => {
             refuse(out, "YEAR must be a number like 2026")
@@ -1963,10 +2048,14 @@ fn range_all_arm(
             // `None`, which `one_rung` reads as "derive this rung's threshold
             // from its own bars" -- the path that was live on the HTTP surface
             // and unreachable from the command line.
+            let span = ((fy, fm), (ty, tm));
+            if let Err(why) = stored_words(vendor, Some(underlying), None, Some(span)) {
+                return refuse(out, &why);
+            }
             let text = range_all(vendor, underlying, (fy, fm), (ty, tm), h);
-            let refused = carries_refusal(&text);
+            let code = work_exit(&text);
             out.push_str(&text);
-            if refused { MISUSED } else { OK }
+            code
         }
         (Err(_), _, _, _, _) | (_, _, Err(_), _, _) => {
             refuse(out, "YEAR must be a number like 2026")
@@ -2002,10 +2091,15 @@ fn stored_month_arm(
         parse_min_hits(min_hits),
     ) {
         (Ok(y), Ok(m), Ok(h)) => {
+            if let Err(why) =
+                stored_words(vendor, Some(underlying), Some(rung), Some(((y, m), (y, m))))
+            {
+                return refuse(out, &why);
+            }
             let text = command(vendor, underlying, rung, y, m, h);
-            let refused = carries_refusal(&text);
+            let code = work_exit(&text);
             out.push_str(&text);
-            if refused { MISUSED } else { OK }
+            code
         }
         (Err(_), _, _) => refuse(out, "YEAR must be a number like 2026"),
         (_, Err(_), _) => refuse(out, "MONTH must be 1..=12"),
@@ -2047,6 +2141,9 @@ fn ledger_all_arm(
         limits.1.parse::<u64>(),
     ) {
         (Ok(fy), Ok(fm), Ok(ty), Ok(tm), Ok(support_ppm), Ok(max_points)) if max_points > 0 => {
+            if let Err(why) = stored_words(vendor, None, None, Some(((fy, fm), (ty, tm)))) {
+                return refuse(out, &why);
+            }
             let request = ledger_all::LedgerAllRequest {
                 vendor,
                 from: (fy, fm),
@@ -2060,9 +2157,9 @@ fn ledger_all_arm(
             } else {
                 ledger_all::ledger_all(&request)
             };
-            let refused = carries_refusal(&text);
+            let code = work_exit(&text);
             out.push_str(&text);
-            if refused { MISUSED } else { OK }
+            code
         }
         (Err(_), _, _, _, _, _) | (_, _, Err(_), _, _, _) => {
             refuse(out, "YEAR must be a number like 2026")
@@ -2126,14 +2223,15 @@ fn ledger_replay_arm(out: &mut String, args: &[&str]) -> u8 {
             (year(oty)?, month(otm)?),
         ))
     })();
+    let parsed = parsed.and_then(|(request, from, to)| {
+        stored_words(vendor, None, None, Some((request.from, request.to)))?;
+        stored_words(vendor, None, None, Some((from, to)))?;
+        Ok((request, from, to))
+    });
     match parsed {
         Ok((request, from, to)) => {
             let report = ledger_v6::ledger_v6_replay(&request, from, to);
-            let status = if carries_refusal(&report) {
-                MISUSED
-            } else {
-                OK
-            };
+            let status = work_exit(&report);
             out.push_str(&report);
             status
         }
@@ -2170,10 +2268,14 @@ fn audit_range_arm(
         parse_min_hits(min_hits),
     ) {
         (Ok(fy), Ok(fm), Ok(ty), Ok(tm), Ok(h)) => {
+            let span = ((fy, fm), (ty, tm));
+            if let Err(why) = stored_words(vendor, Some(underlying), Some(rung), Some(span)) {
+                return refuse(out, &why);
+            }
             let text = audit_range(vendor, underlying, rung, (fy, fm), (ty, tm), h);
-            let refused = carries_refusal(&text);
+            let code = work_exit(&text);
             out.push_str(&text);
-            if refused { MISUSED } else { OK }
+            code
         }
         (Err(_), _, _, _, _) | (_, _, Err(_), _, _) => {
             refuse(out, "YEAR must be a number like 2026")
@@ -2470,8 +2572,18 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
         ["sweep-all", vendor, rung, min_hits] => sweep_all_arm(out, vendor, rung, min_hits),
         ["auto", sessions] => match parse_sessions(sessions) {
             Ok(s) => {
-                out.push_str(&auto(s));
-                OK
+                let text = auto(s);
+                // The search's own verdict decides the code, as `sweep`'s does
+                // above. This arm returned OK unconditionally, so `cli auto 1`
+                // printed `threshold chosen NONE` under an untrustworthy
+                // verdict and exited 0 (P8-01, D-2720).
+                let code = if carries_refusal(&text) || untrustworthy(&text) {
+                    FAILED
+                } else {
+                    OK
+                };
+                out.push_str(&text);
+                code
             }
             Err(why) => refuse(out, why),
         },
@@ -2605,6 +2717,65 @@ fn refuse(out: &mut String, why: &str) -> u8 {
     out.push('\n');
     out.push_str(USAGE);
     MISUSED
+}
+
+/// Writes a named refusal of the WORK, without the usage, and returns
+/// [`FAILED`].
+///
+/// # Which of the two codes, and why most commands had it backwards
+///
+/// [`MISUSED`] is "asked for something it does not understand": an unknown
+/// word, a malformed argument. [`FAILED`] is "asked for something reasonable
+/// and could not do it". Most stored commands exited `MISUSED` for every
+/// refusal their work produced -- a month absent from the store, an unstamped
+/// build, a ledger write that failed -- and the boolean and expression commands
+/// printed the whole usage under an I/O failure, while `command_report`
+/// exited `FAILED` for a malformed number. A script could not tell "fix your
+/// arguments" from "the store or the build could not do it", which is the one
+/// distinction the two codes exist to make (P8-03, D-2722).
+///
+/// So every argument is checked first, by [`refuse`]; what is refused after
+/// that is the work's, and it comes here.
+pub(crate) fn fail(out: &mut String, why: &str) -> u8 {
+    out.push_str("refused: ");
+    out.push_str(why);
+    out.push('\n');
+    FAILED
+}
+
+/// The exit code of a page produced by work whose arguments were understood:
+/// [`FAILED`] when it carries a refusal, [`OK`] otherwise (P8-03, D-2722).
+fn work_exit(text: &str) -> u8 {
+    if carries_refusal(text) { FAILED } else { OK }
+}
+
+/// The words of a stored request, checked before the build, the store or the
+/// clock is consulted: a feed this build knows, an instrument the engine
+/// sweeps, a rung it sweeps, and a span of real months in order.
+///
+/// Each check is the one the command's own work applies -- [`parse_vendor`],
+/// [`stored::swept_index`], [`swept_rung`] and [`stored::months_between`] --
+/// so nothing new is refused. What changes is WHEN, and therefore the code: a
+/// word that names nothing is the operator's to fix and exits [`MISUSED`] with
+/// the usage, before any work can refuse for a reason of its own (P8-03,
+/// D-2722).
+pub(crate) fn stored_words(
+    vendor: &str,
+    underlying: Option<&str>,
+    rung: Option<&str>,
+    span: Option<((u16, u8), (u16, u8))>,
+) -> Result<(), stored::Refusal> {
+    parse_vendor(vendor)?;
+    if let Some(underlying) = underlying {
+        stored::swept_index(underlying)?;
+    }
+    if let Some(rung) = rung {
+        swept_rung(rung)?;
+    }
+    if let Some((from, to)) = span {
+        stored::months_between(from, to)?;
+    }
+    Ok(())
 }
 
 /// Sessions must be at least one and at most ten years of them.
@@ -2772,6 +2943,93 @@ fn stored_anchored_column(
     // bar is read to decide it. D-0507.
     availability: Availability,
 ) -> Result<Column, String> {
+    stored_anchored_column_withholding(
+        Withholding::none(signal),
+        daily,
+        exact_minute,
+        signal_length_micros,
+        availability,
+    )
+}
+
+/// A stored signal series FOLDED whole and SWEPT without its withheld days.
+/// p11num-1, D-1781.
+///
+/// `folded` is every signal bar the store holds for the span, holed days
+/// included; `swept` is `folded` with every bar on a `days` IST day removed,
+/// which is what the sweep, the overlay, the forward and the report read.
+/// The two travel together so no door can fold one series and execute on a
+/// slice that is not its withholding.
+#[derive(Clone, Copy)]
+struct Withholding<'a> {
+    folded: &'a [indicators::Candle],
+    days: &'a [i64],
+    swept: &'a [indicators::Candle],
+}
+
+impl<'a> Withholding<'a> {
+    /// Nothing withheld: the folded series is the swept one.
+    const fn none(signal: &'a [indicators::Candle]) -> Self {
+        Self {
+            folded: signal,
+            days: &[],
+            swept: signal,
+        }
+    }
+}
+
+/// [`stored_anchored_column`] over a series whose withheld days are folded
+/// through the evaluator and given no row. p11num-1, D-1781.
+///
+/// # Why the day is folded, not cut
+///
+/// Every door that withholds a holed day used to remove it from the signal
+/// bars BEFORE this build, so the evaluator saw day D-1 joined directly to
+/// D+1 and every family carrying state across sessions -- EMA20/200 (0-5),
+/// ATR and `SuperTrend` (64-65), swings, BOS and `CHoCH` (56-59, 72-73) and
+/// structure (278-279) -- reached later, SWEPT days in a state no unspliced
+/// run has. `indicators::column::Column::build_withholding` documents the
+/// measurement. Now the whole series is folded and only the withheld days'
+/// rows are left out, so a later row is the row of the true fold.
+///
+/// # What the withheld day still never does
+///
+/// It is never swept and never overlaid. The exact-minute ORB/`GapFib`
+/// overlay runs over `swept` only, so a holed day's signal bar never asks for
+/// the minute it lacks, and the four `exact_minute_overlay_never_substitutes…`
+/// tests are untouched: a hole still refuses when its day IS swept. Folding
+/// it needs no minute it lacks -- the evaluator steps the bars the store
+/// holds, so the state carried forward is the fold of what the vendor served,
+/// hole included, never a reconstruction of the missing minute.
+///
+/// # Errors
+///
+/// Every [`stored_anchored_column`] refusal, and a `swept` slice that is not
+/// exactly `folded` less its withheld days, which is a caller defect and
+/// refuses rather than executing on a mis-indexed column.
+fn stored_anchored_column_withholding(
+    withholding: Withholding<'_>,
+    daily: &stored::DailyContext,
+    exact_minute: &stored::ExactMinuteContext,
+    signal_length_micros: i64,
+    availability: Availability,
+) -> Result<Column, String> {
+    let Withholding {
+        folded,
+        days,
+        swept: signal,
+    } = withholding;
+    let held: std::collections::HashSet<i64> = days.iter().copied().collect();
+    if !folded
+        .iter()
+        .filter(|bar| !held.contains(&indicators::ist_day(bar.ts_micros)))
+        .eq(signal.iter())
+    {
+        return Err(
+            "the swept signal bars are not the folded series less its withheld days; no column was built"
+                .to_owned(),
+        );
+    }
     let widths =
         Widths::pinned().map_err(|why| format!("the pinned tolerances are not valid: {why}"))?;
     let mut evaluator = AnchoredEvaluator::new(
@@ -2781,12 +3039,13 @@ fn stored_anchored_column(
         &daily.references,
     )
     .map_err(|why| format!("the stored 1day reference order was refused: {why:?}"))?;
-    let anchored = AnchoredColumn::build_required(signal, &mut evaluator).map_err(|missing| {
-        format!(
-            "{} signal bar(s) across {} IST day(s) have no eligible stored 1day record strictly before them. Same-day OHLCV and signal-rung reconstruction were not substituted",
-            missing.signal_bars, missing.signal_days
-        )
-    })?;
+    let anchored = AnchoredColumn::build_required_withholding(folded, &mut evaluator, days)
+        .map_err(|missing| {
+            format!(
+                "{} signal bar(s) across {} IST day(s) have no eligible stored 1day record strictly before them. Same-day OHLCV and signal-rung reconstruction were not substituted",
+                missing.signal_bars, missing.signal_days
+            )
+        })?;
     if !anchored.reference_census().reconciles() {
         return Err(
             "the daily-reference census does not reconcile; no partial anchored column was swept"
@@ -2821,6 +3080,24 @@ fn stored_executed_digest(
     Ok(bind_execution_digest(
         stored_anchored_digest(signal, exact_minute, daily)?,
         runner::identity::data_digest(execution),
+    ))
+}
+
+/// [`stored_executed_digest`] over a withholding door's WHOLE folded signal
+/// series, with the withheld days bound beside it. p11num-1, D-1781.
+///
+/// A withheld day's bars move every later mask since D-1781, so they belong
+/// in the data term; [`crate::minute_gaps::bind_withheld`] then names which
+/// days were left out of the sweep, which the folded bars alone cannot say.
+fn stored_withheld_executed_digest(
+    withholding: Withholding<'_>,
+    exact_minute: &stored::ExactMinuteContext,
+    daily: &stored::DailyContext,
+    execution: &[indicators::Candle],
+) -> Result<[u8; 32], String> {
+    Ok(crate::minute_gaps::bind_withheld(
+        stored_executed_digest(withholding.folded, exact_minute, daily, execution)?,
+        withholding.days,
     ))
 }
 
@@ -3168,12 +3445,20 @@ fn root_from(
     explicit: Option<std::ffi::OsString>,
     home: Option<std::ffi::OsString>,
 ) -> Result<std::path::PathBuf, stored::Refusal> {
-    if let Some(explicit) = explicit {
-        return Ok(std::path::PathBuf::from(explicit));
+    // ONE READER WITH THE API'S. An empty BRUTEX_STORE or an empty or relative
+    // HOME is refused by name rather than resolved against the working
+    // directory, where `.brutex/store` could exist and canonicalize (CE-38,
+    // D-1769).
+    if let Some(explicit) = brutex_core::knob::folder("BRUTEX_STORE", explicit)? {
+        return Ok(explicit);
     }
     home.map_or_else(
         || Err("neither BRUTEX_STORE nor HOME is set, so the store cannot be found".to_owned()),
-        |home| Ok(std::path::PathBuf::from(home).join(".brutex").join("store")),
+        |home| {
+            Ok(brutex_core::knob::home(Some(home))?
+                .join(".brutex")
+                .join("store"))
+        },
     )
 }
 
@@ -3215,10 +3500,12 @@ fn root_from(
 fn log_dir_from(
     explicit: Option<std::ffi::OsString>,
     store: Option<std::path::PathBuf>,
-) -> Option<std::path::PathBuf> {
-    explicit
-        .map(std::path::PathBuf::from)
-        .or_else(|| store.map(|s| s.join("logs").join("cli")))
+) -> Result<Option<std::path::PathBuf>, String> {
+    // SET BUT EMPTY IS REFUSED, NOT RESOLVED. `PathBuf::from("")` opened
+    // `events.ndjson` in the working directory, the banner printed
+    // `events -> ` and `/logs` never read it (CE-5, D-1769).
+    Ok(brutex_core::knob::folder("BRUTEX_LOG_DIR", explicit)?
+        .or_else(|| store.map(|s| s.join("logs").join("cli"))))
 }
 
 /// Installs the process-wide event sink, or says why it could not.
@@ -3283,25 +3570,74 @@ fn log_dir_from(
 /// unwritable one by changing permissions.
 #[must_use]
 pub fn install_log() -> String {
-    let Some(dir) = log_dir_from(std::env::var_os("BRUTEX_LOG_DIR"), store_root().ok()) else {
-        return "events are NOT being recorded: neither BRUTEX_LOG_DIR nor a store root \
+    let dir = match log_dir_from(std::env::var_os("BRUTEX_LOG_DIR"), store_root().ok()) {
+        Ok(dir) => dir,
+        Err(why) => return format!("{UNLOGGED}: {why}"),
+    };
+    let Some(dir) = dir else {
+        return format!(
+            "{UNLOGGED}: neither BRUTEX_LOG_DIR nor a store root \
                 is set, so there is nowhere to write them. Set BRUTEX_LOG_DIR, or set \
                 BRUTEX_STORE or HOME so the log can sit beside the store."
-            .to_owned();
+        );
     };
-    let shown = dir.display().to_string();
+    let shown = log_banner(&dir, store_root().ok().as_deref());
     match telemetry::install(&telemetry::Config::new(dir)) {
-        Err(why) => format!("events are NOT being recorded: {why}"),
+        Err(why) => format!("{UNLOGGED}: {why}"),
         // THE DIRECTORY, NOT A TICK. "recorded successfully" would leave the
         // operator exactly where the measurement above found them: told it
         // worked, and unable to find the file.
-        Ok(_installed) => format!(
+        Ok(_installed) => shown,
+    }
+}
+
+/// The opening words of every [`install_log`] answer that means no sink.
+pub const UNLOGGED: &str = "events are NOT being recorded";
+
+/// Says on `err`, before the command runs, that this run has no log.
+///
+/// [`install_log`]'s answer is printed above the report, so it reached the
+/// operator only when the command ENDED. Since D-1537 a second `cli` on one
+/// store is refused the sink, so a long sweep started beside another ran
+/// unlogged for hours with nothing said until exit (conc9-2, D-1774). A
+/// refusal is now also written to `err` at once; a sink that installed writes
+/// nothing here. The answer above the report is unchanged.
+pub fn announce_unlogged(line: &str, err: &mut impl std::io::Write) {
+    if line.starts_with(UNLOGGED) {
+        // Best effort, like every stderr write here: a closed stderr must not
+        // stop the computation it was only describing.
+        let _closed = writeln!(err, "{line}").and_then(|()| err.flush());
+    }
+}
+
+/// The line `install_log` prints once the sink is installed at `dir`.
+///
+/// The /logs page reads the cli half at `<store>/logs/cli` and nowhere else
+/// (`api::logs::cli_half`). So the promise that these events appear there is
+/// made only when `dir` IS that directory; a `BRUTEX_LOG_DIR` elsewhere is told
+/// plainly that /logs will not show them, rather than promised a merge that
+/// never happens (CE-45, D-2652).
+fn log_banner(dir: &std::path::Path, store: Option<&std::path::Path>) -> String {
+    let shown = dir.display();
+    let page_reads = store.map(|s| s.join("logs").join("cli"));
+    if page_reads.as_deref() == Some(dir) {
+        return format!(
             "events -> {shown}\n  \
              The /logs page walks BOTH halves -- the server's directory and \
              this `cli/` beside it -- and merges them newest-first on the \
              clock, so these events appear there. D-0301."
-        ),
+        );
     }
+    let reads = page_reads.map_or_else(
+        || "no store root is set, so it has no cli half to read".to_owned(),
+        |p| format!("it reads the cli half only at {}", p.display()),
+    );
+    format!(
+        "events -> {shown}\n  \
+         The /logs page will NOT show these events: {reads}, and \
+         BRUTEX_LOG_DIR put them elsewhere. Read the file directly, or unset \
+         BRUTEX_LOG_DIR. D-2652."
+    )
 }
 
 /// One structural event about a run. **Never called per bar or per candidate.**
@@ -3397,6 +3733,41 @@ pub fn deliver(
     earned
 }
 
+/// The run context every live-progress event carries: feed, underlying, the
+/// asked span and an attempt token.
+///
+/// `web/src/lib/live-progress.ts` refuses the whole fold for any live event
+/// without an exact `attempt` field, and for a claimed one whose span differs
+/// from the active run's. The grid and validation events each wrote this block
+/// by hand: the progress line dropped the span and the attempt, and the other
+/// three took the attempt only from a browser-started run, so a terminal sweep's
+/// events carried none. The rung events already fell back to
+/// [`binding_attempt`]; this is that rule, written once (CE-49, D-2656).
+fn with_live_context<'a>(event: &mut telemetry::Event<'a>, recording: Option<Recording<'a>>) {
+    live_context_over(event, recording, binding_attempt());
+}
+
+/// [`with_live_context`] with the fallback attempt passed in, so the rule is
+/// provable without installing a process-wide sink.
+fn live_context_over<'a>(
+    event: &mut telemetry::Event<'a>,
+    recording: Option<Recording<'a>>,
+    fallback: Option<u64>,
+) {
+    if let Some(held) = recording {
+        *event = event
+            .with("feed", held.feed)
+            .with("underlying", held.underlying)
+            .with("from_year", u64::from(held.from.0))
+            .with("from_month", u64::from(held.from.1))
+            .with("to_year", u64::from(held.to.0))
+            .with("to_month", u64::from(held.to.1));
+    }
+    if let Some(attempt) = recording.and_then(|held| held.attempt).or(fallback) {
+        *event = event.with("attempt", attempt);
+    }
+}
+
 /// Emits one structural event under an exact browser-attempt key when one was
 /// supplied, without changing the process-wide telemetry run held by unrelated
 /// work. Terminal runs have no browser attempt and keep the ordinary path.
@@ -3467,15 +3838,52 @@ pub fn sweep_stored(
     }
 }
 
-fn command_report(out: &mut String, result: Result<String, String>, label: &str) -> u8 {
+/// Why a command that renders one report did not, and whose it is to fix.
+///
+/// `command_report` exited [`FAILED`] for every refusal, so a malformed number
+/// in `checksum-audit-stored` read as a store that could not do the work. The
+/// producers now say which it was (P8-03, D-2722).
+#[derive(Debug, PartialEq, Eq)]
+pub enum Refused {
+    /// An argument this build does not understand: [`MISUSED`], with the usage.
+    Arguments(String),
+    /// The arguments were understood and the work could not be done: [`FAILED`].
+    Work(String),
+}
+
+/// A refusal of the work is the default, so `?` on a work step needs no
+/// mapping and only an argument check has to say so.
+impl From<String> for Refused {
+    fn from(why: String) -> Self {
+        Self::Work(why)
+    }
+}
+
+impl From<&str> for Refused {
+    fn from(why: &str) -> Self {
+        Self::Work(why.to_owned())
+    }
+}
+
+/// An argument check's refusal, for `map_err`.
+pub(crate) fn misused(why: impl std::fmt::Display) -> Refused {
+    Refused::Arguments(why.to_string())
+}
+
+fn command_report(out: &mut String, result: Result<String, Refused>, label: &str) -> u8 {
     match result {
         Ok(report) => {
             out.push_str(&report);
             OK
         }
-        Err(why) => {
+        Err(Refused::Work(why)) => {
             let _ = writeln!(out, "{label} REFUSED: {why}");
             FAILED
+        }
+        Err(Refused::Arguments(why)) => {
+            let _ = writeln!(out, "{label} REFUSED: {why}");
+            out.push_str(USAGE);
+            MISUSED
         }
     }
 }
@@ -3495,6 +3903,26 @@ pub(crate) struct StoredMonthInputs {
     /// the operator's answer did not reach; it withholds nothing and keeps the
     /// identity it has always had.
     pub(crate) minute_gaps: Option<crate::minute_gaps::GapExclusion>,
+    /// The whole signal month, holed days included, when a day was withheld;
+    /// `None` when `loaded.bars` is already the whole month. p11num-1, D-1781.
+    ///
+    /// The column is FOLDED over this and SWEPT over `loaded.bars`, so a
+    /// withheld day still moves the indicator state every later day reads.
+    pub(crate) folded: Option<Vec<indicators::Candle>>,
+}
+
+impl StoredMonthInputs {
+    /// The folded series, the withheld days and the swept slice, together.
+    fn withholding(&self) -> Withholding<'_> {
+        Withholding {
+            folded: self.folded.as_deref().unwrap_or(&self.loaded.bars),
+            days: self
+                .minute_gaps
+                .as_ref()
+                .map_or(&[], crate::minute_gaps::GapExclusion::day_numbers),
+            swept: &self.loaded.bars,
+        }
+    }
 }
 
 struct StoredSweepRequest<'a> {
@@ -3508,7 +3936,7 @@ struct StoredSweepRequest<'a> {
     commit: &'static str,
 }
 
-fn sweep_audited_stored(arguments: &[&str]) -> Result<String, String> {
+fn sweep_audited_stored(arguments: &[&str]) -> Result<String, Refused> {
     let [
         feed,
         underlying,
@@ -3521,15 +3949,25 @@ fn sweep_audited_stored(arguments: &[&str]) -> Result<String, String> {
         max_records,
     ] = arguments
     else {
-        return Err("audited sweep requires nine arguments".to_owned());
+        return Err(misused("audited sweep requires nine arguments"));
     };
-    swept_rung(rung)?;
+    // EVERY ARGUMENT BEFORE THE BUILD OR THE STORE, so a malformed one is
+    // `MISUSED` and a refusal after them is the work's (P8-03, D-2722).
+    let year = year.parse::<u16>().map_err(misused)?;
+    let month = month.parse::<u8>().map_err(misused)?;
+    let min_hits = parse_min_hits(min_hits).map_err(misused)?;
+    let max_bytes = max_bytes.parse::<u64>().map_err(misused)?;
+    let max_records = max_records.parse::<u64>().map_err(misused)?;
+    stored_words(
+        feed,
+        Some(underlying),
+        Some(rung),
+        Some(((year, month), (year, month))),
+    )
+    .map_err(misused)?;
+    let vendor = parse_vendor(feed).map_err(misused)?;
     let commit = commit_stamp().ok_or("audited sweep requires verified clean build provenance")?;
-    let vendor = parse_vendor(feed)?;
     let root = store_root()?;
-    let year = year.parse::<u16>().map_err(|why| why.to_string())?;
-    let month = month.parse::<u8>().map_err(|why| why.to_string())?;
-    let min_hits = parse_min_hits(min_hits)?;
     let inputs = audited_stored::Inputs::load(audited_stored::Request {
         store_root: &root,
         vendor,
@@ -3538,10 +3976,10 @@ fn sweep_audited_stored(arguments: &[&str]) -> Result<String, String> {
         year,
         month,
         receipt_root: std::path::Path::new(receipt_root),
-        max_bytes: max_bytes.parse::<u64>().map_err(|why| why.to_string())?,
-        max_records: max_records.parse::<u64>().map_err(|why| why.to_string())?,
+        max_bytes,
+        max_records,
     })?;
-    stored_month_kernel(
+    Ok(stored_month_kernel(
         StoredSweepRequest {
             root,
             vendor,
@@ -3554,7 +3992,7 @@ fn sweep_audited_stored(arguments: &[&str]) -> Result<String, String> {
         },
         inputs.data(),
         Some(&inputs),
-    )
+    )?)
 }
 
 /// [`sweep_stored`]'s ordinary input loader, retaining the legacy identity.
@@ -3680,12 +4118,14 @@ fn stored_sweep_inputs(request: &StoredSweepRequest<'_>) -> Result<StoredMonthIn
         stored::rung_length_micros(rung)?,
         |day| stored::session_close_for(cash.as_ref(), day),
     );
-    let withheld = if holed_days.is_empty() {
-        0
+    // FOLDED WHOLE, SWEPT WITHOUT THE HOLED DAYS. p11num-1, D-1781: the whole
+    // month is kept beside the swept slice, because the column is folded over
+    // it and the daily context must anchor every bar the fold steps.
+    let (withheld, folded) = if holed_days.is_empty() {
+        (0, None)
     } else {
         let (kept, withheld) = crate::minute_gaps::withhold(&loaded.bars, &holed_days);
-        loaded.bars = kept;
-        withheld
+        (withheld, Some(std::mem::replace(&mut loaded.bars, kept)))
     };
     if loaded.bars.is_empty() {
         return Err("every signal session has a minute gap; no sweepable bars remain".to_owned());
@@ -3695,7 +4135,7 @@ fn stored_sweep_inputs(request: &StoredSweepRequest<'_>) -> Result<StoredMonthIn
         vendor,
         underlying,
         ((year, month), (year, month)),
-        &loaded.bars,
+        folded.as_deref().unwrap_or(&loaded.bars),
     )?;
     let exact_minute = stored::load_exact_minute_context(
         root,
@@ -3718,6 +4158,7 @@ fn stored_sweep_inputs(request: &StoredSweepRequest<'_>) -> Result<StoredMonthIn
         daily,
         exact_minute,
         minute_gaps: Some(minute_gaps),
+        folded,
     })
 }
 
@@ -3751,6 +4192,22 @@ fn stored_month_params(
     })
 }
 
+/// The column a stored month sweeps: folded over the whole month, rows only
+/// for the days not withheld. p11num-1, D-1781.
+fn stored_month_column(
+    inputs: &StoredMonthInputs,
+    signal_length: i64,
+    availability: Availability,
+) -> Result<Column, String> {
+    stored_anchored_column_withholding(
+        inputs.withholding(),
+        &inputs.daily,
+        &inputs.exact_minute,
+        signal_length,
+        availability,
+    )
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "one stored month transaction keeps causal overlays, exact execution, identity, evidence publication, and rendering together"
@@ -3770,12 +4227,14 @@ fn stored_month_kernel(
         min_hits,
         commit,
     } = request;
+    let withholding = inputs.withholding();
     let StoredMonthInputs {
         loaded,
         execution_bars,
         daily,
         exact_minute,
         minute_gaps,
+        folded: _,
     } = inputs;
     if let Some(guard) = integrity {
         guard.require_current()?;
@@ -3788,7 +4247,11 @@ fn stored_month_kernel(
         });
     validate_one_minute_execution(execution_slice)?;
     let ladder = ladder_for(min_hits)?;
-    let digest = stored_executed_digest(&loaded.bars, exact_minute, daily, execution_slice)?;
+    // THE WHOLE FOLDED MONTH AND THE DAYS LEFT OUT OF IT. D-1781: a withheld
+    // day's bars now move later masks, so they are digested, and the days
+    // themselves are bound beside them.
+    let digest =
+        stored_withheld_executed_digest(withholding, exact_minute, daily, execution_slice)?;
     let digest = integrity.map_or(digest, |guard| guard.bind_digest(digest));
     // The identity, over the bars actually swept and the ladder actually
     // applied. `Params::of` reads the ladder rather than the argument, so a
@@ -3822,13 +4285,7 @@ fn stored_month_kernel(
         guard.require_current()?;
     }
     let availability = stored::vwap_availability(&loaded.key);
-    let column = stored_anchored_column(
-        &loaded.bars,
-        daily,
-        exact_minute,
-        signal_length,
-        availability,
-    )?;
+    let column = stored_month_column(inputs, signal_length, availability)?;
 
     // THE FILE WAS OPENED AND THIS IS WHERE AN OPERATOR LEARNS IT. The question
     // after a sweep that found nothing is "did it even read my month?", and
@@ -4200,6 +4657,23 @@ fn auto_stored_inner(
 /// [`auto_stored_inner`] after the operator's root and build are admitted.
 /// Private so generated tests can drive the search without the process
 /// environment, as [`audit_stored_kernel`] is.
+/// The whole series a column folds, with `bars` cut to the rows it sweeps.
+///
+/// Returns the bars as they were, and leaves in `bars` only those on days not
+/// in `holed_days`. The fold steps every returned bar and the daily context is
+/// anchored on them; only the swept rows leave (p11num-1, D-1781).
+fn fold_whole_sweep_without(
+    bars: &mut Vec<indicators::Candle>,
+    holed_days: &[i64],
+) -> Vec<indicators::Candle> {
+    let folded = bars.clone();
+    if !holed_days.is_empty() {
+        let (kept, _withheld) = crate::minute_gaps::withhold(bars, holed_days);
+        *bars = kept;
+    }
+    folded
+}
+
 fn auto_stored_kernel(
     root: &std::path::Path,
     vendor: Vendor,
@@ -4231,13 +4705,17 @@ fn auto_stored_kernel(
         crate::minute_gaps::days_with_minute_holes(&span.bars, &minutes, signal_length, |day| {
             stored::session_close_for(cash.as_ref(), day)
         });
-    if !holed_days.is_empty() {
-        let (kept, _withheld) = crate::minute_gaps::withhold(&span.bars, &holed_days);
-        span.bars = kept;
-    }
-    let daily = stored::load_daily_context(root, vendor, underlying, (from, to), &span.bars)?;
+    // FOLDED WHOLE, SWEPT WITHOUT THE HOLED DAYS (p11num-1, D-1781): the
+    // whole span is kept for the fold and the daily context that anchors it.
+    let folded = fold_whole_sweep_without(&mut span.bars, &holed_days);
+    let daily = stored::load_daily_context(root, vendor, underlying, (from, to), &folded)?;
     let exact_minute =
         stored::load_exact_minute_context(root, vendor, underlying, (from, to), &span.bars)?;
+    let withholding = Withholding {
+        folded: &folded,
+        days: &holed_days,
+        swept: &span.bars,
+    };
     let (probe_ceiling, named) = match crate::knobs::var("BRUTEX_CEILING") {
         None => (SEARCH_CEILING, false),
         Some(_) => (ceiling_from_env()?, true),
@@ -4248,14 +4726,17 @@ fn auto_stored_kernel(
     let run = auto_search_run(
         &span,
         search_ladder,
-        stored_anchored_digest(&span.bars, &exact_minute, &daily)?,
+        crate::minute_gaps::bind_withheld(
+            stored_anchored_digest(&folded, &exact_minute, &daily)?,
+            &holed_days,
+        ),
         commit,
     );
     let id = identity(&run);
     let attempt = sweep_evidence::begin(root, id.bytes(), sweep_evidence::Operation::AutoSearch)?;
     let availability = stored::vwap_availability(&span.key);
-    let column = stored_anchored_column(
-        &span.bars,
+    let column = stored_anchored_column_withholding(
+        withholding,
         &daily,
         &exact_minute,
         signal_length,
@@ -5583,6 +6064,12 @@ fn grid_rungs(bars: &[indicators::Candle]) -> usize {
     // anywhere -- and this knob is settable over HTTP from a free-text box, so
     // a typo silently bought a different grid. `CLAUDE.md` §4: degrade loudly
     // and name the reason, or refuse. `audit_bars` prints what was refused.
+    //
+    // AND A VALUE OUTSIDE 2..=budget IS REFUSED BY NAME, NOT CLAMPED. This
+    // clamped silently (1 became 2, 100000 became the budget) while
+    // `knobs::refused()` stayed `None`, so the report claimed the operator's
+    // grid; `strict_range_knobs` refuses the same values (CE-75, D-1778).
+    // A refused value falls back to the derived count, and the report says so.
     if let Some(n) = grid_rungs_override() {
         return n;
     }
@@ -5601,13 +6088,19 @@ fn grid_rungs(bars: &[indicators::Candle]) -> usize {
     from_the_data.min(rungs_within_cell_budget())
 }
 
-/// The operator's explicit `BRUTEX_GRID_RUNGS`, clamped to the cell budget and
-/// floored at two, or `None` when it is unset or unusable (the refusal is
-/// recorded by `knobs::count_usize`). The one read [`grid_rungs`] and
+/// The operator's explicit `BRUTEX_GRID_RUNGS` when it is within `2..=` the
+/// cell budget, or `None` when it is unset or outside that range. A value
+/// outside it is refused by name, not clamped (CE-75, D-1778); the refusal is
+/// recorded through `knobs`. The one read [`grid_rungs`] and
 /// [`walk_forward_rungs`] share, so the screen and the walk-forward cannot disagree
 /// about whether an override is in force.
 fn grid_rungs_override() -> Option<usize> {
-    crate::knobs::count_usize("BRUTEX_GRID_RUNGS").map(|n| n.min(rungs_within_cell_budget()).max(2))
+    let n = crate::knobs::count_usize_within("BRUTEX_GRID_RUNGS", rungs_within_cell_budget())?;
+    if n >= 2 {
+        return Some(n);
+    }
+    crate::knobs::refuse_value("BRUTEX_GRID_RUNGS", &n.to_string());
+    None
 }
 
 /// How each walk-forward fold sizes its exit ladder. GAP4-46, D-1660.
@@ -6462,6 +6955,8 @@ fn audit_stored_kernel(request: StoredSweepRequest<'_>) -> Result<String, stored
     let horizon = horizon_for(&loaded.bars, execution.is_some());
     let rungs = grid_rungs(&loaded.bars);
     let derived_rules = Rules::derived(floors_measured_on(&loaded.bars, execution), horizon);
+    // BEFORE THE SWEEP: a TOP the frontier cannot serve is refused, not run. CE-19.
+    frontier::admit_top(derived_rules.top)?;
     let lens = runner::rank::Lens::Detectability;
     let validate = validate_from_env();
     let ladder = ladder_for(min_hits)?;
@@ -6546,6 +7041,8 @@ fn audit_stored_kernel(request: StoredSweepRequest<'_>) -> Result<String, stored
                 exact_minute: &exact_minute,
                 signal_length_micros: signal_length,
                 availability,
+                // `audit-stored` applies no minute-gap rule: nothing withheld.
+                withheld: None,
             }),
             execution,
             native_minute_execution: loaded.timeframe == EXECUTION_RUNG,
@@ -7024,6 +7521,11 @@ struct AuditInputs {
     unsourceable: Vec<i64>,
     daily: stored::DailyContext,
     executed_digest: [u8; 32],
+    /// The whole signal span the column was folded over. p11num-1, D-1781.
+    folded: Vec<indicators::Candle>,
+    /// Every day withheld from the sweep: the holed days, then any day the
+    /// overlay could not source.
+    withheld_days: Vec<i64>,
 }
 
 /// The inputs of the last stored range audit, or its refusal, and the raw
@@ -7191,10 +7693,9 @@ fn load_audit_inputs(
         stored::rung_length_micros(rung)?,
         |day| stored::session_close_for(cash.as_ref(), day),
     );
-    if !holed_days.is_empty() {
-        let (kept, _withheld) = crate::minute_gaps::withhold(&span.bars, &holed_days);
-        span.bars = kept;
-    }
+    // FOLDED WHOLE, SWEPT WITHOUT THE WITHHELD DAYS. p11num-1, D-1781.
+    let folded = fold_whole_sweep_without(&mut span.bars, &holed_days);
+    let mut withheld_days = holed_days;
     // THE COLUMN BUILD IS WHAT REFUSES, so the withholding wraps THAT.
     //
     // `one_rung` guards its own support-derivation build, and this is the
@@ -7207,7 +7708,11 @@ fn load_audit_inputs(
         vendor,
         underlying,
         (from, to),
-        &mut span.bars,
+        FoldedSeries {
+            folded: &folded,
+            days: &mut withheld_days,
+            bars: &mut span.bars,
+        },
         signal_length,
         StoredPreparationBuild {
             rung,
@@ -7224,17 +7729,33 @@ fn load_audit_inputs(
         (from, to),
         &mut span.bars,
     )?;
-    let daily = stored::load_daily_context(root, vendor, underlying, (from, to), &span.bars)?;
+    let daily = stored::load_daily_context(root, vendor, underlying, (from, to), &folded)?;
 
-    if stored_anchored_digest(&span.bars, &exact_minute, &daily)? != preparation_digest {
+    // A DAY THE OVERLAY LOAD WITHHELD AFTER THE COLUMN WAS BUILT changes the
+    // swept bars and not the folded series, so it is refused by name here as
+    // well as by the digest: the column above has rows for that day. D-1781.
+    if !unsourceable.is_empty()
+        || crate::minute_gaps::bind_withheld(
+            stored_anchored_digest(&folded, &exact_minute, &daily)?,
+            &withheld_days,
+        ) != preparation_digest
+    {
         return Err(
             "stored preparation inputs changed before audit identity publication; no search ran"
                 .to_owned(),
         );
     }
     let execution_slice = execution.map_or(span.bars.as_slice(), |exec| exec.bars);
-    let executed_digest =
-        stored_executed_digest(&span.bars, &exact_minute, &daily, execution_slice)?;
+    let executed_digest = stored_withheld_executed_digest(
+        Withholding {
+            folded: &folded,
+            days: &withheld_days,
+            swept: &span.bars,
+        },
+        &exact_minute,
+        &daily,
+        execution_slice,
+    )?;
     Ok(AuditInputs {
         span,
         loaded_bars,
@@ -7245,6 +7766,8 @@ fn load_audit_inputs(
         unsourceable,
         daily,
         executed_digest,
+        folded,
+        withheld_days,
     })
 }
 
@@ -7282,6 +7805,8 @@ fn audit_range_kernel_cached(
         unsourceable,
         daily,
         executed_digest,
+        folded,
+        withheld_days,
     } = cache.inputs(
         AuditKey {
             root: root.clone(),
@@ -7342,6 +7867,8 @@ fn audit_range_kernel_cached(
     // not re-read the process environment behind the CLI knob store.
     let rungs = grid_rungs(&span.bars);
     let rules = Rules::derived(floors_measured_on(&span.bars, execution), horizon);
+    // BEFORE THE SWEEP: a TOP the frontier cannot serve is refused, not run. CE-19.
+    frontier::admit_top(rules.top)?;
     let lens = runner::rank::Lens::Payoff;
     let validate = validate_from_env();
     let ladder = ladder_for(min_hits)?;
@@ -7374,8 +7901,10 @@ fn audit_range_kernel_cached(
         // Same `policy_of` and the same argument order as
         // `screen_range_inner`'s call, so the two paths key identically and a
         // knob added to one cannot be missed by the other.
-        params: Params::of(ladder).with_policy(&policy_of(
-            &span.bars, rules, lens, validate, horizon, rungs,
+        params: Params::of(ladder).with_policy(&span_policy(
+            policy_of(&span.bars, rules, lens, validate, horizon, rungs),
+            from,
+            to,
         )),
         // ONE DATA TERM, BOTH SERIES THAT DECIDE THE ANSWER. On a coarse rung
         // `execution` names the separately loaded one-minute path used for every
@@ -7437,6 +7966,7 @@ fn audit_range_kernel_cached(
                 exact_minute,
                 signal_length_micros: signal_length,
                 availability,
+                withheld: Some((folded.as_slice(), withheld_days.as_slice())),
             }),
             execution,
             native_minute_execution: span.timeframe == EXECUTION_RUNG,
@@ -8351,10 +8881,13 @@ pub fn top_list(feed: Option<&str>, underlying: Option<&str>) -> String {
 /// workspace answers by splitting.
 fn no_frontier(unreadable: &str) -> String {
     if unreadable.is_empty() {
-        return "\n  This run recorded NO frontier. Rows are written by runs made \
-                after `cli frontier` landed; an older run has a ledger row and no \
-                ranked list, which is a gap in the record rather than an empty \
-                result. Re-run it to fill one in.\n"
+        // There is no `cli frontier` command, and this sentence named one
+        // (P8-05, D-2724). Frontier rows are written by every recorded run
+        // since the ranked frontier was kept (D-0287).
+        return "\n  This run recorded NO frontier. Frontier rows are written by \
+                runs recorded since the ranked frontier was kept (D-0287); an \
+                older run has a ledger row and no ranked list, which is a gap in \
+                the record rather than an empty result. Re-run it to fill one in.\n"
             .to_owned();
     }
     format!(
@@ -8588,7 +9121,10 @@ fn newest_complete(
         (Err(why), None) => damaged = Some(why),
         (Ok(record), None) => {
             let kept = feed.is_none_or(|f| crate::results::read_field(&record.feed) == f)
-                && underlying.is_none_or(|u| crate::results::read_field(&record.underlying) == u);
+                && underlying.is_none_or(|u| {
+                    canonical_underlying(&crate::results::read_field(&record.underlying))
+                        == canonical_underlying(u)
+                });
             if kept {
                 keep_best(&mut best, &record);
             }
@@ -8845,9 +9381,10 @@ impl<'f> ListingFold<'f> {
         let kept = self
             .feed
             .is_none_or(|f| crate::results::read_field(&record.feed) == f)
-            && self
-                .underlying
-                .is_none_or(|u| crate::results::read_field(&record.underlying) == u);
+            && self.underlying.is_none_or(|u| {
+                canonical_underlying(&crate::results::read_field(&record.underlying))
+                    == canonical_underlying(u)
+            });
         if !kept {
             return;
         }
@@ -9984,7 +10521,9 @@ impl Rules {
     /// the presence test cannot drift apart again.
     fn stated(name: &str) -> Option<i64> {
         let raw = crate::knobs::var(name)?;
-        if let Some(v) = crate::knobs::nonnegative_floor(&raw) {
+        // `policy_floor`, not `nonnegative_floor`: the same rule the expression
+        // and strict-range readers apply to the same knob (P8-04, D-2723).
+        if let Some(v) = crate::knobs::policy_floor(name, &raw) {
             Some(v)
         } else {
             // NAMED, NOT SWALLOWED. The table in this function's own doc lists
@@ -10925,18 +11464,13 @@ fn cap_within_budget(sampled: usize, elapsed_nanos: u128, budget_ms: u64, offere
 /// gives the same choice to the command an operator reaches for first.
 fn validate_from_env() -> bool {
     let raw = crate::knobs::var("BRUTEX_VALIDATE");
-    // A VALUE THAT IS NEITHER `0` NOR `1` IS NAMED, NOT ONLY OUTVOTED. It still
-    // leaves validation ON -- the safe direction `validates` documents -- but
-    // `false`, `off` or `no` used to mean ON in silence, so an operator who
-    // asked for less got more with nothing saying why. Recorded here it reaches
-    // the `!! KNOB REFUSED` block like every other unusable knob.
-    // audit-20261003 hunt-cli-b-4, D-1566.
-    if let Some(value) = raw.as_deref()
-        && !matches!(value.trim(), "0" | "1")
-    {
-        crate::knobs::refuse_value("BRUTEX_VALIDATE", value);
-    }
-    validates(raw.as_deref())
+    validates(raw.as_deref()).unwrap_or_else(|| {
+        // A WORD THE SWITCH DOES NOT TAKE IS NAMED, AND THE STACK STAYS ON.
+        // The banner's KNOB REFUSED block says which value was not used
+        // (CE-6, D-1769).
+        crate::knobs::refuse_value("BRUTEX_VALIDATE", raw.as_deref().unwrap_or_default());
+        true
+    })
 }
 
 /// The rule itself, over the raw value, so it can be tested without touching the
@@ -10947,14 +11481,17 @@ fn validate_from_env() -> bool {
 /// from the LOOKUP is what makes the rule provable at all — and the reader above
 /// is then one line with nothing left to get wrong.
 ///
-/// Only a literal `0` turns validation off. A malformed or unexpected value
-/// leaves it ON: a typo must never silently buy a weaker answer, which is the
-/// same argument §4 makes against a fallback that hides a failure.
-fn validates(raw: Option<&str>) -> bool {
-    // NOT a `const fn`: matching a `&str` in one needs `PartialEq` as a const
-    // trait, which is not stable. `trim` is the honest rule anyway -- an
-    // operator who exports the variable with a trailing space meant `0`.
-    raw.is_none_or(|value| value.trim() != "0")
+/// The words are `brutex_core::knob::switch`'s — `0`, `false`, `off`, `no`
+/// turn validation off, `1`, `true`, `on`, `yes` leave it on, in any case and
+/// with surrounding space ignored — the same eight the request path already
+/// took. Only a literal `0` used to turn it off here, so `false`, `off` and
+/// `no` silently left it ON against the operator's stated choice (CE-6,
+/// D-1769). Any other word is `None`: [`validate_from_env`] keeps the stack on
+/// and names the refused value, because a typo must never silently buy a
+/// weaker answer, which is the same argument §4 makes against a fallback that
+/// hides a failure.
+fn validates(raw: Option<&str>) -> Option<bool> {
+    brutex_core::knob::switch("BRUTEX_VALIDATE", raw, true).ok()
 }
 
 /// What a report says when the validation stack did not run.
@@ -10965,6 +11502,29 @@ fn validates(raw: Option<&str>) -> bool {
 /// separating them.
 const UNVALIDATED: &str = "!! NOT VALIDATED -- walk-forward, PBO and the bootstrap did NOT run.\n\
    These are CANDIDATES, not findings. Unset BRUTEX_VALIDATE to price them in full.";
+
+/// A range run's policy with the REQUESTED span appended.
+///
+/// `load_span` tolerates months that hold nothing, so widening a span by an
+/// empty month leaves the bars, the digest and [`policy_of`] unchanged, and the
+/// `RunId` with them. The `Record` carries `from`, `to` and `months_asked` and
+/// `same_run_answer` compares them, so the second, byte-identical computation
+/// found its identity taken by a different span and was refused as "its
+/// deterministic fields differ" -- and the asked span then had no row for
+/// `latest_for` to find (conc7-1, D-2667). The span is what the record is keyed
+/// by, so it is folded into the identity, after the twenty-one policy terms; a
+/// single-month run keeps the twenty-one and its identity is unchanged.
+fn span_policy(policy: [u64; 21], from: (u16, u8), to: (u16, u8)) -> [u64; 23] {
+    let month = |(year, month): (u16, u8)| u64::from(year) * 100 + u64::from(month);
+    let mut out = [0_u64; 23];
+    for (slot, term) in out
+        .iter_mut()
+        .zip(policy.into_iter().chain([month(from), month(to)]))
+    {
+        *slot = term;
+    }
+    out
+}
 
 /// Everything outside the `Ladder` that changes what this run records.
 ///
@@ -11281,6 +11841,18 @@ struct Screened<'a> {
     /// this from the calendar afterwards. Kept so `why_refused` can name which
     /// of the two refused the row.
     steady: bool,
+    /// The calendar rule is ON and was never evaluated for this row, so the row
+    /// is NOT admitted on it.
+    ///
+    /// Set only by [`calendar_gate`], only on a row the five cell rules
+    /// admitted, and only when `Rules::min_weakest_bp > 0`. A row outside
+    /// `measured_band(top)`, or one whose variant could not be re-walked, has no
+    /// `consistency`; the gate used to run over the first `top` rows only and
+    /// left every such row admitted, so it was counted in "N of M satisfy every
+    /// rule", could be the selected subject and printed `YOUR RULES: MET` while
+    /// rule 5 had never run on it (p5num-1, D-2714). Kept apart from `steady`
+    /// so the `rule` column names "not measured" rather than "inconsistent".
+    calendar_unmeasured: bool,
 }
 
 /// The one row the final screen actually admitted and ranked first.
@@ -11322,9 +11894,11 @@ impl Screened<'_> {
     /// Whether this row's chosen variant met the consistency rule.
     ///
     /// A row whose consistency could NOT be measured counts as steady, and that
-    /// is deliberate: an unmeasured row must not be refused for failing a rule
-    /// nothing checked. The consistency table says "not measured" for it in so
-    /// many words, so the gap is visible rather than dressed up as a verdict.
+    /// is deliberate: an unmeasured row must not be called INCONSISTENT for a
+    /// rule nothing checked. The consistency table says "not measured" for it in
+    /// so many words. Steady is not admitted, though: with the calendar rule ON
+    /// such a row is refused as `calendar_unmeasured`, because a rule that never
+    /// ran was not met either (p5num-1, D-2714).
     fn steady(&self) -> bool {
         self.steady
     }
@@ -13275,6 +13849,7 @@ fn tier_rows<'a>(
                 // Until measured, a row is steady: a rule that has not run yet
                 // cannot have been broken.
                 steady: true,
+                calendar_unmeasured: false,
             })
         })
         .collect();
@@ -13478,20 +14053,7 @@ fn finish_screen<'a>(
         ))
     });
 
-    // THE CALENDAR GATE, AFTER THE CELL GATES.
-    //
-    // A row that was admitted on its five cell rules and is inconsistent across
-    // the calendar is refused HERE, because a cell has no calendar to check --
-    // see `Rules::min_weakest_bp`. An unmeasured row is left alone: refusing it
-    // would be refusing it for a rule that never ran.
-    for row in rows.iter_mut().take(rules.top) {
-        if let Some(ref c) = row.consistency {
-            row.steady = c.weakest_bp() >= rules.min_weakest_bp;
-            if !row.steady {
-                row.admitted = false;
-            }
-        }
-    }
+    calendar_gate(&mut rows, rules);
     // THE RE-SORT THAT STOOD HERE IS GONE, and its absence is the point. It
     // existed because the loop above flips `admitted`, which the old key read.
     // The key no longer reads it, and `measure_top` mutates in place without
@@ -13513,6 +14075,50 @@ fn finish_screen<'a>(
         selected,
         priced,
         admitted_any,
+    }
+}
+
+/// THE CALENDAR GATE, AFTER THE CELL GATES, over EVERY row.
+///
+/// A row that was admitted on its five cell rules and is inconsistent across
+/// the calendar is refused here, because a cell has no calendar to check -- see
+/// `Rules::min_weakest_bp`.
+///
+/// # Every row, not the first `top` (p5num-1, D-2714)
+///
+/// This ran over `rows.iter_mut().take(rules.top)`. `passed`, `admitted_any`
+/// and `final_selection` all read EVERY row, so once more than `top` rows
+/// cleared the cell rules and the best of them failed the calendar, row
+/// `top + 1` was still admitted: counted as satisfying every rule, selected as
+/// the run's subject, and bannered `YOUR RULES: MET` with rule 5 never applied
+/// to it.
+///
+/// # A row the rule never ran on does not pass it
+///
+/// A row with no `consistency` -- outside `measured_band(top)`, or not
+/// re-walkable -- cannot be shown to meet `min_weakest_bp`. When that rule is
+/// ON such a row is not admitted and is marked `calendar_unmeasured`, so the
+/// `rule` column says why. When it is OFF (`0`) nothing is required of the
+/// calendar and the row is untouched, which is what OFF means.
+///
+/// One comparison per row over rows already bounded by the screen's priced
+/// cap, after a pass that priced each of them twice.
+fn calendar_gate(rows: &mut [Screened<'_>], rules: Rules) {
+    let calendar_on = rules.min_weakest_bp > 0;
+    for row in rows.iter_mut() {
+        match row.consistency {
+            Some(ref c) => {
+                row.steady = c.weakest_bp() >= rules.min_weakest_bp;
+                if !row.steady {
+                    row.admitted = false;
+                }
+            }
+            None if calendar_on && row.admitted => {
+                row.admitted = false;
+                row.calendar_unmeasured = true;
+            }
+            None => {}
+        }
     }
 }
 
@@ -13937,6 +14543,11 @@ fn screen_table(out: &mut String, rows: &[Screened<'_>], rules: Rules, reference
                 exit_label(&row.cell),
                 if row.admitted {
                     "PASS"
+                } else if row.calendar_unmeasured {
+                    // The cell rules passed and the calendar rule never ran:
+                    // not "steady", which would claim it ran and failed
+                    // (p5num-1, D-2714).
+                    "unmeasured"
                 } else {
                     why_refused(&row.cell, rules, row.steady())
                 }
@@ -14820,12 +15431,20 @@ fn one_rung_cached(ask: RungAsk<'_>, store: RungStore, cache: &mut AuditCache) -
         // overlay and the daily context are rebuilt too, because both are keyed
         // to the surviving bars — reusing them would describe a span the column
         // no longer has.
+        // FOLDED WHOLE: a day withheld below leaves the sweep, not the fold.
+        // D-1781.
+        let folded = span.bars.clone();
+        let mut withheld_days: Vec<i64> = Vec::new();
         let (column, digest) = match column_withholding_unsourceable_days(
             &root,
             vendor,
             underlying,
             (from, to),
-            &mut span.bars,
+            FoldedSeries {
+                folded: &folded,
+                days: &mut withheld_days,
+                bars: &mut span.bars,
+            },
             signal_length,
             rung,
         ) {
@@ -15111,8 +15730,9 @@ impl Cadence {
 /// sentence names both spellings rather than the one that failed, because an
 /// operator who typed the wrong unit cannot tell which one this accepts.
 fn parse_cadence(raw: &str) -> Result<Cadence, &'static str> {
-    const BAD: &str = "CADENCE must be a whole number of trades per week (`3`), \
-                       or per year with a `/y` suffix (`6/y`).";
+    const BAD: &str = "CADENCE must be a whole number of trades per week (`3`, \
+                       or `3/w` with the unit spelled out), or per year with a \
+                       `/y` suffix (`6/y`).";
     let word = raw.trim();
     if let Some(head) = word.strip_suffix("/y") {
         return head
@@ -15430,6 +16050,14 @@ fn elite_descend_with_attempt(
     attempt: Option<u64>,
 ) -> String {
     let (max_mae_ppm, top) = limits;
+    // THE DOOR BOUND, NOT THE READER BOUND (D-1934). D-1727's 1 to 1,000 is
+    // the tighter of the two and is what every `cli` door names; CE-19's
+    // `frontier::admit_top` (4,096) stays at the writer. Checking only the
+    // reader bound here named the wrong ceiling to a TOP of 4,097 and let
+    // 1,001 to 4,096 through this door. D-2779.
+    if let Some(why) = top_refusal(top) {
+        return format!("refused: {why}.\n");
+    }
     let (from, to) = span;
     let Some(known) = EVERY_RUNG.iter().find(|r| **r == rung) else {
         return format!(
@@ -15674,6 +16302,27 @@ fn nothing_measured(text: &str) -> bool {
         line.trim_start()
             .strip_prefix("outcome")
             .is_some_and(|rest| rest.trim_start().starts_with("NOTHING MEASURED"))
+    })
+}
+
+/// Whether a rendered report's verdict says its answer may not be believed.
+///
+/// `runner::report`'s verdict prints `trustworthy as a whole answer  NO`
+/// exactly when `Outcome::is_complete` is false: a ladder that halted on a
+/// budget, a column that never warmed, and the `Sweep::default()` that
+/// `Sweeper::auto` substitutes when no rung measured anything. That is the
+/// same predicate `auto_stored_kernel` writes to the sweep evidence through
+/// `sweep_completion(found.affordable && found.outcome.is_complete(), ..)`,
+/// because `affordable == false` always carries a default (incomplete) sweep.
+/// So the exit code and the durable record cannot disagree (P8-01, D-2720).
+///
+/// Matched on the verdict row itself, the way [`nothing_measured`] is, so the
+/// phrase in prose cannot trip it.
+fn untrustworthy(text: &str) -> bool {
+    text.lines().any(|line| {
+        line.trim_start()
+            .strip_prefix("trustworthy as a whole answer")
+            .is_some_and(|rest| rest.trim() == "NO")
     })
 }
 
@@ -16417,8 +17066,13 @@ fn return_over_drawdown_cell(pessimistic: i64, max_drawdown: i64) -> String {
         // A variant that never gave anything back. Unbounded, so it is named
         // rather than printed as a number no divisor produced.
         i64::MAX => "inf".to_owned(),
-        // No profit to divide. `-` is the honest answer, not a zero.
-        0 => "-".to_owned(),
+        // No profit to divide. `-` is the honest answer, not a zero — and it
+        // is decided from the MONEY, not from the ratio. The ratio is also 0
+        // for a profitable variant whose return is under a hundredth of its
+        // drawdown (1,000 paisa against 200,000), and printing `-` there told
+        // the reader it made nothing (CE-17, D-1769).
+        0 if pessimistic <= 0 => "-".to_owned(),
+        0 => "<0.01".to_owned(),
         // HUNDREDTHS, RENDERED AS A DECIMAL, and the raw integer was a second
         // way to misread this column. `return_over_drawdown` is `x100` by the
         // same convention `win_rate_bp` and `profit_factor_bp` use, so a run
@@ -16999,7 +17653,8 @@ fn recorded_row(
         ));
     };
     let matches = record.feed == results::field(key.feed)
-        && record.underlying == results::field(key.underlying)
+        && canonical_underlying(&results::read_field(&record.underlying))
+            == canonical_underlying(key.underlying)
         && record.timeframe == results::field(rung)
         && (record.from_year, record.from_month) == key.from
         && (record.to_year, record.to_month) == key.to
@@ -17289,6 +17944,9 @@ struct ScreenInputs {
     execution_bars: Option<stored::Span>,
     holed_days: Vec<i64>,
     withheld: u64,
+    /// The whole signal span the column was folded over, holed days included.
+    /// p11num-1, D-1781.
+    folded: Vec<indicators::Candle>,
     daily: stored::DailyContext,
     exact_minute: stored::ExactMinuteContext,
     availability: Availability,
@@ -17462,6 +18120,8 @@ fn load_screen_inputs(
         stored::rung_length_micros(rung)?,
         |day| stored::session_close_for(cash.as_ref(), day),
     );
+    // FOLDED WHOLE, SWEPT WITHOUT THE HOLED DAYS. p11num-1, D-1781.
+    let folded = span.bars.clone();
     let withheld = if holed_days.is_empty() {
         0
     } else {
@@ -17472,13 +18132,17 @@ fn load_screen_inputs(
     if span.bars.is_empty() {
         return Err("every signal session has a minute gap; no screenable bars remain".to_owned());
     }
-    let daily = stored::load_daily_context(root, vendor, underlying, (from, to), &span.bars)?;
+    let daily = stored::load_daily_context(root, vendor, underlying, (from, to), &folded)?;
     let exact_minute =
         stored::load_exact_minute_context(root, vendor, underlying, (from, to), &span.bars)?;
     let availability = stored::vwap_availability(&span.key);
     let cost = stored::audit_cost_scope(&span.key)?;
-    let column = stored_anchored_column(
-        &span.bars,
+    let column = stored_anchored_column_withholding(
+        Withholding {
+            folded: &folded,
+            days: &holed_days,
+            swept: &span.bars,
+        },
         &daily,
         &exact_minute,
         signal_length,
@@ -17491,6 +18155,7 @@ fn load_screen_inputs(
         execution_bars,
         holed_days,
         withheld,
+        folded,
         daily,
         exact_minute,
         availability,
@@ -17535,12 +18200,18 @@ fn screen_range_kernel_cached(
         execution_bars,
         holed_days,
         withheld,
+        folded,
         daily,
         exact_minute,
         availability,
         cost,
         column,
     } = loaded?;
+    let withholding = Withholding {
+        folded,
+        days: holed_days,
+        swept: &span.bars,
+    };
     let (signal_length, withheld, availability) = (*signal_length, *withheld, *availability);
     let execution = execution_bars.as_ref().map(|exec| Execution {
         bars: &exec.bars,
@@ -17565,10 +18236,17 @@ fn screen_range_kernel_cached(
         direction: RunDirection::Undirected,
         instrument: &span.key,
         timeframe: span.timeframe,
-        params: Params::of(ladder).with_policy(&policy_of(
-            &span.bars, rules, lens, validate, horizon, rungs,
+        params: Params::of(ladder).with_policy(&span_policy(
+            policy_of(&span.bars, rules, lens, validate, horizon, rungs),
+            from,
+            to,
         )),
-        data_digest: stored_executed_digest(&span.bars, exact_minute, daily, execution_slice)?,
+        data_digest: stored_withheld_executed_digest(
+            withholding,
+            exact_minute,
+            daily,
+            execution_slice,
+        )?,
         commit,
         feed: span.vendor.as_str(),
     });
@@ -17604,6 +18282,7 @@ fn screen_range_kernel_cached(
                 exact_minute,
                 signal_length_micros: signal_length,
                 availability,
+                withheld: Some((withholding.folded, withholding.days)),
             }),
             execution,
             native_minute_execution: span.timeframe == EXECUTION_RUNG,
@@ -17863,6 +18542,78 @@ struct StoredReplay<'a> {
     /// The instrument's VWAP verdict, carried so that every fold's column is
     /// built with the same one the whole-span column was. D-0507.
     availability: Availability,
+    /// The whole folded signal series and the days withheld from its sweep,
+    /// or `None` for a door that withheld nothing. p11num-1, D-1781.
+    ///
+    /// Carried so a walk-forward window's column is folded as the whole-span
+    /// column was: through every withheld bar, with rows only for the
+    /// window's own swept bars. Rebuilding a window from the swept slice alone
+    /// would splice its withheld days back out, and only inside validation.
+    withheld: Option<(&'a [indicators::Candle], &'a [i64])>,
+}
+
+impl StoredReplay<'_> {
+    /// The anchored column of `slice`, a contiguous window of the swept
+    /// series, folded through every withheld bar inside it. D-1781.
+    fn column_of(&self, slice: &[indicators::Candle]) -> Result<Column, String> {
+        let withholding = self.withheld.map_or_else(
+            || Withholding::none(slice),
+            |(folded, days)| window_withholding(folded, days, slice),
+        );
+        stored_anchored_column_withholding(
+            withholding,
+            self.daily,
+            self.exact_minute,
+            self.signal_length_micros,
+            self.availability,
+        )
+    }
+}
+
+/// The part of `folded` a window `slice` of its swept series covers, with the
+/// withheld days. D-1781.
+///
+/// From the first folded bar after the swept bar preceding the window -- so the
+/// withheld bars directly before its first bar are folded into it, as the
+/// whole-span fold folded them -- through the window's last bar. A `slice`
+/// that is not a window of `folded`'s withholding is refused by
+/// [`stored_anchored_column_withholding`]'s own check, never mis-indexed.
+///
+/// One forward pass over `folded` with one hash probe per bar, stopping at
+/// the window's last bar: the same order as the fold the window then runs.
+/// **UNVERIFIED as a measured bound**; read off the source (`CLAUDE.md` §3
+/// rule 6).
+fn window_withholding<'a>(
+    folded: &'a [indicators::Candle],
+    days: &'a [i64],
+    slice: &'a [indicators::Candle],
+) -> Withholding<'a> {
+    let (Some(first), Some(last)) = (slice.first(), slice.last()) else {
+        return Withholding::none(slice);
+    };
+    let held: std::collections::HashSet<i64> = days.iter().copied().collect();
+    // `after_kept` is one past the last swept bar seen before the window, so
+    // the withheld bars between it and the window's first bar are folded in.
+    let (mut after_kept, mut start, mut end) = (0_usize, None, 0_usize);
+    for (index, bar) in folded.iter().enumerate() {
+        if held.contains(&indicators::ist_day(bar.ts_micros)) {
+            continue;
+        }
+        if bar.ts_micros > last.ts_micros {
+            break;
+        }
+        if bar.ts_micros < first.ts_micros {
+            after_kept = index.saturating_add(1);
+            continue;
+        }
+        start.get_or_insert(after_kept);
+        end = index.saturating_add(1);
+    }
+    Withholding {
+        folded: folded.get(start.unwrap_or(end)..end).unwrap_or(&[]),
+        days,
+        swept: slice,
+    }
 }
 
 /// The series a position is actually opened and closed on.
@@ -18513,6 +19264,97 @@ fn identity_hex(identity: &[u8; 32]) -> String {
     out
 }
 
+/// One cached writer handle per process, for one root at a time.
+///
+/// # Why (p12num-1, D-1777)
+///
+/// `ensure_frontier_rows`, `ensure_trade_rows` and `ensure_detail_receipt`
+/// opened `frontier.bin`, `chosen-trades.bin` and `detail-sets.bin` afresh for
+/// every recorded run, and each open reads and seal-checks every row: Θ(total rows) per run, so Θ(runs × rows) per
+/// `sweep-all` (the helper extrapolated about 9.9 GB read over 1,680 runs), and
+/// the frontier's open does it under the exclusive lock. `frontier`'s own doc
+/// promised the walk "once per process". This keeps one handle and brings it
+/// up to date with its `refresh`, which reads only the rows appended since:
+/// O(delta) per run, the same trade `results::with_shared_writer` makes.
+///
+/// # When it opens fresh instead
+///
+/// A different root, a path that now names a different file than the handle
+/// holds (compared by device and inode, two `stat`s), or a refused refresh
+/// (for example a ragged tail another process is still writing) each drop the
+/// handle and open fresh, which is exactly what each type's `refresh` doc tells
+/// a cache to do. A refused operation drops it too, so the next run reopens.
+/// Off unix there is no inode to compare, and every call opens fresh, as before.
+fn with_cached_handle<H, T>(
+    cache: &std::sync::Mutex<Option<CachedHandle<H>>>,
+    root: &std::path::Path,
+    file: &std::path::Path,
+    open: impl Fn(&std::path::Path) -> Result<H, String>,
+    refresh: impl Fn(&mut H) -> Result<(), String>,
+    operation: impl FnOnce(&mut H) -> Result<T, String>,
+) -> Result<T, String> {
+    let mut held = cache
+        .lock()
+        .map_err(|_| "a cached result-file handle is poisoned; nothing was written".to_owned())?;
+    let named = file_identity(file);
+    let reusable = held.take().and_then(|mut cached| {
+        let same = cached.root == root && named.is_some() && cached.identity == named;
+        (same && refresh(&mut cached.handle).is_ok()).then_some(cached)
+    });
+    let mut cached = if let Some(cached) = reusable {
+        cached
+    } else {
+        let handle = open(root)?;
+        CachedHandle {
+            root: root.to_path_buf(),
+            identity: file_identity(file),
+            handle,
+        }
+    };
+    let result = operation(&mut cached.handle);
+    if result.is_ok() {
+        *held = Some(cached);
+    }
+    result
+}
+
+/// A handle kept by [`with_cached_handle`], with what it was opened for.
+struct CachedHandle<H> {
+    root: std::path::PathBuf,
+    /// `(device, inode)` of the file at open time; `None` off unix, which
+    /// never matches, so every call opens fresh there.
+    identity: Option<(u64, u64)>,
+    handle: H,
+}
+
+/// The `(device, inode)` a path names now, or `None` when it cannot be read.
+fn file_identity(path: &std::path::Path) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        std::fs::metadata(path)
+            .ok()
+            .map(|meta| (meta.dev(), meta.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// The process's one cached frontier writer.
+static FRONTIER_WRITER: std::sync::Mutex<Option<CachedHandle<frontier::Frontier>>> =
+    std::sync::Mutex::new(None);
+
+/// The process's one cached chosen-trades writer.
+static TRADES_WRITER: std::sync::Mutex<Option<CachedHandle<trades::Trades>>> =
+    std::sync::Mutex::new(None);
+
+/// The process's one cached detail-receipt writer.
+static RECEIPT_WRITER: std::sync::Mutex<Option<CachedHandle<result_set::Receipts>>> =
+    std::sync::Mutex::new(None);
+
 /// Makes one exact frontier block durable, or verifies the block a killed
 /// invocation left before the ledger commit.
 fn ensure_frontier_rows(
@@ -18540,29 +19382,38 @@ fn ensure_frontier_rows(
         ))
     };
 
-    let mut store = frontier::Frontier::open(root)?;
-    if store.holds(identity) {
-        return verify(&mut store);
-    }
-    if rows.is_empty() {
-        store.confirm_durable()?;
-        return Ok(Prepared::Empty);
-    }
-    match store.append_all(rows) {
-        Ok(_) => Ok(Prepared::Written(rows.len())),
-        // Another process may have won the same identity between `holds` and
-        // the append lock. Reopen and compare bytes before calling that a safe
-        // rerun; every other refusal remains a refusal.
-        Err(first) => {
-            let mut reopened = frontier::Frontier::open(root)
-                .map_err(|why| format!("{first}; reopening to verify it also failed: {why}"))?;
-            if reopened.holds(identity) {
-                verify(&mut reopened)
-            } else {
-                Err(first)
+    with_cached_handle(
+        &FRONTIER_WRITER,
+        root,
+        &frontier::Frontier::path(root),
+        frontier::Frontier::open,
+        frontier::Frontier::refresh,
+        |store| {
+            if store.holds(identity) {
+                return verify(store);
             }
-        }
-    }
+            if rows.is_empty() {
+                store.confirm_durable()?;
+                return Ok(Prepared::Empty);
+            }
+            match store.append_all(rows) {
+                Ok(_) => Ok(Prepared::Written(rows.len())),
+                // Another process may have won the same identity between `holds` and
+                // the append lock. Reopen and compare bytes before calling that a safe
+                // rerun; every other refusal remains a refusal.
+                Err(first) => {
+                    let mut reopened = frontier::Frontier::open(root).map_err(|why| {
+                        format!("{first}; reopening to verify it also failed: {why}")
+                    })?;
+                    if reopened.holds(identity) {
+                        verify(&mut reopened)
+                    } else {
+                        Err(first)
+                    }
+                }
+            }
+        },
+    )
 }
 
 /// Makes one exact trade block durable, with the same resume rule as
@@ -18586,26 +19437,35 @@ fn ensure_trade_rows(
         ))
     };
 
-    let mut store = trades::Trades::open(root)?;
-    if store.holds(identity) {
-        return verify(&mut store);
-    }
-    if rows.is_empty() {
-        store.confirm_durable()?;
-        return Ok(Prepared::Empty);
-    }
-    match store.append_all(rows) {
-        Ok(_) => Ok(Prepared::Written(rows.len())),
-        Err(first) => {
-            let mut reopened = trades::Trades::open(root)
-                .map_err(|why| format!("{first}; reopening to verify it also failed: {why}"))?;
-            if reopened.holds(identity) {
-                verify(&mut reopened)
-            } else {
-                Err(first)
+    with_cached_handle(
+        &TRADES_WRITER,
+        root,
+        &trades::Trades::path(root),
+        trades::Trades::open,
+        trades::Trades::refresh,
+        |store| {
+            if store.holds(identity) {
+                return verify(store);
             }
-        }
-    }
+            if rows.is_empty() {
+                store.confirm_durable()?;
+                return Ok(Prepared::Empty);
+            }
+            match store.append_all(rows) {
+                Ok(_) => Ok(Prepared::Written(rows.len())),
+                Err(first) => {
+                    let mut reopened = trades::Trades::open(root).map_err(|why| {
+                        format!("{first}; reopening to verify it also failed: {why}")
+                    })?;
+                    if reopened.holds(identity) {
+                        verify(&mut reopened)
+                    } else {
+                        Err(first)
+                    }
+                }
+            }
+        },
+    )
 }
 
 fn record_trades(
@@ -18673,6 +19533,10 @@ fn record_frontier(
     priced: &std::collections::HashMap<[u64; 6], (grid::Cell, Direction)>,
 ) -> Result<(String, u64), String> {
     let top = rules.top;
+    // THE WRITER NEVER WRITES PAST THE READER. Every entry point refuses such
+    // a TOP before its sweep; this is the boundary that makes it a property of
+    // the file rather than of each caller remembering. CE-19, D-1981.
+    frontier::admit_top(top)?;
     let kept = by_evidence.len().min(top);
     // RANKED THE WAY THE REPORT RANKS, not the way the sweep did.
     //
@@ -18882,7 +19746,14 @@ fn ensure_detail_receipt(
         direction,
         trade_policy: result_set::TradePolicy::ChosenGridV1,
     };
-    let state = result_set::Receipts::open(root)?.append_exact(receipt)?;
+    let state = with_cached_handle(
+        &RECEIPT_WRITER,
+        root,
+        &result_set::Receipts::path(root),
+        result_set::Receipts::open,
+        result_set::Receipts::refresh,
+        |receipts| receipts.append_exact(receipt),
+    )?;
     Ok(match state {
         result_set::Prepared::Written => format!(
             "  detail receipt prepared and synced: frontier={frontier_rows}, chosen trades={trade_rows}, direction={direction}, policy={}\n",
@@ -18925,7 +19796,36 @@ impl Committed {
 fn same_run_answer(mut left: results::Record, mut right: results::Record) -> bool {
     left.finished_micros = 0;
     right.finished_micros = 0;
+    // The instrument as the CANONICAL symbol on both sides: rows written before
+    // CE-76 hold the word as typed (`nifty`), and a rerun of the same identity
+    // now records `NIFTY`. The identity already names the canonical key, so
+    // the spelling is not a deterministic field of the computation.
+    left.underlying = results::field(&canonical_underlying(&results::read_field(
+        &left.underlying,
+    )));
+    right.underlying = results::field(&canonical_underlying(&results::read_field(
+        &right.underlying,
+    )));
     left == right
+}
+
+/// The instrument word as the ledger records and matches it: the canonical
+/// symbol of the key [`stored::swept_index`] resolves it to, or the word itself
+/// when it resolves to none (a synthetic run names no swept instrument).
+///
+/// # Why (CE-76, D-1778)
+///
+/// Run identity is built from the canonical key, so `nifty`, `NiFtY` and
+/// `NIFTY` are one identity, but the ledger stored the word as typed and
+/// compared it byte for byte. A rerun spelt differently was refused as
+/// "deterministic fields differ", which told the operator the engine was
+/// nondeterministic, and `cli top dhan NIFTY` found nothing over a run recorded
+/// as `nifty` and exited 0. One resolution per row read or written.
+fn canonical_underlying(word: &str) -> String {
+    stored::swept_index(word).map_or_else(
+        |_| word.to_owned(),
+        |key| key.underlying.as_str().to_owned(),
+    )
 }
 
 /// Durability barrier for names created under `results/`.
@@ -18979,9 +19879,13 @@ fn ensure_run_record(
                 confirm_result_directory(root)?;
                 Ok(Committed::Written(index))
             }
-            // A concurrent identical append or a completed write followed by a
-            // failed sync may already be present. Refresh the validated handle
-            // and compare all deterministic fields before confirming durability.
+            // A concurrent identical append may already be present. Refresh the
+            // validated handle and compare all deterministic fields before
+            // confirming durability. This call's OWN failed barrier is never
+            // promoted here: the append cut the record back, and
+            // `confirm_durable` refuses a path whose barrier already failed in
+            // this process, should that cut itself have failed (D-1900,
+            // resources-1).
             Err(first) => {
                 store.refresh().map_err(|why| {
                     format!("{first}; validating its append outcome also failed: {why}")
@@ -19065,15 +19969,11 @@ fn record_run(
         |slot: Option<usize>| -> i16 { slot.and_then(|v| i16::try_from(v).ok()).unwrap_or(-1) };
     let record = results::Record {
         identity: id.bytes(),
-        // The wall clock, taken once, after the work. `SystemTime` can precede
-        // the epoch on a machine whose clock is set wrongly, and that is
-        // recorded as the negative it is rather than clamped: a row stamped
-        // before 1970 is a clock problem an operator should see.
-        finished_micros: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| i64::try_from(d.as_micros()).unwrap_or(i64::MAX)),
+        // The wall clock, taken once, after the work. See [`finished_micros_at`]:
+        // a clock before 1970 is REFUSED by name, never clamped to 0 (CE-50).
+        finished_micros: finished_micros_at(std::time::SystemTime::now())?,
         feed: results::field(into.feed),
-        underlying: results::field(into.underlying),
+        underlying: results::field(&canonical_underlying(into.underlying)),
         timeframe: results::field(into.timeframe),
         from_year: into.from.0,
         from_month: into.from.1,
@@ -19131,6 +20031,36 @@ fn record_run(
         ),
     };
     Ok((report, committed))
+}
+
+/// A ledger row's completion stamp, in microseconds since the epoch.
+///
+/// The comment this replaced said a clock before 1970 "is recorded as the
+/// negative it is rather than clamped", while the code clamped it to `0` with
+/// no word, and an overflow to `i64::MAX`. A negative stamp is not an option
+/// either: the browser refuses a negative `finished_micros`, so one such row
+/// would blank the ledger page. So the run is refused before it reaches the
+/// ledger, naming the clock as the cause — the operator fixes the clock and
+/// reruns, and the rerun is the same identity (CE-50, D-2655).
+///
+/// # Errors
+///
+/// A clock before the epoch, or one past what `i64` microseconds can hold.
+fn finished_micros_at(now: std::time::SystemTime) -> Result<i64, String> {
+    let since = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|before| {
+            format!(
+                "the system clock reads {:?} BEFORE 1970-01-01, so this run has no honest \
+             completion time and was not recorded; correct the clock and rerun",
+                before.duration()
+            )
+        })?;
+    i64::try_from(since.as_micros()).map_err(|_| {
+        "the system clock reads a time past what the ledger's microsecond stamp can \
+         hold, so this run was not recorded; correct the clock and rerun"
+            .to_owned()
+    })
 }
 
 /// The sentence [`record_run`] opens with when the row did not reach the ledger.
@@ -19513,6 +20443,9 @@ fn publish_ranked(
     rules: crate::Rules,
 ) -> (Option<crate::live::Live>, String) {
     let identity = id.bytes();
+    if let Some(why) = mispaired_live_row(by_evidence) {
+        return (None, why);
+    }
     let rows: Vec<crate::frontier::Row> = by_evidence
         .iter()
         .take(STORED_KEEP)
@@ -19539,9 +20472,21 @@ fn publish_ranked(
                   threshold does not move a verdict that is 3.42 against 6.19. The
                   multiply is the only arithmetic and it touches no price: gate
                   11 counts the float TYPE NAME and this line writes
-                  none."
+                  none. ROUNDED AGAINST THE FINDING, though: truncating put
+                  the bar up to a milli BELOW itself, and `t_milli` is rounded,
+                  so a |t| 1.5 milli short of the bar read as clearing it
+                  (CE-7, D-1769). The bar is now the ceiling, the page compares
+                  strictly above it, and a bar that is not finite is one no row
+                  clears."
     )]
-    let bar_milli = (bar * 1_000.0) as i64;
+    let bar_milli = {
+        let scaled = bar * 1_000.0;
+        if scaled.is_finite() {
+            scaled.ceil() as i64
+        } else {
+            i64::MAX
+        }
+    };
     let summary = crate::live::Summary {
         trials,
         bar_milli,
@@ -19571,6 +20516,30 @@ fn publish_ranked(
         },
         Err(why) => (None, format!("the live view could not be started: {why}\n")),
     }
+}
+
+/// Why the live view must not be written, when one of its rows is MISPAIRED.
+///
+/// A row whose forward outcomes belong to other bars has a mean and a t that
+/// mean nothing, and the end-of-run report prints it as MISPAIRED rather than
+/// judging it. `frontier::Row` has no slot for that count, so `/live.json`
+/// judged such a row's |t| against the bar like any other (xcut-1, D-1991). The
+/// live view is refused, by name, rather than served with one row a reader would
+/// count as proved.
+fn mispaired_live_row(by_evidence: &[&runner::rank::Scored]) -> Option<String> {
+    by_evidence
+        .iter()
+        .take(STORED_KEEP)
+        .zip(1_usize..)
+        .find_map(|(scored, rank)| {
+            (scored.edge.mismatched > 0).then(|| {
+                format!(
+                    "the live view was not written: row {rank} is MISPAIRED ({} forward outcomes \
+                     belong to other bars), so its mean and t mean nothing\n",
+                    scored.edge.mismatched
+                )
+            })
+        })
 }
 
 /// One event per ladder level, and this is where it is affordable.
@@ -19969,18 +20938,7 @@ fn grid_entered_event(
         .with("candidates", u64::try_from(candidates).unwrap_or(u64::MAX))
         .with("cap", u64::try_from(cap).unwrap_or(u64::MAX))
         .with("validate", u64::from(validate));
-    if let Some(held) = recording {
-        event = event
-            .with("feed", held.feed)
-            .with("underlying", held.underlying)
-            .with("from_year", u64::from(held.from.0))
-            .with("from_month", u64::from(held.from.1))
-            .with("to_year", u64::from(held.to.0))
-            .with("to_month", u64::from(held.to.1));
-        if let Some(attempt) = held.attempt {
-            event = event.with("attempt", attempt);
-        }
-    }
+    with_live_context(&mut event, recording);
     event
 }
 
@@ -20015,6 +20973,8 @@ const GRID_PROGRESS_STEPS: usize = 10;
 /// beside the constant they depend on is where a reader will look for them.
 struct GridProgress<'a> {
     counted: std::sync::atomic::AtomicUsize,
+    /// The highest count already written, held while the line is written.
+    spoken: std::sync::Mutex<usize>,
     total: usize,
     stride: usize,
     recording: Option<Recording<'a>>,
@@ -20026,6 +20986,7 @@ impl<'a> GridProgress<'a> {
     fn over(total: usize, recording: Option<Recording<'a>>) -> Self {
         Self {
             counted: std::sync::atomic::AtomicUsize::new(0),
+            spoken: std::sync::Mutex::new(0),
             total,
             stride: total.div_ceil(GRID_PROGRESS_STEPS).max(1),
             recording,
@@ -20033,17 +20994,38 @@ impl<'a> GridProgress<'a> {
     }
 
     /// Counts one priced candidate and speaks on a stride boundary.
-    ///
-    /// `Relaxed` is the right ordering: nothing is synchronised through this
-    /// counter, it is read only to decide whether to print, and a race that
-    /// prints one tenth twice or skips one costs a log line and nothing else.
     fn tick(&self) {
+        self.tick_with(|done| note_grid_progress(self.recording, done, self.total));
+    }
+
+    /// [`Self::tick`] over any writer, so the ordering is testable.
+    ///
+    /// # Written counts only go up (conc9-1, D-1773)
+    ///
+    /// The counter is `Relaxed`, because nothing is synchronised through it.
+    /// But the count was taken here and the sink's mutex later, so a worker
+    /// holding 10 could write after one holding 20, and the file's `priced`
+    /// went backwards. The browser reads a drop as a refusal, so a healthy run
+    /// was marked failed for the rest of the rung: 585 drops in 300 rounds of
+    /// 10 candidates when measured. A boundary count is now written only while
+    /// holding `spoken`, and only if it is above the last one written; a lower
+    /// count that arrives late is dropped, because a higher one already said
+    /// more. The lock is taken only on stride boundaries, about eleven times
+    /// per rung, never per candidate.
+    fn tick_with(&self, write: impl FnOnce(usize)) {
         let done = self
             .counted
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
         if done.is_multiple_of(self.stride) || done == self.total {
-            note_grid_progress(self.recording, done, self.total);
+            let mut spoken = self
+                .spoken
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if done > *spoken {
+                *spoken = done;
+                write(done);
+            }
         }
     }
 }
@@ -20086,17 +21068,30 @@ impl<'a> GridProgress<'a> {
 /// minutes, not one record — and that measurement says why this exists, not
 /// what it costs.
 fn note_grid_progress(recording: Option<Recording<'_>>, priced: usize, candidates: usize) {
+    note_attempt(
+        recording.and_then(|held| held.attempt),
+        &grid_progress_event(recording, priced, candidates),
+    );
+}
+
+/// The event [`note_grid_progress`] emits, split out so its shape is asserted
+/// beside every other live boundary's.
+fn grid_progress_event(
+    recording: Option<Recording<'_>>,
+    priced: usize,
+    candidates: usize,
+) -> telemetry::Event<'_> {
     let rung = recording.map_or("", |held| held.timeframe);
     let mut event = telemetry::Event::info("cli.audit", "exit grid progress")
         .with("rung", rung)
         .with("priced", u64::try_from(priced).unwrap_or(u64::MAX))
         .with("candidates", u64::try_from(candidates).unwrap_or(u64::MAX));
-    if let Some(held) = recording {
-        event = event
-            .with("feed", held.feed)
-            .with("underlying", held.underlying);
-    }
-    note_attempt(recording.and_then(|held| held.attempt), &event);
+    // THE SAME CONTEXT EVERY OTHER LIVE EVENT CARRIES. This sent only feed
+    // and underlying, never the span or an attempt, so `live-progress.ts`
+    // refused the WHOLE fold the moment pricing began, another run's
+    // progress line included (CE-49, D-2656).
+    with_live_context(&mut event, recording);
+    event
 }
 
 /// The other half of the bracket, and the count the live view cannot carry.
@@ -20119,18 +21114,7 @@ fn grid_finished_event(
         .with("priced", u64::try_from(priced).unwrap_or(u64::MAX))
         .with("candidates", u64::try_from(candidates).unwrap_or(u64::MAX))
         .with("grid_trades", u64::try_from(trades).unwrap_or(u64::MAX));
-    if let Some(held) = recording {
-        event = event
-            .with("feed", held.feed)
-            .with("underlying", held.underlying)
-            .with("from_year", u64::from(held.from.0))
-            .with("from_month", u64::from(held.from.1))
-            .with("to_year", u64::from(held.to.0))
-            .with("to_month", u64::from(held.to.1));
-        if let Some(attempt) = held.attempt {
-            event = event.with("attempt", attempt);
-        }
-    }
+    with_live_context(&mut event, recording);
     event
 }
 
@@ -20201,18 +21185,7 @@ fn validation_stage_event<'a>(
     let mut event = telemetry::Event::info("cli.audit", msg)
         .with("stage", stage)
         .with("rung", rung);
-    if let Some(held) = recording {
-        event = event
-            .with("feed", held.feed)
-            .with("underlying", held.underlying)
-            .with("from_year", u64::from(held.from.0))
-            .with("from_month", u64::from(held.from.1))
-            .with("to_year", u64::from(held.to.0))
-            .with("to_month", u64::from(held.to.1));
-        if let Some(attempt) = held.attempt {
-            event = event.with("attempt", attempt);
-        }
-    }
+    with_live_context(&mut event, recording);
     event
 }
 
@@ -20415,7 +21388,7 @@ fn opening(banner: &str, refused: Option<&str>) -> String {
 /// it.
 const EQUITY_RANKING_GROSS: &str = "  CASH EQUITY: EVERY FIGURE IN THIS RANKING IS GROSS OF EVERY CHARGE.\n  \
      A share trade pays brokerage, STT, stamp duty, exchange charges, the SEBI\n  \
-     fee and GST, and none is subtracted, so the ranking above is on GROSS\n  \
+     fee, the IPFT, DP charges and GST (an UNVERIFIED list), and none is subtracted, so the ranking above is on GROSS\n  \
      returns. COST-EXCLUDED RESEARCH, NOT A NET RESULT (D-0509, D-0525,\n  \
      D-0681). No equity result carries Selection V6 or execution authority\n  \
      until a charter-sourced equity charge stack exists.\n\n";
@@ -20428,7 +21401,8 @@ const EQUITY_RANKING_GROSS: &str = "  CASH EQUITY: EVERY FIGURE IN THIS RANKING 
 /// lines carry the legend's two-space indent. The same test that binds
 /// [`EQUITY_RANKING_GROSS`] to the audit header binds this.
 const SHARE_MEAN_LEGEND: &str = "ONE share, GROSS OF EVERY CHARGE: brokerage, STT, stamp duty, exchange \
-     charges, the SEBI fee and GST all apply to a share trade\n  and none is subtracted. \
+     charges, the SEBI fee, the IPFT, DP charges and GST (an UNVERIFIED list) all apply to a \
+     share trade\n  and none is subtracted. \
      COST-EXCLUDED RESEARCH, NOT A NET RESULT (D-0509, D-0525, D-0681). No equity result \
      carries\n  Selection V6 or execution authority until a charter-sourced equity charge \
      stack exists.";
@@ -20876,13 +21850,7 @@ fn audit_bars_work(
         cost,
     } = opts;
     let prepared_column = match (prepared_column, replay) {
-        (None, Some(replay)) => match stored_anchored_column(
-            &bars,
-            replay.daily,
-            replay.exact_minute,
-            replay.signal_length_micros,
-            replay.availability,
-        ) {
+        (None, Some(replay)) => match replay.column_of(&bars) {
             Ok(column) => Some(column),
             Err(why) => return format!("refused: {why}\n"),
         },
@@ -21631,15 +22599,7 @@ fn both_shapes(
         signal_length_micros: execution.signal_length_micros,
     };
     if let Some(replay) = replay {
-        let mut builder = |slice: &[indicators::Candle]| {
-            stored_anchored_column(
-                slice,
-                replay.daily,
-                replay.exact_minute,
-                replay.signal_length_micros,
-                replay.availability,
-            )
-        };
+        let mut builder = |slice: &[indicators::Candle]| replay.column_of(slice);
         let anchored = runner::validate::walk_forward_projected_prepared_with_rungs(
             bars,
             execution,
@@ -22076,6 +23036,144 @@ fn record_all_attempt(
               test that cannot panic cannot fail."
 )]
 mod tests {
+    /// conc9-2: a run with no sink says so on stderr before it starts; a run
+    /// with one says nothing there.
+    #[test]
+    fn an_unlogged_run_is_announced_at_once_and_a_logged_one_is_not() {
+        let mut err = Vec::new();
+        let refused = format!("{}: the sink is held by another process", crate::UNLOGGED);
+        crate::announce_unlogged(&refused, &mut err);
+        assert_eq!(err, format!("{refused}\n").into_bytes());
+        let mut quiet = Vec::new();
+        crate::announce_unlogged("events -> /store/logs/cli", &mut quiet);
+        assert!(
+            quiet.is_empty(),
+            "an installed sink is not announced on stderr"
+        );
+    }
+
+    /// p12num-1: the cached handle opens once, refreshes on reuse, and opens
+    /// fresh for a new root, a replaced file, a refused refresh or a refused
+    /// operation.
+    #[test]
+    fn a_cached_handle_refreshes_by_the_delta_and_reopens_when_it_must() {
+        use std::cell::Cell;
+        let dir = std::env::temp_dir().join(format!("brutex-cached-handle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let file = dir.join("ledger.bin");
+        std::fs::write(&file, b"a").expect("file");
+        let cache = std::sync::Mutex::new(None);
+        let (opens, refreshes, fail_refresh) = (Cell::new(0), Cell::new(0), Cell::new(false));
+        let other = dir.join("other");
+        let call = |root: &std::path::Path, fail_op: bool| {
+            crate::with_cached_handle(
+                &cache,
+                root,
+                &file,
+                |_| {
+                    opens.set(opens.get() + 1);
+                    Ok(0_u32)
+                },
+                |_| {
+                    refreshes.set(refreshes.get() + 1);
+                    if fail_refresh.get() {
+                        Err("ragged".to_owned())
+                    } else {
+                        Ok(())
+                    }
+                },
+                |handle| {
+                    *handle += 1;
+                    if fail_op {
+                        Err("refused".to_owned())
+                    } else {
+                        Ok(*handle)
+                    }
+                },
+            )
+        };
+        assert_eq!(call(&dir, false), Ok(1));
+        assert_eq!(call(&dir, false), Ok(2), "the same handle is reused");
+        assert_eq!(
+            (opens.get(), refreshes.get()),
+            (1, 1),
+            "one open, then one refresh"
+        );
+        assert_eq!(call(&other, false), Ok(1), "a new root opens fresh");
+        assert_eq!(opens.get(), 2);
+        // Written beside the old file and renamed over it, so both exist at
+        // once and the replacement cannot reuse the freed inode, which a
+        // remove-then-write may do.
+        let next = dir.join("next.bin");
+        std::fs::write(&next, b"b").expect("replacement");
+        std::fs::rename(&next, &file).expect("replace");
+        assert_eq!(call(&other, false), Ok(1), "a replaced file opens fresh");
+        fail_refresh.set(true);
+        assert_eq!(call(&other, false), Ok(1), "a refused refresh opens fresh");
+        fail_refresh.set(false);
+        assert!(call(&other, true).is_err());
+        let before = opens.get();
+        assert_eq!(
+            call(&other, false),
+            Ok(1),
+            "a refused operation drops the handle"
+        );
+        assert_eq!(opens.get(), before + 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// CE-76: the ledger keys the instrument by its canonical symbol, so a
+    /// rerun spelt differently is the same answer, and an unknown word is kept.
+    #[test]
+    fn an_instrument_spelt_in_another_case_is_the_same_ledger_answer() {
+        assert_eq!(crate::canonical_underlying("nifty"), "NIFTY");
+        assert_eq!(crate::canonical_underlying("BankNifty"), "BANKNIFTY");
+        assert_eq!(crate::canonical_underlying("synthetic"), "synthetic");
+        let row = |word: &str| crate::results::Record {
+            underlying: crate::results::field(word),
+            ..record_for_naming()
+        };
+        assert!(crate::same_run_answer(row("nifty"), row("NIFTY")));
+        assert!(!crate::same_run_answer(row("NIFTY"), row("BANKNIFTY")));
+    }
+
+    /// conc9-1: written progress counts never go backwards, however the
+    /// workers interleave. Before, a worker holding 10 could write after one
+    /// holding 20, and the page read the drop as a refusal.
+    #[test]
+    fn grid_progress_writes_counts_that_only_go_up() {
+        let total = 365;
+        for _round in 0..200 {
+            let progress = crate::GridProgress::over(total, None);
+            let written = std::sync::Mutex::new(Vec::new());
+            std::thread::scope(|scope| {
+                for _ in 0..4 {
+                    scope.spawn(|| {
+                        for _ in 0..=(total / 4) {
+                            progress.tick_with(|done| {
+                                written.lock().expect("test lock").push(done);
+                            });
+                        }
+                    });
+                }
+            });
+            let written = written.into_inner().expect("test lock");
+            assert!(!written.is_empty(), "boundaries were reached");
+            assert!(
+                written.windows(2).all(|pair| pair.first() < pair.last()),
+                "file order is count order: {written:?}"
+            );
+        }
+        // The lock is ordering, not suppression: one thread writes every boundary.
+        let progress = crate::GridProgress::over(100, None);
+        let mut written = Vec::new();
+        for _ in 0..100 {
+            progress.tick_with(|done| written.push(done));
+        }
+        assert_eq!(written, (1..=10).map(|step| step * 10).collect::<Vec<_>>());
+    }
+
     /// **Text arguments pass through unchanged; the first that is not text is
     /// refused by position, as a misuse, and nothing is dispatched.** D-0998.
     #[cfg(unix)]
@@ -22115,9 +23213,9 @@ mod tests {
         side_of_evidence, streaming_note, support_from_knob, sweep, sweep_stored, sweep_with,
         validates,
     };
+    use super::{Cadence, FAILED, carries_refusal, nothing_measured, parse_cadence, untrustworthy};
     use super::{Consistency, Horizon, consistency_of, evaluator, grid, grid_step_ppm, ladder_for};
     use super::{Direction, Side};
-    use super::{FAILED, carries_refusal, nothing_measured};
     use super::{
         MAX_STOP_POINTS, NIFTY_REFERENCE, PAISA_PER_POINT, STOP_FLOOR_POINTS, hundredths_of,
         points_to_ppm_at, ppm_to_points_at, reference_price, return_over_drawdown_cell,
@@ -22320,6 +23418,9 @@ mod tests {
             rung_finished_event(rung, true, ""),
             validation_stage_event(Some(recording), "bootstrap", true),
             validation_stage_event(Some(recording), "bootstrap", false),
+            // CE-49, D-2656: the progress line between them was missing here,
+            // and it carried neither the span nor an attempt.
+            crate::grid_progress_event(Some(recording), 5, 25),
         ];
 
         for event in &events {
@@ -22357,8 +23458,55 @@ mod tests {
                 .iter()
                 .map(|event| event.fields().len())
                 .collect::<Vec<_>>(),
-            vec![12, 12, 11, 12, 9, 9]
+            vec![12, 12, 11, 12, 9, 9, 10]
         );
+    }
+
+    /// CE-49, D-2656: a terminal sweep's grid and validation events carry the
+    /// sink's own run as their attempt, as the rung events always did, so the
+    /// live fold never meets a live event with no attempt field.
+    #[test]
+    fn a_live_event_without_a_browser_attempt_still_carries_one_when_a_sink_runs() {
+        let recording = Recording {
+            root: std::path::Path::new("."),
+            feed: "zerodha",
+            underlying: "NIFTY",
+            timeframe: "15min",
+            from: (2024, 1),
+            to: (2024, 12),
+            attempt: None,
+            months_asked: 12,
+            months_found: 12,
+        };
+        let bare = |message| telemetry::Event::info("cli.audit", message);
+        for message in ["exit grid progress", "validation stage entered"] {
+            let mut with_sink = bare(message);
+            crate::live_context_over(&mut with_sink, Some(recording), Some(77));
+            assert!(
+                with_sink
+                    .fields()
+                    .contains(&("attempt", telemetry::Value::Uint(77))),
+                "{message}: a terminal run's event must carry the sink's run"
+            );
+            let browser = Recording {
+                attempt: Some(41),
+                ..recording
+            };
+            let mut chosen = bare(message);
+            crate::live_context_over(&mut chosen, Some(browser), Some(77));
+            assert!(
+                chosen
+                    .fields()
+                    .contains(&("attempt", telemetry::Value::Uint(41))),
+                "{message}: a browser attempt wins over the fallback"
+            );
+            assert!(
+                !chosen
+                    .fields()
+                    .contains(&("attempt", telemetry::Value::Uint(77))),
+                "{message}: exactly one attempt"
+            );
+        }
     }
 
     /// The fold line carries what the operator could not read for 5h33m:
@@ -22517,8 +23665,246 @@ mod tests {
         );
 
         let mut out = String::new();
-        assert_eq!(run(&argv(&["auto", "1"]), &mut out), OK);
+        assert_eq!(run(&argv(&["auto", "6"]), &mut out), OK, "{out}");
         assert!(!out.is_empty(), "auto rendered something");
+    }
+
+    /// EVERY READER OF A POLICY KNOB ACCEPTS THE SAME VALUES. P8-04, D-2723.
+    ///
+    /// `Rules::stated` admitted any `i64 >= 0`, so `BRUTEX_MIN_WIN_RATE_BP=20000`
+    /// ran screen/elite/ledger silently and `BRUTEX_PROTECTED_EXITS=2` read as
+    /// "on", while `expression-backtest-stored` refused both. For each value,
+    /// the three readers -- `Rules::stated`, `validate_overrides` and the
+    /// strict-range admission -- now agree on whether it is usable.
+    #[test]
+    fn every_reader_of_a_policy_knob_accepts_the_same_values() {
+        let _knobs = crate::knobs::serially();
+        let cases: &[(&str, &str, bool)] = &[
+            ("BRUTEX_MIN_WIN_RATE_BP", "20000", false),
+            ("BRUTEX_MIN_WIN_RATE_BP", "10001", false),
+            ("BRUTEX_MIN_WIN_RATE_BP", "10000", true),
+            ("BRUTEX_MIN_WIN_RATE_BP", "7000", true),
+            ("BRUTEX_MIN_WIN_RATE_BP", "-1", false),
+            ("BRUTEX_PROTECTED_EXITS", "2", false),
+            ("BRUTEX_PROTECTED_EXITS", "01", false),
+            ("BRUTEX_PROTECTED_EXITS", "0", true),
+            ("BRUTEX_PROTECTED_EXITS", "1", true),
+            ("BRUTEX_MIN_TRADES", "40", true),
+            ("BRUTEX_MIN_TRADES", "x", false),
+        ];
+        for &(name, raw, usable) in cases {
+            crate::knobs::clear_all();
+            crate::knobs::set(name, raw);
+            assert_eq!(
+                super::Rules::stated(name).is_some(),
+                usable,
+                "Rules::stated {name}={raw}"
+            );
+            assert_eq!(
+                crate::expression_pricing::validate_overrides().is_ok(),
+                usable,
+                "validate_overrides {name}={raw}"
+            );
+            assert_eq!(
+                crate::audited_range_command::request_value(name, raw),
+                usable,
+                "strict range {name}={raw}"
+            );
+        }
+        crate::knobs::clear_all();
+        crate::knobs::set("BRUTEX_MIN_WIN_RATE_BP", "20000");
+        assert_eq!(super::Rules::operator().min_win_rate_bp, 5_000);
+        assert!(
+            crate::knobs::refused().is_some_and(|text| text.contains("BRUTEX_MIN_WIN_RATE_BP")),
+            "the fallback is named, not silent"
+        );
+        crate::knobs::clear_all();
+        crate::knobs::set("BRUTEX_PROTECTED_EXITS", "2");
+        assert!(super::Rules::protective_exits_required());
+        assert!(crate::knobs::refused().is_some());
+        crate::knobs::clear_all();
+    }
+
+    /// A MALFORMED ARGUMENT EXITS 2 WITH THE USAGE; A REFUSED JOB EXITS 1 WITHOUT IT.
+    /// P8-03, D-2722.
+    ///
+    /// `MISUSED` is documented as "does not understand" and `FAILED` as "could
+    /// not do it". The stored, boolean, expression and research commands
+    /// exited `MISUSED` (most with the whole usage) for every refusal their work
+    /// produced, and `checksum-audit-stored` exited `FAILED` for `x` as a year.
+    /// Each case below is one command's argument refusal and one of its work
+    /// refusals. Year 1999 is a month no feed holds, so the work refuses
+    /// whatever the build or the store: an unstamped build, an absent store
+    /// root and an absent month are all the work's.
+    #[test]
+    fn a_malformed_argument_exits_misused_and_a_refused_job_exits_failed() {
+        let scratch = std::env::temp_dir().join(format!("brutex-p8-03-{}", std::process::id()));
+        let output = scratch.join("out").to_string_lossy().into_owned();
+        let catalog = scratch.join("absent-catalog.txt");
+        let catalog = catalog.to_string_lossy().into_owned();
+        // One command per line; OUT and CATALOG stand for the two scratch
+        // paths, substituted after the split so a path is one word.
+        let words = |line: &str| -> Vec<String> {
+            line.split_whitespace()
+                .map(|word| match word {
+                    "OUT" => output.clone(),
+                    "CATALOG" => catalog.clone(),
+                    word => word.to_owned(),
+                })
+                .collect()
+        };
+        let misused = [
+            "sweep-stored nosuchfeed NIFTY 1min 2026 1 10",
+            "audit-stored zerodha NOSUCH 1min 2026 1 10",
+            "sweep-stored zerodha NIFTY 1day 2026 1 10",
+            "audit-range zerodha NIFTY 60min 2026 8 2019 12 10",
+            "checksum-audit-stored zerodha NIFTY 1min x 1 /r 10",
+            "sweep-audited-stored zerodha NIFTY 1min 2026 13 10 /r 1 1",
+            "expression-stored nosuchfeed NIFTY 1min 2026 1 0",
+            "research-plan nosuchfeed",
+            "boolean-catalog-stored nosuchfeed NIFTY 60min 2025 1 2025 2 CATALOG 60 100 OUT",
+        ];
+        for line in misused {
+            let mut out = String::new();
+            let code = super::dispatch(&words(line), &mut out);
+            assert_eq!(code, MISUSED, "{line}:\n{out}");
+            assert!(
+                out.contains(USAGE),
+                "a malformed argument gets the usage: {line}"
+            );
+        }
+        let failed = [
+            "sweep-stored zerodha NIFTY 1min 1999 1 10",
+            "audit-range zerodha NIFTY 60min 1999 1 1999 2 10",
+            "checksum-audit-stored zerodha NIFTY 1min 1999 1 OUT 10",
+            "expression-stored zerodha NIFTY 1min 1999 1 0",
+            "expression-search-stored zerodha NIFTY 1min 1999 1 all 1 1 1",
+            "boolean-catalog-stored zerodha NIFTY 60min 1999 1 1999 2 CATALOG 60 100 OUT",
+        ];
+        for line in failed {
+            let mut out = String::new();
+            let code = super::dispatch(&words(line), &mut out);
+            assert_eq!(code, FAILED, "{line}:\n{out}");
+            assert!(
+                !out.contains(USAGE),
+                "a refused job is not a usage error: {line}\n{out}"
+            );
+            assert!(
+                out.contains("REFUSED") || carries_refusal(&out),
+                "{line}:\n{out}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// OPERATOR TEXT NAMES ONLY RUNGS AND COMMANDS THIS BINARY ACCEPTS. P8-05, D-2724.
+    ///
+    /// The USAGE legend gave `1min, 1day` as RUNG examples and every sweep
+    /// refuses `1day`; `cli top`'s missing-frontier sentence named `cli
+    /// frontier`, which is not a command; `main.rs` headed a list "the four
+    /// commands" of thirty-five. Every backticked `cli WORD` in the three texts
+    /// must be a dispatched command, the legend must list exactly the swept
+    /// rungs, and the one stored-only rung it names must be refused by a sweep.
+    #[test]
+    fn operator_text_names_only_rungs_and_commands_this_binary_accepts() {
+        let main = include_str!("main.rs");
+        let missing = super::no_frontier("");
+        for text in [USAGE, missing.as_str(), main] {
+            for (at, _) in text.match_indices("`cli ") {
+                let word: String = text[at + 5..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                    .collect();
+                assert!(
+                    COMMANDS.contains(&word.as_str()),
+                    "`cli {word}` is not a command"
+                );
+            }
+        }
+        assert!(!missing.contains("cli frontier"), "{missing}");
+        assert!(!main.contains("# The four"), "main.rs heads a fixed count");
+        let legend = &USAGE[USAGE.find("\nRUNG ").expect("RUNG legend")..];
+        let legend = &legend[..legend.find("\n\n").expect("legend ends")];
+        assert!(legend.contains(&super::EVERY_RUNG.join(" ")), "{legend}");
+        for rung in super::EVERY_RUNG {
+            assert!(super::swept_rung(rung).is_ok(), "{rung}");
+        }
+        assert!(super::swept_rung("1day").is_err());
+        assert!(!legend.contains("1min, 1day"), "{legend}");
+        assert!(legend.contains("1day is stored"), "{legend}");
+    }
+
+    /// A REFUSED ARGUMENT IS REFUSED IN THE GRAMMAR ITS PARSER ACCEPTS. P8-02, D-2721.
+    ///
+    /// `descend` answered every bad CADENCE with "`PER_WEEK` must be a whole
+    /// number of trades per week", discarding `parse_cadence`'s sentence, so
+    /// `6/yr` was told the opposite of what USAGE says. `elite` answered an
+    /// unparsable `MAX_POINTS` with "1 or more" while accepting 0 and USAGE
+    /// telling the operator to pass it. Both refusals now name every spelling
+    /// the parser accepts, and `/w`, which it always accepted, is documented.
+    #[test]
+    fn a_refused_cadence_or_ceiling_names_the_grammar_its_parser_accepts() {
+        let mut out = String::new();
+        let code = run(
+            &argv(&[
+                "descend", "zerodha", "NIFTY", "15min", "2024", "1", "2024", "6", "200000", "6/yr",
+            ]),
+            &mut out,
+        );
+        assert_eq!(code, MISUSED, "{out}");
+        assert!(!out.contains("PER_WEEK"), "{out}");
+        for spelling in ["`3`", "`3/w`", "`6/y`"] {
+            assert!(out.contains(spelling), "missing {spelling}:\n{out}");
+        }
+        assert_eq!(parse_cadence("3/w"), Ok(Cadence::PerWeek(3)));
+        assert!(USAGE.contains("`3/w`"), "USAGE documents the `/w` spelling");
+
+        let mut out = String::new();
+        let code = run(
+            &argv(&[
+                "elite", "zerodha", "NIFTY", "15min", "2024", "1", "2024", "6", "x", "5",
+            ]),
+            &mut out,
+        );
+        assert_eq!(code, MISUSED, "{out}");
+        let first = out.lines().next().unwrap_or_default();
+        assert!(first.contains("or 0 for no ceiling"), "{out}");
+        assert!(!first.ends_with("1 or more"), "{out}");
+    }
+
+    /// A THRESHOLD SEARCH THAT SETTLED ON NOTHING EXITS NON-ZERO. P8-01, D-2720.
+    ///
+    /// `cli auto 1` prints `threshold chosen NONE` and `trustworthy as a whole
+    /// answer NO`, and the arm returned `OK` unconditionally -- the same defect
+    /// probeapi-6 fixed for `sweep` alone. One to five sessions now exit
+    /// `FAILED` with the report still printed; six exit `OK`. The predicate
+    /// reads the verdict row only.
+    #[test]
+    fn an_auto_search_that_settled_on_nothing_exits_non_zero() {
+        for sessions in ["1", "2", "3", "4", "5"] {
+            let mut out = String::new();
+            assert_eq!(
+                run(&argv(&["auto", sessions]), &mut out),
+                FAILED,
+                "auto {sessions}:\n{out}"
+            );
+            assert!(out.contains("threshold chosen"), "{out}");
+            assert!(untrustworthy(&out), "{out}");
+            assert!(!carries_refusal(&out), "{out}");
+        }
+        assert!(untrustworthy(
+            "  trustworthy as a whole answer            NO  "
+        ));
+        assert!(!untrustworthy(
+            "  trustworthy as a whole answer           yes  "
+        ));
+        assert!(!untrustworthy(
+            "trustworthy as a whole answer NO, in prose here"
+        ));
+        assert!(!untrustworthy(
+            "  untrustworthy as a whole answer         NO"
+        ));
+        assert!(!untrustworthy(""));
     }
 
     /// Every refusal NAMES what was wrong and prints the usage.
@@ -22667,10 +24053,35 @@ mod tests {
         );
         // And every stored column is built from a verdict, not a literal: the
         // definition names the parameter and every call passes one.
+        // BOTH BUILDERS, since D-1781 split the withholding fold out of the
+        // plain one, and each call's argument list to its MATCHING paren: the
+        // withholding builder's first argument is itself a call, so the first
+        // `)` would end the list before the verdict.
         let mut calls = 0;
-        for (at, _) in production.match_indices("stored_anchored_column(") {
+        for (at, _) in production.match_indices("stored_anchored_column") {
             let after = &production[at..];
-            let close = after.find(')').expect("a call closes");
+            let Some(open) = [
+                "stored_anchored_column(",
+                "stored_anchored_column_withholding(",
+            ]
+            .iter()
+            .find(|name| after.starts_with(**name))
+            .map(|name| name.len()) else {
+                continue;
+            };
+            let mut depth = 1_usize;
+            let close = after[open..]
+                .char_indices()
+                .find(|&(_, c)| {
+                    match c {
+                        '(' => depth += 1,
+                        ')' => depth -= 1,
+                        _ => {}
+                    }
+                    depth == 0
+                })
+                .map(|(i, _)| open + i)
+                .expect("a call closes");
             let args = &after[..close];
             assert!(
                 args.contains("availability"),
@@ -22680,7 +24091,7 @@ mod tests {
         }
         assert!(
             calls >= 6,
-            "the definition and five shared stored fold doors, at least; found {calls}"
+            "the two definitions and the shared stored fold doors, at least; found {calls}"
         );
     }
 
@@ -23027,6 +24438,10 @@ mod tests {
         for (name, bad) in [
             ("BRUTEX_SCREEN_CAP", "abc"),
             ("BRUTEX_GRID_RUNGS", "0"),
+            // CE-75, D-1778: below two and above the cell budget were clamped
+            // in silence.
+            ("BRUTEX_GRID_RUNGS", "1"),
+            ("BRUTEX_GRID_RUNGS", "99999999999"),
             ("BRUTEX_SCREEN_BUDGET_MS", "-1"),
             ("BRUTEX_GRID_RESOLUTION", "half"),
             ("BRUTEX_SIZING_RATE_BP", "5000"),
@@ -23266,6 +24681,16 @@ mod tests {
             "the refusal names both: {why}"
         );
         assert!(why.contains("HOME"), "the refusal names both: {why}");
+        // CE-38, D-1769: empty or relative values are refused by name.
+        assert!(
+            root_from(Some("".into()), Some("/Users/x".into()))
+                .is_err_and(|why| why.starts_with("BRUTEX_STORE is set but empty"))
+        );
+        assert!(
+            root_from(None, Some("".into()))
+                .is_err_and(|why| why.starts_with("HOME is set but empty"))
+        );
+        assert!(root_from(None, Some("rel".into())).is_err_and(|why| why.contains("relative")));
     }
 
     /// A MISSING STORE ROOT IS A REFUSAL, NEVER AN IMPLICIT DIRECTORY CREATE.
@@ -23459,6 +24884,7 @@ mod tests {
                 admitted: false,
                 consistency: None,
                 steady: true,
+                calendar_unmeasured: false,
             },
             super::Screened {
                 side: Direction::Short,
@@ -23473,6 +24899,7 @@ mod tests {
                 admitted: true,
                 consistency: None,
                 steady: true,
+                calendar_unmeasured: false,
             },
         ];
         let mut rules = crate::Rules::operator();
@@ -23481,6 +24908,108 @@ mod tests {
         assert_eq!(chosen.scored.mask, admitted_b.mask, "rank two is committed");
         assert_eq!(chosen.direction, Direction::Short, "B's side travels too");
         assert_eq!(chosen.cell, rows[1].cell, "B's exact cell travels too");
+    }
+
+    /// THE CALENDAR GATE JUDGES EVERY ROW, NOT THE PRINTED ONES (p5num-1,
+    /// D-2714).
+    ///
+    /// `top + 1` rows clear the cell rules and every measured one fails
+    /// `min_weakest_bp`. The gate ran over the first `top` only, so row
+    /// `top + 1` stayed admitted: counted as passing, selected as the run's
+    /// subject and bannered `YOUR RULES: MET`. A row the rule never ran on
+    /// (no `consistency`) is not admitted while the rule is on either.
+    #[test]
+    fn the_calendar_gate_refuses_an_inconsistent_row_past_the_printed_top() {
+        use runner::outcome::Edge;
+        use runner::rank::Scored;
+
+        fn consistency(weakest: i64) -> super::Consistency {
+            super::Consistency {
+                shares_bp: [weakest; crate::stability::GRAINS.len()],
+                worst_day: 0,
+                years: 1,
+            }
+        }
+        fn row(at: &Scored, measured: Option<i64>) -> super::Screened<'_> {
+            super::Screened {
+                side: Direction::Long,
+                scored: at,
+                rank: 1,
+                cell: grid::Cell {
+                    trades: 10,
+                    wins: 9,
+                    pessimistic: 1_000,
+                    ..grid::Cell::default()
+                },
+                tightest: None,
+                admitted: true,
+                consistency: measured.map(consistency),
+                steady: true,
+                calendar_unmeasured: false,
+            }
+        }
+
+        let scored = |bit: u32| {
+            let base = Scored {
+                mask: vocab::ConditionMask::default(),
+                hits: 100,
+                edge: Edge {
+                    n: 100,
+                    mean_paisa: 1.0,
+                    t: 1.0,
+                    ..Edge::default()
+                },
+            };
+            Scored {
+                mask: base.mask.with_bit(bit),
+                ..base
+            }
+        };
+        let evidence = [scored(1), scored(2), scored(3), scored(4), scored(5)];
+        let mut rules = crate::Rules::operator();
+        rules.top = 2;
+        rules.min_weakest_bp = 5_000;
+        // Rows 0..=2 inconsistent (row 2 is `top + 1`), row 3 steady, row 4
+        // never measured.
+        let fresh = || {
+            [
+                row(&evidence[0], Some(4_000)),
+                row(&evidence[1], Some(3_000)),
+                row(&evidence[2], Some(2_000)),
+                row(&evidence[3], Some(6_000)),
+                row(&evidence[4], None),
+            ]
+        };
+        let mut rows = fresh();
+        super::calendar_gate(&mut rows, rules);
+        let admitted: Vec<bool> = rows.iter().map(|r| r.admitted).collect();
+        assert_eq!(admitted, [false, false, false, true, false]);
+        assert!(!rows[2].steady, "row top + 1 is judged and refused");
+        assert!(!rows[2].calendar_unmeasured);
+        assert!(
+            rows[4].steady,
+            "an unmeasured row is not called inconsistent"
+        );
+        assert!(rows[4].calendar_unmeasured, "it is refused as unmeasured");
+        let chosen = super::final_selection(&rows, rules).expect("row 3 passes");
+        assert_eq!(
+            chosen.scored.mask, evidence[3].mask,
+            "the steady row is chosen"
+        );
+
+        // With no steady row at all, nothing passes and the fallback subject is
+        // reported as such: `admitted_any` reads false.
+        let mut none_steady = fresh();
+        none_steady[3].consistency = Some(consistency(1_000));
+        super::calendar_gate(&mut none_steady, rules);
+        assert!(none_steady.iter().all(|r| !r.admitted), "0 passed");
+
+        // With the calendar rule OFF nothing is required of it: every row keeps
+        // its cell verdict, measured or not.
+        rules.min_weakest_bp = 0;
+        let mut off = fresh();
+        super::calendar_gate(&mut off, rules);
+        assert!(off.iter().all(|r| r.admitted && !r.calendar_unmeasured));
     }
 
     /// A broader earlier tier may price more masks than the final tier. The
@@ -23641,7 +25170,7 @@ mod tests {
                 Some(OsString::from("/tmp/brutex-events")),
                 Some(PathBuf::from("/srv/store")),
             ),
-            Some(PathBuf::from("/tmp/brutex-events")),
+            Ok(Some(PathBuf::from("/tmp/brutex-events"))),
         );
 
         // WITH NO VARIABLE, THE LOG SITS UNDER THE STORE, IN ITS OWN
@@ -23659,7 +25188,7 @@ mod tests {
         // which is the only shape that stays O(1) per event with two writers.
         assert_eq!(
             log_dir_from(None, Some(PathBuf::from("/srv/store"))),
-            Some(PathBuf::from("/srv/store/logs/cli")),
+            Ok(Some(PathBuf::from("/srv/store/logs/cli"))),
             "the CLI owns a child directory so it cannot interleave with the \
              server's file"
         );
@@ -23668,13 +25197,87 @@ mod tests {
         // guess at the working directory. `install_log` turns this into the
         // printed "events are NOT being recorded" line rather than a silent
         // absence — degrade loudly, per §4.
-        assert_eq!(log_dir_from(None, None), None);
+        assert_eq!(log_dir_from(None, None), Ok(None));
+        // CE-5, D-1769: set but EMPTY is refused by name, never the cwd, and
+        // never quietly replaced by the store's directory either.
+        for blank in ["", " "] {
+            assert!(
+                log_dir_from(
+                    Some(OsString::from(blank)),
+                    Some(PathBuf::from("/srv/store"))
+                )
+                .is_err_and(|why| why.starts_with("BRUTEX_LOG_DIR is set but empty"))
+            );
+        }
 
         // AND AN EXPLICIT DIRECTORY STILL WINS WITH NO STORE AT ALL, which is
         // the case for an operator who has moved the store away entirely.
         assert_eq!(
             log_dir_from(Some(OsString::from("/var/log/brutex")), None),
-            Some(PathBuf::from("/var/log/brutex")),
+            Ok(Some(PathBuf::from("/var/log/brutex"))),
+        );
+    }
+
+    /// CE-45, D-2652: the banner promises /logs only for the directory /logs
+    /// reads. A `BRUTEX_LOG_DIR` elsewhere, or no store root at all, is told
+    /// the page will not show its events.
+    #[test]
+    fn the_log_banner_promises_the_logs_page_only_for_the_directory_it_reads() {
+        let store = std::path::PathBuf::from("/srv/store");
+        let read = super::log_banner(&store.join("logs").join("cli"), Some(&store));
+        assert!(read.contains("so these events appear there"), "{read}");
+        assert!(!read.contains("will NOT show"), "{read}");
+
+        let elsewhere = super::log_banner(std::path::Path::new("/tmp/x"), Some(&store));
+        assert!(
+            elsewhere.contains("will NOT show these events"),
+            "{elsewhere}"
+        );
+        assert!(elsewhere.contains("/srv/store/logs/cli"), "{elsewhere}");
+        assert!(!elsewhere.contains("appear there"), "{elsewhere}");
+
+        let no_store = super::log_banner(std::path::Path::new("/tmp/x"), None);
+        assert!(no_store.contains("no store root is set"), "{no_store}");
+    }
+
+    /// CE-50, D-2655: a clock before 1970 refuses the run by name; it is never
+    /// clamped to a plausible 0, and a real time is the exact microsecond count.
+    #[test]
+    fn a_completion_stamp_before_the_epoch_is_refused_not_clamped() {
+        let epoch = std::time::UNIX_EPOCH;
+        let before = epoch - std::time::Duration::from_secs(5);
+        let why = super::finished_micros_at(before).expect_err("before 1970");
+        assert!(why.contains("BEFORE 1970-01-01"), "{why}");
+        assert!(why.contains("not recorded"), "{why}");
+        assert_eq!(super::finished_micros_at(epoch), Ok(0));
+        let later = epoch + std::time::Duration::from_micros(1_759_561_200_123_456);
+        assert_eq!(super::finished_micros_at(later), Ok(1_759_561_200_123_456));
+    }
+
+    #[test]
+    fn the_log_banner_never_promises_without_a_store() {
+        let no_store = super::log_banner(std::path::Path::new("/tmp/x"), None);
+        assert!(no_store.contains("no store root is set"), "{no_store}");
+        assert!(!no_store.contains("appear there"), "{no_store}");
+    }
+
+    /// P3-02-03..05, D-1769: the help text names the optional TIMEFRAMES
+    /// argument, prints no printf escape, and names the cash equities on the
+    /// UNDERLYING line (CLAUDE.md §1).
+    #[test]
+    fn the_usage_text_states_what_the_commands_actually_take() {
+        assert!(!USAGE.contains("%%"), "a Rust &str has no printf escapes");
+        assert!(USAGE.contains("80% of trades won"));
+        assert!(USAGE.contains("LATER_TO_M [TIMEFRAMES]"));
+        let underlying = USAGE
+            .lines()
+            .skip_while(|line| !line.starts_with("UNDERLYING"))
+            .take(2)
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            underlying.contains("NIFTY") && underlying.contains("cash equity"),
+            "{underlying}"
         );
     }
 
@@ -23888,8 +25491,8 @@ mod tests {
             "the arm must be reached, not fall through to the usage refusal: {out}"
         );
         assert!(
-            code == OK || code == MISUSED,
-            "it either searched or refused for a stated reason: {code}"
+            code == OK || code == FAILED,
+            "it either searched or its work refused for a stated reason: {code}"
         );
 
         // A non-numeric date is a refusal, not a parse panic.
@@ -23928,8 +25531,9 @@ mod tests {
             &mut out,
         );
         assert_eq!(
-            code, MISUSED,
-            "a month the store does not hold is a misuse, not a success: {out}"
+            code, FAILED,
+            "a month the store does not hold is a failure, not a success or a \
+             misuse (P8-03, D-2722): {out}"
         );
         assert!(
             out.starts_with("refused: "),
@@ -25143,6 +26747,27 @@ mod tests {
     /// Through `money_key`, the production key, on `Screened` rows rather than
     /// a hand-built tuple: the defect was the mapping from a cell to its terms,
     /// so a test that built the tuple itself would restate it.
+    /// xcut-1, D-1991: a MISPAIRED row stops the live view by name; a clean
+    /// ranking writes it.
+    #[test]
+    fn a_mispaired_row_refuses_the_live_view_by_name() {
+        use runner::rank::Scored;
+
+        let row = |mismatched: u64| Scored {
+            mask: vocab::ConditionMask::default(),
+            hits: 40,
+            edge: runner::outcome::Edge {
+                n: 40,
+                mismatched,
+                ..runner::outcome::Edge::default()
+            },
+        };
+        let (clean, bad) = (row(0), row(3));
+        assert_eq!(super::mispaired_live_row(&[&clean, &clean]), None);
+        let why = super::mispaired_live_row(&[&clean, &bad]).expect("refused");
+        assert!(why.contains("row 2 is MISPAIRED (3 forward"), "{why}");
+    }
+
     #[test]
     fn an_untested_cell_that_never_lost_ranks_behind_a_tested_one() {
         use runner::rank::Scored;
@@ -25205,6 +26830,7 @@ mod tests {
             admitted: true,
             consistency: None,
             steady: true,
+            calendar_unmeasured: false,
         };
         let mut rows = [row(flawless), row(tested)];
         rows.sort_by_key(|r| super::money_key(&r.cell));
@@ -25228,9 +26854,9 @@ mod tests {
     /// in shape to one that ran all three, so the banner is the only thing
     /// separating a CANDIDATE from a FINDING.
     ///
-    /// The switch defaults ON and only a literal `0` turns it off: a typo must
+    /// The switch defaults ON and only an off word turns it off: a typo must
     /// not silently buy a weaker answer, which is why a malformed value is not
-    /// read as off.
+    /// read as off, and is named (CE-6, D-1769).
     #[test]
     fn an_unvalidated_screen_cannot_be_mistaken_for_a_validated_one() {
         assert!(
@@ -25253,41 +26879,58 @@ mod tests {
             );
         }
 
-        // THE DEFAULT IS ON, AND ONLY `0` TURNS IT OFF.
+        // THE DEFAULT IS ON, AND THE EIGHT SWITCH WORDS DECIDE IT.
         //
         // Asserted on `validates`, the same decision `validate_from_env` calls,
         // rather than by re-deriving the rule here — so a change to one is a
         // change to both. The lookup is not tested because it cannot be: this
         // crate is `#![forbid(unsafe_code)]` and `std::env::set_var` is unsafe.
         // Splitting the decision out is what made the rule provable at all.
+        // CE-6, D-1769: the eight switch words, and anything else is refused
+        // (`None`), which `validate_from_env` turns into ON plus a named
+        // KNOB REFUSED line.
         for (raw, want, why) in [
-            (None, true, "absent means the full stack runs"),
-            (Some("0"), false, "a literal zero is the only way off"),
-            (Some(" 0 "), false, "and whitespace around it still counts"),
-            (Some("1"), true, "any other value leaves it on"),
+            (None, Some(true), "absent means the full stack runs"),
+            (Some("0"), Some(false), "zero turns it off"),
+            (
+                Some(" 0 "),
+                Some(false),
+                "and whitespace around it still counts",
+            ),
+            (Some("1"), Some(true), "one leaves it on"),
             (
                 Some("no"),
-                true,
-                "including one that LOOKS like an off switch",
+                Some(false),
+                "an off word is honoured, not reversed",
             ),
-            (Some("false"), true, "and one that reads like one"),
-            (Some(""), true, "and empty is not off"),
-            (Some("00"), true, "and a near-miss is not off either"),
+            (Some("FALSE"), Some(false), "in any case"),
+            (Some("off"), Some(false), "all four of them"),
+            (Some("yes"), Some(true), "and an on word is on"),
+            (Some(""), None, "empty is refused, not read as either"),
+            (Some("00"), None, "and a near-miss is refused by name"),
         ] {
             assert_eq!(validates(raw), want, "{why}");
         }
     }
 
-    /// audit-20261003 hunt-cli-b-4: a `BRUTEX_VALIDATE` value other than `0`
-    /// or `1` still leaves validation ON, and the run now SAYS so through the
-    /// `!! KNOB REFUSED` block, instead of reading `false` as `1` in silence.
+    /// audit-20261003 hunt-cli-b-4: a `BRUTEX_VALIDATE` value the switch does
+    /// not read still leaves validation ON, and the run SAYS so through the
+    /// `!! KNOB REFUSED` block. Since D-1770 the switch is `knob::switch`
+    /// (CE-6), so `false` and `off` are read as off rather than refused.
     #[test]
     fn an_unexpected_validate_value_stays_on_and_is_named_as_refused() {
         let _knobs = crate::knobs::serially();
-        for (raw, refused) in [("false", true), ("off", true), ("1", false), (" 0 ", false)] {
+        for (raw, on, refused) in [
+            ("false", false, false),
+            ("off", false, false),
+            ("1", true, false),
+            (" 0 ", false, false),
+            ("maybe", true, true),
+            ("00", true, true),
+        ] {
             crate::knobs::clear_all();
             crate::knobs::set("BRUTEX_VALIDATE", raw);
-            assert_eq!(super::validate_from_env(), raw.trim() != "0", "{raw:?}");
+            assert_eq!(super::validate_from_env(), on, "{raw:?}");
             let block = crate::knobs::refused().unwrap_or_default();
             assert_eq!(
                 block.contains("BRUTEX_VALIDATE"),
@@ -25475,9 +27118,15 @@ mod tests {
             ]),
             &mut out,
         );
+        // WELL FORMED, SO NOT A MISUSE: every word names something real, and
+        // what refuses is the build or the store -- the work (P8-03, D-2722).
         assert_eq!(
-            code, MISUSED,
-            "a range that cannot be run is a misuse: {out}"
+            code, FAILED,
+            "a well-formed range that cannot be run is a failure: {out}"
+        );
+        assert!(
+            !out.contains("usage:"),
+            "and is not told how to type it: {out}"
         );
         assert!(
             out.starts_with("refused: "),
@@ -25895,8 +27544,11 @@ mod tests {
                  nothing -- it is the only line separating a real sweep from a \
                  generated one:\n{out}"
             );
+            // THE WORD IS REFUSED BEFORE ANY RUNG IS TRIED (P8-03, D-2722), so
+            // the reason is the argument's own sentence and the usage follows.
+            let first = out.lines().next().unwrap_or_default();
             assert!(
-                out.contains("first reason:"),
+                first.len() > "refused: ".len() && out.contains("usage:"),
                 "and it must name WHY, not merely that it refused:\n{out}"
             );
         }
@@ -26371,32 +28023,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A kill that leaves a ragged detail tail cannot be repaired honestly: no
-    /// row follows it and no ledger marker is written.
+    /// A kill that leaves a ragged detail tail: the torn byte was never a row,
+    /// so the next writer cuts it under its lock and the exact preparation
+    /// resumes (sweep-2, D-1901). It still gains no ledger marker.
     #[test]
-    fn a_torn_prepared_tail_blocks_every_later_commit() {
+    fn a_torn_prepared_tail_is_cut_and_the_exact_preparation_resumes() {
         let root = result_commit_root("torn");
         let _ = std::fs::remove_dir_all(&root);
         let identity = [73; 32];
         let row = result_commit_frontier(identity, 11);
         super::ensure_frontier_rows(&root, &identity, &[row]).expect("whole preparation");
+        let path = crate::frontier::Frontier::path(&root);
+        let whole = std::fs::metadata(&path).expect("whole length").len();
         let mut file = std::fs::OpenOptions::new()
             .append(true)
-            .open(crate::frontier::Frontier::path(&root))
+            .open(&path)
             .expect("opens the simulated crash tail");
         std::io::Write::write_all(&mut file, &[0x7f]).expect("one torn byte");
         file.sync_all()
             .expect("the torn state is durable for the test");
 
-        let why = super::ensure_frontier_rows(&root, &identity, &[row])
-            .expect_err("a ragged file cannot be resumed");
-        assert!(
-            why.contains("whole rows") || why.contains("tail"),
-            "the structural damage is named: {why}"
+        super::ensure_frontier_rows(&root, &identity, &[row])
+            .expect("the writer cuts the torn byte and the exact block resumes");
+        assert_eq!(
+            std::fs::metadata(&path).expect("cut length").len(),
+            whole,
+            "exactly the torn byte was cut"
         );
         assert!(
             !crate::results::Results::path(&root).exists(),
-            "damage never receives a ledger marker"
+            "a preparation alone never receives a ledger marker"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -27600,6 +29256,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// GR-05 (P12-02, D-1791): a frontier file this build cannot read costs
+    /// only its own half of the report. The ledger row already in hand still
+    /// renders, by identity, and the unreadable file is named as unreadable
+    /// rather than as an empty result or a whole-report refusal.
+    #[test]
+    fn an_unreadable_frontier_costs_only_its_own_half_of_the_report() {
+        let root = std::env::temp_dir().join(format!("brutex-top-badfr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a temp root");
+
+        let mut ledger = crate::results::Results::open(&root).expect("a fresh ledger");
+        let mut record = record_for_naming();
+        record.identity = [13; 32];
+        record.halted = 0;
+        ledger.append(&record).expect("the row appends");
+        std::fs::write(
+            crate::frontier::Frontier::path(&root),
+            b"not a frontier file",
+        )
+        .expect("a decoy frontier");
+
+        let page = top_at(&root, None, None);
+        assert!(!page.starts_with("refused:"), "{page}");
+        assert!(page.contains(&record.identity_hex()), "{page}");
+        assert!(
+            page.contains("THE FRONTIER FILE COULD NOT BE READ"),
+            "{page}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// A halted run is never the one `top` reports on.
     ///
     /// A halted run's total covers less of the ladder than its combination count
@@ -27632,7 +29319,9 @@ mod tests {
     /// The list exists so a wrong-arity refusal can tell a real command from a
     /// typo, and a list that drifts from the dispatch would make that refusal
     /// lie in the other direction. Every entry must appear in the usage as its
-    /// own `cli <word>` line, and every such line must be in the list.
+    /// own `cli <word>` line, every such line must be in the list, and the set
+    /// of first words the `match` in `dispatch` answers to, read from that
+    /// function's code, must equal the list.
     #[test]
     fn every_command_is_listed_in_both_places() {
         for word in COMMANDS {
@@ -27660,6 +29349,42 @@ mod tests {
         assert!(
             COMMANDS.windows(2).all(|w| w.first() < w.last()),
             "kept sorted so a new command is added in one obvious place"
+        );
+
+        // AND THE DISPATCH ITSELF (P1-11-01). The two halves above read only
+        // `COMMANDS` and `USAGE`, so a deleted `match` arm with its list entry
+        // and usage line left behind passed, and the binary then told the
+        // operator "`X` is a command, but not with N arguments" about a word it
+        // could no longer run. The set of words the `match` in `dispatch`
+        // answers to is read from the function's own code -- bounded at its
+        // closing brace, comment lines dropped -- and must equal the list.
+        let source = include_str!("lib.rs");
+        let (_, rest) = source
+            .split_once("\nfn dispatch(")
+            .expect("the dispatch function exists");
+        let body = rest
+            .split_once("\n}\n")
+            .expect("the dispatch function has a closing brace")
+            .0;
+        let code = body
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut dispatched = std::collections::BTreeSet::new();
+        for piece in code.split('[').skip(1) {
+            if let Some((word, _)) = piece
+                .trim_start()
+                .strip_prefix('"')
+                .and_then(|literal| literal.split_once('"'))
+            {
+                dispatched.insert(word);
+            }
+        }
+        let listed: std::collections::BTreeSet<&str> = COMMANDS.into_iter().collect();
+        assert_eq!(
+            dispatched, listed,
+            "the words `dispatch` matches and the words COMMANDS lists must be one set"
         );
     }
 
@@ -27956,6 +29681,9 @@ mod tests {
         // No profit to divide.
         assert_eq!(return_over_drawdown_cell(0, 29_163), "-");
         assert_eq!(return_over_drawdown_cell(-5_000, 29_163), "-");
+        // CE-17, D-1769: a PROFIT under a hundredth of its drawdown is not
+        // "no profit". The ratio truncates to 0; the money decides the dash.
+        assert_eq!(return_over_drawdown_cell(1_000, 200_000), "<0.01");
 
         // THE REGRESSION ITSELF. A negative drawdown is not a value the engine
         // can produce; if one ever reaches here the answer must not be a
@@ -27978,7 +29706,8 @@ mod tests {
                 };
                 let want = match cell.return_over_drawdown() {
                     i64::MAX => "inf".to_owned(),
-                    0 => "-".to_owned(),
+                    0 if pess <= 0 => "-".to_owned(),
+                    0 => "<0.01".to_owned(),
                     r => hundredths_of(r),
                 };
                 assert_eq!(
@@ -29291,7 +31020,7 @@ mod horizon_tests {
 mod derived_floor_tests {
     use super::{
         Execution, Horizon, Rules, base_win_rate_bp, breakeven_rr_bp, floors_measured_on,
-        project_onto_execution, validate_one_minute_execution,
+        project_onto_execution, statistical_floor_ppm, support_word, validate_one_minute_execution,
     };
     use crate::knobs::serially;
     use indicators::Candle;
@@ -29373,13 +31102,22 @@ mod derived_floor_tests {
                     "only the range audit may take a held digest"
                 );
                 let loader = compact_source(stored_function(source, "load_audit_inputs"));
+                // D-1781: over the whole FOLDED span, with its withheld days.
                 assert!(
                     loader.contains(concat!(
-                        "letexecuted_digest=stored_executed_",
-                        "digest(&span.bars,&exact_minute,&daily,execution_slice)?"
+                        "letexecuted_digest=stored_withheld_executed_",
+                        "digest(Withholding{folded:&folded,days:&withheld_days,swept:&span.bars,},",
+                        "&exact_minute,&daily,execution_slice,)?"
                     )),
                     "the held digest is the two-series composition"
                 );
+                assert_withheld_composition(source);
+                continue;
+            }
+            // D-1781: a withholding door digests its whole folded series and
+            // binds the withheld days; the composition underneath is the same.
+            if before_end.contains("data_digest: stored_withheld_executed_digest(") {
+                assert_withheld_composition(source);
                 continue;
             }
             assert!(
@@ -29421,14 +31159,29 @@ mod derived_floor_tests {
         let kernel = compact_source(stored_function(source, "stored_month_kernel"));
         assert!(
             kernel.contains(concat!(
-                "letdigest=stored_executed_",
-                "digest(&loaded.bars,exact_minute,daily,execution_slice)?;",
+                "letdigest=stored_withheld_executed_",
+                "digest(withholding,exact_minute,daily,execution_slice)?;",
                 "letdigest=integrity.map_or(digest,|guard|guard.bind_digest(digest));",
                 "letid=identity(&Run{"
             )),
             "the shared kernel must preserve all input bytes and add the strict receipt binding only when present"
         );
         assert_eq!(kernel.matches("data_digest:digest,").count(), 1);
+        assert_withheld_composition(source);
+    }
+
+    /// The withholding doors' data term is the two-series composition over the
+    /// whole folded series, with the withheld days bound after it. D-1781.
+    fn assert_withheld_composition(source: &str) {
+        let composed = compact_source(stored_function(source, "stored_withheld_executed_digest"));
+        assert!(
+            composed.contains(concat!(
+                "Ok(crate::minute_gaps::bind_withheld(stored_executed_",
+                "digest(withholding.folded,exact_minute,daily,execution)?,",
+                "withholding.days,))"
+            )),
+            "a withholding door's data term must be the composition over its folded series"
+        );
     }
 
     /// 09:15 IST on 2024-01-01, in epoch microseconds.
@@ -29512,6 +31265,43 @@ mod derived_floor_tests {
              long-only reading returned {down} against a coin flip, which is a \
              floor every combination clears"
         );
+    }
+
+    /// RF-02 (P12-02, D-1791): A FLAT FORWARD WINDOW IS A WIN FOR NEITHER
+    /// SIDE. Every window of a series that never moves is decided and flat, so
+    /// the base rate is exactly zero. Reading a flat window as "not up", the
+    /// defect `indicators/src/session.rs` records, would count each one as a
+    /// win for the short and answer 10,000.
+    #[test]
+    fn a_flat_forward_window_is_a_win_for_neither_side() {
+        let flat = drifting(300, 0);
+        assert_eq!(
+            base_win_rate_bp(&flat, Horizon::DEFAULT),
+            Some(0),
+            "flat windows are decided and won by neither side"
+        );
+    }
+
+    /// SF-13 (P12-02, D-1791): a derived threshold is NAMED as derived in the
+    /// banner, never printed as a number, and a fixed one says it is fixed.
+    #[test]
+    fn a_derived_threshold_is_named_derived_and_a_fixed_one_is_named_fixed() {
+        assert_eq!(support_word(None), "DERIVED per rung from its own bars");
+        assert_eq!(support_word(Some(47_000)), "4.7% (fixed)");
+    }
+
+    /// SF-14 (P12-02, D-1791): THE STOP CEILING AND THE LISTING BOUND CANNOT
+    /// MOVE THE STATISTICAL FLOOR. `statistical_floor_ppm` reads the win rate
+    /// and the assurance and nothing else, so `Rules::elite`'s two arguments,
+    /// the MAE ceiling and the listing bound, give one floor at every value.
+    #[test]
+    fn the_stop_ceiling_and_the_listing_bound_cannot_move_the_floor() {
+        let at = |mae: i64, top: usize| statistical_floor_ppm(&Rules::elite(mae, top), 617_921);
+        let floor = at(1, 1);
+        assert!(floor > 1, "a real floor, not the zero-bar sentinel");
+        for (mae, top) in [(0, 0), (1, 50), (250_000, 1), (i64::MAX, usize::MAX)] {
+            assert_eq!(at(mae, top), floor, "mae {mae}, top {top}");
+        }
     }
 
     /// A FLOOR THAT ROUNDS TO ZERO SWITCHES ITS OWN RULE OFF.
@@ -29912,15 +31702,18 @@ mod derived_floor_tests {
 
         // The screen kernel holds its loaded inputs by reference since
         // D-0997 (one load per descent), so it passes them without the `&`.
+        // D-1781: over its whole folded span, with the withheld days bound.
         let screen_bound = concat!(
-            "data_digest:stored_executed_",
-            "digest(&span.bars,exact_minute,daily,execution_slice)?"
+            "data_digest:stored_withheld_executed_",
+            "digest(withholding,exact_minute,daily,execution_slice,)?"
         );
         // D-1557: the range audit holds its digest beside its inputs, so its
-        // binding is the held one in `load_audit_inputs`.
+        // binding is the held one in `load_audit_inputs`. D-1781: over the
+        // whole folded span, with every withheld day bound.
         let held_bound = concat!(
-            "letexecuted_digest=stored_executed_",
-            "digest(&span.bars,&exact_minute,&daily,execution_slice)?"
+            "letexecuted_digest=stored_withheld_executed_",
+            "digest(Withholding{folded:&folded,days:&withheld_days,swept:&span.bars,},",
+            "&exact_minute,&daily,execution_slice,)?"
         );
         assert_eq!(
             (

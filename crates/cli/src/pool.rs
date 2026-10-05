@@ -47,7 +47,8 @@
 //!
 //! No cost of any kind. On the indices that is correct by charter — an index
 //! is not tradeable. On a cash equity it is NOT correct: brokerage, STT, stamp
-//! duty, exchange charges, the SEBI fee and GST are real, and no rate for any of
+//! duty, exchange charges, the SEBI fee, the IPFT, DP charges and GST are real
+//! (an UNVERIFIED list, D-1779), and no rate for any of
 //! them is quoted here because `docs/00-charter.md` records no source for an
 //! equity charge (`CLAUDE.md` §3 rule 1; D-0681). The operator
 //! asked for this pass without costs so that the rare tail is visible before
@@ -130,8 +131,10 @@ use crate::stored;
 /// Read from the operator's `Rules` rather than written here: `min_rr_bp` is
 /// the reward-to-risk floor every single-instrument cell is admitted against,
 /// and a pooled row is held to the same number so the two tables agree on what
-/// "the rule" is. Zero — the floor OFF — marks every fired row as meeting it,
-/// which is what OFF means.
+/// "the rule" is. Zero — the floor OFF — marks every fired row that WON
+/// somewhere as meeting it, which is what OFF means; a row that never won meets
+/// no rule, exactly as `grid::Cell::clears` refuses a cell with no winner
+/// (p5num-3, D-2713).
 fn tail_rule_bp(rules: crate::Rules) -> i64 {
     rules.min_rr_bp
 }
@@ -212,8 +215,26 @@ impl Pooled {
     }
 
     /// Whether the tail rule holds at the operator's multiple.
+    ///
+    /// `wins > 0` is its own clause for the reason `grid::Cell::clears` gives:
+    /// a candidate whose every pooled trade was flat has `worst == 0`, so
+    /// [`Self::tail_bp`] is [`NEVER_LOST`] and cleared every multiple, and the
+    /// row sorted first reading "wins 0, tail never lost". No winners is never
+    /// what an operator means by a met rule (p5num-3, D-2713).
     fn meets(&self, rule_bp: i64) -> bool {
-        self.fired > 0 && self.tail_bp() >= i128::from(rule_bp)
+        self.fired > 0 && self.wins > 0 && self.tail_bp() >= i128::from(rule_bp)
+    }
+
+    /// The tail as the table prints it: `-` when nothing won, because a
+    /// smallest win over a largest loss with no win has no numerator, and
+    /// "never lost" on a row with no winner reads as the best tail there is
+    /// (p5num-3, D-2713).
+    fn tail_cell(&self) -> String {
+        if self.wins == 0 {
+            "-".to_owned()
+        } else {
+            ratio_cell(self.tail_bp())
+        }
     }
 
     /// The sort key, largest first: the rule met, then the SMALLEST drawdown
@@ -682,8 +703,8 @@ fn not_on_the_surface(out: &mut String, elsewhere: &[String]) {
 /// `sweep_wiring_tests::every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate`
 /// holds it to the header `runner::audit::render` prints.
 pub(crate) const EQUITY_TOTALS_GROSS: &str = "NO COST OF ANY KIND IS CHARGED. Correct on an index by charter; NOT correct on a\n\
-     cash equity, where brokerage, STT, stamp duty, exchange charges, the SEBI fee and\n\
-     GST all apply and none is subtracted: every equity total is GROSS OF EVERY CHARGE.\n\
+     cash equity, where brokerage, STT, stamp duty, exchange charges, the SEBI fee, the\n\
+     IPFT, DP charges and GST (an UNVERIFIED list) all apply and none is subtracted: every equity total is GROSS OF EVERY CHARGE.\n\
      COST-EXCLUDED RESEARCH, NOT A NET RESULT (D-0509, D-0525, D-0681). No equity result\n\
      carries Selection V6 or execution authority until a charter-sourced equity charge\n\
      stack exists.";
@@ -1053,10 +1074,13 @@ pub(crate) fn prepare_span(
         signal_length,
         |day| stored::session_close_for(cash.as_ref(), day),
     );
+    // FOLDED WHOLE, SWEPT WITHOUT THE HOLED DAYS, as the screen does. D-1781.
+    let folded = span.bars.clone();
     if !holed_days.is_empty() {
         let (kept, _withheld) = crate::minute_gaps::withhold(&span.bars, &holed_days);
         span.bars = kept;
     }
+    let mut withheld_days = holed_days;
     // PASS 1'S OWN BUILD, READ-ONLY: a day whose exact closing minute cannot
     // be sourced is withheld and the column rebuilt from what survives, exactly
     // as `one_rung` and `audit_range_kernel` do; `commit: None` records no
@@ -1066,7 +1090,11 @@ pub(crate) fn prepare_span(
         vendor,
         underlying,
         (from, to),
-        &mut span.bars,
+        crate::FoldedSeries {
+            folded: &folded,
+            days: &mut withheld_days,
+            bars: &mut span.bars,
+        },
         signal_length,
         crate::StoredPreparationBuild { rung, commit: None },
     )?;
@@ -1294,7 +1322,7 @@ fn pooled_entries(
                 p.wins.to_string(),
                 p.worst.to_string(),
                 p.min_win.to_string(),
-                ratio_cell(p.tail_bp()),
+                p.tail_cell(),
                 ratio_cell(p.profit_factor_bp()),
                 p.net.to_string(),
                 p.dd_bound.to_string(),
@@ -1444,6 +1472,46 @@ mod tests {
         assert_eq!(p.candidate, 0);
         assert_eq!(p.fired, 1);
         assert_eq!(p.names, vec!["AAA"]);
+    }
+
+    /// **A candidate that never won meets no tail rule** (p5num-3, D-2713).
+    ///
+    /// Every pooled trade flat: `worst == 0`, `wins == 0`, so the tail was
+    /// the never-lost sentinel and `meets` held at every multiple, sorting the
+    /// row first. `grid::Cell::clears` refuses the same cell by its own
+    /// `wins > 0` clause.
+    #[test]
+    fn a_candidate_that_never_won_meets_no_tail_rule() {
+        let union = candidates(2);
+        let surface = vec!["AAA".to_owned(), "BBB".to_owned()];
+        let flat = cell(2, 0, 0, 0, 0, 0);
+        assert!(!flat.clears(0, 0), "the single-instrument rule refuses it");
+        let priced = vec![
+            Ok(vec![Some(flat), Some(cell(1, 1, 500, -10, 500, 10))]),
+            Ok(vec![Some(flat), None]),
+        ];
+        let pooled = fold(&union, &surface, &priced, rules_at(300));
+        assert_eq!(pooled.len(), 2);
+        let never_won = pooled
+            .iter()
+            .find(|p| p.candidate == 0)
+            .expect("the flat candidate is pooled");
+        assert_eq!((never_won.wins, never_won.worst), (0, 0));
+        for rule_bp in [0, 1, 300, i64::MAX] {
+            assert!(!never_won.meets(rule_bp), "rule {rule_bp}");
+        }
+        assert_eq!(never_won.tail_cell(), "-");
+        assert_eq!(
+            pooled.first().map(|p| p.candidate),
+            Some(1),
+            "the candidate that won and met the rule sorts first"
+        );
+        let won = pooled
+            .iter()
+            .find(|p| p.candidate == 1)
+            .expect("the winning candidate is pooled");
+        assert!(won.meets(300));
+        assert_eq!(won.tail_cell(), "50.00x");
     }
 
     /// **The ranking is the rule, then the drawdown bound, then the profit
@@ -2407,6 +2475,51 @@ mod tests {
         (writes, renders, returns)
     }
 
+    /// Pass 1 lists priced rows by the money, smallest drawdown first, ties in
+    /// the order they were screened, and every refusal LAST (CE-4, D-1769).
+    #[test]
+    fn pass_one_puts_refusals_last_and_keeps_ties_in_screened_order() {
+        let record = |dd: i64, worst: i64, net: i64| crate::results::Record {
+            max_drawdown: dd,
+            worst_trade: worst,
+            pessimistic: net,
+            ..crate::results::Record::from_bytes(&[0; crate::results::STRIDE_BYTES])
+        };
+        let row = |symbol: &str, outcome| super::Screened {
+            symbol: symbol.to_owned(),
+            outcome,
+        };
+        let screened = [
+            row("REFUSED_A", Err("a".to_owned())),
+            row("DEEP", Ok(record(900, -50, 10))),
+            row("TIE_FIRST", Ok(record(100, -20, 5))),
+            row("TIE_SECOND", Ok(record(100, -20, 5))),
+            row("SHALLOW_WORSE", Ok(record(100, -80, 5))),
+            row("REFUSED_B", Err("b".to_owned())),
+            row("SHALLOWEST", Ok(record(10, -90, 1))),
+        ];
+        let mut out = String::new();
+        super::render_per_symbol(&mut out, &screened);
+        let order: Vec<&str> = out
+            .lines()
+            .filter_map(|line| line.split_whitespace().next())
+            .filter(|word| screened.iter().any(|s| s.symbol == *word))
+            .collect();
+        assert_eq!(
+            order,
+            [
+                "SHALLOWEST",
+                "TIE_FIRST",
+                "TIE_SECOND",
+                "SHALLOW_WORSE",
+                "DEEP",
+                "REFUSED_A",
+                "REFUSED_B"
+            ],
+            "{out}"
+        );
+    }
+
     /// **Each renderer `run_under` hands the page to only appends to it.**
     /// D-0696.
     ///
@@ -2551,10 +2664,13 @@ mod tests {
         assert!(
             arm.contains(concat!(
                 "        (Ok(fy), Ok(fm), Ok(ty), Ok(tm), Ok(h)) if (fy, fm) <= (ty, tm) => {\n",
+                "            if let Err(why) = stored_words(vendor, None, Some(known), Some(((fy, fm), (ty, tm)))) {\n",
+                "                return refuse(out, &why);\n",
+                "            }\n",
                 "            let text = pool::pool(vendor, known, (fy, fm), (ty, tm), h);\n",
-                "            let refused = carries_refusal(&text);\n",
+                "            let code = work_exit(&text);\n",
                 "            out.push_str(&text);\n",
-                "            if refused { MISUSED } else { OK }\n",
+                "            code\n",
                 "        }\n",
             )),
             "`pool_arm` appends `pool`'s page whole, and exits on what it says:\n{arm}"
@@ -2620,7 +2736,7 @@ mod tests {
     ///   pass 1's refused row and the nothing-to-pool line, and exited OK
     ///   (D-0696).
     ///
-    /// The first exits OK and is not a refusal; the second exits MISUSED. An
+    /// The first exits OK and is not a refusal; the second exits FAILED. An
     /// unstamped build refuses both before a bar is read, and there the child
     /// requires the stamp refusal and that nothing was recorded.
     #[test]
@@ -2688,7 +2804,7 @@ mod tests {
         let emptied = dispatch(&["pool", "zerodha", "60min", "2026", "7", "2026", "7", "auto"]);
         if crate::commit_stamp().is_none() {
             for (status, page) in [&priced, &emptied] {
-                assert_eq!(*status, crate::MISUSED, "{page}");
+                assert_eq!(*status, crate::FAILED, "{page}");
                 assert!(
                     page.starts_with("refused: this build carries no verified commit stamp"),
                     "{page}"
@@ -2792,7 +2908,7 @@ mod tests {
         assert!(crate::carries_refusal(page), "{page}");
         assert_eq!(
             status,
-            crate::MISUSED,
+            crate::FAILED,
             "a pool whose every instrument refused is a refusal of the pool"
         );
         Ok(())
@@ -2815,7 +2931,7 @@ mod tests {
         assert!(!charges.contains("0.025"), "{charges}");
         for claim in [
             "NO COST OF ANY KIND IS CHARGED",
-            "brokerage, STT, stamp duty, exchange charges, the SEBI fee and\nGST",
+            "brokerage, STT, stamp duty, exchange charges, the SEBI fee, the\nIPFT, DP charges and GST (an UNVERIFIED list)",
             "every equity total is GROSS OF EVERY CHARGE",
             "COST-EXCLUDED RESEARCH, NOT A NET RESULT (D-0509, D-0525, D-0681)",
             "No equity result\ncarries Selection V6",

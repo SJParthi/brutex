@@ -231,8 +231,13 @@ fn render(holdings: &Holdings, vendor: Vendor, window: ResearchWindow) -> String
 
 /// CLI boundary for `research-plan VENDOR` with no operator-typed end month.
 pub(crate) fn command(vendor: &str, out: &mut String) -> u8 {
+    // The one argument first, with the usage when it names no feed; what is
+    // refused after that is the work's and exits `FAILED` (P8-03, D-2722).
+    let feed = match crate::parse_vendor(vendor) {
+        Ok(feed) => feed,
+        Err(why) => return crate::refuse(out, &why),
+    };
     let result = (|| {
-        let feed = crate::parse_vendor(vendor)?;
         let window = ResearchWindow::now()?;
         let root = crate::preflight_store_root()?;
         inspect(&root, feed, window)
@@ -242,10 +247,7 @@ pub(crate) fn command(vendor: &str, out: &mut String) -> u8 {
             out.push_str(&report);
             crate::OK
         }
-        Err(why) => {
-            let _ = writeln!(out, "refused: {why}");
-            crate::MISUSED
-        }
+        Err(why) => crate::fail(out, &why),
     }
 }
 

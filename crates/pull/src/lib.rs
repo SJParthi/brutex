@@ -21,10 +21,10 @@
 //! thin adapter over it; the dependency is taken by the change that first makes
 //! a live call. See `crates/pull/Cargo.toml` and `docs/05-decisions.md` D-0035.
 //!
-//! **No trading calendar.** `docs/00-charter.md` records three special-session
-//! shapes and no holiday list, so `P-03` in `docs/04-invariants.md` keeps its
-//! `—` status rather than being satisfied by a weekend rule that would be
-//! wrong — 2025-02-01 was a Saturday and a full 375-bar session.
+//! **No weekday rule.** The trading calendar is [`calendar`], measured rather
+//! than computed from a day of the week — 2025-02-01 was a Saturday and a full
+//! 375-bar session. [`session::Window::verdict`] drops a bar on a day it
+//! records closed, which is `P-03` in `docs/04-invariants.md` (D-2673).
 //!
 //! **No concurrency wrapper around [`rate`].** [`rate::Governor`] takes
 //! `&mut self` and holds no interior mutability, so one governor cannot be

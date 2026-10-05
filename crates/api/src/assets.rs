@@ -93,8 +93,12 @@ const MASTERS: &str = "masters.js";
 const SOURCES: &str = "src";
 
 /// The front-end directory: [`WEB_ENV`], or `web/` beside this workspace.
-#[must_use]
-pub fn web_dir() -> PathBuf {
+///
+/// # Errors
+///
+/// [`WEB_ENV`] is set but empty, which would serve `./build` of the working
+/// directory as the front end (CE-37, D-1769).
+pub fn web_dir() -> Result<PathBuf, String> {
     web_dir_from(std::env::var_os(WEB_ENV))
 }
 
@@ -105,9 +109,8 @@ pub fn web_dir() -> PathBuf {
 /// cannot set an environment variable — `set_var` is `unsafe` under edition
 /// 2024, this crate forbids `unsafe`, and mutating process-wide state would
 /// race every other test in the binary.
-#[must_use]
-fn web_dir_from(value: Option<std::ffi::OsString>) -> PathBuf {
-    value.map_or_else(default_web_dir, PathBuf::from)
+fn web_dir_from(value: Option<std::ffi::OsString>) -> Result<PathBuf, String> {
+    Ok(brutex_core::knob::folder(WEB_ENV, value)?.unwrap_or_else(default_web_dir))
 }
 
 /// `web/` beside the workspace this binary was built from.
@@ -945,7 +948,7 @@ impl Assets {
                      <a href=\"/instruments\">/instruments</a>, \
                      <a href=\"/pull\">/pull</a>, \
                      <a href=\"/store\">/store</a>, \
-                     <a href=\"/audit\">/audit</a>.</p>",
+                     <a href=\"/audit/page\">/audit/page</a>.</p>",
                     crate::render::escape(INDEX),
                     crate::render::escape(&index.display().to_string()),
                     crate::render::escape(&e.to_string()),
@@ -1045,7 +1048,7 @@ impl Assets {
                  <a href=\"/instruments\">/instruments</a>, \
                  <a href=\"/pull\">/pull</a>, \
                  <a href=\"/store\">/store</a>, \
-                 <a href=\"/audit\">/audit</a>, \
+                 <a href=\"/audit/page\">/audit/page</a>, \
                  <a href=\"/autopilot.json\">/autopilot.json</a>.</p>",
                 crate::render::escape(&self.named.display().to_string()),
                 crate::render::escape(WEB_ENV),
@@ -1135,13 +1138,18 @@ mod tests {
     fn the_directory_is_the_environment_or_web_beside_the_workspace() {
         assert_eq!(
             web_dir_from(Some("/somewhere/else".into())),
-            PathBuf::from("/somewhere/else"),
+            Ok(PathBuf::from("/somewhere/else")),
             "the environment wins when it is set"
+        );
+        // CE-37, D-1769: set but empty is refused by name, never `./build`.
+        assert!(
+            web_dir_from(Some("".into()))
+                .is_err_and(|why| why.starts_with("BRUTEX_WEB is set but empty")),
         );
         // Compared against `default_web_dir` rather than only against
         // `web_dir_from(None)`, which calls it: a function compared only
         // against itself cannot be falsified.
-        assert_eq!(web_dir_from(None), default_web_dir());
+        assert_eq!(web_dir_from(None), Ok(default_web_dir()));
         assert!(
             default_web_dir().ends_with("web"),
             "the default names the front-end directory: {}",

@@ -79,6 +79,13 @@ pub enum FnoError {
         /// The field that was looked for.
         field: &'static str,
     },
+    /// A key appears twice inside one object of the answer, so it carries two
+    /// values for one field. Refused by name, as `http::decode_body` refuses
+    /// it (D-1531). CE-56, D-2680.
+    RepeatedKey {
+        /// The repeated key, decoded.
+        key: String,
+    },
 }
 
 impl core::fmt::Display for FnoError {
@@ -109,6 +116,12 @@ impl core::fmt::Display for FnoError {
                  descriptor says the names are. Nothing was read rather than a \
                  partial list: a short list of contracts reads exactly like a \
                  month that had fewer."
+            ),
+            Self::RepeatedKey { ref key } => write!(
+                f,
+                "the answer repeats the key {key:?} inside one object, so it \
+                 carries two values for one field; refused rather than \
+                 silently keeping the last"
             ),
         }
     }
@@ -173,6 +186,10 @@ pub fn contracts_url(spec: &HttpSpec, ask: &Ask) -> Result<String, FnoError> {
 pub fn names(body: &str, field: &'static str) -> Result<Vec<String>, FnoError> {
     let root: serde_json::Value =
         serde_json::from_str(body).map_err(|_| FnoError::Unreadable { field })?;
+    // TWO VALUES FOR ONE KEY ARE TWO ANSWERS (CE-56, D-2680).
+    if let Some(key) = crate::http::repeated_key(body) {
+        return Err(FnoError::RepeatedKey { key });
+    }
     // THE ENVELOPE IS OPTIONAL AND THE FIELD IS NOT. Groww wraps its answers in
     // `payload`; looking there first and at the root second means a vendor that
     // does not wrap is read by the same code rather than by a second copy of it.
@@ -214,9 +231,10 @@ fn join(base: &str, path: &[PathSegment], params: &[Param], ask: &Ask) -> String
             // A value segment resolves through the same table the query does,
             // so a feed that puts its underlying in the path is one row rather
             // than a second builder.
-            PathSegment::Value { placeholder, value } => {
-                out.push_str(&resolve(value, ask).unwrap_or_else(|| placeholder.to_owned()));
-            }
+            PathSegment::Value { placeholder, value } => match resolve(value, ask) {
+                Some(value) => push_encoded(&mut out, &value),
+                None => out.push_str(placeholder),
+            },
         }
     }
     let mut first = true;
@@ -228,9 +246,35 @@ fn join(base: &str, path: &[PathSegment], params: &[Param], ask: &Ask) -> String
         first = false;
         out.push_str(p.name);
         out.push('=');
-        out.push_str(&value);
+        push_encoded(&mut out, &value);
     }
     out
+}
+
+/// `value`, percent-encoded so it is one query or path component whatever it
+/// holds.
+///
+/// The expiry in a contracts URL is the vendor's OWN string from its expiries
+/// answer, and it was appended raw, so a value carrying `&`, `=`, `#` or a
+/// space became a different request (CE-15, D-1769). Every byte outside RFC
+/// 3986's unreserved set is escaped; a value made only of those passes
+/// through unchanged, which is every value a live feed sends today.
+fn push_encoded(out: &mut String, value: &str) {
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            out.push(char::from(byte));
+        } else {
+            out.push('%');
+            // A nibble is below sixteen, so `from_digit` always answers.
+            for nibble in [byte >> 4, byte & 0x0f] {
+                out.push(
+                    char::from_digit(u32::from(nibble), 16)
+                        .unwrap_or('0')
+                        .to_ascii_uppercase(),
+                );
+            }
+        }
+    }
 }
 
 /// What one parameter is worth for this ask, or [`None`] where this ask does
@@ -308,6 +352,24 @@ mod tests {
             contracts_url(&spec, &with_expiry).expect("it builds"),
             "https://api.groww.in/v1/historical/contracts\
              ?exchange=NSE&underlying_symbol=NIFTY&expiry_date=2025-01-25"
+        );
+    }
+
+    /// CE-15, D-1769: a value carrying URL syntax stays ONE component. The
+    /// vendor's own expiry string and an underlying such as `M&M` were
+    /// appended raw, so `&`, `=`, `#` and spaces became a different request.
+    #[test]
+    fn a_value_with_url_syntax_is_percent_encoded_into_one_component() {
+        let hostile = Ask {
+            underlying: "M&M".to_owned(),
+            expiry: "2025-01-25&x=1#f g".to_owned(),
+            year: 2025,
+            ..ask()
+        };
+        assert_eq!(
+            contracts_url(&groww(), &hostile).expect("it builds"),
+            "https://api.groww.in/v1/historical/contracts\
+             ?exchange=NSE&underlying_symbol=M%26M&expiry_date=2025-01-25%26x%3D1%23f%20g"
         );
     }
 
@@ -960,6 +1022,16 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **CE-56. A REPEATED KEY IN THE LOOKUP ANSWER IS REFUSED, NOT RESOLVED
+    /// TO ITS LAST VALUE.** Two `expiries` arrays in one object are two
+    /// answers, and keeping the second silently drops every name in the first.
+    #[test]
+    fn a_lookup_answer_repeating_a_key_in_one_object_is_refused_by_name() {
+        let body = r#"{"payload":{"expiries":["2024-01-25"],"expiries":["2024-02-29"]}}"#;
+        let why = names(body, "expiries").expect_err("two lists for one field");
+        assert!(why.to_string().contains(r#""expiries""#), "{why}");
     }
 }
 

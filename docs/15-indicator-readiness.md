@@ -1,5 +1,7 @@
 # Sweep input and indicator readiness evidence
 
+> **The `target/` paths cited below are session artifacts, not permanent evidence.** `target/` is gitignored, so none of them exists in this repository and none can be opened from it. They record what a local session measured at the time; a claim here is reproducible only through the named test or command beside it. (They were Markdown links, every one dead in the tree — P2-02-03, D-1766.)
+
 This is a code and finite-test inventory, not a guarantee over every possible
 market history or a profitability claim. The vocabulary is the authority for
 bit names. Indicator functions produce those bits, the forward column preserves
@@ -79,7 +81,7 @@ files. A single60min month had147 raw bars, below200-bar warm-up, and explicitly
 refused. The two-month strict range separately completed with80 warmed hourly
 rows at a deliberately zero-survivor support threshold. These are bounded
 actual-data checks, without strategy admission or profit assurance. The exact
-log is [the saved real-data oracle](../target/sweep-audit-20260906/independent-orb-oracle-final-v2.log).
+log is the saved real-data oracle (session artifact `target/sweep-audit-20260906/independent-orb-oracle-final-v2.log`, not in this repository).
 
 `a_session_wider_than_the_type_leaves_yesterday_absent` and its outside-crate
 counterpart retain legacy names. Their revised fixtures use positive one-paisa

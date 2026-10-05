@@ -97,10 +97,13 @@ pub const MAX_MEMBER_FORM_BYTES: usize = crate::server::MAX_FORM_BYTES
 
 /// Which instruments a spot pull covers.
 ///
-/// Seven fixed sets, not a free list. `CLAUDE.md` §1 fixes the engine surface
-/// at two swept indices; the other six sets are stored and never swept, and
-/// saying which is which on the form is the difference between an operator
-/// knowing what a run will contain and guessing.
+/// Nine fixed sets ([`Self::ALL`]), not a free list. `CLAUDE.md` §1 fixes the engine surface
+/// at the two indices plus the 208 F&O shares as cash equities (D-0506,
+/// D-0682). A set is pulled and STORED whole; what the sweep then reads from it
+/// is decided per instrument by
+/// [`brutex_core::instrument::InstrumentKey::is_sweepable`], never by the set.
+/// Saying which sets overlap the surface on the form is the difference between
+/// an operator knowing what a run will contain and guessing.
 ///
 /// # PULLABLE IS NOT SWEPT, and appending here cannot make it so
 ///
@@ -112,14 +115,18 @@ pub const MAX_MEMBER_FORM_BYTES: usize = crate::server::MAX_FORM_BYTES
 /// the `target` field, so the page hardcoded a null and said so. That was a gap
 /// in the REQUEST vocabulary and in nothing else.
 ///
-/// A pull of `n500` therefore **stores** 500 instruments and **sweeps none of
-/// them**. Nothing in this enum is consulted by the sweep: what may be swept is
-/// [`brutex_core::instrument::InstrumentKey::is_sweepable`], a two-element table
-/// in `core`, and [`Self::Swept`] is the one variant that defers to it rather
-/// than keeping a second copy. Widening `CLAUDE.md` §1 is a
-/// `docs/05-decisions.md` entry against THAT table; a row here is not one and
-/// must never be read as one. `a_nifty_tier_target_stores_and_never_sweeps` is
-/// that sentence written as a test.
+/// A pull of `n500` therefore **stores** 500 instruments, and the sweep reads
+/// exactly those of them that are F&O shares — because `is_sweepable` says so
+/// for each, not because the tier was pulled. Nothing in this enum is consulted
+/// by the sweep: what may be swept is
+/// [`brutex_core::instrument::InstrumentKey::is_sweepable`] (the two indices in
+/// `InstrumentKey::SWEPT` and the F&O shares in `core::universe::FNO_INDEX`),
+/// and [`Self::Swept`] is the one variant that defers to it rather than keeping
+/// a second copy. Widening `CLAUDE.md` §1 is a `docs/05-decisions.md` entry
+/// against THAT predicate; a row here is not one and must never be read as
+/// one. `a_nifty_tier_target_stores_and_sweeps_exactly_its_fno_members` is that
+/// sentence written as a test. (This said a tier pull "sweeps none of them",
+/// true before D-0506; tests-docs-security-pass18 P18-05, D-1965.)
 ///
 /// # Why the slugs are the wire's own words
 ///
@@ -131,29 +138,37 @@ pub const MAX_MEMBER_FORM_BYTES: usize = crate::server::MAX_FORM_BYTES
 /// arriving from the other end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SpotTarget {
-    /// `NSE-NIFTY` and `NSE-BANKNIFTY` — the only two the engine sweeps.
+    /// The engine surface this feed lists: `NSE-NIFTY`, `NSE-BANKNIFTY` and the
+    /// F&O shares as cash equities (D-0506, D-0682).
     Swept,
     /// Every NSE index series held for reference, including `NSE-INDIAVIX`.
     ///
     /// Stored and stamped onto trades; never in the condition vocabulary, never
     /// in ranking, never in run identity. `CLAUDE.md` §1.
     Indices,
-    /// The NIFTY Total Market constituents. Stored, never swept.
+    /// The NIFTY Total Market constituents. Stored; the members that are F&O
+    /// shares are swept (D-0506).
     Equities,
-    /// The published NIFTY 500 constituents. Stored, never swept.
+    /// The published NIFTY 500 constituents. Stored; the members that are F&O
+    /// shares are swept (D-0506).
     Nifty500,
-    /// The published NIFTY 200 constituents. Stored, never swept.
+    /// The published NIFTY 200 constituents. Stored; the members that are F&O
+    /// shares are swept (D-0506).
     Nifty200,
-    /// The published NIFTY 100 constituents. Stored, never swept.
+    /// The published NIFTY 100 constituents. Stored; the members that are F&O
+    /// shares are swept (D-0506).
     Nifty100,
-    /// The published NIFTY 50 constituents. Stored, never swept.
+    /// The published NIFTY 50 constituents. Stored; the members that are F&O
+    /// shares are swept (D-0506).
     ///
     /// Fifty EQUITIES, and not the index of the same name: `NSE-NIFTY` is the
     /// spot series [`Self::Swept`] names, and these are the companies underneath
     /// it. The two sets share a word and no member, which is precisely why both
     /// are spelled out on the form rather than left to be inferred.
     Nifty50,
-    /// The 213 F&O underlyings. Stored, never swept.
+    /// The 213 F&O underlyings. Stored; 208 of them are swept as cash
+    /// equities and NIFTY and BANKNIFTY as indices, while FINNIFTY, MIDCPNIFTY
+    /// and NIFTYNXT50 are swept in neither shape (D-0506, D-0682).
     ///
     /// Defined by a list this repository has already transcribed —
     /// `core::universe::FNO_UNDERLYINGS`, derived from the derivative rows of
@@ -169,7 +184,8 @@ pub enum SpotTarget {
     /// pairs and this target cannot add to it.
     Fno,
     /// Every instrument this build tracks — the reference index series and the
-    /// NIFTY Total Market constituents together. Stored, never swept.
+    /// NIFTY Total Market constituents together. Stored; the members on the
+    /// engine surface are swept, and pulling this set widens nothing.
     ///
     /// # The one target defined by a PREDICATE and not by a file
     ///
@@ -406,17 +422,36 @@ impl SpotTarget {
             Self::Swept => {
                 "NSE-NIFTY, NSE-BANKNIFTY and the F&O underlyings this feed lists — the sweep surface, D-0506"
             }
-            Self::Indices => "stored and stamped onto trades; never swept",
-            Self::Equities => "stored, never swept",
-            // EVERY TIER SAYS "never swept" IN THE SAME BREATH AS ITS COUNT.
-            // The count is the reason an operator picks the row and the four
-            // words after it are the reason picking it does not widen §1.
-            Self::Nifty500 => "the published 500 constituents — stored, never swept",
-            Self::Nifty200 => "the published 200 constituents — stored, never swept",
-            Self::Nifty100 => "the published 100 constituents — stored, never swept",
+            // THE TWO SWEPT INDICES ARE IN THIS SET. It is every series the
+            // vendor master calls an index, so it holds NSE-NIFTY and
+            // NSE-BANKNIFTY; "never swept" alone denied them (zero-findings
+            // flag, D-2690). Every other index is reference only.
+            Self::Indices => {
+                "NSE-NIFTY and NSE-BANKNIFTY are swept; every other index is stored and \
+                 stamped onto trades, never swept"
+            }
+            // EVERY EQUITY SET SAYS WHICH OF ITS MEMBERS ARE SWEPT, IN THE SAME
+            // BREATH AS ITS COUNT. These said "stored, never swept" until
+            // P18-05 (D-1965), which told an operator that RELIANCE, HDFCBANK
+            // and every other F&O share in a tier is not swept — false since
+            // D-0506. The set decides nothing; `is_sweepable` decides per
+            // member, and the note says so.
+            Self::Equities => "stored; members that are F&O shares are swept (D-0506)",
+            Self::Nifty500 => {
+                "the published 500 constituents — stored; members that are F&O shares are \
+                 swept (D-0506)"
+            }
+            Self::Nifty200 => {
+                "the published 200 constituents — stored; members that are F&O shares are \
+                 swept (D-0506)"
+            }
+            Self::Nifty100 => {
+                "the published 100 constituents — stored; members that are F&O shares are \
+                 swept (D-0506)"
+            }
             Self::Nifty50 => {
-                "the published 50 constituents — stored, never swept; these are the \
-                 companies, not the NIFTY index"
+                "the published 50 constituents — stored; members that are F&O shares are \
+                 swept (D-0506); these are the companies, not the NIFTY index"
             }
             // BOTH WORDED LIKE `Indices`, NOT LIKE `Equities`, AND THE
             // DIFFERENCE IS FACTUAL.
@@ -427,11 +462,12 @@ impl SpotTarget {
             // the swept pair", which is false. So they say what `Indices`
             // says: the pull stores them, and the sweep surface is unchanged.
             Self::Fno => {
-                "the 213 F&O underlyings — stored, and swept as cash equities since D-0506"
+                "the 213 F&O underlyings — stored; 208 shares swept as cash equities, \
+                 NIFTY and BANKNIFTY as indices (D-0506, D-0682)"
             }
             Self::Everything => {
-                "every tracked series and constituent — stored; the sweep surface \
-                 is unchanged and never swept"
+                "every tracked series and constituent — stored; members on the sweep \
+                 surface are swept, and pulling this widens nothing"
             }
         }
     }
@@ -1289,7 +1325,14 @@ pub fn parse_day_field(body: &str, field: &'static str) -> Result<Day, Refusal> 
     // Padded so `8` and `08` mean the same August, then parsed by the one
     // parser. A piece that is not a number stays un-padded and fails the width
     // check inside `parse_day`, which is where a malformed date belongs.
+    // Digits only, and no wider than the field: `u16::from_str` also takes a
+    // leading `+` and leading zeros, so `from_m=+8` or `0008` once padded to
+    // `08` and walked past the strict-shape refusal D-0905 gives the ISO field
+    // (Z1-slice13-F2, D-1762).
     let pad = |text: &str, width: usize| -> String {
+        if text.len() > width || !text.bytes().all(|b| b.is_ascii_digit()) {
+            return text.to_owned();
+        }
         text.parse::<u16>()
             .map_or_else(|_| text.to_owned(), |n| format!("{n:0width$}"))
     };
@@ -2252,6 +2295,33 @@ pub const NO_QUEUE: &str = "REFUSED · the selection is legal and was understood
     clippy::panic
 )]
 mod tests {
+    /// The three-piece date spelling holds the same D-0905 line as the ISO
+    /// one: a signed piece is malformed, never padded into a real month
+    /// (Z1-slice13-F2, D-1762).
+    #[test]
+    fn a_signed_date_piece_is_refused_in_the_three_piece_spelling_too() {
+        use super::{Refusal, parse_day_field};
+        assert!(parse_day_field("from_y=2024&from_m=8&from_d=6", "from").is_ok());
+        assert!(parse_day_field("from_y=2024&from_m=08&from_d=06", "from").is_ok());
+        for body in [
+            "from_y=2024&from_m=%2B8&from_d=6",
+            "from_y=2024&from_m=8&from_d=%2B6",
+            "from_y=%2B2024&from_m=8&from_d=6",
+            "from_y=2024&from_m=-8&from_d=6",
+            "from_y=0002024&from_m=8&from_d=6",
+            "from_y=2024&from_m=008&from_d=6",
+            "from_y=2024&from_m=8&from_d=00006",
+        ] {
+            assert!(
+                matches!(
+                    parse_day_field(body, "from"),
+                    Err(Refusal::DateNotIso { field: "from", .. })
+                ),
+                "{body} must be refused as malformed"
+            );
+        }
+    }
+
     #[test]
     fn cash_identity_requires_explicit_valid_vendor_scoped_choice() {
         assert_eq!(
@@ -2545,6 +2615,44 @@ mod tests {
     }
 
     #[test]
+    fn only_the_reference_set_says_never_swept() {
+        // NO SET THAT HOLDS SWEPT MEMBERS MAY SAY "never swept". `CLAUDE.md` §1
+        // is enforced by `is_sweepable`, but an operator reads the note. The
+        // equity sets and `Everything` hold F&O shares, which D-0506 put on the
+        // surface, so their notes say which members are swept; these said
+        // "stored, never swept" until P18-05 (D-1965). `Indices` keeps its
+        // reference wording. `Swept` and `Fno` ARE the surface.
+        for target in SpotTarget::ALL {
+            if matches!(target, SpotTarget::Indices) {
+                assert!(
+                    target.note().contains("never swept"),
+                    "{} must say so on the form: {}",
+                    target.slug(),
+                    target.note()
+                );
+                continue;
+            }
+            assert!(
+                !target.note().contains("never swept"),
+                "{} holds swept members and must not disclaim them: {}",
+                target.slug(),
+                target.note()
+            );
+            if !matches!(target, SpotTarget::Swept) {
+                assert!(
+                    target.note().contains("swept"),
+                    "{} must say which of its members are swept: {}",
+                    target.slug(),
+                    target.note()
+                );
+            }
+        }
+        // The F&O note counts what D-0682 counted: 208 shares, two indices.
+        assert!(SpotTarget::Fno.note().contains("208 shares"));
+        assert!(SpotTarget::Fno.note().contains("D-0682"));
+    }
+
+    #[test]
     fn a_spot_request_names_its_target_or_is_refused() {
         for target in SpotTarget::ALL {
             let body = format!("target={}&from=2022-01-08&to=2022-02-08", target.slug());
@@ -2567,62 +2675,40 @@ mod tests {
             (
                 SpotTarget::Indices,
                 "Reference indices",
-                "stored and stamped onto trades; never swept",
+                "NSE-NIFTY and NSE-BANKNIFTY are swept; every other index is stored and stamped onto trades, never swept",
             ),
             (
                 SpotTarget::Equities,
                 "NIFTY Total Market equities",
-                "stored, never swept",
+                "stored; members that are F&O shares are swept (D-0506)",
             ),
             (
                 SpotTarget::Nifty500,
                 "NIFTY 500 equities",
-                "the published 500 constituents — stored, never swept",
+                "the published 500 constituents — stored; members that are F&O shares are \
+                 swept (D-0506)",
             ),
             (
                 SpotTarget::Nifty200,
                 "NIFTY 200 equities",
-                "the published 200 constituents — stored, never swept",
+                "the published 200 constituents — stored; members that are F&O shares are \
+                 swept (D-0506)",
             ),
             (
                 SpotTarget::Nifty100,
                 "NIFTY 100 equities",
-                "the published 100 constituents — stored, never swept",
+                "the published 100 constituents — stored; members that are F&O shares are \
+                 swept (D-0506)",
             ),
             (
                 SpotTarget::Nifty50,
                 "NIFTY 50 equities",
-                "the published 50 constituents — stored, never swept; these are \
-                 the companies, not the NIFTY index",
+                "the published 50 constituents — stored; members that are F&O shares are \
+                 swept (D-0506); these are the companies, not the NIFTY index",
             ),
         ] {
             assert_eq!(target.label(), label);
             assert_eq!(target.note(), note);
-        }
-        // EVERY SET OFF THE SURFACE SAYS "never swept" IN THE TEXT THE FORM
-        // SHOWS. `CLAUDE.md` §1 is enforced by `is_sweepable`, but an operator
-        // reads the note, and a row that offered 500 instruments without that
-        // phrase is the row that gets mistaken for a widened engine surface.
-        // Two rows ARE the surface and say the opposite: `Swept` by definition,
-        // and `Fno` since D-0506 widened the surface to its 213 cash equities.
-        // The tiers stay "never swept" as SETS even though they overlap the
-        // F&O list — the tier decides nothing, `FNO_INDEX` does.
-        for target in SpotTarget::ALL {
-            if matches!(target, SpotTarget::Swept | SpotTarget::Fno) {
-                assert!(
-                    !target.note().contains("never swept"),
-                    "{} is on the surface and must not disclaim it: {}",
-                    target.slug(),
-                    target.note()
-                );
-                continue;
-            }
-            assert!(
-                target.note().contains("never swept"),
-                "{} must say so on the form: {}",
-                target.slug(),
-                target.note()
-            );
         }
         // Every set names ONE universe bit rather than sharing one. `Swept`
         // keeps the index bit: its membership is `is_sweepable`, not the bit.

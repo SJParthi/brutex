@@ -1162,6 +1162,93 @@ fn closure(
     )
 }
 
+/// The PRODUCTION closure of `roots` (P1-08-04, D-2660): every file a non-test
+/// build compiles. A `mod`, `#[path]` or `include!` inside a `#[cfg(test)]`
+/// region is not followed, and a file that is test code from its first token
+/// (`#![cfg(test)]`) is not reported. Gates 11, 14 and 19 used to pick files
+/// by a `/src/` glob and exempt a "whole-file test module" by its STEM, so a
+/// production `resume/manifest.rs` shared a stem with a crate-root test
+/// module and was skipped, and a `#[path]` file outside `src/` was never read.
+fn prod_closure(
+    roots: &[String],
+    read: &dyn Fn(&str) -> Option<String>,
+    exists: &dyn Fn(&str) -> bool,
+) -> (BTreeSet<String>, Vec<String>) {
+    let mut seen = BTreeSet::new();
+    let mut prod = BTreeSet::new();
+    let mut errs = Vec::new();
+    let mut queue: Vec<(String, bool)> = roots.iter().map(|r| (r.clone(), true)).collect();
+    while let Some((f, owns)) = queue.pop() {
+        if !seen.insert(f.clone()) {
+            continue;
+        }
+        let Some(src) = read(&f) else {
+            errs.push(format!("{f}: cannot be read"));
+            continue;
+        };
+        let view = match code_view(&src, true) {
+            Ok(v) => v,
+            Err(e) => {
+                errs.push(format!("{f}: {e}"));
+                continue;
+            }
+        };
+        // `#[cfg(all(test, ..))]` is test-only too: `all` needs `test`. The
+        // workspace spells it so cargo-mutants walks a module (D-1119).
+        let view = match lex(&view) {
+            Ok(l) => {
+                let t = &l.tokens;
+                let mut spans = Vec::new();
+                for i in 0..t.len() {
+                    if is_punct(t.get(i), '#')
+                        && is_punct(t.get(i + 1), '[')
+                        && is_ident(t.get(i + 2), "cfg")
+                        && is_punct(t.get(i + 3), '(')
+                        && is_ident(t.get(i + 4), "all")
+                        && is_punct(t.get(i + 5), '(')
+                        && is_ident(t.get(i + 6), "test")
+                        && (is_punct(t.get(i + 7), ',') || is_punct(t.get(i + 7), ')'))
+                    {
+                        let past = skip_group(t, i + 1);
+                        let last = item_end(t, past);
+                        spans.push((t[i].start, t.get(last).map_or(view.len(), |x| x.end)));
+                    }
+                }
+                let mut bytes = view.into_bytes();
+                blank(&mut bytes, &spans);
+                String::from_utf8(bytes).unwrap_or_default()
+            }
+            Err(e) => {
+                errs.push(format!("{f}: {e}"));
+                continue;
+            }
+        };
+        if lex(&view).is_ok_and(|l| l.tokens.is_empty()) && !src.trim().is_empty() {
+            // Nothing survives the test blanking: compiled out of production.
+            continue;
+        }
+        prod.insert(f.clone());
+        let owns = owns || f.ends_with("/mod.rs") || f == "mod.rs";
+        let (c, e) = children(&f, &view, owns, EVERY_CI_CFG, exists);
+        queue.extend(c.into_iter().map(|(p, o, _, _)| (p, o)));
+        errs.extend(e);
+    }
+    (prod, errs)
+}
+
+/// A crate's production roots among `compiled_roots`: `src/lib.rs`,
+/// `src/main.rs` and `src/bin/**`, never a test, bench, example, build
+/// script or workflow tool.
+fn is_prod_root(r: &str) -> bool {
+    let parts: Vec<&str> = r.split('/').collect();
+    matches!(
+        parts.as_slice(),
+        ["crates", _, "src", "lib.rs" | "main.rs"]
+            | ["crates", _, "src", "bin", _]
+            | ["crates", _, "src", "bin", _, "main.rs"]
+    )
+}
+
 /// The module segments a child adds below its parent: the inline modules it
 /// sits in, then its own name (none for an `include!`, whose text is inlined).
 fn module_rel(stack: &[(Option<String>, u8)], name: Option<&str>) -> Vec<String> {
@@ -3054,15 +3141,139 @@ fn compiled_roots(
     Ok(roots.into_iter().collect())
 }
 
+/// The manifest keys that name or require a build script, in ANY spelling
+/// TOML allows (P1-07-01, D-2660): `build = ..` under `[package]`, a quoted
+/// `"build" = ..`, a dotted `package.build = ..`, an inline
+/// `package = { build = .. }`, and the same four for `links`. Gates 2 and 13
+/// layer 3 used a line grep that saw only the first spelling.
+fn build_key_leaves(src: &str) -> Result<Vec<Leaf>, String> {
+    Ok(toml_leaves(src)?
+        .into_iter()
+        .filter(|l| {
+            let p: Vec<&str> = l.path.iter().map(String::as_str).collect();
+            matches!(p.as_slice(), ["package", "build" | "links"])
+        })
+        .collect())
+}
+
+/// A `[[bench]]` target `cargo bench --workspace` would skip without a word
+/// (P1-08-02, D-2660): `bench = false` (or anything but `true`), or a
+/// `required-features` list it does not enable. A bench list written as an
+/// inline array `bench = [..]` is refused too, because gate 14 reads only
+/// `[[bench]]` headers and would not see its keys at all.
+fn bench_key_findings(path: &str, src: &str) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    for l in toml_leaves(src)? {
+        let p: Vec<&str> = l.path.iter().map(String::as_str).collect();
+        match p.as_slice() {
+            ["bench[]", "bench"] if l.value != "true" => out.push(format!(
+                "{path}:{}: a [[bench]] sets `bench = {}`, so `cargo bench` skips it",
+                l.line, l.value
+            )),
+            ["bench[]", "required-features" | "required_features"] => out.push(format!(
+                "{path}:{}: a [[bench]] sets `required-features`, so `cargo bench --workspace` skips it",
+                l.line
+            )),
+            ["bench"] => out.push(format!(
+                "{path}:{}: benches declared as an inline array; write `[[bench]]` tables",
+                l.line
+            )),
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
+/// The auto-merge workflow's fork refusal is the ONLY control between a fork
+/// and an armed auto-merge (P1-09-01, D-2660): on `workflow_run` and on
+/// `pull_request_target` the token can write, whoever wrote the pull request.
+/// Refused unless a non-comment line reads `isCrossRepository`, and a
+/// non-comment `[ "$fork" = "false" ] ||` refusal comes before the first
+/// `gh pr merge` that arms (`--auto`).
+fn fork_refusal_findings(path: &str, src: &str) -> Vec<String> {
+    let mut reads = false;
+    let mut refusal: Option<usize> = None;
+    for (n, raw) in src.lines().enumerate() {
+        let body = raw.trim_start();
+        if body.starts_with('#') {
+            continue;
+        }
+        reads |= body.contains("isCrossRepository");
+        if refusal.is_none() && body.starts_with("[ \"$fork\" = \"false\" ] ||") {
+            refusal = Some(n + 1);
+        }
+        if body.contains("gh pr merge")
+            && body.contains("--auto")
+            && !body.contains("--disable-auto")
+        {
+            return match (reads, refusal) {
+                (true, Some(_)) => Vec::new(),
+                _ => vec![format!(
+                    "{path}:{}: `gh pr merge --auto` is reached with no fork refusal before it",
+                    n + 1
+                )],
+            };
+        }
+    }
+    vec![format!(
+        "{path}: no `gh pr merge --auto` line was found to guard"
+    )]
+}
+
+/// `mutants :: skip` anywhere in a file's TOKENS (P1-08-01, D-2660).
+/// cargo-mutants honours the attribute bare and inside `cfg_attr` by syntax
+/// alone, without evaluating the predicate, so
+/// `#[cfg_attr(miri, mutants::skip)]` compiles to nothing and still removes a
+/// function from gate 18. Comments and string literals are not tokens of this
+/// shape and are not refused.
+fn mutants_skip_findings(path: &str, src: &str) -> Result<Vec<String>, String> {
+    let t = lex(src)?.tokens;
+    let mut out = Vec::new();
+    for (i, tok) in t.iter().enumerate() {
+        if ident(tok) == Some("mutants") && is_path_sep(&t, i + 1) && is_ident(t.get(i + 3), "skip")
+        {
+            out.push(format!(
+                "{path}:{}: `mutants::skip` hides a function from the mutation gate",
+                tok.line
+            ));
+        }
+    }
+    Ok(out)
+}
+
 /// What gate 1 refuses by CONTENT in a tracked file outside `web/`: a NUL
 /// byte (no allowed extension is binary, and a NUL makes grep skip the file),
 /// bytes that are not UTF-8, a `.rs` that opens with a shebang (a script
 /// wearing a Rust name), and browser code in a `.html` or `.css`.
+///
+/// And by NAME (P1-07-03, P1-07-04, D-2660): a path outside `web/` holding a
+/// control character, a non-ASCII byte, `"` or `\`. A newline split one name
+/// into two lines for every line-oriented check, and git C-quotes the other
+/// three in any listing read without `-z`, so a quoted name's real ending
+/// was invisible to every gate that greps a listing.
 fn content_findings(path: &str, bytes: &[u8]) -> Vec<String> {
     if path.starts_with("web/") {
         return Vec::new();
     }
     let mut out = Vec::new();
+    if path
+        .chars()
+        .any(|c| c.is_control() || !c.is_ascii() || c == '"' || c == '\\')
+    {
+        out.push(format!(
+            "{}: a name with a control character, a non-ASCII byte, `\"` or `\\` (git quotes it)",
+            path.escape_default()
+        ));
+    }
+    if path.starts_with("crates/")
+        && path.ends_with(".rs")
+        && let Ok(text) = std::str::from_utf8(bytes)
+    {
+        match mutants_skip_findings(path, text) {
+            Ok(found) => out.extend(found),
+            Err(e) => out.push(format!("{path}: cannot be lexed for `mutants::skip`: {e}")),
+        }
+    }
     if bytes.contains(&0) {
         out.push(format!("{path}: holds a NUL byte"));
     }
@@ -3091,7 +3302,7 @@ fn content_findings(path: &str, bytes: &[u8]) -> Vec<String> {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: source_scan <code|code-prod|browser|build|unsafe|spawns|strings|fns|inline-mods|modules|web-roots|paths|paths-prod|closure|orphans|toml|deps|step-runs|aggregator|workflow> ARGS"
+        "usage: source_scan <code|code-prod|browser|build|unsafe|spawns|strings|fns|inline-mods|modules|web-roots|paths|paths-prod|closure|orphans|prod-files|toml|deps|build-keys|bench-keys|fork-refusal|step-runs|aggregator|workflow> ARGS"
     );
     ExitCode::from(2)
 }
@@ -3215,6 +3426,34 @@ fn run(args: &[String]) -> Result<bool, String> {
                 }
             }
         }
+        "prod-files" => {
+            let listing = rest
+                .first()
+                .ok_or("prod-files needs a NUL-separated tracked listing")?;
+            let tracked = tracked_set(&read_file(listing)?);
+            let read = |p: &str| {
+                tracked
+                    .contains(p)
+                    .then(|| std::fs::read_to_string(p).ok())
+                    .flatten()
+            };
+            let roots: Vec<String> = compiled_roots(&tracked, &read)?
+                .into_iter()
+                .filter(|r| is_prod_root(r))
+                .collect();
+            if roots.is_empty() {
+                return Err("prod-files found no crate production root".to_owned());
+            }
+            let exists = |p: &str| tracked.contains(p);
+            let (files, errs) = prod_closure(&roots, &read, &exists);
+            for e in &errs {
+                println!("UNRESOLVED {e}");
+            }
+            clean &= errs.is_empty();
+            for f in &files {
+                println!("{f}");
+            }
+        }
         "modules" => {
             let listing = rest
                 .first()
@@ -3285,6 +3524,27 @@ fn run(args: &[String]) -> Result<bool, String> {
                 {
                     println!("{f}:{line}:{kind}:{name}:{pkg}");
                 }
+            }
+        }
+        "build-keys" => {
+            for f in rest {
+                for l in build_key_leaves(&read_file(f)?).map_err(|e| format!("{f}: {e}"))? {
+                    println!("{f}:{}:{} = {}", l.line, l.path.join("."), l.value);
+                }
+            }
+        }
+        "bench-keys" | "fork-refusal" => {
+            for f in rest {
+                let src = read_file(f)?;
+                let found = if cmd == "bench-keys" {
+                    bench_key_findings(f, &src).map_err(|e| format!("{f}: {e}"))?
+                } else {
+                    fork_refusal_findings(f, &src)
+                };
+                for line in &found {
+                    println!("{line}");
+                }
+                clean &= found.is_empty();
             }
         }
         "step-runs" => {
@@ -3582,6 +3842,48 @@ mod tests {
             let (_, errs) = closure(&["c/build.rs".to_owned()], &read, &exists);
             assert!(!errs.is_empty(), "resolved: {root}");
         }
+    }
+
+    #[test]
+    fn the_production_closure_follows_paths_and_not_stems() {
+        // P1-08-04, D-2660. `manifest` is a crate-root test module AND a
+        // production file under `resume/`; the stem rule skipped both.
+        let (read, exists) = tracked(&[
+            (
+                "crates/e/src/lib.rs",
+                "#[cfg(test)]\nmod manifest;\nmod resume;\n#[path = \"../stamp.rs\"]\nmod stamp;\n#[cfg(test)]\nmod t { mod deep; }\nmod whole;\n#[cfg(all(test, unix))]\n#[path = \"../tests/support/mod.rs\"]\nmod support;\n#[cfg(all(test))]\nmod mutated;\n",
+            ),
+            ("crates/e/src/manifest.rs", "fn test_only() {}\n"),
+            ("crates/e/src/resume.rs", "mod manifest;\n"),
+            (
+                "crates/e/src/resume/manifest.rs",
+                "pub fn prod() { v.sort(); }\n",
+            ),
+            (
+                "crates/e/stamp.rs",
+                "pub fn stamp() { eprintln!(\"x\"); }\n",
+            ),
+            ("crates/e/src/t/deep.rs", "fn d() {}\n"),
+            ("crates/e/src/whole.rs", "#![cfg(test)]\nfn w() {}\n"),
+            ("crates/e/tests/support/mod.rs", "fn s() {}\n"),
+            ("crates/e/src/mutated.rs", "fn m() {}\n"),
+        ]);
+        let (files, errs) = prod_closure(&["crates/e/src/lib.rs".to_owned()], &read, &exists);
+        assert!(errs.is_empty(), "{errs:?}");
+        let got: Vec<&str> = files.iter().map(String::as_str).collect();
+        assert_eq!(
+            got,
+            [
+                "crates/e/src/lib.rs",
+                "crates/e/src/resume.rs",
+                "crates/e/src/resume/manifest.rs",
+                "crates/e/stamp.rs",
+            ]
+        );
+        assert!(is_prod_root("crates/e/src/lib.rs"));
+        assert!(is_prod_root("crates/e/src/bin/x.rs"));
+        assert!(!is_prod_root("crates/e/tests/x.rs"));
+        assert!(!is_prod_root("crates/e/build.rs"));
     }
 
     #[test]
@@ -3958,6 +4260,126 @@ mod tests {
             ("empty.md", &b""[..]),
         ] {
             assert!(content_findings(path, bytes).is_empty(), "refused: {path}");
+        }
+    }
+
+    #[test]
+    fn a_build_key_is_seen_in_every_spelling() {
+        // P1-07-01, D-2660: the line grep gates 2 and 13 used saw only the first.
+        for src in [
+            "[package]\nname = \"a\"\nbuild = \"gen.rs\"\n",
+            "[package]\nname = \"a\"\n\"build\" = \"gen.rs\"\n",
+            "package.build = \"gen.rs\"\n",
+            "package = { name = \"a\", build = \"gen.rs\" }\n",
+            "[package]\n'links' = \"z\"\n",
+            "[ package ]\nlinks= \"z\" # comment\n",
+        ] {
+            assert_eq!(build_key_leaves(src).unwrap().len(), 1, "missed: {src}");
+        }
+        for src in [
+            "[package]\nname = \"a\" # build = \"x.rs\"\n",
+            "[dependencies]\nbuild = \"1\"\n",
+            "[[bench]]\nname = \"build\"\n",
+            "[package]\ndescription = \"\"\"\nbuild = 1\n\"\"\"\n",
+        ] {
+            assert!(build_key_leaves(src).unwrap().is_empty(), "refused: {src}");
+        }
+    }
+
+    #[test]
+    fn a_bench_cargo_would_skip_is_refused() {
+        // P1-08-02, D-2660.
+        for src in [
+            "[[bench]]\nname = \"ratio\"\nharness = false\nbench = false\n",
+            "[[bench]]\nname = \"ratio\"\nharness = false\n\"bench\" = false\n",
+            "[[bench]]\nname = \"ratio\"\nharness = false\nrequired-features = [\"x\"]\n",
+            "bench = [{ name = \"ratio\", harness = false, bench = false }]\n",
+        ] {
+            assert!(
+                !bench_key_findings("m", src).unwrap().is_empty(),
+                "passed: {src}"
+            );
+        }
+        for src in [
+            "[[bench]]\nname = \"ratio\"\nharness = false\n",
+            "[[bench]]\nname = \"ratio\"\nharness = false\nbench = true\n",
+            "[lib]\nbench = false\n",
+        ] {
+            assert!(
+                bench_key_findings("m", src).unwrap().is_empty(),
+                "refused: {src}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_fork_refusal_must_precede_the_arming_merge() {
+        // P1-09-01, D-2660.
+        let read = "  --json state,isCrossRepository \\\n";
+        let refuse = "  [ \"$fork\" = \"false\" ] || \\\n    stopped \"fork\"\n";
+        let arm = "  if gh pr merge \"$pr\" --auto --squash; then\n";
+        let disarm = "  elif gh pr merge \"$pr\" --disable-auto >/dev/null; then\n";
+        let good = format!("{disarm}{read}{refuse}{arm}");
+        assert!(fork_refusal_findings("w", &good).is_empty());
+        for bad in [
+            format!("{read}{arm}"),
+            format!("{read}{arm}{refuse}"),
+            format!("{read}  # [ \"$fork\" = \"false\" ] || stopped\n{arm}"),
+            format!("{refuse}{arm}"),
+            format!("{read}{refuse}"),
+        ] {
+            assert!(
+                !fork_refusal_findings("w", &bad).is_empty(),
+                "passed: {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mutants_skip_attribute_is_refused_in_crate_code() {
+        // P1-08-01, D-2660.
+        for src in [
+            "#[cfg_attr(miri, mutants::skip)]\nfn f() {}\n",
+            "#[mutants::skip]\nfn f() {}\n",
+            "#[cfg_attr(all(), mutants :: skip)]\nfn f() {}\n",
+        ] {
+            assert!(
+                !content_findings("crates/a/src/lib.rs", src.as_bytes()).is_empty(),
+                "passed: {src}"
+            );
+        }
+        for src in [
+            "// mutants::skip in prose\nfn f() {}\n",
+            "const S: &str = \"mutants::skip\";\n",
+            "fn mutants() {} fn skip() {}\n",
+        ] {
+            assert!(
+                content_findings("crates/a/src/lib.rs", src.as_bytes()).is_empty(),
+                "refused: {src}"
+            );
+        }
+        assert!(
+            content_findings("web/x.rs", b"#[mutants::skip]\nfn f() {}\n").is_empty(),
+            "web/ is unrestricted"
+        );
+    }
+
+    #[test]
+    fn a_name_git_would_quote_or_split_is_refused() {
+        // P1-07-03, P1-07-04, D-2660.
+        for path in [
+            ".gitignore\npayload.x",
+            "crates/a/run.x\nmd",
+            "config.yml\nmd",
+            "crates/\u{e9}/rust-toolchain.toml",
+            "crates/a\"b/x.rs",
+            "crates/a\\b/x.rs",
+            "docs/tab\there.md",
+        ] {
+            assert!(!content_findings(path, b"").is_empty(), "passed: {path:?}");
+        }
+        for path in ["docs/x.md", "crates/a/src/lib.rs", "web/\u{e9}\n.ts"] {
+            assert!(content_findings(path, b"").is_empty(), "refused: {path:?}");
         }
     }
 

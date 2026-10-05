@@ -429,7 +429,7 @@ pub fn reality_check(
     if block > MAX_BLOCK {
         return None;
     }
-    let periods = aligned(returns)?;
+    let periods = aligned_for(returns, block)?;
     let stats: Vec<Performance> = returns.iter().map(|r| summarise(r)).collect();
 
     // THE OBSERVED STATISTIC: the best mean across strategies, scaled by the
@@ -573,7 +573,7 @@ pub fn spa(returns: &[Vec<i64>], draws: usize, seed: u64, block: usize) -> Optio
     if block > MAX_BLOCK {
         return None;
     }
-    let periods = aligned(returns)?;
+    let periods = aligned_for(returns, block)?;
     let stats: Vec<Performance> = returns.iter().map(|r| summarise(r)).collect();
 
     // HANSEN'S STATISTIC IS `sqrt(n) * mean / sigma`, AND THAT IS EXACTLY
@@ -860,7 +860,7 @@ fn exact_family_test_inputs_v1(
     if draws == 0 || block == 0 || block > MAX_BLOCK || draws.checked_add(1).is_none() {
         return None;
     }
-    let periods = aligned(returns)?;
+    let periods = aligned_for(returns, block)?;
     if periods < 2 {
         return None;
     }
@@ -1232,7 +1232,7 @@ pub fn romano_wolf(
     if block > MAX_BLOCK {
         return Vec::new();
     }
-    let Some(periods) = aligned(returns) else {
+    let Some(periods) = aligned_for(returns, block) else {
         return Vec::new();
     };
     romano_wolf_aligned(returns, periods, draws, seed, block, alpha_ppm)
@@ -1257,7 +1257,7 @@ pub fn romano_wolf_receipt(
     if draws == 0 || block == 0 || block > MAX_BLOCK || alpha_ppm > 1_000_000 {
         return None;
     }
-    let periods = aligned(returns)?;
+    let periods = aligned_for(returns, block)?;
     let rejected = romano_wolf_aligned(returns, periods, draws, seed, block, alpha_ppm);
     let mut decisions = vec![false; returns.len()];
     for result in &rejected {
@@ -1324,7 +1324,7 @@ pub fn romano_wolf_adjusted_p_values_v1(
         return None;
     }
     let denominator = draws.checked_add(1)?;
-    let periods = aligned(returns)?;
+    let periods = aligned_for(returns, block)?;
     if periods < 2 {
         return None;
     }
@@ -1655,6 +1655,18 @@ fn aligned(returns: &[Vec<i64>]) -> Option<usize> {
         return None;
     }
     Some(first)
+}
+
+/// [`aligned`], refused when the average block is longer than the series.
+///
+/// A block past the period count resamples almost every draw as one rotation of
+/// the sample, so the null distribution collapses onto the observed statistic:
+/// measured over 400 periods of pure noise, a block of 40,000 put 36 of 40
+/// families under p = 0.05 where a block of 10 put 2 (D-0742's open half,
+/// refused by D-1990). Refused rather than clamped: a block the caller did not
+/// ask for is an answer to a different question.
+fn aligned_for(returns: &[Vec<i64>], block: usize) -> Option<usize> {
+    aligned(returns).filter(|&periods| block <= periods)
 }
 
 /// Mean and standard error of one series.
@@ -2019,6 +2031,12 @@ mod tests {
         }
     }
 
+    /// The block these short-sample tests resample with. D-1990 refuses a
+    /// block longer than the sample, and each of them has fewer periods than
+    /// `DEFAULT_BLOCK`, so they draw one period at a time; what they pin is the
+    /// period count, not the block (D-1934).
+    const SHORT_SAMPLE_BLOCK: usize = 1;
+
     /// A ONE-PERIOD SERIES HAS NOTHING TO RESAMPLE, SO IT CARRIES NO EVIDENCE.
     ///
     /// `aligned` refuses an empty series and a length mismatch and nothing else,
@@ -2040,14 +2058,14 @@ mod tests {
         for magnitude in [1_i64, 7, 500, 1_000_000] {
             let one = vec![vec![magnitude]];
 
-            let rc = reality_check(&one, 1_000, 3, DEFAULT_BLOCK).expect("a verdict");
+            let rc = reality_check(&one, 1_000, 3, SHORT_SAMPLE_BLOCK).expect("a verdict");
             same(rc.p_value, 1.0, "one period cannot be resampled");
             assert!(
                 !rc.clears(),
                 "Reality Check cleared a single period of {magnitude} paisa"
             );
 
-            let v = spa(&one, 1_000, 3, DEFAULT_BLOCK).expect("a verdict");
+            let v = spa(&one, 1_000, 3, SHORT_SAMPLE_BLOCK).expect("a verdict");
             same(v.p_value, 1.0, "one period cannot be resampled");
             assert!(
                 !v.clears(),
@@ -2060,7 +2078,7 @@ mod tests {
         // threshold — asserting otherwise would smuggle in the number this crate
         // declined to invent.
         let two = vec![vec![10_i64, 20]];
-        let v = spa(&two, 1_000, 3, DEFAULT_BLOCK).expect("a verdict");
+        let v = spa(&two, 1_000, 3, SHORT_SAMPLE_BLOCK).expect("a verdict");
         assert!(
             v.p_value <= 1.0,
             "two periods still produce a computed p-value, not the guard's 1.0"
@@ -2082,7 +2100,7 @@ mod tests {
     fn a_verdict_reports_the_sample_size_it_had_and_what_that_is_worth() {
         for periods in [2_usize, 3, 5, 10, 30, 100, 400] {
             let set = vec![noise(periods, 4), noise(periods, 5)];
-            let v = spa(&set, 200, 6, DEFAULT_BLOCK).expect("a verdict");
+            let v = spa(&set, 200, 6, SHORT_SAMPLE_BLOCK).expect("a verdict");
             assert_eq!(v.periods, periods, "the sample size travels with it");
             assert!(
                 v.calibration().contains("period"),
@@ -2444,7 +2462,7 @@ mod tests {
             &[vec![-1, 1, -1, 1], vec![1, -1, 1, -1]],
             20,
             7,
-            DEFAULT_BLOCK,
+            SHORT_SAMPLE_BLOCK,
             50_000,
         )
         .expect("an aligned family with real draws has a receipt");
@@ -2458,11 +2476,12 @@ mod tests {
         assert_eq!(complete.alpha_ppm(), 50_000);
 
         assert!(
-            romano_wolf_receipt(&[vec![1, 2], vec![1]], 20, 7, DEFAULT_BLOCK, 50_000).is_none()
+            romano_wolf_receipt(&[vec![1, 2], vec![1]], 20, 7, SHORT_SAMPLE_BLOCK, 50_000)
+                .is_none()
         );
-        assert!(romano_wolf_receipt(&[vec![1, 2]], 0, 7, DEFAULT_BLOCK, 50_000).is_none());
+        assert!(romano_wolf_receipt(&[vec![1, 2]], 0, 7, SHORT_SAMPLE_BLOCK, 50_000).is_none());
         assert!(romano_wolf_receipt(&[vec![1, 2]], 20, 7, 0, 50_000).is_none());
-        assert!(romano_wolf_receipt(&[vec![1, 2]], 20, 7, DEFAULT_BLOCK, 1_000_001).is_none());
+        assert!(romano_wolf_receipt(&[vec![1, 2]], 20, 7, SHORT_SAMPLE_BLOCK, 1_000_001).is_none());
     }
 
     #[test]
@@ -2487,7 +2506,7 @@ mod tests {
         // Dropping a strategy on an uncomputable gate would make the test more
         // powerful on exactly the samples that justify it least.
         let set = vec![vec![10_i64, 20, 30], vec![-5_i64, -5, -5]];
-        let v = spa(&set, 50, 9, DEFAULT_BLOCK).expect("three periods still yield a verdict");
+        let v = spa(&set, 50, 9, SHORT_SAMPLE_BLOCK).expect("three periods still yield a verdict");
         assert_eq!(v.strategies, 2);
         assert!(
             v.statistic.is_finite(),
@@ -2530,7 +2549,7 @@ mod tests {
     #[test]
     fn two_periods_are_tested_by_the_reality_check_rather_than_refused() {
         let two = vec![vec![10_i64, 20]];
-        let rc = reality_check(&two, 1_000, 3, DEFAULT_BLOCK).expect("a verdict");
+        let rc = reality_check(&two, 1_000, 3, SHORT_SAMPLE_BLOCK).expect("a verdict");
         assert_eq!(rc.periods, 2);
         same(rc.p_value, 1.0 / 1_001.0, "no draw can beat sqrt(2) * 15");
         assert!(rc.clears(), "the floor 1/1001 clears 5%");
@@ -3344,12 +3363,16 @@ mod stepdown_partition_tests {
         );
     }
 
-    /// EVERY ROUND REMOVES AT LEAST ONE, OR THE LOOP STOPS.
+    /// EVERY ROUND REMOVES AT LEAST ONE, OR THE LOOP STOPS, and no strategy is
+    /// rejected twice.
     ///
-    /// The `while !alive.is_empty()` bound rests on it. Under the old `retain`
-    /// this was guaranteed by the predicate; under a hand-written partition a
-    /// survivor pushed on both branches would loop forever, and a test that
-    /// merely finished would not say so. This one asserts the count.
+    /// Termination is STRUCTURAL: a round runs only when `end > start`, and
+    /// `start = end` after it, so the walk over the ordered strategies cannot
+    /// revisit one. A round number exists only after a non-empty round, so a
+    /// per-round count could not fail (P7-02, D-2667). What this asserts is
+    /// what a broken partition would change: the fixture must reject something,
+    /// each strategy appears at most once, and the rounds are numbered in order
+    /// without a gap.
     #[test]
     fn the_surviving_set_strictly_shrinks_every_round_that_rejects() {
         let set: Vec<Vec<i64>> = (0..12)
@@ -3361,21 +3384,30 @@ mod stepdown_partition_tests {
             })
             .collect();
         let rejected = romano_wolf(&set, 150, 5, DEFAULT_BLOCK, 50_000);
-        if rejected.is_empty() {
-            return;
+        assert!(
+            !rejected.is_empty(),
+            "means from 0.75 to 121.75 against an SE near 0.7 must reject"
+        );
+        let mut seen = vec![false; set.len()];
+        let mut expected_round = 0_usize;
+        for r in &rejected {
+            let slot = seen.get_mut(r.strategy).expect("a strategy of the input");
+            assert!(!*slot, "strategy {} rejected twice", r.strategy);
+            *slot = true;
+            assert!(
+                r.round == expected_round || r.round == expected_round + 1,
+                "round {} after round {expected_round}: a gap or a step back",
+                r.round
+            );
+            expected_round = r.round;
         }
         let rounds = rejected.last().map_or(0, |r| r.round);
-        for round in 0..=rounds {
-            let n = rejected.iter().filter(|r| r.round == round).count();
-            assert!(
-                n > 0,
-                "round {round} emitted nothing, so the loop ran a round without \
-                 shrinking the surviving set"
-            );
-        }
         assert!(
-            rejected.len() <= set.len(),
-            "the total rejected can never exceed the input"
+            rounds < rejected.len() && rejected.len() <= set.len(),
+            "{} rounds for {} rejections of {} strategies",
+            rounds + 1,
+            rejected.len(),
+            set.len()
         );
     }
 
@@ -3452,7 +3484,7 @@ mod block_ceiling_tests {
     /// so above one million periods the restart probability floors to zero
     /// and every draw is one rotation of the series. Every entry point
     /// refuses that block instead of resampling rotations; one million itself
-    /// is still accepted.
+    /// is under the ceiling, and a block is also refused past the series length (D-1990).
     #[test]
     fn a_block_the_ppm_draw_cannot_restart_is_refused_by_every_entry_point() {
         let ceiling = 1_000_000_usize;
@@ -3503,19 +3535,48 @@ mod block_ceiling_tests {
             Some(FamilyTestsRefusalV1::White)
         );
 
-        // A strong edge the stepdown names at the ceiling is not named beyond it.
+        // A strong edge the stepdown names at the series length is not named
+        // beyond it.
         let strong = vec![edged(periods, 21, 60), edged(periods, 22, 0)];
-        assert!(!romano_wolf(&strong, 999, 3, ceiling, 50_000).is_empty());
+        assert!(!romano_wolf(&strong, 999, 3, periods, 50_000).is_empty());
         assert!(romano_wolf(&strong, 999, 3, beyond, 50_000).is_empty());
 
-        // One million is still a block the draw can restart at, and is accepted.
-        assert!(reality_check(&set, 999, 3, ceiling).is_some());
-        assert!(spa(&set, 999, 3, ceiling).is_some());
-        assert!(white_reality_check_receipt_v1(&set, 999, 3, ceiling).is_some());
-        assert!(spa_receipt_v1(&set, 999, 3, ceiling).is_some());
-        assert!(romano_wolf_receipt(&set, 999, 3, ceiling, 50_000).is_some());
-        assert!(romano_wolf_adjusted_p_values_v1(&set, 999, 3, ceiling).is_some());
-        assert!(family_tests_v1(&set, &[0], 999, 3, ceiling).is_ok());
+        // A block as long as the series is accepted.
+        assert!(reality_check(&set, 999, 3, periods).is_some());
+        assert!(spa(&set, 999, 3, periods).is_some());
+        assert!(white_reality_check_receipt_v1(&set, 999, 3, periods).is_some());
+        assert!(spa_receipt_v1(&set, 999, 3, periods).is_some());
+        assert!(romano_wolf_receipt(&set, 999, 3, periods, 50_000).is_some());
+        assert!(romano_wolf_adjusted_p_values_v1(&set, 999, 3, periods).is_some());
+        assert!(family_tests_v1(&set, &[0], 999, 3, periods).is_ok());
+    }
+
+    /// D-0742's open half, D-1990: a block longer than the series is refused
+    /// by every entry point, even under the ppm ceiling. Measured before the
+    /// fix: over 400 periods of pure noise, a block of 40,000 put 36 of 40
+    /// families under p = 0.05.
+    #[test]
+    fn a_block_longer_than_the_series_is_refused_by_every_entry_point() {
+        let periods = 200_usize;
+        let longer = periods + 1;
+        assert!(longer <= super::MAX_BLOCK, "under the ppm ceiling");
+        let set = vec![edged(periods, 11, 3), edged(periods, 12, 0)];
+        assert!(reality_check(&set, 999, 3, longer).is_none());
+        assert!(spa(&set, 999, 3, longer).is_none());
+        assert!(white_reality_check_receipt_v1(&set, 999, 3, longer).is_none());
+        assert!(spa_receipt_v1(&set, 999, 3, longer).is_none());
+        assert!(romano_wolf_receipt(&set, 999, 3, longer, 50_000).is_none());
+        assert!(romano_wolf_adjusted_p_values_v1(&set, 999, 3, longer).is_none());
+        let strong = vec![edged(periods, 21, 60), edged(periods, 22, 0)];
+        assert!(romano_wolf(&strong, 999, 3, longer, 50_000).is_empty());
+        assert_eq!(
+            family_tests_v1(&set, &[0], 999, 3, longer).err(),
+            Some(FamilyTestsRefusalV1::RomanoWolf)
+        );
+        assert_eq!(
+            family_tests_v1(&set, &[], 999, 3, longer).err(),
+            Some(FamilyTestsRefusalV1::White)
+        );
     }
 }
 

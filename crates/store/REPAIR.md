@@ -63,8 +63,16 @@ Completion bytes:
 | 16 | 64 | Original expected header, encoded with its existing slot CRC |
 | 80 | 64 | Revised committed header, encoded with its existing slot CRC |
 
-Both headers retain their existing format/version and CRC contracts. The new
-file's bar format remains V2; revision ordinal is not a bar format version.
+Each header keeps the format/version and CRC contract of the file it came
+from. The revised file is created through `BarFile::open_or_create`, so it is
+born at `store::layout::Layout::CURRENT` — bar **version 3** since D-1571, with
+mandatory block checksums — whatever the source month's version. A revision of
+a version-2 month therefore embeds a version-2 original header and a version-3
+revised header; the two versions share one bar geometry (56-byte stride,
+73-record blocks, the same slot), so the records are byte-compatible. The
+revision ordinal is not a bar format version. (This said "The new file's bar
+format remains V2", which stopped being true at D-1571;
+tests-docs-security-pass14 P14-05, D-1959.)
 On open the receipt's magic, ordinal, exact length, header CRCs, symbol,
 timeframe, checksum flags, bounds, and agreement with the opened revised
 header are checked. Block CRCs are checked lazily by the existing read path.

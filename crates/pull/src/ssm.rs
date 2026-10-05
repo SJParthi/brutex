@@ -241,6 +241,7 @@ impl AwsIdentity {
     /// [`SsmError`] naming the variable that was missing, so an operator is
     /// told which one to set rather than that "AWS failed".
     pub fn from_env() -> Result<Self, SsmError> {
+        refuse_non_unicode(|name| std::env::var(name))?;
         Self::from_lookup(|name| std::env::var(name).ok())
     }
 
@@ -305,6 +306,7 @@ impl AwsIdentity {
     /// [`SsmError`] naming every place that was looked at, so "no credentials"
     /// is never the whole message.
     pub fn discover() -> Result<Self, SsmError> {
+        refuse_non_unicode(|name| std::env::var(name))?;
         Self::discover_from(|name| std::env::var(name).ok(), Self::from_shared_file)
     }
 
@@ -372,12 +374,12 @@ impl AwsIdentity {
                 "HOME is unset, so ~/.aws/credentials cannot be located".to_owned(),
             ));
         };
-        Self::from_credentials_file(
-            &std::path::PathBuf::from(home)
-                .join(".aws")
-                .join("credentials"),
-            profile,
-        )
+        // AN EMPTY OR RELATIVE HOME IS REFUSED, not read as the working
+        // directory's `.aws/credentials` (CE-38, D-1769).
+        let home = brutex_core::knob::home(Some(home)).map_err(|why| {
+            SsmError::unreachable(format!("{why}, so ~/.aws/credentials cannot be located"))
+        })?;
+        Self::from_credentials_file(&home.join(".aws").join("credentials"), profile)
     }
 
     /// One profile out of a credentials file **the caller names**.
@@ -494,6 +496,35 @@ fn non_blank(value: Option<String>) -> Option<String> {
     value.filter(|v| !v.trim().is_empty())
 }
 
+/// The four AWS identity variables this module reads.
+const AWS_IDENTITY_VARS: [&str; 4] = [
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_PROFILE",
+];
+
+/// Refuses, by name, an AWS identity variable that is set but not UTF-8.
+///
+/// `std::env::var(..).ok()` reads a non-UTF-8 value as UNSET, so a mangled
+/// `AWS_PROFILE` or key pair silently signed as `[default]`: an identity the
+/// operator did not choose, which D-1534 already refuses for the half-set
+/// case. Other environment readers in the workspace refuse non-UTF-8 by name,
+/// and this now does too (CE-69, D-1772). Four lookups, whatever the input.
+fn refuse_non_unicode(
+    read: impl Fn(&str) -> Result<String, std::env::VarError>,
+) -> Result<(), SsmError> {
+    for name in AWS_IDENTITY_VARS {
+        if let Err(std::env::VarError::NotUnicode(_)) = read(name) {
+            return Err(SsmError::unreachable(format!(
+                "{name} is set but is not valid UTF-8. Refused rather than \
+                 read as unset, which would sign as a different AWS identity."
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Lower-case hex, which is the only encoding `SigV4` accepts.
 ///
 /// Written out rather than pulled in: a `hex` dependency for sixteen characters
@@ -539,9 +570,16 @@ fn hmac(key: &[u8], data: &str) -> Vec<u8> {
 /// for the next, and one derived for `ap-south-1` cannot sign for anywhere else
 /// — which is why a leaked signature is worth so much less than a leaked secret.
 fn signing_key(secret: &str, date: &str, region: &str) -> Vec<u8> {
+    signing_key_for(secret, date, region, SERVICE)
+}
+
+/// [`signing_key`] for a named service. Split out so the derivation can be
+/// checked against the vector AWS publishes, which is for service `iam`; this
+/// module only ever signs for [`SERVICE`].
+fn signing_key_for(secret: &str, date: &str, region: &str, service: &str) -> Vec<u8> {
     let k_date = hmac(format!("AWS4{secret}").as_bytes(), date);
     let k_region = hmac(&k_date, region);
-    let k_service = hmac(&k_region, SERVICE);
+    let k_service = hmac(&k_region, service);
     hmac(&k_service, "aws4_request")
 }
 
@@ -553,7 +591,7 @@ fn signing_key(secret: &str, date: &str, region: &str) -> Vec<u8> {
 /// `crate::ingest::parse_window` takes `today`: a function that reads the clock
 /// cannot be tested at its own boundary, and a signature is only checkable
 /// against a fixed instant.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct Signable<'a> {
     /// The host header, `ssm.<region>.amazonaws.com`.
     pub host: &'a str,
@@ -565,6 +603,22 @@ pub struct Signable<'a> {
     pub body: &'a str,
     /// The session token, when the identity carries one.
     pub session_token: Option<&'a str>,
+}
+
+/// Redacted like [`AwsIdentity`]: the body names the real parameter path, which
+/// `CLAUDE.md` §8 keeps out of every tracked file, and the session token is a
+/// credential. A derived `Debug` printed both into any panic or log line that
+/// formatted a `Signable` (P11-02, D-1776).
+impl core::fmt::Debug for Signable<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Signable")
+            .field("host", &self.host)
+            .field("region", &self.region)
+            .field("stamp", &self.stamp)
+            .field("body", &"<redacted>")
+            .field("session_token", &self.session_token.map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 impl Signable<'_> {
@@ -1188,10 +1242,32 @@ mod tests {
     /// endpoint, where it reads as a credentials problem.
     #[test]
     fn the_signing_key_matches_the_published_derivation() {
+        // THE PUBLISHED VECTOR, COMPARED (P1-14-01). This test said it checked
+        // AWS's derivation and asserted only length, determinism and
+        // inequality, which every HMAC chain satisfies: `AWS{secret}` for
+        // `AWS4{secret}`, a renamed `aws4_request` or reordered links all
+        // passed. AWS's "derive a signing key" example is for service `iam`
+        // with this secret, date and region, and its documented key is the
+        // hex below.
+        assert_eq!(
+            hex(&signing_key_for(
+                EXAMPLE_SECRET,
+                "20150830",
+                "us-east-1",
+                "iam"
+            )),
+            "c4afb1cc5771d871763a393e44b703571b55cc28424d1a5e86da6ed3c154a4b9",
+            "AWS's published signing key for its own worked example"
+        );
         let key = signing_key(EXAMPLE_SECRET, "20150830", "us-east-1");
-        // AWS's own worked example for service `iam`; this module signs for
-        // `ssm`, so the chain is re-derived here with the same first three
-        // links and asserted to be 32 bytes of HMAC-SHA256 output.
+        // The same chain for `ssm`, the one service this module signs for,
+        // computed outside this crate (an HMAC-SHA256 chain in another tool)
+        // from the same four links.
+        assert_eq!(
+            hex(&key),
+            "1b014a52e2c4682dbb4f9c057f77de175576bae388238bec84a63594a1c63358",
+            "the published chain with service `ssm`"
+        );
         assert_eq!(key.len(), 32, "HMAC-SHA256 is 32 bytes");
         // Deterministic: the same inputs give the same key, every time.
         assert_eq!(key, signing_key(EXAMPLE_SECRET, "20150830", "us-east-1"));
@@ -1330,6 +1406,17 @@ mod tests {
             session_token: None,
         };
         let header = signable.authorization(&identity()).expect("signs");
+        // THE WHOLE HEADER, PINNED (P1-14-01). The value was computed outside
+        // this crate by an independent `SigV4` implementation following AWS's
+        // specification (canonical request, string to sign, four-link key) for
+        // exactly these inputs, so a reordered string-to-sign or a changed
+        // chain fails here rather than against a live endpoint.
+        assert_eq!(
+            header,
+            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260807/ap-south-1/ssm/aws4_request, \
+             SignedHeaders=content-type;host;x-amz-date;x-amz-target, \
+             Signature=75a1dae843ac5a003e5a5e6e6cd8a3df0742ea7d527203b07a96e1024149233d"
+        );
         assert!(header.starts_with("AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260807/"));
         assert!(header.contains("/ap-south-1/ssm/aws4_request"));
         assert!(header.contains("SignedHeaders=content-type;host;x-amz-date;x-amz-target"));
@@ -1764,6 +1851,50 @@ mod tests {
         assert_eq!(kind, SecretError::Unreachable);
         assert!(detail.contains("ap-south-1"), "{detail}");
         assert!(detail.contains("§8"), "{detail}");
+    }
+
+    /// CE-69: a non-UTF-8 AWS variable is refused by name, not read as unset.
+    #[test]
+    fn a_non_unicode_aws_variable_is_refused_by_name() {
+        use std::env::VarError;
+        for bad in AWS_IDENTITY_VARS {
+            let read = |name: &str| {
+                if name == bad {
+                    Err(VarError::NotUnicode(std::ffi::OsString::from("x")))
+                } else {
+                    Err(VarError::NotPresent)
+                }
+            };
+            let Err(SsmError { detail, .. }) = refuse_non_unicode(read) else {
+                panic!("{bad} not UTF-8 must be refused")
+            };
+            assert!(detail.contains(bad), "the refusal names {bad}: {detail}");
+        }
+        let unset = refuse_non_unicode(|_: &str| Err(VarError::NotPresent));
+        assert!(unset.is_ok(), "unset variables are not refused here");
+        let set = refuse_non_unicode(|_: &str| Ok("AKIAEXAMPLE".to_owned()));
+        assert!(set.is_ok(), "UTF-8 values pass");
+    }
+
+    /// P11-02: a formatted `Signable` names neither the body nor the token.
+    #[test]
+    fn a_signable_prints_no_parameter_path_and_no_token() {
+        let signable = Signable {
+            host: "ssm.ap-south-1.amazonaws.com",
+            region: "ap-south-1",
+            stamp: "20261004T000000Z",
+            body: r#"{"Name":"PARAMETER-NAME"}"#,
+            session_token: Some("TOKEN-VALUE"),
+        };
+        let shown = format!("{signable:?}");
+        assert!(
+            !shown.contains("PARAMETER-NAME") && !shown.contains("TOKEN-VALUE"),
+            "{shown}"
+        );
+        assert!(
+            shown.contains("ap-south-1") && shown.contains("<redacted>"),
+            "{shown}"
+        );
     }
 
     /// **A FIFO AT `~/.aws/credentials` IS REFUSED, NOT WAITED ON.** P1-19-03,

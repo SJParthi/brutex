@@ -69,3 +69,63 @@ pub const O_NOFOLLOW_NONBLOCK: i32 = 0x8800;
 /// `O_NOFOLLOW | O_NONBLOCK` on macOS: `0x100 | 0x4`.
 #[cfg(target_os = "macos")]
 pub const O_NOFOLLOW_NONBLOCK: i32 = 0x0104;
+
+/// Linux UAPI `include/uapi/asm-generic/errno.h`: `ELOOP 40`, the error an
+/// `O_NOFOLLOW` open of a final symlink returns. Shared by `x86_64` and
+/// aarch64. `std`'s `ErrorKind::FilesystemLoop` is not stable on this
+/// toolchain, so the writer compares the raw code (CE-62, D-2686).
+#[cfg(all(
+    any(target_os = "linux", target_os = "android"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+pub const ELOOP: i32 = 40;
+
+/// macOS SDK `sys/errno.h`: `ELOOP 62`.
+#[cfg(target_os = "macos")]
+pub const ELOOP: i32 = 62;
+
+/// Opens `path` for reading with [`O_NOFOLLOW_NONBLOCK`]: a FIFO with no
+/// writer opens at once instead of waiting, and a final symlink is refused by
+/// the host (`ELOOP`). The caller checks the handle's own `fstat`.
+///
+/// Here so a crate that reads one bounded file by path (`pull`'s census and
+/// master readers, CE-64 and CE-65, D-2684) names no per-architecture value of
+/// its own. On a target with no verified flag value the open is refused as
+/// unsupported rather than risk a blocking one.
+///
+/// # Errors
+///
+/// The host's error for the open, or `Unsupported` on an unverified target.
+#[cfg(any(
+    target_os = "macos",
+    all(
+        any(target_os = "linux", target_os = "android"),
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+pub fn open_read_no_follow(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW_NONBLOCK)
+        .open(path)
+}
+
+/// [`open_read_no_follow`] on a target with no verified flag value: refused.
+///
+/// # Errors
+///
+/// Always `Unsupported`.
+#[cfg(not(any(
+    target_os = "macos",
+    all(
+        any(target_os = "linux", target_os = "android"),
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+)))]
+pub fn open_read_no_follow(_path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "bounded reads require verified macOS or Linux x86_64/aarch64 open flags",
+    ))
+}

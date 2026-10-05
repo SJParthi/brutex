@@ -308,19 +308,32 @@ fn receipt_fifo_cannot_block_either_read_or_publication() -> Result<(), Box<dyn 
             .status()?
             .success()
     );
+    // THE CHILD MUST PROVE IT RAN (P1-10-02): a status alone passes on a
+    // child whose `--exact` matched nothing. The path comes from
+    // `module_path!()` and the child's `1 passed` line is required.
+    let test = concat!(
+        module_path!(),
+        "::receipt_fifo_cannot_block_either_read_or_publication"
+    );
+    let test = test.split_once("::").map_or(test, |(_, path)| path);
     let mut child = std::process::Command::new(std::env::current_exe()?)
-        .args([
-            "--exact",
-            "checksum_receipts::tests::receipt_fifo_cannot_block_either_read_or_publication",
-        ])
+        .args(["--exact", test])
         .env(PROBE, &path)
-        .stdout(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()?;
     let started = std::time::Instant::now();
     loop {
         if let Some(status) = child.try_wait()? {
-            assert!(status.success());
+            let mut stdout = String::new();
+            if let Some(mut pipe) = child.stdout.take() {
+                std::io::Read::read_to_string(&mut pipe, &mut stdout)?;
+            }
+            assert!(status.success(), "{stdout}");
+            assert!(
+                stdout.contains("test result: ok. 1 passed;"),
+                "the child must run exactly this one test:\n{stdout}"
+            );
             break;
         }
         if started.elapsed() > std::time::Duration::from_secs(2) {

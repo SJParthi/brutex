@@ -213,3 +213,20 @@ export function strikeExact(paisa) {
   const body = paise === 0 ? String(rupees) : `${rupees}.${String(paise).padStart(2, '0')}`;
   return neg ? `-${body}` : body;
 }
+
+/**
+ * The symbol a sweep is asked for, from a census instrument name.
+ *
+ * `NSE-CASH-BAJAJ-AUTO` is `BAJAJ-AUTO`, not `AUTO`: a symbol may hold a `-`,
+ * so the name is everything after the exchange and segment, read by
+ * {@link parseKey}. Only a spot series is swept; a future or option row
+ * answers `null` rather than lending its months to the underlying's spot
+ * series (P3-02-02, D-1769).
+ *
+ * @param {unknown} full
+ * @returns {string|null}
+ */
+export function sweptSymbolOf(full) {
+  const p = parseKey(full);
+  return p.kind === 'spot' && p.underlying ? p.underlying : null;
+}

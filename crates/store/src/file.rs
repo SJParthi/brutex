@@ -64,12 +64,15 @@
 //! * A network filesystem whose lock is a fiction. `flock` over NFS is
 //!   emulated, and over some mounts it is a no-op that reports success.
 //!   `docs/02-store-format.md` §9 already says to keep the store on local disk.
-//! * A symlink at any path component. [`crate::path::StorePath`] guarantees a
-//!   **lexical** property only, and this module resolves nothing: it opens the
-//!   rendered path with an ordinary `open`, so `bars/groww` linked at
-//!   `bars/dhan` sends one vendor's writes into another's file with the lock
-//!   held on the wrong month. Closing it needs `openat` with `O_NOFOLLOW` per
-//!   component.
+//! * A symlink swapped into a DIRECTORY component between the writer's walk
+//!   and its open. [`crate::path::StorePath`] guarantees a **lexical**
+//!   property only, so `bars/groww` linked at `bars/dhan` would send one
+//!   vendor's writes into another's file. The writer refuses every link it
+//!   finds below the root by `symlink_metadata` before creating anything, and
+//!   opens the month file, its lock and its sidecar with `O_NOFOLLOW`, so a
+//!   leaf link is refused at the open itself (CE-62, D-2686). A directory
+//!   link placed after the walk is still followed: closing that window needs
+//!   `openat` per component, which `std` does not offer without `unsafe`.
 //! * A crash. The lock is released by the kernel when the process dies, which
 //!   is the property a lock *file* created with `O_EXCL` would not have — that
 //!   was the alternative, and it was rejected because a crashed writer would
@@ -433,12 +436,33 @@ pub enum StoreError {
         /// Which operation refused.
         action: Action,
     },
+    /// The writer met a symbolic link at a path component below the store
+    /// root, or at the month file, its lock or its sidecar.
+    ///
+    /// Vendor-prefix isolation is a LEXICAL property of `StorePath`: a link at
+    /// `bars/groww` naming `bars/dhan` sends one vendor's appends into
+    /// another's month with the lock held on the wrong file. The writer
+    /// therefore refuses every link it meets and names the linked component
+    /// (`docs/02-store-format.md` §9). CE-62, D-2686.
+    Symlinked {
+        /// The component that is a link (not the link's target).
+        path: PathBuf,
+    },
     /// The path is not there. `ENOENT`.
     Missing {
         /// The path that does not exist.
         path: PathBuf,
         /// Which operation refused.
         action: Action,
+    },
+    /// A durability barrier on this month already failed in this process.
+    ///
+    /// Linux marks the pages of a failed `fsync` clean, so a second barrier
+    /// would report success without proving anything reached the device. The
+    /// month takes no further append from this process. D-1907.
+    BarrierFailed {
+        /// The month whose barrier failed.
+        path: PathBuf,
     },
     /// The host refused for a reason this module does not classify.
     ///
@@ -1004,9 +1028,11 @@ impl fmt::Display for StoreError {
             }
             Self::NotADirectory { path, action } => write_not_a_directory(f, path, *action),
             Self::NotARegularFile { path, action } => write_not_regular(f, path, *action),
+            Self::Symlinked { path } => write_symlinked(f, path),
             Self::Missing { path, action } => {
                 write!(f, "{} does not exist, {action} it", path.display())
             }
+            Self::BarrierFailed { path } => write_barrier_failed(f, path),
             Self::Io {
                 path,
                 action,
@@ -1455,6 +1481,14 @@ impl BarFile {
         // that names it. Found before creating, so a directory that already
         // existed costs nothing; bounded by the path's depth below the root.
         // audit-20261003 hunt-store-4, D-1522.
+        // NO LINK BELOW THE ROOT IS FOLLOWED (CE-62, D-2686). `create_dir_all`
+        // and an ordinary `open` both resolve links, so a linked directory or
+        // month file sent this month's appends wherever the link pointed.
+        // Every existing component from the root down to the month file is
+        // asked with `symlink_metadata`, which never follows, before anything
+        // is created; the leaves are then opened with `O_NOFOLLOW` as well, so
+        // a link swapped in after this walk still fails at the open.
+        refuse_links_below(root, &bars_path)?;
         let created = missing_below(root, &dir);
         fault(fs::create_dir_all(&dir), &dir, Action::CreateDir)?;
         for made in &created {
@@ -1464,8 +1498,9 @@ impl BarFile {
         // The lock is taken before the bar file is opened, let alone measured.
         // Everything below this line assumes exactly one writer. Every `?`
         // below it releases the month through the guard's explicit unlock.
+        refuse_link(&lock_path)?;
         let lock = Flock::try_lock(
-            fault(open_rw(&lock_path), &lock_path, Action::Open)?,
+            writer_open(open_rw(&lock_path), &lock_path)?,
             lock_path.clone(),
         )
         .map_err(|refusal| lock_fault(&lock_path, refusal))?;
@@ -1474,7 +1509,7 @@ impl BarFile {
         // existed can have been truncated or zeroed; one this open creates was
         // deleted whole, an explicit act D-1520 does not second-guess.
         let existed = matches!(fs::symlink_metadata(&bars_path), Ok(meta) if meta.is_file());
-        let bars = fault(open_rw(&bars_path), &bars_path, Action::Open)?;
+        let bars = writer_open(open_rw(&bars_path), &bars_path)?;
         let mut len = fault(bars.metadata(), &bars_path, Action::Measure)?.len();
 
         // `len == 0` WAS THE REPAIR CONDITION, AND IT DID NOT COVER THE CRASH.
@@ -1912,6 +1947,22 @@ impl BarFile {
                 asked: timeframe_secs,
             });
         }
+        // THE COUNTER AND THE RANGE AGAINST THE MONTH, not only the length
+        // (CE-61, CE-63, D-2685). `Header::validate` bounds `n_valid` by the
+        // bytes the file has, and a sparse file has as many as it claims: a
+        // CRC-valid slot naming 2^34 records opened, and every reader that
+        // sized a vector or a loop from it (`api::bars::window`,
+        // `read_month_bars`, `calendar_of`, the ingest history checks) aborted
+        // or spun. The writer can never commit past the month's grid, so the
+        // writer's own bound is the reader's. A range outside the month is the
+        // same kind of fault, named as a header fault rather than found later
+        // as an overlap that blames an offered batch.
+        if let Err(source) = Admission::new(month, timeframe_secs).admit_header(&header) {
+            return Err(StoreError::Format {
+                path: bars_path,
+                source,
+            });
+        }
         // THE SIDECAR IS OPENED ONLY IF THE HEADER SAYS THERE IS ONE.
         //
         // Asked of the FLAG and never of the filesystem: a `.crc` that exists
@@ -1963,15 +2014,17 @@ impl BarFile {
                     // checksum file. Missing existing evidence is a refusal,
                     // never permission to seal history anew.
                     let fresh = header.n_valid == 0;
-                    let sidecar = fault(
-                        File::options()
-                            .read(true)
-                            .write(true)
-                            .create(fresh)
-                            .truncate(false)
-                            .open(at),
+                    refuse_link(at)?;
+                    let sidecar = writer_open(
+                        no_follow(
+                            File::options()
+                                .read(true)
+                                .write(true)
+                                .create(fresh)
+                                .truncate(false),
+                        )
+                        .open(at),
                         at,
-                        Action::Open,
                     )?;
                     // THE SIDECAR'S NAME IS DURABLE BEFORE ANY COMMIT NEEDS IT.
                     //
@@ -2137,7 +2190,7 @@ impl BarFile {
                 &sum.to_le_bytes(),
             )?;
         }
-        fault(crc.sync_all(), &self.bars_path, Action::Sync)
+        barrier(crc, &self.bars_path)
     }
 
     /// Verifies the old tail block's committed prefix against its existing
@@ -2250,6 +2303,27 @@ impl BarFile {
         })
     }
 
+    /// The checks every append makes before it reads a bar.
+    fn may_append<R: Row>(&self) -> Result<(), StoreError> {
+        // THE FILE'S STRIDE AND THE RECORD'S WIDTH MUST AGREE. Writing a
+        // 24-byte record into a 56-byte geometry lays every field at the wrong
+        // offset and the CRC would still pass, because the bytes written are
+        // the bytes read back. Refused here, once, before any of them move.
+        if u64::try_from(R::LEN) != Ok(self.layout.record_stride()) {
+            return Err(StoreError::NotABarPath {
+                found: FileKind::Overlay,
+            });
+        }
+        // A MONTH WHOSE BARRIER FAILED TAKES NO FURTHER APPEND IN THIS
+        // PROCESS (D-1907, store1-2). Linux marks the pages of a failed
+        // `fsync` clean, so a second barrier returns success without writing
+        // them: re-issuing the same append would "commit" records that may
+        // never have reached the device, and the duplicate check below would
+        // answer `AlreadyPresent` from the page cache for a header slot whose
+        // barrier failed. Both are refused by name instead.
+        refuse_after_failed_barrier(&self.bars_path)
+    }
+
     /// Appends a batch and publishes it.
     ///
     /// The sequence is `docs/02-store-format.md` §5: the records are written
@@ -2284,15 +2358,7 @@ impl BarFile {
     /// the host refuses: [`StoreError::DiskFull`], [`StoreError::ShortWrite`],
     /// [`StoreError::Denied`], [`StoreError::Io`].
     pub fn append<R: Row>(&mut self, batch: &[R]) -> Result<Appended, StoreError> {
-        // THE FILE'S STRIDE AND THE RECORD'S WIDTH MUST AGREE. Writing a
-        // 24-byte record into a 56-byte geometry lays every field at the wrong
-        // offset and the CRC would still pass, because the bytes written are
-        // the bytes read back. Refused here, once, before any of them move.
-        if u64::try_from(R::LEN) != Ok(self.layout.record_stride()) {
-            return Err(StoreError::NotABarPath {
-                found: FileKind::Overlay,
-            });
-        }
+        self.may_append::<R>()?;
         let (first_ts, last_ts) = survey(batch)?;
         self.admission.admit(batch)?;
         let count = len_u64(batch.len());
@@ -2429,7 +2495,7 @@ impl BarFile {
         // below `commit.durable_through` is on stable storage when the second
         // write is issued.
         write_fully(&self.bars, &self.bars_path, at, &image)?;
-        fault(self.bars.sync_all(), &self.bars_path, Action::Sync)?;
+        barrier(&self.bars, &self.bars_path)?;
 
         // THE CHECKSUMS, BETWEEN THE RECORDS AND THE COMMIT. The ORDER is the
         // whole guarantee, and the other order is unsafe:
@@ -2459,7 +2525,7 @@ impl BarFile {
         // Step 4 and step 5: one write of one self-checked 64-byte unit, into
         // the slot that does not hold the previous commit.
         write_fully(&self.bars, &self.bars_path, commit.offset, &commit.bytes)?;
-        fault(self.bars.sync_all(), &self.bars_path, Action::Sync)?;
+        barrier(&self.bars, &self.bars_path)?;
 
         self.header = commit.header;
         // THE WRITE ITSELF, ONCE IT IS DURABLE — after the second `sync_all`,
@@ -3441,6 +3507,41 @@ impl Admission {
         }
     }
 
+    /// The most records the month holds on this rung's grid: the month's
+    /// length over the grid width. The writer admits no stamp outside the
+    /// month or off the grid and commits strictly increasing stamps, so no
+    /// committed counter exceeds this. On the daily rung the grid is one
+    /// second (any whole second is admitted), so the bound is the month's
+    /// seconds: loose, and still the writer's own. CE-61, D-2685; proved by
+    /// `store::write::a_header_counting_more_records_than_its_month_holds_is_refused`.
+    pub(crate) const fn slots(&self) -> u64 {
+        // `until > from` for every month and `width >= 1_000_000`, so the
+        // quotient is positive and fits.
+        ((self.until - self.from) / self.width).unsigned_abs()
+    }
+
+    /// The header-level half of [`Self::admit`]: a non-empty header's counter
+    /// within [`Self::slots`] and its range inside the month. Two comparisons
+    /// and one division, once per open. CE-61 and CE-63, D-2685.
+    pub(crate) const fn admit_header(&self, header: &Header) -> Result<(), FormatError> {
+        let slots = self.slots();
+        if header.n_valid > slots {
+            return Err(FormatError::CounterExceedsMonth {
+                n_valid: header.n_valid,
+                slots,
+            });
+        }
+        if header.n_valid > 0
+            && (header.first_ts_micros < self.from || header.last_ts_micros >= self.until)
+        {
+            return Err(FormatError::RangeOutsideMonth {
+                first_ts_micros: header.first_ts_micros,
+                last_ts_micros: header.last_ts_micros,
+            });
+        }
+        Ok(())
+    }
+
     pub(crate) fn admit<R: Row>(&self, batch: &[R]) -> Result<(), StoreError> {
         for (offset, row) in batch.iter().enumerate() {
             let ts_micros = row.stamp();
@@ -3929,14 +4030,90 @@ fn fsync_dir(dir: &Path) -> Result<(), StoreError> {
     fault(handle.sync_all(), dir, Action::Sync)
 }
 
-/// Opens for reading and writing, creating but never truncating.
+/// Opens for reading and writing, creating but never truncating, and never
+/// through a final symlink (CE-62, D-2686).
 fn open_rw(path: &Path) -> io::Result<File> {
-    File::options()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
+    no_follow(
+        File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false),
+    )
+    .open(path)
+}
+
+/// `O_NOFOLLOW` on the hosts `crate::open_flags` has a verified value for.
+/// Elsewhere the options are returned unchanged and [`refuse_link`]'s
+/// `symlink_metadata` check is the only guard, which is weaker by the window
+/// between the check and the open.
+fn no_follow(options: &mut fs::OpenOptions) -> &mut fs::OpenOptions {
+    #[cfg(any(
+        target_os = "macos",
+        all(
+            any(target_os = "linux", target_os = "android"),
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    ))]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(crate::open_flags::O_NOFOLLOW);
+    }
+    options
+}
+
+/// A writer open's failure, named: a final symlink the kernel refused under
+/// `O_NOFOLLOW` (`ELOOP`) is [`StoreError::Symlinked`], everything else is
+/// what [`classify`] says it is.
+fn writer_open(opened: io::Result<File>, path: &Path) -> Result<File, StoreError> {
+    opened.map_err(|why| {
+        #[cfg(any(
+            target_os = "macos",
+            all(
+                any(target_os = "linux", target_os = "android"),
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            )
+        ))]
+        if why.raw_os_error() == Some(crate::open_flags::ELOOP) {
+            return StoreError::Symlinked {
+                path: path.to_path_buf(),
+            };
+        }
+        classify(path, Action::Open, &why)
+    })
+}
+
+/// [`StoreError::Symlinked`] when `path` itself is a link. Asked with
+/// `symlink_metadata`, which never follows; an absent path is not a link.
+fn refuse_link(path: &Path) -> Result<(), StoreError> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(StoreError::Symlinked {
+            path: path.to_path_buf(),
+        }),
+        _ => Ok(()),
+    }
+}
+
+/// [`refuse_link`] for every component of `leaf` below `root`, root-most
+/// first, stopping at the first that does not exist (nothing below it can).
+/// The root itself is the operator's to place and may be a link. Bounded by
+/// the path's depth below the root, which `crate::path` fixes.
+fn refuse_links_below(root: &Path, leaf: &Path) -> Result<(), StoreError> {
+    let Ok(below) = leaf.strip_prefix(root) else {
+        return Ok(());
+    };
+    let mut at = root.to_path_buf();
+    for part in below.components() {
+        at.push(part);
+        match fs::symlink_metadata(&at) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(StoreError::Symlinked { path: at });
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    Ok(())
 }
 
 /// A file, seen as the two positional calls this module makes of it.
@@ -4097,6 +4274,72 @@ fn lock_fault(path: &Path, refusal: TryLockError) -> StoreError {
     }
 }
 
+/// [`StoreError::Symlinked`]'s sentence.
+fn write_symlinked(f: &mut fmt::Formatter<'_>, path: &Path) -> fmt::Result {
+    write!(
+        f,
+        "{} is a symbolic link, and the bar writer follows none below the store \
+         root: a link there can send one vendor's appends into another's month. \
+         Nothing was opened through it",
+        path.display()
+    )
+}
+
+/// [`StoreError::BarrierFailed`]'s sentence.
+fn write_barrier_failed(f: &mut fmt::Formatter<'_>, path: &Path) -> fmt::Result {
+    write!(
+        f,
+        "a durability barrier on {} already failed in this process; a second barrier cannot prove its bytes reached the device, so it takes no further append",
+        path.display()
+    )
+}
+
+/// Every month whose durability barrier failed in this process. Process-wide,
+/// because a second handle on the same path shares the same page cache.
+static FAILED_BARRIERS: Mutex<std::collections::BTreeSet<PathBuf>> =
+    Mutex::new(std::collections::BTreeSet::new());
+
+/// The durability barrier of an append. A failure is remembered for `path`
+/// before it is returned, so no later append confirms it with a second one.
+fn barrier(file: &File, path: &Path) -> Result<(), StoreError> {
+    sync_hooked(file).map_err(|refusal| {
+        FAILED_BARRIERS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(path.to_path_buf());
+        classify(path, Action::Sync, &refusal)
+    })
+}
+
+/// `sync_all`, through the thread-local test fault injector.
+///
+/// The injector is compiled out of production and ADDS a branch under test
+/// rather than replacing one, so the `sync_all` line that ships is the line
+/// every test runs. It used to be a `cfg(test)`/`cfg(not(test))` fork whose
+/// production arm no test compiled (P10-07, D-2740); this is the shape of
+/// `cli::fixed_tail::sync_all_hooked` (D-1902).
+fn sync_hooked(file: &File) -> io::Result<()> {
+    #[cfg(test)]
+    if tests::sync_fault_fires() {
+        return Err(io::Error::other("injected sync fault"));
+    }
+    file.sync_all()
+}
+
+/// Refuses an append to a month whose barrier already failed in this process.
+fn refuse_after_failed_barrier(path: &Path) -> Result<(), StoreError> {
+    if FAILED_BARRIERS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains(path)
+    {
+        return Err(StoreError::BarrierFailed {
+            path: path.to_path_buf(),
+        });
+    }
+    Ok(())
+}
+
 /// Lifts an [`io::Result`] into this module's errors.
 fn fault<T>(result: io::Result<T>, path: &Path, action: Action) -> Result<T, StoreError> {
     match result {
@@ -4135,6 +4378,68 @@ fn len_u64(len: usize) -> u64 {
 )]
 mod tests {
     use std::cell::{Cell, RefCell};
+
+    thread_local! {
+        /// Barriers to let pass on this thread before one fails.
+        static SYNC_FAULT: Cell<Option<u32>> = const { Cell::new(None) };
+    }
+
+    /// Whether the armed barrier fault fires now; it fires once.
+    pub(super) fn sync_fault_fires() -> bool {
+        SYNC_FAULT.with(|armed| match armed.get() {
+            Some(0) => {
+                armed.set(None);
+                true
+            }
+            Some(left) => {
+                armed.set(Some(left - 1));
+                false
+            }
+            None => false,
+        })
+    }
+
+    /// store1-2, D-1907: a failed append barrier is never confirmed. The
+    /// same handle, a reopened handle, and the duplicate check all refuse the
+    /// month by name rather than "committing" or answering `AlreadyPresent`
+    /// from a page cache whose barrier failed.
+    #[test]
+    fn a_failed_append_barrier_is_never_confirmed_by_a_later_append() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+        for skip in [0_u32, 1, 2] {
+            let (path, mut file) = month(&format!("failed-barrier-{skip}"));
+            let batch: Vec<Bar> = (0..3).map(bar).collect();
+            SYNC_FAULT.with(|armed| armed.set(Some(skip)));
+            let refusal = file.append(&batch);
+            assert!(
+                matches!(
+                    refusal,
+                    Err(StoreError::Io {
+                        action: Action::Sync,
+                        ..
+                    })
+                ),
+                "barrier {skip}: {refusal:?}"
+            );
+            assert!(!sync_fault_fires(), "barrier {skip} fired");
+            let barred = Err(StoreError::BarrierFailed { path: path.clone() });
+            assert_eq!(file.append(&batch), barred, "the same handle");
+            drop(file);
+            let mut reopened = reopen(&path).expect("the month reopens");
+            assert_eq!(reopened.append(&batch), barred, "a reopened handle");
+            assert_eq!(reopened.append(&[bar(3)]), barred, "any later append");
+            assert!(
+                barred
+                    .clone()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("cannot prove"),
+                "the refusal says why"
+            );
+            drop(reopened);
+            let _ignored = std::fs::remove_file(&path);
+        }
+    }
 
     use super::{
         Action, Appended, Bar, BarFile, FormatError, Layout, NO_BLOCK, Positional, StoreError,

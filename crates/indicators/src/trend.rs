@@ -1567,6 +1567,20 @@ mod tests {
         for _ in 0..3 {
             assert_eq!(run(), first, "a rerun disagreed");
         }
+        // P1-13-01: the equality holds for any deterministic body, a constant
+        // or an always-refusing one included (`filter_map(.ok())` turns the
+        // latter into `[] == []`). Every candle must step, and the run must
+        // not be constant.
+        assert_eq!(first.len(), series.len(), "every fixture candle must step");
+        assert!(
+            first
+                .iter()
+                .skip(1)
+                .zip(first.iter())
+                .any(|(later, earlier)| later != earlier),
+            "every candle produced an identical result, so this test would pass \
+             on a body that ignores its input entirely"
+        );
     }
 
     /// `bits` is a function of the bar, so asking twice gives the same answer.

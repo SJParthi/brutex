@@ -53,6 +53,36 @@
 use crate::census;
 use crate::server::{Loaded, Site, percent_decode};
 
+/// How many legs one press may carry: one per feed, per rung the ingest page
+/// offers (`1s`, `1min`, `1day`), per route (`/pull/spot`, `/pull/fno`).
+///
+/// A form with more is refused by name ([`Refusal::TooManyLegs`]) rather than
+/// read, so [`MAX_RUN_FORM_BYTES`] has a count to be sized from (P3-01-01,
+/// D-1769).
+pub const MAX_RUN_LEGS: usize = pull::vendor::FEED_COUNT * 3 * 2;
+
+/// The worst size of one `leg=` field: a member form the inner route admits
+/// ([`crate::ingest::MAX_MEMBER_FORM_BYTES`]) plus an ordinary form's worth of
+/// envelope, percent-encoded twice more by the page. Encoding an
+/// already-encoded byte turns `%` into `%25`, so each pass costs at most a
+/// further two bytes per original escape: five bytes per form byte in all.
+pub const MAX_LEG_FIELD_BYTES: usize =
+    "leg=".len() + 5 * (crate::ingest::MAX_MEMBER_FORM_BYTES + crate::server::MAX_FORM_BYTES);
+
+/// The body `/pull/run` and `/pull/recovery` read.
+///
+/// Both carry legs, and each leg repeats its member list twice-encoded, so the
+/// shared 8 KiB bound answered a framework 413 in plain text at about 340
+/// ticked members on one leg and about 55 across six; the page then reported
+/// a `SyntaxError` instead of a reason (P3-01-01, D-1769). Sized so every run
+/// [`legs_from`] would accept is read, and one leg too many reaches
+/// [`Refusal::TooManyLegs`]. 27,347,836 bytes at most — about 27.3 MB, or
+/// 26.1 MiB — held in memory once; see `docs/06-limits.md`. (This said "about
+/// 26.5 MB", which is neither unit; tests-docs-security-pass17 P17-19,
+/// D-1967, and `the_run_form_bound_is_the_figure_the_limits_document_states`.)
+pub const MAX_RUN_FORM_BYTES: usize =
+    crate::server::MAX_FORM_BYTES + (MAX_RUN_LEGS + 1) * MAX_LEG_FIELD_BYTES;
+
 /// How many passes one press may make.
 ///
 /// A window can be larger than one sitting at a legal rate, so the run keeps
@@ -201,10 +231,11 @@ pub struct Progress {
     pub passes: u32,
     /// How many subsequent passes actually retried at least one failed feed.
     pub retries: u32,
-    /// The store's row count when the run started.
-    pub rows_at_start: u64,
-    /// The store's row count as of the last pass.
-    pub rows_now: u64,
+    /// The store's row count when the run started; `None` when the census
+    /// total does not fit a `u64` (see [`rows_now`]).
+    pub rows_at_start: Option<u64>,
+    /// The store's row count as of the last pass; `None` as above.
+    pub rows_now: Option<u64>,
     /// One per vendor, in the order the feeds were ticked.
     pub feeds: Vec<FeedReport>,
     /// The summary, once there is one. `None` means still running, and it is
@@ -286,9 +317,17 @@ impl Progress {
         out.push_str(",\"retries\":");
         out.push_str(&self.retries.to_string());
         out.push_str(",\"rowsAtStart\":");
-        out.push_str(&self.rows_at_start.to_string());
+        out.push_str(
+            &self
+                .rows_at_start
+                .map_or_else(|| "null".to_owned(), |rows| rows.to_string()),
+        );
         out.push_str(",\"rowsNow\":");
-        out.push_str(&self.rows_now.to_string());
+        out.push_str(
+            &self
+                .rows_now
+                .map_or_else(|| "null".to_owned(), |rows| rows.to_string()),
+        );
         out.push_str(",\"stopping\":");
         out.push_str(if self.stopping { "true" } else { "false" });
         out.push_str(",\"finished\":");
@@ -384,6 +423,18 @@ pub enum Refusal {
     /// A run is already in flight. Named rather than queued: two runs over one
     /// store would interleave two vendors' writes into one month file.
     AlreadyRunning,
+    /// A leg's envelope names a vendor or rung its own payload does not ask
+    /// for. The chain, the ladder and the failure gating all read the
+    /// envelope while the route runs the payload, so the two must be one
+    /// request (P1-02-01, D-1765).
+    Disagrees {
+        /// The leg, decoded once, as it arrived.
+        leg: String,
+        /// Which half disagreed, and with what.
+        why: String,
+    },
+    /// The form carried more legs than one press may ([`MAX_RUN_LEGS`]).
+    TooManyLegs(usize),
 }
 
 impl Refusal {
@@ -404,6 +455,17 @@ impl Refusal {
                  interleave two vendors' writes into a single month file. Watch \
                  /pull/run.json, or stop it first."
                 .to_owned(),
+            Self::Disagrees { leg, why } => format!(
+                "A leg's envelope disagrees with its own payload and NOTHING was \
+                 started -- the run would be filed, ordered and gated under the \
+                 envelope while the payload decides what is fetched. {why}. The \
+                 leg was: {leg}"
+            ),
+            Self::TooManyLegs(count) => format!(
+                "The run carried {count} legs and NOTHING was started. One press \
+                 carries at most {MAX_RUN_LEGS}: one per feed, per rung, per \
+                 route. Split the selection into two presses."
+            ),
         }
     }
 }
@@ -442,6 +504,13 @@ pub fn legs_from(body: &str) -> Result<Vec<Leg>, Refusal> {
         let Some(("leg", raw)) = field.split_once('=') else {
             continue;
         };
+        if legs.len() == MAX_RUN_LEGS {
+            let count = body
+                .split('&')
+                .filter(|field| field.starts_with("leg="))
+                .count();
+            return Err(Refusal::TooManyLegs(count));
+        }
         let decoded = percent_decode(raw);
         let mut parts = decoded.splitn(5, '|');
         let (Some(route), Some(vendor), Some(dir), Some(label), Some(payload)) = (
@@ -469,12 +538,25 @@ pub fn legs_from(body: &str) -> Result<Vec<Leg>, Refusal> {
         // A LEG'S PAYLOAD IS A FORM TOO, and it reaches `pull_spot` and
         // `pull_fno` without passing the `one_value_per_form_field` middleware, so a repeated
         // single-value field inside it is refused here, before any leg runs
-        // (h-api-2, D-1512).
+        // (h-api-2, D-1512), with the middleware's own bound on distinct keys
+        // (P5-05, D-2659).
         let body = percent_decode(payload);
-        if let Some(key) = crate::server::repeated_form_key(&body) {
-            return Err(Refusal::Malformed(format!(
-                "{decoded} (its form names {key:?} more than once)"
-            )));
+        match crate::server::form_key_verdict(&body) {
+            Some(crate::server::FormKeys::Repeated(key)) => {
+                return Err(Refusal::Malformed(format!(
+                    "{decoded} (its form names {key:?} more than once)"
+                )));
+            }
+            Some(crate::server::FormKeys::TooMany) => {
+                return Err(Refusal::Malformed(format!(
+                    "{decoded} (its form names more than {} distinct fields)",
+                    crate::server::MAX_DISTINCT_FORM_KEYS
+                )));
+            }
+            None => {}
+        }
+        if let Some(why) = envelope_disagreement(route, vendor, dir, &body) {
+            return Err(Refusal::Disagrees { leg: decoded, why });
         }
         legs.push(Leg {
             route,
@@ -488,6 +570,43 @@ pub fn legs_from(body: &str) -> Result<Vec<Leg>, Refusal> {
         return Err(Refusal::NothingAsked);
     }
     Ok(legs)
+}
+
+/// Where a leg's envelope and its payload name different requests, or `None`
+/// when they are one.
+///
+/// The payload is read the way the route that runs it reads it: `vendor` through
+/// [`crate::ingest::parse_feed`] (absent means Dhan), and for spot
+/// `granularity` through [`crate::ingest::parse_granularity`] (absent means one
+/// minute), for derivatives `series` through [`crate::ingest::Series`]. That is
+/// the check `recovery::plan` already made on its own legs; `/pull/run`
+/// trusted the label (P1-02-01, D-1765).
+fn envelope_disagreement(route: Route, vendor: &str, dir: &str, body: &str) -> Option<String> {
+    let asked = crate::server::param(body, "vendor");
+    let feed = crate::ingest::parse_feed(&asked).map(pull::vendor::Feed::wire);
+    if feed != Some(vendor) {
+        return Some(format!(
+            "the envelope names vendor {vendor:?} and the payload asks for {asked:?}"
+        ));
+    }
+    let (field, payload_dir) = match route {
+        Route::Spot => {
+            let raw = crate::server::param(body, "granularity");
+            let rung = crate::ingest::parse_granularity(&raw).map(pull::vendor::Granularity::dir);
+            ("granularity", (raw, rung))
+        }
+        Route::Fno => {
+            let raw = crate::server::param(body, "series");
+            let series = crate::ingest::Series::from_slug(&raw).map(|series| match series {
+                crate::ingest::Series::Futures => "futures",
+                crate::ingest::Series::Options => "options",
+            });
+            ("series", (raw, series))
+        }
+    };
+    let (raw, rung) = payload_dir;
+    (rung != Some(dir))
+        .then(|| format!("the envelope names rung {dir:?} and the payload's {field} is {raw:?}"))
 }
 
 /// Groups legs by vendor, keeping the order the feeds were ticked, and sorts
@@ -537,13 +656,26 @@ pub fn by_feed(legs: Vec<Leg>) -> Vec<(String, Vec<Leg>)> {
 /// `docs/06-limits.md` "Pull-run and recovery row counts (D-1382)" says why a
 /// header-only read is not used. UNVERIFIED: the bound is read from the
 /// code and has not been measured.
-pub(crate) fn rows_now(site: &Site) -> u64 {
+pub(crate) fn rows_now(site: &Site) -> Option<u64> {
     let (censuses, _) = crate::server::census_now(site);
-    censuses
-        .iter()
-        .filter_map(census::VendorCensus::counters)
-        .map(|(_months, rows, _entries)| rows)
-        .sum()
+    rows_total(
+        censuses
+            .iter()
+            .filter_map(census::VendorCensus::counters)
+            .map(|(_months, rows, _entries)| rows),
+    )
+}
+
+/// The vendors' row counts added, or `None` when the total does not fit.
+///
+/// A plain `.sum()` here panicked on overflow, and the release profile aborts
+/// on a panic: two CRC-valid manifests each claiming about `u64::MAX` rows
+/// (`Entry::check` refuses only zero) killed the server on the first pull
+/// POST and on every restart after it (CE-74, D-1776). The page shows the
+/// count as unknown instead, and the pass loop treats an unknown count as no
+/// proven growth.
+fn rows_total(mut rows: impl Iterator<Item = u64>) -> Option<u64> {
+    rows.try_fold(0_u64, u64::checked_add)
 }
 
 /// Edits the live progress, if run `run` still owns the slot.
@@ -622,8 +754,11 @@ fn stopping(site: &Site, run: u64) -> bool {
 /// `/pull/run` refuses to start a second one while it holds. A task that
 /// panicked, or that was cancelled at a shutdown, would leave that `None` in
 /// place forever and every later press would be refused with `AlreadyRunning`
-/// against a run that no longer exists. `Drop` runs on the panic path, so the
-/// slot is released on every exit rather than only the happy one.
+/// against a run that no longer exists. `Drop` runs when the task is cancelled
+/// or dropped at shutdown, in every build, so the slot is released on those
+/// exits as well as the happy one. A panic is covered only where it unwinds:
+/// `dev` and `test`. `release` sets `panic = "abort"` (root `Cargo.toml`), so
+/// there a panic ends the process and the slot dies with it (poison-1, D-1771).
 ///
 /// It writes only when nothing else has: a run that finished normally has
 /// already put its own summary there, and this must not paint over it. And it
@@ -1037,7 +1172,9 @@ where
         {
             break;
         }
-        if after > before {
+        // Growth is proven only by two known counts; an unknown one (CE-74)
+        // proves nothing, so the pass is judged as if nothing landed.
+        if matches!((before, after), (Some(before), Some(after)) if after > before) {
             clean_empty = 0;
             continue;
         }
@@ -1072,14 +1209,17 @@ where
         progress.finished = Some(run_summary(
             progress,
             &outcomes,
-            current_rows.saturating_sub(started_rows),
+            current_rows
+                .zip(started_rows)
+                .map(|(now, start)| now.saturating_sub(start)),
         ));
     });
 }
 
 /// Terminal feeds remain part of the final verdict even while other feeds
 /// reach an idle stop. Neither a skipped feed nor a stopped task is success.
-fn run_summary(progress: &Progress, outcomes: &[PassOutcome], landed: u64) -> String {
+fn run_summary(progress: &Progress, outcomes: &[PassOutcome], landed: Option<u64>) -> String {
+    let landed_said = landed_words(landed);
     let halted: Vec<String> = progress
         .feeds
         .iter()
@@ -1095,7 +1235,7 @@ fn run_summary(progress: &Progress, outcomes: &[PassOutcome], landed: u64) -> St
         .collect();
     if !halted.is_empty() {
         return format!(
-            "INCOMPLETE after {} pass(es); {landed} bar(s) added to the store census. \
+            "INCOMPLETE after {} pass(es); {landed_said} bar(s) added to the store census. \
              {} pass(es) were retried after a failure. Halted feed(s): {} \
              Full basket coverage has not been verified.{}",
             progress.passes,
@@ -1156,10 +1296,20 @@ fn note_dead_chain(
     });
 }
 
+/// The bars-added figure in words: the number, or `an unknown number of`
+/// when the census total did not fit a `u64` (CE-74, D-1776).
+fn landed_words(landed: Option<u64>) -> String {
+    landed.map_or_else(
+        || "an unknown number of".to_owned(),
+        |rows| rows.to_string(),
+    )
+}
+
 /// Describe an operator stop, pass ceiling, or idle stop. Store growth and
 /// receipt verdicts cannot establish coverage of every requested instrument.
 #[must_use]
-pub fn summary_of(passes: u32, retries: u32, landed: u64, stopped: bool) -> String {
+pub fn summary_of(passes: u32, retries: u32, landed: Option<u64>, stopped: bool) -> String {
+    let landed = landed_words(landed);
     // NOT `retried`: clippy denies a binding whose name is one letter from
     // `retries` beside it, and it is right — the two mean different things.
     let note = if retries > 0 {
@@ -1222,10 +1372,133 @@ mod tests {
         out
     }
 
-    /// One `leg` field, encoded exactly as the page encodes it.
+    /// One `leg` field, encoded exactly as the page encodes it, whose payload
+    /// declares the vendor and rung its envelope names -- as the page's does.
     fn field(route: &str, vendor: &str, dir: &str, label: &str, body: &str) -> String {
+        raw_field(
+            route,
+            vendor,
+            dir,
+            label,
+            &format!("{}&{body}", declared(route, vendor, dir)),
+        )
+    }
+
+    /// The payload fields that agree with an envelope, the way the page writes
+    /// them.
+    fn declared(route: &str, vendor: &str, dir: &str) -> String {
+        if route == "/pull/fno" {
+            let series = if dir == "futures" { "fut" } else { "opt" };
+            format!("vendor={vendor}&series={series}")
+        } else {
+            format!("vendor={vendor}&granularity={dir}")
+        }
+    }
+
+    /// One `leg` field whose payload is exactly `body`, agreeing or not.
+    fn raw_field(route: &str, vendor: &str, dir: &str, label: &str, body: &str) -> String {
         let joined = format!("{route}|{vendor}|{dir}|{label}|{}", enc(body));
         format!("leg={}", enc(&joined))
+    }
+
+    /// An envelope that names one request while its payload asks for another
+    /// refuses the whole run, on either half and on either route.
+    ///
+    /// The chain, the ladder order and the failed-daily gate all read the
+    /// envelope; `pull_spot` and `pull_fno` run the payload. A `groww|1day`
+    /// leg carrying `granularity=1min` and no `vendor` would have run a Dhan
+    /// minute pull filed as a Groww day pass (P1-02-01, D-1765).
+    #[test]
+    fn a_leg_whose_payload_disagrees_with_its_envelope_refuses_the_run() {
+        let refused = |leg: String, needle: &str| match legs_from(&leg) {
+            Err(Refusal::Disagrees { leg, why }) => {
+                assert!(why.contains(needle), "{why}");
+                assert!(Refusal::Disagrees { leg, why }.why().contains(needle));
+            }
+            other => panic!("a disagreeing leg must be refused, got {other:?}"),
+        };
+        // The finding's own repro: no vendor means Dhan, 1min is not 1day.
+        refused(
+            raw_field(
+                "/pull/spot",
+                "groww",
+                "1day",
+                "x",
+                "member=NIFTY&granularity=1min",
+            ),
+            "\"groww\"",
+        );
+        refused(
+            raw_field(
+                "/pull/spot",
+                "groww",
+                "1day",
+                "x",
+                "vendor=groww&granularity=1min",
+            ),
+            "\"1min\"",
+        );
+        // An absent granularity means one minute, not the envelope's day.
+        refused(
+            raw_field("/pull/spot", "dhan", "1day", "x", "vendor=dhan"),
+            "granularity",
+        );
+        refused(
+            raw_field(
+                "/pull/fno",
+                "dhan",
+                "options",
+                "x",
+                "vendor=dhan&series=fut",
+            ),
+            "\"fut\"",
+        );
+        refused(
+            raw_field("/pull/fno", "dhan", "futures", "x", "vendor=dhan"),
+            "series",
+        );
+        refused(
+            raw_field(
+                "/pull/fno",
+                "groww",
+                "options",
+                "x",
+                "vendor=zerodha&series=opt",
+            ),
+            "\"zerodha\"",
+        );
+        // The same leg, agreeing, is read; the vendor matches case-blind the
+        // way the route that runs it reads it.
+        for agreeing in [
+            raw_field(
+                "/pull/spot",
+                "groww",
+                "1day",
+                "x",
+                "vendor=Groww&granularity=1DAY",
+            ),
+            raw_field("/pull/spot", "dhan", "1min", "x", "member=NIFTY"),
+            raw_field(
+                "/pull/fno",
+                "dhan",
+                "futures",
+                "x",
+                "vendor=dhan&series=fut",
+            ),
+            raw_field(
+                "/pull/fno",
+                "groww",
+                "options",
+                "x",
+                "vendor=groww&series=opt",
+            ),
+        ] {
+            assert_eq!(
+                legs_from(&agreeing).map(|legs| legs.len()),
+                Ok(1),
+                "{agreeing}"
+            );
+        }
     }
 
     /// A form body survives the two encodings intact, INCLUDING the characters
@@ -1239,8 +1512,15 @@ mod tests {
     #[test]
     fn a_body_carrying_every_separator_survives_both_encodings() {
         let body = "member=BANKNIFTY&seg=futures%2Coptions&note=a|b+c&pct=100%";
-        let legs = legs_from(&field("/pull/spot", "dhan", "1day", "Spot · 1 day", body))
-            .expect("one well-formed leg");
+        let body = format!("vendor=dhan&granularity=1day&{body}");
+        let legs = legs_from(&raw_field(
+            "/pull/spot",
+            "dhan",
+            "1day",
+            "Spot · 1 day",
+            &body,
+        ))
+        .expect("one well-formed leg");
         assert_eq!(legs.len(), 1);
         assert_eq!(legs[0].body, body, "the body reaches the route unchanged");
         assert_eq!(legs[0].route, Route::Spot);
@@ -1262,13 +1542,7 @@ mod tests {
             "ok",
             "member=A&member=B&from=x",
         );
-        let twice = field(
-            "/pull/spot",
-            "dhan",
-            "1day",
-            "bad",
-            "from=x&vendor=a&from=y",
-        );
+        let twice = field("/pull/spot", "dhan", "1day", "bad", "from=x&to=a&from=y");
         assert_eq!(legs_from(&good).expect("a list is not a repeat").len(), 1);
         match legs_from(&format!("{good}&{twice}")) {
             Err(Refusal::Malformed(why)) => {
@@ -1360,6 +1634,75 @@ mod tests {
     /// every leg names a real feed. Before D-0906 `legs_from` copied the vendor
     /// unchecked, so a form of invented vendor names grew one group and one
     /// chain per distinct name. W1-api3-3.
+    /// P3-01-01, D-1769: one leg past the bound is refused by name, and the
+    /// widest leg the page can write fits the field bound.
+    #[test]
+    fn a_run_past_the_leg_bound_is_refused_by_name_and_the_widest_leg_fits() {
+        let one = field("/pull/spot", "dhan", "1day", "d", "a=1");
+        let full = vec![one.clone(); MAX_RUN_LEGS].join("&");
+        assert_eq!(
+            legs_from(&full).map(|legs| legs.len()).ok(),
+            Some(MAX_RUN_LEGS)
+        );
+        let over = vec![one; MAX_RUN_LEGS + 1].join("&");
+        match legs_from(&over) {
+            Err(Refusal::TooManyLegs(count)) => {
+                assert_eq!(count, MAX_RUN_LEGS + 1);
+                let why = Refusal::TooManyLegs(count).why();
+                assert!(why.contains(&MAX_RUN_LEGS.to_string()), "{why}");
+            }
+            other => panic!("one leg past the bound must be named, got {other:?}"),
+        }
+        // The page's own shape: a member form of `MAX_MEMBERS` symbols that
+        // each need escaping, encoded once more for the payload and once
+        // more for the field.
+        let encode = |text: &str| -> String {
+            text.bytes()
+                .map(|b| {
+                    if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
+                        char::from(b).to_string()
+                    } else {
+                        format!("%{b:02X}")
+                    }
+                })
+                .collect()
+        };
+        let symbol = "&".repeat(brutex_core::symbol::SYMBOL_CAPACITY);
+        let members =
+            vec![format!("member={}", encode(&symbol)); crate::ingest::MAX_MEMBERS].join("&");
+        let form = format!("target=nifty50&vendor=dhan&{members}");
+        assert!(
+            form.len() <= crate::ingest::MAX_MEMBER_FORM_BYTES,
+            "{}",
+            form.len()
+        );
+        let leg = format!(
+            "leg={}",
+            encode(&["/pull/spot", "dhan", "1day", "label", &encode(&form)].join("|"))
+        );
+        assert!(
+            leg.len() <= MAX_LEG_FIELD_BYTES,
+            "{} > {MAX_LEG_FIELD_BYTES}",
+            leg.len()
+        );
+        const { assert!(MAX_RUN_FORM_BYTES > MAX_RUN_LEGS * MAX_LEG_FIELD_BYTES) };
+    }
+
+    /// The figures `docs/06-limits.md` states for the form bounds, from the
+    /// constants: 168,192 for a member form, 881,924 for one leg field and
+    /// 27,347,836 for a run form (8,192 + 31 × 881,924). The prose said "about
+    /// 26.5 MB", which is neither 27.35 MB nor 26.08 MiB. P17-19, D-1967.
+    #[test]
+    fn the_run_form_bound_is_the_figure_the_limits_document_states() {
+        assert_eq!(crate::ingest::MAX_MEMBER_FORM_BYTES, 168_192);
+        assert_eq!(MAX_LEG_FIELD_BYTES, 881_924);
+        assert_eq!(MAX_RUN_LEGS, 30);
+        assert_eq!(MAX_RUN_FORM_BYTES, 27_347_836);
+        let limits = include_str!("../../../docs/06-limits.md");
+        assert!(limits.contains("read up to 27,347,836 bytes of form"));
+        assert!(!limits.contains("about 26.5 MB"));
+    }
+
     #[test]
     fn a_leg_naming_no_feed_refuses_the_run_so_groups_never_outnumber_feeds() {
         let invented: Vec<String> = (0..=pull::vendor::FEED_COUNT)
@@ -1506,6 +1849,24 @@ mod tests {
         assert!(progress.json().contains("\"running\":false"));
     }
 
+    /// CE-74: a census total past `u64::MAX` is unknown, not a panic, and the
+    /// page is told so.
+    #[test]
+    fn a_row_total_that_does_not_fit_is_unknown_not_a_panic() {
+        assert_eq!(rows_total([u64::MAX, 1].into_iter()), None);
+        assert_eq!(rows_total([u64::MAX - 1, 1].into_iter()), Some(u64::MAX));
+        assert_eq!(rows_total(std::iter::empty()), Some(0));
+        let unknown = Progress {
+            rows_at_start: Some(5),
+            rows_now: None,
+            started: true,
+            ..Progress::default()
+        };
+        let json = unknown.json();
+        assert!(json.contains(r#""rowsAtStart":5,"rowsNow":null"#), "{json}");
+        assert!(summary_of(2, 0, None, false).contains("an unknown number of bar(s)"));
+    }
+
     /// Every field the page reads is in the document, with the name it reads.
     ///
     /// Hand-written JSON has no compiler checking the key names against the
@@ -1515,8 +1876,8 @@ mod tests {
         let progress = Progress {
             passes: 7,
             retries: 2,
-            rows_at_start: 10,
-            rows_now: 99,
+            rows_at_start: Some(10),
+            rows_now: Some(99),
             stopping: true,
             finished: None,
             started: true,
@@ -1600,9 +1961,9 @@ mod tests {
     /// backfill was complete when it was cut short.
     #[test]
     fn the_ceiling_stop_is_not_worded_as_a_finished_window() {
-        let finished = summary_of(3, 0, 500, false);
-        let ceiling = summary_of(MAX_PASSES, 4, 500, false);
-        let stopped = summary_of(9, 1, 500, true);
+        let finished = summary_of(3, 0, Some(500), false);
+        let ceiling = summary_of(MAX_PASSES, 4, Some(500), false);
+        let stopped = summary_of(9, 1, Some(500), true);
 
         assert!(finished.contains("Idle retries stopped"), "{finished}");
         assert!(finished.contains("Full basket coverage has not been verified"));
@@ -2027,10 +2388,10 @@ mod tests {
         assert!(!stopping(&site, first), "its own live claim is not stopped");
 
         let second = claim(&site);
-        with_progress(&site, first, |progress| progress.rows_now = 7);
+        with_progress(&site, first, |progress| progress.rows_now = Some(7));
         with_progress(&site, first, |progress| progress.passes = 3);
         let seen = observed(&site);
-        assert_eq!(seen.rows_now, 0, "A's late tick landed in B: {seen:?}");
+        assert_eq!(seen.rows_now, None, "A's late tick landed in B: {seen:?}");
         assert_eq!(seen.passes, 0, "A's late write landed in B: {seen:?}");
         assert!(
             stopping(&site, first),
@@ -2047,8 +2408,12 @@ mod tests {
             halted_feeds(&site, first).is_empty(),
             "A must not read B's halted feeds as its own"
         );
-        with_progress(&site, second, |progress| progress.rows_now = 9);
-        assert_eq!(observed(&site).rows_now, 9, "B's own edits still land");
+        with_progress(&site, second, |progress| progress.rows_now = Some(9));
+        assert_eq!(
+            observed(&site).rows_now,
+            Some(9),
+            "B's own edits still land"
+        );
     }
 
     /// **THE SKIP LIST IS READ FROM THE LIVE DOCUMENT, PER FEED.**
@@ -2236,7 +2601,7 @@ mod tests {
         assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
         assert_eq!(
             (progress.passes, progress.retries, progress.rows_now),
-            (1, 0, 0)
+            (1, 0, Some(0))
         );
         let feed = &progress.feeds[0];
         assert_eq!((feed.legs_done, feed.skipped, feed.retries), (1, 1, 0));
@@ -2266,7 +2631,7 @@ mod tests {
         assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 6);
         assert_eq!(
             (progress.passes, progress.retries, progress.rows_now),
-            (3, 0, 0)
+            (3, 0, Some(0))
         );
         assert_eq!(progress.feeds[0].legs_done, 2);
         let summary = progress.finished.expect("idle summary");
@@ -2548,7 +2913,7 @@ mod tests {
             assert_eq!((feed.legs_done, feed.skipped, feed.retries), (1, 2, 1));
             assert_eq!(feed.credential_dead, code == 401);
             assert_eq!(progress.retries, 1);
-            let summary = run_summary(&progress, &passes.outcomes, 0);
+            let summary = run_summary(&progress, &passes.outcomes, Some(0));
             assert!(summary.contains("INCOMPLETE") && summary.contains(&format!("HTTP {code}")));
             assert!(!summary.contains("HTTP 503"));
         }
@@ -2576,7 +2941,7 @@ mod tests {
         let feed = &progress.feeds[0];
         assert_eq!((feed.legs_done, feed.skipped, feed.retries), (1, 2, 1));
         assert!(feed.finished && feed.doing.is_empty());
-        assert!(run_summary(&progress, &passes.outcomes, 0).contains("pressed stop"));
+        assert!(run_summary(&progress, &passes.outcomes, Some(0)).contains("pressed stop"));
         assert!(passes.respond(&[]).await.is_empty());
         assert_eq!(
             observed(&passes.site),
@@ -2723,7 +3088,7 @@ mod tests {
                 progress.rows_at_start,
                 progress.rows_now
             ),
-            (5, 1, 0, 1)
+            (5, 1, Some(0), Some(1))
         );
         assert_eq!(
             (
@@ -2782,7 +3147,7 @@ mod tests {
             let progress = observed(&passes.site);
             assert_eq!(progress.retries, index);
             assert_eq!(progress.feeds[0].retries, index);
-            assert_eq!(rows_now(&passes.site), 0);
+            assert_eq!(rows_now(&passes.site), Some(0));
         }
         let progress = observed(&passes.site);
         assert!(
@@ -2792,7 +3157,7 @@ mod tests {
                 .unwrap()
                 .contains("HTTP 200")
         );
-        let summary = summary_of(MAX_PASSES, progress.retries, 0, false);
+        let summary = summary_of(MAX_PASSES, progress.retries, Some(0), false);
         assert!(
             summary.contains("ceiling")
                 && summary.contains("Full basket coverage has not been verified")
@@ -2891,7 +3256,7 @@ mod tests {
             .as_deref()
             .expect("terminal cause");
         assert!(why.contains("HTTP 422") && !why.contains("HTTP 503"));
-        assert!(run_summary(&progress, &outcomes, 0).contains("INCOMPLETE"));
+        assert!(run_summary(&progress, &outcomes, Some(0)).contains("INCOMPLETE"));
     }
 
     #[tokio::test]
@@ -3155,8 +3520,8 @@ mod tests {
         let progress = Progress {
             passes: 3,
             retries: 9,
-            rows_at_start: 0,
-            rows_now: 500,
+            rows_at_start: Some(0),
+            rows_now: Some(500),
             stopping: false,
             finished: None,
             started: true,

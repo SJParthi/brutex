@@ -339,19 +339,38 @@ pub const SOURCES: [Source; 4] = [
 ///
 /// # It refuses rather than emits, in four ways
 ///
-/// A document that is not an object, an object whose values are not arrays of
-/// strings, a conversion that yields **no rows**, and any name or category
-/// carrying a comma or a newline — which would produce a CSV whose columns do
-/// not line up with its header and which `Published::read` would then
-/// mis-split. Every one is a refusal naming the cause, because the alternative
-/// is a catalogue that parses into the wrong names.
+/// A document that is not an object, an object that names one category twice
+/// (two lists for one category, CE-58), a conversion that yields **no rows**,
+/// and any name or category carrying a comma or a newline — which would
+/// produce a CSV whose columns do not line up with its header and which
+/// `Published::read` would then mis-split. Every one is a refusal naming the
+/// cause, because the alternative is a catalogue that parses into the wrong
+/// names.
+///
+/// # And it skips, loudly, in two
+///
+/// A category whose value is not a list and a list element that is not a
+/// string are skipped rather than refused (MR-04): one malformed element must
+/// not cost every index NSE publishes. Each skip is counted and the skipped
+/// categories are named at `Warn` and on stderr (D-2682).
 ///
 /// # Errors
 ///
-/// A sentence for each of the four.
+/// A sentence for each of the four refusals.
 pub fn nse_index_csv(body: &str) -> Result<String, String> {
     let parsed: serde_json::Value =
         serde_json::from_str(body).map_err(|why| format!("the index list is not JSON — {why}"))?;
+    // A CATEGORY NAMED TWICE IS TWO LISTS FOR ONE CATEGORY. `serde_json` keeps
+    // the last and says nothing, so every name in the first vanished from the
+    // catalogue. Refused by name, as `http::decode_body` refuses a repeated key
+    // (D-1531). CE-58, D-2682.
+    if let Some(key) = crate::http::repeated_key(body) {
+        return Err(format!(
+            "the index list repeats the key {key:?} inside one object, so it \
+             carries two lists for one category; refused rather than silently \
+             keeping the last"
+        ));
+    }
     let Some(groups) = parsed.as_object() else {
         return Err(
             "the index list is JSON but not an object of category to names, so \
@@ -362,12 +381,22 @@ pub fn nse_index_csv(body: &str) -> Result<String, String> {
 
     let mut out = String::from("index_name,category\n");
     let mut rows = 0_usize;
+    // WHAT MR-04 SKIPS IS COUNTED AND NAMED (CE-58, D-2682). A category whose
+    // value is not a list, and a list element that is not a name, are still
+    // skipped rather than costing the whole catalogue, but no longer silently:
+    // `note_index_skips` reports both counts and every skipped category's name.
+    let mut skipped = IndexSkips::default();
     for (category, names) in groups {
         let Some(list) = names.as_array() else {
+            skipped.categories.push(category.as_str());
             continue;
         };
         for name in list {
             let Some(name) = name.as_str() else {
+                skipped.elements = skipped.elements.saturating_add(1);
+                if skipped.categories_with_elements.last() != Some(&category.as_str()) {
+                    skipped.categories_with_elements.push(category.as_str());
+                }
                 continue;
             };
             // A COMMA IN A FIELD IS A COLUMN THIS FILE DOES NOT HAVE. Quoting
@@ -396,7 +425,54 @@ pub fn nse_index_csv(body: &str) -> Result<String, String> {
                 .to_owned(),
         );
     }
+    note_index_skips(&skipped);
     Ok(out)
+}
+
+/// What [`nse_index_csv`] skipped under MR-04, by name. CE-58, D-2682.
+#[derive(Debug, Default)]
+struct IndexSkips<'a> {
+    /// Categories whose value is not a list of names, every one by name.
+    categories: Vec<&'a str>,
+    /// List elements that are not strings, across every category.
+    elements: u64,
+    /// The categories those elements sat in, each once.
+    categories_with_elements: Vec<&'a str>,
+}
+
+/// One `Warn` line and one `eprintln!` when the conversion skipped anything,
+/// and nothing when it skipped nothing. The line carries both counts and the
+/// first skipped category; the stderr sentence names every one, so a category
+/// NSE reshaped is visible on a default run rather than missing from
+/// `nse_indices.csv` with the master reported `Written`. CE-58, D-2682.
+fn note_index_skips(skipped: &IndexSkips<'_>) {
+    if skipped.categories.is_empty() && skipped.elements == 0 {
+        return;
+    }
+    let first = skipped
+        .categories
+        .first()
+        .or_else(|| skipped.categories_with_elements.first())
+        .copied()
+        .unwrap_or_default();
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::warn("pull.masters", "index entries skipped")
+            .with(
+                "categories",
+                telemetry::Value::Uint(u64::try_from(skipped.categories.len()).unwrap_or(u64::MAX)),
+            )
+            .with("elements", telemetry::Value::Uint(skipped.elements))
+            .with("category", telemetry::Value::Str(first)),
+    );
+    eprintln!(
+        "brutex: the NSE index list carried {} categor(ies) that are not a list \
+         of names ({:?}) and {} list element(s) that are not a name (in {:?}); \
+         those were skipped and every other name converted (MR-04)",
+        skipped.categories.len(),
+        skipped.categories,
+        skipped.elements,
+        skipped.categories_with_elements
+    );
 }
 
 /// Which kind of transport a fetch is going out on.
@@ -1146,7 +1222,19 @@ fn land_validated(dir: &Path, source: &Source, body: &str) -> Landed {
         Err(why) => return Landed::Refused(why),
     };
     let target = path_of(dir, source);
-    let changed = !holds_exactly(&target, body.as_bytes());
+    // THE CURRENT MASTER IS OPENED WITHOUT FOLLOWING A LINK AND REFUSED BY
+    // NAME UNLESS IT IS A REGULAR FILE (CE-65, D-2684): a plain open blocked
+    // for ever on a FIFO while this source's lock was held, and read a device
+    // without a bound. Otherwise it is compared bounded (OD-5, D-2374).
+    let changed = match holds_exactly(&target, body.as_bytes()) {
+        Ok(held) => !held,
+        Err(why) => {
+            return Landed::Refused(format!(
+                "the master {} {why}; nothing was written over it",
+                target.display()
+            ));
+        }
+    };
     // IDENTICAL BYTES ARE NOT REWRITTEN (OD-5, D-2374). A vendor that
     // regenerates once a day answers the same bytes all day, and each refresh
     // used to write, sync and rename a full copy (up to `MAX_BODY_BYTES`) to
@@ -1187,17 +1275,22 @@ fn land_validated(dir: &Path, source: &Source, body: &str) -> Landed {
 /// `read_to_string` of the whole target with no cap, so a held file of any
 /// size was read into memory just to answer one boolean. Any read failure
 /// answers `false`: the caller then replaces the file, which is what it did
-/// for an absent or unreadable target before.
-fn holds_exactly(target: &Path, body: &[u8]) -> bool {
+/// for an absent or unreadable target before. A target that opens but is not a
+/// regular file (a FIFO, a device, a directory) is `Err` and nothing is read
+/// (CE-65, D-2684): the open does not follow a final link and does not block.
+fn holds_exactly(target: &Path, body: &[u8]) -> Result<bool, crate::ingest::Unbounded> {
     use std::io::Read as _;
-    let Ok(file) = File::open(target) else {
-        return false;
+    let Ok(file) = store::open_flags::open_read_no_follow(target) else {
+        return Ok(false);
     };
-    if !file
-        .metadata()
-        .is_ok_and(|held| held.len() == body.len() as u64)
-    {
-        return false;
+    let Ok(meta) = file.metadata() else {
+        return Ok(false);
+    };
+    if !meta.is_file() {
+        return Err(crate::ingest::Unbounded::NotRegular);
+    }
+    if meta.len() != body.len() as u64 {
+        return Ok(false);
     }
     let mut reader = file.take(body.len() as u64);
     let mut chunk = [0_u8; 8_192];
@@ -1205,16 +1298,16 @@ fn holds_exactly(target: &Path, body: &[u8]) -> bool {
     // loop bound a mutation could turn into a pass that never ends.
     for expected in body.chunks(chunk.len()) {
         let Some(window) = chunk.get_mut(..expected.len()) else {
-            return false;
+            return Ok(false);
         };
         if reader.read_exact(window).is_err() {
-            return false;
+            return Ok(false);
         }
         if *window != *expected {
-            return false;
+            return Ok(false);
         }
     }
-    true
+    Ok(true)
 }
 
 /// Marks an unchanged master as confirmed now, without rewriting it (OD-5,
@@ -3047,5 +3140,55 @@ mod tests {
             .find(|s| s.file == NSE_INDICES_FILE)
             .expect("the index source");
         assert_eq!(source.vendor, None);
+    }
+
+    /// **CE-58. A CATEGORY NAMED TWICE IS TWO ANSWERS AND IS REFUSED.**
+    ///
+    /// `serde_json` keeps the last list of a repeated category, so `NIFTY 50`
+    /// below vanished from `nse_indices.csv` with nothing said. D-1531's rule:
+    /// refuse the repeat by name.
+    #[test]
+    fn an_index_document_naming_a_category_twice_is_refused_by_name() {
+        let json = r#"{"Broad":["NIFTY 50"],"Broad":["NIFTY NEXT 50"]}"#;
+        let why = super::nse_index_csv(json).expect_err("two lists for one category");
+        assert!(why.contains(r#""Broad""#), "{why}");
+    }
+
+    /// **CE-65. A MASTER TARGET THAT IS NOT A REGULAR FILE IS REFUSED, AND A
+    /// FIFO THERE NEVER HOLDS THE LANDING.**
+    ///
+    /// The change check read the current master with `read_to_string` by path:
+    /// a FIFO blocked it for ever while the source's lock was held, and a
+    /// device was read without a bound.
+    #[test]
+    fn a_master_target_that_is_not_a_regular_file_is_refused_and_never_waits() {
+        let dir = scratch("masters-not-regular");
+        let source = &SOURCES[0];
+        let target = path_of(&dir, source);
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&target)
+                .status()
+                .expect("the test host runs its FIFO fixture")
+                .success()
+        );
+        let (sent, answer) = std::sync::mpsc::channel();
+        let worker = {
+            let dir = dir.clone();
+            std::thread::spawn(move || {
+                let _ = sent.send(land(&dir, &SOURCES[0], &a_master()));
+            })
+        };
+        let landed = answer.recv_timeout(std::time::Duration::from_secs(2));
+        if landed.is_err() {
+            let _ = std::fs::OpenOptions::new().write(true).open(&target);
+        }
+        let _ = worker.join();
+        let landed = landed.expect("a FIFO at the target must not hold the landing");
+        let Landed::Refused(ref why) = landed else {
+            panic!("a target that is not a regular file is refused: {landed:?}");
+        };
+        assert!(why.contains("not a regular file"), "{why}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

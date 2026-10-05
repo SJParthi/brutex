@@ -243,22 +243,22 @@ pub const ADMISSION_EVIDENCE_SOURCE_MATRIX_V1: [EvidenceSourceMapRowV1; 44] = [
     EvidenceSourceMapRowV1 {
         field: "ambiguous_fill_rate_ppm",
         availability: EvidenceAvailabilityV1::MeasuredDirect,
-        source: "Cell.ambiguous_bars / Cell.trades",
+        source: "Cell.ambiguous_bars / Cell.trades (rounded up)",
     },
     EvidenceSourceMapRowV1 {
         field: "gap_affected_rate_ppm",
         availability: EvidenceAvailabilityV1::MeasuredDirect,
-        source: "Cell.gapped / Cell.trades",
+        source: "Cell.gapped / Cell.trades (rounded up)",
     },
     EvidenceSourceMapRowV1 {
         field: "session_concentration_ppm",
         availability: EvidenceAvailabilityV1::MeasuredByExactReplay,
-        source: "largest IST entry-day TradeRow count / all TradeRows",
+        source: "largest IST entry-day TradeRow count / all TradeRows (rounded up)",
     },
     EvidenceSourceMapRowV1 {
         field: "largest_trade_profit_share_ppm",
         availability: EvidenceAvailabilityV1::MeasuredByExactReplay,
-        source: "largest positive TradeRow.worst / reconciled gross win",
+        source: "largest positive TradeRow.worst / reconciled gross win (rounded up)",
     },
     EvidenceSourceMapRowV1 {
         field: "execution_complete",
@@ -318,7 +318,7 @@ pub const ADMISSION_EVIDENCE_SOURCE_MATRIX_V1: [EvidenceSourceMapRowV1; 44] = [
     EvidenceSourceMapRowV1 {
         field: "average_loss_paisa",
         availability: EvidenceAvailabilityV1::MeasuredDirect,
-        source: "|Cell.avg_loss()| with explicit no-loser Unmeasured state",
+        source: "Cell.avg_loss_magnitude_ceil() (rounded up) with explicit no-loser Unmeasured state",
     },
     EvidenceSourceMapRowV1 {
         field: "profit_factor_ppm",
@@ -1409,7 +1409,7 @@ fn direct_cell_values(cell: &Cell) -> Result<DirectCellEvidenceV1, String> {
     let average_loss = if losing == 0 {
         ObservedU64V1::Unmeasured
     } else {
-        ObservedU64V1::Measured(cell.avg_loss().unsigned_abs())
+        ObservedU64V1::Measured(cell.avg_loss_magnitude_ceil())
     };
     let worst_loss = negative_magnitude(cell.worst_trade);
     let min_win = nonnegative_u64("minimum win", cell.min_win)?;
@@ -1434,8 +1434,8 @@ fn direct_cell_values(cell: &Cell) -> Result<DirectCellEvidenceV1, String> {
         } else {
             ObservedU64V1::Unmeasured
         },
-        ambiguous_fill_rate_ppm: measured_rate(cell.ambiguous_bars, cell.trades)?,
-        gap_affected_rate_ppm: measured_rate(cell.gapped, cell.trades)?,
+        ambiguous_fill_rate_ppm: measured_ceiling_rate(cell.ambiguous_bars, cell.trades)?,
+        gap_affected_rate_ppm: measured_ceiling_rate(cell.gapped, cell.trades)?,
         drawdown_paisa: nonnegative_u64("maximum drawdown", cell.max_drawdown)?,
         worst_trade_loss_paisa: worst_loss,
         losing_trade_rate_ppm: measured_rate(losing, cell.trades)?,
@@ -1630,16 +1630,14 @@ pub(crate) fn reconcile_trade_rows(
                 .checked_add(row.worst)
                 .ok_or_else(|| "chosen-cell gross-win row sum overflowed i64".to_owned())?;
             best_trade = best_trade.max(row.worst);
-            // THE SAME BRACKET TEST `grid::tally_trade` APPLIES -- D-0595.
+            // THE SAME FLOOR `grid::tally_trade` FOLDS: `min(worst)` over the
+            // wins (D-0602, reversing D-0595's bracket test, which was
+            // backwards and inflated the 3:1 rule).
             //
             // This is the THIRD place a `min_win` is folded from trade rows and
             // reconciled against the evaluated cell, and all three must agree
             // exactly or this function returns "chosen-cell trade detail does
-            // not reconcile ...". A win no larger than its own `best - worst`
-            // bracket is a win under one admissible ordering and a loss under
-            // another, so it is not the floor a 3:1 rule may rest on.
-            // `min(worst)` over the wins -- the bracket test this replaces was
-            // backwards and inflated the 3:1 rule. See `grid::tally_trade`. D-0602.
+            // not reconcile ...".
             if row.worst > 0 && (min_win == 0 || row.worst < min_win) {
                 min_win = row.worst;
             }
@@ -1721,7 +1719,7 @@ pub(crate) fn reconcile_trade_rows(
     let largest_share = if gross_win_u64 == 0 {
         ObservedU64V1::Unmeasured
     } else {
-        ObservedU64V1::Measured(rate_ppm(
+        ObservedU64V1::Measured(ceiling_rate_ppm(
             nonnegative_u64("largest winning trade", best_trade)?,
             gross_win_u64,
         )?)
@@ -1730,7 +1728,7 @@ pub(crate) fn reconcile_trade_rows(
     Ok(ReconciledTradeEvidenceV1 {
         max_mae_paisa: ObservedU64V1::Measured(max_mae_paisa),
         weakest_period_return_paisa: ObservedI64V1::Measured(weakest),
-        session_concentration_ppm: ObservedU64V1::Measured(rate_ppm(
+        session_concentration_ppm: ObservedU64V1::Measured(ceiling_rate_ppm(
             max_session_trades,
             row_count,
         )?),
@@ -2006,6 +2004,26 @@ fn measured_rate(part: u64, total: u64) -> Result<ObservedU64V1, String> {
     } else {
         Ok(ObservedU64V1::Measured(rate_ppm(part, total)?))
     }
+}
+
+/// `measured_rate` rounded UP, for a rate a MAXIMUM gates: a floor put a true
+/// 333,333.33 ppm on a 333,333 cap and passed it (p2inst-1, D-1990). The
+/// minimum-gated win rate and the losing rate the runner reconciles as the
+/// canonical floor keep `measured_rate`.
+fn measured_ceiling_rate(part: u64, total: u64) -> Result<ObservedU64V1, String> {
+    if total == 0 {
+        Ok(ObservedU64V1::Unmeasured)
+    } else {
+        Ok(ObservedU64V1::Measured(ceiling_rate_ppm(part, total)?))
+    }
+}
+
+fn ceiling_rate_ppm(part: u64, total: u64) -> Result<u64, String> {
+    if total == 0 {
+        return Err("rate projection has a zero denominator".to_owned());
+    }
+    let projected = (u128::from(part) * u128::from(PPM)).div_ceil(u128::from(total));
+    u64::try_from(projected).map_err(|_| "rate projection does not fit u64".to_owned())
 }
 
 fn rate_ppm(part: u64, total: u64) -> Result<u64, String> {
@@ -3249,9 +3267,11 @@ mod tests {
             measured.session_concentration_ppm,
             ObservedU64V1::Measured(500_000)
         );
+        // 10 of 15 is 666,666.67 ppm; a maximum gates it, so it rounds UP
+        // (p2inst-1, D-1990). The floor 666,666 passed a 666,666 cap.
         assert_eq!(
             measured.largest_trade_profit_share_ppm,
-            ObservedU64V1::Measured(666_666)
+            ObservedU64V1::Measured(666_667)
         );
         assert_eq!(
             measured.weakest_period_return_paisa,
@@ -3356,6 +3376,37 @@ mod tests {
         let cell = Cell { trades: 2, ..cell };
         let why = super::reconcile_trade_rows(&cell, &changed).expect_err("optimistic overflow");
         assert!(why.contains("optimistic row sum overflowed"), "{why}");
+    }
+
+    #[test]
+    fn direct_max_gated_rates_round_up_and_min_gated_rates_keep_their_floor() {
+        // p2inst-1, D-1990: 1 of 3 is 333,333.33 ppm, which a floor put on a
+        // 333,333 cap. The win rate is gated by a minimum and the losing rate is
+        // the floor the runner reconciles, so both stay floored.
+        let cell = Cell {
+            trades: 3,
+            wins: 1,
+            timed_out: 3,
+            ambiguous_bars: 1,
+            gapped: 1,
+            ..Cell::default()
+        };
+        let actual = super::direct_cell_values(&cell).expect("coherent cell");
+        assert_eq!(
+            actual.ambiguous_fill_rate_ppm,
+            ObservedU64V1::Measured(333_334)
+        );
+        assert_eq!(
+            actual.gap_affected_rate_ppm,
+            ObservedU64V1::Measured(333_334)
+        );
+        assert_eq!(actual.win_rate_ppm, ObservedU64V1::Measured(333_333));
+        assert_eq!(
+            actual.losing_trade_rate_ppm,
+            ObservedU64V1::Measured(666_666)
+        );
+        assert!(super::ceiling_rate_ppm(1, 0).is_err());
+        assert!(super::ceiling_rate_ppm(u64::MAX, 1).is_err());
     }
 
     #[test]

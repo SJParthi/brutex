@@ -55,6 +55,30 @@
 //! would answer a question with the wrong bar. Withholding declines to answer
 //! it, out loud.
 //!
+//! # Removed from the SAMPLE, not from the HISTORY (p11num-1, D-1781)
+//!
+//! Until D-1781 the paragraph above was false. Every door cut the holed day
+//! out of the signal bars before the indicator fold, so the day left the
+//! evaluator's input as well as the sample: every family that carries state
+//! across sessions -- EMA20/200 (0-5), ATR and `SuperTrend` (64-65), swings, BOS
+//! and `CHoCH` (56-59, 72-73), structure (278-279) -- was computed on day D-1
+//! spliced onto D+1, and the swept days after D carried masks no unspliced run
+//! produces. Nothing said so. MEASURED on the finding's repro (14 sessions of
+//! 375 bars, one interior minute missing): 40 of the 1,125 later bars differed
+//! on trend bits.
+//!
+//! Now the day is folded and not swept. [`withhold`] still produces the swept
+//! slice, but the column is built over the WHOLE signal series by
+//! `stored_anchored_column_withholding`, which steps the holed day through
+//! the evaluator and gives its bars no row
+//! (`indicators::column::AnchoredColumn::build_required_withholding`). The
+//! state a later day starts from is the fold of every bar the store holds,
+//! the holed day's included -- with its missing minute still missing, because
+//! nothing reconstructs it. [`MINUTE_GAP_POLICY`] is 2 from D-1781, and every
+//! withholding door binds the withheld days into its data term with
+//! [`bind_withheld`], so no run made under the splice shares an identity with
+//! one made under the fold on a span that withheld a day.
+//!
 //! # Measured, never written down
 //!
 //! The twelve days above are evidence, not a table. [`days_with_interior_gaps`]
@@ -84,10 +108,51 @@ use indicators::Candle;
 /// the other, and under one version number a later change to this would be
 /// indistinguishable from a change to that.
 ///
-/// TWO since D-1662: the census also withholds a day whose demanded closing
-/// minute is absent ([`days_with_minute_holes`]), so a holed span withholds
-/// more days than version 1 did and must not share its identity.
-pub const MINUTE_GAP_POLICY: u32 = 2;
+/// # Version 2 (D-1662)
+///
+/// The census also withholds a day whose demanded closing minute is absent
+/// ([`days_with_minute_holes`]), so a holed span withholds more days than
+/// version 1 did and must not share its identity.
+///
+/// # Version 3 (D-1781, p11num-1, D-1934)
+///
+/// Versions 1 and 2 removed a holed day from the indicator fold as well as
+/// from the sample, splicing D-1 onto D+1. Version 3 folds the day and
+/// withholds only its rows, so the masks on later days change. A second
+/// branch numbered that change 2 while D-1662 also took 2; the merge gives the
+/// combined computation its own number so neither version-2 run shares it.
+/// Earlier runs keep their recorded identities and stay valid under them
+/// (`CLAUDE.md` §3 rule 8); they are not this computation.
+pub const MINUTE_GAP_POLICY: u32 = 3;
+
+/// Bind the days a door withheld into its data term. D-1781.
+///
+/// Since D-1781 a withholding door digests the WHOLE folded signal series,
+/// so the withheld days no longer leave a mark on its data term by being
+/// absent from it. This puts them back, with the rule's version: a holed
+/// span's term is `blake3(tag ‖ MINUTE_GAP_POLICY ‖ digest ‖ count ‖ days)`,
+/// and two runs that withheld different days, or the same days under a
+/// different rule, cannot share it.
+///
+/// A span that withheld nothing returns `digest` unchanged. Its column is the
+/// same fold under either version -- nothing was cut and nothing is left out
+/// -- so its data term has nothing new to say; `sweep-stored`, which binds the
+/// version as a params term of its own (`stored_month_params`), still moves.
+#[must_use]
+pub fn bind_withheld(digest: [u8; 32], days: &[i64]) -> [u8; 32] {
+    if days.is_empty() {
+        return digest;
+    }
+    let mut hash = brutex_core::blake3::Hasher::new();
+    hash.update(b"brutex-minute-gap-withheld-days\0");
+    hash.update(&MINUTE_GAP_POLICY.to_le_bytes());
+    hash.update(&digest);
+    hash.update(&u64::try_from(days.len()).unwrap_or(u64::MAX).to_le_bytes());
+    for day in days {
+        hash.update(&day.to_le_bytes());
+    }
+    hash.finalize()
+}
 
 /// One minute, in microseconds.
 const MINUTE_MICROS: i64 = 60_000_000;

@@ -16,6 +16,9 @@ pub const MAX_CONCURRENT: usize = 4;
 pub const MAX_SCAN_BYTES: u64 = 64 * 1024 * 1024;
 /// Maximum verified rows belonging to one run that a request will hold.
 pub const MAX_RESULT_ROWS: u64 = 4_096;
+// The frontier writer refuses a TOP above this same count before a run, so a
+// run never commits frontier rows this reader then refuses whole. CE-19, D-1981.
+const _: () = assert!(cli::frontier::MAX_ROWS as u64 == MAX_RESULT_ROWS);
 /// Maximum rows rendered in one response page.
 pub const MAX_PAGE_ROWS: u64 = 256;
 /// Maximum zero-based page accepted at the HTTP boundary.
@@ -330,6 +333,25 @@ impl Selector {
         root: Result<std::path::PathBuf, String>,
         query: &str,
     ) -> Result<Self, String> {
+        // THE SAME EXACTNESS EVERY SIBLING DETAIL ROUTE HOLDS. This read only
+        // its three keys through `param`, so `offset=256` (the boolean routes'
+        // spelling) or a typo like `pgae=3` was answered page 0 under 200,
+        // again and again. Unknown, repeated and empty keys now refuse
+        // (P1-01-04, D-1765).
+        query_is_bounded(query)?;
+        let mut seen = std::collections::BTreeSet::new();
+        for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            if value.is_empty()
+                || !matches!(key, "identity" | "page" | "limit")
+                || !seen.insert(key)
+            {
+                return Err(format!(
+                    "unknown, repeated or empty detail query field {key:?}; this \
+                     route reads identity, page and limit"
+                ));
+            }
+        }
         let page = Page::parse(query)?;
         let root = root?;
         let identity = crate::trades::from_hex_public(&crate::server::param(query, "identity"))
@@ -342,6 +364,8 @@ impl Selector {
     }
 }
 
+/// A canonical unsigned decimal: `+3` and `003` are refused, as
+/// `candidatejson::integer` refuses them, rather than read as 3 (D-1765).
 fn integer_param(query: &str, name: &str) -> Result<Option<u64>, String> {
     let value = crate::server::param(query, name);
     if value.is_empty() {
@@ -349,8 +373,10 @@ fn integer_param(query: &str, name: &str) -> Result<Option<u64>, String> {
     }
     value
         .parse::<u64>()
+        .ok()
+        .filter(|parsed| parsed.to_string() == value)
         .map(Some)
-        .map_err(|_| format!("`{name}` must be an unsigned decimal integer"))
+        .ok_or_else(|| format!("`{name}` must be a canonical unsigned decimal integer"))
 }
 
 /// Bounds every file a fresh detail request will index before it opens one.
@@ -844,6 +870,61 @@ pub(crate) fn must_admit(held: bool, pinned: bool, current: impl FnOnce() -> boo
     !held || (!pinned && !current())
 }
 
+/// ONE RETAINED READER, TAKEN OUT BY A REQUEST AND PUT BACK WHEN IT ENDS
+/// (locks-2, D-1912).
+///
+/// The five index-stop JSON caches held a process-wide `try_lock` guard across
+/// the whole render, a cold `Reader::open` included. `spawn_blocking` cannot be
+/// cancelled, so a request the page had just abandoned kept the slot until its
+/// verification finished, and the same viewer's next click was refused 503
+/// "busy". The mutex is now held only to take the entry out and to put it back:
+/// a request that finds the slot empty opens its own reader, and the last one
+/// to finish is the one retained. Concurrency stays bounded by `run`'s
+/// admission, not by this slot.
+pub(crate) struct Checkout<'slot, T> {
+    slot: &'slot std::sync::Mutex<Option<T>>,
+    value: Option<T>,
+}
+
+impl<'slot, T> Checkout<'slot, T> {
+    /// Empties `slot` into this request. The lock is released on return.
+    pub(crate) fn take(slot: &'slot std::sync::Mutex<Option<T>>) -> Self {
+        // A poisoned slot holds a plain `Option`; no invariant spans the
+        // panic, and the shipped binary aborts on panic regardless.
+        let value = slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        Self { slot, value }
+    }
+}
+
+impl<T> std::ops::Deref for Checkout<'_, T> {
+    type Target = Option<T>;
+    fn deref(&self) -> &Option<T> {
+        &self.value
+    }
+}
+
+impl<T> std::ops::DerefMut for Checkout<'_, T> {
+    fn deref_mut(&mut self) -> &mut Option<T> {
+        &mut self.value
+    }
+}
+
+impl<T> Drop for Checkout<'_, T> {
+    /// Puts a still-admitted entry back. An entry this request evicted stays
+    /// out.
+    fn drop(&mut self) {
+        if let Some(value) = self.value.take() {
+            *self
+                .slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(value);
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::expect_used,
@@ -859,6 +940,40 @@ mod tests {
         must_admit, preflight, run, run_calendar, run_log_read, run_store_read, seek_window,
         window,
     };
+
+    /// locks-2, D-1912: a request that finds the retained reader taken out is
+    /// not refused; it starts empty, and the entry is back once the first
+    /// request ends. An evicted entry is not put back.
+    #[test]
+    fn a_checked_out_reader_never_refuses_the_next_request() {
+        let slot = std::sync::Mutex::new(Some(7_u8));
+        let first = super::Checkout::take(&slot);
+        assert_eq!(*first, Some(7));
+        let second = super::Checkout::take(&slot);
+        assert_eq!(*second, None);
+        drop(second);
+        drop(first);
+        let mut third = super::Checkout::take(&slot);
+        assert_eq!(*third, Some(7));
+        *third = None;
+        drop(third);
+        assert_eq!(*slot.lock().unwrap(), None);
+    }
+
+    /// locks-2, D-1912: no index-stop cache holds its slot across the render.
+    #[test]
+    fn no_index_stop_cache_holds_its_slot_across_the_render() {
+        for source in [
+            include_str!("indexstopvixjson.rs"),
+            include_str!("indexstopcandlesjson.rs"),
+            include_str!("indexstopqualificationjson.rs"),
+            include_str!("indexstopjson.rs"),
+            include_str!("indexstoprankingjson.rs"),
+        ] {
+            assert!(!source.contains(".try_lock()"));
+            assert!(source.contains("crate::detail::Checkout::take(CACHE.get_or_init("));
+        }
+    }
 
     /// THE ADMISSION DECISION, EVERY INPUT. W1-api1-5, D-1444.
     ///
@@ -982,7 +1097,7 @@ mod tests {
         let set = || Ok(std::path::PathBuf::from("/selector-fixture"));
         assert_eq!(
             Selector::parse(unset(), "identity=x&page=banana").err(),
-            Some("`page` must be an unsigned decimal integer".to_owned())
+            Some("`page` must be a canonical unsigned decimal integer".to_owned())
         );
         assert_eq!(
             Selector::parse(unset(), "identity=x").err(),
@@ -1006,6 +1121,39 @@ mod tests {
                 limit: 3
             }
         );
+    }
+
+    /// The selector is exact the way every sibling detail route is: an
+    /// unknown key (the boolean routes' `offset`, a typo), a repeated key, an
+    /// empty value and a non-canonical integer all refuse instead of answering
+    /// page 0 (P1-01-04, D-1765).
+    #[test]
+    fn a_detail_selector_refuses_unknown_keys_and_non_canonical_integers() {
+        let set = || Ok(std::path::PathBuf::from("/selector-fixture"));
+        let id = "ab".repeat(32);
+        for query in [
+            format!("identity={id}&offset=256"),
+            format!("identity={id}&pgae=3"),
+            format!("identity={id}&page=1&page=2"),
+            format!("identity={id}&page="),
+            format!("identity={id}&limit"),
+        ] {
+            let why = Selector::parse(set(), &query).err().unwrap_or_default();
+            assert!(why.contains("detail query field"), "{query}: {why}");
+        }
+        for (query, field) in [
+            (format!("identity={id}&page=%2B1"), "`page`"),
+            (format!("identity={id}&page=003"), "`page`"),
+            (format!("identity={id}&limit=016"), "`limit`"),
+        ] {
+            let why = Selector::parse(set(), &query).err().unwrap_or_default();
+            assert!(
+                why.contains(field) && why.contains("canonical"),
+                "{query}: {why}"
+            );
+        }
+        assert!(Selector::parse(set(), &format!("identity={id}&page=0&limit=16")).is_ok());
+        assert!(Page::parse("page=%2B1").is_err());
     }
 
     #[test]

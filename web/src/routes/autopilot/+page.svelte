@@ -85,6 +85,7 @@
   // ceiling; see `$lib/ask.js` for why the wrapper exists rather than a signal
   // threaded through every call site.
   import { ask } from '$lib/ask.js';
+  import { journalBanner, journalIsRecord, readJournalError } from '$lib/autopilot-journal.js';
   import { watchVisible } from '$lib/page-requests.js';
   import { untrack } from 'svelte';
 
@@ -155,6 +156,7 @@
    *   waiting_ms: number | null,
    *   absorbed_ms: number | null,
    *   journal: string | null,
+   *   journal_status: import('$lib/autopilot-journal.js').JournalStatus,
    *   failures: Failure[]
    * }} Autopilot
    */
@@ -633,6 +635,9 @@
         waiting_ms: num(raw.waiting_ms),
         absorbed_ms: num(raw.absorbed_ms),
         journal: str(raw.journal),
+        // P1-06-01, D-2661: the append's own answer. Dropped here, a journal
+        // that could not be written was rendered as "the durable record".
+        journal_status: readJournalError(raw.journal_error),
         // `month`, `why` and `at` STAY NULL WHEN THEY ARE ABSENT. Substituting
         // a sentence here would make a malformed payload indistinguishable
         // from a well-formed one; the snag rows name each absence instead, on
@@ -1730,6 +1735,20 @@
       </div>
     {/if}
 
+    <!-- A FAILED JOURNAL APPEND IS A BAD-TONE BANNER AT THE TOP, NOT A LINE AT
+         THE FOOT OF A LIST (CE-78, D-1786). `journal_error` was read into
+         `journal_status` and shown only beside the failure list and the trail
+         note; the operator reading the beam was never told the durable record
+         had stopped being written. -->
+    {#if ap && ap.journal_status.state === 'failed'}
+      <div class="beam bad" role="alert">
+        <div>
+          <p class="claim">The journal is not being written.</p>
+          <p class="claim-sub">{journalBanner(ap.journal_status, ap.journal ?? JOURNAL)}</p>
+        </div>
+      </div>
+    {/if}
+
     <!-- ==============================================================
          THE DECK. Six readings, each carrying the source it came from.
          ============================================================== -->
@@ -1839,7 +1858,7 @@
         <div class="g-v" class:dn={Boolean(ap?.failures?.length)}>
           {#if ap}{@render N(ap.failures.length)}{:else}{@render N(
               null,
-              `/autopilot.json did not answer, so the failure list is unknown. The durable record is the journal at ${JOURNAL}`
+              `/autopilot.json did not answer, so the failure list is unknown, and so is whether the journal at ${JOURNAL} is being written`
             )}{/if}
         </div>
         <div class="g-n">
@@ -2149,8 +2168,9 @@
             <div class="void">
               <b>Unknown — and unknown is not zero.</b>
               The failure list lives in /autopilot.json, which did not
-              answer. The durable record is <code>{JOURNAL}</code>, rendered at
-              <a class="link" href="/audit">Audit</a>.
+              answer — and so does <code>journal_error</code>, so whether the
+              journal at <code>{JOURNAL}</code> (rendered at
+              <a class="link" href="/audit">Audit</a>) is being written is unknown too.
             </div>
           {:else if ap.failures.length === 0}
             <div class="void">
@@ -2196,9 +2216,14 @@
 
             <div class="bay-note">
               {@render src('rep')} Each of these stalled after its attempts and was passed over, so later months
-              were not blocked behind it. This list dies with the process; the durable record is
-              <code>{ap.journal ?? JOURNAL}</code>, rendered at <a class="link" href="/audit">Audit</a>. A failure
-              here and not there was never written down, and that is a defect in the journal, not in this page.
+              were not blocked behind it. This list dies with the process;
+              {#if journalIsRecord(ap.journal_status)}
+                the durable record is
+                <code>{ap.journal ?? JOURNAL}</code>, rendered at <a class="link" href="/audit">Audit</a>. A failure
+                here and not there was never written down, and that is a defect in the journal, not in this page.
+              {:else}
+                <span class="unk">{journalBanner(ap.journal_status, ap.journal ?? JOURNAL)}</span>
+              {/if}
             </div>
           {/if}
         </section>
@@ -2217,8 +2242,15 @@
           </div>
 
           <div class="bay-note top">
-            Changes this page saw between two of its own reads. Not a server log, and gone when the tab is. The
-            durable record is <code>{ap?.journal ?? JOURNAL}</code>.
+            Changes this page saw between two of its own reads. Not a server log, and gone when the tab is.
+            {#if ap && !journalIsRecord(ap.journal_status)}
+              <span class="unk">{journalBanner(ap.journal_status, ap.journal ?? JOURNAL)}</span>
+            {:else if ap}
+              The durable record is <code>{ap.journal ?? JOURNAL}</code>.
+            {:else}
+              Whether the journal at <code>{JOURNAL}</code> is being written is unknown: /autopilot.json has not
+              answered.
+            {/if}
           </div>
 
           <div class="trail">

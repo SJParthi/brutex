@@ -3183,6 +3183,42 @@ fn daily_eligibility_of(day: i64) -> Result<DailyEligibility, Refusal> {
     }
 }
 
+/// The first signal day's daily context must be anchored to the session it
+/// follows on the canonical calendar (CE-10, D-1769).
+fn anchored_to_prior_session(
+    references: &[DailyReference],
+    first_signal_day: i64,
+) -> Result<(), Refusal> {
+    // THE NEWEST ELIGIBLE RECORD BEFORE THE FIRST SIGNAL DAY MUST BE THE
+    // SESSION THAT DAY FOLLOWS. This asked only for ANY eligible record before
+    // it, and `daily_context_from_span`'s per-day walk covers a day only once a
+    // previous signal day exists, so a previous-month file that ended early
+    // anchored the first day's pivots, previous-day and gap bits to an older
+    // session while GapFib,
+    // which asks `prior_accepted_session`, anchored to the right one (CE-10,
+    // D-1769). Both sides now ask the canonical calendar the same question.
+    let newest_before = references
+        .iter()
+        .rev()
+        .find(|reference| {
+            reference.ist_day() < first_signal_day
+                && reference.eligibility() == DailyEligibility::Eligible
+        })
+        .map(DailyReference::ist_day);
+    let Some(newest_before) = newest_before else {
+        return Err(format!(
+            "the first signal IST day {first_signal_day} has no eligible stored 1day record strictly before it. Same-day OHLCV, a coarse reconstruction, and a guessed holiday are all forbidden; load the preceding daily history"
+        ));
+    };
+    let (prior_session, _) = prior_accepted_session(first_signal_day)?;
+    if newest_before != prior_session {
+        return Err(format!(
+            "the first signal IST day {first_signal_day} follows the accepted session {prior_session}, but the newest eligible stored 1day record before it is {newest_before}. The daily file ends early, and anchoring the first day's previous-day, pivot and gap context to an older session is refused rather than guessed; load the missing daily history"
+        ));
+    }
+    Ok(())
+}
+
 /// Turn a complete stored one-day span into explicit causal reference records.
 pub(crate) fn daily_context_from_span(
     daily: Span,
@@ -3247,14 +3283,7 @@ pub(crate) fn daily_context_from_span(
         eligibility.push(u8::from(decision == DailyEligibility::Eligible));
     }
 
-    if !references.iter().any(|reference| {
-        reference.ist_day() < first_signal_day
-            && reference.eligibility() == DailyEligibility::Eligible
-    }) {
-        return Err(format!(
-            "the first signal IST day {first_signal_day} has no eligible stored 1day record strictly before it. Same-day OHLCV, a coarse reconstruction, and a guessed holiday are all forbidden; load the preceding daily history"
-        ));
-    }
+    anchored_to_prior_session(&references, first_signal_day)?;
 
     // Every regular signal session that is followed by another observed signal
     // session must itself have a stored daily record.  The signal stream is the
@@ -5052,6 +5081,34 @@ mod tests {
             why.contains("older anchor was not silently reused"),
             "{why}"
         );
+    }
+
+    /// CE-10, D-1769: a daily file that ends before the session the first
+    /// signal day follows refuses, instead of anchoring that day to an older
+    /// session. Monday's record exists, Tuesday traded and has none, and the
+    /// first signal day is Wednesday.
+    #[test]
+    fn a_first_signal_day_whose_prior_session_has_no_daily_record_refuses() {
+        let daily = daily_span(vec![candle_on_ist_day(OPEN_MONDAY_2026_08_03, 2_500_000)]);
+        let signal = [candle_on_ist_day(OPEN_WEDNESDAY_2026_08_05, 2_600_100)];
+        let why = daily_context_from_span(daily, &signal)
+            .expect_err("Wednesday follows Tuesday, not Monday");
+        assert!(
+            why.contains(&format!(
+                "follows the accepted session {OPEN_TUESDAY_2026_08_04}"
+            )),
+            "{why}"
+        );
+        assert!(
+            why.contains(&format!("is {OPEN_MONDAY_2026_08_03}")),
+            "{why}"
+        );
+        // And with Tuesday's record present the same first day is accepted.
+        let daily = daily_span(vec![
+            candle_on_ist_day(OPEN_MONDAY_2026_08_03, 2_500_000),
+            candle_on_ist_day(OPEN_TUESDAY_2026_08_04, 2_550_000),
+        ]);
+        daily_context_from_span(daily, &signal).expect("the prior session is on file");
     }
 
     #[test]

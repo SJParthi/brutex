@@ -239,7 +239,9 @@ pub fn masters_dir() -> Result<PathBuf, String> {
 ///
 /// No value and no `HOME`. See [`default_masters_dir_from`].
 fn masters_dir_from(value: Option<std::ffi::OsString>) -> Result<PathBuf, String> {
-    value.map_or_else(default_masters_dir, |v| Ok(PathBuf::from(v)))
+    // SET BUT EMPTY IS REFUSED, NOT RESOLVED. `PathBuf::from("")` is the
+    // working directory (CE-33, D-1769).
+    brutex_core::knob::folder("BRUTEX_MASTERS", value)?.map_or_else(default_masters_dir, Ok)
 }
 
 /// The directory the bar store and its manifests are read from.
@@ -290,8 +292,12 @@ fn store_dir_from(
     value: Option<std::ffi::OsString>,
     home: Option<std::ffi::OsString>,
 ) -> Result<PathBuf, String> {
-    if let Some(value) = value {
-        return Ok(PathBuf::from(value));
+    // SET BUT EMPTY IS REFUSED, NOT RESOLVED: `PathBuf::from("")` is the
+    // working directory, the `.` fallback this function's doc says was removed,
+    // reached by another road (CE-33, D-1769). An empty or relative HOME is
+    // refused the same way (CE-38).
+    if let Some(value) = brutex_core::knob::folder("BRUTEX_STORE", value)? {
+        return Ok(value);
     }
     let Some(home) = home else {
         return Err(format!(
@@ -304,7 +310,9 @@ fn store_dir_from(
                 .map_or_else(|e| format!("unreadable ({e})"), |p| p.display().to_string())
         ));
     };
-    Ok(PathBuf::from(home).join(".brutex").join("store"))
+    Ok(brutex_core::knob::home(Some(home))?
+        .join(".brutex")
+        .join("store"))
 }
 
 /// Where the masters live when `BRUTEX_MASTERS` says nothing.
@@ -351,7 +359,11 @@ fn default_masters_dir_from(home: Option<std::ffi::OsString>) -> Result<PathBuf,
                  under an environment that has HOME.",
             ))
         },
-        |home| Ok(PathBuf::from(home).join(".brutex").join("masters")),
+        |home| {
+            Ok(brutex_core::knob::home(Some(home))?
+                .join(".brutex")
+                .join("masters"))
+        },
     )
 }
 
@@ -1211,11 +1223,14 @@ async fn instruments_json(
     let (censuses, entries) = census_now(&site);
     // ONE PASS OVER THE CENSUS, NOT ONE PER INSTRUMENT. See `bars_by_symbol`.
     let held = bars_by_symbol(censuses.iter().find(|c| c.vendor == feed), entries.iter());
-    let bars_of =
-        |sym: brutex_core::symbol::Symbol| -> u64 { held.get(&sym).copied().unwrap_or(0) };
+    let bars_of = |key: &brutex_core::instrument::InstrumentKey| -> u64 {
+        held.get(&(key.exchange, key.segment, key.underlying))
+            .copied()
+            .unwrap_or(0)
+    };
     listing.sort_unstable_by_key(|(key, _)| {
         (
-            bars_of(key.underlying) == 0,
+            bars_of(key) == 0,
             key.kind != brutex_core::instrument::Kind::Index,
             key.underlying,
         )
@@ -1223,7 +1238,7 @@ async fn instruments_json(
 
     let mut out = String::from("[");
     for (n, (key, entry)) in listing.into_iter().enumerate() {
-        let bars = bars_of(key.underlying);
+        let bars = bars_of(key);
         // THE TRACKED UNIVERSE ONLY — the same predicate the page uses.
         //
         // This iterated the whole master and shipped 2,780 listings while the
@@ -1350,10 +1365,19 @@ async fn instruments_json(
 /// other citation in this file already avoids.
 ///
 /// The iterator is taken generically for that test: it counts what it yields.
+///
+/// # What one count is
+///
+/// The ONE-MINUTE SPOT bars of one listing: keyed by exchange, segment and
+/// symbol, with every contract series and every other rung left out. It was
+/// keyed by the symbol alone, so the NIFTY index row summed its 1-minute and
+/// 1-day bars and every stored NIFTY option, an index whose only data was
+/// options showed as held and charted nothing, and `NSE-CASH-X` and
+/// `BSE-CASH-X` showed one number (Z1-slice14-F1, D-1762).
 fn bars_by_symbol<'a>(
     census: Option<&census::VendorCensus>,
     entries: impl IntoIterator<Item = &'a (census::Series, store::path::YearMonth)>,
-) -> std::collections::HashMap<brutex_core::symbol::Symbol, u64> {
+) -> std::collections::HashMap<ListingKey, u64> {
     // PRE-SIZED FROM THE ENTRIES, not from the census. Gate 11 rule 3 refuses a
     // map that grows by rehashing, and this function exists to remove a cost —
     // it replaced an O(entries x universe) nested scan, so a map that rehashes
@@ -1371,12 +1395,24 @@ fn bars_by_symbol<'a>(
         return held;
     };
     for (series, month) in entries {
+        if series.contract.is_some() || series.timeframe != store::path::Timeframe::MINUTE_1 {
+            continue;
+        }
         if let Some(rows) = census.rows_for(&series.at(*month)) {
-            *held.entry(series.symbol).or_insert(0) += rows;
+            *held
+                .entry((series.exchange, series.segment, series.symbol))
+                .or_insert(0) += rows;
         }
     }
     held
 }
+
+/// The part of an instrument key that names its spot series in the store.
+type ListingKey = (
+    brutex_core::instrument::Exchange,
+    brutex_core::instrument::Segment,
+    brutex_core::symbol::Symbol,
+);
 
 /// The sentence every route answers with when `feed=` names a vendor this
 /// build cannot read.
@@ -2028,14 +2064,24 @@ fn empty_bars_page(
 /// Extracted from [`bars_json`] because that function is at clippy's line
 /// ceiling, and because the emit is the part worth reading on its own: it is
 /// the only place a bar becomes bytes on this route.
-fn bars_array(rows: &[store::format::Bar], from: Option<i64>, to: Option<i64>) -> String {
+fn bars_array(
+    rows: &[store::format::Bar],
+    from: Option<i64>,
+    to: Option<i64>,
+) -> (String, Vec<String>) {
     let inside = |bar: &store::format::Bar| {
         from.is_none_or(|at| bar.ts_micros >= at) && to.is_none_or(|at| bar.ts_micros < at)
     };
     let mut out = String::with_capacity(rows.len() * 96 + 32);
+    let mut withheld = Vec::new();
     out.push('[');
     let mut written = 0usize;
     for bar in rows.iter().filter(|bar| inside(bar)) {
+        // A VALUE A BROWSER CANNOT HOLD IS WITHHELD BY NAME (CE-60, D-2687).
+        if let Some(why) = inexact_bar(bar) {
+            withheld.push(why);
+            continue;
+        }
         if written > 0 {
             out.push(',');
         }
@@ -2058,7 +2104,51 @@ fn bars_array(rows: &[store::format::Bar], from: Option<i64>, to: Option<i64>) -
         );
     }
     out.push(']');
-    out
+    (out, withheld)
+}
+
+/// The largest magnitude a browser's JSON number holds exactly: 2^53 − 1.
+const BROWSER_EXACT: i64 = (1 << 53) - 1;
+
+/// Whether `value` survives `JSON.parse` as itself.
+const fn browser_exact(value: i64) -> bool {
+    value.unsigned_abs() <= BROWSER_EXACT.unsigned_abs()
+}
+
+/// The fault naming the first field of `bar` a browser's JSON number cannot
+/// hold exactly, or `None` when every field is exact.
+///
+/// The store admits any non-negative `i64` count and price, and both bar
+/// routes write them as bare numbers: `9007199254740993` would reach a page as
+/// `9007199254740992`, and `/db` and `/markets` check nothing. The other routes
+/// either quote such values or refuse them; these two keep their wire shape and
+/// withhold the bar, named in the `faults` they already carry, so every page is
+/// covered by one rule at the server (CE-60, D-2687).
+fn inexact_bar(bar: &store::format::Bar) -> Option<String> {
+    let interest = (bar.open_interest != store::format::OI_NULL).then_some(bar.open_interest);
+    [
+        ("o", Some(bar.open)),
+        ("h", Some(bar.high)),
+        ("l", Some(bar.low)),
+        ("c", Some(bar.close)),
+        ("v", Some(bar.volume)),
+        ("oi", interest),
+    ]
+    .into_iter()
+    .find_map(|(field, value)| {
+        value
+            .filter(|&held| !browser_exact(held))
+            .map(|held| inexact_fault(bar.ts_micros, field, held))
+    })
+}
+
+/// [`inexact_bar`]'s sentence, shared with the window's change fields.
+fn inexact_fault(ts_micros: i64, field: &str, value: i64) -> String {
+    format!(
+        "the bar at {ts_micros} UTC micros carries `{field}` = {value}, outside \
+         ±(2^53 − 1), which a browser's JSON number cannot hold exactly; the bar \
+         is withheld rather than sent to be rounded"
+    )
 }
 
 /// An optional ISO day as midnight IST in UTC microseconds.
@@ -2434,9 +2524,10 @@ async fn bars_json(
         .and_then(|at| file.first_at_or_after(at).ok())
         .and_then(|index| usize::try_from(index).ok())
         .map_or(held, |index| index.clamp(begins, held));
-    let (rows, faults) = bars::page(&file, begins, ends.saturating_sub(begins));
+    let (rows, mut faults) = bars::page(&file, begins, ends.saturating_sub(begins));
 
-    let out = bars_array(&rows, from_micros, to_micros);
+    let (out, mut withheld) = bars_array(&rows, from_micros, to_micros);
+    faults.append(&mut withheld);
 
     // A FAULTY RECORD IS NOT SILENTLY SKIPPED. `page` returns what it could
     // read and what it could not; dropping the second half would draw a chart
@@ -3319,6 +3410,29 @@ impl WindowAsk {
                     .map_err(|_| format!("{raw:?} is not a whole number for {key:?}"))
             }
         };
+        // ABSENT MEANS DESCENDING, which is what the grid opens on and what a
+        // reader of a store asks for first: the newest row. Anything else that
+        // is not `asc` or `desc` is refused: `dir=ASC` once answered newest
+        // first with a 200 (Z1-slice14-F3, D-1762).
+        let desc = match param(query, "dir").as_str() {
+            "" | "desc" => true,
+            "asc" => false,
+            other => {
+                return Err(format!(
+                    "{other:?} is not a direction. Accepted: asc, desc."
+                ));
+            }
+        };
+        // Same rule: `extremes=yes` once dropped the extremes silently.
+        let want_extremes = match param(query, "extremes").as_str() {
+            "" | "0" | "false" => false,
+            "1" | "true" => true,
+            other => {
+                return Err(format!(
+                    "{other:?} is not an extremes flag. Accepted: 0, 1, false, true."
+                ));
+            }
+        };
         Ok(Self {
             vendor,
             timeframe,
@@ -3326,12 +3440,22 @@ impl WindowAsk {
             from,
             to,
             sort,
-            // ABSENT MEANS DESCENDING, which is what the grid opens on and what
-            // a reader of a store asks for first: the newest row.
-            desc: !matches!(param(query, "dir").as_str(), "asc"),
+            desc,
             offset: number("offset", 0)?,
-            limit: number("limit", bars::PAGE_BARS)?,
-            want_extremes: matches!(param(query, "extremes").as_str(), "1" | "true"),
+            // A LIMIT OUTSIDE 1..=MAX IS REFUSED, NOT CLAMPED. `limit=5000`
+            // answered 1,000 rows under a 200 and a pager stepping by what it
+            // asked skipped 4,000 of them; `limit=0` answered an empty page
+            // beside a non-zero total (P1-01-01, P1-02-02, D-1765).
+            limit: match number("limit", bars::PAGE_BARS)? {
+                limit @ 1..=bars::MAX_WINDOW_LIMIT => limit,
+                other => {
+                    return Err(format!(
+                        "{other} is not a page size this grid serves. Accepted: 1 to {}.",
+                        bars::MAX_WINDOW_LIMIT
+                    ));
+                }
+            },
+            want_extremes,
         })
     }
 }
@@ -3384,11 +3508,11 @@ async fn bars_window_json(
     };
     let (sort, want_extremes) = (asked.sort, asked.want_extremes);
 
-    let body = render_window(&window, sort.scans() || want_extremes);
+    let (body, withheld) = render_window(&window, sort.scans() || want_extremes);
     // PARTIAL CONTENT WHEN A RECORD WOULD NOT READ, the same status
     // `/bars.json` answers with, for the same reason: the rows are real and
     // the set is not whole, and one status must not mean both.
-    let status = if window.faults.is_empty() {
+    let status = if window.faults.is_empty() && withheld == 0 {
         axum::http::StatusCode::OK
     } else {
         axum::http::StatusCode::PARTIAL_CONTENT
@@ -3404,14 +3528,32 @@ async fn bars_window_json(
 ///
 /// `months_missing` is on it for the same reason: a sparse store is legal, and
 /// a reader must be able to tell a gap from a refusal — `CLAUDE.md` §4.
-fn render_window(window: &bars::Window, scanned: bool) -> String {
+///
+/// Returns the body and how many bars or extremes were withheld because a
+/// browser's JSON number cannot hold one of their values (CE-60, D-2687); the
+/// caller answers 206 when that is not zero, as for a record that would not
+/// read. Each is named in `faults`.
+fn render_window(window: &bars::Window, scanned: bool) -> (String, usize) {
     let mut rows = String::with_capacity(window.bars.len() * 128 + 32);
+    let mut withheld: Vec<String> = Vec::new();
     rows.push('[');
-    for (n, row) in window.bars.iter().enumerate() {
-        if n > 0 {
+    let mut written = 0usize;
+    for row in &window.bars {
+        let bar = &row.bar;
+        let change = [("chg", row.chg), ("oichg", row.oichg)]
+            .into_iter()
+            .find_map(|(field, bps)| {
+                bps.filter(|&held| !browser_exact(held))
+                    .map(|held| inexact_fault(bar.ts_micros, field, held))
+            });
+        if let Some(why) = inexact_bar(bar).or(change) {
+            withheld.push(why);
+            continue;
+        }
+        if written > 0 {
             rows.push(',');
         }
-        let bar = &row.bar;
+        written = written.saturating_add(1);
         // EXACTLY ONE OF EACH PAIR IS NON-NULL, on every row, the same contract
         // `/store.json`'s `chg_bps`/`chg_why` already keeps. An unknown change
         // is never `0` — zero is a real bar that closed where the last one did.
@@ -3447,19 +3589,34 @@ fn render_window(window: &bars::Window, scanned: bool) -> String {
 
     let extremes = window.extremes.map_or_else(
         || "null".to_owned(),
-        |top| format!(r#"{{"range":{},"volume":{}}}"#, top.range, top.volume),
+        |top| {
+            if browser_exact(top.range) && browser_exact(top.volume) {
+                format!(r#"{{"range":{},"volume":{}}}"#, top.range, top.volume)
+            } else {
+                withheld.push(format!(
+                    "the window's extremes (range {}, volume {}) lie outside \
+                     ±(2^53 − 1), which a browser's JSON number cannot hold \
+                     exactly; withheld as null",
+                    top.range, top.volume
+                ));
+                "null".to_owned()
+            }
+        },
     );
-    format!(
+    let mut faults: Vec<&str> = window.faults.iter().map(String::as_str).collect();
+    faults.extend(withheld.iter().map(String::as_str));
+    let body = format!(
         r#"{{"total":{},"months_read":{},"months_missing":{},"scanned":{scanned},"extremes":{extremes},"faults":{},"bars":{rows}}}"#,
         window.total,
         window.months_read,
         window.months_missing,
-        if window.faults.is_empty() {
+        if faults.is_empty() {
             "null".to_owned()
         } else {
-            render::json_string(&window.faults.join("; "))
+            render::json_string(&faults.join("; "))
         }
-    )
+    );
+    (body, withheld.len())
 }
 
 /// The census as it is on disk RIGHT NOW, not as it was at startup.
@@ -4211,12 +4368,14 @@ const fn can_be_rebased(segment: brutex_core::instrument::Segment) -> bool {
 /// price — gives 2,147,490,000 bp, past `i32::MAX`. Proven by
 /// `api::server::basis_points_do_not_fit_i32_and_an_ordinary_price_proves_it`.
 ///
-/// # Preconditions, carried by the type rather than by a comment
+/// # No precondition on the sign
 ///
-/// Both arguments come from `pull::manifest::Closes::paisa`, and
-/// `Closes::known` refuses every negative, so both are in `0..=i64::MAX`. That
-/// is what makes the subtraction below unable to overflow, and it is why there
-/// is no `checked_sub` arm no input could ever enter.
+/// The manifest caller passes `pull::manifest::Closes::paisa`, which refuses
+/// every negative, but `bars::with_change` passes a raw stored close or open
+/// interest, and a store read does not validate prices (an unsealed month is
+/// read with no checksum). One corrupt bar of `i64::MIN` made the subtraction
+/// overflow, and the release profile aborts on that, taking the whole server
+/// down from one GET (CE-2, D-1761). The subtraction is therefore checked.
 ///
 /// # Errors
 ///
@@ -4228,9 +4387,9 @@ pub(crate) fn basis_points(first_paisa: i64, last_paisa: i64) -> Result<i64, Unk
     if first_paisa <= 0 {
         return Err(Unknown::BaseNotPositive);
     }
-    // Both operands are in `0..=i64::MAX`, so this is in `-i64::MAX ..=
-    // i64::MAX` and cannot overflow. See the precondition above.
-    let delta = last_paisa - first_paisa;
+    let Some(delta) = last_paisa.checked_sub(first_paisa) else {
+        return Err(Unknown::Overflow);
+    };
     let Some(scaled) = delta.checked_mul(10_000) else {
         return Err(Unknown::Overflow);
     };
@@ -5086,13 +5245,10 @@ pub const HTTP_LIVE: &str = "THE HTTP PATH IS WIRED TO THIS ROUTE. The credentia
      anything is spent, the feed's rate budget is charged through \
      pull::rate::Governor, held per feed on the site so its buckets survive \
      between requests — a request that will not be issued costs no credential \
-     read and no socket. WHAT IS STILL MISSING, so this sentence does not \
-     overstate itself the way its predecessors did: a window longer than the \
-     vendor's per-request cap is still sent whole rather than split, so a \
-     multi-year range is refused by the vendor or silently truncated by it \
-     (pull::session::split_window computes the chunks and has no caller yet); \
-     a window that stores nothing still reports STORED; and the expired-F&O \
-     endpoints are not modelled at all.";
+     read and no socket. A window longer than the vendor's per-request cap is \
+     split by pull::session::split_window into chunks that never cross a month, \
+     and expired F&O contracts are asked for through pull::rolling. A window \
+     that stores no bar is receipted STORED NOTHING, never STORED.";
 
 /// What the page says when the broker is NOT reachable from this process.
 ///
@@ -5285,7 +5441,8 @@ pub struct Site {
     ///
     /// `Some(progress)` with `progress.finished == None` is the ONE reading of
     /// "a run is in flight", and `pullrun::Finisher` guarantees it is cleared
-    /// on every exit including a panic. A finished run is deliberately LEFT
+    /// on every exit, including cancellation and, where a panic unwinds (`dev`,
+    /// `test`), a panic; `release` aborts on a panic, which ends the process. A finished run is deliberately LEFT
     /// here rather than taken out: the page reads its summary after it ends,
     /// and a slot emptied on completion would answer that read with nothing.
     pub run: std::sync::Mutex<Option<crate::pullrun::Progress>>,
@@ -5296,8 +5453,10 @@ pub struct Site {
     /// each other, `Some` with no `finished_micros` as the one reading of "in
     /// flight", and a finished run LEFT in the slot so the page can read its
     /// report after it ends. `sweeprun::TaskFinisher` turns every abnormal task
-    /// exit into a finished refusal, including a panic and a queued blocking
-    /// task dropped during shutdown, so no dead task can leave this slot busy.
+    /// exit into a finished refusal, including a queued blocking task dropped
+    /// during shutdown and, where a panic unwinds (`dev`, `test`), a panic, so no
+    /// dead task can leave this slot busy; `release` aborts on a panic, which
+    /// ends the process and the slot with it (poison-1, D-1771).
     ///
     /// Separate from [`Self::run`] rather than sharing it, because a pull and
     /// a sweep are independent work: a sweep reads bars off disk and a pull
@@ -7111,9 +7270,12 @@ fn note_run_finished(out: &BrokerRun, balanced: bool, claimed: Option<u64>) {
 ///
 /// # Why it lives here and not in `crates/pull`
 ///
-/// `crates/pull` declares no telemetry dependency and does not gain one: that
-/// would add an edge `CLAUDE.md` §5's graph does not carry. The event is
-/// emitted at the `api` layer, beside the two that were already here.
+/// `crates/pull` does depend on `telemetry` (its `Cargo.toml`, and the
+/// `pull -> telemetry` arrow in `CLAUDE.md` §5), but `pull::ingest` hands the
+/// failed member back as a value rather than reporting it, and the route that
+/// knows the feed, rung and month the operator asked for is this one, so the
+/// event is emitted here. (This once said `pull` had no telemetry dependency;
+/// Z1-slice14-F4, D-1762.)
 fn note_member_failure(
     failure: &pull::ingest::Failure,
     month: &str,
@@ -8514,7 +8676,7 @@ where
             Err(why) => why,
         };
 
-        if why.status.is_some_and(|code| (500..=599).contains(&code)) {
+        if why.status.is_some_and(|code| matches!(code, 500..=599)) {
             server_errors = server_errors.saturating_add(1);
         }
         // THE SAME MARKER THE BARS PATH READS. Dhan spells a dead session in the
@@ -8522,13 +8684,17 @@ where
         // and so must this one, or the two paths disagree about one credential.
         let invalid_auth = why.detail.contains("Invalid_Authentication");
 
-        match step(why.status, invalid_auth, None, attempt, server_errors) {
+        // THE VENDOR'S OWN NAME FOR IT, read from the body by the transport
+        // (CE-29, D-1769). `None` here sent a 403 "not entitled" down the dead
+        // token arm and a 400 `DH-906` down the answered one.
+        match step(why.status, invalid_auth, why.named, attempt, server_errors) {
             Step::NotEntitled => {
                 return Err(pull::chain::Refusal {
                     // ALIVE, AND NOT ENTITLED. Two different facts, and
                     // conflating them halts a feed over a subscription gap.
                     credential_dead: false,
                     status: why.status,
+                    named: why.named,
                     detail: format!(
                         "{why} — the credential is ALIVE and this API key is not \
                          entitled to this call. Re-running later cannot fix it; \
@@ -8544,6 +8710,7 @@ where
                     // re-derived downstream by grepping a rendered page.
                     credential_dead: true,
                     status: why.status,
+                    named: why.named,
                     detail: format!(
                         "{why} — the access token is no longer valid mid-walk. \
                          This repository never mints one (§8): the refreshed \
@@ -8560,6 +8727,7 @@ where
                     // THE VENDOR'S SIDE FAILED; the credential was fine.
                     credential_dead: false,
                     status: why.status,
+                    named: why.named,
                     // MARKED, SO THE RUN LOOP DOES NOT HAVE TO READ THIS
                     // SENTENCE TO KNOW WHAT IT SAYS. The marker is stripped in
                     // `broker_run` before the reason reaches an operator or the
@@ -8587,6 +8755,7 @@ where
         // EXHAUSTED IS ABOUT THE TRANSPORT, NOT THE TOKEN.
         credential_dead: false,
         status: last.status,
+        named: last.named,
         detail: format!(
             "{last} — and it failed {THROTTLE_ATTEMPTS} times, so the transport \
              is not blipping, it is down"
@@ -9721,7 +9890,7 @@ async fn with_retry(
                     return Err(text);
                 }
                 let invalid_auth = text.contains("Invalid_Authentication");
-                if status.is_some_and(|code| (500..=599).contains(&code)) {
+                if status.is_some_and(|code| matches!(code, 500..=599)) {
                     server_errors = server_errors.saturating_add(1);
                 }
                 match step(status, invalid_auth, named, attempt, server_errors) {
@@ -9820,8 +9989,14 @@ async fn with_retry(
                         // vendor had just refused. So the decrease is taken here
                         // for the named case only, which is precisely the set
                         // the transport misses. D-0322.
+                        //
+                        // AND THE TRANSPORT DOES NOT MISS A 2xx. A throttle
+                        // named in a 2xx body is recorded by
+                        // `weigh_body_parsed` (D-0950), so taking it here too
+                        // counted it twice and halved the refusals needed to
+                        // floor the allowance (CE-30, D-1769).
                         if throttled
-                            && status != Some(429)
+                            && transport_missed_throttle(status)
                             && let Ok(budgets) = site.budgets.lock()
                             && let Some(Some(shared)) = budgets.get(feed as usize)
                         {
@@ -9843,6 +10018,36 @@ async fn with_retry(
         "{last} — and it failed {THROTTLE_ATTEMPTS} times, so the transport is not \
          blipping, it is down"
     ))
+}
+
+/// Whether a throttle `step` named under `status` is one the transport did not
+/// already record against the shared governor.
+///
+/// `window_async` records a 429 on its status, and a throttle named in a 2xx
+/// body in `weigh_body_parsed`. What it cannot see is a named throttle under
+/// any other answered status, and that is the only set `with_retry` may record
+/// (D-0322, CE-30, D-1769).
+fn transport_missed_throttle(status: Option<u16>) -> bool {
+    status.is_some_and(|code| code != 429 && !matches!(code, 200..=299))
+}
+
+#[cfg(test)]
+mod throttle_record_tests {
+    use super::transport_missed_throttle;
+
+    /// One named throttle is one decrement: a 429 and a 2xx body are the
+    /// transport's to record, a named throttle under any other status is
+    /// `with_retry`'s, and no status means nothing was answered (CE-30, D-1769).
+    #[test]
+    fn a_throttle_the_transport_recorded_is_not_recorded_again() {
+        for code in [200, 201, 204, 299, 429] {
+            assert!(!transport_missed_throttle(Some(code)), "{code}");
+        }
+        for code in [199, 300, 400, 403, 428, 430, 500, 503] {
+            assert!(transport_missed_throttle(Some(code)), "{code}");
+        }
+        assert!(!transport_missed_throttle(None));
+    }
 }
 
 /// Every secret this feed's [`pull::vendor::AuthScheme`] names, read from
@@ -10207,7 +10412,14 @@ pub(crate) async fn credentialed_source(
             "HOME is unset, so ~/.brutex/credentials.toml cannot be located".to_owned(),
         ));
     };
-    let config_path = pull::config::default_config_path(std::path::Path::new(&home));
+    // AN EMPTY OR RELATIVE HOME IS REFUSED, not read as the working
+    // directory's `.brutex/credentials.toml` (CE-38, D-1769).
+    let home = brutex_core::knob::home(Some(home)).map_err(|why| {
+        Unreadable::configuration(format!(
+            "{why}, so ~/.brutex/credentials.toml cannot be located"
+        ))
+    })?;
+    let config_path = pull::config::default_config_path(&home);
     let config = pull::config::CredentialConfig::load(&config_path).map_err(|why| {
         Unreadable::configuration(format!(
             "the credential configuration at {} is not usable: {why}",
@@ -12821,29 +13033,9 @@ async fn roll_one(
     last_settled: Day,
 ) -> Result<Rolled, String> {
     let label = format!("{word} {flag}/{code} {strike} {option_type}");
-    // THE EXPIRY THE ANSWER WILL NOT CARRY, established BEFORE the request.
-    //
-    // Asked first on purpose: if this underlying has no regime for that cadence
-    // the contract cannot be filed whatever comes back, and finding that out
-    // after the round-trip spends a request to learn something the calendar
-    // already knew.
-    // DERIVED FROM THIS CHUNK'S END, not the operator's. A rolling series is
-    // ATM-relative and its underlying contract changes every week, so resolving
-    // a 230-day ask to ONE expiry would file eight months of bars under a
-    // single contract. The chunk's own end names the contract its own bars
-    // belong to.
-    // A PRE-FLIGHT CHECK, AND ITS VALUE IS DELIBERATELY DISCARDED.
-    //
-    // Asked before the socket opens: if this underlying has no expiry regime
-    // for that cadence, not one bar can be filed whatever comes back, and
-    // learning it after the round-trip spends a request on something the
-    // calendar already knew.
-    //
-    // The ANSWER is not kept, because one expiry cannot name a rolling answer —
-    // see the split below. This asks whether the regime exists, not what it
-    // resolves to.
-    pull::rolling::expiry_of(asked.underlying.as_str(), &rolling, flag, code, window.to())
-        .map_err(|why| format!("{label}: {why}"))?;
+    // A PRE-FLIGHT CHECK on the chunk's first day, before the socket opens; see
+    // `rolling_preflight` for what it asks and why on that day.
+    rolling_preflight(asked, &rolling, flag, window, &label)?;
 
     // THE VENDOR'S WORD FOR THE RUNG, NOT THE STORE'S — and this sent the
     // store's.
@@ -12947,7 +13139,17 @@ async fn roll_one(
                 // The reply was decoded even when a contract cannot be named.
                 // Keep its read count and any earlier acknowledged groups.
                 note_run_failure(&mut failed, &mut why_not, why);
-                break;
+                // SKIP THE UNNAMED RUN, NOT THE REST OF THE ANSWER. A holiday
+                // week's contract is refused by name (CE-14) and counted once
+                // above; the contracts after it in the same chunk are real and
+                // were dropped by the `break` this replaced (CE-43, D-2650).
+                // Each row's key is computed a bounded number of times (at
+                // most three), so the loop stays O(rows).
+                at = at.saturating_add(1);
+                while rows.get(at).is_some_and(|row| key_at(row).is_err()) {
+                    at = at.saturating_add(1);
+                }
+                continue;
             }
         };
 
@@ -13439,8 +13641,12 @@ where
             .ok_or_else(|| format!("{label}: row vanished"))?,
     )?;
     let mut end = at.saturating_add(1);
+    // A LATER ROW THAT CANNOT BE NAMED ENDS THE GROUP; IT DOES NOT TAKE THE
+    // GROUP WITH IT. The rows before it named one contract and are filed; the
+    // unnamed row is the next call's first row, where its refusal is counted.
+    // Propagating it here discarded every good row ahead of it (CE-43, D-2650).
     while let Some(row) = rows.get(end) {
-        if key_at(row)? != key {
+        if key_at(row).ok() != Some(key) {
             break;
         }
         end = end.saturating_add(1);
@@ -14506,6 +14712,45 @@ fn cadence_has_contracts(
     cadence_has_contracts_on(asked, rolling, flag, asked.window.from())
 }
 
+/// Whether a rolling chunk can carry any contract, asked before its request.
+///
+/// Asked before the socket opens: if this underlying has no expiry regime for
+/// that cadence, not one bar can be filed whatever comes back, and learning it
+/// after the round-trip spends a request on something the calendar already
+/// knew. It asks whether the regime exists, not what it resolves to, so it asks
+/// `listing_of`, which cannot refuse a cadence for one closed-day contract the
+/// way `expiry_of` rightly refuses that contract; that refusal is counted per
+/// run inside `roll_one` (CE-43, D-2650).
+///
+/// ASKED OF THE CHUNK'S FIRST DAY, the day the walk's own chunk filter asks
+/// (`cadence_has_contracts_on(.., chunk.from())`). It was asked of the last
+/// day, so a chunk spanning a withdrawal (BANKNIFTY weeklies from 2024-11-14)
+/// was refused whole and its good weeklies before the withdrawal were lost on
+/// every rerun under the end-week reason (CE-54, D-2659). A withdrawal is one
+/// way, so a cadence listed on the first day has at least that day's contract;
+/// a run whose own contract cannot be named is refused per run by `rolling_key`.
+///
+/// # Cost
+///
+/// The bounded dated-table lookups `cadence_has_contracts_on` states, once per
+/// chunk and before any request.
+fn rolling_preflight(
+    asked: &ingest::FnoRequest,
+    rolling: &pull::vendor::RollingSpec,
+    flag: &str,
+    window: pull::session::Window,
+    label: &str,
+) -> Result<(), String> {
+    match pull::rolling::listing_of(asked.underlying.as_str(), rolling, flag, window.from()) {
+        Ok(pull::rolling::Listing::Listed) => Ok(()),
+        Ok(pull::rolling::Listing::Withdrawn) => Err(format!(
+            "{label}: this cadence was withdrawn for the underlying by the chunk's first \
+             day, so no contract existed"
+        )),
+        Err(why) => Err(format!("{label}: {why}")),
+    }
+}
+
 /// The same question asked of ONE DAY, which is the granularity the rule needs.
 ///
 /// # Why the window is not fine enough
@@ -14532,9 +14777,16 @@ fn cadence_has_contracts_on(
     flag: &str,
     on: pull::session::Day,
 ) -> bool {
-    rolling.expiry_codes.first().is_some_and(|code| {
-        pull::rolling::expiry_of(asked.underlying.as_str(), rolling, flag, code, on).is_ok()
-    })
+    // ONLY A WITHDRAWN CADENCE IS SKIPPED. This was `expiry_of(..).is_ok()`,
+    // and after CE-14 `expiry_of` also refuses one contract whose computed
+    // expiry is a closed day — so a holiday week dropped the whole cadence (at
+    // the window's first day) or the whole chunk, uncounted, with `planned`
+    // shrunk to match. Any other refusal is ASKED, so `roll_one` refuses it by
+    // name and the walk counts it (CE-43, D-2650).
+    !matches!(
+        pull::rolling::listing_of(asked.underlying.as_str(), rolling, flag, on),
+        Ok(pull::rolling::Listing::Withdrawn)
+    )
 }
 
 /// How many vendor requests this walk will make, before it makes any of them.
@@ -15605,10 +15857,20 @@ fn store_filter(query: &str) -> census::StoreFilter {
         // and upper-cases at construction, so the comparison is now allocation
         // free on both sides.
         symbol: (!symbol.is_empty()).then(|| symbol.to_uppercase()),
-        // Not offered in the bar yet: the store holds one timeframe today, and
-        // a control with one option is a control that lies about having a
-        // choice. The field is parsed so a URL can still carry it.
-        timeframe: None,
+        // PARSED, AND SHOWN. This read `None` under a comment saying the field
+        // was parsed, while the store held two rungs — so `?timeframe=1day`
+        // silently listed both (P1-02-05, D-1765). It is read through the
+        // store's own `Timeframe::KNOWN` the way `timeframe_param` reads it,
+        // and the filter bar renders it, so what the bar shows is what was
+        // applied. An unknown value is `None`, shown as "All", like every
+        // other malformed narrowing here.
+        timeframe: {
+            let raw = param(query, "timeframe");
+            store::path::Timeframe::KNOWN
+                .iter()
+                .copied()
+                .find(|rung| rung.as_str() == raw)
+        },
         from: month(&param(query, "from")),
         to: month(&param(query, "to")),
     }
@@ -15668,6 +15930,49 @@ fn bars_refusal(
     )
 }
 
+/// The feed a `/bars` request names, under either spelling.
+///
+/// `feed=` is how every sibling read route spells it (`/bars.json`,
+/// `/bars/window.json`, `/store`); this page read only `vendor=`, so
+/// `/bars?feed=groww` was answered with Dhan's month under 200 (P1-02-03,
+/// D-1765). Both are read now. `vendor=` stays because the links this server
+/// renders carry it. A request carrying both with different values is
+/// refused: neither can be chosen without guessing.
+///
+/// # Errors
+///
+/// `Err(())` when `feed` and `vendor` are both present and differ, compared
+/// case-blind as [`ingest::parse_vendor`] compares.
+fn bars_feed_word(query: &str) -> Result<String, ()> {
+    let feed = param(query, "feed");
+    let vendor = param(query, "vendor");
+    match (feed.is_empty(), vendor.is_empty()) {
+        (false, false) if !feed.eq_ignore_ascii_case(&vendor) => Err(()),
+        (false, _) => Ok(feed),
+        _ => Ok(vendor),
+    }
+}
+
+/// The vendor a `/bars` request names, or the sentence its refusal carries.
+///
+/// ONE PARSER, shared with the pull form. This route had its own copy that
+/// compared with `==` while `ingest::parse_vendor` used `eq_ignore_ascii_case`,
+/// so `?vendor=Groww` meant a different vendor here than there — one question,
+/// two answers, and BOTH silently fell back to Dhan. Being served Dhan's copy
+/// of a month after asking for Groww's, under HTTP 200, is the worst class of
+/// defect in this repository: a wrong answer wearing the shape of a right one.
+fn bars_vendor(query: &str) -> Result<Vendor, &'static str> {
+    let word = bars_feed_word(query).map_err(|()| {
+        "`feed` and `vendor` name different feeds. Refused rather than \
+         answered from either: the page cannot know which one was meant."
+    })?;
+    ingest::parse_vendor(&word).ok_or(
+        "that is not a vendor this build has a feed for. Refused rather \
+         than answered from another vendor's prefix — a month served from \
+         the wrong feed looks exactly like the right one.",
+    )
+}
+
 /// The exchange and segment to read one symbol's bars from.
 ///
 /// [`Unlocated`] means **nothing placed under that name and nothing asked** — the
@@ -15680,9 +15985,10 @@ fn bars_refusal(
 ///
 /// `param_or(query, "segment", "INDEX")`, justified in its own doc as *"the
 /// only values the engine surface has (`CLAUDE.md` §1)"*. §1 keeps two sets
-/// apart in consecutive sentences: the engine SWEEPS two instruments, and
-/// *"futures, options and single stocks may be stored. They are never swept."*
-/// This route reads the store.
+/// apart: the engine SWEEPS the two spot indices and the cash equities of the
+/// F&O shares (D-0506), while contracts and single stocks outside the F&O
+/// universe *"may be stored and are never swept"*. This route reads the store.
+/// (This quoted §1 as it read before D-0506 widened the sweep.)
 ///
 /// D-0335 fixed the same defect on `/calendar.json`, where the literal was
 /// LIVE: `ADANIENT` is filed at `NSE/CASH/ADANIENT/` and was probed at
@@ -15742,7 +16048,9 @@ fn locate_series(site: &Site, query: &str, symbol: &str) -> Result<(String, Stri
     // hand-typed `/bars` URL. D-0686. At most `Vendor::ALL` censuses, each
     // walked once through `held_entries`, as before.
     let (censuses, _) = census_now(site);
-    let asked_vendor = ingest::parse_vendor(&param(query, "vendor"));
+    let asked_vendor = bars_feed_word(query)
+        .ok()
+        .and_then(|word| ingest::parse_vendor(&word));
     let asked_first = censuses
         .iter()
         .filter(|census| Some(census.vendor) == asked_vendor);
@@ -15936,9 +16244,10 @@ fn unlocatable(site: &Site, symbol: &str, why: &Unlocated) -> (axum::http::Statu
 /// defaults this route no longer takes. Its own doc justified them: an absent
 /// `?segment=` means INDEX *"because those are the only values the engine
 /// surface has (`CLAUDE.md` §1)"*. That conflates two sets §1 keeps apart in
-/// consecutive sentences: the engine SWEEPS two instruments, and *"futures,
-/// options and single stocks may be stored. They are never swept."* This route
-/// reads the store. D-0339 removed the helper and [`locate_series`] replaced
+/// consecutive sentences: the engine SWEEPS the two spot indices and the F&O
+/// shares' cash equities (D-0506), and contracts and single stocks outside the
+/// F&O universe *"may be stored and are never swept"*. This route reads the
+/// store. D-0339 removed the helper and [`locate_series`] replaced
 /// it, placed ABOVE this paragraph rather than inside it — which is the mistake
 /// that split it in the first place.
 #[must_use]
@@ -15950,25 +16259,19 @@ pub fn bars_html(site: &Site, query: &str) -> (axum::http::StatusCode, String) {
         Ok(pair) => pair,
         Err(why) => return unlocatable(site, &symbol, &why),
     };
-    // ONE PARSER, shared with the pull form. This route had its own copy that
-    // compared with `==` while `ingest::parse_vendor` used
-    // `eq_ignore_ascii_case`, so `?vendor=Groww` meant a different vendor here
-    // than there — one question, two answers, and BOTH silently fell back to
-    // Dhan. Being served Dhan's copy of a month after asking for Groww's, under
-    // HTTP 200, is the worst class of defect in this repository: a wrong answer
-    // wearing the shape of a right one.
-    let asked_vendor = param(query, "vendor");
-    let Some(vendor) = ingest::parse_vendor(&asked_vendor) else {
-        return bars_refusal(
-            site,
-            axum::http::StatusCode::BAD_REQUEST,
-            &symbol,
-            &segment,
-            "—",
-            "that is not a vendor this build has a feed for. Refused rather \
-             than answered from another vendor's prefix — a month served from \
-             the wrong feed looks exactly like the right one.",
-        );
+    // See `bars_vendor` for why this is one parser and refuses by name.
+    let vendor = match bars_vendor(query) {
+        Ok(vendor) => vendor,
+        Err(why) => {
+            return bars_refusal(
+                site,
+                axum::http::StatusCode::BAD_REQUEST,
+                &symbol,
+                &segment,
+                "—",
+                why,
+            );
+        }
     };
     let page = page_number(query);
 
@@ -16114,12 +16417,16 @@ pub enum Broker {
 /// `web/src/routes/+layout.svelte` have both said `/` is since they were
 /// written. The server-rendered dashboard it displaced answers at
 /// `/dashboard`, unchanged and still linked from the nav; D-0064.
-pub fn router(site: Loaded) -> axum::Router {
-    router_serving(
+///
+/// # Errors
+///
+/// `BRUTEX_WEB` is set but empty; see [`assets::web_dir`].
+pub fn router(site: Loaded) -> Result<axum::Router, String> {
+    Ok(router_serving(
         site,
-        std::sync::Arc::new(assets::Assets::new(&assets::web_dir())),
+        std::sync::Arc::new(assets::Assets::new(&assets::web_dir()?)),
         DEFAULT_ADDR,
-    )
+    ))
 }
 
 /// Production HTTP surface with durable sweep-control and result-read auditing.
@@ -16346,39 +16653,83 @@ fn request_bounds_refusal(
 /// `member` is the ticked instruments of a pull; `leg` is one leg of a press.
 const MULTI_VALUED_FORM_FIELDS: [&str; 2] = ["member", "leg"];
 
-/// The first form-body key that appears twice and is not a list field, or
-/// `None`. The query rule ([`repeated_query_key`]) for the body.
-pub(crate) fn repeated_form_key(body: &str) -> Option<&str> {
-    let mut seen = std::collections::HashSet::with_capacity(
-        body.bytes()
-            .filter(|b| *b == b'&')
-            .count()
-            .saturating_add(1),
-    );
-    body.split('&')
+/// The most distinct single-valued keys one form body may name.
+///
+/// No form this server reads has more than a few dozen fields; every list a
+/// form carries is a [`MULTI_VALUED_FORM_FIELDS`] key and is not counted. The
+/// bound is what keeps the duplicate check's memory independent of the body:
+/// the set was reserved at one entry per `&` before a key was read, so a
+/// 27 MB body of bare `&` allocated about 570 MB (P5-05, D-2659).
+pub(crate) const MAX_DISTINCT_FORM_KEYS: usize = 256;
+
+/// What [`form_key_verdict`] found wrong with a form body.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum FormKeys<'a> {
+    /// This key appears twice and is not a list field.
+    Repeated(&'a str),
+    /// More than [`MAX_DISTINCT_FORM_KEYS`] distinct single-valued keys.
+    TooMany,
+}
+
+/// The first thing wrong with a form body's keys, or `None`. The query rule
+/// ([`repeated_query_key`]) for the body, with a bound on distinct keys.
+///
+/// Memory is at most [`MAX_DISTINCT_FORM_KEYS`] set entries, reserved once,
+/// whatever the body holds; empty pairs (`&&`) are skipped without a probe.
+/// Proven by `api::server::tests::a_form_body_past_the_distinct_key_bound_is_refused`.
+pub(crate) fn form_key_verdict(body: &str) -> Option<FormKeys<'_>> {
+    let mut seen = std::collections::HashSet::with_capacity(MAX_DISTINCT_FORM_KEYS);
+    for key in body
+        .split('&')
         .filter(|pair| !pair.is_empty())
         .map(|pair| pair.split_once('=').map_or(pair, |(key, _)| key))
         .filter(|key| !MULTI_VALUED_FORM_FIELDS.contains(key))
-        .find(|key| !seen.insert(*key))
+    {
+        if seen.contains(key) {
+            return Some(FormKeys::Repeated(key));
+        }
+        if seen.len() == MAX_DISTINCT_FORM_KEYS {
+            return Some(FormKeys::TooMany);
+        }
+        seen.insert(key);
+    }
+    None
+}
+
+/// Whether a route reads its body as strict JSON rather than as a form.
+///
+/// These three decode with `sweeprun::wire_body`, which refuses a duplicate
+/// key itself; every other route reads its body with [`param`], whatever the
+/// client's `Content-Type` says. The exemption was decided by that header or a
+/// leading `{`, so `action=stop&action=start` sent as JSON reached a form
+/// reader unchecked and read as `stop` (P5-06, D-2659).
+fn reads_json_body(path: &str) -> bool {
+    matches!(
+        path,
+        "/backtest/run" | "/backtest/descend" | "/engine/command"
+    )
 }
 
 /// The body bound [`one_value_per_form_field`] reads within, by route.
 ///
 /// The two member routes carry their own larger `DefaultBodyLimit`,
-/// [`crate::ingest::MAX_MEMBER_FORM_BYTES`] (D-1499). This middleware runs
+/// [`crate::ingest::MAX_MEMBER_FORM_BYTES`] (D-1499), and the two leg routes
+/// [`crate::pullrun::MAX_RUN_FORM_BYTES`] (D-1769). This middleware runs
 /// outside every route layer, so reading at the shared [`MAX_FORM_BYTES`] here
 /// answered 750 ticked members with a 413 before the route's own bound was
 /// ever consulted (D-1592). Every other route keeps the shared bound, which its
-/// extractor enforces again. O(1): two comparisons against literal paths.
+/// extractor enforces again. O(1): four comparisons against literal paths.
 /// Which route gets which bound is proven by
 /// `api::server::form_read_bound_is_wide_only_on_the_member_routes`; the
 /// constant cost is by construction and UNVERIFIED by any measurement
 /// (`docs/06-limits.md`, D-1459).
 fn form_read_bound(path: &str) -> usize {
-    if matches!(path, "/ingest/queue" | "/pull/spot") {
-        crate::ingest::MAX_MEMBER_FORM_BYTES
-    } else {
-        MAX_FORM_BYTES
+    match path {
+        "/ingest/queue" | "/pull/spot" => crate::ingest::MAX_MEMBER_FORM_BYTES,
+        // The two leg routes read the run bound for the same reason (P3-01-01,
+        // D-1769); their own `DefaultBodyLimit` is that bound too.
+        "/pull/run" | "/pull/recovery" => crate::pullrun::MAX_RUN_FORM_BYTES,
+        _ => MAX_FORM_BYTES,
     }
 }
 
@@ -16391,7 +16742,9 @@ fn form_read_bound(path: &str) -> usize {
 /// one, was never read, on the very routes that spend vendor quota. The body is
 /// read here once, within [`MAX_FORM_BYTES`] (the bound `DefaultBodyLimit`
 /// already gave every handler, answered with the same `413` past it), checked,
-/// and handed on unchanged. A JSON body is not a form and is passed through.
+/// and handed on unchanged. A body on one of the three strict-JSON routes
+/// ([`reads_json_body`]) is not a form and is passed through; any other route's
+/// body is checked whatever its `Content-Type` (P5-06, D-2659).
 ///
 /// O(body) once per request, bounded by [`form_read_bound`].
 async fn one_value_per_form_field(
@@ -16421,29 +16774,31 @@ async fn one_value_per_form_field(
         )
             .into_response();
     };
-    let json = parts
-        .headers
-        .get(axum::http::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.to_ascii_lowercase().contains("json"))
-        || matches!(bytes.trim_ascii_start().first(), Some(b'{' | b'['));
-    if !json
+    if !reads_json_body(parts.uri.path())
         && let Ok(text) = std::str::from_utf8(&bytes)
-        && let Some(key) = repeated_form_key(text)
+        && let Some(wrong) = form_key_verdict(text)
     {
-        return (
-            axum::http::StatusCode::BAD_REQUEST,
-            [(
-                axum::http::header::CONTENT_TYPE,
-                "text/plain; charset=utf-8",
-            )],
-            format!(
+        let why = match wrong {
+            FormKeys::Repeated(key) => format!(
                 "REFUSED — the form names {:?} more than once. Every field this \
                  server reads from a form is read once, so a second value would \
                  be silently ignored; send each field once. Nothing was read or \
                  run.\n",
                 note_alphabet(key)
             ),
+            FormKeys::TooMany => format!(
+                "REFUSED — the form names more than {MAX_DISTINCT_FORM_KEYS} \
+                 distinct fields, and no form this server reads has that many. \
+                 Nothing was read or run.\n"
+            ),
+        };
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; charset=utf-8",
+            )],
+            why,
         )
             .into_response();
     }
@@ -16585,10 +16940,21 @@ fn route_table(assets: std::sync::Arc<assets::Assets>) -> axum::Router<Loaded> {
         // still serve one leg each; this starts a run that drives them itself,
         // so the operator's retry loop is no longer inside a browser tab. See
         // `crate::pullrun`.
-        .route("/pull/run", axum::routing::post(pull_run))
+        // Both read legs, each repeating its member list twice-encoded, so
+        // both read the run bound, not 8 KiB (P3-01-01, D-1769).
+        .route(
+            "/pull/run",
+            axum::routing::post(pull_run).layer(axum::extract::DefaultBodyLimit::max(
+                crate::pullrun::MAX_RUN_FORM_BYTES,
+            )),
+        )
         .route(
             "/pull/recovery",
-            axum::routing::post(crate::recovery::start).get(crate::recovery::page),
+            axum::routing::post(crate::recovery::start)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    crate::pullrun::MAX_RUN_FORM_BYTES,
+                ))
+                .get(crate::recovery::page),
         )
         .route(
             "/pull/recovery.json",
@@ -16635,12 +17001,16 @@ fn route_table(assets: std::sync::Arc<assets::Assets>) -> axum::Router<Loaded> {
             )),
         )
         // THE AUDIT'S TWO. `/audit.json` is what the browser console reads and
-        // `/audit` is the no-script page, unchanged. Before the JSON route
+        // `/audit/page` is the no-script page. It answered `/audit` until
+        // P3-02-01 (D-1971): a registered route beats the fallback, so a nav
+        // click rendered the Svelte console and a reload rendered this page --
+        // the collision `/backtest` below documents. `/audit` is now the front
+        // end's, through the fallback, exactly as `/backtest` is. Before the JSON route
         // existed the console fetched the PAGE and parsed its table back out
         // with `DOMParser`, which coupled a browser to `render::audit_row`'s
         // markup and left one path answered by two different applications.
         .route("/audit.json", axum::routing::get(audit_json::audit_json))
-        .route("/audit", axum::routing::get(audit_get))
+        .route("/audit/page", axum::routing::get(audit_get))
         .route("/store", axum::routing::get(store_get))
         .route("/bars", axum::routing::get(bars_get))
         // THE LOG, READABLE FROM THE APPLICATION THAT WROTE IT.
@@ -16809,9 +17179,10 @@ fn route_table(assets: std::sync::Arc<assets::Assets>) -> axum::Router<Loaded> {
         )
         // THE MASTERS, SEPARATE FROM THE BARS. `/pull/*` spends the vendor's
         // quota per instrument-month; this moves four files, three of them free
-        // public CDN downloads. `Site::load` parses them once at startup with
-        // no reload path, so the status route answers whether a restart is
-        // required rather than pretending one is not. D-0308.
+        // public CDN downloads. A refresh re-parses them in place through
+        // `Site::reparse`; the status route answers whether a restart is still
+        // required (a refused reparse, or a file changed by another hand).
+        // D-0308, D-1762.
         // AND THE PAGE THAT REACHES THEM. D-0308 shipped the two routes below
         // and no way to reach either: refreshing a master required having read
         // this table. D-0312.
@@ -18813,32 +19184,7 @@ fn take_serve_lock(store_root: &Path, addr: std::net::SocketAddr) -> Result<Serv
     let file = match store::flock::Flock::try_lock(file, path.clone()) {
         Ok(held) => held,
         Err(refusal) => {
-            // WHO HOLDS IT, NOT MERELY THAT SOMEBODY DOES. The holder wrote its
-            // address and pid into this file after taking the lock, and reading a
-            // locked file is not itself a locked operation.
-            //
-            // THE FIRST LINE ONLY. A holder stamps one line. A file stamped by a
-            // build that did not cut it to its own stamp can still carry an
-            // older, longer holder's tail after that line, and quoting the whole
-            // file showed the operator a second, stale pid as though it held the
-            // store. R9-api-cx-2, D-1446.
-            let held_by = std::fs::read_to_string(&path).unwrap_or_default();
-            let held_by = held_by.lines().next().unwrap_or_default().trim();
-            return Err(format!(
-                "REFUSED: another brutex api is already serving this store.\n  \
-                 store: {}\n  lock:  {} ({refusal})\n  held by: {}\n\
-                 Two servers over one store run two autopilots against one \
-                 append-only tree and spend one shared vendor token's quota twice. \
-                 A different port is not a second store. Stop the other instance, \
-                 or point this one at another BRUTEX_STORE.",
-                store_root.display(),
-                path.display(),
-                if held_by.is_empty() {
-                    "an instance that had not yet stamped the file"
-                } else {
-                    held_by
-                }
-            ));
+            return Err(serve_lock_refusal(store_root, &path, &refusal));
         }
     };
     // STAMPED AFTER THE LOCK IS HELD, so the value a refused instance reads was
@@ -18861,6 +19207,56 @@ fn take_serve_lock(store_root: &Path, addr: std::net::SocketAddr) -> Result<Serv
     Ok(ServeLock { root: key })
 }
 
+/// Names why the one-server lock was refused (locks-1, D-1911).
+///
+/// ONLY `WouldBlock` MEANS ANOTHER INSTANCE HOLDS IT. `TryLockError::Error` is
+/// the host refusing `flock` itself (ENOLCK on a mount with no lock manager,
+/// ENOTSUP on a filesystem with no advisory locks): no other instance exists,
+/// and the first line of the file is the last SUCCESSFUL holder's stamp, a
+/// dead process. Both arms used to say "another brutex api is already
+/// serving" and quote that pid. The census lock was split the same way by
+/// D-0955.
+fn serve_lock_refusal(store_root: &Path, path: &Path, refusal: &std::fs::TryLockError) -> String {
+    match refusal {
+        std::fs::TryLockError::WouldBlock => {
+            // WHO HOLDS IT, NOT MERELY THAT SOMEBODY DOES. The holder wrote its
+            // address and pid into this file after taking the lock, and reading a
+            // locked file is not itself a locked operation.
+            //
+            // THE FIRST LINE ONLY. A holder stamps one line. A file stamped by a
+            // build that did not cut it to its own stamp can still carry an
+            // older, longer holder's tail after that line, and quoting the whole
+            // file showed the operator a second, stale pid as though it held the
+            // store. R9-api-cx-2, D-1446.
+            let held_by = std::fs::read_to_string(path).unwrap_or_default();
+            let held_by = held_by.lines().next().unwrap_or_default().trim();
+            format!(
+                "REFUSED: another brutex api is already serving this store.\n  \
+                 store: {}\n  lock:  {} ({refusal})\n  held by: {}\n\
+                 Two servers over one store run two autopilots against one \
+                 append-only tree and spend one shared vendor token's quota twice. \
+                 A different port is not a second store. Stop the other instance, \
+                 or point this one at another BRUTEX_STORE.",
+                store_root.display(),
+                path.display(),
+                if held_by.is_empty() {
+                    "an instance that had not yet stamped the file"
+                } else {
+                    held_by
+                }
+            )
+        }
+        std::fs::TryLockError::Error(host) => format!(
+            "REFUSED: the host refused to lock {} for store {}: {host}. No other \
+             instance is implied, so stopping one or changing the port will not \
+             help; refused rather than served without the lock. Put the store on \
+             a filesystem that supports advisory locks.",
+            path.display(),
+            store_root.display()
+        ),
+    }
+}
+
 /// Writes this instance's `addr=… pid=…` line into the held serve lock, cut to
 /// its own length, and decides what a failure leaves (v3b-2, D-1481): a
 /// cleared file is served with one WARN event and a stderr line, an uncleared
@@ -18880,17 +19276,29 @@ fn stamp_serve_lock(
         path,
     )?;
     if let Some(warning) = stamped {
-        let _noted = telemetry::emit(
-            &telemetry::Event::new(
-                telemetry::Level::Warn,
-                "api.serve",
-                "the serve lock is held but could not be stamped",
-            )
-            .with("why", telemetry::Value::Str(&warning)),
-        );
-        warn_line!("{warning}");
+        note_unstamped_lock(&warning, |line| warn_line!("{line}"));
     }
     Ok(())
+}
+
+/// What a stamp failure that still serves leaves behind: one WARN event, and
+/// `warning` handed to `say` -- which in production is [`warn_line!`], a line
+/// on standard error.
+///
+/// Split out of [`stamp_serve_lock`] so the "never silently discarded" half of
+/// APIC-07 can be driven: the split between a failed stamp and a successful
+/// clear cannot be produced on one descriptor by any fixture, so the step that
+/// reports it is called directly instead (P1-17-02).
+fn note_unstamped_lock(warning: &str, say: impl FnOnce(&str)) {
+    let _noted = telemetry::emit(
+        &telemetry::Event::new(
+            telemetry::Level::Warn,
+            "api.serve",
+            "the serve lock is held but could not be stamped",
+        )
+        .with("why", telemetry::Value::Str(warning)),
+    );
+    say(warning);
 }
 
 /// What a failed serve-lock stamp leaves, decided over two operations a test
@@ -19417,7 +19825,7 @@ fn reap_detached(
 /// because a server started from `/` or from a read-only directory must still
 /// log somewhere it can write, and the store root is already required to be
 /// writable for the process to do anything at all.
-fn served_log_dir(store_root: &Path) -> PathBuf {
+fn served_log_dir(store_root: &Path) -> Result<PathBuf, String> {
     log_dir_from(
         std::env::var_os(LOG_DIR_ENV),
         std::env::current_dir().ok().as_deref(),
@@ -19460,14 +19868,17 @@ fn log_dir_from(
     named: Option<std::ffi::OsString>,
     cwd: Option<&Path>,
     store_root: &Path,
-) -> PathBuf {
-    if let Some(named) = named {
-        return PathBuf::from(named);
+) -> Result<PathBuf, String> {
+    // SET BUT EMPTY IS REFUSED: `PathBuf::from("")` opened `events.ndjson`
+    // in the working directory, an untracked file in the checkout that gate 1
+    // forbids (CE-36, D-1769).
+    if let Some(named) = brutex_core::knob::folder(LOG_DIR_ENV, named)? {
+        return Ok(named);
     }
-    match cwd {
+    Ok(match cwd {
         Some(cwd) if is_workspace_root(cwd) => cwd.join("logs"),
         _ => telemetry::dir_beneath_store(store_root),
-    }
+    })
 }
 
 /// Read here rather than threaded through [`run_in`] for the same reason
@@ -19594,7 +20005,13 @@ async fn run_in_over(
                 // let a retarget after admission send later writers elsewhere
                 // while this process still held the old store's lock.
                 let store_root = one_server.root.clone();
-                let log_dir = served_log_dir(&store_root);
+                let log_dir = match served_log_dir(&store_root) {
+                    Ok(dir) => dir,
+                    Err(why) => {
+                        warn_line!("REFUSED — {why}. No request was served.");
+                        return FAILED;
+                    }
+                };
                 // The ENV DECIDES THE LEVELS AND THE CALLER DECIDES THE
                 // DIRECTORY. `served_log_level` builds a template it cannot
                 // know the path for, so the directory is set here, where it is
@@ -19612,7 +20029,14 @@ async fn run_in_over(
                 // is not being served looks exactly like a front end that is
                 // broken, and the operator has no way to tell the two apart
                 // from the browser. `CLAUDE.md` §4.
-                let front = std::sync::Arc::new(assets::Assets::new(&assets::web_dir()));
+                let web = match assets::web_dir() {
+                    Ok(web) => web,
+                    Err(why) => {
+                        warn_line!("REFUSED — {why}. No request was served.");
+                        return FAILED;
+                    }
+                };
+                let front = std::sync::Arc::new(assets::Assets::new(&web));
                 announce_front_end(&front);
                 // `serving`, not `load`: this is the one process that may
                 // reach a broker. See `Broker`.
@@ -19784,6 +20208,32 @@ async fn run_in_over(
 mod tests {
     use super::*;
     use std::io::Write as _;
+
+    /// locks-1, D-1911: a host refusal of `flock` names the host, never another
+    /// instance, and never quotes the last holder's stamp; only `WouldBlock`
+    /// says another api is serving and names its holder.
+    #[test]
+    fn a_host_lock_refusal_is_not_reported_as_another_instance() {
+        let root = std::env::temp_dir().join(format!("brutex-locks1-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("scratch");
+        let path = root.join(SERVE_LOCK);
+        std::fs::write(&path, "addr=127.0.0.1:8080 pid=4242\n").expect("stale stamp");
+        let host = std::fs::TryLockError::Error(std::io::Error::from_raw_os_error(37));
+        let why = serve_lock_refusal(&root, &path, &host);
+        assert!(why.contains("the host refused to lock"), "{why}");
+        assert!(!why.contains("another brutex api"), "{why}");
+        assert!(!why.contains("pid=4242"), "{why}");
+        let busy = serve_lock_refusal(&root, &path, &std::fs::TryLockError::WouldBlock);
+        assert!(
+            busy.contains("another brutex api is already serving"),
+            "{busy}"
+        );
+        assert!(
+            busy.contains("held by: addr=127.0.0.1:8080 pid=4242"),
+            "{busy}"
+        );
+        std::fs::remove_dir_all(&root).expect("cleanup");
+    }
 
     /// A directory holding one or both masters, named after the test.
     /// The third mastered vendor's file, written for every fixture.
@@ -19994,6 +20444,137 @@ mod tests {
             "weeklies existed before 2024-11-13, so this is a dated table and \
              not a constant that always refuses WEEK"
         );
+    }
+
+    /// CE-43, D-2650: A HOLIDAY-WEEK CONTRACT DOES NOT REMOVE ITS CADENCE.
+    ///
+    /// NIFTY's weekly computed from 2024-08-14 lands on 2024-08-15, a closed
+    /// day, so `expiry_of` refuses that ONE contract (CE-14). The cadence
+    /// filter read that refusal as "no weekly contracts" and dropped WEEK for
+    /// the whole window, and every chunk opening in a holiday week, uncounted.
+    /// Both the window-level and the per-chunk question must now say "asked".
+    #[test]
+    fn a_holiday_week_contract_does_not_remove_its_cadence_from_the_walk() {
+        let today = pull::session::Day::new(2026, 8, 20).expect("a real date");
+        let asked = ingest::parse_fno(
+            "underlying=NIFTY&series=opt&vendor=dhan&from=2024-08-14&to=2024-09-13",
+            today,
+        )
+        .expect("a NIFTY expired-option window is readable");
+        let on = asked.window.from();
+        assert!(
+            pull::rolling::expiry_of("NIFTY", &dhan_rolling(), "WEEK", "1", on).is_err(),
+            "the premise: the near weekly computed from 2024-08-14 is refused"
+        );
+        assert!(
+            cadence_has_contracts(&asked, &dhan_rolling(), "WEEK"),
+            "a refused contract is not a withdrawn cadence: WEEK must be asked"
+        );
+        assert!(cadence_has_contracts_on(
+            &asked,
+            &dhan_rolling(),
+            "WEEK",
+            on
+        ));
+        let ram_navami_month = pull::session::Day::new(2023, 3, 29).expect("a real date");
+        assert!(
+            cadence_has_contracts_on(&asked, &dhan_rolling(), "MONTH", ram_navami_month),
+            "the monthly computed from 2023-03-29 is a closed day; MONTH is still asked"
+        );
+    }
+
+    /// CE-54, D-2659: a chunk that spans a cadence's withdrawal is asked, because
+    /// its first day still has contracts; a chunk wholly after it is refused.
+    #[test]
+    fn a_chunk_spanning_a_withdrawal_is_asked_for_the_weeks_before_it() {
+        let today = pull::session::Day::new(2026, 8, 20).expect("a real date");
+        let asked = ingest::parse_fno(
+            "underlying=BANKNIFTY&series=opt&vendor=dhan&from=2024-11-01&to=2024-11-30",
+            today,
+        )
+        .expect("a BANKNIFTY expired-option window is readable");
+        let day = |d: u8| pull::session::Day::new(2024, 11, d).expect("a real date");
+        assert_eq!(
+            pull::rolling::listing_of("BANKNIFTY", &dhan_rolling(), "WEEK", day(30)),
+            Ok(pull::rolling::Listing::Withdrawn),
+            "the premise: BANKNIFTY weeklies are withdrawn by the chunk's last day"
+        );
+        let spanning = pull::session::Window::new(day(1), day(30)).expect("a window");
+        assert_eq!(
+            rolling_preflight(&asked, &dhan_rolling(), "WEEK", spanning, "w"),
+            Ok(())
+        );
+        let after = pull::session::Window::new(day(20), day(30)).expect("a window");
+        let why = rolling_preflight(&asked, &dhan_rolling(), "WEEK", after, "w")
+            .expect_err("a chunk wholly after the withdrawal has no contract");
+        assert!(why.contains("withdrawn"), "{why}");
+        let monthly = rolling_preflight(&asked, &dhan_rolling(), "MONTH", after, "m");
+        assert_eq!(monthly, Ok(()), "the monthly is never withdrawn");
+    }
+
+    /// CE-53, D-2671: a weekly whose computed expiry is a Muhurat-only day is
+    /// now refused by `expiry_of`, and that refusal still does not remove WEEK
+    /// from the walk — only a withdrawn cadence does (CE-43).
+    #[test]
+    fn a_muhurat_week_contract_does_not_remove_its_cadence_from_the_walk() {
+        let today = pull::session::Day::new(2026, 8, 20).expect("a real date");
+        for (underlying, from, to) in [
+            ("NIFTY", "2021-11-01", "2021-11-30"),
+            ("BANKNIFTY", "2021-11-01", "2021-11-30"),
+            ("NIFTY", "2025-10-20", "2025-11-18"),
+        ] {
+            let asked = ingest::parse_fno(
+                &format!("underlying={underlying}&series=opt&vendor=dhan&from={from}&to={to}"),
+                today,
+            )
+            .expect("an expired-option window is readable");
+            let on = asked.window.from();
+            assert!(
+                pull::rolling::expiry_of(underlying, &dhan_rolling(), "WEEK", "1", on).is_err(),
+                "the premise: the near weekly from {from} lands on a Muhurat and is refused"
+            );
+            assert!(
+                cadence_has_contracts(&asked, &dhan_rolling(), "WEEK"),
+                "{underlying} {from}: a refused contract is not a withdrawn cadence"
+            );
+            assert!(cadence_has_contracts_on(
+                &asked,
+                &dhan_rolling(),
+                "WEEK",
+                on
+            ));
+        }
+    }
+
+    /// CE-43, D-2650: one row that cannot be named ends its group; it does not
+    /// discard the good rows before it, and the rows after it start a new group.
+    #[test]
+    fn an_unnamed_row_ends_its_group_without_discarding_the_rows_before_it() {
+        let row = |ts_micros: i64| pull::rolling::Row {
+            bar: store::format::Bar {
+                ts_micros,
+                ..store::format::Bar::default()
+            },
+            overlay: store::format::Overlay {
+                ts_micros,
+                spot: store::format::OI_NULL,
+                iv_micros: store::format::OI_NULL,
+            },
+            strike: Some(100),
+        };
+        let rows = [row(1), row(2), row(3), row(4)];
+        let day = Day::new(2024, 8, 22).expect("a real date");
+        // Row 3 is the holiday-week bar: its contract cannot be named.
+        let key_at = |r: &pull::rolling::Row| {
+            if r.bar.ts_micros == 3 {
+                Err("closed-day expiry".to_owned())
+            } else {
+                Ok((day, 100))
+            }
+        };
+        assert_eq!(next_group(&rows, 0, "t", key_at), Ok((2, (day, 100))));
+        assert!(next_group(&rows, 2, "t", key_at).is_err());
+        assert_eq!(next_group(&rows, 3, "t", key_at), Ok((4, (day, 100))));
     }
 
     /// AN UNREADABLE CENSUS REFUSES RATHER THAN GUESSING EITHER WAY.
@@ -21931,6 +22512,13 @@ mod tests {
             .expect("a port to sit on");
         let taken = squatter.local_addr().expect("the address it took");
 
+        // THE EVENT IS READ BACK, NOT INFERRED FROM THE EXIT CODE (P1-12-02).
+        // `FAILED` is also what several earlier arms of `run_in` return, so the
+        // code alone proved neither that the bind arm was reached nor that it
+        // logged anything; deleting the `telemetry::emit` left this green. The
+        // shared sink is installed first, so `run_in`'s own install is refused
+        // and its emit lands where `emitted::landed` reads.
+        let from = crate::emitted::mark();
         assert_eq!(
             run_in(
                 &agreeing("bindrefused"),
@@ -21940,6 +22528,21 @@ mod tests {
             .await,
             FAILED,
             "a port already held is a refused bind, and the exit code says so"
+        );
+        let address = taken.to_string();
+        let mine: Vec<telemetry::Record> =
+            crate::emitted::landed(from, "api.server", "cannot bind the listening address")
+                .into_iter()
+                .filter(|record| crate::emitted::says(record, "addr", &address))
+                .collect();
+        assert_eq!(mine.len(), 1, "one event for the refused bind: {mine:?}");
+        assert_eq!(mine[0].level, telemetry::Level::Error, "{mine:?}");
+        assert!(
+            mine[0]
+                .field("why")
+                .and_then(telemetry::OwnedValue::as_str)
+                .is_some_and(|why| !why.is_empty()),
+            "the host's reason travels: {mine:?}"
         );
         // The listener is dropped here, not before: releasing it early would
         // race the bind and this test would pass for the wrong reason.
@@ -22393,6 +22996,41 @@ mod tests {
         assert!(warned.contains("os error 28"), "the host's words: {warned}");
         assert!(warned.contains("emptied"), "{warned}");
 
+        // AND THE WARNING IS NOT DISCARDED (P1-17-02): the step
+        // `stamp_serve_lock` takes with it leaves one WARN event naming it and
+        // one line on the error writer. Deleting that step used to leave this
+        // test green.
+        let from = crate::emitted::mark();
+        let mut said = Vec::new();
+        note_unstamped_lock(&warned, |line| said.push(line.to_owned()));
+        assert_eq!(said, vec![warned.clone()], "the stderr line is the warning");
+        let noted: Vec<telemetry::Record> = crate::emitted::landed(
+            from,
+            "api.serve",
+            "the serve lock is held but could not be stamped",
+        )
+        .into_iter()
+        .filter(|record| crate::emitted::says(record, "why", "/store/serve.lock"))
+        .collect();
+        assert_eq!(noted.len(), 1, "one WARN event: {noted:?}");
+        assert_eq!(noted[0].level, telemetry::Level::Warn, "{noted:?}");
+        // And production takes that step: the body of `stamp_serve_lock`,
+        // bounded at its closing brace, hands the warning to it. The needles
+        // are split so this file cannot match them in this test.
+        let source = include_str!("server.rs");
+        let body = source
+            .split_once(concat!("\nfn stamp_serve_", "lock(\n"))
+            .and_then(|(_, rest)| rest.split_once("\n}\n"))
+            .map_or("", |(body, _)| body);
+        assert!(
+            body.contains(concat!("if let Some(warning) = ", "stamped {"))
+                && body.contains(concat!(
+                    "note_unstamped_",
+                    "lock(&warning, |line| warn_line!(\"{line}\"));"
+                )),
+            "`stamp_serve_lock` hands its warning to `note_unstamped_lock`: {body}"
+        );
+
         let refused = stamp_outcome(full, || Err(std::io::Error::from_raw_os_error(5)), path)
             .expect_err("neither stamped nor cleared");
         assert!(refused.starts_with("REFUSED:"), "{refused}");
@@ -22640,8 +23278,13 @@ mod tests {
             );
             for name in symbols {
                 let symbol = brutex_core::symbol::Symbol::new(name).expect("a symbol");
+                let key = (
+                    brutex_core::instrument::Exchange::Nse,
+                    brutex_core::instrument::Segment::Index,
+                    symbol,
+                );
                 assert_eq!(
-                    held.get(&symbol),
+                    held.get(&key),
                     Some(&(4 * ONE_PASS_ROWS)),
                     "{name} holds four months of {ONE_PASS_ROWS} rows"
                 );
@@ -22673,6 +23316,49 @@ mod tests {
                 "and it is still one visit per entry when every probe misses"
             );
         }
+    }
+
+    /// One count is one listing's one-minute SPOT bars: an option on the same
+    /// symbol, the same symbol's daily rung, and the same symbol on another
+    /// exchange each stay out of it (Z1-slice14-F1, D-1762).
+    #[test]
+    fn an_instrument_counts_only_its_own_one_minute_spot_bars() {
+        use brutex_core::instrument::{Contract, Exchange, Segment};
+        let symbol = brutex_core::symbol::Symbol::new("NIFTY").expect("a symbol");
+        let spot = census::Series {
+            contract: None,
+            exchange: Exchange::Nse,
+            segment: Segment::Index,
+            symbol,
+            timeframe: store::path::Timeframe::MINUTE_1,
+        };
+        let option = census::Series {
+            contract: Some(Contract::parse("2026-01-29-2500000-CE").expect("a contract")),
+            segment: Segment::Fno,
+            ..spot
+        };
+        let daily = census::Series {
+            timeframe: store::path::Timeframe::DAY_1,
+            ..spot
+        };
+        let bse = census::Series {
+            exchange: Exchange::Bse,
+            ..spot
+        };
+        let at = month_of(2026, 1);
+        let entries = [(spot, at), (option, at), (daily, at), (bse, at)];
+        let census = one_pass_census(&entries);
+        let held = bars_by_symbol(Some(&census), entries.iter());
+        assert_eq!(
+            held.get(&(Exchange::Nse, Segment::Index, symbol)),
+            Some(&ONE_PASS_ROWS)
+        );
+        assert_eq!(
+            held.get(&(Exchange::Bse, Segment::Index, symbol)),
+            Some(&ONE_PASS_ROWS)
+        );
+        assert_eq!(held.get(&(Exchange::Nse, Segment::Fno, symbol)), None);
+        assert_eq!(held.len(), 2, "{held:?}");
     }
 
     /// The rows every fixture month in [`one_pass_census`] is recorded with.
@@ -22829,7 +23515,7 @@ mod tests {
             "reasons",
             Some(&format!(
                 "{GROWW_HEAD}\
-                 NSE,CASH,,SOMEBOND,EQ,N2,INE002A01018,,\n\
+                 NSE,CASH,,SOMEBOND,EQ,N2,INE002A01018,,,NSE-SOMEBOND\n\
                  NSE,CASH,,SOMESME,EQ,SM,INE002A01018,,,NSE-SOMESME\n"
             )),
             None,
@@ -22870,10 +23556,10 @@ mod tests {
         let dir = masters(
             "routinebond",
             Some(&format!(
-                "{GROWW_HEAD}NSE,CASH,,SOMEBOND,EQ,N2,INE002A01018,,\n"
+                "{GROWW_HEAD}NSE,CASH,,SOMEBOND,EQ,N2,INE002A01018,,,NSE-SOMEBOND\n"
             )),
             Some(&format!(
-                "{DHAN_HEAD}NSE,E,INE002A01018,EQUITY,SOMEBOND,SOME BOND,DEB,N2,,,\n"
+                "{DHAN_HEAD}NSE,E,INE002A01018,EQUITY,SOMEBOND,SOME BOND,DEB,N2,,,,9999\n"
             )),
         );
         let (text, clean) = report(&dir);
@@ -23196,8 +23882,8 @@ mod tests {
             Some(&format!(
                 "{GROWW_HEAD}\
                  NSE,CASH,,RELIANCE,EQ,EQ,INE002A01018,,,NSE-RELIANCE\n\
-                 NSE,CASH,,NIFTY.100,IDX,,NIFTY,,\n\
-                 NSE,CASH,,NIFTY.200,IDX,,NIFTY,,\n"
+                 NSE,CASH,,NIFTY.100,IDX,,NIFTY,,,NSE-NIFTY.100\n\
+                 NSE,CASH,,NIFTY.200,IDX,,NIFTY,,,NSE-NIFTY.200\n"
             )),
             None,
         );
@@ -23230,7 +23916,7 @@ mod tests {
         assert!(text.contains("groww: 1 kept"), "{text}");
         assert!(text.contains("1 unreadable"), "{text}");
         assert!(
-            text.contains("row has 5 field(s); the columns this vendor needs run to 9"),
+            text.contains("row has 5 field(s); the columns this vendor needs run to 10"),
             "the shortfall is named: {text}"
         );
         assert!(
@@ -23300,11 +23986,32 @@ mod tests {
             // route is the one way a static handler can silently take a route
             // over, and the only way to prove it cannot is to put one there.
             (build.join("store.json"), "\"DECOY\""),
+            // AND A SENTINEL WHERE A TRAVERSAL WOULD LAND (P1-12-05). The
+            // static root is `build/`, so `/../Cargo.toml` names this file.
+            // Without it nothing existed there, and "nothing leaked" held
+            // whether or not the handler refused the path.
+            (dir.join("Cargo.toml"), "[package] TRAVERSAL-LEAK-SENTINEL"),
         ] {
             let mut f = std::fs::File::create(&path).expect("create");
             f.write_all(body.as_bytes()).expect("write");
         }
         std::sync::Arc::new(assets::Assets::new(&dir))
+    }
+
+    /// `/audit` ITSELF IS THE FRONT END'S, by reload as by click (P3-02-01,
+    /// D-1971). A registered `/audit` beat the fallback, so a nav click
+    /// rendered Svelte and a reload rendered the Rust page.
+    async fn the_audit_path_is_the_front_ends(addr: std::net::SocketAddr) {
+        let console = get(addr, "/audit").await;
+        assert!(console.contains("200 OK"), "{console}");
+        assert!(
+            console.contains("<title>shell</title>"),
+            "the shell answers /audit: {console}"
+        );
+        assert!(
+            !console.contains("It is a file on disk, not memory"),
+            "and the Rust page does not: {console}"
+        );
     }
 
     #[tokio::test]
@@ -23383,7 +24090,7 @@ mod tests {
             "Store is a real link now: {root}"
         );
         assert!(
-            root.contains("<a class=\"lnk\" href=\"/audit\">Audit</a>"),
+            root.contains("<a class=\"lnk\" href=\"/audit/page\">Audit</a>"),
             "and Audit is a real link too: {root}"
         );
         assert!(
@@ -23423,7 +24130,7 @@ mod tests {
         // pull has been run against this store root, and a page that 500s on a
         // fresh install is a page that is broken exactly when it is first
         // opened.
-        let audit_page = get(addr, "/audit?page=3").await;
+        let audit_page = get(addr, "/audit/page?page=3").await;
         let status = audit_page.lines().next().unwrap_or_default();
         assert!(status.contains("200 OK"), "{audit_page}");
         assert!(audit_page.contains("nothing recorded yet"), "{audit_page}");
@@ -23431,6 +24138,7 @@ mod tests {
             audit_page.contains("It is a file on disk, not memory"),
             "and it says where the history lives: {audit_page}"
         );
+        the_audit_path_is_the_front_ends(addr).await;
 
         // A GET ON A POST ROUTE STARTS NOTHING. A crawler follows links and a
         // browser refetches on back; either would otherwise begin an ingest.
@@ -23555,9 +24263,21 @@ mod tests {
         assert!(db.contains("<title>shell</title>"), "{db}");
 
         // 8. AND A TRAVERSAL IS REFUSED OVER THE WIRE, not only in a unit test.
+        // The fixture holds a sentinel at the path the traversal names, so
+        // "nothing leaked" can fail, and the STATUS LINE must say 400 -- not
+        // merely some "400" anywhere in the headers or body.
         let escape = get(addr, "/%2e%2e/Cargo.toml").await;
-        assert!(escape.contains("400"), "{escape}");
-        assert!(!escape.contains("[package]"), "nothing leaked: {escape}");
+        assert!(
+            escape
+                .lines()
+                .next()
+                .is_some_and(|status| status.starts_with("HTTP/1.1 400")),
+            "{escape}"
+        );
+        assert!(
+            !escape.contains("TRAVERSAL-LEAK-SENTINEL"),
+            "nothing leaked: {escape}"
+        );
 
         let _ = tokio::net::TcpStream::connect(stop_addr).await;
         served
@@ -24380,14 +25100,84 @@ mod tests {
         })
         .await;
         assert_eq!(
-            repeated_form_key("a=1&b=2&member=x&member=y&leg=1&leg=2"),
+            form_key_verdict("a=1&b=2&member=x&member=y&leg=1&leg=2"),
             None
         );
-        assert_eq!(repeated_form_key("a=1&&b=2&a"), Some("a"));
         assert_eq!(
-            repeated_form_key("action=stop&action=start"),
-            Some("action")
+            form_key_verdict("a=1&&b=2&a"),
+            Some(FormKeys::Repeated("a"))
         );
+        assert_eq!(
+            form_key_verdict("action=stop&action=start"),
+            Some(FormKeys::Repeated("action"))
+        );
+    }
+
+    /// P5-05, D-2659: the duplicate check's set is bounded by a constant, not by
+    /// the body. A body of bare separators names no key and is passed; a body
+    /// naming one more distinct key than the bound is refused by name.
+    #[test]
+    fn a_form_body_past_the_distinct_key_bound_is_refused() {
+        assert_eq!(form_key_verdict(&"&".repeat(1 << 20)), None);
+        let keys = |n: usize| {
+            (0..n)
+                .map(|i| format!("k{i}=1"))
+                .collect::<Vec<_>>()
+                .join("&")
+        };
+        assert_eq!(form_key_verdict(&keys(MAX_DISTINCT_FORM_KEYS)), None);
+        assert_eq!(
+            form_key_verdict(&keys(MAX_DISTINCT_FORM_KEYS + 1)),
+            Some(FormKeys::TooMany)
+        );
+        let lists = format!("{}&a=1", "member=x&leg=1&".repeat(4096));
+        assert_eq!(
+            form_key_verdict(&lists),
+            None,
+            "list fields are not counted"
+        );
+    }
+
+    /// P5-06, D-2659: a form route checks its body whatever the client calls
+    /// it. The exemption followed `Content-Type` and a leading `{`, so a form
+    /// sent as JSON reached [`param`] unchecked; only the three strict-JSON
+    /// routes are exempt now, and each refuses a duplicate key itself.
+    #[tokio::test]
+    async fn a_form_sent_as_json_to_a_form_route_is_still_checked() {
+        assert!(reads_json_body("/engine/command"));
+        assert!(reads_json_body("/backtest/run"));
+        assert!(reads_json_body("/backtest/descend"));
+        assert!(!reads_json_body("/pull/spot"));
+        with_server("jsonform", |addr| async move {
+            for form in [
+                "target=swept&vendor=dhan&vendor=groww&from=2024-01-01&to=2024-01-31",
+                "{&target=swept&vendor=dhan&vendor=groww&from=2024-01-01&to=2024-01-31",
+            ] {
+                let host = format!("localhost:{}", addr.port());
+                let request = format!(
+                    "POST /pull/spot HTTP/1.1\r\nHost: {host}\r\nOrigin: http://{host}\r\n\
+                     Sec-Fetch-Site: same-origin\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{form}",
+                    form.len()
+                );
+                let said = tokio::task::spawn_blocking(move || {
+                    use std::io::Read as _;
+                    let mut s = std::net::TcpStream::connect(addr).expect("connect");
+                    s.write_all(request.as_bytes()).expect("write");
+                    let mut buf = String::new();
+                    s.read_to_string(&mut buf).expect("read");
+                    buf
+                })
+                .await
+                .expect("the client thread must not panic");
+                assert!(said.starts_with("HTTP/1.1 400"), "{form}: {said}");
+                assert!(
+                    said.contains("the form names \"vendor\" more than once"),
+                    "{form}: {said}"
+                );
+            }
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -24461,7 +25251,21 @@ mod tests {
             form_read_bound("/pull/spot"),
             crate::ingest::MAX_MEMBER_FORM_BYTES
         );
-        for path in ["/pull/fno", "/ingest/queue/", "/pull", "/", "/control"] {
+        for path in ["/pull/run", "/pull/recovery"] {
+            assert_eq!(
+                form_read_bound(path),
+                crate::pullrun::MAX_RUN_FORM_BYTES,
+                "{path}"
+            );
+        }
+        for path in [
+            "/pull/fno",
+            "/ingest/queue/",
+            "/pull/run/",
+            "/pull",
+            "/",
+            "/control",
+        ] {
             assert_eq!(form_read_bound(path), MAX_FORM_BYTES, "{path}");
         }
     }
@@ -24898,7 +25702,7 @@ mod tests {
             "a crate is not the workspace root"
         );
         assert_eq!(
-            log_dir_from(None, Some(repo), store),
+            log_dir_from(None, Some(repo), store).expect("no variable"),
             telemetry::dir_beneath_store(store),
             "a crate directory falls back to the store, never to ./logs"
         );
@@ -24910,7 +25714,7 @@ mod tests {
             .expect("crates/api has two parents");
         assert!(is_workspace_root(root), "the workspace root is recognised");
         assert_eq!(
-            log_dir_from(None, Some(root), store),
+            log_dir_from(None, Some(root), store).expect("no variable"),
             root.join("logs"),
             "the workspace root takes ./logs, which is what pressing Run does"
         );
@@ -25134,7 +25938,8 @@ mod tests {
                 Some(std::ffi::OsString::from("/named/elsewhere")),
                 None,
                 store
-            ),
+            )
+            .expect("a named folder"),
             std::path::Path::new("/named/elsewhere"),
             "an explicit BRUTEX_LOGS wins over every probe"
         );
@@ -25146,14 +25951,22 @@ mod tests {
             .and_then(std::path::Path::parent)
             .expect("crates/api has two parents");
         assert_eq!(
-            log_dir_from(Some(std::ffi::OsString::from("/named")), Some(root), store),
+            log_dir_from(Some(std::ffi::OsString::from("/named")), Some(root), store)
+                .expect("a named folder"),
             std::path::Path::new("/named"),
         );
         assert_eq!(
-            log_dir_from(None, None, store),
+            log_dir_from(None, None, store).expect("no variable"),
             telemetry::dir_beneath_store(store),
             "no variable and no working directory falls back to the store"
         );
+        // CE-36, D-1769: set but empty is refused by name, never the cwd.
+        for blank in ["", "  "] {
+            assert!(
+                log_dir_from(Some(std::ffi::OsString::from(blank)), Some(root), store)
+                    .is_err_and(|why| why.starts_with("BRUTEX_LOGS is set but empty"))
+            );
+        }
     }
 
     /// A directory with no manifest at all is not a workspace root, and the
@@ -25169,7 +25982,8 @@ mod tests {
                 None,
                 Some(std::path::Path::new("/nonexistent-uCe1r")),
                 store
-            ),
+            )
+            .expect("no variable"),
             telemetry::dir_beneath_store(store),
         );
     }
@@ -25241,6 +26055,33 @@ mod tests {
             ("explorer.exe", &[][..])
         );
         assert_eq!(browser_handler(BrowserHost::Other), ("xdg-open", &[][..]));
+    }
+
+    /// CE-33 and CE-38, D-1769: a store or masters folder set but EMPTY, and
+    /// a HOME that is empty or relative, are refused by name, never resolved
+    /// against the working directory.
+    #[test]
+    fn an_empty_folder_or_a_relative_home_is_refused_not_resolved() {
+        for blank in ["", " "] {
+            let why = store_dir_from(Some(blank.into()), Some("/home/who".into()))
+                .expect_err("an empty store refuses");
+            assert!(why.starts_with("BRUTEX_STORE is set but empty"), "{why}");
+            let why = masters_dir_from(Some(blank.into())).expect_err("an empty masters refuses");
+            assert!(why.starts_with("BRUTEX_MASTERS is set but empty"), "{why}");
+            let why = store_dir_from(None, Some(blank.into())).expect_err("an empty HOME refuses");
+            assert!(why.starts_with("HOME is set but empty"), "{why}");
+            let why =
+                default_masters_dir_from(Some(blank.into())).expect_err("an empty HOME refuses");
+            assert!(why.starts_with("HOME is set but empty"), "{why}");
+        }
+        assert!(
+            store_dir_from(None, Some("relative/home".into()))
+                .is_err_and(|why| why.contains("relative"))
+        );
+        assert!(
+            default_masters_dir_from(Some("relative/home".into()))
+                .is_err_and(|why| why.contains("relative"))
+        );
     }
 
     #[test]
@@ -25848,10 +26689,11 @@ mod tests {
     ///
     /// This route read `param_or(query, "segment", "INDEX")`, whose own doc
     /// justified the default: those are *"the only values the engine surface
-    /// has"*. `CLAUDE.md` §1 keeps two sets apart in consecutive sentences —
-    /// the engine SWEEPS two instruments, and *"futures, options and single
-    /// stocks may be stored. They are never swept."* This route reads the
-    /// store, so the sweep surface is the wrong set to default from.
+    /// has"*. `CLAUDE.md` §1 keeps two sets apart: the engine SWEEPS the two
+    /// spot indices and the F&O shares' cash equities (D-0506), and contracts
+    /// and single stocks outside the F&O universe *"may be stored and are never
+    /// swept"*. This route reads the store, so the sweep surface is the wrong
+    /// set to default from.
     ///
     /// It was latent rather than live: `render` always writes `&segment=` from
     /// the census, so only a hand-typed URL reached it. D-0335 fixed the same
@@ -26343,10 +27185,24 @@ mod tests {
         // AND THE DRIVER SELECTS ON THE RESOLVED TYPE rather than naming the
         // index word. Read from the source because the choice sits inside an
         // `async fn` that opens sockets; the property is which field it reads.
+        //
+        // THE POSITIVE NEEDLE IS SPLIT TOO (P1-12-01). It was written whole,
+        // so it matched this assertion's own literal and passed after the
+        // selection moved into `instrument_word` and the old shape was gone.
+        // The selection itself is now called directly, both ways, and the
+        // driver's call site is pinned by a needle that cannot match itself.
+        assert_eq!(instrument_word(&rolling, true), rolling.index_word);
+        assert_eq!(instrument_word(&rolling, false), rolling.stock_word);
+        assert_ne!(
+            rolling.index_word, rolling.stock_word,
+            "the two words differ, so the two calls above can tell them apart"
+        );
         let src = include_str!("server.rs");
-        assert!(
-            src.contains("let word = if is_index {"),
-            "the strike width follows the underlying's own type"
+        let selection = concat!("let word = instrument_word(", "&rolling, is_index);");
+        assert_eq!(
+            src.matches(selection).count(),
+            1,
+            "the strike width follows the underlying's own type, at one call site"
         );
         // THE NEEDLE IS SPLIT SO IT CANNOT MATCH ITSELF. This file is its own
         // haystack, so a literal written whole here would be found in this very
@@ -26365,7 +27221,7 @@ mod tests {
         // `parse_fno` admits 213 names and 209 of them are keyed
         // `(Cash, Equity)`, which the single `(Index, Index)` probe missed.
         assert!(
-            src.contains("brutex_core::instrument::Kind::Equity,"),
+            src.contains(concat!("brutex_core::instrument::", "Kind::Equity,")),
             "rolling_security_id probes the equity shape as well as the index one"
         );
     }
@@ -26376,11 +27232,22 @@ mod tests {
             .await
             .expect("bind");
         let addr = taken.local_addr().expect("addr");
+        // "AND SAYS WHICH" IS READ BACK (P1-12-02): `FAILED` alone is returned
+        // by earlier arms too, so the refused bind's own event, naming this
+        // address, must be the one that landed.
+        let from = crate::emitted::mark();
         assert_eq!(
             run(&argv(&["serve", &addr.to_string()]), fired()).await,
             FAILED,
             "an address already in use is a refusal, not a silent retry"
         );
+        let address = addr.to_string();
+        let named = crate::emitted::landed(from, "api.server", "cannot bind the listening address")
+            .into_iter()
+            .filter(|record| crate::emitted::says(record, "addr", &address))
+            .count();
+        assert_eq!(named, 1, "the refusal names the address it could not bind");
+        drop(taken);
     }
 
     #[tokio::test]
@@ -26405,7 +27272,8 @@ mod tests {
         let stop_addr = stopper.local_addr().expect("addr");
         let served = tokio::spawn(serve(
             listener,
-            router(Loaded::new(Site::load(&dir, &store_root("health503")))),
+            router(Loaded::new(Site::load(&dir, &store_root("health503"))))
+                .expect("BRUTEX_WEB is not set empty in a test"),
             Box::pin(async move { stopper.accept().await.map(|_| ()) }),
         ));
 
@@ -28505,9 +29373,15 @@ mod tests {
     /// `autopilot`'s tests, which drive `take_seat` and `take_every_seat`
     /// against each other directly.
     /// audit-20261003 o1surface2-3, D-1589: A LANDING DOES NOT HOLD THE ONLY
-    /// WORKER. On a one-worker multi-thread runtime, a task doing 400 ms of
-    /// blocking store work through `off_the_workers` leaves another task free
-    /// to run; inline, that task would wait the full 400 ms.
+    /// WORKER. On a one-worker multi-thread runtime, a task blocked inside
+    /// `off_the_workers` leaves another task free to run; inline, that task
+    /// would wait for the landing.
+    ///
+    /// Ordered by a channel, not timed (P5-07, D-2659): the landing blocks
+    /// until the other task has run, so the test passes only if that task ran
+    /// while the landing held its thread. A wall-clock bound of 300 ms after a
+    /// 20 ms sleep failed on a loaded host with nothing wrong; the 10 s here is
+    /// only the failure signal for a real deadlock.
     #[test]
     fn blocking_landing_work_leaves_the_runtime_answering() {
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -28516,20 +29390,20 @@ mod tests {
             .build()
             .unwrap();
         runtime.block_on(async {
-            let began = std::time::Instant::now();
-            let landing = tokio::spawn(async {
-                off_the_workers(|| std::thread::sleep(std::time::Duration::from_millis(400)));
+            let (ran, wait) = std::sync::mpsc::channel::<()>();
+            let landing = tokio::spawn(async move {
+                off_the_workers(move || wait.recv_timeout(std::time::Duration::from_secs(30)))
             });
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            let answered = tokio::spawn(async { std::time::Instant::now() })
-                .await
-                .unwrap();
+            let answered = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                tokio::spawn(async move { ran.send(()) }),
+            )
+            .await;
             assert!(
-                answered.duration_since(began) < std::time::Duration::from_millis(300),
-                "another task waited {:?} behind a landing",
-                answered.duration_since(began)
+                matches!(answered, Ok(Ok(Ok(())))),
+                "another task could not run while a landing held its thread: {answered:?}"
             );
-            landing.await.unwrap();
+            assert_eq!(landing.await.unwrap(), Ok(()));
         });
         // And both landing calls in `land_spot` go through it.
         let source = include_str!("server.rs");
@@ -28548,18 +29422,23 @@ mod tests {
     async fn a_dropped_pull_route_does_not_cancel_the_pull() {
         let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = std::sync::Arc::clone(&finished);
+        // GATED, NOT TIMED (P5-07, D-2659). The pull cannot finish until the
+        // route has been dropped, so the drop always lands mid-pull; a 200 ms
+        // sleep raced a 20 ms timeout and a loaded host could lose that race.
+        let (release, gate) = tokio::sync::oneshot::channel::<()>();
         let route = detached_pull("Spot pull", async move {
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            gate.await.expect("the test releases the pull");
             flag.store(true, std::sync::atomic::Ordering::SeqCst);
             (axum::http::StatusCode::OK, String::from("done"))
         });
-        // The client goes away 20 ms in: the route's future is dropped.
+        // The client goes away mid-pull: the route's future is dropped.
         let cut = tokio::time::timeout(std::time::Duration::from_millis(20), route).await;
         assert!(
             cut.is_err(),
             "the route had not finished when it was dropped"
         );
         assert!(!finished.load(std::sync::atomic::Ordering::SeqCst));
+        release.send(()).expect("the pull still holds its gate");
         let until = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         while !finished.load(std::sync::atomic::Ordering::SeqCst) {
             assert!(
@@ -28994,32 +29873,6 @@ mod tests {
         }
     }
 
-    /// **A DAILY WINDOW IS SPLIT BY THE MONTH AND NOT BY THE ONE-MINUTE CAP.**
-    ///
-    /// The two bounds are different rules from different owners. The **cap** is
-    /// the vendor's, and `docs/00-charter.md` §4 records it *per rung*: Groww
-    /// "30 days per request **at 1-minute granularity**", Dhan 90 against its
-    /// intraday-charts endpoint. Neither records a day-level figure, so neither
-    /// descriptor carries one — UNVERIFIED, absent rather than guessed. The
-    /// **month** is the store's, and it binds at every rung, because a bar file
-    /// addresses one month whatever the bar length is.
-    ///
-    /// So the daily split must be the month alone. Groww at one minute needs
-    /// **126** requests per instrument for 2020-01-01..2026-08-07 — 80 months,
-    /// plus one extra cut inside each of the 46 months longer than its 30-day
-    /// cap. At the day rung it needs **80**, one per month and no more.
-    ///
-    /// # The honest size of that, because a test should not flatter it
-    ///
-    /// 80 is a FLOOR, not a target, and it is the store's floor rather than any
-    /// vendor's: `docs/05-decisions.md` D-0054 says "14 at day level", which
-    /// implies a ~172-day cap that appears in no source and is unreachable
-    /// regardless. For Dhan the daily count and the one-minute count are both
-    /// 80 — its 90-day cap is already wider than any month, so the month was
-    /// the only bound at either rung and this change buys it nothing. Asserted
-    /// for both feeds, including the one where the answer is "no difference",
-    /// because a test that only looked at Groww would let a Dhan regression
-    /// through.
     /// **Each rung is split by the cap its own vendor published, and by nothing
     /// else.**
     ///
@@ -29033,6 +29886,14 @@ mod tests {
     /// rung. What survives is the case it still serves: a rung the vendor
     /// published NO cap for has no number to chunk by, and the month is the
     /// only bound left.
+    ///
+    /// Groww therefore needs 81 one-minute requests (its 30-day cap) and 14
+    /// daily ones (its 180-day cap) for this 80-month window, and Dhan, which
+    /// publishes no day cap, still needs 80 daily ones. A first doc block on
+    /// this test said the daily split was "the month alone" and counted 126
+    /// and 80 for Groww — D-0055's rule, which D-0320 and D-1370 removed —
+    /// while the body asserted 81 and 14. Deleted by tests-docs-security-pass18
+    /// P18-03, D-1962.
     #[test]
     fn each_rung_is_split_by_the_cap_its_own_vendor_published() {
         /// The window touches this many months; a capped rung must beat it.
@@ -30504,8 +31365,8 @@ mod tests {
             "localdropped",
             &format!(
                 "{GDFL_MEMBER_HEAD}\
-                 NIFTY,08/02/2022,10:00:00,100.00,0,0,0,0,0,0\n\
-                 NIFTY,08/02/2022,10:00:01,100.50,0,0,0,0,0,0\n"
+                 NIFTY,08/02/2022,10:00:00,100.00,0,0,0,0,1,0\n\
+                 NIFTY,08/02/2022,10:00:01,100.50,0,0,0,0,1,0\n"
             ),
         );
 
@@ -30562,18 +31423,20 @@ mod tests {
         let site = site("localfailed", &dir);
         // File order is the only order there is, and this file's order
         // descends — the fold refuses it rather than sorting it, and the
-        // member fails before any bar file is opened.
+        // member fails before any bar file is opened. A trading Monday: a
+        // Saturday's rows are dropped as a closed day (D-2673) before the
+        // fold could see their order (D-1934).
         let folder = vendor_folder(
             "localfailed",
             &format!(
                 "{GDFL_MEMBER_HEAD}\
-                 NIFTY,08/01/2022,10:00:00,100.00,0,0,0,0,0,0\n\
-                 NIFTY,08/01/2022,09:30:00,100.50,0,0,0,0,0,0\n"
+                 NIFTY,10/01/2022,10:00:00,100.00,0,0,0,0,1,0\n\
+                 NIFTY,10/01/2022,09:30:00,100.50,0,0,0,0,1,0\n"
             ),
         );
 
         let (code, html) = spot_answer(
-            &spot_form(&folder, "2022-01-08", "2022-01-08"),
+            &spot_form(&folder, "2022-01-10", "2022-01-10"),
             day(2026, 8, 7),
             moment(),
             &site,
@@ -33378,6 +34241,32 @@ mod percentage_tests {
         );
     }
 
+    /// `HTTP_LIVE` said chunking had "no caller yet" and expired F&O was "not
+    /// modelled at all" after both landed (Z1-slice14-F2, D-1762). Each claim
+    /// it now makes names a path this test reads.
+    #[test]
+    fn the_live_broker_banner_names_only_what_exists() {
+        assert!(!HTTP_LIVE.contains("no caller yet"));
+        assert!(!HTTP_LIVE.contains("not modelled"));
+        let me = include_str!("server.rs");
+        assert!(me.contains("pull::session::split_window(asked_window"));
+        let pull = Path::new(env!("CARGO_MANIFEST_DIR")).join("../pull/src/lib.rs");
+        let pull = std::fs::read_to_string(pull).expect("crates/pull/src/lib.rs");
+        assert!(pull.contains("pub mod rolling"));
+        assert!(include_str!("audit.rs").contains("Self::Empty => \"STORED NOTHING\""));
+    }
+
+    /// A corrupt stored bar reaches `basis_points` raw through
+    /// `bars::with_change`, so a delta that leaves `i64` is a refusal and
+    /// never the abort it was (CE-2, D-1761).
+    #[test]
+    fn a_corrupt_close_past_i64_is_an_overflow_refusal_not_an_abort() {
+        assert_eq!(basis_points(100, i64::MIN), Err(Unknown::Overflow));
+        assert_eq!(basis_points(1, i64::MIN + 1), Err(Unknown::Overflow));
+        assert_eq!(basis_points(2, i64::MIN + 2), Err(Unknown::Overflow));
+        assert_eq!(basis_points(100, -100), Ok(-20_000));
+    }
+
     /// **NO EQUITY RENDERS A NUMBER WHILE NO THRESHOLD IS SOURCED.**
     ///
     /// `docs/05-decisions.md` D-0018 already decided this: a suspected
@@ -33737,28 +34626,41 @@ fn resolved_master_rows(merged: &merge::Merged, vendor: Vendor) -> Vec<(String, 
 /// evaluated and its verdict is reported, so an operator can see whether this
 /// pass WOULD be publishable — but the append-only write is a separate act and
 /// is not taken here.
+///
+/// # The feed is named, never defaulted
+///
+/// An absent `feed` used to mean Groww here while it means Dhan on every other
+/// route, and a crawl of ~150 requests started against a feed nobody named. It
+/// is now required, read case-blind as [`ingest::parse_vendor`] reads it, and
+/// every refusal of the REQUEST answers 400 rather than a 200 a monitor reads
+/// as success (P1-02-04, D-1765). A refusal the server cannot help — no HTTP
+/// client, no clock — answers 503.
 pub async fn universe_resolve(
     axum::extract::State(site): axum::extract::State<Loaded>,
     body: String,
-) -> ([(axum::http::HeaderName, &'static str); 1], String) {
+) -> (
+    axum::http::StatusCode,
+    [(axum::http::HeaderName, &'static str); 1],
+    String,
+) {
     let json = [(axum::http::header::CONTENT_TYPE, "application/json")];
 
     let feed = param(&body, "feed");
-    let feed = if feed.is_empty() {
-        brutex_core::vendor::Vendor::Groww.as_str().to_owned()
+    let named = if feed.is_empty() {
+        None
     } else {
-        feed
+        ingest::parse_vendor(&feed)
     };
-    let Some(vendor) = brutex_core::vendor::Vendor::ALL
-        .into_iter()
-        .find(|v| v.as_str() == feed)
-    else {
+    let Some(vendor) = named else {
         return (
+            axum::http::StatusCode::BAD_REQUEST,
             json,
             format!(
                 r#"{{"ok":false,"why":{}}}"#,
                 render::json_string(&format!(
-                    "{feed:?} is not a vendor this build names. It is one of: {}",
+                    "{feed:?} is not a vendor this build names, and a crawl is \
+                     never started against a feed the request did not name. \
+                     Send feed= one of: {}",
                     brutex_core::vendor::Vendor::ALL
                         .map(brutex_core::vendor::Vendor::as_str)
                         .join(", ")
@@ -33766,6 +34668,7 @@ pub async fn universe_resolve(
             ),
         );
     };
+    let feed = vendor.as_str().to_owned();
 
     // THE MASTER IS THE ONE ALREADY READ, not one fetched here. See this
     // function's own documentation on why a broker request is a separate act.
@@ -33798,6 +34701,7 @@ pub async fn universe_resolve(
         Ok(client) => client,
         Err(why) => {
             return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
                 json,
                 format!(r#"{{"ok":false,"why":{}}}"#, render::json_string(&why)),
             );
@@ -33810,6 +34714,7 @@ pub async fn universe_resolve(
         Ok(day) => day,
         Err(why) => {
             return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
                 json,
                 format!(
                     r#"{{"ok":false,"why":{}}}"#,
@@ -33845,7 +34750,11 @@ pub async fn universe_resolve(
     .await;
 
     let verdict = snap.admits_publication(None);
-    (json, universe_snapshot_json(&snap, &verdict))
+    (
+        axum::http::StatusCode::OK,
+        json,
+        universe_snapshot_json(&snap, &verdict),
+    )
 }
 
 /// One snapshot as JSON, with the publication verdict beside it.
@@ -33951,6 +34860,84 @@ mod universe_route_tests {
             !me.contains(&verb("get")),
             "a GET on this route would let a link preview crawl an exchange"
         );
+    }
+
+    /// `/store`'s bar length is read from the query, not dropped: the store
+    /// holds more than one rung, and `?timeframe=1day` used to list them all
+    /// (P1-02-05, D-1765). An unknown rung is no narrowing, shown as "All".
+    #[test]
+    fn the_store_filter_reads_the_bar_length_it_is_given() {
+        assert_eq!(
+            store_filter("timeframe=1day").timeframe,
+            Some(store::path::Timeframe::DAY_1)
+        );
+        assert_eq!(
+            store_filter("timeframe=1min&symbol=nifty").timeframe,
+            Some(store::path::Timeframe::MINUTE_1)
+        );
+        assert_eq!(store_filter("timeframe=5parsecs").timeframe, None);
+        assert_eq!(store_filter("").timeframe, None);
+    }
+
+    /// `/bars` reads the feed under the spelling every sibling route uses,
+    /// keeps the `vendor=` its own links carry, and refuses a request whose
+    /// two spellings disagree (P1-02-03, D-1765).
+    #[test]
+    fn the_bars_page_reads_feed_as_well_as_vendor_and_refuses_a_disagreement() {
+        use super::tests::{agreeing, site};
+        assert_eq!(
+            bars_feed_word("feed=groww&symbol=NIFTY"),
+            Ok("groww".to_owned())
+        );
+        assert_eq!(bars_feed_word("vendor=zerodha"), Ok("zerodha".to_owned()));
+        assert_eq!(
+            bars_feed_word("feed=Groww&vendor=groww"),
+            Ok("Groww".to_owned())
+        );
+        assert_eq!(bars_feed_word(""), Ok(String::new()));
+        assert_eq!(bars_feed_word("feed=groww&vendor=dhan"), Err(()));
+        let dir = agreeing("bars-feed-disagrees");
+        let built = site("bars-feed-disagrees", &dir);
+        let (status, body) = bars_html(
+            &built,
+            "symbol=NIFTY&exchange=NSE&segment=INDEX&feed=groww&vendor=dhan&month=2025-07",
+        );
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("name different feeds"), "{body}");
+        let (status, body) = bars_html(
+            &built,
+            "symbol=NIFTY&exchange=NSE&segment=INDEX&feed=nofeed&month=2025-07",
+        );
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body.contains("not a vendor this build has a feed for"),
+            "{body}"
+        );
+    }
+
+    /// A crawl is never started against a feed the request did not name, and
+    /// the refusal is a 400 a monitor can see rather than a 200 carrying
+    /// `ok:false` (P1-02-04, D-1765). Both refusals return before the HTTP
+    /// client is built, so this test opens no socket.
+    #[tokio::test]
+    async fn a_crawl_with_no_feed_or_an_unknown_one_is_refused_with_400() {
+        use super::tests::{agreeing, site};
+        let dir = agreeing("resolve-feed-refused");
+        let built: Loaded = std::sync::Arc::new(site("resolve-feed-refused", &dir));
+        for body in ["", "feed=", "feed=nofeed", "member=NIFTY"] {
+            let (status, _, answer) = universe_resolve(
+                axum::extract::State(std::sync::Arc::clone(&built)),
+                body.to_owned(),
+            )
+            .await;
+            assert_eq!(
+                status,
+                axum::http::StatusCode::BAD_REQUEST,
+                "{body}: {answer}"
+            );
+            assert!(answer.contains(r#""ok":false"#), "{answer}");
+            assert!(answer.contains("did not name"), "{answer}");
+        }
     }
 
     /// **The boot-snapshot class, refused by name.**
@@ -34854,7 +35841,7 @@ fn calendar_json_reading(
     // this — `/ingest`, computing how many bars a month owed — is asking an
     // EXCHANGE question, and refusing it left the browser holding four
     // hardcoded tables of the same facts, which is the duplication D-0274
-    // recorded and P-03 is still open on.
+    // recorded (P-03 itself was closed by D-2673).
     //
     // The honest answer is not to pick an instrument. It is to derive every
     // instrument this feed holds and agree them, and to ship the agreement's

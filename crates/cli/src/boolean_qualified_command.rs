@@ -10,9 +10,14 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 pub(crate) fn command(args: &[&str], out: &mut String) -> u8 {
-    match parse(args).and_then(|request| execute(request, out)) {
+    // Arguments, then work, each with its own code (P8-03, D-2722).
+    let request = match parse(args) {
+        Ok(request) => request,
+        Err(why) => return crate::refuse(out, &why),
+    };
+    match execute(request, out) {
         Ok(()) => crate::OK,
-        Err(why) => crate::refuse(out, &why),
+        Err(why) => crate::fail(out, &why),
     }
 }
 #[derive(Clone, Copy)]
@@ -48,6 +53,7 @@ fn parse<'a>(args: &[&'a str]) -> Result<Request<'a>, String> {
     else {
         return Err("boolean-qualified-campaign-stored requires 14 explicit arguments: VENDOR SYMBOLS FY FM TY TM CATALOG HORIZON MAX_POINTS OUTPUT LATER_FY LATER_FM LATER_TY LATER_TM".into());
     };
+    crate::boolean_catalog_command::words(vendor, symbols)?;
     let from = month(fy, fm)?;
     let to = month(ty, tm)?;
     let later_from = month(lfy, lfm)?;

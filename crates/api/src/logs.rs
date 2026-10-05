@@ -113,14 +113,26 @@ struct Asked {
     target: String,
     /// The run the reader narrowed to, or zero for every run.
     run: u64,
+    /// Each filter the request carried that could not be read, by name, with
+    /// what it said. Such a filter is no narrowing, and the answer says so in
+    /// its JSON and with one Warn, rather than passing the unfiltered tail off
+    /// as the filtered one (P1-01-02, D-1765).
+    ignored: Vec<(&'static str, String)>,
 }
 
 /// Reads the query string into a bounded [`telemetry::Query`].
 ///
 /// Every parameter is **clamped rather than refused**. A log viewer that
 /// answers a mangled bookmark with a 400 is a log viewer an operator stops
-/// reaching for, and unlike a pull request nothing here can be made wrong by a
-/// bad number — the worst a bad `limit` can do is show a different count.
+/// reaching for, and the worst a bad `limit` can do is show a different count.
+///
+/// **A bad `level` or `run` is not a count.** It drops a narrowing, so the
+/// unfiltered tail would arrive looking like the filtered one. Each is still
+/// answered rather than refused, but it is NAMED: listed under `ignored` in the
+/// JSON, beside the filters that were applied, and reported by one
+/// `api.logs filter ignored` Warn — the bargain `audit_json`'s `page ignored`
+/// strikes (P1-01-02, D-1765). `run` must be a canonical unsigned integer;
+/// `+3`, `03` and `3.0` are not quietly read as some run.
 fn asked(raw: &str) -> Asked {
     // NOT THROUGH `render::query_value`. That is a percent-ENCODER, and
     // `param` has already decoded; encoding a decoded value and then parsing it
@@ -138,7 +150,30 @@ fn asked(raw: &str) -> Asked {
     // ZERO IS "EVERY RUN", not run zero. An event outside a backfill omits the
     // key entirely, so there is no run zero to ask for and the value is free to
     // mean the absence of a filter.
-    let run = crate::server::param(raw, "run").parse::<u64>().unwrap_or(0);
+    let run_word = crate::server::param(raw, "run");
+    let run = run_word
+        .parse::<u64>()
+        .ok()
+        .filter(|run| run.to_string() == run_word)
+        .unwrap_or(0);
+    let mut ignored = Vec::new();
+    if level.is_none() && !level_word.is_empty() {
+        ignored.push(("level", level_word));
+    }
+    if run == 0 && !run_word.is_empty() && run_word != "0" {
+        ignored.push(("run", run_word));
+    }
+    for (param, word) in &ignored {
+        let _dropped_when_filtered = telemetry::emit(
+            &telemetry::Event::warn("api.logs", "filter ignored")
+                .with("param", telemetry::Value::Str(param))
+                .with("asked", telemetry::Value::Str(word))
+                .with(
+                    "why",
+                    telemetry::Value::Str("not a value this filter reads; answered without it"),
+                ),
+        );
+    }
 
     let mut query = telemetry::Query::last(limit);
     query.max_scan_bytes = SCAN_BYTES;
@@ -157,6 +192,7 @@ fn asked(raw: &str) -> Asked {
         level,
         target,
         run,
+        ignored,
     }
 }
 
@@ -352,7 +388,16 @@ fn both_halves(
     let ran = cli_dir.map_or_else(telemetry::Tail::default, |d| {
         telemetry::tail(d, telemetry::DEFAULT_KEEP_FILES, query)
     });
+    merged(served, ran, query.limit)
+}
 
+/// The union of two walked halves, and the completeness flags merged in the
+/// direction that cannot over-promise (LG-05).
+///
+/// Split from [`both_halves`] so a test can hand it two walks it cannot cause
+/// from real files, such as a half that hit its scan cap beside one that did
+/// not (P12-02, D-1791). Behaviour is unchanged.
+fn merged(served: telemetry::Tail, ran: telemetry::Tail, limit: usize) -> telemetry::Tail {
     let mut records = served.records;
     records.extend(ran.records);
     records.sort_by(|left, right| {
@@ -364,7 +409,7 @@ fn both_halves(
     // THE LIMIT APPLIES TO THE UNION. Each half already honoured it, so without
     // this the page would return up to twice what was asked for -- and the
     // caller's `limit` is what bounds the response, not a suggestion.
-    records.truncate(query.limit);
+    records.truncate(limit);
 
     telemetry::Tail {
         records,
@@ -480,10 +525,55 @@ fn json_of(
         }
         out.push_str(&render::json_string(why));
     }
+    // THE FILTERS THIS ANSWER APPLIED, AND THE ONES IT COULD NOT. Without them
+    // `?level=eror` and no level at all answered byte-identically (D-1765).
+    // The run twice, as each record carries it: a number, and the exact
+    // decimal a JavaScript reader cannot round.
+    let (run, run_key) = if asked.run == 0 {
+        ("null".to_owned(), "null".to_owned())
+    } else {
+        (asked.run.to_string(), format!("\"{}\"", asked.run))
+    };
+    let _ = write!(
+        out,
+        r#"],"level":{},"target":{},"run":{run},"run_key":{run_key},"ignored":["#,
+        asked.level.map_or_else(
+            || "null".to_owned(),
+            |level| render::json_string(level.label())
+        ),
+        if asked.target.is_empty() {
+            "null".to_owned()
+        } else {
+            render::json_string(&asked.target)
+        },
+    );
+    for (n, (param, word)) in asked.ignored.iter().enumerate() {
+        if n > 0 {
+            out.push(',');
+        }
+        let _ = write!(
+            out,
+            r#"{{"param":{},"asked":{}}}"#,
+            render::json_string(param),
+            render::json_string(word)
+        );
+    }
     out.push_str("],\"sink\":");
     out.push_str(&sink_json(health));
     out.push('}');
     out
+}
+
+/// Whether the banner and `/logs.json`'s `loud` must speak.
+///
+/// Wider than [`telemetry::Health::is_loud`], which stays "were events lost"
+/// because the dropped-events note keys on it. A held clock and a standing
+/// `last_error` lose no event, but each is something the operator must be told:
+/// `clock_held` was counted and rendered nowhere, so after a clock jump every
+/// event kept a frozen time while the page said "Sink healthy", and
+/// `last_error` was shown only beside a loss (conc9-3, D-1774).
+const fn banner_is_loud(h: &telemetry::Health) -> bool {
+    h.is_loud() || h.clock_held > 0 || h.last_error.is_some()
 }
 
 /// The WRITE side of the log, as JSON. `null` when this process has no sink.
@@ -494,14 +584,15 @@ fn sink_json(health: Option<&telemetry::Health>) -> String {
     let mut out = String::new();
     let _ = write!(
         out,
-        r#"{{"written":{},"dropped":{},"rotations":{},"rotation_failures":{},"current_bytes":{},"next_seq":{},"loud":{},"last_error":{}}}"#,
+        r#"{{"written":{},"dropped":{},"rotations":{},"rotation_failures":{},"current_bytes":{},"next_seq":{},"clock_held":{},"loud":{},"last_error":{}}}"#,
         h.written,
         h.dropped,
         h.rotations,
         h.rotation_failures,
         h.current_bytes,
         h.next_seq,
-        h.is_loud(),
+        h.clock_held,
+        banner_is_loud(h),
         h.last_error
             .as_deref()
             .map_or_else(|| "null".to_owned(), render::json_string),
@@ -837,14 +928,30 @@ fn health_banner(health: Option<&telemetry::Health>) -> String {
                 server names the reason on stdout at startup.</p>"
             .to_owned();
     };
-    if !h.is_loud() {
+    if !banner_is_loud(h) {
         return format!(
             "<p class=\"lead\">Sink healthy · {} written · 0 dropped · {} \
              rotation(s) · {} byte(s) in the current file.</p>",
             h.written, h.rotations, h.current_bytes,
         );
     }
-    let mut out = String::from("<p class=\"halt\"><b>The log is incomplete</b>");
+    let mut out = String::from(if h.is_loud() {
+        "<p class=\"halt\"><b>The log is incomplete</b>"
+    } else if h.clock_held > 0 {
+        "<p class=\"halt\"><b>The log's clock is held</b>"
+    } else {
+        "<p class=\"halt\"><b>The sink reported a failure</b>"
+    });
+    if h.clock_held > 0 {
+        let _ = write!(
+            out,
+            "{} event(s) read a clock BEHIND the last one written and were \
+             stamped at that later instant instead, so their times on this page \
+             are not when they happened, and a stale-run check reading them \
+             may see a dead run as live. ",
+            h.clock_held,
+        );
+    }
     if h.dropped > 0 {
         let _ = write!(
             out,
@@ -856,8 +963,16 @@ fn health_banner(health: Option<&telemetry::Health>) -> String {
     if h.rotation_failures > 0 {
         let _ = write!(
             out,
-            "{} roll(s) failed, so the current file is past its bound and the \
-             oldest events may already have been overwritten. ",
+            // WHAT THE SINK ACTUALLY DOES AFTER A FAILED ROLL. It stops
+            // rotating for the life of the process (`Sink::rotation_broken`),
+            // so nothing is overwritten after the failure: the file GROWS. The
+            // banner said the opposite and never said a restart resumes
+            // rotation (CE-41, D-1769).
+            "{} roll(s) failed, so rotation has stopped for the life of this \
+             process: the current file is growing past its bound and no later \
+             event overwrites an older one. The failed roll itself may have \
+             removed the oldest retained file. Fix the cause named below and \
+             restart the server to resume rotation. ",
             h.rotation_failures,
         );
     }
@@ -1698,6 +1813,48 @@ mod tests {
         }
     }
 
+    /// LG-05 (P12-02, D-1791): the completeness flags of two halves merge in
+    /// the direction that cannot over-promise. `hit_scan_cap` and
+    /// `partial_tail` OR, `reached_oldest` ANDs, and `missing` sums, with a
+    /// half that answers `None` contributing nothing rather than a zero. Every
+    /// one of the four input combinations of each flag is walked.
+    #[test]
+    fn completeness_flags_merge_in_the_direction_that_cannot_over_promise() {
+        let half = |cap: bool, torn: bool, oldest: bool, missing: Option<u64>| telemetry::Tail {
+            hit_scan_cap: cap,
+            partial_tail: torn,
+            reached_oldest: oldest,
+            missing,
+            ..telemetry::Tail::default()
+        };
+        for left in [false, true] {
+            for right in [false, true] {
+                let both = super::merged(
+                    half(left, left, left, None),
+                    half(right, right, right, None),
+                    10,
+                );
+                assert_eq!(both.hit_scan_cap, left || right, "cap {left} {right}");
+                assert_eq!(both.partial_tail, left || right, "torn {left} {right}");
+                assert_eq!(both.reached_oldest, left && right, "oldest {left} {right}");
+            }
+        }
+        for (served, ran, want) in [
+            (Some(2), Some(3), Some(5)),
+            (Some(2), None, Some(2)),
+            (None, Some(3), Some(3)),
+            (None, None, None),
+            (Some(u64::MAX), Some(1), Some(u64::MAX)),
+        ] {
+            let both = super::merged(
+                half(false, false, true, served),
+                half(false, false, true, ran),
+                10,
+            );
+            assert_eq!(both.missing, want, "{served:?} + {ran:?}");
+        }
+    }
+
     #[test]
     fn the_limit_bounds_the_union_and_not_each_half() {
         // Each half already honours the limit, so without a truncation on the
@@ -1945,6 +2102,55 @@ mod tests {
             walk_notes(&walk(Vec::new()), Some(&health(9, 9, None))).is_empty(),
             "a loud banner does not invent a MISSING note"
         );
+    }
+
+    /// CE-41, D-1769: after a failed roll the banner says rotation STOPPED
+    /// and the file is growing, never that events were overwritten, and that a
+    /// restart resumes it.
+    #[test]
+    fn a_failed_roll_is_described_as_stopped_rotation_not_overwrite() {
+        let page = health_banner(Some(&health(0, 1, Some("rename refused"))));
+        assert!(
+            page.contains("rotation has stopped for the life of this process"),
+            "{page}"
+        );
+        assert!(
+            page.contains("restart the server to resume rotation"),
+            "{page}"
+        );
+        assert!(
+            !page.contains("may already have been overwritten"),
+            "{page}"
+        );
+        assert!(page.contains("rename refused"), "{page}");
+    }
+
+    /// conc9-3: a held clock and a standing last error each make the banner
+    /// and `/logs.json` speak, though no event was lost.
+    #[test]
+    fn a_held_clock_and_a_standing_error_are_shown() {
+        let mut held = health(0, 0, None);
+        held.clock_held = 3;
+        let page = health_banner(Some(&held));
+        assert!(
+            page.contains("clock is held") && page.contains("3 event(s)"),
+            "{page}"
+        );
+        assert!(!page.contains("Sink healthy"), "{page}");
+        let json = sink_json(Some(&held));
+        assert!(
+            json.contains(r#""clock_held":3"#) && json.contains(r#""loud":true"#),
+            "{json}"
+        );
+
+        let erred = health(0, 0, Some("floor resumed ahead of the clock"));
+        let page = health_banner(Some(&erred));
+        assert!(page.contains("reported a failure"), "{page}");
+        assert!(page.contains("floor resumed ahead of the clock"), "{page}");
+
+        let quiet = health(0, 0, None);
+        assert!(health_banner(Some(&quiet)).contains("Sink healthy"));
+        assert!(sink_json(Some(&quiet)).contains(r#""loud":false"#));
     }
 
     fn health(dropped: u64, rotation_failures: u64, last_error: Option<&str>) -> telemetry::Health {
@@ -2200,6 +2406,55 @@ mod tests {
             .contains(r#""errors":[]"#),
             "and no stray comma when there are none"
         );
+    }
+
+    /// A filter that could not be read is named in the answer, and the filters
+    /// that were applied are echoed, so `?level=eror&run=12x` no longer answers
+    /// byte-identically to no filter at all (P1-01-02, D-1765).
+    #[test]
+    fn an_unreadable_filter_is_named_and_the_applied_ones_are_echoed() {
+        let bad = asked("level=eror&run=12x");
+        assert_eq!(bad.level, None);
+        assert_eq!(bad.run, 0);
+        assert_eq!(
+            bad.ignored,
+            vec![("level", "eror".to_owned()), ("run", "12x".to_owned())]
+        );
+        // `+` is a space on the wire, so a literal plus arrives as `%2B`.
+        for (wire, word) in [("%2B3", "+3"), ("03", "03"), ("3.0", "3.0"), ("-3", "-3")] {
+            let one = asked(&format!("run={wire}"));
+            assert_eq!(one.run, 0, "{word}");
+            assert_eq!(one.ignored, vec![("run", word.to_owned())], "{word}");
+        }
+        let json = json_of(
+            &walk(Vec::new()),
+            &bad,
+            None,
+            (std::path::Path::new("/served"), None),
+        );
+        assert!(
+            json.contains(
+                r#""level":null,"target":null,"run":null,"run_key":null,"ignored":[{"param":"level","asked":"eror"},{"param":"run","asked":"12x"}],"sink":"#
+            ),
+            "{json}"
+        );
+
+        let good = asked("level=WARN&target=api.backtest&run=18446744073709551615");
+        assert!(good.ignored.is_empty());
+        let json = json_of(
+            &walk(Vec::new()),
+            &good,
+            None,
+            (std::path::Path::new("/served"), None),
+        );
+        assert!(
+            json.contains(
+                r#""level":"warn","target":"api.backtest","run":18446744073709551615,"run_key":"18446744073709551615","ignored":[],"sink":"#
+            ),
+            "{json}"
+        );
+        // Zero is "every run" and is not a mistake.
+        assert!(asked("run=0").ignored.is_empty());
     }
 
     /// **EVERY WALK FLAG REACHES THE PAGE, AND EACH ONE ALONE.**

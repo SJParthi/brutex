@@ -230,7 +230,9 @@ struct Case {
 /// brackets.
 /// 30 -> 31 at D-1443: `api.calendar withheld`, a calendar month inside the
 /// span whose daily rung was not read, driven over two daily bars on disk.
-const ROWS: usize = 31;
+/// 31 -> 33 at D-1765: `api.backtest limit ignored`, an unparseable `limit`,
+/// and `api.logs filter ignored`, a `level` or `run` that could not be read.
+const ROWS: usize = 33;
 
 /// How many distinct production emit sites those rows cover.
 ///
@@ -1124,6 +1126,46 @@ fn cases() -> Vec<Case> {
         });
     }
 
+    // crates/api/src/backtest.rs — an unparseable `limit` answered the default
+    // page and said nothing (P1-01-03, D-1765).
+    cases.push(Case {
+        site: "backtest.rs api.backtest limit ignored",
+        target: "api.backtest",
+        message: "limit ignored",
+        level: telemetry::Level::Warn,
+        drive: Box::new(|| {
+            assert_eq!(
+                crate::backtest::limit_asked("limit=emit-site-probe"),
+                crate::backtest::DEFAULT_LIMIT
+            );
+        }),
+        mine: Box::new(|record| {
+            says(record, "asked", "emit-site-probe") && says(record, "param", "limit")
+        }),
+    });
+
+    // crates/api/src/logs.rs — a `level` or `run` filter that could not be read
+    // answered the unfiltered tail as if it were the filtered one (P1-01-02,
+    // D-1765).
+    cases.push(Case {
+        site: "logs.rs api.logs filter ignored",
+        target: "api.logs",
+        message: "filter ignored",
+        level: telemetry::Level::Warn,
+        drive: Box::new(|| {
+            let (status, _headers, body) = block_on(crate::logs::logs_json(
+                "/logs.json?level=emit-site-probe&limit=1"
+                    .parse()
+                    .expect("a real uri"),
+            ));
+            assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+            assert!(body.contains("emit-site-probe"), "{body}");
+        }),
+        mine: Box::new(|record| {
+            says(record, "asked", "emit-site-probe") && says(record, "param", "level")
+        }),
+    });
+
     cases
 }
 
@@ -1596,10 +1638,15 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // 19 -> 20 at D-0948: `pull.credential re-read returned the SAME value`,
     // driven and read back by `server::credential_law_tests::
     // a_rejected_token_whose_re_read_is_unchanged_halts_the_spot_run_with_no_further_request`.
+    // 20 -> 21 at D-1920 (P1-17-02): `api.serve the serve lock is held but
+    // could not be stamped`, driven through `note_unstamped_lock` and read back
+    // by `server::tests::a_serve_lock_stamp_that_fails_is_cleared_or_refused_never_left_stale`.
     // 20 -> 21 at D-2771: `api.serve shutdown drain ended with requests
     // still in flight`, driven and read back by `server::shutdown_tests::
     // a_request_still_running_after_the_signal_does_not_hold_the_server_open`.
-    const REACHED_IN_SERVER_TESTS: usize = 21;
+    // 21 -> 22 when both met in the PR #74 merge (D-2779): the two lines above
+    // were each written as 20 -> 21 on their own side, and both sites are driven.
+    const REACHED_IN_SERVER_TESTS: usize = 22;
     // Both production recovery boundaries are emitted and read back through
     // this installed sink by recovery::tests::
     // recovery_boundary_events_are_read_back_from_the_installed_sink.
@@ -1675,17 +1722,18 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     /// own tests cover the landing and the transport pairing against a
     /// recording transport, which is the half that has no network in it.
     ///
-    /// AND ONE MORE, added with D-1481 (v3b-2): `api.serve the serve lock is
-    /// held but could not be stamped`. It fires only when writing the stamp
-    /// into a lock file this process holds fails while emptying that same file
-    /// succeeds — a disk that fills between two calls on one descriptor. No
-    /// fixture produces that split: `/dev/full` fails both, which is the
-    /// refusal arm `a_serve_lock_stamp_that_fails_is_cleared_or_refused_never_left_stale`
-    /// drives end to end, and the decision between the two arms is driven
-    /// directly through `stamp_outcome` with the host's own errors.
+    /// ONE THAT LEFT THIS LIST, added with D-1481 (v3b-2) and moved to
+    /// `REACHED_IN_SERVER_TESTS` by P1-17-02 (D-1920): `api.serve the serve
+    /// lock is held but could not be stamped`. It fires only when writing the
+    /// stamp fails while emptying the same file succeeds, a split no fixture
+    /// produces on one descriptor. The report step now lives in
+    /// `note_unstamped_lock`, which
+    /// `a_serve_lock_stamp_that_fails_is_cleared_or_refused_never_left_stale`
+    /// calls directly with the warning `stamp_outcome` produced, and reads the
+    /// event back.
     ///
     /// The rows of the table above, every one of them struck through — plus
-    /// `pull.fno discovery refused`, the three named before it and the eight
+    /// `pull.fno discovery refused`, the three named before it and the seven
     /// named here, which are the sites no test in this binary can drive.
     ///
     /// AND TWO MORE, added with D-1582 and D-1583 (audit-20261003):
@@ -1696,7 +1744,7 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     /// previous window`, which needs more than fifty cross-site failures and
     /// then a minute's wait — the ration it reports is proven by
     /// `logs::tests::a_flood_of_failed_requests_writes_a_bounded_number_of_lines`.
-    const UNREACHABLE: usize = 11;
+    const UNREACHABLE: usize = 10;
     // COUNTED FROM THE SOURCE, not declared. An additional emit added
     // anywhere under `crates/api/src` fails this test until somebody decides
     // which of the three columns it belongs in, which is the whole point of
@@ -1717,13 +1765,20 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // 60 -> 61 at D-1481: the unstamped serve lock's WARN, named in the
     // unreachable list above.
     //
-    // 61 -> 63 at D-1582 and D-1583: the two unreachable sites named above.
+    // 61 -> 63 at D-1765: `api.backtest limit ignored` and `api.logs filter
+    // ignored`, both driven in the table above.
+    //
+    // 63 -> 65 at D-1582 and D-1583, merged in: the two unreachable sites
+    // named above.
     //
     // 63 -> 64 at D-2771: the bounded shutdown drain's WARN, driven in
     // `server::shutdown_tests`.
+    //
+    // 65 -> 66 when both met in the PR #74 merge (D-2779): D-2771 counted its
+    // WARN as 63 -> 64 on a side without D-1765's two sites.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 64,
+        lib_sites, 66,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"
