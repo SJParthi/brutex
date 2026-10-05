@@ -2204,7 +2204,13 @@ const AUDIT_LITERAL: &str = "-354 -7 repeats";
 //   ROUND 3 (gdfl_r3_attack_tests.rs). The `r3-*` words are scratch
 //     roots, as above; `22` and `333` are the fields of an invented
 //     columnar text column.
+//   ROUND 4 (gdfl_r4_attack_tests.rs). The `r4-*` words are scratch
+//     roots, as above; `restated` and `definition` are the telemetry
+//     fields naming a day the journal sends back under another bar
+//     definition (D-3191), and `7` the digit an over-long invented strike
+//     repeats.
 const GDFL_LITERAL: &str = "
+    r4-retried r4-restated r4-stamp r4-torn-append restated definition 7
     r3-journal-hand r3-journal-fuzz r3-shape r3-shape-store r3-cm-world
     r3-filters 22 333
     r2-era r2-filter-claim r2-filter-claim-store r2-fold-count r2-journal

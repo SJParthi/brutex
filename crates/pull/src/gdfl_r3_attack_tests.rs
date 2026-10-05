@@ -415,7 +415,8 @@ fn run_stocks_on(store: &Path) -> Result<Report, ImportRefusal> {
 /// very thing D-3173 exists to prevent.
 #[test]
 fn r3_01_a_journal_whose_torn_close_was_itself_torn_never_stops_a_later_run() {
-    let base = b"done stocks 2024-04-01 * files=0\n";
+    // `definition=` names the bar definition that built the day (D-3191).
+    let base = b"done stocks 2024-04-01 * definition=2 files=0\n";
     for tail in [
         &b"d (t"[..],
         b"d (",
@@ -530,8 +531,12 @@ fn r3_02_random_crash_histories_always_load_to_the_lines_written_whole() {
                 let verb = rng.below(3);
                 let text = match verb {
                     0 => format!("begin {key}"),
-                    1 => format!("done {key} files=1 seconds=2 failures=0"),
-                    _ => format!("incomplete {key} files=1 seconds=0 failures=1"),
+                    1 => format!(
+                        "done {key} definition={BAR_DEFINITION} files=1 seconds=2 failures=0"
+                    ),
+                    _ => format!(
+                        "incomplete {key} definition={BAR_DEFINITION} files=1 seconds=0 failures=1"
+                    ),
                 };
                 let at = file_len(&path);
                 journal.append(&text).unwrap();

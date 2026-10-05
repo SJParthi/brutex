@@ -423,28 +423,37 @@ fn dated_shape(body: &[u8]) -> Option<(usize, u8, u8, u8, i64)> {
 }
 
 /// The underlying a name's own shape spells, whether or not the name decodes:
-/// the text before its dated `DD MON YY STRIKE` reading, else before its
-/// monthly `YY MON STRIKE` one. Both shapes put two digits and a month at
-/// their split, and a strike holds no letter, so where both exist they split
-/// at one place. `None` when the name has neither shape, no `CE`/`PE` side,
-/// or is past the length cap.
+/// the text before the two digits and the month its LAST letters spell, the
+/// split both the dated `DD MON YY STRIKE` and the monthly `YY MON STRIKE`
+/// reading put there. A strike holds no letter, so the month of either
+/// reading is the name's last letters, and the split is found from the end
+/// whatever follows the month. `None` when the name has no `CE`/`PE` side,
+/// its last three letters are no month, no two digits precede them, or
+/// nothing precedes those.
 ///
 /// `LTI06APR24100CE` (a Saturday expiry) does not decode, and its shape still
 /// says it is `LTI`'s, never `LT`'s: `crate::gdfl_import` asks this before it
 /// falls back to the longest underlying a shapeless name starts with
-/// (D-3197). O(ticker length).
+/// (D-3197). Neither does `LTI06APR24100.125CE` nor a name past the length
+/// cap, and they are `LTI`'s too: this asked for a strike that parsed and a
+/// name inside the cap, and a strike that is no strike handed `LTI…` back to
+/// `LT` (D-3192). Every name the strict readings shape, this shapes at the
+/// same split. O(ticker length), with no cap.
 #[must_use]
 pub(crate) fn shaped_underlying(ticker: &str) -> Option<&str> {
-    if ticker.len() > TICKER_CAP {
-        return None;
-    }
     let body = ticker
         .strip_suffix("CE")
         .or_else(|| ticker.strip_suffix("PE"))?;
     let bytes = body.as_bytes();
-    let at = dated_shape(bytes)
-        .map(|(at, ..)| at)
-        .or_else(|| monthly_shape(bytes).map(|(at, ..)| at))?;
+    let mut last = None;
+    for (at, byte) in bytes.iter().enumerate() {
+        if byte.is_ascii_alphabetic() {
+            last = Some(at);
+        }
+    }
+    let at = last?.checked_sub(4).filter(|&at| at > 0)?;
+    two_digits(bytes.get(at..at + 2)?)?;
+    month_of(bytes.get(at + 2..at + 5)?)?;
     body.get(..at)
 }
 

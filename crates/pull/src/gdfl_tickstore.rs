@@ -292,9 +292,10 @@ pub fn rebuild<B: ReadAt>(src: &B, entry: &IndexEntry) -> Result<Vec<u8>, CmRefu
 
 /// A columnar block's body after its kind byte (§4, kind 1), rebuilt, and
 /// refused once anything it states or builds is past `size` bytes (D-3198):
-/// every row ends in a terminator, so rows are at most `size`; a column's
-/// text is at most `size`; a text column's payload is its text; a numeric
-/// column's payload is `rows + 2 + w * rows` with `w` at most 8.
+/// every row ends in a terminator, so rows are at most `size`; the header
+/// and the columns' texts together are at most `size` (D-3193); a text
+/// column's payload is its text; a numeric column's payload is
+/// `rows + 2 + w * rows` with `w` at most 8.
 fn columnar(body: &[u8], index_rows: u64, size: u64) -> Result<Vec<u8>, CmRefusal> {
     let mut c = Cursor::new(body, COLUMNAR);
     let terminator: &[u8] = match c.u8()? {
@@ -322,6 +323,12 @@ fn columnar(body: &[u8], index_rows: u64, size: u64) -> Result<Vec<u8>, CmRefusa
         return Err(bad(PAST_SIZE));
     }
     let mut columns = Vec::new();
+    // The header and every column's text so far: every row holds a field of
+    // every column, so the rebuilt file is longer than their sum, and the
+    // sum is held to `size` BEFORE each column is decoded. One column at a
+    // time let a thousand columns each one size long decode a thousand sizes
+    // before the rebuild loop's check (D-3193).
+    let mut stated = u64::from(header_len);
     for _ in 0..ncols {
         let tag = c.u8()?;
         let (payload_len, text_len, zlen) = (c.u64()?, c.u64()?, c.u64()?);
@@ -330,7 +337,8 @@ fn columnar(body: &[u8], index_rows: u64, size: u64) -> Result<Vec<u8>, CmRefusa
             1 => rows.saturating_mul(9).saturating_add(2),
             _ => return Err(bad(COLUMNAR)),
         };
-        if text_len > size || payload_len > most {
+        stated = stated.saturating_add(text_len);
+        if stated > size || payload_len > most {
             return Err(bad(PAST_SIZE));
         }
         let payload = unzstd(c.take(zlen)?, payload_len)?;

@@ -664,7 +664,8 @@ fn a_torn_journal_line_is_ignored_and_a_foreign_one_refuses_the_run() {
     put(
         &store,
         "imports/gdfl.journal",
-        b"done indices 2024-04-01 * files=2\ndone ind",
+        // `definition=` names the bar definition that built the day (D-3191).
+        b"done indices 2024-04-01 * definition=2 files=2\ndone ind",
     );
     let got = import(&root, Src::Store, ImportKind::Indices, d1(), d1(), &store);
     assert_eq!(got.days_skipped, 1);

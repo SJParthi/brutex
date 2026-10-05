@@ -935,6 +935,27 @@ that failed on the unmodified code.
   18 MB before the size check**: fixed. D-3198, DPT-20.
 - **Round 3: random index worlds, filtered stock worlds and a run of filters
   over one store**: no failure beyond D-3197. D-3199, DPT-21, DPT-22.
+- **Round 4: a day closed `incomplete` and imported again was named in no
+  list**: fixed. D-3190, DPT-23.
+- **Round 4: a day done before D-3170 was never rebuilt (the journal did not
+  record the bar definition)**: fixed; such a day is imported again and the
+  append-only store judges it. D-3191, DPT-24.
+- **Round 4: a shaped name with a strike that does not parse, or past the
+  length cap, claimed by a shorter filter (`LT` for `LTI…`)**: fixed. D-3192,
+  DPT-25.
+- **Round 4: a columnar block of many columns decoded far past its size
+  before any check summed the columns**: fixed. D-3193, DPT-26.
+- **Round 4: a row stamped past its day filed as a bar of the next day**:
+  fixed. D-3194, DPT-27.
+- **Round 4: a journal line torn by a failed write inside a run was glued to
+  the next line**: fixed. D-3195, DPT-28.
+- **Round 4, open, not fixed.** A shapeless undecodable name (no month after
+  two digits) is still claimed by every filter whose name is its longest
+  prefix among the F&O list and that filter, so nested filter names (`LT`,
+  `LTI`) both claim `LTIXYZCE`; a fixed owner needs a fixed universe of
+  names, which D-3167 chose not to have. A tick-store index or raw block is
+  decoded up to the length its footer or entry states, which no sourced fact
+  bounds.
 - **Open.** D-2802 to D-2807 are cited in the GDFL code and head no entry in
   `docs/05-decisions.md`. Whether the long-dated months 2022-06, 2023-06 and
   2023-12 exist, and whether monthly names persist after the cutover, needs the

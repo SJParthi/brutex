@@ -59613,3 +59613,91 @@ times are test-profile timings: p50 85 ns at 10^3 entries, 195 ns at 10^4,
 probe per lookup holds by shape, and the growth is consistent with cache
 misses on a larger table; that cause is UNVERIFIED and is not a bench-gate
 claim.
+
+### D-3190 — `Report::resumed` names every day the journal sends back — 2026-10-05
+
+**Finding.** A day an earlier run closed `incomplete` was imported again and
+named in no list: `resumed` held only days begun and never closed. Round 3
+recorded this as an open item.
+
+**Decision.** `resumed` lists every day the journal names that a run takes up
+again, in day order: begun and never closed, closed `incomplete`, or closed
+`done` under another bar definition (D-3191). Its doc states exactly that,
+including that such a day is listed when the source no longer holds it. The
+journal keeps the `incomplete` keys it reads. DPT-23.
+
+### D-3191 — The journal records the bar definition that built a day — 2026-10-05
+
+**Finding.** A `done` line did not say which one-second bar definition built
+its day, so a day done before D-3170 (no look-ahead) was skipped by every
+later run: a silent stale result.
+
+**Decision.** `gdfl_import::BAR_DEFINITION` (2; 1 was D-2802 as first
+written, 2 is D-3170) is written into every `done` and `incomplete` line as
+`definition=<n>`, and is bumped whenever a change makes a file build different
+bars. A day whose last `done` line names another number, or none, is not done:
+it is imported again and named in `resumed` and `Report::restated`. It is not
+refused up front, because the append-only store already judges the result:
+`AlreadyPresent` for the same bars (the day is then closed `done` under this
+definition), and a named `OverlapDisagrees` refusal for different ones, which
+closes the day `incomplete` and leaves the bars as they were on every run. A
+`definition=` that is empty, signed, zero-padded, past `u32` or repeated is a
+foreign line. The journal's line format is stated in `Journal::load`'s doc and
+the module doc. Four existing tests that wrote `done` lines by hand with no
+`definition=` now write one. DPT-24.
+
+### D-3192 — An undecodable name's shape is read from its last letters — 2026-10-05
+
+**Finding.** D-3197's shape needed a strike that parsed and a name inside the
+64-byte cap. `LTI06APR24100.125CE`, `…100.50CE`, a strike past `i64` and a
+name past the cap were "shapeless", and the prefix rule handed them to `LT`
+and `NIFTYIT…` to `NIFTY`: both filters claimed one file.
+
+**Decision.** `gdfl_nfo::shaped_underlying` finds the name's last ASCII
+letters, which in either reading are its month because a strike holds no
+letter, and returns the text before the two digits in front of them. It
+parses no strike and has no cap, and is O(ticker length). Every name the
+strict readings shape is shaped at the same split; 300,000 random names
+confirm it against `decode_ticker`. DPT-25.
+
+### D-3193 — A columnar block's columns, together, are held to its size — 2026-10-05
+
+**Finding.** D-3198 held each column's text to the entry's size one column
+at a time, and the rebuilt file only once every column was decoded. A block
+of 1,000 columns each 60,000 bytes long, stating 65,536 bytes, decoded 60 MB
+of columns before any check summed them.
+
+**Decision.** Every row holds a field of every column, so the rebuilt file is
+longer than the header plus every column's text. That sum is kept as columns
+are read and refused as `PAST_SIZE` before the column that passes the size is
+decoded. An honest block of many columns at exactly its size still rebuilds.
+DPT-26.
+
+### D-3194 — A row stamped past its day is refused — 2026-10-05
+
+**Finding.** `convert` and `drive` are public and took a `Tick` whose `sod`
+was any `u32`. The readers hold it below 86,400; the runtime did not. A row
+of 1 April stamped second 122,400 was filed as a bar of 2 April at 10:00,
+inside that day's session, with no failure.
+
+**Decision.** `convert` refuses a row at or past second 86,400, traded or
+not, as the new `ImportRefusal::StampPastTheDay`, before placement. The
+timing test `per_tick_build_and_per_second_lookup_cost` built 10^6 ticks at
+three a second from 09:15, which ran past the day; it now builds twelve a
+second from midnight. DPT-27.
+
+### D-3195 — A journal append closes a torn last line first — 2026-10-05
+
+**Finding.** A journal write that fails part way leaves a torn line, is a
+named failure, and the run continues. The next append was written straight
+after the torn bytes: `do` + `begin stocks 2024-04-02 *` became a foreign
+line every later load refused, and a torn `done` line glued to the next one
+hid that line. Only a load closed a torn tail.
+
+**Decision.** Every append reads the journal's last byte first (O(1)) and,
+when it is not a newline, writes ` (torn)` and a newline before its line, as
+a load does. A load's own close is the same write with no line. A torn
+`done` therefore leaves its day begun and not closed, and the next run
+resumes it. This round's other attacks found no further failure: random
+crash histories, foreign lines and filters were not re-run beyond the
+existing DPT-15, DPT-18 and DPT-22 tests, which still pass. DPT-28.

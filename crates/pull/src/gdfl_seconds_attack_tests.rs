@@ -599,7 +599,8 @@ fn a_torn_journal_line_stays_ignored_on_every_later_run() {
         b"done ind (to",
     ] {
         let root = scratch("seconds-torn");
-        let mut text = b"done indices 2024-04-01 * files=2\n".to_vec();
+        // `definition=` names the bar definition that built the day (D-3191).
+        let mut text = b"done indices 2024-04-01 * definition=2 files=2\n".to_vec();
         text.extend_from_slice(torn);
         put(&root, "imports/gdfl.journal", &text);
         for run in 0..3 {
@@ -1310,8 +1311,11 @@ fn percentiles(mut samples: Vec<f64>) -> (f64, f64, f64) {
 fn per_tick_build_and_per_second_lookup_cost() {
     let mut rng = Rng(0x434F_5354_5331_0001);
     for n in [1_000_u32, 10_000, 100_000, 1_000_000] {
+        // Twelve ticks a second from midnight, so 10^6 ticks stay inside the
+        // day: three a second from 09:15 ran to second 366,633, a stamp the
+        // runtime now refuses (D-3194).
         let ticks: Vec<Tick> = (0..n)
-            .map(|i| tick(T + i / 3, 5 + i64::from(i % 1_000), u64::from(i % 4)))
+            .map(|i| tick(i / 12, 5 + i64::from(i % 1_000), u64::from(i % 4)))
             .collect();
         let reps = (2_000_000 / n).clamp(5, 200);
         let mut samples = Vec::new();
@@ -1323,7 +1327,7 @@ fn per_tick_build_and_per_second_lookup_cost() {
             samples.push(started.elapsed().as_nanos() as f64 / f64::from(n));
             seconds = got.seconds.len();
         }
-        assert_eq!(seconds, usize::try_from(n.div_ceil(3)).unwrap());
+        assert_eq!(seconds, usize::try_from(n.div_ceil(12)).unwrap());
         let (p50, p99, max) = percentiles(samples);
         eprintln!("build n={n} reps={reps} ns/tick p50={p50:.1} p99={p99:.1} max={max:.1}");
     }

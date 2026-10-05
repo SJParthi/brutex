@@ -1262,7 +1262,8 @@ fn r2_05_a_foreign_journal_is_refused_every_time_and_never_written() {
         b"done st (to",
     ] {
         let root = scratch("r2-journal");
-        let mut text = b"done stocks 2024-04-01 * files=0\n".to_vec();
+        // `definition=` names the bar definition that built the day (D-3191).
+        let mut text = b"done stocks 2024-04-01 * definition=2 files=0\n".to_vec();
         text.extend_from_slice(torn);
         put(&root, "imports/gdfl.journal", &text);
         for attempt in 0..3 {
