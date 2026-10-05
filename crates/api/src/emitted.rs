@@ -79,11 +79,6 @@ use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
 /// record written afterwards would go somewhere no reader can find.
 pub(crate) fn sink() -> &'static telemetry::Sink {
     static PREPARED: std::sync::Once = std::sync::Once::new();
-    let dir = crate::scratch::path("telemetry");
-    PREPARED.call_once(|| {
-        let _ignored = std::fs::remove_dir_all(&dir);
-    });
-    let config = telemetry::Config::new(&dir).with_min_level(telemetry::Level::Trace);
     // ONE INSTALL AT A TIME. Two tests calling this at once both passed
     // `install`'s emptiness check; the second's `Sink::open` of the same file
     // was refused while the first had not yet published its sink, so
@@ -91,6 +86,11 @@ pub(crate) fn sink() -> &'static telemetry::Sink {
     // `server::shutdown_tests` joined the `emitted` tests as a reader of this
     // sink (D-2771).
     static INSTALLING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let dir = crate::scratch::path("telemetry");
+    PREPARED.call_once(|| {
+        let _ignored = std::fs::remove_dir_all(&dir);
+    });
+    let config = telemetry::Config::new(&dir).with_min_level(telemetry::Level::Trace);
     let _one = INSTALLING
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
