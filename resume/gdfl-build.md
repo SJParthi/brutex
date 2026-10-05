@@ -53,3 +53,10 @@ A second copy of the app runs over the scratch store at http://127.0.0.1:8081/db
 4. Squash-integrate the clean parts into a new local branch feat/gdfl-1s; prove with `git log -p` that no GDFL row is in any commit; merge final/all-fixes and resolve the store v3 conflicts.
 5. /db: show seconds in the Time column for 1-second bars; wire /spot.json and the rate so moneyness, IV and greeks fill in.
 6. Land code only through PR #74's merge gate once the user says to import into the real store.
+
+## Running when this session stopped (2026-10-05 02:15 UTC)
+
+`work-20260925/state/import-scratch/run-all-days.sh` is importing EVERY GDFL day (2018-09-03..2026-09-24) into the scratch store the :8081 viewer reads: indices, then stocks, then options. It is resumable: re-run the script and finished days are skipped. Progress: `import-scratch/logs/all-status.txt` and `logs/all-<kind>.txt`. Options for all days may need roughly 1 TB and many hours; check `df -h /Volumes/WD_BLACK` (4.3 TB free at start).
+
+## Update 2026-10-05 03:33 UTC
+The user asked to load GDFL into the REAL app store, then said to leave it for the new account. The import into `/Volumes/WD_BLACK/brutex/fresh-20260919/runtime/store` was STOPPED partway through the indices (Sep 2018 onward partly loaded; stocks and options not started). Resume it with `work-20260925/state/import-scratch/run-real-store.sh` (finished days are skipped). The scratch-store import (run-all-days.sh) is also stopped; :8081 still serves what it holds.
