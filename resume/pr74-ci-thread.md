@@ -106,3 +106,4 @@ Artifacts.
 
 ### Prompt for a new session (paste as is)
 Read CLAUDE.md, then the fix-queue branch file resume/pr74-ci-thread.md (last section) in sjparthi/brutex. You are the PR 74 CI thread: drive PR #74 (head final/all-fixes) to ci-ok green. Find the latest CI run on final/all-fixes, fix every red job and every Gate 18 mutation survivor, validate locally before each push, and push only before Gate 18 shards start. Append progress to resume/pr74-ci-thread.md on fix-queue. Do not merge other branches unless a thread hands one over as validated.
+- Update: run 37251141390 on 969493e: W, 1+2 (incl. 1e), 3-6, Gate 8 (D-1465 works), Gate 18 plan all green. Remaining: coverage + Gate 20, Gate 18 shards, ci-ok.
