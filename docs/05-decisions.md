@@ -64535,3 +64535,236 @@ Global Replay V4 needs all eight selections live, and keeps the retention;
 `docs/06-limits.md` says so.
 
 **Evidence.** ZQ-33.
+### D-2585 — The store grid scales to its own feed, a share bar draws only reasons with drops, and a strike keeps its sign — 2026-10-06
+
+**The findings.** apir-1: `render::page_peak` took the largest row count of
+every vendor while the table draws one feed, so the page said "quartiles of
+100" (another feed's count) above a column of 10s. apir-2: `share_bar` gave the
+rounding remainder to the last reason in order, so a reason with no drops drew
+a slice titled ": 0". apir-3 (latent): `kind_cells` printed -5 paisa as "0.05",
+because the sign lived only in the truncated rupee part.
+
+**The decision.** `page_peak` takes the shown feed and counts only its cells.
+The remainder goes to the last reason whose count is non-zero, and a zero
+reason draws nothing. A strike's sign is written on its own, beside
+`unsigned_abs` of both parts. No stored byte changes; these are page renderers.
+
+**Evidence.** ZK-20.
+
+### D-2586 — A portless Host names port 80, and a price refusal is one sentence — 2026-10-06
+
+**The findings.** P1-03-2: `api serve 127.0.0.1:80` is a loopback address
+`loopback_serve_addr` accepts, but `local_host_authority` required the `Host`
+to carry the port, and every browser elides the default one, so every request
+was refused 403 "came from somewhere else". `origin_matches_host` compared raw
+text. apis-2: the no-underlying refusal in `price_group` had lost its `\`
+continuation and carried an 18-space run.
+
+**The decision.** `effective_http_port` reads an absent port as 80 (RFC 9110
+§4.2.1) only when the authority has no port separator after its host; an
+empty, non-numeric or out-of-range port is refused, never read as 80. Origin
+and Host are compared as host plus effective port. The refusal sentence is the
+named constant `NO_UNDERLYING_BESIDE_THE_BAR`.
+
+**Evidence.** ZK-21, ZK-22.
+
+### D-2587 — A stop that abandons engine work exits FAILED — 2026-10-06
+
+**The finding.** conc16-2. `main` bound `end_runtime`'s abandoned count to
+`_abandoned`, so a stop that left engine tasks unfinished exited 0 and logged
+Info "exited cleanly" right after the Error event saying their results were
+lost.
+
+**The decision.** `api::server::exit_after_shutdown(code, abandoned)` turns
+`OK` into `FAILED` when any task was abandoned and keeps any code that is
+already non-zero. `main` applies it before `note_exit`.
+
+**Evidence.** ZK-23.
+
+### D-2588 — Autopilot rung state: a revive clears both rungs, journal losses stay counted, a global halt refuses a resume, a clear day pass hands over, months count once — 2026-10-06
+
+**The findings and decisions.**
+- conc15-3: `revive` cleared only the live rung's counters, so a store halt
+  revived on the other rung came back with `store_refused` still set and one
+  new refusal re-halted it as "twice". `revive` now also resets the parked
+  rung's counters, keeping its frontier hint.
+- conc15-4: `journal_error` was replaced on every tick, so a refused record
+  was forgotten when a later one landed. `Status::note_journal` keeps
+  `journal_error` as current state and adds sticky `journal_lost` and
+  `journal_first_loss`, both on `/autopilot.json`.
+- conc15-5: `admit_resume` read only the feeds, so the empty-universe halt
+  (phase `Halted`, no halted feed) was admitted and published "resumed". It
+  is now refused with `RESUME_CANNOT_CLEAR` and the status's reason.
+- conc15-1: since D-3000 a day pass that finds nothing owed hands the loop to
+  the minute rung, but it published `Idle` with the "store is complete"
+  sentence and waited `IDLE_POLL_SECS`. `day_hand_over` returns
+  `Pass { wait: 0, owed: false }` for that case without publishing; a terminal
+  feed set and an empty universe are not handed over.
+- conc15-6: one `months_done` counted every `Advance` on either rung and the
+  current month again each day. It is now per rung (swapped by `enter` with
+  `parked_months_done`), and a (rung, month) pair counts once, through the
+  `retired` set (bounded by twice the months owed, one insert, expected-O(1)
+  and UNVERIFIED by a measurement,
+  per `Advance`).
+
+The "stand-off reads as paused" half of conc15-5 is not changed.
+
+**Evidence.** ZK-24 to ZK-28.
+
+### D-2589 — The `/dev/full` leg of the serve-lock stamp test is Linux-only — 2026-10-06
+
+**The finding.** P16-02. The host-neutral stamp test symlinked its lock to
+`/dev/full` with no `cfg`; macOS has no such device, so the test failed on the
+operator's machine.
+
+**The decision.** That leg is its own test, `a_serve_lock_stamp_on_dev_full_is_refused`,
+under `cfg(target_os = "linux")`, with a premise check that the device exists.
+The `stamp_outcome` legs already drive ENOSPC on every host.
+
+**Evidence.** ZK-29.
+
+### D-2590 — Failed-request line rations belong to the site — 2026-10-06
+
+**The finding.** P16-04. The rations were a process `static`, so every routed
+test in the api binary shared one 60 s window and spent failures could
+suppress the 404 line another test asserts.
+
+**The decision.** The rations live on `Site::failed_lines`, and
+`logs::note_request` is installed with `from_fn_with_state` over the router's
+site. Production builds one `Site` and serves its router from it, so the
+per-process bound in `docs/06-limits.md` is unchanged.
+
+**Evidence.** ZK-30.
+
+### D-2591 — One universe resolution at a time — 2026-10-06
+
+**The finding.** P1-04-03. `POST /universe/resolve` ran a full third-party
+crawl (about 300 documents) per press with no slot, so concurrent presses
+multiplied it.
+
+**The decision.** A process-wide `RESOLVING` mutex, taken with `try_lock`
+after the request is validated and before the HTTP client is built. A press
+while one runs answers 409 and opens nothing. Same shape as
+`mastersrun::REFRESH`.
+
+**Evidence.** ZK-31.
+
+### D-2592 — A recovery press against a held run slot is refused before its replay — 2026-10-06
+
+**The finding.** P1-04-04. `recovery::start` ran `preflight_submission`, an
+O(history) journal replay on a blocking thread, before `claim` looked at the
+slot, so every press during a pull paid the replay to be told 409.
+
+**The decision.** A one-lock probe (`slot_running`) answers 409 before the
+preflight. `claim` stays the authority. Routing the preflight and
+`prepare_successor` through `detail::run` (429 at the bound) is NOT done: that
+pool is shared with tests that hold every slot, and the recovery tests do not
+take the serial guard, so it would make them flaky; the tokio blocking pool's
+own bound (512) is what applies today.
+
+**Evidence.** ZK-32.
+
+### D-2593 — `/bars/window.json` and `/backtest.json` read in the store-read pool — 2026-10-06
+
+**The findings.** resources-4, P1-04-01. Both heavy reads ran inline on an
+async worker with no bound on how many ran at once.
+
+**The decision.** Both run through `detail::run_store_read`, sharing its
+`MAX_STORE_READ_CONCURRENT` = 8 slots, and answer 429 past them;
+`/backtest.json` keeps the body shape its page parses. `docs/06-limits.md`
+names both routes and states the per-request memory bound times 8. The
+resources-2 half (a window holds every month file open for the request) is
+not changed.
+
+**Evidence.** ZK-33.
+
+### D-2594 — A failed accept is said, once per errno a minute — 2026-10-06
+
+**The finding.** conc11-3. `LimitedListener::accept` delegated to axum, whose
+only report of EMFILE, ENFILE, ENOBUFS or ENOMEM is `tracing::error!`, which
+this workspace never subscribes, so a server out of descriptors stopped
+answering in silence.
+
+**The decision.** The listener runs its own accept loop with axum's policy
+(one connection's error retried at once, anything else after a second), and
+says each listener failure as one stderr line and one Error event
+`api.accept` "accept refused" with the errno, at most once per errno per
+`ACCEPT_NOTE_WINDOW_SECS` = 60.
+
+**Evidence.** ZK-34.
+
+### D-2595 — Refusals, halts and blocked recoveries reach `/logs` at their level — 2026-10-06
+
+**The findings.** conc13-1: `cli`'s "command finished" was Info with no
+reason for every exit, and a blocked recovery's "recovery ended" was Info.
+conc13-3: the sweep, descent and command routes returned several refusals
+(budget environment, stamp, busy slot, execution lease, invocation journal,
+launch preparation, start marker) with no event. conc13-4: the autopilot's
+halts, stalls and backoffs and the pull run's failed legs lived only in
+memory.
+
+**The decision.** A non-OK `cli` exit finishes at Warn with `why` (the page's
+refusal line, or a sentence saying it printed none). A blocked recovery ends
+at Error. Every refusal arm of the three sweep routes goes through
+`refuse_logged`, one `api.sweep` Warn with the body's own sentence. `settle`
+emits `autopilot` "halted" (Error), "stalled" and "backing off" (Warn) with
+the feed, the month and the reason, and `note_leg_failure` emits `api.pull`
+"leg failed" (Error for a feed-halting outcome, Warn otherwise). Each is one
+event per decision at a structural boundary; none is in a gate-17 crate.
+
+**Evidence.** ZK-35.
+
+### D-2596 — A pull refused at its door is journaled — 2026-10-06
+
+**The finding.** conc19-1. The spot and F&O handlers' unknown-feed and
+busy-seat arms answered 400/409 and wrote no journal record, while a refused
+press leg was told the reason was in the audit journal.
+
+**The decision.** `door_refusal_recorded` appends a `NotStarted` record whose
+note is the refusal and says on the receipt whether it landed, as
+`spot_answer`'s refusals do. The clock-failure arm after the seat is not
+changed.
+
+**Evidence.** ZK-36.
+
+### D-2597 — An interim `100 Continue` does not start the next head's clock — 2026-10-06
+
+**The finding.** P1-03-1. `HeadDeadline` re-armed the head deadline on any
+write, including hyper's `100 Continue`, so a long POST from a client that
+sends `Expect: 100-continue` had its handler cut by a false 408.
+
+**The decision.** A write that is the interim line and nothing else
+(`is_interim_response`; one non-empty slice for a vectored write) does not
+re-arm. A write that carries the interim line and the final response re-arms,
+so a kept-alive connection never sits without a clock.
+
+**Evidence.** ZK-37.
+
+### D-2598 — A read's owed terminal is settled off the async worker — 2026-10-06
+
+**The finding.** resources-3. A GET/HEAD audited route stays bound to its
+connection, so a client that went away dropped the armed attempt, whose
+`Drop` wrote and synced `Cancelled` on the Tokio worker.
+
+**The decision.** `request_audited` holds the attempt in `OwedTerminal`
+across the handler. Dropped early, it hands the attempt to `spawn_blocking`,
+which writes the same `Cancelled`. During a panic it settles in place, so the
+attempt still records `Failed`; outside a runtime it settles in place.
+
+**Evidence.** ZK-38.
+
+### D-2599 — The store's untyped I/O refusals and a failed barrier are store-class — 2026-10-06
+
+**The finding.** conc11-2. `autopilot::classify` knew five disk phrases; the
+store's `Io` rendering ("... failed: {kind:?} (errno {code:?})") for EIO,
+EDQUOT, EFBIG and a `StorageFull` ENOSPC, and its `BarrierFailed` sentence,
+fell to Transport, so a failing disk was retried and stalled instead of
+halted.
+
+**The decision.** The table adds "durability barrier", "(errno some(5))",
+"quotaexceeded", "filetoolarge" and "storagefull". Not done: a typed class
+carried from `StoreError` through `pull::ingest` (the M fix), and making a
+`BarrierFailed` halt restart-only (its probe can still revive the feed, which
+then refuses again and re-halts within `STORE_PROBES`).
+
+**Evidence.** ZK-39.

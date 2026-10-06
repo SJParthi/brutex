@@ -586,6 +586,19 @@ pub(crate) fn take_every_log_read_slot(
         .collect()
 }
 
+/// Takes every store-read slot that is free, for a test that must see a
+/// store-reading route refused at admission (resources-4, P1-04-01, D-2593).
+/// Asks for the serial guard so it cannot race [`hold_every_slot`] or the
+/// other pool-holding tests; it takes what is free rather than exactly
+/// [`MAX_STORE_READ_CONCURRENT`], and the caller asserts what it got.
+#[cfg(test)]
+pub(crate) fn take_every_store_read_slot(
+    _apart: &tokio::sync::MutexGuard<'static, ()>,
+) -> Vec<Permit> {
+    std::iter::from_fn(|| Permit::try_take_from(&STORE_READ_ACTIVE, MAX_STORE_READ_CONCURRENT))
+        .collect()
+}
+
 /// One long-lived read handle on a results file, refreshed per request.
 ///
 /// # Why a cached handle, and what it changes

@@ -1272,36 +1272,36 @@ type JsonHeaders = [(axum::http::HeaderName, &'static str); 1];
 ///
 /// The body is [`respond`], for the reason that function's header gives.
 ///
-/// # Off the async workers (sweep-3, D-2573)
+/// # Off the async workers, and admitted
 ///
-/// The read now takes a shared lock that WAITS for an append in progress, so
-/// it runs in [`crate::detail::run`]'s bounded blocking pool, as every other
-/// detail route does. A pool that is full answers 429 in the ledger's own
-/// shape, so the page renders the sentence rather than a parse failure.
+/// A read is up to [`MAX_RUNS`] records and a multi-megabyte body. It ran
+/// inline on a Tokio worker with no bound on how many ran at once, so a few
+/// concurrent page loads stalled `/health`, the pull conductors and the
+/// autopilot. It now runs in the store-read pool's
+/// [`crate::detail::MAX_STORE_READ_CONCURRENT`] slots, and past them answers
+/// 429 in the body shape the page already parses. resources-4, D-2593.
 pub async fn backtest_json(uri: axum::http::Uri) -> (axum::http::StatusCode, JsonHeaders, String) {
-    let root = crate::server::store_dir();
     let query = uri.query().unwrap_or("").to_owned();
-    match crate::detail::run(move || respond(root, &query)).await {
-        Ok(answer) => answer,
-        Err(why) => admission_refused(&why),
+    match crate::detail::run_store_read(move || respond(crate::server::store_dir(), &query)).await {
+        Ok(answered) => answered,
+        Err(why) => not_admitted(&why),
     }
 }
 
-/// The ledger-shaped answer for a read the detail pool did not admit (429) or
-/// could not join (503). sweep-3, D-2573.
-fn admission_refused(
-    why: &crate::detail::RunError,
-) -> (axum::http::StatusCode, JsonHeaders, String) {
+/// The answer when the store-read pool refused or could not join the read:
+/// 429 when saturated, 503 otherwise, with the refusal in the field the page
+/// renders (resources-4, D-2593).
+fn not_admitted(why: &crate::detail::RunError) -> (axum::http::StatusCode, JsonHeaders, String) {
     let (status, _) = crate::detail::admission_refused(
-        "the backtest ledger read",
-        crate::detail::MAX_CONCURRENT,
+        "backtest ledger read",
+        crate::detail::MAX_STORE_READ_CONCURRENT,
         why,
     );
     let (_, headers, body) = respond(
         Err(format!(
-            "the backtest ledger read was not admitted ({why:?}): at most {} detail \
-             reads run at once, off the async workers; retry",
-            crate::detail::MAX_CONCURRENT
+            "the backtest ledger read was not admitted ({why:?}): at most {} store reads \
+             run at once, off the async workers; retry",
+            crate::detail::MAX_STORE_READ_CONCURRENT
         )),
         "",
     );
@@ -2227,7 +2227,10 @@ mod tests {
     #[tokio::test]
     async fn the_handler_answers_over_the_real_environment() {
         // The only line `respond` cannot cover: reading the environment. It
-        // answers one of exactly two statuses and nothing else.
+        // answers one of exactly two statuses and nothing else. The read is
+        // admitted through the store-read pool now (resources-4, D-2593), so
+        // this keeps apart from a test that holds every slot.
+        let _apart = crate::detail::apart_from_slot_owners().await;
         let (status, _, body) = super::backtest_json(
             "/backtest.json?limit=1"
                 .parse::<axum::http::Uri>()
@@ -2331,7 +2334,7 @@ mod tests {
                 axum::http::StatusCode::SERVICE_UNAVAILABLE,
             ),
         ] {
-            let (got, headers, body) = super::admission_refused(&why);
+            let (got, headers, body) = super::not_admitted(&why);
             assert_eq!(got, status);
             assert_eq!(headers[0].1, "application/json; charset=utf-8");
             assert!(body.contains(r#""runs":[]"#), "{body}");

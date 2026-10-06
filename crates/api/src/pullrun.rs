@@ -1006,6 +1006,25 @@ fn note_leg_failure(
             this leg remains owed and is eligible for another pass."
         }
     };
+    // A FAILED LEG IS A LINE IN `/logs`, NOT ONLY A FIELD ON A PAGE. The
+    // progress below is in memory and overwritten; a halted feed had no
+    // durable trace of when or why. Error for a feed-halting outcome, Warn for
+    // one still owed. One event per failed leg. conc13-4, D-2595.
+    let halts = matches!(outcome, LegOutcome::Credential | LegOutcome::Permanent);
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::new(
+            if halts {
+                telemetry::Level::Error
+            } else {
+                telemetry::Level::Warn
+            },
+            "api.pull",
+            "leg failed",
+        )
+        .with("leg", telemetry::Value::Str(&leg.label))
+        .with("status", telemetry::Value::Uint(u64::from(status.as_u16())))
+        .with("why", telemetry::Value::Str(reason)),
+    );
     with_progress(site, run, |progress| {
         if let Some(feed) = progress.feeds.get_mut(nth) {
             if feed.last_error.is_none()
@@ -3976,5 +3995,37 @@ mod tests {
             "the deferral must be on the wire, or a feed that deferred half its \
              legs reads like one that had half as many: {doc}"
         );
+    }
+
+    /// conc13-4, D-2595. On the old code a failed leg only wrote the run's
+    /// in-memory progress; nothing reached `/logs`. Each outcome is driven: a
+    /// feed-halting one is Error, a retryable one Warn, and each names its leg.
+    #[test]
+    fn a_failed_leg_is_logged_at_its_level() {
+        let _sink = crate::emitted::sink();
+        let site = site("conc13-4-leg");
+        for (outcome, level) in [
+            (LegOutcome::Credential, telemetry::Level::Error),
+            (LegOutcome::Permanent, telemetry::Level::Error),
+            (LegOutcome::Retry, telemetry::Level::Warn),
+            (LegOutcome::Empty, telemetry::Level::Warn),
+        ] {
+            let label = format!("conc13-4 {outcome:?}");
+            let one = Leg {
+                label: label.clone(),
+                ..leg("dhan", "spot")
+            };
+            let from = crate::emitted::mark();
+            note_leg_failure(&site, 1, 0, &one, axum::http::StatusCode::CONFLICT, outcome);
+            let mut ours = 0;
+            for record in crate::emitted::landed(from, "api.pull", "leg failed") {
+                if crate::emitted::says(&record, "leg", &label) {
+                    ours += 1;
+                    assert_eq!(record.level, level, "{outcome:?}");
+                    assert!(record.field("why").is_some(), "{record:?}");
+                }
+            }
+            assert_eq!(ours, 1, "{outcome:?}");
+        }
     }
 }

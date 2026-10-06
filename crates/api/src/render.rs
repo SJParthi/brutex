@@ -516,12 +516,20 @@ fn kind_cells(kind: Kind) -> String {
         } => {
             // Strike is paisa; a human reads rupees. core owns the split so the
             // browser and the server cannot disagree about it.
+            //
+            // THE SIGN IS WRITTEN ON ITS OWN. `rupees_trunc()` of -5 paisa is
+            // 0, which has no sign to print, so the old `{}.{:02}` rendered -5
+            // paisa as "0.05": a negative strike shown as a positive one. Every
+            // strike constructor refuses <= 0 today (D-1311), so this was
+            // latent; the page no longer leans on that. `unsigned_abs` because
+            // `i64::MIN.abs()` overflows. apir-3, D-2585.
             format!(
-                "<td>Option {}</td><td>{}</td><td class=\"num\">{}.{:02}</td>",
+                "<td>Option {}</td><td>{}</td><td class=\"num\">{}{}.{:02}</td>",
                 side.as_str(),
                 expiry,
-                strike.rupees_trunc(),
-                strike.paisa_part().abs()
+                if strike.raw() < 0 { "-" } else { "" },
+                strike.rupees_trunc().unsigned_abs(),
+                strike.paisa_part().unsigned_abs()
             )
         }
     }
@@ -1359,9 +1367,10 @@ fn coverage_strip(held: &[bool]) -> String {
 
 /// One stacked bar: each drop reason's share of the total, in integer percent.
 ///
-/// Percentages are computed against the total and the last segment takes
-/// whatever rounding left over, so the four always add to the width and the bar
-/// never shows a gap that is really a division remainder.
+/// Percentages are computed against the total and the last segment WITH A DROP
+/// takes whatever rounding left over, so the segments always add to the width,
+/// the bar never shows a gap that is really a division remainder, and a reason
+/// with no drops draws nothing (apir-2, D-2585).
 fn share_bar(drops: Drops) -> String {
     let total = drops.total();
     if total == 0 {
@@ -1375,10 +1384,24 @@ fn share_bar(drops: Drops) -> String {
         "<svg class=\"share\" viewBox=\"0 0 100 10\" preserveAspectRatio=\"none\" role=\"img\" \
          aria-label=\"each drop reason's share\">",
     );
+    // THE REMAINDER GOES TO THE LAST REASON THAT HAS A DROP, not to the last
+    // reason in order. It went to the last in order, so a zero-count
+    // `OnClosedDay` still drew a slice titled ": 0" carrying the other reasons'
+    // rounding residue: a colour on the bar for a reason nothing was dropped
+    // for. `total > 0` here and `total` is the sum over `DROP_REASONS`, so at
+    // least one reason is non-zero. apir-2, D-2585.
+    let mut last_nonzero = 0usize;
+    for (i, reason) in DROP_REASONS.into_iter().enumerate() {
+        if drops.of(reason) > 0 {
+            last_nonzero = i;
+        }
+    }
     let mut at = 0u64;
     for (i, reason) in DROP_REASONS.into_iter().enumerate() {
-        let last = i + 1 == DROP_REASONS.len();
-        let width = if last {
+        let last = i == last_nonzero;
+        let width = if drops.of(reason) == 0 {
+            0
+        } else if last {
             100u64.saturating_sub(at)
         } else {
             drops.of(reason).saturating_mul(100) / total
@@ -2389,11 +2412,17 @@ fn census_cards(censuses: &[&VendorCensus]) -> String {
 /// denominator would be exactly the invention `CLAUDE.md` §3 rule 1 forbids, so
 /// the scale is stated on the page as what it is: relative to the fullest month
 /// shown.
-fn page_peak(rows: &[Coverage]) -> u64 {
+///
+/// **Of the feed this page shows, and of no other.** It maxed over every vendor
+/// in `row.rows` while the table draws only `feed`'s column, so a page showing
+/// Groww's 10-row months shaded them against Dhan's 100 and said "quartiles of
+/// 100", a number that appears nowhere on the page. apir-1, D-2585.
+fn page_peak(rows: &[Coverage], feed: Vendor) -> u64 {
     let mut peak = 1u64;
     for row in rows {
-        for &(_, n) in &row.rows {
-            if let Some(v) = n
+        for &(vendor, n) in &row.rows {
+            if vendor == feed
+                && let Some(v) = n
                 && v > peak
             {
                 peak = v;
@@ -2409,7 +2438,7 @@ fn page_peak(rows: &[Coverage]) -> u64 {
 /// differ in shape before they differ in digits, and the row is tinted by which
 /// it is. That is the whole change: a grid of numbers is a grid nobody scans.
 fn coverage_table(view: &StoreView<'_>) -> String {
-    let peak = page_peak(view.rows);
+    let peak = page_peak(view.rows, view.feed);
     let mut out = String::with_capacity(768 + view.rows.len() * 320);
     let held: Vec<bool> = view.rows.iter().map(Coverage::is_held).collect();
     let filled = held.iter().filter(|h| **h).count();
@@ -4399,6 +4428,123 @@ mod tests {
         assert_eq!(none.matches("<rect").count(), 1, "{none}");
     }
 
+    /// The widths of every segment a share bar draws, and the classes.
+    fn share_segments(svg: &str) -> Vec<(String, u64)> {
+        let mut out = Vec::new();
+        for part in svg.split("<rect class=\"").skip(1) {
+            let class = part.split('"').next().expect("a class").to_owned();
+            let width = part
+                .split("width=\"")
+                .nth(1)
+                .and_then(|w| w.split('"').next())
+                .and_then(|w| w.parse::<u64>().ok())
+                .expect("a width");
+            out.push((class, width));
+        }
+        out
+    }
+
+    /// apir-2, D-2585. On the old code the LAST reason in order took
+    /// `100 - at` whatever its own count, so `{1, 1, 1, 0, 0}` drew a 1-wide
+    /// `r4` slice titled "on a closed day: 0". Every assignment of 0..=3 to
+    /// the five reasons is enumerated (4^5 = 1024 bars): a zero reason never
+    /// draws, a non-zero one always does, and the bar always fills 100.
+    #[test]
+    fn a_reason_with_no_drops_draws_no_slice() {
+        let svg = share_bar(Drops {
+            before_window: 1,
+            after_window: 1,
+            before_open: 1,
+            after_close: 0,
+            ..Drops::default()
+        });
+        assert!(!svg.contains("class=\"r3\""), "{svg}");
+        assert!(!svg.contains("class=\"r4\""), "{svg}");
+        assert!(!svg.contains(": 0<"), "no slice is titled with zero: {svg}");
+        for code in 0u32..1024 {
+            let c = |k: u32| u64::from((code >> (2 * k)) & 3);
+            let drops = Drops {
+                before_window: c(0),
+                after_window: c(1),
+                before_open: c(2),
+                after_close: c(3),
+                on_closed_day: Some(c(4)),
+                unclassified_kept: Some(0),
+            };
+            let svg = share_bar(drops);
+            if drops.total() == 0 {
+                assert!(svg.contains("nothing was dropped"), "{code}: {svg}");
+                continue;
+            }
+            let segments = share_segments(&svg);
+            let sum: u64 = segments.iter().map(|(_, w)| *w).sum();
+            assert_eq!(sum, 100, "{code}: {svg}");
+            for (i, reason) in DROP_REASONS.into_iter().enumerate() {
+                let drawn = segments.iter().any(|(class, _)| *class == format!("r{i}"));
+                assert_eq!(drawn, drops.of(reason) > 0, "{code} r{i}: {svg}");
+            }
+        }
+        // The extremes: one reason at u64::MAX is the whole bar.
+        let svg = share_bar(Drops {
+            before_open: u64::MAX,
+            ..Drops::default()
+        });
+        assert_eq!(share_segments(&svg), vec![("r2".to_owned(), 100)], "{svg}");
+    }
+
+    /// apir-1, D-2585. On the old code the scale was the largest count of ANY
+    /// vendor, so the Groww page below said "quartiles of 100" (Dhan's count,
+    /// never drawn) and shaded Groww's 10 as q1.
+    #[test]
+    fn the_store_grid_scales_its_swatches_to_the_feed_it_shows() {
+        let series = crate::census::Series {
+            contract: None,
+            exchange: Exchange::Nse,
+            segment: Segment::Index,
+            symbol: Symbol::new("NIFTY").expect("valid"),
+            timeframe: store::path::Timeframe::MINUTE_1,
+        };
+        let row = |groww: Option<u64>, dhan: Option<u64>| Coverage {
+            series,
+            month: store::path::YearMonth::new(2026, 7).expect("valid"),
+            rows: vec![(Vendor::Groww, groww), (Vendor::Dhan, dhan)],
+        };
+        assert_eq!(page_peak(&[row(Some(10), Some(100))], Vendor::Groww), 10);
+        assert_eq!(page_peak(&[row(Some(10), Some(100))], Vendor::Dhan), 100);
+        assert_eq!(page_peak(&[row(None, Some(100))], Vendor::Groww), 1);
+        assert_eq!(page_peak(&[row(Some(0), Some(100))], Vendor::Groww), 1);
+        assert_eq!(page_peak(&[], Vendor::Groww), 1);
+        assert_eq!(
+            page_peak(&[row(Some(u64::MAX), None)], Vendor::Groww),
+            u64::MAX
+        );
+        assert_eq!(
+            page_peak(
+                &[row(Some(3), Some(100)), row(Some(7), Some(1))],
+                Vendor::Groww
+            ),
+            7,
+            "the largest of the shown feed across rows"
+        );
+        let rows = [row(Some(10), Some(100))];
+        let html = store_page(&StoreView {
+            feed: Vendor::Groww,
+            today: d(2026, 8, 7),
+            censuses: &[],
+            rows: &rows,
+            page: 0,
+            last_page: 0,
+            total: 1,
+            notes: &Notes::build(&["store root: /tmp/x".to_owned()]),
+            filter: None,
+            held: 1,
+            held_only: false,
+        });
+        assert!(html.contains("quartiles of 10 "), "{html}");
+        assert!(!html.contains("quartiles of 100"), "{html}");
+        assert!(html.contains("class=\"sw q4\""), "{html}");
+    }
+
     #[test]
     fn the_coverage_strip_draws_one_tick_per_row_and_no_more() {
         assert_eq!(
@@ -4898,6 +5044,44 @@ mod tests {
         });
         assert!(put.contains("Option PE"));
         assert!(put.contains("27000.50"), "the paisa part must not be lost");
+    }
+
+    /// apir-3, D-2585. On the old `{}.{:02}` with `rupees_trunc()` and
+    /// `paisa_part().abs()`, -5 paisa rendered "0.05" (the sign lived only in
+    /// the rupee part, which truncates to 0), and `i64::MIN` panicked on
+    /// `abs()` in a debug build. Every boundary is enumerated.
+    #[test]
+    fn a_negative_strike_keeps_its_sign_on_the_page() {
+        let cell = |raw: i64| {
+            kind_cells(Kind::Option {
+                expiry: Expiry::new(2026, 8, 4).expect("valid"),
+                strike: Paisa::from_raw(raw),
+                side: OptionSide::Call,
+            })
+        };
+        for (raw, shown) in [
+            (-5, ">-0.05<"),
+            (-1, ">-0.01<"),
+            (-99, ">-0.99<"),
+            (-100, ">-1.00<"),
+            (-101, ">-1.01<"),
+            (-2_700_050, ">-27000.50<"),
+            (0, ">0.00<"),
+            (1, ">0.01<"),
+            (5, ">0.05<"),
+            (100, ">1.00<"),
+            (i64::MAX, ">92233720368547758.07<"),
+            (i64::MIN, ">-92233720368547758.08<"),
+        ] {
+            let html = cell(raw);
+            assert!(html.contains(shown), "{raw} paisa must read {shown}: {html}");
+            assert_eq!(
+                html.matches('-').count(),
+                usize::from(raw < 0) + 2,
+                "exactly one sign for a negative strike, none for a positive \
+                 one (the expiry carries two dashes): {raw}: {html}"
+            );
+        }
     }
 
     #[test]

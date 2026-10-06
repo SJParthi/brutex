@@ -557,8 +557,10 @@ fn update(site: &Site, edit: impl FnOnce(&mut Progress)) {
     }
 }
 
+/// The refusal for a recovery start while a run holds the slot.
+const TWICE: &str = "a pull already owns the run slot; recovery was not started twice";
+
 fn claim(site: &Site, recovery: Option<([u8; 32], bool)>) -> Result<(), String> {
-    const TWICE: &str = "a pull already owns the run slot; recovery was not started twice";
     // THE CLEAR IS PERSISTED BEFORE THE SLOT IS TAKEN, NOT UNDER IT. Its
     // journal open, append and up to four fsyncs used to run while this
     // function held `site.run`, so every poll of `/pull/run.json`, every
@@ -629,6 +631,21 @@ pub(crate) async fn start(State(site): State<Loaded>, body: String) -> RecoveryR
         // This branch never claims a run slot, clears STOP, publishes an
         // activation pointer, reads source bars, or enters the worker.
         return prepare_reply(site, asked, headers).await;
+    }
+    // A PRESS THAT WILL BE REFUSED 409 PAYS NOTHING FIRST. The preflight
+    // replays the plan's journal and the recovery history, O(history), on a
+    // blocking thread, and it ran BEFORE `claim` looked at the slot: every
+    // press while a pull or another recovery ran paid the whole replay to be
+    // told "already owns the run slot", and repeated presses queued replays
+    // on the blocking pool. This probe is one lock read and is advisory only:
+    // `claim` below stays the authority, so a run that starts between the two
+    // is still refused there. P1-04-04, D-2592.
+    if slot_running(&site) {
+        return (
+            StatusCode::CONFLICT,
+            headers,
+            serde_json::json!({"started":false,"why":TWICE}).to_string(),
+        );
     }
     let preflight_site = Loaded::clone(&site);
     let preflight = tokio::task::spawn_blocking(move || {
@@ -899,6 +916,10 @@ async fn drive(site: Loaded, id: [u8; 32], prepared: Result<Journal, String>, ex
         with_terminal(answer, journal.append(control).map_err(failure))
     });
     let result = worker.await.map_err(failure).and_then(|result| result);
+    // A BLOCKED RECOVERY ENDS AT ERROR, NOT INFO. It was Info either way, so
+    // `/logs?level=warn` hid every blocked plan and its reason. conc13-1,
+    // D-2595.
+    let level = recovery_end_level(&result);
     let text = result.unwrap_or_else(|why| format!("Recovery BLOCKED: {why}. Existing source data is preserved; this is not complete coverage."));
     crate::recovery_control::idle(&site);
     update(&site, |progress| {
@@ -909,10 +930,20 @@ async fn drive(site: Loaded, id: [u8; 32], prepared: Result<Journal, String>, ex
         }
     });
     let _ = telemetry::emit(
-        &telemetry::Event::info("pull.recovery", "recovery ended")
+        &telemetry::Event::new(level, "pull.recovery", "recovery ended")
             .with("plan", telemetry::Value::Str(&hex(id)))
             .with("summary", telemetry::Value::Str(&text)),
     );
+}
+
+/// The level a recovery's end is logged at: Info when it verified, Error when
+/// it was blocked (conc13-1, D-2595).
+const fn recovery_end_level<T>(result: &Result<T, String>) -> telemetry::Level {
+    if result.is_ok() {
+        telemetry::Level::Info
+    } else {
+        telemetry::Level::Error
+    }
 }
 
 fn load_lifecycle(
@@ -2352,7 +2383,18 @@ mod tests {
             events
                 .iter()
                 .any(|event| crate::emitted::says(event, "plan", &hex(id))
-                    && crate::emitted::says(event, "summary", "Recovery BLOCKED"))
+                    && crate::emitted::says(event, "summary", "Recovery BLOCKED")
+                    // conc13-1, D-2595: a blocked end is Error, not Info, so
+                    // `/logs?level=warn` shows it. Info on the old code.
+                    && event.level == telemetry::Level::Error)
+        );
+        assert_eq!(
+            recovery_end_level(&Ok::<(), String>(())),
+            telemetry::Level::Info
+        );
+        assert_eq!(
+            recovery_end_level(&Err::<(), String>(String::new())),
+            telemetry::Level::Error
         );
         assert!(!site.run.lock().unwrap().as_ref().unwrap().running());
         assert!(!root.exists());
@@ -2539,6 +2581,36 @@ mod tests {
         let implicit = claim(&site, None).unwrap_err();
         assert!(implicit.contains("not started twice"), "{implicit}");
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// P1-04-04, D-2592. The request below activates a successor that was
+    /// never prepared, so its preflight refuses 503. On the old code the
+    /// preflight (an O(history) replay) ran BEFORE the slot was looked at, so
+    /// with a pull holding the slot this press answered that 503; it now
+    /// answers 409 before any replay, writes nothing, and once the slot is
+    /// free the same press reaches the preflight again (503), proving the
+    /// order rather than a changed answer.
+    #[tokio::test]
+    async fn a_recovery_press_while_a_pull_runs_is_refused_before_any_journal_replay() {
+        let (scratch, site, body, old) = missing_fixture("recovery-busy-preflight");
+        let request = successor_form(&body, old, [53; 32], false);
+        let before = history_bytes(&site);
+        *site.run.lock().unwrap() = Some(Progress::claimed());
+        let (status, _, answer) = start(State(Loaded::clone(&site)), request.clone()).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{answer}");
+        assert!(answer.contains("already owns the run slot"), "{answer}");
+        assert!(answer.contains(r#""started":false"#), "{answer}");
+        assert_eq!(history_bytes(&site), before, "a refused press writes nothing");
+        // A FINISHED run in the slot is not a running one: the probe admits.
+        site.run.lock().unwrap().as_mut().unwrap().finished = Some(String::from("done"));
+        let (status, _, answer) = start(State(Loaded::clone(&site)), request.clone()).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{answer}");
+        assert!(!answer.contains("already owns the run slot"), "{answer}");
+        *site.run.lock().unwrap() = None;
+        let (status, _, answer) = start(State(Loaded::clone(&site)), request).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{answer}");
+        assert_eq!(history_bytes(&site), before, "the preflight writes nothing");
+        std::fs::remove_dir_all(scratch).unwrap();
     }
 
     /// A REFUSED TERMINAL APPEND KEEPS THE ERROR THAT ENDED THE RUN.

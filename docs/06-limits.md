@@ -11992,7 +11992,12 @@ rule 6); every bound is read from the source.
   `read_record` per bar), folds the change over them, and holds them all in
   memory: O(n) reads and O(n) memory, and `n` reaches about 1.9 million at
   `MAX_WINDOW_MONTHS` = 240 (the figure `bars.rs` states). The `ts` sort
-  without extremes is the bounded seek path and is unchanged.
+  without extremes is the bounded seek path and is unchanged. Since D-2593 at
+  most `detail::MAX_STORE_READ_CONCURRENT` = 8 such requests run at once, so
+  the route's worst-case memory is 8 times one scan's (P1-04-01); one scan's
+  bound is the one stated here, UNVERIFIED by a measurement. Each request
+  still holds every month file of its range open for its duration
+  (resources-2, not changed).
 * **UC-20 (a freshness bug, not a cost).** `/store?show=gaps` built its axis
   from `Site::series` and its cells from `Site::censuses`, both read at boot.
   It now builds the axis with `census::held_series` over the request's fresh
@@ -12176,6 +12181,16 @@ below is timed.
   `detail::MAX_STORE_READ_CONCURRENT` = 8, and a ninth is answered 429 naming
   the bound. (This paragraph said those three still read inline on an async
   worker; D-1508 moved them.) Their wall-clock cost is not measured.
+  `/bars/window.json` (`bars::window` and its render) and `/backtest.json`
+  (the ledger read of up to `MAX_RUNS` records and its body) now run in the
+  same store-read pool and share its 8 slots, a ninth answered 429
+  (`/backtest.json` in the body shape its page parses). Until resources-4 and
+  P1-04-01 (D-2593) both ran inline on an async worker with no bound on
+  concurrency. `bars_window_and_backtest_reads_run_in_the_store_read_pool_and_answer_429_when_it_is_full`
+  in `crates/api/src/bars_window_route_tests.rs` holds the pool full and sees
+  both refused. Per request a window scan still holds up to `MAX_WINDOW_MONTHS`
+  month files and, on the scan path, every bar it reads (W1-api5-4 below); the
+  pool bounds how many such requests exist at once to 8, not what one costs.
 * **Days a month's daily rung did not prove are withheld, not closed.** A
   month inside the span that the census holds only at another rung, that it
   does not hold at all, or whose daily records failed their checks is now

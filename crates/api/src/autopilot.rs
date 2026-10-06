@@ -387,12 +387,26 @@ pub fn classify(reason: &str) -> Trouble {
         "tokenexception",
         "invalid_authentication",
     ];
-    const STORE: [&str; 5] = [
+    // THE STORE'S OWN UNTYPED SPELLINGS TOO (conc11-2, D-2599). `StoreError::Io`
+    // renders "{action} {path} failed: {kind:?} (errno {code:?})", so EIO,
+    // EDQUOT, EFBIG and an ENOSPC the host reports as `StorageFull` reached
+    // here as kind names nobody listed, and `BarrierFailed` ("a durability
+    // barrier on ... already failed in this process") as a sentence nobody
+    // listed. Each fell to Transport: the "same store refusal twice" halt and
+    // its write probe never fired on a failing disk, the month was retried and
+    // stalled at vendor cost, and the feed moved on to write later months to
+    // the same device. Matched on the lowercased text, as every marker here is.
+    const STORE: [&str; 10] = [
         "disk full",
         "no space",
         "short write",
         "permission denied",
         "read-only filesystem",
+        "durability barrier",
+        "(errno some(5))",
+        "quotaexceeded",
+        "filetoolarge",
+        "storagefull",
     ];
     let lower = reason.to_ascii_lowercase();
     if CREDENTIAL.iter().any(|m| lower.contains(m)) {
@@ -1009,6 +1023,37 @@ fn after_pass(
     }
 }
 
+/// The answer of a DAY pass whose survey chose nothing and reconsidered
+/// nothing, when that answer is "the minute rung is next, at once"; `None`
+/// for every other idle pass, which publishes its verdict as before.
+///
+/// conc15-1, D-2588. Since D-3000 a day pass that finds nothing owed is what
+/// proves the day rung clear and hands the loop to the minute rung. It took
+/// the common idle branch on the way: it published `Phase::Idle` with the
+/// `Settled::Complete` sentence "the store is complete through the newest
+/// finished day" while the minute rung could still owe every month, and
+/// returned [`IDLE_POLL_SECS`], so `fly` napped a minute before the first
+/// minute pass, once at startup and again on every new day or masters parse.
+/// The minute pass that follows at once publishes the real verdict.
+///
+/// A terminal feed set and an empty universe are NOT handed over: both are
+/// halts the page must show, and the minute pass would only re-derive them.
+const fn day_hand_over(
+    rung: pull::vendor::Granularity,
+    carry_on: bool,
+    terminal: bool,
+    halts: bool,
+) -> Option<Pass> {
+    if matches!(rung, pull::vendor::Granularity::Day1) && !carry_on && !terminal && !halts {
+        Some(Pass {
+            wait: 0,
+            owed: false,
+        })
+    } else {
+        None
+    }
+}
+
 /// What one [`round`] answered: how long to wait, and whether its rung still
 /// owes work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1251,8 +1296,25 @@ pub struct FeedState {
     pub stalls: Vec<Stall>,
     /// The last reason this feed reported, verbatim.
     pub last_reason: Option<String>,
-    /// How many months this feed has retired since it started.
+    /// How many DISTINCT months the LIVE rung has retired since the process
+    /// started.
+    ///
+    /// conc15-6, D-2588. This was one counter for the feed, bumped by every
+    /// `Advance` on either rung, and the current month advanced again on each
+    /// new day, so it ran past `months_total` (which counts each month once).
+    /// It is now per rung, swapped by [`Self::enter`] with
+    /// [`Self::parked_months_done`], and a month counts once per rung, decided
+    /// by [`Self::retired`]. Reported beside the target's `timeframe`, which
+    /// names the live rung.
     pub months_done: u32,
+    /// The parked rung's [`Self::months_done`].
+    pub parked_months_done: u32,
+    /// Every (rung, month) this process has already counted in
+    /// `months_done`. One `insert` per `Advance` (expected-O(1), UNVERIFIED by a
+    /// measurement); bounded by
+    /// twice the months between the feed's floor and yesterday, because a
+    /// pair is never inserted twice.
+    pub retired: std::collections::HashSet<(pull::vendor::Granularity, YearMonth)>,
     /// Which rung [`Self::frontier`], [`Self::attempts`], [`Self::dry`] and
     /// [`Self::backoff`] currently belong to. One of [`RUNGS`].
     pub rung: pull::vendor::Granularity,
@@ -1282,6 +1344,8 @@ impl FeedState {
             stalls: Vec::new(),
             last_reason: None,
             months_done: 0,
+            parked_months_done: 0,
+            retired: std::collections::HashSet::new(),
             rung: pull::vendor::Granularity::Day1,
             parked: Place::at(frontier),
         }
@@ -1318,6 +1382,16 @@ impl FeedState {
         self.backoff = backoff;
         self.store_refused = store_refused;
         self.rung = rung;
+        // EACH RUNG ITS OWN COUNT (conc15-6, D-2588).
+        std::mem::swap(&mut self.months_done, &mut self.parked_months_done);
+    }
+
+    /// Count the live rung's frontier month as retired, once per rung for the
+    /// life of the process. conc15-6, D-2588.
+    fn count_retired(&mut self) {
+        if self.retired.insert((self.rung, self.frontier)) {
+            self.months_done = self.months_done.saturating_add(1);
+        }
     }
 
     /// Record that the live rung's frontier month stalled.
@@ -1402,11 +1476,22 @@ impl FeedState {
     /// write probe succeeds. Both reset the credential re-read allowance too:
     /// a feed that is being driven again is owed its one §8 re-read the same as
     /// a fresh one.
+    ///
+    /// **BOTH RUNGS' COUNTERS ARE CLEARED, NOT ONLY THE LIVE ONE'S.** A halt is
+    /// the feed's, not a rung's, and the evidence that clears it is about the
+    /// disk or the manifest, which both rungs write through. Clearing only the
+    /// live rung left the parked rung's `store_refused` set: a store halt on
+    /// the minute rung, revived on a day round after a roll-over, came back on
+    /// `enter(Minute1)` with that flag still true, and ONE new store refusal
+    /// re-halted it with the false sentence "the store refused the same write
+    /// twice". The parked frontier is kept; it is a hint, and only the
+    /// per-month counters are about the fault. conc15-3, D-2588.
     fn revive(&mut self) {
         self.halted = None;
         self.halt_kind = None;
         self.probe = None;
         self.clear_month();
+        self.parked = Place::at(self.parked.frontier);
     }
 
     /// The wait after this many consecutive backoffs: 30 s, 60 s, 120 s …
@@ -1512,7 +1597,7 @@ impl FeedState {
         if out.complete {
             self.unstall();
             self.clear_month();
-            self.months_done = self.months_done.saturating_add(1);
+            self.count_retired();
             return Next::Advance;
         }
         if out.stored > 0 {
@@ -1550,7 +1635,7 @@ impl FeedState {
         self.dry = self.dry.saturating_add(1);
         if self.dry >= DRY_ROUNDS {
             self.clear_month();
-            self.months_done = self.months_done.saturating_add(1);
+            self.count_retired();
             return Next::Advance;
         }
         Next::Retry
@@ -1727,14 +1812,29 @@ pub struct Status {
     pub failures: Vec<Failed>,
     /// Where the run journal is, so an operator can go and read it.
     pub journal: String,
-    /// Why the last tick's record did not reach that journal. Empty when every
-    /// record this process wrote landed.
+    /// Why the LAST tick's record did not reach that journal: current state,
+    /// empty when the last tick's record landed. It is NOT a statement about
+    /// every record this process wrote: a later tick whose record lands clears
+    /// it. [`Self::journal_lost`] is the half that is never cleared (conc15-4,
+    /// D-2588).
     ///
     /// **A path is not a proof.** `journal` said where the file is and every
     /// page read it as evidence the runs were being recorded; the append's
     /// answer was discarded at the one site that produces it. This is that
     /// answer, and `/autopilot.json` carries it as `journal_error`.
     pub journal_error: String,
+    /// How many tick records this process could not append, ever. Never
+    /// cleared in-process.
+    ///
+    /// conc15-4, D-2588. `journal_error` alone was overwritten by the next
+    /// tick, so one refused record was forgotten as soon as a later one landed
+    /// and `/autopilot.json` then read as though every record had landed while
+    /// `/audit` was missing a tick. `/autopilot.json` carries it as
+    /// `journal_lost`.
+    pub journal_lost: u64,
+    /// The first refusal counted in [`Self::journal_lost`], verbatim, or
+    /// empty. Kept for the life of the process, as `journal_first_loss`.
+    pub journal_first_loss: String,
     /// Milliseconds spent waiting between units, this process.
     pub waiting_ms: u64,
     /// Milliseconds of vendor throttling the governor absorbed, this process.
@@ -1771,6 +1871,8 @@ impl Default for Status {
             failures: Vec::new(),
             journal: String::new(),
             journal_error: String::new(),
+            journal_lost: 0,
+            journal_first_loss: String::new(),
             waiting_ms: 0,
             absorbed_ms: 0,
             feeds: Vec::new(),
@@ -1796,7 +1898,9 @@ pub struct FeedReport {
     pub done: usize,
     /// Attempts spent on the current month.
     pub attempts: u8,
-    /// Months retired since this process started.
+    /// Distinct months the live rung (the target's `timeframe`) has retired
+    /// since this process started, each month once, so it does not run past
+    /// `months_total` over a fixed floor (conc15-6, D-2588).
     pub months_done: u32,
     /// Months between the feed's floor and yesterday.
     pub months_total: u32,
@@ -1813,6 +1917,26 @@ pub struct FeedReport {
 }
 
 impl Status {
+    /// Record one tick's journal answer: `None` when its record landed.
+    ///
+    /// `journal_error` is the current state and is replaced; `journal_lost`
+    /// and `journal_first_loss` are sticky for the life of the process, so a
+    /// refused record is never forgotten because a later one landed
+    /// (conc15-4, D-2588). One counter and at most one string move; the cost
+    /// is UNVERIFIED by a measurement.
+    pub fn note_journal(&mut self, error: Option<String>) {
+        match error {
+            None => self.journal_error.clear(),
+            Some(why) => {
+                self.journal_lost = self.journal_lost.saturating_add(1);
+                if self.journal_first_loss.is_empty() {
+                    self.journal_first_loss.clone_from(&why);
+                }
+                self.journal_error = why;
+            }
+        }
+    }
+
     /// The state word this payload will carry, which is not always the phase's
     /// own.
     ///
@@ -1882,13 +2006,15 @@ impl Status {
         let mut out = String::with_capacity(2048);
         let _ = write!(
             out,
-            r#"{{"state":{},"why":{},"pull_active":{},"cursor":{},"journal":{},"journal_error":{},"waiting_ms":{},"absorbed_ms":{},"target":{{"from":{},"to":{},"instruments":{},"timeframe":{},"feed":{}}},"now":"#,
+            r#"{{"state":{},"why":{},"pull_active":{},"cursor":{},"journal":{},"journal_error":{},"journal_lost":{},"journal_first_loss":{},"waiting_ms":{},"absorbed_ms":{},"target":{{"from":{},"to":{},"instruments":{},"timeframe":{},"feed":{}}},"now":"#,
             render::json_string(self.state()),
             render::json_string(&self.why()),
             self.now.is_some(),
             render::json_string(&self.cursor),
             render::json_string(&self.journal),
             render::json_string(&self.journal_error),
+            self.journal_lost,
+            render::json_string(&self.journal_first_loss),
             self.waiting_ms,
             self.absorbed_ms,
             render::json_string(&self.target.from),
@@ -3523,6 +3649,11 @@ async fn round(
         };
         let note = stall_note(feeds);
         let carry_on = retrying.is_some();
+        // A CLEAR DAY PASS HANDS OVER; IT DOES NOT SAY "COMPLETE". See
+        // `day_hand_over` (conc15-1, D-2588).
+        if let Some(pass) = day_hand_over(granularity, carry_on, terminal, settled.halts()) {
+            return pass;
+        }
         // THE REPORTS WERE TAKEN BEFORE THE RECONSIDERATION, so they still hold
         // the frontier and the retry counters as they stood a moment ago. Left
         // alone, the page would carry `"retried":0` on the very stall whose
@@ -3615,11 +3746,13 @@ async fn round(
     // THE JOURNAL'S ANSWER TRAVELS WITH THE BARS. Published beside
     // `bars_stored` because it is a fact about the same tick, and cleared on a
     // tick whose record landed so the page shows the CURRENT state of the file
-    // rather than the worst one this process ever saw.
-    let journal_error = out.journal_error.clone().unwrap_or_default();
+    // rather than the worst one this process ever saw. The worst one is not
+    // lost: `note_journal` counts it in `journal_lost` and keeps the first
+    // refusal, never cleared in-process (conc15-4, D-2588).
+    let journal_error = out.journal_error.clone();
     site.autopilot.publish(move |status| {
         status.bars_stored = status.bars_stored.saturating_add(stored);
-        status.journal_error = journal_error;
+        status.note_journal(journal_error);
     });
 
     Pass::owed(settle(site, state, &out))
@@ -3632,7 +3765,15 @@ async fn round(
 /// [`FeedState::observe`] decides, and this only writes the decision down where
 /// an operator can read it.
 fn settle(site: &Loaded, state: &mut FeedState, out: &TickOutcome) -> u64 {
-    match state.observe(out) {
+    let next = state.observe(out);
+    note_decision(
+        state.feed.display(),
+        state.frontier,
+        state.attempts,
+        state.last_reason.as_deref(),
+        &next,
+    );
+    match next {
         Next::Advance => {
             if let Some(next) = month_after(state.frontier) {
                 state.frontier = next;
@@ -3688,6 +3829,37 @@ fn settle(site: &Loaded, state: &mut FeedState, out: &TickOutcome) -> u64 {
             IDLE_POLL_SECS
         }
     }
+}
+
+/// One durable `autopilot` line for a decision that stops or delays a feed.
+///
+/// conc13-4, D-2595. Every halt, stall and backoff lived only in the
+/// in-memory status, overwritten by the next publish and lost on restart:
+/// nothing in `/logs` said when or why a feed stopped. `Halt` is Error
+/// ("halted"), `Stall` is Warn ("stalled"), `Wait` is Warn ("backing off"),
+/// each with the feed, the month and the reason; `Advance` and `Retry` say
+/// nothing (a decision per tick, at the tick's own boundary, never per bar).
+/// `month` and `attempts` are read after `observe`, so a stall names the month
+/// it passed over (the frontier moves only after this).
+fn note_decision(feed: &str, month: YearMonth, attempts: u8, last: Option<&str>, next: &Next) {
+    let (level, message, why, secs) = match next {
+        Next::Advance | Next::Retry => return,
+        Next::Wait { secs } => (telemetry::Level::Warn, "backing off", last, Some(*secs)),
+        Next::Stall { reason } => (telemetry::Level::Warn, "stalled", Some(reason.as_str()), None),
+        Next::Halt { reason } => (telemetry::Level::Error, "halted", Some(reason.as_str()), None),
+    };
+    let month = month.to_string();
+    let mut event = telemetry::Event::new(level, "autopilot", message)
+        .with("feed", telemetry::Value::Str(feed))
+        .with("month", telemetry::Value::Str(&month))
+        .with("attempts", telemetry::Value::Uint(u64::from(attempts)));
+    if let Some(why) = why {
+        event = event.with("why", telemetry::Value::Str(why));
+    }
+    if let Some(secs) = secs {
+        event = event.with("secs", telemetry::Value::Uint(secs));
+    }
+    let _dropped_when_filtered = telemetry::emit(&event);
 }
 
 /// One unit of work: run the existing sweep, journal it, and re-probe the store
@@ -4009,7 +4181,7 @@ pub enum Admission {
 
 /// Whether a resume would change anything, read from the published status.
 ///
-/// # The three answers, and the state each one is read from
+/// # The four cases, and the state each one is read from
 ///
 /// * **Every reported feed is halted** → refused. The loop is still running and
 ///   `survey` will choose nothing for as long as that holds, so "resumed" would
@@ -4018,6 +4190,9 @@ pub enum Admission {
 ///   [`fly`]'s three pre-loop exits — no live broker, an unusable clock, a rung
 ///   the store cannot file — and in every one of them the task has *returned*.
 ///   Nothing is left to read the flag.
+/// * **Feeds have reported, none of them is halted, and the phase is
+///   `Halted`** → refused. That is `round`'s whole-autopilot halt (an empty
+///   universe), which no feed carries (conc15-5, D-2588).
 /// * **Anything else** → honoured, with any terminal feeds named.
 ///
 /// An empty feed list with a phase that is not `Halted` is the ordinary state
@@ -4056,6 +4231,24 @@ pub fn admit_resume(control: &Control) -> Admission {
                     };
                 }
                 return Admission::Clear;
+            }
+            // A GLOBAL HALT WITH NO FEED HALTED IS STILL A HALT. `round`
+            // publishes `Phase::Halted` over a full feed list when the
+            // universe is empty (`Settled::halts`), with every feed report's
+            // `halted` empty. This read only the feeds, so it answered
+            // `Clear`, and `start` published "resumed … Running" over a halt
+            // no resume can clear. The halt is the round's own measurement and
+            // the next pass re-takes it, so the refusal names it verbatim.
+            // conc15-5, D-2588.
+            if status.phase == Phase::Halted && halted.is_empty() {
+                return Admission::Refused {
+                    why: format!(
+                        "{RESUME_CANNOT_CLEAR} No single feed is terminal, but the \
+                         autopilot as a whole is halted, so a resume has nothing it \
+                         could start. The reason, verbatim: {}",
+                        status.why()
+                    ),
+                };
             }
             if halted.len() == status.feeds.len() {
                 return Admission::Refused {
@@ -7872,6 +8065,403 @@ mod tests {
             state.revive();
             assert!(state.halted.is_none() && state.halt_kind.is_none());
             assert!(state.probe.is_none());
+        }
+    }
+
+    /// One tick outcome of each shape the G6 tests below drive.
+    fn outcome(reason: Option<&str>, complete: bool) -> TickOutcome {
+        TickOutcome {
+            attempted: 773,
+            reached: 773,
+            stored: 0,
+            reason: reason.map(str::to_owned),
+            complete,
+            stopped: false,
+            journal_error: None,
+            credential: None,
+        }
+    }
+
+    /// conc11-2, D-2599. On the old table EIO, EDQUOT, EFBIG, a `StorageFull`
+    /// ENOSPC and the store's own failed-barrier refusal were Transport, so a
+    /// failing disk was retried and stalled instead of halted. The sentences
+    /// are the store's own `Display`, so a reworded store refusal fails here.
+    #[test]
+    fn a_disk_io_error_and_a_failed_barrier_are_store_class() {
+        let path = std::path::PathBuf::from("/x/2024-06.bin");
+        let io = |kind: std::io::ErrorKind, code: Option<i32>| {
+            store::file::StoreError::Io {
+                path: path.clone(),
+                action: store::file::Action::Sync,
+                kind,
+                code,
+            }
+            .to_string()
+        };
+        let barrier = store::file::StoreError::BarrierFailed { path: path.clone() }.to_string();
+        for (reason, class) in [
+            (io(std::io::ErrorKind::Other, Some(5)), Trouble::Store),
+            (io(std::io::ErrorKind::QuotaExceeded, Some(122)), Trouble::Store),
+            (io(std::io::ErrorKind::FileTooLarge, Some(27)), Trouble::Store),
+            (io(std::io::ErrorKind::StorageFull, Some(28)), Trouble::Store),
+            (barrier.clone(), Trouble::Store),
+            (io(std::io::ErrorKind::Other, Some(4)), Trouble::Transport),
+            (io(std::io::ErrorKind::Other, Some(55)), Trouble::Transport),
+            (io(std::io::ErrorKind::Other, None), Trouble::Transport),
+            (String::from("operation timed out"), Trouble::Transport),
+            (String::from("status 401 from the vendor"), Trouble::Credential),
+            (String::new(), Trouble::Transport),
+        ] {
+            assert_eq!(classify(&reason), class, "{reason}");
+        }
+        // A disk-full refusal followed by the failed-barrier refusal it causes
+        // is the same store refusing twice: it halts, and the probe is armed.
+        let mut state = FeedState::new(
+            pull::vendor::Feed::Groww,
+            brutex_core::vendor::Vendor::Groww,
+            month(2020, 5),
+        );
+        let full = outcome(Some("NIFTY — disk full writing /store/x.bin"), false);
+        let failed_barrier = outcome(Some(&barrier), false);
+        assert!(matches!(state.observe(&full), Next::Wait { .. }));
+        assert!(matches!(state.observe(&failed_barrier), Next::Halt { .. }));
+        assert_eq!(state.halt_kind, Some(Halt::Store));
+    }
+
+    /// conc13-4, D-2595. On the old code `settle` only published to the
+    /// in-memory status: no halt, stall or backoff reached `/logs`. Each now
+    /// lands one `autopilot` event at its level, naming the feed, the month
+    /// and the reason; an advance or a retry lands none.
+    #[tokio::test]
+    async fn a_halt_a_stall_and_a_backoff_are_logged() {
+        let _sink = crate::emitted::sink();
+        let site = empty_site("conc13-4-logged");
+        let fresh = || {
+            FeedState::new(
+                pull::vendor::Feed::Groww,
+                brutex_core::vendor::Vendor::Groww,
+                month(2020, 5),
+            )
+        };
+        let failed = outcome(Some("conc13-4 operation timed out"), false);
+        let feed = pull::vendor::Feed::Groww.display();
+        let landed = |from: u64, message: &str, needle: &str| -> Vec<telemetry::Record> {
+            let mut ours = Vec::new();
+            for record in crate::emitted::landed(from, "autopilot", message) {
+                if crate::emitted::says(&record, "why", needle)
+                    && crate::emitted::says(&record, "feed", feed)
+                    && crate::emitted::says(&record, "month", "2020-05")
+                {
+                    ours.push(record);
+                }
+            }
+            ours
+        };
+
+        let from = crate::emitted::mark();
+        let mut state = fresh();
+        assert!(settle(&site, &mut state, &failed) > 0, "a backoff waits");
+        let said = landed(from, "backing off", "conc13-4 operation timed out");
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert_eq!(said[0].level, telemetry::Level::Warn);
+
+        let from = crate::emitted::mark();
+        let mut state = FeedState {
+            attempts: MAX_MONTH_ATTEMPTS.saturating_sub(1),
+            ..fresh()
+        };
+        assert_eq!(settle(&site, &mut state, &failed), 0);
+        let said = landed(from, "stalled", "conc13-4 operation timed out");
+        assert_eq!(said.len(), 1, "the stall names the month it passed: {said:?}");
+        assert_eq!(said[0].level, telemetry::Level::Warn);
+
+        let from = crate::emitted::mark();
+        let mut state = fresh();
+        let dead = TickOutcome {
+            credential: Some(CredentialStop::SameValue),
+            ..outcome(Some("conc13-4 status 401"), false)
+        };
+        assert_eq!(settle(&site, &mut state, &dead), IDLE_POLL_SECS);
+        let said = landed(from, "halted", "conc13-4 status 401");
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert_eq!(said[0].level, telemetry::Level::Error);
+
+        // Advance and Retry say nothing. A month no other test uses, so a
+        // concurrent test's line cannot be read as this one's.
+        let from = crate::emitted::mark();
+        let mut state = FeedState::new(
+            pull::vendor::Feed::Groww,
+            brutex_core::vendor::Vendor::Groww,
+            month(2033, 3),
+        );
+        assert_eq!(settle(&site, &mut state, &outcome(None, true)), 0);
+        state.frontier = month(2033, 3);
+        assert_eq!(settle(&site, &mut state, &outcome(None, false)), 0);
+        for message in ["backing off", "stalled", "halted"] {
+            for record in crate::emitted::landed(from, "autopilot", message) {
+                assert!(
+                    !crate::emitted::says(&record, "month", "2033-03"),
+                    "{message}: {record:?}"
+                );
+            }
+        }
+    }
+
+    /// conc15-3, D-2588. On the old `revive`, only the live rung's counters
+    /// were cleared: a store halt on the minute rung, revived while the day
+    /// rung was live, came back on `enter(Minute1)` with `store_refused` still
+    /// set, and ONE new disk refusal re-halted it as "the same write twice".
+    /// Both orders and both rungs are driven.
+    #[test]
+    fn a_revive_clears_both_rungs() {
+        use pull::vendor::Granularity::{Day1, Minute1};
+        let full = outcome(Some("NIFTY — disk full writing /store/x.bin"), false);
+        for (halted_on, revived_on) in [
+            (Minute1, Day1),
+            (Day1, Minute1),
+            (Minute1, Minute1),
+            (Day1, Day1),
+        ] {
+            let mut state = FeedState::new(
+                pull::vendor::Feed::Groww,
+                brutex_core::vendor::Vendor::Groww,
+                month(2020, 5),
+            );
+            state.enter(halted_on);
+            assert!(matches!(state.observe(&full), Next::Wait { .. }));
+            assert!(matches!(state.observe(&full), Next::Halt { .. }));
+            state.enter(revived_on);
+            state.revive();
+            for rung in [Day1, Minute1, halted_on] {
+                state.enter(rung);
+                assert!(!state.store_refused, "{halted_on}->{revived_on}: {rung}");
+                assert_eq!(state.attempts, 0, "{halted_on}->{revived_on}: {rung}");
+                assert_eq!(state.backoff, 0, "{halted_on}->{revived_on}: {rung}");
+            }
+            state.enter(halted_on);
+            assert!(
+                matches!(state.observe(&full), Next::Wait { .. }),
+                "ONE refusal after a revive is not 'twice': {halted_on}->{revived_on}"
+            );
+        }
+        // The parked frontier is a hint and survives the revive.
+        let mut state = FeedState::new(
+            pull::vendor::Feed::Groww,
+            brutex_core::vendor::Vendor::Groww,
+            month(2020, 5),
+        );
+        state.enter(Minute1);
+        state.frontier = month(2021, 7);
+        state.enter(Day1);
+        state.revive();
+        assert_eq!(state.parked.frontier, month(2021, 7));
+    }
+
+    /// conc15-4, D-2588. On the old code `journal_error` was replaced by
+    /// every tick, so a refused record was forgotten the moment a later one
+    /// landed; there was no count. Sequences of landed (`None`) and refused
+    /// (`Some`) records are enumerated over every length up to 6.
+    #[test]
+    fn a_lost_journal_record_stays_counted() {
+        let mut status = Status::default();
+        status.note_journal(Some(String::from("disk full")));
+        status.note_journal(None);
+        assert_eq!(status.journal_error, "");
+        assert_eq!(status.journal_lost, 1);
+        assert_eq!(status.journal_first_loss, "disk full");
+        let json = status.json();
+        assert!(json.contains(r#""journal_error":"""#), "{json}");
+        assert!(json.contains(r#""journal_lost":1"#), "{json}");
+        assert!(
+            json.contains(r#""journal_first_loss":"disk full""#),
+            "{json}"
+        );
+
+        for len in 0u32..=6 {
+            for bits in 0u32..(1 << len) {
+                let mut status = Status::default();
+                let mut lost = 0u64;
+                let mut first: Option<String> = None;
+                let mut last = String::new();
+                for at in 0..len {
+                    if (bits >> at) & 1 == 1 {
+                        let why = format!("refusal {at}");
+                        lost += 1;
+                        if first.is_none() {
+                            first = Some(why.clone());
+                        }
+                        last.clone_from(&why);
+                        status.note_journal(Some(why));
+                    } else {
+                        last.clear();
+                        status.note_journal(None);
+                    }
+                }
+                assert_eq!(status.journal_lost, lost, "{len}/{bits:b}");
+                assert_eq!(
+                    status.journal_first_loss,
+                    first.unwrap_or_default(),
+                    "{len}/{bits:b}"
+                );
+                assert_eq!(status.journal_error, last, "{len}/{bits:b}");
+            }
+        }
+        let mut status = Status {
+            journal_lost: u64::MAX,
+            ..Status::default()
+        };
+        status.note_journal(Some(String::from("again")));
+        assert_eq!(status.journal_lost, u64::MAX, "saturates, never wraps");
+        assert_eq!(status.journal_first_loss, "again");
+    }
+
+    /// conc15-5, D-2588. On the old code a `Halted` phase over feeds none of
+    /// which is halted (the empty-universe halt) was `Clear`, and `start`
+    /// published "resumed" over it.
+    #[test]
+    fn resume_is_refused_over_a_global_halt() {
+        let control = Control::new();
+        let feeds = vec![
+            FeedReport {
+                feed: String::from("Dhan"),
+                ..FeedReport::default()
+            },
+            FeedReport {
+                feed: String::from("Groww"),
+                ..FeedReport::default()
+            },
+        ];
+        control.publish(|status| {
+            status.phase = Phase::Halted;
+            status.detail = String::from("NOTHING IS TRACKED: the masters are absent");
+            status.feeds.clone_from(&feeds);
+        });
+        let Admission::Refused { why } = admit_resume(&control) else {
+            panic!("a global halt is refused");
+        };
+        assert!(why.starts_with(RESUME_CANNOT_CLEAR), "{why}");
+        assert!(why.contains("NOTHING IS TRACKED"), "{why}");
+        // Every other phase over the same feeds is still admitted.
+        for phase in [
+            Phase::Starting,
+            Phase::Running,
+            Phase::Idle,
+            Phase::Backoff,
+            Phase::Paused,
+        ] {
+            control.publish(|status| status.phase = phase);
+            assert_eq!(admit_resume(&control), Admission::Clear, "{phase:?}");
+        }
+        // A halted phase WITH a halted feed keeps its partial answer.
+        control.publish(|status| {
+            status.phase = Phase::Halted;
+            if let Some(first) = status.feeds.first_mut() {
+                first.halted = String::from("the broker credential is dead");
+            }
+        });
+        assert!(matches!(
+            admit_resume(&control),
+            Admission::Partial { .. }
+        ));
+    }
+
+    /// conc15-1, D-2588. On the old code a day pass that found nothing owed
+    /// took the common idle branch: it published `Idle` with the "store is
+    /// complete" sentence and waited `IDLE_POLL_SECS` before the minute rung.
+    /// Every combination of the four inputs is enumerated.
+    #[test]
+    fn a_clear_day_pass_hands_over_without_a_nap() {
+        use pull::vendor::Granularity::{Day1, Minute1};
+        for rung in [Day1, Minute1] {
+            for carry_on in [false, true] {
+                for terminal in [false, true] {
+                    for halts in [false, true] {
+                        let handed = day_hand_over(rung, carry_on, terminal, halts);
+                        let expected = rung == Day1 && !carry_on && !terminal && !halts;
+                        assert_eq!(
+                            handed.is_some(),
+                            expected,
+                            "{rung} carry_on={carry_on} terminal={terminal} halts={halts}"
+                        );
+                        if let Some(pass) = handed {
+                            assert_eq!(pass.wait, 0, "no nap before the minute pass");
+                            assert!(!pass.owed, "the day rung is proven clear");
+                        }
+                    }
+                }
+            }
+        }
+        // AND `round` ASKS BEFORE IT PUBLISHES. Source text, because a round
+        // that reaches the Complete branch needs a whole held store.
+        let source = include_str!("autopilot.rs");
+        let body = source
+            .split_once("\nasync fn round(")
+            .expect("round exists")
+            .1;
+        let asked = body.find("day_hand_over(granularity").expect("asked");
+        let published = body
+            .find("AN EMPTY UNIVERSE IS HALTED, NOT IDLE")
+            .expect("the idle publish");
+        assert!(asked < published, "the hand-over precedes the idle publish");
+        // And the pass it returns makes `fly`'s next tick the minute rung.
+        let now = Some((Day::new(2026, 10, 5).expect("day"), 3));
+        let clear = after_pass(Day1, false, None, now);
+        assert_eq!(rung_for(clear, now), Minute1);
+    }
+
+    /// conc15-6, D-2588. On the old code one counter took every `Advance` on
+    /// either rung and the current month again each day, so the month 2020-05
+    /// completed on both rungs and twice more read `months_done == 4` against
+    /// one month owed.
+    #[test]
+    fn months_done_never_exceeds_months_total() {
+        use pull::vendor::Granularity::{Day1, Minute1};
+        let complete = outcome(None, true);
+        let dry = outcome(None, false);
+        let mut state = FeedState::new(
+            pull::vendor::Feed::Groww,
+            brutex_core::vendor::Vendor::Groww,
+            month(2020, 5),
+        );
+        for rung in [Day1, Minute1, Day1, Minute1] {
+            state.enter(rung);
+            state.frontier = month(2020, 5);
+            assert_eq!(state.observe(&complete), Next::Advance);
+            assert_eq!(state.months_done, 1, "{rung}: one month, once");
+        }
+        // A dry retirement of an already-counted month adds nothing either.
+        state.enter(Day1);
+        state.frontier = month(2020, 5);
+        assert_eq!(state.observe(&dry), Next::Retry);
+        assert_eq!(state.observe(&dry), Next::Advance);
+        assert_eq!(state.months_done, 1);
+        // A NEW month counts, on its own rung only.
+        state.frontier = month(2020, 6);
+        assert_eq!(state.observe(&complete), Next::Advance);
+        assert_eq!(state.months_done, 2, "day rung: May and June");
+        state.enter(Minute1);
+        assert_eq!(state.months_done, 1, "minute rung: May only");
+        state.frontier = month(2020, 6);
+        assert_eq!(state.observe(&dry), Next::Retry);
+        assert_eq!(state.observe(&dry), Next::Advance);
+        assert_eq!(state.months_done, 2, "minute rung: May and June");
+        assert_eq!(state.retired.len(), 4, "two months on two rungs");
+        // Over a whole span retired repeatedly on both rungs, each rung's
+        // count equals the distinct months, never more.
+        let mut state = FeedState::new(
+            pull::vendor::Feed::Groww,
+            brutex_core::vendor::Vendor::Groww,
+            month(2020, 1),
+        );
+        for _day in 0..3 {
+            for rung in [Day1, Minute1] {
+                state.enter(rung);
+                for m in 1u8..=12 {
+                    state.frontier = month(2020, m);
+                    assert_eq!(state.observe(&complete), Next::Advance);
+                }
+                assert_eq!(state.months_done, 12, "{rung}");
+            }
         }
     }
 }

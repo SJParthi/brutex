@@ -522,6 +522,83 @@ async fn a_write_whose_client_goes_away_records_the_handlers_real_outcome() {
     assert_eq!(record.response_status, 202);
 }
 
+/// resources-3, D-2598. A READ stays bound to its connection, so its client
+/// going away drops the handler; the terminal it then owes is still
+/// `Cancelled` (the truth for a read), and it is now settled by the
+/// `OwedTerminal` guard on the blocking pool rather than written and synced by
+/// the attempt's `Drop` on the async worker. The outcome is driven end to end;
+/// where it runs is pinned off the source, because a terminal's thread is not
+/// observable from the journal (on the old code the guard does not exist).
+#[tokio::test]
+async fn a_read_whose_client_goes_away_writes_cancelled_off_the_async_worker() {
+    let _apart = crate::detail::apart_from_slot_owners().await;
+    let root = Scratch::new();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let notify = Arc::clone(&entered);
+    let path = root.0.clone();
+    let connection = tokio::spawn(async move {
+        super::request_audited(path, "GET /backtest.json".to_owned(), async move {
+            notify.notify_one();
+            std::future::pending::<()>().await;
+            StatusCode::OK.into_response()
+        })
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
+    connection.abort();
+    assert!(connection.await.unwrap_err().is_cancelled());
+    let mut record = None;
+    for _ in 0..500 {
+        let seen = journal::read(&root.0, ID_BASE + 1).unwrap().unwrap();
+        if seen.phase.terminal() {
+            record = Some(seen);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let record = record.expect("the read's terminal was recorded");
+    assert_eq!(record.phase, Phase::Cancelled);
+    assert_eq!(record.response_status, 0);
+
+    let source = include_str!("operation_audit.rs");
+    let body = source
+        .split_once("pub(crate) async fn request_audited(")
+        .and_then(|(_, rest)| rest.split_once("\n}\n"))
+        .map_or("", |(body, _)| body);
+    let guarded = body.find("OwedTerminal(Some(attempt))").expect("guarded");
+    let awaited = body.find("handler.await").expect("awaited");
+    assert!(guarded < awaited, "the attempt is guarded across the handler");
+    let guard = source
+        .split_once("impl Drop for OwedTerminal {")
+        .and_then(|(_, rest)| rest.split_once("\n}\n"))
+        .map_or("", |(body, _)| body);
+    assert!(guard.contains("spawn_blocking(move || drop(attempt))"), "{guard}");
+    assert!(guard.contains("std::thread::panicking()"), "{guard}");
+}
+
+/// resources-3, D-2598: a guard taken back owes nothing, and one dropped
+/// outside any runtime settles in place.
+#[test]
+fn an_owed_terminal_taken_back_or_dropped_outside_a_runtime_settles_once() {
+    let root = Scratch::new();
+    let attempt = journal::begin(&root.0, Origin::Http, "GET /backtest.json").unwrap();
+    let mut owed = super::OwedTerminal(Some(attempt));
+    let mut taken = owed.take().expect("the attempt");
+    assert!(owed.take().is_none(), "a second take is empty");
+    drop(owed);
+    taken.finish(Phase::Completed, 200).unwrap();
+    drop(taken);
+    let seen = journal::read(&root.0, ID_BASE + 1).unwrap().unwrap();
+    assert_eq!(seen.phase, Phase::Completed);
+
+    let attempt = journal::begin(&root.0, Origin::Http, "GET /backtest.json").unwrap();
+    drop(super::OwedTerminal(Some(attempt)));
+    let seen = journal::read(&root.0, ID_BASE + 2).unwrap().unwrap();
+    assert_eq!(seen.phase, Phase::Cancelled, "dropped in place, no runtime");
+}
+
 #[tokio::test]
 async fn a_busy_journal_start_is_retryable_without_dispatching_the_handler() {
     // `request_audited` journals through a detail slot, so this is kept apart

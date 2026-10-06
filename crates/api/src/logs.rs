@@ -1179,6 +1179,7 @@ fn page_shell(asked: &Asked, body: &str) -> String {
 /// 5xx is re-emitted at `Error` regardless of floor, because a request that
 /// failed is not detail.
 pub async fn note_request(
+    axum::extract::State(site): axum::extract::State<crate::server::Loaded>,
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
@@ -1201,7 +1202,9 @@ pub async fn note_request(
     // [`FAILED_LINES_PER_WINDOW`] and [`LOCAL_FAILED_LINES_PER_WINDOW`].
     if level != telemetry::Level::Debug {
         let now = u64::try_from(telemetry::now_millis()).unwrap_or(0);
-        let admit = FAILED_LINES
+        // THE SITE'S RATIONS, not a process static (P16-04, D-2590).
+        let admit = site
+            .failed_lines
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .admit(from_another_site, now);
@@ -1298,9 +1301,6 @@ pub(crate) fn cross_site(headers: &axum::http::HeaderMap) -> bool {
 
 /// The length of one rationing window, in milliseconds.
 pub const FAILED_LINE_WINDOW_MS: u64 = 60_000;
-
-/// The process's failed-request rations, one per origin class.
-static FAILED_LINES: std::sync::Mutex<Rations> = std::sync::Mutex::new(Rations::new());
 
 /// One ration per origin class: cross-site (D-1583) and same-origin (D-1552).
 #[derive(Debug)]

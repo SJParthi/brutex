@@ -3765,12 +3765,51 @@ async fn bars_window_json(
         Ok(asked) => asked,
         Err(why) => return refuse(why),
     };
+    // OFF THE ASYNC WORKERS, AND ADMITTED. The window opens up to
+    // `MAX_WINDOW_MONTHS` month files and, on the scan path, reads every held
+    // bar into memory; it ran inline on a Tokio worker with no bound on how
+    // many ran at once, so a few concurrent scans stalled `/health`, the pull
+    // conductors and the autopilot. It now shares the store-read pool's
+    // `MAX_STORE_READ_CONCURRENT` slots and answers 429 past them, as
+    // `/folder.json` does. resources-4, P1-04-01, D-2593.
+    let root = site.store_root.clone();
+    let (exchange, segment, symbol) = (
+        param(query, "exchange"),
+        param(query, "segment"),
+        param(query, "symbol"),
+    );
+    let read = crate::detail::run_store_read(move || {
+        bars_window_reading(&root, &asked, &exchange, &segment, &symbol)
+    })
+    .await;
+    match read {
+        Ok((status, body)) => (status, json(), body),
+        Err(why) => {
+            let (status, body) = crate::detail::admission_refused(
+                "bars window read",
+                crate::detail::MAX_STORE_READ_CONCURRENT,
+                &why,
+            );
+            (status, json(), body)
+        }
+    }
+}
+
+/// Everything [`bars_window_json`] does once the request is parsed, on the
+/// store-read pool (resources-4, P1-04-01, D-2593).
+fn bars_window_reading(
+    root: &Path,
+    asked: &WindowAsk,
+    exchange: &str,
+    segment: &str,
+    symbol: &str,
+) -> (axum::http::StatusCode, String) {
     let window = match bars::window(
-        &site.store_root,
+        root,
         asked.vendor,
-        &param(query, "exchange"),
-        &param(query, "segment"),
-        &param(query, "symbol"),
+        exchange,
+        segment,
+        symbol,
         asked.timeframe,
         asked.contract,
         asked.from,
@@ -3782,11 +3821,14 @@ async fn bars_window_json(
         asked.want_extremes,
     ) {
         Ok(window) => window,
-        Err(why) => return refuse(why),
+        Err(why) => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                format!(r#"{{"error":{}}}"#, render::json_string(&why)),
+            );
+        }
     };
-    let (sort, want_extremes) = (asked.sort, asked.want_extremes);
-
-    let (body, withheld) = render_window(&window, sort.scans() || want_extremes);
+    let (body, withheld) = render_window(&window, asked.sort.scans() || asked.want_extremes);
     // PARTIAL CONTENT WHEN A RECORD WOULD NOT READ, the same status
     // `/bars.json` answers with, for the same reason: the rows are real and
     // the set is not whole, and one status must not mean both.
@@ -3795,7 +3837,7 @@ async fn bars_window_json(
     } else {
         axum::http::StatusCode::PARTIAL_CONTENT
     };
-    (status, json(), body)
+    (status, body)
 }
 
 /// A [`bars::Window`] as the JSON the grid reads.
@@ -5737,6 +5779,16 @@ pub struct Site {
     /// dropping it under the runtime's teardown. It was spawned and its handle
     /// dropped (lifecycle-1, D-2583). See [`drain_background`].
     pub(crate) press_task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// The failed-request line rations [`crate::logs::note_request`] spends.
+    ///
+    /// P16-04, D-2590. They were one `static` per process, so every routed
+    /// test in the api binary drew on one 60 s window: 200 local failures
+    /// spent by unrelated tests suppressed the 404 line another test asserts,
+    /// and that test failed with correct production code. One per `Site`:
+    /// production builds one `Site` and serves both of its routers from it,
+    /// so the per-process bound `docs/06-limits.md` states is unchanged, and
+    /// each test site has its own window.
+    pub(crate) failed_lines: std::sync::Mutex<crate::logs::Rations>,
     /// The browser-started SWEEP, in the same shape as [`Self::run`] and for
     /// the same reasons: one slot per `Site` so concurrent tests do not refuse
     /// each other, `Some` with no `finished_micros` as the one reading of "in
@@ -6008,6 +6060,7 @@ impl Site {
             run: std::sync::Mutex::new(None),
             recovery_active: std::sync::Mutex::new(None),
             press_task: std::sync::Mutex::new(None),
+            failed_lines: std::sync::Mutex::new(crate::logs::Rations::new()),
             // NO SWEEP UNTIL SOMEBODY PRESSES RUN, for the reason above it.
             sweep: std::sync::Mutex::new(None),
             reload_lock: std::sync::Mutex::new(()),
@@ -11591,6 +11644,29 @@ fn recorded_fact(journal: &audit::Journal, record: &audit::Record) -> (&'static 
     }
 }
 
+/// A pull refused at its door (an unreadable feed, a busy seat), journaled as
+/// `NotStarted` and said on the receipt, before any census or vendor is read.
+///
+/// conc19-1, D-2596. These arms answered 400/409 and wrote nothing, while
+/// `pullrun::note_leg_failure` told the operator of a refused press leg that
+/// "the reason is in the audit journal" — and `/audit` had no record. The
+/// source is the request's own `target` (or `underlying` for F&O), raw.
+fn door_refusal_recorded(
+    site: &Site,
+    scope: audit::Scope,
+    now: std::time::SystemTime,
+    body: &str,
+    why: &str,
+) -> (&'static str, String) {
+    let source = if matches!(scope, audit::Scope::Fno) {
+        param(body, "underlying")
+    } else {
+        param(body, "target")
+    };
+    let record = audit::Record::refused(scope, audit::Outcome::NotStarted, now, &source, why);
+    recorded_fact(&site.journal(), &record)
+}
+
 /// The run's record, then one more for every member that did not land.
 ///
 /// # Why the failures are separate records
@@ -12100,45 +12176,42 @@ async fn spot_pull_held(site: &Site, body: &str) -> SpotAnswer {
     // the walk, so a real Dhan pull is refused by a typo. D-0355.
     let asked_vendor = param(body, "vendor");
     let Some(wants) = ingest::parse_feed(&asked_vendor) else {
+        let why = format!(
+            "{asked_vendor:?} is not a feed this build has a descriptor \
+             for, so there is no seat to take and no vendor to ask. \
+             Refused rather than answered as another feed: a pull \
+             that took Dhan's seat for a request naming something \
+             else would refuse the real Dhan pull behind it."
+        );
+        let recorded = door_refusal_recorded(site, audit::Scope::Spot, now, body, &why);
         return (
             axum::http::StatusCode::BAD_REQUEST,
             receipt(),
             axum::response::Html(accepted_html(
                 "Spot pull",
-                vec![(
-                    "Refused because",
-                    format!(
-                        "{asked_vendor:?} is not a feed this build has a descriptor \
-                         for, so there is no seat to take and no vendor to ask. \
-                         Refused rather than answered as another feed: a pull \
-                         that took Dhan's seat for a request naming something \
-                         else would refuse the real Dhan pull behind it."
-                    ),
-                )],
+                vec![("Refused because", why), recorded],
                 Broker::Refused,
             )),
         );
     };
     let Some(_seat) = site.autopilot.take_seat(wants) else {
+        let why = format!(
+            "another pull already holds {}'s seat, so this request was \
+             refused rather than run against a manifest that pull is \
+             already writing to. Other feeds are unaffected — the seats \
+             are per feed, because the census they stand for is. If it \
+             is the autopilot, pause it at /autopilot and try again; it \
+             resumes from wherever the store reaches, so nothing is lost \
+             by pausing.",
+            wants.display()
+        );
+        let recorded = door_refusal_recorded(site, audit::Scope::Spot, now, body, &why);
         return (
             axum::http::StatusCode::CONFLICT,
             receipt(),
             axum::response::Html(accepted_html(
                 "Spot pull",
-                vec![(
-                    "Refused because",
-                    format!(
-                        "another pull already holds {}'s seat, so this request was \
-                         refused rather than run against a manifest that pull is \
-                         already writing to. Other feeds are unaffected — the seats \
-                         are per feed, because the census they stand for is. If it \
-                         is the autopilot, pause it at /autopilot and try again; it \
-                         resumes from wherever the store reaches, so nothing is lost \
-                         by pausing.",
-                        wants.display()
-                    )
-                    .to_owned(),
-                )],
+                vec![("Refused because", why), recorded],
                 site.broker,
             )),
         );
@@ -14352,6 +14425,16 @@ const fn bar_width_secs(cadence: pull::session::Cadence) -> u32 {
     }
 }
 
+/// The refusal an option bar with no underlying level beside it is priced
+/// with, as the operator reads it.
+///
+/// A named constant because the literal lost its `\` continuation once and
+/// shipped with an 18-space run in the middle of the sentence (apis-2,
+/// D-2586); `api::server::tests::the_no_underlying_refusal_reads_as_one_sentence`
+/// pins the exact text.
+const NO_UNDERLYING_BESIDE_THE_BAR: &str =
+    "the vendor sent no underlying level beside this bar, so there is nothing to price it against";
+
 fn price_group(
     group: &[pull::rolling::Row],
     inputs: PriceInputs,
@@ -14385,10 +14468,7 @@ fn price_group(
         }
         let Some(spot) = row.overlay.spot() else {
             out.refused = out.refused.saturating_add(1);
-            note_price_refusal(
-                &mut out,
-                "the vendor sent no underlying level beside this bar, so there                  is nothing to price it against",
-            );
+            note_price_refusal(&mut out, NO_UNDERLYING_BESIDE_THE_BAR);
             continue;
         };
         // Measured at the bar's close (grk-2, D-2604); see `chain_quotes`.
@@ -15992,44 +16072,42 @@ async fn fno_pull_held(
     // and then held Dhan's seat for the whole walk on its behalf. D-0355.
     let asked_vendor = param(body, "vendor");
     let Some(wants) = ingest::parse_feed(&asked_vendor) else {
+        let why = format!(
+            "{asked_vendor:?} is not a feed this build has a descriptor \
+             for, so there is no seat to take and no vendor to ask. \
+             Refused rather than answered as another feed: this walk \
+             holds its seat to the end, so a typo would refuse the \
+             real pull behind it for the length of the walk."
+        );
+        let recorded = door_refusal_recorded(site, audit::Scope::Fno, now, body, &why);
         return (
             axum::http::StatusCode::BAD_REQUEST,
             axum::response::Html(accepted_html(
                 "Expired F&O pull",
-                vec![(
-                    "Refused because",
-                    format!(
-                        "{asked_vendor:?} is not a feed this build has a descriptor \
-                         for, so there is no seat to take and no vendor to ask. \
-                         Refused rather than answered as another feed: this walk \
-                         holds its seat to the end, so a typo would refuse the \
-                         real pull behind it for the length of the walk."
-                    ),
-                )],
+                vec![("Refused because", why), recorded],
                 Broker::Refused,
             )),
         );
     };
     let Some(_seat) = site.autopilot.take_seat(wants) else {
+        let why = format!(
+            "another pull already holds {}'s seat, so this walk was \
+             refused BEFORE it asked the vendor for anything — rather \
+             than spending a month of discovery and a cross product of \
+             bar requests to be refused by the census lock at the end. \
+             Other feeds are unaffected: the seats are per feed, \
+             because the census they stand for is. If it is the \
+             autopilot, pause it at /autopilot and try again; it \
+             resumes from wherever the store reaches, so nothing is \
+             lost by pausing.",
+            wants.display()
+        );
+        let recorded = door_refusal_recorded(site, audit::Scope::Fno, now, body, &why);
         return (
             axum::http::StatusCode::CONFLICT,
             axum::response::Html(accepted_html(
                 "Expired F&O pull",
-                vec![(
-                    "Refused because",
-                    format!(
-                        "another pull already holds {}'s seat, so this walk was \
-                         refused BEFORE it asked the vendor for anything — rather \
-                         than spending a month of discovery and a cross product of \
-                         bar requests to be refused by the census lock at the end. \
-                         Other feeds are unaffected: the seats are per feed, \
-                         because the census they stand for is. If it is the \
-                         autopilot, pause it at /autopilot and try again; it \
-                         resumes from wherever the store reaches, so nothing is \
-                         lost by pausing.",
-                        wants.display()
-                    ),
-                )],
+                vec![("Refused because", why), recorded],
                 site.broker,
             )),
         );
@@ -17103,7 +17181,11 @@ fn admitted(table: axum::Router<Loaded>, site: Loaded, local_addr: SocketAddr) -
         .layer(axum::middleware::from_fn(move |request, next| {
             same_origin_writes_only(local_addr, request, next)
         }))
-        .layer(axum::middleware::from_fn(crate::logs::note_request))
+        // THE SITE'S OWN RATIONS (P16-04, D-2590), not a process static.
+        .layer(axum::middleware::from_fn_with_state(
+            Loaded::clone(&site),
+            crate::logs::note_request,
+        ))
         .layer(axum::extract::DefaultBodyLimit::max(MAX_FORM_BYTES))
         .layer(axum::middleware::map_response(never_framed))
         .with_state(site)
@@ -18041,7 +18123,7 @@ fn local_host_authority(raw: &str, local_addr: SocketAddr) -> bool {
     let Ok(authority) = raw.parse::<axum::http::uri::Authority>() else {
         return false;
     };
-    if raw.contains('@') || authority.port_u16() != Some(local_addr.port()) {
+    if raw.contains('@') || effective_http_port(&authority) != Some(local_addr.port()) {
         return false;
     }
     let host = authority.host();
@@ -18057,17 +18139,51 @@ fn local_host_authority(raw: &str, local_addr: SocketAddr) -> bool {
         .is_ok_and(|ip| ip == local_addr.ip())
 }
 
+/// The port an `http://` authority names, with the scheme's default when it
+/// names none.
+///
+/// **A browser elides the default port.** `api serve 127.0.0.1:80` is a
+/// loopback address [`loopback_serve_addr`] accepts, and every browser request
+/// to it says `Host: 127.0.0.1` with no port; reading that as "no port" refused
+/// every page of a server it had just bound, as "came from somewhere else"
+/// (P1-03-2, D-2586). RFC 9110 §4.2.1 gives `http`'s default as 80.
+///
+/// The default applies only when the authority has NO port separator after
+/// its host. `Authority`'s parser does not validate the port text, so
+/// `127.0.0.1:`, `127.0.0.1:abc` and `127.0.0.1:99999` all parse with
+/// `port_u16() == None`; each is answered `None` and refused, never read as 80.
+/// A bracketed IPv6 host's own colons are not a separator.
+fn effective_http_port(authority: &axum::http::uri::Authority) -> Option<u16> {
+    let text = authority.as_str();
+    let after_host = text.rsplit_once(']').map_or(text, |(_, tail)| tail);
+    if after_host.contains(':') {
+        authority.port_u16()
+    } else {
+        Some(80)
+    }
+}
+
 /// Whether a browser `Origin` is the exact `Host` authority on plain HTTP.
+///
+/// Compared as host and EFFECTIVE port, not as raw text, so `Origin:
+/// http://127.0.0.1` and `Host: 127.0.0.1:80` are the same authority, as they
+/// are to the browser that sent them (P1-03-2, D-2586).
 fn origin_matches_host(origin: &str, host: &str) -> bool {
     let Some((scheme, authority)) = origin.split_once("://") else {
         return false;
     };
-    if scheme != "http" {
+    if scheme != "http" || authority.contains('@') {
         return false;
     }
-    authority
-        .parse::<axum::http::uri::Authority>()
-        .is_ok_and(|parsed| !authority.contains('@') && parsed.as_str().eq_ignore_ascii_case(host))
+    let (Ok(origin), Ok(host)) = (
+        authority.parse::<axum::http::uri::Authority>(),
+        host.parse::<axum::http::uri::Authority>(),
+    ) else {
+        return false;
+    };
+    origin.host().eq_ignore_ascii_case(host.host())
+        && effective_http_port(&origin).is_some()
+        && effective_http_port(&origin) == effective_http_port(&host)
 }
 
 /// The `403` body: which header decided, and what it actually said.
@@ -18318,6 +18434,70 @@ struct LimitedListener {
     inner: tokio::net::TcpListener,
     slots: std::sync::Arc<Slots>,
     head_read_timeout: std::time::Duration,
+    /// The last accept failure said, as (errno, epoch seconds). conc11-3.
+    accept_noted: Option<(Option<i32>, u64)>,
+}
+
+/// How long one accept failure's errno stays said before it is said again.
+const ACCEPT_NOTE_WINDOW_SECS: u64 = 60;
+
+/// How long the acceptor waits after a failure that is not one connection's.
+/// axum's own `handle_accept_error` waits the same second.
+const ACCEPT_RETRY_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Whether an accept failure belongs to one connection (the peer gave up
+/// between SYN and accept) rather than to the listener. These are retried at
+/// once and never said, as axum's own accept loop treats them.
+fn one_connections_accept_error(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::ConnectionReset
+    )
+}
+
+/// Whether this accept failure is SAID: once per errno per
+/// [`ACCEPT_NOTE_WINDOW_SECS`], recording that it was.
+///
+/// conc11-3, D-2594. `LimitedListener::accept` delegated to axum's
+/// `Listener::accept`, whose only report of EMFILE, ENFILE, ENOBUFS or ENOMEM
+/// is `tracing::error!`, and nothing in this workspace subscribes `tracing`.
+/// So a server that ran out of descriptors stopped answering, one failed
+/// accept a second for ever, with nothing in `/logs` and nothing on stderr.
+/// Each such failure is now one Error event and one stderr line, at most once
+/// per errno a minute so a wedged acceptor cannot roll the log window. Two
+/// compares and a store; the cost is UNVERIFIED by a measurement.
+fn note_accept_error(
+    e: &std::io::Error,
+    noted: &mut Option<(Option<i32>, u64)>,
+    now_secs: u64,
+) -> bool {
+    let errno = e.raw_os_error();
+    if let Some((held, at)) = *noted
+        && held == errno
+        && now_secs >= at
+        && now_secs - at < ACCEPT_NOTE_WINDOW_SECS
+    {
+        return false;
+    }
+    *noted = Some((errno, now_secs));
+    true
+}
+
+/// One accept failure, said: one stderr line and one Error event `api.accept`
+/// "accept refused" carrying the host's words and the errno (0 when the host
+/// gave none). conc11-3, D-2594.
+fn say_accept_error(e: &std::io::Error) {
+    warn_line!("the server could not accept a connection and keeps retrying every second: {e}");
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::new(telemetry::Level::Error, "api.accept", "accept refused")
+            .with("why", telemetry::Value::Str(&e.to_string()))
+            .with(
+                "errno",
+                telemetry::Value::Int(i64::from(e.raw_os_error().unwrap_or(0))),
+            ),
+    );
 }
 
 impl axum::serve::Listener for LimitedListener {
@@ -18331,7 +18511,23 @@ impl axum::serve::Listener for LimitedListener {
         // Bound BEFORE the await, so a shutdown that cancels this accept gives
         // the slot back instead of leaking it.
         let slot = Slot(std::sync::Arc::clone(&self.slots));
-        let (io, addr) = axum::serve::Listener::accept(&mut self.inner).await;
+        // THIS LOOP, NOT AXUM'S, so a failed accept is said (conc11-3,
+        // D-2594). Same retry policy as axum's: one connection's error is
+        // retried at once; any other waits a second.
+        let (io, addr) = loop {
+            match self.inner.accept().await {
+                Ok(pair) => break pair,
+                Err(e) if one_connections_accept_error(&e) => {}
+                Err(e) => {
+                    let now = u64::try_from(ingest::epoch_secs(std::time::SystemTime::now()))
+                        .unwrap_or(0);
+                    if note_accept_error(&e, &mut self.accept_noted, now) {
+                        say_accept_error(&e);
+                    }
+                    tokio::time::sleep(ACCEPT_RETRY_WAIT).await;
+                }
+            }
+        };
         (HeadDeadline::new(io, slot, self.head_read_timeout), addr)
     }
 
@@ -18378,6 +18574,40 @@ struct HeadDeadline {
     /// re-armed a deadline nobody would ever look at: the idle socket was held
     /// for as long as the client liked, which the keep-alive test caught.
     parked_read: Option<std::task::Waker>,
+}
+
+/// Whether a write is hyper's interim `100 Continue`, which is not the
+/// response to the request and must not start the next head's clock.
+///
+/// P1-03-1, D-2597. Every write with `n > 0` re-armed the head deadline, and
+/// hyper writes `HTTP/1.1 100 Continue` for a request that sent `Expect:
+/// 100-continue` (curl does for any POST body over 1 KiB) BEFORE the body is
+/// read and the handler runs. The head clock then ran under the handler, the
+/// alarm fired in the read's pending arm, a false 408 was written, and the
+/// handler's future was dropped: a long POST from a non-browser client died at
+/// the head timeout. While the head is `Delivered`, the first write is either
+/// that interim line or the final status line, so the prefix decides it; once
+/// a final response has re-armed the clock, `rearm` is a no-op anyway. Only
+/// `100` is matched: hyper sends no other 1xx, and `101` would be a final
+/// answer to an upgrade, which this server does not offer.
+///
+/// **Only a write that is the interim line and nothing else.** A write that
+/// carries the interim line AND the final response behind it is a response,
+/// and it re-arms: otherwise a kept-alive connection would sit `Delivered`
+/// with no clock at all. Cost: one 13-byte prefix compare, and only when that
+/// matches, one pass over the write for its first blank line.
+fn is_interim_response(write: &[u8]) -> bool {
+    if !write.starts_with(b"HTTP/1.1 100 ") {
+        return false;
+    }
+    let mut ends = 0usize;
+    for (at, pair) in write.windows(4).enumerate() {
+        if pair == b"\r\n\r\n" {
+            ends = at.saturating_add(4);
+            break;
+        }
+    }
+    ends == write.len()
 }
 
 /// What a client that sent part of a head is told before its socket closes.
@@ -18451,6 +18681,8 @@ impl HeadDeadline {
     }
 
     /// A written response starts the next head's clock.
+    ///
+    /// Not an interim one: see [`is_interim_response`] (P1-03-1, D-2597).
     fn rearm(&mut self) {
         match self.state {
             HeadState::Delivered => {
@@ -18536,7 +18768,8 @@ impl tokio::io::AsyncWrite for HeadDeadline {
     ) -> std::task::Poll<std::io::Result<usize>> {
         let this = &mut *self;
         let written = std::pin::Pin::new(&mut this.io).poll_write(cx, buf);
-        if matches!(written, std::task::Poll::Ready(Ok(n)) if n > 0) {
+        if matches!(written, std::task::Poll::Ready(Ok(n)) if n > 0) && !is_interim_response(buf)
+        {
             this.rearm();
         }
         written
@@ -18549,7 +18782,18 @@ impl tokio::io::AsyncWrite for HeadDeadline {
     ) -> std::task::Poll<std::io::Result<usize>> {
         let this = &mut *self;
         let written = std::pin::Pin::new(&mut this.io).poll_write_vectored(cx, bufs);
-        if matches!(written, std::task::Poll::Ready(Ok(n)) if n > 0) {
+        // INTERIM ONLY WHEN IT IS THE ONE NON-EMPTY SLICE: a vectored write
+        // of the interim line with the final response behind it re-arms.
+        let mut only: Option<&[u8]> = None;
+        let mut slices = 0usize;
+        for slice in bufs {
+            if !slice.is_empty() {
+                slices = slices.saturating_add(1);
+                only = Some(&**slice);
+            }
+        }
+        let interim = slices == 1 && only.is_some_and(is_interim_response);
+        if matches!(written, std::task::Poll::Ready(Ok(n)) if n > 0) && !interim {
             this.rearm();
         }
         written
@@ -18624,6 +18868,7 @@ pub async fn serve_limited(
             freed: tokio::sync::Notify::new(),
         }),
         head_read_timeout: limits.head_read_timeout,
+        accept_noted: None,
     };
     let app = app.layer(axum::middleware::from_fn_with_state(
         limits.body_read_timeout,
@@ -18818,6 +19063,7 @@ mod head_deadline_tests {
             inner,
             slots: std::sync::Arc::clone(&slots),
             head_read_timeout: T,
+            accept_noted: None,
         };
         let _first_client = TcpStream::connect(addr).await.unwrap();
         let (first, _) = tokio::time::timeout(T, listener.accept())
@@ -19266,6 +19512,57 @@ mod head_deadline_tests {
         assert!(said.starts_with("HTTP/1.1 200 OK"), "{said:?}");
         assert!(said.ends_with("ignored"), "{said:?}");
         let _ = stop.send(());
+    }
+
+    /// P1-03-1, D-2597. On the old code hyper's interim `100 Continue` was a
+    /// write like any other and re-armed the HEAD clock under a handler that
+    /// had not answered yet: three deadlines later the alarm fired, a false
+    /// 408 went out and the handler was dropped. The interim line no longer
+    /// starts the next head's clock; the final response still does.
+    #[tokio::test]
+    async fn an_expect_continue_post_with_a_slow_handler_is_not_cut() {
+        let (addr, stop) = start(limits(8)).await;
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(
+                b"POST /echo-slow HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n\
+                  Expect: 100-continue\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let interim = one_response(&mut client, "\r\n\r\n").await;
+        assert!(interim.starts_with("HTTP/1.1 100 Continue"), "{interim:?}");
+        client.write_all(b"body").await.unwrap();
+        let began = Instant::now();
+        let (said, closed) = drain(&mut client, T * 10).await;
+        assert!(closed);
+        assert!(!said.contains("408"), "{said:?}");
+        assert!(said.starts_with("HTTP/1.1 200 OK"), "{said:?}");
+        assert!(said.ends_with("body"), "{said:?}");
+        assert!(began.elapsed() >= T * 2 + T_SLACK);
+        let _ = stop.send(());
+    }
+
+    /// P1-03-1, D-2597: the interim test, at its edges.
+    #[test]
+    fn only_a_lone_interim_line_is_interim() {
+        use super::is_interim_response;
+        for (write, interim) in [
+            ("HTTP/1.1 100 Continue\r\n\r\n", true),
+            ("HTTP/1.1 100 \r\n\r\n", true),
+            ("HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\n\r\nok", false),
+            ("HTTP/1.1 100 Continue\r\n", false),
+            ("HTTP/1.1 100 Continue", false),
+            ("HTTP/1.1 101 Switching Protocols\r\n\r\n", false),
+            ("HTTP/1.1 200 OK\r\n\r\n", false),
+            ("HTTP/1.1 408 Request Timeout\r\n\r\n", false),
+            ("HTTP/1.0 100 Continue\r\n\r\n", false),
+            ("HTTP/1.1 100", false),
+            ("", false),
+            ("body", false),
+        ] {
+            assert_eq!(is_interim_response(write.as_bytes()), interim, "{write:?}");
+        }
     }
 
     /// THE AUDIT'S SHAPE: a crowd of body drippers filling the cap cannot
@@ -19956,6 +20253,25 @@ fn note_drained(abandoned: &[&'static str]) {
 pub fn end_runtime(runtime: tokio::runtime::Runtime, grace: std::time::Duration) -> usize {
     cli::cancel::request();
     wait_then_end(runtime, grace)
+}
+
+/// The exit code a stopped process has earned once [`end_runtime`] has said
+/// how many engine tasks it abandoned.
+///
+/// conc16-2, D-2587. `main` discarded the count, so a stop that abandoned
+/// engine work exited [`OK`] and logged Info "exited cleanly" right after the
+/// Error event saying those results were lost and must be re-run. An abandoned
+/// task turns a clean code into [`FAILED`]: the process was asked for something
+/// reasonable (finish the work it accepted) and could not do it. A code that is
+/// already non-zero is kept, because it already names a worse or more specific
+/// outcome ([`MISUSED`], [`DEGRADED`], or [`FAILED`] itself).
+#[must_use]
+pub const fn exit_after_shutdown(code: u8, abandoned: usize) -> u8 {
+    if abandoned > 0 && code == OK {
+        FAILED
+    } else {
+        code
+    }
 }
 
 /// [`end_runtime`] without asking engine work to stop: waits at most `grace`,
@@ -20724,6 +21040,339 @@ async fn run_in_over(
 mod tests {
     use super::*;
     use std::io::Write as _;
+
+    /// apis-2, D-2586. The old literal lost its `\` continuation and carried an
+    /// 18-space run inside the sentence; the source scan fails on it, and the
+    /// constant is pinned to the single-spaced sentence an operator reads.
+    #[test]
+    fn the_no_underlying_refusal_reads_as_one_sentence() {
+        assert_eq!(
+            NO_UNDERLYING_BESIDE_THE_BAR,
+            "the vendor sent no underlying level beside this bar, so there is nothing \
+             to price it against"
+        );
+        assert!(!NO_UNDERLYING_BESIDE_THE_BAR.contains("  "));
+        let source = include_str!("server.rs");
+        let start = source.find("\nfn price_group(").expect("price_group is here");
+        let end = source[start..]
+            .find("\nfn note_price_refusal(")
+            .expect("note_price_refusal follows it");
+        let body = &source[start..start + end];
+        assert!(
+            body.contains("note_price_refusal(&mut out, NO_UNDERLYING_BESIDE_THE_BAR)"),
+            "price_group refuses with the pinned sentence"
+        );
+        assert!(
+            !body.contains("there  "),
+            "no run of spaces survives inside price_group's refusal sentence"
+        );
+    }
+
+    /// P16-02, D-2589. On the old code the host-neutral serve-lock stamp
+    /// test symlinked its lock name to `/dev/full` with no `cfg`, so it failed
+    /// on macOS. This pins that the host-neutral body names no device and the
+    /// device leg is gated to Linux. Needles are split so this test cannot
+    /// match itself.
+    #[test]
+    fn the_dev_full_leg_runs_only_where_dev_full_exists() {
+        let source = include_str!("server.rs");
+        let neutral = source
+            .split_once(concat!(
+                "fn a_serve_lock_stamp_that_fails_is_",
+                "cleared_or_refused_never_left_stale() {\n"
+            ))
+            .and_then(|(_, rest)| rest.split_once("\n    }\n"))
+            .map_or("", |(body, _)| body);
+        assert!(!neutral.is_empty(), "the host-neutral test exists");
+        assert!(
+            !neutral.contains(concat!("\"/dev/", "full\"")),
+            "the host-neutral test names no host-specific device"
+        );
+        let gated = concat!(
+            "#[cfg(target_os = \"linux\")]\n    #[test]\n    fn a_serve_lock_stamp_on_",
+            "dev_full_is_refused() {"
+        );
+        assert!(source.contains(gated), "the device leg is Linux-only");
+    }
+
+    /// conc16-2, D-2587. The old `main` bound the abandoned count to
+    /// `_abandoned`, so a stop that lost engine work exited `OK`; the source
+    /// half fails on it, and the mapping is enumerated over every code `run`
+    /// names plus an unnamed one, at 0, 1 and `usize::MAX` abandoned.
+    #[test]
+    fn an_abandoned_engine_task_turns_a_clean_stop_into_failed() {
+        for (code, none, some) in [
+            (OK, OK, FAILED),
+            (FAILED, FAILED, FAILED),
+            (MISUSED, MISUSED, MISUSED),
+            (DEGRADED, DEGRADED, DEGRADED),
+            (u8::MAX, u8::MAX, u8::MAX),
+        ] {
+            assert_eq!(exit_after_shutdown(code, 0), none, "code {code}, 0");
+            assert_eq!(exit_after_shutdown(code, 1), some, "code {code}, 1");
+            assert_eq!(
+                exit_after_shutdown(code, usize::MAX),
+                some,
+                "code {code}, max"
+            );
+        }
+        let main = include_str!("main.rs");
+        assert!(
+            main.contains("api::server::exit_after_shutdown(code, abandoned)"),
+            "main maps the abandoned count into the exit code"
+        );
+        assert!(
+            !main.contains("let _abandoned"),
+            "main no longer discards the abandoned count"
+        );
+        let mapped = main
+            .find("exit_after_shutdown(code, abandoned)")
+            .expect("mapped");
+        let noted = main.find("note_exit(code, count)").expect("noted");
+        assert!(mapped < noted, "the code is mapped before it is noted");
+    }
+
+    /// conc11-3, D-2594. On the old code the acceptor delegated to axum,
+    /// whose only report of a failed accept is `tracing::error!`, which this
+    /// workspace never subscribes: nothing was said at all. The rate rule is
+    /// enumerated over errno, window edge and clock order; the saying lands
+    /// one Error event; and the acceptor's own source calls both.
+    #[test]
+    fn an_accept_failure_is_logged_once_per_window() {
+        let emfile = std::io::Error::from_raw_os_error(24);
+        let enfile = std::io::Error::from_raw_os_error(23);
+        let bare = std::io::Error::other("no errno");
+        let mut noted = None;
+        assert!(note_accept_error(&emfile, &mut noted, 1_000), "the first is said");
+        assert!(!note_accept_error(&emfile, &mut noted, 1_000), "same second");
+        assert!(!note_accept_error(&emfile, &mut noted, 1_059), "inside the window");
+        assert!(note_accept_error(&emfile, &mut noted, 1_060), "the window's edge");
+        assert!(note_accept_error(&enfile, &mut noted, 1_061), "a new errno is said");
+        assert!(note_accept_error(&emfile, &mut noted, 1_062), "and so is a change back");
+        assert!(note_accept_error(&bare, &mut noted, 1_063), "no errno is its own class");
+        assert!(!note_accept_error(&bare, &mut noted, 1_064));
+        assert!(
+            note_accept_error(&bare, &mut noted, 1_000),
+            "a clock that stepped back is said, never held silent"
+        );
+        let mut noted = None;
+        assert!(note_accept_error(&emfile, &mut noted, 0));
+        assert!(!note_accept_error(&emfile, &mut noted, ACCEPT_NOTE_WINDOW_SECS - 1));
+        assert!(note_accept_error(&emfile, &mut noted, u64::MAX));
+        assert!(!note_accept_error(&emfile, &mut noted, u64::MAX));
+        // One connection's failure is retried, never said; the listener's are.
+        for (kind, own) in [
+            (std::io::ErrorKind::ConnectionRefused, true),
+            (std::io::ErrorKind::ConnectionAborted, true),
+            (std::io::ErrorKind::ConnectionReset, true),
+            (std::io::ErrorKind::OutOfMemory, false),
+            (std::io::ErrorKind::Other, false),
+        ] {
+            assert_eq!(
+                one_connections_accept_error(&std::io::Error::from(kind)),
+                own,
+                "{kind:?}"
+            );
+        }
+        assert!(!one_connections_accept_error(&emfile), "EMFILE is the listener's");
+
+        let _sink = crate::emitted::sink();
+        let from = crate::emitted::mark();
+        say_accept_error(&emfile);
+        let said = crate::emitted::landed(from, "api.accept", "accept refused");
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert_eq!(said[0].level, telemetry::Level::Error, "{said:?}");
+        assert!(crate::emitted::says(&said[0], "why", "os error 24"), "{said:?}");
+        assert!(said[0].field("errno").is_some(), "{said:?}");
+
+        let source = include_str!("server.rs");
+        let accept = source
+            .split_once("impl axum::serve::Listener for LimitedListener {")
+            .and_then(|(_, rest)| rest.split_once("\n}\n"))
+            .map_or("", |(body, _)| body);
+        assert!(accept.contains("self.inner.accept().await"), "{accept}");
+        assert!(accept.contains("note_accept_error(&e, &mut self.accept_noted, now)"));
+        assert!(accept.contains("say_accept_error(&e)"));
+        assert!(!accept.contains(concat!("Listener::accept(&mut self.", "inner)")));
+    }
+
+    /// conc19-1, D-2596. On the old code a pull refused at its door (busy
+    /// seat, unreadable feed) answered 409/400 and wrote NO journal record,
+    /// while a refused press leg was told "the reason is in the audit
+    /// journal". Both routes and both door arms are driven; each leaves
+    /// exactly one `NotStarted` record whose note is the refusal sentence.
+    #[tokio::test]
+    async fn a_seat_refused_spot_pull_leaves_a_journal_record() {
+        let site = Site::load(&masters("conc19-1", None, None), &store_root("conc19-1"));
+        let journal = site.journal();
+        let count = |journal: &audit::Journal| match journal.look() {
+            audit::Log::Held { records, .. } => records,
+            _ => 0,
+        };
+        let newest = |journal: &audit::Journal| -> audit::Record {
+            let records = count(journal);
+            let page = journal.page(records, 0, 1).expect("the journal reads");
+            let mut out = None;
+            for entry in page {
+                out = entry.decoded.ok();
+            }
+            out.expect("the newest record decodes")
+        };
+        let seat = site
+            .autopilot
+            .take_seat(pull::vendor::Feed::Dhan)
+            .expect("the seat is free");
+        let before = count(&journal);
+        let (code, _, axum::response::Html(page)) =
+            spot_pull_held(&site, "vendor=dhan&target=swept&from=2024-01-01&to=2024-01-31").await;
+        assert_eq!(code, axum::http::StatusCode::CONFLICT, "{page}");
+        assert!(page.contains("yes — appended to"), "{page}");
+        assert_eq!(count(&journal), before + 1, "one record");
+        let record = newest(&journal);
+        assert_eq!(record.outcome, audit::Outcome::NotStarted);
+        assert_eq!(record.scope, audit::Scope::Spot);
+        assert!(record.note.contains("seat"), "{}", record.note);
+        assert_eq!(record.source, "swept");
+
+        let (code, axum::response::Html(page)) =
+            fno_pull_held(&site, "vendor=dhan&underlying=NIFTY").await;
+        assert_eq!(code, axum::http::StatusCode::CONFLICT, "{page}");
+        assert_eq!(count(&journal), before + 2, "one more record");
+        let record = newest(&journal);
+        assert_eq!(record.scope, audit::Scope::Fno);
+        assert_eq!(record.outcome, audit::Outcome::NotStarted);
+        assert_eq!(record.source, "NIFTY");
+        drop(seat);
+
+        for (spot, body) in [(true, "vendor=dahn&target=swept"), (false, "vendor=dahn&underlying=NIFTY")] {
+            let code = if spot {
+                spot_pull_held(&site, body).await.0
+            } else {
+                fno_pull_held(&site, body).await.0
+            };
+            assert_eq!(code, axum::http::StatusCode::BAD_REQUEST, "{body}");
+            let record = newest(&journal);
+            assert_eq!(record.outcome, audit::Outcome::NotStarted, "{body}");
+            assert!(record.note.contains("not a feed this build"), "{}", record.note);
+        }
+        assert_eq!(count(&journal), before + 4);
+    }
+
+    /// P16-04, D-2590. On the old code the rations were one process `static`,
+    /// so a router whose site had spent its window silenced every other
+    /// router's failed lines; there was no `Site::failed_lines` to read. Two
+    /// sites: A spends exactly its local and cross-site allowances (and one
+    /// past each), and B still writes its first line of both classes.
+    #[test]
+    fn a_spent_ration_in_one_router_does_not_suppress_another_routers_failed_line() {
+        let a = Site::load(&masters("p1604-a", None, None), &store_root("p1604-a"));
+        let b = Site::load(&masters("p1604-b", None, None), &store_root("p1604-b"));
+        let now = 1_000_000u64;
+        for (cross, allowance) in [
+            (false, crate::logs::LOCAL_FAILED_LINES_PER_WINDOW),
+            (true, crate::logs::FAILED_LINES_PER_WINDOW),
+        ] {
+            let mut rations = a.failed_lines.lock().expect("a's rations");
+            for n in 0..allowance {
+                assert!(rations.admit(cross, now).write, "a {cross}: line {n}");
+            }
+            assert!(
+                !rations.admit(cross, now).write,
+                "a {cross}: one past the allowance is held back"
+            );
+        }
+        for cross in [false, true] {
+            let admit = b.failed_lines.lock().expect("b's rations").admit(cross, now);
+            assert!(admit.write, "b {cross}: its own window is untouched");
+            assert_eq!(admit.summary, None, "b {cross}: nothing of b's was held");
+        }
+        // AND THE MIDDLEWARE SPENDS THE SITE'S, installed with that site's
+        // state. Needles split so this test cannot match itself.
+        let logs = include_str!("logs.rs");
+        assert!(
+            logs.contains(concat!("let admit = site\n            .failed_", "lines")),
+            "note_request spends its site's rations"
+        );
+        assert!(
+            !logs.contains(concat!("static FAILED_", "LINES:")),
+            "no process-wide ration remains"
+        );
+        let source = include_str!("server.rs");
+        assert!(
+            !source.contains(concat!("from_fn(crate::logs::note_", "request)")),
+            "admitted no longer installs note_request without a site"
+        );
+        assert!(
+            source.contains(concat!("Loaded::clone(&site),\n            crate::logs::note_", "request,")),
+            "admitted installs note_request with its site as state"
+        );
+    }
+
+    /// P1-03-2, D-2586. On the old code `port_u16() != Some(local.port())`
+    /// refused `Host: 127.0.0.1` on a `:80` listener (the browser elides the
+    /// default port), so every page of `api serve 127.0.0.1:80` answered 403.
+    /// The default is 80 and nothing else: a malformed or empty port is never
+    /// read as it, and a portless host never matches a non-80 listener.
+    #[test]
+    fn a_default_port_host_matches_a_port_80_listener() {
+        let v4_80: SocketAddr = "127.0.0.1:80".parse().expect("addr");
+        let v4_8080: SocketAddr = "127.0.0.1:8080".parse().expect("addr");
+        let v6_80: SocketAddr = "[::1]:80".parse().expect("addr");
+        let lan_80: SocketAddr = "192.168.1.5:80".parse().expect("addr");
+        for (host, at, admitted) in [
+            ("127.0.0.1", v4_80, true),
+            ("localhost", v4_80, true),
+            ("LOCALHOST", v4_80, true),
+            ("127.0.0.1:80", v4_80, true),
+            ("localhost:80", v4_80, true),
+            ("[::1]", v6_80, true),
+            ("[::1]:80", v6_80, true),
+            ("127.0.0.1", v4_8080, false),
+            ("localhost", v4_8080, false),
+            ("127.0.0.1:8080", v4_8080, true),
+            ("127.0.0.1:80", v4_8080, false),
+            ("127.0.0.1:", v4_80, false),
+            ("127.0.0.1:abc", v4_80, false),
+            ("127.0.0.1:99999", v4_80, false),
+            ("127.0.0.1:65616", v4_80, false),
+            ("127.0.0.1:0", v4_80, false),
+            ("[::1]:", v6_80, false),
+            ("[::1]", v4_80, false),
+            ("127.0.0.2", v4_80, false),
+            ("user@127.0.0.1", v4_80, false),
+            ("", v4_80, false),
+            ("127.0.0.1", lan_80, false),
+        ] {
+            assert_eq!(
+                local_host_authority(host, at),
+                admitted,
+                "Host {host:?} against {at}"
+            );
+        }
+        for (origin, host, same) in [
+            ("http://127.0.0.1", "127.0.0.1", true),
+            ("http://127.0.0.1", "127.0.0.1:80", true),
+            ("http://127.0.0.1:80", "127.0.0.1", true),
+            ("http://LOCALHOST", "localhost:80", true),
+            ("http://[::1]", "[::1]:80", true),
+            ("http://127.0.0.1:8080", "127.0.0.1:8080", true),
+            ("http://127.0.0.1", "127.0.0.1:8080", false),
+            ("http://127.0.0.1:8080", "127.0.0.1", false),
+            ("http://localhost", "127.0.0.1", false),
+            ("https://127.0.0.1", "127.0.0.1", false),
+            ("http://127.0.0.1:", "127.0.0.1", false),
+            ("http://127.0.0.1:abc", "127.0.0.1", false),
+            ("http://u@127.0.0.1", "127.0.0.1", false),
+            ("127.0.0.1", "127.0.0.1", false),
+            ("http://", "127.0.0.1", false),
+        ] {
+            assert_eq!(
+                origin_matches_host(origin, host),
+                same,
+                "Origin {origin:?} against Host {host:?}"
+            );
+        }
+    }
 
     /// locks-1, D-1911: a host refusal of `flock` names the host, never another
     /// instance, and never quotes the last holder's stamp; only `WouldBlock`
@@ -23638,9 +24287,9 @@ mod tests {
     /// **A FAILED SERVE-LOCK STAMP IS NEVER DISCARDED.** v3b-2, D-1481. The
     /// stamp's result was dropped, so a full disk left the previous holder's
     /// line for a refused instance to quote. Each arm of the decision is driven
-    /// with the error the host gives, and the refusal is driven end to end
-    /// through a lock name that resolves to `/dev/full`, where every write
-    /// fails with ENOSPC and no length can be set.
+    /// with the error the host gives. The end-to-end refusal through a lock
+    /// name that resolves to `/dev/full` is
+    /// `a_serve_lock_stamp_on_dev_full_is_refused`, Linux only (P16-02).
     #[test]
     fn a_serve_lock_stamp_that_fails_is_cleared_or_refused_never_left_stale() {
         let path = Path::new("/store/serve.lock");
@@ -23698,7 +24347,26 @@ mod tests {
             refused.contains("os error 28") && refused.contains("os error 5"),
             "{refused}"
         );
+        // THE `/dev/full` LEG IS ITS OWN TEST, under `cfg(target_os =
+        // "linux")`: a_serve_lock_stamp_on_dev_full_is_refused. Nothing above
+        // names a host-specific path. P16-02, D-2589.
+    }
 
+    /// **The end-to-end leg of the stamp refusal, through `/dev/full`.**
+    ///
+    /// P16-02, D-2589. This leg sat inside the host-neutral test above with no
+    /// `cfg`, and macOS has no `/dev/full`: the dangling link opened with create
+    /// answered EACCES, the refusal read "could not be opened", and the
+    /// assertion failed on the operator's Mac while Linux CI stayed green. The
+    /// ENOSPC arms are already driven on every host through `stamp_outcome`
+    /// above; only this one needs the device, so only this one is gated.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_serve_lock_stamp_on_dev_full_is_refused() {
+        assert!(
+            Path::new("/dev/full").exists(),
+            "premise: Linux provides /dev/full"
+        );
         let root = crate::scratch::path("serve-lock-dev-full");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("mkdir");
@@ -35391,8 +36059,22 @@ fn resolved_master_rows(merged: &merge::Merged, vendor: Vendor) -> Vec<(String, 
     rows
 }
 
+/// The one `/universe/resolve` crawl this process may run at a time.
+/// P1-04-03, D-2591.
+static RESOLVING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// The refusal a press receives while another crawl holds [`RESOLVING`].
+const UNIVERSE_RESOLVE_BUSY: &str = "a resolution is already running, so this press \
+     started nothing: no socket was opened and no third-party document was asked \
+     for. Wait for that crawl's answer and press again if it is still wanted.";
+
 /// `POST /universe/resolve` — crawl the exchange's directory and report what
 /// agreed with a feed's master.
+///
+/// # One crawl at a time
+///
+/// A press while another crawl is running answers 409 before any socket is
+/// opened ([`RESOLVING`], P1-04-03, D-2591).
 ///
 /// # POST, and there is no GET
 ///
@@ -35465,6 +36147,25 @@ pub async fn universe_resolve(
         );
     };
     let feed = vendor.as_str().to_owned();
+
+    // ONE CRAWL AT A TIME, AND A SECOND PRESS IS TOLD SO. Every press ran its
+    // own full ~300-document crawl of a third party with no slot or lock, so
+    // concurrent presses multiplied the sockets this route exists to spend
+    // once. Taken AFTER the request is validated, so a malformed press still
+    // answers 400 and never 409, and BEFORE the HTTP client is built, so a
+    // refused press opens nothing. Held across the crawl and released when
+    // this function returns, however it returns. The same shape as
+    // `mastersrun::REFRESH`. P1-04-03, D-2591.
+    let Ok(_resolving) = RESOLVING.try_lock() else {
+        return (
+            axum::http::StatusCode::CONFLICT,
+            json,
+            format!(
+                r#"{{"ok":false,"why":{}}}"#,
+                render::json_string(UNIVERSE_RESOLVE_BUSY)
+            ),
+        );
+    };
 
     // THE MASTER IS THE ONE ALREADY READ, not one fetched here. See this
     // function's own documentation on why a broker request is a separate act.
@@ -35734,6 +36435,43 @@ mod universe_route_tests {
             assert!(answer.contains(r#""ok":false"#), "{answer}");
             assert!(answer.contains("did not name"), "{answer}");
         }
+    }
+
+    /// P1-04-03, D-2591. On the old code nothing serialised the crawl: a
+    /// press while another ran built its own client and crawled ~300 third
+    /// party documents. With the slot held, every valid feed answers 409
+    /// before the client is built (so this opens no socket), a malformed
+    /// press still answers 400, and the slot is free again once released.
+    #[tokio::test]
+    async fn a_second_universe_resolve_while_one_runs_is_refused_409() {
+        use super::tests::{agreeing, site};
+        let dir = agreeing("resolve-busy");
+        let built: Loaded = std::sync::Arc::new(site("resolve-busy", &dir));
+        let held = RESOLVING.lock().await;
+        for vendor in brutex_core::vendor::Vendor::ALL {
+            let body = format!("feed={}", vendor.as_str());
+            let (status, _, answer) = universe_resolve(
+                axum::extract::State(std::sync::Arc::clone(&built)),
+                body.clone(),
+            )
+            .await;
+            assert_eq!(status, axum::http::StatusCode::CONFLICT, "{body}: {answer}");
+            assert!(answer.contains(r#""ok":false"#), "{answer}");
+            assert!(answer.contains("already running"), "{answer}");
+            assert!(answer.contains("no socket was opened"), "{answer}");
+        }
+        let (status, _, answer) = universe_resolve(
+            axum::extract::State(std::sync::Arc::clone(&built)),
+            String::from("feed=nofeed"),
+        )
+        .await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::BAD_REQUEST,
+            "the request is judged before the slot: {answer}"
+        );
+        drop(held);
+        assert!(RESOLVING.try_lock().is_ok(), "the slot is released");
     }
 
     /// **The boot-snapshot class, refused by name.**

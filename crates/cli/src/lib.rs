@@ -2403,16 +2403,40 @@ fn run_with_sink(args: &[String], out: &mut String, sink: Option<&telemetry::Sin
             .with("phase", "running"),
     );
     let code = dispatch(args, out);
-    command_event(
-        sink,
-        attempt,
-        &telemetry::Event::info("cli.lifecycle", "command finished")
-            .with("command", command)
-            .with("sweep_command", is_sweep_command(command))
-            .with("phase", if code == OK { "completed" } else { "refused" })
-            .with("exit_code", u64::from(code)),
-    );
+    command_event(sink, attempt, &finished_event(command, code, out));
     code
+}
+
+/// The `cli.lifecycle` "command finished" event for one exit.
+///
+/// conc13-1, D-2595. It was Info with no reason whatever the code, so a
+/// refused command left one Info line that `/logs?level=warn` hides, and its
+/// reason existed only on stdout while `/backtest/run.json` told the operator
+/// to inspect the logs. A non-OK exit is now Warn and carries `why`: the
+/// page's own refusal line, or a sentence saying it printed none. The
+/// telemetry encoder bounds the value's length.
+fn finished_event<'a>(command: &'a str, code: u8, page: &'a str) -> telemetry::Event<'a> {
+    let event = telemetry::Event::new(
+        if code == OK {
+            telemetry::Level::Info
+        } else {
+            telemetry::Level::Warn
+        },
+        "cli.lifecycle",
+        "command finished",
+    )
+    .with("command", command)
+    .with("sweep_command", is_sweep_command(command))
+    .with("phase", if code == OK { "completed" } else { "refused" })
+    .with("exit_code", u64::from(code));
+    if code == OK {
+        event
+    } else {
+        event.with(
+            "why",
+            refusal_reason(page).unwrap_or("the command printed no refusal line"),
+        )
+    }
 }
 
 fn command_event(
@@ -23370,6 +23394,78 @@ mod tests {
         );
         assert!(without_sink.contains("`scrreen` is not a command this build knows"));
         sink.release_run(777);
+        drop(sink);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// conc13-1, D-2595. On the old code "command finished" was Info with no
+    /// `why` for every exit code, so a refused command was invisible at
+    /// `/logs?level=warn` and its reason lived only on stdout. Every exit code
+    /// is driven, with and without a refusal line on the page.
+    #[test]
+    fn a_refused_command_finishes_at_warn_with_its_reason() {
+        let why_of = |event: &telemetry::Event<'_>| -> Option<String> {
+            let mut found = None;
+            for (key, value) in event.fields() {
+                if *key == "why"
+                    && let telemetry::Value::Str(text) = value
+                {
+                    found = Some((*text).to_owned());
+                }
+            }
+            found
+        };
+        let refused_page = "PROVENANCE\nrefused: `scrreen` is not a command this build knows\nusage";
+        for code in [super::OK, super::FAILED, MISUSED, 3, u8::MAX] {
+            for page in [refused_page, "", "a report with no refusal line"] {
+                let event = super::finished_event("screen", code, page);
+                if code == super::OK {
+                    assert_eq!(event.level(), telemetry::Level::Info, "{code} {page:?}");
+                    assert_eq!(why_of(&event), None, "{code} {page:?}");
+                } else {
+                    assert_eq!(event.level(), telemetry::Level::Warn, "{code} {page:?}");
+                    let why = why_of(&event).expect("a refused exit carries why");
+                    if page == refused_page {
+                        assert!(why.contains("`scrreen` is not a command"), "{why}");
+                    } else {
+                        assert_eq!(why, "the command printed no refusal line");
+                    }
+                }
+            }
+        }
+        // And end to end through a private sink: the refused command's
+        // finished line is Warn and names the refusal.
+        let root = std::env::temp_dir().join(format!(
+            "brutex-command-why-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let sink = telemetry::Sink::open(&telemetry::Config::new(&root)).expect("private sink");
+        let mut out = String::new();
+        assert_eq!(
+            super::run_with_sink(&argv(&["scrreen"]), &mut out, Some(&sink)),
+            MISUSED
+        );
+        let events = telemetry::tail(
+            &root,
+            sink.keep_files(),
+            &telemetry::Query::last(8).from_target("cli.lifecycle"),
+        )
+        .records;
+        let mut finished = 0;
+        for event in &events {
+            if event.message == "command finished" {
+                finished += 1;
+                assert_eq!(event.level, telemetry::Level::Warn, "{event:?}");
+                let why = event
+                    .field("why")
+                    .and_then(telemetry::OwnedValue::as_str)
+                    .expect("why");
+                assert!(why.contains("`scrreen` is not a command"), "{why}");
+            }
+        }
+        assert_eq!(finished, 1, "{events:?}");
         drop(sink);
         let _ = std::fs::remove_dir_all(&root);
     }

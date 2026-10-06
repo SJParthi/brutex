@@ -58,7 +58,11 @@ fn main() -> std::process::ExitCode {
             }
         }
     });
-    let _abandoned = api::server::end_runtime(runtime, api::server::SHUTDOWN_GRACE);
+    // THE ABANDONED COUNT DECIDES THE CODE. It was bound to `_abandoned` and
+    // dropped, so a stop that lost engine work exited 0 under an Error line
+    // saying the results were lost (conc16-2, D-2587).
+    let abandoned = api::server::end_runtime(runtime, api::server::SHUTDOWN_GRACE);
+    let code = api::server::exit_after_shutdown(code, abandoned);
     note_exit(code, count);
     std::process::ExitCode::from(code)
 }
