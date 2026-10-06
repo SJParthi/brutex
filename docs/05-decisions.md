@@ -63308,3 +63308,29 @@ positions. Five statements did not agree:
 every one of these numbers from `TABLE` rather than restating them, so the next
 append fails the test instead of leaving the documents stale. It failed before
 the edit with `row 235 near_forming_pivot_pivot says — for a Near position`.
+
+### D-3407 — One move is not a distribution under the asymmetry lens either — 2026-10-06
+
+**What was observed.** The permutations lens (L3) found, in round 4, that
+`Edge::worst_reward_risk_bp` (D-0593) had no guard on `n`. `Edge::payoff_bp`
+answers zero below two observations ("One move is not a distribution"). A
+single win, or a single short move, scored `i64::MAX` here, as a sample that
+never lost. That contradicts the function's own doc, which says it "is ALWAYS
+at or below" `payoff_bp`. `rank::ByAsymmetry` orders on this value first, so
+under `elite --lens asymmetry` a one-observation mask outranked every real
+never-lost sample with a smaller largest move. With the default win-rate floor
+a mask cannot reach n = 1. With `BRUTEX_MIN_WIN_RATE_BP=0`, a floor the code
+explicitly allows, the support floor is one trade and n = 1 masks are ranked.
+
+**Decided.** Below two observations the function returns zero, the guard
+`payoff_bp` already has. Proof: XPERM-07, an exhaustive property over 2,800
+small samples that failed before the fix with `[-30]: worst
+9223372036854775807 above payoff 0`.
+
+**Refuted in the same round.** `OverlapWindow` assumes a forward window spans
+exactly `H` bars, but a downward step of the prefix-median cadence can put a
+Signal column's exit at `i + 2H`. The window then drops a pair that overlaps.
+Every shipped path reprojects onto the 60-second Fill cadence, where the exit
+is at most `i + H`. Only `Sweeper::run_ranked` (test callers) and the public
+`edge` reach a Signal column. It is a hardening candidate for its owner, not a
+shipped defect: clamp or assert `exit <= source + H`.

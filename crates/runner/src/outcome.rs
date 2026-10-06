@@ -1399,6 +1399,9 @@ impl Edge {
     /// what to do with it, and `CLAUDE.md` §4 asks that the decision be visible
     /// rather than folded into a sentinel here.
     ///
+    /// **Fewer than two moves.** Zero, exactly as [`Self::payoff_bp`] answers: one
+    /// move has no smallest win and no largest loss to set against it (D-3407).
+    ///
     /// **Nothing won.** The smallest win is zero, so the ratio is zero — the
     /// floor, tying with the worst. A setup that never won is not asymmetric,
     /// it is absent, and ranking it above anything would be the fallback that
@@ -1416,6 +1419,13 @@ impl Edge {
     /// not 3.
     #[must_use]
     pub fn worst_reward_risk_bp(&self) -> i64 {
+        // Fewer than two observations — zero, the guard `payoff_bp` has. One move
+        // is not a distribution, and without this a single win scored `i64::MAX`
+        // above a `payoff_bp` of zero, breaking the "always at or below" this
+        // doc states and topping `rank::ByAsymmetry` (D-3407).
+        if self.n < 2 {
+            return 0;
+        }
         let (smallest_gain, largest_giveback) = if self.mean_paisa < 0.0 {
             (self.min_loss_paisa, self.max_win_paisa)
         } else {
@@ -2862,6 +2872,67 @@ mod tests {
     /// Charging zero to a side would move the ratio by the number of flat bars
     /// rather than by anything about the setup, and on a coarse rung flat bars
     /// are common.
+    /// An `Edge` from a list of moves, built exactly as `edge` fills one: `Sides`
+    /// over the moves, the mean over all of them.
+    fn edge_of_moves(moves: &[i64]) -> Edge {
+        let mut sides = Sides::default();
+        for &x in moves {
+            sides.observe(x);
+        }
+        let n = u64::try_from(moves.len()).unwrap_or(u64::MAX);
+        let sum: i128 = moves.iter().map(|&x| i128::from(x)).sum();
+        Edge {
+            n,
+            mean_paisa: super::wide(sum) / super::wide(i128::from(n)),
+            wins: sides.wins,
+            win_sum: super::wide(sides.win_sum),
+            losses: sides.losses,
+            loss_sum: super::wide(sides.loss_sum),
+            min_win_paisa: super::wide(i128::from(sides.min_win)),
+            max_win_paisa: super::wide(i128::from(sides.max_win)),
+            max_loss_paisa: super::wide(i128::from(sides.max_loss)),
+            min_loss_paisa: super::wide(i128::from(sides.min_loss)),
+            ..Edge::default()
+        }
+    }
+
+    /// **XPERM-07 (D-3407).** `worst_reward_risk_bp`'s own doc: "this is ALWAYS at
+    /// or below" `payoff_bp`. Exhaustive over every sample of one to four moves
+    /// drawn from seven values, flats and both signs included: 2,800 samples. A
+    /// single move scored `i64::MAX` here while `payoff_bp` refused it ("One move
+    /// is not a distribution"), so one lucky move outranked every real sample
+    /// under `rank::ByAsymmetry`.
+    #[test]
+    fn the_worst_case_ratio_is_never_above_the_mean_ratio_on_any_small_sample() {
+        const VALUES: [i64; 7] = [-30, -10, -1, 0, 1, 10, 30];
+        let mut samples = 0_u32;
+        for len in 1..=4_u32 {
+            for code in 0..7_usize.pow(len) {
+                let moves: Vec<i64> = (0..len)
+                    .map(|slot| {
+                        let digit = code / 7_usize.pow(slot) % 7;
+                        VALUES.get(digit).copied().unwrap_or(0)
+                    })
+                    .collect();
+                let edge = edge_of_moves(&moves);
+                assert!(
+                    edge.worst_reward_risk_bp() <= edge.payoff_bp(),
+                    "{moves:?}: worst {} above payoff {}",
+                    edge.worst_reward_risk_bp(),
+                    edge.payoff_bp()
+                );
+                samples += 1;
+            }
+        }
+        assert_eq!(samples, 7 + 49 + 343 + 2_401);
+        assert_eq!(edge_of_moves(&[5]).worst_reward_risk_bp(), 0, "one move");
+        assert_eq!(
+            edge_of_moves(&[-5]).worst_reward_risk_bp(),
+            0,
+            "one short move"
+        );
+    }
+
     #[test]
     fn a_flat_move_is_neither_a_win_nor_a_loss() {
         let mut sides = Sides::default();
