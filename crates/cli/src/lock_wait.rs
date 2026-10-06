@@ -70,10 +70,7 @@ pub(crate) fn within<T>(
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::expect_used,
-    reason = "scratch lock fixtures must fail loudly"
-)]
+#[expect(clippy::expect_used, reason = "scratch lock fixtures must fail loudly")]
 mod tests {
     use super::*;
     use std::cell::Cell;

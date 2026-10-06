@@ -3178,7 +3178,11 @@ mod tests {
         let slow = leg_claims(12);
         assert_eq!((fast, slow), (Some(11), None));
         leg_ends(fast);
-        assert_eq!(sink.run(), 0, "the old shape: the slow leg is left with no run");
+        assert_eq!(
+            sink.run(),
+            0,
+            "the old shape: the slow leg is left with no run"
+        );
         leg_ends(slow);
 
         // The press holds it.
@@ -3186,9 +3190,17 @@ mod tests {
         assert_eq!(press.run, Some(7));
         let fast = leg_claims(11);
         let slow = leg_claims(12);
-        assert_eq!((fast, slow), (None, None), "no leg takes a key the press holds");
+        assert_eq!(
+            (fast, slow),
+            (None, None),
+            "no leg takes a key the press holds"
+        );
         leg_ends(fast);
-        assert_eq!(sink.run(), 7, "the slow feed's events still carry the press");
+        assert_eq!(
+            sink.run(),
+            7,
+            "the slow feed's events still carry the press"
+        );
         leg_ends(slow);
         assert_eq!(sink.run(), 7);
         drop(press);
@@ -3212,7 +3224,9 @@ mod tests {
             .split_once("async fn conduct_with<")
             .expect("conduct_with")
             .1;
-        let claim = conduct.find("PressRun::claim(telemetry::global()").expect("claimed");
+        let claim = conduct
+            .find("PressRun::claim(telemetry::global()")
+            .expect("claimed");
         let first_pass = conduct.find("run_pass(&site").expect("a pass");
         assert!(claim < first_pass, "the key is claimed after a pass ran");
         let _ = std::fs::remove_dir_all(&dir);
@@ -3236,8 +3250,11 @@ mod tests {
                         segment: Segment::Index,
                         symbol: Symbol::new("NIFTY").expect("symbol"),
                         timeframe: Timeframe::MINUTE_1,
-                        month: YearMonth::new(2000 + n / 12, u8::try_from(n % 12 + 1).expect("month"))
-                            .expect("month"),
+                        month: YearMonth::new(
+                            2000 + n / 12,
+                            u8::try_from(n % 12 + 1).expect("month"),
+                        )
+                        .expect("month"),
                     },
                     rows: 1,
                     first_ts_micros: 1,
@@ -3274,7 +3291,11 @@ mod tests {
         .await;
         assert_eq!(progress.passes, CLEAN_EMPTY_PASSES, "{progress:?}");
         assert_eq!(progress.rows_at_start, Some(0));
-        assert_eq!(progress.rows_now, Some(0), "another feed's rows were counted");
+        assert_eq!(
+            progress.rows_now,
+            Some(0),
+            "another feed's rows were counted"
+        );
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
     }
 
@@ -3297,7 +3318,10 @@ mod tests {
         )
         .await;
         assert_eq!(progress.passes, CLEAN_EMPTY_PASSES + 1, "{progress:?}");
-        assert_eq!((progress.rows_at_start, progress.rows_now), (Some(0), Some(1)));
+        assert_eq!(
+            (progress.rows_at_start, progress.rows_now),
+            (Some(0), Some(1))
+        );
     }
 
     /// `press_vendors` over every feed name, an unknown name, a duplicate and
@@ -3311,10 +3335,16 @@ mod tests {
         assert!(press_vendors(&[group("nobody"), group("")]).is_empty());
         for feed in pull::vendor::Feed::ALL {
             let got = press_vendors(&[group(feed.wire()), group(feed.wire())]);
-            assert_eq!(got, feed.store_vendor().into_iter().collect::<Vec<_>>(), "{feed:?}");
+            assert_eq!(
+                got,
+                feed.store_vendor().into_iter().collect::<Vec<_>>(),
+                "{feed:?}"
+            );
         }
-        let all: Vec<(String, Vec<Leg>)> =
-            pull::vendor::Feed::ALL.iter().map(|feed| group(feed.wire())).collect();
+        let all: Vec<(String, Vec<Leg>)> = pull::vendor::Feed::ALL
+            .iter()
+            .map(|feed| group(feed.wire()))
+            .collect();
         assert_eq!(press_vendors(&all).len(), pull::vendor::Feed::ALL.len());
 
         let held = site("press1-rows-in");

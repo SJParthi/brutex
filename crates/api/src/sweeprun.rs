@@ -7173,8 +7173,11 @@ mod tests {
         assert!(site.sweep.lock().expect("slot").is_none(), "no run started");
         // Other tests in this binary may press concurrently, so the event is
         // found by its sentence, which is this press's own body.
-        let said =
-            crate::emitted::landed(from, "api.sweep", "a sweep was refused at its execution lease");
+        let said = crate::emitted::landed(
+            from,
+            "api.sweep",
+            "a sweep was refused at its execution lease",
+        );
         let mut ours = 0;
         for record in &said {
             let why = record
@@ -7186,7 +7189,10 @@ mod tests {
                 assert_eq!(record.level, telemetry::Level::Warn, "{record:?}");
             }
         }
-        assert!(ours >= 1, "the refusal is logged with its reason: {said:?} / {body}");
+        assert!(
+            ours >= 1,
+            "the refusal is logged with its reason: {said:?} / {body}"
+        );
         // And the helper itself, for every refusal class: one Warn, its
         // sentence, and the same answer `refused` gives.
         for why in [

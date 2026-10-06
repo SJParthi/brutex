@@ -456,7 +456,10 @@ fn a_walk_with_a_refused_month_logs_it_and_exits_failed() {
     crate::knobs::clear_all();
     let refused = crate::batch::refused_months(&report);
     assert!(refused > 0, "{report}");
-    assert!(!crate::carries_refusal(&report), "the page is still a report");
+    assert!(
+        !crate::carries_refusal(&report),
+        "the page is still a report"
+    );
     // The exit the arm takes for this page.
     let code = if refused > 0 {
         crate::FAILED

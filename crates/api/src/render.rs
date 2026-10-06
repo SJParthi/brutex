@@ -3378,10 +3378,8 @@ mod tests {
         let made = 70;
         let keep = MAX_FOLDER_SUGGESTIONS + 1;
         for descending in [false, true] {
-            let root = std::env::temp_dir().join(format!(
-                "brutex-det1-{}-{descending}",
-                std::process::id()
-            ));
+            let root = std::env::temp_dir()
+                .join(format!("brutex-det1-{}-{descending}", std::process::id()));
             let _ = std::fs::remove_dir_all(&root);
             std::fs::create_dir_all(&root).unwrap();
             let order: Vec<usize> = if descending {
@@ -5074,7 +5072,10 @@ mod tests {
             (i64::MIN, ">-92233720368547758.08<"),
         ] {
             let html = cell(raw);
-            assert!(html.contains(shown), "{raw} paisa must read {shown}: {html}");
+            assert!(
+                html.contains(shown),
+                "{raw} paisa must read {shown}: {html}"
+            );
             assert_eq!(
                 html.matches('-').count(),
                 usize::from(raw < 0) + 2,

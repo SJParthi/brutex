@@ -641,8 +641,8 @@ fn index_stop_vix_repeated_minute_scratch_is_admitted_before_cold_validation() -
 /// test covered both and asserted the locked case published unavailability,
 /// which was the defect.
 #[test]
-fn index_stop_vix_corrupt_reference_month_publishes_explicit_unavailability()
--> Result<(), String> {
+fn index_stop_vix_corrupt_reference_month_publishes_explicit_unavailability() -> Result<(), String>
+{
     let fixture = Fixture::new()?;
     let loaded = source(&fixture, "NSE-NIFTY", 5, 5)?;
     seed(&fixture, Vendor::Zerodha, 0, false)?;

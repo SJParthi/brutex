@@ -142,7 +142,11 @@ fn a_cold_catalog_open_does_not_hold_the_cache_lock() {
         &Asked::parse(&format!("identity={ID}&completion={pin}&limit=1")).unwrap(),
     )
     .unwrap();
-    assert_eq!(COLD_ADMISSIONS.with(std::cell::Cell::get), cold + 1, "the warm page reopened");
+    assert_eq!(
+        COLD_ADMISSIONS.with(std::cell::Cell::get),
+        cold + 1,
+        "the warm page reopened"
+    );
     assert_eq!(warm["rows"], first["rows"]);
     fs::remove_dir_all(root).unwrap();
 }

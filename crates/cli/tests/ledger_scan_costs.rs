@@ -417,21 +417,27 @@ fn a_population_v5_commit_opens_appends_and_reopens_and_hashes_whole_files() {
     assert_eq!(count(open, "ledger.scan()?"), 1, "{open}");
     let finish = body(POPULATION_V5, "", "fn finish_written(");
     assert!(finish.contains("self.scan()?"), "{finish}");
-    for (head, caller) in [
-        ("fn append_locked(", "the fresh append"),
-        ("fn complete_trailing(", "the trailing completion"),
-    ] {
-        let written = body(POPULATION_V5, "impl PopulationV5Ledger", head);
-        assert_eq!(
-            count(written, "self.finish_written(prepared.population_id)"),
-            1,
-            "{caller} must finish with one rescan: {written}"
-        );
-    }
+    // ONE WRITTEN PATH SINCE D-2555 (conc4-2): a receipt-less trailing block
+    // is cut (or, foreign, discarded) by `withdraw_trailing` and the whole
+    // block is appended fresh, so `complete_trailing` no longer exists.
+    assert!(
+        !POPULATION_V5.contains("fn complete_trailing("),
+        "a retried prefix is rewritten, never completed in place"
+    );
+    let written = body(
+        POPULATION_V5,
+        "impl PopulationV5Ledger",
+        "fn append_locked(",
+    );
+    assert_eq!(
+        count(written, "self.finish_written(prepared.population_id)"),
+        1,
+        "the fresh append must finish with one rescan: {written}"
+    );
     assert_eq!(
         count(POPULATION_V5, "finish_written("),
-        3,
-        "one definition and the two written paths' calls, no other"
+        2,
+        "one definition and the one written path's call, no other"
     );
     let reuse = body(POPULATION_V5, "", "fn reuse_existing(");
     assert!(!reuse.contains("scan("), "{reuse}");

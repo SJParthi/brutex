@@ -748,8 +748,7 @@ pub fn read_model(
     }
     // cli2-5, D-2624: an empty catalog is a seal that was never written —
     // the same answer as no catalog, not a damaged one.
-    if fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_file() && meta.len() == 0)
-    {
+    if fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_file() && meta.len() == 0) {
         return Ok(None);
     }
     #[cfg(test)]
@@ -1498,8 +1497,7 @@ fn read_sealed_generation(
 
 /// The refusal for a 0-byte detail file (cli2-5, D-2624). It says "busy",
 /// like [`busy`], because a retry after the next writer is the remedy.
-const EMPTY_DETAIL: &str =
-    "candidate detail is busy: the file is empty, an interrupted write the next writer fills; retry this exact saved page";
+const EMPTY_DETAIL: &str = "candidate detail is busy: the file is empty, an interrupted write the next writer fills; retry this exact saved page";
 
 fn busy(why: std::fs::TryLockError) -> String {
     match why {

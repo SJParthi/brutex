@@ -5546,7 +5546,7 @@ fn ensure_header(file: &mut File, path: &Path) -> Result<(), PopulationStatistic
         path,
         POPULATION_STATISTICS_V2_HEADER_BYTES,
         POPULATION_STATISTICS_V2_RECORD_STRIDE,
-        &bytes,
+        &header()?,
     )?;
     Ok(())
 }

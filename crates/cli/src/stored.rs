@@ -4481,8 +4481,8 @@ mod tests {
         assert!(prior_session_record(&none, &span).is_none());
 
         let cash = swept_index("RELIANCE").expect("an F&O cash equity");
-        let note = overnight_note(&cash, &span, &daily);
-        assert!(note.contains("-50.00% into the"), "{note}");
+        let measured = overnight_note(&cash, &span, &daily);
+        assert!(measured.contains("-50.00% into the"), "{measured}");
         let without = overnight_note(&cash, &span, &none);
         assert!(!without.contains("-50.0"), "{without}");
         // An index gets nothing, with or without a prior.

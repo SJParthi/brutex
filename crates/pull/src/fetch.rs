@@ -329,6 +329,17 @@ pub enum FetchError {
     },
 }
 
+/// [`FetchError::CredentialNotAHeaderValue`]'s sentence (P1-19-01, D-2525).
+fn write_not_a_header_value(f: &mut core::fmt::Formatter<'_>, header: &str) -> core::fmt::Result {
+    write!(
+        f,
+        "the credential for the {header} header holds a byte no HTTP \
+         header can carry, most often a newline stored with the token. \
+         Nothing was sent and no client was built. Re-store the \
+         credential without it; the value is not shown here."
+    )
+}
+
 impl core::fmt::Display for FetchError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match *self {
@@ -414,13 +425,7 @@ impl core::fmt::Display for FetchError {
                 if names_two { "two" } else { "one" },
                 if given_two { "two were" } else { "one was" }
             ),
-            Self::CredentialNotAHeaderValue { header } => write!(
-                f,
-                "the credential for the {header} header holds a byte no HTTP \
-                 header can carry, most often a newline stored with the token. \
-                 Nothing was sent and no client was built. Re-store the \
-                 credential without it; the value is not shown here."
-            ),
+            Self::CredentialNotAHeaderValue { header } => write_not_a_header_value(f, header),
             Self::PathSegmentUnusable {
                 placeholder,
                 ref value,

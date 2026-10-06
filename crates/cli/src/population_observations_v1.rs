@@ -4562,7 +4562,10 @@ mod tests {
             for (at, _) in shipping.match_indices("init_or_heal_header(") {
                 let tail = &shipping[at..];
                 let call = tail.split_once(')').map_or(tail, |(head, _)| head);
-                if tail.get(..call.len() + 40).is_some_and(|near| near.contains(header)) {
+                if tail
+                    .get(..call.len() + 40)
+                    .is_some_and(|near| near.contains(header))
+                {
                     after = Some(tail);
                 }
             }

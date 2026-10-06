@@ -279,32 +279,6 @@ pub(crate) async fn request_audited(
     }
 }
 
-/// An armed value whose drop runs on the blocking pool, not on the async worker
-/// that drops it. log-2, D-2577.
-struct DropOffWorker<T: Send + 'static>(Option<T>);
-
-impl<T: Send + 'static> Drop for DropOffWorker<T> {
-    fn drop(&mut self) {
-        if let Some(value) = self.0.take() {
-            drop_off_worker(value);
-        }
-    }
-}
-
-/// Drops `value` on Tokio's blocking pool when a runtime is current, and here
-/// otherwise — no runtime means no worker to stall. A runtime already shutting
-/// down drops the closure, and with it `value`, on this thread: the write still
-/// happens, synchronously, which is what it always did. log-2, D-2577.
-fn drop_off_worker<T: Send + 'static>(value: T) {
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) => {
-            let _detached: tokio::task::JoinHandle<()> =
-                handle.spawn_blocking(move || drop(value));
-        }
-        Err(_) => drop(value),
-    }
-}
-
 fn record_json(record: &Record) -> serde_json::Value {
     serde_json::json!({
         "invocation": record.id.to_string(), "origin": record.origin.label(),

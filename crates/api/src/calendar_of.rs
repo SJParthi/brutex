@@ -698,7 +698,9 @@ fn read_minute_spans(file: &store::file::BarFile, month: YearMonth) -> Result<Da
 ///
 /// Two `first_at_or_after` lookups per day in `own`: O(1) each on an indexed
 /// month, `ceil(log2(n + 1))` record reads on a legacy one. `docs/06-limits.md`
-/// D-2581.
+/// D-2581. UNVERIFIED as a measurement: argued from the lookups' shape and
+/// proven in behaviour only by
+/// `api::calendar_of::tests::the_counter_path_needs_every_proved_day_full_and_nothing_outside`.
 fn every_proved_day_is_full(file: &store::file::BarFile, own: &[i64]) -> bool {
     let mut inside = 0_u64;
     for &day in own {

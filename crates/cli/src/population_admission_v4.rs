@@ -4037,7 +4037,8 @@ mod tests {
             .append(true)
             .open(&path)
             .expect("open for the bad record");
-        file.write_all(&[0x5a; RECORD_BYTES]).expect("bad whole record");
+        file.write_all(&[0x5a; RECORD_BYTES])
+            .expect("bad whole record");
         drop(file);
         let before = std::fs::metadata(&path).expect("stat").len();
         assert!(PopulationAdmissionV4Ledger::open_write(root.path(), bounds()).is_err());

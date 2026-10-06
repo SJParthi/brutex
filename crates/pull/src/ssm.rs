@@ -1298,7 +1298,7 @@ mod tests {
                 format!("{pad}{pad}"),
             ] {
                 let refused = refuse_unusable_value(&value).expect_err("padding refuses");
-                assert_eq!(refused.kind, SecretError::Padded, "{:?}", pad);
+                assert_eq!(refused.kind, SecretError::Padded, "{pad:?}");
                 assert!(
                     !refused.detail.contains("SECRETVALUE"),
                     "the value is never quoted: {}",

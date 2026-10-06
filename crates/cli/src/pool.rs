@@ -3899,7 +3899,10 @@ mod tests {
         assert!(!header.iter().any(|name| name.contains(">=")), "{header:?}");
         let source = include_str!("pool.rs");
         let shipping = source.split("\nmod tests {").next().unwrap_or(source);
-        assert!(!shipping.contains("a lower bound on the pooled"), "stale wording");
+        assert!(
+            !shipping.contains("a lower bound on the pooled"),
+            "stale wording"
+        );
 
         // Above the pooled figure: A -100, B +150, A -100.
         let a = [-100, -100];
@@ -3909,7 +3912,11 @@ mod tests {
         assert_eq!(sequence_drawdown(&merged), 100, "the pooled figure is 100");
         // Below the pooled figure: A and B each lose 100 at once.
         assert_eq!(sequence_drawdown(&[-100]), 100, "the column prints 100");
-        assert_eq!(sequence_drawdown(&[-100, -100]), 200, "the pooled figure is 200");
+        assert_eq!(
+            sequence_drawdown(&[-100, -100]),
+            200,
+            "the pooled figure is 200"
+        );
         assert_eq!(sequence_drawdown(&[]), 0);
     }
 }

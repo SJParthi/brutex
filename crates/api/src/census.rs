@@ -1165,7 +1165,11 @@ mod tests {
     fn the_axis_docs_do_not_say_the_surface_is_two_indices() {
         let source = include_str!("census.rs");
         let needle = concat!("exactly these", " two");
-        assert_eq!(source.matches(needle).count(), 0, "a stale surface claim is back");
+        assert_eq!(
+            source.matches(needle).count(),
+            0,
+            "a stale surface claim is back"
+        );
         let stale = concat!("fixes the surface", " at exactly");
         assert_eq!(source.matches(stale).count(), 0);
         let swept = swept_series();

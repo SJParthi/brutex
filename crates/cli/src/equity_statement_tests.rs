@@ -47,6 +47,13 @@ fn banners(underlying: &str) -> [(&'static str, String); 6] {
             "audit-range",
             span_banner(
                 &span(underlying),
+                &crate::stored::DailyContext {
+                    bars: Vec::new(),
+                    references: Vec::new(),
+                    eligibility: Vec::new(),
+                    asked: 0,
+                    found: 0,
+                },
                 underlying,
                 (2025, 1),
                 (2025, 6),

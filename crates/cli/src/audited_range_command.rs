@@ -226,8 +226,14 @@ fn run(
         commit,
         feed: span.vendor.as_str(),
     });
-    let mut header =
-        crate::span_banner(&span, request.underlying, request.from, request.to, commit);
+    let mut header = crate::span_banner(
+        &span,
+        &daily,
+        request.underlying,
+        request.from,
+        request.to,
+        commit,
+    );
     header.push_str(&guard.note());
     header.push_str(&crate::daily_reference_note(&daily, &exact_minute));
     let check = || {

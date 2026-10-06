@@ -9246,18 +9246,30 @@ mod tests {
         let first = prepared(70);
         let second = prepared(71);
         let written = a.append_complete(&first).expect("A commits");
-        assert!(matches!(written, CandidateUniverseProductionCommitV1::Written(_)));
+        assert!(matches!(
+            written,
+            CandidateUniverseProductionCommitV1::Written(_)
+        ));
         let after = b
             .append_complete(&second)
             .expect("B re-scans A's growth and commits");
-        assert!(matches!(after, CandidateUniverseProductionCommitV1::Written(_)));
+        assert!(matches!(
+            after,
+            CandidateUniverseProductionCommitV1::Written(_)
+        ));
         assert_eq!(after.audit().first_row(), first.receipt().row_count());
         let reused = b.append_complete(&first).expect("B reuses A's universe");
-        assert!(matches!(reused, CandidateUniverseProductionCommitV1::Reused(_)));
+        assert!(matches!(
+            reused,
+            CandidateUniverseProductionCommitV1::Reused(_)
+        ));
         assert_eq!(reused.audit(), written.audit());
         // A, now behind B, re-scans too and reuses B's universe.
         let reused = a.append_complete(&second).expect("A reuses B's universe");
-        assert!(matches!(reused, CandidateUniverseProductionCommitV1::Reused(_)));
+        assert!(matches!(
+            reused,
+            CandidateUniverseProductionCommitV1::Reused(_)
+        ));
         let fresh = CandidateUniverseLedgerV1::open_read(root.path(), bounds).expect("reader");
         assert_eq!(
             fresh

@@ -399,7 +399,13 @@ fn set_aside_abandoned_tail(
         .map_err(|why| why.to_string())?;
     file.read_exact(&mut tail).map_err(|why| why.to_string())?;
     let digest = brutex_core::blake3::hash(&tail);
-    let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    let hex = digest
+        .iter()
+        .fold(String::with_capacity(64), |mut hex, byte| {
+            use std::fmt::Write as _;
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        });
     let aside = root.join(format!("{FILE_NAME}.abandoned-{committed}-{hex}"));
     let scratch = root.join(format!("{FILE_NAME}.abandoned-{committed}-{hex}.writing"));
     // A STALE SCRATCH IS UNLINKED, NEVER OPENED, and the new one is made with
@@ -418,15 +424,24 @@ fn set_aside_abandoned_tail(
                 .open(&scratch)
         })
         .and_then(|mut out| {
-            crate::fixed_tail::write_at_end(&mut out, &scratch.display(), 0, &tail, Write::write_all)
-                .map_err(std::io::Error::other)?;
+            crate::fixed_tail::write_at_end(
+                &mut out,
+                &scratch.display(),
+                0,
+                &tail,
+                Write::write_all,
+            )
+            .map_err(std::io::Error::other)?;
             crate::fixed_tail::sync_all_hooked(&out, &scratch)
         })
         .and_then(|()| std::fs::rename(&scratch, &aside));
     if let Err(why) = copied {
         let removed = match std::fs::remove_file(&scratch) {
             Err(gone) if gone.kind() != std::io::ErrorKind::NotFound => {
-                format!("; removing scratch {} also failed: {gone}", scratch.display())
+                format!(
+                    "; removing scratch {} also failed: {gone}",
+                    scratch.display()
+                )
             }
             _ => String::new(),
         };

@@ -1093,7 +1093,8 @@ mod tests {
     #[test]
     fn separating_lines_take_opposite_colours_from_one_open() {
         // (open, high, low, close) for a bar opening at 150, by colour.
-        let colours: [(&str, (i64, i64, i64, i64)); 3] = [
+        type Bar = (i64, i64, i64, i64);
+        let colours: [(&str, Bar); 3] = [
             ("white", (150, 260, 140, 250)),
             ("black", (150, 160, 40, 50)),
             ("doji", (150, 170, 130, 150)),

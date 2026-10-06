@@ -8079,8 +8079,7 @@ mod tests {
     /// and inserted every block visited before it, so across eight fresh maps
     /// the named identity or the index size differed.
     #[test]
-    fn a_foreign_duplicate_block_is_refused_by_its_first_identity_and_a_retry_names_the_same_one()
-     {
+    fn a_foreign_duplicate_block_is_refused_by_its_first_identity_and_a_retry_names_the_same_one() {
         for round in 0..8_u8 {
             let root = root(&format!("foreign-duplicate-{round}"));
             let _ = std::fs::remove_dir_all(&root);

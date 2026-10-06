@@ -525,12 +525,12 @@ impl HttpSource {
     ///
     /// [`FetchError::CredentialNotAHeaderValue`] naming the header and never
     /// the value, for a credential holding a byte no header can carry. The
-    /// assembled `String` is dropped either way; nothing else holds it.
+    /// caller drops the assembled `String` either way; nothing else holds it.
     fn sensitive_header(
         header: &'static str,
-        assembled: String,
+        assembled: &str,
     ) -> Result<reqwest::header::HeaderValue, FetchError> {
-        let mut value = reqwest::header::HeaderValue::from_str(&assembled)
+        let mut value = reqwest::header::HeaderValue::from_str(assembled)
             .map_err(|_| FetchError::CredentialNotAHeaderValue { header })?;
         value.set_sensitive(true);
         Ok(value)
@@ -556,7 +556,7 @@ impl HttpSource {
         // `Credential::print`.
         let print = credential.print();
         let assembled = Self::header_value(spec.auth.scheme, credential)?;
-        let header_value = Self::sensitive_header(spec.auth.header, assembled)?;
+        let header_value = Self::sensitive_header(spec.auth.header, &assembled)?;
         let client = pooled_client().map_err(|why| FetchError::TransportFailed {
             detail: format!("the HTTPS client could not be built: {why}"),
         })?;

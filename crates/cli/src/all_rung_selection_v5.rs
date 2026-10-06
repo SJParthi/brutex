@@ -370,8 +370,7 @@ impl AllRungSelectionV5SuccessorSetV1 {
             preflight_successor_rung(&mut self.fifteen_minute, 900, "15min", arity)?;
         let thirty_minute =
             preflight_successor_rung(&mut self.thirty_minute, 1_800, "30min", arity)?;
-        let sixty_minute =
-            preflight_successor_rung(&mut self.sixty_minute, 3_600, "60min", arity)?;
+        let sixty_minute = preflight_successor_rung(&mut self.sixty_minute, 3_600, "60min", arity)?;
         self.topology
             .require_same("after all-rung Selection V5 successor preflight")?;
 

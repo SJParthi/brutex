@@ -1522,7 +1522,8 @@ const ALLOW_FLOAT: Allow = &[
 const ALLOW_UNSIZED: Allow = &[
     ("crates/api/src/catalog.rs", 1),
     ("crates/pull/src/manifest.rs", 1),
-    ("crates/api/src/autopilot.rs", 1),
+    // +1 clock-1 (D-2578): `FeedState::retired`, one entry per (rung, month) the backfill retires, bounded by the walked calendar.
+    ("crates/api/src/autopilot.rs", 2),
     ("crates/api/src/ladder.rs", 1),
     ("crates/api/src/server.rs", 4),
     ("crates/cli/src/admission_store.rs", 5),
@@ -1536,7 +1537,8 @@ const ALLOW_UNSIZED: Allow = &[
     ("crates/cli/src/execution_v3.rs", 8),
     ("crates/cli/src/execution_v4.rs", 9),
     ("crates/cli/src/frontier.rs", 1),
-    ("crates/cli/src/global_replay.rs", 9),
+    // +1 rep-1 (D-2640): `OfferedIndex::new` sizes its map with `try_reserve(intents.len())` on the next line.
+    ("crates/cli/src/global_replay.rs", 10),
     ("crates/cli/src/global_replay_v2.rs", 10),
     ("crates/cli/src/global_replay_v3.rs", 10),
     ("crates/cli/src/institutional_statistics.rs", 2),
@@ -1623,8 +1625,10 @@ const ALLOW_SORT: Allow = &[
     ("crates/api/src/census.rs", 2),
     ("crates/api/src/master.rs", 1),
     ("crates/api/src/merge.rs", 4),
-    ("crates/api/src/render.rs", 1),
-    ("crates/pull/src/archive.rs", 1),
+    // +1 determinism-1 (D-2571): the capped folder walk sorts the folders it read so the offered set does not depend on directory order; bounded by the cap.
+    ("crates/api/src/render.rs", 2),
+    // +2 determinism-2 (D-2531): the archive walk sorts each directory and its rejected list, per directory, named in docs/06-limits.md.
+    ("crates/pull/src/archive.rs", 3),
     ("crates/pull/src/manifest.rs", 1),
     ("crates/store/src/catalog.rs", 1),
     ("crates/cli/src/boolean_statistics_v1.rs", 1),
@@ -1800,7 +1804,8 @@ const ALLOW_MEMBER: Allow = &[
     ("crates/api/src/indexstopqualificationjson.rs", 1),
     ("crates/api/src/index_consistency_projection.rs", 1),
     ("crates/cli/src/index_stop_search_reader.rs", 1),
-    ("crates/api/src/pullrun.rs", 3),
+    // +2 press-1 (D-2574): `vendors` and `out` hold at most one entry per store vendor, a compile-time handful.
+    ("crates/api/src/pullrun.rs", 5),
     ("crates/cli/src/selection_v6_source.rs", 1),
     ("crates/api/src/booleanjson.rs", 1),
     ("crates/cli/src/audited_range.rs", 1),

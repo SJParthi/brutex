@@ -660,7 +660,10 @@ fn a_snapshot_probe_does_not_refuse_the_writer() -> Result<(), String> {
         .err()
         .ok_or("a live owner must still refuse")?;
     assert!(refused.contains("already owned"), "{refused}");
-    assert!(refused.contains("held past the one-second wait"), "{refused}");
+    assert!(
+        refused.contains("held past the one-second wait"),
+        "{refused}"
+    );
     assert!(started.elapsed() >= crate::lock_wait::WAIT * crate::lock_wait::WAITS);
     drop(opened);
     drop(Journal::open(&scratch.0, "expression-search-v1", [14; 32])?);

@@ -1823,7 +1823,7 @@ fn entry_fills(bars: &[Candle], index: usize, side: Side) -> (i64, i64) {
 /// caller reads. Pricing a same-bar pair therefore refused a long ENTRY whose
 /// low was 1-4 paisa although a long entry reads only the high, and a short's
 /// pessimistic EXIT the same way. The refusal then fell back to a `0` entry or
-/// a flat exit, while `crate::trade::round_trip`, which puts each leg on its
+/// a zero-P&L exit, while `crate::trade::round_trip`, which puts each leg on its
 /// own bar, accepted and priced the same trade — the two halves disagreed
 /// behind a fallback (`CLAUDE.md` §4).
 ///
@@ -7459,7 +7459,7 @@ mod tests {
     /// through `fills_at(bar, bar, ..)`, which checks the SELL leg — the low —
     /// against one tick whichever leg is read. A long entry on O 1000 / H 1000
     /// / L 3 therefore came back `(0, 1000)`, a ZERO worst entry, and a short's
-    /// pessimistic exit on H 1100 / L 3 came back `None` and was booked flat,
+    /// pessimistic exit on H 1100 / L 3 came back `None` and was booked at zero P&L,
     /// while `trade::round_trip` (each leg on its own bar) priced both. On the
     /// old code the first two assertions fail.
     ///

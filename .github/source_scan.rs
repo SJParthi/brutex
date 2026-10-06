@@ -2449,7 +2449,10 @@ fn swallowed(lines: &[String], needle: &str) -> Option<String> {
             .split(|c: char| c.is_whitespace() || c == ';')
             .filter(|w| !w.is_empty())
             .collect();
-        if ended.is_none() {
+        // A STEP'S OWN YAML KEYS ARE NOT SCRIPT. `if: always()` is a
+        // condition, not a function definition; only script lines can end or
+        // replace the script (P15-02, D-2513).
+        if ended.is_none() && !is_step_key(body) {
             ended = ends_the_script(&words);
         }
         if words.first() == Some(&"set")
@@ -2508,6 +2511,20 @@ fn continued(lines: &[String]) -> Vec<String> {
         }
     }
     out
+}
+
+/// Whether `body` is one of a step's YAML keys (`- name:`, `if:`, `run: |`,
+/// `with:` and the like) rather than a line of its script: a lower-case key of
+/// letters, digits, `-` or `_`, then `:` and a space or the end.
+fn is_step_key(body: &str) -> bool {
+    let key = body.strip_prefix("- ").unwrap_or(body);
+    key.split_once(':').is_some_and(|(name, rest)| {
+        !name.is_empty()
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+            && (rest.is_empty() || rest.starts_with(' '))
+    })
 }
 
 /// Why the words of one script line, met before the needle, can end or
@@ -4805,6 +4822,14 @@ mod tests {
         assert!(ends_the_script(&["exit", "-1"]).is_some());
         assert_eq!(ends_the_script(&[]), None);
         assert!(ends_the_script(&["()"]).is_some());
+        assert!(is_step_key("if: always()"));
+        assert!(is_step_key("- name: Gate 3"));
+        assert!(is_step_key("run: |"));
+        assert!(is_step_key("run:"));
+        assert!(!is_step_key("f() { :; }"));
+        assert!(!is_step_key("exit 0"));
+        assert!(!is_step_key("echo a:b"));
+        assert!(!is_step_key("Gate: x"));
         assert_eq!(ends_the_script(&["f()x"]), None);
         assert_eq!(
             continued(&lines("a \\\nb \\\nc\nd\\")),

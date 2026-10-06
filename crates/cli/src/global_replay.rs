@@ -772,7 +772,9 @@ pub(crate) enum OfferedStream {
 /// 200 stream heads per emitted minute". The minute's intents already carry
 /// each constituent, built once in `offered_for_minute`; they are indexed
 /// here once, and each decision is one expected-O(1) probe. The answers are
-/// the scan's: a unique match, an alias, or nothing offered.
+/// the scan's: a unique match, an alias, or nothing offered. UNVERIFIED as a
+/// measured bound; proven in shape by
+/// `cli::global_replay::tests::a_minute_of_200_offers_is_indexed_once_and_answers_like_the_scan`.
 pub(crate) struct OfferedIndex(HashMap<Constituent, OfferedStream>);
 
 impl OfferedIndex {
@@ -5265,11 +5267,11 @@ mod tests {
         let streams: Vec<usize> = (0..200).rev().collect();
         let index = OfferedIndex::new(&intents, &streams).expect("index");
         for (intent, stream) in intents.iter().zip(&streams) {
-            assert_eq!(index.find(intent.constituent), OfferedStream::Found(*stream));
             assert_eq!(
-                find_offered_stream(&index, intent.constituent),
-                Ok(*stream)
+                index.find(intent.constituent),
+                OfferedStream::Found(*stream)
             );
+            assert_eq!(find_offered_stream(&index, intent.constituent), Ok(*stream));
         }
         // Same priority, other side: a different constituent, not offered.
         let short = offered_constituent(1, Direction::Short);

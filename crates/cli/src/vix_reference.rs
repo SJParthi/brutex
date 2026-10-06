@@ -31,7 +31,7 @@ use brutex_core::instrument::{Exchange, InstrumentKey};
 use brutex_core::vendor::Vendor;
 use indicators::Candle;
 use pull::session::IstMoment;
-use store::file::{BarFile, StoreError};
+use store::file::BarFile;
 use store::format::Bar;
 use store::path::{FileKind, StorePath, Timeframe, YearMonth};
 
@@ -167,7 +167,7 @@ impl VixReferenceMonth {
         month: YearMonth,
     ) -> Result<Self, VixOpenRefusal> {
         let key = InstrumentKey::index(Exchange::Nse, VIX_REFERENCE_SYMBOL).map_err(|why| {
-            unavailable(format!(
+            VixOpenRefusal::Unavailable(format!(
                 "the fixed reference key NSE-{VIX_REFERENCE_SYMBOL} is invalid: {why}. Nothing was read"
             ))
         })?;
@@ -179,7 +179,7 @@ impl VixReferenceMonth {
 
         let path = StorePath::for_key(vendor, &key, Timeframe::MINUTE_1, month, FileKind::Bars)
             .map_err(|why| {
-                unavailable(format!(
+                VixOpenRefusal::Unavailable(format!(
                     "the {vendor} NSE-{VIX_REFERENCE_SYMBOL} 1min path for {month} is invalid: {why}. Nothing was read",
                     vendor = vendor.as_str()
                 ))
@@ -718,7 +718,7 @@ mod tests {
         assert!(
             !matches!(
                 BarFile::open_existing(&root, path, symbol_id),
-                Err(StoreError::Missing { .. })
+                Err(store::file::StoreError::Missing { .. })
             ),
             "the fixture exists; lock must not be reclassified as missing"
         );
@@ -774,10 +774,15 @@ mod tests {
         // Missing: Unavailable, without the wait.
         let started = std::time::Instant::now();
         match VixReferenceMonth::open_waiting(&root, Vendor::Groww, month()).map(|m| m.records()) {
-            Err(VixOpenRefusal::Unavailable(why)) => assert!(why.contains("does not exist"), "{why}"),
+            Err(VixOpenRefusal::Unavailable(why)) => {
+                assert!(why.contains("does not exist"), "{why}");
+            }
             other => panic!("a missing month is unavailable, not {other:?}"),
         }
-        assert!(started.elapsed() < bound, "a missing month is not waited for");
+        assert!(
+            started.elapsed() < bound,
+            "a missing month is not waited for"
+        );
 
         // Malformed: Unavailable.
         std::fs::write(&file_path, b"torn reference month").expect("torn fixture");

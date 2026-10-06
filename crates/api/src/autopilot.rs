@@ -3845,8 +3845,18 @@ fn note_decision(feed: &str, month: YearMonth, attempts: u8, last: Option<&str>,
     let (level, message, why, secs) = match next {
         Next::Advance | Next::Retry => return,
         Next::Wait { secs } => (telemetry::Level::Warn, "backing off", last, Some(*secs)),
-        Next::Stall { reason } => (telemetry::Level::Warn, "stalled", Some(reason.as_str()), None),
-        Next::Halt { reason } => (telemetry::Level::Error, "halted", Some(reason.as_str()), None),
+        Next::Stall { reason } => (
+            telemetry::Level::Warn,
+            "stalled",
+            Some(reason.as_str()),
+            None,
+        ),
+        Next::Halt { reason } => (
+            telemetry::Level::Error,
+            "halted",
+            Some(reason.as_str()),
+            None,
+        ),
     };
     let month = month.to_string();
     let mut event = telemetry::Event::new(level, "autopilot", message)
@@ -4917,10 +4927,7 @@ mod tests {
         assert_eq!(admit_newly_drivable(&mut empty, right), 3);
         // And the loop calls it: a source check on `fly`.
         let source = include_str!("autopilot.rs");
-        let fly = source
-            .split_once("pub async fn fly(")
-            .expect("fly")
-            .1;
+        let fly = source.split_once("pub async fn fly(").expect("fly").1;
         let fly = &fly[..fly.find("\n}\n").expect("fly ends")];
         assert!(fly.contains("rederive_on_new_day(&mut feeds, &mut derived_for, day)"));
         // The helper only acts on a CHANGED day.
@@ -8101,15 +8108,27 @@ mod tests {
         let barrier = store::file::StoreError::BarrierFailed { path: path.clone() }.to_string();
         for (reason, class) in [
             (io(std::io::ErrorKind::Other, Some(5)), Trouble::Store),
-            (io(std::io::ErrorKind::QuotaExceeded, Some(122)), Trouble::Store),
-            (io(std::io::ErrorKind::FileTooLarge, Some(27)), Trouble::Store),
-            (io(std::io::ErrorKind::StorageFull, Some(28)), Trouble::Store),
+            (
+                io(std::io::ErrorKind::QuotaExceeded, Some(122)),
+                Trouble::Store,
+            ),
+            (
+                io(std::io::ErrorKind::FileTooLarge, Some(27)),
+                Trouble::Store,
+            ),
+            (
+                io(std::io::ErrorKind::StorageFull, Some(28)),
+                Trouble::Store,
+            ),
             (barrier.clone(), Trouble::Store),
             (io(std::io::ErrorKind::Other, Some(4)), Trouble::Transport),
             (io(std::io::ErrorKind::Other, Some(55)), Trouble::Transport),
             (io(std::io::ErrorKind::Other, None), Trouble::Transport),
             (String::from("operation timed out"), Trouble::Transport),
-            (String::from("status 401 from the vendor"), Trouble::Credential),
+            (
+                String::from("status 401 from the vendor"),
+                Trouble::Credential,
+            ),
             (String::new(), Trouble::Transport),
         ] {
             assert_eq!(classify(&reason), class, "{reason}");
@@ -8172,7 +8191,11 @@ mod tests {
         };
         assert_eq!(settle(&site, &mut state, &failed), 0);
         let said = landed(from, "stalled", "conc13-4 operation timed out");
-        assert_eq!(said.len(), 1, "the stall names the month it passed: {said:?}");
+        assert_eq!(
+            said.len(),
+            1,
+            "the stall names the month it passed: {said:?}"
+        );
         assert_eq!(said[0].level, telemetry::Level::Warn);
 
         let from = crate::emitted::mark();
@@ -8282,7 +8305,7 @@ mod tests {
                 let mut status = Status::default();
                 let mut lost = 0u64;
                 let mut first: Option<String> = None;
-                let mut last = String::new();
+                let mut newest = String::new();
                 for at in 0..len {
                     if (bits >> at) & 1 == 1 {
                         let why = format!("refusal {at}");
@@ -8290,10 +8313,10 @@ mod tests {
                         if first.is_none() {
                             first = Some(why.clone());
                         }
-                        last.clone_from(&why);
+                        newest.clone_from(&why);
                         status.note_journal(Some(why));
                     } else {
-                        last.clear();
+                        newest.clear();
                         status.note_journal(None);
                     }
                 }
@@ -8303,7 +8326,7 @@ mod tests {
                     first.unwrap_or_default(),
                     "{len}/{bits:b}"
                 );
-                assert_eq!(status.journal_error, last, "{len}/{bits:b}");
+                assert_eq!(status.journal_error, newest, "{len}/{bits:b}");
             }
         }
         let mut status = Status {
@@ -8359,10 +8382,7 @@ mod tests {
                 first.halted = String::from("the broker credential is dead");
             }
         });
-        assert!(matches!(
-            admit_resume(&control),
-            Admission::Partial { .. }
-        ));
+        assert!(matches!(admit_resume(&control), Admission::Partial { .. }));
     }
 
     /// conc15-1, D-2588. On the old code a day pass that found nothing owed

@@ -1246,7 +1246,10 @@ mod tests {
             .split_once("pub(crate) fn ledger_v6(")
             .expect("the verb exists");
         let verb = verb.split_once("\n}\n").map_or(verb, |(body, _)| body);
-        assert!(verb.contains("run_route(request, &mut out, drop)"), "{verb}");
+        assert!(
+            verb.contains("run_route(request, &mut out, drop)"),
+            "{verb}"
+        );
         let (_, replay) = production
             .split_once("pub(crate) fn ledger_v6_replay(")
             .expect("the replay verb exists");
@@ -1274,12 +1277,13 @@ mod tests {
                 .or_else(|| source.split_once("\npub(crate) mod tests {"))
                 .map_or(source, |(before, _)| before);
             assert!(!production.contains("create_dir_all("), "{name}");
-            assert!(production.contains("crate::durable_dir::create_all("), "{name}");
+            assert!(
+                production.contains("crate::durable_dir::create_all("),
+                "{name}"
+            );
         }
-        let temp = std::env::temp_dir().join(format!(
-            "brutex-ledger-v6-durable-{}",
-            std::process::id()
-        ));
+        let temp =
+            std::env::temp_dir().join(format!("brutex-ledger-v6-durable-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp);
         let deep = temp.join("a").join("b");
         let roots = RungRoots::create(&deep, "5min").expect("a fresh deep ROOT is laid out");

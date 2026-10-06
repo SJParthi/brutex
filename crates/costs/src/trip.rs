@@ -1906,7 +1906,7 @@ mod tests {
     /// COMPILES on the old code, so that doctest fails there) and by this test
     /// over the public path: every broker on both venues refuses 2023-06-15
     /// and the last day before 2024-10-01, and on the first verified day and
-    /// on the old example's 2026-05-15 every set carries the flat ₹40 round
+    /// on the old example's 2026-05-15 every set carries the fixed ₹40 round
     /// trip, with no investor-protection rate on the BSE.
     #[test]
     fn a_resolved_bse_set_carries_the_flat_brokerage_and_no_ipft() {

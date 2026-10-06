@@ -610,6 +610,10 @@ mod tests {
     /// last instant does not match (still `Rows`), a file SHORTER than the
     /// counter (still `Rows`), and an entry counting zero rows.
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one table of grown, prefixed, shorter and empty months against one census, conc14-1"
+    )]
     fn a_month_grown_past_its_census_is_ahead_not_lying() -> Result<(), Box<dyn std::error::Error>>
     {
         let root = std::env::temp_dir().join(format!(

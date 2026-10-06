@@ -2095,9 +2095,12 @@ fn range_all_arm(
 /// The exit rule travels with the command (conc13-6, D-2642): `sweep-stored`
 /// takes [`sweep_exit`], so a halted or unmeasured ladder exits [`FAILED`];
 /// `audit-stored` keeps [`work_exit`].
+/// A stored-month command and the exit rule its report is judged by.
+type MonthCommand = (fn(&str, &str, &str, u16, u8, u64) -> String, fn(&str) -> u8);
+
 fn stored_month_arm(
     out: &mut String,
-    (command, exit): (fn(&str, &str, &str, u16, u8, u64) -> String, fn(&str) -> u8),
+    (command, exit): MonthCommand,
     what: (&str, &str, &str),
     when: (&str, &str, &str),
 ) -> u8 {
@@ -23478,7 +23481,8 @@ mod tests {
             }
             found
         };
-        let refused_page = "PROVENANCE\nrefused: `scrreen` is not a command this build knows\nusage";
+        let refused_page =
+            "PROVENANCE\nrefused: `scrreen` is not a command this build knows\nusage";
         for code in [super::OK, super::FAILED, MISUSED, 3, u8::MAX] {
             for page in [refused_page, "", "a report with no refusal line"] {
                 let event = super::finished_event("screen", code, page);
@@ -24157,7 +24161,10 @@ mod tests {
         let what = ("zerodha", "NIFTY", "1min");
         let when = ("2025", "5", "1");
         for (command, want) in [
-            (halted as fn(&str, &str, &str, u16, u8, u64) -> String, FAILED),
+            (
+                halted as fn(&str, &str, &str, u16, u8, u64) -> String,
+                FAILED,
+            ),
             (unmeasured, FAILED),
             (complete, OK),
         ] {

@@ -451,7 +451,10 @@ fn the_receipt_fast_path_still_syncs() {
     {
         let _armed = Armed::arm("fast-path-wrong.bin", Kind::Sync);
         assert!(publish(&path, &expected).is_err());
-        assert!(Armed::pending(), "no barrier runs for bytes that do not match");
+        assert!(
+            Armed::pending(),
+            "no barrier runs for bytes that do not match"
+        );
     }
     assert_eq!(fs::read(&path).expect("never overwritten"), wrong);
     // A fault armed on another name does not fire: the barrier is this file's.

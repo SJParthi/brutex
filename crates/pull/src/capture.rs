@@ -949,7 +949,10 @@ mod tests {
         let landed = write_new_capture_with_stamp(&dir, prefix, b"NEW BODY", stamp)
             .expect("a later name is free");
         assert_eq!(landed, candidate_path(&dir, prefix, stamp, 2));
-        assert_eq!(std::fs::read(&landed).expect("new"), b"NEW BODY".to_vec());
+        assert_eq!(
+            std::fs::read(&landed).expect("the landed body"),
+            b"NEW BODY".to_vec()
+        );
         assert_eq!(
             std::fs::read(&crashed).expect("left staging survives"),
             b"CRASHED HALF".to_vec()

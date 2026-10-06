@@ -3635,7 +3635,14 @@ fn one_rung_derives_and_sweeps_one_read() {
         commit: commit.to_owned(),
     };
     let load = || {
-        crate::load_audit_inputs(&fixture.root, Vendor::Zerodha, "NIFTY", "5min", months, commit)
+        crate::load_audit_inputs(
+            &fixture.root,
+            Vendor::Zerodha,
+            "NIFTY",
+            "5min",
+            months,
+            commit,
+        )
     };
     let raw = crate::stored::load_span(
         &fixture.root,

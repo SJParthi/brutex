@@ -531,25 +531,29 @@ mod tests {
                     .days_from_epoch(),
             )
         };
-        let (may1, may29, may30, may31) = (
+        let (first, friday, saturday, sunday) = (
             epoch(2020, 5, 1),
             epoch(2020, 5, 29),
             epoch(2020, 5, 30),
             epoch(2020, 5, 31),
         );
-        assert_eq!(kind_of(may31), DayKind::Closed, "the premise: a Sunday");
-        assert_eq!(kind_of(may30), DayKind::Closed, "and a Saturday");
-        assert_eq!(kind_of(may29), DayKind::Open(Session::full()));
-        assert_eq!(last_not_closed(may1, may31), Some(may29));
-        assert_eq!(last_not_closed(may1, may29), Some(may29), "already open");
-        assert_eq!(last_not_closed(may29, may29), Some(may29), "one open day");
+        assert_eq!(kind_of(sunday), DayKind::Closed, "the premise: a Sunday");
+        assert_eq!(kind_of(saturday), DayKind::Closed, "and a Saturday");
+        assert_eq!(kind_of(friday), DayKind::Open(Session::full()));
+        assert_eq!(last_not_closed(first, sunday), Some(friday));
+        assert_eq!(last_not_closed(first, friday), Some(friday), "already open");
         assert_eq!(
-            last_not_closed(may30, may31),
+            last_not_closed(friday, friday),
+            Some(friday),
+            "one open day"
+        );
+        assert_eq!(
+            last_not_closed(saturday, sunday),
             None,
             "a closed weekend alone"
         );
-        assert_eq!(last_not_closed(may31, may30), None, "an empty range");
-        assert_eq!(last_not_closed(may31, may31), None, "one closed day");
+        assert_eq!(last_not_closed(sunday, saturday), None, "an empty range");
+        assert_eq!(last_not_closed(sunday, sunday), None, "one closed day");
         // UNMEASURED IS NOT CLOSED: past the window the day is still asked.
         assert_eq!(
             last_not_closed(LAST_DAY + 1, LAST_DAY + 9),

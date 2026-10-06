@@ -143,17 +143,46 @@ fn sweep_all_keeps_the_column_zero_refusal_and_dispatch_status() {
 #[test]
 fn refused_months_reads_the_tally_line_only() {
     use crate::batch::refused_months;
-    assert_eq!(refused_months("1 swept · 2 refused · 10 bars · 3 combinations kept\n"), 2);
-    assert_eq!(refused_months("0 swept · 0 refused · 0 bars · 0 combinations kept"), 0);
     assert_eq!(
-        refused_months(&format!("{} swept · {} refused · 0 bars", u64::MAX, u64::MAX)),
+        refused_months("1 swept · 2 refused · 10 bars · 3 combinations kept\n"),
+        2
+    );
+    assert_eq!(
+        refused_months("0 swept · 0 refused · 0 bars · 0 combinations kept"),
+        0
+    );
+    assert_eq!(
+        refused_months(&format!(
+            "{} swept · {} refused · 0 bars",
+            u64::MAX,
+            u64::MAX
+        )),
         u64::MAX
     );
-    assert_eq!(refused_months("  1 swept · 2 refused · 0 bars"), 0, "indented");
-    assert_eq!(refused_months("x1 swept · 2 refused · 0 bars"), 0, "not a count");
+    assert_eq!(
+        refused_months("  1 swept · 2 refused · 0 bars"),
+        0,
+        "indented"
+    );
+    assert_eq!(
+        refused_months("x1 swept · 2 refused · 0 bars"),
+        0,
+        "not a count"
+    );
     assert_eq!(refused_months(" swept · 2 refused · 0 bars"), 0, "no count");
-    assert_eq!(refused_months("1 swept · -2 refused · 0 bars"), 0, "negative");
-    assert_eq!(refused_months("1 swept · 2 refused"), 0, "no trailing tally");
-    assert_eq!(refused_months("  REFUSED  zerodha NIFTY 1min 2025-05  — torn\n"), 0);
+    assert_eq!(
+        refused_months("1 swept · -2 refused · 0 bars"),
+        0,
+        "negative"
+    );
+    assert_eq!(
+        refused_months("1 swept · 2 refused"),
+        0,
+        "no trailing tally"
+    );
+    assert_eq!(
+        refused_months("  REFUSED  zerodha NIFTY 1min 2025-05  — torn\n"),
+        0
+    );
     assert_eq!(refused_months(""), 0);
 }

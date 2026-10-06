@@ -2281,9 +2281,18 @@ const PULL_SCRATCH_2: &str = "
 //   not-a-pair     deliberately malformed `Set-Cookie` values the
 //     cookie jar must skip. They are invented nonsense whose whole
 //     purpose is to not parse.
+//   new          `capture.rs`, an `expect()` label in pull1-3's
+//     staging test ("new capture landed", D-2527).
+//   budgeted     `http.rs`, test labels of pull1-2's governor test
+//     ("a budgeted feed builds", D-2524).
+//   entry        `benches/ratio.rs`, bench labels ("C-26 entry lookup"),
+//     prose about a census entry count, not a path segment.
+//   published    `capture.rs`, prose in the staged-capture refusals
+//     (pull1-3, D-2527): "no capture was published under ...". The
+//     English verb, never a path segment.
 const PULL_ASSERT: &str = "
     zerodha-unreadable-0 partial splittable untouched
-    emit-sites novalue not-a-pair
+    emit-sites novalue not-a-pair new published budgeted entry
 ";
 
 // ---- group 30: TWO YEAR-MONTHS AND TWO BARE NUMBERS, all four

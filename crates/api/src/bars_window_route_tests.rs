@@ -557,7 +557,10 @@ async fn bars_window_and_backtest_reads_run_in_the_store_read_pool_and_answer_42
     .await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
     assert!(body.contains("was not admitted"), "{body}");
-    assert!(body.contains(r#""runs":[]"#), "the page's own shape: {body}");
+    assert!(
+        body.contains(r#""runs":[]"#),
+        "the page's own shape: {body}"
+    );
 
     drop(held);
     let (status, _, body) =
@@ -573,11 +576,17 @@ async fn bars_window_and_backtest_reads_run_in_the_store_read_pool_and_answer_42
         .split_once("\nasync fn bars_window_json(")
         .and_then(|(_, rest)| rest.split_once("\n}\n"))
         .map_or("", |(body, _)| body);
-    assert!(window.contains("crate::detail::run_store_read("), "{window}");
+    assert!(
+        window.contains("crate::detail::run_store_read("),
+        "{window}"
+    );
     let backtest = include_str!("backtest.rs");
     let handler = backtest
         .split_once("\npub async fn backtest_json(")
         .and_then(|(_, rest)| rest.split_once("\n}\n"))
         .map_or("", |(body, _)| body);
-    assert!(handler.contains("crate::detail::run_store_read("), "{handler}");
+    assert!(
+        handler.contains("crate::detail::run_store_read("),
+        "{handler}"
+    );
 }

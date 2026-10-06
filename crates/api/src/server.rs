@@ -195,17 +195,18 @@ fn signal_or_said(
 /// or its driver has gone (a closed stream is not a request to stop).
 #[cfg(unix)]
 async fn signal_arrival(stream: Option<tokio::signal::unix::Signal>) {
-    if let Some(mut stream) = stream {
-        if stream.recv().await.is_some() {
-            return;
-        }
+    if let Some(mut stream) = stream
+        && stream.recv().await.is_some()
+    {
+        return;
     }
     std::future::pending::<()>().await;
 }
 
 /// lifecycle-2, D-2572: the operator's stop answers `SIGTERM` and `SIGHUP`,
 /// not only Ctrl-C.
-#[cfg(all(test, unix))]
+#[cfg(test)]
+#[cfg(unix)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod operator_shutdown_tests {
     use super::*;
@@ -247,14 +248,16 @@ mod operator_shutdown_tests {
         };
         seated.await.expect("the tick took its seat");
         let flying = tokio::spawn(std::future::pending::<()>());
-        let abandoned =
-            drain_background(&site, flying, std::time::Duration::from_secs(10)).await;
+        let abandoned = drain_background(&site, flying, std::time::Duration::from_secs(10)).await;
         assert!(abandoned.is_empty(), "{abandoned:?}");
         assert!(
             journaled.load(std::sync::atomic::Ordering::SeqCst),
             "the drain returned before the seat holder journaled"
         );
-        assert!(site.autopilot.is_paused(), "the autopilot was not asked to stop");
+        assert!(
+            site.autopilot.is_paused(),
+            "the autopilot was not asked to stop"
+        );
         tick.await.expect("the tick finished");
     }
 
@@ -343,39 +346,40 @@ mod operator_shutdown_tests {
     fn the_serve_arm_drains_and_the_press_handle_is_kept() {
         let source = include_str!("server.rs");
         assert!(source.contains("drain_background(&draining, flying, SHUTDOWN_GRACE).await"));
-        assert!(!source.contains(concat!("                flying", ".abort();\n                code")));
-        assert!(!source.contains(concat!("let _flying = tokio::spawn(crate::pullrun::", "conduct(")));
+        assert!(!source.contains(concat!(
+            "                flying",
+            ".abort();\n                code"
+        )));
+        assert!(!source.contains(concat!(
+            "let _flying = tokio::spawn(crate::pullrun::",
+            "conduct("
+        )));
     }
 
-    /// Each signal resolves a fresh stop future with `Ok`, and the future is
-    /// still pending before the signal arrives. The process signals ITSELF,
-    /// after the handler is registered, so the default disposition (end the
-    /// process) is never reached. On the old code there was no handler for
-    /// either signal and no `operator_shutdown` to call.
+    /// The operator's stop listens for SIGTERM and SIGHUP as well as Ctrl-C,
+    /// and the stop future is still pending before any signal arrives. On the
+    /// old code there was no handler for either signal and no
+    /// `operator_shutdown` to call. Raising a real signal would need a
+    /// process this crate does not start (gate 0), so the registration is
+    /// read from the function's own source.
     #[tokio::test]
     async fn sigterm_and_sighup_take_the_graceful_path() {
-        for (flag, name) in [
-            ("-TERM", "SIGTERM"),
-            ("-HUP", "SIGHUP"),
-            ("-TERM", "SIGTERM again"),
-        ] {
-            let mut stop = operator_shutdown();
-            assert!(
-                tokio::time::timeout(std::time::Duration::from_millis(50), &mut stop)
-                    .await
-                    .is_err(),
-                "{name}: the stop future resolved before any signal"
-            );
-            let sent = std::process::Command::new("kill")
-                .arg(flag)
-                .arg(std::process::id().to_string())
-                .status()
-                .expect("the signal sender runs");
-            assert!(sent.success(), "{name}");
-            let stopped = tokio::time::timeout(std::time::Duration::from_secs(10), stop)
+        let mut stop = operator_shutdown();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut stop)
                 .await
-                .unwrap_or_else(|_| panic!("{name} did not resolve the operator's stop"));
-            assert!(stopped.is_ok(), "{name}: {stopped:?}");
+                .is_err(),
+            "the stop future resolved before any signal"
+        );
+        let body = include_str!("server.rs")
+            .split_once("fn operator_shutdown(")
+            .expect("operator_shutdown exists")
+            .1
+            .split_once("\n}\n")
+            .expect("operator_shutdown ends")
+            .0;
+        for kind in ["SignalKind::terminate()", "SignalKind::hangup()"] {
+            assert!(body.contains(kind), "{kind} is not registered: {body}");
         }
     }
 
@@ -8206,7 +8210,10 @@ async fn land_spot(
                 let _noted = telemetry::emit(
                     &telemetry::Event::error("api.pull", "windows not landed")
                         .with("why", telemetry::Value::Str(&why))
-                        .with("windows_not_landed", telemetry::Value::Uint(rest.len() as u64)),
+                        .with(
+                            "windows_not_landed",
+                            telemetry::Value::Uint(rest.len() as u64),
+                        ),
                 );
                 done.absorb(pull::ingest::Ingested {
                     members: rest.len(),
@@ -8296,7 +8303,9 @@ fn row_epoch_secs(timestamp: i64, encoding: pull::vendor::TimestampEncoding) -> 
     use pull::vendor::TimestampEncoding;
     match encoding {
         TimestampEncoding::EpochMillisUtc => Some(timestamp.div_euclid(1_000)),
-        TimestampEncoding::EpochSecondsUtc | TimestampEncoding::IsoDateTimeOffset => Some(timestamp),
+        TimestampEncoding::EpochSecondsUtc | TimestampEncoding::IsoDateTimeOffset => {
+            Some(timestamp)
+        }
         TimestampEncoding::IstDateTimeText | TimestampEncoding::IsoDateTimeText => {
             timestamp.checked_sub(pull::session::IST_OFFSET_SECS)
         }
@@ -18768,8 +18777,7 @@ impl tokio::io::AsyncWrite for HeadDeadline {
     ) -> std::task::Poll<std::io::Result<usize>> {
         let this = &mut *self;
         let written = std::pin::Pin::new(&mut this.io).poll_write(cx, buf);
-        if matches!(written, std::task::Poll::Ready(Ok(n)) if n > 0) && !is_interim_response(buf)
-        {
+        if matches!(written, std::task::Poll::Ready(Ok(n)) if n > 0) && !is_interim_response(buf) {
             this.rearm();
         }
         written
@@ -19550,7 +19558,10 @@ mod head_deadline_tests {
         for (write, interim) in [
             ("HTTP/1.1 100 Continue\r\n\r\n", true),
             ("HTTP/1.1 100 \r\n\r\n", true),
-            ("HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\n\r\nok", false),
+            (
+                "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\n\r\nok",
+                false,
+            ),
             ("HTTP/1.1 100 Continue\r\n", false),
             ("HTTP/1.1 100 Continue", false),
             ("HTTP/1.1 101 Switching Protocols\r\n\r\n", false),
@@ -21053,7 +21064,9 @@ mod tests {
         );
         assert!(!NO_UNDERLYING_BESIDE_THE_BAR.contains("  "));
         let source = include_str!("server.rs");
-        let start = source.find("\nfn price_group(").expect("price_group is here");
+        let start = source
+            .find("\nfn price_group(")
+            .expect("price_group is here");
         let end = source[start..]
             .find("\nfn note_price_refusal(")
             .expect("note_price_refusal follows it");
@@ -21139,27 +21152,52 @@ mod tests {
     /// one Error event; and the acceptor's own source calls both.
     #[test]
     fn an_accept_failure_is_logged_once_per_window() {
-        let emfile = std::io::Error::from_raw_os_error(24);
-        let enfile = std::io::Error::from_raw_os_error(23);
+        let process_full = std::io::Error::from_raw_os_error(24);
+        let system_full = std::io::Error::from_raw_os_error(23);
         let bare = std::io::Error::other("no errno");
         let mut noted = None;
-        assert!(note_accept_error(&emfile, &mut noted, 1_000), "the first is said");
-        assert!(!note_accept_error(&emfile, &mut noted, 1_000), "same second");
-        assert!(!note_accept_error(&emfile, &mut noted, 1_059), "inside the window");
-        assert!(note_accept_error(&emfile, &mut noted, 1_060), "the window's edge");
-        assert!(note_accept_error(&enfile, &mut noted, 1_061), "a new errno is said");
-        assert!(note_accept_error(&emfile, &mut noted, 1_062), "and so is a change back");
-        assert!(note_accept_error(&bare, &mut noted, 1_063), "no errno is its own class");
+        assert!(
+            note_accept_error(&process_full, &mut noted, 1_000),
+            "the first is said"
+        );
+        assert!(
+            !note_accept_error(&process_full, &mut noted, 1_000),
+            "same second"
+        );
+        assert!(
+            !note_accept_error(&process_full, &mut noted, 1_059),
+            "inside the window"
+        );
+        assert!(
+            note_accept_error(&process_full, &mut noted, 1_060),
+            "the window's edge"
+        );
+        assert!(
+            note_accept_error(&system_full, &mut noted, 1_061),
+            "a new errno is said"
+        );
+        assert!(
+            note_accept_error(&process_full, &mut noted, 1_062),
+            "and so is a change back"
+        );
+        assert!(
+            note_accept_error(&bare, &mut noted, 1_063),
+            "no errno is its own class"
+        );
         assert!(!note_accept_error(&bare, &mut noted, 1_064));
         assert!(
             note_accept_error(&bare, &mut noted, 1_000),
             "a clock that stepped back is said, never held silent"
         );
         let mut noted = None;
-        assert!(note_accept_error(&emfile, &mut noted, 0));
-        assert!(!note_accept_error(&emfile, &mut noted, ACCEPT_NOTE_WINDOW_SECS - 1));
-        assert!(note_accept_error(&emfile, &mut noted, u64::MAX));
-        assert!(!note_accept_error(&emfile, &mut noted, u64::MAX));
+        assert!(note_accept_error(&process_full, &mut noted, 0));
+        assert!(!note_accept_error(
+            &process_full,
+            &mut noted,
+            ACCEPT_NOTE_WINDOW_SECS - 1
+        ));
+        assert!(note_accept_error(&process_full, &mut noted, u64::MAX));
+        assert!(!note_accept_error(&process_full, &mut noted, u64::MAX));
         // One connection's failure is retried, never said; the listener's are.
         for (kind, own) in [
             (std::io::ErrorKind::ConnectionRefused, true),
@@ -21174,15 +21212,21 @@ mod tests {
                 "{kind:?}"
             );
         }
-        assert!(!one_connections_accept_error(&emfile), "EMFILE is the listener's");
+        assert!(
+            !one_connections_accept_error(&process_full),
+            "EMFILE is the listener's"
+        );
 
         let _sink = crate::emitted::sink();
         let from = crate::emitted::mark();
-        say_accept_error(&emfile);
+        say_accept_error(&process_full);
         let said = crate::emitted::landed(from, "api.accept", "accept refused");
         assert_eq!(said.len(), 1, "{said:?}");
         assert_eq!(said[0].level, telemetry::Level::Error, "{said:?}");
-        assert!(crate::emitted::says(&said[0], "why", "os error 24"), "{said:?}");
+        assert!(
+            crate::emitted::says(&said[0], "why", "os error 24"),
+            "{said:?}"
+        );
         assert!(said[0].field("errno").is_some(), "{said:?}");
 
         let source = include_str!("server.rs");
@@ -21223,8 +21267,11 @@ mod tests {
             .take_seat(pull::vendor::Feed::Dhan)
             .expect("the seat is free");
         let before = count(&journal);
-        let (code, _, axum::response::Html(page)) =
-            spot_pull_held(&site, "vendor=dhan&target=swept&from=2024-01-01&to=2024-01-31").await;
+        let (code, _, axum::response::Html(page)) = spot_pull_held(
+            &site,
+            "vendor=dhan&target=swept&from=2024-01-01&to=2024-01-31",
+        )
+        .await;
         assert_eq!(code, axum::http::StatusCode::CONFLICT, "{page}");
         assert!(page.contains("yes — appended to"), "{page}");
         assert_eq!(count(&journal), before + 1, "one record");
@@ -21244,7 +21291,10 @@ mod tests {
         assert_eq!(record.source, "NIFTY");
         drop(seat);
 
-        for (spot, body) in [(true, "vendor=dahn&target=swept"), (false, "vendor=dahn&underlying=NIFTY")] {
+        for (spot, body) in [
+            (true, "vendor=dahn&target=swept"),
+            (false, "vendor=dahn&underlying=NIFTY"),
+        ] {
             let code = if spot {
                 spot_pull_held(&site, body).await.0
             } else {
@@ -21253,7 +21303,11 @@ mod tests {
             assert_eq!(code, axum::http::StatusCode::BAD_REQUEST, "{body}");
             let record = newest(&journal);
             assert_eq!(record.outcome, audit::Outcome::NotStarted, "{body}");
-            assert!(record.note.contains("not a feed this build"), "{}", record.note);
+            assert!(
+                record.note.contains("not a feed this build"),
+                "{}",
+                record.note
+            );
         }
         assert_eq!(count(&journal), before + 4);
     }
@@ -21282,7 +21336,11 @@ mod tests {
             );
         }
         for cross in [false, true] {
-            let admit = b.failed_lines.lock().expect("b's rations").admit(cross, now);
+            let admit = b
+                .failed_lines
+                .lock()
+                .expect("b's rations")
+                .admit(cross, now);
             assert!(admit.write, "b {cross}: its own window is untouched");
             assert_eq!(admit.summary, None, "b {cross}: nothing of b's was held");
         }
@@ -21303,7 +21361,10 @@ mod tests {
             "admitted no longer installs note_request without a site"
         );
         assert!(
-            source.contains(concat!("Loaded::clone(&site),\n            crate::logs::note_", "request,")),
+            source.contains(concat!(
+                "Loaded::clone(&site),\n            crate::logs::note_",
+                "request,"
+            )),
             "admitted installs note_request with its site as state"
         );
     }
@@ -23165,17 +23226,25 @@ mod tests {
         };
         let mut dated = std::collections::HashMap::new();
         let done = super::land_spot(&landed, &key, &site, &mut dated).await;
-        assert_eq!(done.bars_committed, 0, "a body landed past a refusal: {done:?}");
+        assert_eq!(
+            done.bars_committed, 0,
+            "a body landed past a refusal: {done:?}"
+        );
         assert_eq!(done.members, 2, "both bodies are counted: {done:?}");
         assert_eq!(done.rows_read, 720);
         assert_eq!(done.failures.len(), 1, "{:?}", done.failures);
         assert!(
-            done.failures[0].why.contains("the 1 after it were not landed"),
+            done.failures[0]
+                .why
+                .contains("the 1 after it were not landed"),
             "{:?}",
             done.failures
         );
         assert!(
-            !site.store_root.join("bars/zerodha/NSE/CASH/RELIANCE").exists(),
+            !site
+                .store_root
+                .join("bars/zerodha/NSE/CASH/RELIANCE")
+                .exists(),
             "no RELIANCE month file may exist"
         );
     }
@@ -23189,6 +23258,10 @@ mod tests {
     /// refused; a day other than today, a daily rung and a window with no bar
     /// on today are never refused; and a holiday (no session row) is not.
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one fixture walked across every boundary clock-2 names"
+    )]
     fn todays_window_is_refused_when_the_answer_stops_before_the_session_close() {
         use pull::fetch::{RawRow, RawWindow};
         use pull::session::{IST_OFFSET_SECS, Window};
@@ -23240,17 +23313,37 @@ mod tests {
         assert!(why.contains("10:04"), "{why}");
         assert!(why.contains("partial day"), "{why}");
         let whole = window("CASH", Granularity::Minute1, rows(today, 555, last), today);
-        assert_eq!(super::partial_today_refusal(&whole, &whole.bodies, today), None);
-        let short = window("CASH", Granularity::Minute1, rows(today, 555, last - 1), today);
+        assert_eq!(
+            super::partial_today_refusal(&whole, &whole.bodies, today),
+            None
+        );
+        let short = window(
+            "CASH",
+            Granularity::Minute1,
+            rows(today, 555, last - 1),
+            today,
+        );
         assert!(super::partial_today_refusal(&short, &short.bodies, today).is_some());
         let yesterday = window("CASH", Granularity::Minute1, rows(other, 555, 604), other);
-        assert_eq!(super::partial_today_refusal(&yesterday, &yesterday.bodies, today), None);
+        assert_eq!(
+            super::partial_today_refusal(&yesterday, &yesterday.bodies, today),
+            None
+        );
         let daily = window("CASH", Granularity::Day1, rows(today, 555, 555), today);
-        assert_eq!(super::partial_today_refusal(&daily, &daily.bodies, today), None);
+        assert_eq!(
+            super::partial_today_refusal(&daily, &daily.bodies, today),
+            None
+        );
         let empty = window("CASH", Granularity::Minute1, Vec::new(), today);
-        assert_eq!(super::partial_today_refusal(&empty, &empty.bodies, today), None);
+        assert_eq!(
+            super::partial_today_refusal(&empty, &empty.bodies, today),
+            None
+        );
         let foreign = window("FNO", Granularity::Minute1, rows(today, 555, 604), today);
-        assert_eq!(super::partial_today_refusal(&foreign, &foreign.bodies, today), None);
+        assert_eq!(
+            super::partial_today_refusal(&foreign, &foreign.bodies, today),
+            None
+        );
         // The index's own close, not the cash one.
         let index_close = pull::vendor::Venue::NseIndex
             .hours_on(today)
@@ -23262,7 +23355,10 @@ mod tests {
             rows(today, 555, i64::from(index_close) - 1),
             today,
         );
-        assert_eq!(super::partial_today_refusal(&index, &index.bodies, today), None);
+        assert_eq!(
+            super::partial_today_refusal(&index, &index.bodies, today),
+            None
+        );
         // Timestamp encodings: overflow is skipped, not wrapped.
         assert_eq!(
             super::row_epoch_secs(i64::MIN, pull::vendor::TimestampEncoding::IstDateTimeText),
@@ -23286,11 +23382,20 @@ mod tests {
             super::refused_landing_why("cause", 1),
             "cause; this window was not landed"
         );
-        assert_eq!(super::refused_landing_why("cause", 0), "cause; this window was not landed");
+        assert_eq!(
+            super::refused_landing_why("cause", 0),
+            "cause; this window was not landed"
+        );
         let two = super::refused_landing_why("cause", 2);
-        assert!(two.starts_with("cause; ") && two.contains("the 1 after it"), "{two}");
+        assert!(
+            two.starts_with("cause; ") && two.contains("the 1 after it"),
+            "{two}"
+        );
         let many = super::refused_landing_why("cause", usize::MAX);
-        assert!(many.contains(&format!("the {} after it", usize::MAX - 1)), "{many}");
+        assert!(
+            many.contains(&format!("the {} after it", usize::MAX - 1)),
+            "{many}"
+        );
     }
 
     fn cash_month_files(site: &Site) -> Vec<(PathBuf, Vec<u8>)> {

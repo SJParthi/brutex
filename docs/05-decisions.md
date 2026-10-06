@@ -65020,3 +65020,12 @@ drawdown in neither direction, and the module and field docs,
 documented as a ranking key, not a bound.
 
 **Evidence.** ZQ-55.
+
+### D-2569 — Where two drafts fixed one defect, one fix is kept — 2026-10-06
+
+The zero-findings drafts were written in parallel, and four pairs met on one code path. One implementation is kept per path, and the earlier decision's text stays as its record:
+
+- **The audited route's terminal (log-2, D-2577; resources-3, D-2598).** Both moved the cancelled attempt's write off the Tokio worker. D-2598's `OwedTerminal` is kept, because it also settles in place when the handler panics. D-2577's `DropOffWorker` and its unit test are removed. D-2577's behaviour, "a dropped audited request finishes its attempt off the worker", is held by D-2598's tests.
+- **The backtest ledger read (sweep-3, D-2573; resources-4, D-2593).** Both moved the read off the async workers. D-2593's store-read pool is kept. D-2573's waiting shared lock in `respond` stays, and the 429 answer is D-2593's `not_admitted`.
+- **The VIX month open (indexstop-1, D-2621; replay-1/replay-5, D-2636).** Both made a held lock a transient refusal rather than a saved "unavailable" month. D-2636's `VixOpenRefusal` and its bounded writer wait (`open_waiting`) are kept, and they close indexstop-1 too. D-2621's test `a_locked_vix_month_refuses_publication_and_the_retry_captures_it` is kept, asserting D-2636's "busy, not unavailable" sentence.
+- **The Statistics V2/V3 header (pop2-6, D-2626; conc5-1, D-2644).** D-2644's shared `fixed_tail::init_or_heal_header` is kept. It cuts and re-initialises a torn or all-zero header and remembers a failed header barrier, which covers pop2-6's torn-header heal. D-2626's tests still run against it.

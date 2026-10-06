@@ -1219,7 +1219,9 @@ fn publish_and_recovery_apply_the_same_record_bound() {
     assert!(checkpoint.contains("qualification::verify_search_slot_bounded("));
     let recovery = include_str!("index_stop_search.rs");
     assert!(
-        recovery.contains("request.configuration.capture.records,\n        request.configuration.replay_nodes,"),
+        recovery.contains(
+            "request.configuration.capture.records,\n        request.configuration.replay_nodes,"
+        ),
         "recovery's record bound is the capture's records"
     );
 }

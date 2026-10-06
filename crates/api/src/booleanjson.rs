@@ -204,31 +204,30 @@ fn render_with_budget(
             Some(project(&held.reader, asked)?)
         }
     };
-    let mut body = match warm {
-        Some(body) => body,
-        None => {
-            // THE COLD OPEN RUNS WITH THE LOCK RELEASED (expr-3, D-2576). It
-            // authenticates and decodes the whole catalog up to the budget, and
-            // the guard used to be held across it, so every other catalog
-            // request parked here inside `detail::run` holding a detail permit.
-            // The lock is retaken only to install the opened reader.
-            #[cfg(test)]
-            COLD_ADMISSIONS.with(|count| count.set(count.get() + 1));
-            #[cfg(test)]
-            crate::detail::note_slot_free(slot);
-            let reader = Reader::open(root, asked.identity, budget.bytes()).map_err(|why| budget.context(&format!(
-                "Catalog {} unavailable under configured evidence root {}: {why}. The dashboard BRUTEX_STORE must match the catalog command OUTPUT_ROOT; no other folder was searched.",
-                crate::server::hex32(asked.identity), root.display()
-            )))?;
-            let projected = project(&reader, asked);
-            *slot.lock().map_err(|_| "Boolean catalog cache poisoned")? = Some(Cached {
-                root: root.to_path_buf(),
-                identity: asked.identity,
-                budget,
-                reader,
-            });
-            projected?
-        }
+    let mut body = if let Some(body) = warm {
+        body
+    } else {
+        // THE COLD OPEN RUNS WITH THE LOCK RELEASED (expr-3, D-2576). It
+        // authenticates and decodes the whole catalog up to the budget, and
+        // the guard used to be held across it, so every other catalog
+        // request parked here inside `detail::run` holding a detail permit.
+        // The lock is retaken only to install the opened reader.
+        #[cfg(test)]
+        COLD_ADMISSIONS.with(|count| count.set(count.get() + 1));
+        #[cfg(test)]
+        crate::detail::note_slot_free(slot);
+        let reader = Reader::open(root, asked.identity, budget.bytes()).map_err(|why| budget.context(&format!(
+            "Catalog {} unavailable under configured evidence root {}: {why}. The dashboard BRUTEX_STORE must match the catalog command OUTPUT_ROOT; no other folder was searched.",
+            crate::server::hex32(asked.identity), root.display()
+        )))?;
+        let projected = project(&reader, asked);
+        *slot.lock().map_err(|_| "Boolean catalog cache poisoned")? = Some(Cached {
+            root: root.to_path_buf(),
+            identity: asked.identity,
+            budget,
+            reader,
+        });
+        projected?
     };
     body.as_object_mut()
         .ok_or("catalog projection object absent")?

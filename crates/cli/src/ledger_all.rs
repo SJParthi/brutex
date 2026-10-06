@@ -2018,10 +2018,8 @@ pub(crate) mod tests {
     /// `LedgerTree::create` preceded `build_sweepers`.
     #[test]
     fn ledger_all_refuses_a_bad_month_or_backwards_range_before_creating_its_tree() {
-        let root = std::env::temp_dir().join(format!(
-            "brutex-ledger-all-bad-span-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("brutex-ledger-all-bad-span-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let path = root.to_str().expect("utf-8 scratch root");
         for v6 in [false, true] {
@@ -2035,18 +2033,15 @@ pub(crate) mod tests {
                 (("2026", "256"), ("2026", "1"), "MONTH must be 1..=12"),
             ] {
                 let mut out = String::new();
-                let code = crate::ledger_all_arm(
-                    &mut out,
-                    "dhan",
-                    from,
-                    to,
-                    ("200000", "50"),
-                    path,
-                    v6,
-                );
+                let code =
+                    crate::ledger_all_arm(&mut out, "dhan", from, to, ("200000", "50"), path, v6);
                 assert_eq!(code, crate::MISUSED, "{from:?}..{to:?}: {out}");
                 assert!(out.contains(needle), "{from:?}..{to:?}: {out}");
-                assert!(!root.exists(), "{from:?}..{to:?} created {}", root.display());
+                assert!(
+                    !root.exists(),
+                    "{from:?}..{to:?} created {}",
+                    root.display()
+                );
             }
         }
         let source = include_str!("ledger_all.rs");

@@ -2883,7 +2883,7 @@ fn ensure_header(file: &mut File, path: &Path) -> Result<(), PopulationStatistic
         path,
         POPULATION_STATISTICS_V3_HEADER_BYTES,
         POPULATION_STATISTICS_V3_RECORD_STRIDE,
-        &bytes,
+        &header()?,
     )?;
     Ok(())
 }
@@ -4220,7 +4220,8 @@ mod tests {
     #[test]
     fn a_kill_torn_tail_is_cut_by_the_writer_and_refused_by_a_reader() -> Result<(), String> {
         let root = TestDir::new()?;
-        let stride = usize::try_from(POPULATION_STATISTICS_V3_RECORD_STRIDE).map_err(|why| why.to_string())?;
+        let stride = usize::try_from(POPULATION_STATISTICS_V3_RECORD_STRIDE)
+            .map_err(|why| why.to_string())?;
         for stray in [1, 32, stride / 2, stride - 1, stride] {
             let ledger_root = root.child(&format!("torn-tail-{stray}"))?;
             let produced = produced_fixture(
@@ -4235,7 +4236,8 @@ mod tests {
                 .append(true)
                 .open(&path)
                 .map_err(|why| why.to_string())?;
-            file.write_all(&vec![0x5a; stray]).map_err(|why| why.to_string())?;
+            file.write_all(&vec![0x5a; stray])
+                .map_err(|why| why.to_string())?;
             drop(file);
             assert!(
                 PopulationStatisticsV3Ledger::open_read(&ledger_root, bounds()?).is_err(),
@@ -4245,7 +4247,9 @@ mod tests {
             if stray == stride {
                 assert!(opened.is_err(), "a whole foreign stride is refused");
                 assert_eq!(
-                    std::fs::metadata(&path).map_err(|why| why.to_string())?.len(),
+                    std::fs::metadata(&path)
+                        .map_err(|why| why.to_string())?
+                        .len(),
                     whole.len() as u64 + stray as u64,
                     "a whole record is never cut"
                 );
@@ -4273,12 +4277,18 @@ mod tests {
             let path = ledger_root.join(DATA_FILE);
             std::fs::write(&path, &expected[..kept]).map_err(|why| why.to_string())?;
             assert!(PopulationStatisticsV3Ledger::open_read(&ledger_root, bounds()?).is_err());
-            assert_eq!(std::fs::read(&path).map_err(|why| why.to_string())?, &expected[..kept]);
+            assert_eq!(
+                std::fs::read(&path).map_err(|why| why.to_string())?,
+                &expected[..kept]
+            );
             drop(
                 PopulationStatisticsV3Ledger::open_writer(&ledger_root, bounds()?)
                     .map_err(|why| format!("{kept}: the writer rewrites: {why}"))?,
             );
-            assert_eq!(std::fs::read(&path).map_err(|why| why.to_string())?, expected.to_vec());
+            assert_eq!(
+                std::fs::read(&path).map_err(|why| why.to_string())?,
+                expected.to_vec()
+            );
             PopulationStatisticsV3Ledger::open_read(&ledger_root, bounds()?)?;
         }
         let foreign_root = root.child("foreign-short-header")?;
@@ -4288,7 +4298,10 @@ mod tests {
         foreign[0] ^= 1;
         std::fs::write(&path, &foreign).map_err(|why| why.to_string())?;
         assert!(PopulationStatisticsV3Ledger::open_writer(&foreign_root, bounds()?).is_err());
-        assert_eq!(std::fs::read(&path).map_err(|why| why.to_string())?, foreign);
+        assert_eq!(
+            std::fs::read(&path).map_err(|why| why.to_string())?,
+            foreign
+        );
         Ok(())
     }
 }

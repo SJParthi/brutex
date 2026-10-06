@@ -40,10 +40,14 @@ fn frame(seed: u8) -> Block {
 
 /// Where an abandoned tail at `offset` holding `tail` is set aside (D-2554).
 fn quarantine(root: &Path, offset: impl std::fmt::Display, tail: &[u8]) -> PathBuf {
-    let hex: String = brutex_core::blake3::hash(tail)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
+    let hex =
+        brutex_core::blake3::hash(tail)
+            .iter()
+            .fold(String::with_capacity(64), |mut hex, byte| {
+                use std::fmt::Write as _;
+                let _ = write!(hex, "{byte:02x}");
+                hex
+            });
     root.join(format!("{FILE_NAME}.abandoned-{offset}-{hex}"))
 }
 
@@ -597,7 +601,11 @@ fn a_failed_or_repeated_quarantine_never_wedges_the_rung() {
         .expect("list")
         .map(|entry| entry.expect("entry").file_name())
         .collect();
-    assert_eq!(left, [std::ffi::OsString::from(FILE_NAME)], "no partial copy");
+    assert_eq!(
+        left,
+        [std::ffi::OsString::from(FILE_NAME)],
+        "no partial copy"
+    );
     assert_eq!(std::fs::read(&path).expect("ledger"), &first[..4096]);
     assert!(persist(&scratch.0, bounds(2), &own).expect("the rerun sets it aside"));
     // A second source abandons a tail at the same offset after a cut.

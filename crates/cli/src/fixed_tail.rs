@@ -883,7 +883,10 @@ mod tests {
         }
         // A reader never calls the helper, and the zero header is still
         // refused by name by a magic check: the healing is the writer's.
-        assert_eq!(sixteen_byte_header(*b"BRUTEXRS", 3)[..12], magic_and_version(*b"BRUTEXRS", 3));
+        assert_eq!(
+            sixteen_byte_header(*b"BRUTEXRS", 3)[..12],
+            magic_and_version(*b"BRUTEXRS", 3)
+        );
         assert_eq!(sixteen_byte_header(*b"BRUTEXRS", 3)[12..], [0_u8; 4]);
     }
 
@@ -903,7 +906,11 @@ mod tests {
         }
         assert_eq!(contents(&path), Vec::<u8>::new(), "cut back to nothing");
         assert!(refuse_after_failed_barrier(&path).is_err(), "remembered");
-        assert_eq!(init(&path), Ok(HeaderInit::Written), "the next open rewrites");
+        assert_eq!(
+            init(&path),
+            Ok(HeaderInit::Written),
+            "the next open rewrites"
+        );
         assert_eq!(contents(&path), HEADER16.to_vec());
 
         let path = scratch("conc5-1-write");

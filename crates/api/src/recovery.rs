@@ -2600,7 +2600,11 @@ mod tests {
         assert_eq!(status, StatusCode::CONFLICT, "{answer}");
         assert!(answer.contains("already owns the run slot"), "{answer}");
         assert!(answer.contains(r#""started":false"#), "{answer}");
-        assert_eq!(history_bytes(&site), before, "a refused press writes nothing");
+        assert_eq!(
+            history_bytes(&site),
+            before,
+            "a refused press writes nothing"
+        );
         // A FINISHED run in the slot is not a running one: the probe admits.
         site.run.lock().unwrap().as_mut().unwrap().finished = Some(String::from("done"));
         let (status, _, answer) = start(State(Loaded::clone(&site)), request.clone()).await;

@@ -410,71 +410,7 @@ async fn cancelled_request_records_cancellation_and_never_completed() {
         phase = journal::read(&root.0, ID_BASE + 1)
             .unwrap()
             .map(|record| record.phase);
-        if phase.is_some_and(|phase| phase.terminal()) {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    assert_eq!(phase, Some(Phase::Cancelled));
-}
-
-/// log-2, D-2577: an armed value dropped on an async worker is dropped on the
-/// blocking pool instead — a different thread — and outside a runtime it is
-/// dropped where it stands. On the old middleware the armed `Attempt` was
-/// dropped directly by the future, on the worker thread itself: this probe's
-/// `Drop` would have run on the test's own thread.
-#[tokio::test(flavor = "current_thread")]
-async fn a_dropped_audited_request_finishes_its_attempt_off_the_worker() {
-    struct Probe(std::sync::mpsc::Sender<std::thread::ThreadId>);
-    impl Drop for Probe {
-        fn drop(&mut self) {
-            let _sent = self.0.send(std::thread::current().id());
-        }
-    }
-    let worker = std::thread::current().id();
-    let (sent, seen) = std::sync::mpsc::channel();
-    drop(super::DropOffWorker(Some(Probe(sent.clone()))));
-    let dropped_on = tokio::task::spawn_blocking(move || {
-        seen.recv_timeout(std::time::Duration::from_secs(10))
-    })
-    .await
-    .unwrap()
-    .unwrap();
-    assert_ne!(dropped_on, worker, "the armed value was dropped on the worker");
-    // An emptied guard drops nothing; outside a runtime the value drops here.
-    drop(super::DropOffWorker::<Probe>(None));
-    let (outside, seen_outside) = std::sync::mpsc::channel();
-    let here = std::thread::spawn(move || {
-        super::drop_off_worker(Probe(outside));
-        std::thread::current().id()
-    })
-    .join()
-    .unwrap();
-    assert_eq!(
-        seen_outside
-            .recv_timeout(std::time::Duration::from_secs(10))
-            .unwrap(),
-        here
-    );
-    drop(sent);
-    // And the middleware itself: a dropped request still journals `Cancelled`.
-    let _apart = crate::detail::apart_from_slot_owners().await;
-    let root = Scratch::new();
-    let path = root.0.clone();
-    let cut = tokio::time::timeout(
-        std::time::Duration::from_millis(200),
-        request_audited(path, "GET /trades.json".to_owned(), async move {
-            std::future::pending::<axum::response::Response>().await
-        }),
-    )
-    .await;
-    assert!(cut.is_err(), "the handler never answers, so the request is cut");
-    let mut phase = None;
-    for _ in 0..500 {
-        phase = journal::read(&root.0, ID_BASE + 1)
-            .unwrap()
-            .map(|record| record.phase);
-        if phase.is_some_and(|phase| phase.terminal()) {
+        if phase.is_some_and(Phase::terminal) {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -569,12 +505,18 @@ async fn a_read_whose_client_goes_away_writes_cancelled_off_the_async_worker() {
         .map_or("", |(body, _)| body);
     let guarded = body.find("OwedTerminal(Some(attempt))").expect("guarded");
     let awaited = body.find("handler.await").expect("awaited");
-    assert!(guarded < awaited, "the attempt is guarded across the handler");
+    assert!(
+        guarded < awaited,
+        "the attempt is guarded across the handler"
+    );
     let guard = source
         .split_once("impl Drop for OwedTerminal {")
         .and_then(|(_, rest)| rest.split_once("\n}\n"))
         .map_or("", |(body, _)| body);
-    assert!(guard.contains("spawn_blocking(move || drop(attempt))"), "{guard}");
+    assert!(
+        guard.contains("spawn_blocking(move || drop(attempt))"),
+        "{guard}"
+    );
     assert!(guard.contains("std::thread::panicking()"), "{guard}");
 }
 

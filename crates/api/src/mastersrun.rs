@@ -1826,18 +1826,28 @@ mod tests {
         std::fs::write(&path, a_master()).expect("a master on disk");
         let stamps = super::stamps_of(&dir);
         assert_eq!(stamps.len(), masters::SOURCES.len());
-        assert!(stamps[0].is_some());
-        assert!(stamps[1..].iter().all(Option::is_none));
+        assert!(stamps.first().is_some_and(Option::is_some));
+        assert!(
+            stamps
+                .get(1..)
+                .is_some_and(|rest| rest.iter().all(Option::is_none))
+        );
         let parsed_at = std::time::SystemTime::now();
 
         let untouched = super::status_rows(&dir, parsed_at, &stamps);
-        assert!(untouched.contains(r#""restart_required":false"#), "{untouched}");
-        assert!(!untouched.contains(r#""newer_than_parse":true"#), "{untouched}");
+        assert!(
+            untouched.contains(r#""restart_required":false"#),
+            "{untouched}"
+        );
+        assert!(
+            !untouched.contains(r#""newer_than_parse":true"#),
+            "{untouched}"
+        );
 
         // Rewritten, and its mtime set an hour before the parse.
         std::thread::sleep(std::time::Duration::from_millis(20));
         std::fs::write(&path, format!("{}\n", a_master())).expect("rewrite");
-        let back = parsed_at - std::time::Duration::from_secs(3_600);
+        let back = parsed_at - std::time::Duration::from_hours(1);
         std::fs::File::options()
             .write(true)
             .open(&path)
@@ -1845,8 +1855,14 @@ mod tests {
             .set_modified(back)
             .expect("set the mtime back");
         let rewritten = super::status_rows(&dir, parsed_at, &stamps);
-        assert!(rewritten.contains(r#""newer_than_parse":true"#), "{rewritten}");
-        assert!(rewritten.contains(r#""restart_required":true"#), "{rewritten}");
+        assert!(
+            rewritten.contains(r#""newer_than_parse":true"#),
+            "{rewritten}"
+        );
+        assert!(
+            rewritten.contains(r#""restart_required":true"#),
+            "{rewritten}"
+        );
         // The old ordering, over the same file, says not newer: the defect.
         let ordered = super::status_rows(&dir, parsed_at, &[]);
         assert!(ordered.contains(r#""restart_required":false"#), "{ordered}");
@@ -1857,10 +1873,16 @@ mod tests {
         let fresh = super::stamps_of(&dir);
         std::fs::remove_file(&path).expect("remove the first");
         let appeared = super::status_rows(&dir, parsed_at, &stamps);
-        assert!(appeared.contains(r#""restart_required":true"#), "{appeared}");
+        assert!(
+            appeared.contains(r#""restart_required":true"#),
+            "{appeared}"
+        );
         // And an absent one is not, whatever the parse saw.
         let after_removal = super::status_rows(&dir, parsed_at, &fresh);
-        assert!(after_removal.contains(r#""restart_required":false"#), "{after_removal}");
+        assert!(
+            after_removal.contains(r#""restart_required":false"#),
+            "{after_removal}"
+        );
         std::fs::remove_dir_all(&dir).expect("clean up");
     }
 

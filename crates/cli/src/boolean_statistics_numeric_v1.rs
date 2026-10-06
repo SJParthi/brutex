@@ -168,7 +168,9 @@ fn split_statistics(
     // by `cli::candidate_universe::boolean_candidate_v1::statistics::numeric::tests::segment_sums_match_the_period_walk`.
     let mut summaries = Vec::new();
     if !masks.is_empty() {
-        summaries.try_reserve_exact(returns.len()).map_err(display)?;
+        summaries
+            .try_reserve_exact(returns.len())
+            .map_err(display)?;
         for row in returns {
             summaries.push(segment_sums(row, width)?);
         }

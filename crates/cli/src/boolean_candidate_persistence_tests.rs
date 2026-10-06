@@ -188,8 +188,7 @@ fn a_reader_lease_does_not_refuse_a_republish_of_a_committed_identity() -> Resul
         };
         republish()?;
         let directory = root.join(namespace).join(crate::identity_hex(&identity));
-        let reader =
-            fs::File::open(directory.join("owner.lock")).map_err(|why| why.to_string())?;
+        let reader = fs::File::open(directory.join("owner.lock")).map_err(|why| why.to_string())?;
         reader.try_lock_shared().map_err(|why| why.to_string())?;
         let again = std::thread::scope(|scope| {
             let release = scope.spawn(|| {
@@ -208,7 +207,10 @@ fn a_reader_lease_does_not_refuse_a_republish_of_a_committed_identity() -> Resul
         let refusal = republish().err().unwrap_or_default();
         reader.unlock().map_err(|why| why.to_string())?;
         assert!(lost_owner_race(&refusal), "{namespace}: {refusal}");
-        assert!(refusal.contains("one-second wait"), "{namespace}: {refusal}");
+        assert!(
+            refusal.contains("one-second wait"),
+            "{namespace}: {refusal}"
+        );
         assert!(committed(&directory)?, "{namespace}");
         assert_eq!(read_exact(&directory.join("body.bin"), 64)?, body);
     }

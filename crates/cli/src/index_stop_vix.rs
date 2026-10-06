@@ -5,7 +5,7 @@
 //! opens the market store.
 use crate::candidate_universe::boolean_candidate_v1::persistence::{self, Observation};
 use crate::index_stop_store::{Reader as Catalog, Trade};
-use crate::vix_reference::{OpenRefusal, VixReferenceMonth, VixStamp};
+use crate::vix_reference::{VixReferenceMonth, VixStamp};
 use brutex_core::blake3::{Hasher, hash};
 use brutex_core::vendor::Vendor;
 use indicators::Candle;
