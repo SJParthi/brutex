@@ -76,12 +76,12 @@ Archive name is `NSE_{SEGMENT}_TICK_{YYYYMMDD}.zip` — **computable from
 
 No header row. Date format `YYYYMMDD`.
 
-`NSE_IDX_TICK_20221003.zip → BANKNIFTY.csv`:
-
-```
-20221003,09:07:41,38444.90,0,0
-20221003,15:31:42,38029.65,0,0
-```
+`NSE_IDX_TICK_20221003.zip → BANKNIFTY.csv` holds rows of five
+comma-separated fields: the date as `YYYYMMDD`, the time as `HH:MM:SS`, the
+index level as a decimal with two places, and two fields that are `0` on every
+row read. Its first row is stamped 09:07:41 and its last 15:31:42 (below).
+This file quoted those two rows until 7 Oct 2026; no vendor row is quoted in
+this repository (D-3348).
 
 ### GDFL
 
@@ -134,8 +134,12 @@ Header row present. Date format **`DD/MM/YYYY`** — `01/07/2025` is 1 July, not
 
 ```
 Ticker,Date,Time,LTP,BuyPrice,BuyQty,SellPrice,SellQty,LTQ,OpenInterest
-FINNIFTY-III.NFO,01/07/2025,09:16:16,27674,0,0,0,0,65,65
 ```
+
+That is the header. A row under it carries the contract's ticker with its
+`.NFO` suffix, the date as `DD/MM/YYYY`, the time as `HH:MM:SS`, then the
+eight numeric fields the header names. This file quoted one such row until
+7 Oct 2026; no vendor row is quoted in this repository (D-3348).
 
 `LTQ` is `0` on most rows — those are **quote** updates, not trades.
 
@@ -193,6 +197,34 @@ Every row here is a field, not a branch:
 | Column layout **per (vendor, segment)** | 5 / 9 / 10 columns |
 | Date format | `YYYYMMDD` vs `DD/MM/YYYY` |
 | Granularity | one-second snapshot, not tick |
+
+---
+
+## Measured on the operator's store, 6–7 Oct 2026 — summary
+
+Everything above was read from the sample archives. This section summarises
+what was measured on the two feeds the operator uses, Zerodha and GDFL, in
+the operator's own store (`bars/zerodha/...` and `bars/gdfl/...`), read-only
+through a shadow on 7 Oct 2026 and by the /db audit of 6 Oct 2026. Counts and
+summaries only; the dated rows with their paths are in `docs/00-charter.md`
+§4z, §4g, §9 and the GDFL capital-market section, and the decisions are
+D-3320, D-3323 and D-3324.
+
+| Fact | Zerodha | GDFL |
+|---|---|---|
+| Rungs held | `1min` and `1day` pulled; 2–60min derived from `1min` | `1s` only, 2018-09-03 to 2026-09-24 |
+| Share price basis | back-adjusted by the vendor as of the pull date: 101 of 208 F&O shares differ from GDFL by a factor over some run | raw, as traded |
+| Not proportional | ASHOKLEY is GDFL ÷ 2 − ₹2.48; CANBK, BANKBARODA and BPCL drift run to run | — |
+| Quantised | BAJFINANCE prices on a 50-paisa grid before 2025-06-16 (raw ÷ 10 would need 0.5 paisa) | — |
+| Share volume basis | its own: in 45 of the 101, the volume factor differs from the price factor by more than 2% | raw, the sum of traded quantities |
+| Index level | as published, not adjusted: high and low agree with GDFL on the days checked; the `1day` open and close follow the day bar's own rules (NIFTY 2026-09: open equal on 12 of 17 common days) | as published |
+| `1day` close | the official close: differs from the last `1min` close on 2,081 of 2,126 NIFTY days (median 4.69 bps), equal on all 42 days from 2026-08-03 | — (no day rung) |
+| Closing auction, from 2026-08-03 | an eligible share's minutes end at 15:14; the `1day` close is the auction price | one late print per eligible share (RELIANCE 2026-09-24 at 15:28:07, equal to Zerodha's close), kept apart from trades (D-3320) |
+| 2020-03-13 and 2020-03-23 | minute gaps in every share | the same share gaps; on 2020-03-13 a frozen index level |
+
+The halts on those two days are **suspected**, not sourced: no NSE circular
+was found on 7 Oct 2026 (charter, "Historical circuit-breaker evidence
+boundary").
 
 ---
 
