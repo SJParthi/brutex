@@ -124,3 +124,12 @@ Read CLAUDE.md, then the fix-queue branch file resume/pr74-ci-thread.md (last se
   | session_01JdvYEitZmXjZfqekdkTn15 | WS4 attack audit | wip/audit-batch3 | D-1842..1849, 2292..2299 |
   | session_01QLkK4a9pEwwpAEMZhwMK3q | WS5 zero-findings | zero/next | D-2691.., 2500.. |
 - Plan: no push to final/all-fixes until run 1283 ends. Then merge every handed-over branch into final/all-fixes, validate, ONE push.
+- 03:40 UTC: owner sent new standing rules (zero bugs with evidence, attack every extreme permutation, O(1) with measured p99, everything persisted/logged/searchable/visible at O(1), Rust only everywhere except web/, one common incremental runtime, everything in parallel, comparison-table artifact). Saved as resume/pr74-g18-run1283/prompts/owner-rules-20261006.md and sent to all 9 sessions. WS2 now continues attack rounds until a round finds zero; WS3 continues with its own unclaimed found rows on fixboard/pr74-batch4.
+- 03:38 UTC: four attack-lens sessions started (prompts in resume/attack-lenses-20261006/prompts/, trackers + RESULT files go in resume/attack-lenses-20261006/):
+  | session | lens | branch | D range | invariant prefix |
+  |---|---|---|---|---|
+  | session_011y3kRe4mCpbx4d7HK6WEPo | L1 observability/persistence/audit | attack/observability | D-3200..3299 | OBSV- |
+  | session_01XZSFAKEtQLAHWiX5iWiHrM | L2 O(1) with measured p99 | attack/o1-p99 | D-3300..3399 | O1P- |
+  | session_01R51JmkeR6PuVuzyEFgGFXq | L3 permutations + differential | attack/permutations | D-3400..3499 | XPERM- |
+  | session_01HjzyWzsojN9XoNtyh6n1Dd | L4 Rust-only/one authority/docs drift | attack/one-authority | D-3500..3599 | ONEAUTH- |
+  WS2 overflow range D-3700..3799.
