@@ -2747,6 +2747,44 @@ fn reconcile_derived(
 /// # Errors
 ///
 /// The path's refusal or the store's, in its own words.
+/// How many times [`open_for_append`] asks again while readers hold the
+/// month, [`READER_WAIT`] apart: one second in all.
+const READER_WAITS: u32 = 20;
+
+/// The pause between two asks while readers hold the month.
+const READER_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// The month's writer, asked again for a bounded second while only READERS
+/// hold its lock.
+///
+/// A browser chart, a `cli` load or a strict ledger guard reading the month
+/// holds the lock shared, and the exclusive writer was refused at once with
+/// "another writer holds": a derived rung refused that way for a past month
+/// was never derived again (barflow-1, D-2552). A reader closes in
+/// milliseconds, so the write waits for it; a reader still there after the
+/// bound, and a real second writer at once, refuse by name as before.
+///
+/// # Cost
+///
+/// At most [`READER_WAITS`] + 1 opens and one second of sleep, a constant no
+/// input can raise; one open when no reader is there.
+///
+/// # Errors
+///
+/// The store's refusal, as text.
+fn open_for_append(root: &Path, path: StorePath<'_>, symbol_id: u32) -> Result<BarFile, String> {
+    let mut waited = 0;
+    loop {
+        match BarFile::open_or_create(root, path, symbol_id) {
+            Err(store::file::StoreError::ReaderHolds { .. }) if waited < READER_WAITS => {
+                waited += 1;
+                std::thread::sleep(READER_WAIT);
+            }
+            other => return other.map_err(|why| why.to_string()),
+        }
+    }
+}
+
 fn write_and_count(
     bars: &[store::format::Bar],
     store_root: &Path,
@@ -2755,8 +2793,7 @@ fn write_and_count(
     key: EntryKey,
 ) -> Result<(Held, usize), String> {
     let path = StorePath::new(parts).map_err(|why| why.to_string())?;
-    let mut file =
-        BarFile::open_or_create(store_root, path, symbol_id).map_err(|why| why.to_string())?;
+    let mut file = open_for_append(store_root, path, symbol_id)?;
     // THE DISCRIMINANT IS KEPT, AND IT WAS THROWN AWAY. `Committed` and
     // `AlreadyPresent` are the difference between a run that wrote a month and
     // one that re-offered it, and `?` on its own erased that.
@@ -2857,8 +2894,7 @@ fn write_overlay(
         ..parts
     })
     .map_err(|why| why.to_string())?;
-    let mut file =
-        BarFile::open_or_create(store_root, path, symbol_id).map_err(|why| why.to_string())?;
+    let mut file = open_for_append(store_root, path, symbol_id)?;
     file.append(rows).map_err(|why| why.to_string())?;
     Ok(())
 }
@@ -2964,8 +3000,7 @@ pub fn write_greeks(rows: &[store::format::Greek], into: GreekTarget<'_>) -> Res
                   disagreement the comment above names"
     )]
     let symbol_id = brutex_core::universe::fnv1a(into.symbol) as u32;
-    let mut file =
-        BarFile::open_or_create(into.store_root, path, symbol_id).map_err(|why| why.to_string())?;
+    let mut file = open_for_append(into.store_root, path, symbol_id)?;
     file.append(rows).map_err(|why| why.to_string())?;
     Ok(())
 }
@@ -3664,9 +3699,12 @@ mod tests {
     use store::path::Timeframe;
 
     use super::{
-        CensusLock, DeriveInto, EntryKey, MAX_CENSUS_BYTES, check_day, closes_in_hand,
-        day_check_of, install_locked, lock_refusal, write_and_count,
+        CensusLock, DeriveInto, EntryKey, MAX_CENSUS_BYTES, READER_WAIT, READER_WAITS, check_day,
+        closes_in_hand, day_check_of, install_locked, lock_refusal, open_for_append,
+        write_and_count,
     };
+    use store::file::BarFile;
+    use store::path::StorePath;
 
     /// **A MEMBER'S ROWS ARE LANDED BORROWED, NOT CLONED.** o1api-36, D-1203.
     ///
@@ -3760,6 +3798,67 @@ mod tests {
     /// of it, a partial overlap reports only the suffix, and a total re-offer
     /// reports **zero** — the number that makes a re-run distinguishable from a
     /// first run.
+    #[test]
+    fn a_write_waits_for_a_reader_and_refuses_one_that_outlasts_the_bound() {
+        // barflow-1, D-2552: a reader holding the month shared made the
+        // writer refuse at once with "another writer holds". The writer now
+        // asks again for a bounded second, so a reader that closes within it
+        // lets the write through, and one that stays is refused by name.
+        let root = scratch("reader-wait-for-a-closing-reader");
+        let month = store::path::YearMonth::new(2026, 1).expect("a legal month");
+        let path = StorePath::new(store::path::PathParts {
+            vendor: brutex_core::vendor::Vendor::Dhan,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: store::path::Timeframe::MINUTE_1,
+            month,
+            file: store::path::FileKind::Bars,
+        })
+        .expect("a path");
+        drop(open_for_append(&root, path, 7).expect("the month is created"));
+
+        let reader = BarFile::open_existing(&root, path, 7).expect("a reader");
+        let closing = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            drop(reader);
+        });
+        let started = std::time::Instant::now();
+        let writer = open_for_append(&root, path, 7).expect("waited for the reader");
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(150),
+            "the reader was waited for"
+        );
+        closing.join().expect("the reader closed");
+        drop(writer);
+
+        let stays = BarFile::open_existing(&root, path, 7).expect("a reader that stays");
+        let started = std::time::Instant::now();
+        let refused = open_for_append(&root, path, 7).expect_err("the reader outlasts the bound");
+        let waited = started.elapsed();
+        assert!(refused.contains("a reader holds"), "{refused}");
+        assert!(
+            waited >= READER_WAIT * READER_WAITS,
+            "the whole bound was waited: {waited:?}"
+        );
+        assert!(
+            waited < READER_WAIT * (READER_WAITS + 20),
+            "and no longer: {waited:?}"
+        );
+        drop(stays);
+
+        let writer = open_for_append(&root, path, 7).expect("the month is free");
+        let started = std::time::Instant::now();
+        let refused = open_for_append(&root, path, 7).expect_err("a second writer");
+        assert!(refused.contains("another writer holds"), "{refused}");
+        assert!(
+            started.elapsed() < READER_WAIT * 5,
+            "a real second writer is refused at once, not waited for"
+        );
+        drop(writer);
+    }
+
     #[test]
     fn a_partial_overlap_counts_the_suffix_it_wrote_not_the_batch_it_offered() {
         let root = scratch("partialcount");

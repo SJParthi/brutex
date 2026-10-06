@@ -258,13 +258,19 @@ fn strict_extent_and_presence_refusals_never_change_source_bytes() {
         .expect("open")
         .audit_checksums(exact)
         .expect("exact bound");
-    for kind in [FileKind::Checksums, FileKind::Lock] {
-        let path = fixture.named(kind);
-        let saved = fs::read(&path).expect("existing");
-        fs::remove_file(&path).expect("inject missing");
-        assert!(fixture.audited().is_err());
-        fs::write(&path, saved).expect("restore");
-    }
+    let path = fixture.named(FileKind::Checksums);
+    let saved = fs::read(&path).expect("existing");
+    fs::remove_file(&path).expect("inject missing");
+    assert!(fixture.audited().is_err());
+    fs::write(&path, saved).expect("restore");
+    // A MISSING LOCK IS RE-CREATED BY THE READER, not refused (store1-1,
+    // D-2551): an absent `.lock` is made empty with `create_new` and held
+    // shared, so a later writer must respect it. The audit then holds that
+    // lock like any other, and no source byte changes.
+    let lock = fixture.named(FileKind::Lock);
+    fs::remove_file(&lock).expect("inject missing");
+    fixture.audited().expect("the reader re-creates the lock");
+    assert_eq!(fs::read(&lock).expect("re-created"), Vec::<u8>::new());
     for len in [0, crc.len() - 1, crc.len() + 4] {
         let mut changed = crc.clone();
         changed.resize(len, 0);

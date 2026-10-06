@@ -387,6 +387,13 @@ pub enum StoreError {
         /// The lock file.
         path: PathBuf,
     },
+    /// A writer was refused because READERS hold this month's lock shared
+    /// (barflow-1, D-2552). Not a second writer: the readers will close, and
+    /// the write can be asked again.
+    ReaderHolds {
+        /// The lock file.
+        path: PathBuf,
+    },
     /// The disk filled. `ENOSPC`.
     ///
     /// This is the error a writable mapping could not have returned — it would
@@ -1018,6 +1025,7 @@ impl fmt::Display for StoreError {
         match self {
             Self::NotABarPath { found } => write_not_a_bar_path(f, *found),
             Self::Locked { path } => write!(f, "another writer holds {}", path.display()),
+            Self::ReaderHolds { path } => write_reader_holds(f, path),
             Self::DiskFull { path, action } => write!(f, "disk full {action} {}", path.display()),
             Self::Denied { path, action } => {
                 write!(f, "permission denied {action} {}", path.display())
@@ -1505,7 +1513,7 @@ impl BarFile {
             writer_open(open_rw(&lock_path), &lock_path)?,
             lock_path.clone(),
         )
-        .map_err(|refusal| lock_fault(&lock_path, refusal))?;
+        .map_err(|refusal| writer_lock_fault(&lock_path, refusal))?;
 
         // Whether the month file was THERE before this open. Only a file that
         // existed can have been truncated or zeroed; one this open creates was
@@ -4303,6 +4311,43 @@ fn lock_fault(path: &Path, refusal: TryLockError) -> StoreError {
         },
         TryLockError::Error(host) => classify(path, Action::Lock, &host),
     }
+}
+
+/// A writer's refused month lock, with its holder named.
+///
+/// The exclusive lock is refused by a reader's SHARED lock as much as by a
+/// writer's, and the refusal used to say "another writer holds" either way: a
+/// browser chart, a `cli` load or a ledger guard reading the month read as a
+/// second writer, and the ingest gave up on a write the reader would have let
+/// through a moment later (barflow-1, D-2552). A shared probe on a second
+/// description tells the two apart: it is granted beside readers and refused
+/// beside a writer. The probe is released at once and holds nothing.
+fn writer_lock_fault(path: &Path, refusal: TryLockError) -> StoreError {
+    match refusal {
+        TryLockError::WouldBlock if held_by_readers(path) => StoreError::ReaderHolds {
+            path: path.to_path_buf(),
+        },
+        other => lock_fault(path, other),
+    }
+}
+
+/// Whether the month lock at `path` is held by readers only: a shared lock
+/// on a second read-only description is granted. Any failure to ask answers
+/// `false`, so the refusal keeps the stricter "another writer" wording.
+fn held_by_readers(path: &Path) -> bool {
+    open_read(path)
+        .ok()
+        .and_then(|handle| Flock::try_lock_shared(handle, path.to_path_buf()).ok())
+        .is_some()
+}
+
+/// [`StoreError::ReaderHolds`]'s sentence.
+fn write_reader_holds(f: &mut fmt::Formatter<'_>, path: &Path) -> fmt::Result {
+    write!(
+        f,
+        "a reader holds {} shared, so this write must wait for it to close the month",
+        path.display()
+    )
 }
 
 /// [`StoreError::Symlinked`]'s sentence.

@@ -63297,3 +63297,67 @@ leave the two descent doors with different bounds.
 
 - conc6-4. `round` said "a hand-made pull is running" whenever `site.run` was held, including by a recovery the server resumed at boot. It now reads `recovery_active` under the same lock order (run, then active) and says "a recovery plan is running" for a recovery. ZX-47.
 - `wip/zero/network` also carried D-2693 (conc8-4, a 64 KiB Parameter Store read cap). `final/all-fixes` already caps that read at 16 KiB under D-2326, so the duplicate is not taken.
+### D-2551 — A store reader holds a lock a later writer must respect, and a live repair publisher is Busy, not abandoned — 2026-10-06
+
+**The findings.** store1-1: `BarFile::open_existing` on a month with no
+`.lock` read without any lock. A writer arriving later created the lock, took
+it exclusively against nobody, and appended under the reader's live handle.
+store2-1: a repair reservation was a bare `create_new` file. A second caller
+of the same ordinal found it and reported `Incomplete` (abandoned) for a
+publication still in progress, or an I/O failure that said nothing was
+published.
+
+**The decision.**
+- A reader that finds the lock absent creates it, empty and with
+  `create_new`, and holds it shared like any other. A lost creation race goes
+  back to the ordinary read-only open. Only a read-only filesystem, where no
+  writer can append either, reads without a lock.
+- A repair reservation is created and exclusively locked under a per-process
+  scratch name, and only then hard-linked to `.reserved-v1`. Its publisher
+  holds the lock until the completion is synced. A caller that finds it still
+  locked gets the new `RepairError::Busy` and retries the SAME ordinal. A
+  reservation nobody holds and no completion is `Incomplete` as before.
+
+Ported from `wip/zero/conc-data` 477ae86 (that commit's D-2557 text is not taken: no code for it exists on any branch). Because a reader now holds a lock on months that had none, a writer meets more shared locks; D-2552 names those refusals and waits a bounded second for them.
+
+**Evidence.** ZK-07. `absent_siblings_keep_their_answers` was seen failing
+with the reader fix disabled. The Busy test cannot compile against the
+previous code, because `RepairError::Busy` is new.
+
+### D-2559 — A store header slot whose barrier failed is written back — 2026-10-06
+
+**The finding.** store1-2 (the part D-1907 left): a failed barrier on the
+header slot was remembered, so later appends refused, but the slot itself
+stayed in the page cache. Every reader in this boot took it as the newest
+commit and named records the device may not hold.
+
+**The decision.** Before writing the slot, the append reads its previous 64
+bytes. If the barrier fails, it writes them back and syncs, so the previous
+commit is the newest one again. If the restore itself fails, that failure is
+returned. The month stays barred for appends in this process (D-1907).
+
+**Evidence.** ZK-08. The extended test was seen failing with the restore
+disabled.
+
+### D-2552 — A writer refused by readers is told so, and waits a bounded second — 2026-10-06
+
+**The finding.** barflow-1. `BarFile::open_or_create` takes the month's lock
+exclusively with a non-blocking `try_lock`, and every reader holds it shared:
+`/bars/window.json` (up to 240 months), `cli` stored loads and the strict
+ledger guards. Any such reader made the ingest writer refuse at once with
+"another writer holds ...", which named the holder wrongly, and a derived rung
+refused that way for a past month was never derived again. D-2551 widens the
+set of readers that hold a lock, so the refusal would have become more common.
+
+**The decision.**
+- `open_or_create` probes a refused lock with a shared lock on a second
+  read-only description. Granted means only readers hold it: the refusal is
+  the new `StoreError::ReaderHolds` ("a reader holds ... shared, so this write
+  must wait for it to close the month"). Refused means a writer holds it, and
+  the answer stays `Locked`. The probe is released at once.
+- `pull::ingest::open_for_append` (the three ingest writers: bars, overlay,
+  greeks) asks again on `ReaderHolds` every 50 ms for at most 20 times, one
+  second in all, a constant no input raises; a real second writer is refused
+  at once, as before. A reader still there after the bound is refused by name.
+
+**Evidence.** ZK-09.

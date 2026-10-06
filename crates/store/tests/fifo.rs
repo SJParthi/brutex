@@ -278,8 +278,9 @@ fn absent_siblings_keep_their_answers() {
     assert!(lock.is_file(), "the reader created the absent lock");
     assert_eq!(
         BarFile::open_or_create(&scratch.root, month(), 7).err(),
-        Some(StoreError::Locked { path: lock.clone() }),
-        "a later writer is excluded while the lockless reader is live"
+        Some(StoreError::ReaderHolds { path: lock.clone() }),
+        "a later writer is excluded while the lockless reader is live, and is \
+         told a reader holds the month (D-2552)"
     );
     drop(file);
     assert_eq!(

@@ -624,6 +624,47 @@ fn a_second_writer_is_refused_while_the_month_is_held() {
     assert!(lock_path.is_file(), "the lock file itself is not deleted");
 }
 
+/// barflow-1, D-2552: a writer refused by READERS is told a reader holds the
+/// month, never "another writer"; a real second writer is still `Locked`;
+/// and once the readers close the writer opens. Two readers and one reader
+/// both count as readers.
+#[test]
+fn a_reader_holding_the_month_is_named_as_a_reader_not_a_writer() {
+    let scratch = Scratch::new("reader-holds");
+    drop(open(scratch.root()).expect("create"));
+    let lock_path = bars_path()
+        .with_file(FileKind::Lock)
+        .to_path_buf(scratch.root());
+    let reader = BarFile::open_existing(scratch.root(), bars_path(), SYMBOL).expect("a reader");
+    let another = BarFile::open_existing(scratch.root(), bars_path(), SYMBOL).expect("a second");
+    let refused = outcome(open(scratch.root()));
+    assert_eq!(
+        refused,
+        Err(StoreError::ReaderHolds {
+            path: lock_path.clone()
+        })
+    );
+    let said = refused.unwrap_err().to_string();
+    assert!(said.contains("a reader holds"), "{said}");
+    assert!(!said.contains("writer holds"), "{said}");
+    drop(another);
+    assert_eq!(
+        outcome(open(scratch.root())),
+        Err(StoreError::ReaderHolds {
+            path: lock_path.clone()
+        }),
+        "one reader left is still a reader"
+    );
+    drop(reader);
+    let writer = open(scratch.root()).expect("the readers closed");
+    assert_eq!(
+        outcome(open(scratch.root())),
+        Err(StoreError::Locked { path: lock_path }),
+        "a second writer is still a writer"
+    );
+    drop(writer);
+}
+
 // ===========================================================================
 // What the host refuses
 // ===========================================================================
@@ -1183,6 +1224,10 @@ fn every_host_refusal_names_the_file_and_the_operation() {
             ".ovl",
         ),
         (StoreError::Locked { path: path.clone() }, "another writer"),
+        (
+            StoreError::ReaderHolds { path: path.clone() },
+            "a reader holds",
+        ),
         (
             StoreError::DiskFull {
                 path: path.clone(),

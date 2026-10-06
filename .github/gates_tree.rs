@@ -2138,6 +2138,8 @@ const CAPTURE_FIELD: &str = "kind rung corrected negative_volume unreadable";
 //     names a lock takes, JSON that will not convert, a row with no
 //     comma, and a document of the wrong shape.
 //   partialcount     ingest.rs, the partial-batch counter's own test.
+//   reader-wait-for-a-closing-reader  ingest.rs, barflow-1's test of a
+//     writer waiting for a reader to close the month (D-2552).
 //   spanning-months  tests/broker.rs, a batch that crosses a month end.
 //   identity         tests/unit.rs:121-122, the STEM handed to `tmp`
 //     twice by the test that proves two calls never collide. It is a
@@ -2152,6 +2154,7 @@ const PULL_SCRATCH_2: &str = "
     short-body not-csv json-body index-lands no-partial
     same-source-lock lock-names json-will-not-convert no-comma
     wrong-shape partialcount spanning-months identity
+    reader-wait-for-a-closing-reader
 ";
 
 // ---- group 29: ASSERTION LABELS, A FILENAME PREFIX AND TWO
