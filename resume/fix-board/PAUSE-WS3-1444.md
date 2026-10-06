@@ -30,3 +30,4 @@
 3. Let /tmp/claude-0/mutall.sh finish cli and api (it resumes with --iterate). Then run Gate 18 on `git diff fixboard/pr74-batch4...fixboard/pr74-batch5 -- crates`.
 4. Update RESULT-20261006.md.
 - 14:45 UTC: the Gate 18 cli run (old tree a08d2ec4) also reports `candidate_trades.rs:1358 AlreadyExists guard -> false` as not caught (missed or timeout); e0709bd3's `linked_or_lost_race` test covers both the true and false variants.
+- 15:04 UTC: the old-tree cli run also reports `candidate_trades.rs:1358 == -> !=` (same AlreadyExists guard) as not caught; also covered by e0709bd3's direct test (each io::ErrorKind asserted).
