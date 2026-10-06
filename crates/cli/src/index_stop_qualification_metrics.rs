@@ -1,7 +1,7 @@
 //! Exact trade/session arithmetic from native rows, without a grid capability.
 use super::{Snapshot, display};
 use crate::candidate_universe::population_base_evidence_v2::{
-    measured_rate, ratio_observed, return_drawdown,
+    measured_max_rate, measured_rate, ratio_observed, return_drawdown,
 };
 use runner::admission::{
     AdmissionEvidenceValuesV1, CompletenessV1, HypothesisDecisionV1, ObservedI64V1, ObservedU64V1,
@@ -136,10 +136,14 @@ fn weakest<S: Snapshot>(row: &S) -> Result<ObservedI64V1, String> {
     Ok(ObservedI64V1::Measured(weakest))
 }
 
-pub(super) fn base<S: Snapshot>(row: &S) -> Result<AdmissionEvidenceValuesV1, String> {
+pub(in super::super) fn base<S: Snapshot>(row: &S) -> Result<AdmissionEvidenceValuesV1, String> {
     let m = row.metrics();
     let t = trade_facts(row)?;
     let rate = |part, total, name| measured_rate(part, total, name).map_err(display);
+    // A rate a MAXIMUM gates rounds UP; `rate` floors, which is safe only for the
+    // minimum-gated win rate and the losing rate the runner reconciles (p2idx-1,
+    // D-1990).
+    let ceiling = |part, total, name| measured_max_rate(part, total, name).map_err(display);
     let ratio = |part, total, name| ratio_observed(part, total, name).map_err(display);
     let measured = |n| {
         if m.trades > 0 {
@@ -171,14 +175,14 @@ pub(super) fn base<S: Snapshot>(row: &S) -> Result<AdmissionEvidenceValuesV1, St
         fwer_p_value_ppm: ObservedU64V1::Unmeasured,
         spa_p_value_ppm: ObservedU64V1::Unmeasured,
         decided_folds: ObservedU64V1::Unmeasured,
-        ambiguous_fill_rate_ppm: rate(t.ambiguous, m.trades, "native fill bound rate")?,
-        gap_affected_rate_ppm: rate(m.stop_gaps, m.trades, "native stop gap rate")?,
-        session_concentration_ppm: rate(
+        ambiguous_fill_rate_ppm: ceiling(t.ambiguous, m.trades, "native fill bound rate")?,
+        gap_affected_rate_ppm: ceiling(m.stop_gaps, m.trades, "native stop gap rate")?,
+        session_concentration_ppm: ceiling(
             row.periods().iter().map(|p| p.trades).max().unwrap_or(0),
             m.trades,
             "native session concentration",
         )?,
-        largest_trade_profit_share_ppm: rate(
+        largest_trade_profit_share_ppm: ceiling(
             t.max_win,
             t.gross_win,
             "native largest profit share",
@@ -207,9 +211,9 @@ pub(super) fn base<S: Snapshot>(row: &S) -> Result<AdmissionEvidenceValuesV1, St
             .gross_win
             .checked_div(m.wins)
             .map_or(ObservedU64V1::Unmeasured, ObservedU64V1::Measured),
-        average_loss_paisa: t
-            .gross_loss
-            .checked_div(losses)
+        // Rounded UP: gated by a maximum (p3floor-1, D-1769).
+        average_loss_paisa: (losses != 0)
+            .then(|| t.gross_loss.div_ceil(losses))
             .map_or(ObservedU64V1::Unmeasured, ObservedU64V1::Measured),
         profit_factor_ppm: ratio(t.gross_win, t.gross_loss, "native profit factor")?,
         consecutive_losing_streak: measured(t.losing_streak),

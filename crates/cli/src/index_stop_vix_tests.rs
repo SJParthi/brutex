@@ -477,7 +477,15 @@ fn index_stop_vix_corrupt_publication_prevents_completed_native_attempt_without_
         .join(crate::identity_hex(&saved.identity()))
         .join("body.bin");
     let native = fs::read(&native_path).map_err(display)?;
-    fs::write(directory(&fixture, &saved).join("complete.bin"), b"torn").map_err(display)?;
+    // A WHOLE receipt with the wrong bytes is corrupt published history and
+    // still refuses; a SHORTER one is an attempt cut short, which D-1760
+    // resumes (`index_stop_vix_publication_cut_short_before_its_receipt_resumes`).
+    let receipt = directory(&fixture, &saved).join("complete.bin");
+    let mut corrupt = fs::read(&receipt).map_err(display)?;
+    if let Some(first) = corrupt.first_mut() {
+        *first ^= 0xff;
+    }
+    fs::write(&receipt, corrupt).map_err(display)?;
     let context = loaded.prepare(limits())?;
     assert!(
         crate::index_stop::produce_catalog(
@@ -724,6 +732,60 @@ fn index_stop_vix_full_capture_budget_refuses_before_any_companion_publication()
 }
 
 #[test]
+fn index_stop_vix_publication_cut_short_before_its_receipt_resumes() -> Result<(), String> {
+    let (fixture, _, saved) = saved(None)?;
+    let directory = directory(&fixture, &saved);
+    let whole = fs::read(directory.join("body.bin")).map_err(display)?;
+    let receipt = fs::read(directory.join("complete.bin")).map_err(display)?;
+    let catalog = Catalog::open(
+        &fixture.output,
+        saved.identity(),
+        bounds().bytes,
+        bounds().records,
+    )?;
+    // A kill after `prepare_in_namespace` created the directory, part-way
+    // through the body, and before `finish` wrote the receipt (D-1760).
+    // The last case is a whole body from a capture that saw another VIX
+    // store, beside a torn receipt: still scratch, never published.
+    let mut other = whole.clone();
+    if let Some(last) = other.last_mut() {
+        *last ^= 1;
+    }
+    for (body, torn) in [
+        (whole.get(..0).unwrap_or_default(), 0),
+        (whole.get(..whole.len() / 2).unwrap_or_default(), 0),
+        (other.as_slice(), 40),
+    ] {
+        fs::remove_file(directory.join("complete.bin")).map_err(display)?;
+        fs::write(directory.join("body.bin"), body).map_err(display)?;
+        if torn > 0 {
+            fs::write(
+                directory.join("complete.bin"),
+                receipt.get(..torn).unwrap_or_default(),
+            )
+            .map_err(display)?;
+        }
+        let reader = publish(
+            &fixture.output,
+            &fixture.root,
+            Vendor::Zerodha,
+            &catalog,
+            bounds(),
+        )?;
+        assert_eq!(reader.image.meta.feed, "zerodha");
+        assert_eq!(
+            fs::read(directory.join("body.bin")).map_err(display)?,
+            whole
+        );
+        assert_eq!(
+            fs::read(directory.join("complete.bin")).map_err(display)?,
+            receipt
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn index_stop_vix_compound_projection_excludes_each_writer_and_releases_on_error()
 -> Result<(), String> {
     let (fixture, _, saved) = saved(None)?;
@@ -779,4 +841,29 @@ fn index_stop_vix_compound_projection_excludes_each_writer_and_releases_on_error
         }
     }
     Ok(())
+}
+
+/// ledgers-1, D-1908: the committed-receipt answer is reachable only from the
+/// owner-lock race. This call's own failure, a failed receipt barrier
+/// included, is returned. Measured on the source because a failed barrier
+/// after the receipt's bytes are visible cannot be produced here.
+#[test]
+#[expect(clippy::expect_used, reason = "a missing function is a failed fixture")]
+fn only_a_lost_owner_race_is_answered_by_the_committed_receipt() {
+    let source = include_str!("index_stop_vix.rs");
+    let (_, publish) = source
+        .split_once("pub(crate) fn publish(")
+        .expect("publish exists");
+    let publish = publish
+        .split_once("\nfn saved(")
+        .map_or(publish, |(body, _)| body);
+    assert!(
+        !publish.contains("Err(_) if persistence::committed"),
+        "{publish}"
+    );
+    assert!(
+        publish.contains("Err(why) if persistence::lost_owner_race(&why) => return Ok(Some(why)),")
+    );
+    assert!(publish.contains("Some(why) if persistence::committed(&directory)? =>"));
+    assert!(publish.contains("Err(why) => return Err(why),"));
 }

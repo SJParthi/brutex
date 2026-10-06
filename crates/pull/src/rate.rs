@@ -729,7 +729,8 @@ impl Window {
     /// real reduction in a few refusals; a day quota erodes gently and stays
     /// usable.
     ///
-    /// **The floor is one, never zero.** An allowance of zero is an absorbing
+    /// **The floor is one permit a second, never zero** ([`Self::floor_of`],
+    /// D-1769; it was one permit per span). An allowance of zero is an absorbing
     /// state — no request is ever admitted, so no success is ever observed, so
     /// nothing ever raises it again. A governor that can reach it is a governor
     /// that can permanently stop a pull on one bad minute, and the recovery
@@ -751,8 +752,47 @@ impl Window {
         self.permitted = self
             .permitted
             .saturating_sub(Self::step_of(self.ceiling))
-            .max(1);
+            .max(Self::floor_of(self.span, self.ceiling));
         self.credit = 0;
+    }
+
+    /// The lowest allowance a refusal may step this span down to: one permit
+    /// per second across the span, or the ceiling where that is smaller, and
+    /// never below one.
+    ///
+    /// # THE FLOOR WAS ONE FOR EVERY SPAN, AND ON A DAY SPAN ONE IS A DAY'S SLEEP
+    ///
+    /// Each refusal steps every span down by `ceiling / BACKOFF_STEPS`, so the
+    /// 100,000/day window reached ONE after exactly 32 refusals and the next
+    /// permit was a day away — measured: a wait of 86,390 s, and a second
+    /// queued one of 172,790 s — while recovery adds a step back per
+    /// [`SUCCESSES_PER_STEP`] clean answers that a one-a-day allowance cannot
+    /// earn. The feed stalled until the process restarted, behind a sleep no
+    /// caller bounded (CE-28, D-1769).
+    ///
+    /// A refusal is evidence the arrival RATE is too high, and the slowest rate
+    /// any vendor here publishes is per second. So every span floors at the
+    /// same rate — one permit per second — expressed in its own length: 1 for a
+    /// second, 60 for a minute, 86,400 for a day. The second span's floor is
+    /// unchanged; a long span can no longer be stepped below the rate the
+    /// shortest one already floors at, which is the only thing it was ever
+    /// doing past that point.
+    ///
+    /// # A span published slower than one per second keeps its old floor
+    ///
+    /// Flooring it at one per second would sit ABOVE its own ceiling, and a
+    /// refusal would then narrow nothing. Such a span floors at one step,
+    /// `ceiling / BACKOFF_STEPS` and never below one, as before. No live feed
+    /// publishes one — every ceiling in `crate::vendor` is faster than a permit
+    /// a second, pinned by
+    /// `every_live_rate_span_floors_at_one_permit_per_second` — so that branch
+    /// guards a descriptor nobody has written yet. Named rather than hidden:
+    /// `docs/06-limits.md` records it.
+    fn floor_of(span: WindowSpan, ceiling: u32) -> u32 {
+        match u32::try_from(span.len_micros() / MICROS_PER_SECOND) {
+            Ok(per_second) if per_second < ceiling => per_second,
+            _ => Self::step_of(ceiling),
+        }
     }
 }
 

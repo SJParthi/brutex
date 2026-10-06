@@ -193,7 +193,7 @@ pub const MAX_FILE_BYTES: u64 = 64 * 1024;
 /// arm no test could reach. The assertion below keeps the two honest, and
 /// `pull::unit::the_configuration_file_is_bounded_before_it_is_read` pins the
 /// value itself so the expression cannot drift.
-const MAX_FILE_BYTES_LEN: usize = 64 * 1024;
+pub(crate) const MAX_FILE_BYTES_LEN: usize = 64 * 1024;
 
 const _: () = assert!(MAX_FILE_BYTES == 65_536 && MAX_FILE_BYTES_LEN == 65_536);
 
@@ -439,6 +439,14 @@ pub enum ConfigError {
         /// The number of bytes read before the reader stopped.
         at_least: u64,
     },
+    /// The file opens with a byte-order mark, U+FEFF.
+    ///
+    /// Refused by name. It used to fall through to line 1's parse and come
+    /// back as an unknown key or an unparseable line, which is loud but sends
+    /// the operator looking for a typo they cannot see (CE-77, D-1780). It is
+    /// not stripped: §4 bans a fallback that hides a failure, and an editor
+    /// that writes one is worth knowing about.
+    ByteOrderMark,
     /// A line is longer than [`MAX_LINE_BYTES`].
     LineTooLong {
         /// One-based line number.
@@ -568,6 +576,10 @@ impl fmt::Display for ConfigError {
             Self::LineTooLong { line, len } => {
                 write!(f, "line {line} is {len} bytes, max {MAX_LINE_BYTES}")
             }
+            Self::ByteOrderMark => write!(
+                f,
+                "the file starts with a byte-order mark (U+FEFF); save it as UTF-8 without one"
+            ),
             Self::Unparseable { line } => write!(f, "line {line} is not a line this reader knows"),
             Self::UnknownTable { line } => {
                 write!(f, "line {line} is not a [vendor.<name>] table header")
@@ -832,6 +844,9 @@ impl CredentialConfig {
         let mut vendors: Vec<VendorPaths> = Vec::with_capacity(Vendor::ALL.len());
         let mut current: Option<Pending> = None;
 
+        if text.starts_with('\u{feff}') {
+            return Err(ConfigError::ByteOrderMark);
+        }
         for (index, raw) in text.lines().enumerate() {
             let line = index + 1;
             if raw.len() > MAX_LINE_BYTES {
@@ -1018,7 +1033,13 @@ impl CredentialConfig {
 /// `?`: their failure arms then live in `std`, which is not this repository's code to measure, instead
 /// of being two arms in this function that a test would have to force a
 /// permission error to reach.
-fn read_bounded(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+///
+/// **Two callers, one shape.** `crate::ssm::AwsIdentity::from_credentials_file`
+/// reads `~/.aws/credentials` through this too: it sits beside this file on the
+/// same start-up path and was read with an unbounded `read_to_string`, so the
+/// FIFO hang and the device OOM this function removes were still reachable one
+/// file over. P1-19-03, D-2326.
+pub(crate) fn read_bounded(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
     if !std::fs::metadata(path)?.is_file() {
         return Ok(None);
     }

@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { parse } from 'svelte/compiler';
+import { readJournalError } from '../src/lib/autopilot-journal.js';
 
 // Execute the actual page reader and coverage functions. No copied date
 // arithmetic can make this pass while the live page still rejects its API.
@@ -16,7 +17,8 @@ const code = names.map((name) => {
   assert.ok(node, `the actual Autopilot ${name} declaration must exist`);
   return source.slice(node.start, node.end);
 }).join('\n');
-const page = new Function('inrs', `${code}\nreturn {monthKey,monthLabel,span,readState};`)(String);
+const page = new Function('inrs', 'readJournalError',
+  `${code}\nreturn {monthKey,monthLabel,span,readState};`)(String, readJournalError);
 
 test('the native civil-day target produces monthly coverage without changing its reported day bounds', () => {
   const raw = { state: 'waiting', why: 'Waiting for the next check', now: null, failures: [],

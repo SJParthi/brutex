@@ -39,7 +39,7 @@ arrives from outside.
 | 1 | Identity | Fixed width, never variable | `Symbol` 24 B, `Isin` 12 B, `InstrumentKey` is `Copy` with a structural hash | ✓ |
 | 2 | Hashing | No cryptographic hash on a trusted path | FNV-1a, not SipHash. `core` may declare no dependency (gate 9), so the hash is four `const` lines rather than a crate | ◐ |
 | 3 | Maps | Pre-sized with headroom | `HashMap::with_capacity(reservation_for(n))`, factor 2. **Lookup** is expected O(1), not adversarial worst-case. **Append** avoids a resize for the first `n_valid` calls after a load and is amortised O(1) after that — see below | ◐ |
-| 4 | Membership | No search of any kind | Open-addressed table built at compile time. **Never `binary_search`** | ✓ |
+| 4 | Membership | No search of any kind | Open-addressed table built at compile time. **Never `binary_search`**. **Two bounds:** a hit is asserted at `<= 8` steps (worst measured 7) and a miss, which runs on to the first empty slot, at `<= 12` (worst measured 11) — `core::universe::a_miss_probes_further_than_a_hit_and_its_bound_is_measured_too`. `of_equity` on a name outside every tier is six misses | ✓ |
 | 5 | Address | Arithmetic, never lookup | `base + header + i·stride`. The path is the index | ✓ |
 | 6 | Hot data | One fixed-width mask per bar | **48 bytes.** `ConditionMask` is `[u64; WORDS]` with `WORDS = 6`, pinned by a `const` assertion in `vocab::mask`; `engine::column::Column` owns exactly one such row per bar and no position bit plane | ✓ |
 | 7 | Residency | Build once, reuse without re-reading the source slice | `engine::column::Column::from_rows` copies the fixed rows once and every threshold/candidate probe reuses them. This is logical reuse, not a claim that the OS physically pins all pages in RAM | ◐ |
@@ -73,7 +73,7 @@ Measured on an Apple M4 Pro, 48 GB, macOS 26.5.2, rustc 1.97.1.
 |---|---|---|
 | One mask evaluation | fixed **384-bit representation**, 370 allocated positions (`C-V-01…03`) | Six words are evaluated every time, independent of candidate popcount and answer. This row was first labelled `1→74`, then `1→234`; both were stale vocabulary counts. The live extreme is now tested separately all the way to the representation's padding at k=384, so a width correction cannot again stop at a condition-family boundary |
 | Live `Column::support`, candidate k=1 → k=4 / k=8 / k=384 | **0.971× / 0.996× / 0.942×** (`C-E-02`, `C-E-09`) | One fixed-six-word `hits` per row. `the_live_support_body_is_one_fixed_width_hit_test` structurally refuses the former Θ(k) position-bitmap loop; the ratios are regression evidence, not an adversarial latency guarantee |
-| Universe membership | worst probe **6** (750 members) / **7** (213 members) | Replaced ~10 comparisons that grew with the list |
+| Universe membership | worst **hit** probe **6** (750 members) / **7** (213 members); worst **miss** probe **11** (750) / **10** (213); six tables, so `of_equity` on a name in no tier is at most **54** steps measured, **72** by the asserted per-table miss bound | Replaced ~10 comparisons that grew with the list. Probe counts are a property of the compiled tables, not of the machine. The hit column alone was quoted here as the whole bound until P1-18-07 (D-1947); a miss is never the shorter walk |
 | NSE series membership | worst probe **2** (6 members) / **1** (2) / **6** (120) | Layer 4's last holdout. `core::vendor::board_of` binary-searched these three until D-0065. The 120-code table measured **10** at 256 slots and was refused by its own test until it was 512 — the second time this section's own warning has caught a table that was accepted by `build` and too slow to ship |
 | Page render, 2,787 → 50,000 instruments | **0.974× – 1.084×**, every sort column × pill, plus the hatch and a clamped deep page | Layer 12. `cargo bench -p api`, exit 0, 2026-08-12 — re-measured for D-0130. Absolute ~157 µs at *both* sizes, release profile. Marginal cost of one more instrument: **0 – 280 ps** per request (C-15), against 85,400 ps before D-0042. **It regressed to 1,433 – 2,100 ps on all thirty C-15 lines and was caught by this bench**, not by the rows or the counts — the page drew its notes, and a note's length is the universe. D-0130 |
 | Dashboard, 2 → 50,000 instruments | **0.974×** | Layer 12. Was 80.640× under a docstring that already said "nothing here scans" (C-16). Then **1.954× and still green**, at 87.1 → 170.2 µs, through the whole D-0130 regression: a 3.0× ratio ceiling is wide enough to hide a doubling, which is why C-15's slope exists beside it. Now 10.7 → 10.4 µs |
@@ -154,9 +154,17 @@ here at all; every statement about that saving is an **EXTRAPOLATION**. See
 A layer is not built because the code looks right. It is built when a test
 asserts the bound as a **number**:
 
-- Layer 4's probe length is asserted at `<= 8` and printed. The first attempt
-  measured **14** — worse than the `binary_search` it replaced, still O(1) by
-  definition — and the test refused it until the table was widened.
+- Layer 4's probe length is asserted twice. A **hit** is asserted at `<= 8` by
+  `core::universe::the_probe_length_is_bounded_which_is_what_makes_it_o1`; the
+  first attempt measured **14** — worse than the `binary_search` it replaced,
+  still O(1) by definition — and the test refused it until the table was
+  widened. A **miss** is asserted at `<= 12` by
+  `core::universe::a_miss_probes_further_than_a_hit_and_its_bound_is_measured_too`,
+  over every slot rather than sample strings, because a miss runs on to the
+  first empty slot and is never the shorter walk. This line quoted the hit
+  bound alone as layer 4's bound, which is wrong in the unsafe direction: the
+  call made most, `of_equity` on a name in no tier, is six misses. P1-18-07,
+  D-1947.
 - Layer 8's flatness is asserted against the **3.0×** shared-CI ceiling
   (`CEILING_PERMILLE = 3_000` in `crates/engine/benches/ratio.rs`). The 1.4× in
   `docs/04-invariants.md` applies to dedicated hardware and no harness asserts

@@ -34,6 +34,10 @@
 //! last; C-BC-01 and C-BC-02 time the COLD one, which verifies its block, and
 //! C-BC-02 holds it to its own budget because it does not fit C-29's (D-0914).
 //!
+//! C-TIX-01 and C-TIX-02 time `BarFile::first_at_or_after` through the `.tix`
+//! time index: flat at 1x, 10x and 100x the file, and within the warm record
+//! read's budget (D-2329).
+//!
 //! All arithmetic is integer. `clippy::float_arithmetic` is a workspace lint
 //! and a ratio is the one place it would be tempting.
 
@@ -448,6 +452,82 @@ fn cold_record_read_stays_within_its_budget() -> bool {
     )
 }
 
+/// Fourteen timestamps spread from the first bar of an `n`-bar bench file to
+/// its last, each a different index entry from the one before it, so every
+/// lookup reads an entry it did not read last.
+fn tix_stamps(n: u64) -> [i64; COLD_BLOCKS] {
+    let last = u64::try_from(COLD_BLOCKS - 1).unwrap_or(1);
+    let mut out = [0i64; COLD_BLOCKS];
+    for (slot, step) in out.iter_mut().zip(0u64..) {
+        let row = step.saturating_mul(n.saturating_sub(1)) / last;
+        let secs = i64::try_from(row).unwrap_or(0);
+        *slot = JUNE_2024_IST_START.saturating_add(secs.saturating_mul(1_000_000));
+    }
+    out
+}
+
+/// Times one time-to-row lookup, in picoseconds per call, cycling through
+/// [`tix_stamps`]. Each stamp is a bar's own, so each lookup is the index's
+/// common case: one 16-byte entry `pread` and no bar read.
+fn tix_ps(file: &BarFile, n: u64) -> u128 {
+    if file.time_lookup() != store::file::TimeLookup::Indexed {
+        refuse("the bench month has no ready time index; the row would time the bisection");
+    }
+    let at = tix_stamps(n);
+    let mut next = 0usize;
+    cost_ps(280, || {
+        let ts = at.get(next % COLD_BLOCKS).copied().unwrap_or(0);
+        next = next.wrapping_add(1);
+        file.first_at_or_after(black_box(ts))
+    })
+}
+
+/// C-TIX-01 — time to row costs the same whatever the file holds. D-2329.
+///
+/// `BarFile::first_at_or_after` was a bisection (D-1434): its cost grew with
+/// `log2(n_valid)`, fourteen probes at a one-minute month. Through the `.tix`
+/// index it is one entry read. Timed at 1x, 10x and 100x the record count on
+/// the one-second rung; a bisection would be visibly slower at 100x, a scan
+/// a hundred times slower.
+fn time_lookup_is_flat_in_the_file() -> bool {
+    let (small, _d1) = loaded("tix-small", 1_000);
+    let (medium, _d2) = loaded("tix-medium", 10_000);
+    let (large, _d3) = loaded("tix-large", 100_000);
+    let base = tix_ps(&small, 1_000);
+    let mut ok = true;
+    ok &= ratio(
+        "C-TIX-01 first_at_or_after, 10x file",
+        base,
+        tix_ps(&medium, 10_000),
+    );
+    ok &= ratio(
+        "C-TIX-01 first_at_or_after, 100x file",
+        base,
+        tix_ps(&large, 100_000),
+    );
+    ok
+}
+
+/// C-TIX-02 — one time-to-row lookup costs a bounded multiple of the address
+/// floor, the budget a warm record read is held to. D-2329.
+fn time_lookup_stays_within_its_budget() -> bool {
+    /// Floors allowed per time lookup: C-29's 800, the warm record read's
+    /// budget, because the lookup's common case is one 16-byte `pread` — the
+    /// same shape as that read. Measured in the D-2329 commit; see
+    /// `docs/04-invariants.md` C-TIX-02.
+    const ALLOWED_TIX: u128 = 800;
+
+    let (file, _d) = loaded("tix-budget", 10_000);
+    let floor = floor_ps(Layout::V2);
+    let at = tix_ps(&file, 10_000);
+    budget(
+        "C-TIX-02 first_at_or_after against the address floor",
+        floor,
+        at,
+        ALLOWED_TIX,
+    )
+}
+
 /// C-01 — reading the header costs the same whatever region it is handed.
 ///
 /// The region a caller passes may be a whole read-only mapping of the file, so
@@ -558,6 +638,8 @@ fn main() {
     ok &= record_read_stays_within_its_budget();
     ok &= cold_record_read_is_flat_in_the_file();
     ok &= cold_record_read_stays_within_its_budget();
+    ok &= time_lookup_is_flat_in_the_file();
+    ok &= time_lookup_stays_within_its_budget();
     if ok {
         println!("all ratios within the ceiling");
     } else {

@@ -313,3 +313,114 @@ fn no_document_says_the_cold_block_verify_is_unmeasured() {
         }
     }
 }
+
+/// **§2, §3, §6 and §8 state the byte layouts the code writes.**
+///
+/// The `.crc` family's entry layout, the byte order of the slot and the
+/// record, and the `.ovl` / `.grk` record tables were stated only in Rust
+/// comments until tests-docs-security-pass14 P14-02/P14-03 (D-1959). Each
+/// sentence is pinned here against the constant or the encoder it describes.
+#[test]
+fn the_sidecar_byte_order_and_sibling_record_layouts_are_stated() {
+    use store::format::{
+        GREEK_MAGIC, GREEK_RECORDS_PER_BLOCK, GREEK_STRIDE, GREEK_VERSION, Greek, OVERLAY_MAGIC,
+        OVERLAY_RECORDS_PER_BLOCK, OVERLAY_STRIDE, OVERLAY_VERSION, Overlay, RECORDS_PER_BLOCK,
+    };
+
+    let two = section("2");
+    assert!(two.contains("**Every integer in the slot is little-endian**"));
+    let three = section("3");
+    assert!(three.contains(
+        "**On disk the seven fields are little-endian `i64`s at offsets 0, 8, 16, 24, 32, 40 and 48**"
+    ));
+
+    let six = section("6");
+    assert!(six.contains("| Entry for block *b* | 4 bytes at byte offset `4·b` |"));
+    assert!(six.contains("| Entry encoding | `u32`, little-endian |"));
+    assert!(six.contains("check value `0xE3069283`"));
+    assert_eq!(store::crc::CHECK_VALUE, 0xE306_9283);
+    assert!(six.contains(&format!(
+        "(73 bars, {OVERLAY_RECORDS_PER_BLOCK} overlay rows, {GREEK_RECORDS_PER_BLOCK} Greek rows)"
+    )));
+    assert_eq!(RECORDS_PER_BLOCK, 73);
+    // The sentence quotes the writer's own comment, so the comment must exist.
+    assert!(FILE_RS.contains("FOUR BYTES AT `block * 4`"));
+
+    let eight = section("8");
+    let magic = |m: [u8; 8]| String::from_utf8_lossy(&m).into_owned();
+    assert!(eight.contains(&format!(
+        "Magic `{}`, version `{OVERLAY_VERSION}`, stride `{OVERLAY_STRIDE}`, **{OVERLAY_RECORDS_PER_BLOCK}** records per block",
+        magic(OVERLAY_MAGIC)
+    )));
+    assert!(eight.contains(&format!(
+        "Magic `{}`, version `{GREEK_VERSION}`, stride `{GREEK_STRIDE}`, **{GREEK_RECORDS_PER_BLOCK}** records per block",
+        magic(GREEK_MAGIC)
+    )));
+
+    // The overlay table's offsets are the encoder's: one distinct value per
+    // field, read back little-endian at the stated offset.
+    let overlay = Overlay {
+        ts_micros: 0x0102_0304_0506_0708,
+        spot: 0x1112_1314_1516_1718,
+        iv_micros: 0x2122_2324_2526_2728,
+    }
+    .image();
+    for (offset, value, name) in [
+        (0usize, 0x0102_0304_0506_0708_i64, "ts_micros"),
+        (8, 0x1112_1314_1516_1718, "spot"),
+        (16, 0x2122_2324_2526_2728, "iv_micros"),
+    ] {
+        let mut field = [0u8; 8];
+        field.copy_from_slice(overlay.get(offset..offset + 8).expect("in the record"));
+        assert_eq!(i64::from_le_bytes(field), value, "{name} at {offset}");
+        assert!(eight.contains(&format!("| {offset} | 8 | `{name}` |")));
+    }
+
+    // The Greek table's offsets: every f64 field carries a distinct value.
+    let greek = Greek {
+        ts_micros: 7,
+        spot: 8,
+        volatility: 0.5,
+        delta: 1.5,
+        gamma: 2.5,
+        vega: 3.5,
+        theta: 4.5,
+        rho: 5.5,
+        rate: 6.5,
+        provenance: Greek::provenance_of(1, 2, true, -3),
+    }
+    .image();
+    let word = |offset: usize| {
+        let mut field = [0u8; 8];
+        field.copy_from_slice(greek.get(offset..offset + 8).expect("in the record"));
+        field
+    };
+    assert_eq!(i64::from_le_bytes(word(0)), 7);
+    assert_eq!(i64::from_le_bytes(word(8)), 8);
+    for (offset, value, name) in [
+        (16usize, 0.5_f64, "volatility"),
+        (24, 1.5, "delta"),
+        (32, 2.5, "gamma"),
+        (40, 3.5, "vega"),
+        (48, 4.5, "theta"),
+        (56, 5.5, "rho"),
+        (64, 6.5, "rate"),
+    ] {
+        assert_eq!(
+            f64::from_le_bytes(word(offset)).to_bits(),
+            value.to_bits(),
+            "{name}"
+        );
+        assert!(eight.contains(&format!("| {offset} | 8 | `{name}` |")));
+    }
+    let provenance = i64::from_le_bytes(word(72));
+    assert_eq!(provenance & 0xFF, 1, "bits 0..8 are the volatility source");
+    assert_eq!(
+        (provenance >> 8) & 0xFF,
+        2,
+        "bits 8..16 are the rate source"
+    );
+    assert_eq!((provenance >> 16) & 1, 1, "bit 16 is the band flag");
+    assert_eq!(provenance >> 32, -3, "bits 32..64 are the signed steps");
+    assert!(eight.contains("| 72 | 8 | `provenance` |"));
+}

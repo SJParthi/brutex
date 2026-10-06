@@ -725,6 +725,28 @@ impl AnchoredSearchLineageV4Ledger {
             if named_identity(&root)? != root_identity {
                 return Err("anchored search-lineage V4 root changed while opening".to_owned());
             }
+            if writable {
+                // ledgers-3, D-1910: the writer cuts a kill-torn tail under its exclusive
+                // lock; the bytes past the last whole record were never acknowledged.
+                // A whole NIFTY member left by a torn pair is kept: the scan
+                // already treats it as the exact retry's orphan.
+                for (file, path, width) in [
+                    (
+                        &member_file,
+                        &member_path,
+                        ANCHORED_SEARCH_LINEAGE_V4_MEMBER_BYTES,
+                    ),
+                    (
+                        &completion_file,
+                        &completion_path,
+                        ANCHORED_SEARCH_LINEAGE_V4_COMPLETION_BYTES,
+                    ),
+                ] {
+                    let width = u64::try_from(width)
+                        .map_err(|_| "search-lineage V4 width does not fit u64".to_owned())?;
+                    crate::fixed_tail::heal_torn_tail(file, path, 0, width, &[])?;
+                }
+            }
             let lock_generation = file_generation(&lock_file, &lock_path, LOCK_FILE_MAX_BYTES)?;
             let member_generation =
                 file_generation(&member_file, &member_path, bounds.member_bytes)?;
@@ -2598,6 +2620,49 @@ mod tests {
             .open(root.path().join(MEMBER_FILE))
             .expect("open member file");
         append_with_rollback(&mut file, &[], |_, _| Ok(())).expect("a clean write succeeds");
+
+        // AND PRODUCTION IS WIRED THROUGH IT, IN ONE CALL (P1-17-04). Everything
+        // above drives the helper directly, so `append_raw` writing with
+        // `write_all` (no rollback) or `append_locked` going back to one
+        // `append_raw` per member (the D-1620 crash window) passed it. Both
+        // shapes are read from the code, bounded at each function's closing
+        // brace, with comments dropped; the needles are split so this test
+        // cannot match itself.
+        let source = include_str!("anchored_search_lineage_v4.rs");
+        let code_of = |anchor: &str, close: &str| -> String {
+            source
+                .split_once(anchor)
+                .and_then(|(_, rest)| rest.split_once(close))
+                .map_or("", |(body, _)| body)
+                .lines()
+                .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let raw = code_of(concat!("\nfn append_", "raw("), "\n}\n");
+        assert_eq!(
+            raw.matches(concat!(
+                "append_with_",
+                "rollback(file, raw, Write::write_all)"
+            ))
+            .count(),
+            1,
+            "append_raw delegates to the rollback helper: {raw}"
+        );
+        assert!(
+            !raw.contains(concat!("file.write_", "all(")),
+            "append_raw must not write around the rollback: {raw}"
+        );
+        let locked = code_of(concat!("\n    fn append_", "locked("), "\n    }\n");
+        assert_eq!(
+            locked.matches(concat!("append_", "raw(")).count(),
+            1,
+            "a pair's members are written in one call: {locked}"
+        );
+        assert!(
+            locked.contains(concat!("None => (encode_", "members(&members)?, 2),")),
+            "and that one call carries both members: {locked}"
+        );
     }
 
     #[test]
@@ -2638,6 +2703,16 @@ mod tests {
             assert_refuses(
                 AnchoredSearchLineageV4Ledger::open_read(root.path(), bounds()),
                 "ragged",
+            );
+            // ledgers-3, D-1910: the next writer cuts the never-acknowledged
+            // tail, and a reader then opens.
+            drop(
+                AnchoredSearchLineageV4Ledger::open_write(root.path(), bounds())
+                    .expect("the writer cuts the ragged tail"),
+            );
+            drop(
+                AnchoredSearchLineageV4Ledger::open_read(root.path(), bounds())
+                    .expect("a reader opens the healed ledger"),
             );
         }
 

@@ -136,7 +136,7 @@ fn refuse(name: &str, raw: &str) {
 ///
 /// `u64` because this is also the reader for counts whose domain really is
 /// `u64`, such as a millisecond budget. Machine-sized counts go through
-/// [`count_usize`] so a value that parses as `u64` but cannot fit this target is
+/// [`count_usize_within`] so a value that parses as `u64` but cannot fit this target is
 /// recorded rather than disappearing at a later conversion.
 #[must_use]
 pub(crate) fn count(name: &str) -> Option<u64> {
@@ -152,18 +152,13 @@ pub(crate) fn count(name: &str) -> Option<u64> {
     }
 }
 
-/// A positive, machine-sized count, with representation failures recorded.
+/// A positive, machine-sized count, with representation failures recorded,
+/// refusing anything above `ceiling`.
 ///
 /// Parsing in the target type matters on a 32-bit target: `u64::MAX` is a valid
 /// [`count`] but cannot be a `Vec` bound or an iterator count there. Letting each
 /// caller append `.and_then(usize::try_from(..).ok())` would reintroduce the
 /// exact silent fallback this module exists to expose, one step after parsing.
-#[must_use]
-pub(crate) fn count_usize(name: &str) -> Option<usize> {
-    count_usize_within(name, usize::MAX)
-}
-
-/// [`count_usize`], refusing anything above `ceiling`.
 ///
 /// **An unbounded count is a way to kill the process from a text box.** Three
 /// knobs reach a `with_capacity` before a single bar is scored -- the priced
@@ -199,6 +194,31 @@ pub(crate) fn machine_count(raw: &str, ceiling: usize) -> Option<usize> {
 
 pub(crate) fn nonnegative_floor(raw: &str) -> Option<i64> {
     raw.trim().parse::<i64>().ok().filter(|value| *value >= 0)
+}
+
+/// One policy knob's value, by the ONE rule every reader of it applies.
+///
+/// # Three readers, two rules (P8-04, D-2723)
+///
+/// `Rules::stated` (screen, elite, ranges, pool, ledgers, the browser sweep)
+/// and `strict_range_knobs` admitted any `i64 >= 0` through
+/// [`nonnegative_floor`], while `expression_pricing::validate_overrides`
+/// refused a win rate above 10,000 bp and any `BRUTEX_PROTECTED_EXITS` other
+/// than `0` or `1`. So `BRUTEX_MIN_WIN_RATE_BP=20000` -- a 200% win rate --
+/// ran silently on one path and was refused on the other, and
+/// `BRUTEX_PROTECTED_EXITS=2` was "on" on one and refused on the other. Every
+/// reader now asks this function; what each does with a `None` (a named
+/// fallback, or a refusal) is still that reader's own documented choice.
+///
+/// A win rate is a fraction of trades and cannot exceed 10,000 bp; the
+/// protective-exit switch is a boolean and has exactly two spellings.
+pub(crate) fn policy_floor(name: &str, raw: &str) -> Option<i64> {
+    let value = nonnegative_floor(raw)?;
+    match name {
+        "BRUTEX_MIN_WIN_RATE_BP" => (value <= 10_000).then_some(value),
+        "BRUTEX_PROTECTED_EXITS" => matches!(raw.trim(), "0" | "1").then_some(value),
+        _ => Some(value),
+    }
 }
 
 pub(crate) fn horizon_count(raw: &str) -> Option<runner::outcome::Horizon> {
@@ -423,8 +443,8 @@ fn render(mut pairs: Vec<(&str, &str)>) -> String {
 mod tests {
     use super::serially;
     use super::{
-        clear_all, count, count_usize, describe, refuse_value, refused, render, resolve, set,
-        set_here, var,
+        clear_all, count, count_usize_within, describe, refuse_value, refused, render, resolve,
+        set, set_here, var,
     };
 
     /// The whole point: a knob nobody set reads through to the environment, so
@@ -688,7 +708,11 @@ mod tests {
         let too_large = "999999999999999999999999999999999999999";
         set(name, too_large);
 
-        assert_eq!(count_usize(name), None, "the count cannot be represented");
+        assert_eq!(
+            count_usize_within(name, usize::MAX),
+            None,
+            "the count cannot be represented"
+        );
         let block = refused().expect("the failed count must be reportable");
         assert!(
             block.contains(name) && block.contains(too_large),
@@ -698,7 +722,7 @@ mod tests {
         clear_all();
         set(name, "42");
         assert_eq!(
-            count_usize(name),
+            count_usize_within(name, usize::MAX),
             Some(42),
             "a representable count is taken"
         );

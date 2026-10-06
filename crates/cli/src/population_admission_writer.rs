@@ -1308,7 +1308,7 @@ pub(crate) fn metrics_from_cell(
         u64::try_from(cell.min_win).map_err(|_| "cell minimum win does not fit u64".to_owned())?;
     let average_win =
         u64::try_from(cell.avg_win()).map_err(|_| "cell average win is negative".to_owned())?;
-    let average_loss = negative_magnitude(cell.avg_loss());
+    let average_loss = cell.avg_loss_magnitude_ceil();
     Ok(TopMetricsV1 {
         drawdown,
         worst_loss,

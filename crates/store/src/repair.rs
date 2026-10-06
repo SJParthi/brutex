@@ -360,7 +360,12 @@ fn write_revision(
         false,
     )?;
     io_at(reserved.sync_all(), &reservation, "sync reservation", false)?;
-    for kind in [FileKind::Bars, FileKind::Checksums, FileKind::Lock] {
+    for kind in [
+        FileKind::Bars,
+        FileKind::Checksums,
+        FileKind::Lock,
+        FileKind::TimeIndex,
+    ] {
         let sibling = path.with_file(kind).to_path_buf(&revision_root);
         if exists(&sibling)? {
             return Err(RepairError::Incomplete(sibling));

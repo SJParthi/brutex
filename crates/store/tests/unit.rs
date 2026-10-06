@@ -880,11 +880,11 @@ fn the_constants_are_the_current_versions_layout() {
     assert_eq!(v2.record_stride(), RECORD_STRIDE);
     assert_eq!(v2.records_per_block(), RECORDS_PER_BLOCK);
     assert_eq!(v2.block_len(), BLOCK_LEN);
-    // THREE GEOMETRIES, NOT ONE. `KNOWN` answers "which geometries can this
-    // build read", and two of the three are sidecars: the overlay's 24-byte
-    // records at version 9 and the computed greeks' 80 at version 8, beside the
-    // bar's 56 at version 2. Resolution is by the file's own version number, so
-    // none can be confused by a reader that reads the header it was handed.
+    // FOUR ROWS, THREE GEOMETRIES. `KNOWN` answers "which geometries can this
+    // build read": the bar's 56-byte records at versions 2 and 3 (one geometry,
+    // D-1571), the overlay's 24 at version 9 and the computed greeks' 80 at
+    // version 8. Resolution is by the file's own version number, so none can
+    // be confused by a reader that reads the header it was handed.
     assert_eq!(Layout::KNOWN, &[v2, v3, Layout::OVERLAY, Layout::GREEKS]);
     assert_eq!(Layout::OVERLAY.record_stride(), 24);
     assert_eq!(Layout::GREEKS.record_stride(), 80);
@@ -893,7 +893,8 @@ fn the_constants_are_the_current_versions_layout() {
     // duplicate version makes resolution pick whichever row is first, and a
     // duplicate stride makes two geometries indistinguishable to a reader that
     // resolved correctly — asserted as a property over the whole list rather
-    // than as a pair, so a fourth row is checked against all three.
+    // than as a pair, so a new row is checked against every other. The bar
+    // pair is the one stride exemption; magic separates it (S-29).
     for (index, one) in Layout::KNOWN.iter().enumerate() {
         for other in Layout::KNOWN.iter().skip(index + 1) {
             assert_ne!(
@@ -1074,6 +1075,15 @@ fn a_degenerate_layout_is_refused_at_declaration() {
         Layout::declare(3, MAGIC, 2, u64::MAX, 2),
         bad("block_len"),
         "a block length that does not fit u64 is not a geometry",
+    );
+    // The header's stride field is a u16: the widest stride it can carry is
+    // admitted and one byte more is refused, so a stride can never be
+    // truncated into a header that names another geometry. D-1955.
+    assert!(Layout::declare(3, MAGIC, 2, u64::from(u16::MAX), 73).is_ok());
+    assert_eq!(
+        Layout::declare(3, MAGIC, 2, u64::from(u16::MAX) + 1, 73),
+        bad("record_stride"),
+        "a stride the header's u16 field cannot hold is not a geometry",
     );
     assert_eq!(
         Layout::declare(3, *b"NOTBRUTE", 2, 56, 73),
@@ -2461,6 +2471,7 @@ fn the_sibling_files_of_a_month_share_every_segment_but_the_extension() {
             "bars/groww/NSE/INDEX/NIFTY/1min/2024-06.lock".to_owned(),
             "bars/groww/NSE/INDEX/NIFTY/1min/2024-06.ovl.crc".to_owned(),
             "bars/groww/NSE/INDEX/NIFTY/1min/2024-06.grk.crc".to_owned(),
+            "bars/groww/NSE/INDEX/NIFTY/1min/2024-06.tix".to_owned(),
         ],
     );
 
@@ -2469,8 +2480,9 @@ fn the_sibling_files_of_a_month_share_every_segment_but_the_extension() {
     // advisory lock" needs a name that cannot drift from the file it guards.
     assert_eq!(FileKind::Lock.extension(), ".lock");
     // Each of the three record families has an independent integrity file;
-    // the existing month lock still serializes their writers.
-    assert_eq!(FileKind::ALL.len(), 7);
+    // the existing month lock still serializes their writers. The eighth is
+    // the bar file's time index (D-2329), which is not a record stream.
+    assert_eq!(FileKind::ALL.len(), 8);
 
     let bars = StorePath::new(base).expect("legal");
     assert_eq!(bars.timeframe(), Timeframe::MINUTE_1);

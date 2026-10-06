@@ -10,9 +10,13 @@
 //!
 //! The two files are fixed-stride and independently versioned. Opening is
 //! O(rows + receipts) and builds a bounded hash index. After open, a structural
-//! audit lookup and one row seek are O(1) in record count (plus bounded file
-//! generation checks); a page is O(page length), and the sealed internal append
-//! is O(new rows). No whole-ledger operation is described as O(1).
+//! audit lookup and one row seek are O(1) in record count (plus bounded,
+//! metadata-only file generation checks); a page is O(page length), and an
+//! append on an already-open handle is O(new rows). The production append door
+//! opens the ledger once per call, so one production append costs
+//! O(rows + receipts) for that open plus O(new rows) to write the block and
+//! re-read it from disk (D-1680). No whole-ledger operation is described as
+//! O(1).
 //!
 //! Crate-internal production preparation is available only through
 //! [`CandidateUniverseProductionSourceV1`]. That opaque source bundle rebuilds
@@ -1215,6 +1219,8 @@ impl<'a> CandidateGlobalReplayOosSourceV1<'a> {
         minute_load_bound: StoredSpanLoadBoundV1,
         daily_load_bound: StoredSpanLoadBoundV1,
     ) -> Result<Self, CandidateUniverseRefusal> {
+        #[cfg(test)]
+        OOS_SOURCE_BUILDS.with(|count| count.set(count.get().saturating_add(1)));
         require_rung(rung_seconds)?;
         require_series_family(family, execution_series)?;
         if execution_series.calendar_digest() != crate::stored::calendar_policy_digest_v2() {
@@ -1638,6 +1644,34 @@ pub(crate) fn build_candidate_columns(
     require_column_sources("execution", &execution_column, execution_bars.len())?;
     require_same_evaluation_spec(&signal_column, &execution_column)?;
     Ok((signal_column, execution_column))
+}
+
+/// The rows Candidate production's signal column sweeps over these inputs,
+/// read from that column's own census, warm-up excluded (D-2103).
+///
+/// This runs the one builder below, so a ledger sizing its support on it asks
+/// exactly the fold its Candidate commit will sweep; there is no second count.
+/// O(signal + daily + minute), one column build. **UNVERIFIED as a measured
+/// bound**; read off the source.
+///
+/// # Errors
+///
+/// Every refusal of that build.
+pub(crate) fn candidate_signal_swept_v1(
+    signal_bars: &[Candle],
+    daily_references: &[DailyReference],
+    reference_minute_context: &[Candle],
+    rung_seconds: u32,
+    evaluation: &CandidateEvaluationInputsV1,
+) -> Result<u64, CandidateUniverseRefusal> {
+    build_candidate_signal_column(
+        signal_bars,
+        daily_references,
+        reference_minute_context,
+        rung_seconds,
+        evaluation,
+    )
+    .map(|column| column.census().swept)
 }
 
 /// Builds one exact anchored signal column from the typed daily reference and
@@ -2654,8 +2688,11 @@ impl<'a> ProducedCandidateUniverseV1<'a> {
         &self.base_evidence
     }
 
-    /// Commits the complete block through the private writer and reopens it
-    /// read-only before returning success.
+    /// Commits the complete block through the private writer, then re-reads
+    /// and re-seals that block and its receipt from disk through the same
+    /// handle after a generation recheck, before returning success. One full
+    /// open, O(rows + receipts), plus O(new rows); before D-1680 the writer
+    /// was dropped and a second full read-only open followed.
     ///
     /// # Errors
     ///
@@ -2673,7 +2710,7 @@ impl<'a> ProducedCandidateUniverseV1<'a> {
     }
 
     /// Persists the same-pass Base records only after the exact Candidate
-    /// completion has itself been freshly reopened.
+    /// completion has itself been re-read from disk (D-1680).
     pub(crate) fn append_base_evidence_and_reopen(
         &self,
         root: &Path,
@@ -3157,7 +3194,8 @@ pub(crate) fn verify_population_v5_canonical_record(
 #[cfg(test)]
 pub(crate) use tests::population_v5_test_canonical_candidate_record_for_identity;
 
-/// Crate-internal result of a typed append followed by exact read-only reopen.
+/// Crate-internal result of a typed append followed by an exact re-read of the
+/// committed block from disk (D-1680).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CandidateUniverseProductionCommitV1 {
     /// New row bytes and then a new receipt were synced.
@@ -3350,6 +3388,8 @@ impl CandidateUniverseLedgerV1 {
     }
 
     fn scan(&mut self) -> Result<(), CandidateUniverseRefusal> {
+        #[cfg(test)]
+        LEDGER_SCANS.with(|count| count.set(count.get().saturating_add(1)));
         verify_header(
             &mut self.row_file,
             ROW_MAGIC,
@@ -3663,6 +3703,51 @@ impl CandidateUniverseLedgerV1 {
         }
     }
 
+    /// Where the block starts: the end of the ledger, or the first row of an
+    /// orphan of this exact retry, cut back so the block is written whole.
+    fn cut_orphan_for_rewrite(
+        &mut self,
+        receipt: &CandidateUniverseReceiptV1,
+        prepared: &PreparedCandidateUniverseV1,
+    ) -> Result<u64, CandidateUniverseRefusal> {
+        let Some(orphan) = self.orphan else {
+            return Ok(self.total_rows);
+        };
+        if orphan.universe_id != receipt.universe_id() {
+            return Err(format!(
+                "candidate row tail belongs to {}, not requested {}; no fallback may hide it",
+                hex32(orphan.universe_id),
+                hex32(receipt.universe_id())
+            ));
+        }
+        if orphan.row_count > receipt.row_count {
+            return Err(format!(
+                "candidate orphan has {} rows, longer than exact retry {}",
+                orphan.row_count, receipt.row_count
+            ));
+        }
+        let prefix = usize::try_from(orphan.row_count)
+            .map_err(|_| "candidate orphan prefix does not fit usize".to_owned())?;
+        compare_rows(
+            &mut self.row_file,
+            orphan.first_row,
+            prepared
+                .rows
+                .get(..prefix)
+                .ok_or_else(|| "candidate retry lost its orphan prefix".to_owned())?,
+        )?;
+        // REWRITTEN, NOT VOUCHED FOR (ledgers-2, D-1915): the orphan
+        // may be the bytes of a run whose barrier failed, and a barrier
+        // on this descriptor cannot prove them durable. The block is
+        // cut back and written again whole; the bytes are identical.
+        let start = candidate_row_offset(orphan.first_row)?;
+        self.row_file
+            .set_len(start)
+            .and_then(|()| self.row_file.sync_all())
+            .map_err(|why| format!("cannot cut candidate orphan for rewrite: {why}"))?;
+        Ok(orphan.first_row)
+    }
+
     fn append_complete_locked(
         &mut self,
         prepared: &PreparedCandidateUniverseV1,
@@ -3688,6 +3773,10 @@ impl CandidateUniverseLedgerV1 {
                 existing.first_row,
                 prepared.rows.as_slice(),
             )?;
+            // A path whose barrier failed in this process is never reused as
+            // committed history (ledgers-2, D-1915).
+            crate::fixed_tail::refuse_after_failed_barrier(&self.row_path)?;
+            crate::fixed_tail::refuse_after_failed_barrier(&self.receipt_path)?;
             return Ok(CandidateUniverseProductionCommitV1::Reused(existing));
         }
         let current_universes = u64::try_from(self.audits.len())
@@ -3698,35 +3787,10 @@ impl CandidateUniverseLedgerV1 {
                 self.bounds.max_universes
             ));
         }
-        let (first_row, prefix) = match self.orphan {
-            Some(orphan) => {
-                if orphan.universe_id != receipt.universe_id() {
-                    return Err(format!(
-                        "candidate row tail belongs to {}, not requested {}; no fallback may hide it",
-                        hex32(orphan.universe_id),
-                        hex32(receipt.universe_id())
-                    ));
-                }
-                if orphan.row_count > receipt.row_count {
-                    return Err(format!(
-                        "candidate orphan has {} rows, longer than exact retry {}",
-                        orphan.row_count, receipt.row_count
-                    ));
-                }
-                let prefix = usize::try_from(orphan.row_count)
-                    .map_err(|_| "candidate orphan prefix does not fit usize".to_owned())?;
-                compare_rows(
-                    &mut self.row_file,
-                    orphan.first_row,
-                    prepared
-                        .rows
-                        .get(..prefix)
-                        .ok_or_else(|| "candidate retry lost its orphan prefix".to_owned())?,
-                )?;
-                (orphan.first_row, orphan.row_count)
-            }
-            None => (self.total_rows, 0),
-        };
+        // An orphan is cut back and rewritten whole, so nothing is prefixed.
+        let first_row = self.cut_orphan_for_rewrite(&receipt, prepared)?;
+        let prefix = 0_u64;
+        let block_start = candidate_row_offset(first_row)?;
         let desired_total = first_row
             .checked_add(receipt.row_count)
             .ok_or_else(|| "candidate append row total overflowed u64".to_owned())?;
@@ -3745,9 +3809,13 @@ impl CandidateUniverseLedgerV1 {
                 .get(prefix_usize..)
                 .ok_or_else(|| "candidate append prefix exceeds prepared rows".to_owned())?,
         )?;
-        self.row_file
-            .sync_data()
-            .map_err(|why| format!("cannot sync candidate rows: {why}"))?;
+        // A failed barrier cuts the block back (ledgers-2, D-1915).
+        crate::fixed_tail::sync_or_roll_back(
+            &self.row_file,
+            &self.row_path,
+            block_start,
+            File::sync_data,
+        )?;
         self.total_rows = desired_total;
         self.orphan = Some(OrphanBlockV1 {
             universe_id: receipt.universe_id(),
@@ -3755,15 +3823,108 @@ impl CandidateUniverseLedgerV1 {
             row_count: receipt.row_count,
         });
         self.row_generation = file_generation(&self.row_file, &self.row_path)?;
+        let receipt_start = self
+            .receipt_file
+            .metadata()
+            .map_err(|why| format!("cannot stat candidate completions: {why}"))?
+            .len();
         append_receipt(&mut self.receipt_file, &receipt)?;
-        self.receipt_file
-            .sync_data()
-            .map_err(|why| format!("cannot sync candidate completion: {why}"))?;
+        crate::fixed_tail::sync_or_roll_back(
+            &self.receipt_file,
+            &self.receipt_path,
+            receipt_start,
+            File::sync_data,
+        )?;
         let audit = CandidateUniverseReopenAuditV1 { first_row, receipt };
         self.audits.insert(receipt.universe_id(), audit);
         self.orphan = None;
         self.receipt_generation = file_generation(&self.receipt_file, &self.receipt_path)?;
         Ok(CandidateUniverseProductionCommitV1::Written(audit))
+    }
+
+    /// Re-reads one just-committed block from disk through this handle and
+    /// returns its indexed audit, under the shared lock.
+    ///
+    /// This replaces a second full open after a production append (D-1680):
+    /// the open that preceded the append already validated every older row
+    /// and completion, so only the new block and its receipt are re-read. The
+    /// three file generations are rechecked first, the physical row and
+    /// receipt counts must equal what this handle wrote, the block's rows are
+    /// re-sealed against its receipt, and the last stored receipt must be the
+    /// committed one when the commit wrote it. O(block rows).
+    ///
+    /// # Errors
+    ///
+    /// Refuses a stale or replaced file, a physical count this handle did not
+    /// write, an absent universe, a receipt or row that differs on disk, or a
+    /// lock failure.
+    fn reverify_committed(
+        &mut self,
+        committed: &CandidateUniverseProductionCommitV1,
+    ) -> Result<CandidateUniverseReopenAuditV1, CandidateUniverseRefusal> {
+        self.writer_lock
+            .lock_shared()
+            .map_err(|why| format!("cannot take shared candidate reverify lock: {why}"))?;
+        let result = self.reverify_committed_locked(committed);
+        let released = self
+            .writer_lock
+            .unlock()
+            .map_err(|why| format!("cannot release candidate reverify lock: {why}"));
+        match (result, released) {
+            (Ok(audit), Ok(())) => Ok(audit),
+            (Err(why), _) | (Ok(_), Err(why)) => Err(why),
+        }
+    }
+
+    fn reverify_committed_locked(
+        &mut self,
+        committed: &CandidateUniverseProductionCommitV1,
+    ) -> Result<CandidateUniverseReopenAuditV1, CandidateUniverseRefusal> {
+        self.require_unchanged()?;
+        let expected = committed.audit();
+        let physical_rows = record_count(
+            &self.row_file,
+            CANDIDATE_ROW_STRIDE_V1,
+            self.bounds.max_rows,
+            "candidate rows",
+        )?;
+        let receipt_count = record_count(
+            &self.receipt_file,
+            CANDIDATE_RECEIPT_STRIDE_V1,
+            self.bounds.max_universes,
+            "candidate completions",
+        )?;
+        let indexed = u64::try_from(self.audits.len())
+            .map_err(|_| "candidate index size does not fit u64".to_owned())?;
+        if physical_rows != self.total_rows || receipt_count != indexed {
+            return Err(format!(
+                "candidate ledger holds {physical_rows} rows and {receipt_count} completions on disk, not the {} and {indexed} this append committed",
+                self.total_rows
+            ));
+        }
+        let audit = self
+            .audits
+            .get(&expected.universe_id())
+            .copied()
+            .ok_or_else(|| {
+                format!(
+                    "candidate production universe {} disappeared after receipt-last append",
+                    hex32(expected.universe_id())
+                )
+            })?;
+        if matches!(committed, CandidateUniverseProductionCommitV1::Written(_)) {
+            // The indexed universe was found, so `receipt_count == indexed >= 1`.
+            let last = receipt_count.saturating_sub(1);
+            if read_receipt(&mut self.receipt_file, last)? != audit.receipt {
+                return Err(format!(
+                    "candidate production universe {} is not the last stored completion",
+                    hex32(expected.universe_id())
+                ));
+            }
+        }
+        validate_file_block(&mut self.row_file, audit.first_row, &audit.receipt)?;
+        self.require_unchanged()?;
+        Ok(audit)
     }
 
     fn require_unchanged(&self) -> Result<(), CandidateUniverseRefusal> {
@@ -3810,21 +3971,24 @@ fn append_produced_candidate_universe_v1(
     bounds: CandidateUniverseBoundsV1,
     produced: &ProducedCandidateUniverseV1<'_>,
 ) -> Result<CandidateUniverseProductionCommitV1, CandidateUniverseRefusal> {
-    let root = root.as_ref();
-    let mut ledger = CandidateUniverseLedgerV1::open(root, bounds)?;
-    let committed = ledger.append_complete(&produced.prepared)?;
-    let expected = committed.audit();
-    drop(ledger);
+    append_prepared_and_reverify(root.as_ref(), bounds, &produced.prepared)
+}
 
-    let reopened = CandidateUniverseLedgerV1::open_read(root, bounds)?
-        .reopen_audit(&expected.universe_id())?
-        .ok_or_else(|| {
-            format!(
-                "candidate production universe {} disappeared after receipt-last append",
-                hex32(expected.universe_id())
-            )
-        })?;
-    if reopened != expected || reopened.receipt() != produced.prepared.receipt {
+/// One production append: one full open, the append, then a re-read of only
+/// the committed block through the same handle. O(R + C) for the open plus
+/// O(new rows); before D-1680 a second full `open_read` made it
+/// 2 x O(R + C) + O(new rows).
+fn append_prepared_and_reverify(
+    root: &Path,
+    bounds: CandidateUniverseBoundsV1,
+    prepared: &PreparedCandidateUniverseV1,
+) -> Result<CandidateUniverseProductionCommitV1, CandidateUniverseRefusal> {
+    let mut ledger = CandidateUniverseLedgerV1::open(root, bounds)?;
+    let committed = ledger.append_complete(prepared)?;
+    let expected = committed.audit();
+    let reopened = ledger.reverify_committed(&committed)?;
+    drop(ledger);
+    if reopened != expected || reopened.receipt() != prepared.receipt {
         return Err(format!(
             "candidate production universe {} did not reopen with the exact prepared semantic bytes",
             hex32(expected.universe_id())
@@ -4761,6 +4925,20 @@ struct HoistedExecutionV1<'s> {
     run_source: ExecutionDigestsV1,
     long: AttestedTrainingV1<'s>,
     short: AttestedTrainingV1<'s>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only count of [`CandidateGlobalReplayOosSourceV1::new`] calls on
+    /// this thread.
+    pub(crate) static OOS_SOURCE_BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only count of `CandidateUniverseLedgerV1::scan` calls (one per
+    /// full open) on this thread.
+    static LEDGER_SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -6099,7 +6277,10 @@ fn ensure_header(
             .and_then(|()| file.sync_data())
             .map_err(|why| format!("cannot initialize candidate file {}: {why}", path.display()))?;
     }
-    verify_header(file, magic, kind, stride, path)
+    verify_header(file, magic, kind, stride, path)?;
+    // ledgers-3, D-1910: the writer cuts a kill-torn tail under its exclusive
+    // lock; the bytes past the last whole record were never acknowledged.
+    crate::fixed_tail::heal_torn_tail(file, path, HEADER_BYTES_V1, stride, &[]).map(drop)
 }
 
 fn verify_header(
@@ -6140,6 +6321,14 @@ fn verify_header(
         &raw[32..64],
         digest_domain(HEADER_DOMAIN, &raw[..32]),
     )
+}
+
+/// The byte offset of candidate row `index` in the row file.
+fn candidate_row_offset(index: u64) -> Result<u64, CandidateUniverseRefusal> {
+    index
+        .checked_mul(CANDIDATE_ROW_STRIDE_V1)
+        .and_then(|bytes| bytes.checked_add(HEADER_BYTES_V1))
+        .ok_or_else(|| "candidate row offset overflowed u64".to_owned())
 }
 
 fn record_count(
@@ -6906,6 +7095,47 @@ mod tests {
         (audit, base)
     }
 
+    /// ledgers-2, D-1915: a failed Base record or completion barrier is cut
+    /// back, so no later barrier on a fresh descriptor vouches for it; the
+    /// exact rerun then writes.
+    #[test]
+    fn a_failed_base_barrier_is_cut_and_the_rerun_writes() {
+        for name in [
+            "base-evidence-records-v3.bin",
+            "base-evidence-completions-v3.bin",
+        ] {
+            let root = test_dir();
+            let bounds = BaseEvidenceLedgerBoundsV2::new(32, 8).expect("nonzero Base bounds");
+            let (candidate, base) = candidate_base_fixture(47, InstrumentFamilyV1::Nifty);
+            {
+                let _armed = crate::fixed_tail::fault::Armed::arm(
+                    name,
+                    crate::fixed_tail::fault::Kind::Sync,
+                );
+                assert!(
+                    append_and_reopen_base_evidence_v2(root.path(), bounds, &candidate, &base)
+                        .is_err(),
+                    "{name}"
+                );
+            }
+            let completions =
+                std::fs::metadata(root.path().join("base-evidence-completions-v3.bin"))
+                    .expect("measure completions")
+                    .len();
+            assert_eq!(
+                completions, 64,
+                "{name}: no completion survives a failed barrier"
+            );
+            let written =
+                append_and_reopen_base_evidence_v2(root.path(), bounds, &candidate, &base)
+                    .expect("the exact rerun writes");
+            assert!(
+                matches!(written, BaseEvidenceProductionCommitV2::Written(_)),
+                "{name}"
+            );
+        }
+    }
+
     #[test]
     fn durable_base_is_receipt_last_idempotent_fixed_offset_and_zero_row_safe() {
         let root = test_dir();
@@ -6938,7 +7168,26 @@ mod tests {
         assert_ne!(first.candidate_semantic_id(), [0; 32]);
         assert_ne!(first.candidate_row_digest(), [0; 32]);
         assert_ne!(first.trade_rows_digest(), [0; 32]);
-        let _ = first.admission_values();
+        // THE PROJECTION'S ADMISSION VALUES ARE THE SEALED RECORD'S (P1-10-04).
+        // This was `let _ = first.admission_values();`, the only call to the
+        // projection's accessor in the workspace, so a decode that filled the
+        // values from the wrong fields or the wrong record was never seen.
+        let sealed = base
+            .records()
+            .first()
+            .copied()
+            .expect("the fixture seals one record per candidate row")
+            .admission_values()
+            .expect("the fixture's Base record projects");
+        assert_eq!(first.admission_values(), &sealed);
+        assert!(
+            matches!(
+                first.admission_values().support_hits,
+                runner::admission::ObservedU64V1::Measured(hits) if hits > 0
+            ),
+            "the decoded support is a measured, non-zero count, so the equality \
+             above compares values and not two defaults"
+        );
         assert!(matches!(
             reader.record(&audit, audit.record_count()),
             Err(BaseEvidenceLedgerRefusalV2::BoundExceeded {
@@ -8843,6 +9092,234 @@ mod tests {
         );
     }
 
+    /// ledgers-2, D-1915: a failed candidate row or completion barrier is cut
+    /// back, so no later barrier vouches for it; the exact rerun writes.
+    #[test]
+    fn a_failed_candidate_barrier_is_cut_and_the_rerun_writes() {
+        let bounds = CandidateUniverseBoundsV1::new(32, 4).expect("fixture bounds are nonzero");
+        for name in [ROW_FILE, RECEIPT_FILE] {
+            let root = test_dir();
+            let offered = prepared(52);
+            let mut ledger =
+                CandidateUniverseLedgerV1::open(root.path(), bounds).expect("ledger opens");
+            {
+                let _armed = crate::fixed_tail::fault::Armed::arm(
+                    name,
+                    crate::fixed_tail::fault::Kind::Sync,
+                );
+                assert!(ledger.append_complete(&offered).is_err(), "{name}");
+            }
+            drop(ledger);
+            assert_eq!(
+                std::fs::metadata(root.path().join(RECEIPT_FILE))
+                    .expect("measure completions")
+                    .len(),
+                HEADER_BYTES_V1,
+                "{name}: no completion survives a failed barrier"
+            );
+            let mut ledger =
+                CandidateUniverseLedgerV1::open(root.path(), bounds).expect("ledger reopens");
+            assert!(
+                matches!(
+                    ledger
+                        .append_complete(&offered)
+                        .expect("the exact rerun writes"),
+                    CandidateUniverseProductionCommitV1::Written(_)
+                ),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn production_append_scans_the_ledger_once_and_rereads_only_its_block() {
+        // W2-cli3-4 / D-1680: before, every production append ran two full
+        // O(R + C) opens (`open`, then a fresh `open_read`).
+        let bounds = CandidateUniverseBoundsV1::new(32, 4).expect("fixture bounds are nonzero");
+        let root = test_dir();
+        let first = prepared(60);
+        LEDGER_SCANS.with(|count| count.set(0));
+        let written = append_prepared_and_reverify(root.path(), bounds, &first)
+            .expect("an append onto an empty ledger writes and reverifies");
+        assert!(matches!(
+            written,
+            CandidateUniverseProductionCommitV1::Written(_)
+        ));
+        assert_eq!(written.audit().first_row(), 0);
+        assert_eq!(written.audit().receipt(), *first.receipt());
+        assert_eq!(
+            LEDGER_SCANS.with(std::cell::Cell::get),
+            1,
+            "one full open per production append, not two"
+        );
+
+        let second = prepared(61);
+        LEDGER_SCANS.with(|count| count.set(0));
+        let appended = append_prepared_and_reverify(root.path(), bounds, &second)
+            .expect("a second universe appends after the first");
+        assert!(matches!(
+            appended,
+            CandidateUniverseProductionCommitV1::Written(_)
+        ));
+        assert_eq!(appended.audit().first_row(), first.receipt().row_count());
+        assert_eq!(LEDGER_SCANS.with(std::cell::Cell::get), 1);
+
+        LEDGER_SCANS.with(|count| count.set(0));
+        let reused = append_prepared_and_reverify(root.path(), bounds, &first)
+            .expect("an exact retry of an older universe is reused");
+        assert!(matches!(
+            reused,
+            CandidateUniverseProductionCommitV1::Reused(_)
+        ));
+        assert_eq!(reused.audit(), written.audit());
+        assert_eq!(LEDGER_SCANS.with(std::cell::Cell::get), 1);
+
+        let fresh = CandidateUniverseLedgerV1::open_read(root.path(), bounds)
+            .expect("a fresh reader sees both completions");
+        assert_eq!(
+            fresh
+                .reopen_audit(&second.receipt().universe_id())
+                .expect("generations hold"),
+            Some(appended.audit())
+        );
+    }
+
+    #[test]
+    fn reverify_committed_refuses_every_disagreement_with_the_disk() {
+        let bounds = CandidateUniverseBoundsV1::new(32, 4).expect("fixture bounds are nonzero");
+
+        // A foreign write between the append and the re-read changes the
+        // row file's generation and refuses.
+        let foreign_root = test_dir();
+        let mut foreign = CandidateUniverseLedgerV1::open(foreign_root.path(), bounds)
+            .expect("foreign fixture opens");
+        let committed = foreign
+            .append_complete(&prepared(62))
+            .expect("foreign fixture commits");
+        let mut external = open_file(&foreign_root.path().join(ROW_FILE), true, false)
+            .expect("external writer opens");
+        external.seek(SeekFrom::End(0)).expect("external seeks");
+        external
+            .write_all(&[0_u8; 1])
+            .and_then(|()| external.sync_data())
+            .expect("external byte persists");
+        drop(external);
+        assert!(
+            foreign
+                .reverify_committed(&committed)
+                .expect_err("a foreign modification must refuse")
+                .contains("changed since open")
+        );
+
+        // A row that differs on disk while the cached generation was made to
+        // match (the ABA a metadata generation cannot see) is still refused,
+        // because the block itself is re-read and re-sealed.
+        let aba_root = test_dir();
+        let mut aba =
+            CandidateUniverseLedgerV1::open(aba_root.path(), bounds).expect("aba fixture opens");
+        let committed = aba
+            .append_complete(&prepared(63))
+            .expect("aba fixture commits");
+        let row_path = aba_root.path().join(ROW_FILE);
+        let mut corrupt = open_file(&row_path, true, false).expect("row file reopens");
+        let fact_offset = HEADER_BYTES_V1 + 248;
+        let mut byte = [0_u8; 1];
+        corrupt
+            .seek(SeekFrom::Start(fact_offset))
+            .and_then(|_| corrupt.read_exact(&mut byte))
+            .expect("fact byte reads");
+        byte[0] ^= 1;
+        corrupt
+            .seek(SeekFrom::Start(fact_offset))
+            .and_then(|_| corrupt.write_all(&byte))
+            .and_then(|()| corrupt.sync_data())
+            .expect("fact mutation persists");
+        drop(corrupt);
+        aba.row_generation =
+            file_generation(&aba.row_file, &row_path).expect("generation remeasures");
+        assert!(
+            aba.reverify_committed(&committed)
+                .expect_err("a corrupt committed row must refuse")
+                .contains("seal")
+        );
+    }
+
+    #[test]
+    fn reverify_committed_refuses_counts_absences_and_order_it_did_not_write() {
+        let bounds = CandidateUniverseBoundsV1::new(32, 4).expect("fixture bounds are nonzero");
+        // A physical row count this handle did not write refuses, as does a
+        // completion count that differs from the index.
+        let count_root = test_dir();
+        let mut counted = CandidateUniverseLedgerV1::open(count_root.path(), bounds)
+            .expect("count fixture opens");
+        let committed = counted
+            .append_complete(&prepared(64))
+            .expect("count fixture commits");
+        counted.total_rows += 1;
+        assert!(
+            counted
+                .reverify_committed(&committed)
+                .expect_err("rows on disk differ from the committed total")
+                .contains("rows and 1 completions on disk")
+        );
+        counted.total_rows -= 1;
+        let bogus = prepared(65).receipt;
+        counted.audits.insert(
+            bogus.universe_id(),
+            CandidateUniverseReopenAuditV1 {
+                first_row: 0,
+                receipt: bogus,
+            },
+        );
+        assert!(
+            counted
+                .reverify_committed(&committed)
+                .expect_err("completions on disk differ from the index")
+                .contains("not the")
+        );
+        counted.audits.remove(&bogus.universe_id());
+        counted
+            .reverify_committed(&committed)
+            .expect("the restored handle reverifies");
+
+        // A universe absent from the index, with counts that still agree,
+        // refuses by name.
+        assert!(
+            counted
+                .reverify_committed(&CandidateUniverseProductionCommitV1::Written(
+                    CandidateUniverseReopenAuditV1 {
+                        first_row: 0,
+                        receipt: *prepared(66).receipt(),
+                    }
+                ))
+                .expect_err("an absent universe refuses")
+                .contains("disappeared")
+        );
+
+        // A Written commit that is not the last stored completion refuses.
+        let order_root = test_dir();
+        let mut ordered = CandidateUniverseLedgerV1::open(order_root.path(), bounds)
+            .expect("order fixture opens");
+        let older = ordered
+            .append_complete(&prepared(67))
+            .expect("older commits");
+        ordered
+            .append_complete(&prepared(68))
+            .expect("newer commits");
+        assert!(
+            ordered
+                .reverify_committed(&older)
+                .expect_err("an older Written commit is not the last completion")
+                .contains("not the last stored completion")
+        );
+        assert_eq!(
+            ordered
+                .reverify_committed(&CandidateUniverseProductionCommitV1::Reused(older.audit()))
+                .expect("a Reused older block re-reads cleanly"),
+            older.audit()
+        );
+    }
+
     #[test]
     fn ragged_corrupt_and_stale_files_fail_closed() {
         let bounds = CandidateUniverseBoundsV1::new(32, 4).expect("fixture bounds are nonzero");
@@ -8859,9 +9336,24 @@ mod tests {
         ragged.sync_data().expect("ragged byte syncs");
         drop(ragged);
         assert!(
-            CandidateUniverseLedgerV1::open(ragged_root.path(), bounds)
-                .expect_err("ragged fixed-stride file must refuse")
+            CandidateUniverseLedgerV1::open_read(ragged_root.path(), bounds)
+                .expect_err("a reader refuses the ragged fixed-stride file")
                 .contains("ragged")
+        );
+        // ledgers-3, D-1910: the next writer cuts the never-acknowledged tail.
+        drop(
+            CandidateUniverseLedgerV1::open(ragged_root.path(), bounds)
+                .expect("the writer cuts the ragged tail"),
+        );
+        assert_eq!(
+            std::fs::metadata(ragged_root.path().join(ROW_FILE))
+                .expect("measure")
+                .len(),
+            HEADER_BYTES_V1
+        );
+        drop(
+            CandidateUniverseLedgerV1::open_read(ragged_root.path(), bounds)
+                .expect("a reader opens the healed ledger"),
         );
 
         let corrupt_root = test_dir();

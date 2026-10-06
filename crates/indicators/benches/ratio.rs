@@ -34,9 +34,11 @@
 //! capped Newton at 64 steps and then stepped down **unbounded**, under a doc
 //! comment calling itself constant-cost. At `i128::MAX` the step-down needed
 //! 1,638,791,155,897,336,446 decrements — `O(sqrt(v))` in a function documented
-//! as O(1). The cap is now two compile-time constants, and the row below
-//! measures the two ends of the input range against each other rather than
-//! trusting the constants to be large enough.
+//! as O(1). A later 128-step cap oscillated to its limit at every `k^2 - 1`
+//! (W3-indicators2-1). The loop is now a decreasing Newton from a seed at or
+//! above the root, capped by one compile-time constant (D-1665), and the row
+//! below checks the count at the ends of the input range against it rather than
+//! trusting the constant to be large enough.
 //!
 //! # What this bench cannot see
 //!
@@ -578,8 +580,9 @@ fn a_candle_costs_the_same_whatever_it_contains() -> bool {
 ///
 /// The first version timed `isqrt_i128(1)` against `isqrt_i128(i128::MAX)` and
 /// demanded a flat ratio. It breached at **217x**, and the breach was correct: the
-/// Newton loop exits on convergence, so a small input finishes in one or two
-/// iterations and a 127-bit one needs about sixty-six. The function never promised
+/// Newton loop of the day exited on convergence, so a small input finished in one
+/// or two iterations and a 127-bit one needed about sixty-six (2 and 6 since
+/// D-1665's seeded loop; the cost still varies). The function never promised
 /// a flat cost. It promises a **bounded iteration count**, and timing a bounded
 /// count end to end against a flat ceiling can only produce a false breach or a
 /// ceiling relaxed until it catches nothing.
@@ -651,7 +654,8 @@ fn the_integer_square_root_is_bounded_and_flat_per_iteration() -> bool {
     // a ceiling.
     //
     // Cost per iteration is not flat either: measured 4.0 ns at v = 1 against 13.3
-    // ns at i128::MAX, a 3.3x spread, because each iteration performs a 128-bit
+    // ns at i128::MAX on the pre-D-1665 loop, a 3.3x spread, because each iteration
+    // performs a 128-bit
     // division whose own cost rises with the magnitude of its operands. There is no
     // honest ratio to assert here -- a ceiling loose enough to pass would be loose
     // enough to miss a real regression, and picking the baseline that happens to

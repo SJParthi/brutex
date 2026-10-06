@@ -91,6 +91,17 @@ function fetched() {
     )) {
       out.add({ path: m[1], file: file.slice(web.length + 1) }.path);
     }
+    // AND EVERY ABSOLUTE `.json` LITERAL, WHATEVER CALLS IT. The readers in
+    // `$lib` take their fetcher as a parameter (`request`, defaulting to `ask`),
+    // which no import alias names, so `/expression-search.json`,
+    // `/candidate-trades.json` and three `/index-stop-*.json` routes were called,
+    // served and missing from ROUTES while this suite passed (P2-02-01,
+    // D-1766). A gate that depends on the callee's NAME has the blind spot the
+    // paragraph above describes, one rename later; the path's own shape does
+    // not.
+    for (const m of text.matchAll(/[`'"](\/[A-Za-z0-9_\-/.]*\.json)(?=[?`'"])/g)) {
+      out.add(m[1]);
+    }
   }
   return [...out];
 }

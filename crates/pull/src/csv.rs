@@ -81,6 +81,12 @@ use crate::vendor::DateFormat;
 pub const GDFL_HEADER: &str =
     "Ticker,Date,Time,LTP,BuyPrice,BuyQty,SellPrice,SellQty,LTQ,OpenInterest";
 
+/// The ticker suffix of a GDFL index row: `docs/00-charter.md` measured
+/// `<NAME>.NSE_IDX.csv` files whose rows carry `NIFTY 50.NSE_IDX` and
+/// `NIFTY BANK.NSE_IDX`. A GDFL row with it is an index level; every other
+/// GDFL row (futures, options, equity) is a traded instrument.
+pub const GDFL_INDEX_SUFFIX: &str = ".NSE_IDX";
+
 /// Which columns a vendor's CSV carries, in order.
 ///
 /// One variant per shape actually observed in the operator's archives. A shape
@@ -92,7 +98,8 @@ pub enum Columns {
     ///
     /// `TrueData`'s index layout. Volume and open interest are present in the
     /// row and always zero, because an index has neither. Observed:
-    /// `20221003,09:07:41,38444.90,0,0`.
+    /// `20221003,09:07:41,38444.90,0,0`. The open interest decodes absent,
+    /// never as a measured zero (D-2689).
     TrueDataIndex,
     /// `date, time, price, volume, open_interest, …` — nine fields.
     ///
@@ -103,7 +110,9 @@ pub enum Columns {
     /// OpenInterest` — ten fields, with a header row.
     ///
     /// GDFL's layout for both options and futures. `LTQ` is `0` on most rows:
-    /// those are **quote** updates, not trades.
+    /// those are **quote** updates, not trades, and on a traded instrument
+    /// they are skipped and counted (D-2688). GDFL index files share the
+    /// layout; their rows are kept and their open interest is absent (D-2689).
     Gdfl,
     /// Plain `TrueData` F&O: `date, time, price, volume, open_interest`.
     /// Five fields, no header, no bid/ask columns. The observed row and vendor
@@ -157,6 +166,19 @@ impl Columns {
         match self {
             Self::Gdfl => Some(GDFL_HEADER),
             Self::TrueDataIndex | Self::TrueDataFutures | Self::TrueDataFno => None,
+        }
+    }
+
+    /// Whether a row of this shape is an index level: `TrueData`'s index
+    /// layout, or a GDFL row whose ticker ends in [`GDFL_INDEX_SUFFIX`].
+    /// D-2688, D-2689.
+    fn is_index_row(self, fields: &[&str]) -> bool {
+        match self {
+            Self::TrueDataIndex => true,
+            Self::Gdfl => fields
+                .first()
+                .is_some_and(|ticker| ticker.trim().ends_with(GDFL_INDEX_SUFFIX)),
+            Self::TrueDataFutures | Self::TrueDataFno => false,
         }
     }
 
@@ -522,6 +544,29 @@ struct Tally {
     /// stating something impossible, and writing `0` beside it would be
     /// asserting no trade in a minute we have no reading for.
     negative_volume: u64,
+    /// Rows whose open-interest field parsed as a NEGATIVE count and were
+    /// skipped.
+    ///
+    /// An open interest counts contracts, so `-5` is not a quantity. It used
+    /// to decode as `Some(-5)` and die at `store::file::survey` as
+    /// `ImpossibleCount`, costing the whole member and its derived rungs and
+    /// naming a batch index rather than a line (CE-59). D-1490's rule for the
+    /// JSON shapes is the rule here: skip the row and count it. `i64::MIN`
+    /// stays a refusal, because it is spelled exactly like the null.
+    /// D-2683.
+    negative_open_interest: u64,
+    /// GDFL rows on a traded instrument (futures, options, equity) whose
+    /// `LTQ` is zero, skipped because they are quote updates, not trades.
+    ///
+    /// `docs/08-vendor-samples.md`: "`LTQ` is `0` on most rows — those are
+    /// **quote** updates, not trades." Such a row's `LTP` is the last traded
+    /// price, possibly from an earlier minute, so folding it put an earlier
+    /// trade into a bar's open, high or low and stored a bar with volume 0 for
+    /// a minute that traded nothing (p10num-1, D-2688). Not a degrade — it is
+    /// most rows of an ordinary file — so it is counted by name on the "file
+    /// decoded" line without raising its level. An index file keeps every row:
+    /// every column after `LTP` is zero there (`docs/00-charter.md`).
+    quote_rows: u64,
 }
 
 /// One decoded file, on the rolling log.
@@ -551,37 +596,83 @@ struct Tally {
 /// index and plain F&O share that physical shape. The caller supplies the
 /// segment and product; the decoder does not infer them from row values.
 fn note_decoded(columns: Columns, tally: Tally, rows: usize) {
-    let _dropped_when_filtered = telemetry::emit(
-        &telemetry::Event::debug("pull.csv", "file decoded")
-            .with("rows_in", telemetry::Value::Uint(tally.lines))
-            .with("rows", telemetry::Value::Uint(rows as u64))
-            .with("skipped", telemetry::Value::Uint(tally.skipped))
-            .with("fields", telemetry::Value::Uint(columns.count() as u64))
-            .with("header", telemetry::Value::Bool(columns.has_header()))
-            // THE SUBSTITUTIONS, ON THE SAME LINE AS THE COUNTS THEY QUALIFY. A
-            // `rows` figure that includes rows whose volume this build invented
-            // is not the same fact as one where every field was read, and until
-            // these two appeared there was no way to tell those apart from
-            // outside -- which is the silence §4 forbids, not the substitution
-            // itself.
-            .with(
-                "unreadable_volume",
-                telemetry::Value::Uint(tally.unreadable_volume),
-            )
-            .with(
-                "unreadable_oi",
-                telemetry::Value::Uint(tally.unreadable_open_interest),
-            )
-            // SKIPPED ROWS ARE NOT SUBSTITUTIONS AND GET THEIR OWN FIELD. The
-            // two above qualify a `rows` figure that still counts them; this
-            // one explains why `rows` is SHORT of `rows_in`, which is a
-            // different question and an operator asking it should not have to
-            // subtract the other two to answer it.
-            .with(
-                "negative_volume",
-                telemetry::Value::Uint(tally.negative_volume),
-            ),
-    );
+    let _dropped_when_filtered = telemetry::emit(&decoded_event(columns, tally, rows));
+    // AND ON STDERR WHEN SOMETHING WAS DEGRADED, the same pair the JSON
+    // decoders' `note_negative_volume_bars` writes (CE-57, D-2681).
+    if degraded(tally) {
+        eprintln!(
+            "brutex: a {}-field CSV file decoded {rows} row(s) with {} unreadable \
+             volume(s) stored as 0, {} unreadable open interest(s) stored absent, \
+             and {} negative volume(s) and {} negative open interest(s) skipped",
+            columns.count(),
+            tally.unreadable_volume,
+            tally.unreadable_open_interest,
+            tally.negative_volume,
+            tally.negative_open_interest
+        );
+    }
+}
+
+/// Whether the pass substituted or skipped anything.
+const fn degraded(tally: Tally) -> bool {
+    tally.unreadable_volume != 0
+        || tally.unreadable_open_interest != 0
+        || tally.negative_volume != 0
+        || tally.negative_open_interest != 0
+}
+
+/// [`note_decoded`]'s event, built apart from the emit so its level and its
+/// fields can be asserted without installing the process-wide sink.
+///
+/// # `Warn` when anything was degraded, `Debug` when nothing was
+///
+/// The degrade counts rode only on a `Debug` line, and the default floor is
+/// `Info`, so a default run kept no trace of a zero-filled volume or a skipped
+/// row. A file with any degrade is now reported at `Warn`; a clean one stays
+/// at `Debug`, so the line does not fire on every ordinary member (CE-57,
+/// D-2681).
+fn decoded_event(columns: Columns, tally: Tally, rows: usize) -> telemetry::Event<'static> {
+    let level = if degraded(tally) {
+        telemetry::Level::Warn
+    } else {
+        telemetry::Level::Debug
+    };
+    telemetry::Event::new(level, "pull.csv", "file decoded")
+        .with("rows_in", telemetry::Value::Uint(tally.lines))
+        .with("rows", telemetry::Value::Uint(rows as u64))
+        .with("skipped", telemetry::Value::Uint(tally.skipped))
+        .with("fields", telemetry::Value::Uint(columns.count() as u64))
+        .with("header", telemetry::Value::Bool(columns.has_header()))
+        // THE SUBSTITUTIONS, ON THE SAME LINE AS THE COUNTS THEY QUALIFY. A
+        // `rows` figure that includes rows whose volume this build invented
+        // is not the same fact as one where every field was read, and until
+        // these two appeared there was no way to tell those apart from
+        // outside -- which is the silence §4 forbids, not the substitution
+        // itself.
+        .with(
+            "unreadable_volume",
+            telemetry::Value::Uint(tally.unreadable_volume),
+        )
+        .with(
+            "unreadable_oi",
+            telemetry::Value::Uint(tally.unreadable_open_interest),
+        )
+        // SKIPPED ROWS ARE NOT SUBSTITUTIONS AND GET THEIR OWN FIELD. The
+        // two above qualify a `rows` figure that still counts them; this
+        // one explains why `rows` is SHORT of `rows_in`, which is a
+        // different question and an operator asking it should not have to
+        // subtract the other two to answer it.
+        .with(
+            "negative_volume",
+            telemetry::Value::Uint(tally.negative_volume),
+        )
+        .with(
+            "negative_oi",
+            telemetry::Value::Uint(tally.negative_open_interest),
+        )
+        // NOT A DEGRADE, AND NOT SILENT: the GDFL quote rows a traded
+        // instrument's file carried and the decoder left out (D-2688).
+        .with("quote_rows", telemetry::Value::Uint(tally.quote_rows))
 }
 
 /// One file that did not decode, on the rolling log — at `Warn`.
@@ -644,6 +735,8 @@ pub fn decode(body: &str, columns: Columns) -> Result<Vec<RawRow>, CsvError> {
         unreadable_volume: 0,
         unreadable_open_interest: 0,
         negative_volume: 0,
+        negative_open_interest: 0,
+        quote_rows: 0,
     };
     // ONE EVENT PER FILE, ON EITHER OUTCOME. The pass below is per row and
     // logs nothing; this is where its two counters are read. A file that
@@ -687,6 +780,36 @@ fn fields_of(line: &str, want: usize) -> Result<[&str; MAX_FIELDS], usize> {
     } else {
         Err(got)
     }
+}
+
+/// What one open-interest cell does to its row.
+enum Interest {
+    /// Keep the row, with this open interest (`None` for an unreadable cell,
+    /// which is counted).
+    Keep(Option<i64>),
+    /// Skip the row: a negative count, counted (D-1490's rule for the JSON
+    /// shapes, CE-59, D-2683).
+    Skip,
+}
+
+/// One open-interest cell of a traded instrument's row, or the refusal of the
+/// file for `i64::MIN`, which is spelled exactly like the §7 null.
+fn open_interest_of(text: &str, line: usize, tally: &mut Tally) -> Result<Interest, CsvError> {
+    let parsed = text.trim().parse::<i64>().ok();
+    if parsed == Some(i64::MIN) {
+        return Err(CsvError::OpenInterestSentinel {
+            line,
+            got: text.trim().to_owned(),
+        });
+    }
+    if parsed.is_none() {
+        tally.unreadable_open_interest = tally.unreadable_open_interest.saturating_add(1);
+    }
+    if parsed.is_some_and(|count| count < 0) {
+        tally.negative_open_interest = tally.negative_open_interest.saturating_add(1);
+        return Ok(Interest::Skip);
+    }
+    Ok(Interest::Keep(parsed))
 }
 
 /// Line one against the header the shape declares, already trimmed. D-1360.
@@ -837,9 +960,11 @@ fn decode_rows(body: &str, columns: Columns, tally: &mut Tally) -> Result<Vec<Ra
         //
         // It also closes the single hole in a rule already written down. D-0148
         // (`store::format::Bar::counts_are_sane`) refuses every negative open
-        // interest EXCEPT `OI_NULL`, so a vendor sending -5 is caught at the
-        // store's survey; `i64::MIN` is the one negative value that walks past
-        // that check, precisely because it is spelled exactly like the null.
+        // interest EXCEPT `OI_NULL`; `i64::MIN` is the one negative value that
+        // walks past that check, precisely because it is spelled exactly like
+        // the null. Every other negative is skipped and counted below rather
+        // than left for the store's survey, where it cost the whole member
+        // (CE-59, D-2683).
         //
         // WHAT THIS DOES NOT FIX. Rows that reach `fetch::land` by the HTTP
         // path build `open_interest` from a `Vec<i64>` rather than from this
@@ -848,19 +973,22 @@ fn decode_rows(body: &str, columns: Columns, tally: &mut Tally) -> Result<Vec<Ra
         // and is not this module's to place. Nor does this make an open
         // interest OF `i64::MIN` storable — §7 has spent that value, and an
         // open interest is a contract count, which is never negative at all.
-        let open_interest = {
+        //
+        // AN INDEX ROW: `TrueData`'s index layout, or a GDFL row whose ticker
+        // carries the `.NSE_IDX` suffix `docs/00-charter.md` measured
+        // (`NIFTY 50.NSE_IDX`). Every column after the level is zero on an
+        // index, so its open interest is absent rather than measured
+        // (p10num-2, D-2689) and its zero `LTQ` is the norm, not a quote
+        // (p10num-1, D-2688).
+        let index_row = columns.is_index_row(&fields);
+        let open_interest = if index_row {
+            None
+        } else {
             let text = fields.get(at.open_interest).copied().unwrap_or_default();
-            let parsed = text.trim().parse::<i64>().ok();
-            if parsed == Some(i64::MIN) {
-                return Err(CsvError::OpenInterestSentinel {
-                    line: line_no,
-                    got: text.trim().to_owned(),
-                });
+            match open_interest_of(text, line_no, tally)? {
+                Interest::Keep(read) => read,
+                Interest::Skip => continue,
             }
-            if parsed.is_none() {
-                tally.unreadable_open_interest = tally.unreadable_open_interest.saturating_add(1);
-            }
-            parsed
         };
 
         // VOLUME IS READ HERE AND NOT IN THE LITERAL BELOW, for the reason open
@@ -878,6 +1006,12 @@ fn decode_rows(body: &str, columns: Columns, tally: &mut Tally) -> Result<Vec<Ra
             match text.trim().parse::<i64>() {
                 Ok(n) if n < 0 => {
                     tally.negative_volume = tally.negative_volume.saturating_add(1);
+                    continue;
+                }
+                // A GDFL QUOTE ROW ON A TRADED INSTRUMENT IS NOT A TRADE, so it
+                // contributes no price and no bar (p10num-1, D-2688).
+                Ok(0) if columns == Columns::Gdfl && !index_row => {
+                    tally.quote_rows = tally.quote_rows.saturating_add(1);
                     continue;
                 }
                 Ok(n) => n,
@@ -1406,24 +1540,23 @@ mod tests {
         // THE HAPPY PATH FIRST, so that what refuses below is the value and not
         // the fixture. An ordinary contract count decodes and stays a
         // measurement.
-        let ordinary = decode(&row(&2_000.to_string()), Columns::TrueDataIndex)
+        let ordinary = decode(&row(&2_000.to_string()), Columns::TrueDataFno)
             .expect("an ordinary contract count is not a sentinel");
         assert_eq!(ordinary.len(), 1);
         assert_eq!(ordinary[0].open_interest, Some(2_000));
         assert_eq!(ordinary[0].volume, 250, "and the volume beside it");
 
-        // ONE PAST THE SENTINEL IS AN ORDINARY NUMBER HERE. The guard is the
-        // single value §7 spends, never a range near it: an absurd count is the
-        // store's business — D-0148 refuses a negative one at `survey` — and
-        // not this decoder's to widen into.
-        let near = decode(&row(&(i64::MIN + 1).to_string()), Columns::TrueDataIndex)
+        // ONE PAST THE SENTINEL IS A NEGATIVE COUNT, NOT A REFUSAL. The
+        // refusal is the single value §7 spends; every other negative skips
+        // its row and is counted (CE-59, D-2683), so the file still decodes.
+        let near = decode(&row(&(i64::MIN + 1).to_string()), Columns::TrueDataFno)
             .expect("only the sentinel itself is refused at this boundary");
-        assert_eq!(near[0].open_interest, Some(i64::MIN + 1));
+        assert!(near.is_empty(), "a negative count skips its row: {near:?}");
 
         // THE COLLISION. Stored, this row would reach the bar as exactly the
         // value `unwrap_or(i64::MIN)` produces for a field that was never sent.
         let sentinel = i64::MIN.to_string();
-        let refused = decode(&row(&sentinel), Columns::TrueDataIndex)
+        let refused = decode(&row(&sentinel), Columns::TrueDataFno)
             .expect_err("the null sentinel is not a measurement");
         assert_eq!(
             refused,
@@ -1447,7 +1580,7 @@ mod tests {
         // parse at all is still ABSENT and still counted: "this build could not
         // read it" and "the vendor sent the null" are different claims, and
         // only the second would be a lie on disk.
-        let unreadable = decode(&row("NOT A COUNT"), Columns::TrueDataIndex)
+        let unreadable = decode(&row("NOT A COUNT"), Columns::TrueDataFno)
             .expect("an unreadable count degrades rather than refusing the file");
         assert_eq!(unreadable[0].open_interest, None);
         assert_eq!(
@@ -1510,8 +1643,14 @@ mod tests {
         let sentinel = i64::MIN.to_string();
         let ordinary = 2_000.to_string();
 
+        // AN INDEX LAYOUT READS NO OPEN INTEREST AT ALL (D-2689): an index has
+        // none, so even the sentinel in that column decodes absent.
+        let (index_row, _) = one_row(Columns::TrueDataIndex, &ordinary, &sentinel);
+        assert_eq!(
+            decode(&index_row, Columns::TrueDataIndex).map(|rows| rows[0].open_interest),
+            Ok(None)
+        );
         for columns in [
-            Columns::TrueDataIndex,
             Columns::TrueDataFutures,
             Columns::TrueDataFno,
             Columns::Gdfl,
@@ -1599,7 +1738,7 @@ mod tests {
         // against, so a truncated answer cannot pass for a correct one.
         let clean: String = (1..=4).map(|second| row(second, &ordinary)).collect();
         assert_eq!(
-            decode(&clean, Columns::TrueDataIndex).map(|rows| rows.len()),
+            decode(&clean, Columns::TrueDataFno).map(|rows| rows.len()),
             Ok(4),
             "every row of the fixture reads before one of them is poisoned"
         );
@@ -1608,7 +1747,7 @@ mod tests {
             .map(|second| row(second, if second == 3 { &sentinel } else { &ordinary }))
             .collect();
         assert_eq!(
-            decode(&poisoned, Columns::TrueDataIndex),
+            decode(&poisoned, Columns::TrueDataFno),
             Err(CsvError::OpenInterestSentinel {
                 line: 3,
                 got: sentinel.clone(),
@@ -1642,7 +1781,7 @@ mod tests {
         let leading_zero = format!("-0{}", i64::MIN.unsigned_abs());
 
         for spelling in [bare.clone(), format!("  {bare} "), leading_zero] {
-            let refused = decode(&row(&spelling), Columns::TrueDataIndex)
+            let refused = decode(&row(&spelling), Columns::TrueDataFno)
                 .expect_err("every spelling of the null sentinel is the null sentinel");
             assert_eq!(
                 refused,
@@ -1931,5 +2070,175 @@ mod tests {
             );
         }
         assert!(body.contains(&format!("{}{}", "with_capacity(", "bound)")));
+    }
+
+    /// **CE-59. A NEGATIVE OPEN INTEREST SKIPS ITS ROW, NOT THE MEMBER.**
+    ///
+    /// An open interest counts contracts, so `-5` is not a quantity. It used to
+    /// decode as `Some(-5)` and die at the store's survey as `ImpossibleCount`,
+    /// taking the whole member and its derived rungs with it and naming a
+    /// batch index rather than a line. D-1490's rule for the JSON shapes is
+    /// the rule here: skip the row and count it.
+    #[test]
+    fn a_negative_open_interest_skips_its_row_and_keeps_the_rest() {
+        let body = "20221003,09:15:01,38445.65,0,-5\n20221003,09:15:02,38419.40,0,7\n";
+        let rows = decode(body, Columns::TrueDataFno).expect("one bad row is not a bad file");
+        assert_eq!(rows.len(), 1, "the -5 row is skipped: {rows:?}");
+        assert_eq!(rows[0].open_interest, Some(7), "and the next row is kept");
+    }
+
+    /// **CE-57. A DEGRADE IS LOGGED WHERE AN OPERATOR SEES IT.**
+    ///
+    /// The three degrade counts rode only on the `Debug` "file decoded" line,
+    /// and the default floor is `Info`, so a default run kept no trace of a
+    /// zero-filled volume or a skipped row. A file with any degrade now says
+    /// so at `Warn`; a clean file stays at `Debug`, so the line does not fire
+    /// on every ordinary member.
+    #[test]
+    fn a_decoded_file_with_a_degrade_is_reported_at_warn_and_a_clean_one_is_not() {
+        let clean = Tally {
+            lines: 3,
+            skipped: 0,
+            unreadable_volume: 0,
+            unreadable_open_interest: 0,
+            negative_volume: 0,
+            negative_open_interest: 0,
+            quote_rows: 0,
+        };
+        assert_eq!(
+            decoded_event(Columns::TrueDataFno, clean, 3).level(),
+            telemetry::Level::Debug
+        );
+        for tally in [
+            Tally {
+                unreadable_volume: 1,
+                ..clean
+            },
+            Tally {
+                unreadable_open_interest: 1,
+                ..clean
+            },
+            Tally {
+                negative_volume: 1,
+                ..clean
+            },
+            Tally {
+                negative_open_interest: 1,
+                ..clean
+            },
+        ] {
+            let event = decoded_event(Columns::TrueDataFno, tally, 2);
+            assert_eq!(event.level(), telemetry::Level::Warn, "{tally:?}");
+        }
+        // AND THE COUNT IS ON THE LINE, BY NAME, through the shipped decoder.
+        let mut tally = clean;
+        let rows = decode_rows(
+            "20221003,09:15:01,38445.65,abc,0\n20221003,09:15:02,38419.40,0,-5\n",
+            Columns::TrueDataFno,
+            &mut tally,
+        )
+        .expect("both degrades are rows, not refusals");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            (tally.unreadable_volume, tally.negative_open_interest),
+            (1, 1)
+        );
+    }
+
+    /// **p10num-1. A GDFL QUOTE ROW (LTQ 0) IS NOT A TRADE, AND ON A FUTURES,
+    /// OPTIONS OR EQUITY FILE IT CONTRIBUTES NO PRICE AND NO BAR.**
+    ///
+    /// `docs/08-vendor-samples.md`: "`LTQ` is `0` on most rows — those are
+    /// **quote** updates, not trades." Its `LTP` is the LAST traded price,
+    /// possibly from an earlier minute, and folding it put a 09:19 trade into
+    /// the 09:20 bar's open and low and stored a 09:21 bar with volume 0 for a
+    /// minute that traded nothing. The report's five rows.
+    #[test]
+    fn a_gdfl_quote_row_contributes_no_price_and_no_bar_on_a_traded_instrument() {
+        let row = |time: &str, ltp: &str, ltq: u32| {
+            format!("FINNIFTY-III.NFO,01/07/2025,{time},{ltp},0,0,0,0,{ltq},65\n")
+        };
+        let mut body = format!("{GDFL_HEADER}\n");
+        for (time, ltp, ltq) in [
+            ("09:19:58", "100.00", 25),
+            ("09:20:00", "100.00", 0),
+            ("09:20:05", "102.00", 50),
+            ("09:20:40", "103.00", 10),
+            ("09:21:10", "103.00", 0),
+        ] {
+            body.push_str(&row(time, ltp, ltq));
+        }
+        let mut tally = Tally {
+            lines: 0,
+            skipped: 0,
+            unreadable_volume: 0,
+            unreadable_open_interest: 0,
+            negative_volume: 0,
+            negative_open_interest: 0,
+            quote_rows: 0,
+        };
+        let rows = decode_rows(&body, Columns::Gdfl, &mut tally).expect("five rows decode");
+        assert_eq!(rows.len(), 3, "the two quote rows are not trades: {rows:?}");
+        assert_eq!(tally.quote_rows, 2, "and they are counted, by name");
+
+        let bars: Vec<store::format::Bar> = rows
+            .iter()
+            .map(|row| store::format::Bar {
+                ts_micros: row.timestamp * 1_000_000,
+                open: row.open,
+                high: row.high,
+                low: row.low,
+                close: row.close,
+                volume: row.volume,
+                open_interest: row.open_interest.unwrap_or(store::format::OI_NULL),
+            })
+            .collect();
+        let folded = crate::fold::fold(&bars, crate::fold::Bucket::MINUTE).expect("folds");
+        assert_eq!(folded.len(), 2, "09:19 and 09:20; nothing traded at 09:21");
+        let at_0920 = folded[1];
+        assert_eq!(
+            (
+                at_0920.open,
+                at_0920.high,
+                at_0920.low,
+                at_0920.close,
+                at_0920.volume
+            ),
+            (10_200, 10_300, 10_200, 10_300, 60),
+            "the 09:20 bar is the trades inside 09:20 and nothing else"
+        );
+    }
+
+    /// **p10num-1, the other half. AN INDEX FILE KEEPS EVERY ROW**: every
+    /// column after `LTP` is zero on an index (`docs/00-charter.md`), so `LTQ`
+    /// 0 is the norm there and `LTP` is the index level.
+    #[test]
+    fn a_gdfl_index_row_is_kept_though_its_ltq_is_zero() {
+        let body =
+            format!("{GDFL_HEADER}\nNIFTY 50.NSE_IDX,26/05/2026,09:15:00,24000.00,0,0,0,0,0,0\n");
+        let rows = decode(&body, Columns::Gdfl).expect("an index row decodes");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].close, 2_400_000);
+    }
+
+    /// **p10num-2. AN INDEX HAS NO OPEN INTEREST, SO ITS ZERO COLUMN IS ABSENT,
+    /// NOT A MEASURED ZERO.** `CLAUDE.md` §7 spends `i64::MIN` on absence and
+    /// says zero means zero; `docs/08-vendor-samples.md` says an index's volume
+    /// and open interest are "structurally absent rather than zero". The
+    /// `TrueData` index layout and GDFL's `.NSE_IDX` rows both decode `None`.
+    #[test]
+    fn an_index_row_decodes_its_open_interest_as_absent() {
+        let rows = decode("20221003,09:15:00,100.00,0,0\n", Columns::TrueDataIndex)
+            .expect("an index row decodes");
+        assert_eq!(rows[0].open_interest, None);
+        let body =
+            format!("{GDFL_HEADER}\nNIFTY BANK.NSE_IDX,26/05/2026,09:15:00,52000.00,0,0,0,0,0,0\n");
+        let rows = decode(&body, Columns::Gdfl).expect("an index row decodes");
+        assert_eq!(rows[0].open_interest, None);
+        // A traded instrument's zero stays a measured zero.
+        let body =
+            format!("{GDFL_HEADER}\nFINNIFTY-III.NFO,01/07/2025,09:16:16,27674,0,0,0,0,65,0\n");
+        let rows = decode(&body, Columns::Gdfl).expect("a traded row decodes");
+        assert_eq!(rows[0].open_interest, Some(0));
     }
 }

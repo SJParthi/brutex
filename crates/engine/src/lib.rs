@@ -1053,7 +1053,9 @@ impl Ladder {
         }
     }
 
-    /// The same ladder with a different per-level candidate ceiling.
+    /// The same ladder with a different candidate ceiling: CUMULATIVE across every
+    /// level past k=1, not per level, as `Ladder::exhausted` counts it
+    /// (Z1-slice09-F2, D-1771).
     ///
     /// A ceiling of zero is raised to one, for the reason
     /// [`Ladder::with_min_hits`] raises `min_hits`: a ceiling of zero refuses
@@ -1072,7 +1074,8 @@ impl Ladder {
         }
     }
 
-    /// The per-level candidate ceiling this ladder will actually apply.
+    /// The cumulative candidate ceiling this ladder will actually apply, across
+    /// every level past k=1.
     #[must_use]
     pub const fn ceiling(&self) -> usize {
         self.ceiling
@@ -1183,11 +1186,14 @@ impl Ladder {
     ///
     /// Measured by `C-E-04`, in `crates/engine/benches/ratio.rs`.
     ///
-    /// Per candidate the work is one `HashSet` probe (O(1)), up to `k` subset
-    /// probes (O(k), and `k` is bounded by the vocabulary width), and one
-    /// support count, which walks the bars. Support counting is O(bars) because
-    /// it *is* the measurement. The join is O(|F|²) in the previous frontier,
-    /// which is Apriori's documented shape and not a hidden scan.
+    /// At k=1, one expected-O(1) `HashSet<u32>` insert per offered position.
+    /// At k>=2 there is no dedup probe, because the prefix join is injective
+    /// (D-1440); per candidate the work is `k − 2` expected-O(1) subset probes
+    /// (the two parents are skipped), a constant meaning check, and one support
+    /// count, which walks the bars. Support counting is O(bars) because it *is*
+    /// the measurement. The join walks `Σ |B|²/2` pairs over the previous
+    /// frontier's prefix blocks `B`, which is Apriori's documented shape and not
+    /// a hidden scan (p7num-2, D-2666).
     ///
     /// # Termination
     ///
@@ -1502,7 +1508,10 @@ impl Ladder {
         // support 0 or at support == bars is named in the output rather than
         // dropped. A support-0 position poisons its whole subtree; a support-1
         // position partitions nothing.
-        let mut first: Vec<Itemset> = reserved(live.len())?;
+        // The survivors are DISTINCT live positions, so at most the vocabulary
+        // width; a long caller list with repeats is legal (each is counted in
+        // `duplicates`) and must not size this vector (p7num-3, D-2666).
+        let mut first: Vec<Itemset> = reserved(live.len().min(vocab::table::COUNT))?;
         // Both counted inside the loop below, so every entry in `live` increments exactly
         // one bucket and `Frontier::reconciles` becomes an invariant of the loop rather
         // than an identity one residual makes true by construction.
@@ -1557,7 +1566,7 @@ impl Ladder {
                     reason: Why::AlwaysTrue,
                 });
             } else if hits >= self.min_hits {
-                first.push(Itemset { mask: m, hits });
+                primitives::append(&mut first, Itemset { mask: m, hits });
             } else {
                 // Counted here, not derived afterwards. `infrequent` used to be
                 // `generated - frequent - excluded`, which absorbed every silently
@@ -1851,11 +1860,6 @@ impl Ladder {
         // level is allowed to hold anyway.
         let mut out: Vec<Itemset> = reserved(frequent_prev.len().min(self.ceiling))?;
         let mut generated: u64 = 0;
-        // NOT `mut`, AND THAT IS THE PROOF. Nothing increments it any more:
-        // the prefix join cannot produce a repeat and `keyed.dedup()` removes
-        // the malformed-input case before the join. The field is still
-        // REPORTED, so a level that somehow found one would have to make this
-        // mutable again -- a compiler error is a better guard than a counter.
         let mut pruned: u64 = 0;
         let mut infrequent: u64 = 0;
         let mut halted: Option<Halt> = None;
@@ -2169,6 +2173,11 @@ fn joined_frontier(
         k,
         frequent,
         generated,
+        // A LITERAL ZERO, because the prefix join is injective and
+        // `keyed.dedup()` removes the malformed-input case before it (D-1440):
+        // there is no duplicate to count at k>=2. Nothing would fail to compile
+        // if one appeared; the join tests witness it by distinctness
+        // (p7num-1, D-2666).
         duplicates: 0,
         excluded: 0,
         pruned,
@@ -2501,6 +2510,25 @@ mod manifest;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `CLAUDE.md` §3 rule 4: result append goes through
+    /// `primitives::append` AT EVERY k. The k=1 loop pushed into `first`
+    /// directly, so the primitive `C-E-11` times was not the one k=1 ran
+    /// (P1-15-04, D-1764). The shipping region names no other `push(Itemset`.
+    #[test]
+    fn every_level_appends_its_survivors_through_the_one_primitive() {
+        let source = include_str!("lib.rs");
+        let shipping = source
+            .split_once("\n#[cfg(test)]\n")
+            .map_or("", |(code, _)| code);
+        assert!(
+            !shipping.is_empty(),
+            "the shipping region precedes the tests"
+        );
+        assert!(shipping.contains("primitives::append(&mut first, Itemset { mask: m, hits });"));
+        assert!(shipping.contains("primitives::append(out, Itemset { mask: *mask, hits });"));
+        assert!(!shipping.contains(".push(Itemset"));
+    }
 
     /// Eight positions over sixty-four bars -- a column the ladder climbs.
     ///
@@ -3212,6 +3240,34 @@ mod tests {
         ] {
             assert!(capacity > LIVE_POSITIONS, "metadata capacity {capacity}");
         }
+    }
+
+    /// p7num-3, D-2666: k=1's survivor vector is sized by the vocabulary, not
+    /// by the caller's list. A million copies of one position used to reserve a
+    /// million 56-byte itemsets for at most one survivor.
+    #[test]
+    fn a_repeated_live_list_does_not_size_the_first_level() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (live, column) = a_climbing_column();
+        let one = *live.first().ok_or("the fixture has a live position")?;
+        let repeated = vec![one; 1_000_000];
+        let ladder = Ladder::with_min_hits(1)
+            .with_ceiling(10_000)
+            .with_pair_budget(1_000_000)
+            .with_support_lanes(1);
+        let (first, _) = ladder.first_level(&column, &repeated)?;
+        assert!(
+            first.frequent.len() <= 1,
+            "one distinct position survives at most once"
+        );
+        assert!(
+            first.frequent.capacity() <= vocab::table::COUNT,
+            "capacity {} for {} offered entries",
+            first.frequent.capacity(),
+            repeated.len()
+        );
+        assert_eq!(first.duplicates, 999_999);
+        Ok(())
     }
 
     #[test]

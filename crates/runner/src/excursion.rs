@@ -764,6 +764,28 @@ impl Crossings {
         self.peak_ppm_at(offset, entry, side, true)
     }
 
+    /// [`Self::adverse_ppm_at`] rounded UP, for the figure a maximum gates.
+    ///
+    /// `worst_mae` is admitted by `<= max_mae_ppm`, and a floored `10000.495`
+    /// ppm read as `10000` and passed a `10000` cap (p3floor-2, D-1769). The
+    /// floored reading still drives rung crossing and every trade row, so this
+    /// is a second reading rather than a change to [`ppm_of`].
+    #[must_use]
+    pub fn adverse_ppm_ceil_at(&self, offset: usize, entry: i64, side: Side) -> Ppm {
+        let Some(last) = self.low_run.len().checked_sub(1) else {
+            return 0;
+        };
+        let at = offset.min(last);
+        let (Some(&low), Some(&high)) = (self.low_run.get(at), self.high_run.get(at)) else {
+            return 0;
+        };
+        let move_paisa = match side {
+            Side::Long => entry.saturating_sub(low),
+            Side::Short => high.saturating_sub(entry),
+        };
+        ppm_ceil_of(move_paisa, entry)
+    }
+
     /// The best the path had gone FOR `entry` by offset `offset`, in ppm.
     ///
     /// The mirror of [`Self::adverse_ppm_at`]; every word there applies, with
@@ -1479,6 +1501,22 @@ fn ppm_of(move_paisa: i64, entry: i64) -> Ppm {
     i64::try_from(scaled).unwrap_or(i64::MAX)
 }
 
+/// [`ppm_of`] rounded up: the smallest whole ppm not below the exact move.
+fn ppm_ceil_of(move_paisa: i64, entry: i64) -> Ppm {
+    if move_paisa <= 0 || entry <= 0 {
+        return 0;
+    }
+    let numerator = i128::from(move_paisa).saturating_mul(i128::from(PPM_ONE));
+    let denominator = i128::from(entry);
+    let floor = numerator / denominator;
+    let scaled = if numerator % denominator == 0 {
+        floor
+    } else {
+        floor.saturating_add(1)
+    };
+    i64::try_from(scaled).unwrap_or(i64::MAX)
+}
+
 #[cfg(test)]
 #[allow(
     clippy::expect_used,
@@ -1698,6 +1736,38 @@ mod tests {
         assert_eq!(c.stop_at(1), 1, "15,000 ppm on the second");
         assert_eq!(c.stop_at(2), NEVER, "30,000 ppm was never reached");
         assert_eq!(c.target_at(0), NEVER, "the path never went favourable");
+    }
+
+    /// p3floor-2, D-1769: the reading a maximum gates rounds UP, and the
+    /// crossing reading beside it still floors.
+    #[test]
+    fn the_gated_adverse_reading_rounds_up_and_the_crossing_reading_floors() {
+        let entry = 199_999_i64;
+        let bars = vec![bar(0, entry - 2_000, entry + 2_000)];
+        let rungs = ladder(&[5_000]);
+        let ladders = Ladders {
+            stops: &rungs,
+            targets: &rungs,
+            trails: &rungs,
+        };
+        for side in [Side::Long, Side::Short] {
+            let c = crossings(&bars, 0, 0, entry, side, ladders);
+            // 2,000 * 1,000,000 / 199,999 = 10,000.05 ppm.
+            assert_eq!(c.adverse_ppm_at(0, entry, side), 10_000, "{side:?}");
+            assert_eq!(c.adverse_ppm_ceil_at(0, entry, side), 10_001, "{side:?}");
+        }
+        let exact = 200_000_i64;
+        let c = crossings(&bars, 0, 0, exact, Side::Long, ladders);
+        let floor = c.adverse_ppm_at(0, exact, Side::Long);
+        assert_eq!(
+            c.adverse_ppm_ceil_at(0, exact, Side::Long),
+            floor,
+            "exact stays exact"
+        );
+        assert_eq!(super::ppm_ceil_of(0, exact), 0);
+        assert_eq!(super::ppm_ceil_of(5, 0), 0);
+        let empty = crossings(&[], 0, 0, entry, Side::Long, ladders);
+        assert_eq!(empty.adverse_ppm_ceil_at(0, entry, Side::Long), 0);
     }
 
     #[test]

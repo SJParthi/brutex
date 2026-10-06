@@ -108,7 +108,17 @@ fn parse(query: &str) -> Result<Option<(String, String)>, String> {
     let underlying = crate::server::param(query, "underlying");
     match (feed.is_empty(), underlying.is_empty()) {
         (true, true) if seen.is_empty() => Ok(None),
-        (false, false) => Ok(Some((feed, underlying))),
+        // THE FEED IS READ, NOT COPIED. The ledger keys runs by the feed's
+        // wire name, so `Zerodha` or a typo used to miss every row and answer
+        // 200 with a sentence about runs that halted or traded nothing --
+        // runs that do not exist. Parsed the way every other route parses a
+        // feed and looked up by its wire name (P1-02-06, D-1765).
+        (false, false) => match crate::ingest::parse_feed(&feed) {
+            Some(named) => Ok(Some((named.wire().to_owned(), underlying))),
+            None => Err(format!(
+                "{feed:?} is not a feed this build has; the top run is looked up by feed"
+            )),
+        },
         _ => Err(
             "`feed` and `underlying` filter together: give both nonempty values or neither"
                 .to_owned(),
@@ -359,6 +369,18 @@ mod tests {
         assert_eq!(
             parse("feed=zerodha&underlying=NIFTY"),
             Ok(Some(("zerodha".to_owned(), "NIFTY".to_owned())))
+        );
+        // A feed is canonicalised to the wire name the ledger keys by, and a
+        // feed this build does not have is refused rather than answered with
+        // a sentence about runs that do not exist (P1-02-06, D-1765).
+        assert_eq!(
+            parse("feed=Zerodha&underlying=NIFTY"),
+            Ok(Some(("zerodha".to_owned(), "NIFTY".to_owned())))
+        );
+        let typo = parse("feed=zerodah&underlying=NIFTY");
+        assert!(
+            typo.as_ref().is_err_and(|why| why.contains("zerodah")),
+            "{typo:?}"
         );
         let dir = crate::scratch::path("top-absent-store");
         let _ = std::fs::remove_dir_all(&dir);

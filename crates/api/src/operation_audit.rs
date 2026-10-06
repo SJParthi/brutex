@@ -114,9 +114,47 @@ pub async fn note_request(
     let Some(route) = audited_route(request.uri().path()) else {
         return next.run(request).await;
     };
-    let label = format!("{} {route}", public_method(request.method()));
+    let method = public_method(request.method());
+    let label = format!("{method} {route}");
     let root = site.store_root.clone();
-    request_audited(root, label, next.run(request)).await
+    if matches!(method, "GET" | "HEAD") {
+        return request_audited(root, label, next.run(request)).await;
+    }
+    request_audited_detached(root, label, next.run(request)).await
+}
+
+/// [`request_audited`] on its own task, so a client that goes away cannot
+/// interrupt it. P3-01-03, D-1973.
+///
+/// # Why a write route is detached and a read is not
+///
+/// Dropping the connection drops the handler future. On a launch route
+/// (`/backtest/run`, `/backtest/descend`, `/engine/command`) the admission is
+/// a `spawn_blocking` closure, which a dropped `JoinHandle` does not cancel: it
+/// went on to take the lease and start the run while the armed attempt's
+/// `Drop` wrote `Cancelled`/0 -- a terminal saying the work was cancelled for
+/// work that was not. Run here, the handler and its true terminal finish
+/// whether or not anyone is still listening, so `Cancelled` is never written
+/// while the handler can still dispatch. A read dispatches nothing, so its
+/// cancellation is the truth and it stays bound to its connection.
+pub(crate) async fn request_audited_detached(
+    root: std::path::PathBuf,
+    label: String,
+    handler: impl std::future::Future<Output = axum::response::Response> + Send + 'static,
+) -> axum::response::Response {
+    match tokio::spawn(request_audited(root, label, handler)).await {
+        Ok(response) => response,
+        // A panic unwound inside the task, so the armed attempt's `Drop` ran
+        // while panicking and recorded `Failed`; this says so rather than
+        // answering as if the handler had returned.
+        Err(why) => failure(
+            &format!(
+                "the audited handler did not return ({why}); its invocation record holds the outcome"
+            ),
+            true,
+        )
+        .into_response(),
+    }
 }
 
 /// [`note_request`]'s journal around one handler, with the route label already
@@ -242,7 +280,14 @@ fn parse(query: &str) -> Result<Asked, String> {
         if slot.is_some() {
             return Err("duplicate audit query field".to_owned());
         }
-        *slot = Some(integer(raw)?);
+        let value = integer(raw)?;
+        // Every durable id is above `ID_BASE`; one at or below it can never
+        // name a record, so it is the caller's error (400), not the 503 the
+        // journal's own refusal would map to (Z1-slice13-F3, D-1762).
+        if key != "limit" && value <= journal::ID_BASE {
+            return Err("audit IDs must lie in the durable invocation namespace".to_owned());
+        }
+        *slot = Some(value);
     }
     if let Some(id) = id {
         if before.is_some() || limit.is_some() {

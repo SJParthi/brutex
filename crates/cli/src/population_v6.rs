@@ -51,6 +51,11 @@ use crate::population_finalization_v4::{
 use crate::step3_orchestrator::CommittedStoredCandidatePreAdmissionV1;
 use runner::exit_grid_policy::ExecutionDispositionV1;
 
+/// The label #74's short-write test injects with. Appends to this ledger go
+/// through `fixed_tail`, which names the file instead (D-1770).
+#[cfg(test)]
+const APPEND_LABEL: &str = "Population V6 record";
+
 pub(crate) type PopulationV6Refusal = String;
 
 pub(crate) const POPULATION_V6_HEADER_BYTES: u64 = 64;
@@ -2158,27 +2163,33 @@ impl PopulationV6Ledger {
         let completion_index = record_len
             .checked_sub(1)
             .ok_or_else(|| "Population V6 block omits Completion".to_owned())?;
-        for index in prefix..completion_index {
-            let raw = records
-                .get(
-                    usize::try_from(index)
+        let evidence = records
+            .get(
+                usize::try_from(prefix)
+                    .map_err(|_| "Population V6 append index does not fit usize".to_owned())?
+                    ..usize::try_from(completion_index)
                         .map_err(|_| "Population V6 append index does not fit usize".to_owned())?,
-                )
-                .ok_or_else(|| "Population V6 append record is absent".to_owned())?;
-            append_raw(&mut self.data_file, raw)?;
-        }
-        self.data_file
-            .sync_all()
-            .map_err(|why| format!("cannot sync Population V6 evidence: {why}"))?;
-        append_raw(
+            )
+            .ok_or_else(|| "Population V6 append record is absent".to_owned())?;
+        // A short write or a failed barrier cuts every record this call wrote
+        // (D-1900, pop1-2): a ragged tail refused the whole ledger for good.
+        crate::fixed_tail::append_block(
             &mut self.data_file,
-            records
-                .last()
-                .ok_or_else(|| "Population V6 encoded block is empty".to_owned())?,
-        )?;
-        self.data_file
-            .sync_all()
-            .map_err(|why| format!("cannot sync Population V6 Completion: {why}"))?;
+            &self.data_path,
+            evidence.iter().map(Ok::<_, String>),
+            File::sync_all,
+        )
+        .map_err(|why| format!("cannot append Population V6 evidence: {why}"))?;
+        let completion = records
+            .last()
+            .ok_or_else(|| "Population V6 encoded block is empty".to_owned())?;
+        crate::fixed_tail::append_block(
+            &mut self.data_file,
+            &self.data_path,
+            [Ok::<_, String>(completion)],
+            File::sync_all,
+        )
+        .map_err(|why| format!("cannot append Population V6 Completion: {why}"))?;
         self.root_file
             .sync_all()
             .map_err(|why| format!("cannot sync Population V6 directory: {why}"))?;
@@ -2439,13 +2450,6 @@ fn read_record_at(file: &mut File, index: u64) -> Result<[u8; RECORD_BYTES], Pop
         .and_then(|_| file.read_exact(&mut raw))
         .map_err(|why| format!("cannot read Population V6 record {index}: {why}"))?;
     Ok(raw)
-}
-
-/// Label every append to this ledger names, and its rollback test injects with.
-const APPEND_LABEL: &str = "Population V6 record";
-
-fn append_raw(file: &mut File, raw: &[u8; RECORD_BYTES]) -> Result<(), PopulationV6Refusal> {
-    crate::append_rollback::append(file, raw, APPEND_LABEL)
 }
 
 fn open_root(root: &Path) -> Result<(PathBuf, File, PlatformIdentity), PopulationV6Refusal> {
@@ -3228,6 +3232,11 @@ impl CommittedStoredPopulationV6 {
     /// run re-authenticates the whole retained source and projects all C rows,
     /// so the lookup does not change the call's class. W2-cli13-3. UNVERIFIED:
     /// the O(C) bound is read from the code and has not been measured.
+    ///
+    /// Every strategy is resolved and validated before any witness is minted,
+    /// and each family's OOS fold (its replay source, Θ(S + Q + D + E)) is
+    /// built once at that family's first witness and shared by the rest
+    /// (W2-cli3-3, D-1684); before D-1684 every witness rebuilt it.
     pub(crate) fn selected_stored_oos_witnesses(
         &mut self,
         request: crate::stored_post_training_oos::StoredPostTrainingOosRequestV1,
@@ -3247,6 +3256,10 @@ impl CommittedStoredPopulationV6 {
             .map_err(|why| why.to_string())?;
         let mut seen = std::collections::HashSet::new();
         seen.try_reserve(strategies.len())
+            .map_err(|why| why.to_string())?;
+        let mut planned = Vec::new();
+        planned
+            .try_reserve_exact(strategies.len())
             .map_err(|why| why.to_string())?;
         for strategy in strategies {
             if !seen.insert(*strategy) {
@@ -3291,10 +3304,30 @@ impl CommittedStoredPopulationV6 {
                 };
                 *cohort = Some(held.stored_post_training_oos_cohort(request)?);
             }
-            let witness = cohort
+            planned.push((slot, row.disposition()));
+        }
+        // One OOS fold per family, shared by every witness of that family
+        // (W2-cli3-3, D-1684): the fold depends only on cohort fields, and it
+        // used to be rebuilt for every witness.
+        let mut folds: [Option<crate::stored_post_training_oos::StoredOosFoldV1<'_>>; 2] =
+            [None, None];
+        for (slot, disposition) in planned {
+            let fold = folds
+                .get_mut(slot)
+                .ok_or("Population V6 replay family slot")?;
+            if fold.is_none() {
+                *fold = Some(
+                    cohorts
+                        .get(slot)
+                        .and_then(Option::as_ref)
+                        .ok_or("Population V6 OOS cohort disappeared")?
+                        .fold_recorded(observer)?,
+                );
+            }
+            let witness = fold
                 .as_ref()
-                .ok_or("Population V6 OOS cohort disappeared")?
-                .mint_witness_recorded(row.disposition(), observer)?;
+                .ok_or("Population V6 OOS fold disappeared")?
+                .mint_witness_recorded(disposition, observer)?;
             remaining = remaining.checked_sub(u64::try_from(witness.candidate_count()).map_err(|why| why.to_string())?)
                 .ok_or("Population V6 stored OOS aggregate candidate ceiling exceeded; no partial replay")?;
             witnesses.push(witness);
@@ -3695,6 +3728,59 @@ mod tests {
                 .map_err(|why| format!("cannot persist ragged prefix: {why}"))?;
             drop(ragged);
             assert!(PopulationV6Ledger::open_read(&ragged_root, bounds()).is_err());
+            Ok(())
+        })
+    }
+
+    /// pop1-2, D-1900: a short write or failed barrier, on the evidence or on
+    /// the Completion, is cut back; the ledger opens and the exact rerun
+    /// commits. The fault fires through the ledger's own append.
+    #[test]
+    fn a_failed_write_or_barrier_is_cut_back_and_the_rerun_commits() -> Result<(), String> {
+        use crate::fixed_tail::fault::{Armed, Kind};
+        with_evaluated_prepared(|_source, prepared, root| {
+            for (case, (kind, skip)) in [
+                (
+                    Kind::Write {
+                        keep: RECORD_BYTES / 2,
+                    },
+                    0,
+                ),
+                (
+                    Kind::Write {
+                        keep: RECORD_BYTES / 2,
+                    },
+                    1,
+                ),
+                (Kind::Sync, 0),
+                (Kind::Sync, 1),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let case_root = root.join(format!("fault-{case}"));
+                std::fs::create_dir(&case_root)
+                    .map_err(|why| format!("cannot create fault root: {why}"))?;
+                let mut writer = PopulationV6Ledger::open_write(&case_root, bounds())?;
+                let armed = Armed::arm_after(DATA_FILE, kind, skip);
+                let refusal = writer.append(&prepared).err().unwrap_or_default();
+                assert!(!Armed::pending(), "case {case} fired");
+                drop(armed);
+                assert!(refusal.contains("injected"), "case {case}: {refusal}");
+                drop(writer);
+                let len = std::fs::metadata(case_root.join(DATA_FILE))
+                    .map_err(|why| format!("cannot measure fault file: {why}"))?
+                    .len();
+                assert_eq!(
+                    len.saturating_sub(HEADER_BYTES as u64) % RECORD_BYTES as u64,
+                    0,
+                    "case {case} ends on a whole record"
+                );
+                drop(PopulationV6Ledger::open_read(&case_root, bounds())?);
+                let mut rerun = PopulationV6Ledger::open_write(&case_root, bounds())?;
+                let (written, _) = rerun.append(&prepared)?;
+                assert!(written, "case {case}");
+            }
             Ok(())
         })
     }

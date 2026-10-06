@@ -9,7 +9,8 @@ use std::process::Command;
 
 fn valid_legacy_value(name: &str) -> &'static str {
     match name {
-        "BRUTEX_VALIDATE" => "1",
+        // A switch: exactly `0` or `1` on every reader (P8-04, D-2723).
+        "BRUTEX_VALIDATE" | "BRUTEX_PROTECTED_EXITS" => "1",
         "BRUTEX_SIZING_RATE_BP" => "5001",
         _ => "2",
     }
@@ -280,7 +281,9 @@ fn prepared_headings() -> Result<(), String> {
     let root = crate::store_root()?;
     let stock = format!(
         "{}{}",
-        crate::STORED_PROVENANCE,
+        // The prepared catalogue is a page over many instrument-months, so it
+        // opens with the pooled banner and not the single-run one. D-1705.
+        crate::STORED_POOLED_PROVENANCE,
         runner::audit::CostScope::CashEquity.report_note()
     );
     for (symbols, cash) in [

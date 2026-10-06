@@ -241,6 +241,7 @@ impl AwsIdentity {
     /// [`SsmError`] naming the variable that was missing, so an operator is
     /// told which one to set rather than that "AWS failed".
     pub fn from_env() -> Result<Self, SsmError> {
+        refuse_non_unicode(|name| std::env::var(name))?;
         Self::from_lookup(|name| std::env::var(name).ok())
     }
 
@@ -305,6 +306,7 @@ impl AwsIdentity {
     /// [`SsmError`] naming every place that was looked at, so "no credentials"
     /// is never the whole message.
     pub fn discover() -> Result<Self, SsmError> {
+        refuse_non_unicode(|name| std::env::var(name))?;
         Self::discover_from(|name| std::env::var(name).ok(), Self::from_shared_file)
     }
 
@@ -372,12 +374,12 @@ impl AwsIdentity {
                 "HOME is unset, so ~/.aws/credentials cannot be located".to_owned(),
             ));
         };
-        Self::from_credentials_file(
-            &std::path::PathBuf::from(home)
-                .join(".aws")
-                .join("credentials"),
-            profile,
-        )
+        // AN EMPTY OR RELATIVE HOME IS REFUSED, not read as the working
+        // directory's `.aws/credentials` (CE-38, D-1769).
+        let home = brutex_core::knob::home(Some(home)).map_err(|why| {
+            SsmError::unreachable(format!("{why}, so ~/.aws/credentials cannot be located"))
+        })?;
+        Self::from_credentials_file(&home.join(".aws").join("credentials"), profile)
     }
 
     /// One profile out of a credentials file **the caller names**.
@@ -393,12 +395,52 @@ impl AwsIdentity {
     ///
     /// [`SsmError`] when the file is absent, the profile is not in it, or the
     /// profile carries no key pair — three different faults, named separately.
+    /// And, before any of those, when the path is not a regular file, when it
+    /// holds more than [`crate::config::MAX_FILE_BYTES`], or when it is not
+    /// UTF-8 — each named by its own sentence.
+    ///
+    /// # The read is bounded, and a FIFO is refused before it is opened
+    ///
+    /// This was `std::fs::read_to_string(path)`: no `is_file` check and no
+    /// bound. A FIFO at `~/.aws/credentials` blocked in `open` forever with
+    /// nothing logged, and a symlink to `/dev/zero` grew the string until the
+    /// allocator gave up — the two failures D-0036 removed from
+    /// `credentials.toml`, still reachable in the file beside it on the same
+    /// start-up path. It now goes through `crate::config::read_bounded`, the
+    /// same `metadata`-then-`take` shape, so the two credential files share one
+    /// bound and one refusal order. P1-19-03, D-2326; proved by
+    /// `pull::ssm::a_fifo_credentials_file_is_refused_without_opening_it`
+    /// and `pull::ssm::an_oversized_credentials_file_is_refused_by_size`.
     pub fn from_credentials_file(path: &std::path::Path, profile: &str) -> Result<Self, SsmError> {
-        let text = std::fs::read_to_string(path).map_err(|why| {
+        let read = crate::config::read_bounded(path).map_err(|why| {
             SsmError::unreachable(format!(
                 "the AWS identity is in neither the environment nor {}: {why}. \
                  This is the AWS key that proves you may READ the parameter — \
                  not the broker token, which is what comes back from it.",
+                path.display()
+            ))
+        })?;
+        let Some(bytes) = read else {
+            return Err(SsmError::unreachable(format!(
+                "{} is not a regular file (a FIFO, a device, a socket or a \
+                 directory), so it was refused before it was opened: a FIFO \
+                 with no writer blocks forever and a device never ends. The \
+                 AWS credentials file must be an ordinary file.",
+                path.display()
+            )));
+        };
+        if bytes.len() > crate::config::MAX_FILE_BYTES_LEN {
+            return Err(SsmError::unreachable(format!(
+                "{} holds more than {} bytes, which is more than any \
+                 credentials file this reader will take into memory; refused \
+                 rather than read whole",
+                path.display(),
+                crate::config::MAX_FILE_BYTES
+            )));
+        }
+        let text = String::from_utf8(bytes).map_err(|_| {
+            SsmError::unreachable(format!(
+                "{} is not UTF-8 text, so no profile in it can be read",
                 path.display()
             ))
         })?;
@@ -454,6 +496,35 @@ fn non_blank(value: Option<String>) -> Option<String> {
     value.filter(|v| !v.trim().is_empty())
 }
 
+/// The four AWS identity variables this module reads.
+const AWS_IDENTITY_VARS: [&str; 4] = [
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_PROFILE",
+];
+
+/// Refuses, by name, an AWS identity variable that is set but not UTF-8.
+///
+/// `std::env::var(..).ok()` reads a non-UTF-8 value as UNSET, so a mangled
+/// `AWS_PROFILE` or key pair silently signed as `[default]`: an identity the
+/// operator did not choose, which D-1534 already refuses for the half-set
+/// case. Other environment readers in the workspace refuse non-UTF-8 by name,
+/// and this now does too (CE-69, D-1772). Four lookups, whatever the input.
+fn refuse_non_unicode(
+    read: impl Fn(&str) -> Result<String, std::env::VarError>,
+) -> Result<(), SsmError> {
+    for name in AWS_IDENTITY_VARS {
+        if let Err(std::env::VarError::NotUnicode(_)) = read(name) {
+            return Err(SsmError::unreachable(format!(
+                "{name} is set but is not valid UTF-8. Refused rather than \
+                 read as unset, which would sign as a different AWS identity."
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Lower-case hex, which is the only encoding `SigV4` accepts.
 ///
 /// Written out rather than pulled in: a `hex` dependency for sixteen characters
@@ -499,9 +570,16 @@ fn hmac(key: &[u8], data: &str) -> Vec<u8> {
 /// for the next, and one derived for `ap-south-1` cannot sign for anywhere else
 /// — which is why a leaked signature is worth so much less than a leaked secret.
 fn signing_key(secret: &str, date: &str, region: &str) -> Vec<u8> {
+    signing_key_for(secret, date, region, SERVICE)
+}
+
+/// [`signing_key`] for a named service. Split out so the derivation can be
+/// checked against the vector AWS publishes, which is for service `iam`; this
+/// module only ever signs for [`SERVICE`].
+fn signing_key_for(secret: &str, date: &str, region: &str, service: &str) -> Vec<u8> {
     let k_date = hmac(format!("AWS4{secret}").as_bytes(), date);
     let k_region = hmac(&k_date, region);
-    let k_service = hmac(&k_region, SERVICE);
+    let k_service = hmac(&k_region, service);
     hmac(&k_service, "aws4_request")
 }
 
@@ -513,7 +591,7 @@ fn signing_key(secret: &str, date: &str, region: &str) -> Vec<u8> {
 /// `crate::ingest::parse_window` takes `today`: a function that reads the clock
 /// cannot be tested at its own boundary, and a signature is only checkable
 /// against a fixed instant.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct Signable<'a> {
     /// The host header, `ssm.<region>.amazonaws.com`.
     pub host: &'a str,
@@ -525,6 +603,22 @@ pub struct Signable<'a> {
     pub body: &'a str,
     /// The session token, when the identity carries one.
     pub session_token: Option<&'a str>,
+}
+
+/// Redacted like [`AwsIdentity`]: the body names the real parameter path, which
+/// `CLAUDE.md` §8 keeps out of every tracked file, and the session token is a
+/// credential. A derived `Debug` printed both into any panic or log line that
+/// formatted a `Signable` (P11-02, D-1776).
+impl core::fmt::Debug for Signable<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Signable")
+            .field("host", &self.host)
+            .field("region", &self.region)
+            .field("stamp", &self.stamp)
+            .field("body", &"<redacted>")
+            .field("session_token", &self.session_token.map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 impl Signable<'_> {
@@ -863,17 +957,17 @@ pub async fn get_parameter(
         request = request.header(name, value);
     }
 
-    let answer = request.body(body).send().await.map_err(|why| {
+    let mut answer = request.body(body).send().await.map_err(|why| {
         // `why` is reqwest's own words and never carries a header this code
         // set, so neither secret can reach this string.
         SsmError::unreachable(format!("{host} was not reached: {why}"))
     })?;
 
     let status = answer.status();
-    let text = answer
-        .text()
-        .await
-        .map_err(|why| SsmError::unreachable(format!("the answer could not be read: {why}")))?;
+    // BOUNDED, LIKE EVERY OTHER VENDOR READ IN THIS CRATE. This was
+    // `answer.text()`, which held the whole body before anything looked at it,
+    // with only the client's 10 s timeout as a bound. See `answer_within`.
+    let text = answer_within(&mut answer).await?;
 
     if !status.is_success() {
         // AWS names its faults in the body; the port's four variants are what
@@ -950,6 +1044,50 @@ pub async fn get_parameter(
             .with("value_len", telemetry::Value::Uint(value.len() as u64)),
     );
     Ok(value)
+}
+
+/// The most of one Parameter Store answer this build takes off the socket.
+///
+/// A `GetParameter` answer is one small JSON object: the parameter's name,
+/// type, version, ARN and dates, and one value — a broker credential, which is
+/// a header value. Sixteen kibibytes holds that with room to spare and is
+/// small enough that holding it costs nothing. The figure is this build's
+/// CHOICE, not an AWS limit: what AWS caps a parameter value at is UNVERIFIED
+/// here, because `docs/00-charter.md` records no AWS source. A real answer
+/// that ever runs past it is refused naming this number, so the cap is raised
+/// by a decision rather than by a silent truncation. D-2326.
+///
+/// Refusal bodies are read through the same cap: their text is only matched
+/// against fault names (see `refusal_detail`) and never quoted.
+pub const MAX_ANSWER_BYTES: usize = 16 * 1024;
+
+/// The body of a Parameter Store answer, refused past [`MAX_ANSWER_BYTES`].
+///
+/// Read through `crate::http::body_within`, the chunked reader every broker
+/// read in this crate uses, so memory never exceeds the cap plus one frame no
+/// matter what the far end sends. `body_within` stops at the first frame past
+/// the cap and reports a byte count above it; that count is what is refused,
+/// before any parse sees the kept prefix — a cut JSON object is not decoded as
+/// if it were whole. P1-19-03, D-2326; proved by
+/// `pull::ssm::an_oversized_parameter_store_answer_is_refused_by_size`.
+///
+/// # Errors
+///
+/// [`SsmError`] when a frame never arrives, or when the body runs past
+/// [`MAX_ANSWER_BYTES`] — two different sentences.
+async fn answer_within(answer: &mut reqwest::Response) -> Result<String, SsmError> {
+    let (text, seen) = crate::http::body_within(answer, MAX_ANSWER_BYTES)
+        .await
+        .map_err(|why| SsmError::unreachable(format!("the answer could not be read: {why}")))?;
+    if seen > MAX_ANSWER_BYTES {
+        return Err(SsmError::unreachable(format!(
+            "the Parameter Store answer (status {}) ran past {MAX_ANSWER_BYTES} \
+             bytes, which is more than one parameter's answer can need; refused \
+             rather than read whole",
+            answer.status().as_u16()
+        )));
+    }
+    Ok(text)
 }
 
 /// The current instant, in the basic ISO-8601 form `SigV4` requires.
@@ -1104,10 +1242,32 @@ mod tests {
     /// endpoint, where it reads as a credentials problem.
     #[test]
     fn the_signing_key_matches_the_published_derivation() {
+        // THE PUBLISHED VECTOR, COMPARED (P1-14-01). This test said it checked
+        // AWS's derivation and asserted only length, determinism and
+        // inequality, which every HMAC chain satisfies: `AWS{secret}` for
+        // `AWS4{secret}`, a renamed `aws4_request` or reordered links all
+        // passed. AWS's "derive a signing key" example is for service `iam`
+        // with this secret, date and region, and its documented key is the
+        // hex below.
+        assert_eq!(
+            hex(&signing_key_for(
+                EXAMPLE_SECRET,
+                "20150830",
+                "us-east-1",
+                "iam"
+            )),
+            "c4afb1cc5771d871763a393e44b703571b55cc28424d1a5e86da6ed3c154a4b9",
+            "AWS's published signing key for its own worked example"
+        );
         let key = signing_key(EXAMPLE_SECRET, "20150830", "us-east-1");
-        // AWS's own worked example for service `iam`; this module signs for
-        // `ssm`, so the chain is re-derived here with the same first three
-        // links and asserted to be 32 bytes of HMAC-SHA256 output.
+        // The same chain for `ssm`, the one service this module signs for,
+        // computed outside this crate (an HMAC-SHA256 chain in another tool)
+        // from the same four links.
+        assert_eq!(
+            hex(&key),
+            "1b014a52e2c4682dbb4f9c057f77de175576bae388238bec84a63594a1c63358",
+            "the published chain with service `ssm`"
+        );
         assert_eq!(key.len(), 32, "HMAC-SHA256 is 32 bytes");
         // Deterministic: the same inputs give the same key, every time.
         assert_eq!(key, signing_key(EXAMPLE_SECRET, "20150830", "us-east-1"));
@@ -1246,6 +1406,17 @@ mod tests {
             session_token: None,
         };
         let header = signable.authorization(&identity()).expect("signs");
+        // THE WHOLE HEADER, PINNED (P1-14-01). The value was computed outside
+        // this crate by an independent `SigV4` implementation following AWS's
+        // specification (canonical request, string to sign, four-link key) for
+        // exactly these inputs, so a reordered string-to-sign or a changed
+        // chain fails here rather than against a live endpoint.
+        assert_eq!(
+            header,
+            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260807/ap-south-1/ssm/aws4_request, \
+             SignedHeaders=content-type;host;x-amz-date;x-amz-target, \
+             Signature=75a1dae843ac5a003e5a5e6e6cd8a3df0742ea7d527203b07a96e1024149233d"
+        );
         assert!(header.starts_with("AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260807/"));
         assert!(header.contains("/ap-south-1/ssm/aws4_request"));
         assert!(header.contains("SignedHeaders=content-type;host;x-amz-date;x-amz-target"));
@@ -1680,5 +1851,218 @@ mod tests {
         assert_eq!(kind, SecretError::Unreachable);
         assert!(detail.contains("ap-south-1"), "{detail}");
         assert!(detail.contains("§8"), "{detail}");
+    }
+
+    /// CE-69: a non-UTF-8 AWS variable is refused by name, not read as unset.
+    #[test]
+    fn a_non_unicode_aws_variable_is_refused_by_name() {
+        use std::env::VarError;
+        for bad in AWS_IDENTITY_VARS {
+            let read = |name: &str| {
+                if name == bad {
+                    Err(VarError::NotUnicode(std::ffi::OsString::from("x")))
+                } else {
+                    Err(VarError::NotPresent)
+                }
+            };
+            let Err(SsmError { detail, .. }) = refuse_non_unicode(read) else {
+                panic!("{bad} not UTF-8 must be refused")
+            };
+            assert!(detail.contains(bad), "the refusal names {bad}: {detail}");
+        }
+        let unset = refuse_non_unicode(|_: &str| Err(VarError::NotPresent));
+        assert!(unset.is_ok(), "unset variables are not refused here");
+        let set = refuse_non_unicode(|_: &str| Ok("AKIAEXAMPLE".to_owned()));
+        assert!(set.is_ok(), "UTF-8 values pass");
+    }
+
+    /// P11-02: a formatted `Signable` names neither the body nor the token.
+    #[test]
+    fn a_signable_prints_no_parameter_path_and_no_token() {
+        let signable = Signable {
+            host: "ssm.ap-south-1.amazonaws.com",
+            region: "ap-south-1",
+            stamp: "20261004T000000Z",
+            body: r#"{"Name":"PARAMETER-NAME"}"#,
+            session_token: Some("TOKEN-VALUE"),
+        };
+        let shown = format!("{signable:?}");
+        assert!(
+            !shown.contains("PARAMETER-NAME") && !shown.contains("TOKEN-VALUE"),
+            "{shown}"
+        );
+        assert!(
+            shown.contains("ap-south-1") && shown.contains("<redacted>"),
+            "{shown}"
+        );
+    }
+
+    /// **A FIFO AT `~/.aws/credentials` IS REFUSED, NOT WAITED ON.** P1-19-03,
+    /// D-2326. The read was `std::fs::read_to_string`, which opens first and a
+    /// read-only open of a FIFO with no writer blocks forever, with nothing
+    /// logged. The read runs on a thread so a regression is a failed assertion
+    /// after five seconds rather than a hung suite; a writer is then opened,
+    /// which is what releases a reader blocked in open(2).
+    ///
+    /// `mkfifo` is the external program, run from a test only, for the reason
+    /// `pull::ingest::a_fifo_at_the_lock_path_is_refused_rather_than_waited_on`
+    /// gives: `std` has no FIFO constructor and `CLAUDE.md` §2 forbids a binding.
+    #[test]
+    fn a_fifo_credentials_file_is_refused_without_opening_it() {
+        let dir = std::env::temp_dir().join(format!("brutex-ssm-{}-fifo", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a scratch dir");
+        let path = dir.join("credentials");
+        let _stale = std::fs::remove_file(&path);
+        let made = std::process::Command::new("/usr/bin/mkfifo")
+            .arg(&path)
+            .status()
+            .expect("the FIFO this test is about can be made");
+        assert!(
+            made.success(),
+            "the premise: a FIFO at the credentials name"
+        );
+
+        let (tell, heard) = std::sync::mpsc::channel();
+        let asked = path.clone();
+        std::thread::spawn(move || {
+            let answer = AwsIdentity::from_credentials_file(&asked, "default").map(drop);
+            let _gone = tell.send(answer);
+        });
+        let answer = heard.recv_timeout(std::time::Duration::from_secs(5));
+        if answer.is_err() {
+            // Release the reader blocked in open(2) before failing.
+            let _writer = std::fs::OpenOptions::new().write(true).open(&path);
+        }
+        let Ok(Err(SsmError { detail, kind })) = answer else {
+            panic!("a FIFO credentials file must refuse promptly, got {answer:?}")
+        };
+        assert_eq!(kind, SecretError::Unreachable);
+        assert!(detail.contains("not a regular file"), "{detail}");
+        assert!(
+            detail.contains("credentials"),
+            "the path is named: {detail}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// **THE CREDENTIALS FILE IS BOUNDED AT THE READ.** A file of exactly
+    /// `crate::config::MAX_FILE_BYTES` is read and its profile found; one byte
+    /// more is refused naming the bound, so a symlink to a device or a runaway
+    /// file can no longer grow the read until the allocator gives up. A file
+    /// that is not UTF-8 is refused by its own sentence. P1-19-03, D-2326.
+    #[test]
+    fn an_oversized_credentials_file_is_refused_by_size() {
+        let profile = "[default]\naws_access_key_id = AKIAEXAMPLE\naws_secret_access_key = shhh\n#";
+        let cap = crate::config::MAX_FILE_BYTES_LEN;
+        let pad = "x".repeat(cap - profile.len());
+        let exact = file_holding("cap exact", &format!("{profile}{pad}"));
+        assert_eq!(
+            std::fs::metadata(&exact)
+                .expect("the file was written")
+                .len(),
+            65_536
+        );
+        let id = AwsIdentity::from_credentials_file(&exact, "default")
+            .expect("a file of exactly the bound is read");
+        assert_eq!(id.key_id, "AKIAEXAMPLE");
+
+        let over = file_holding("cap over", &format!("{profile}{pad}x"));
+        let Err(SsmError { detail, kind }) = AwsIdentity::from_credentials_file(&over, "default")
+        else {
+            panic!("one byte past the bound must be refused")
+        };
+        assert_eq!(kind, SecretError::Unreachable);
+        assert!(detail.contains("more than 65536 bytes"), "{detail}");
+
+        let dir = over.parent().expect("a scratch dir").to_path_buf();
+        let binary = dir.join("not utf8.bin");
+        std::fs::write(&binary, [0xff, 0xfe]).expect("a non-UTF-8 file");
+        let Err(SsmError { detail, .. }) = AwsIdentity::from_credentials_file(&binary, "default")
+        else {
+            panic!("a file that is not text holds no profile")
+        };
+        assert!(detail.contains("not UTF-8"), "{detail}");
+        for path in [exact, over] {
+            std::fs::remove_dir_all(path.parent().expect("a scratch dir")).ok();
+        }
+    }
+
+    /// One raw HTTP answer from a loopback socket, read by `answer_within`.
+    fn answered(head: &str, body: Vec<u8>) -> Result<String, SsmError> {
+        use std::io::{Read as _, Write as _};
+        let socket = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback");
+        let address = socket.local_addr().expect("address");
+        let head = format!("HTTP/1.1 200 OK\r\n{head}Connection: close\r\n\r\n");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = socket.accept().expect("request");
+            let mut request = [0; 4096];
+            let received = stream.read(&mut request).expect("headers");
+            assert!(received > 0, "the client sent request bytes");
+            stream.write_all(head.as_bytes()).expect("response headers");
+            let _ = stream.write_all(&body);
+        });
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(async {
+                let mut answer = pooled_client()
+                    .expect("client")
+                    .get(format!("http://{address}"))
+                    .send()
+                    .await
+                    .expect("response");
+                answer_within(&mut answer).await
+            });
+        server.join().expect("fixture server");
+        result
+    }
+
+    /// **THE PARAMETER STORE ANSWER IS BOUNDED BEFORE IT IS HELD.** P1-19-03,
+    /// D-2326. `get_parameter` read it with `answer.text()`, whole, bounded
+    /// only by the client's timeout. An answer of exactly
+    /// [`MAX_ANSWER_BYTES`] is returned whole; one that runs past it is refused
+    /// naming the cap and the status, and a body that never arrives is refused
+    /// by its own sentence.
+    #[test]
+    fn an_oversized_parameter_store_answer_is_refused_by_size() {
+        assert_eq!(MAX_ANSWER_BYTES, 16_384);
+        let exact = answered("", vec![b'a'; MAX_ANSWER_BYTES]).expect("exactly the cap is read");
+        assert_eq!(exact.len(), MAX_ANSWER_BYTES);
+
+        let Err(SsmError { detail, kind }) = answered("", vec![b'a'; MAX_ANSWER_BYTES + 1]) else {
+            panic!("one byte past the cap must be refused")
+        };
+        assert_eq!(kind, SecretError::Unreachable);
+        assert!(detail.contains("ran past 16384 bytes"), "{detail}");
+        assert!(detail.contains("status 200"), "{detail}");
+
+        let Err(SsmError { detail, .. }) = answered("Content-Length: 4\r\n", b"ab".to_vec()) else {
+            panic!("a body cut short is not an answer")
+        };
+        assert!(detail.contains("could not be read"), "{detail}");
+    }
+
+    /// **`get_parameter` READS ITS ANSWER THROUGH THE BOUNDED READER.** The
+    /// test above proves `answer_within` refuses; nothing else would notice
+    /// `get_parameter` going back to `answer.text()`, because its host is
+    /// fixed to AWS and no test can answer for it. So the shape is pinned on
+    /// the source, comments excluded. D-2326.
+    #[test]
+    fn get_parameter_reads_its_answer_through_the_bounded_reader() {
+        let source = include_str!("ssm.rs");
+        let start = source
+            .find("pub async fn get_parameter(")
+            .expect("the function");
+        let end = source.find("pub const MAX_ANSWER_BYTES").expect("the cap");
+        let code: String = source
+            .get(start..end)
+            .expect("the function precedes the cap")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(code.contains("answer_within(&mut answer)"), "{code}");
+        assert!(!code.contains(".text()"), "the whole-body read is back");
     }
 }

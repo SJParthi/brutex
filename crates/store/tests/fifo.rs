@@ -308,7 +308,7 @@ fn the_catalog_counts_a_fifo_month_and_does_not_hold_it() {
     assert_eq!(out.census.not_regular, 1, "the FIFO");
     assert_eq!(out.census.linked, 1, "the link to it");
     assert_eq!(out.census.spot, 1);
-    assert_eq!(out.census.other_kind, 2, "the real .lock and .crc");
-    assert_eq!(out.census.seen, 5);
+    assert_eq!(out.census.other_kind, 3, "the real .lock, .crc and .tix");
+    assert_eq!(out.census.seen, 6);
     assert!(out.census.reconciles());
 }

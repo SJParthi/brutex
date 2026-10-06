@@ -774,6 +774,16 @@ impl StoredDataCompletenessLedgerV1 {
                     format!("{} header could not be synced: {why}", path.display())
                 })?;
             }
+            if writable {
+                // The writer cuts a torn tail under its lock (D-1901, cli3-3).
+                crate::fixed_tail::heal_torn_tail(
+                    &file,
+                    &path,
+                    HEADER_BYTES as u64,
+                    RECEIPT_STRIDE_BYTES as u64,
+                    &HEADER_MAGIC_V1,
+                )?;
+            }
             let receipts = scan_file(&mut file, &path, max_receipts)?;
             let generation = snapshot(&mut file, &path)?;
             Ok((receipts, generation))
@@ -1554,6 +1564,32 @@ mod tests {
 
     /// W2-cli15-4, D-1635: the strict route's `ChecksumReceiptV1` byte is a
     /// valid receipt byte and round-trips; a byte outside the vocabulary is not.
+    /// cli3-3, D-1901: a sub-record tail is refused by a reader and cut by
+    /// the next writer under its exclusive lock; committed bytes stay.
+    #[test]
+    fn a_torn_tail_is_cut_by_the_writer_and_refused_by_a_reader() {
+        let temp = Temp::new("torn-tail");
+        drop(StoredDataCompletenessLedgerV1::open(&temp.path, 4).expect("the writer opens"));
+        let path = StoredDataCompletenessLedgerV1::path(&temp.path);
+        let whole = std::fs::metadata(&path).expect("metadata").len();
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("reopen for the torn fixture");
+        file.write_all(&[7_u8; 3]).expect("torn tail");
+        drop(file);
+        assert!(
+            StoredDataCompletenessLedgerV1::open_read(&temp.path, 4).is_err(),
+            "a reader refuses the torn tail"
+        );
+        drop(StoredDataCompletenessLedgerV1::open(&temp.path, 4).expect("the writer cuts"));
+        assert_eq!(std::fs::metadata(&path).expect("metadata").len(), whole);
+        drop(
+            StoredDataCompletenessLedgerV1::open_read(&temp.path, 4)
+                .expect("a reader opens the cut file"),
+        );
+    }
+
     #[test]
     fn a_checksum_receipt_integrity_byte_seals_and_an_unknown_byte_refuses() {
         assert_eq!(

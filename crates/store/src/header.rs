@@ -258,7 +258,13 @@ impl Header {
     ) -> Self {
         // THE STRIDE COMES FROM THE LAYOUT, not from a constant beside it, so
         // the two cannot disagree about one file.
-        #[allow(clippy::cast_possible_truncation)]
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "every Layout is built through Layout::declared or \
+                      Layout::declare, and both refuse a record_stride above \
+                      u16::MAX (layout.rs degenerate_field), so this narrowing \
+                      is lossless; `const fn` rules out u16::try_from here"
+        )]
         let record_stride = layout.record_stride() as u16;
         Self {
             format_version: layout.version(),

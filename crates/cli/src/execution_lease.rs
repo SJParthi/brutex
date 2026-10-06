@@ -79,9 +79,17 @@ fn verify(file: &File, path: &Path) -> Result<(), Refusal> {
         || !named.is_file()
         || (held.dev(), held.ino()) != (named.dev(), named.ino())
     {
-        return Err(unavailable(
-            "the execution lock is not the same empty regular file; nothing was repaired",
-        ));
+        // NAMED, WITH THE REMEDY. An extra hard link (a `cp -al` snapshot, an
+        // `ln`) refused every sweep for good with a sentence that named no
+        // file (CE-40, D-1769).
+        return Err(unavailable(format!(
+            "the execution lock {} is not the same empty regular file with one \
+             link (it has {} link(s), {} byte(s)); nothing was repaired. Remove \
+             any other hard link to it, or the file itself if no sweep is running",
+            path.display(),
+            held.nlink(),
+            held.len()
+        )));
     }
     Ok(())
 }
@@ -296,5 +304,16 @@ mod tests {
         fs::remove_file(&lock_path).expect("remove private symlink");
         fs::hard_link(&target, &lock_path).expect("hardlink fixture");
         assert!(matches!(probe(&root.0), Err(Refusal::Unavailable(_))));
+        // CE-40, D-1769: the refusal names the lock file, its link count and
+        // what to remove.
+        let why = probe(&root.0)
+            .expect_err("a hard-linked lock refuses")
+            .to_string();
+        let canonical = fs::canonicalize(&root.0)
+            .expect("canonical root")
+            .join(NAME);
+        assert!(why.contains(&canonical.display().to_string()), "{why}");
+        assert!(why.contains("it has 2 link(s)"), "{why}");
+        assert!(why.contains("Remove any other hard link"), "{why}");
     }
 }

@@ -4489,9 +4489,14 @@ impl<const N: usize> MemberIndex<N> {
 /// engine builds for.
 ///
 /// `n` must be a power of two — `hash & (n - 1)` is the modulo `n` a probe
-/// needs only then, and it is `0` for `n = 0` after the subtraction wraps.
-/// [`MemberIndex::build`] asserts that for every table, and this function is
-/// `pub(crate)` and reached from nowhere that does not go through one.
+/// needs only then. `n = 0` does NOT wrap: `n as u64 - 1` underflows, and
+/// with overflow checks on — the `dev` and `release` profiles both keep them
+/// (`Cargo.toml`) — that is a panic at run time and a compile error in a
+/// `const` context. It is unreachable rather than tolerated:
+/// [`MemberIndex::build`] asserts `is_power_of_two` for every table, which
+/// `0` is not, and this function is `pub(crate)` and reached from nowhere
+/// that does not go through one. (This said "it is `0` for `n = 0` after the
+/// subtraction wraps"; crash-edge-pass20 row 200, D-1955.)
 ///
 /// `pub(crate)` for the same reason [`MemberIndex::slots`] is: a probe-length
 /// test in another module of this crate must start where `contains` starts,

@@ -600,14 +600,21 @@ pub fn read_dir_reporting(
 /// forever, and BOTH feed folders on this operator's machine are symlinks, so
 /// that is a live hazard rather than a theoretical one.
 ///
-/// Four, measured. The deepest real member sits three below the feed folder —
-/// `gdfl/GFDLNFO_TICK_01072025/Futures/-I/AARTIIND-I.NFO.csv` — and four leaves
-/// exactly one level of headroom for a vendor that adds a wrapper. A fifth
+/// Five, measured. The deepest real member's folder sits three below the feed
+/// folder — `gdfl/GFDLNFO_TICK_01072025/Futures/-I/AARTIIND-I.NFO.csv`, whose
+/// `-I` is walked at depth 3 — and five leaves exactly one level of headroom
+/// for a vendor that adds a wrapper, which puts that folder at depth 4. A sixth
 /// would be room for a mistake rather than for a vendor.
+///
+/// THIS WAS FOUR, AND FOUR WAS NO HEADROOM AT ALL. The check is
+/// `depth >= MAX_DEPTH`, so at four one wrapper folder put every Futures
+/// `-I/-II/-III` contract at the bound and skipped them all, leaving only a
+/// `skipped` count, while this sentence promised a level to spare (CE-21,
+/// D-1769). `a_gdfl_tree_inside_one_wrapper_folder_is_still_walked` pins it.
 ///
 /// Deeper members are SKIPPED and counted, never silently dropped:
 /// [`Passed::skipped`] is on the walk's own log line.
-pub const MAX_DEPTH: usize = 4;
+pub const MAX_DEPTH: usize = 5;
 
 fn walk(
     dir: &Path,

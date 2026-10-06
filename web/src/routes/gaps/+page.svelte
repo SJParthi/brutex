@@ -64,7 +64,7 @@
   import { createPageRequests } from '$lib/page-requests.js';
   import { store, syncStore } from '$lib/store.svelte.js';
   import { parseKey } from '$lib/instrument.js';
-  import { monthVerdict, isWholeAudit } from '$lib/gap-verdict.js';
+  import { monthVerdict, isWholeAudit, unreadablePeers } from '$lib/gap-verdict.js';
 
   /** @typedef {{ day: number, from: number, to: number, minutes: number, reason: string }} Run */
   /**
@@ -99,7 +99,8 @@
    *     source: 'peers' | 'table',
    *     stale: boolean,
    *     covers_span: boolean,
-   *     voted_by: string[]
+   *     voted_by: string[],
+   *     unreadable?: string[]
    *   },
    *   month: MonthVerdict[]
    * }} Answer
@@ -426,6 +427,26 @@
       its full listing lifetime or guarantees that a provider can supply every expected minute.
     </p>
 
+    {@const unread = unreadablePeers(b.calendar)}
+    {#if unread === null}
+      <div class="refusal" role="alert">
+        <span class="rlabel">Peer readings unknown</span>
+        <p>
+          This answer does not say which peer readings could not be opened (<code>calendar.unreadable</code>
+          is missing or malformed), so it cannot show that every peer that might have voted was read.
+          The span is not called whole on an answer that did not say.
+        </p>
+      </div>
+    {:else if unread.length > 0}
+      <div class="refusal" role="alert">
+        <span class="rlabel">Peers that could not be read</span>
+        <p>
+          <b>{unread.length}</b> peer reading{unread.length === 1 ? '' : 's'} could not be opened and did
+          not vote: {unread.join(', ')}. The calendar above lacks whatever {unread.length === 1 ? 'it' : 'they'}
+          would have proved, so <em>none missing</em> here is not a whole span.
+        </p>
+      </div>
+    {/if}
     {#if b.calendar?.stale}
       <div class="refusal">
         <span class="rlabel">The table has run out</span>

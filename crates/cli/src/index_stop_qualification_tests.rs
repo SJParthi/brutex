@@ -571,6 +571,91 @@ fn missing_daily_native_parent_foreign_pin_or_changed_body_never_becomes_admissi
 }
 
 #[test]
+fn single_stop_max_gated_rates_are_the_ceiling_of_their_exact_fraction() {
+    // p2idx-1, D-1990: each of these four is gated by a MAXIMUM, so the
+    // projection is the ceiling; the win rate, gated by a minimum, is the floor.
+    use runner::admission::ObservedU64V1::Measured;
+    let up = |part: u64, total: u64| (u128::from(part) * 1_000_000).div_ceil(u128::from(total));
+    let down = |part: u64, total: u64| u128::from(part) * 1_000_000 / u128::from(total);
+    let fixture = Fixture::new(false);
+    let mut inexact = 0;
+    for row in &fixture.later {
+        let values = numeric::metrics::base(row).unwrap();
+        let m = row.metrics();
+        let wins: Vec<u64> = row
+            .trades()
+            .iter()
+            .filter_map(|t| u64::try_from(t.pessimistic_paisa).ok().filter(|w| *w > 0))
+            .collect();
+        let ambiguous = row
+            .trades()
+            .iter()
+            .filter(|t| t.optimistic_paisa != t.pessimistic_paisa)
+            .count() as u64;
+        let session = row.periods().iter().map(|p| p.trades).max().unwrap();
+        let mut pairs = vec![
+            (values.ambiguous_fill_rate_ppm, ambiguous, m.trades),
+            (values.gap_affected_rate_ppm, m.stop_gaps, m.trades),
+            (values.session_concentration_ppm, session, m.trades),
+        ];
+        if let Some(best) = wins.iter().copied().max() {
+            let share = values.largest_trade_profit_share_ppm;
+            pairs.push((share, best, wins.iter().sum()));
+        } else {
+            assert_eq!(
+                values.largest_trade_profit_share_ppm,
+                runner::admission::ObservedU64V1::Unmeasured
+            );
+        }
+        for (value, part, total) in pairs {
+            assert_eq!(value, Measured(u64::try_from(up(part, total)).unwrap()));
+            inexact += usize::from(up(part, total) != down(part, total));
+        }
+        assert_eq!(
+            values.win_rate_ppm,
+            Measured(u64::try_from(down(m.wins, m.trades)).unwrap())
+        );
+    }
+    // The fixture must exercise the rounding, or the ceiling is unproved.
+    assert!(inexact > 0, "no inexact max-gated rate in the fixture");
+}
+
+#[test]
+fn no_cli_v1_builder_floors_a_max_gated_probability() {
+    // D-0743's open cli builders, D-1990: PBO, FWER, SPA, White and RW are each
+    // gated by a MAXIMUM, and `AdmissionExactProbabilityV2::ppm` floors, so a
+    // true probability just above a cap was stored ON it and passed. The three
+    // V1 builders that fill those fields must take `ceiling_ppm`. The live
+    // fixtures measure PBO 0 of 35, which cannot show the rounding, so this
+    // binds the source; `the_ceiling_projection_rounds_up_only_a_remainder`
+    // in runner proves the projection itself.
+    for (name, source) in [
+        (
+            "index_stop_qualification_numeric.rs",
+            include_str!("index_stop_qualification_numeric.rs"),
+        ),
+        (
+            "boolean_admission_v1.rs",
+            include_str!("boolean_admission_v1.rs"),
+        ),
+        (
+            "boolean_admission_reader.rs",
+            include_str!("boolean_admission_reader.rs"),
+        ),
+    ] {
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            !production.contains(".ppm()"),
+            "{name} floors a probability"
+        );
+        assert!(
+            production.contains(".ceiling_ppm()"),
+            "{name} lost its ceiling"
+        );
+    }
+}
+
+#[test]
 fn zero_trade_family_remains_in_statistics_and_does_not_pass_vacuously() {
     let fixture = Fixture::new(true);
     let reader = fixture.publish();

@@ -941,3 +941,57 @@ fn v4_refuses_inverted_or_idle_readings_that_v3_never_checked() {
         assert_eq!(v3.reasons & Reason::InvalidCountOrReturn.mask(), 0);
     }
 }
+
+/// The days `pull::calendar` records as traded but not a full regular session:
+/// its irregular sessions and its sessions of unmeasured length, derived by
+/// asking `kind_of` of every day it measures rather than by copying its tables.
+fn calendar_non_regular_days() -> Vec<i64> {
+    (pull::calendar::FIRST_DAY..=pull::calendar::LAST_DAY)
+        .filter(|&day| match kind_of(day) {
+            DayKind::Open(session) => session != pull::calendar::Session::full(),
+            DayKind::OpenLengthUnmeasured => true,
+            DayKind::Closed | DayKind::Unmeasured => false,
+        })
+        .collect()
+}
+
+/// Days in `left` that `right` lacks, then days in `right` that `left` lacks.
+fn set_disagreement(left: &[i64], right: &[i64]) -> (Vec<i64>, Vec<i64>) {
+    let only = |a: &[i64], b: &[i64]| a.iter().copied().filter(|d| !b.contains(d)).collect();
+    (only(left, right), only(right, left))
+}
+
+/// CE-55, D-2672: `indicators::evaluator::CHARTER_NON_REGULAR_IST_DAYS` is a
+/// second copy of `pull::calendar`'s irregular and length-unmeasured sets, and
+/// `indicators` may not depend on `pull` (gate 22), so nothing in either crate
+/// can pin them together. `cli` reads both (`eligibility_of`, `calendar_bytes`),
+/// so the pin lives here: the two sets are equal, checked in BOTH directions,
+/// and the checker itself is shown to catch a day missing from either side.
+#[test]
+fn the_indicators_non_regular_days_equal_the_pull_calendars_in_both_directions() {
+    let indicators_days = indicators::evaluator::CHARTER_NON_REGULAR_IST_DAYS;
+    let calendar_days = calendar_non_regular_days();
+    assert_eq!(
+        calendar_days.len(),
+        9,
+        "four irregular plus five unmeasured"
+    );
+    let (only_indicators, only_calendar) = set_disagreement(&indicators_days, &calendar_days);
+    assert!(
+        only_indicators.is_empty() && only_calendar.is_empty(),
+        "indicators has {only_indicators:?} that pull::calendar does not, and \
+         pull::calendar has {only_calendar:?} that indicators does not"
+    );
+    // The checker sees a drift in each direction, not just one.
+    let fewer = &indicators_days[1..];
+    assert_eq!(
+        set_disagreement(fewer, &calendar_days),
+        (Vec::new(), vec![indicators_days[0]])
+    );
+    let mut more = indicators_days.to_vec();
+    more.push(pull::calendar::LAST_DAY);
+    assert_eq!(
+        set_disagreement(&more, &calendar_days),
+        (vec![pull::calendar::LAST_DAY], Vec::new())
+    );
+}

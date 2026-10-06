@@ -186,8 +186,12 @@ CI gate 1 enforces this by walking every tracked file. It is not advisory.
    the right tool there. Two rules follow from the distinction, and the second
    is the one that bites: **a new consumer that takes `&[Candle]` and indexes
    into it inherits no protection at all** — `vwap::availability_of` reads the
-   whole slice, which is exactly why `cli` and `runner` pass
-   `Availability::Absent` rather than deriving it. Wiring `PastPrefix` into the
+   whole slice, which is exactly why stored callers select availability from
+   instrument kind before reading bars: spot indices use `Availability::Absent`,
+   eligible cash equities use `Availability::Present` (D-0507). Futures remain
+   outside the sweep scope. No caller may infer eligibility from later volume.
+   (This said `cli` and `runner` pass `Absent` everywhere; `AGENTS.md` carried
+   the correction and this file did not — P1-15-01, D-1764.) Wiring `PastPrefix` into the
    fold, or writing a gate that refuses slice indexing on that path, would make
    the original sentence true; until one of those lands this is the honest
    statement. D-0212.
@@ -338,7 +342,7 @@ What survives from that reasoning is the half about gate 22, and it is the half
 that carries the rule: `cli` declines to be a *swept* crate, not to be a caller.
 
 It is **not** on gate 22's list and must never be added to one: clause A pins
-`vocab`, `indicators` and `engine` to `vocab` alone. `cli` is a caller, exactly
+`vocab` to no dependency at all and `indicators` and `engine` to `vocab` alone. `cli` is a caller, exactly
 as `runner` is.
 
 Every report it renders is led by a **provenance banner, and there are two of
@@ -449,9 +453,19 @@ Report failures plainly. Do not paper over a red gate.
 
 **The table was eight rows while fourteen documents existed**, so six carried no
 stated authority at all and a reader had no way to know whether they bound
-anything. All fourteen are listed now. Two numbers are used twice — `07-` and
-`09-` — which is a naming defect, not two documents pretending to be one; both
-of each pair are named above and neither is authoritative over the other.
+anything. The fourteen above are the documents with authority. Two numbers are
+used twice among them — `07-` and `09-` — which is a naming defect, not two
+documents pretending to be one; both of each pair are named above and neither
+is authoritative over the other.
+
+**`docs/12-` to `docs/35-` and `docs/research-policy/` hold no authority.** They
+are audit, readiness, research and integration reports: evidence of what was
+measured or decided at the time, cited by the decisions that act on them. Where
+one disagrees with a document in the table, the table's document wins and the
+report is the stale copy. `22-` is used twice (`22-expression-search.md`,
+`22-research-policy.md`), the same naming defect as `07-` and `09-`. This
+paragraph said "all fourteen are listed now" while 25 more documents existed
+(P1-15-02, D-1764).
 
 If this file and a document disagree, **this file wins** and the document is
 the stale copy to fix — **with one caveat that has already bitten.** That rule

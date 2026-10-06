@@ -112,8 +112,10 @@ impl Column {
     ///
     /// # Why this exists, and what it measured
     ///
-    /// [`crate::Ladder::walk`]'s `seen` set rejects a duplicate by its MASK -- which
-    /// bits a candidate names. Two candidates that name different bits and select the
+    /// [`crate::Ladder::walk`] rejected a duplicate by its MASK -- which bits a
+    /// candidate names -- through a `seen` set that D-1440 removed once the prefix
+    /// join was shown injective; masks are still the only thing that keys a
+    /// candidate (P9-04). Two candidates that name different bits and select the
     /// SAME BARS are not duplicates to it, and they are the same hypothesis to
     /// everything downstream: the same trades, the same mean, the same t-statistic.
     ///
@@ -469,21 +471,53 @@ mod tests {
     /// `set_positions` dependency in the body.
     #[test]
     fn the_live_support_body_is_one_fixed_width_hit_test() {
+        // BOUNDED AT THE FUNCTION'S OWN CLOSING BRACE, AND COMMENTS ARE NOT CODE
+        // (P1-13-03). The body ran to the next function's NAME, so it took in
+        // that function's doc comment, and nothing was stripped: one
+        // `// row.hits(candidate)` line met the count while the code walked the
+        // candidate's positions. This is the bypass `vocab::mask`'s twin test
+        // already closed. The anchor starts with a real newline, which this
+        // literal (a backslash and an `n`) does not contain, so it cannot match
+        // itself.
+        const ANCHOR: &str = "\n    pub fn support(&self, candidate: &ConditionMask) -> u64 {\n";
         let source = include_str!("column.rs");
         let body = source
-            .split("pub fn support(&self, candidate: &ConditionMask) -> u64 {")
-            .nth(1)
-            .and_then(|tail| tail.split("pub fn support_fingerprinted").next())
-            .unwrap_or("");
+            .split_once(ANCHOR)
+            .and_then(|(_, rest)| rest.split_once("\n    }\n"))
+            .map(|(body, _)| body);
+        assert!(
+            body.is_some(),
+            "`support` no longer has the signature `{ANCHOR}` closing at one indent"
+        );
+        let code: String = body
+            .unwrap_or_default()
+            .lines()
+            .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
+            .collect::<Vec<_>>()
+            .join("\n");
         assert_eq!(
-            body.matches("row.hits(candidate)").count(),
+            code.matches("row.hits(candidate)").count(),
             1,
             "the live support fold must perform exactly one fixed-width hit test per row"
         );
-        assert!(
-            !body.contains("set_positions(candidate)") && !body.contains("popcount()"),
-            "candidate depth must not control live support work"
-        );
+        assert_eq!(code.matches(".fold(").count(), 1, "one fold over the rows");
+        for banned in [
+            "set_positions",
+            "popcount",
+            "for ",
+            "while ",
+            "loop ",
+            ".all(",
+            ".any(",
+            ".filter(",
+            ".count(",
+            ".get(",
+        ] {
+            assert!(
+                !code.contains(banned),
+                "`{banned}` in `support`: candidate depth must not control live support work"
+            );
+        }
     }
 
     #[test]
@@ -590,8 +624,9 @@ mod tests {
     ///
     /// Bit 9 is set on exactly the bars bit 3 is set on, so a candidate naming
     /// `{3}`, one naming `{9}` and one naming `{3,9}` all select the same bars.
-    /// `Ladder::walk`'s mask-keyed `seen` calls those three distinct candidates,
-    /// and they are one hypothesis.
+    /// `Ladder::walk` keys candidates by mask (its former `seen` set did too,
+    /// until D-1440), so it calls those three distinct candidates, and they are
+    /// one hypothesis (P9-04).
     #[test]
     fn masks_that_differ_but_select_the_same_bars_share_a_fingerprint() {
         let bars = 300;

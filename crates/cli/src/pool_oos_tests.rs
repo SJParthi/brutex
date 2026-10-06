@@ -77,10 +77,12 @@ fn prepared(bars: Vec<Candle>) -> PreparedSpan {
     let mut evaluator = crate::evaluator_stored(indicators::vwap::Availability::Absent)
         .expect("the stored evaluator");
     let column = indicators::column::Column::build(&bars, &mut evaluator);
+    let horizon = runner::outcome::Horizon::bars(15).expect("a positive horizon");
     PreparedSpan {
+        rules: crate::Rules::derived(&bars, horizon),
         bars,
         column,
-        horizon: runner::outcome::Horizon::bars(15).expect("a positive horizon"),
+        horizon,
     }
 }
 

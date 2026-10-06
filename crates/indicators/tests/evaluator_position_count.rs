@@ -40,3 +40,24 @@ fn the_documented_evaluator_position_count_is_the_live_table() {
         "`positions()` is not the live mask"
     );
 }
+
+/// `docs/10-shared-core.md` states the position count twice, in §1's table and
+/// in §3, and both must be the number `positions()` returns.
+///
+/// P1-18-02: §1 said 328 while §3 still said 272, because nothing read §3. A
+/// downstream consumer is told to rely on this file, so its count is checked
+/// against the code rather than trusted. D-1942.
+#[test]
+fn this_documents_position_counts_are_the_live_table() {
+    let doc = include_str!("../../../docs/10-shared-core.md");
+    let flat = doc.split_whitespace().collect::<Vec<_>>().join(" ");
+    let count = Evaluator::positions().len();
+    assert!(
+        flat.contains(&format!("Twelve position sources, {count} positions.")),
+        "docs/10-shared-core.md §1 does not state {count} positions"
+    );
+    assert!(
+        flat.contains(&format!("**{count} positions** in total")),
+        "docs/10-shared-core.md §3 does not state {count} positions"
+    );
+}

@@ -998,3 +998,20 @@ fn the_present_tense_position_counts_in_this_crates_prose_match_the_table() {
         "tolerance.rs restated its near count"
     );
 }
+
+/// X-21 (P12-08, D-1798): `NSE-INDIAVIX` is reference only and never enters
+/// the condition vocabulary. No row of the table, tombstones included, names
+/// the volatility index, so no mask bit can stand for it. This pins the
+/// table; that no evaluator READS the index is structural (`Evaluator` folds
+/// one instrument's own candles and is handed nothing else).
+#[test]
+fn no_condition_names_the_volatility_index() {
+    for row in &vocab::table::TABLE {
+        let name = row.name.to_ascii_lowercase();
+        assert!(
+            !name.contains("vix") && !name.contains("volatility_index"),
+            "{}",
+            row.name
+        );
+    }
+}

@@ -478,7 +478,12 @@ fn regular_generation(
     let held = file.metadata().map_err(error)?;
     let named = fs::symlink_metadata(path).map_err(error)?;
     if !held.is_file() || !named.is_file() || held.nlink() != 1 {
-        return Err("checksum receipt refuses a non-regular file or alias".to_owned());
+        return Err(format!(
+            "checksum receipt refuses {}: it is not a regular file with one link \
+             ({} links); remove any other hard link to it (CE-40, D-1769)",
+            path.display(),
+            held.nlink()
+        ));
     }
     crate::result_set::file_generation(file, path)
 }
@@ -532,7 +537,8 @@ fn open_writable(_path: &Path) -> Result<File, String> {
 ///
 /// # Errors
 /// Refuses malformed arguments and every strict audit/durability failure.
-pub fn command(args: &[&str]) -> Result<String, String> {
+pub fn command(args: &[&str]) -> Result<String, crate::Refused> {
+    use crate::misused;
     let [
         vendor,
         underlying,
@@ -543,16 +549,21 @@ pub fn command(args: &[&str]) -> Result<String, String> {
         max_bytes,
     ] = args
     else {
-        return Err("checksum-audit-stored requires VENDOR UNDERLYING RUNG YEAR MONTH RECEIPT_ROOT MAX_BYTES".to_owned());
+        return Err(misused(
+            "checksum-audit-stored requires VENDOR UNDERLYING RUNG YEAR MONTH RECEIPT_ROOT MAX_BYTES",
+        ));
     };
-    let vendor = crate::parse_vendor(vendor)?;
-    let key = crate::stored::swept_index(underlying)?;
-    let timeframe = crate::stored::rung(rung)?;
+    // EVERY ARGUMENT BEFORE THE STORE: a malformed one is the operator's to fix
+    // and is `MISUSED`; this exited `FAILED` for `x` as a year (P8-03, D-2722).
+    let vendor = crate::parse_vendor(vendor).map_err(misused)?;
+    let key = crate::stored::swept_index(underlying).map_err(misused)?;
+    let timeframe = crate::stored::rung(rung).map_err(misused)?;
     let month = YearMonth::new(
-        year.parse::<u16>().map_err(error)?,
-        month.parse::<u8>().map_err(error)?,
+        year.parse::<u16>().map_err(misused)?,
+        month.parse::<u8>().map_err(misused)?,
     )
-    .map_err(error)?;
+    .map_err(misused)?;
+    let max_bytes = max_bytes.parse::<u64>().map_err(misused)?;
     let store_root = crate::store_root()?;
     let admitted = audit_month(MonthRequest {
         store_root: &store_root,
@@ -561,7 +572,7 @@ pub fn command(args: &[&str]) -> Result<String, String> {
         key: &key,
         timeframe,
         month,
-        max_bytes: max_bytes.parse::<u64>().map_err(error)?,
+        max_bytes,
     })?;
     let evidence = admitted.evidence();
     Ok(format!(

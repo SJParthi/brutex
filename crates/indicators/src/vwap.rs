@@ -67,16 +67,17 @@
 //! # Integer square root, no floats
 //!
 //! Sigma needs a square root and §7 forbids floating point at any layer. This uses
-//! a Newton iteration on `i128` whose total step count is **bounded** by two
-//! compile-time constants — `ITERATION_CEILING` = 130 — for every `i128`. Measured
-//! by `C-I-03`, in `crates/indicators/benches/ratio.rs`, which folds the count at
-//! 1, `i64::MAX`, `10^30` and `i128::MAX`: 1, 37, 55 and 69 iterations.
+//! a decreasing Newton iteration on `i128` from a seed at or above the root, whose
+//! step count is **bounded** by one compile-time constant — `ITERATION_CEILING` =
+//! 16 — for every `i128`. Measured by `C-I-03`, in
+//! `crates/indicators/benches/ratio.rs`, which folds the count at 1, `i64::MAX`,
+//! `10^30` and `i128::MAX`: 2, 5, 5 and 6 iterations (D-1665; the old loop took
+//! 1, 37, 55 and 69, and 128 or 129 at every `k^2 - 1`).
 //!
-//! **Bounded, not flat.** This paragraph said "so the cost is O(1) for every
-//! `i128`", which reads as *the cost does not vary*. It varies by 217x, because the
-//! Newton loop exits on convergence. The honest limit is in `docs/06-limits.md` and
-//! the long version is on [`isqrt_i128`], which also records why an earlier 64-step
-//! cap was worse than this.
+//! **Bounded, not flat.** The count varies with the operand and each iteration is
+//! a 128-bit division. The honest limit is in `docs/06-limits.md` and the long
+//! version is on [`isqrt_i128`], which also records why the earlier loops were
+//! worse than this.
 //!
 //! # Sigma refuses on one observation
 //!
@@ -129,52 +130,42 @@ const ACC_CEILING: i128 = 10_i128.pow(34);
 /// `i128::isqrt` exists but is not `const`, and an unbounded loop would make
 /// sigma's cost depend on the value, which `CLAUDE.md` §3 rule 4 forbids.
 ///
-/// # Why the cap is [`NEWTON_STEPS`] and not 64
+/// # Decreasing Newton from a seed at or above the root (D-1665)
 ///
-/// An earlier version capped Newton at 64 and then stepped down without a bound,
-/// under a doc comment claiming "64 iterations is past the point of convergence
-/// for any `i128`". **That claim was false and was measured false.** Starting from
-/// `guess = v`, each iteration roughly halves the guess until it nears `sqrt(v)`,
-/// so a 127-bit input needs about 64 halvings *before* quadratic convergence even
-/// begins. Above roughly `10^34.3` the 64-step cap returned early and the
-/// unbounded step-down absorbed the remainder: at `i128::MAX` it needed
-/// **1,638,791,155,897,336,446 decrements**, i.e. `O(sqrt(v))`, in a `pub fn`
-/// documented as constant-cost.
+/// The seed is `1 << ceil(bits(v) / 2)`, which is at least `sqrt(v)` and at most
+/// twice it. From a seed at or above the root, the integer Newton step
+/// `(g + v / g) / 2` strictly decreases until it reaches `floor(sqrt(v))`, and the
+/// first step that does NOT decrease is the exit: the textbook rule, which returns
+/// the exact floor with no correction afterwards.
 ///
-/// 128 steps covers the ~64 halvings plus the handful of quadratic steps for every
-/// `i128`, and the step-down is now bounded at [`STEP_DOWN_STEPS`]. Both are
-/// compile-time constants, so the iteration count is **bounded** by
-/// [`ITERATION_CEILING`] for every input in the type — including the ones no
-/// caller reaches today.
+/// The seed's relative error `e` is at most 1, and each step leaves at most
+/// `e^2 / 2`, so six steps take it below `2^-64` -- under one unit for any root an
+/// `i128` can have -- and one or two more steps reach the exit. **Measured**
+/// (W3-indicators2-0): at most 5 iterations over every `v` in `1..=10^6`, 7 at
+/// `isqrt(i128::MAX)^2 - 1`, and 8 as the worst of five million pseudo-random
+/// inputs across every bit length. [`NEWTON_STEPS`] = 16 is twice that.
 ///
-/// # BOUNDED IS NOT FLAT, and this doc used to say it was
+/// # What it replaced, and why the old figures were wrong (W3-indicators2-1)
 ///
-/// Proven by `C-I-03` — `indicators::bench::the_integer_square_root_is_bounded_and_flat_per_iteration`
-/// in `crates/indicators/benches/ratio.rs` — which asserts the iteration count
-/// against [`ITERATION_CEILING`] and prints the cost spread without comparing it to
-/// a ceiling, because there is no honest ceiling to compare it to.
+/// The previous loop started at `guess = v` and stopped on `guess == previous`.
+/// From `v` a 127-bit input spends about sixty-four halvings before Newton even
+/// converges -- so 69 iterations at `i128::MAX` -- and every `v = k^2 - 1`
+/// (3, 8, 143, ...) never stops at all: Newton oscillates between `k - 1` and `k`,
+/// `guess` never equals `previous`, and the loop ran its whole 128-step cap, then
+/// a bounded step-down fixed the root. 999 of the inputs in `1..=10^6` hit that
+/// cap. The root was right; the documented 1-to-69 iteration range was not.
 ///
-/// The sentence above ended "so the cost is O(1) for every input in the type",
-/// and that reads as *the cost does not vary*. **It varies by a factor of 217.**
-/// Measured, `cargo bench -p indicators`: 4.3 ns at `v = 1` against 928 ns at
-/// `i128::MAX`. The Newton loop exits on convergence — `guess != previous` — so a
-/// small input finishes in one or two iterations and a 127-bit one needs about
-/// sixty-six, and each of those iterations is a 128-bit division whose own cost
-/// rises with the operands.
+/// # BOUNDED IS NOT FLAT
 ///
-/// Both readings of "O(1)" are defensible in isolation and only one of them is
-/// what a reader of `CLAUDE.md` §3 rule 4 will take from it, so the claim is now
-/// stated as the bound it is. **The honest limit is recorded in
-/// `docs/06-limits.md`**, which §10 makes the authority on what is not
-/// constant-time, and the bench measures cost PER ITERATION rather than end to
-/// end — see [`isqrt_i128_counted`].
+/// The count still depends on the operand -- 2 at `v = 1`, up to 8 measured --
+/// and each iteration is a 128-bit division whose own cost rises with its
+/// operands. The honest limit is in `docs/06-limits.md` §51; `C-I-03` in
+/// `crates/indicators/benches/ratio.rs` asserts the count against
+/// [`ITERATION_CEILING`] and prints the cost as context, not as a ceiling.
 ///
-/// Making it genuinely flat is possible and was rejected: dropping the
-/// convergence exit would run all 128 iterations every time, paying the worst
-/// case on every call to buy a flatness no caller needs. VWAP abstains entirely
-/// on spot indices, so this function does not execute on those runs. Eligible
-/// cash-stock sweeps do execute it; their per-bar cost includes this bounded,
-/// operand-dependent work.
+/// VWAP abstains entirely on spot indices, so this function does not execute on
+/// those runs. Eligible cash-stock sweeps do execute it; their per-bar cost
+/// includes this bounded, operand-dependent work.
 #[must_use]
 pub fn isqrt_i128(v: i128) -> i128 {
     isqrt_i128_counted(v).0
@@ -197,43 +188,41 @@ pub fn isqrt_i128_counted(v: i128) -> (i128, u32) {
     if v <= 0 {
         return (0, 0);
     }
-    let mut guess = v;
-    let mut previous = 0;
+    // AT OR ABOVE THE ROOT: `bits` is at most 127, so the shift is at most 64
+    // and the seed fits. `v >= 2^(bits - 1)` makes `2^ceil(bits / 2)` at least
+    // `sqrt(v)`, and `v < 2^bits` makes it at most twice the root.
+    let bits = i128::BITS.saturating_sub(v.leading_zeros());
+    let mut guess: i128 = 1_i128 << bits.div_ceil(2);
     let mut i: u32 = 0;
-    while i < NEWTON_STEPS && guess != previous {
-        previous = guess;
-        guess = guess.midpoint(v / guess);
+    while i < NEWTON_STEPS {
         i = i.saturating_add(1);
+        let next = guess.midpoint(v / guess);
+        // THE TEXTBOOK EXIT: from above, Newton decreases until it reaches the
+        // floor, and the first step that does not decrease means it has.
+        if next >= guess {
+            break;
+        }
+        guess = next;
     }
-    // Newton can land one above. A bounded step-down keeps the never-over-reports
-    // property without letting a pathological input turn this into a scan: with
-    // NEWTON_STEPS = 128 the residual is provably at most 1, and the bound of 2
-    // leaves a step of margin rather than sitting exactly on the proof.
-    let mut down: u32 = 0;
-    while down < STEP_DOWN_STEPS && guess > 0 && guess.saturating_mul(guess) > v {
-        guess = guess.saturating_sub(1);
-        down = down.saturating_add(1);
-    }
-    (guess, i.saturating_add(down))
+    (guess, i)
 }
 
-/// Newton iterations. Enough for the full `i128` range — see [`isqrt_i128`].
-pub const NEWTON_STEPS: u32 = 128;
-
-/// Bound on the corrective step-down. The residual after [`NEWTON_STEPS`] is at
-/// most 1; this leaves one step of margin.
-pub const STEP_DOWN_STEPS: u32 = 2;
+/// Newton iterations allowed. Twice the measured worst case — see
+/// [`isqrt_i128`] for the proof sketch and the measurement.
+pub const NEWTON_STEPS: u32 = 16;
 
 /// The most iterations [`isqrt_i128`] can ever perform.
 ///
 /// A compile-time constant, which is what bounds the function's cost. Measured by
 /// `C-I-03`, in `crates/indicators/benches/ratio.rs`, which asserts the real count
 /// against this ceiling at both ends of the input range rather than trusting the
-/// constants to be large enough — the previous ceiling was 64 and was not.
+/// constant to be large enough.
 ///
 /// It bounds the cost and does **not** make it uniform; the spread is recorded in
-/// `docs/06-limits.md`.
-pub const ITERATION_CEILING: u32 = NEWTON_STEPS + STEP_DOWN_STEPS;
+/// `docs/06-limits.md`. It equals [`NEWTON_STEPS`]: the decreasing iteration
+/// lands exactly on the floor, so the bounded step-down the old oscillating loop
+/// needed is gone (D-1665).
+pub const ITERATION_CEILING: u32 = NEWTON_STEPS;
 
 /// The running VWAP accumulators for one session.
 ///
@@ -697,16 +686,16 @@ mod tests {
     /// **not** reset the accumulators before reaching the guard under test.
     /// **`isqrt` of a perfect square is exact, and the step-down must not overrun.**
     ///
-    /// The Newton loop can overshoot by one, so a bounded step-down corrects it
-    /// while `guess * guess > v`. Mutated to `>= v` that condition is TRUE at a
-    /// perfect square, so the correction fires once too often and `isqrt(144)`
-    /// answers **11**. A standard deviation one unit low on every exact square is
-    /// the kind of wrong that never looks wrong.
+    /// The exit is `next >= guess`. Mutated to `next > guess` the loop keeps
+    /// stepping at the floor -- the count jumps to the cap -- and the root is
+    /// unchanged, so the counts below are what catch it. Mutated so the exit never
+    /// fires, or the seed starts below the root, the floor itself moves.
     #[test]
     fn isqrt_is_exact_on_perfect_squares_and_does_not_overshoot_down() {
         for n in [1_i128, 2, 3, 12, 100, 1_000, 46_341, 1_000_000] {
-            let (root, _) = isqrt_i128_counted(n * n);
+            let (root, steps) = isqrt_i128_counted(n * n);
             assert_eq!(root, n, "isqrt({}) must be exactly {n}", n * n);
+            assert!(steps <= 8, "isqrt({}) took {steps}", n * n);
         }
         // And one either side of a square, so the floor is a floor.
         let (below, _) = isqrt_i128_counted(143);
@@ -715,20 +704,57 @@ mod tests {
         assert_eq!(above, 12, "floor above 144");
     }
 
-    /// **The iteration ceiling is the sum of its two halves.**
+    /// **W3-indicators2-1: `k^2 - 1` no longer oscillates to the cap.**
+    ///
+    /// The old loop stopped on `guess == previous`, and at every `v = k^2 - 1`
+    /// Newton alternates between `k - 1` and `k`, so it ran all 128 steps and a
+    /// step-down repaired the root: 128 or 129 iterations at every one of these,
+    /// measured on the old code. Each must now be exact in at most 8.
+    #[test]
+    fn one_below_a_square_is_exact_in_a_handful_of_steps() {
+        for k in [2_i128, 3, 12, 975, 1_000_000_000_000_000, i128::MAX.isqrt()] {
+            let v = k * k - 1;
+            let (root, steps) = isqrt_i128_counted(v);
+            assert_eq!(root, k - 1, "isqrt({v})");
+            assert!(steps <= 8, "isqrt({v}) took {steps} iterations");
+        }
+    }
+
+    /// Every input in `1..=10^6`, against the standard library, and the most
+    /// iterations any of them takes -- the figure the docs quote as measured.
+    #[test]
+    fn every_input_to_a_million_is_exact_and_takes_at_most_five_steps() {
+        let mut worst = 0_u32;
+        for v in 1..=1_000_000_i128 {
+            let (root, steps) = isqrt_i128_counted(v);
+            assert_eq!(root, v.isqrt(), "isqrt({v})");
+            worst = worst.max(steps);
+        }
+        assert_eq!(worst, 5, "the measured worst case below 10^6 moved");
+        for v in [
+            i128::MAX,
+            i128::MAX - 1,
+            1_i128 << 126,
+            (1_i128 << 126) - 1,
+            2,
+            3,
+            4,
+        ] {
+            let (root, steps) = isqrt_i128_counted(v);
+            assert_eq!(root, v.isqrt(), "isqrt({v})");
+            assert!(steps <= 8, "isqrt({v}) took {steps}");
+        }
+    }
+
+    /// **The iteration ceiling is the Newton budget, and nothing else.**
     ///
     /// `ITERATION_CEILING` is what the ratio bench compares a measured step count
-    /// against. Mutated from `+` to `-` it becomes 126 — BELOW the Newton budget
-    /// alone — and to `*` it becomes 256. Either silently changes what the bench
-    /// is allowed to accept, and nothing in the library asserted the arithmetic.
+    /// against. The decreasing iteration needs no step-down, so the ceiling is the
+    /// Newton budget alone: twice the measured worst case of 8.
     #[test]
-    fn the_iteration_ceiling_is_the_sum_of_the_two_loops() {
-        assert_eq!(
-            ITERATION_CEILING,
-            NEWTON_STEPS + STEP_DOWN_STEPS,
-            "the ceiling is the two budgets added, not any other operation"
-        );
-        assert_eq!(ITERATION_CEILING, 130, "128 Newton steps plus 2 step-downs");
+    fn the_iteration_ceiling_is_the_newton_budget() {
+        assert_eq!(ITERATION_CEILING, NEWTON_STEPS);
+        assert_eq!(ITERATION_CEILING, 16, "twice the measured worst case");
     }
 
     /// **A close exactly ON the VWAP is neither above it nor below it.**
@@ -1571,16 +1597,15 @@ mod tests {
     /// thing measuring it was `benches/ratio.rs` — which `cargo test` does not run,
     /// which coverage does not run, and which lives behind its own CI gate. The four
     /// counts below are the ones that bench prints and the module documentation
-    /// quotes; a quoted number rots and an asserted one does not. Lower
-    /// [`NEWTON_STEPS`] and the count at `i128::MAX` moves, which is the failure the
-    /// old 64-step cap hid behind an unbounded step-down.
+    /// quotes; a quoted number rots and an asserted one does not. A change to the
+    /// seed or the exit moves these counts (D-1665).
     #[test]
     fn the_documented_iteration_counts_are_the_measured_ones() {
         for (v, want) in [
-            (1_i128, 1_u32),
-            (i128::from(i64::MAX), 37),
-            (10_i128.pow(30), 55),
-            (i128::MAX, 69),
+            (1_i128, 2_u32),
+            (i128::from(i64::MAX), 5),
+            (10_i128.pow(30), 5),
+            (i128::MAX, 6),
         ] {
             let (root, steps) = isqrt_i128_counted(v);
             assert_eq!(root, v.isqrt(), "the root of {v} is not the exact one");

@@ -127,14 +127,18 @@ pub enum LakeError {
         got: ColumnType,
     },
 
-    /// The `timestamp` leaf declares a logical type this reader would misread.
+    /// The `timestamp` leaf declares a logical or converted type this reader
+    /// would misread.
     ///
     /// The reader decodes `timestamp` as microseconds since the epoch, UTC. A
     /// leaf declared NANOS or MILLIS, or MICROS not adjusted to UTC (a wall
     /// clock), would decode off by ×1000, ÷1000 or the zone offset, so it is
-    /// refused by name (audit-20261003 hunt-store-5, D-1528).
+    /// refused by name (audit-20261003 hunt-store-5, D-1528). A legacy
+    /// converted type other than `TIMESTAMP_MICROS` (for example
+    /// `TIMESTAMP_MILLIS` with no logical type) is refused the same way
+    /// (h-pull-1, D-2270).
     UnsupportedTimestamp {
-        /// The declared logical type, rendered.
+        /// The declared logical or converted type, rendered.
         declared: String,
     },
 
@@ -179,6 +183,21 @@ pub enum LakeError {
         max_def_level: i16,
         /// The leaf's maximum repetition level. An unrepeated leaf has 0.
         max_rep_level: i16,
+    },
+
+    /// An integer column declares a logical or converted type that does not
+    /// decode as the plain signed integer this reader returns.
+    ///
+    /// `volume`, `open_interest` and `greeks_provenance_id` are read as
+    /// signed integers. An unsigned annotation reads a value past the signed
+    /// maximum as negative, and a DECIMAL, TIME, TIMESTAMP or DATE annotation
+    /// is a different quantity under the right name, so each is refused by
+    /// name rather than decoded (h-pull-1, D-2270).
+    UnsupportedIntegerAnnotation {
+        /// The column.
+        name: &'static str,
+        /// The declared logical and converted types, rendered.
+        declared: String,
     },
 
     /// A page could not be decoded.
@@ -389,6 +408,10 @@ impl fmt::Display for LakeError {
             Self::UnsupportedTimestamp { declared } => write!(
                 f,
                 "column `timestamp` declares {declared}; this reader decodes INT64 microseconds since the epoch, UTC, and refuses any other unit or a timestamp not adjusted to UTC rather than misreading it"
+            ),
+            Self::UnsupportedIntegerAnnotation { name, declared } => write!(
+                f,
+                "column `{name}` declares {declared}; this reader decodes it as a plain signed integer and refuses an unsigned, decimal, date or time annotation rather than misreading it"
             ),
             Self::UnsupportedColumnShape {
                 name,
@@ -660,6 +683,13 @@ mod tests {
                     names: vec!["a".to_owned(), "b".to_owned()],
                 },
                 "9 column",
+            ),
+            (
+                LakeError::UnsupportedIntegerAnnotation {
+                    name: "volume",
+                    declared: "converted type UINT_64".to_owned(),
+                },
+                "UINT_64",
             ),
             (
                 LakeError::UnsupportedColumnShape {

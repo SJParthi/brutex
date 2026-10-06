@@ -20,17 +20,15 @@
 //!
 //! # The staleness answer is the half that matters
 //!
-//! `Site::load` parses the masters **once, at startup**, and there is no reload
-//! path. So an operator who refreshes the masters while the server is running
-//! gets new bytes on disk and the same universe in memory — and every page keeps
-//! answering from the boot parse with nothing saying so. [`status_json`] is what
-//! says so: it compares each master's mtime against the moment the site was
-//! loaded and reports which are newer.
-//!
-//! **That does not fix it, and this module does not claim to.** Hot-reloading
-//! needs the master set behind a swap inside `Site`, which every route shares;
-//! until that lands, the honest thing is a refresh that tells the operator a
-//! restart is required rather than one that silently does half the job.
+//! `Site::load` parses the masters at startup, and a refresh re-parses them in
+//! place: [`refresh`] calls `reload`, which calls `Site::reparse` to swap a
+//! fresh parse into the site every route shares, with a new parse time and
+//! generation, and answers `"restart_required": false`. A restart is needed
+//! only when that reparse is refused (`"reloaded": false`, its reason named),
+//! or when a master changed on disk by some other hand, which [`status_json`]
+//! reports by comparing each master's mtime against the moment of the current
+//! parse. This module said "there is no reload path" for several commits after
+//! the reload landed (Z1-slice13-F1, D-1762).
 
 use std::path::Path;
 
@@ -501,13 +499,53 @@ async fn credentialed_zerodha() -> Result<pull::http::HttpSource, String> {
 /// Unlike a sweep, this is four files and seconds — there is no progress to
 /// poll and no slot to claim. A route that returned `202` here would invent a
 /// state machine for work that finishes before the response would have.
+///
+/// # But it does not die with the connection -- P3-01-04, D-1974
+///
+/// On a sick host the ladder outlasts the page's 90 s ceiling, and the abort
+/// closed the connection, which dropped this future: files already landed
+/// stayed replaced on disk, while the per-source records and the reload never
+/// ran. The work now runs on its own task, as `recovery::start`'s does, so
+/// every source is recorded and the universe re-parsed whether or not anyone
+/// is still waiting for the answer.
 pub async fn refresh(
+    axum::extract::State(site): axum::extract::State<crate::server::Loaded>,
+) -> (axum::http::StatusCode, JsonHeaders, String) {
+    detached(refresh_work(site)).await
+}
+
+/// Runs `work` on its own task and answers with what it returned.
+///
+/// Dropping the returned future drops only the wait: the task keeps running to
+/// its end. A task that did not return is a 500 that says where the outcome is.
+async fn detached(
+    work: impl std::future::Future<Output = (axum::http::StatusCode, JsonHeaders, String)>
+    + Send
+    + 'static,
+) -> (axum::http::StatusCode, JsonHeaders, String) {
+    match tokio::spawn(work).await {
+        Ok(answer) => answer,
+        Err(why) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            json_headers(),
+            format!(
+                r#"{{"landed":[],"refusal":{}}}"#,
+                crate::render::json_string(&format!(
+                    "the refresh task did not return ({why}); /masters/status.json and /logs say what landed"
+                ))
+            ),
+        ),
+    }
+}
+
+/// [`refresh`]'s work, on the task [`detached`] gives it.
+async fn refresh_work(
     // THE SITE IS READ **AND WRITTEN** NOW, which reverses this parameter's
     // former comment. It used to say *"this route writes files and never
     // touches the parsed universe"*, and that was the whole defect: an
     // operator pressed Refresh, four files landed, and every page kept
     // answering from the boot parse. `Site::reparse` is what closes it.
-    axum::extract::State(site): axum::extract::State<crate::server::Loaded>,
+    site: crate::server::Loaded,
 ) -> (axum::http::StatusCode, JsonHeaders, String) {
     // FIFO async lock covers fetch -> landing -> reload, including credentials
     // and all sources. An older download cannot publish after a newer refresh.
@@ -649,10 +687,10 @@ pub async fn refresh(
 /// `GET /masters/status.json` — what is on disk, and whether it is newer than
 /// the parse this process is answering from.
 ///
-/// **The staleness answer.** `POST /masters/refresh` re-parses what it writes
-/// ([`reload`]), but a master changed on disk any other way while the server
-/// runs is new bytes behind an old universe, and so is one whose re-parse was
-/// refused. Nothing said so before this route; the page looked identical.
+/// **The staleness answer.** A refresh through this module re-parses in place
+/// (`Site::reparse`), so after one this answers "not newer". A master changed
+/// on disk any other way, or a refresh whose reparse was refused, is new bytes
+/// behind the parse still in memory, and this is what says so.
 pub async fn status_json(
     axum::extract::State(site): axum::extract::State<crate::server::Loaded>,
 ) -> (axum::http::StatusCode, JsonHeaders, String) {
@@ -805,13 +843,10 @@ fn page_html() -> String {
          <th>On disk</th><th>Last refresh</th></tr></thead><tbody>{rows}</tbody></table>\
          <div id=\"ledger\"></div>\
          <div id=\"xverify\" class=\"att\"></div>\
-         <p class=\"foot\">A refresh writes new bytes to disk and then re-parses them into the \
-         running server, so every page answers from the new masters. If that re-parse is \
-         refused, the previous universe stays in force and the refresh says so, with the \
-         reason. When a file changes under a running server some other way, its row says a \
-         restart is required. Restart the server in either case once the cause is fixed, \
-         because saying nothing would leave every other page answering from an old parse \
-         with nothing to indicate it.</p>\
+         <p class=\"foot\">A refresh writes new bytes to disk and re-parses the universe in \
+         place, so every page answers from the new files without a restart. A restart is \
+         required only when that re-parse is refused, or when a file changed on disk some \
+         other way; this page says so on the row when either happens.</p>\
          <script src=\"/masters.js\" defer></script>",
         // THE REAL NAV, NOT A SECOND COPY OF IT. This page was self-contained
         // following `crate::logs`, and inherited its defect with it: a page
@@ -925,11 +960,55 @@ mod tests {
             let waker = std::task::Waker::noop();
             let mut cx = std::task::Context::from_waker(waker);
             assert!(std::future::Future::poll(next.as_mut(), &mut cx).is_pending());
-            // Cancel while queued: no directory lookup, credential or fetch.
+            // Dropping the WAIT does not cancel the refresh (D-1974): it is
+            // queued on its own task behind the lock. Nothing here yields, so
+            // that task never runs before this runtime is dropped, and no
+            // directory lookup, credential or fetch happens in this test.
             drop(next);
             drop(first);
             assert!(super::REFRESH.try_lock().is_ok());
         });
+    }
+
+    /// P3-01-04, D-1974. The page aborts at 90 s and the abort drops the
+    /// handler's future; the refresh must still record every source and
+    /// reload. `refresh` hands its whole work to `detached`, and `detached`
+    /// keeps the work running after its caller is gone.
+    #[test]
+    fn a_refresh_whose_caller_goes_away_still_runs_to_its_end() {
+        block_on(async {
+            let gate = std::sync::Arc::new(tokio::sync::Notify::new());
+            let opened = std::sync::Arc::clone(&gate);
+            let (done, finished) = tokio::sync::oneshot::channel();
+            let mut waiter = Box::pin(super::detached(async move {
+                opened.notified().await;
+                let _ = done.send(());
+                (
+                    axum::http::StatusCode::OK,
+                    super::json_headers(),
+                    String::new(),
+                )
+            }));
+            let waker = std::task::Waker::noop();
+            let mut cx = std::task::Context::from_waker(waker);
+            assert!(std::future::Future::poll(waiter.as_mut(), &mut cx).is_pending());
+            // THE PAGE'S CEILING FIRES and the connection's future is dropped.
+            drop(waiter);
+            gate.notify_one();
+            finished
+                .await
+                .expect("the work ran to its end although nobody was waiting");
+        });
+        let source = include_str!("mastersrun.rs");
+        let handler = source
+            .split_once("pub async fn refresh(")
+            .and_then(|(_, rest)| rest.split_once("\n}\n"))
+            .map(|(body, _)| body)
+            .expect("the handler");
+        assert!(
+            handler.contains("detached(refresh_work(site)).await"),
+            "the handler runs its work detached: {handler}"
+        );
     }
 
     #[test]
@@ -1519,18 +1598,16 @@ mod tests {
     }
 
     #[test]
-    fn the_page_says_a_restart_is_required_rather_than_pretending_otherwise() {
-        // `Site::load` PARSES ONCE AT STARTUP. A page that refreshed the bytes
-        // and said nothing would leave every other page answering from the boot
-        // parse, which is the failure wearing a success's clothes §4 bans.
+    fn the_page_says_a_refresh_reloads_and_names_when_a_restart_is_required() {
+        // A refresh re-parses through `Site::reparse` (D-1762). The footer
+        // once told the operator to restart after every refresh, which sent
+        // them to restart a server that had already reloaded; it must name
+        // the two cases that do need a restart, and no others.
         let html = super::page_html();
-        assert!(html.contains("restart is required"), "on the row");
-        assert!(html.contains("Restart the server"), "and after a refresh");
-        // audit-20261003 webcontract-3, D-1585: AND IT DOES NOT CONTRADICT
-        // `reload`. The footer said a refresh "does not reload the parsed
-        // universe" while the route re-parses every refresh.
-        assert!(!html.contains("does <b>not</b> reload"), "stale footer");
-        assert!(html.contains("re-parses them into the running server"));
+        assert!(html.contains("re-parses the universe in place"), "{html}");
+        assert!(html.contains("A restart is required only when"), "{html}");
+        assert!(!html.contains("Restart the server"), "{html}");
+        assert!(!html.contains("does <b>not</b> reload"), "{html}");
     }
 
     #[test]
@@ -1628,13 +1705,172 @@ mod tests {
             "/dashboard",
             "/instruments",
             "/pull",
-            "/audit",
+            "/audit/page",
             "/store",
             "/logs",
         ] {
             assert!(
                 html.contains(&format!("href=\"{href}\"")),
                 "{href} is not reachable from the masters page"
+            );
+        }
+    }
+
+    /// MR-15 (P12-02, D-1792): the credentialed leg runs the SAME ladder as
+    /// the public one. Both legs reach a source only through `obtain`, the one
+    /// function that retries, re-primes and falls back, and a credential that
+    /// could not be read asks nothing and records a refusal with no steps.
+    ///
+    /// Read off the source because the credentialed arm needs a Parameter
+    /// Store read this binary cannot make (`CLAUDE.md` §8); a behavioural
+    /// test of that arm is not possible without the credential, and that is
+    /// the stated limit of this one.
+    #[test]
+    fn the_credentialed_leg_reaches_a_source_only_through_the_public_ladder() {
+        let source = include_str!("mastersrun.rs");
+        let body = |name: &str| {
+            source
+                .split_once(&format!("async fn {name}"))
+                .and_then(|(_, rest)| rest.split_once("\n}\n"))
+                .map(|(body, _)| body)
+                .expect("the function is defined")
+        };
+        let public = body("refresh_with<");
+        let credentialed = body("credentialed_leg<");
+        assert!(public.contains("obtain(from, clock, dir, source).await"));
+        assert!(credentialed.contains("obtain(wire, clock, dir, source).await"));
+        assert_eq!(
+            credentialed.matches("obtain(").count(),
+            1,
+            "one ladder, called once"
+        );
+        assert!(
+            credentialed.contains("Landed::Refused(why.clone())")
+                && credentialed.contains("Fetched::default()"),
+            "an unreadable credential asks nothing and says so"
+        );
+    }
+
+    /// Every record the shared sink holds for `target` from sequence `from` on.
+    fn emitted_since(target: &str, from: u64) -> Vec<telemetry::Record> {
+        let sink = crate::emitted::sink();
+        let dir = sink
+            .path()
+            .parent()
+            .expect("the sink writes a file inside a directory")
+            .to_path_buf();
+        telemetry::tail(
+            &dir,
+            sink.keep_files(),
+            &telemetry::Query::last(telemetry::MAX_LIMIT).from_target(target),
+        )
+        .records
+        .into_iter()
+        .filter(|record| record.seq >= from)
+        .collect()
+    }
+
+    /// MR-22 (P12-02, D-1792): THE LOG LEVEL FOLLOWS THE OUTCOME, at both
+    /// granularities. Per attempt: a refused prime and a retryable refusal are
+    /// `Warn`, a body is `Info`, a settled refusal is `Error`. Per source: a
+    /// landing is `Info`, a skipped source is `Warn`, a refusal and an
+    /// unconfirmed durability are `Error`. Each record is told apart by a
+    /// field this test alone writes, so a concurrent emit cannot satisfy it.
+    #[test]
+    fn every_outcome_is_logged_at_the_level_its_consequence_earns() {
+        use masters::{Attempt, Fetched, Got, Verdict};
+        use telemetry::Level;
+
+        let source = &masters::SOURCES[0];
+        let url = "https://mr22.invalid/levels";
+        let step = |number: u32, got: Got| Attempt {
+            url: url.to_owned(),
+            number,
+            waited_ms: 0,
+            got,
+        };
+        let refused = |status: Option<u16>, verdict: Verdict| Got::Refused {
+            status,
+            detail: "mr22".to_owned(),
+            verdict,
+        };
+        let tried = Fetched {
+            body: None,
+            attempts: vec![
+                step(
+                    1,
+                    Got::PrimeRefused {
+                        detail: "mr22".to_owned(),
+                    },
+                ),
+                step(2, Got::Body { bytes: 7 }),
+                step(3, refused(Some(503), Verdict::Again)),
+                step(4, refused(None, Verdict::Reprime)),
+                step(5, refused(Some(404), Verdict::Never)),
+            ],
+        };
+        let from = crate::emitted::mark();
+        super::record(
+            source,
+            &Ok(Landed::Written {
+                bytes: 922_001,
+                changed: true,
+            }),
+            &tried,
+        );
+        let quiet = Fetched::default();
+        super::record(source, &Err("mr22 skipped".to_owned()), &quiet);
+        super::record(
+            source,
+            &Ok(Landed::Refused("mr22 refused".to_owned())),
+            &quiet,
+        );
+        super::record(
+            source,
+            &Ok(Landed::Uncertain {
+                bytes: 922_002,
+                changed: false,
+                why: "mr22 uncertain".to_owned(),
+            }),
+            &quiet,
+        );
+
+        let attempts = emitted_since("api.masters.attempt", from);
+        for (number, level) in [
+            (1, Level::Warn),
+            (2, Level::Info),
+            (3, Level::Warn),
+            (4, Level::Warn),
+            (5, Level::Error),
+        ] {
+            let found: Vec<_> = attempts
+                .iter()
+                .filter(|record| {
+                    crate::emitted::says(record, "url", url)
+                        && crate::emitted::counts(record, "attempt", number)
+                })
+                .collect();
+            assert_eq!(found.len(), 1, "attempt {number}: {attempts:?}");
+            assert!(
+                found.iter().all(|record| record.level == level),
+                "attempt {number}: {found:?}"
+            );
+        }
+        let sources = emitted_since("api.masters.source", from);
+        for (needle, level) in [
+            ("922001 bytes", Level::Info),
+            ("mr22 skipped", Level::Warn),
+            ("mr22 refused", Level::Error),
+            ("mr22 uncertain", Level::Error),
+        ] {
+            let found: Vec<_> = sources
+                .iter()
+                .filter(|record| crate::emitted::says(record, "detail", needle))
+                .collect();
+            assert_eq!(found.len(), 1, "{needle}: {sources:?}");
+            assert!(
+                found.iter().all(|record| record.level == level),
+                "{needle}: {found:?}"
             );
         }
     }

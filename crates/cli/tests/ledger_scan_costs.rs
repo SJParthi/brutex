@@ -67,11 +67,10 @@ fn doc_above(source: &str, anchor: &str, item: &str) -> String {
         let line = line.trim();
         if line.starts_with("///") {
             doc.push(line);
-        } else if !(line.starts_with("#[")
-            || line.starts_with("clippy::")
-            || line.starts_with("reason")
-            || line == ")]")
-        {
+        } else if !doc.is_empty() {
+            // Every line between the item and its rustdoc is attribute text,
+            // however many lines a `cfg_attr(not(test), expect(..))` spans
+            // (CE-95, D-1956); the first non-doc line ABOVE the doc ends it.
             break;
         }
     }
@@ -526,7 +525,9 @@ fn a_population_v5_commit_scans_the_whole_ledger_three_times_and_its_docs_say_so
 
     let module = words(
         POPULATION_V5
-            .get(..POPULATION_V5.find("#![expect(").expect("the module doc"))
+            // The `//!` block ends at the first `use`: CE-95 (D-1956) removed the
+            // module-wide `#![expect(` this used to stop at.
+            .get(..POPULATION_V5.find("\nuse ").expect("the module doc"))
             .expect("its text"),
     );
     assert!(decode.contains("hash_parts(ROW_SEAL_DOMAIN,"), "{decode}");

@@ -111,13 +111,24 @@ test('a keystroke costs the same at 800 instruments and at 80,000', () => {
   // 800 is the bound `index.svelte.js` names; 100× it is the headroom. The
   // ceiling is 3.0×, the same one `crates/*/benches/ratio.rs` uses, and for the
   // same reason: below that a wall-clock ratio on a shared machine is noise.
+  //
+  // THE PREFIX IS `A`, WHOSE BUCKET GROWS WITH THE CATALOGUE. This probed
+  // `ABCD`, which neither universe holds, so both timings measured a `Map`
+  // miss and a probe that copied or scanned its bucket passed (P2-02-02,
+  // D-1766). Here the bucket is about 31 rows against about
+  // 3,077, so a copy or a scan is a hundredfold and cannot hide under 3.0×.
   const small = universe(800);
   const large = universe(80_000);
   const ixS = build(small);
   const ixL = build(large);
+  assert.ok((ixL.get('A') ?? []).length > 50 * (ixS.get('A') ?? []).length);
+
+  // The deterministic half: the bucket is returned BY REFERENCE, never copied.
+  assert.equal(probe(ixL, large, 'A'), ixL.get('A'));
+  assert.equal(probe(ixS, small, 'a'), ixS.get('A'));
 
   /** @param {Map<string, Array<any>>} ix @param {Array<any>} rows */
-  const at = (ix, rows) => cost(20_000, () => probe(ix, rows, 'ABCD'));
+  const at = (ix, rows) => cost(20_000, () => probe(ix, rows, 'A'));
   const ratio = at(ixL, large) / at(ixS, small);
 
   assert.ok(
@@ -130,23 +141,30 @@ test('a keystroke costs the same at 800 instruments and at 80,000', () => {
 test('the one place cost is NOT constant is named, and it is bounded by a bucket', () => {
   // Beyond four characters `probe` filters the four-character bucket. The
   // module says so. This pins that the cost tracks the BUCKET and not the
-  // catalogue: a hundredfold catalogue whose 4-prefix buckets stay the same
-  // size must not make the filter a hundred times dearer.
-  /** @type {Array<{symbol: string}>} */
-  const rows = [];
-  for (let i = 0; i < 40_000; i += 1) rows.push({ symbol: `ABCD${i}` }); // one fat bucket
-  /** @type {Array<{symbol: string}>} */
-  const spread = [];
-  for (let i = 0; i < 40_000; i += 1) spread.push({ symbol: `AB${i % 100}D${i}` });
+  // catalogue: a hundredfold catalogue whose `ABCD` bucket stays the same size
+  // must not make the filter a hundred times dearer. It used to assert only
+  // that a fat bucket cost more than a missing one, which a full scan of the
+  // catalogue also satisfied (P2-02-02, D-1766).
+  /** @param {number} others */
+  const catalogue = (others) => {
+    /** @type {Array<{symbol: string}>} */
+    const rows = [];
+    for (let i = 0; i < 400; i += 1) rows.push({ symbol: `ABCD${i}` });
+    for (let i = 0; i < others; i += 1) rows.push({ symbol: `ZY${i}` });
+    return rows;
+  };
+  const small = catalogue(0);
+  const large = catalogue(40_000);
+  const ixS = build(small);
+  const ixL = build(large);
+  assert.equal(probe(ixL, large, 'ABCD1').length, 111); // ABCD1, ABCD10..19, ABCD100..199
+  assert.deepEqual(probe(ixL, large, 'ABCD1'), probe(ixS, small, 'ABCD1'));
 
-  const fat = build(rows);
-  const thin = build(spread);
-  const fatCost = cost(2_000, () => probe(fat, rows, 'ABCD1'));
-  const thinCost = cost(2_000, () => probe(thin, spread, 'ABCD1'));
-
+  const ratio =
+    cost(2_000, () => probe(ixL, large, 'ABCD1')) / cost(2_000, () => probe(ixS, small, 'ABCD1'));
   assert.ok(
-    fatCost > thinCost,
-    'the long-query filter should track the bucket it filters, which is the ' +
-      'documented non-constant path'
+    ratio < 3,
+    `the long-query filter grew ${ratio.toFixed(2)}× for a 100× catalogue with the ` +
+      `same bucket — it must filter the four-character bucket, not the catalogue`
   );
 });

@@ -27,7 +27,7 @@
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
@@ -891,9 +891,13 @@ impl AnchoredSearchLineageV3Ledger {
         }
         self.require_append_capacity()?;
         let members = prepared.members(self.completion_records);
-        for raw in encode_member_records(&members)? {
-            append_raw(&mut self.member_file, &raw)?;
-        }
+        // BOTH MEMBERS IN ONE APPEND (D-1854). Two appends rolled back one at a
+        // time would leave the first member alone after a failed second, a
+        // partial trailing pair every later open refuses.
+        append_raw(
+            &mut self.member_file,
+            &encode_member_records(&members)?.concat(),
+        )?;
         self.member_file
             .sync_data()
             .map_err(|why| format!("cannot sync search-lineage members: {why}"))?;
@@ -1551,11 +1555,23 @@ fn record_count(
     Ok(count)
 }
 
+/// The label every failed append names.
+const APPEND_LABEL: &str = "search-lineage V3 bytes";
+
+/// Appends `raw` through the shared rollback (D-1850, D-1854): a failed or
+/// short write truncates the file back to its length before the attempt, so a
+/// torn tail can never wedge the ledger.
 fn append_raw(file: &mut File, raw: &[u8]) -> Result<(), AnchoredSearchLineageV3Refusal> {
-    file.seek(SeekFrom::End(0))
-        .map_err(|why| format!("cannot seek search-lineage append: {why}"))?;
-    file.write_all(raw)
-        .map_err(|why| format!("cannot append search-lineage bytes: {why}"))
+    append_raw_with(file, raw, std::io::Write::write_all)
+}
+
+/// [`append_raw`] with the write supplied, so a test can inject a short write.
+fn append_raw_with(
+    file: &mut File,
+    raw: &[u8],
+    write: impl FnOnce(&mut File, &[u8]) -> std::io::Result<()>,
+) -> Result<(), AnchoredSearchLineageV3Refusal> {
+    crate::append_rollback::append_with(file, raw, APPEND_LABEL, write)
 }
 
 fn open_root(
@@ -1821,6 +1837,7 @@ mod tests {
     use runner::Sweeper;
     use runner::outcome::Horizon;
     use runner::validate::{AnchoredSearchValidationV3, DEFAULT_RUNGS, ExecutionSeries};
+    use std::io::Write as _;
     use std::sync::OnceLock;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -2156,6 +2173,67 @@ mod tests {
         assert_refuses(
             decode_completion(&noncanonical_completion),
             "Completion reserve",
+        );
+    }
+
+    /// AHA-05 (h-cli-4, D-1854). A failed pair append truncates BOTH members
+    /// back, so no lone first member is left for every later open to refuse,
+    /// and after an injected short write into each file the next persist
+    /// writes and the ledger reopens.
+    #[test]
+    fn a_failed_pair_append_truncates_both_members_back_and_the_ledger_stays_open() {
+        let (nifty, banknifty) = projections();
+        let prepared = PreparedPairV3::from_opaque(&nifty, &banknifty).expect("prepare pair");
+        let root = TestRoot::new("append-rollback");
+        initialize(root.path());
+        let path = root.path().join(MEMBER_FILE);
+        let before = std::fs::read(&path).expect("read members before");
+        let pair = encode_member_records(&prepared.members(0))
+            .expect("encode pair")
+            .concat();
+        let mut member = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("open members");
+        let refusal = append_raw_with(&mut member, &pair, |file, raw| {
+            // Past the whole first member, short of the second.
+            file.write_all(raw.get(..raw.len() / 2 + 1).expect("partial pair"))?;
+            Err(std::io::Error::other("injected short write"))
+        })
+        .expect_err("a failed write refuses");
+        assert_eq!(
+            refusal,
+            format!(
+                "cannot append {APPEND_LABEL}: injected short write; truncated back to {} bytes",
+                before.len()
+            )
+        );
+        drop(member);
+        assert_eq!(std::fs::read(&path).expect("read members after"), before);
+        for (name, width) in [
+            (MEMBER_FILE, ANCHORED_SEARCH_LINEAGE_V3_MEMBER_BYTES),
+            (COMPLETION_FILE, ANCHORED_SEARCH_LINEAGE_V3_COMPLETION_BYTES),
+        ] {
+            crate::append_rollback::tests::inject_short_write(
+                &root.path().join(name),
+                APPEND_LABEL,
+                width,
+            );
+        }
+        let written = persist_anchored_search_lineage_v3(root.path(), bounds(), &nifty, &banknifty)
+            .expect("the next persist writes after the rollbacks");
+        assert!(matches!(
+            written,
+            AnchoredSearchLineageV3AuthenticatedCommit::Written(_)
+        ));
+        assert_eq!(
+            written.authority().structural_receipt().pair_id(),
+            prepared.pair_id
+        );
+        drop(
+            AnchoredSearchLineageV3Ledger::open_read(root.path(), bounds())
+                .expect("the ledger stays readable"),
         );
     }
 

@@ -1,5 +1,12 @@
 # Handover: wire the backtest into `api` and `web`
 
+> **DONE — kept as history; do not build from it.** `/backtest.json`,
+> `/backtest/run` and the backtest page exist, `api` now depends on `cli` and
+> `vocab` too, and the results ledger stride is not 205: it is 261 at version 3
+> and 213 at version 2 (`cli::results::STRIDE`, `STRIDE_V2`). Read
+> `crates/api/src/backtest.rs` and `docs/02-store-format.md`, not the offsets
+> below. P1-15-08, D-1764.
+
 ## READ THIS FIRST — what you are being asked to do
 
 Build the backtest page. The engine, the sweep, the 1-minute execution layer,

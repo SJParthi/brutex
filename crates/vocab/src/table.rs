@@ -1142,7 +1142,10 @@ pub const TABLE: [BitDef; 370] = [
     plain(364, "third_plus_cross_day_open"),
     // ---- 365–369. Day of week. -----------------------------------------
     //
-    // NSE trades Monday to Friday, so five bits and no more. They are `plain`
+    // NSE ordinarily trades Monday to Friday, so five bits and no more. Six
+    // charter-recorded weekend sessions (`docs/00-charter.md` §3) set none of
+    // them, by design (D-0694): a session the vocabulary cannot name is
+    // unnamed, not folded into a neighbour. They are `plain`
     // rather than banded because a weekday is exact: a bar is on Tuesday or it
     // is not, and there is no near-Tuesday.
     //

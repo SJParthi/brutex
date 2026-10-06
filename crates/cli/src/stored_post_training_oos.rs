@@ -209,6 +209,90 @@ pub(crate) struct StoredPostTrainingOosCohortV1 {
     audit: StoredPostTrainingOosAuditV1,
 }
 
+/// One cohort's OOS replay source, built once and shared by every witness of
+/// that cohort (D-1684). It borrows the cohort, so it cannot outlive the bytes
+/// it was built from; each witness still re-proves the cohort current.
+pub(crate) struct StoredOosFoldV1<'c> {
+    cohort: &'c StoredPostTrainingOosCohortV1,
+    specification: indicators::column::EvaluationSpecFingerprintV1,
+    source: CandidateGlobalReplayOosSourceV1<'c>,
+}
+
+impl StoredOosFoldV1<'_> {
+    /// Mints one witness over this fold. Per witness: the cohort integrity
+    /// check twice (each re-derives the cohort identity, hashing the signal,
+    /// minute-context, daily and execution streams, Θ(S + Q + D + E)), the
+    /// evaluator check, and the Runner replay over the OOS execution bars.
+    /// The fold's column evaluation and alignment are not repeated.
+    ///
+    /// # Errors
+    ///
+    /// The same refusals a cohort mint names, except those of building the
+    /// source, which [`StoredPostTrainingOosCohortV1::fold_recorded`] owns.
+    pub(crate) fn mint_witness_recorded(
+        &self,
+        disposition: &ExecutionDispositionV1,
+        observer: &mut StoredOosObserverV1<'_>,
+    ) -> Result<StoredPostTrainingOosWitnessV1, StoredPostTrainingOosRefusal> {
+        self.mint_inner(disposition, Some(observer))
+    }
+
+    fn mint_inner(
+        &self,
+        disposition: &ExecutionDispositionV1,
+        mut observer: Option<&mut StoredOosObserverV1<'_>>,
+    ) -> Result<StoredPostTrainingOosWitnessV1, StoredPostTrainingOosRefusal> {
+        let cohort = self.cohort;
+        cohort.require_integrity()?;
+        if self.specification.as_bytes() != &disposition.evaluation_spec_fingerprint() {
+            return Err("stored OOS disposition evaluator differs before fold".to_owned());
+        }
+        let resolved = match disposition.side() {
+            runner::excursion::Side::Long => &cohort.long,
+            runner::excursion::Side::Short => &cohort.short,
+        };
+        let witness = match &mut observer {
+            Some(observer) => self.source.mint_witness_recorded(
+                cohort.ladder,
+                resolved,
+                disposition,
+                &mut |identity| observer(StoredOosComputationV1::ReplayStarted(identity)),
+            )?,
+            None => self
+                .source
+                .mint_witness(cohort.ladder, resolved, disposition)?,
+        };
+        witness
+            .require_integrity()
+            .map_err(|why| format!("stored OOS Runner witness integrity refused: {why}"))?;
+        cohort
+            .root
+            .require_same("after minting stored post-training OOS witness")?;
+        cohort.require_integrity()?;
+        let run_id = witness.run_id().bytes();
+        let selected_exit_digest = witness.selected_exit_digest();
+        let universe_digest = witness.universe_digest();
+        let witness_id = hash_parts(
+            WITNESS_ID_DOMAIN,
+            &[
+                &cohort.audit.cohort_id,
+                &run_id,
+                &selected_exit_digest,
+                &universe_digest,
+            ],
+        );
+        if let Some(observer) = observer {
+            observer(StoredOosComputationV1::ReplayCompleted)?;
+        }
+        Ok(StoredPostTrainingOosWitnessV1 {
+            cohort_id: cohort.audit.cohort_id,
+            witness_id,
+            witness,
+            strict: cohort.stored.strict.clone(),
+        })
+    }
+}
+
 impl StoredPostTrainingOosCohortV1 {
     #[expect(
         clippy::too_many_arguments,
@@ -344,6 +428,51 @@ impl StoredPostTrainingOosCohortV1 {
         disposition: &ExecutionDispositionV1,
         mut observer: Option<&mut StoredOosObserverV1<'_>>,
     ) -> Result<StoredPostTrainingOosWitnessV1, StoredPostTrainingOosRefusal> {
+        if self.specification()?.as_bytes() != &disposition.evaluation_spec_fingerprint() {
+            return Err("stored OOS disposition evaluator differs before fold".to_owned());
+        }
+        let fold = self.fold_inner(observer.as_deref_mut())?;
+        fold.mint_inner(disposition, observer)
+    }
+
+    /// Builds this cohort's OOS replay source once, for every witness of the
+    /// cohort to replay over (W2-cli3-3, D-1684).
+    ///
+    /// The source is the anchored signal column, its exact-minute overlay,
+    /// the checked one-minute execution column, their alignment, calendars
+    /// and stream digests: Θ(S + Q + D + E) for S signal, Q minute-context,
+    /// D daily and E execution bars. Every input is a cohort field, so it is
+    /// the same for every disposition. Before D-1684 it was rebuilt for every
+    /// witness. The observer sees one fold stage here, not one per witness.
+    ///
+    /// # Errors
+    ///
+    /// A stale or changed cohort, a refused calendar or series, or an observer
+    /// refusal.
+    pub(crate) fn fold_recorded(
+        &self,
+        observer: &mut StoredOosObserverV1<'_>,
+    ) -> Result<StoredOosFoldV1<'_>, StoredPostTrainingOosRefusal> {
+        self.fold_inner(Some(observer))
+    }
+
+    fn specification(
+        &self,
+    ) -> Result<indicators::column::EvaluationSpecFingerprintV1, StoredPostTrainingOosRefusal> {
+        // The empty column obtains the canonical evaluator fingerprint without
+        // evaluating any input bar. Do not duplicate its byte encoding here.
+        let mut evaluator =
+            indicators::evaluator::Evaluator::new(self.widths, self.availability, self.thresholds);
+        Ok(indicators::column::Column::build(&[], &mut evaluator)
+            .evaluation_spec_token()
+            .ok_or("stored OOS evaluator specification unavailable before fold")?
+            .fingerprint_v1())
+    }
+
+    fn fold_inner(
+        &self,
+        mut observer: Option<&mut StoredOosObserverV1<'_>>,
+    ) -> Result<StoredOosFoldV1<'_>, StoredPostTrainingOosRefusal> {
         self.require_integrity()?;
         let execution = self.execution()?;
         let execution_calendar = crate::stored::calendar_receipt_v2_for_bars(
@@ -363,17 +492,7 @@ impl StoredPostTrainingOosCohortV1 {
         )
         .map_err(|why| format!("stored OOS execution series refused: {why}"))?;
         let daily_reference = self.daily_reference();
-        // The empty column obtains the canonical evaluator fingerprint without
-        // evaluating any input bar. Do not duplicate its byte encoding here.
-        let mut evaluator =
-            indicators::evaluator::Evaluator::new(self.widths, self.availability, self.thresholds);
-        let specification = indicators::column::Column::build(&[], &mut evaluator)
-            .evaluation_spec_token()
-            .ok_or("stored OOS evaluator specification unavailable before fold")?
-            .fingerprint_v1();
-        if specification.as_bytes() != &disposition.evaluation_spec_fingerprint() {
-            return Err("stored OOS disposition evaluator differs before fold".to_owned());
-        }
+        let specification = self.specification()?;
         let fold_identity = hash_parts(
             b"brutex-stored-oos-fold-v1\0",
             &[&self.audit.cohort_id, specification.as_bytes()],
@@ -406,45 +525,10 @@ impl StoredPostTrainingOosCohortV1 {
         if let Some(observer) = &mut observer {
             observer(StoredOosComputationV1::FoldCompleted)?;
         }
-        let resolved = match disposition.side() {
-            runner::excursion::Side::Long => &self.long,
-            runner::excursion::Side::Short => &self.short,
-        };
-        let witness = match &mut observer {
-            Some(observer) => source.mint_witness_recorded(
-                self.ladder,
-                resolved,
-                disposition,
-                &mut |identity| observer(StoredOosComputationV1::ReplayStarted(identity)),
-            )?,
-            None => source.mint_witness(self.ladder, resolved, disposition)?,
-        };
-        witness
-            .require_integrity()
-            .map_err(|why| format!("stored OOS Runner witness integrity refused: {why}"))?;
-        self.root
-            .require_same("after minting stored post-training OOS witness")?;
-        self.require_integrity()?;
-        let run_id = witness.run_id().bytes();
-        let selected_exit_digest = witness.selected_exit_digest();
-        let universe_digest = witness.universe_digest();
-        let witness_id = hash_parts(
-            WITNESS_ID_DOMAIN,
-            &[
-                &self.audit.cohort_id,
-                &run_id,
-                &selected_exit_digest,
-                &universe_digest,
-            ],
-        );
-        if let Some(observer) = observer {
-            observer(StoredOosComputationV1::ReplayCompleted)?;
-        }
-        Ok(StoredPostTrainingOosWitnessV1 {
-            cohort_id: self.audit.cohort_id,
-            witness_id,
-            witness,
-            strict: self.stored.strict.clone(),
+        Ok(StoredOosFoldV1 {
+            cohort: self,
+            specification,
+            source,
         })
     }
 

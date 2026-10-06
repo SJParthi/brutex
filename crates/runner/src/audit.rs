@@ -146,8 +146,9 @@ impl CostScope {
 /// V6 clause (AF-19). It names no rate, for the reason the audit header names
 /// none: `docs/00-charter.md` records no source for one.
 pub const CASH_EQUITY_GROSS: &str = "  CASH EQUITY. EVERY TOTAL BELOW IS GROSS OF EVERY CHARGE: brokerage,\n  \
-     STT, stamp duty, exchange charges, the SEBI fee and GST apply to a\n  \
-     share trade and none is subtracted. COST-EXCLUDED RESEARCH, NOT A NET\n  \
+     STT, stamp duty, exchange charges, the SEBI fee, the IPFT, DP charges\n  \
+     and GST (an UNVERIFIED list) apply to a share trade and none is\n  \
+     subtracted. COST-EXCLUDED RESEARCH, NOT A NET\n  \
      RESULT (D-0509, D-0525, D-0681). No equity result carries Selection V6\n  \
      or execution authority until a charter-sourced equity charge stack\n  \
      exists.";
@@ -166,9 +167,18 @@ pub const CASH_EQUITY_GROSS: &str = "  CASH EQUITY. EVERY TOTAL BELOW IS GROSS O
 /// and to say so on every such report rather than refuse them. This is the
 /// sentence that says so. An index never splits, so no index report carries
 /// it.
-pub const CORPORATE_ACTIONS_UNCHECKED: &str = "  CORPORATE ACTIONS ARE UNCHECKED (D-0018, D-0694). No split, bonus or\n  \
-     demerger detection has run over these bars, so an overnight jump in\n  \
-     them can be a corporate action rather than a market move. D-0018\n  \
+///
+/// It names every action kind that moves a stock's open with no market cause:
+/// split, bonus, rights issue, face-value change, demerger and dividend. It
+/// named only "split, bonus or demerger" until numeric-pass16 p16num-3
+/// (D-1969); an ex-dividend or ex-rights open is the same fake gap, smaller.
+/// A dividend never enters P&L, because every trade has exited by its own
+/// session's close and so never holds through an ex-date (`docs/06-limits.md`,
+/// the D-0694 section, says so); the ex-date gap still reaches the conditions.
+pub const CORPORATE_ACTIONS_UNCHECKED: &str = "  CORPORATE ACTIONS ARE UNCHECKED (D-0018, D-0694). No split, bonus,\n  \
+     rights issue, face-value change, demerger or dividend detection has\n  \
+     run over these bars. An overnight jump in them\n  \
+     can be a corporate action rather than a market move. D-0018\n  \
      requires such a window to be refused with its date named; no\n  \
      threshold for that detector is sourced, so none was applied.";
 
@@ -321,8 +331,8 @@ fn equity_header(out: &mut String) {
         out,
         "  CASH EQUITY run. EVERY TOTAL BELOW IS GROSS OF EVERY CHARGE.\n  \
          A stock IS tradeable -- you buy real shares -- so brokerage, STT,\n  \
-         stamp duty, exchange charges, the SEBI fee and GST all apply to a\n  \
-         share trade. This engine has no equity charge path:\n  \
+         stamp duty, exchange charges, the SEBI fee, the IPFT, DP charges\n  \
+         and GST (an UNVERIFIED list) all apply to a share trade. This engine has no equity charge path:\n  \
          `costs::scope::Segment` has no equity variant, so NONE of those\n  \
          charges is subtracted anywhere in this run, and the ranking that\n  \
          chose this combination is on GROSS returns.\n\n  \
@@ -381,7 +391,9 @@ fn equity_header(out: &mut String) {
 /// # What is NOT in these figures, for a cash-equity run
 ///
 /// **Every charge.** A stock is bought as real shares, so brokerage, STT,
-/// stamp duty, exchange charges, the SEBI fee and GST all apply, and no path
+/// stamp duty, exchange charges, the SEBI fee, the IPFT, DP charges and GST
+/// all apply (an UNVERIFIED list: no charter source enumerates the equity
+/// charge stack, D-1779), and no path
 /// in this engine computes any of them. The `scope` argument is what tells the
 /// header which of the two statements is true; it was absent until D-0681, and
 /// the index statement was printed over stocks for as long as it was.
@@ -726,9 +738,9 @@ fn grid_columns(out: &mut String) {
     let _ = writeln!(
         out,
         "  stop+tsl+ttp+target+time = trades. total/fill cost/worst trip/drawdown \
-         are paisa; the MAE/MFE columns and ret/DD are ppm.\n  total is the WORST \
+         are paisa; winner MAE/MFE and all MAE are ppm; ret/DD and mfe/allMAE are\n  ratios in hundredths (250 = 2.50).\n  total is the WORST \
          reading of BOTH legs: in at the worst price the bar PRINTED, out \
-         at the worse of the two orderings. entry cost is what that entry gave \
+         at the worse of the two orderings. fill cost is what that entry gave \
          up against the open; unknown is what the ordering could still be worth."
     );
 }
@@ -946,8 +958,18 @@ pub fn strategy_report(out: &mut String, cell: &Cell, name: &str, scope: CostSco
             format!("{}%", hundredths(cell.win_rate_bp())),
             "winners / trades",
         ),
-        ("avg winning trade", money(cell.avg_win()), ""),
-        ("avg losing trade", money(cell.avg_loss()), ""),
+        mean_row(
+            "avg winning trade",
+            cell.wins == 0,
+            cell.avg_win(),
+            "no winning trade",
+        ),
+        mean_row(
+            "avg losing trade",
+            losers == 0,
+            cell.avg_loss(),
+            "no losing trade",
+        ),
         (
             "largest winning trade",
             money(cell.best_trade),
@@ -965,7 +987,7 @@ pub fn strategy_report(out: &mut String, cell: &Cell, name: &str, scope: CostSco
         ),
         (
             "return over drawdown",
-            hundredths(cell.return_over_drawdown()),
+            ratio_or_no_dd(cell.return_over_drawdown()),
             "profit per unit of pain",
         ),
         (
@@ -988,6 +1010,39 @@ pub fn strategy_report(out: &mut String, cell: &Cell, name: &str, scope: CostSco
     }
 
     excursion_block(out, cell);
+}
+
+/// One average row of the STRATEGY REPORT, or a dash when its side is empty.
+///
+/// A MEAN OVER NO TRADES IS NOT `0.00` (p5num-4, D-2712). `avg_win` and
+/// `avg_loss` return 0 when their side is empty, and printed through [`money`]
+/// that read as a measured mean. The dash says nothing was averaged and the note
+/// says why, as the PROFIT FACTOR row already does.
+fn mean_row(
+    label: &'static str,
+    empty: bool,
+    mean: i64,
+    why: &'static str,
+) -> (&'static str, String, &'static str) {
+    if empty {
+        (label, "-".to_owned(), why)
+    } else {
+        (label, money(mean), "")
+    }
+}
+
+/// A return-over-drawdown in hundredths, or `no DD` for the zero-drawdown
+/// sentinel.
+///
+/// The sentinel is [`i64::MAX`], which [`hundredths`] printed as
+/// `92233720368547758.07` in the STRATEGY REPORT — a measured ratio that never
+/// happened. Same words as the grid's [`ret_dd`] cell (p5num-4, D-2712).
+fn ratio_or_no_dd(ratio: i64) -> String {
+    if ratio == i64::MAX {
+        "no DD".to_owned()
+    } else {
+        hundredths(ratio)
+    }
 }
 
 /// An integer in hundredths, rendered with its decimal point. `250` is `2.50`.
@@ -1543,7 +1598,7 @@ mod tests {
     }
     use super::{
         CASH_EQUITY_GROSS, CORPORATE_ACTIONS_UNCHECKED, CostScope, bootstrap, grid, overfitting,
-        render_selected, trades, walk_forward,
+        render_selected, strategy_report, trades, walk_forward,
     };
     use crate::pbo::{Placement, probability_of_overfitting};
     use crate::trade::{Trade, Trades};
@@ -1892,7 +1947,7 @@ mod tests {
                 );
             }
             for disclosure in [
-                "apply to a\n  share trade",
+                "and GST (an UNVERIFIED list) all apply to a share trade",
                 "This engine has no equity charge path",
                 "the ranking that\n  chose this combination is on GROSS returns",
                 "COST-EXCLUDED RESEARCH, NOT A NET RESULT",
@@ -1970,6 +2025,67 @@ mod tests {
         );
     }
 
+    /// A SENTINEL OR AN EMPTY MEAN IS NEVER PRINTED AS A MEASUREMENT IN THE
+    /// STRATEGY REPORT (p5num-4, D-2712).
+    ///
+    /// An all-winner variant has no drawdown, so `return_over_drawdown` is the
+    /// `i64::MAX` sentinel; it has no loser, so `avg_loss` is 0. A variant that
+    /// never won has `avg_win` 0. All three printed as numbers.
+    #[test]
+    fn the_strategy_report_names_its_sentinels_and_empty_means_in_words() {
+        let row = |out: &str, label: &str| -> String {
+            out.lines()
+                .find(|line| line.starts_with(&format!("  {label}")))
+                .map(str::to_owned)
+                .expect("the report carries the row")
+        };
+        let all_won = crate::grid::Cell {
+            trades: 3,
+            wins: 3,
+            pessimistic: 300,
+            optimistic: 450,
+            gross_win: 300,
+            best_trade: 150,
+            min_win: 50,
+            ..crate::grid::Cell::default()
+        };
+        assert_eq!(all_won.return_over_drawdown(), i64::MAX);
+        let mut out = String::new();
+        strategy_report(&mut out, &all_won, "SL·TP", CostScope::IndexSpot);
+        assert!(!out.contains("92233720368547758"), "{out}");
+        let ret = row(&out, "return over drawdown");
+        assert!(ret.contains("no DD"), "{ret}");
+        let loss = row(&out, "avg losing trade");
+        assert!(loss.contains("no losing trade"), "{loss}");
+        assert!(!loss.contains("0.00"), "{loss}");
+        assert!(row(&out, "avg winning trade").contains("1.00"), "{out}");
+
+        let never_won = crate::grid::Cell {
+            trades: 2,
+            wins: 0,
+            pessimistic: -200,
+            optimistic: -100,
+            gross_loss: -200,
+            worst_trade: -150,
+            max_drawdown: 200,
+            ..crate::grid::Cell::default()
+        };
+        let mut out = String::new();
+        strategy_report(&mut out, &never_won, "SL·TP", CostScope::IndexSpot);
+        let win = row(&out, "avg winning trade");
+        assert!(win.contains("no winning trade"), "{win}");
+        assert!(!win.contains("0.00"), "{win}");
+        assert!(row(&out, "avg losing trade").contains("-₹1.00"), "{out}");
+        // A measured ratio still prints as one.
+        let measured = crate::grid::Cell {
+            max_drawdown: 100,
+            ..all_won
+        };
+        let mut out = String::new();
+        strategy_report(&mut out, &measured, "SL·TP", CostScope::IndexSpot);
+        assert!(row(&out, "return over drawdown").contains("3.00"), "{out}");
+    }
+
     /// A STOCK'S STRATEGY REPORT NEVER CALLS A TOTAL NET PROFIT, AND SAYS THE
     /// ONE SELECTION RANKS ON IS GROSS OF EVERY CHARGE.
     ///
@@ -2037,13 +2153,16 @@ mod tests {
 
     /// Every charge the equity statement says a share trade pays, as it names
     /// them.
-    const SHARE_TRADE_CHARGES: [&str; 6] = [
+    const SHARE_TRADE_CHARGES: [&str; 9] = [
         "brokerage",
         "STT",
         "stamp duty",
         "exchange charges",
         "SEBI fee",
+        "IPFT",
+        "DP charges",
         "GST",
+        "UNVERIFIED list",
     ];
 
     /// The first rate unit or currency `text` names, or `None`.
@@ -2268,7 +2387,8 @@ mod tests {
     /// A CASH-EQUITY AUDIT SAYS CORPORATE ACTIONS ARE UNCHECKED, BESIDE ITS
     /// CHARGE STATEMENT, AND AN INDEX AUDIT NEVER DOES. D-0694.
     ///
-    /// No split, bonus or demerger detector exists (D-0018 names no threshold
+    /// No split, bonus, rights, face-value, demerger or dividend detector
+    /// exists (D-0018 names no threshold
     /// and the charter names no source), so an overnight jump in a stock's
     /// bars can be a corporate action. The operator chose to keep ranking
     /// stocks and to say so; an index never splits and says nothing.
@@ -2288,7 +2408,7 @@ mod tests {
             );
             for fact in [
                 "CORPORATE ACTIONS ARE UNCHECKED (D-0018, D-0694)",
-                "No split, bonus or\n  demerger detection has run",
+                "No split, bonus,\n  rights issue, face-value change, demerger or dividend detection has",
                 "can be a corporate action rather than a market move",
                 "no\n  threshold for that detector is sourced",
             ] {
@@ -2337,7 +2457,9 @@ mod tests {
             "stamp duty",
             "exchange charges",
             "SEBI fee",
-            "GST",
+            "IPFT",
+            "DP charges",
+            "GST (an UNVERIFIED list)",
             "COST-EXCLUDED RESEARCH, NOT A NET RESULT",
             "No equity result carries Selection V6",
             "D-0681",

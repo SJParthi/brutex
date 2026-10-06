@@ -89,7 +89,10 @@ fn the_kernels_second_context_read_is_stated_and_still_paid() {
     for call in [
         "exact_minute_withholding_unsourceable_days(",
         "stored::load_daily_context(",
-        "stored_anchored_digest(&span.bars, &exact_minute, &daily)? != preparation_digest",
+        // D-1781: the second digest is over the FOLDED series, bound to the
+        // withheld days, as the build's was.
+        "stored_anchored_digest(&folded, &exact_minute, &daily)?",
+        "!= preparation_digest",
     ] {
         assert!(
             after.contains(call),

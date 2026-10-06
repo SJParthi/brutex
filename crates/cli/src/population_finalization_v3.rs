@@ -31,14 +31,9 @@
 //! times this, so the shape above is read from the source rather
 //! than measured. `CLAUDE.md` §3 rule 6.
 
-#![expect(
-    dead_code,
-    reason = "the append-only successor exposes authenticated projection fields reserved for the downstream integration still blocked on Population V4"
-)]
-
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
-use std::io::{Read as _, Seek as _, SeekFrom};
+use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
@@ -52,6 +47,11 @@ use crate::population_admission_v3::{
     AdmissionV3Family, AdmissionV3Status, PopulationAdmissionV3Authority,
     PopulationAdmissionV3DecisionProjection,
 };
+
+/// The label #74's short-write test injects with. Appends to this ledger go
+/// through `fixed_tail`, which names the file instead (D-1770).
+#[cfg(test)]
+const APPEND_LABEL: &str = "Finalization V3 fixed record";
 
 /// Bytes in one canonical Population Finalization V3 row.
 pub(crate) const POPULATION_FINALIZATION_V3_ROW_BYTES: usize = 2_048;
@@ -1183,6 +1183,14 @@ impl PopulationFinalizationV3Authority {
     ///
     /// Refuses an out-of-range ordinal or any stale, replaced, corrupt,
     /// reordered or crosswired retained source.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) fn row_projection(
         &mut self,
         global_sequence: u64,
@@ -2139,6 +2147,14 @@ impl PopulationFinalizationV3Ledger {
         }
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     fn authenticated_row(
         &mut self,
         receipt: PopulationFinalizationV3StructuralReceipt,
@@ -2325,6 +2341,7 @@ impl PopulationFinalizationV3Ledger {
         }
         self.require_append_bound(count, 1)?;
         let first = self.row_records;
+        let block = crate::fixed_tail::start(&mut self.row_file, &self.row_path.display())?;
         for (offset, row) in prepared.rows.iter().enumerate() {
             let physical = first
                 .checked_add(
@@ -2332,11 +2349,20 @@ impl PopulationFinalizationV3Ledger {
                         .map_err(|_| "Finalization V3 append offset does not fit u64".to_owned())?,
                 )
                 .ok_or_else(|| "Finalization V3 append physical row overflowed".to_owned())?;
-            append_raw(&mut self.row_file, &encode_row(row, physical)?)?;
+            append_raw(
+                &mut self.row_file,
+                &self.row_path,
+                block,
+                &encode_row(row, physical)?,
+            )?;
         }
-        self.row_file
-            .sync_data()
-            .map_err(|why| format!("cannot sync Finalization V3 rows: {why}"))?;
+        crate::fixed_tail::sync_or_roll_back(
+            &self.row_file,
+            &self.row_path,
+            block,
+            File::sync_data,
+        )
+        .map_err(|why| format!("cannot sync Finalization V3 rows: {why}"))?;
         self.row_records = self
             .row_records
             .checked_add(count)
@@ -2344,10 +2370,21 @@ impl PopulationFinalizationV3Ledger {
         self.refresh_row_generation()?;
         self.require_unchanged()?;
         let completion = prepared.expected_completion(self.completion_records, first)?;
-        append_raw(&mut self.completion_file, &encode_completion(&completion)?)?;
-        self.completion_file
-            .sync_data()
-            .map_err(|why| format!("cannot sync Finalization V3 Completion: {why}"))?;
+        let block =
+            crate::fixed_tail::start(&mut self.completion_file, &self.completion_path.display())?;
+        append_raw(
+            &mut self.completion_file,
+            &self.completion_path,
+            block,
+            &encode_completion(&completion)?,
+        )?;
+        crate::fixed_tail::sync_or_roll_back(
+            &self.completion_file,
+            &self.completion_path,
+            block,
+            File::sync_data,
+        )
+        .map_err(|why| format!("cannot sync Finalization V3 Completion: {why}"))?;
         sync_directory(&self.root_file, &self.root)?;
         self.completion_records = self
             .completion_records
@@ -2432,6 +2469,7 @@ impl PopulationFinalizationV3Ledger {
             .ok_or_else(|| "Finalization V3 missing row count is invalid".to_owned())?;
         self.require_append_bound(missing, 1)?;
         self.require_unchanged()?;
+        let block = crate::fixed_tail::start(&mut self.row_file, &self.row_path.display())?;
         for (offset, row) in prepared.rows.iter().enumerate().skip(kept) {
             let physical = trailing
                 .first_row_record
@@ -2440,11 +2478,20 @@ impl PopulationFinalizationV3Ledger {
                         .map_err(|_| "Finalization V3 retry offset does not fit u64".to_owned())?,
                 )
                 .ok_or_else(|| "Finalization V3 retry physical row overflowed".to_owned())?;
-            append_raw(&mut self.row_file, &encode_row(row, physical)?)?;
+            append_raw(
+                &mut self.row_file,
+                &self.row_path,
+                block,
+                &encode_row(row, physical)?,
+            )?;
         }
-        self.row_file
-            .sync_data()
-            .map_err(|why| format!("cannot sync Finalization V3 retry rows: {why}"))?;
+        crate::fixed_tail::sync_or_roll_back(
+            &self.row_file,
+            &self.row_path,
+            block,
+            File::sync_data,
+        )
+        .map_err(|why| format!("cannot sync Finalization V3 retry rows: {why}"))?;
         self.row_records = self
             .row_records
             .checked_add(missing)
@@ -2453,10 +2500,21 @@ impl PopulationFinalizationV3Ledger {
         self.require_unchanged()?;
         let completion =
             prepared.expected_completion(self.completion_records, trailing.first_row_record)?;
-        append_raw(&mut self.completion_file, &encode_completion(&completion)?)?;
-        self.completion_file
-            .sync_data()
-            .map_err(|why| format!("cannot sync Finalization V3 retry Completion: {why}"))?;
+        let block =
+            crate::fixed_tail::start(&mut self.completion_file, &self.completion_path.display())?;
+        append_raw(
+            &mut self.completion_file,
+            &self.completion_path,
+            block,
+            &encode_completion(&completion)?,
+        )?;
+        crate::fixed_tail::sync_or_roll_back(
+            &self.completion_file,
+            &self.completion_path,
+            block,
+            File::sync_data,
+        )
+        .map_err(|why| format!("cannot sync Finalization V3 retry Completion: {why}"))?;
         sync_directory(&self.root_file, &self.root)?;
         self.completion_records = self
             .completion_records
@@ -2854,11 +2912,17 @@ fn read_fixed_at<const N: usize>(
     Ok(raw)
 }
 
-/// Label every append to this ledger names, and its rollback test injects with.
-const APPEND_LABEL: &str = "Finalization V3 fixed record";
-
-fn append_raw(file: &mut File, raw: &[u8]) -> Result<(), PopulationFinalizationV3Refusal> {
-    crate::append_rollback::append(file, raw, APPEND_LABEL)
+/// Appends one record of the block that began at `block`. A write error cuts
+/// the file back to `block`, so no ragged tail survives it (D-1900).
+fn append_raw(
+    file: &mut File,
+    path: &Path,
+    block: u64,
+    raw: &[u8],
+) -> Result<(), PopulationFinalizationV3Refusal> {
+    crate::fixed_tail::write_at_end(file, &path.display(), block, raw, |file, raw| {
+        file.write_all(raw)
+    })
 }
 
 fn open_root_directory(
@@ -3163,7 +3227,6 @@ fn hash_exact_prefix(
 )]
 mod tests {
     use super::*;
-    use std::io::Write as _;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_TEST_ROOT: AtomicU64 = AtomicU64::new(0);
@@ -3622,6 +3685,52 @@ mod tests {
                 .expect("lookup structural receipt"),
             Some(receipt)
         );
+    }
+
+    /// slice24-F1, D-1900: a short write or failed barrier on either file is
+    /// cut back to the last whole record; the ledger opens read-only and the
+    /// exact rerun commits.
+    #[test]
+    fn a_failed_write_or_barrier_in_either_file_is_cut_and_the_rerun_commits() {
+        use crate::fixed_tail::fault::{Armed, Kind};
+        let limits = bounds();
+        let value = prepared();
+        let half = POPULATION_FINALIZATION_V3_ROW_BYTES / 2;
+        for (case, (file, kind, skip)) in [
+            (ROW_FILE, Kind::Write { keep: half }, 0),
+            (ROW_FILE, Kind::Write { keep: half }, 2),
+            (ROW_FILE, Kind::Sync, 0),
+            (COMPLETION_FILE, Kind::Write { keep: half }, 0),
+            (COMPLETION_FILE, Kind::Sync, 0),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let root = TestRoot::new("fault");
+            let armed = Armed::arm_after(file, kind, skip);
+            let refusal = persist_population_finalization_v3(root.path(), limits, &value)
+                .err()
+                .unwrap_or_default();
+            assert!(!Armed::pending(), "case {case} fired");
+            drop(armed);
+            assert!(refusal.contains("injected"), "case {case}: {refusal}");
+            for (name, stride) in [
+                (ROW_FILE, POPULATION_FINALIZATION_V3_ROW_BYTES),
+                (COMPLETION_FILE, POPULATION_FINALIZATION_V3_COMPLETION_BYTES),
+            ] {
+                let len = std::fs::metadata(root.path().join(name))
+                    .expect("stat fault file")
+                    .len();
+                assert_eq!(len % stride as u64, 0, "case {case} {name} is whole");
+            }
+            PopulationFinalizationV3Ledger::open_read(root.path(), limits)
+                .expect("the cut ledger opens read-only");
+            assert!(matches!(
+                persist_population_finalization_v3(root.path(), limits, &value)
+                    .expect("the exact rerun commits"),
+                PopulationFinalizationV3Commit::Written(_)
+            ));
+        }
     }
 
     #[test]

@@ -1621,6 +1621,72 @@ mod tests {
         assert_eq!(charges.total_charges().raw(), 235_11);
     }
 
+    /// A straddling trip whose two days carry DIFFERENT rate sets: each per-leg
+    /// levy takes its own leg's rate, and GST is the larger of the two in
+    /// either argument order (D-1535). Every shipped `Rates::new` set carries
+    /// the same GST and no verified boundary moves the exchange, SEBI or IPFT
+    /// rate, so only sets minted with `Rates::with_all` can tell the legs
+    /// apart. (P10-01: `sell.gst() > buy.gst()` mutated to `<` survived every
+    /// other test, as did pricing the sell leg at the buy set's rates.)
+    #[test]
+    fn a_straddling_trip_takes_each_legs_own_levies_and_the_larger_gst() {
+        let low = Rates::with_all(
+            Broker::Groww,
+            BpsX100::new(15_000),
+            BpsX100::new(100_000),
+            BpsX100::new(10_000),
+            BpsX100::new(50_000),
+            stamp_duty(OrderSide::Buy),
+            GST_ON_FEE_BASE,
+        );
+        let high = Rates::with_all(
+            Broker::Groww,
+            BpsX100::new(15_000),
+            BpsX100::new(300_000),
+            BpsX100::new(70_000),
+            BpsX100::new(200_000),
+            stamp_duty(OrderSide::Buy),
+            BpsX100::new(GST_ON_FEE_BASE.get() * 2),
+        );
+        let fills = flat_fills(100_00, 120_00, Direction::Long);
+
+        for (buy, sell) in [(&low, &high), (&high, &low)] {
+            let charges = charge_stack_legs(fills, 65, buy, sell).expect("in range");
+            let leg = |rate_of: fn(&Rates) -> BpsX100| {
+                levy_ceiling(charges.buy_notional(), rate_of(buy))
+                    .expect("in range")
+                    .raw()
+                    + levy_ceiling(charges.sell_notional(), rate_of(sell))
+                        .expect("in range")
+                        .raw()
+            };
+            assert_eq!(charges.exchange().raw(), leg(|r| r.exchange()));
+            assert_eq!(charges.sebi().raw(), leg(|r| r.sebi()));
+            assert_eq!(charges.ipft().raw(), leg(|r| r.ipft()));
+
+            // The buy leg's notional differs from the sell leg's, so taking
+            // either leg at the other's rate moves the figure.
+            let swapped = levy_ceiling(charges.buy_notional(), sell.exchange())
+                .expect("in range")
+                .raw()
+                + levy_ceiling(charges.sell_notional(), buy.exchange())
+                    .expect("in range")
+                    .raw();
+            assert_ne!(charges.exchange().raw(), swapped);
+
+            let base = Paisa::from_raw(
+                charges.brokerage().raw()
+                    + charges.exchange().raw()
+                    + charges.sebi().raw()
+                    + charges.ipft().raw(),
+            );
+            let larger = statutory_levy(base, high.gst()).expect("in range");
+            let lower = statutory_levy(base, low.gst()).expect("in range");
+            assert_ne!(larger, lower, "the two GST rates must be told apart");
+            assert_eq!(charges.gst(), larger, "never the lower GST");
+        }
+    }
+
     #[test]
     fn the_brokerage_is_flat_per_order_and_a_thousand_lots_pay_what_one_pays() {
         // Trap 4. Everything else scales; this does not.

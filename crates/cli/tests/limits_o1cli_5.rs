@@ -93,7 +93,18 @@ fn the_span_loaded_for_one_number_is_stated_and_still_paid() {
     // cache: `screen_range_kernel_cached` loads once per key through
     // `load_screen_inputs`, so a lone screen still loads its own span.
     assert!(body("\nfn screen_range_inner(").contains("screen_range_kernel_cached("));
-    assert!(body("\nfn screen_range_kernel_cached(").contains("load_screen_inputs("));
+    // D-2101 routes that load through `ScreenCache::inputs`, which the
+    // descent's swept-row count shares, so the kernel asks the cache and the
+    // cache's one method calls the loader.
+    assert!(body("\nfn screen_range_kernel_cached(").contains("cache.inputs("));
+    let cache = LIB
+        .split_once("\nimpl ScreenCache {")
+        .expect("the screen cache has methods")
+        .1
+        .split_once("\n}\n")
+        .expect("the impl closes")
+        .0;
+    assert!(cache.contains("load_screen_inputs("));
     assert!(
         body("\nfn load_screen_inputs(").contains("stored::load_span("),
         "the screen no longer loads its own span: update the limit"

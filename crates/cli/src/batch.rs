@@ -40,8 +40,9 @@
 //!
 //! **The months run in PARALLEL, and the totals do not.** Each instrument-month
 //! is wholly independent — its own file, its own evaluator, its own ladder, its
-//! own identity — so the walk is `par_iter`, and wall-clock divides by the core
-//! count rather than the work being done one core at a time as it was.
+//! own identity — so each chunk's loading and sweeping is `par_iter`, and
+//! wall-clock divides by the core count rather than the work being done one core
+//! at a time as it was. Only the filing is sequential.
 //!
 //! The parallelism is over MONTHS and not over candidates, and that is forced
 //! rather than chosen: gate 22 pins `vocab indicators engine` to `vocab` alone,
@@ -50,14 +51,18 @@
 //! candidates via rayon" while **no crate in the workspace took that arrow** —
 //! the sweep was entirely single-threaded. This is the axis `cli` owns.
 //!
-//! §3 rule 5 survives by shape, and it takes THREE properties, not two. Indexed
+//! §3 rule 5 survives by shape, and it takes FOUR properties, not two. Indexed
 //! `collect` preserves order; [`Tally`] is folded sequentially over the collected
-//! rows rather than mutated from the workers; and each month is given an
+//! rows rather than mutated from the workers; each month is given an
 //! explicit [`BATCH_CEILING`] so its halt point is a stated constant rather than
-//! the machine free memory. The third was missing at first and it was the one
-//! that mattered: `engine::Ladder` halts on a real `try_reserve` probe, so N
-//! concurrent ladders would each halt at a point decided by what the others held
-//! — making depth, kept and completed scheduling-dependent. D-0234.
+//! the machine free memory; and no worker writes the ledger or begins an
+//! attempt -- [`sweep_chunk`] begins a chunk's attempts as one input-ordered
+//! group and files its months one at a time in input order (D-1701). The third
+//! was missing at first and it mattered: `engine::Ladder` halts on a real
+//! `try_reserve` probe, so N concurrent ladders would each halt at a point
+//! decided by what the others held — making depth, kept and completed
+//! scheduling-dependent. D-0234. The fourth was missing until D-1701: the
+//! ledger rows and attempt tokens followed thread completion (GAP13-13).
 
 use crate::stored;
 use core::fmt::Write as _;
@@ -326,23 +331,12 @@ fn sweep_under(
         offered: u64::try_from(wanted.len()).unwrap_or(u64::MAX),
         ..Tally::default()
     };
-    // THE 54,000 SWEEPS, IN PARALLEL, AND STILL BYTE-IDENTICAL.
+    // THE 54,000 SWEEPS, IN PARALLEL, AND STILL IN ONE ORDER.
     //
     // Each instrument-month is wholly independent: its own file, its own
-    // evaluator, its own ladder, its own run identity. This was a `for` loop on
-    // one core while `rayon` sat in the workspace manifest with no crate taking
-    // the arrow at all.
-    //
-    // WHAT IS SHARED IS WRITTEN SERIALLY, IN WALK ORDER. This comment used to say
-    // "nothing is shared and nothing is written", and both halves were false:
-    // every month allocated an evidence attempt token from the process-wide
-    // journal and appended a row to the one `runs.bin`, from inside the worker,
-    // so which month got which token and where its ledger row landed followed
-    // thread timing (audit-20261003 hunt-conc-1, KNOWN GAP13-13). Now each
-    // window of months runs in four phases: load and identify in parallel
-    // (reads only), begin every attempt serially in walk order, sweep in
-    // parallel (each month writes only its own attempt's depth file), then file
-    // the ledger row and finish the attempt serially in walk order. D-1564.
+    // evaluator, its own ladder, its own run identity. Nothing is shared, and
+    // the workers write nothing but each attempt's own depth rows. This was a `for` loop on one core while `rayon` sat in
+    // the workspace manifest with no crate taking the arrow at all.
     //
     // WHY THE PARALLELISM IS HERE AND NOT OVER CANDIDATES, which is where the
     // architecture document claimed it was: gate 22 pins `vocab indicators
@@ -351,13 +345,20 @@ fn sweep_under(
     // not expressible without a law change. This axis is `cli`'s own and needs
     // none.
     //
-    // DETERMINISM (§3 rule 5) IS HELD BY SHAPE, NOT BY LUCK. Two properties do
-    // it, and both are needed:
+    // DETERMINISM (§3 rule 5) IS HELD BY SHAPE, NOT BY LUCK. Three properties
+    // do it, and all are needed:
     //   * `map(..).collect()` on an INDEXED parallel iterator preserves order,
     //     so `rows` is the same sequence whatever order the threads finish in;
     //   * the `Tally` is folded SEQUENTIALLY over `rows` below rather than
-    //     mutated from the workers, so no counter depends on scheduling.
-    // A rerun therefore produces the same bytes, which is what makes reruns safe.
+    //     mutated from the workers, so no counter depends on scheduling;
+    //   * nothing durable is written from a worker: `sweep_chunk` begins each
+    //     chunk's attempts in one input-ordered group and files each month's
+    //     ledger row and terminal sequentially, in input order. Until D-1701
+    //     the workers appended both, so the ledger's row order and the attempt
+    //     tokens followed thread completion while this comment said "the same
+    //     bytes" (GAP13-13).
+    // A rerun therefore produces the same report and the same row order; the
+    // ledger's completion timestamps are wall-clock and differ, as they must.
     // SHARE CPU AS WELL AS MEMORY. `par_iter` can keep at most the Rayon pool's
     // workers active at once; declaring the full catalog length would divide a
     // fourteen-core machine by 54,000 even though only fourteen months can be
@@ -365,30 +366,12 @@ fn sweep_under(
     // preventing N outer sweeps from each spawning one worker per machine core.
     let concurrent = wanted.len().min(rayon::current_num_threads()).max(1);
     let _sharing = crate::SharedBy::these(concurrent);
-    // A WINDOW, SO THE LOADED MONTHS ARE BOUNDED. Phase one holds every month
-    // of its window in memory until phase three sweeps it; a window of a few
-    // months per worker bounds that to a constant multiple of the workers
-    // rather than to the whole catalog, at the cost of one barrier per window.
-    let window = concurrent.saturating_mul(WINDOW_PER_WORKER).max(1);
+    // IN CHUNKS OF THAT WIDTH, so the months whose attempts are begun together
+    // are the months that can run together, and memory stays what one month per
+    // worker holds. Each chunk files its months in input order (D-1701).
     let mut rows: Vec<Row> = Vec::with_capacity(wanted.len());
-    for months in wanted.chunks(window) {
-        let prepared: Vec<Result<Ready, Row>> = months
-            .par_iter()
-            .map(|held| prepare(root, held, min_hits, commit))
-            .collect();
-        let begun: Vec<Result<(Ready, crate::sweep_evidence::Attempt), Row>> = prepared
-            .into_iter()
-            .map(|ready| ready.and_then(|ready| begin(root, ready)))
-            .collect();
-        let swept: Vec<Result<Swept, Row>> = begun
-            .into_par_iter()
-            .map(|begun| begun.and_then(sweep))
-            .collect();
-        for (held, swept) in months.iter().zip(swept) {
-            rows.push(
-                swept.map_or_else(|refused| refused, |swept| file(root, held, swept, min_hits)),
-            );
-        }
+    for chunk in wanted.chunks(concurrent) {
+        rows.extend(sweep_chunk(root, chunk, min_hits, commit));
     }
     for row in &rows {
         tally.fold(row);
@@ -454,12 +437,11 @@ fn at_least_one_filed(walk: &catalog::Census, offered: u64, rows: &[Row]) -> Res
     Err(why.trim_end().to_owned())
 }
 
-/// Months loaded per worker before a window's attempts begin. D-1564.
-const WINDOW_PER_WORKER: usize = 4;
-
-/// A month whose inputs are loaded and whose identity is known. Nothing durable
-/// has been written for it yet.
-struct Ready {
+/// One instrument-month loaded and identified. No attempt is begun and nothing
+/// is written: [`sweep_chunk`] begins every attempt of a chunk afterwards, in
+/// input order.
+struct Prepared<'h> {
+    held: &'h Held,
     label: String,
     loaded: stored::Loaded,
     daily: stored::DailyContext,
@@ -469,31 +451,153 @@ struct Ready {
     id: runner::identity::RunId,
 }
 
-/// A month whose sweep ran under its begun attempt, not yet filed.
-struct Swept {
-    ready: Ready,
+/// One instrument-month swept under its begun attempt, not yet filed.
+struct Swept<'h> {
+    held: &'h Held,
+    /// The feed and the CANONICAL instrument the identity was built from
+    /// (`loaded.vendor`, `loaded.key.underlying`), so the ledger row names what
+    /// the identity names and not the word the catalogue listed (AC-whp-law-0,
+    /// D-1661).
+    feed: String,
+    underlying: String,
+    label: String,
+    id: runner::identity::RunId,
     attempt: crate::sweep_evidence::Attempt,
     outcome: runner::StreamedOutcome,
+    kept: usize,
+    depth: usize,
+    completed: bool,
 }
 
-/// One month, every phase in turn: what the parallel walk does in windows.
+impl Row {
+    /// A month that refused before its sweep ran.
+    const fn refused_before(label: String, identity: Option<String>, why: String) -> Self {
+        Self {
+            label,
+            bars: 0,
+            depth: 0,
+            kept: 0,
+            completed: false,
+            identity,
+            refused: Some(why),
+            ran: false,
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test seam: the symbol whose sweep is held back, so the months of a
+    /// chunk finish in a different order from their input order. D-1701.
+    static SLOW_SYMBOL: core::cell::RefCell<Option<String>> = const { core::cell::RefCell::new(None) };
+}
+
+/// Hold back every later sweep of `symbol` started by THIS thread's
+/// [`sweep_under`] call. Test-only; `None` clears it.
+#[cfg(test)]
+pub(crate) fn slow_symbol(symbol: Option<&str>) {
+    SLOW_SYMBOL.with(|slow| *slow.borrow_mut() = symbol.map(str::to_owned));
+}
+
+/// One chunk of at most the rayon pool's width, in four phases, so that
+/// everything durable happens in INPUT order whatever order the threads finish
+/// in (GAP13-13, D-1701).
+///
+/// 1. Load and identify each month, in parallel. Pure: nothing is written.
+/// 2. Begin every identified month's attempt with one `begin_many`, in input
+///    order, so attempt tokens follow input order.
+/// 3. Build the column and sweep each month under its attempt, in parallel.
+///    The only writes are each attempt's own depth rows, in its own file.
+/// 4. File each swept month -- ledger row, then the attempt's terminal -- one
+///    at a time, in input order.
+///
+/// Until this, `one` did all four inside the rayon worker, so the ledger rows,
+/// the attempt tokens and the journal's terminals were appended in thread
+/// completion order and `cli results` listed one store's identical rerun
+/// differently. A begin refusal refuses exactly the months it left without an
+/// attempt, by name; the months it began still sweep.
+///
+/// The cost of the order is a barrier per chunk: a chunk's slowest month holds
+/// the next chunk back. `docs/06-limits.md` states it.
+fn sweep_chunk(root: &std::path::Path, chunk: &[&Held], min_hits: u64, commit: &str) -> Vec<Row> {
+    #[cfg(test)]
+    let slow = SLOW_SYMBOL.with(|slow| slow.borrow().clone());
+    let prepared: Vec<Result<Prepared<'_>, Row>> = chunk
+        .par_iter()
+        .map(|held| prepare(root, held, min_hits, commit))
+        .collect();
+    let identities: Vec<[u8; 32]> = prepared
+        .iter()
+        .filter_map(|p| p.as_ref().ok().map(|p| p.id.bytes()))
+        .collect();
+    let mut begun = Vec::with_capacity(identities.len());
+    let refusal = crate::sweep_evidence::begin_many(
+        root,
+        &identities,
+        crate::sweep_evidence::Operation::Sweep,
+        &mut begun,
+    )
+    .err();
+    let mut attempts = begun.into_iter();
+    let staged: Vec<Result<(Prepared<'_>, crate::sweep_evidence::Attempt), Row>> = prepared
+        .into_iter()
+        .map(|p| {
+            let p = p?;
+            match attempts.next() {
+                Some(attempt) => Ok((p, attempt)),
+                None => Err(Row::refused_before(
+                    p.label,
+                    Some(p.id.hex()),
+                    refusal.clone().unwrap_or_else(|| {
+                        "sweep evidence admitted fewer attempts than months identified".to_owned()
+                    }),
+                )),
+            }
+        })
+        .collect();
+    let swept: Vec<Result<Swept<'_>, Row>> = staged
+        .into_par_iter()
+        .map(|staged| {
+            let (p, attempt) = staged?;
+            #[cfg(test)]
+            if slow.as_deref() == Some(p.held.symbol.as_str()) {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+            sweep_prepared(p, attempt)
+        })
+        .collect();
+    swept
+        .into_iter()
+        .map(|swept| match swept {
+            Ok(swept) => file_swept(root, swept, min_hits),
+            Err(row) => row,
+        })
+        .collect()
+}
+
+/// One instrument-month through all four phases of [`sweep_chunk`]: the
+/// tests' door to a single month. Production sweeps whole chunks.
 #[cfg(test)]
 fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row {
-    prepare(root, held, min_hits, commit)
-        .and_then(|ready| begin(root, ready))
-        .and_then(sweep)
-        .map_or_else(|refused| refused, |swept| file(root, held, swept, min_hits))
+    sweep_chunk(root, &[held], min_hits, commit)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| {
+            Row::refused_before(
+                String::new(),
+                None,
+                "a one-month chunk returned no row".to_owned(),
+            )
+        })
 }
 
-/// Phase one: load the month and derive its identity. Reads only.
-///
-/// Takes no `&mut Tally`. That parameter was what stopped the walk above being
-/// parallel, and removing it is what `Tally::fold` exists for.
-#[expect(
-    clippy::too_many_lines,
-    reason = "one stored batch row keeps its signal, daily, exact-minute, identity, and refusal receipts together"
-)]
-fn prepare(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Result<Ready, Row> {
+/// Loads and identifies one instrument-month, or refuses it by name.
+fn prepare<'h>(
+    root: &std::path::Path,
+    held: &'h Held,
+    min_hits: u64,
+    commit: &str,
+) -> Result<Prepared<'h>, Row> {
     // THE SYMBOL IS A DIRECTORY'S NAME, ESCAPED. The feed, rung and month are
     // parsed before a holding exists; the symbol directory is not, and it can
     // be called anything a filesystem admits. Printed raw, one named
@@ -521,16 +625,7 @@ fn prepare(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> 
     if let Ok(key) = stored::swept_index(&held.symbol)
         && let Some(why) = stored::misfiled(&key, &held.exchange, &held.segment, &held.symbol)
     {
-        return Err(Row {
-            label,
-            bars: 0,
-            depth: 0,
-            kept: 0,
-            completed: false,
-            identity: None,
-            refused: Some(why),
-            ran: false,
-        });
+        return Err(Row::refused_before(label, None, why));
     }
     let loaded = match stored::load(
         root,
@@ -542,16 +637,7 @@ fn prepare(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> 
     ) {
         Ok(loaded) => loaded,
         Err(why) => {
-            return Err(Row {
-                label,
-                bars: 0,
-                depth: 0,
-                kept: 0,
-                completed: false,
-                identity: None,
-                refused: Some(why),
-                ran: false,
-            });
+            return Err(Row::refused_before(label, None, why));
         }
     };
     let daily = match stored::load_daily_context(
@@ -566,16 +652,7 @@ fn prepare(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> 
     ) {
         Ok(daily) => daily,
         Err(why) => {
-            return Err(Row {
-                label,
-                bars: 0,
-                depth: 0,
-                kept: 0,
-                completed: false,
-                identity: None,
-                refused: Some(why),
-                ran: false,
-            });
+            return Err(Row::refused_before(label, None, why));
         }
     };
     let exact_minute = match stored::load_exact_minute_context(
@@ -590,46 +667,19 @@ fn prepare(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> 
     ) {
         Ok(context) => context,
         Err(why) => {
-            return Err(Row {
-                label,
-                bars: 0,
-                depth: 0,
-                kept: 0,
-                completed: false,
-                identity: None,
-                refused: Some(why),
-                ran: false,
-            });
+            return Err(Row::refused_before(label, None, why));
         }
     };
     let signal_length = match stored::rung_length_micros(held.timeframe.as_str()) {
         Ok(length) => length,
         Err(why) => {
-            return Err(Row {
-                label,
-                bars: 0,
-                depth: 0,
-                kept: 0,
-                completed: false,
-                identity: None,
-                refused: Some(why),
-                ran: false,
-            });
+            return Err(Row::refused_before(label, None, why));
         }
     };
     let digest = match crate::stored_anchored_digest(&loaded.bars, &exact_minute, &daily) {
         Ok(digest) => digest,
         Err(why) => {
-            return Err(Row {
-                label,
-                bars: 0,
-                depth: 0,
-                kept: 0,
-                completed: false,
-                identity: None,
-                refused: Some(why),
-                ran: false,
-            });
+            return Err(Row::refused_before(label, None, why));
         }
     };
     // A STATED CEILING, BECAUSE THE DEFAULT ONE IS THE MACHINE'S FREE MEMORY.
@@ -665,20 +715,22 @@ fn prepare(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> 
     //
     // Built from the ladder that ACTUALLY RAN rather than from `min_hits` as
     // typed — `Params::of` reads the ladder, so a zero the ladder raised to one
-    // is recorded as the one that ran. Same construction as `sweep_stored`, so
-    // sweeping a month here and sweeping it alone produce the same 64 hex
-    // characters, which is the only thing that makes the two reports comparable.
+    // is recorded as the one that ran.
+    //
+    // IT IS NOT `sweep-stored`'s IDENTITY FOR THE SAME MONTH, and this said it
+    // was: "the same 64 hex characters, which is the only thing that makes the
+    // two reports comparable" (W2-cli1-5, D-1701). It cannot be. This digest is
+    // `stored_anchored_digest` over the signal, exact-minute and daily streams,
+    // and this ladder carries `BATCH_CEILING`; `sweep-stored` binds the
+    // one-minute execution series into its digest (`stored_executed_digest`)
+    // and sweeps under the machine's derived ceiling and its minute-gap policy.
+    // Different inputs to the hash, so never equal: the two ledger rows cannot
+    // be joined by identity. What does compare across them is the feed, the
+    // instrument, the month and the combination (mask) each row names.
     let id = runner::identity::identity(&runner::identity::Run {
-        // `Default::default()` and not the named path, for the reason
-        // `crate::sweep_stored` gives at its own call site: spelling
-        // `ConditionMask` needs a `vocab` arrow that `CLAUDE.md` §5 does not
-        // draw for `cli`, and adding one to satisfy a lint would be the silent
-        // scope change §3 rule 2 forbids.
-        #[expect(
-            clippy::default_trait_access,
-            reason = "the named path would add a dependency arrow §5 does not draw"
-        )]
-        mask: Default::default(),
+        // The named path: `cli` depends on `vocab` directly (CLAUDE.md §5,
+        // D-0683), so no lint suppression is needed to spell it. D-1706.
+        mask: vocab::ConditionMask::default(),
         direction: runner::identity::Direction::Undirected,
         instrument: &loaded.key,
         timeframe: loaded.timeframe,
@@ -690,8 +742,8 @@ fn prepare(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> 
         // two feeds' rows for one instrument-month from carrying one identity.
         feed: loaded.vendor.as_str(),
     });
-
-    Ok(Ready {
+    Ok(Prepared {
+        held,
         label,
         loaded,
         daily,
@@ -702,72 +754,40 @@ fn prepare(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> 
     })
 }
 
-/// Phase two, serial and in walk order: the durable start that precedes the
-/// sweep, so attempt tokens are allocated in the order months are offered.
-fn begin(
-    root: &std::path::Path,
-    ready: Ready,
-) -> Result<(Ready, crate::sweep_evidence::Attempt), Row> {
-    match crate::sweep_evidence::begin(
-        root,
-        ready.id.bytes(),
-        crate::sweep_evidence::Operation::Sweep,
-    ) {
-        Ok(attempt) => Ok((ready, attempt)),
-        Err(why) => Err(unswept(&ready, why)),
-    }
-}
-
-/// A row for a month whose identity is known and whose sweep never ran.
-fn unswept(ready: &Ready, why: String) -> Row {
-    Row {
-        label: ready.label.clone(),
-        bars: 0,
-        depth: 0,
-        kept: 0,
-        completed: false,
-        identity: Some(ready.id.hex()),
-        refused: Some(why),
-        ran: false,
-    }
-}
-
-/// Phase three, in parallel: the sweep. Its only write is this month's own
-/// attempt's depth rows.
-fn sweep((ready, attempt): (Ready, crate::sweep_evidence::Attempt)) -> Result<Swept, Row> {
-    let availability = crate::stored::vwap_availability(&ready.loaded.key);
-    let column = crate::stored_anchored_column(
-        &ready.loaded.bars,
-        &ready.daily,
-        &ready.exact_minute,
-        ready.signal_length,
+/// Builds one month's column and sweeps it under its begun attempt.
+fn sweep_prepared(
+    prepared: Prepared<'_>,
+    attempt: crate::sweep_evidence::Attempt,
+) -> Result<Swept<'_>, Row> {
+    let Prepared {
+        held,
+        label,
+        loaded,
+        daily,
+        exact_minute,
+        signal_length,
+        ladder,
+        id,
+    } = prepared;
+    let availability = crate::stored::vwap_availability(&loaded.key);
+    let column = match crate::stored_anchored_column(
+        &loaded.bars,
+        &daily,
+        &exact_minute,
+        signal_length,
         availability,
-    )
-    .map_err(|why| unswept(&ready, why))?;
-    let outcome = Sweeper::new(ready.ladder).run_prepared_streamed_reporting(
+    ) {
+        Ok(column) => column,
+        Err(why) => {
+            return Err(Row::refused_before(label, Some(id.hex()), why));
+        }
+    };
+    let outcome = Sweeper::new(ladder).run_prepared_streamed_reporting(
         &column,
         &mut |level, admitted, pairs| {
             let _ = attempt.level(crate::sweep_evidence::DepthRow::of(level, admitted, pairs));
         },
     );
-    Ok(Swept {
-        ready,
-        attempt,
-        outcome,
-    })
-}
-
-/// Phase four, serial and in walk order: the event, the ledger row and the
-/// attempt's terminal record.
-fn file(root: &std::path::Path, held: &Held, swept: Swept, min_hits: u64) -> Row {
-    let Swept {
-        ready,
-        attempt,
-        outcome,
-    } = swept;
-    let Ready {
-        label, loaded, id, ..
-    } = ready;
     let kept = usize::try_from(
         outcome
             .sweep
@@ -795,15 +815,43 @@ fn file(root: &std::path::Path, held: &Held, swept: Swept, min_hits: u64) -> Row
             .with("kept", u64::try_from(kept).unwrap_or(u64::MAX))
             .with("completed", completed),
     );
+    Ok(Swept {
+        held,
+        feed: loaded.vendor.as_str().to_owned(),
+        underlying: loaded.key.underlying.as_str().to_owned(),
+        label,
+        id,
+        attempt,
+        outcome,
+        kept,
+        depth,
+        completed,
+    })
+}
 
-    // AND THE LEDGER, WHICH IS THE HALF THE EVENT ABOVE COULD NOT BE.
+/// Files one swept month -- its ledger row, then its attempt's terminal -- and
+/// returns its row. Called in input order only.
+fn file_swept(root: &std::path::Path, swept: Swept<'_>, min_hits: u64) -> Row {
+    let Swept {
+        held,
+        feed,
+        underlying,
+        label,
+        id,
+        attempt,
+        outcome,
+        kept,
+        depth,
+        completed,
+    } = swept;
+    // AND THE LEDGER, WHICH IS THE HALF THE SWEEP'S EVENT COULD NOT BE.
     //
-    // The comment on `id` says this identity is built "same construction as
-    // `sweep_stored`, so sweeping a month here and sweeping it alone produce the
-    // same 64 hex characters, which is the only thing that makes the two
-    // reports comparable." They were comparable in the REPORT and nowhere else:
-    // the row was never appended, so nothing could put the two side by side,
-    // which is what comparable is for.
+    // This month's row was never appended until this was written, so nothing
+    // could put a batch month beside the same month swept by `sweep-stored`.
+    // It can now -- by feed, instrument, month and combination, NOT by
+    // identity: the two identities differ by construction (the digest and the
+    // ceiling, see `prepare`), so a join on the 64 hex characters finds nothing
+    // (W2-cli1-5, D-1701).
     //
     // THIS NEEDED THE STREAMED WALK FIRST, and that is why it is landing now
     // rather than with the other three verbs. `Sweep` carries no count of
@@ -817,8 +865,8 @@ fn file(root: &std::path::Path, held: &Held, swept: Swept, min_hits: u64) -> Row
         crate::record_swept_run(
             crate::Recording {
                 root,
-                feed: loaded.vendor.as_str(),
-                underlying: held.symbol.as_str(),
+                feed: feed.as_str(),
+                underlying: underlying.as_str(),
                 timeframe: held.timeframe.as_str(),
                 from: (held.month.year(), held.month.month()),
                 to: (held.month.year(), held.month.month()),

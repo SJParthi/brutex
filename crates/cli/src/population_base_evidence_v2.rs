@@ -383,17 +383,10 @@ struct TradeAggregatesV2 {
     gross_win: i64,
     gross_loss: i64,
     best_trade: i64,
-    /// The smallest win that EXCEEDED its own execution bracket — D-0595.
-    ///
-    /// # The counter that is deliberately NOT beside it
-    ///
-    /// Zero now carries two meanings — nothing won, or nothing won by more than
-    /// its own pricing uncertainty — and a `scratch_wins` field would separate
-    /// them. It is not added: this struct has `encode_aggregates` and
-    /// `decode_aggregates` at a FIXED width, so a new field is a new file
-    /// version at its own stride under `CLAUDE.md` §4, and §3 rule 8 forbids
-    /// mutating a format in place. The ambiguity is recorded here rather than
-    /// paid for with a format version nothing else needs yet.
+    /// The smallest pessimistic (worst-reading) P&L over the trades with
+    /// `worst > 0` — D-0602, which reverses D-0595's bracket rule. Zero means
+    /// only that no trade won. This doc described the reversed rule until
+    /// Z1-slice23-F2 (D-1763).
     min_win: i64,
     worst_trade: i64,
     max_drawdown: i64,
@@ -633,8 +626,10 @@ impl BaseEvidenceRecordV2 {
             average_win_paisa: gross_win
                 .checked_div(a.wins)
                 .map_or(ObservedU64V1::Unmeasured, ObservedU64V1::Measured),
-            average_loss_paisa: gross_loss
-                .checked_div(a.losses)
+            average_loss_paisa: (a.losses != 0)
+                // Rounded UP: this field is gated by a maximum, and a floored mean
+                // passed a 150 cap at a true 150.5 (p3floor-1, D-1769).
+                .then(|| gross_loss.div_ceil(a.losses))
                 .map_or(ObservedU64V1::Unmeasured, ObservedU64V1::Measured),
             profit_factor_ppm: ratio_observed(gross_win, gross_loss, "profit factor")?,
             consecutive_losing_streak: measured_when(
@@ -1082,41 +1077,9 @@ fn fold_trade_rows(
                 .ok_or(BaseEvidenceRefusalV2::Arithmetic("winning trade count"))?;
             gross_win = checked_i64_add(gross_win, row.worst, "gross win")?;
             best_trade = best_trade.max(row.worst);
-            // A SCRATCH IS NOT THE SMALLEST WIN, AND THE THRESHOLD IS NOT A
-            // NUMBER -- D-0595.
-            //
-            // The operator's rule is `min(win) >= 3x max(loss)`, and `min_win`
-            // took the smallest STRICTLY POSITIVE trade. One trade that gained
-            // a single paisa therefore set it to 1 and collapsed the ratio to
-            // nearly zero, however large the real winners were. That was the
-            // rule working exactly as written and it was still the wrong answer
-            // to the question the rule asks.
-            //
-            // The repair is not a constant. `row.best` and `row.worst` are ONE
-            // trade priced under the best and the worst reading of both legs,
-            // so their difference is that trade's own execution uncertainty. A
-            // gain no larger than that bracket is a win only under one of two
-            // equally admissible readings -- flip the intra-bar ordering and it
-            // is a loss. It cannot be the evidence a 3:1 rule rests on.
-            //
-            // So a win counts toward `min_win` when it EXCEEDS its own bracket,
-            // and is a scratch otherwise. Self-scaling across instruments and
-            // rungs, measured rather than declared, and with no parameter that
-            // can be set wrongly -- which is §6's argument, honoured by having
-            // nothing to set.
-            //
-            // NOT the direction `Rules::fills_hold` takes. That rule demands
-            // `optimistic >= 2 * pessimistic` -- that the uncertainty be LARGE
-            // beside the profit. This demands the profit be large beside the
-            // uncertainty. They are opposite tests and only one of them is
-            // about evidence.
-            //
-            // `wins`, `gross_win`, `best_trade` and every streak are untouched:
-            // a scratch really did win, and `TradeAggregatesV2::validate`
-            // requires `losses == trades - wins`. Only the question "what is
-            // the smallest win this rule may rest on" changes.
-            // `min(worst)` over the wins -- the bracket test this replaces was
-            // backwards and inflated the 3:1 rule. See `grid::tally_trade`. D-0602.
+            // `min(worst)` over the wins. D-0595's bracket test was backwards
+            // and inflated the 3:1 rule; D-0602 reversed it. See
+            // `grid::tally_trade`.
             if row.worst > 0 && (min_win == 0 || row.worst < min_win) {
                 min_win = row.worst;
             }
@@ -1647,7 +1610,7 @@ pub(crate) fn measured_rate(
 }
 
 /// A rate a policy gates from above, projected by ceiling (D-1644).
-fn measured_max_rate(
+pub(crate) fn measured_max_rate(
     part: u64,
     total: u64,
     name: &'static str,
@@ -1927,6 +1890,57 @@ mod tests {
             CompletenessV1::Unmeasured
         );
         AdmissionEvidenceV1::new(values).expect("canonical base projection");
+    }
+
+    #[test]
+    fn max_gated_rates_round_up_and_min_gated_rates_keep_their_floor() {
+        // p2bool-1, D-1990: 400,001 of 2,000,000 is a 200,000.5 ppm share, and
+        // 1 of 3 is 333,333.33 ppm. A floor put each on a round cap and passed.
+        let mut r = record();
+        let a = &mut r.draft.aggregates;
+        a.trades = 3;
+        a.wins = 2;
+        a.losses = 1;
+        a.ambiguous_bars = 1;
+        a.gapped = 1;
+        a.max_session_trades = 1;
+        a.best_trade = 400_001;
+        a.gross_win = 2_000_000;
+        let values = r.admission_values().expect("finite projection");
+        assert_eq!(
+            values.largest_trade_profit_share_ppm,
+            ObservedU64V1::Measured(200_001)
+        );
+        assert_eq!(
+            values.ambiguous_fill_rate_ppm,
+            ObservedU64V1::Measured(333_334)
+        );
+        assert_eq!(
+            values.gap_affected_rate_ppm,
+            ObservedU64V1::Measured(333_334)
+        );
+        assert_eq!(
+            values.session_concentration_ppm,
+            ObservedU64V1::Measured(333_334)
+        );
+        // Minimum-gated, and the losing rate the runner reconciles as a floor.
+        assert_eq!(values.win_rate_ppm, ObservedU64V1::Measured(666_666));
+        assert_eq!(
+            values.losing_trade_rate_ppm,
+            ObservedU64V1::Measured(333_333)
+        );
+        assert_eq!(
+            measured_max_rate(1, 0, "none"),
+            Ok(ObservedU64V1::Unmeasured)
+        );
+        assert!(matches!(
+            max_rate_ppm(1, 0, "zero"),
+            Err(BaseEvidenceRefusalV2::Arithmetic("zero"))
+        ));
+        assert!(matches!(
+            max_rate_ppm(u64::MAX, 1, "too wide"),
+            Err(BaseEvidenceRefusalV2::Arithmetic("too wide"))
+        ));
     }
 
     #[test]

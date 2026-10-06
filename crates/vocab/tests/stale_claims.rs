@@ -299,6 +299,31 @@ fn every_test_a_corrected_row_cites_exists() {
     }
 }
 
+/// AHB-01 (h-eng-1, D-1860). `indicators::column` described alignment as "the
+/// first execution bar stamped at or after" a signal's close and cited an
+/// `align` test asserting `[Some(10), Some(10)]`. Since D-0401 `align` maps
+/// only to the bar at EXACTLY the close instant, and no such test exists.
+#[test]
+fn the_column_docs_state_the_exact_close_alignment_rule() {
+    let align = read("crates/runner/src/align.rs");
+    assert!(
+        align.contains("c.ts_micros == deadline"),
+        "align no longer maps to the exact close instant: AHB-01 must be re-derived"
+    );
+    let column = flat(&read("crates/indicators/src/column.rs"));
+    for stale in [
+        "first execution bar stamped at or after",
+        "execution bar stamped at or after each signal's close",
+        "Some(10), Some(10)",
+        "A hole of one bar is enough to collide",
+        "A hole in the execution series: rows 1",
+    ] {
+        assert!(!column.contains(stale), "column.rs says again: {stale}");
+    }
+    assert!(column.contains("returns the execution bar stamped EXACTLY at the"));
+    assert!(column.contains("execution hole therefore DROPS a signal"));
+}
+
 /// UC-6, AC-gates-o1-4 (its `grid_entered_event` half too, D-1486), AC-whp-tb-6, AC-whp-tb-7, ET-o1-proof-coverage-8,
 /// ET-strategies-trades-ranking-costs-9, R9-csr-o1-0: the false sentences, as
 /// they were written, do not come back.
@@ -377,5 +402,35 @@ fn the_corrected_sentences_do_not_return() {
     assert!(
         initialise.contains("crate::format::FLAG_CHECKSUMS,\n    );"),
         "store::file::initialise no longer passes FLAG_CHECKSUMS: S-06 is stale"
+    );
+}
+
+/// R9-csr-cx-4: the weekday bits' comments said NSE does not trade on a
+/// weekend, beside a paragraph and a charter (`docs/00-charter.md` §3) that
+/// record six weekend sessions and 1,710 bars. The behaviour (a weekend bar sets
+/// no weekday bit) is right and stays; the sentences that called the exchange
+/// weekday-only are refused here so they cannot return. D-1667.
+#[test]
+fn no_weekday_comment_says_nse_never_trades_on_a_weekend() {
+    for file in ["crates/indicators/src/lib.rs", "crates/vocab/src/table.rs"] {
+        let text = flat(&read(file));
+        for stale in [
+            "NSE trades Monday to Friday",
+            "NSE does not trade them",
+            "NSE DOES NOT TRADE THESE",
+            "an exchange that trades Monday to Friday",
+            "A weekend bar in an equity series is a store defect",
+        ] {
+            assert!(!text.contains(stale), "{file} still says {stale:?}");
+        }
+    }
+    let lib = flat(&read("crates/indicators/src/lib.rs"));
+    assert!(
+        lib.contains("NSE ordinarily trades Monday to Friday"),
+        "the corrected statement is the one weekday_bit carries"
+    );
+    assert!(
+        lib.contains("1,710 real trading bars"),
+        "the charter's count stays"
     );
 }

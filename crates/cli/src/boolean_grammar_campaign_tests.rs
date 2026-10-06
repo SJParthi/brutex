@@ -781,7 +781,9 @@ fn absent_or_insufficient_physical_admission_refuses_before_journal_creation() {
             "zerodha", "NIFTY", "2025", "5", "2025", "5", "30", "5", "50", "2", "100", &root,
         ];
         let mut out = String::new();
-        assert_eq!(command(&args, &mut out), crate::MISUSED);
+        // The arguments are well formed; what is missing is the operator's
+        // configuration, so the work refuses: `FAILED` (P8-03, D-2722).
+        assert_eq!(command(&args, &mut out), crate::FAILED);
         let expected = match mode.as_str() {
             "missing" => {
                 "strict input configuration is unavailable; missing [BRUTEX_CHECKSUM_RECEIPTS, BRUTEX_CHECKSUM_MAX_BYTES, BRUTEX_CHECKSUM_MAX_RECORDS]"

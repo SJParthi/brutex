@@ -63,7 +63,7 @@ use crate::population_statistics_v3::PopulationStatisticsV3Bounds;
 use crate::population_v6::PopulationV6Bounds;
 use crate::step3_orchestrator::{
     StoredCandidatePreAdmissionRequestV1, StoredPopulationV6RouteV1,
-    commit_stored_population_v6_route, commit_strict_candidate_pre_admission_authority_v1,
+    commit_stored_population_v6_route, commit_strict_candidate_pre_admission_authority_sized_v1,
 };
 
 /// The two charter families, in the order every V6 successor requires them.
@@ -242,7 +242,7 @@ impl RungRoots {
 /// reuses rather than rewrites them.
 pub(crate) fn ledger_v6(request: &LedgerAllRequest<'_>) -> String {
     let mut out = String::new();
-    out.push_str(crate::STORED_PROVENANCE);
+    out.push_str(crate::STORED_POOLED_PROVENANCE);
     let _ = writeln!(
         out,
         "\nLEDGER-V6  {} {:04}-{:02}..{:04}-{:02}  support {} ppm  stop ceiling {} points\n\
@@ -279,7 +279,24 @@ pub(crate) fn ledger_v6(request: &LedgerAllRequest<'_>) -> String {
     out
 }
 
+/// Hands the sizing load to the one family that may consume it.
+///
+/// Only [`SIZING_UNDERLYING`](crate::step3_orchestrator::strict::SIZING_UNDERLYING)
+/// receives it, and only once: every other family, and a second request for
+/// the sizing family, gets `None` and loads its own span (D-1683).
+fn preloaded_for<T>(underlying: &str, sized: &mut Option<T>) -> Option<T> {
+    if underlying == crate::step3_orchestrator::strict::SIZING_UNDERLYING {
+        sized.take()
+    } else {
+        None
+    }
+}
+
 /// The route itself, lifted out so [`ledger_v6`] owns only the report.
+///
+/// Per rung: one strict NIFTY load sizes the support threshold and is handed
+/// to the NIFTY family commit, and BANKNIFTY loads its own, so eight rungs
+/// make sixteen strict loads, not twenty-four (D-1683).
 ///
 /// # Errors
 ///
@@ -306,13 +323,18 @@ fn run_route(
 
     let mut committed = Vec::with_capacity(8);
     for (index, rung) in LEDGER_RUNGS.into_iter().enumerate() {
-        let (sweeper, sizing_inputs) = crate::step3_orchestrator::strict::size_sweeper(
+        let (sweeper, sizing_inputs, sized) = crate::step3_orchestrator::strict::size_sweeper(
             &source_root,
             vendor,
             request,
             rung,
             bounds,
             &strict,
+            &crate::candidate_universe::CandidateEvaluationInputsV1 {
+                widths,
+                availability: Availability::Absent,
+                thresholds: Thresholds::CLASSICAL,
+            },
         )?;
         crate::note(&rung_started_event(rung, index));
         let roots = RungRoots::create(request.root, rung).inspect_err(|why| {
@@ -322,10 +344,15 @@ fn run_route(
         // The shared Candidate kernel keeps ordinary pricing semantics.
         // Strict identities additionally bind exact receipts and physical
         // limits; only repeated strict requests reuse the same authority.
+        // The sizing census already loaded NIFTY's span for this rung; the
+        // NIFTY commit consumes that context instead of loading it again
+        // (W2-cli7-3, D-1683).
+        let mut sized = Some(sized);
         let mut families = Vec::with_capacity(ROUTE_FAMILIES.len());
         for underlying in ROUTE_FAMILIES {
             sizing_inputs.require_current()?;
-            let committed_family = commit_strict_candidate_pre_admission_authority_v1(
+            let preloaded = preloaded_for(underlying, &mut sized);
+            let committed_family = commit_strict_candidate_pre_admission_authority_sized_v1(
                 StoredCandidatePreAdmissionRequestV1 {
                     root: source_root.as_path(),
                     vendor,
@@ -346,6 +373,7 @@ fn run_route(
                     bounds,
                 },
                 &strict,
+                preloaded,
             )
             .map_err(|why| {
                 let refusal = format!("v6 {rung} {underlying} refused: {why}");
@@ -631,7 +659,7 @@ pub(crate) fn ledger_v6_replay(
     oos_from: (u16, u8),
     oos_to: (u16, u8),
 ) -> String {
-    let mut out = String::from(crate::STORED_PROVENANCE);
+    let mut out = String::from(crate::STORED_POOLED_PROVENANCE);
     let _ = writeln!(
         out,
         "GLOBAL REPLAY V4 — actual Selection V6 prefixes, OOS {}-{:02} through {}-{:02}",
@@ -665,6 +693,18 @@ pub(crate) fn ledger_v6_replay(
     out
 }
 
+/// Runs the complete eight-rung [`run_route`] and then Global Replay V4.
+///
+/// # Cost
+///
+/// Not O(1) and not proportional to new work: whether a committed authority
+/// can be reused depends on its data digest, which needs the strict load, so
+/// every invocation (a rerun over committed authorities included) loads all
+/// eight rungs of both families and re-runs Search V4 before reuse is
+/// decided. O(full Step-4 route) per call, growing with span bars times
+/// candidates; `docs/06-limits.md` states it (W2-cli7-2, D-1683). Invariant
+/// LBE-11 pins the statement; the route's per-rung load count is
+/// `cli::step3_orchestrator::tests::strict_v6_fixture_tests::strict_v6_the_nifty_commit_consumes_the_sizing_load_once`.
 fn replay_route(
     request: &LedgerAllRequest<'_>,
     from: (u16, u8),
@@ -1038,6 +1078,27 @@ mod tests {
     #[test]
     fn missing_policy_refuses_before_ledger_v6_replay_market_sizing() {
         assert_missing_policy_precedes_market_sizing(true);
+    }
+
+    /// The sizing load reaches NIFTY once and no other family at all.
+    #[test]
+    fn the_sizing_load_is_handed_to_nifty_once_and_to_no_other_family() {
+        let mut sized = Some(7_u8);
+        assert_eq!(super::preloaded_for("BANKNIFTY", &mut sized), None);
+        assert_eq!(
+            sized,
+            Some(7),
+            "a refused hand-off must not consume the load"
+        );
+        assert_eq!(super::preloaded_for("NIFTY", &mut sized), Some(7));
+        assert_eq!(sized, None);
+        assert_eq!(super::preloaded_for("NIFTY", &mut sized), None);
+        let mut route = Some(9_u8);
+        let handed: Vec<_> = ROUTE_FAMILIES
+            .iter()
+            .map(|family| super::preloaded_for(family, &mut route))
+            .collect();
+        assert_eq!(handed, [Some(9), None]);
     }
 
     /// The family order is the one every V6 successor demands.

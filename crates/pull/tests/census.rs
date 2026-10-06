@@ -710,15 +710,15 @@ fn a_census_that_cannot_be_read_is_not_treated_as_a_first_ingest() {
     let archive = scratch.archive(&[("NIFTY", body())]);
     let store = scratch.store();
     let path = manifest_path(&store, VENDOR);
-    // A directory where the census file goes: it has metadata, and reading it
-    // is refused by the host.
+    // A directory where the census file goes: it opens, and its handle is
+    // not a regular file, so it is refused unread (CE-64, D-2684).
     fs::create_dir_all(&path).expect("a directory at the census path");
 
     let done = run(&archive, &store, &request());
     assert_eq!(done.bars_stored, 0);
     assert_eq!(done.failures.len(), 1);
     assert!(
-        done.failures[0].why.contains("could not be read"),
+        done.failures[0].why.contains("is not a regular file"),
         "the host's refusal is carried — {}",
         done.failures[0].why
     );

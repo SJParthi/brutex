@@ -53,6 +53,36 @@
 use crate::census;
 use crate::server::{Loaded, Site, percent_decode};
 
+/// How many legs one press may carry: one per feed, per rung the ingest page
+/// offers (`1s`, `1min`, `1day`), per route (`/pull/spot`, `/pull/fno`).
+///
+/// A form with more is refused by name ([`Refusal::TooManyLegs`]) rather than
+/// read, so [`MAX_RUN_FORM_BYTES`] has a count to be sized from (P3-01-01,
+/// D-1769).
+pub const MAX_RUN_LEGS: usize = pull::vendor::FEED_COUNT * 3 * 2;
+
+/// The worst size of one `leg=` field: a member form the inner route admits
+/// ([`crate::ingest::MAX_MEMBER_FORM_BYTES`]) plus an ordinary form's worth of
+/// envelope, percent-encoded twice more by the page. Encoding an
+/// already-encoded byte turns `%` into `%25`, so each pass costs at most a
+/// further two bytes per original escape: five bytes per form byte in all.
+pub const MAX_LEG_FIELD_BYTES: usize =
+    "leg=".len() + 5 * (crate::ingest::MAX_MEMBER_FORM_BYTES + crate::server::MAX_FORM_BYTES);
+
+/// The body `/pull/run` and `/pull/recovery` read.
+///
+/// Both carry legs, and each leg repeats its member list twice-encoded, so the
+/// shared 8 KiB bound answered a framework 413 in plain text at about 340
+/// ticked members on one leg and about 55 across six; the page then reported
+/// a `SyntaxError` instead of a reason (P3-01-01, D-1769). Sized so every run
+/// [`legs_from`] would accept is read, and one leg too many reaches
+/// [`Refusal::TooManyLegs`]. 27,347,836 bytes at most — about 27.3 MB, or
+/// 26.1 MiB — held in memory once; see `docs/06-limits.md`. (This said "about
+/// 26.5 MB", which is neither unit; tests-docs-security-pass17 P17-19,
+/// D-1967, and `the_run_form_bound_is_the_figure_the_limits_document_states`.)
+pub const MAX_RUN_FORM_BYTES: usize =
+    crate::server::MAX_FORM_BYTES + (MAX_RUN_LEGS + 1) * MAX_LEG_FIELD_BYTES;
+
 /// How many passes one press may make.
 ///
 /// A window can be larger than one sitting at a legal rate, so the run keeps
@@ -201,10 +231,11 @@ pub struct Progress {
     pub passes: u32,
     /// How many subsequent passes actually retried at least one failed feed.
     pub retries: u32,
-    /// The store's row count when the run started.
-    pub rows_at_start: u64,
-    /// The store's row count as of the last pass.
-    pub rows_now: u64,
+    /// The store's row count when the run started; `None` when the census
+    /// total does not fit a `u64` (see [`rows_now`]).
+    pub rows_at_start: Option<u64>,
+    /// The store's row count as of the last pass; `None` as above.
+    pub rows_now: Option<u64>,
     /// One per vendor, in the order the feeds were ticked.
     pub feeds: Vec<FeedReport>,
     /// The summary, once there is one. `None` means still running, and it is
@@ -227,7 +258,25 @@ pub struct Progress {
     /// the route renders for an empty slot. So the distinction lives here
     /// rather than in a second constructor nobody is obliged to call.
     pub started: bool,
+    /// Which claim this document belongs to. `0` is the never-claimed
+    /// `Default`; every [`Progress::claimed`] takes the next number from one
+    /// process-wide counter, so two claims never share one.
+    ///
+    /// # Why a run carries a number and not just the slot
+    ///
+    /// The slot outlives the run that filled it. A run publishes its summary,
+    /// which frees the slot, and only THEN drops its [`Finisher`] and its
+    /// last ticker poll. A second press admitted in that gap installed a fresh
+    /// document, and the first run's `Finisher` saw that document's
+    /// `finished: None` and wrote "ended abnormally" onto a live run, which
+    /// freed the slot for a third press over the same store. Every edit a run
+    /// makes is now addressed to its own number and lands nowhere once the slot
+    /// holds another. Not rendered: the page has no use for it. D-2760.
+    pub generation: u64,
 }
+
+/// The last generation handed out. Starts at zero, which no claim receives.
+static GENERATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl Progress {
     /// A document for a run that has just been claimed and has not yet done
@@ -239,6 +288,9 @@ impl Progress {
     pub fn claimed() -> Self {
         Self {
             started: true,
+            generation: GENERATIONS
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                .wrapping_add(1),
             ..Self::default()
         }
     }
@@ -265,9 +317,17 @@ impl Progress {
         out.push_str(",\"retries\":");
         out.push_str(&self.retries.to_string());
         out.push_str(",\"rowsAtStart\":");
-        out.push_str(&self.rows_at_start.to_string());
+        out.push_str(
+            &self
+                .rows_at_start
+                .map_or_else(|| "null".to_owned(), |rows| rows.to_string()),
+        );
         out.push_str(",\"rowsNow\":");
-        out.push_str(&self.rows_now.to_string());
+        out.push_str(
+            &self
+                .rows_now
+                .map_or_else(|| "null".to_owned(), |rows| rows.to_string()),
+        );
         out.push_str(",\"stopping\":");
         out.push_str(if self.stopping { "true" } else { "false" });
         out.push_str(",\"finished\":");
@@ -363,6 +423,18 @@ pub enum Refusal {
     /// A run is already in flight. Named rather than queued: two runs over one
     /// store would interleave two vendors' writes into one month file.
     AlreadyRunning,
+    /// A leg's envelope names a vendor or rung its own payload does not ask
+    /// for. The chain, the ladder and the failure gating all read the
+    /// envelope while the route runs the payload, so the two must be one
+    /// request (P1-02-01, D-1765).
+    Disagrees {
+        /// The leg, decoded once, as it arrived.
+        leg: String,
+        /// Which half disagreed, and with what.
+        why: String,
+    },
+    /// The form carried more legs than one press may ([`MAX_RUN_LEGS`]).
+    TooManyLegs(usize),
 }
 
 impl Refusal {
@@ -383,6 +455,17 @@ impl Refusal {
                  interleave two vendors' writes into a single month file. Watch \
                  /pull/run.json, or stop it first."
                 .to_owned(),
+            Self::Disagrees { leg, why } => format!(
+                "A leg's envelope disagrees with its own payload and NOTHING was \
+                 started -- the run would be filed, ordered and gated under the \
+                 envelope while the payload decides what is fetched. {why}. The \
+                 leg was: {leg}"
+            ),
+            Self::TooManyLegs(count) => format!(
+                "The run carried {count} legs and NOTHING was started. One press \
+                 carries at most {MAX_RUN_LEGS}: one per feed, per rung, per \
+                 route. Split the selection into two presses."
+            ),
         }
     }
 }
@@ -421,6 +504,13 @@ pub fn legs_from(body: &str) -> Result<Vec<Leg>, Refusal> {
         let Some(("leg", raw)) = field.split_once('=') else {
             continue;
         };
+        if legs.len() == MAX_RUN_LEGS {
+            let count = body
+                .split('&')
+                .filter(|field| field.starts_with("leg="))
+                .count();
+            return Err(Refusal::TooManyLegs(count));
+        }
         let decoded = percent_decode(raw);
         let mut parts = decoded.splitn(5, '|');
         let (Some(route), Some(vendor), Some(dir), Some(label), Some(payload)) = (
@@ -448,12 +538,25 @@ pub fn legs_from(body: &str) -> Result<Vec<Leg>, Refusal> {
         // A LEG'S PAYLOAD IS A FORM TOO, and it reaches `pull_spot` and
         // `pull_fno` without passing the `one_value_per_form_field` middleware, so a repeated
         // single-value field inside it is refused here, before any leg runs
-        // (h-api-2, D-1512).
+        // (h-api-2, D-1512), with the middleware's own bound on distinct keys
+        // (P5-05, D-2659).
         let body = percent_decode(payload);
-        if let Some(key) = crate::server::repeated_form_key(&body) {
-            return Err(Refusal::Malformed(format!(
-                "{decoded} (its form names {key:?} more than once)"
-            )));
+        match crate::server::form_key_verdict(&body) {
+            Some(crate::server::FormKeys::Repeated(key)) => {
+                return Err(Refusal::Malformed(format!(
+                    "{decoded} (its form names {key:?} more than once)"
+                )));
+            }
+            Some(crate::server::FormKeys::TooMany) => {
+                return Err(Refusal::Malformed(format!(
+                    "{decoded} (its form names more than {} distinct fields)",
+                    crate::server::MAX_DISTINCT_FORM_KEYS
+                )));
+            }
+            None => {}
+        }
+        if let Some(why) = envelope_disagreement(route, vendor, dir, &body) {
+            return Err(Refusal::Disagrees { leg: decoded, why });
         }
         legs.push(Leg {
             route,
@@ -467,6 +570,43 @@ pub fn legs_from(body: &str) -> Result<Vec<Leg>, Refusal> {
         return Err(Refusal::NothingAsked);
     }
     Ok(legs)
+}
+
+/// Where a leg's envelope and its payload name different requests, or `None`
+/// when they are one.
+///
+/// The payload is read the way the route that runs it reads it: `vendor` through
+/// [`crate::ingest::parse_feed`] (absent means Dhan), and for spot
+/// `granularity` through [`crate::ingest::parse_granularity`] (absent means one
+/// minute), for derivatives `series` through [`crate::ingest::Series`]. That is
+/// the check `recovery::plan` already made on its own legs; `/pull/run`
+/// trusted the label (P1-02-01, D-1765).
+fn envelope_disagreement(route: Route, vendor: &str, dir: &str, body: &str) -> Option<String> {
+    let asked = crate::server::param(body, "vendor");
+    let feed = crate::ingest::parse_feed(&asked).map(pull::vendor::Feed::wire);
+    if feed != Some(vendor) {
+        return Some(format!(
+            "the envelope names vendor {vendor:?} and the payload asks for {asked:?}"
+        ));
+    }
+    let (field, payload_dir) = match route {
+        Route::Spot => {
+            let raw = crate::server::param(body, "granularity");
+            let rung = crate::ingest::parse_granularity(&raw).map(pull::vendor::Granularity::dir);
+            ("granularity", (raw, rung))
+        }
+        Route::Fno => {
+            let raw = crate::server::param(body, "series");
+            let series = crate::ingest::Series::from_slug(&raw).map(|series| match series {
+                crate::ingest::Series::Futures => "futures",
+                crate::ingest::Series::Options => "options",
+            });
+            ("series", (raw, series))
+        }
+    };
+    let (raw, rung) = payload_dir;
+    (rung != Some(dir))
+        .then(|| format!("the envelope names rung {dir:?} and the payload's {field} is {raw:?}"))
 }
 
 /// Groups legs by vendor, keeping the order the feeds were ticked, and sorts
@@ -516,26 +656,46 @@ pub fn by_feed(legs: Vec<Leg>) -> Vec<(String, Vec<Leg>)> {
 /// `docs/06-limits.md` "Pull-run and recovery row counts (D-1382)" says why a
 /// header-only read is not used. UNVERIFIED: the bound is read from the
 /// code and has not been measured.
-pub(crate) fn rows_now(site: &Site) -> u64 {
+pub(crate) fn rows_now(site: &Site) -> Option<u64> {
     let (censuses, _) = crate::server::census_now(site);
-    censuses
-        .iter()
-        .filter_map(census::VendorCensus::counters)
-        .map(|(_months, rows, _entries)| rows)
-        .sum()
+    rows_total(
+        censuses
+            .iter()
+            .filter_map(census::VendorCensus::counters)
+            .map(|(_months, rows, _entries)| rows),
+    )
 }
 
-/// Edits the live progress, if a run still owns the slot.
+/// The vendors' row counts added, or `None` when the total does not fit.
+///
+/// A plain `.sum()` here panicked on overflow, and the release profile aborts
+/// on a panic: two CRC-valid manifests each claiming about `u64::MAX` rows
+/// (`Entry::check` refuses only zero) killed the server on the first pull
+/// POST and on every restart after it (CE-74, D-1776). The page shows the
+/// count as unknown instead, and the pass loop treats an unknown count as no
+/// proven growth.
+fn rows_total(mut rows: impl Iterator<Item = u64>) -> Option<u64> {
+    rows.try_fold(0_u64, u64::checked_add)
+}
+
+/// Edits the live progress, if run `run` still owns the slot.
 ///
 /// A closure rather than a returned guard, so the lock cannot be held across an
 /// `.await` by accident — which is the one way a `std::sync::Mutex` here could
 /// stall the whole fan-out.
-fn with_progress<F: FnOnce(&mut Progress)>(site: &Site, edit: F) {
+///
+/// The edit lands only on the document whose [`Progress::generation`] is
+/// `run`. Once the slot holds a later claim, a late write from this run (its
+/// `Finisher`, a ticker poll that was mid-flight at `abort`, a detached chain)
+/// is dropped rather than written into someone else's run. D-2760.
+fn with_progress<F: FnOnce(&mut Progress)>(site: &Site, run: u64, edit: F) {
     let mut held = site
         .run
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(progress) = held.as_mut() {
+    if let Some(progress) = held.as_mut()
+        && progress.generation == run
+    {
         edit(progress);
     }
 }
@@ -552,18 +712,20 @@ fn with_progress<F: FnOnce(&mut Progress)>(site: &Site, edit: F) {
 /// Read BEFORE the pass clears `finished`, because a halted feed must keep its
 /// `finished` flag: the page otherwise draws it as pending forever while nothing
 /// is ever spawned for it.
-fn halted_feeds(site: &Site) -> Vec<bool> {
+fn halted_feeds(site: &Site, run: u64) -> Vec<bool> {
     let held = site
         .run
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    held.as_ref().map_or_else(Vec::new, |progress| {
-        progress
-            .feeds
-            .iter()
-            .map(|feed| feed.credential_dead)
-            .collect()
-    })
+    held.as_ref()
+        .filter(|progress| progress.generation == run)
+        .map_or_else(Vec::new, |progress| {
+            progress
+                .feeds
+                .iter()
+                .map(|feed| feed.credential_dead)
+                .collect()
+        })
 }
 
 /// Whether the operator has asked this run to stop.
@@ -571,12 +733,17 @@ fn halted_feeds(site: &Site) -> Vec<bool> {
 /// Checked between legs rather than inside one: a leg that has already asked
 /// the vendor for bars must be allowed to write them, or a stop would throw
 /// away answers that were already paid for.
-fn stopping(site: &Site) -> bool {
+///
+/// A run whose slot now holds another claim (or nothing) is stopped too: it
+/// no longer has a document to report into, and pulling on would put a second
+/// run's writes on one store behind the first one's back. D-2760.
+fn stopping(site: &Site, run: u64) -> bool {
     let held = site
         .run
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    held.as_ref().is_some_and(|progress| progress.stopping)
+    held.as_ref()
+        .is_none_or(|progress| progress.generation != run || progress.stopping)
 }
 
 /// Marks the run finished HOWEVER the task ends.
@@ -587,19 +754,27 @@ fn stopping(site: &Site) -> bool {
 /// `/pull/run` refuses to start a second one while it holds. A task that
 /// panicked, or that was cancelled at a shutdown, would leave that `None` in
 /// place forever and every later press would be refused with `AlreadyRunning`
-/// against a run that no longer exists. `Drop` runs on the panic path, so the
-/// slot is released on every exit rather than only the happy one.
+/// against a run that no longer exists. `Drop` runs when the task is cancelled
+/// or dropped at shutdown, in every build, so the slot is released on those
+/// exits as well as the happy one. A panic is covered only where it unwinds:
+/// `dev` and `test`. `release` sets `panic = "abort"` (root `Cargo.toml`), so
+/// there a panic ends the process and the slot dies with it (poison-1, D-1771).
 ///
 /// It writes only when nothing else has: a run that finished normally has
-/// already put its own summary there, and this must not paint over it.
+/// already put its own summary there, and this must not paint over it. And it
+/// writes only into ITS run's document: the slot is free from the moment the
+/// summary lands, and a press admitted before this drop has a `finished: None`
+/// of its own that this must not read as ours. D-2760.
 struct Finisher {
     /// Whose slot to release.
     site: Loaded,
+    /// Which claim of that slot is ours.
+    run: u64,
 }
 
 impl Drop for Finisher {
     fn drop(&mut self) {
-        with_progress(&self.site, |progress| {
+        with_progress(&self.site, self.run, |progress| {
             if progress.finished.is_none() {
                 progress.finished = Some(
                     "The run ended without recording a summary, which means the task \
@@ -710,6 +885,7 @@ async fn request_leg(site: Loaded, leg: Leg) -> (axum::http::StatusCode, String)
 /// to resume is visible. Otherwise retain the first failure for diagnosis.
 fn note_leg_failure(
     site: &Site,
+    run: u64,
     nth: usize,
     leg: &Leg,
     status: axum::http::StatusCode,
@@ -731,7 +907,7 @@ fn note_leg_failure(
             this leg remains owed and is eligible for another pass."
         }
     };
-    with_progress(site, |progress| {
+    with_progress(site, run, |progress| {
         if let Some(feed) = progress.feeds.get_mut(nth) {
             if feed.last_error.is_none()
                 || matches!(outcome, LegOutcome::Credential | LegOutcome::Permanent)
@@ -751,6 +927,7 @@ fn note_leg_failure(
 /// advances `legs_done`; dependencies and early breaks remain unattempted.
 async fn run_chain<F, Fut>(
     site: Loaded,
+    run: u64,
     nth: usize,
     legs: Vec<Leg>,
     checkpoints: Checkpoints,
@@ -764,7 +941,7 @@ where
     let mut result = PassOutcome::Clean;
     let mut failed_spot_rank = None;
     for (leg, clean) in legs.iter().zip(checkpoints.iter()) {
-        if stopping(&site) {
+        if stopping(&site, run) {
             break;
         }
         if clean.load(std::sync::atomic::Ordering::Relaxed) {
@@ -778,14 +955,14 @@ where
         {
             continue;
         }
-        with_progress(&site, |progress| {
+        with_progress(&site, run, |progress| {
             if let Some(feed) = progress.feeds.get_mut(nth) {
                 feed.doing.clone_from(&leg.label);
             }
         });
         attempted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (status, html) = request(Loaded::clone(&site), leg.clone()).await;
-        with_progress(&site, |progress| {
+        with_progress(&site, run, |progress| {
             if let Some(feed) = progress.feeds.get_mut(nth) {
                 feed.legs_done = feed.legs_done.saturating_add(1);
             }
@@ -795,7 +972,7 @@ where
             clean.store(true, std::sync::atomic::Ordering::Relaxed);
             continue;
         }
-        note_leg_failure(&site, nth, leg, status, outcome);
+        note_leg_failure(&site, run, nth, leg, status, outcome);
         if leg.route == Route::Spot {
             failed_spot_rank = Some(ladder_rank(&leg.dir));
         }
@@ -805,7 +982,7 @@ where
         }
         result = PassOutcome::Retry;
     }
-    with_progress(&site, |progress| {
+    with_progress(&site, run, |progress| {
         if let Some(feed) = progress.feeds.get_mut(nth) {
             feed.skipped = u32::try_from(legs.len())
                 .unwrap_or(u32::MAX)
@@ -834,6 +1011,7 @@ where
 /// There is no chunk checkpoint or new classification of its untyped prose.
 async fn run_pass<F, Fut>(
     site: &Loaded,
+    run: u64,
     groups: &[(String, Vec<Leg>)],
     outcomes: &mut [PassOutcome],
     checkpoints: &[Checkpoints],
@@ -842,10 +1020,10 @@ async fn run_pass<F, Fut>(
     F: Fn(Loaded, Leg) -> Fut + Clone + Send + 'static,
     Fut: core::future::Future<Output = (axum::http::StatusCode, String)> + Send + 'static,
 {
-    if stopping(site) {
+    if stopping(site, run) {
         return;
     }
-    let halted = halted_feeds(site);
+    let halted = halted_feeds(site, run);
     let retry_cycle = outcomes.contains(&PassOutcome::Retry);
     let mut flying = Vec::with_capacity(groups.len());
     for (nth, (((_vendor, group), prior), clean)) in groups
@@ -866,7 +1044,7 @@ async fn run_pass<F, Fut>(
             }
         }
         let again = *prior == PassOutcome::Retry;
-        with_progress(site, |progress| {
+        with_progress(site, run, |progress| {
             if let Some(feed) = progress.feeds.get_mut(nth) {
                 feed.finished = false;
                 feed.legs_done = 0;
@@ -880,6 +1058,7 @@ async fn run_pass<F, Fut>(
             std::sync::Arc::clone(&attempted),
             tokio::spawn(run_chain(
                 Loaded::clone(site),
+                run,
                 nth,
                 group.clone(),
                 Checkpoints::clone(clean),
@@ -895,6 +1074,7 @@ async fn run_pass<F, Fut>(
             Err(dead) => {
                 note_dead_chain(
                     site,
+                    run,
                     nth,
                     attempted.load(std::sync::atomic::Ordering::Relaxed),
                     &dead,
@@ -904,7 +1084,7 @@ async fn run_pass<F, Fut>(
         };
         if again && attempted.load(std::sync::atomic::Ordering::Relaxed) > 0 {
             retrying = true;
-            with_progress(site, |progress| {
+            with_progress(site, run, |progress| {
                 if let Some(feed) = progress.feeds.get_mut(nth) {
                     feed.retries = feed.retries.saturating_add(1);
                 }
@@ -915,7 +1095,7 @@ async fn run_pass<F, Fut>(
         }
     }
     if retrying {
-        with_progress(site, |progress| {
+        with_progress(site, run, |progress| {
             progress.retries = progress.retries.saturating_add(1);
         });
     }
@@ -925,23 +1105,27 @@ async fn run_pass<F, Fut>(
 /// server restart. Feeds run in parallel; each feed's legs run sequentially.
 /// Fixed refusals halt that feed. Transient failures retry up to [`MAX_PASSES`].
 /// Idle termination is an observation about store growth, never full coverage.
-pub async fn conduct(site: Loaded, legs: Vec<Leg>) {
-    conduct_with(site, legs, request_leg).await;
+///
+/// `run` is the [`Progress::generation`] the caller installed when it claimed
+/// the slot; every edit this run makes is addressed to it. D-2760.
+pub async fn conduct(site: Loaded, run: u64, legs: Vec<Leg>) {
+    conduct_with(site, run, legs, request_leg).await;
 }
 
 /// The request seam permits deterministic coordinator tests without vendors,
 /// credentials, alternate production behavior, or a second pass loop.
-async fn conduct_with<F, Fut>(site: Loaded, legs: Vec<Leg>, request: F)
+async fn conduct_with<F, Fut>(site: Loaded, run: u64, legs: Vec<Leg>, request: F)
 where
     F: Fn(Loaded, Leg) -> Fut + Clone + Send + 'static,
     Fut: core::future::Future<Output = (axum::http::StatusCode, String)> + Send + 'static,
 {
     let _finisher = Finisher {
         site: Loaded::clone(&site),
+        run,
     };
     let groups = by_feed(legs);
     let started_rows = rows_now(&site);
-    with_progress(&site, |progress| {
+    with_progress(&site, run, |progress| {
         progress.rows_at_start = started_rows;
         progress.rows_now = started_rows;
         progress.feeds = groups
@@ -960,7 +1144,7 @@ where
             loop {
                 tokio::time::sleep(ROWS_TICK).await;
                 let seen = rows_now(&site);
-                with_progress(&site, |progress| progress.rows_now = seen);
+                with_progress(&site, run, |progress| progress.rows_now = seen);
             }
         })
     };
@@ -969,26 +1153,28 @@ where
     let mut passes = 0_u32;
     let mut clean_empty = 0_u32;
     while passes < MAX_PASSES {
-        if stopping(&site) {
+        if stopping(&site, run) {
             break;
         }
         let repairing = outcomes.contains(&PassOutcome::Retry);
         let before = rows_now(&site);
-        run_pass(&site, &groups, &mut outcomes, &checkpoints, &request).await;
+        run_pass(&site, run, &groups, &mut outcomes, &checkpoints, &request).await;
         passes = passes.saturating_add(1);
         let after = rows_now(&site);
-        with_progress(&site, |progress| {
+        with_progress(&site, run, |progress| {
             progress.passes = passes;
             progress.rows_now = after;
         });
-        if stopping(&site)
+        if stopping(&site, run)
             || outcomes
                 .iter()
                 .all(|outcome| *outcome == PassOutcome::Halted)
         {
             break;
         }
-        if after > before {
+        // Growth is proven only by two known counts; an unknown one (CE-74)
+        // proves nothing, so the pass is judged as if nothing landed.
+        if matches!((before, after), (Some(before), Some(after)) if after > before) {
             clean_empty = 0;
             continue;
         }
@@ -1012,21 +1198,28 @@ where
             break;
         }
     }
+    // `abort` cannot stop a poll already inside the synchronous `rows_now`;
+    // that poll would finish and write after the summary below. Awaiting the
+    // handle returns only once the task has actually stopped. D-2760.
     ticker.abort();
+    let _cancelled = ticker.await;
     let current_rows = rows_now(&site);
-    with_progress(&site, |progress| {
+    with_progress(&site, run, |progress| {
         progress.rows_now = current_rows;
         progress.finished = Some(run_summary(
             progress,
             &outcomes,
-            current_rows.saturating_sub(started_rows),
+            current_rows
+                .zip(started_rows)
+                .map(|(now, start)| now.saturating_sub(start)),
         ));
     });
 }
 
 /// Terminal feeds remain part of the final verdict even while other feeds
 /// reach an idle stop. Neither a skipped feed nor a stopped task is success.
-fn run_summary(progress: &Progress, outcomes: &[PassOutcome], landed: u64) -> String {
+fn run_summary(progress: &Progress, outcomes: &[PassOutcome], landed: Option<u64>) -> String {
+    let landed_said = landed_words(landed);
     let halted: Vec<String> = progress
         .feeds
         .iter()
@@ -1042,7 +1235,7 @@ fn run_summary(progress: &Progress, outcomes: &[PassOutcome], landed: u64) -> St
         .collect();
     if !halted.is_empty() {
         return format!(
-            "INCOMPLETE after {} pass(es); {landed} bar(s) added to the store census. \
+            "INCOMPLETE after {} pass(es); {landed_said} bar(s) added to the store census. \
              {} pass(es) were retried after a failure. Halted feed(s): {} \
              Full basket coverage has not been verified.{}",
             progress.passes,
@@ -1073,8 +1266,14 @@ fn run_summary(progress: &Progress, outcomes: &[PassOutcome], landed: u64) -> St
 ///
 /// The panic itself goes to standard error through the panic hook and never
 /// reaches `telemetry`, so this is the only surface that can say it happened.
-fn note_dead_chain(site: &Site, nth: usize, attempted: usize, dead: &tokio::task::JoinError) {
-    with_progress(site, |progress| {
+fn note_dead_chain(
+    site: &Site,
+    run: u64,
+    nth: usize,
+    attempted: usize,
+    dead: &tokio::task::JoinError,
+) {
+    with_progress(site, run, |progress| {
         if let Some(feed) = progress.feeds.get_mut(nth) {
             // Labels may be empty. An explicit attempt count, not display
             // text, distinguishes a panicked request from an unattempted leg.
@@ -1097,10 +1296,20 @@ fn note_dead_chain(site: &Site, nth: usize, attempted: usize, dead: &tokio::task
     });
 }
 
+/// The bars-added figure in words: the number, or `an unknown number of`
+/// when the census total did not fit a `u64` (CE-74, D-1776).
+fn landed_words(landed: Option<u64>) -> String {
+    landed.map_or_else(
+        || "an unknown number of".to_owned(),
+        |rows| rows.to_string(),
+    )
+}
+
 /// Describe an operator stop, pass ceiling, or idle stop. Store growth and
 /// receipt verdicts cannot establish coverage of every requested instrument.
 #[must_use]
-pub fn summary_of(passes: u32, retries: u32, landed: u64, stopped: bool) -> String {
+pub fn summary_of(passes: u32, retries: u32, landed: Option<u64>, stopped: bool) -> String {
+    let landed = landed_words(landed);
     // NOT `retried`: clippy denies a binding whose name is one letter from
     // `retries` beside it, and it is right — the two mean different things.
     let note = if retries > 0 {
@@ -1163,10 +1372,133 @@ mod tests {
         out
     }
 
-    /// One `leg` field, encoded exactly as the page encodes it.
+    /// One `leg` field, encoded exactly as the page encodes it, whose payload
+    /// declares the vendor and rung its envelope names -- as the page's does.
     fn field(route: &str, vendor: &str, dir: &str, label: &str, body: &str) -> String {
+        raw_field(
+            route,
+            vendor,
+            dir,
+            label,
+            &format!("{}&{body}", declared(route, vendor, dir)),
+        )
+    }
+
+    /// The payload fields that agree with an envelope, the way the page writes
+    /// them.
+    fn declared(route: &str, vendor: &str, dir: &str) -> String {
+        if route == "/pull/fno" {
+            let series = if dir == "futures" { "fut" } else { "opt" };
+            format!("vendor={vendor}&series={series}")
+        } else {
+            format!("vendor={vendor}&granularity={dir}")
+        }
+    }
+
+    /// One `leg` field whose payload is exactly `body`, agreeing or not.
+    fn raw_field(route: &str, vendor: &str, dir: &str, label: &str, body: &str) -> String {
         let joined = format!("{route}|{vendor}|{dir}|{label}|{}", enc(body));
         format!("leg={}", enc(&joined))
+    }
+
+    /// An envelope that names one request while its payload asks for another
+    /// refuses the whole run, on either half and on either route.
+    ///
+    /// The chain, the ladder order and the failed-daily gate all read the
+    /// envelope; `pull_spot` and `pull_fno` run the payload. A `groww|1day`
+    /// leg carrying `granularity=1min` and no `vendor` would have run a Dhan
+    /// minute pull filed as a Groww day pass (P1-02-01, D-1765).
+    #[test]
+    fn a_leg_whose_payload_disagrees_with_its_envelope_refuses_the_run() {
+        let refused = |leg: String, needle: &str| match legs_from(&leg) {
+            Err(Refusal::Disagrees { leg, why }) => {
+                assert!(why.contains(needle), "{why}");
+                assert!(Refusal::Disagrees { leg, why }.why().contains(needle));
+            }
+            other => panic!("a disagreeing leg must be refused, got {other:?}"),
+        };
+        // The finding's own repro: no vendor means Dhan, 1min is not 1day.
+        refused(
+            raw_field(
+                "/pull/spot",
+                "groww",
+                "1day",
+                "x",
+                "member=NIFTY&granularity=1min",
+            ),
+            "\"groww\"",
+        );
+        refused(
+            raw_field(
+                "/pull/spot",
+                "groww",
+                "1day",
+                "x",
+                "vendor=groww&granularity=1min",
+            ),
+            "\"1min\"",
+        );
+        // An absent granularity means one minute, not the envelope's day.
+        refused(
+            raw_field("/pull/spot", "dhan", "1day", "x", "vendor=dhan"),
+            "granularity",
+        );
+        refused(
+            raw_field(
+                "/pull/fno",
+                "dhan",
+                "options",
+                "x",
+                "vendor=dhan&series=fut",
+            ),
+            "\"fut\"",
+        );
+        refused(
+            raw_field("/pull/fno", "dhan", "futures", "x", "vendor=dhan"),
+            "series",
+        );
+        refused(
+            raw_field(
+                "/pull/fno",
+                "groww",
+                "options",
+                "x",
+                "vendor=zerodha&series=opt",
+            ),
+            "\"zerodha\"",
+        );
+        // The same leg, agreeing, is read; the vendor matches case-blind the
+        // way the route that runs it reads it.
+        for agreeing in [
+            raw_field(
+                "/pull/spot",
+                "groww",
+                "1day",
+                "x",
+                "vendor=Groww&granularity=1DAY",
+            ),
+            raw_field("/pull/spot", "dhan", "1min", "x", "member=NIFTY"),
+            raw_field(
+                "/pull/fno",
+                "dhan",
+                "futures",
+                "x",
+                "vendor=dhan&series=fut",
+            ),
+            raw_field(
+                "/pull/fno",
+                "groww",
+                "options",
+                "x",
+                "vendor=groww&series=opt",
+            ),
+        ] {
+            assert_eq!(
+                legs_from(&agreeing).map(|legs| legs.len()),
+                Ok(1),
+                "{agreeing}"
+            );
+        }
     }
 
     /// A form body survives the two encodings intact, INCLUDING the characters
@@ -1180,8 +1512,15 @@ mod tests {
     #[test]
     fn a_body_carrying_every_separator_survives_both_encodings() {
         let body = "member=BANKNIFTY&seg=futures%2Coptions&note=a|b+c&pct=100%";
-        let legs = legs_from(&field("/pull/spot", "dhan", "1day", "Spot · 1 day", body))
-            .expect("one well-formed leg");
+        let body = format!("vendor=dhan&granularity=1day&{body}");
+        let legs = legs_from(&raw_field(
+            "/pull/spot",
+            "dhan",
+            "1day",
+            "Spot · 1 day",
+            &body,
+        ))
+        .expect("one well-formed leg");
         assert_eq!(legs.len(), 1);
         assert_eq!(legs[0].body, body, "the body reaches the route unchanged");
         assert_eq!(legs[0].route, Route::Spot);
@@ -1203,13 +1542,7 @@ mod tests {
             "ok",
             "member=A&member=B&from=x",
         );
-        let twice = field(
-            "/pull/spot",
-            "dhan",
-            "1day",
-            "bad",
-            "from=x&vendor=a&from=y",
-        );
+        let twice = field("/pull/spot", "dhan", "1day", "bad", "from=x&to=a&from=y");
         assert_eq!(legs_from(&good).expect("a list is not a repeat").len(), 1);
         match legs_from(&format!("{good}&{twice}")) {
             Err(Refusal::Malformed(why)) => {
@@ -1301,6 +1634,75 @@ mod tests {
     /// every leg names a real feed. Before D-0906 `legs_from` copied the vendor
     /// unchecked, so a form of invented vendor names grew one group and one
     /// chain per distinct name. W1-api3-3.
+    /// P3-01-01, D-1769: one leg past the bound is refused by name, and the
+    /// widest leg the page can write fits the field bound.
+    #[test]
+    fn a_run_past_the_leg_bound_is_refused_by_name_and_the_widest_leg_fits() {
+        let one = field("/pull/spot", "dhan", "1day", "d", "a=1");
+        let full = vec![one.clone(); MAX_RUN_LEGS].join("&");
+        assert_eq!(
+            legs_from(&full).map(|legs| legs.len()).ok(),
+            Some(MAX_RUN_LEGS)
+        );
+        let over = vec![one; MAX_RUN_LEGS + 1].join("&");
+        match legs_from(&over) {
+            Err(Refusal::TooManyLegs(count)) => {
+                assert_eq!(count, MAX_RUN_LEGS + 1);
+                let why = Refusal::TooManyLegs(count).why();
+                assert!(why.contains(&MAX_RUN_LEGS.to_string()), "{why}");
+            }
+            other => panic!("one leg past the bound must be named, got {other:?}"),
+        }
+        // The page's own shape: a member form of `MAX_MEMBERS` symbols that
+        // each need escaping, encoded once more for the payload and once
+        // more for the field.
+        let encode = |text: &str| -> String {
+            text.bytes()
+                .map(|b| {
+                    if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
+                        char::from(b).to_string()
+                    } else {
+                        format!("%{b:02X}")
+                    }
+                })
+                .collect()
+        };
+        let symbol = "&".repeat(brutex_core::symbol::SYMBOL_CAPACITY);
+        let members =
+            vec![format!("member={}", encode(&symbol)); crate::ingest::MAX_MEMBERS].join("&");
+        let form = format!("target=nifty50&vendor=dhan&{members}");
+        assert!(
+            form.len() <= crate::ingest::MAX_MEMBER_FORM_BYTES,
+            "{}",
+            form.len()
+        );
+        let leg = format!(
+            "leg={}",
+            encode(&["/pull/spot", "dhan", "1day", "label", &encode(&form)].join("|"))
+        );
+        assert!(
+            leg.len() <= MAX_LEG_FIELD_BYTES,
+            "{} > {MAX_LEG_FIELD_BYTES}",
+            leg.len()
+        );
+        const { assert!(MAX_RUN_FORM_BYTES > MAX_RUN_LEGS * MAX_LEG_FIELD_BYTES) };
+    }
+
+    /// The figures `docs/06-limits.md` states for the form bounds, from the
+    /// constants: 168,192 for a member form, 881,924 for one leg field and
+    /// 27,347,836 for a run form (8,192 + 31 × 881,924). The prose said "about
+    /// 26.5 MB", which is neither 27.35 MB nor 26.08 MiB. P17-19, D-1967.
+    #[test]
+    fn the_run_form_bound_is_the_figure_the_limits_document_states() {
+        assert_eq!(crate::ingest::MAX_MEMBER_FORM_BYTES, 168_192);
+        assert_eq!(MAX_LEG_FIELD_BYTES, 881_924);
+        assert_eq!(MAX_RUN_LEGS, 30);
+        assert_eq!(MAX_RUN_FORM_BYTES, 27_347_836);
+        let limits = include_str!("../../../docs/06-limits.md");
+        assert!(limits.contains("read up to 27,347,836 bytes of form"));
+        assert!(!limits.contains("about 26.5 MB"));
+    }
+
     #[test]
     fn a_leg_naming_no_feed_refuses_the_run_so_groups_never_outnumber_feeds() {
         let invented: Vec<String> = (0..=pull::vendor::FEED_COUNT)
@@ -1447,6 +1849,24 @@ mod tests {
         assert!(progress.json().contains("\"running\":false"));
     }
 
+    /// CE-74: a census total past `u64::MAX` is unknown, not a panic, and the
+    /// page is told so.
+    #[test]
+    fn a_row_total_that_does_not_fit_is_unknown_not_a_panic() {
+        assert_eq!(rows_total([u64::MAX, 1].into_iter()), None);
+        assert_eq!(rows_total([u64::MAX - 1, 1].into_iter()), Some(u64::MAX));
+        assert_eq!(rows_total(std::iter::empty()), Some(0));
+        let unknown = Progress {
+            rows_at_start: Some(5),
+            rows_now: None,
+            started: true,
+            ..Progress::default()
+        };
+        let json = unknown.json();
+        assert!(json.contains(r#""rowsAtStart":5,"rowsNow":null"#), "{json}");
+        assert!(summary_of(2, 0, None, false).contains("an unknown number of bar(s)"));
+    }
+
     /// Every field the page reads is in the document, with the name it reads.
     ///
     /// Hand-written JSON has no compiler checking the key names against the
@@ -1456,11 +1876,12 @@ mod tests {
         let progress = Progress {
             passes: 7,
             retries: 2,
-            rows_at_start: 10,
-            rows_now: 99,
+            rows_at_start: Some(10),
+            rows_now: Some(99),
             stopping: true,
             finished: None,
             started: true,
+            generation: 0,
             feeds: vec![FeedReport {
                 vendor: "dhan".to_owned(),
                 legs: 4,
@@ -1540,9 +1961,9 @@ mod tests {
     /// backfill was complete when it was cut short.
     #[test]
     fn the_ceiling_stop_is_not_worded_as_a_finished_window() {
-        let finished = summary_of(3, 0, 500, false);
-        let ceiling = summary_of(MAX_PASSES, 4, 500, false);
-        let stopped = summary_of(9, 1, 500, true);
+        let finished = summary_of(3, 0, Some(500), false);
+        let ceiling = summary_of(MAX_PASSES, 4, Some(500), false);
+        let stopped = summary_of(9, 1, Some(500), true);
 
         assert!(finished.contains("Idle retries stopped"), "{finished}");
         assert!(finished.contains("Full basket coverage has not been verified"));
@@ -1604,12 +2025,38 @@ mod tests {
     /// `conduct` edits through [`with_progress`], which is a no-op when the slot
     /// is empty — so a test that skipped this would exercise the loop and
     /// observe nothing, which is the shape of a test that asserts nothing.
-    fn claim(site: &Site) {
+    fn claim(site: &Site) -> u64 {
         let mut held = site
             .run
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *held = Some(Progress::claimed());
+        let claimed = Progress::claimed();
+        let run = claimed.generation;
+        *held = Some(claimed);
+        run
+    }
+
+    /// The generation of whatever claim the slot holds, `0` when it holds none:
+    /// the number a run driven by a test addresses its edits to.
+    fn current(site: &Site) -> u64 {
+        site.run
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map_or(0, |progress| progress.generation)
+    }
+
+    /// Edits whatever document the slot holds, as an operator route does: a
+    /// stop or a test's setup is addressed to the slot, not to one run.
+    fn edit_slot<F: FnOnce(&mut Progress)>(site: &Site, edit: F) {
+        if let Some(progress) = site
+            .run
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_mut()
+        {
+            edit(progress);
+        }
     }
 
     /// Reads the live document back, as the page's poll would.
@@ -1655,10 +2102,11 @@ mod tests {
     async fn conduct_runs_the_scaffold_and_releases_the_slot_when_stopped() {
         let site = site("conductstop");
         claim(&site);
-        with_progress(&site, |progress| progress.stopping = true);
+        edit_slot(&site, |progress| progress.stopping = true);
 
         conduct(
             Loaded::clone(&site),
+            current(&site),
             vec![leg("dhan", "1day"), leg("groww", "1day")],
         )
         .await;
@@ -1761,6 +2209,7 @@ mod tests {
             bound,
             conduct(
                 Loaded::clone(&site),
+                current(&site),
                 // GDFL, BECAUSE THE FIXTURE ABOVE IS A GDFL FILE. Its own
                 // comment says so — `GFDLNFO_TICK_01072025/...`, ten columns —
                 // and it was run under `TrueData`, whose F&O row is five wide.
@@ -1859,12 +2308,111 @@ mod tests {
         // AND THE SUMMARY ENDS IT. A press that finished must not keep the
         // backfill standing off, or one hand-made pull would silence the
         // autopilot for the life of the process.
-        with_progress(&site, |progress| {
+        edit_slot(&site, |progress| {
             progress.finished = Some("done".to_owned());
         });
         assert!(
             !observed(&site).running(),
             "the summary releases the standoff"
+        );
+    }
+
+    /// **A RUN'S FINISHER NEVER FINISHES THE NEXT RUN.** D-2760, runs-1.
+    ///
+    /// The production order, replayed step by step with no clock: run A writes
+    /// its summary, which frees the slot; press B is admitted and installs its
+    /// own claim; only then does A's `Finisher` drop. Before the generation,
+    /// that drop saw B's `finished: None`, stamped "ended abnormally" on a live
+    /// run and freed the slot for a third press over the same store.
+    #[test]
+    fn a_finisher_dropped_after_the_next_claim_leaves_that_run_running() {
+        let site = site("finishernext");
+
+        // Its own run, unfinished: the Finisher DOES stamp it. The abnormal-end
+        // guard still works; it is only addressed now.
+        let lost = claim(&site);
+        drop(Finisher {
+            site: Loaded::clone(&site),
+            run: lost,
+        });
+        let stamped = observed(&site);
+        assert!(!stamped.running(), "an abnormal end still frees its slot");
+        assert!(
+            stamped
+                .finished
+                .as_deref()
+                .is_some_and(|why| why.contains("stopped abnormally")),
+            "{stamped:?}"
+        );
+
+        let first = claim(&site);
+        let finisher = Finisher {
+            site: Loaded::clone(&site),
+            run: first,
+        };
+        with_progress(&site, first, |progress| {
+            progress.finished = Some("A's own summary".to_owned());
+        });
+        let second = claim(&site);
+        assert_ne!(first, second, "two claims never share a generation");
+        drop(finisher);
+
+        let seen = observed(&site);
+        assert_eq!(seen.generation, second);
+        assert!(
+            seen.running(),
+            "B is live, so its slot must still read as running: {seen:?}"
+        );
+        assert_eq!(seen.finished, None, "A's Finisher wrote into B");
+    }
+
+    /// **EVERY EDIT IS ADDRESSED.** A late write from an ended run (the ticker
+    /// poll that was mid-flight at `abort`, a detached chain) lands nowhere once
+    /// the slot holds a later claim, and that run reads itself as stopped.
+    #[test]
+    fn edits_from_an_ended_run_never_land_on_the_next_claim() {
+        assert_ne!(
+            Progress::claimed().generation,
+            0,
+            "zero is the never-claimed Default and no claim may reuse it"
+        );
+        let site = site("latetick");
+        let first = claim(&site);
+        edit_slot(&site, |progress| {
+            progress.feeds = vec![FeedReport {
+                credential_dead: true,
+                ..FeedReport::default()
+            }];
+        });
+        assert_eq!(halted_feeds(&site, first), vec![true]);
+        assert!(!stopping(&site, first), "its own live claim is not stopped");
+
+        let second = claim(&site);
+        with_progress(&site, first, |progress| progress.rows_now = Some(7));
+        with_progress(&site, first, |progress| progress.passes = 3);
+        let seen = observed(&site);
+        assert_eq!(seen.rows_now, None, "A's late tick landed in B: {seen:?}");
+        assert_eq!(seen.passes, 0, "A's late write landed in B: {seen:?}");
+        assert!(
+            stopping(&site, first),
+            "a run that no longer owns the slot must stop pulling"
+        );
+        assert!(!stopping(&site, second));
+        edit_slot(&site, |progress| {
+            progress.feeds = vec![FeedReport {
+                credential_dead: true,
+                ..FeedReport::default()
+            }];
+        });
+        assert!(
+            halted_feeds(&site, first).is_empty(),
+            "A must not read B's halted feeds as its own"
+        );
+        with_progress(&site, second, |progress| progress.rows_now = Some(9));
+        assert_eq!(
+            observed(&site).rows_now,
+            Some(9),
+            "B's own edits still land"
         );
     }
 
@@ -1894,7 +2442,7 @@ mod tests {
     fn a_halted_feed_is_reported_to_the_spawn_loop_and_a_healthy_one_is_not() {
         let held = site("haltedlist");
         claim(&held);
-        with_progress(&held, |progress| {
+        edit_slot(&held, |progress| {
             progress.feeds = vec![
                 FeedReport {
                     vendor: "dhan".to_owned(),
@@ -1910,7 +2458,7 @@ mod tests {
         });
 
         assert_eq!(
-            halted_feeds(&held),
+            halted_feeds(&held, current(&held)),
             vec![true, false],
             "the skip list is BY POSITION, because that is how the spawn loop \
              indexes `groups` — a list that lost the order would skip the wrong \
@@ -1923,7 +2471,7 @@ mod tests {
         // first pass — a run that asks for nothing and reports finishing.
         let fresh = site("haltedlistempty");
         assert!(
-            halted_feeds(&fresh).is_empty(),
+            halted_feeds(&fresh, current(&fresh)).is_empty(),
             "no run claimed, nothing halted"
         );
     }
@@ -1951,7 +2499,7 @@ mod tests {
         claim(&held);
         tokio::time::timeout(
             core::time::Duration::from_secs(5),
-            conduct_with(Loaded::clone(&held), legs, request),
+            conduct_with(Loaded::clone(&held), current(&held), legs, request),
         )
         .await
         .expect("the synthetic run must finish without retry sleeps");
@@ -2053,7 +2601,7 @@ mod tests {
         assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
         assert_eq!(
             (progress.passes, progress.retries, progress.rows_now),
-            (1, 0, 0)
+            (1, 0, Some(0))
         );
         let feed = &progress.feeds[0];
         assert_eq!((feed.legs_done, feed.skipped, feed.retries), (1, 1, 0));
@@ -2083,7 +2631,7 @@ mod tests {
         assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 6);
         assert_eq!(
             (progress.passes, progress.retries, progress.rows_now),
-            (3, 0, 0)
+            (3, 0, Some(0))
         );
         assert_eq!(progress.feeds[0].legs_done, 2);
         let summary = progress.finished.expect("idle summary");
@@ -2106,7 +2654,7 @@ mod tests {
                     "in-flight is not done"
                 );
                 capture.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                with_progress(&site, |progress| progress.stopping = true);
+                edit_slot(&site, |progress| progress.stopping = true);
                 std::future::ready(receipt(200, "STORED"))
             },
         )
@@ -2124,7 +2672,7 @@ mod tests {
         let held = site(name);
         claim(&held);
         let groups = by_feed(legs);
-        with_progress(&held, |progress| {
+        edit_slot(&held, |progress| {
             progress.feeds = groups
                 .iter()
                 .map(|(vendor, legs)| FeedReport {
@@ -2167,6 +2715,7 @@ mod tests {
         {
             run_pass(
                 &self.site,
+                current(&self.site),
                 &self.groups,
                 &mut self.outcomes,
                 &self.checkpoints,
@@ -2364,7 +2913,7 @@ mod tests {
             assert_eq!((feed.legs_done, feed.skipped, feed.retries), (1, 2, 1));
             assert_eq!(feed.credential_dead, code == 401);
             assert_eq!(progress.retries, 1);
-            let summary = run_summary(&progress, &passes.outcomes, 0);
+            let summary = run_summary(&progress, &passes.outcomes, Some(0));
             assert!(summary.contains("INCOMPLETE") && summary.contains(&format!("HTTP {code}")));
             assert!(!summary.contains("HTTP 503"));
         }
@@ -2384,7 +2933,7 @@ mod tests {
             .run(move |site, requested| {
                 assert_eq!(requested, minute);
                 assert_eq!(observed(&site).feeds[0].legs_done, 0);
-                with_progress(&site, |p| p.stopping = true);
+                edit_slot(&site, |p| p.stopping = true);
                 std::future::ready(receipt(200, "STORED"))
             })
             .await;
@@ -2392,7 +2941,7 @@ mod tests {
         let feed = &progress.feeds[0];
         assert_eq!((feed.legs_done, feed.skipped, feed.retries), (1, 2, 1));
         assert!(feed.finished && feed.doing.is_empty());
-        assert!(run_summary(&progress, &passes.outcomes, 0).contains("pressed stop"));
+        assert!(run_summary(&progress, &passes.outcomes, Some(0)).contains("pressed stop"));
         assert!(passes.respond(&[]).await.is_empty());
         assert_eq!(
             observed(&passes.site),
@@ -2455,7 +3004,7 @@ mod tests {
         // requests: whichever task starts first sets stop before it returns.
         passes
             .run(|site, _leg| {
-                with_progress(&site, |p| p.stopping = true);
+                edit_slot(&site, |p| p.stopping = true);
                 std::future::ready(receipt(200, "STORED"))
             })
             .await;
@@ -2539,7 +3088,7 @@ mod tests {
                 progress.rows_at_start,
                 progress.rows_now
             ),
-            (5, 1, 0, 1)
+            (5, 1, Some(0), Some(1))
         );
         assert_eq!(
             (
@@ -2598,7 +3147,7 @@ mod tests {
             let progress = observed(&passes.site);
             assert_eq!(progress.retries, index);
             assert_eq!(progress.feeds[0].retries, index);
-            assert_eq!(rows_now(&passes.site), 0);
+            assert_eq!(rows_now(&passes.site), Some(0));
         }
         let progress = observed(&passes.site);
         assert!(
@@ -2608,7 +3157,7 @@ mod tests {
                 .unwrap()
                 .contains("HTTP 200")
         );
-        let summary = summary_of(MAX_PASSES, progress.retries, 0, false);
+        let summary = summary_of(MAX_PASSES, progress.retries, Some(0), false);
         assert!(
             summary.contains("ceiling")
                 && summary.contains("Full basket coverage has not been verified")
@@ -2627,6 +3176,7 @@ mod tests {
         let checkpoints = checkpoints_for(&groups);
         run_pass(
             &held,
+            current(&held),
             &groups,
             &mut outcomes,
             &checkpoints,
@@ -2647,6 +3197,7 @@ mod tests {
         for _ in 0..2 {
             run_pass(
                 &held,
+                current(&held),
                 &groups,
                 &mut outcomes,
                 &checkpoints,
@@ -2668,6 +3219,7 @@ mod tests {
         let checkpoints = checkpoints_for(&groups);
         run_pass(
             &held,
+            current(&held),
             &groups,
             &mut outcomes,
             &checkpoints,
@@ -2676,6 +3228,7 @@ mod tests {
         .await;
         run_pass(
             &held,
+            current(&held),
             &groups,
             &mut outcomes,
             &checkpoints,
@@ -2684,6 +3237,7 @@ mod tests {
         .await;
         run_pass(
             &held,
+            current(&held),
             &groups,
             &mut outcomes,
             &checkpoints,
@@ -2702,7 +3256,7 @@ mod tests {
             .as_deref()
             .expect("terminal cause");
         assert!(why.contains("HTTP 422") && !why.contains("HTTP 503"));
-        assert!(run_summary(&progress, &outcomes, 0).contains("INCOMPLETE"));
+        assert!(run_summary(&progress, &outcomes, Some(0)).contains("INCOMPLETE"));
     }
 
     #[tokio::test]
@@ -2721,6 +3275,7 @@ mod tests {
         let checkpoints = checkpoints_for(&groups);
         run_pass(
             &held,
+            current(&held),
             &groups,
             &mut outcomes,
             &checkpoints,
@@ -2735,6 +3290,7 @@ mod tests {
         .await;
         run_pass(
             &held,
+            current(&held),
             &groups,
             &mut outcomes,
             &checkpoints,
@@ -2770,6 +3326,7 @@ mod tests {
         let capture = std::sync::Arc::clone(&calls);
         run_pass(
             &held,
+            current(&held),
             &groups,
             &mut outcomes,
             &checkpoints,
@@ -2963,11 +3520,12 @@ mod tests {
         let progress = Progress {
             passes: 3,
             retries: 9,
-            rows_at_start: 0,
-            rows_now: 500,
+            rows_at_start: Some(0),
+            rows_now: Some(500),
             stopping: false,
             finished: None,
             started: true,
+            generation: 0,
             feeds: vec![
                 FeedReport {
                     vendor: "dhan".to_owned(),
@@ -3048,7 +3606,7 @@ mod tests {
 
         // ONE FEED REPORT, because `run_chain` writes into `feeds[nth]` and
         // `conduct` is what normally builds that list.
-        with_progress(&site, |progress| {
+        edit_slot(&site, |progress| {
             progress.feeds = vec![FeedReport {
                 vendor: pull::vendor::Feed::TrueData.wire().to_owned(),
                 legs: 2,
@@ -3061,6 +3619,7 @@ mod tests {
             bound,
             run_chain(
                 Loaded::clone(&site),
+                current(&site),
                 0,
                 vec![
                     Leg {

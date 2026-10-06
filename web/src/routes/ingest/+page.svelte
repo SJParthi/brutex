@@ -10,7 +10,7 @@
    *
    * 2. A run that refused 407 of 785 instruments showed ONE reason. The
    *    receipt renders `done.failures.iter().take(5)` — five, and the run's
-   *    own `Members failed` count is beside it, so the page can SEE that it
+   *    own `Failure diagnostics` count is beside it, so the page can SEE that it
    *    was truncated and say so instead of implying the list is complete.
    *
    * 3. The bar length was not askable. `api::ingest::parse_spot` has read a
@@ -64,7 +64,7 @@
     watchStore,
     foldMonths
   } from '$lib/store.svelte.js';
-  import { notAReceipt, RECEIPT_HEADER } from '$lib/receipt.js';
+  import { failureCount, notAReceipt, RECEIPT_HEADER } from '$lib/receipt.js';
   // IMPORTED AS `request`, AND THE ALIAS IS THE WHOLE POINT.
   //
   // `readFolder` declares its own `const ask` for probing folder segments. A
@@ -90,7 +90,9 @@
   // THE SELECTION LIVES IN THE ADDRESS BAR. See `$lib/urlstate.js` for why,
   // and for the measurement of what used to reset on every reload.
   import { encode as encodeSel, decode as decodeSel, same as sameSel } from '$lib/urlstate.js';
-  import { foldMinuteOwed, withheldDays } from '$lib/calendar-owed.js';
+  import { createCalendarLoader, emptyCalendar, foldMinuteOwed } from '$lib/calendar-owed.js';
+  import { emptyPilot, failedPilot, foldIngestStatus, pilotNotice } from '$lib/ingest-status.js';
+  import { feedMeter, landedOf } from '$lib/run-card.js';
 
   // ─────────────────────── WHAT AN ANSWER LOOKS LIKE ───────────────────────
   //
@@ -1028,107 +1030,28 @@
   /**
    * The exchange calendar, as the store knows it.
    *
-   * @type {{
-   *   first: string, last: string,
-   *   owed: Map<string, number|null>,
-   *   indexOwed: Map<string, number|null>,
-   *   withheld: Set<string>, withheldMonths: Set<string>,
-   *   from: string[], clashes: number, why: string
-   * }}
+   * @type {import('$lib/calendar-owed.js').Calendar}
    */
-  let calendar = $state({
-    first: '',
-    last: '',
-    owed: new Map(),
-    indexOwed: new Map(),
-    withheld: new Set(),
-    withheldMonths: new Set(),
-    from: [],
-    clashes: 0,
-    why: ''
-  });
+  let calendar = $state(emptyCalendar(''));
 
-  /** An epoch day as `YYYY-MM-DD`. UTC midnight, like every other date here. */
-  /** @param {number} day */
-  function isoOfEpochDay(day) {
-    return new Date(day * 86_400_000).toISOString().slice(0, 10);
-  }
-
-  /** @param {string|null} feed */
-  async function loadCalendar(feed) {
-    if (!feed) return;
-    try {
-      const response = await request(`/calendar.json?feed=${encodeURIComponent(feed)}`, {
-        cache: 'no-store'
-      });
-      if (!response.ok) {
-        calendar = {
-          first: '',
-          last: '',
-          owed: new Map(),
-          indexOwed: new Map(),
-          withheld: new Set(),
-          withheldMonths: new Set(),
-          from: [],
-          clashes: 0,
-          why: `/calendar.json answered ${response.status}`
-        };
-        return;
-      }
-      const body = await response.json();
-      /** @type {Map<string, number|null>} */
-      const owed = new Map();
-      /** @type {Map<string, number|null>} */
-      const indexOwed = new Map();
-      for (const entry of body?.days ?? []) {
-        const day = isoOfEpochDay(entry.day);
-        owed.set(day, entry.owed ?? null);
-        // MISSING IS UNKNOWN, NEVER "SAME AS EXCHANGE". An older API does not
-        // carry the index-specific field and therefore cannot prove a common
-        // index denominator on the systems-outage day. Falling back to `owed`
-        // would silently restore the false 166-hole claim D-0420 refuses.
-        indexOwed.set(day, entry.indexOwed ?? null);
-      }
-      // A DAY ABSENT FROM `days` IS A HOLIDAY ONLY IF IT IS NOT WITHHELD. The
-      // server names, in `withheld`, every stretch whose daily rung it did not
-      // read or could not trust (R9-api-law-0, D-1443); this page used to read
-      // those days as "NSE holiday", which is the unmeasured dressed as a
-      // fact. A malformed list throws into the catch below and the whole
-      // calendar degrades loudly, rather than its days becoming holidays.
-      // D-1507.
-      const withheld = withheldDays(body?.withheld, isoOfEpochDay);
-      calendar = {
-        first: owed.size ? isoOfEpochDay(body.firstDay) : '',
-        last: owed.size ? isoOfEpochDay(body.lastDay) : '',
-        owed,
-        indexOwed,
-        withheld: withheld.days,
-        withheldMonths: withheld.months,
-        from: body?.derivedFrom ?? [],
-        clashes: (body?.disagreements ?? []).length,
-        why: owed.size ? '' : 'the store holds no bars for this feed'
-      };
-    } catch (error) {
-      calendar = {
-        first: '',
-        last: '',
-        owed: new Map(),
-        indexOwed: new Map(),
-        withheld: new Set(),
-        withheldMonths: new Set(),
-        from: [],
-        clashes: 0,
-        why:
-          error instanceof Error
-            ? `the calendar request failed (${error.message})`
-            : 'the calendar request failed'
-      };
+  // THE READ IS TICKETED (CE-71, D-2732). It had no request token: a slower
+  // answer for the previous feed replaced the current feed's calendar, and the
+  // previous calendar stood under the new feed (or under no feed) while nothing
+  // had answered. `createCalendarLoader` clears to "not loaded" on every feed
+  // change and lands an answer only while its ticket is current.
+  const calendarRequests = createPageRequests();
+  const calendarLoader = createCalendarLoader({
+    request,
+    requests: calendarRequests,
+    apply: (next) => {
+      calendar = next;
     }
-  }
+  });
+  onDestroy(() => calendarRequests.dispose());
 
   $effect(() => {
     const feed = feeds.active;
-    untrack(() => loadCalendar(feed));
+    untrack(() => void calendarLoader.load(feed));
   });
 
   const DAYNAME = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -4630,35 +4553,40 @@
 
   /** The sweep's ladder — what is in flight, and whether a feed has halted. */
   /**
+   * THE FOLD IS `$lib/ingest-status.js` (CE-79, D-1787): a refused or failed
+   * read clears the flight and the halts rather than keeping the previous
+   * answer, the 503's `error` is named, and `surveyed` / `blocked_by` are
+   * carried so an empty list is never read as "nothing halted".
    * @type {{
    *   at: number,
    *   inFlight: PilotFlight | null,
    *   feeds: PilotFeed[],
    *   state: string,
+   *   surveyed: boolean | null,
+   *   blockedBy: string | null,
    *   error: string | null,
    *   busy: boolean
    * }}
    */
-  let pilot = $state({ at: 0, inFlight: null, feeds: [], state: '', error: null, busy: false });
+  let pilot = $state(emptyPilot());
   let pilotAsked = false;
+  const pilotSays = $derived(pilotNotice(pilot));
 
   async function readPilot() {
     if (pilot.busy) return;
     pilot = { ...pilot, busy: true, error: null };
     try {
       const r = await request('/ingest/status.json');
-      if (!r.ok) throw new Error(`/ingest/status.json answered HTTP ${r.status}`);
-      const j = await r.json();
-      pilot = {
-        at: Date.now(),
-        inFlight: j.in_flight ?? null,
-        feeds: Array.isArray(j.waiting_on) ? j.waiting_on : [],
-        state: String(j.state ?? ''),
-        error: null,
-        busy: false
-      };
+      /** @type {unknown} */
+      let body;
+      try {
+        body = await r.json();
+      } catch {
+        body = undefined;
+      }
+      pilot = foldIngestStatus(r.status, body, Date.now());
     } catch (why) {
-      pilot = { ...pilot, busy: false, error: String(why) };
+      pilot = failedPilot(`/ingest/status.json could not be read: ${why instanceof Error ? why.message : String(why)}`);
     }
   }
 
@@ -5442,7 +5370,7 @@
    */
   /** @param {CensusRow} row */
   async function pullRow(row) {
-    if (phase === 'running') return;
+    if (phase === 'running' || pressing) return;
     const span = shortSpan(row);
     if (!span) return;
     await runPull(
@@ -5458,6 +5386,15 @@
   // decides what the right-hand column shows.
 
   let phase = $state('idle');
+  /**
+   * HELD FROM THE PRESS UNTIL `phase` IS SET, synchronously, before the first
+   * `await`. `phase` turns `running` only after the pre-run census, which takes
+   * hundreds of milliseconds, so a guard on `phase` alone let a second press
+   * through: two snapshots and either a false pre-run error or two
+   * `POST /pull/run`, the loser of which set `done` over a live run and hid
+   * Stop. conc18-1.
+   */
+  let pressing = $state(false);
   let startedAt = $state(0);
   let finishedAt = $state(0);
   /**
@@ -5728,11 +5665,9 @@
 
   /** Every `Failed` row the receipt carried — the server sends at most five. */
   const namedFailures = $derived((receipt?.facts ?? []).filter((f) => f.k === 'Failed'));
-  const failedCount = $derived.by(() => {
-    const raw = factValue.get('Members failed');
-    const parsed = Number(String(raw ?? '').replace(/[^0-9]/g, ''));
-    return Number.isFinite(parsed) ? parsed : 0;
-  });
+  // `Failure diagnostics`, through `$lib/receipt.js`: the key the server
+  // emits, pinned against `server.rs` by `tests/receipt.test.js` (P17-01).
+  const failedCount = $derived(failureCount(receipt?.facts ?? []));
   /**
    * THE TRUNCATION, STATED. `landed_answer` writes
    * `for f in done.failures.iter().take(5)`, so a run with 407 failures puts
@@ -5891,7 +5826,7 @@
         group = GROUP.silent;
         reason =
           hiddenFailures > 0
-            ? `The store gained nothing for this instrument and no reason was sent for it. The run recorded ${n(failedCount)} failed member(s) and put only ${n(namedFailures.length)} reason(s) on the wire, so this may be one of the ${n(hiddenFailures)} whose reason the server truncated.`
+            ? `The store gained nothing for this instrument and no reason was sent for it. The run recorded ${n(failedCount)} failure diagnostic(s) and put only ${n(namedFailures.length)} reason(s) on the wire, so this may be one of the ${n(hiddenFailures)} whose reason the server truncated.`
             : 'The run reported no failure for this instrument and the store gained nothing for it. It was named by the universe and is not accounted for.';
         tone = 'warn';
       }
@@ -6669,7 +6604,7 @@
   async function start(e) {
     e?.preventDefault?.();
     showProblems = true;
-    if (problems.length > 0 || phase === 'running') return;
+    if (problems.length > 0 || phase === 'running' || pressing) return;
 
     /* THE SAME LIST THE PAGE COUNTS, AND THAT IS THE WHOLE POINT.
      *
@@ -6717,6 +6652,9 @@
 
     // THE BEFORE READING IS TAKEN FIRST AND IS NOT OPTIONAL. Every count the
     // card shows is a difference against it.
+    // THE LATCH IS TAKEN BEFORE THE FIRST AWAIT AND RELEASED IN THE SAME
+    // SYNCHRONOUS CONTINUATION THAT SETS `phase`, so no press lands between.
+    pressing = true;
     try {
       baseline = await snapshot();
       live = baseline;
@@ -6725,6 +6663,8 @@
       live = null;
       netError = `The store could not be read before starting, so nothing this run does could be measured against it: ${why}`;
       return;
+    } finally {
+      pressing = false;
     }
 
     startedAt = Date.now();
@@ -6755,6 +6695,12 @@
           `The run was refused and gave no reason, which is itself the fault: HTTP ${r.status}.`;
         phase = 'done';
         finishedAt = Date.now();
+        releaseWatch?.();
+        releaseWatch = null;
+        /* 409 IS "A RUN IS ALREADY IN FLIGHT". That run is real and this page
+           must show it, not a finished card with Stop gone: pick it up exactly
+           as a page load does. The refusal stays in `netError`. conc18-1. */
+        if (r.status === 409) await resumeRun();
         return;
       }
     } catch (why) {
@@ -6899,7 +6845,7 @@
    * @param {Set<string>} asked
    */
   async function runPull(bodies, asked) {
-    if (bodies.length === 0 || phase === 'running') return;
+    if (bodies.length === 0 || phase === 'running' || pressing) return;
 
     receipt = null;
     receipts = [];
@@ -6915,6 +6861,9 @@
     // THE BEFORE READING IS TAKEN FIRST AND IS NOT OPTIONAL. Every outcome
     // below is a difference against it; without one there is nothing to
     // subtract and the page would have to guess.
+    // THE LATCH IS TAKEN BEFORE THE FIRST AWAIT AND RELEASED IN THE SAME
+    // SYNCHRONOUS CONTINUATION THAT SETS `phase`, so no press lands between.
+    pressing = true;
     try {
       baseline = await snapshot();
       live = baseline;
@@ -6923,6 +6872,8 @@
       live = null;
       netError = `The store could not be read before starting, so nothing this run does could be measured against it: ${why}`;
       return;
+    } finally {
+      pressing = false;
     }
 
     startedAt = Date.now();
@@ -7165,6 +7116,8 @@
       said = await r.json();
     } catch (why) {
       stopAsked = false;
+      // NOTHING WAS STOPPED, so the run is not an aborted one. conc18-2.
+      aborted = false;
       pollError = `Stop could not be delivered, so the run may still be going: ${why}. Reload this page to see what it is doing.`;
       return;
     }
@@ -7175,6 +7128,7 @@
        done nothing. */
     if (said?.stopping !== true) {
       stopAsked = false;
+      aborted = false;
       pollError =
         'Nothing was stopped: the server reports no run in progress. It may have finished on its own — the status below is the reading that matters.';
       return;
@@ -7193,6 +7147,7 @@
     sent = { done: 0, of: 0, label: '' };
     askedKeys = new Set();
     netError = null;
+    pollError = null;
     outcomes = [];
     outcomeIndex = new Map();
     baseline = null;
@@ -8558,7 +8513,7 @@
             {/if}
 
             <div class="actions">
-              <button class="btn primary" type="submit" disabled={phase === 'running'}>
+              <button class="btn primary" type="submit" disabled={phase === 'running' || pressing}>
                 {#if phase === 'running'}
                   <span class="spin ring" aria-hidden="true"></span> Running…
                 {:else}
@@ -8621,6 +8576,25 @@
               {/if}
 
             </div>
+
+            <!-- THE RUN'S OWN REFUSALS, SAID OUT LOUD. `netError` (a refused or
+                 unreachable `/pull/run`, a pre-run census that failed, a dropped
+                 leg) and `pollError` (an unreadable run status, a Stop the
+                 server never took, a census poll that failed) were written by
+                 every handler and rendered nowhere, so a press that failed
+                 looked like a press that did nothing. Shown whatever `phase`
+                 is. conc18-2, CLAUDE.md §4. -->
+            {#if netError}
+              <p class="note wrap warn" role="alert" data-run-error="net">{netError}</p>
+            {/if}
+            {#if pollError}
+              <p class="note wrap warn" role="alert" data-run-error="poll">
+                {#if phase === 'running'}The progress shown is the last reading this page took. {/if}{pollError}
+              </p>
+            {/if}
+            {#if phase === 'done' && aborted && !netError}
+              <p class="note wrap" data-run-error="stopped">Stopped at your request. What landed before the stop is counted below.</p>
+            {/if}
 
             <!-- ══════════════ HOW FAR THROUGH THE RUN IS ══════════════
 
@@ -8751,9 +8725,11 @@
                  with nothing behind it in the other direction, and it is the
                  first thing an operator asks about. -->
             {#if runState && (runState.running || runState.passes > 0)}
+              <!-- NEVER A DELTA FROM A NULL OR A NEGATIVE ONE (CE-81): see `landedOf`. -->
+              {@const landed = landedOf(runState.rowsAtStart, runState.rowsNow)}
               <div class="runcard">
                 <div class="runtop">
-                  <span><b>{n(runState.rowsNow - runState.rowsAtStart)}</b> bar(s) landed</span>
+                  <span title={landed.why}>{#if landed.count === null}{landed.lead}{:else}<b>{n(landed.count)}</b>{/if} bar(s) {landed.kind === 'dropped' ? 'FEWER than at the start — the census total fell, so nothing is claimed as landed' : 'landed'}</span>
                   <span>pass <b>{n(runState.passes)}</b></span>
                   {#if runState.retries > 0}<span><b>{n(runState.retries)}</b> retried</span>{/if}
                   <span class="runwhere">{runState.running ? (runState.stopping ? 'stopping at the next leg' : 'running on the server') : 'finished'}</span>
@@ -8761,6 +8737,7 @@
                 <table class="runfeeds">
                   <tbody>
                     {#each runState.feeds ?? [] as f (f.vendor)}
+                      {@const meter = feedMeter(f)}
                       <tr>
                         <td class="rf-v">{feedName(f.vendor)}</td>
                         <!-- ══ THE FEED'S OWN PROGRESS, AS A LENGTH ══
@@ -8786,13 +8763,16 @@
                               aria-hidden="true"
                               ><i
                                 class="fill"
-                                class:up={f.finished || (f.legsDone ?? 0) >= (f.legs ?? 0)}
+                                class:up={meter.up}
+                                class:halt={meter.halted}
                                 style="width:{Math.min(100, ((f.legsDone ?? 0) / f.legs) * 100)}%"
                               ></i></i
                             >
                           {/if}
                         </td>
-                        <td class="rf-d">{f.finished ? '—' : (f.doing || 'waiting for its turn')}</td>
+                        <!-- `skipped` IS RENDERED NOW (CE-81). A halted feed finishes with
+                             `skipped = legs - legsDone`; '—' there read as done. -->
+                        <td class="rf-d">{#if meter.skipped > 0}<span class="rf-halt">halted · {n(meter.skipped)} leg(s) skipped</span>{:else}{f.finished ? '—' : (f.doing || 'waiting for its turn')}{/if}</td>
                         <!-- ══ THE VENDOR'S OWN WORDS, NOT A GUESS ABOUT THEM ══
                              This read `retrying after a failure` for EVERY
                              `lastError`, and threw the error itself away.
@@ -9024,6 +9004,16 @@
              The DOT carries that (tone + `live`), the timestamp carries when,
              and the word is drawn only when it is not `measured` — i.e. only
              when something is wrong and the reader must be told in words. -->
+        <!-- THE LADDER'S OWN STATE, WHEN IT CANNOT BE TRUSTED (CE-79). The
+             fail and retry verdicts below are read from /ingest/status.json;
+             a refused read or a survey that has not happened is said here,
+             in the server's words, rather than left as "no halt". -->
+        {#if pilotSays}
+          <p class="caution" class:loud={pilotSays.tone === 'bad'} role="alert">
+            <span class="tag {pilotSays.tone === 'bad' ? 'down' : 'warn'}">{pilotSays.head}</span>
+            <span class="msg">{pilotSays.text}</span>
+          </p>
+        {/if}
         <div class="prov" aria-live="polite" title={provenance.detail}>
           <i class="dot {provenance.tone}" class:live={provenance.live}></i>
           {#if provenance.tone !== 'up'}
@@ -9623,7 +9613,7 @@
                           <button
                             class="btn sm"
                             type="button"
-                            disabled={phase === 'running' || problems.length > 0 || sp === null}
+                            disabled={phase === 'running' || pressing || problems.length > 0 || sp === null}
                             title={phase === 'running'
                               ? 'A pull is already on the wire — /pull/spot is synchronous and this page sends one at a time.'
                               : problems.length > 0
@@ -12009,6 +11999,10 @@
   .cscroll td .meter .fill.up,
   td.rf-n .meter .fill.up {
     background: var(--up);
+  }
+  /* A HALTED FEED'S PARTIAL BAR IS NOT SUCCESS AND NOT MERELY PENDING (CE-81). */
+  td.rf-n .meter .fill.halt {
+    background: var(--down);
   }
   /* The cell that holds a fill is its own containing block — see the single
      `.cscroll td.num` rule further down, which now carries `position: relative`

@@ -243,16 +243,64 @@ fn a_banner_line_on_a_closed_stream_is_dropped_loudly_and_never_panics() {
     assert_eq!(err, b"why 2\n");
 }
 
+/// `source` with every `#[cfg(test)]` item removed, by rustfmt's layout: the
+/// attribute, any attributes after it, and the item through the closing brace
+/// at the attribute's own indentation (or its one line when it ends in `;`).
+fn without_test_items(source: &str) -> Vec<&str> {
+    let mut kept = Vec::new();
+    let mut lines = source.lines();
+    while let Some(line) = lines.next() {
+        if line.trim_start() != "#[cfg(test)]" {
+            kept.push(line);
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        let closing = format!("{}}}", " ".repeat(indent));
+        let mut in_attribute = false;
+        for item in lines.by_ref() {
+            let trimmed = item.trim_start();
+            if in_attribute || trimmed.starts_with("#[") {
+                // An attribute may run over several lines (`#[allow(` ... `)]`).
+                in_attribute = !trimmed.ends_with(']');
+                continue;
+            }
+            if trimmed.ends_with(';') && item.len() - trimmed.len() == indent {
+                break;
+            }
+            if item == closing {
+                break;
+            }
+        }
+    }
+    kept
+}
+
 /// probeapi-7: no print macro that can panic is left in this file's
 /// production code. The serve path prints through `say!` / `warn_line!`.
+///
+/// THE WHOLE FILE, LESS ITS TEST ITEMS (P1-12-04). The scan stopped at the
+/// first `mod tests {`, and roughly 2,500 lines of production handlers sit
+/// after it, between later `#[cfg(test)]` modules, so a print there was never
+/// read. Every `#[cfg(test)]` item is removed instead, and a late production
+/// handler must still be in what is scanned.
 #[test]
 fn production_code_in_server_rs_prints_through_the_panic_free_writers() {
     let source = include_str!("server.rs");
-    let production = source
-        .split_once("\nmod tests {")
-        .map_or(source, |(before, _)| before);
+    let production = without_test_items(source);
+    for late in ["async fn vocab_json(", "async fn calendar_json("] {
+        assert!(
+            production.iter().any(|line| line.starts_with(late)),
+            "`{late}` is production code after the test modules and must be scanned"
+        );
+    }
+    assert!(
+        !production
+            .iter()
+            .any(|line| line.starts_with(concat!("mod ", "tests {"))),
+        "the test module is not production code"
+    );
     let offenders: Vec<&str> = production
-        .lines()
+        .into_iter()
         .filter(|line| !line.trim_start().starts_with("//"))
         .filter(|line| {
             ["println!(", "print!(", "eprintln!(", "eprint!("]

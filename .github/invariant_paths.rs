@@ -264,6 +264,172 @@ fn two_segment_resolves((a, b): (&str, &str), names: &Names<'_>) -> bool {
     }
 }
 
+/// Does a CRATE-FIRST token's every middle segment name a module of the file
+/// that declares its test? D-2100.
+///
+/// Gate 10's shell table checks `crate::...::name` by its first and last
+/// segments only, so `store::file::sidecar_checksum_tests::x` passed on any `x`
+/// in `store`, and a renamed or misspelt module in the middle was never read.
+/// The token resolves only when a tracked file of that crate declares `name`
+/// and every middle segment is one of that file's module names: a component
+/// of its path, a segment it is mounted at in the MODULES table, an inline
+/// `mod m {` it declares (the INLINE table, `source_scan inline-mods`), or
+/// `bench` for a file under the crate's `benches/`, the name every cost row
+/// gives the crate's bench target. The order and nesting of the segments are
+/// not checked; docs/06-limits.md states that limit.
+fn crate_first_resolves(
+    token: &str,
+    declarations: &[(&str, &str)],
+    modules: &[(&str, &str)],
+    inline: &std::collections::HashMap<&str, HashSet<&str>>,
+) -> bool {
+    let segments: Vec<&str> = token.split("::").collect();
+    let [krate, middle @ .., name] = segments.as_slice() else {
+        return false;
+    };
+    let prefix = format!("crates/{krate}/");
+    declarations.iter().any(|(path, function)| {
+        function == name
+            && path.starts_with(&prefix)
+            && file_answers(path, krate, middle, modules, inline)
+    })
+}
+
+/// Does the file at `path`, in crate `krate`, answer to every one of
+/// `segments` as a module name? Its path components, its mountings in the
+/// MODULES table, its inline `mod m {` declarations, and `bench` for a file
+/// under the crate's `benches/`. D-2100.
+fn file_answers(
+    path: &str,
+    krate: &str,
+    segments: &[&str],
+    modules: &[(&str, &str)],
+    inline: &std::collections::HashMap<&str, HashSet<&str>>,
+) -> bool {
+    let own = module_segments(path, modules);
+    let bench = path.starts_with(&format!("crates/{krate}/benches/"));
+    segments.iter().all(|segment| {
+        own.contains(segment)
+            || (bench && *segment == "bench")
+            || inline.get(path).is_some_and(|mods| mods.contains(segment))
+    })
+}
+
+/// Every declaration a `::`-qualified token can name, as `crate<SPACE>fn`, for
+/// Gate 12's proof lookup. D-2100.
+///
+/// Gate 12 read only `a::b::c`: a two-segment token was never seen, and a
+/// longer one was cut to its first three segments and looked up as the wrong
+/// function. Every token of two or more segments now resolves here. A
+/// crate-first token (`store::file::name`) names a declaration of `name` in
+/// that crate whose file answers to every middle segment, as
+/// [`crate_first_resolves`] reads them. A module-first token
+/// (`grid::name`, `server::store_wire::tests::name`) names a declaration of
+/// `name` in any crate whose file answers to every segment but the last.
+/// `.github/` tools belong to no crate and are never named.
+fn resolutions(
+    tokens: &str,
+    declarations: &str,
+    modules: &str,
+    inline: &str,
+) -> Vec<(String, String)> {
+    let modules: Vec<(&str, &str)> = modules
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .collect();
+    let pairs: Vec<(&str, &str)> = declarations
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .collect();
+    let mut inline_by_file: std::collections::HashMap<&str, HashSet<&str>> =
+        std::collections::HashMap::new();
+    for (file, name) in inline.lines().filter_map(|line| line.split_once('\t')) {
+        inline_by_file.entry(file).or_default().insert(name);
+    }
+    let mut by_name: std::collections::HashMap<&str, Vec<&str>> = std::collections::HashMap::new();
+    for (path, function) in &pairs {
+        by_name.entry(function).or_default().push(path);
+    }
+    let crates = crate_names(&pairs);
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for token in tokens.lines().map(str::trim).filter(|t| !t.is_empty()) {
+        if !seen.insert(token) {
+            continue;
+        }
+        let segments: Vec<&str> = token.split("::").collect();
+        let [first, .., name] = segments.as_slice() else {
+            continue;
+        };
+        if segments.len() < 2 {
+            continue;
+        }
+        let (krate, middle) = if crates.contains(first) {
+            (Some(*first), &segments[1..segments.len() - 1])
+        } else {
+            (None, &segments[..segments.len() - 1])
+        };
+        let mut named = HashSet::new();
+        for path in by_name.get(name).into_iter().flatten() {
+            let Some(own_crate) = path
+                .strip_prefix("crates/")
+                .and_then(|r| r.split('/').next())
+            else {
+                continue;
+            };
+            if krate.is_some_and(|k| k != own_crate) {
+                continue;
+            }
+            if file_answers(path, own_crate, middle, &modules, &inline_by_file)
+                && named.insert(own_crate)
+            {
+                out.push((token.to_owned(), format!("{own_crate} {name}")));
+            }
+        }
+    }
+    out
+}
+
+/// Every crate-first `a::b::name` token of the document whose middle segments
+/// do not resolve, one per line, in document order, each once. Gate 10 reads
+/// the list inside its own row loop, so its allowlist applies to these as it
+/// does to the crate-and-name check. D-2100.
+fn unresolved_middles(
+    document: &str,
+    declarations: &str,
+    modules: &str,
+    inline: &str,
+) -> Vec<String> {
+    let modules: Vec<(&str, &str)> = modules
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .collect();
+    let pairs: Vec<(&str, &str)> = declarations
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .collect();
+    let mut inline_by_file: std::collections::HashMap<&str, HashSet<&str>> =
+        std::collections::HashMap::new();
+    for (file, name) in inline.lines().filter_map(|line| line.split_once('\t')) {
+        inline_by_file.entry(file).or_default().insert(name);
+    }
+    let crates = crate_names(&pairs);
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for line in document.lines().filter(|line| line.starts_with('|')) {
+        for token in qualified_tokens(line) {
+            let first = token.split("::").next().unwrap_or("");
+            if crates.contains(first)
+                && seen.insert(token)
+                && !crate_first_resolves(token, &pairs, &modules, &inline_by_file)
+            {
+                out.push(token.to_owned());
+            }
+        }
+    }
+    out
+}
+
 /// Every function and module name, once: in each crate, and anywhere.
 struct Names<'a> {
     by_crate: std::collections::HashMap<&'a str, HashSet<&'a str>>,
@@ -307,20 +473,7 @@ const STATUS: [&str; 5] = ["✓", "◐", "—", "✗", "~"];
 /// the status glyph): snake case, at least three underscores (a test name,
 /// not a field or a variable), not a prefix ending in `_`. D-1606.
 fn bare_proof_names(line: &str) -> Vec<&str> {
-    let cells: Vec<&str> = {
-        let mut cells = Vec::new();
-        let mut start = 0;
-        let bytes = line.as_bytes();
-        for (at, byte) in bytes.iter().enumerate() {
-            if *byte == b'|' && (at == 0 || bytes[at - 1] != b'\\') {
-                if at > 0 {
-                    cells.push(&line[start..at]);
-                }
-                start = at + 1;
-            }
-        }
-        cells
-    };
+    let cells = row_cells(line);
     let [.., proof, status] = cells.as_slice() else {
         return Vec::new();
     };
@@ -429,14 +582,125 @@ fn verify_with(document: &str, declarations: &str, modules: &str) -> Result<usiz
     }
 }
 
-fn run() -> Result<usize, String> {
+/// The cells of a table row, split on every `|` not escaped as `\|`. D-1606's
+/// splitting, shared by [`bare_proof_names`]'s rule and [`unproven_ticks`].
+fn row_cells(line: &str) -> Vec<&str> {
+    let mut cells = Vec::new();
+    let mut start = 0;
+    let bytes = line.as_bytes();
+    for (at, byte) in bytes.iter().enumerate() {
+        if *byte == b'|' && (at == 0 || bytes[at - 1] != b'\\') {
+            if at > 0 {
+                cells.push(&line[start..at]);
+            }
+            start = at + 1;
+        }
+    }
+    cells
+}
+
+/// Does a `✓` row's proof cell NAME something that can prove it? P12-02, D-1799.
+///
+/// Accepted: a backticked token whose last segment is a function some tracked
+/// source declares, either at the end of a `crate::module::name` path or with
+/// at least two underscores in a bare or two-segment name (a test name, not a
+/// field or a one-word helper); a CI gate by number (`gate 17`); or a
+/// front-end test file (`.test.js`). Everything else -- a code pointer, "the
+/// same test", a test count, a decision id -- is refused, because a row whose
+/// proof is invisible to gate 10 can go false with the gate green (P12-03).
+///
+/// WHAT IT CANNOT SEE, stated in `docs/06-limits.md`: whether the named
+/// function is a TEST (the declaration table does not say), and whether a
+/// named gate or file proves this row. It refuses an unnamed proof; it does
+/// not certify a named one.
+fn names_a_proof(proof: &str, functions: &HashSet<&str>) -> bool {
+    let lower = proof.to_ascii_lowercase();
+    let gate = lower
+        .match_indices("gate ")
+        .any(|(at, word)| lower[at + word.len()..].starts_with(|c: char| c.is_ascii_digit()));
+    gate || lower.contains(".test.js")
+        || proof.split('`').skip(1).step_by(2).any(|value| {
+            let value = value.strip_suffix("()").unwrap_or(value);
+            let last = value.rsplit("::").next().unwrap_or(value);
+            functions.contains(last)
+                && (value.split("::").count() >= 3
+                    || last.bytes().filter(|byte| *byte == b'_').count() >= 2)
+        })
+}
+
+/// Every `✓` row whose proof cell names nothing [`names_a_proof`] accepts.
+/// A header row (the line after it is the `|---` separator) is not a row.
+fn unproven_ticks(document: &str, declarations: &str) -> Vec<String> {
+    let functions: HashSet<&str> = declarations
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .map(|(_, function)| function)
+        .collect();
+    let lines: Vec<&str> = document.lines().collect();
+    let mut refused = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let header = lines
+            .get(index + 1)
+            .is_some_and(|next| next.starts_with("|---"));
+        let cells = row_cells(line);
+        if !line.starts_with('|') || header || cells.len() < 3 {
+            continue;
+        }
+        if let [.., proof, status] = cells.as_slice()
+            && status.trim() == "✓"
+            && !names_a_proof(proof, &functions)
+        {
+            refused.push(format!(
+                "line {}: a ✓ row names no test, gate or front-end test file: {}",
+                index + 1,
+                cells.first().map_or("", |id| id.trim())
+            ));
+        }
+    }
+    refused
+}
+
+/// `Some(checked)` for a verification, `None` for a `--middles` or `--resolve`
+/// listing.
+fn run() -> Result<Option<usize>, String> {
     let arguments: Vec<_> = std::env::args().skip(1).collect();
+    if let [mode, document, declarations, modules, inline] = arguments.as_slice()
+        && mode == "--middles"
+    {
+        let read = |path: &String| std::fs::read_to_string(path).map_err(|why| why.to_string());
+        for token in unresolved_middles(
+            &read(document)?,
+            &read(declarations)?,
+            &read(modules)?,
+            &read(inline)?,
+        ) {
+            println!("{token}");
+        }
+        return Ok(None);
+    }
+    if let [mode, declarations, modules, inline] = arguments.as_slice()
+        && mode == "--resolve"
+    {
+        let read = |path: &String| std::fs::read_to_string(path).map_err(|why| why.to_string());
+        let mut tokens = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut tokens)
+            .map_err(|why| why.to_string())?;
+        for (token, named) in resolutions(
+            &tokens,
+            &read(declarations)?,
+            &read(modules)?,
+            &read(inline)?,
+        ) {
+            println!("{token}\t{named}");
+        }
+        return Ok(None);
+    }
     let (document, declarations, modules) = match arguments.as_slice() {
         [document, declarations] => (document, declarations, None),
         [document, declarations, modules] => (document, declarations, Some(modules)),
         _ => {
             return Err(
-                "usage: invariant-paths DOCUMENT PATH_DECLARATIONS [MODULE_PATHS]".to_owned(),
+                "usage: invariant-paths DOCUMENT PATH_DECLARATIONS [MODULE_PATHS], invariant-paths --middles DOCUMENT PATH_DECLARATIONS MODULE_PATHS INLINE_MODULES, or invariant-paths --resolve PATH_DECLARATIONS MODULE_PATHS INLINE_MODULES < TOKENS".to_owned(),
             );
         }
     };
@@ -447,15 +711,20 @@ fn run() -> Result<usize, String> {
         None => String::new(),
     };
     let checked = verify_with(&document, &declarations, &modules)?;
+    let unproven = unproven_ticks(&document, &declarations);
+    if !unproven.is_empty() {
+        return Err(unproven.join("\n"));
+    }
     if checked == 0 {
         return Err("no path-qualified invariant proofs were checked".to_owned());
     }
-    Ok(checked)
+    Ok(Some(checked))
 }
 
 fn main() -> ExitCode {
     match run() {
-        Ok(checked) => {
+        Ok(None) => ExitCode::SUCCESS,
+        Ok(Some(checked)) => {
             println!(
                 "{checked} path-qualified test references checked against their exact tracked files"
             );
@@ -664,5 +933,153 @@ mod tests {
         ] {
             assert!(verify(unchecked, LONG).is_ok(), "{unchecked}");
         }
+    }
+
+    /// P12-02, D-1799: a `✓` row must name something that can prove it.
+    #[test]
+    fn a_tick_row_must_name_a_test_a_gate_or_a_front_end_test_file() {
+        const TESTS: &str = "crates/api/src/a.rs\tthe_long_test\ncrates/api/src/a.rs\tshort\n";
+        for named in [
+            "| X-01 | a property | `api::a::the_long_test` | ✓ |",
+            "| X-01 | a property | `api::bench::short`, the bench lines | ✓ |",
+            "| X-01 | a property | `the_long_test()`, and prose | ✓ |",
+            "| X-01 | a property | CI gate 24 | ✓ |",
+            "| X-01 | a property | Gate 17, the swept crates | ✓ |",
+            "| X-01 | a property | `web/tests/live.test.js` | ✓ |",
+            "| X-01 | a \\| piped property | `the_long_test` | ✓ |",
+        ] {
+            assert!(unproven_ticks(named, TESTS).is_empty(), "{named}");
+        }
+        for unnamed in [
+            "| X-01 | a property | the same test's second half | ✓ |",
+            "| X-01 | a property | `short`, a production helper | ✓ |",
+            "| X-01 | a property | `the_renamed_test` | ✓ |",
+            "| X-01 | a property | the aggregate count | ✓ |",
+            "| X-01 | a property | gate keeping | ✓ |",
+            "| X-01 | a property | D-0593 | ✓ |",
+        ] {
+            let refused = unproven_ticks(unnamed, TESTS);
+            assert_eq!(refused.len(), 1, "{unnamed}");
+            assert!(
+                refused.iter().all(|why| why.contains("X-01")),
+                "{refused:?}"
+            );
+        }
+        // Other glyphs, header rows and prose are not this rule's to judge.
+        for skipped in [
+            "| X-01 | a property | the same test | ✗ |",
+            "| X-01 | a property | the same test | ◐ |",
+            "| ID | Invariant | Proof | ✓ |\n|---|---|---|---|",
+            "prose that ends | ✓ |",
+            "| ✓ |",
+        ] {
+            assert!(unproven_ticks(skipped, TESTS).is_empty(), "{skipped}");
+        }
+    }
+
+    const MIDDLE_DECLS: &str = "crates/store/src/file.rs\tread\ncrates/store/src/file.rs\tsealed\ncrates/store/benches/ratio.rs\tflat\ncrates/api/src/store_wire.rs\tshares\ncrates/cli/tests/limits.rs\tbound\n";
+    const MIDDLE_INLINE: &str = "crates/store/src/file.rs\tchecksum_tests\n";
+    const MIDDLE_MODULES: &str = "crates/api/src/store_wire.rs\tserver::store_wire\n";
+
+    fn middles(document: &str) -> Vec<String> {
+        unresolved_middles(document, MIDDLE_DECLS, MIDDLE_MODULES, MIDDLE_INLINE)
+    }
+
+    #[test]
+    fn a_crate_first_token_resolves_through_path_mount_inline_and_bench() {
+        for token in [
+            "store::file::read",
+            "store::file::checksum_tests::sealed",
+            "store::bench::flat",
+            "store::benches::ratio::flat",
+            "api::server::store_wire::shares",
+            "cli::limits::bound",
+            "cli::tests::limits::bound",
+        ] {
+            assert!(
+                middles(&format!("| R-01 | x | `{token}` | ✓ |")).is_empty(),
+                "{token}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wrong_or_misplaced_middle_segment_is_listed_once() {
+        for token in [
+            // a module the declaring file is not in
+            "store::wrong_tests::sealed",
+            // an inline module of ANOTHER file of the same crate does not lend
+            "store::checksum_tests::flat",
+            // `bench` names only a benches/ file
+            "store::bench::read",
+            // the right module in the wrong crate
+            "api::file::read",
+            // the name is not declared at all
+            "store::file::absent",
+            // four segments with one bad middle
+            "store::file::checksum_tests::nested_tests::sealed",
+        ] {
+            let document = format!("| R-01 | x | `{token}` and `{token}` |\n| R-02 | `{token}` |");
+            assert_eq!(middles(&document), [token.to_owned()], "{token}");
+        }
+    }
+
+    #[test]
+    fn module_first_tokens_and_prose_lines_are_not_middle_checked() {
+        // `server` is no crate: invariant_paths' module-first check reads it.
+        let document = "| R-01 | `server::nowhere::shares` |\nprose `store::wrong::read`\n";
+        assert!(middles(document).is_empty());
+    }
+
+    fn resolved(tokens: &str) -> Vec<(String, String)> {
+        resolutions(tokens, MIDDLE_DECLS, MIDDLE_MODULES, MIDDLE_INLINE)
+    }
+
+    #[test]
+    fn two_and_four_segment_tokens_resolve_to_their_crate_and_name() {
+        let got = resolved(
+            "store::read\nfile::read\nstore::file::checksum_tests::sealed\nserver::store_wire::shares\nstore_wire::shares\nstore::bench::flat\n",
+        );
+        let pairs: Vec<(&str, &str)> = got.iter().map(|(t, n)| (t.as_str(), n.as_str())).collect();
+        assert_eq!(
+            pairs,
+            [
+                ("store::read", "store read"),
+                ("file::read", "store read"),
+                ("store::file::checksum_tests::sealed", "store sealed"),
+                ("server::store_wire::shares", "api shares"),
+                ("store_wire::shares", "api shares"),
+                ("store::bench::flat", "store flat"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_token_with_a_wrong_segment_or_a_foreign_root_resolves_to_nothing() {
+        // The old reader cut a four-segment token to `store::file::checksum_tests`
+        // and looked up `checksum_tests`; the whole token is read now.
+        for token in [
+            "store::file::wrong_tests::sealed",
+            "api::read",
+            "std::mem",
+            "crate::read",
+            "store::bench::read",
+            "checksum_tests::flat",
+            "read",
+        ] {
+            assert!(resolved(token).is_empty(), "{token}");
+        }
+    }
+
+    #[test]
+    fn a_repeated_token_or_a_name_in_two_files_of_one_crate_is_listed_once() {
+        let declarations = format!("{MIDDLE_DECLS}crates/store/src/other.rs\tread\n");
+        let got = resolutions(
+            "store::read\nstore::read\n",
+            &declarations,
+            MIDDLE_MODULES,
+            MIDDLE_INLINE,
+        );
+        assert_eq!(got, [("store::read".to_owned(), "store read".to_owned())]);
     }
 }

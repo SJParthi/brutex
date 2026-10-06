@@ -506,7 +506,12 @@ fn missing_terminal_audit_refuses_success_but_keeps_index_observations() {
 }
 
 const CHILD: &str = "BRUTEX_INDEX_STOP_LAUNCH_TEST_CHILD";
-const CHILD_TEST: &str = "indexstoplaunch::tests::configured_launch_admits_only_exact_requests_and_records_missing_source_refusal";
+/// Built from `module_path!()` so a renamed or moved module cannot strand it
+/// (P1-12-03); the crate's own name is dropped because the harness omits it.
+const CHILD_PATH: &str = concat!(
+    module_path!(),
+    "::configured_launch_admits_only_exact_requests_and_records_missing_source_refusal"
+);
 
 #[test]
 fn configured_launch_admits_only_exact_requests_and_records_missing_source_refusal()
@@ -524,9 +529,12 @@ fn configured_launch_admits_only_exact_requests_and_records_missing_source_refus
     .unwrap();
     let log = root.0.join("child.log");
     let output = std::fs::File::create_new(&log).unwrap();
+    let child_test = CHILD_PATH
+        .split_once("::")
+        .map_or(CHILD_PATH, |(_, path)| path);
     let mut command = std::process::Command::new(std::env::current_exe().unwrap());
     command
-        .args(["--exact", CHILD_TEST, "--nocapture", "--test-threads=1"])
+        .args(["--exact", child_test, "--nocapture", "--test-threads=1"])
         .env_clear();
     if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
         command.env("LLVM_PROFILE_FILE", profile);
@@ -568,6 +576,12 @@ fn configured_launch_admits_only_exact_requests_and_records_missing_source_refus
     };
     let output = std::fs::read_to_string(log).unwrap();
     assert!(status.success(), "{output}");
+    // THE CHILD MUST PROVE IT RAN (P1-12-03): `--exact` on a name that
+    // matches nothing exits zero, which a status check alone accepts.
+    assert!(
+        output.contains("test result: ok. 1 passed;"),
+        "the child must run exactly this one test:\n{output}"
+    );
     Ok(())
 }
 

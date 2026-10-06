@@ -21,10 +21,10 @@
 //! thin adapter over it; the dependency is taken by the change that first makes
 //! a live call. See `crates/pull/Cargo.toml` and `docs/05-decisions.md` D-0035.
 //!
-//! **No trading calendar.** `docs/00-charter.md` records three special-session
-//! shapes and no holiday list, so `P-03` in `docs/04-invariants.md` keeps its
-//! `—` status rather than being satisfied by a weekend rule that would be
-//! wrong — 2025-02-01 was a Saturday and a full 375-bar session.
+//! **No weekday rule.** The trading calendar is [`calendar`], measured rather
+//! than computed from a day of the week — 2025-02-01 was a Saturday and a full
+//! 375-bar session. [`session::Window::verdict`] drops a bar on a day it
+//! records closed, which is `P-03` in `docs/04-invariants.md` (D-2673).
 //!
 //! **No concurrency wrapper around [`rate`].** [`rate::Governor`] takes
 //! `&mut self` and holds no interior mutability, so one governor cannot be
@@ -124,6 +124,8 @@ pub mod cash_session_cache;
 pub mod chain;
 pub mod config;
 pub mod csv;
+/// The pulled day bar, checked against the days its minute bars fold to.
+pub mod daycheck;
 /// DhanHQ v2's TWO error vocabularies -- one vendor's row in `refusal`.
 ///
 /// `DH-902` "not subscribed" and `DH-901` "token expired" both arrive as

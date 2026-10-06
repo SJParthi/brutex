@@ -306,6 +306,200 @@ pub fn bonferroni_t(n: u64) -> f64 {
     upper_tail_quantile(FWER / (2.0 * n_f))
 }
 
+/// Whether `t`, a Student-t statistic from `observations` observations, clears
+/// the two-sided Bonferroni bar for `trials` tests at [`FWER`].
+///
+/// # Why the reference distribution is Student-t and not the normal
+///
+/// [`bonferroni_t`] is a NORMAL quantile, and `Edge::t` is Student-t with
+/// `observations - 1` degrees of freedom. "The two converge by about thirty"
+/// holds at a 5% tail, not at a Bonferroni tail of `0.05 / (2N)`. At 29 degrees
+/// of freedom the normal bar is 4.351 for N = 3,689 and the Student-t bar is
+/// 5.225, so a row at the normal bar spent about eleven times its share of the
+/// family-wise budget; at N = 61,125,295 the two are 6.141 and 8.924
+/// (p8num-1, D-2725). So the verdict is taken against the row's OWN
+/// distribution: `t` clears when its two-sided Student-t tail probability is
+/// at most `FWER / trials`, which is the Bonferroni rule itself.
+///
+/// The Student-t tail is always heavier than the normal one, so this never
+/// admits a row [`bonferroni_t`] would refuse; it only refuses rows the normal
+/// bar admitted across two distributions.
+///
+/// Fewer than two observations have no degrees of freedom and never clear. A
+/// non-finite `t` other than an infinity never clears. No trials at all is the
+/// zero bar [`bonferroni_t`] already returns for that case.
+#[must_use]
+pub fn clears_bonferroni(t: f64, observations: u64, trials: u64) -> bool {
+    let Some(df) = observations.checked_sub(1).filter(|df| *df >= 1) else {
+        return false;
+    };
+    let tail = student_t_two_sided_tail(t, df);
+    if trials == 0 {
+        return !tail.is_nan();
+    }
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "see expected_max_t: the walk cannot reach 2^53 candidates."
+    )]
+    let budget = FWER / trials as f64;
+    tail <= budget
+}
+
+/// [`clears_bonferroni`] for a statistic carried in rounded thousandths, as
+/// `Edge::t_milli` and the live frontier rows carry it.
+///
+/// Judged at the SMALLEST `|t|` the rounded figure can stand for,
+/// `(|t_milli| - 0.5) / 1000`, so a rounded figure can never clear a bar the
+/// true statistic does not -- the same direction CE-7 (D-1769) took for the
+/// normal comparison.
+#[must_use]
+pub fn clears_bonferroni_milli(t_milli: i64, observations: u64, trials: u64) -> bool {
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "a t in thousandths is far below 2^53 for any statistic a run \
+                  produces; a saturated figure only grows the lower bound."
+    )]
+    let at_least = (t_milli.unsigned_abs() as f64 - 0.5).max(0.0) / 1_000.0;
+    clears_bonferroni(at_least, observations, trials)
+}
+
+/// The two-sided Bonferroni bar for `trials` tests on a Student-t statistic
+/// with `df` degrees of freedom: the `|t|` at which [`clears_bonferroni`] turns.
+///
+/// Found by bisection on [`student_t_two_sided_tail`], which is monotone in
+/// `|t|`, to well inside the two decimals a report prints. Returns 0 for no
+/// trials, as [`bonferroni_t`] does, and NaN for `df == 0`, where the
+/// distribution does not exist.
+#[must_use]
+pub fn bonferroni_t_student(trials: u64, df: u64) -> f64 {
+    if df == 0 {
+        return f64::NAN;
+    }
+    if trials == 0 {
+        return 0.0;
+    }
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "see expected_max_t: the walk cannot reach 2^53 candidates."
+    )]
+    let budget = FWER / trials as f64;
+    let mut high = bonferroni_t(trials).max(1.0);
+    while student_t_two_sided_tail(high, df) > budget {
+        high *= 2.0;
+    }
+    let mut low = 0.0;
+    for _ in 0..200 {
+        let mid = 0.5 * (low + high);
+        if student_t_two_sided_tail(mid, df) > budget {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    high
+}
+
+/// `P(|T| >= |t|)` for Student's t with `df` degrees of freedom.
+///
+/// Abramowitz & Stegun 26.7.1 gives the distribution as an incomplete beta
+/// function, so the two-sided tail is `I_x(df/2, 1/2)` with
+/// `x = df / (df + t^2)`. Computed in the tail itself rather than as one minus
+/// a CDF, so a tail of `1e-10` keeps its digits. NaN in, NaN out.
+#[must_use]
+pub fn student_t_two_sided_tail(t: f64, df: u64) -> f64 {
+    if t.is_nan() || df == 0 {
+        return f64::NAN;
+    }
+    if t.is_infinite() {
+        return 0.0;
+    }
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "a degrees-of-freedom count is an observation count; 2^53 is \
+                  beyond any series this engine stores."
+    )]
+    let nu = df as f64;
+    let x = nu / (nu + t * t);
+    regularized_incomplete_beta(0.5 * nu, 0.5, x)
+}
+
+/// The regularized incomplete beta function `I_x(a, b)`, for `a, b > 0`.
+///
+/// The continued fraction of Abramowitz & Stegun 26.5.8, evaluated by the
+/// modified Lentz method, on the side of the symmetry
+/// `I_x(a, b) = 1 - I_{1-x}(b, a)` where it converges quickly. Returns NaN
+/// when the fraction has not converged, which every caller reads as "does not
+/// clear" rather than as a probability.
+fn regularized_incomplete_beta(a: f64, b: f64, x: f64) -> f64 {
+    if x.is_nan() {
+        return f64::NAN;
+    }
+    if x <= 0.0 {
+        return 0.0;
+    }
+    if x >= 1.0 {
+        return 1.0;
+    }
+    let ln_front = a * x.ln() + b * (-x).ln_1p() - ln_beta(a, b);
+    if x < (a + 1.0) / (a + b + 2.0) {
+        ln_front.exp() * beta_continued_fraction(a, b, x) / a
+    } else {
+        1.0 - ln_front.exp() * beta_continued_fraction(b, a, 1.0 - x) / b
+    }
+}
+
+/// The continued fraction of A&S 26.5.8 by the modified Lentz method.
+fn beta_continued_fraction(a: f64, b: f64, x: f64) -> f64 {
+    /// Below this a Lentz denominator is replaced, so a zero cannot divide.
+    const TINY: f64 = 1e-300;
+    /// Convergence: the last factor is within this of one.
+    const EPSILON: f64 = 1e-15;
+    /// Iterations before the fraction is declared not to converge. The tails
+    /// this crate asks for converge in tens of terms at any degrees of freedom.
+    const MAX_TERMS: u32 = 100_000;
+    let guard = |value: f64| if value.abs() < TINY { TINY } else { value };
+    let mut upper = 1.0;
+    let mut lower = 1.0 / guard(1.0 - (a + b) * x / (a + 1.0));
+    let mut fraction = lower;
+    for term in 1..=MAX_TERMS {
+        let term = f64::from(term);
+        let even = term * (b - term) * x / ((a - 1.0 + 2.0 * term) * (a + 2.0 * term));
+        lower = 1.0 / guard(1.0 + even * lower);
+        upper = guard(1.0 + even / upper);
+        fraction *= lower * upper;
+        let odd = -(a + term) * (a + b + term) * x / ((a + 2.0 * term) * (a + 1.0 + 2.0 * term));
+        lower = 1.0 / guard(1.0 + odd * lower);
+        upper = guard(1.0 + odd / upper);
+        let step = lower * upper;
+        fraction *= step;
+        if (step - 1.0).abs() < EPSILON {
+            return fraction;
+        }
+    }
+    f64::NAN
+}
+
+/// `ln B(a, b) = ln Γ(a) + ln Γ(b) - ln Γ(a + b)`.
+fn ln_beta(a: f64, b: f64) -> f64 {
+    ln_gamma(a) + ln_gamma(b) - ln_gamma(a + b)
+}
+
+/// `ln Γ(x)` for `x > 0`: Stirling's series, Abramowitz & Stegun 6.1.41,
+/// after shifting `x` to at least 10 with `ln Γ(x) = ln Γ(x + 1) - ln x`. The
+/// first omitted term is below `1e-12` there.
+fn ln_gamma(x: f64) -> f64 {
+    let mut z = x;
+    let mut shift = 0.0;
+    while z < 10.0 {
+        shift += z.ln();
+        z += 1.0;
+    }
+    let inv = 1.0 / z;
+    let inv2 = inv * inv;
+    let series = inv * (1.0 / 12.0 - inv2 * (1.0 / 360.0 - inv2 * (1.0 / 1260.0 - inv2 / 1680.0)));
+    (z - 0.5) * z.ln() - z + 0.5 * core::f64::consts::TAU.ln() + series - shift
+}
+
 /// Two-sided p-value for a t-statistic, under the normal approximation.
 ///
 /// `2·(1 − Φ(|t|))`. The normal rather than Student's t because the samples
@@ -565,8 +759,10 @@ fn upper_tail_quantile(alpha: f64) -> f64 {
 )]
 mod tests {
     use super::{
-        benjamini_hochberg, bonferroni_t, effective_trials, expected_max_bailey, expected_max_t,
-        inverse_normal_cdf, normal_cdf, p_value, trials, trials_with_grid,
+        benjamini_hochberg, bonferroni_t, bonferroni_t_student, clears_bonferroni,
+        clears_bonferroni_milli, effective_trials, expected_max_bailey, expected_max_t,
+        inverse_normal_cdf, normal_cdf, p_value, student_t_two_sided_tail, trials,
+        trials_with_grid,
     };
     use engine::{Frontier, Itemset, Sweep};
     use vocab::ConditionMask;
@@ -685,6 +881,93 @@ mod tests {
             (t - 3.78).abs() < 0.01,
             "expected the published 3.78 for 316 tests, computed {t}"
         );
+    }
+
+    /// THE STUDENT-T TAIL MATCHES ITS CLOSED FORMS. p8num-1, D-2725.
+    ///
+    /// One and two degrees of freedom have exact tails: the Cauchy
+    /// `1 - (2/pi) atan(t)` and `1 - t / sqrt(2 + t^2)`. Checked relative to the
+    /// tail itself, far out where a one-minus-CDF form would have no digits
+    /// left.
+    #[test]
+    fn the_student_t_tail_matches_its_closed_forms() {
+        for t in [0.0_f64, 0.5, 1.0, 1.7, 2.0, 4.0, 9.0, 100.0, 1.0e4] {
+            let cauchy = 2.0 / core::f64::consts::PI * (1.0 / t).atan();
+            let one = student_t_two_sided_tail(t, 1);
+            if t > 0.0 {
+                assert!(
+                    ((one - cauchy) / cauchy).abs() < 1e-9,
+                    "df 1, t {t}: {one} vs {cauchy}"
+                );
+            }
+            let exact = 1.0 - t / (2.0 + t * t).sqrt();
+            let two = student_t_two_sided_tail(t, 2);
+            assert!(
+                ((two - exact) / exact).abs() < 1e-6,
+                "df 2, t {t}: {two} vs {exact}"
+            );
+            assert!(
+                (student_t_two_sided_tail(-t, 7) - student_t_two_sided_tail(t, 7)).abs() < 1e-15
+            );
+        }
+        assert!((student_t_two_sided_tail(0.0, 1) - 1.0).abs() < 1e-12);
+        assert!(student_t_two_sided_tail(f64::NAN, 29).is_nan());
+        assert!(student_t_two_sided_tail(1.0, 0).is_nan());
+        assert!(student_t_two_sided_tail(f64::INFINITY, 29).abs() < f64::MIN_POSITIVE);
+    }
+
+    /// THE NORMAL BAR IS NOT THE STUDENT-T BAR AT THIRTY OBSERVATIONS. p8num-1, D-2725.
+    ///
+    /// The audit's table at 29 degrees of freedom, reproduced: the normal
+    /// Bonferroni bar understates the Student-t one by 0.56 at 316 trials and
+    /// by 2.78 at 61,125,295. A row at t = 5.00 with thirty observations
+    /// cleared the normal bar of 3,689 trials (4.351) and must not clear the
+    /// Student-t one (5.225). With enough degrees of freedom the two meet.
+    #[test]
+    fn a_thirty_observation_row_is_held_to_the_student_t_bonferroni_bar() {
+        for (trials, normal, student) in [
+            (316, 3.778, 4.339),
+            (3_689, 4.351, 5.225),
+            (1_000_000, 5.451, 7.289),
+            (61_125_295, 6.141, 8.924),
+        ] {
+            let at_29 = bonferroni_t_student(trials, 29);
+            assert!(
+                (at_29 - student).abs() < 2e-3,
+                "{trials}: Student-t bar {at_29}, audit {student}"
+            );
+            assert!((bonferroni_t(trials) - normal).abs() < 2e-3, "{trials}");
+            assert!(at_29 > bonferroni_t(trials) + 0.5, "{trials}");
+            let wide = bonferroni_t_student(trials, 100_000_000);
+            assert!(
+                (wide - bonferroni_t(trials)).abs() < 1e-3,
+                "{trials}: {wide} at large df vs normal {}",
+                bonferroni_t(trials)
+            );
+        }
+        assert!(5.0 > bonferroni_t(3_689), "the normal bar admitted it");
+        assert!(!clears_bonferroni(5.0, 30, 3_689));
+        assert!(!clears_bonferroni(-5.0, 30, 3_689));
+        assert!(clears_bonferroni(5.3, 30, 3_689));
+        assert!(clears_bonferroni(5.0, 1_000, 3_689));
+        assert!(!clears_bonferroni_milli(5_000, 30, 3_689));
+        assert!(clears_bonferroni_milli(5_300, 30, 3_689));
+        // Rounded thousandths are judged at the smallest |t| they stand for.
+        let edge = bonferroni_t_student(3_689, 29);
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "a bar near five, in thousandths"
+        )]
+        let ceiling = (edge * 1_000.0).ceil() as i64;
+        assert!(!clears_bonferroni_milli(ceiling - 1, 30, 3_689));
+        assert!(clears_bonferroni_milli(ceiling + 1, 30, 3_689));
+        assert!(!clears_bonferroni(9.0, 1, 3_689), "no degrees of freedom");
+        assert!(!clears_bonferroni(9.0, 0, 3_689));
+        assert!(!clears_bonferroni(f64::NAN, 30, 3_689));
+        assert!(clears_bonferroni(f64::INFINITY, 30, 3_689));
+        assert!(clears_bonferroni(0.0, 30, 0), "no trials is the zero bar");
+        assert!(bonferroni_t_student(0, 29).abs() < f64::MIN_POSITIVE);
+        assert!(bonferroni_t_student(3_689, 0).is_nan());
     }
 
     #[test]

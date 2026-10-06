@@ -482,50 +482,71 @@ impl Trades {
         std::fs::create_dir_all(&dir)
             .map_err(|why| format!("the results directory could not be made: {why}"))?;
         let path = Self::path(root);
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
             .open(&path)
             .map_err(|why| format!("{} could not be opened: {why}", path.display()))?;
-        let len = file
-            .metadata()
-            .map_err(|why| format!("{} could not be measured: {why}", path.display()))?
-            .len();
-        if len == 0 {
-            write_fresh_header(&mut file, &path)?;
-            return Ok(Self {
-                file,
-                path,
-                root: root.to_path_buf(),
-                require_parent: false,
-                blocks: std::collections::HashMap::new(),
-                // A FRESH FILE HOLDS ONLY ITS HEADER, so the index has read
-                // everything there is.
-                scanned: HEADER,
-                write_refusal: None,
-            });
-        }
-        check_header(&mut file, &path, len)?;
-        let Indexed {
-            blocks,
-            write_refusal,
-        } = index_of(&mut file, len)?;
-        // `index_of` walks every WHOLE row, so the cursor sits at the end of the
-        // last one -- and a ragged tail cannot reach here, `check_header`
-        // refuses it.
-        let scanned =
-            HEADER.saturating_add((len.saturating_sub(HEADER) / STRIDE).saturating_mul(STRIDE));
-        Ok(Self {
+        // THE WRITER'S OPEN HOLDS THE EXCLUSIVE LOCK while it measures, cuts
+        // a torn tail and indexes (D-1901, sweep-2): an unlocked length could
+        // land inside another writer's live append.
+        file.lock()
+            .map_err(|why| format!("{} could not be locked: {why}", path.display()))?;
+        let mut trades = Self {
             file,
             path,
             root: root.to_path_buf(),
             require_parent: false,
+            blocks: std::collections::HashMap::new(),
+            // A FRESH FILE HOLDS ONLY ITS HEADER, so the index has read
+            // everything there is.
+            scanned: HEADER,
+            write_refusal: None,
+        };
+        let indexed = trades.index_locked();
+        let released = trades
+            .file
+            .unlock()
+            .map_err(|why| format!("{} could not be unlocked: {why}", trades.path.display()));
+        indexed.and(released).map(|()| trades)
+    }
+
+    /// [`Self::open`]'s body under the exclusive lock.
+    ///
+    /// A torn tail -- bytes past the last whole row -- is never a row: a trade
+    /// block is exposed only under a committed result-set receipt and ledger
+    /// row, both written after this block is whole and synced. So the writer
+    /// cuts it and says so. Read-only opens still refuse it.
+    fn index_locked(&mut self) -> Result<(), Refusal> {
+        crate::fixed_tail::heal_torn_tail(
+            &self.file,
+            &self.path,
+            HEADER,
+            STRIDE,
+            &crate::fixed_tail::magic_and_version(MAGIC, VERSION),
+        )?;
+        let len = self
+            .file
+            .metadata()
+            .map_err(|why| format!("{} could not be measured: {why}", self.path.display()))?
+            .len();
+        if len == 0 {
+            return write_fresh_header(&mut self.file, &self.path);
+        }
+        check_header(&mut self.file, &self.path, len)?;
+        let Indexed {
             blocks,
-            scanned,
             write_refusal,
-        })
+        } = index_of(&mut self.file, len)?;
+        self.blocks = blocks;
+        self.write_refusal = write_refusal;
+        // `index_of` walks every WHOLE row, so the cursor sits at the end of the
+        // last one -- and a ragged tail cannot reach here, it was cut above.
+        self.scanned =
+            HEADER.saturating_add((len.saturating_sub(HEADER) / STRIDE).saturating_mul(STRIDE));
+        Ok(())
     }
 
     /// Where a run's rows are, or `None`. **O(1)** — one hash probe.
@@ -620,6 +641,28 @@ impl Trades {
     /// Split out for the reason `results::append_locked` is: an early `return`
     /// inside the locked region would strand the lock until the process exits.
     fn append_locked(&mut self, rows: &[Row], identity: [u8; 32]) -> Result<u64, Refusal> {
+        self.append_locked_with(rows, identity, std::io::Write::write_all, File::sync_all)
+    }
+
+    /// The append body with an injectable write and barrier, used to prove
+    /// rollback against a real file. Production passes `write_all` and
+    /// `sync_all`.
+    fn append_locked_with(
+        &mut self,
+        rows: &[Row],
+        identity: [u8; 32],
+        write: impl FnOnce(&mut File, &[u8]) -> std::io::Result<()>,
+        sync: impl FnOnce(&File) -> std::io::Result<()>,
+    ) -> Result<u64, Refusal> {
+        // A tail another writer's killed append left since this handle opened
+        // is cut here, under the exclusive lock (D-1901).
+        crate::fixed_tail::heal_torn_tail(
+            &self.file,
+            &self.path,
+            HEADER,
+            STRIDE,
+            &crate::fixed_tail::magic_and_version(MAGIC, VERSION),
+        )?;
         // THE DUPLICATE TEST NEEDS THE LOCK, and it was made before it.
         // `blocks` is built once at open and knows nothing about a block
         // another process appended since. Two processes both passed, and
@@ -654,28 +697,13 @@ impl Trades {
         // because `first` floors while the seek does not. The cause is known
         // here and `at` is where the file ended, so this removes only what this
         // call wrote.
-        self.file
-            .write_all(&buffer)
-            .map_err(|why| match self.file.set_len(at) {
-                Ok(()) => format!(
-                    "{} could not be written: {why}. The partial write was rolled \
-                     back, so the file still ends on a whole row.",
-                    self.path.display()
-                ),
-                Err(and) => format!(
-                    "{} could not be written: {why}. Rolling the partial write \
-                     back ALSO failed: {and}. The file now ends mid-row and is \
-                     refused on the next open until its tail is cut back to byte \
-                     {at}.",
-                    self.path.display()
-                ),
-            })?;
+        crate::fixed_tail::write_at_end(&mut self.file, &self.path.display(), at, &buffer, write)?;
         // `sync_all`, NOT `sync_data`: this write EXTENDS the file, so the
-        // LENGTH is part of what has to survive. A torn length here does not
-        // cost "a detail row" -- it misaligns every run recorded afterwards.
-        self.file
-            .sync_all()
-            .map_err(|why| format!("{} could not be synced: {why}", self.path.display()))?;
+        // LENGTH is part of what has to survive. A failed barrier cuts the
+        // block as well: the failed pages stay readable but clean, so keeping
+        // them let a lookup find the block and a second barrier "confirm" it
+        // (resources-1, D-1900).
+        crate::fixed_tail::sync_or_roll_back(&self.file, &self.path, at, sync)?;
         self.blocks.insert(
             identity,
             Block {
@@ -695,6 +723,9 @@ impl Trades {
     /// Names a shared-lock, durability-barrier, or unlock failure. A caller
     /// must not promote the child to the public ledger after any such refusal.
     pub fn confirm_durable(&mut self) -> Result<(), Refusal> {
+        // A barrier that already failed on this file in this process is never
+        // confirmed by a second one (resources-1, D-1900).
+        crate::fixed_tail::refuse_after_failed_barrier(&self.path)?;
         self.file.lock_shared().map_err(|why| {
             format!(
                 "{} could not be locked for syncing: {why}",
@@ -1179,17 +1210,18 @@ fn check_header(file: &mut File, path: &Path, len: u64) -> Result<(), Refusal> {
     // `frontier::check_header` and `results::open_with` have both refused this
     // since they were written; the wording here is theirs.
     //
-    // The remainder is left alone rather than truncated. Cutting a file back is
-    // a decision about the operator's history and belongs to them — §3 rule 8 —
-    // and the whole rows before the tear are still readable and still counted.
+    // A READER leaves the remainder alone. The next WRITER, under its
+    // exclusive lock, cuts it before indexing (D-1901): bytes past the last
+    // whole row were never a row, and a block is exposed only under a
+    // committed receipt and ledger row written after it was whole and synced.
     let body = len.saturating_sub(HEADER);
     if !body.is_multiple_of(STRIDE) {
         let whole = body / STRIDE;
         let spare = body % STRIDE;
         return Err(format!(
             "{} has {spare} bytes past its last whole row — an append was \
-             interrupted. {whole} whole rows are intact; the remainder is left \
-             alone, because truncating it is a decision about your own history. \
+             interrupted. {whole} whole rows are intact; a reader leaves the \
+             remainder alone, and the next writer cuts it under its lock. \
              Nothing was written.",
             path.display()
         ));
@@ -1559,10 +1591,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A stale writer must not append after a torn tail left by a crashed peer.
-    /// Doing so would shift every later fixed-stride row permanently.
+    /// A torn tail left by a crashed peer is cut by the next writer under the
+    /// exclusive lock, never skipped and never extended: appending past it
+    /// would shift every later fixed-stride row (sweep-2, D-1901).
     #[test]
-    fn a_stale_handle_refuses_to_extend_a_ragged_chosen_trade_tail() {
+    fn a_stale_handle_cuts_a_ragged_chosen_trade_tail_before_appending() {
         use std::io::Write as _;
 
         let dir = std::env::temp_dir().join(format!(
@@ -1583,14 +1616,55 @@ mod tests {
             .sync_all()
             .expect("make the adversarial tail visible");
 
-        let why = stale
+        let reader = Trades::open_read(&dir)
+            .err()
+            .expect("a reader refuses the torn tail");
+        assert!(reader.contains("past its last whole row"), "{reader}");
+        stale
             .append_all(&[row([0x42; 32], 0)])
-            .expect_err("a ragged tail is never skipped");
-        assert!(why.contains("torn tail"), "{why}");
+            .expect("the writer cuts the torn tail and appends");
         assert_eq!(
-            std::fs::metadata(&path).expect("unchanged tail").len(),
-            before + 3,
-            "the refusal neither extends nor silently repairs append-only history"
+            std::fs::metadata(&path).expect("whole rows").len(),
+            before + super::STRIDE,
+            "the three torn bytes are gone and the row sits on the stride"
+        );
+        drop(Trades::open_read(&dir).expect("a reader opens the healed file"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// resources-1, D-1900: a failed barrier cuts the trade block and the file
+    /// is never confirmed durable by a second barrier.
+    #[test]
+    fn a_failed_trade_barrier_cuts_the_block_and_is_never_confirmed() {
+        let dir = std::env::temp_dir().join(format!(
+            "brutex-trades-failed-barrier-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut store = Trades::open(&dir).expect("fresh trades");
+        let path = Trades::path(&dir);
+        let before = std::fs::metadata(&path).expect("header").len();
+        store.file.lock().expect("the append lock");
+        let why = store
+            .append_locked_with(
+                &[row([0x43; 32], 0)],
+                [0x43; 32],
+                std::io::Write::write_all,
+                |_| Err(std::io::Error::other("injected EIO at fsync")),
+            )
+            .expect_err("the injected barrier refuses");
+        store.file.unlock().expect("the append unlock");
+        assert!(why.contains("injected EIO at fsync"), "{why}");
+        assert_eq!(std::fs::metadata(&path).expect("cut").len(), before);
+        let mut reopened = Trades::open(&dir).expect("reopen");
+        assert!(!reopened.holds(&[0x43; 32]), "nothing to promote");
+        let refused = reopened
+            .confirm_durable()
+            .expect_err("a failed barrier is never confirmed by a second");
+        assert!(
+            refused.contains("already failed in this process"),
+            "{refused}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

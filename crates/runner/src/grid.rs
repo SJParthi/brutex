@@ -449,7 +449,11 @@ impl Cell {
     // SCOPED TO THIS FUNCTION, and deliberately not to the module.
     //
     // `significance`, `bootstrap` and `outcome` each take this exception at
-    // module level, and they can: none of them ever sees a price. `grid` does --
+    // module level. `outcome` is not price-free: it reads candles, and its
+    // `Edge` carries paisa SUMS as `f64` (D-1173), so its module-wide allow
+    // is a standing exception over money rather than evidence that none is
+    // there (this said "none of them ever sees a price"; CE-96, D-1958).
+    // `grid` --
     // it carries paisa in `gross_win`, `gross_loss` and every P&L field on this
     // same struct -- so a module-level allow here would switch off the lint that
     // keeps §7's integer rule enforceable for the rest of the file.
@@ -560,6 +564,21 @@ impl Cell {
             return 0;
         }
         self.gross_loss.saturating_div(losers.cast_signed())
+    }
+
+    /// The MAGNITUDE of the mean loss, rounded UP, for a field a maximum gates.
+    ///
+    /// [`Self::avg_loss`] truncates toward zero, so `-301` over two losers is
+    /// `-150` and a `150` cap admitted a true mean of `150.5`. Admission
+    /// evidence reads this one instead (p3floor-1, D-1769); the display keeps
+    /// the truncated figure.
+    #[must_use]
+    pub const fn avg_loss_magnitude_ceil(&self) -> u64 {
+        let losers = self.trades.saturating_sub(self.wins);
+        if losers == 0 {
+            return 0;
+        }
+        self.gross_loss.unsigned_abs().div_ceil(losers)
     }
 
     /// Mean holding time, in execution bars — minutes under the 1-minute layer.
@@ -4550,8 +4569,12 @@ fn one_variant(
         if let Some(rows) = trades.as_deref_mut() {
             rows.push(row_of(bars, c, exit, pess, opt, went_against, went_for));
         }
-        if went_against > cell.worst_mae {
-            cell.worst_mae = went_against;
+        // `worst_mae` is gated by a maximum, so it takes the reading rounded UP
+        // (p3floor-2, D-1769); `went_against` stays the floored figure the
+        // trade rows and the all-trades sum have always carried.
+        let worst_of_this = c.cross.adverse_ppm_ceil_at(pess_off, c.entry_pess, side);
+        if worst_of_this > cell.worst_mae {
+            cell.worst_mae = worst_of_this;
         }
 
         if pess > 0 {
@@ -6376,6 +6399,33 @@ mod exit_family_tests {
 mod tests {
     use super::{Cell, Grid, Levels, Streaks, evaluate, evaluate_over, tally_trade};
 
+    /// p3floor-1, D-1769: the gated mean-loss magnitude rounds UP.
+    #[test]
+    fn the_gated_mean_loss_magnitude_rounds_up() {
+        let cell = Cell {
+            trades: 2,
+            wins: 0,
+            gross_loss: -301,
+            ..Cell::default()
+        };
+        assert_eq!(cell.avg_loss(), -150, "the display figure still truncates");
+        assert_eq!(cell.avg_loss_magnitude_ceil(), 151);
+        let even = Cell {
+            trades: 3,
+            wins: 1,
+            gross_loss: -300,
+            ..Cell::default()
+        };
+        assert_eq!(even.avg_loss_magnitude_ceil(), 150);
+        let none = Cell {
+            trades: 2,
+            wins: 2,
+            gross_loss: 0,
+            ..Cell::default()
+        };
+        assert_eq!(none.avg_loss_magnitude_ceil(), 0);
+    }
+
     /// BOTH RUNS ARE MEASURED, AND EACH ONE ENDS THE OTHER.
     ///
     /// `max_losing_streak` shipped alone. A reader shown only the bad run learns
@@ -6388,21 +6438,19 @@ mod tests {
     /// visibly wrong rather than coincidentally right: the four-win run comes
     /// AFTER the three-loss run, so a winning counter that the losses did not
     /// clear would read seven.
-    /// **A win inside its own pricing bracket is not the floor — D-0595.**
+    /// **The floor is the smallest win under the worst reading, whatever its
+    /// bracket — D-0602, reversing D-0595.**
     ///
     /// `min_win` is the numerator of the operator's `min(win) >= 3x max(loss)`
-    /// rule, and it took the smallest STRICTLY POSITIVE trade. One trade that
-    /// gained a single paisa therefore set the floor to one paisa and collapsed
-    /// the ratio however large the real winners were.
+    /// rule. D-0595 excluded a win no larger than its own `best - worst`
+    /// bracket; D-0602 found that backwards: `pess > 0` means the trade won
+    /// under the WORST admissible reading, so the bracket is uncertainty about
+    /// the win's size, never its sign. The middle case below, a win of 20
+    /// whose readings span 80, is therefore the floor. This doc still stated
+    /// D-0595's rule while the body asserted D-0602's (Z1-slice23-F2, D-1763).
     ///
-    /// The test that matters is the middle case: a win of 20 whose two readings
-    /// span 80 is a win under one admissible ordering and a loss under another,
-    /// so it cannot be the evidence a ratio rests on — while a win of 300 whose
-    /// readings span 100 survives either reading and can.
-    ///
-    /// Every OTHER count is asserted unchanged in the same pass, because a
-    /// scratch really did win and `TradeAggregatesV2::validate` requires
-    /// `losses == trades - wins`. Only the floor moves.
+    /// Every OTHER count is asserted in the same pass: every win is still in
+    /// the gross, the ceiling and the streak.
     #[test]
     fn the_floor_is_the_smallest_win_under_the_worst_reading_whatever_its_bracket() {
         let mut cell = Cell::default();
@@ -7890,7 +7938,12 @@ mod tests {
             // `Debug` text gained `refused_levels: None`. The same value came
             // out with D-1541's time-exit choice switched off and on, so no
             // cell of this fixture moved; was 11_636_914_018_498_032_287.
-            3_310_703_317_024_171_291,
+            //
+            // RE-TAKEN on merging staging (D-1770): `worst_mae` now takes the
+            // adverse reading rounded UP (p3floor-2, D-1769), on top of
+            // D-1545's rendering; was 3_310_703_317_024_171_291 here and
+            // 5_087_617_185_273_455_494 on staging alone. Counts unchanged.
+            10_616_736_728_369_623_410,
             "every cell of both grids, byte for byte"
         );
     }

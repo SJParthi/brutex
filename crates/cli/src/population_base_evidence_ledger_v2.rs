@@ -1166,6 +1166,43 @@ impl LedgerV2 {
         }
     }
 
+    /// The exact retry of a universe already complete: the Base bytes must
+    /// match, and are re-synced unless this process saw their barrier fail.
+    fn reuse_complete(
+        &mut self,
+        existing: &BaseEvidenceReopenAuditV2,
+        receipt: &CandidateUniverseReceiptV1,
+        prepared: &PreparedBaseEvidenceV2,
+    ) -> Result<BaseEvidenceProductionCommitV2, BaseEvidenceLedgerRefusalV2> {
+        let expected =
+            CompletionV2::from_prepared(receipt, prepared, existing.completion.first_record)?;
+        if existing.completion != expected {
+            return Err(BaseEvidenceLedgerRefusalV2::Reconciliation(
+                "Candidate universe is complete with different Base bytes".to_owned(),
+            ));
+        }
+        compare_prepared(&mut self.record_file, expected.first_record, prepared)?;
+        // A path whose barrier failed in this process is never confirmed
+        // by a second one (ledgers-2, D-1915).
+        crate::fixed_tail::refuse_after_failed_barrier(&self.record_path)
+            .and_then(|()| crate::fixed_tail::refuse_after_failed_barrier(&self.completion_path))
+            .map_err(BaseEvidenceLedgerRefusalV2::Io)?;
+        self.record_file
+            .sync_data()
+            .map_err(|why| io_error("re-sync reused Base records", &self.record_path, &why))?;
+        self.completion_file.sync_data().map_err(|why| {
+            io_error(
+                "re-sync reused Base completion",
+                &self.completion_path,
+                &why,
+            )
+        })?;
+        sync_directory(&self.root_file, &self.root)?;
+        self.record_generation = file_generation(&self.record_file, &self.record_path)?;
+        self.completion_generation = file_generation(&self.completion_file, &self.completion_path)?;
+        Ok(BaseEvidenceProductionCommitV2::Reused(*existing))
+    }
+
     fn append_locked(
         &mut self,
         candidate: &CandidateUniverseReopenAuditV1,
@@ -1180,29 +1217,7 @@ impl LedgerV2 {
             .map_err(|_| BaseEvidenceLedgerRefusalV2::Arithmetic("offered record count"))?;
         require_bound("append records", offered, self.bounds.records)?;
         if let Some(existing) = self.audits.get(&receipt.universe_id()).copied() {
-            let expected =
-                CompletionV2::from_prepared(&receipt, prepared, existing.completion.first_record)?;
-            if existing.completion != expected {
-                return Err(BaseEvidenceLedgerRefusalV2::Reconciliation(
-                    "Candidate universe is complete with different Base bytes".to_owned(),
-                ));
-            }
-            compare_prepared(&mut self.record_file, expected.first_record, prepared)?;
-            self.record_file
-                .sync_data()
-                .map_err(|why| io_error("re-sync reused Base records", &self.record_path, &why))?;
-            self.completion_file.sync_data().map_err(|why| {
-                io_error(
-                    "re-sync reused Base completion",
-                    &self.completion_path,
-                    &why,
-                )
-            })?;
-            sync_directory(&self.root_file, &self.root)?;
-            self.record_generation = file_generation(&self.record_file, &self.record_path)?;
-            self.completion_generation =
-                file_generation(&self.completion_file, &self.completion_path)?;
-            return Ok(BaseEvidenceProductionCommitV2::Reused(existing));
+            return self.reuse_complete(&existing, &receipt, prepared);
         }
         require_bound(
             "completion",
@@ -1235,10 +1250,22 @@ impl LedgerV2 {
                     prepared,
                     orphan.record_count,
                 )?;
-                (orphan.first_record, orphan.record_count)
+                // REWRITTEN, NOT VOUCHED FOR (ledgers-2, D-1915). The orphan
+                // may be the bytes of a run whose barrier failed; a barrier on
+                // this descriptor cannot prove them durable, so the block is
+                // cut back and written again whole. The bytes are identical.
+                let start = record_offset(orphan.first_record)?;
+                self.record_file
+                    .set_len(start)
+                    .and_then(|()| self.record_file.sync_all())
+                    .map_err(|why| {
+                        io_error("cut Base orphan for rewrite", &self.record_path, &why)
+                    })?;
+                (orphan.first_record, 0)
             }
             None => (self.total_records, 0),
         };
+        let block_start = record_offset(first_record)?;
         let completion = CompletionV2::from_prepared(&receipt, prepared, first_record)?;
         let new_total =
             first_record
@@ -1248,16 +1275,30 @@ impl LedgerV2 {
                 ))?;
         require_bound("records", new_total, self.bounds.records)?;
         append_prepared_records(&mut self.record_file, prepared, prefix)?;
-        self.record_file
-            .sync_data()
-            .map_err(|why| io_error("sync Base records", &self.record_path, &why))?;
+        // A failed barrier cuts the block back (ledgers-2, D-1915).
+        crate::fixed_tail::sync_or_roll_back(
+            &self.record_file,
+            &self.record_path,
+            block_start,
+            File::sync_data,
+        )
+        .map_err(BaseEvidenceLedgerRefusalV2::Io)?;
         self.total_records = new_total;
         self.orphan = Some(orphan_from_completion(&completion));
         self.record_generation = file_generation(&self.record_file, &self.record_path)?;
+        let completion_start = self
+            .completion_file
+            .metadata()
+            .map_err(|why| io_error("stat Base completion", &self.completion_path, &why))?
+            .len();
         append_completion(&mut self.completion_file, &completion)?;
-        self.completion_file
-            .sync_data()
-            .map_err(|why| io_error("sync Base completion", &self.completion_path, &why))?;
+        crate::fixed_tail::sync_or_roll_back(
+            &self.completion_file,
+            &self.completion_path,
+            completion_start,
+            File::sync_data,
+        )
+        .map_err(BaseEvidenceLedgerRefusalV2::Io)?;
         sync_directory(&self.root_file, &self.root)?;
         let audit = BaseEvidenceReopenAuditV2 { completion };
         self.audits.insert(receipt.universe_id(), audit);
@@ -1471,6 +1512,14 @@ fn compare_prepared_prefix(
     Ok(())
 }
 
+/// The byte offset of record `index` in the record file.
+fn record_offset(index: u64) -> Result<u64, BaseEvidenceLedgerRefusalV2> {
+    index
+        .checked_mul(RECORD_BYTES_U64)
+        .and_then(|bytes| bytes.checked_add(HEADER_BYTES_U64))
+        .ok_or(BaseEvidenceLedgerRefusalV2::Arithmetic("record offset"))
+}
+
 fn append_prepared_records(
     file: &mut File,
     prepared: &PreparedBaseEvidenceV2,
@@ -1637,7 +1686,12 @@ fn ensure_header(
             .and_then(|()| file.sync_data())
             .map_err(|why| io_error("initialize header", path, &why))?;
     }
-    verify_header(file, magic, kind, stride, path)
+    verify_header(file, magic, kind, stride, path)?;
+    // ledgers-3, D-1910: the writer cuts a kill-torn tail under its exclusive
+    // lock; the bytes past the last whole record were never acknowledged.
+    crate::fixed_tail::heal_torn_tail(file, path, HEADER_BYTES_U64, stride, &[])
+        .map(drop)
+        .map_err(BaseEvidenceLedgerRefusalV2::Io)
 }
 
 fn verify_header(
@@ -2130,6 +2184,30 @@ mod projection_tests {
                 maximum: 1,
             })
         ));
+    }
+
+    /// ledgers-3, D-1910: a kill-torn tail in either file is refused by a
+    /// reader and cut by the next writer, after which both open.
+    #[test]
+    fn a_kill_torn_tail_is_cut_by_the_writer_and_refused_by_a_reader() {
+        for name in [RECORD_FILE, COMPLETION_FILE] {
+            let root = TestRoot::new();
+            let bounds = BaseEvidenceLedgerBoundsV2::new(4, 4).expect("fixture bounds are nonzero");
+            drop(LedgerV2::open(root.ledger(), bounds).expect("headers initialize"));
+            let path = root.ledger().join(name);
+            OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .and_then(|mut file| file.write_all(&[7; 5]))
+                .expect("torn bytes write");
+            assert!(LedgerV2::open_read(root.ledger(), bounds).is_err());
+            drop(LedgerV2::open(root.ledger(), bounds).expect("writer heals"));
+            assert_eq!(
+                std::fs::metadata(&path).expect("measure").len(),
+                HEADER_BYTES_U64
+            );
+            drop(LedgerV2::open_read(root.ledger(), bounds).expect("reader opens"));
+        }
     }
 
     #[test]

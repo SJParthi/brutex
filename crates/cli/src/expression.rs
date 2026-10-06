@@ -32,28 +32,40 @@ pub(crate) fn stored(
     let Ok(month @ 1..=12) = month.parse::<u8>() else {
         return crate::refuse(out, "MONTH must be 1..=12");
     };
-    match run(feed, underlying, rung, year, month, source) {
+    // Every argument is checked before the work, so a refusal after this is the
+    // work's and exits `FAILED` without the usage (P8-03, D-2722).
+    let expression = match parse_expression(source) {
+        Ok(expression) => expression,
+        Err(why) => return crate::refuse(out, &why),
+    };
+    let span = Some(((year, month), (year, month)));
+    if let Err(why) = crate::stored_words(feed, Some(underlying), Some(rung), span) {
+        return crate::refuse(out, &why);
+    }
+    match run(feed, underlying, rung, (year, month), (source, &expression)) {
         Ok(report) => {
             out.push_str(&report);
             crate::OK
         }
-        Err(why) => crate::refuse(out, &why),
+        Err(why) => crate::fail(out, &why),
     }
+}
+
+fn parse_expression(source: &str) -> Result<Expression, String> {
+    Expression::parse(source).map_err(|why| {
+        format!(
+            "expression refused: {why:?}; use live names or bit numbers, !, &, | and parentheses"
+        )
+    })
 }
 
 fn run(
     feed: &str,
     underlying: &str,
     rung: &str,
-    year: u16,
-    month: u8,
-    source: &str,
+    (year, month): (u16, u8),
+    (source, expression): (&str, &Expression),
 ) -> Result<String, String> {
-    let expression = Expression::parse(source).map_err(|why| {
-        format!(
-            "expression refused: {why:?}; use live names or bit numbers, !, &, | and parentheses"
-        )
-    })?;
     crate::swept_rung(rung)?;
     let commit = crate::commit_stamp().ok_or_else(|| "this build has no verified clean commit stamp; the expression cannot run before its identity is recordable".to_owned())?;
     let vendor = crate::parse_vendor(feed)?;
@@ -74,7 +86,7 @@ fn run(
         commit,
         feed: loaded.vendor.as_str(),
     };
-    let identity = runner::expression::identity(&run, &expression);
+    let identity = runner::expression::identity(&run, expression);
     // Both lifecycle and descriptor sync before the indicator fold or expression
     // evaluation. A failure here prevents the computation, not just its report.
     let attempt = crate::sweep_evidence::begin(
@@ -85,7 +97,7 @@ fn run(
     let directory =
         attempt_directory(&root, identity, attempt.token()).map_err(|e| e.to_string())?;
     let mut writer =
-        EvidenceWriter::begin(&directory, identity, &expression).map_err(|e| e.to_string())?;
+        EvidenceWriter::begin(&directory, identity, expression).map_err(|e| e.to_string())?;
     let column = crate::stored_anchored_column(
         &loaded.bars,
         &daily,
@@ -93,7 +105,7 @@ fn run(
         crate::stored::rung_length_micros(rung)?,
         crate::stored::vwap_availability(&loaded.key),
     )?;
-    let summary = runner::expression::evaluate(&column, &expression, |index, verdict| {
+    let summary = runner::expression::evaluate(&column, expression, |index, verdict| {
         let bar = loaded.bars.get(index).ok_or_else(|| {
             std::io::Error::other("expression source is outside its historical slice")
         })?;

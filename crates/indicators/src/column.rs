@@ -400,6 +400,9 @@ pub struct Column {
 pub struct AnchoredColumn {
     column: Column,
     references: DailyReferenceCensus,
+    /// Bars folded through the evaluator on a withheld IST day and given no
+    /// row. Zero unless built by [`Self::build_required_withholding`].
+    withheld: u64,
 }
 
 /// A strict anchored column was asked to admit signal bars with no prior
@@ -424,7 +427,50 @@ impl AnchoredColumn {
         Self {
             column,
             references: evaluator.reference_census(),
+            withheld: 0,
         }
+    }
+
+    /// [`Self::build_required`] over a series some of whose IST days are
+    /// FOLDED and not SWEPT. p11num-1, D-1781.
+    ///
+    /// Every bar of `bars` is stepped through `evaluator` in order, so the
+    /// indicator state a later day starts from is the state the whole series
+    /// produced. A bar whose IST day is in `withheld_days` then gets no row,
+    /// no source, no acceptance verdict and no census entry: the returned
+    /// column is exactly the column of the slice with those days removed, as
+    /// [`Column::build_withholding`] documents, and its masks are the masks
+    /// of the whole fold.
+    ///
+    /// The daily-reference census DOES count a withheld day's bars, because
+    /// the evaluator consumed references for them; the admission refusal
+    /// below therefore also refuses a withheld bar that had no prior daily
+    /// record, since its state reached every later row.
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::build_required`].
+    pub fn build_required_withholding(
+        bars: &[Candle],
+        evaluator: &mut AnchoredEvaluator<'_>,
+        withheld_days: &[i64],
+    ) -> Result<Self, MissingDailyReference> {
+        let mut next = *evaluator;
+        let (column, withheld) = Column::build_withholding_from(bars, &mut next, withheld_days);
+        let built = Self {
+            column,
+            references: next.reference_census(),
+            withheld,
+        }
+        .require_daily_reference()?;
+        *evaluator = next;
+        Ok(built)
+    }
+
+    /// Bars folded on a withheld day and given no row.
+    #[must_use]
+    pub const fn withheld_bars(&self) -> u64 {
+        self.withheld
     }
 
     /// Build and refuse the whole column if any accepted signal bar had no
@@ -489,8 +535,9 @@ impl AnchoredColumn {
 /// [`Column::build`] fills `source` with the bar whose CLOSE carried the mask, so
 /// a position opens on the bar AFTER it. [`Column::reproject`] overwrites the
 /// same field with the execution bar a position can actually be OPENED on —
-/// `align::onto_execution` returns the first execution bar stamped at or after
-/// the signal's close, which is already the fill bar.
+/// `align::onto_execution` returns the execution bar stamped EXACTLY at the
+/// signal's close instant, on the same IST day, which is already the fill bar;
+/// a missing bar there is `None`, never a later bar (D-0401).
 ///
 /// Nothing recorded which convention a given `Column` was under, and
 /// `runner::trade::walk` read every column under the first: it added `+1` to a
@@ -545,8 +592,65 @@ impl Column {
         Self::build_from(bars, evaluator)
     }
 
+    /// Fold EVERY bar of `bars` through `evaluator`, and give a row only to
+    /// bars whose IST day is not in `withheld_days`. p11num-1, D-1781.
+    ///
+    /// # Why the day is folded and not cut
+    ///
+    /// Cutting a day out of the slice before the fold splices day D-1 onto
+    /// day D+1: every family that carries state across sessions — the EMAs,
+    /// ATR and `SuperTrend`, swings and structure — is then computed as if the
+    /// market had not traded on D, and every later swept row carries masks
+    /// no unspliced run would produce. MEASURED on the p11num-1 repro shape
+    /// (14 sessions of 375 bars, one interior minute missing on the eleventh):
+    /// the finding's walk differed on trend bits at 40 of the 1,125 bars after
+    /// the held day, and `tests/withheld_fold.rs`'s walk at 29.
+    ///
+    /// Here the fold is the whole series, exactly as [`Self::build`] folds
+    /// it; only the OUTPUT omits the withheld days. The returned column is
+    /// therefore indexed as if the caller had handed in the slice with those
+    /// days removed: [`Self::sources`], the acceptance bitmap, the census and
+    /// [`Self::first_swept`] all count kept bars only, so a caller that
+    /// executes on the kept slice reads every outcome off the right bar.
+    /// The second value is how many bars were folded and given no row.
+    ///
+    /// A withheld bar the evaluator refuses leaves its state unchanged, as
+    /// any refusal does, and is counted in that second value, not the
+    /// census: the census describes the kept slice.
+    ///
+    /// # Look-ahead
+    ///
+    /// None is added. Bars are still handed over one at a time in order, and
+    /// whether a row is EMITTED for a bar never changes what was folded
+    /// before it. Which days are withheld is the caller's input.
+    ///
+    /// # Cost
+    ///
+    /// One set probe more per bar than [`Self::build`] when `withheld_days`
+    /// is non-empty, and none when it is empty. **UNVERIFIED as a measured
+    /// bound**: no bench row times this door (`CLAUDE.md` §3 rule 6).
+    #[must_use]
+    pub fn build_withholding(
+        bars: &[Candle],
+        evaluator: &mut Evaluator,
+        withheld_days: &[i64],
+    ) -> (Self, u64) {
+        Self::build_withholding_from(bars, evaluator, withheld_days)
+    }
+
     /// Shared forward fold for regular and stored-daily-anchored evaluators.
     fn build_from<E: ColumnEvaluation>(bars: &[Candle], evaluator: &mut E) -> Self {
+        Self::build_withholding_from(bars, evaluator, &[]).0
+    }
+
+    /// The fold [`Self::build_withholding`] documents, for either evaluator.
+    fn build_withholding_from<E: ColumnEvaluation>(
+        bars: &[Candle],
+        evaluator: &mut E,
+        withheld_days: &[i64],
+    ) -> (Self, u64) {
+        let withheld_set: std::collections::HashSet<i64> = withheld_days.iter().copied().collect();
+        let mut withheld: usize = 0;
         let spec = evaluator.replay_spec();
         let mut bits = Vec::with_capacity(bars.len());
         let mut known = Vec::with_capacity(bars.len());
@@ -556,9 +660,19 @@ impl Column {
         let mut accepted: Vec<bool> = Vec::with_capacity(bars.len());
 
         for (index, bar) in bars.iter().enumerate() {
+            // FOLDED, NEVER SWEPT. The step happens first and unconditionally,
+            // so a withheld day moves the state every later row reads.
+            let stepped = evaluator.step_with_warmth(bar);
+            if !withheld_set.is_empty() && withheld_set.contains(&crate::ist_day(bar.ts_micros)) {
+                withheld = withheld.saturating_add(1);
+                continue;
+            }
+            // THE KEPT SLICE'S INDEX: this bar's position once every withheld
+            // bar before it is removed. Equal to `index` when none is.
+            let index = index.saturating_sub(withheld);
             census.offered = census.offered.saturating_add(1);
 
-            match evaluator.step_with_warmth(bar) {
+            match stepped {
                 Ok((mask, available, warm)) => {
                     accepted.push(true);
                     if warm {
@@ -582,7 +696,7 @@ impl Column {
             }
         }
 
-        Self {
+        let column = Self {
             bits,
             known,
             source,
@@ -600,7 +714,8 @@ impl Column {
             // source, so no two rows can name one index. Only reprojection can
             // put two signals on one execution bar.
             collided: 0,
-        }
+        };
+        (column, u64::try_from(withheld).unwrap_or(u64::MAX))
     }
 
     /// Fallibly duplicates this exact column without rebuilding evaluator
@@ -888,21 +1003,22 @@ impl Column {
                 // ONE FILL BAR, ONE ROW. A SECOND SIGNAL ON IT IS NOT A SECOND
                 // OBSERVATION.
                 //
-                // `align::onto_execution` is forward-only and returns the FIRST
-                // execution bar stamped at or after each signal's close, so when
-                // the execution series has a hole two consecutive signals resolve
-                // to the same bar -- `align`'s own test asserts `[Some(10),
-                // Some(10)]` as the correct output. Both rows were then pushed
-                // with the same `source`, and `outcome::edge` zips `bits` with
-                // `sources` and accumulates one observation per ROW: the same
-                // forward return entered the mean twice. `n` inflates, the
-                // standard error understates, `|t|` inflates -- and `|t|` is what
-                // picks the combination that gets traded.
+                // `align::onto_execution` maps each signal ONLY to the execution
+                // bar stamped exactly at its close instant on the same IST day,
+                // and records `None` when that bar is missing (D-0401). An
+                // execution hole therefore DROPS a signal; it can no longer
+                // resolve two signals to one bar. Through `align`, a collision
+                // needs two signal rows with the same or overlapping close
+                // instant (duplicate or overlapping signal stamps), which a
+                // well-formed signal series does not have.
                 //
-                // MEASURED, not hypothetical: the 81 months of one-minute zerodha
-                // NIFTY this store holds are 618,296 bars against roughly 626,625
-                // for 1,671 sessions of 375 -- about 8,329 missing, 1.32%. A hole
-                // of one bar is enough to collide two 2-minute signals.
+                // The guard stays as defence for every direct caller of this
+                // public door, which may hand any non-decreasing map. Two rows
+                // pushed with the same `source` would let `outcome::edge`, which
+                // zips `bits` with `sources` and accumulates one observation per
+                // ROW, count one forward return twice: `n` inflates, the standard
+                // error understates, `|t|` inflates -- and `|t|` is what picks the
+                // combination that gets traded.
                 //
                 // The FIRST signal keeps the bar, and that is the physical answer
                 // rather than a tiebreak: it is the earliest signal that could
@@ -954,8 +1070,8 @@ impl Column {
                 known,
                 source,
                 // `onto` HOLDS FILL BARS, not signal bars: `align::onto_execution`
-                // returns the first execution bar stamped at or after the
-                // signal's close, which is the earliest bar a position can be
+                // returns the execution bar stamped exactly at the signal's
+                // close instant (D-0401), which is the bar a position is
                 // opened on. Recording that is what stops `trade::walk` adding
                 // a second `+1` to a bar that already is the fill.
                 sourced: Sourced::Fill,
@@ -1745,13 +1861,103 @@ pub(super) mod tests {
         );
     }
 
+    /// **V-02 and V-03 on the production fold, at many cuts.** P12-01.
+    ///
+    /// `a_prefix_of_the_bars_gives_a_prefix_of_the_column` cuts once. This
+    /// cuts every 25th bar of the warm run (120 cuts, under both
+    /// availabilities so the VWAP family is folded too) and at each cut builds
+    /// two more columns through the real `Evaluator`: one over the prefix
+    /// alone (the future is ABSENT) and one over the run with every bar from
+    /// the cut onward replaced by a valid but extreme bar (the future is
+    /// MUTATED). Every row sourced before the cut must be identical, bits and
+    /// knowledge both, in all three columns.
+    ///
+    /// Not every single cut: that is 3,000 rebuilds of up to 3,000 bars per
+    /// availability, extrapolated (not measured) at minutes in a debug
+    /// build. The stride is the stated limit of this test.
+    #[test]
+    fn every_row_before_a_cut_ignores_an_absent_or_mutated_future() {
+        fn rows_before(column: &Column, cut: usize) -> usize {
+            column.sources().iter().take_while(|&&s| s < cut).count()
+        }
+        let bars = warm_run();
+        let mut suffix_moved_something = false;
+        for availability in [Availability::Absent, Availability::Present] {
+            let full = Column::build(&bars, &mut evaluator(availability));
+            assert!(full.first_swept().is_some(), "the warm run sweeps");
+            for cut in (1..bars.len()).step_by(25) {
+                let head = bars.get(..cut).expect("cut is inside the run");
+                let short = Column::build(head, &mut evaluator(availability));
+
+                let mut mutated = bars.clone();
+                for slot in mutated.iter_mut().skip(cut) {
+                    let close = slot.close.saturating_mul(4);
+                    *slot = Candle::new(
+                        slot.ts_micros,
+                        slot.open.saturating_mul(3),
+                        close.saturating_add(9_000),
+                        slot.low.saturating_div(2),
+                        close,
+                        slot.volume.saturating_mul(1_000),
+                        OI_NULL,
+                    );
+                }
+                let corrupted = Column::build(&mutated, &mut evaluator(availability));
+
+                let n = rows_before(&full, cut);
+                assert_eq!(
+                    rows_before(&short, cut),
+                    n,
+                    "absent future: rows before the cut"
+                );
+                assert_eq!(
+                    rows_before(&corrupted, cut),
+                    n,
+                    "mutated future: rows before the cut"
+                );
+                for other in [&short, &corrupted] {
+                    assert_eq!(
+                        other.bits().get(..n),
+                        full.bits().get(..n),
+                        "bits before the cut moved"
+                    );
+                    assert_eq!(
+                        other.known().get(..n),
+                        full.known().get(..n),
+                        "knowledge before the cut moved"
+                    );
+                }
+                suffix_moved_something |= corrupted.bits().get(n..) != full.bits().get(n..);
+            }
+        }
+        // Without this the test would pass on a fold that ignores its bars.
+        assert!(
+            suffix_moved_something,
+            "no mutated suffix changed any later row, so the mutation tested nothing"
+        );
+    }
+
     #[test]
     fn the_same_bars_give_the_same_column_twice() {
         // §3 rule 5, idempotence, byte for byte.
         let bars = warm_run();
         let mut a = evaluator(Availability::Absent);
         let mut b = evaluator(Availability::Absent);
-        assert_eq!(Column::build(&bars, &mut a), Column::build(&bars, &mut b));
+        let once = Column::build(&bars, &mut a);
+        assert_eq!(once, Column::build(&bars, &mut b));
+        // P1-13-01: the equality holds for any deterministic build, one that
+        // emits a constant row included. The fixture's bars vary, so the
+        // column must be swept and its rows must not be constant.
+        assert!(once.first_swept().is_some(), "the warm run sweeps");
+        let rows = once.bits();
+        assert!(
+            rows.iter()
+                .skip(1)
+                .zip(rows.iter())
+                .any(|(later, earlier)| later != earlier),
+            "every swept row is identical, so this test would pass on a build \
+             that ignores its bars entirely"
+        );
     }
 
     /// `clear_before` ZEROES BELOW THE BOUNDARY AND KEEPS THE BOUNDARY ITSELF.
@@ -2280,12 +2486,14 @@ mod reproject_tests {
     ///
     /// # The number this changes
     ///
-    /// `align::onto_execution` is forward-only and returns the first execution
-    /// bar stamped at or after each signal's close, so a hole in the execution
-    /// series resolves two consecutive signals to the same bar; `align`'s own
-    /// test asserts `[Some(10), Some(10)]` as the correct output. Both rows used
-    /// to be pushed with that same source, and `outcome::edge` accumulates one
-    /// observation per ROW -- so one forward return entered the mean twice.
+    /// `align::onto_execution` maps a signal only to the execution bar stamped
+    /// exactly at its close instant (D-0401), so an execution hole drops the
+    /// signal rather than colliding it with the next one. A collision reaches
+    /// this door through duplicate or overlapping signal stamps, or from a
+    /// direct caller handing any non-decreasing map, as this fixture does. Both
+    /// rows used to be pushed with that same source, and `outcome::edge`
+    /// accumulates one observation per ROW -- so one forward return would enter
+    /// the mean twice.
     ///
     /// That inflates `n`, understates the standard error and inflates `|t|`, and
     /// `|t|` is what selects the combination that gets traded. A duplicated
@@ -2300,9 +2508,10 @@ mod reproject_tests {
         let column = Column::build(&bars, &mut ev);
         assert!(column.len() >= 4, "the fixture must give enough rows");
 
-        // A hole in the execution series: rows 1 and 2 both resolve to bar 22,
-        // and rows 3 and 4 both resolve to bar 24. Everything else is distinct,
-        // and the map stays non-decreasing as `align::onto_execution` returns it.
+        // A direct caller's map (duplicate signal stamps would give the same
+        // shape): rows 1 and 2 both resolve to bar 22, and rows 3 and 4 both
+        // resolve to bar 24. Everything else is distinct, and the map stays
+        // non-decreasing, which is the precondition this door checks.
         let mut onto: Vec<Option<usize>> = (0..column.len()).map(|i| Some(i + 20)).collect();
         if let Some(slot) = onto.get_mut(1) {
             *slot = Some(22);

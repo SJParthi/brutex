@@ -368,7 +368,7 @@ fn run(entry: &audit::Entry, out: &mut String) {
                 //
                 // `Kind::label` already existed for the Rust page and had no
                 // second caller. This is that caller.
-                r#"{{"ordinal":{},"fault":null,"kind":{},"at":{},"took_micros":{},"scope":{},"outcome":{},"loud":{},"members":{},"rows_read":{},"bars_stored":{},"rows_folded":{},"counted":{},"failures":{},"window":{},"source":{},"source_bytes":{},"note":{},"note_bytes":{},"drops":["#,
+                r#"{{"ordinal":{},"fault":null,"kind":{},"at":{},"took_micros":{},"scope":{},"outcome":{},"loud":{},"members":{},"rows_read":{},"bars_stored":{},"rows_folded":{},"counted":{},"failures":{},"window":{},"source":{},"source_bytes":{},"note":{},"note_bytes":{},"version":{},"note_capacity":{},"kept_unclassified_day":{},"drops":["#,
                 entry.ordinal,
                 render::json_string(r.kind.label()),
                 r.at_unix_secs,
@@ -387,6 +387,13 @@ fn run(entry: &audit::Entry, out: &mut String) {
                 r.source_bytes,
                 render::json_string(&r.note),
                 r.note_bytes,
+                r.version,
+                r.note_capacity(),
+                // NULL, NOT ZERO, on a version-1 record: that build kept these
+                // rows without counting them (D-2673).
+                r.drops
+                    .unclassified_kept
+                    .map_or_else(|| "null".to_owned(), |n| n.to_string()),
             );
             // AN ARRAY OF NAMED REASONS, NOT FOUR FIXED KEYS. A fifth drop
             // reason is a row the console draws without being taught its name,
@@ -399,7 +406,9 @@ fn run(entry: &audit::Entry, out: &mut String) {
                     out,
                     r#"{{"reason":{},"rows":{}}}"#,
                     render::json_string(reason.label()),
-                    r.drops.of(reason)
+                    r.drops
+                        .recorded(reason)
+                        .map_or_else(|| "null".to_owned(), |n| n.to_string())
                 );
             }
             out.push_str("]}");

@@ -448,7 +448,9 @@ impl Stepdown {
             .map(|&row| returns.get(row).map(Vec::as_slice))
             .collect::<Option<_>>()?;
         let periods = named.first()?.len();
-        if periods < 2 || named.iter().any(|series| series.len() != periods) {
+        // A block longer than the series is refused, as every bootstrap.rs
+        // entry point refuses it (D-1990).
+        if periods < 2 || block > periods || named.iter().any(|series| series.len() != periods) {
             return None;
         }
         let stats: Vec<Performance> = named.iter().map(|series| summarise(series)).collect();

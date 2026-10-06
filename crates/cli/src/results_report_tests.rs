@@ -384,12 +384,15 @@ fn public_listing_obeys_the_configured_owned_root() -> Result<(), Box<dyn std::e
     }
     let fixture = Fixture::new(&[row(61, 500, 2)])?;
     let before = fixture.bytes()?;
+    // P1-11-02: the path comes from `module_path!()` and the child's own
+    // `1 passed` line is required, so a child that ran nothing fails.
+    let test = concat!(
+        module_path!(),
+        "::public_listing_obeys_the_configured_owned_root"
+    );
+    let test = test.split_once("::").map_or(test, |(_, path)| path);
     let output = std::process::Command::new(std::env::current_exe()?)
-        .args([
-            "--exact",
-            "results_report_tests::public_listing_obeys_the_configured_owned_root",
-            "--nocapture",
-        ])
+        .args(["--exact", test, "--nocapture"])
         .env(CHILD, &fixture.0)
         .env("BRUTEX_STORE", &fixture.0)
         .output()?;
@@ -398,6 +401,10 @@ fn public_listing_obeys_the_configured_owned_root() -> Result<(), Box<dyn std::e
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed;"),
+        "the child must run exactly this one test"
     );
     fixture.unchanged(&before)
 }

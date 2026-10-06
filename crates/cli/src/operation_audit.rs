@@ -336,16 +336,39 @@ fn append(file: &mut File, expected: u64, record: &Record) -> Result<(), String>
 
 trait DurableWrite: io::Write {
     fn sync(&mut self) -> io::Result<()>;
+    /// The current end of the file: where the next append lands.
+    fn end(&mut self) -> io::Result<u64>;
+    /// Cut the file back to `len` bytes.
+    fn truncate_to(&mut self, len: u64) -> io::Result<()>;
 }
 impl DurableWrite for File {
     fn sync(&mut self) -> io::Result<()> {
         self.sync_all()
     }
+    fn end(&mut self) -> io::Result<u64> {
+        self.seek(SeekFrom::End(0))
+    }
+    fn truncate_to(&mut self, len: u64) -> io::Result<()> {
+        self.set_len(len)
+    }
 }
+/// Appends one fixed-stride record and syncs it. A failed or short write is
+/// truncated back to the length before it, so neither the index nor an
+/// invocation file is left torn for every later reader to refuse (the
+/// D-1850 shape, D-1854); when the truncation also fails both errors are
+/// named. A failed sync after a whole write is not rolled back and is
+/// never acknowledged.
 fn write_synced(file: &mut impl DurableWrite, image: &[u8; BYTES]) -> Result<(), String> {
-    file.write_all(image)
-        .and_then(|()| file.sync())
-        .map_err(error)
+    let end = file.end().map_err(error)?;
+    if let Err(why) = file.write_all(image) {
+        return Err(match file.truncate_to(end) {
+            Ok(()) => error(format!("{why}; truncated back to {end} bytes")),
+            Err(and) => error(format!(
+                "{why}; truncation back to {end} bytes also failed: {and}"
+            )),
+        });
+    }
+    file.sync().map_err(error)
 }
 
 struct State {
@@ -578,7 +601,7 @@ pub fn begin(root: &Path, origin: Origin, label: &str) -> Result<Attempt, String
 }
 
 /// Look up exactly one invocation across process restarts, with bounded reads.
-/// Missing per-invocation creation returns its unconfirmed indexed start.
+/// Missing or empty per-invocation creation returns its unconfirmed indexed start.
 /// # Errors
 /// Refuses busy writers, torn/corrupt records, wrong ancestry and invalid IDs.
 pub fn read(root: &Path, id: u64) -> Result<Option<Record>, String> {
@@ -615,7 +638,14 @@ pub fn read(root: &Path, id: u64) -> Result<Option<Record>, String> {
     // A writer only appends. Taking its lock to poll progress could fail the
     // computation. Verify this bounded snapshot again after the sync instead.
     let bytes = length(&file)?;
-    if bytes == 0 || at(&mut file, 0)? != started {
+    // A crash between `create_new` and the first synced record leaves an empty
+    // journal. It confirms nothing, exactly like a missing one, so it reads as
+    // the same unconfirmed indexed start; a partial record was refused by
+    // `length` above (D-1742).
+    if bytes == 0 {
+        return Ok(Some(started));
+    }
+    if at(&mut file, 0)? != started {
         return Err(error("invocation journal lost its indexed start"));
     }
     let last = at(&mut file, bytes / STRIDE - 1)?;

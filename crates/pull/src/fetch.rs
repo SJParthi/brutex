@@ -839,6 +839,12 @@ pub fn land_rows(
         if verdict.is_none() {
             verdict = cash_close_verdict(epoch_utc, request, cash_schedule)?;
         }
+        // KEPT ON A DAY THE CALENDAR CANNOT CLASSIFY, AND COUNTED BY NAME
+        // (P-03, D-2673). Dropping it would invent a closed day; keeping it
+        // uncounted would be the silent keep `CLAUDE.md` §4 bans.
+        if verdict.is_none() && crate::session::on_unclassified_day(epoch_utc) {
+            census.count_unclassified_kept();
+        }
         // A SESSION-HOURS VERDICT IS COUNTED AND KEPT. A WINDOW ONE IS DROPPED.
         //
         // Operator's rule, 2026-08-19: **whatever the vendor provides, we
@@ -973,13 +979,26 @@ pub fn land_rows(
     // pays no call per row. `DropCensus` counted every rejection in a plain
     // integer, and this is that count, once, where the window closes.
     //
-    // The four reasons are named separately rather than summed, because
+    // The reasons are named separately rather than summed, because
     // "outside the window" and "outside the session" send an operator to two
     // different places — the caller's chunking and the vendor's clock.
+    emit_landed(rows.len(), bars.len(), &census);
+    Ok(Landed {
+        bars,
+        census,
+        outside_session,
+    })
+}
+
+/// The row ledger for one landed window, as one aggregate event: rows in, bars
+/// out, and each drop reason by name, plus the bars kept on a day the exchange
+/// calendar cannot classify. Split out of [`land_rows`] so that body stays one
+/// readable loop; it emits once per window, never per row.
+fn emit_landed(rows_in: usize, bars_out: usize, census: &DropCensus) {
     let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::debug("pull.land", "window decoded")
-            .with("rows_in", telemetry::Value::Uint(rows.len() as u64))
-            .with("bars_out", telemetry::Value::Uint(bars.len() as u64))
+            .with("rows_in", telemetry::Value::Uint(rows_in as u64))
+            .with("bars_out", telemetry::Value::Uint(bars_out as u64))
             .with(
                 "before_window",
                 telemetry::Value::Uint(u64::from(
@@ -1003,13 +1022,18 @@ pub fn land_rows(
                 telemetry::Value::Uint(u64::from(
                     census.of(crate::session::DropReason::AtOrAfterSessionClose),
                 )),
+            )
+            .with(
+                "on_closed_day",
+                telemetry::Value::Uint(u64::from(
+                    census.of(crate::session::DropReason::OnClosedDay),
+                )),
+            )
+            .with(
+                "kept_unclassified_day",
+                telemetry::Value::Uint(u64::from(census.unclassified_kept())),
             ),
     );
-    Ok(Landed {
-        bars,
-        census,
-        outside_session,
-    })
 }
 
 /// Fetches one window and lands it, in one call.

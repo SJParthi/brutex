@@ -95,29 +95,7 @@ pub fn expiry_of(
     code: &str,
     on: crate::session::Day,
 ) -> Result<brutex_core::instrument::Expiry, RollingError> {
-    // THE CADENCE THE ROW NAMES, RESOLVED ONCE AND BEFORE THE WALK. Two
-    // comparisons against a fixed table — constant work, and a flag the row
-    // does not carry is refused here rather than inside the loop.
-    let cadence = spec
-        .expiry_flags
-        .iter()
-        .find(|(word, _)| *word == flag)
-        .map(|(_, cadence)| *cadence)
-        .ok_or(RollingError::NoExpiry {
-            why: "the expiry cadence is not one this vendor serves",
-        })?;
-    let symbol =
-        brutex_core::symbol::Symbol::new(underlying).map_err(|_| RollingError::NoExpiry {
-            why: "the underlying is not a symbol this build knows",
-        })?;
-    let slot = costs::venue::swept_slot(symbol).map_err(|_| RollingError::NoExpiry {
-        why: "the underlying has no expiry regime recorded",
-    })?;
-    let day = costs::day::TradeDay::new(on.year(), on.month(), on.day()).map_err(|_| {
-        RollingError::NoExpiry {
-            why: "the bar's own day is not a real date",
-        }
-    })?;
+    let (cadence, slot, day) = regime_of(underlying, spec, flag, on)?;
 
     // THE ORDINAL IS THE CODE'S POSITION IN THE ROW, NOT A SECOND SPELLING OF
     // IT.
@@ -173,11 +151,143 @@ pub fn expiry_of(
     let settled = found.ok_or(RollingError::NoExpiry {
         why: "no expiry was reached",
     })?;
+    // A CLOSED DAY IS NOT AN EXPIRY. `costs::expiry` returns the plain
+    // calendar weekday and leaves holidays to its caller, and this caller never
+    // asked, so a holiday week's contract got a closed day as its expiry, was
+    // filed under that key, and priced at a tenor ~4.8x too long (CE-14,
+    // D-1769). The exchange's holiday-shift rule is not recorded in
+    // `docs/00-charter.md`, so the closed day is REFUSED rather than stepped
+    // back (`CLAUDE.md` §3 rule 1). A day past the calendar's last measured
+    // day cannot be checked and is passed through; `docs/06-limits.md` names
+    // that limit.
+    //
+    // AND A DAY OPEN ONLY FOR A MUHURAT HOUR IS NOT AN EXPIRY EITHER (CE-53,
+    // D-2671). Refusing only `Closed` accepted 2021-11-04 (a Muhurat of
+    // unmeasured length) and 2025-10-21 (13:45-14:44) as weekly expiries, and
+    // bars filed under that key were priced to a 15:30 close the day never
+    // had. An expiry must be a FULL regular session; anything short of one is
+    // refused the same way, for the same reason.
+    match crate::calendar::kind_of(i64::from(settled.ordinal())) {
+        crate::calendar::DayKind::Closed => {
+            return Err(RollingError::NoExpiry {
+                why: "the computed expiry falls on a day the exchange calendar marks closed, and \
+                      the rule that moves an expiry off a holiday is not charter-sourced, so no \
+                      date is guessed",
+            });
+        }
+        crate::calendar::DayKind::Open(session) if session == crate::calendar::Session::full() => {}
+        crate::calendar::DayKind::Open(_) | crate::calendar::DayKind::OpenLengthUnmeasured => {
+            return Err(RollingError::NoExpiry {
+                why: "the computed expiry falls on a day the exchange calendar records as \
+                      something other than a full regular session (a Muhurat hour or an \
+                      irregular session), and the rule that moves an expiry off such a day is \
+                      not charter-sourced, so no date is guessed",
+            });
+        }
+        crate::calendar::DayKind::Unmeasured => {}
+    }
     brutex_core::instrument::Expiry::new(settled.year(), settled.month(), settled.day()).map_err(
         |_| RollingError::NoExpiry {
             why: "the calendar produced a date this store cannot name",
         },
     )
+}
+
+/// Whether an underlying lists contracts on a cadence on one day.
+///
+/// Distinct from [`expiry_of`], and the distinction is CE-43: `expiry_of`
+/// answers "which contract", and can refuse a contract that exists (its
+/// computed expiry is a closed day, CE-14). A caller asking "is this cadence
+/// worth a request at all" must not read that refusal as "no contracts", or a
+/// holiday week silently removes a whole cadence from a walk. Only
+/// [`Listing::Withdrawn`] means the exchange listed nothing. D-2650.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Listing {
+    /// The cadence's regime lists contracts on or after that day.
+    Listed,
+    /// The cadence was withdrawn for this underlying before that day
+    /// (`costs::expiry`'s `WeeklyRegime::Withdrawn`), so no contract exists.
+    Withdrawn,
+}
+
+/// Whether `underlying` lists contracts on cadence `flag` on `on`.
+///
+/// # Errors
+///
+/// The same named refusals as [`expiry_of`] for a cadence this vendor does not
+/// serve, an unknown underlying, an unreal day or a day before the regime was
+/// verified from. A closed-day expiry is NOT an error here: it is a property of
+/// one contract, not of the cadence.
+///
+/// # Cost
+///
+/// O(1): one slot lookup and one dated-table step, the first step of
+/// [`expiry_of`]'s walk. **UNVERIFIED as a measurement**, as there.
+pub fn listing_of(
+    underlying: &str,
+    spec: &RollingSpec,
+    flag: &str,
+    on: crate::session::Day,
+) -> Result<Listing, RollingError> {
+    let (cadence, slot, day) = regime_of(underlying, spec, flag, on)?;
+    match cadence {
+        crate::vendor::ExpiryCadence::Weekly => {
+            match costs::expiry::next_weekly_expiry(slot, day) {
+                Ok(Some(_)) => Ok(Listing::Listed),
+                Ok(None) => Ok(Listing::Withdrawn),
+                Err(_) => Err(RollingError::NoExpiry {
+                    why: "the day is before this weekly regime was verified from",
+                }),
+            }
+        }
+        crate::vendor::ExpiryCadence::Monthly => costs::expiry::next_monthly_expiry(slot, day)
+            .map(|_| Listing::Listed)
+            .map_err(|_| RollingError::NoExpiry {
+                why: "the day is before this monthly regime was verified from",
+            }),
+    }
+}
+
+/// The cadence, the swept slot and the trade day one rolling question is
+/// asked on: the shared first half of [`expiry_of`] and [`listing_of`], so the
+/// two cannot drift on which flag, underlying or day they refuse.
+fn regime_of(
+    underlying: &str,
+    spec: &RollingSpec,
+    flag: &str,
+    on: crate::session::Day,
+) -> Result<
+    (
+        crate::vendor::ExpiryCadence,
+        costs::venue::SweptSlot,
+        costs::day::TradeDay,
+    ),
+    RollingError,
+> {
+    // THE CADENCE THE ROW NAMES, RESOLVED ONCE AND BEFORE THE WALK. Two
+    // comparisons against a fixed table — constant work, and a flag the row
+    // does not carry is refused here rather than inside the loop.
+    let cadence = spec
+        .expiry_flags
+        .iter()
+        .find(|(word, _)| *word == flag)
+        .map(|(_, cadence)| *cadence)
+        .ok_or(RollingError::NoExpiry {
+            why: "the expiry cadence is not one this vendor serves",
+        })?;
+    let symbol =
+        brutex_core::symbol::Symbol::new(underlying).map_err(|_| RollingError::NoExpiry {
+            why: "the underlying is not a symbol this build knows",
+        })?;
+    let slot = costs::venue::swept_slot(symbol).map_err(|_| RollingError::NoExpiry {
+        why: "the underlying has no expiry regime recorded",
+    })?;
+    let day = costs::day::TradeDay::new(on.year(), on.month(), on.day()).map_err(|_| {
+        RollingError::NoExpiry {
+            why: "the bar's own day is not a real date",
+        }
+    })?;
+    Ok((cadence, slot, day))
 }
 
 /// One rolling-option request: a shape, not a contract.
@@ -223,6 +333,14 @@ pub struct Ask {
 pub enum RollingError {
     /// The body was not JSON.
     NotJson,
+    /// A key appears twice inside one object, so the body carries two values
+    /// for one field. `serde_json` keeps the last and says nothing; this is
+    /// refused by name instead, as `http::decode_body` refuses it (D-1531).
+    /// CE-56, D-2680.
+    RepeatedKey {
+        /// The repeated key, decoded.
+        key: String,
+    },
     /// The side's object was absent. `CALL` asked and no `ce` returned.
     NoSide {
         /// Which key was looked for — `ce` or `pe`.
@@ -272,6 +390,17 @@ pub enum RollingError {
         /// The cell exactly as the vendor wrote it.
         text: String,
     },
+    /// A decimal cell that is present and cannot be read exactly — not text
+    /// or a number, or a form the six-place shift does not read (an exponent,
+    /// an overflow, junk). It was stored as the null sentinel, which is the
+    /// record that the vendor SENT NONE, and pricing then solved its own value
+    /// and labelled it so (CE-16, D-1769).
+    Undecimal {
+        /// Which field.
+        field: &'static str,
+        /// The cell exactly as the vendor wrote it.
+        text: String,
+    },
     /// A price cell that is negative, or is not zero and snaps to zero.
     /// GAP16-23, D-1492.
     NotAPrice {
@@ -294,6 +423,12 @@ impl core::fmt::Display for RollingError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::NotJson => f.write_str("the rolling answer is not JSON"),
+            Self::RepeatedKey { key } => write!(
+                f,
+                "the rolling answer repeats the key {key:?} inside one object, \
+                 so it carries two values for one field; refused rather than \
+                 silently keeping the last"
+            ),
             Self::UnknownSide => write!(
                 f,
                 "that is not a side this feed's descriptor names, so there is no \
@@ -332,6 +467,12 @@ impl core::fmt::Display for RollingError {
             Self::Unrepresentable { field } => {
                 write!(f, "a `{field}` value does not fit paisa as an i64")
             }
+            Self::Undecimal { field, text } => write!(
+                f,
+                "a `{field}` cell holds {text}, which is not a decimal this build \
+                 reads exactly. Refused rather than stored as the absence the \
+                 vendor did not state"
+            ),
             Self::Uncountable { field, text } => write!(
                 f,
                 "a `{field}` cell holds {text}, which is not a non-negative whole \
@@ -448,8 +589,14 @@ pub fn body(spec: &RollingSpec, ask: &Ask) -> String {
     out
 }
 
-/// One `"key":"value"` pair, JSON-escaped.
+/// One `"key":"value"` pair, JSON-escaped as RFC 8259 requires.
+///
+/// Escaped only `"` and `\` until CE-68: a security id is vendor-file text
+/// and may hold a control character, which sent Dhan a body no parser accepts
+/// and an error that blamed the vendor. Below 0x20 is now `\u00XX`, the same
+/// rule as `api::pullrun::quote_for_json` (D-1772).
 fn push_pair(out: &mut String, key: &str, value: &str, first: bool) {
+    use core::fmt::Write as _;
     if !first {
         out.push(',');
     }
@@ -460,6 +607,13 @@ fn push_pair(out: &mut String, key: &str, value: &str, first: bool) {
         match ch {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if u32::from(c) < 0x20 => {
+                // Writing into a `String` cannot fail.
+                let _cannot_fail = write!(out, "\\u{:04x}", u32::from(c));
+            }
             other => out.push(other),
         }
     }
@@ -507,6 +661,11 @@ pub fn read(
     scale: PriceScale,
 ) -> Result<Vec<Row>, RollingError> {
     let root: serde_json::Value = serde_json::from_str(body).map_err(|_| RollingError::NotJson)?;
+    // A KEY REPEATED INSIDE ONE OBJECT IS TWO ANSWERS IN ONE BODY, refused
+    // here exactly as `http::decode_body` refuses it (CE-56, D-2680).
+    if let Some(key) = crate::http::repeated_key(body) {
+        return Err(RollingError::RepeatedKey { key });
+    }
     // THE ENVELOPE IS OPTIONAL, exactly as `fno::names` treats it, and for the
     // same reason: one reader for a vendor that wraps and one that does not.
     let held = root.get("data").unwrap_or(&root);
@@ -630,7 +789,10 @@ pub fn read(
             // IV IN MILLIONTHS, and the multiply happens on the way in so the
             // store never holds a float. See `Overlay`'s header for why a
             // volatility is stored as an integer despite being a statistic.
-            iv_micros: iv.map_or(OI_NULL, |a| a.get(at).map_or(OI_NULL, micros_of)),
+            iv_micros: match iv.and_then(|a| a.get(at)) {
+                None | Some(serde_json::Value::Null) => OI_NULL,
+                Some(cell) => micros_of(cell, f.implied_volatility)?,
+            },
         };
         // THE STRIKE FOR THIS STAMP. A rolling series is ATM-relative, so the
         // resolved strike genuinely can differ between two bars of one answer
@@ -845,13 +1007,23 @@ fn paisa(
 /// # Cost
 ///
 /// One pass over at most a few dozen characters. No allocation.
-fn micros_of(cell: &serde_json::Value) -> i64 {
+///
+/// # Errors
+///
+/// [`RollingError::Undecimal`] for a present cell that is not text or a
+/// number, or that `shift_six` cannot read. A JSON `null` never reaches here:
+/// the caller files it as absent, which is what the vendor said.
+fn micros_of(cell: &serde_json::Value, field: &'static str) -> Result<i64, RollingError> {
+    let refuse = || RollingError::Undecimal {
+        field,
+        text: cell.to_string(),
+    };
     let text = match cell {
         serde_json::Value::String(text) => text.clone(),
         serde_json::Value::Number(n) => n.to_string(),
-        _ => return OI_NULL,
+        _ => return Err(refuse()),
     };
-    shift_six(text.trim()).unwrap_or(OI_NULL)
+    shift_six(text.trim()).ok_or_else(refuse)
 }
 
 /// A decimal string as millionths, half-up, or `None` when it will not read.
@@ -1145,6 +1317,39 @@ mod tests {
         );
     }
 
+    /// CE-16, D-1769: an implied-volatility cell that is present and cannot
+    /// be read refuses the answer by name; only a `null` or a missing cell is
+    /// filed as "the vendor sent none".
+    #[test]
+    fn an_unreadable_volatility_cell_is_refused_not_filed_as_absent() {
+        let with = |iv: &str| {
+            format!(
+                r#"{{"data":{{"ce":{{
+                "timestamp":[1700000000],
+                "open":[100.0],"high":[100.0],"low":[100.0],"close":[100.0],
+                "volume":[1],"iv":[{iv}]
+            }}}}}}"#
+            )
+        };
+        for bad in [
+            r#""junk""#,
+            "1e-7",
+            "true",
+            r#"{"v":1}"#,
+            "99999999999999999999",
+        ] {
+            let got = read(&with(bad), &spec(), "CALL", PriceScale::Rupees);
+            assert!(
+                matches!(got, Err(RollingError::Undecimal { field: "iv", .. })),
+                "{bad}: {got:?}"
+            );
+        }
+        let rows = read(&with("null"), &spec(), "CALL", PriceScale::Rupees).expect("null reads");
+        assert_eq!(rows[0].overlay.iv_micros, OI_NULL);
+        let rows = read(&with("0.125"), &spec(), "CALL", PriceScale::Rupees).expect("reads");
+        assert_eq!(rows[0].overlay.iv_micros, 125_000);
+    }
+
     /// **IV AND SPOT LAND IN THE OVERLAY, KEYED BY THE BAR'S OWN STAMP.**
     ///
     /// The stamp is the join. Position would be faster and wrong the first time
@@ -1305,6 +1510,119 @@ mod tests {
         assert_ne!(
             monthly, near,
             "the monthly and the near weekly are not the same contract"
+        );
+    }
+
+    /// CE-43, D-2650: `listing_of` separates "no contract on this cadence"
+    /// from "this contract's expiry is refused". The closed-day weeks that
+    /// `expiry_of` refuses are `Listed`; BANKNIFTY weeklies after their
+    /// 2024-11-13 withdrawal are `Withdrawn`; a cadence the row does not serve
+    /// is refused by name.
+    #[test]
+    fn a_closed_day_contract_is_listed_and_only_a_withdrawal_is_not() {
+        use crate::session::Day;
+        for (on, flag) in [
+            (Day::new(2024, 8, 14).expect("a real day"), "WEEK"),
+            (Day::new(2023, 3, 29).expect("a real day"), "MONTH"),
+        ] {
+            assert!(expiry_of("NIFTY", &spec(), flag, "1", on).is_err());
+            assert_eq!(
+                listing_of("NIFTY", &spec(), flag, on),
+                Ok(Listing::Listed),
+                "{on:?} {flag}"
+            );
+        }
+        let after = Day::new(2026, 1, 5).expect("a real day");
+        assert_eq!(
+            listing_of("BANKNIFTY", &spec(), "WEEK", after),
+            Ok(Listing::Withdrawn)
+        );
+        assert_eq!(
+            listing_of("BANKNIFTY", &spec(), "MONTH", after),
+            Ok(Listing::Listed)
+        );
+        assert!(matches!(
+            listing_of("NIFTY", &spec(), "DAILY", after),
+            Err(RollingError::NoExpiry { why }) if why.contains("not one this vendor serves")
+        ));
+    }
+
+    /// CE-14, D-1769: a computed expiry the exchange calendar marks CLOSED is
+    /// refused, not filed. NIFTY's weekly from 2024-08-14 lands on 2024-08-15
+    /// (Independence Day) and its monthly from 2023-03-29 on 2023-03-30 (Ram
+    /// Navami); both are `Closed` in `pull::calendar`.
+    #[test]
+    fn a_computed_expiry_on_a_closed_day_is_refused() {
+        use crate::session::Day;
+        for (on, flag) in [
+            (Day::new(2024, 8, 14).expect("a real day"), "WEEK"),
+            (Day::new(2023, 3, 29).expect("a real day"), "MONTH"),
+        ] {
+            let got = expiry_of("NIFTY", &spec(), flag, "1", on);
+            assert!(
+                matches!(
+                    got,
+                    Err(RollingError::NoExpiry { why }) if why.contains("marks closed")
+                ),
+                "{on:?} {flag}: {got:?}"
+            );
+        }
+        // An ordinary week still resolves.
+        assert!(
+            expiry_of(
+                "NIFTY",
+                &spec(),
+                "WEEK",
+                "1",
+                Day::new(2024, 8, 21).expect("a day")
+            )
+            .is_ok()
+        );
+    }
+
+    /// CE-53, D-2671: an expiry must be a FULL regular session. A day that is
+    /// open only for a Muhurat hour is refused exactly as a closed day is,
+    /// never filed under that key and priced to a 15:30 close it never had.
+    /// NIFTY and BANKNIFTY weeklies from 2021-11-01 land on the 2021-11-04
+    /// Muhurat (`OpenLengthUnmeasured`); NIFTY's weekly from 2025-10-20 lands
+    /// on the 2025-10-21 Muhurat (`Open`, 13:45-14:44). The cadence stays
+    /// `Listed`: a refused contract is not a withdrawn cadence (CE-43).
+    #[test]
+    fn a_computed_expiry_on_a_muhurat_only_day_is_refused_like_a_closed_one() {
+        use crate::session::Day;
+        for (underlying, on) in [
+            ("NIFTY", Day::new(2021, 11, 1).expect("a real day")),
+            ("BANKNIFTY", Day::new(2021, 11, 1).expect("a real day")),
+            ("NIFTY", Day::new(2025, 10, 20).expect("a real day")),
+        ] {
+            let got = expiry_of(underlying, &spec(), "WEEK", "1", on);
+            assert!(
+                matches!(
+                    got,
+                    Err(RollingError::NoExpiry { why }) if why.contains("full regular session")
+                ),
+                "{underlying} {on:?}: {got:?}"
+            );
+            assert_eq!(
+                listing_of(underlying, &spec(), "WEEK", on),
+                Ok(Listing::Listed),
+                "{underlying} {on:?}"
+            );
+        }
+        // The closed-day refusal keeps its own words, and a full day resolves.
+        assert!(matches!(
+            expiry_of("NIFTY", &spec(), "WEEK", "1", Day::new(2024, 8, 14).expect("a day")),
+            Err(RollingError::NoExpiry { why }) if why.contains("marks closed")
+        ));
+        assert!(
+            expiry_of(
+                "NIFTY",
+                &spec(),
+                "WEEK",
+                "1",
+                Day::new(2021, 11, 8).expect("a day")
+            )
+            .is_ok()
         );
     }
 
@@ -1542,5 +1860,44 @@ mod tests {
             .expect_err("refused")
             .to_string();
         assert!(said.contains("`close`") && said.contains("-5"), "{said}");
+    }
+
+    /// **CE-56. A KEY REPEATED INSIDE ONE OBJECT IS TWO ANSWERS FOR ONE FIELD.**
+    ///
+    /// `serde_json` keeps the last of a repeated key without saying so, so
+    /// `"close":[100.00],"close":[200.00]` read as a close of 200. D-1531
+    /// refused this in `http::decode_body`; this reader parses on its own and
+    /// never called that check.
+    #[test]
+    fn a_rolling_answer_repeating_a_key_in_one_object_is_refused_by_name() {
+        let body = r#"{"data":{"ce":{"timestamp":[1700000000],"open":[100.00],"high":[100.00],
+            "low":[100.00],"close":[100.00],"close":[200.00],"volume":[7]}}}"#;
+        let why = read(body, &spec(), "CALL", PriceScale::Rupees)
+            .map(|rows| rows.len())
+            .expect_err("two closes for one bar is two answers");
+        assert!(why.to_string().contains(r#""close""#), "{why}");
+
+        // THE SAME KEY IN TWO OBJECTS IS NOT A REPEAT: both sides carry every
+        // field name once each, and that is the vendor's ordinary answer.
+        let both = r#"{"data":{"ce":{"timestamp":[1700000000],"open":[1],"high":[1],"low":[1],
+            "close":[1],"volume":[1]},"pe":{"timestamp":[1700000000],"open":[1],"high":[1],
+            "low":[1],"close":[1],"volume":[1]}}}"#;
+        assert_eq!(
+            read(both, &spec(), "CALL", PriceScale::Rupees).map(|rows| rows.len()),
+            Ok(1)
+        );
+    }
+
+    /// CE-68: a control character in a value is escaped, so the body parses.
+    /// Before the fix `\u{1}` and a newline went out raw and no JSON parser
+    /// accepted the request.
+    #[test]
+    fn a_control_character_in_a_value_still_makes_valid_json() {
+        let mut out = String::from("{");
+        push_pair(&mut out, "securityId", "13\u{1}\n\t\r\"\\x", true);
+        out.push('}');
+        assert_eq!(out, r#"{"securityId":"13\u0001\n\t\r\"\\x"}"#);
+        let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+        assert_eq!(parsed["securityId"], "13\u{1}\n\t\r\"\\x");
     }
 }

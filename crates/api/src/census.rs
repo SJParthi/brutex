@@ -476,7 +476,7 @@ const NONBLOCK: Option<i32> = Some(0x4);
 const NONBLOCK: Option<i32> = None;
 
 /// Opens `path` for reading without waiting for a FIFO's writer.
-fn open_without_waiting(path: &Path) -> std::io::Result<std::fs::File> {
+pub(crate) fn open_without_waiting(path: &Path) -> std::io::Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -488,7 +488,7 @@ fn open_without_waiting(path: &Path) -> std::io::Result<std::fs::File> {
 }
 
 /// What a path that is not a regular file is, in the refusal's words.
-fn kind_of(kind: std::fs::FileType) -> &'static str {
+pub(crate) fn kind_of(kind: std::fs::FileType) -> &'static str {
     #[cfg(unix)]
     {
         use std::os::unix::fs::FileTypeExt as _;
@@ -802,10 +802,13 @@ pub fn grid_rows(series: usize) -> usize {
 ///
 /// # Cost
 ///
-/// **O(keys log keys)** — one pass to collect and one sort. Not O(1), and it is
-/// not on a request path: `api::server::Site` computes it once at startup beside
-/// the manifest load that is already O(entries), and every `/store` request is
-/// arithmetic and hash probes off the result. `docs/06-limits.md` §32.
+/// **O(keys log keys)** — one pass to collect and one sort. Not O(1).
+/// `api::server::Site` computes it once at startup beside the manifest load
+/// that is already O(entries), and `/store?show=gaps` computes it again per
+/// request over that request's fresh censuses (UC-20, D-1446); the default
+/// `/store` view is arithmetic and hash probes off the startup result.
+/// `docs/06-limits.md` §32. (This said "not on a request path" until
+/// tests-docs-security-pass17 P17-16, D-1967.)
 ///
 /// Sorted, because the pager addresses a row by **ordinal** — `HashMap`
 /// iteration order is not stable between runs, so an unsorted axis would put a

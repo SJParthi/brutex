@@ -47,9 +47,19 @@ recomputed per candidate, per worker, or per level.
 
 ## 3. Look-ahead
 
-At bar *i* the evaluator may read bars `0..=i` and nothing else. State that
-carries forward — moving averages, pivots, swing detection — updates **after**
-the bar is emitted, never before.
+At bar *i* the evaluator may read bars `0..=i` and nothing else. Within that,
+two kinds of state differ in when bar *i* enters them, and both are correct:
+
+- **Anchors** — levels fixed before the bar, such as pivots and the previous
+  session's ladders — are read for bar *i* and only then updated, so bar *i* is
+  compared with a reference it did not move.
+- **Descriptions** — running summaries of where price has traded, such as VWAP
+  (`indicators::vwap`, "fold, then emit") and the session's running extremes
+  (`indicators::session`) — fold bar *i* first and then emit, because a running
+  average that excluded the newest bar would describe the past, not the bar.
+
+Neither reads bar *i+1*. (This said every family updates **after** the bar is
+emitted, which the description families never did; p11num-4, D-1775.)
 
 Swing-based conditions (`bos_*`, `choch_*`, `near_swing_*`) confirm a swing
 only *k* bars after it occurred. That latency is correct and must not be
@@ -59,13 +69,18 @@ only *k* bars after it occurred. That latency is correct and must not be
 
 ## 4. Conditions that do not apply to daily bars
 
-Time-of-day bits (44–47) and VWAP bits (52–53) are meaningless on a 1-day bar.
-On a daily timeframe they are cleared, not left as noise. A bit that cannot be
-evaluated evaluates false — it never evaluates to "probably".
+Time-of-day bits (44–47) and the VWAP family are meaningless on a 1-day bar.
+No code clears them on daily bars, because `1day` is not a swept rung
+(`cli::EVERY_RUNG` stops at `60min`); a 1-day sweep would need that clearing first. A
+bit that cannot be evaluated evaluates false — it never evaluates to
+"probably".
 
-VWAP additionally requires traded volume. Spot indices carry none, so bits
-52–53 permanently abstain on the two engine instruments. That is honest and
-documented rather than quietly producing zeros that look like signal.
+VWAP additionally requires traded volume. Availability is chosen from the
+instrument kind before any bar is read (D-0507): spot indices carry no volume,
+so the VWAP family abstains on `NSE-NIFTY` and `NSE-BANKNIFTY`; the 208 F&O
+cash equities carry it, so the whole VWAP family is live on them. (This said
+VWAP abstains permanently on "the two engine instruments", which stopped being
+the whole engine surface at D-0506; p11num-4, D-1775.)
 
 ---
 

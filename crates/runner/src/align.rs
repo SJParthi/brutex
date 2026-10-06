@@ -341,6 +341,35 @@ mod tests {
         assert_eq!(got.unreachable, 2);
     }
 
+    /// AHB-01 (h-eng-1, D-1860). A one-bar execution hole DROPS a signal; it
+    /// never resolves two consecutive signals to one fill bar. The old
+    /// "first bar at or after the close" rule collided two 2-minute signals on
+    /// a one-bar hole; under the exact-close rule every mapped index is
+    /// strictly increasing, so `Column::reproject`'s `collided` stays 0 through
+    /// this door unless signal stamps themselves repeat.
+    #[test]
+    fn an_execution_hole_drops_a_signal_and_never_collides_two() {
+        let signal = coarse(2, 5); // closes at 2, 4, 6, 8, 10
+        let exec: Vec<Candle> = (0..12).filter(|&m| m != 4).map(bar).collect();
+        let got = onto_execution(&signal, &[0, 1, 2, 3, 4], &exec, 2 * ONE_MIN).expect("aligned");
+        assert_eq!(
+            got.onto,
+            vec![Some(2), None, Some(5), Some(7), Some(9)],
+            "the signal closing into the hole is unreachable; its neighbour keeps \
+             its own exact bar"
+        );
+        assert_eq!(got.unreachable, 1);
+        let mapped: Vec<usize> = got.onto.iter().flatten().copied().collect();
+        assert!(
+            mapped.windows(2).all(|w| w[0] < w[1]),
+            "no two signals share a fill bar: {mapped:?}"
+        );
+        // Only a repeated signal stamp can share a bar, and it is the caller's
+        // duplicate, not a data hole.
+        let dup = onto_execution(&signal, &[2, 2], &exec, 2 * ONE_MIN).expect("aligned");
+        assert_eq!(dup.onto, vec![Some(5), Some(5)]);
+    }
+
     #[test]
     fn a_signal_whose_close_is_past_every_execution_bar_is_unreachable() {
         let signal = coarse(15, 2);

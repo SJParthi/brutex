@@ -449,17 +449,58 @@ fn documented_graph() -> BTreeMap<String, BTreeSet<String>> {
     documented_graph_from(ARCHITECTURE)
 }
 
-/// The same document parser, with supplied text so its row alternatives can be tested.
-fn documented_graph_from(document: &str) -> BTreeMap<String, BTreeSet<String>> {
-    let members = member_names();
+/// §1 of `document`, through to the next `## ` heading.
+fn graph_section(document: &str) -> &str {
     let section = document
         .split("## 1. The graph")
         .nth(1)
         .expect("§1 exists; if it was renamed this test must be updated with it");
-    let section = section
+    section
         .split("\n## ")
         .next()
-        .expect("splitting always yields a first element");
+        .expect("splitting always yields a first element")
+}
+
+/// The first-cell name of EVERY crate-shaped row in §1, in document order,
+/// before any filter against the workspace.
+///
+/// [`documented_graph_from`] drops a row whose name is not a member, which is
+/// right for building the graph and is why "every row names a real crate"
+/// could not fail against it (P1-14-02): the check compared a set the parser
+/// had already narrowed to the members. This list is read before that filter,
+/// and keeps duplicates so a second, contradictory row for one crate is seen.
+fn documented_row_names_from(document: &str) -> Vec<String> {
+    graph_section(document)
+        .lines()
+        .filter(|line| line.starts_with("| `"))
+        .filter_map(|line| {
+            let cells: Vec<&str> = line.split('|').map(str::trim).collect();
+            (cells.len() >= 5).then(|| cells[1].trim_matches('`').to_owned())
+        })
+        .collect()
+}
+
+/// What is wrong with §1's row names against `members`: rows for a crate that
+/// is not a member, and crates with more than one row.
+fn row_name_faults(names: &[String], members: &BTreeSet<&str>) -> (Vec<String>, Vec<String>) {
+    let invented: Vec<String> = names
+        .iter()
+        .filter(|name| !members.contains(name.as_str()))
+        .cloned()
+        .collect();
+    let mut seen = BTreeSet::new();
+    let duplicated: Vec<String> = names
+        .iter()
+        .filter(|name| !seen.insert(name.as_str()))
+        .cloned()
+        .collect();
+    (invented, duplicated)
+}
+
+/// The same document parser, with supplied text so its row alternatives can be tested.
+fn documented_graph_from(document: &str) -> BTreeMap<String, BTreeSet<String>> {
+    let members = member_names();
+    let section = graph_section(document);
 
     let mut graph = BTreeMap::new();
     for line in section.lines() {
@@ -493,25 +534,73 @@ fn documented_graph_from(document: &str) -> BTreeMap<String, BTreeSet<String>> {
     graph
 }
 
+/// Every member the root manifest's `members = [ ... ]` names, as a crate
+/// directory name under `crates/`.
+///
+/// # Panics
+///
+/// On a member outside `crates/` or a glob (P1-14-03). The parser used to keep
+/// only `crates/` members and drop the rest, so `"tools/x"` or `"xtask"` never
+/// reached any check here, and `"crates/*"` became a crate named `*`. Comments
+/// are removed per line first, so a `]` or `"` inside one cannot truncate or
+/// shift the list.
+fn workspace_members(manifest: &str) -> BTreeSet<&str> {
+    let list = manifest
+        .split_once("members = [")
+        .expect("the workspace manifest has a members list")
+        .1;
+    let mut members = BTreeSet::new();
+    for line in list.lines() {
+        let code = line.split_once('#').map_or(line, |(code, _)| code);
+        for (index, piece) in code.split('"').enumerate() {
+            if index % 2 == 1 {
+                let name = piece.strip_prefix("crates/").unwrap_or_else(|| {
+                    panic!(
+                        "workspace member {piece:?} is not under crates/; no check here reads it"
+                    )
+                });
+                assert!(
+                    !name.contains('*') && !name.contains('/') && !name.is_empty(),
+                    "workspace member {piece:?} is not one crate directory"
+                );
+                members.insert(name);
+            }
+        }
+        if code.contains(']') {
+            break;
+        }
+    }
+    members
+}
+
+/// The members parser refuses what it used to drop.
+#[test]
+fn the_members_parser_refuses_a_member_it_cannot_check() {
+    assert_eq!(
+        workspace_members(
+            "members = [\n    \"crates/core\", # a comment with ] and \" in it\n    \"crates/store\",\n]\n"
+        ),
+        BTreeSet::from(["core", "store"])
+    );
+    for bad in [
+        "members = [\"crates/core\", \"tools/probe\"]",
+        "members = [\"xtask\"]",
+        "members = [\"crates/*\"]",
+    ] {
+        assert!(
+            std::panic::catch_unwind(|| workspace_members(bad)).is_err(),
+            "{bad} must be refused, not dropped"
+        );
+    }
+}
+
 /// The hand-written manifest list is the whole workspace.
 ///
 /// Without this, a twelfth crate could be added and every other test here would
 /// still pass while never looking at it — the check would silently narrow.
 #[test]
 fn the_manifest_list_is_the_whole_workspace() {
-    let members: BTreeSet<&str> = WORKSPACE
-        .split("members = [")
-        .nth(1)
-        .expect("the workspace manifest has a members list")
-        .split(']')
-        .next()
-        .expect("splitting always yields a first element")
-        .split('"')
-        .skip(1)
-        .step_by(2)
-        .filter_map(|p| p.strip_prefix("crates/"))
-        .collect();
-
+    let members = workspace_members(WORKSPACE);
     assert_eq!(
         members,
         member_names(),
@@ -536,11 +625,32 @@ fn the_documented_table_lists_every_crate_and_no_others() {
          the table is a crate whose arrows nothing checks."
     );
 
-    let invented: Vec<&String> = documented.difference(&real).collect();
+    // READ BEFORE THE MEMBER FILTER (P1-14-02). `documented` cannot hold a
+    // non-member by construction, so its difference with `real` was empty
+    // whatever the document said; the row names are read unfiltered instead.
+    let (invented, duplicated) =
+        row_name_faults(&documented_row_names_from(ARCHITECTURE), &member_names());
     assert!(
         invented.is_empty(),
         "§1 has a row for {invented:?}, which is not a workspace member. `CLAUDE.md` \
-         §5 names a `cli` crate that does not exist; §1 must not repeat that."
+         §5 once drew a `web` crate that does not exist; §1 must not repeat that."
+    );
+    assert!(
+        duplicated.is_empty(),
+        "§1 has more than one row for {duplicated:?}; only the last would be checked"
+    );
+}
+
+/// The row-name check sees an invented row and a duplicated one.
+#[test]
+fn an_invented_or_duplicated_row_is_named() {
+    let document = "## 1. The graph\n\
+                    | `store` | wrong | `vocab` | ✓ |\n\
+                    | `web` | browser | `core` | ✓ |\n\
+                    | `store` | store | `core` | ✓ |\n";
+    assert_eq!(
+        row_name_faults(&documented_row_names_from(document), &member_names()),
+        (vec!["web".to_owned()], vec!["store".to_owned()])
     );
 }
 

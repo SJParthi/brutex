@@ -67,9 +67,9 @@ export function chargeScope(run) {
   return {
     gross: true,
     load: 'Not subtracted',
-    note: 'gross of every charge: brokerage, STT, stamp duty, exchange charges, the SEBI fee and GST are not subtracted · spread is not modeled',
+    note: 'gross of every charge: brokerage, STT, stamp duty, exchange charges, the SEBI fee, the IPFT, DP charges and GST (an UNVERIFIED list) are not subtracted · spread is not modeled',
     trades:
-      'Every figure is gross of every charge: no brokerage, STT, stamp duty, exchange charge, SEBI fee or GST is subtracted, and spread remains unmodeled.',
+      'Every figure is gross of every charge: no brokerage, STT, stamp duty, exchange charge, SEBI fee, IPFT, DP charge or GST (an UNVERIFIED list) is subtracted, and spread remains unmodeled.',
     serverNote
   };
 }

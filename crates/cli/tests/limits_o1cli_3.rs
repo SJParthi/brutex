@@ -1,7 +1,8 @@
 //! The parallel rungs' repeated reads of one minute series, stated where they
 //! are paid (audit o1cli-3).
 //!
-//! `sweep_rungs` runs every rung through `one_rung` in parallel, and each rung
+//! `sweep_rungs` runs every rung through `one_rung` (one at a time since
+//! D-1701; in parallel before), and each rung
 //! reads the same one-minute span for itself, several times. Nothing stated
 //! it. This file holds `docs/06-limits.md` to the code: the section must state
 //! the count, and every read it counts must still be where it says.
@@ -55,7 +56,7 @@ const STORED: &str = include_str!("../src/stored.rs");
 fn the_parallel_rungs_repeated_minute_reads_are_stated_and_still_paid() {
     let limit = limit("## Parallel rungs each re-read the same one-minute span (audit o1cli-3)");
     for sentence in [
-        "`sweep_rungs` runs every rung through `one_rung` in parallel",
+        "`sweep_rungs` runs every rung through `one_rung`, one rung at a time in input order",
         "the execution series `audit_range_kernel` loads",
         "one per attempt of every column build",
         "one per attempt of `exact_minute_withholding_unsourceable_days`",
@@ -69,8 +70,13 @@ fn the_parallel_rungs_repeated_minute_reads_are_stated_and_still_paid() {
         );
     }
     let sweep = body("\nfn sweep_rungs(");
-    // D-1556: the rungs run as ordered lanes, still in parallel.
-    assert!(sweep.contains("ordered::map(") && sweep.contains("one_rung("));
+    // One rung at a time since D-1701 (GAP13-13): the reads are the same
+    // count, paid in sequence rather than at once.
+    assert!(
+        sweep.contains("in_input_order(")
+            && sweep.contains("one_rung(")
+            && !sweep.contains("par_iter")
+    );
     let exact = STORED
         .split_once("pub fn load_exact_minute_context(")
         .and_then(|(_, rest)| rest.split_once("\n}\n"))

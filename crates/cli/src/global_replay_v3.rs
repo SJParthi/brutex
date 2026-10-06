@@ -39,7 +39,7 @@
 
 #![expect(
     dead_code,
-    reason = "Global Replay V3 remains crate-private until the Step-3 orchestrator moves the all-rung Selection V5 and exact OOS replay capabilities into this terminal join"
+    reason = "Global Replay V3 has NO production caller: nothing outside this file names the module, and the Step-3 orchestrator writes Global Replay V4 instead. It is kept, with its tests, as the append-only definition of a format docs/02 describes. Module-wide on purpose, because the whole module is unreached (CE-95 checked it, D-1956)"
 )]
 
 use std::collections::{HashMap, HashSet};
@@ -3353,6 +3353,102 @@ mod tests {
     use super::*;
 
     static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    /// `docs/02-store-format.md` §33 states the Global Replay V3 records this
+    /// build writes: one row per file naming its magic and stride, the version,
+    /// and each record's seal offset. P1-16-04, D-1940.
+    #[test]
+    fn the_store_format_doc_states_the_global_replay_v3_this_build_writes() {
+        let doc = include_str!("../../../docs/02-store-format.md");
+        let section = doc
+            .split_once("## 33. Global Replay V3")
+            .map_or("", |(_, rest)| rest);
+        let section = section.split_once("\n## ").map_or(section, |(own, _)| own);
+        assert!(section.starts_with(&format!(" — version {VERSION}\n")));
+        let section = section.split_whitespace().collect::<Vec<_>>().join(" ");
+        let shown = |magic: [u8; 16]| String::from_utf8_lossy(&magic).replace('\0', "\\0");
+        let thousands = |bytes: usize| {
+            if bytes >= 1_000 {
+                format!("{},{:03}", bytes / 1_000, bytes % 1_000)
+            } else {
+                bytes.to_string()
+            }
+        };
+        for (file, magic, stride) in [
+            (WITNESS_FILE, WITNESS_MAGIC, GLOBAL_REPLAY_V3_WITNESS_BYTES),
+            (
+                CANDIDATE_FILE,
+                CANDIDATE_MAGIC,
+                GLOBAL_REPLAY_V3_CANDIDATE_BYTES,
+            ),
+            (
+                DECISION_FILE,
+                DECISION_MAGIC,
+                GLOBAL_REPLAY_V3_DECISION_BYTES,
+            ),
+            (MONEY_FILE, MONEY_MAGIC, GLOBAL_REPLAY_V3_MONEY_BYTES),
+            (
+                COMPLETION_FILE,
+                COMPLETION_MAGIC,
+                GLOBAL_REPLAY_V3_COMPLETION_BYTES,
+            ),
+        ] {
+            let row = format!("| `{file}` | `{}` | {} |", shown(magic), thousands(stride));
+            assert!(section.contains(&row), "§33 lacks the row {row}");
+            let seal = format!("| {} | {SEAL_BYTES} | seal |", stride - SEAL_BYTES);
+            assert!(section.contains(&seal), "§33 lacks the seal row {seal}");
+        }
+        assert!(section.contains(&format!("| `{LOCK_FILE}` | none |")));
+        assert!(section.contains(&format!("version `{VERSION}` as a `u32` at `16..20`")));
+        assert!(section.contains(&format!(
+            "| 116 | {} | eight selection IDs",
+            RUNG_COUNT * 32
+        )));
+        // `money_id` hashes both VIX stamps, so the section must say VIX
+        // reaches the money identity and must not claim it never does.
+        // numeric-pass19 p19num-1, D-1957.
+        assert!(section.contains("It is hashed into each money id"));
+        assert!(!section.contains("never changes selection, execution, money"));
+    }
+
+    /// The doc's claim above, held by the code: one VIX stamp changed and
+    /// nothing else changes the money id. numeric-pass19 p19num-1, D-1957.
+    #[test]
+    fn a_vix_stamp_is_part_of_the_money_identity() -> Result<(), String> {
+        let row = priceable(1, 2, 3);
+        let candle = Candle {
+            ts_micros: 1_700_000_000_000_000,
+            open: 1_500,
+            high: 1_510,
+            low: 1_490,
+            close: 1_505,
+            volume: 0,
+            open_interest: i64::MIN,
+        };
+        let absent = VixPairV3 {
+            entry: VixStamp::Absent,
+            exit: VixStamp::Absent,
+        };
+        let entry_exact = VixPairV3 {
+            entry: VixStamp::Exact(candle),
+            exit: VixStamp::Absent,
+        };
+        let exit_exact = VixPairV3 {
+            entry: VixStamp::Absent,
+            exit: VixStamp::Exact(candle),
+        };
+        let decision = [7_u8; 32];
+        let base = money_id(decision, row, absent)?;
+        assert_ne!(base, money_id(decision, row, entry_exact)?);
+        assert_ne!(base, money_id(decision, row, exit_exact)?);
+        assert_ne!(
+            money_id(decision, row, entry_exact)?,
+            money_id(decision, row, exit_exact)?,
+            "the entry and exit stamps occupy distinct positions"
+        );
+        assert_eq!(base, money_id(decision, row, absent)?);
+        Ok(())
+    }
 
     struct AbsentVix {
         calls: CounterCell<u64>,

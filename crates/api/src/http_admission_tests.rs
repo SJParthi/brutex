@@ -231,22 +231,43 @@ async fn every_answer_forbids_framing_and_sniffing() {
                  Content-Length: {}\r\nConnection: close\r\n\r\n{huge}",
                 huge.len()
             );
-            let too_big = tokio::task::spawn_blocking(move || {
-                use std::io::{Read as _, Write as _};
-                let mut socket = std::net::TcpStream::connect(addr).expect("connect");
-                socket.write_all(request.as_bytes()).expect("write");
-                let mut answer = String::new();
-                socket.read_to_string(&mut answer).expect("read");
-                answer
-            })
-            .await
-            .expect("join");
+            let too_big = post_raw(addr, request).await;
             assert!(status_line(&too_big).contains("413"), "{too_big}");
             assert_never_framed("the body limit", &too_big);
+
+            // `/pull/run` and `/pull/recovery` read the run bound: a body past
+            // 8 KiB reaches the route's own JSON refusal, not a framework 413
+            // in plain text (P3-01-01, D-1769).
+            for path in ["/pull/run", "/pull/recovery"] {
+                let wide = format!("pad={}", "x".repeat(2 * crate::server::MAX_FORM_BYTES));
+                let request = format!(
+                    "POST {path} HTTP/1.1\r\nHost: {local}\r\n{origin}\
+                     Content-Type: application/x-www-form-urlencoded\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{wide}",
+                    wide.len()
+                );
+                let answer = post_raw(addr, request).await;
+                assert!(!status_line(&answer).contains("413"), "{path}: {answer}");
+                assert!(status_line(&answer).contains("400"), "{path}: {answer}");
+            }
         },
     )
     .await;
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// One raw request on a fresh socket, answered in full.
+async fn post_raw(addr: std::net::SocketAddr, request: String) -> String {
+    tokio::task::spawn_blocking(move || {
+        use std::io::{Read as _, Write as _};
+        let mut socket = std::net::TcpStream::connect(addr).expect("connect");
+        socket.write_all(request.as_bytes()).expect("write");
+        let mut answer = String::new();
+        socket.read_to_string(&mut answer).expect("read");
+        answer
+    })
+    .await
+    .expect("join")
 }
 
 /// **THE AUDIT LAYER'S OWN ANSWER IS NOT FRAMED EITHER, NOR THE PLAIN ROUTER'S.**

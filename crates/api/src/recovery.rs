@@ -725,6 +725,13 @@ pub(crate) fn resume(site: Loaded) -> Result<bool, String> {
     Ok(true)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Fails the next `seeded` on this thread after its pointer journal is
+    /// open and before the pointer is appended: the crash window of D-2762.
+    static FAIL_BEFORE_POINTER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 fn seeded(site: &Site, id: [u8; 32], units: Option<Vec<Record>>) -> Result<Journal, String> {
     if !site.store_root.is_dir() {
         return Err(
@@ -774,7 +781,32 @@ fn seeded(site: &Site, id: [u8; 32], units: Option<Vec<Record>>) -> Result<Journ
     } else {
         drop(Journal::create_new(&attempts).map_err(failure)?);
     }
-    let mut active = Journal::open(&active_path(site)).map_err(failure)?;
+    // THE FIRST POINTER IS STAGED, NEVER WRITTEN INTO AN EMPTY `active.bin`.
+    // `active_history` refuses an empty pointer file, and every entry point
+    // goes through it, so a crash or a failed append between creating that
+    // file and writing its first record used to wedge recovery for good. The
+    // first activation now writes its pointer under a staging name and links
+    // it into place only once the record is durable; `active.bin` either does
+    // not exist or holds a pointer. A staging file left by such a crash was
+    // never linked, so it never stood for an activation and is replaced.
+    // D-2762, recovery-2.
+    let active_file = active_path(site);
+    let first = !active_file.try_exists().map_err(failure)?;
+    let staging = root(site).join("active.bin.first");
+    let mut active = if first {
+        match std::fs::remove_file(&staging) {
+            Ok(()) => {}
+            Err(why) if why.kind() == std::io::ErrorKind::NotFound => {}
+            Err(why) => return Err(failure(why)),
+        }
+        Journal::create_new(&staging).map_err(failure)?
+    } else {
+        Journal::open_existing(&active_file).map_err(failure)?
+    };
+    #[cfg(test)]
+    if FAIL_BEFORE_POINTER.with(std::cell::Cell::take) {
+        return Err("injected failure before the activation pointer was written".to_owned());
+    }
     let seal = journal.latest.get(&CONTROL).ok_or("missing plan seal")?;
     let pointer_body = if seal.body == CONTROL_BODY {
         hex(id)
@@ -792,6 +824,13 @@ fn seeded(site: &Site, id: [u8; 32], units: Option<Vec<Record>>) -> Result<Journ
         .checked_add(1)
         .ok_or("recovery activation sequence overflow")?;
     active.append(pointer).map_err(failure)?;
+    if first {
+        drop(active);
+        // `hard_link`, not `rename`: it refuses rather than replaces an
+        // `active.bin` that appeared since the check above.
+        std::fs::hard_link(&staging, &active_file).map_err(failure)?;
+        std::fs::remove_file(&staging).map_err(failure)?;
+    }
     std::fs::File::open(root(site))
         .and_then(|file| file.sync_all())
         .map_err(failure)?;
@@ -1576,12 +1615,26 @@ async fn retry_day(
         if stopping(site) {
             return Err("stopped before the next source request".to_owned());
         }
+        // EVERYTHING THAT CAN REFUSE BEFORE THE NETWORK RUNS BEFORE THE
+        // RESERVATION. A reserved attempt is durable and is never refunded, so
+        // a seat held by the autopilot, a hand pull or an F&O walk used to cost
+        // this day one of its three attempts with no request ever sent. The
+        // seat is taken here and handed to `recovery_spot`, which no longer
+        // takes its own; a busy seat refuses with the budget untouched.
+        // D-2761, recovery-1.
+        let asked = checked(&item.body, ingest::today_ist().map_err(failure)?)?;
+        let Some(seat) = site.autopilot.take_seat(asked.feed) else {
+            return Err(
+                "the selected feed already has an active pull; no attempt was reserved and \
+                 this day's retry budget is unchanged"
+                    .to_owned(),
+            );
+        };
         if !reserve(&mut item) {
             break;
         }
         append_attempt(journal, attempts, item.clone())?;
-        let asked = checked(&item.body, ingest::today_ist().map_err(failure)?)?;
-        let run = server::recovery_spot(site, &asked).await?;
+        let run = server::recovery_spot(site, &asked, seat).await?;
         item.committed = item
             .committed
             .saturating_add(run.total.bars_committed as u64);
@@ -1971,6 +2024,47 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// **A FIRST ACTIVATION THAT DIES BEFORE ITS POINTER WEDGES NOTHING.**
+    /// D-2762, recovery-2.
+    ///
+    /// The failure is injected after the pointer journal is open and before
+    /// the pointer is appended, which is where a kill, ENOSPC or EIO landed.
+    /// Before D-2762 that left a 0-byte `active.bin`, which `active_history`
+    /// refuses, so every later start, prepare and boot resume refused forever.
+    #[test]
+    fn a_first_activation_that_fails_before_its_pointer_leaves_no_empty_pointer_file() {
+        let root = crate::scratch::path("recovery-first-pointer");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let site = Site::load(&root.join("missing-masters"), &root);
+        let units = plan(
+            vec![leg("NIFTY", "1min", date(2026, 8, 27), date(2026, 8, 27))],
+            today(),
+        )
+        .unwrap();
+        let id = scope_identity(&units);
+
+        FAIL_BEFORE_POINTER.with(|fail| fail.set(true));
+        let failed = seeded(&site, id, Some(units.clone()));
+        assert!(failed.is_err(), "the injected failure must surface");
+        drop(failed);
+        assert!(
+            !active_path(&site).exists(),
+            "an activation with no pointer must not leave a pointer file"
+        );
+        active_history(&site).expect("a failed first activation must not wedge recovery");
+
+        let journal = seeded(&site, id, Some(units)).expect("the retry activates");
+        drop(journal);
+        let history = active_history(&site).expect("one recorded activation");
+        assert_eq!(history.latest[&id].attempts, 1, "activated exactly once");
+        assert!(
+            !super::root(&site).join("active.bin.first").exists(),
+            "the staging name does not outlive the install"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     /// What one start of an already-seeded plan replays, COUNTED rather than
     /// argued. W1-api4-0 and W1-api4-1; D-0907; `docs/06-limits.md`.
     ///
@@ -2325,6 +2419,53 @@ mod tests {
         drop(journal);
         std::fs::remove_file(path).unwrap();
         std::fs::remove_dir(dir).unwrap();
+    }
+
+    /// **A BUSY SEAT COSTS NO ATTEMPT.** D-2761, recovery-1.
+    ///
+    /// The feed's seat is held, as an autopilot tick, a hand `/pull/spot` or an
+    /// F&O walk holds it. `retry_day` must refuse BEFORE it reserves: before
+    /// D-2761 it made an `InFlight` attempt durable in the shared ledger and
+    /// only then met the seat, so each collision spent one of the day's three
+    /// never-refunded attempts with no request sent.
+    #[tokio::test]
+    async fn a_held_feed_seat_refuses_retry_day_without_charging_its_budget() {
+        let root = crate::scratch::path("recovery-seat-before-reserve");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let site = Loaded::new(Site::load(&root.join("missing-masters"), &root));
+        std::fs::create_dir_all(super::root(&site)).unwrap();
+        let mut plan = Journal::open(&root.join("plan.bin")).unwrap();
+        let mut attempts = Journal::open(&super::root(&site).join("attempts.bin")).unwrap();
+        let day = date(2026, 8, 27);
+        let parent = canonical("NIFTY", "1day", Window::new(day, day).unwrap(), "scan");
+        let feed = checked(&parent, today()).unwrap().feed;
+
+        let held = site.autopilot.take_seat(feed).expect("the seat is free");
+        let refused = retry_day(&site, &mut plan, &mut attempts, &parent, day, &None).await;
+        drop(held);
+
+        let why = refused.expect_err("a held seat must refuse");
+        assert!(why.contains("no attempt was reserved"), "{why}");
+        assert!(
+            attempts.latest.is_empty(),
+            "the shared budget was charged for a request never sent: {:?}",
+            attempts
+                .latest
+                .values()
+                .map(|row| row.attempts)
+                .collect::<Vec<_>>()
+        );
+        assert!(plan.latest.is_empty(), "nothing was reserved in the plan");
+        drop((plan, attempts));
+        let reopened = Journal::open(&super::root(&site).join("attempts.bin")).unwrap();
+        assert!(reopened.latest.is_empty(), "nothing durable was charged");
+        assert!(
+            site.autopilot.take_seat(feed).is_some(),
+            "the refusal leaves no seat behind"
+        );
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

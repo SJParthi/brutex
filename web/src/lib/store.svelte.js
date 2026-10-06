@@ -69,7 +69,7 @@ import { foldWindow, foldKey } from '$lib/fold.js';
 // A REQUEST THAT CANNOT END IS A SPINNER THAT LIES. `ask` is `fetch` with a
 // ceiling; see `$lib/ask.js` for why the wrapper exists rather than a signal
 // threaded through every call site.
-import { createCensusLoader, STORE_CENSUS_MS } from '$lib/store-census.js';
+import { createCensusLoader, censusFailure, STORE_CENSUS_MS } from '$lib/store-census.js';
 import { ask } from '$lib/ask.js';
 import { readFeedHeader } from '$lib/feed-summary.js';
 import { pooled } from '$lib/pooled.js';
@@ -483,7 +483,7 @@ function read(feed, generation) {
   const token = {};
   flightToken = token;
   const mine = census.load(feed, generation)
-    .then((r) => (r.ok ? r.body : Promise.reject(new Error(`HTTP ${r.status} from /store.json`))))
+    .then((r) => (r.ok ? r.body : Promise.reject(new Error(censusFailure(r)))))
     .then((body) => {
       if (asked !== key || flightToken !== token) return;
       if (!Array.isArray(body)) throw new Error('the body of /store.json is not a JSON array');
