@@ -2325,9 +2325,18 @@ const GDFL_IMPORT_LITERAL: &str = "-10000 -3 -42 00 0100 04 06 10 10500 18 19 19
 // None is a parameter-path segment.
 const RISKFREE_LITERAL: &str = "cut_off_price implicit_yield_pct released 2020-01-01-01 \
      2020-01-xx 2020-0a-01 2020-1-01 20200-01-01 2020-01-1 20200101 abcd-01-01 98 published gone removed solved written";
+// THE PIECES OF THE GDFL LINE'S JOINED LITERALS, red when that line was
+// merged onto the mainline's split of every `/`-joined literal (P1-07-02,
+// D-2660). Fixtures and format text: the vendor's `dd/mm/yyyy` date column
+// (`03/09/2018`, and `/04/` swapped for `/05/` to make a wrong date), the
+// row-shape pattern `dd/dd/dddd` the CM decoder matches, the tick store's tree year
+// (`cm/STOCKS/2023/...`) and a nested `sub` folder in a zip member name an
+// attack test feeds the reader. None names an account, an environment or a
+// vendor field.
+const GDFL_JOINED_PIECE: &str = "05 09 2018 2023 dd dddd sub";
 
 /// Every declared group, in the order the step joined them.
-const DECLARED: [&str; 56] = [
+const DECLARED: [&str; 57] = [
     SEG_SHAPE,
     VENDOR_WIRE,
     CLAIM_STANDING,
@@ -2384,6 +2393,7 @@ const DECLARED: [&str; 56] = [
     LATE_LABEL,
     GDFL_IMPORT_LITERAL,
     RISKFREE_LITERAL,
+    GDFL_JOINED_PIECE,
 ];
 
 fn declared() -> BTreeSet<&'static str> {

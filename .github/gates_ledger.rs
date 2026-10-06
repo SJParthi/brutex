@@ -3401,9 +3401,10 @@ mod tests {
 
     #[test]
     fn gate11_allowlists_carry_the_counts_the_merged_code_needs() {
-        // D-1958, D-1932 and the zero-work counts, carried by D-1938.
+        // D-1958, D-1932 and the zero-work counts, carried by D-1938; pricing.rs
+        // gains D-2830's thirteen widenings on the merge of the GDFL line.
         let count = |l: Allow, f: &str| l.iter().find(|(p, _)| *p == f).map(|(_, n)| *n);
-        assert_eq!(count(ALLOW_FLOAT, "crates/pull/src/pricing.rs"), Some(23));
+        assert_eq!(count(ALLOW_FLOAT, "crates/pull/src/pricing.rs"), Some(36));
         assert_eq!(count(ALLOW_FLOAT, "crates/runner/src/report.rs"), Some(4));
         assert_eq!(
             count(ALLOW_FLOAT, "crates/runner/src/significance.rs"),
