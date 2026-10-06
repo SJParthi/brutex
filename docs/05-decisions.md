@@ -63357,3 +63357,17 @@ depth is `below_depth.checked_sub(1)?`. There is nothing left to mutate
 equivalently. The differential test
 `the_incremental_prefix_check_admits_exactly_what_the_full_rewalk_did` and the
 `MAX_NAME_BYTES` assertions in `table::tests` hold the behaviour.
+
+### D-2082 — An overlay's duplicate check is pinned field by field — 2026-10-06
+
+**What was observed.** Shard 182 of run 1283 (Gate 18 on 969493e1) left
+`<impl Row for Overlay>::same_bytes` replaced with `true` alive. No test offered
+an overlay that differs from the one stored. With the duplicate check answering
+`true`, a restated spot or implied volatility would be filed as a re-run of the
+record already there.
+
+**Decided.** `unit::an_overlay_matches_only_its_own_bytes` (G18-rest-27) checks
+a record against itself and against a copy, and both match. It then moves each
+of the three fields by one in each direction, to `i64::MIN`, to `i64::MAX` and
+to the null sentinel. Every one of those must fail to match, in both
+directions.

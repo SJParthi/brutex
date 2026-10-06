@@ -6907,3 +6907,4 @@ old line regex the same input and watched it pass.
 | G18-rest-24 | An index that is present but cannot be opened is `Unreadable`, not `Absent` (D-2077) | `store::tix::an_index_that_cannot_be_opened_is_named_unreadable_not_absent` | ✓ |
 | G18-rest-25 | A writer open of an empty month keeps only an index that is exactly a confirming header, and rewrites a longer one or a damaged one (D-2077) | `store::tix::a_writer_open_of_an_empty_month_rewrites_every_index_but_the_fresh_one` | ✓ |
 | G18-rest-26 | An index damaged under a live writer is rebuilt before its next append, which commits (D-2077) | `store::tix::an_index_damaged_under_a_live_writer_is_rebuilt_before_its_append` | ✓ |
+| G18-rest-27 | An overlay is the same bytes as another only when all three fields are equal; one field moved by one, to either extreme or to the null sentinel, is a different record (D-2082) | `store::unit::an_overlay_matches_only_its_own_bytes` | ✓ |
