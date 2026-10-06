@@ -421,3 +421,277 @@ fn the_pool_oos_arm_refuses_an_overlapping_split_and_bad_words_before_reading() 
     let (status, page) = run(&base[..12]);
     assert_eq!(status, crate::MISUSED, "a missing CATALOG_OUT: {page}");
 }
+
+/// **The verb's own split check: strict after, single months admitted.**
+/// G18-cli-b-05, D-2020.
+///
+/// `dispatch` parses the words, so the split is checked again by `run` for
+/// every caller. Each boundary is held on both sides: a later span starting IN
+/// the training span's last month is refused and one starting the month after
+/// is not; a one-month span (first == last) is admitted on either side and a
+/// backwards one refused. An admitted split goes on to the next refusal (an
+/// unknown feed here), so nothing is read either way.
+#[test]
+fn the_verb_refuses_exactly_the_misordered_splits() {
+    let catalog = std::path::Path::new("/nonexistent-brutex-pool-oos/held.catalog");
+    let ordered = "the later months must be ordered";
+    for (training, later, refused, why) in [
+        (
+            ((2025, 1), (2025, 3)),
+            ((2025, 4), (2025, 6)),
+            false,
+            "after",
+        ),
+        (
+            ((2025, 1), (2025, 3)),
+            ((2025, 3), (2025, 6)),
+            true,
+            "overlaps",
+        ),
+        (
+            ((2025, 1), (2025, 3)),
+            ((2024, 4), (2025, 6)),
+            true,
+            "precedes",
+        ),
+        (
+            ((2025, 1), (2025, 3)),
+            ((2025, 4), (2025, 4)),
+            false,
+            "one later month",
+        ),
+        (
+            ((2025, 1), (2025, 3)),
+            ((2025, 6), (2025, 4)),
+            true,
+            "later backwards",
+        ),
+        (
+            ((2025, 3), (2025, 3)),
+            ((2025, 4), (2025, 6)),
+            false,
+            "one training month",
+        ),
+        (
+            ((2025, 3), (2025, 1)),
+            ((2025, 4), (2025, 6)),
+            true,
+            "training backwards",
+        ),
+    ] {
+        let why_not = super::run("no-such-feed", "5min", training, later, None, catalog)
+            .expect_err("every case is refused somewhere");
+        assert_eq!(why_not.contains(ordered), refused, "{why}: {why_not}");
+        let page = super::pool_oos("no-such-feed", "5min", training, later, None, catalog);
+        assert_eq!(page, format!("refused: {why_not}\n"), "{why}");
+    }
+}
+
+/// **An empty store is reported as a page, not refused, and an existing
+/// CATALOG_OUT is refused before it.** G18-cli-b-06, D-2020.
+#[test]
+fn an_empty_store_is_a_page_and_an_existing_catalog_out_is_refused_first() {
+    let scratch = Scratch::new();
+    let vendor = crate::parse_vendor("zerodha").expect("a feed");
+    let catalog = scratch.0.join("held.catalog");
+    let page = super::run_under(
+        &scratch.0,
+        vendor,
+        "zerodha",
+        "5min",
+        (((2025, 1), (2025, 3)), ((2025, 4), (2025, 6))),
+        None,
+        &catalog,
+    )
+    .expect("an empty surface is a page");
+    assert!(
+        page.contains(
+            "OUT OF SAMPLE. Discovery reads 2025-01..2025-03 only. The union is then judged on \
+             2025-04..2025-06"
+        ),
+        "{page}"
+    );
+    assert!(page.contains("0 instruments on the surface"), "{page}");
+    assert!(!catalog.exists(), "no catalog for nothing judged");
+    std::fs::write(&catalog, b"kept").expect("an existing catalog");
+    let why = super::run_under(
+        &scratch.0,
+        vendor,
+        "zerodha",
+        "5min",
+        (((2025, 1), (2025, 3)), ((2025, 4), (2025, 6))),
+        None,
+        &catalog,
+    )
+    .expect_err("an existing catalog is refused");
+    assert!(why.contains("already exists"), "{why}");
+    assert_eq!(std::fs::read(&catalog).expect("kept"), b"kept");
+}
+
+/// **Every surface instrument gets one entry, and a span that cannot be read
+/// is that instrument's named refusal.** G18-cli-b-07, D-2020.
+#[test]
+fn walk_all_answers_once_per_instrument_and_names_an_unreadable_span() {
+    let scratch = Scratch::new();
+    let vendor = crate::parse_vendor("zerodha").expect("a feed");
+    let surface = ["NSE-NIFTY".to_owned(), "NSE-BANKNIFTY".to_owned()];
+    let walked = super::walk_all(
+        &scratch.0,
+        vendor,
+        "5min",
+        &surface,
+        (((2025, 1), (2025, 3)), ((2025, 4), (2025, 6))),
+        &union(),
+    );
+    assert_eq!(walked.len(), surface.len());
+    for entry in walked {
+        let why = entry.expect_err("nothing is stored");
+        assert!(why.starts_with("training span: "), "{why}");
+    }
+}
+
+fn judgement(candidate: usize, held: bool) -> super::Judgement {
+    super::Judgement {
+        candidate,
+        training: super::Tally {
+            trades: 3,
+            sum_ppm: 30,
+        },
+        later: super::Tally {
+            trades: 2,
+            sum_ppm: 20,
+        },
+        held,
+    }
+}
+
+fn judged(rows: Vec<super::Judgement>) -> super::Judged {
+    super::Judged {
+        rows,
+        training_sessions: 10,
+        later_sessions: 5,
+        draws: 7,
+        reality: None,
+    }
+}
+
+/// **A held row becomes a written catalog and the page says where; no held
+/// row writes nothing and says so.** G18-cli-b-08, D-2020.
+#[test]
+fn hand_off_writes_the_held_rows_and_says_where() {
+    let scratch = Scratch::new();
+    let union = union();
+    let path = scratch.0.join("held.catalog");
+    let mut out = String::new();
+    super::hand_off(
+        &mut out,
+        &union,
+        &judged(vec![judgement(1, true), judgement(0, false)]),
+        &path,
+        "heading",
+        (2025, 6),
+    );
+    assert!(
+        out.contains(&format!(
+            "CATALOG WRITTEN: 1 program(s) at {}. It is the CATALOG_FILE",
+            path.display()
+        )),
+        "{out}"
+    );
+    assert!(out.contains("qualify it on months after 2025-06"), "{out}");
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("written"),
+        "# heading\n366\n"
+    );
+    let mut refused = String::new();
+    super::hand_off(
+        &mut refused,
+        &union,
+        &judged(vec![judgement(1, true)]),
+        &path,
+        "heading",
+        (2025, 6),
+    );
+    assert!(
+        refused.contains("refused: the held catalog was not written"),
+        "{refused}"
+    );
+    let none = scratch.0.join("none.catalog");
+    let mut nothing = String::new();
+    super::hand_off(
+        &mut nothing,
+        &union,
+        &judged(vec![judgement(0, false)]),
+        &none,
+        "heading",
+        (2025, 6),
+    );
+    assert!(nothing.contains("NO CATALOG WRITTEN"), "{nothing}");
+    assert!(!none.exists());
+}
+
+/// **The table shows every held row and the operator's TOP, and counts the
+/// rest exactly when there is a rest.** G18-cli-b-09, D-2020.
+#[test]
+fn render_counts_the_hidden_failed_rows_only_when_some_are_hidden() {
+    let union = union();
+    let top = crate::Rules::operator().top.max(1);
+    let mut out = String::new();
+    let shown_all: Vec<_> = (0..top).map(|_| judgement(0, false)).collect();
+    super::render(&mut out, &union, &judged(shown_all), 2);
+    assert!(
+        out.contains(
+            "OUT OF SAMPLE -- 2 candidate(s) pooled across 2 instrument(s); 10 training and 5 \
+             later IST session(s); 7 bootstrap draws."
+        ),
+        "{out}"
+    );
+    assert!(out.contains("0 HELD under Romano-Wolf"), "{out}");
+    assert!(out.contains("White's Reality Check: NOT COMPUTED"), "{out}");
+    assert!(!out.contains("more FAILED"), "nothing hidden: {out}");
+    assert_eq!(out.matches("FAILED").count(), top, "{out}");
+    let mut hidden = String::new();
+    let with_rest: Vec<_> = (0..top + 3).map(|_| judgement(0, false)).collect();
+    super::render(&mut hidden, &union, &judged(with_rest), 2);
+    assert!(
+        hidden.contains("  ... and 3 more FAILED candidate(s), in discovery order, not shown."),
+        "{hidden}"
+    );
+    let mut one_hidden = String::new();
+    let one_more: Vec<_> = (0..=top).map(|_| judgement(0, false)).collect();
+    super::render(&mut one_hidden, &union, &judged(one_more), 2);
+    assert!(one_hidden.contains("... and 1 more FAILED"), "{one_hidden}");
+}
+
+/// **A catalog of exactly the readers' byte bound is written; one byte over
+/// is refused by name before any file appears.** G18-cli-b-10, D-2020.
+///
+/// The text is `# <heading>\n366\n`, seven bytes beside the heading.
+#[test]
+fn a_catalog_at_the_byte_bound_is_written_and_one_byte_over_is_refused() {
+    let scratch = Scratch::new();
+    let bound = usize::try_from(crate::boolean_catalog_command::CATALOG_BYTES).expect("fits");
+    let held = [Candidate {
+        words: mask(TUESDAY),
+        direction: Direction::Long,
+    }];
+    let at = scratch.0.join("at.catalog");
+    assert_eq!(
+        write_catalog(&at, &held, &"h".repeat(bound - 7)).expect("at the bound"),
+        1
+    );
+    assert_eq!(
+        std::fs::metadata(&at).expect("written").len(),
+        crate::boolean_catalog_command::CATALOG_BYTES
+    );
+    let over = scratch.0.join("over.catalog");
+    let why = write_catalog(&over, &held, &"h".repeat(bound - 6)).expect_err("one byte over");
+    assert!(
+        why.contains(&format!(
+            "the held catalog is {} bytes, over the",
+            bound + 1
+        )),
+        "{why}"
+    );
+    assert!(!over.exists(), "nothing was written");
+}
