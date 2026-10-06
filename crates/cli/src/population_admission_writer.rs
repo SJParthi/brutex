@@ -841,21 +841,20 @@ where
             member.item.mask.words()
         )
     };
-    let attested = match attested {
-        Some(attested) => attested,
-        None => {
-            #[cfg(test)]
-            tests::ATTESTATIONS.with(|count| count.set(count.get() + 1));
-            attested.insert(
-                resolved
-                    .attest_training(
-                        authority.execution_series,
-                        authority.execution_column,
-                        authority.horizon,
-                    )
-                    .map_err(refused)?,
-            )
-        }
+    let attested = if let Some(attested) = attested {
+        attested
+    } else {
+        #[cfg(test)]
+        tests::ATTESTATIONS.with(|count| count.set(count.get() + 1));
+        attested.insert(
+            resolved
+                .attest_training(
+                    authority.execution_series,
+                    authority.execution_column,
+                    authority.horizon,
+                )
+                .map_err(refused)?,
+        )
     };
     let evaluated = resolved
         .evaluate_with_attested(attested, run)
@@ -1719,6 +1718,8 @@ mod tests {
     }
 
     /// One validation per grid, then the O(1)-per-cell entry (D-1834).
+    /// Proof:
+    /// `cli::population_admission_writer::no_strategy_digest_entry_validates_the_whole_grid_per_cell`.
     #[expect(
         clippy::too_many_arguments,
         reason = "the strategy identity's own terms, passed through unchanged"
@@ -1753,7 +1754,8 @@ mod tests {
     /// per cell. The public `derive_strategy_digest_v1` ran
     /// `validate_evaluation` (O(G)) for every cell it was asked about, so a
     /// caller deriving a grid through it paid O(G²); the only entry now takes
-    /// the grid's one validation and is O(1) per cell.
+    /// the grid's one validation and is O(1) per cell. Proof:
+    /// `cli::population_admission_writer::no_strategy_digest_entry_validates_the_whole_grid_per_cell`.
     #[test]
     fn no_strategy_digest_entry_validates_the_whole_grid_per_cell() {
         let source = include_str!("population_admission_writer.rs");
@@ -2735,7 +2737,8 @@ mod tests {
 
     /// A bound population still refuses, per cell and in O(1), a foreign
     /// ranking policy, a data source other than the one it verified, and a
-    /// cell of another population (D-1835).
+    /// cell of another population (D-1835). Proof:
+    /// `cli::population_admission_writer::a_bound_population_refuses_a_foreign_cell_policy_or_data_source`.
     #[test]
     fn a_bound_population_refuses_a_foreign_cell_policy_or_data_source() {
         use crate::institutional_evidence::{
