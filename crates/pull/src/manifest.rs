@@ -1679,7 +1679,7 @@ impl Held {
     /// a second half that fails its own, or [`EntryFault::CloseHalfRecorded`] /
     /// [`EntryFault::CloseNotAPrice`] for a pair that is not a pair.
     pub fn decode(bytes: &[u8]) -> Result<Self, EntryFault> {
-        Self::decode_at(bytes, true)
+        Self::decode_versioned(bytes, true)
     }
 
     /// Decodes a version-2 entry, whose bytes `16..60` of the closes half were
@@ -1692,10 +1692,10 @@ impl Held {
     ///
     /// As [`Self::decode`], less the contract and reserved-tail refusals.
     pub fn decode_v2(bytes: &[u8]) -> Result<Self, EntryFault> {
-        Self::decode_at(bytes, false)
+        Self::decode_versioned(bytes, false)
     }
 
-    fn decode_at(bytes: &[u8], with_contract: bool) -> Result<Self, EntryFault> {
+    fn decode_versioned(bytes: &[u8], with_contract: bool) -> Result<Self, EntryFault> {
         let entry = Entry::decode(bytes)?;
         let half = image_of_at(bytes, IMAGE_LEN).map_err(|len| EntryFault::TooShort { len })?;
         verify(&half).map_err(|(stored, computed)| EntryFault::Checksum { stored, computed })?;

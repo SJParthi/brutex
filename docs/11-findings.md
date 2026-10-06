@@ -998,3 +998,14 @@ tests are named in `docs/04-invariants.md` rows DPR.
   stored with no balance line, and discards the session and window drop
   census. It makes no false claim, but the gap between the two numbers is
   unexplained.
+- **Round 7 (2026-10-06):** three defects, two of them in round 6's own
+  multi-month fixes, all fixed:
+  - greeks were filed for a month whose bars were refused (D-3139, DPM-12);
+  - a refused greek month uncounted the month already written (D-3139,
+    DPM-13);
+  - an address-stage refusal lacked its origin (D-3700, DPM-14).
+  Also from the gap audit: the census decoded v2 entries with v3 meaning and
+  read an unreadable contract as the spot key (D-3680, DPM-11), fixed. Its
+  #1, a zero or leading-zero strike, was refuted on this branch.
+  Latent, not fixed: `from_rows` does not check that every overlay was
+  consumed by a month. No caller produces an overlay without a bar today.

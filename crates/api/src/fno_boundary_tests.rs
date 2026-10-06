@@ -1401,6 +1401,7 @@ fn greek_filing_refuses_an_unaddressable_rung_without_claiming_a_write() {
         &fixture.site,
         &fixture.wire,
     )
+    .1
     .expect("an unaddressable Greek file must refuse rather than acknowledge");
     assert!(why.contains("no Greek-file timeframe"), "{why}");
     assert!(!fixture.root.join("dhan").exists());
@@ -1573,7 +1574,7 @@ fn greeks_in_a_chunk_that_crosses_a_month_are_filed_under_their_own_months() {
         &fixture.site,
         &fixture.wire,
     );
-    assert_eq!(why, None, "both months' greeks file");
+    assert_eq!(why, (2, None), "both months' greeks file");
     let path = |month: u8| {
         StorePath::new(PathParts {
             vendor: fixture.wire.store_vendor,
@@ -1590,4 +1591,82 @@ fn greeks_in_a_chunk_that_crosses_a_month_are_filed_under_their_own_months() {
     };
     assert!(path(6).is_file(), "June's greek is in June's file");
     assert!(path(7).is_file(), "July's greek is in July's file");
+}
+
+/// ROUND 7 (D-3139). One greek per month, June then July, 2025.
+fn june_and_july_greeks() -> [store::format::Greek; 2] {
+    let greek = |ts_micros: i64| store::format::Greek {
+        ts_micros,
+        spot: 2_500_000,
+        volatility: 0.12,
+        delta: 0.5,
+        gamma: 0.01,
+        vega: 0.2,
+        theta: -0.1,
+        rho: 0.05,
+        rate: 0.065,
+        provenance: store::format::Greek::provenance_of(
+            store::format::VOL_FROM_VENDOR,
+            store::format::RATE_FROM_OPERATOR,
+            false,
+            0,
+        ),
+    };
+    [greek(1_751_277_540_000_000), greek(1_751_341_500_000_000)]
+}
+
+/// ROUND 7 (D-3139). A group that landed June's bars and not July's files no
+/// July greek: it would join on a stamp with no bar behind it.
+#[test]
+fn greeks_are_kept_only_for_the_months_whose_bars_landed() {
+    let fixture = Fixture::new(1);
+    let june_only = pull::manifest::Held::new(
+        pull::manifest::Entry {
+            key: pull::manifest::EntryKey {
+                contract: Some(fixture.chain.contracts[0].contract),
+                exchange: brutex_core::instrument::Exchange::Nse,
+                segment: brutex_core::instrument::Segment::Fno,
+                symbol: brutex_core::symbol::Symbol::new("NIFTY").expect("a symbol"),
+                timeframe: Timeframe::MINUTE_1,
+                month: YearMonth::new(2025, 6).expect("June"),
+            },
+            rows: 1,
+            first_ts_micros: 1_751_277_540_000_000,
+            last_ts_micros: 1_751_277_540_000_000,
+        },
+        pull::manifest::Closes::UNKNOWN,
+    );
+    let [june, july] = june_and_july_greeks();
+    assert_eq!(in_landed_months(vec![june, july], &[june_only]), vec![june]);
+    assert_eq!(in_landed_months(vec![june, july], &[]), Vec::new());
+}
+
+/// ROUND 7 (D-3139). June's greek is written, July's file refuses: the count
+/// says one filed and the refusal is named, never zero filed.
+#[test]
+fn a_greek_month_that_refuses_does_not_uncount_the_month_already_filed() {
+    let fixture = Fixture::new(1);
+    let contract = fixture.chain.contracts[0].contract;
+    let july_file = StorePath::new(PathParts {
+        vendor: fixture.wire.store_vendor,
+        exchange: "NSE",
+        segment: "FNO",
+        symbol: "NIFTY",
+        contract: Some(contract),
+        timeframe: Timeframe::MINUTE_1,
+        month: YearMonth::new(2025, 7).expect("month"),
+        file: FileKind::Greeks,
+    })
+    .expect("an address")
+    .to_path_buf(&fixture.root);
+    fs::create_dir_all(&july_file).expect("block only July's Greek file");
+    let (filed, refused) = file_the_greeks(
+        &june_and_july_greeks(),
+        contract,
+        &fixture.asked,
+        &fixture.site,
+        &fixture.wire,
+    );
+    assert_eq!(filed, 1, "June's greek reached disk and is counted");
+    assert!(refused.is_some(), "July's refusal is named");
 }

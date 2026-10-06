@@ -124,3 +124,34 @@ fn a_decoded_batch_across_a_month_end_is_filed_one_month_per_file() {
     assert!(again.failures.is_empty(), "{:?}", again.failures);
     assert_eq!(again.bars_committed, 0);
 }
+
+/// ROUND 7 (D-3700). A member refused at the address stage names the endpoint
+/// it came from, as the session-stage refusal and the landed path do.
+#[test]
+fn an_address_stage_refusal_names_its_origin() {
+    let request = BarRequest {
+        instrument_id: String::new(),
+        listing: Listing::Index,
+        window: Window::new(day(2025, 6, 20), day(2025, 7, 10)).expect("a window"),
+        granularity: Granularity::Minute1,
+    };
+    let scratch = Scratch::new("month-span");
+    let bars = [bar(day(2025, 6, 30), 15, 29)];
+    let done = pull::ingest::from_rows(
+        &bars,
+        &[],
+        "NIFTY",
+        "attack",
+        &scratch.0,
+        Plan {
+            exchange: "BSE",
+            ..plan(&request)
+        },
+    );
+    assert_eq!(done.failures.len(), 1, "{:?}", done.failures);
+    assert!(
+        done.failures[0].why.ends_with("(from attack)"),
+        "{:?}",
+        done.failures
+    );
+}

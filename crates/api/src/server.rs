@@ -12618,7 +12618,8 @@ fn price_chain_month(
 
     let records = greek_records(&out);
     if !records.is_empty()
-        && let Some(why) = file_the_greeks(&records, month_of.found.contract, asked, site, wire)
+        && let (_, Some(why)) =
+            file_the_greeks(&records, month_of.found.contract, asked, site, wire)
     {
         // COUNTED AS REFUSED, NOT SILENT. The rows were computed and could not
         // be filed, which is a different fact from "could not be computed" and
@@ -13345,12 +13346,19 @@ async fn roll_one(
         // are true and neither implies killing the other 251 runs.** The
         // consequence is scoped to THIS contract-month; scoping the reaction to
         // the whole walk was the same conflation the two `?` above made.
+        // ONLY THE MONTHS WHOSE BARS LANDED (D-3139). Since D-3136 a group
+        // can land June and refuse July; July's greeks would have no bar
+        // behind them, so they are not filed. July's refusal is already on
+        // the receipt through `trouble`.
+        let records = in_landed_months(records, &pending);
         if !records.is_empty() {
-            match file_the_greeks(&records, contract, asked, site, wire) {
-                Some(why) => {
-                    note_run_failure(&mut failed, &mut why_not, &format!("{label}: {why}"));
-                }
-                None => priced.filed = priced.filed.saturating_add(records.len()),
+            // WHAT LANDED IS COUNTED EVEN WHEN A LATER MONTH REFUSES (D-3139),
+            // the rule D-3120 gave the bars.
+            let (greeks_filed, greeks_refused) =
+                file_the_greeks(&records, contract, asked, site, wire);
+            priced.filed = priced.filed.saturating_add(greeks_filed);
+            if let Some(why) = greeks_refused {
+                note_run_failure(&mut failed, &mut why_not, &format!("{label}: {why}"));
             }
         }
         // COLLECTED, NOT WRITTEN PER GROUP.
@@ -13810,9 +13818,11 @@ fn greek_records(done: &pull::pricing::PricedAll) -> Vec<store::format::Greek> {
 
 /// Files one contract-month's greeks beside its bars.
 ///
-/// Returns the reason on failure rather than a `Result`, matching every other
-/// filing step on this path — the caller turns it into the run's error with the
-/// contract's label attached, which a bare store error does not carry.
+/// Returns how many records it filed and the first refusal, rather than a
+/// `Result`, matching every other filing step on this path — the caller turns
+/// the refusal into the run's error with the contract's label attached, which a
+/// bare store error does not carry. A refused month does not stop or uncount
+/// the others (D-3139).
 ///
 /// # Why the month comes from each RECORD, not the window (D-3137)
 ///
@@ -13839,15 +13849,23 @@ fn file_the_greeks(
     asked: &ingest::FnoRequest,
     site: &Site,
     wire: &Wire,
-) -> Option<String> {
+) -> (usize, Option<String>) {
     let Some(timeframe) = asked.granularity.store_timeframe() else {
-        return Some("the requested granularity has no Greek-file timeframe".to_owned());
+        return (
+            0,
+            Some("the requested granularity has no Greek-file timeframe".to_owned()),
+        );
     };
+    let mut filed = 0usize;
+    let mut refused: Option<String> = None;
     let mut rest = records;
     while let Some(first) = rest.first() {
         let month = match greek_month(first.ts_micros) {
             Ok(month) => month,
-            Err(why) => return Some(format!("the Greek-file month could not be named: {why}")),
+            Err(why) => {
+                let why = format!("the Greek-file month could not be named: {why}");
+                return (filed, refused.or(Some(why)));
+            }
         };
         let run = rest
             .iter()
@@ -13855,11 +13873,38 @@ fn file_the_greeks(
             .count();
         let (these, after) = rest.split_at(run);
         rest = after;
-        if let Some(why) = file_greek_month(these, contract, asked, site, wire, timeframe, month) {
-            return Some(why);
+        // A REFUSED MONTH DOES NOT UNCOUNT THE MONTHS ALREADY WRITTEN, and
+        // does not stop the ones after it (D-3139; D-3120 for the bars).
+        match file_greek_month(these, contract, asked, site, wire, timeframe, month) {
+            None => filed = filed.saturating_add(these.len()),
+            Some(why) => refused = refused.or(Some(why)),
         }
     }
-    None
+    (filed, refused)
+}
+
+/// The greeks among `records` whose IST month's bars landed, as `pending`
+/// (one census row per landed month, D-3136) names them. Both are in time
+/// order, so one merge walk decides each record: O(records + months), with no
+/// membership scan. D-3139.
+fn in_landed_months(
+    records: Vec<store::format::Greek>,
+    pending: &[pull::manifest::Held],
+) -> Vec<store::format::Greek> {
+    let mut months = pending.iter().map(|held| held.entry.key.month).peekable();
+    let mut kept = Vec::with_capacity(records.len());
+    for record in records {
+        // A stamp with no IST month cannot be in a month whose bars landed:
+        // its bar was refused at the address stage and is on the receipt.
+        let Ok(month) = greek_month(record.ts_micros) else {
+            continue;
+        };
+        while months.next_if(|landed| *landed < month).is_some() {}
+        if months.peek() == Some(&month) {
+            kept.push(record);
+        }
+    }
+    kept
 }
 
 /// The IST month a greek's stamp falls in, which names its file. D-3137.

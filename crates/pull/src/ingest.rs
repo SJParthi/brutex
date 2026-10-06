@@ -1392,6 +1392,8 @@ pub fn from_rows(
                 instrument: instrument.to_owned(),
                 why,
             });
+            // NAMED LIKE EVERY OTHER REFUSAL ON THIS DOOR (D-3700).
+            name_the_origin(&mut done, origin);
             return done;
         }
     };

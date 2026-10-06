@@ -63818,3 +63818,33 @@ leading-zero spelling) is refuted on this branch: D-3150 and D-3157 refuse
 both. `a_zero_strike_and_a_leading_zero_strike_are_refused_by_the_http_reader`
 in `crates/pull/tests/attack_decoder.rs` passes unchanged. Trailing-zero
 fractions stay a vendor-evidence question (D-3116 files one contract once).
+
+### D-3139 — A rolling group's greeks are filed only for months whose bars landed, and each filed month is counted — 2026-10-06
+
+**Finding (data-path round 7, against D-3136 and D-3137).**
+
+- **Greeks with no bar.** After D-3136, `from_rows` can land June and refuse
+  July. `land_rolling_group` returns `Ok` when anything landed, and `roll_one`
+  then filed the greeks of the whole group, July's included. That breaks the
+  rule at that call site: every stamp a greeks row joins on has a bar behind
+  it.
+- **Under-counted.** After D-3137, `file_the_greeks` returned at July's
+  refusal after June's greeks were written, and `roll_one` counted `filed` 0.
+  The receipt said no Greek rows were written while June's were on disk.
+  Measured with July's Greek path blocked: 0 counted, 1 written.
+
+**Decision.** `roll_one` keeps only the greeks whose IST month has a census
+row in `pending`, one per landed month (`in_landed_months`). That is a merge
+walk over two time-ordered lists, with no membership scan. `file_the_greeks`
+returns `(filed, first refusal)` and continues past a refused month, the rule
+D-3120 gave the bars. The chain path, one month per chunk, keeps its
+all-or-nothing refusal. DPM-12, DPM-13.
+
+### D-3700 — A decoded-door refusal at the address stage names its origin — 2026-10-06
+
+**Finding (data-path round 7, low).** `from_rows`' address-stage refusal
+returned before `name_the_origin`, so its receipt line lacked "(from
+<endpoint>)", which every other refusal on that door carries. Measured: a plan
+naming BSE gave a failure with no origin.
+
+**Decision.** That refusal names its origin too. DPM-14.
