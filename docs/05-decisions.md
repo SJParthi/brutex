@@ -63651,8 +63651,13 @@ never be cut before it is refused, and extended the ragged-file tests to
 the writable open; it could not reproduce the defect on its own base,
 where `fixed_tail` did not exist. Here both exist. Both ledgers are
 headerless, so the heal was called with an empty magic, and an empty magic
-cuts any file: CE-89 reproduced on this merge (its tests failed against
-D-1910's code, which is what D-2794 wrote them to do).
+cuts any file. CE-89 therefore holds on this merge's inputs: PR #74's own
+version of the ragged-file test appended one foreign byte (`0x5a`) to an
+empty member file and asserted that the writer cuts it ("the writer cuts
+the ragged tail"), the opposite of D-2794's assertion on the same fixture.
+D-2794's tests were not run against D-1910's code here (a temporary revert
+was refused in this session), so that failure is read from the code, not
+measured.
 
 **Decision.** Each of the six files is healed with the 16-byte magic its
 own records begin with (`PARAMETER_MAGIC`, `PERCENTILE_MAGIC`,
