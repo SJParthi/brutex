@@ -17337,7 +17337,7 @@ const EXTENSIONLESS_ROUTES: &[&str] = &[
     "/autopilot/resume",
     "/autopilot/control",
     "/ingest/queue",
-    "/audit",
+    "/audit/page",
     "/store",
     "/bars",
     "/logs",

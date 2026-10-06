@@ -63692,3 +63692,11 @@ evicts at. Behaviour is unchanged. The allowlist count is not raised.
 `an_unchanged_first_page_keeps_the_held_session_and_its_learned_cursors`
 and `a_pinned_page_keeps_its_session_from_being_evicted_first` are
 unchanged and green.
+
+**And `EXTENSIONLESS_ROUTES`.** D-2752 (CE-99) listed `/audit` among
+`route_table`'s extensionless routes; on PR #74's head D-1971 had moved the
+server's page to `/audit/page` and left `/audit` to the front end. The list
+names `/audit/page`, which is what
+`route_variants_cover_every_extensionless_route` reads out of
+`route_table`, so a variant of `/audit/page` is refused and `/audit` stays
+the front end's.
