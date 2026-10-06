@@ -220,7 +220,7 @@ fn section_154_states_index_reads_the_bounded_reserve_and_the_two_open_append() 
 
 #[test]
 fn the_ledger_v6_route_and_replay_costs_are_stated() {
-    let route = function(LEDGER_V6, "fn run_route(");
+    let route = function(LEDGER_V6, "fn run_route<T>(");
     assert!(route.contains("preloaded_for(underlying, &mut sized)"));
     let hand_off = function(LEDGER_V6, "fn preloaded_for<");
     assert!(hand_off.contains("sized.take()"));
@@ -233,7 +233,7 @@ fn the_ledger_v6_route_and_replay_costs_are_stated() {
     assert_eq!(sizing.matches("load(").count(), 1);
     assert!(sizing.contains("Ok((sweeper, inputs, sized))"));
     let replay = function(LEDGER_V6, "fn replay_route(");
-    assert!(replay.contains("run_route(request, out)?"));
+    assert!(replay.contains("run_route(request, out, std::convert::identity)?"));
     let start = LEDGER_V6.find("fn replay_route(").expect("replay_route");
     let doc = flat(
         LEDGER_V6

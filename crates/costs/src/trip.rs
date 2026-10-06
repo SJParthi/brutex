@@ -2474,8 +2474,11 @@ mod tests {
             })
         );
 
-        // (9) The slippage line: a bar whose low is deeply negative gives an
-        //     enormous per-unit slippage on tiny notionals.
+        // (9) The slippage line: a bar whose low is deeply negative used to
+        //     give an enormous per-unit slippage on tiny notionals. The floor
+        //     lifts that sell ABOVE the printed low, which is favourable, so
+        //     the realized slippage is zero and nothing overflows
+        //     (Z1-slice10-F2, D-2539).
         let slippery = worst_case_fills(
             Bar::flat(TICK_HELPER).expect("legal"),
             Bar::new(
@@ -2488,10 +2491,8 @@ mod tests {
         )
         .expect("in range");
         assert_eq!(
-            charge_stack(slippery, 1_000, &tame),
-            Err(CostError::Overflow {
-                operation: "the slippage line"
-            })
+            charge_stack(slippery, 1_000, &tame).map(|charges| charges.slippage),
+            Ok(Paisa::from_raw(0))
         );
 
         // (10) The net: a gross at the bottom of i64 and any charge at all.

@@ -7169,9 +7169,13 @@ mod tests {
                 std::fs::metadata(root.path().join("base-evidence-completions-v3.bin"))
                     .expect("measure completions")
                     .len();
-            assert_eq!(
-                completions, 64,
-                "{name}: no completion survives a failed barrier"
+            // No completion RECORD survives: the file holds at most its
+            // header. Since conc5-1 (D-2644) the header barrier is hooked too,
+            // so a fault armed on a fresh ledger can fire there and leave the
+            // file cut to nothing instead of header-only.
+            assert!(
+                completions == 0 || completions == 64,
+                "{name}: no completion survives a failed barrier ({completions} bytes)"
             );
             let written =
                 append_and_reopen_base_evidence_v2(root.path(), bounds, &candidate, &base)

@@ -2819,10 +2819,18 @@ mod tests {
 
         let syncs = code.iter().filter(|l| l.contains(".sync_all()")).count();
         assert_eq!(
-            syncs, 2,
-            "exactly two direct durability barriers are expected: one after the \
-             fresh header is read back, and one in `confirm_durable`. The record \
-             append's barrier is `fixed_tail::sync_or_roll_back` (D-1900)."
+            syncs, 1,
+            "exactly one direct durability barrier is expected, in \
+             `confirm_durable`. The record append's barrier is \
+             `fixed_tail::sync_or_roll_back` (D-1900) and the fresh header's is \
+             `fixed_tail::sync_all_or_roll_back` (conc5-1, D-2644)."
+        );
+        assert_eq!(
+            code.iter()
+                .filter(|l| l.contains("fixed_tail::sync_all_or_roll_back("))
+                .count(),
+            1,
+            "the fresh header's barrier cuts the file back if it fails"
         );
 
         // THE APPEND'S BARRIER ROLLS BACK ON FAILURE NOW (D-1900, resources-1),

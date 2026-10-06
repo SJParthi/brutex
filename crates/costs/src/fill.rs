@@ -1198,15 +1198,13 @@ mod tests {
             // The OTHER bar's low is not a fill leg and must not refuse.
             assert!(fills_at(degenerate, normal, Direction::Long, Anchor::PrintedExtreme).is_ok());
             assert!(fills_at(normal, degenerate, Direction::Short, Anchor::PrintedExtreme).is_ok());
-            // The worst case still ABSORBS a modest one with its floor; at the
-            // `i64` edge its realized slippage leaves `i64` and is refused as
-            // an overflow by name, which is unchanged by D-1192.
+            // The worst case ABSORBS it with its floor at every low, the `i64`
+            // edge included: the floor lifts the sell ABOVE the printed low,
+            // which is favourable to the seller, so the realized slippage is
+            // the signed adverse move clamped at zero and cannot leave `i64`
+            // (Z1-slice10-F2, D-2539; it was refused as an overflow before).
             let worst = fills_at(normal, degenerate, Direction::Long, Anchor::AdverseExtreme);
-            if low >= -100 {
-                assert_eq!(worst.map(Fills::sell), Ok(TICK));
-            } else {
-                assert!(matches!(worst, Err(CostError::Overflow { .. })));
-            }
+            assert_eq!(worst.map(Fills::sell), Ok(TICK), "low {low}");
         }
         // Exactly one tick is the boundary and is a real fill, unchanged.
         let at_tick = Bar::new(p(100_00), p(100_00), TICK).expect("legal");

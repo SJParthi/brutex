@@ -3851,10 +3851,14 @@ fn note_decision(feed: &str, month: YearMonth, attempts: u8, last: Option<&str>,
             Some(reason.as_str()),
             None,
         ),
+        // THE VENDOR'S OWN WORDS, NOT THE SENTENCE AROUND THEM. A halt's
+        // reason is a paragraph that quotes the verbatim cause at its END, and
+        // telemetry bounds a string field, so the cause was cut off the line.
+        // The paragraph stays on the page; the line carries the cause.
         Next::Halt { reason } => (
             telemetry::Level::Error,
             "halted",
-            Some(reason.as_str()),
+            last.or(Some(reason.as_str())),
             None,
         ),
     };
@@ -7936,7 +7940,8 @@ mod tests {
         let site = empty_site("stall-reconsider");
         let yesterday = yesterday_ist(std::time::SystemTime::now()).expect("a usable clock");
         let mut feeds = drivable(yesterday);
-        let now = ingest::epoch_secs(std::time::SystemTime::now());
+        // The stall schedule reads the steady clock since clock-3 (D-2579).
+        let now = steady_secs();
         let feed = feeds.first_mut().expect("a drivable feed");
         let frontier_before = feed.frontier;
         feed.stalls.push(Stall {

@@ -3969,10 +3969,15 @@ mod tests {
                 0,
                 "case {case} ends on a whole record"
             );
-            drop(PopulationStatisticsV3Ledger::open_read(
-                &case_root,
-                bounds()?,
-            )?);
+            // A fault on the header's own barrier (hooked since conc5-1,
+            // D-2644) cuts a fresh file to nothing, which a reader refuses as
+            // no ledger; any longer cut ledger still opens read-only.
+            if len > 0 {
+                drop(PopulationStatisticsV3Ledger::open_read(
+                    &case_root,
+                    bounds()?,
+                )?);
+            }
             assert!(matches!(
                 produced.append_and_reopen(&case_root, bounds()?)?,
                 PopulationStatisticsV3Commit::Written(_)

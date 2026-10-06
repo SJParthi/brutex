@@ -1261,7 +1261,7 @@ fn render_pooled(
 }
 
 /// What the pooled table's `dd1max` column is, printed under the pass-2
-/// heading (p2misc-1, D-2648). It said "a lower bound on the pooled drawdown",
+/// heading (p2misc-1, D-2648). It called the column the pooled drawdown's lower bound,
 /// which the largest single-instrument drawdown is not.
 const POOLED_DRAWDOWN_LEGEND: &str = "dd1max is the LARGEST single-instrument drawdown among those \
      pooled; it bounds the pooled drawdown in neither direction and is not that figure";

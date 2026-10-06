@@ -4054,16 +4054,21 @@ mod tests {
         assert_eq!(bytes, header().to_vec());
         drop(PopulationV6Ledger::open_read(&root, bounds())?);
 
+        // A ONE-BYTE PREFIX OF THE HEADER is an interrupted genesis, and since
+        // conc5-1 (D-2644) the writer cuts and re-initialises it under its
+        // lock instead of refusing it on every open. A reader still refuses.
         std::fs::write(root.join(DATA_FILE), [header()[0]]).map_err(|why| why.to_string())?;
-        let short = PopulationV6Ledger::open_write(&root, bounds());
+        let reader = PopulationV6Ledger::open_read(&root, bounds());
         assert!(
-            matches!(&short, Err(why) if why.contains("cannot read Population V6 header")),
-            "a one-byte header still refuses: {:?}",
-            short.as_ref().err()
+            matches!(&reader, Err(why) if why.contains("cannot read Population V6 header")),
+            "a reader never heals a torn header: {:?}",
+            reader.as_ref().err()
         );
+        drop(PopulationV6Ledger::open_write(&root, bounds())?);
         assert_eq!(
             std::fs::read(root.join(DATA_FILE)).map_err(|why| why.to_string())?,
-            vec![header()[0]]
+            header().to_vec(),
+            "the writer re-initialised the torn header"
         );
         std::fs::remove_dir_all(&root).map_err(|why| why.to_string())?;
         Ok(())

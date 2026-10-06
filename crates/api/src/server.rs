@@ -22783,7 +22783,9 @@ mod tests {
         assert!(
             done.failures
                 .iter()
-                .any(|failure| failure.why.contains("incomplete cash-session cache"))
+                .any(|failure| failure.why.contains("incomplete cash-session cache")),
+            "{:?}",
+            done.failures
         );
         let again = super::land_spot(&landed, &key, &site, &mut dated).await;
         assert_eq!(again.rows_read, 2);
@@ -23817,10 +23819,15 @@ mod tests {
             assert_eq!(done.derived_files, 0);
             assert_eq!(done.rows_read, 360);
             assert_eq!(done.failures.len(), 1);
+            // The event carries the schedule's own refusal; the failure wraps
+            // it in the windows the landing stopped (equity-1, D-2575).
             assert!(
                 crate::emitted::landed(mark, "api.pull", "cash schedule refused")
                     .iter()
-                    .any(|record| crate::emitted::says(record, "why", &done.failures[0].why))
+                    .any(|record| record
+                        .field("why")
+                        .and_then(telemetry::OwnedValue::as_str)
+                        .is_some_and(|why| done.failures[0].why.contains(why)))
             );
             assert!(
                 done.failures[0]

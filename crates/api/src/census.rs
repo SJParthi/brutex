@@ -1156,7 +1156,7 @@ mod tests {
     }
 
     /// Z1-slice12-F2, D-2570: the `held_series` and `swept_series` docs said
-    /// `CLAUDE.md` §1 fixed the engine surface "at exactly these two" indices,
+    /// `CLAUDE.md` §1 fixed the engine surface "at exactly these" two indices (quoted split, so this doc does not match itself),
     /// which D-0506 made false. On the old source the needle is present twice
     /// and this fails; the needle is split so this test does not match itself.
     /// The second half pins what the docs now say the function does: two

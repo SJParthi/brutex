@@ -780,19 +780,16 @@ async fn a_window_after_every_discovered_expiry_is_empty_without_claiming_a_fetc
         assert_eq!(record.rows_read, 0);
         assert_eq!(record.bars_stored, 0);
         assert_eq!(record.failures, 0);
-        if also_held {
-            assert!(body.contains("1, resumed rather than refetched"), "{body}");
-            assert!(
-                body.contains("every contract-month with bars owed"),
-                "{body}"
-            );
-        } else {
-            assert!(
-                body.contains("no contract has bars owed within this window"),
-                "{body}"
-            );
-            assert!(!body.contains("Contract-months already held"), "{body}");
-        }
+        // The window is one CLOSED day (a Sunday). Since conc12-1 (D-2535) a
+        // span ends on its last day the calendar does not report closed, so
+        // an all-closed window owes nothing at all and a held contract-month
+        // is never even reached to be counted as resumed: both cases answer
+        // that nothing is owed, and neither claims a fetch.
+        assert!(
+            body.contains("no contract has bars owed within this window"),
+            "{body}"
+        );
+        assert!(!body.contains("resumed rather than refetched"), "{body}");
         assert!(
             !body.contains("the fetched bars were already stored"),
             "{body}"

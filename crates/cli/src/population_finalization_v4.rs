@@ -3456,8 +3456,13 @@ mod tests {
                 0,
                 "case {case} ends on a whole record"
             );
-            PopulationFinalizationV4Ledger::open_read(finalization_root.path(), bounds())
-                .expect("the cut ledger opens read-only");
+            // A fault on the header's own barrier (hooked since conc5-1,
+            // D-2644) cuts a fresh file to nothing, which a reader refuses as
+            // no ledger; any longer cut ledger still opens read-only.
+            if len > 0 {
+                PopulationFinalizationV4Ledger::open_read(finalization_root.path(), bounds())
+                    .expect("the cut ledger opens read-only");
+            }
             assert!(matches!(
                 commit_population_finalization_v4(finalization_root.path(), bounds(), source())
                     .expect("the exact rerun commits"),
