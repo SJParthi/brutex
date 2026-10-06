@@ -239,3 +239,12 @@ Next poll: 12:40.
 - Option for the owner (NOT taken without a yes): when run 1286 finishes (~Oct 7 evening UTC),
   spend up to ~8% of the weekly waking only the owners of named survivors, so PR 74 can go green
   before the reset. Default is to hold until Tue 04:30 IST.
+
+## ~17:40 UTC — OWNER APPROVED: spend up to 8% weekly on PR 74 survivors (cap 93%)
+- The owner answered "go ahead" to the option above. Weekly HARD CAP for this week: 93%
+  (from 85%).
+- Use: only after CI run 1286 (37502065146, fbdabaec) finishes. Wake ONLY the owners of named
+  Gate 18 survivors (cli-a, cli-b, api, runner, rest), fix only those, then one push. Everything
+  else stays paused.
+- Survivor-round trigger armed for Oct 7 20:30 UTC; it re-arms +2 h while the run is still going.
+  The cheap CI check at 19:50 UTC Oct 6 is still armed. Full RESUME at Mon 12 Oct 23:02 UTC.
