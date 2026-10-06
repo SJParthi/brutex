@@ -907,18 +907,20 @@ Narrative only. No row is added to the table above.
 
 ### Attack lens L2, O(1) at measured p99 — dispositions — 2026-10-06
 
+Narrative only. No row is added to the tables above: these findings are
+listed as bullets, as every audit appended after them has been, and each
+stays IN PROGRESS naming its branch commit until the squash merge to `main`.
+
 Found by five read-only per-crate audits of every per-operation path. Each
 candidate went to a separate refuter told to default to refuting. One was
 refuted: the frontier read's per-read sort, which is linear on rows already
 written best-first and capped at 4,096. The survivors:
 
-| ID | Severity | Finding | Where | Disposition |
-|---|---|---|---|---|
-| `F-8D5719` | `unguarded` | Gate 8 measured every rule-4 operation at the minimum of a mean, which a tail cannot move: planted one-in-fifty O(n) tails passed C-BC-01 at 1.20× and C-E-10 at 1.08× | `crates/store/benches/ratio.rs`, `crates/engine/benches/ratio.rs`; `docs/06-limits.md` §1 | FIXED f80e4d11 — O1P-01..04 gate p99 at 10^3..10^6 and breach the same plants at 9.4×–158.8× (D-3300, D-3301) |
-| `F-054F53` | `gap` | An append rebuilds the .tix in O(n_valid) and no document said so; the rebuild was "once per month" and "timed by nothing" | `crates/store/src/file.rs` `index_batch`; `docs/06-limits.md`; `docs/02-store-format.md` | FIXED f80e4d11 — named in all three; measured 0.49 → 80 ms at 10^3 → 10^6 bars (D-3302) |
-| `F-4EB825` | `gap` | An audit read fsyncs twice per row on a GET and no limit named it: up to 64 per `/backtest/audit.json` page | `crates/cli/src/operation_audit.rs` `read`, `page` | FIXED f80e4d11 — named and measured, 2.4 ms per page flat at 10^2..10^4 invocations; the syncs are kept (D-3303) |
-| `F-D27B5E` | `wrong` | cli results append and refresh claimed O(delta + 1) against D-1560, whose growth branch re-hashes the indexed prefix | `crates/cli/src/results.rs` header, `append`, `refresh`; `docs/06-limits.md` §100 | FIXED f80e4d11 — documents state O(indexed bytes + delta) (D-3305) |
-| `F-C33088` | `wrong` | Four stale cost and shape comments in api and telemetry: "nothing here scans", "the only `read_dir`", "two `read_dir` sites", "carries no bench" | `crates/api/src/bars.rs`, `render.rs`, `autopilot.rs`; `crates/telemetry/src/sink.rs` | FIXED f80e4d11 (D-3304) |
+- **`F-8D5719`** (`unguarded`) — Gate 8 measured every rule-4 operation at the minimum of a mean, which a tail cannot move: planted one-in-fifty O(n) tails passed C-BC-01 at 1.20× and C-E-10 at 1.08×. Where: `crates/store/benches/ratio.rs`, `crates/engine/benches/ratio.rs`; `docs/06-limits.md` §1. Disposition: IN PROGRESS on `attack/o1-p99`, fixed there in f80e4d11 (the squash commit is named once it merges) — O1P-01..04 gate p99 at 10^3..10^6 and breach the same plants at 9.4×–158.8× (D-3300, D-3301).
+- **`F-054F53`** (`gap`) — An append rebuilds the .tix in O(n_valid) and no document said so; the rebuild was "once per month" and "timed by nothing". Where: `crates/store/src/file.rs` `index_batch`; `docs/06-limits.md`; `docs/02-store-format.md`. Disposition: IN PROGRESS on `attack/o1-p99`, fixed there in f80e4d11 (the squash commit is named once it merges) — named in all three; measured 0.49 → 80 ms at 10^3 → 10^6 bars (D-3302).
+- **`F-4EB825`** (`gap`) — An audit read fsyncs twice per row on a GET and no limit named it: up to 64 per `/backtest/audit.json` page. Where: `crates/cli/src/operation_audit.rs` `read`, `page`. Disposition: IN PROGRESS on `attack/o1-p99`, fixed there in f80e4d11 (the squash commit is named once it merges) — named and measured, 2.4 ms per page flat at 10^2..10^4 invocations; the syncs are kept (D-3303).
+- **`F-D27B5E`** (`wrong`) — cli results append and refresh claimed O(delta + 1) against D-1560, whose growth branch re-hashes the indexed prefix. Where: `crates/cli/src/results.rs` header, `append`, `refresh`; `docs/06-limits.md` §100. Disposition: IN PROGRESS on `attack/o1-p99`, fixed there in f80e4d11 (the squash commit is named once it merges) — documents state O(indexed bytes + delta) (D-3305).
+- **`F-C33088`** (`wrong`) — Four stale cost and shape comments in api and telemetry: "nothing here scans", "the only `read_dir`", "two `read_dir` sites", "carries no bench". Where: `crates/api/src/bars.rs`, `render.rs`, `autopilot.rs`; `crates/telemetry/src/sink.rs`. Disposition: IN PROGRESS on `attack/o1-p99`, fixed there in f80e4d11 (the squash commit is named once it merges) (D-3304).
 
 **What these fixes are proven by.** For `F-8D5719` the evidence is the plants:
 each was run against these rows and breached them, and was then reverted. The
@@ -934,10 +936,8 @@ cost claims against code) plus new p99 rows. The manifest finding is a
 measurement, repeated three times. The two comments were each read against
 the code they describe. No separate refuter was run in this round.
 
-| ID | Severity | Finding | Where | Disposition |
-|---|---|---|---|---|
-| `F-DE1694` | `wrong` | A random manifest lookup is flat in probes, not in time, and the fixed-key row hid it: p99 2.0×–4.1× at 10^5 months while C-12 and `docs/07-o1-architecture.md` read 1.0× | `crates/pull/src/manifest.rs` `Manifest::entry`; `crates/pull/benches/ratio.rs` C-12 | FIXED e2715c9b — O1P-05 gates 10^4 and prints 10^5; named in `docs/06-limits.md` and `docs/07-o1-architecture.md` (D-3306, D-3307) |
-| `F-3D3988` | `wrong` | fno_land and price_group cost comments contradicted the code: "one census read for the whole run", and an O(rows) "nothing scans" block on the O(bars) `read_month_bars` | `crates/api/src/server.rs` | FIXED e2715c9b (D-3308) |
+- **`F-DE1694`** (`wrong`) — A random manifest lookup is flat in probes, not in time, and the fixed-key row hid it: p99 2.0×–4.1× at 10^5 months while C-12 and `docs/07-o1-architecture.md` read 1.0×. Where: `crates/pull/src/manifest.rs` `Manifest::entry`; `crates/pull/benches/ratio.rs` C-12. Disposition: IN PROGRESS on `attack/o1-p99`, fixed there in e2715c9b (the squash commit is named once it merges) — O1P-05 gates 10^4 and prints 10^5; named in `docs/06-limits.md` and `docs/07-o1-architecture.md` (D-3306, D-3307).
+- **`F-3D3988`** (`wrong`) — fno_land and price_group cost comments contradicted the code: "one census read for the whole run", and an O(rows) "nothing scans" block on the O(bars) `read_month_bars`. Where: `crates/api/src/server.rs`. Disposition: IN PROGRESS on `attack/o1-p99`, fixed there in e2715c9b (the squash commit is named once it merges) (D-3308).
 
 ### Attack lens L2, round 3 — dispositions — 2026-10-06
 
@@ -948,9 +948,7 @@ defects below. One more correction to the round 1 table: F-8D5719's "planted
 one-in-fifty O(n) tails" was two plants, a one-in-fifty tail in
 `read_record` and a one-key-in-64 scan in `offer`.
 
-| ID | Severity | Finding | Where | Disposition |
-|---|---|---|---|---|
-| `F-61001B` | `wrong` | The lens's own p99 rows misdescribed what they measured: O1P-01 could re-read the previous block, O1P-05 cycled 4,096 keys while claiming uniform draws, and three sets of quoted numbers disagreed | `crates/store/benches/ratio.rs` `cold_index`; `crates/pull/benches/ratio.rs` O1P-05; `docs/04`, `06`, `07` | FIXED 7ebc0a9e (D-3309) |
+- **`F-61001B`** (`wrong`) — The lens's own p99 rows misdescribed what they measured: O1P-01 could re-read the previous block, O1P-05 cycled 4,096 keys while claiming uniform draws, and three sets of quoted numbers disagreed. Where: `crates/store/benches/ratio.rs` `cold_index`; `crates/pull/benches/ratio.rs` O1P-05; `docs/04`, `06`, `07`. Disposition: IN PROGRESS on `attack/o1-p99`, fixed there in 7ebc0a9e (the squash commit is named once it merges) (D-3309).
 
 ### Attack lens L2, round 4 — dispositions — 2026-10-06
 
@@ -970,10 +968,8 @@ api GET handlers is recorded with the next round.
 The router-first pass over all 58 GET routes found two per-request costs no
 section stated:
 
-| ID | Severity | Finding | Where | Disposition |
-|---|---|---|---|---|
-| `F-A86CB4` | `gap` | An idle run-status poll can walk the CLI log six times at 4 MiB each, outside the D-2327 pool | `crates/api/src/sweeprun.rs` `newest_sweep_marker`, `observe_elsewhere`, `status_tail` | FIXED in the commit carrying D-3311 (named; one walk measured) |
-| `F-BE221F` | `gap` | `/boolean-campaign.json` opens the campaign twice per request, each open walking the checkpoint directory | `crates/api/src/booleancampaignjson.rs` `render`; `crates/cli/src/boolean_campaign_reader.rs` `require_current` | FIXED in the commit carrying D-3312 (named) |
+- **`F-A86CB4`** (`gap`) — An idle run-status poll can walk the CLI log six times at 4 MiB each, outside the D-2327 pool. Where: `crates/api/src/sweeprun.rs` `newest_sweep_marker`, `observe_elsewhere`, `status_tail`. Disposition: IN PROGRESS on `attack/o1-p99`, fixed there in 2ead7ff7 (the squash commit is named once it merges) (named; one walk measured).
+- **`F-BE221F`** (`gap`) — `/boolean-campaign.json` opens the campaign twice per request, each open walking the checkpoint directory. Where: `crates/api/src/booleancampaignjson.rs` `render`; `crates/cli/src/boolean_campaign_reader.rs` `require_current`. Disposition: IN PROGRESS on `attack/o1-p99`, fixed there in 2ead7ff7 (the squash commit is named once it merges) (named).
 
 ### Attack lens L2, round 5 — dispositions — 2026-10-06
 
