@@ -603,13 +603,17 @@ impl HttpSource {
         mut self,
         governor: Option<std::sync::Arc<std::sync::Mutex<crate::rate::Governor>>>,
     ) -> Self {
-        if self.governor.is_some() {
-            // THE CALLER NOW CHARGES, and only if it actually handed one over.
-            // Sharing a governor and spending from it are one act; both sides
-            // calling `admit` is two permits for one request. See
-            // `charged_by_caller`.
-            self.charged_by_caller = governor.is_some();
-            self.governor = governor;
+        // NOTHING HANDED OVER IS NOT "NO GOVERNOR". `None` used to replace the
+        // source's own governor and clear its charge, so a caller that had no
+        // shared instance to give left a budgeted feed ungoverned: no permit
+        // was asked for by anyone. The source keeps its own and charges it.
+        // conc:pull1-2, D-2803.
+        if let (Some(_), Some(shared)) = (&self.governor, governor) {
+            // THE CALLER NOW CHARGES. Sharing a governor and spending from it
+            // are one act; both sides calling `admit` is two permits for one
+            // request. See `charged_by_caller`.
+            self.charged_by_caller = true;
+            self.governor = Some(shared);
         }
         self
     }
@@ -3949,6 +3953,26 @@ mod tests {
     /// moves it forward only. The cursor therefore answers the exact question
     /// this test is about -- **was the governor asked at all** -- with no sleep,
     /// no ceiling to exhaust, and no race against the second rolling over.
+    /// **A source handed no governor keeps its own and charges it.**
+    /// conc:pull1-2, D-2803.
+    #[test]
+    fn sharing_nothing_keeps_the_sources_own_governor() {
+        let crate::vendor::Transport::Http(spec) = crate::vendor::Feed::Dhan.descriptor().transport
+        else {
+            panic!("Dhan is an HTTP feed");
+        };
+        let owned = HttpSource::new(spec, Credential::token("t".to_owned())).expect("Dhan builds");
+        let own = std::sync::Arc::clone(owned.governor.as_ref().expect("Dhan is budgeted"));
+        let kept = owned.sharing(None);
+        assert!(
+            kept.governor
+                .as_ref()
+                .is_some_and(|held| std::sync::Arc::ptr_eq(held, &own)),
+            "the source's own governor stays"
+        );
+        assert!(!kept.charged_by_caller, "and the source still charges it");
+    }
+
     #[tokio::test]
     async fn a_shared_governor_is_charged_by_the_caller_and_not_again_here() {
         let crate::vendor::Transport::Http(spec) = crate::vendor::Feed::Dhan.descriptor().transport

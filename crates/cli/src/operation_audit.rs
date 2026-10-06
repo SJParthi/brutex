@@ -263,6 +263,34 @@ pub fn is_busy(why: &str) -> bool {
     why.starts_with(BUSY)
 }
 
+/// How long [`begin`] waits for the invocation index's lock.
+///
+/// Every `/backtest/run.json` poll and every status read takes the index's
+/// SHARED lock for one record read, so a CLI start that met one of those
+/// instants was refused "busy" with no writer anywhere (conc:cli1-2). The
+/// holders it waits for hold for one read or one append, microseconds; a
+/// second is far past that and still refuses a holder that does not let go.
+/// D-2804.
+const INDEX_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Retries `take` while it answers `WouldBlock`, every millisecond, until
+/// `wait` has passed; any other answer is returned at once. The last
+/// `WouldBlock` is the refusal.
+fn within<T>(
+    wait: std::time::Duration,
+    mut take: impl FnMut() -> Result<T, std::fs::TryLockError>,
+) -> Result<T, std::fs::TryLockError> {
+    let started = std::time::Instant::now();
+    loop {
+        match take() {
+            Err(std::fs::TryLockError::WouldBlock) if started.elapsed() < wait => {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            answer => return answer,
+        }
+    }
+}
+
 fn lock_error(why: std::fs::TryLockError) -> String {
     match why {
         std::fs::TryLockError::WouldBlock => {
@@ -542,15 +570,15 @@ pub fn begin(root: &Path, origin: Origin, label: &str) -> Result<Attempt, String
     // duplicate left in a child another thread spawned would otherwise hold it
     // and report this journal busy with no writer alive (D-0693).
     let index_path = base.join("index.bin");
-    let mut index = Flock::try_lock(
-        options()
+    let mut index = within(INDEX_LOCK_WAIT, || {
+        let file = options()
             .read(true)
             .append(true)
             .create(true)
             .open(&index_path)
-            .map_err(error)?,
-        index_path.as_path(),
-    )
+            .map_err(std::fs::TryLockError::Error)?;
+        Flock::try_lock(file, index_path.as_path())
+    })
     .map_err(lock_error)?;
     let bytes = length(&index)?;
     let ordinal = (bytes / STRIDE)

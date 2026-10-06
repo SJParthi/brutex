@@ -5344,9 +5344,14 @@ type SharedGovernor = std::sync::Arc<std::sync::Mutex<pull::rate::Governor>>;
 /// `CLAUDE.md` §3 rule 6: a structural argument is not a
 /// measurement, however sound it is.
 fn shared_governor(site: &Site, feed: pull::vendor::Feed) -> Option<SharedGovernor> {
+    // A POISONED LOCK IS STILL READ. The slots are `Arc`s set once at
+    // startup; a panic elsewhere while holding the lock cannot have left one
+    // half-written. `.ok()?` turned poison into "no governor", and the source
+    // then ran with a fresh one of its own, a second instance spending the
+    // same vendor quota. conc:pull1-2, D-2803.
     site.budgets
         .lock()
-        .ok()?
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(feed as usize)?
         .as_ref()
         .map(std::sync::Arc::clone)
@@ -21140,6 +21145,30 @@ mod tests {
             .outcome,
             audit::Outcome::Failed
         );
+    }
+
+    /// **A poisoned budget table still hands out the shared governor.**
+    /// conc:pull1-2, D-2803.
+    #[test]
+    fn a_poisoned_budget_table_still_shares_its_governor() {
+        let root = crate::scratch::path("budget-poison");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let site = Site::load(&root.join("missing-masters"), &root);
+        let before = shared_governor(&site, pull::vendor::Feed::Dhan).expect("Dhan is budgeted");
+        std::thread::scope(|scope| {
+            let _ = scope
+                .spawn(|| {
+                    let _held = site.budgets.lock();
+                    panic!("poison the budget table");
+                })
+                .join();
+        });
+        assert!(site.budgets.is_poisoned());
+        let after = shared_governor(&site, pull::vendor::Feed::Dhan)
+            .expect("poison does not turn the shared governor into none");
+        assert!(std::sync::Arc::ptr_eq(&before, &after));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// **A vendor-down breaker stop backs off; only an operator's stop retries
