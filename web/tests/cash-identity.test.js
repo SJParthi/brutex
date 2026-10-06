@@ -29,10 +29,10 @@ test('ingest form wires the cross-check default and never renders an unknown den
   const cell = new Function('c', 'r', 'n', `return (${cells[0]});`);
   const n = (/** @type {number} */ value) => `#${value}`;
   for (const c of [null, undefined, {}, { expectedKnown: false }, { expectedKnown: 0 }]) {
-    assert.equal(cell(c, { exp: 0 }), 'unverified', `${JSON.stringify(c)}: an unknown total is never a zero`);
+    assert.equal(cell(c, { exp: 0 }, n), 'unverified', `${JSON.stringify(c)}: an unknown total is never a zero`);
   }
-  assert.equal(cell({ expectedKnown: true }, { exp: 0 }), '#0', 'a known zero total is a number');
-  assert.equal(cell({ expectedKnown: true }, { exp: 1129875 }), '#1129875');
+  assert.equal(cell({ expectedKnown: true }, { exp: 0 }, n), '#0', 'a known zero total is a number');
+  assert.equal(cell({ expectedKnown: true }, { exp: 1129875 }, n), '#1129875');
 });
 
 test('cash identity is an explicit Zerodha-only choice with separate assurance levels', () => {
