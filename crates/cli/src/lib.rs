@@ -23413,6 +23413,13 @@ mod tests {
                 .map(str::to_owned)
         };
         let first = events.first().expect("audit-stored");
+        for event in &events {
+            assert_eq!(
+                event.field("phase").and_then(telemetry::OwnedValue::as_str),
+                Some("refused"),
+                "a refused command finishes as refused: {event:?}"
+            );
+        }
         assert!(
             reason(first).is_some_and(|got| !got.is_empty() && line.starts_with(got.as_str())),
             "the refusal's own line: {first:?} vs {line}"
