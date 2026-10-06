@@ -1,15 +1,13 @@
 id	state	commit	note
 F-25A074	pushed	f9ab789	pattern midpoints exact (D-3402, XPERM-02)
 F-3B4D5A	pushed	30a8cde	SuperTrend stop held exactly (D-3403, XPERM-03)
-F-109F13	pushed	364ce11	Muhurat kept-claims corrected (D-3404, XPERM-04); gap.rs reason fixed
+F-109F13	pushed	364ce11	Muhurat kept-claims corrected (D-3404, XPERM-04)
+F-36228D	pushed	3c5c237	crossing rows by last definite side (D-3405, XPERM-05)
+F-8D5073	pushed	3c5c237	vocabulary counts/kinds from TABLE (D-3406, XPERM-06)
+F-0486DA	pushed	24c7e3a	worst_reward_risk_bp n<2 guard (D-3407, XPERM-07); gate18 6/6
+F-1D5275	pushed	bc1e1f4	trades_needed_for doc values/threshold (D-3408, XPERM-08)
 F-DBC24E	doc	cee4ccb	WITHDRAWN: duplicate of ind1-2 (D-3400)
-R1-VWAP	doc	-	REFUTED: docs/26-vwap-mapping.md defines the floor (D-3401)
-R1-ST-SEED	doc	-	REFUTED: D-1542 locked seed; wording fixed (D-3401)
-R2-PIVOT	doc	-	REFUTED: daily.rs:30-40 (D-3401)
-R3-GAPFLOOR	operator	-	REFUTED as defect: IF-23/D-1861 floor; owner call (D-3404)
-R3-STTIE	operator	-	REFUTED: seed tie rule needs an owner decision (D-3404)
-R2-GAPMID	operator	-	ind1-2 (owner branch); bit 68 floored mid also theirs
-R2-ROLLING-IV	operator	-	STO-2
-R1-FOLDGRID	operator	-	D-3130/D-3131
-GATE18	pushed	b464db8	81 mutants: 76 caught, 3 unviable, 2 missed then killed (2/2 caught)
-ROUND4	found	-	running
+REFUTED	doc	-	VWAP floor, ST seed past warm, daily pivot floor, gap ladder floor, ST seed tie, OverlapWindow exit>i+H (latent)
+TRACKED	operator	-	ind1-2 (EMA/gap mid/bit 68), STO-2, D-3130, p9num-2, c4a-7, D-1439, D-1497, slice08 F2, numeric-pass18 Note A + p18num-1
+OWNER	operator	-	VWAP exact mean?, pivot/gap floors?, ST seed tie rule?, cli statistical_floor_ppm premise (UNVERIFIED)
+ROUND6	found	-	running
