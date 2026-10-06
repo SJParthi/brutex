@@ -3701,9 +3701,9 @@ mod tests {
             ..clean.clone()
         };
         for (found, level, says) in [
-            (Ok(clean), Level::Info, "agrees"),
-            (Ok(differed), Level::Warn, "differs"),
-            (Ok(day_absent), Level::Warn, "differs"),
+            (Ok(clean), Level::Info, "1day agrees with"),
+            (Ok(differed), Level::Warn, "1day differs from"),
+            (Ok(day_absent), Level::Warn, "1day differs from"),
             (
                 Err("unreadable".to_owned()),
                 Level::Warn,

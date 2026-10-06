@@ -99,9 +99,17 @@ mod tests {
     use super::{CHILD, where_permission_binds};
     use std::os::unix::fs::MetadataExt as _;
 
-    /// The file a child's body leaves for the parent whose process id is `parent`.
-    fn marker(parent: u32) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("brutex-uid-probe-{parent}-child"))
+    /// The file a child's body leaves for its parent, named by the PARENT's
+    /// process id: the parent's own, or the child's parent's.
+    fn marker(in_child: bool) -> std::path::PathBuf {
+        let dir = std::env::temp_dir();
+        let own = std::process::id();
+        let parent = if in_child {
+            std::os::unix::process::parent_id()
+        } else {
+            own
+        };
+        dir.join(format!("brutex-uid-probe-{parent}-child"))
     }
 
     /// `test`'s name as the harness knows it, in whichever binary this is.
@@ -113,12 +121,12 @@ mod tests {
 
     #[test]
     fn the_body_runs_in_a_child_where_the_bits_bind() {
-        let own = marker(std::process::id());
+        let own = marker(false);
         let _stale = std::fs::remove_file(&own);
         where_permission_binds(
             &named("the_body_runs_in_a_child_where_the_bits_bind"),
             || {
-                let parent = marker(std::os::unix::process::parent_id());
+                let parent = marker(true);
                 assert!(
                     std::fs::File::create_new(parent).is_ok(),
                     "the body leaves its marker"
@@ -140,6 +148,6 @@ mod tests {
     #[test]
     #[should_panic(expected = "ran no test")]
     fn a_child_that_ran_no_test_fails_the_parent() {
-        where_permission_binds(&named("a_name_no_test_carries"), || {});
+        where_permission_binds(&named("no test carries this name"), || {});
     }
 }

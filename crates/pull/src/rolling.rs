@@ -1907,7 +1907,7 @@ mod tests {
     #[test]
     fn the_control_escape_stops_below_the_space() {
         let mut out = String::new();
-        push_pair(&mut out, "k", "a\u{1f} b", true);
-        assert_eq!(out, r#""k":"a\u001f b""#);
+        push_pair(&mut out, "securityId", "a\u{1f} b", true);
+        assert_eq!(out, r#""securityId":"a\u001f b""#);
     }
 }
