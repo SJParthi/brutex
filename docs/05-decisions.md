@@ -63182,8 +63182,8 @@ never occur.
 
 ### D-2057 — White's p-value keeps one point-mass clause, and the block ceiling is tested on a series longer than it — 2026-10-06
 
-**What was observed.** Run 1283 left eleven `runner::bootstrap` mutants:
-`block > MAX_BLOCK` as `>=` and `==` in `reality_check`, `romano_wolf`,
+**What was observed.** Run 1283 left thirteen `runner::bootstrap` mutants:
+`block > MAX_BLOCK` as `>=` and `==` in `reality_check`, `spa`, `romano_wolf`,
 `romano_wolf_receipt` and `romano_wolf_adjusted_p_values_v1`; `> 1_000_000`
 on alpha in `romano_wolf_receipt`; `draws > 0` as `>=` in `Verdict::clears`;
 and `||` as `&&` in `reality_check`'s p-value. The ceiling tests used 200
@@ -63195,7 +63195,9 @@ one period is a point mass.
 **Decided.** The p-value is `1.0` when `white_null_is_a_point_mass`, and the
 two redundant clauses are removed. Their cases stay pinned by the existing
 zero-draw and single-period tests. `the_ceiling_is_read_on_a_series_longer_than_it`
-runs all four entry points over 1,000,001 periods: a block of 1,000,000 is
+runs every block-taking entry point (Reality Check, SPA, both V1 receipts,
+Romano-Wolf, its two receipts and `family_tests_v1`) over 1,000,001 periods:
+a block of 1,000,000 is
 answered (the stepdown rejects the edged series) and 1,000,001 is refused.
 Alpha 1,000,000 ppm is accepted and 1,000,001 refused. `clears` is false at
 zero draws, even at p = 0, and true at one draw and p = 0.05. Invariants
@@ -63208,7 +63210,8 @@ changes no output is the shape D-0192 refuses to leave alive.
 
 **What was observed.** Run 1283 left eight `runner::significance` mutants:
 five on `x < (a + 1.0) / (a + b + 2.0)` in `regularized_incomplete_beta`, two
-on the Lentz guard's `< TINY`, and `z < 10.0` as `<=` in `ln_gamma`. Each
+on the Lentz guard's `< TINY`, and `z < 10.0` as `<=` in `ln_gamma`; shard
+178 later added a `-` as `+` inside `ln_gamma`'s Stirling series. Each
 moves a branch whose two sides agree to about 1e-13. This was measured with a
 copy of the three functions over t-statistics at 1 to 100,000 degrees of
 freedom, where every mutant changed the result by 3e-14 to 3e-11. No test
@@ -63289,8 +63292,11 @@ including `from == to` and reversed ones. It now also asserts that
 ### D-2063 — A training slice past the arithmetic envelope is refused at attestation, and the attestation prints its identity — 2026-10-06
 
 **What was observed.** Run 1283 left `validate_arithmetic_envelope_view`
-replaced with `Ok(())`, `envelope_extremes` replaced with `Ok((0, 1))`,
-`Ok((0, -1))` and `Ok((1, -1))`, and `AttestedTrainingV1`'s `Debug` replaced
+replaced with `Ok(())`, `validate_envelope_extremes` replaced with `Ok(())`,
+`envelope_extremes` replaced with each of `Ok((0, 1))`, `Ok((0, -1))`,
+`Ok((1, -1))`, `Ok((1, 1))`, `Ok((-1, 1))` and `Ok((-1, -1))`
+(`validate_envelope_extremes` and the last three came from shards 178 to
+183), and `AttestedTrainingV1`'s `Debug` replaced
 with an empty write. No test in the workspace reached
 `ExitGridErrorV1::ArithmeticEnvelopeExceeded`.
 

@@ -3580,6 +3580,14 @@ mod block_ceiling_tests {
         assert!(romano_wolf_receipt(&set, draws, 3, periods, alpha).is_none());
         assert!(romano_wolf_adjusted_p_values_v1(&set, draws, 3, ceiling).is_some());
         assert!(romano_wolf_adjusted_p_values_v1(&set, draws, 3, periods).is_none());
+        assert!(spa(&set, draws, 3, ceiling).is_some());
+        assert!(spa(&set, draws, 3, periods).is_none());
+        assert!(white_reality_check_receipt_v1(&set, draws, 3, ceiling).is_some());
+        assert!(white_reality_check_receipt_v1(&set, draws, 3, periods).is_none());
+        assert!(spa_receipt_v1(&set, draws, 3, ceiling).is_some());
+        assert!(spa_receipt_v1(&set, draws, 3, periods).is_none());
+        assert!(family_tests_v1(&set, &[0], draws, 3, ceiling).is_ok());
+        assert!(family_tests_v1(&set, &[0], draws, 3, periods).is_err());
     }
 
     /// An alpha of exactly one million ppm is a probability, so the receipt
