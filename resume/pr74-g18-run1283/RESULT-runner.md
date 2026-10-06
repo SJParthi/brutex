@@ -68,3 +68,33 @@ All three paths are O(1) per operation before and after; the differences are wit
 - Mutation evidence used lib tests only (`--cargo-arg=--lib`); every listed mutant was caught there, so integration tests were
   not needed for any kill. The full suite was run separately and is green.
 - Gate 11 refused two first attempts (a `.sort_*` in audit.rs, one extra `f64` line in significance.rs); both reworked (f097f06).
+
+## Part 2: run 1283's never-tested runner cases (untested-mutants-run1283.md), 2026-10-06
+Branch head: **460b702** (pushed). It contains origin/final/all-fixes 969493e1, which is unchanged.
+
+The 116 `crates/runner` lines were mapped from 969493e1 line numbers to c216c97 through `git diff -U0` hunks.
+- 113 matched mutants that exist on c216c97.
+- 3 no longer exist: the `audit.rs` `grid` match guard `key(b) < key(a)` -> false and `<` -> `==`/`>`. That guard was
+  removed by D-2056.
+- The coordinator's count was 121 ("116 + 5 from shard 138"). The list holds 116 runner lines, and the README says only
+  that shard 138 printed no summary. I found no list of the 5 extra cases, so they are UNVERIFIED and not run.
+
+**M4**, on c216c97: 113 mutants, full runner suite, exact-name `--re`, `--baseline skip --jobs 1 --timeout 900
+--minimum-test-timeout 900 --build-timeout 900 --cap-lints true --cargo-arg=--locked --test-tool nextest
+--cargo-test-arg=--max-fail=1:immediate`. Copied tree, not in-place. `--in-diff` was not used, because it would drop
+the mutants on lines my diff does not touch. Result: **104 caught, 1 missed, 1 timeout, 7 unviable**.
+
+| item | fixed? | commit | evidence |
+|---|---|---|---|
+| audit.rs:1148:50 `-` -> `/` in grid (MISSED; equivalent: `select_nth` at `shown` also leaves the `shown` smallest in front) | yes, restructured: pivot on index `shown` under `shown < len` (cannot exist) | a8d09ad (D-2065) | absent from list; M5 caught all 3 mutants on the new guard (1152:14 `==`, `>`, `<=`) |
+| expression_validation.rs:261:18 `+=` -> `*=` in index_folds (TIMEOUT: `fold` stuck at 0) | yes, restructured: `fold = fold.saturating_add(1)` (cannot exist) | 460b702 (D-2066) | absent from list; M5 caught all 8 remaining `index_folds` mutants, 0 timeout |
+
+**M5**, on 460b702 with M4's flags: 11 mutants (the new `audit.rs` guard plus every `index_folds` mutant).
+Result: **11 caught, 0 missed, 0 timeout, 0 unviable**.
+
+Checks on 460b702:
+- `cargo fmt --check` clean.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings` clean.
+- All 13 runner test binaries pass as uid 65534: lib 753 tests and integration 46.
+- The static gates (language-purity job, gate 1e skipped) all PASS.
+- `git grep "changed by cargo-mutants"` is empty.
