@@ -5,7 +5,8 @@
 //! `docs/07-o1-architecture.md`: *"A layer is not built because the code looks
 //! right. It is built when a test asserts the bound as a number."* Layer 13 is
 //! "counters, never scans", and the two numbers that make it real are here:
-//! reading the census costs the same whatever the census holds, and it beats
+//! reading the census for one cached key costs the same whatever the census
+//! holds (random keys are O1P-05, which is not flat in time at 10^5), and it beats
 //! re-deriving the same answer from the entries by a wide margin, measured in
 //! the same process.
 //!
@@ -40,9 +41,10 @@
 //!
 //! Not measured either: residency. A probe into a 100,000-entry map that has
 //! fallen out of cache costs more than one into a map that has not, and that is
-//! layer 7's subject rather than layer 3's. These measurements probe one key
+//! layer 7's subject rather than layer 3's. C-11, C-12 and C-26 probe one key
 //! repeatedly, so what they report is the **probe count** — which is what "no
-//! rehash, one probe" claims — and not the machine's memory hierarchy.
+//! rehash, one probe" claims — and not the machine's memory hierarchy. O1P-05,
+//! below, does measure it: random keys past the cache (D-3307).
 
 use std::hint::black_box;
 use std::time::Instant;

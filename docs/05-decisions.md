@@ -63386,3 +63386,17 @@ O1P-05. The D-3300 section's "every other row" now names C-T-01b and the O1P
 rows. A sweep for "carries no bench" found the greeks paragraph, written
 before `crates/greeks/benches/ratio.rs` existed. It now names C-G-01 and
 C-G-02 and keeps the per-argument claim an extrapolation. Text only.
+
+### D-3317 — The last O(delta) copies for the results ledger, and the pull bench header — 2026-10-06
+
+A tenth review found that the pull bench's module header still said its rows
+measure the probe count and not the memory hierarchy, beside O1P-05, which
+measures exactly that. It also found that `docs/06-limits.md` still called
+the results ledger's shared-handle refresh O(delta) in two sections. A grep for
+"O(delta)" across `docs/0*.md`, `CLAUDE.md`, and `crates/cli` and `crates/api`
+sources then found two more: the D-0523 Results/Receipts sentence, and
+`cli`'s `with_cached_handle` doc comparing itself to `with_shared_writer`.
+Each now states the growth-branch re-hash.
+
+The trades and frontier `O(delta)` statements are correct as written. Those
+ledgers have no prefix recheck, so they were left. Text only.

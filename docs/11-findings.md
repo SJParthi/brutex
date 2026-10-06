@@ -1008,3 +1008,8 @@ Four older statements called the census lookup flat with no qualifier, and
 one paragraph said greeks carried no bench. Corrected by D-3316. A grep for
 "flat to within", "lookup is flat", "100× the census" and "carries no bench"
 was run afterwards across docs, CLAUDE.md, crates/*/src and the benches.
+
+### Attack lens L2, round 10 — dispositions — 2026-10-06
+
+The pull bench header and two results-ledger "O(delta)" sections. A grep
+afterwards found two more of the latter, and all are corrected by D-3317.

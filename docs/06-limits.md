@@ -8890,7 +8890,8 @@ and subsequent automatic probes, and returns when the current walk returns.
 It is not an immediate cancellation guarantee.
 
 Cold Results/Receipts opens remain O(history); warm refresh is O(delta) with
-expected hash cost. Top selection uses an ordered map. Live census still
+expected hash cost when nothing else wrote, and O(indexed bytes + delta) when
+another writer grew the file (D-1560, D-3305; this sentence predates both). Top selection uses an ordered map. Live census still
 measures a bounded directory; decoded unchanged files are reused. Four admitted
 blocking tasks, 64 MiB file ceilings, 256-row pages and 4,096-row selected-result
 caps bound specified dashboard work; they are not constant I/O deadlines or
@@ -12998,7 +12999,9 @@ not:
   opened the results ledger, which builds the identity index and hashes the
   file, before its backward scan, once per rung of `range-all`, `pool` pass 1
   and every `descend` step. D-1700 replaced it with `recorded_row`, one
-  expected-O(1) probe of the shared ledger handle after an O(delta) refresh;
+  expected-O(1) probe of the shared ledger handle after an O(delta) refresh,
+  or O(indexed bytes + delta) when another writer grew the ledger (D-1560,
+  D-3305);
   "A range rung's row is read back by identity" below states it.
 
 - **Ordered lanes (D-1556; replaces the completion-order statement D-1564
@@ -15430,11 +15433,12 @@ The rollback on a failed append is one `seek`, one `set_len` and one
 ## A range rung's row is read back by identity through the shared ledger handle (D-1700)
 
 - **`one_rung` reads its own ledger row back with one expected-O(1) probe,
-  not O(1) worst case, after an O(delta) refresh.** `recorded_row` lifts the
+  not O(1) worst case, after a catch-up refresh.** `recorded_row` lifts the
   identity from the rung's page and calls `of_identity` on the process's
   shared ledger handle (`results::with_shared_writer`). The handle's `refresh`
   absorbs the rows appended since its last use -- O(delta), zero in the common
-  case because the same handle just committed the row -- and the probe is one
+  case because the same handle just committed the row, and O(indexed bytes +
+  delta) when another writer grew the ledger (D-1560, D-3305) -- and the probe is one
   `HashMap` lookup, expected O(1), then one fixed-width read. The handle's
   FIRST open in a process (and on a change of store root) is the O(runs) index
   build `Results::open` states; it is paid once per process and root, not
