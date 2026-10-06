@@ -1312,8 +1312,7 @@ pub(crate) fn limit_asked(raw: &str) -> usize {
                 ),
         );
     }
-    crate::server::param(raw, "limit")
-        .parse::<usize>()
+    crate::server::whole_count(&crate::server::param(raw, "limit"))
         .unwrap_or(DEFAULT_LIMIT)
         .clamp(1, MAX_RUNS)
 }
@@ -1321,7 +1320,7 @@ pub(crate) fn limit_asked(raw: &str) -> usize {
 /// The `limit` text when it is present and is not a whole number.
 fn unparseable_limit(raw: &str) -> Option<String> {
     let asked = crate::server::param(raw, "limit");
-    (!asked.is_empty() && asked.parse::<usize>().is_err()).then_some(asked)
+    (!asked.is_empty() && crate::server::whole_count(&asked).is_none()).then_some(asked)
 }
 
 #[cfg(test)]
@@ -1899,6 +1898,27 @@ mod tests {
             assert_eq!(super::unparseable_limit(raw), None, "{raw}");
         }
         assert_eq!(super::limit_asked("limit=7"), 7);
+    }
+
+    /// **A whole number too large for the type asks for everything.**
+    /// Gap-audit #4, D-3684: it was answered the default page and logged as
+    /// "not a whole number".
+    #[test]
+    fn a_limit_past_usize_is_clamped_to_the_ceiling_and_not_named_unparseable() {
+        let huge = "limit=99999999999999999999";
+        assert_eq!(super::limit_asked(huge), super::MAX_RUNS);
+        assert_eq!(super::unparseable_limit(huge), None, "it is a whole number");
+        let max = format!("limit={}", usize::MAX);
+        assert_eq!(super::limit_asked(&max), super::MAX_RUNS);
+        assert_eq!(
+            super::limit_asked("limit=99999999999999999999x"),
+            super::DEFAULT_LIMIT
+        );
+        assert_eq!(
+            super::limit_asked("limit=-99999999999999999999"),
+            super::DEFAULT_LIMIT
+        );
+        assert_eq!(super::limit_asked("limit=0"), 1);
     }
 
     #[test]

@@ -140,8 +140,7 @@ fn asked(raw: &str) -> Asked {
     // digit is in the unreserved set — and would have turned any other input
     // into a `%XX` soup that parses to the default, which is the same answer for
     // the wrong reason.
-    let limit = crate::server::param(raw, "limit")
-        .parse::<usize>()
+    let limit = crate::server::whole_count(&crate::server::param(raw, "limit"))
         .unwrap_or(50)
         .clamp(1, PAGE_LIMIT);
     let level_word = crate::server::param(raw, "level");
@@ -1387,10 +1386,23 @@ impl Ration {
 
 #[cfg(test)]
 mod tests {
-    // The same exceptions every test module in this workspace takes.
     #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
     use super::*;
+
+    /// **A `limit` past `usize` asks for the page ceiling, not the default.**
+    /// Gap-audit #4, D-3684.
+    #[test]
+    fn a_limit_past_usize_reads_the_page_ceiling() {
+        assert_eq!(
+            super::asked("limit=99999999999999999999").limit,
+            super::PAGE_LIMIT
+        );
+        assert_eq!(super::asked("limit=nope").limit, 50);
+        assert_eq!(super::asked("limit=7").limit, 7);
+    }
+
+    // The same exceptions every test module in this workspace takes.
 
     /// audit-20261003 hunt-api-3, D-1583: A FLOOD OF FAILED REQUESTS CANNOT
     /// WIPE THE LOG. 100,000 failed requests inside one window write at most

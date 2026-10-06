@@ -684,6 +684,26 @@ enum Behind {
     Bar(Bar),
 }
 
+/// Which stored value a change was measured against.
+#[derive(Clone, Copy)]
+enum Base {
+    Close,
+    OpenInterest,
+}
+
+/// Why a change against a non-positive previous value is withheld: ZERO and
+/// NEGATIVE are different facts. A zero close or open interest is a real zero;
+/// a negative one is a corrupt stored value (a store read does not validate
+/// prices), and both were reported as "is zero" (gap-audit #13, D-3685).
+const fn non_positive_base(base: i64, of: Base) -> &'static str {
+    match (of, base == 0) {
+        (Base::Close, true) => "previous_close_zero",
+        (Base::Close, false) => "previous_close_negative",
+        (Base::OpenInterest, true) => "previous_oi_zero",
+        (Base::OpenInterest, false) => "previous_oi_negative",
+    }
+}
+
 /// Folds the change columns over one file's records, IN THE ORDER WRITTEN.
 ///
 /// `behind` is what precedes the first slot. A `None` slot is a record that
@@ -708,7 +728,7 @@ fn with_change(behind: Behind, rows: Vec<Option<Bar>>) -> Vec<WindowBar> {
             Behind::Bar(before) => match crate::server::basis_points(before.close, bar.close) {
                 Ok(bps) => (Some(bps), ""),
                 Err(crate::server::Unknown::Overflow) => (None, "overflow"),
-                Err(_) => (None, "previous_close_zero"),
+                Err(_) => (None, non_positive_base(before.close, Base::Close)),
             },
         };
         // OPEN INTEREST HAS A NULL AND A REAL ZERO, and they are not the same
@@ -726,7 +746,10 @@ fn with_change(behind: Behind, rows: Vec<Option<Bar>>) -> Vec<WindowBar> {
                     match crate::server::basis_points(before.open_interest, bar.open_interest) {
                         Ok(bps) => (Some(bps), ""),
                         Err(crate::server::Unknown::Overflow) => (None, "overflow"),
-                        Err(_) => (None, "previous_oi_zero"),
+                        Err(_) => (
+                            None,
+                            non_positive_base(before.open_interest, Base::OpenInterest),
+                        ),
                     }
                 }
             }
@@ -2781,6 +2804,38 @@ mod window_tests {
         let first = with_change(Behind::Nothing, vec![Some(bar(100, 50))]);
         assert_eq!(first[0].chg_why, "first_bar_in_file");
         assert_eq!(first[0].oichg_why, "first_bar_in_file");
+    }
+
+    /// **A zero base and a negative base are named apart.** Gap-audit #13,
+    /// D-3685: a corrupt negative previous close or open interest was reported
+    /// as "is zero".
+    #[test]
+    fn a_negative_base_is_not_called_zero() {
+        let bar = |close: i64, open_interest: i64| Bar {
+            ts_micros: 0,
+            open: close,
+            high: close,
+            low: close,
+            close,
+            volume: 0,
+            open_interest,
+        };
+        let rows = with_change(
+            Behind::Nothing,
+            vec![
+                Some(bar(0, 0)),
+                Some(bar(-100, -1)),
+                Some(bar(i64::MIN + 1, i64::MIN + 1)),
+                Some(bar(100, 10)),
+            ],
+        );
+        assert_eq!(rows[1].chg_why, "previous_close_zero");
+        assert_eq!(rows[1].oichg_why, "previous_oi_zero");
+        assert_eq!(rows[2].chg_why, "previous_close_negative");
+        assert_eq!(rows[2].oichg_why, "previous_oi_negative");
+        assert_eq!(rows[3].chg_why, "previous_close_negative");
+        assert_eq!(rows[3].oichg_why, "previous_oi_negative");
+        assert!(rows.iter().all(|row| row.chg.is_none()));
     }
 
     /// **THE `records unreadable` LINE COUNTS THE ROWS THAT READ, NOT THE

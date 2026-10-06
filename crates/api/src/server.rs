@@ -16916,6 +16916,30 @@ where
     Ok(axum::body::Bytes::from(held))
 }
 
+/// A query count read as a whole number, saturating at `usize::MAX`.
+///
+/// `parse::<usize>` refuses a run of digits too long for the type with the
+/// same error as `abc`, so `?limit=99999999999999999999` (an operator asking
+/// for everything) was answered the DEFAULT page and logged as "not a whole
+/// number". A whole number past the type is as large as a count can be; the
+/// caller's clamp then answers the ceiling. Anything else is still `None`.
+/// Gap-audit #4, D-3684.
+pub(crate) fn whole_count(text: &str) -> Option<usize> {
+    match text.parse::<usize>() {
+        Ok(count) => Some(count),
+        // ONLY A RUN OF DIGITS. The parser reports the overflow as soon as the
+        // digits pass the type, before it reaches a trailing `x`, so the kind
+        // alone would saturate `99999999999999999999x`.
+        Err(why)
+            if *why.kind() == std::num::IntErrorKind::PosOverflow
+                && text.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            Some(usize::MAX)
+        }
+        Err(_) => None,
+    }
+}
+
 /// The first query key that appears twice, or `None`.
 ///
 /// One pass, one set insert per segment. The set is sized from the segment
@@ -18001,6 +18025,10 @@ struct HeadDeadline {
     /// re-armed a deadline nobody would ever look at: the idle socket was held
     /// for as long as the client liked, which the keep-alive test caught.
     parked_read: Option<std::task::Waker>,
+    /// When the peer must have taken more of the response by, armed when a
+    /// write returns `Pending` and cleared by any write that makes progress.
+    /// D-3689.
+    write_stall: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
 }
 
 /// What a client that sent part of a head is told before its socket closes.
@@ -18025,7 +18053,41 @@ impl HeadDeadline {
             },
             alarm: Box::pin(tokio::time::sleep_until(deadline)),
             parked_read: None,
+            write_stall: None,
         }
+    }
+
+    /// The write side's own deadline.
+    ///
+    /// A client that sends requests and never reads the answers (several
+    /// thousand pipelined `GET`s in one write) fills both socket buffers, and
+    /// then hyper waits on a write that never becomes ready while the head
+    /// clock, polled only on reads, is never looked at. The connection held its
+    /// slot for ever: 256 of them stopped the server accepting and held a
+    /// graceful shutdown open (gap-audit #2). A write that made no progress for
+    /// one head timeout now fails the connection, which gives the slot back.
+    /// The alarm is polled here so its own timer wakes the task; a socket that
+    /// never becomes writable would otherwise never poll this again. D-3689.
+    fn write_progress<T>(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+        written: std::task::Poll<std::io::Result<T>>,
+    ) -> std::task::Poll<std::io::Result<T>> {
+        if written.is_ready() {
+            self.write_stall = None;
+            return written;
+        }
+        let timeout = self.timeout;
+        let alarm = self
+            .write_stall
+            .get_or_insert_with(|| Box::pin(tokio::time::sleep(timeout)));
+        if alarm.as_mut().poll(cx).is_ready() {
+            return std::task::Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "the peer took none of the response for a whole head timeout",
+            )));
+        }
+        written
     }
 
     /// Fold freshly read bytes into the head state.
@@ -18151,6 +18213,17 @@ impl tokio::io::AsyncRead for HeadDeadline {
     }
 }
 
+/// Whether `bytes` begin an INTERIM (1xx) response: `100 Continue` is
+/// written while the request it answers is still being read, so it is not the
+/// end of an exchange and must not start the next head's clock. Re-arming on
+/// it put the request back under the head deadline mid-handler, and a handler
+/// slower than that deadline was cut with a 408 naming a head that had
+/// arrived (gap-audit #3, D-3688). Hyper writes the interim on its own, so its
+/// first bytes are the status line.
+fn interim(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"HTTP/1.1 1") || bytes.starts_with(b"HTTP/1.0 1")
+}
+
 impl tokio::io::AsyncWrite for HeadDeadline {
     fn poll_write(
         mut self: std::pin::Pin<&mut Self>,
@@ -18159,10 +18232,10 @@ impl tokio::io::AsyncWrite for HeadDeadline {
     ) -> std::task::Poll<std::io::Result<usize>> {
         let this = &mut *self;
         let written = std::pin::Pin::new(&mut this.io).poll_write(cx, buf);
-        if matches!(written, std::task::Poll::Ready(Ok(n)) if n > 0) {
+        if matches!(written, std::task::Poll::Ready(Ok(n)) if n > 0) && !interim(buf) {
             this.rearm();
         }
-        written
+        this.write_progress(cx, written)
     }
 
     fn poll_write_vectored(
@@ -18172,10 +18245,15 @@ impl tokio::io::AsyncWrite for HeadDeadline {
     ) -> std::task::Poll<std::io::Result<usize>> {
         let this = &mut *self;
         let written = std::pin::Pin::new(&mut this.io).poll_write_vectored(cx, bufs);
-        if matches!(written, std::task::Poll::Ready(Ok(n)) if n > 0) {
+        if matches!(written, std::task::Poll::Ready(Ok(n)) if n > 0)
+            && !bufs
+                .iter()
+                .find(|slice| !slice.is_empty())
+                .is_some_and(|slice| interim(slice))
+        {
             this.rearm();
         }
-        written
+        this.write_progress(cx, written)
     }
 
     /// `true`, because `poll_write_vectored` above forwards to a tokio
@@ -18466,6 +18544,7 @@ mod head_deadline_tests {
                 }),
             )
             .route("/ignore", axum::routing::post(|| async { "ignored" }))
+            .route("/big", axum::routing::get(|| async { vec![b'x'; 1 << 20] }))
     }
 
     /// A server on an ephemeral port, and the sender that stops it.
@@ -18557,6 +18636,62 @@ mod head_deadline_tests {
             0,
             "the slot is given back with the wrapper"
         );
+    }
+
+    /// **Both write paths leave a delivered head delivered on an interim
+    /// response, and re-arm on a final one.** D-3688. Hyper uses the
+    /// vectored path; the plain one is driven here so neither can drift.
+    #[tokio::test]
+    async fn an_interim_write_on_either_path_keeps_the_head_delivered() {
+        use tokio::io::AsyncWriteExt as _;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _client = TcpStream::connect(addr).await.unwrap();
+        let (io, _) = listener.accept().await.unwrap();
+        let slots = std::sync::Arc::new(Slots {
+            live: std::sync::atomic::AtomicUsize::new(1),
+            cap: 1,
+            freed: tokio::sync::Notify::new(),
+        });
+        let mut wrapped = HeadDeadline::new(io, Slot(std::sync::Arc::clone(&slots)), T);
+        let delivered =
+            |wrapped: &HeadDeadline| matches!(wrapped.state, super::HeadState::Delivered);
+        for interim_line in [
+            &b"HTTP/1.1 100 Continue\r\n\r\n"[..],
+            b"HTTP/1.0 102 Processing\r\n\r\n",
+        ] {
+            wrapped.state = super::HeadState::Delivered;
+            wrapped.write_all(interim_line).await.unwrap();
+            assert!(
+                delivered(&wrapped),
+                "plain write of an interim keeps it delivered"
+            );
+            wrapped
+                .write_vectored(&[
+                    std::io::IoSlice::new(&[]),
+                    std::io::IoSlice::new(interim_line),
+                ])
+                .await
+                .unwrap();
+            assert!(
+                delivered(&wrapped),
+                "vectored write of an interim keeps it delivered"
+            );
+        }
+        wrapped.state = super::HeadState::Delivered;
+        wrapped.write_all(b"HTTP/1.1 200 OK\r\n\r\n").await.unwrap();
+        assert!(
+            !delivered(&wrapped),
+            "a final response re-arms the head clock"
+        );
+        wrapped.state = super::HeadState::Delivered;
+        wrapped
+            .write_vectored(&[std::io::IoSlice::new(b"HTTP/1.1 200 OK\r\n\r\n")])
+            .await
+            .unwrap();
+        assert!(!delivered(&wrapped), "on the vectored path too");
+        assert!(!super::interim(b"HTTP/1.1 2"));
+        assert!(!super::interim(b""));
     }
 
     /// **THE CAP IS EXACT: `cap` SLOTS, NOT `cap + 1`.** A slot is taken only
@@ -18804,6 +18939,61 @@ mod head_deadline_tests {
         assert!(closed, "an idle kept-alive socket was held forever");
         assert_eq!(said, "");
         assert!(idle.elapsed() >= T_SLACK);
+        let _ = stop.send(());
+    }
+
+    /// **A client that never reads its answers gives its slot back.**
+    /// Gap-audit #2, D-3689. With a cap of one, a client pipelines 64 requests
+    /// for a mebibyte each and reads nothing, so the server's writes stall once
+    /// both socket buffers fill. The stalled connection is failed after one
+    /// head timeout of no progress, and a second client is then served.
+    #[tokio::test]
+    async fn a_client_that_never_reads_cannot_hold_its_slot() {
+        let (addr, stop) = start(limits(1)).await;
+        let mut hog = TcpStream::connect(addr).await.unwrap();
+        let ask = "GET /big HTTP/1.1\r\nHost: x\r\n\r\n".repeat(64);
+        hog.write_all(ask.as_bytes()).await.unwrap();
+        tokio::time::sleep(T).await;
+        let began = Instant::now();
+        let mut next = TcpStream::connect(addr).await.unwrap();
+        next.write_all(b"GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let (said, closed) = drain(&mut next, T * 20).await;
+        assert!(
+            said.starts_with("HTTP/1.1 200 OK"),
+            "the next client is served: {said:?}"
+        );
+        assert!(closed);
+        assert!(began.elapsed() < T * 20);
+        drop(hog);
+        let _ = stop.send(());
+    }
+
+    /// **An interim `100 Continue` does not restart the head clock.**
+    /// Gap-audit #3, D-3688. Writing the interim response re-armed the head
+    /// deadline, so a request whose handler ran past it was cut mid-handler
+    /// with a 408 naming a head that had in fact arrived. The handler here
+    /// sleeps three head timeouts and must still answer.
+    #[tokio::test]
+    async fn an_interim_continue_does_not_restart_the_head_clock() {
+        let (addr, stop) = start(limits(8)).await;
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(
+                b"POST /echo-slow HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\nContent-Length: 4\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let interim = one_response(&mut client, "\r\n\r\n").await;
+        assert!(interim.starts_with("HTTP/1.1 100"), "{interim:?}");
+        client.write_all(b"body").await.unwrap();
+        let (said, _) = drain(&mut client, T * 10).await;
+        assert!(said.starts_with("HTTP/1.1 200 OK"), "{said:?}");
+        assert!(
+            said.ends_with("body"),
+            "the handler's answer arrives: {said:?}"
+        );
         let _ = stop.send(());
     }
 
@@ -21145,6 +21335,29 @@ mod tests {
             .outcome,
             audit::Outcome::Failed
         );
+    }
+
+    /// `whole_count` saturates only a run of digits too long for the type.
+    #[test]
+    fn a_whole_count_saturates_only_past_the_type() {
+        assert_eq!(whole_count("0"), Some(0));
+        assert_eq!(whole_count("42"), Some(42));
+        assert_eq!(whole_count(&usize::MAX.to_string()), Some(usize::MAX));
+        assert_eq!(whole_count("18446744073709551616"), Some(usize::MAX));
+        assert_eq!(whole_count("99999999999999999999999999"), Some(usize::MAX));
+        for not in [
+            "",
+            "-1",
+            "-99999999999999999999",
+            "99999999999999999999x",
+            "+99999999999999999999",
+            "1e3",
+            "3.0",
+            "abc",
+            " 7",
+        ] {
+            assert_eq!(whole_count(not), None, "{not:?}");
+        }
     }
 
     /// **A poisoned budget table still hands out the shared governor.**

@@ -479,8 +479,14 @@ magic, version and stride: the same 32,768-byte header region, the same
 64-byte slot, the same commit counter, and blocks of whole records anchored at
 byte 32,768. Their block checksums are optional as at bar version 2 (`flags`
 bit 0), and when present live in `.ovl.crc` / `.grk.crc` (§6's sidecar layout).
-Neither is in `store::layout::Layout::KNOWN`, the bar versions a `.bin` resolves
-against. Every integer and float is little-endian. Until P14-03 (D-1959) this
+Both ARE in `store::layout::Layout::KNOWN` (`[V2, V3, OVERLAY, GREEKS]`),
+because `Header::decode` resolves a version while it decodes and a geometry
+outside that list is `UnknownVersion` at its own first byte. What keeps an
+overlay or Greeks header in a `.bin` from being read at its stride is
+`store::file`'s per-kind table (`BAR_TABLE`, `[V2, V3]`, chosen by
+`table_of` from the file kind), never `KNOWN`. Every integer and float is
+little-endian. (This sentence said neither was in `KNOWN`; the code put both
+there. Gap-audit #17, D-3687.) Until P14-03 (D-1959) this
 section gave only each record's width and version.
 
 ### 8.1 `.ovl` — overlay record, 24 bytes
