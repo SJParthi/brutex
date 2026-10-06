@@ -112,46 +112,62 @@ struct Session {
 }
 fn render(root: &Path, asked: &Asked) -> Result<String, String> {
     static SESSIONS: OnceLock<Mutex<VecDeque<Session>>> = OnceLock::new();
-    let mut sessions = SESSIONS
-        .get_or_init(|| Mutex::new(VecDeque::new()))
-        .lock()
-        .map_err(|_| "search snapshot cache poisoned")?;
-    let index = if let Some(snapshot) = asked.snapshot {
-        sessions
-            .iter()
-            .position(|held| {
-                held.root == root
-                    && held.identity == asked.identity
-                    && held.reader.progress().checkpoint == Some(snapshot)
-            })
-            .ok_or("search snapshot is not admitted or expired; refresh its first page")?
-    } else {
-        let Some(reader) = Reader::open(root, asked.identity, crate::detail::MAX_SCAN_BYTES)?
-        else {
-            return Ok(json!({"schema_version":1,"status":"missing","identity":crate::server::hex32(asked.identity),"why":"No recorded expression-search checkpoint namespace exists for this exact search ID.","rows":[],"refusal":null}).to_string());
-        };
-        sessions.retain(|held| {
-            held.root != root
-                || held.identity != asked.identity
-                || held.reader.progress().checkpoint != reader.progress().checkpoint
-        });
-        if sessions.len() == 8 {
-            sessions.pop_front();
+    let slot = SESSIONS.get_or_init(|| Mutex::new(VecDeque::new()));
+    if let Some(snapshot) = asked.snapshot {
+        // A WARM PAGE of an already-open reader, under the lock as before: it
+        // is bounded by `MAX_SCAN_BYTES` and keeps a concurrent page of the
+        // same snapshot from being refused as "expired" while it is out.
+        let mut sessions = slot.lock().map_err(|_| "search snapshot cache poisoned")?;
+        let mut found = None;
+        for (at, held) in sessions.iter().enumerate() {
+            if held.root == root
+                && held.identity == asked.identity
+                && held.reader.progress().checkpoint == Some(snapshot)
+            {
+                found = Some(at);
+                break;
+            }
         }
-        sessions.push_back(Session {
-            root: root.to_path_buf(),
-            identity: asked.identity,
-            reader,
-        });
-        sessions.len() - 1
+        let index =
+            found.ok_or("search snapshot is not admitted or expired; refresh its first page")?;
+        let held = sessions
+            .get_mut(index)
+            .ok_or("search snapshot cache entry missing")?;
+        let page = held
+            .reader
+            .page(asked.cursor, asked.limit, crate::detail::MAX_SCAN_BYTES)?;
+        return Ok(body(held.reader.progress(), &page, asked.limit));
+    }
+    // THE COLD OPEN AND ITS FIRST PAGE RUN WITH THE LOCK RELEASED (expr-3,
+    // D-2576). The mutex used to be held across `Reader::open` — a read of the
+    // whole checkpoint namespace up to `MAX_SCAN_BYTES` — so every other search
+    // request parked on it inside `detail::run`, each holding a detail permit,
+    // and the other detail routes answered 429 behind one cold open. The lock
+    // is now taken only to install the opened reader.
+    #[cfg(test)]
+    crate::detail::note_slot_free(slot);
+    let Some(mut reader) = Reader::open(root, asked.identity, crate::detail::MAX_SCAN_BYTES)?
+    else {
+        return Ok(json!({"schema_version":1,"status":"missing","identity":crate::server::hex32(asked.identity),"why":"No recorded expression-search checkpoint namespace exists for this exact search ID.","rows":[],"refusal":null}).to_string());
     };
-    let held = sessions
-        .get_mut(index)
-        .ok_or("search snapshot cache entry missing")?;
-    let page = held
-        .reader
-        .page(asked.cursor, asked.limit, crate::detail::MAX_SCAN_BYTES)?;
-    Ok(body(held.reader.progress(), &page, asked.limit))
+    let answer = reader
+        .page(asked.cursor, asked.limit, crate::detail::MAX_SCAN_BYTES)
+        .map(|page| body(reader.progress(), &page, asked.limit));
+    let mut sessions = slot.lock().map_err(|_| "search snapshot cache poisoned")?;
+    sessions.retain(|held| {
+        held.root != root
+            || held.identity != asked.identity
+            || held.reader.progress().checkpoint != reader.progress().checkpoint
+    });
+    if sessions.len() == 8 {
+        sessions.pop_front();
+    }
+    sessions.push_back(Session {
+        root: root.to_path_buf(),
+        identity: asked.identity,
+        reader,
+    });
+    answer
 }
 fn anchor_json(anchor: Option<Anchor>) -> Value {
     anchor.map_or(Value::Null,|anchor|json!({"sequence":anchor.sequence.to_string(),"seal":crate::server::hex32(anchor.seal)}))
@@ -173,6 +189,30 @@ fn body(progress: &Progress, page: &Page, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// expr-3, D-2576: a first page's cold `Reader::open` runs with the
+    /// session cache's mutex FREE. The namespace is absent, so the open finds
+    /// nothing and the answer is `missing` — what matters is the probe taken
+    /// at the open point. On the old `render` the guard was held across the
+    /// open and the probe recorded `false`.
+    #[test]
+    fn a_slow_cold_open_does_not_park_other_detail_permits() -> Result<(), String> {
+        let id = "cd".repeat(32);
+        let asked = Asked::parse(&format!("identity={id}"))?;
+        crate::detail::SLOT_FREE_AT_OPEN.with(|cell| cell.set(None));
+        // Absent namespace: `missing`, or a refusal naming the path; either
+        // way the open was reached, which is what the probe needs.
+        let answer = render(&crate::scratch::path("expr3-cold-unlocked"), &asked);
+        assert_eq!(
+            crate::detail::SLOT_FREE_AT_OPEN.with(std::cell::Cell::get),
+            Some(true),
+            "the reader was opened with the session cache locked"
+        );
+        if let Ok(answer) = answer {
+            assert!(answer.contains(r#""status":"missing""#), "{answer}");
+        }
+        Ok(())
+    }
     #[test]
     fn exact_snapshot_and_cursor_pairs_refuse_splicing_or_unbounded_queries() -> Result<(), String>
     {

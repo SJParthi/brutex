@@ -758,32 +758,116 @@ pub async fn status_json(
             r#"{"masters":[],"refusal":"neither BRUTEX_MASTERS nor HOME is set, so the masters directory cannot be found"}"#.to_owned(),
         );
     };
-    let parsed_at = site.universe().at;
+    let (parsed_at, stamps) = {
+        let parsed = site.universe();
+        (parsed.at, parsed.stamps.clone())
+    };
 
-    let body = status_rows(&dir, parsed_at);
+    let body = status_rows(&dir, parsed_at, &stamps);
     (axum::http::StatusCode::OK, json_headers(), body)
 }
 
-/// The status answer over a directory and a parse time a caller names.
+/// What a master file looked like on disk: enough to tell a rewrite from no
+/// change WITHOUT ordering two clock readings.
 ///
-/// Split out for the reason every other split in this module has: the two
-/// inputs it depends on are a directory and a clock reading, and behind a
-/// handler both are the process's, so nothing could assert what an absent file
-/// or an old file actually renders as.
-fn status_rows(dir: &Path, parsed_at: std::time::SystemTime) -> String {
+/// # Why identity and not "newer" (clock-5, D-2580)
+///
+/// `newer_than_parse` compared the file's mtime against the wall-clock time of
+/// the parse. A clock stepped back between the parse and a later rewrite gave
+/// the new bytes an mtime BEFORE the parse, so a changed master read as "not
+/// newer", `restart_required` stayed false, and the process went on answering
+/// from the old bytes. An mtime can also be set by the writer (an archive
+/// extraction, a copy that preserves times). The stamp is the length, the
+/// mtime, the device, the inode and the inode-change time — the last of which
+/// no ordinary writer can set — and a master is CHANGED when any differs from
+/// the stamp taken just before the parse read it. Taken before, not after, so a
+/// write racing the read shows as changed (a needless restart) rather than as
+/// unchanged (stale bytes served as current). `cli::live::LiveStamp` is the
+/// same idea for the live feed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileStamp {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    dev: u64,
+    ino: u64,
+    ctime: i64,
+    ctime_nsec: i64,
+}
+
+impl FileStamp {
+    /// The stamp of the file at `path`, or `None` when nothing can be read
+    /// there.
+    #[must_use]
+    pub fn of(path: &Path) -> Option<Self> {
+        let held = std::fs::metadata(path).ok()?;
+        Some(Self::from_metadata(&held))
+    }
+
+    fn from_metadata(held: &std::fs::Metadata) -> Self {
+        #[cfg(unix)]
+        let (dev, ino, ctime, ctime_nsec) = {
+            use std::os::unix::fs::MetadataExt as _;
+            (held.dev(), held.ino(), held.ctime(), held.ctime_nsec())
+        };
+        #[cfg(not(unix))]
+        let (dev, ino, ctime, ctime_nsec) = (0, 0, 0, 0);
+        Self {
+            len: held.len(),
+            modified: held.modified().ok(),
+            dev,
+            ino,
+            ctime,
+            ctime_nsec,
+        }
+    }
+}
+
+/// Every master's stamp, in [`masters::SOURCES`] order. Taken by
+/// `Site::load` and `Site::reparse` BEFORE they read the masters (clock-5,
+/// D-2580). One `stat` per source.
+#[must_use]
+pub fn stamps_of(dir: &Path) -> Vec<Option<FileStamp>> {
+    masters::SOURCES
+        .iter()
+        .map(|source| FileStamp::of(&masters::path_of(dir, source)))
+        .collect()
+}
+
+/// The status answer over a directory, a parse time and the stamps the parse
+/// took, as a caller names them.
+///
+/// Split out for the reason every other split in this module has: the inputs
+/// it depends on are a directory and what the parse saw, and behind a handler
+/// both are the process's, so nothing could assert what an absent file or an
+/// old file actually renders as.
+///
+/// `stamps` is in [`masters::SOURCES`] order. A source the parse recorded no
+/// stamp slot for — a `Site` built by `Site::new` over a universe read
+/// elsewhere, which names no directory — keeps the old ordering test against
+/// `parsed_at`; every served site records one (clock-5, D-2580).
+fn status_rows(
+    dir: &Path,
+    parsed_at: std::time::SystemTime,
+    stamps: &[Option<FileStamp>],
+) -> String {
     let rows: Vec<String> = masters::SOURCES
         .iter()
-        .map(|source| {
+        .enumerate()
+        .map(|(at, source)| {
             let path = masters::path_of(dir, source);
             let held = std::fs::metadata(&path).ok();
             let bytes = held.as_ref().map_or(0, std::fs::Metadata::len);
-            // NEWER THAN THE PARSE MEANS THE PROCESS IS ANSWERING FROM OLD
-            // BYTES. Equal is not newer: a file written in the same second the
-            // site loaded was read by that load.
-            let newer = held
-                .as_ref()
-                .and_then(|m| m.modified().ok())
-                .is_some_and(|at| at > parsed_at);
+            // CHANGED SINCE THE PARSE MEANS THE PROCESS IS ANSWERING FROM OLD
+            // BYTES. The wire name stays `newer_than_parse`, which the page
+            // reads; the test is now inequality with the stamp the parse took,
+            // not an mtime ordered against a wall clock that can step back
+            // (clock-5, D-2580). An absent file is not changed: there are no
+            // new bytes to answer from.
+            let newer = match (held.as_ref(), stamps.get(at)) {
+                (None, _) => false,
+                (Some(now), Some(parsed)) => Some(FileStamp::from_metadata(now)) != *parsed,
+                (Some(now), None) => now.modified().is_ok_and(|when| when > parsed_at),
+            };
             // WHEN, AND NOT ONLY WHETHER. "Present" says a file exists;
             // "present, written eleven months ago" is the answer an operator
             // acts on, and it is the whole reason this module exists — a stale
@@ -1727,6 +1811,59 @@ mod tests {
         );
     }
 
+    /// clock-5, D-2580: a master rewritten after the parse, with an mtime an
+    /// hour BEFORE the parse (a clock stepped back, or a writer that preserves
+    /// times), still reads as changed and requires a restart. On the old
+    /// ordering test (`mtime > parsed_at`) it read as not newer, so
+    /// `restart_required` was false while the process served the old bytes.
+    /// The boundaries: an untouched file is not changed; an absent one is not
+    /// changed; one that appeared after the parse is.
+    #[test]
+    fn a_master_rewritten_with_an_older_mtime_than_the_parse_still_requires_a_restart() {
+        let dir = scratch("status-stamp");
+        let first = &masters::SOURCES[0];
+        let path = masters::path_of(&dir, first);
+        std::fs::write(&path, a_master()).expect("a master on disk");
+        let stamps = super::stamps_of(&dir);
+        assert_eq!(stamps.len(), masters::SOURCES.len());
+        assert!(stamps[0].is_some());
+        assert!(stamps[1..].iter().all(Option::is_none));
+        let parsed_at = std::time::SystemTime::now();
+
+        let untouched = super::status_rows(&dir, parsed_at, &stamps);
+        assert!(untouched.contains(r#""restart_required":false"#), "{untouched}");
+        assert!(!untouched.contains(r#""newer_than_parse":true"#), "{untouched}");
+
+        // Rewritten, and its mtime set an hour before the parse.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&path, format!("{}\n", a_master())).expect("rewrite");
+        let back = parsed_at - std::time::Duration::from_secs(3_600);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .expect("open")
+            .set_modified(back)
+            .expect("set the mtime back");
+        let rewritten = super::status_rows(&dir, parsed_at, &stamps);
+        assert!(rewritten.contains(r#""newer_than_parse":true"#), "{rewritten}");
+        assert!(rewritten.contains(r#""restart_required":true"#), "{rewritten}");
+        // The old ordering, over the same file, says not newer: the defect.
+        let ordered = super::status_rows(&dir, parsed_at, &[]);
+        assert!(ordered.contains(r#""restart_required":false"#), "{ordered}");
+
+        // A master that appears after the parse is a change too.
+        let second = &masters::SOURCES[1];
+        std::fs::write(masters::path_of(&dir, second), a_master()).expect("a second master");
+        let fresh = super::stamps_of(&dir);
+        std::fs::remove_file(&path).expect("remove the first");
+        let appeared = super::status_rows(&dir, parsed_at, &stamps);
+        assert!(appeared.contains(r#""restart_required":true"#), "{appeared}");
+        // And an absent one is not, whatever the parse saw.
+        let after_removal = super::status_rows(&dir, parsed_at, &fresh);
+        assert!(after_removal.contains(r#""restart_required":false"#), "{after_removal}");
+        std::fs::remove_dir_all(&dir).expect("clean up");
+    }
+
     #[test]
     fn the_status_answer_carries_when_each_master_was_written() {
         // "PRESENT" IS NOT THE QUESTION. A master present and eleven months old
@@ -1737,7 +1874,7 @@ mod tests {
         let source = &masters::SOURCES[0];
         std::fs::write(masters::path_of(&dir, source), a_master()).expect("a master on disk");
 
-        let json = super::status_rows(&dir, std::time::SystemTime::UNIX_EPOCH);
+        let json = super::status_rows(&dir, std::time::SystemTime::UNIX_EPOCH, &[]);
         assert!(json.contains(r#""modified_unix_millis":"#), "{json}");
         assert!(
             !json.contains(r#""modified_unix_millis":null,"newer_than_parse":true"#),

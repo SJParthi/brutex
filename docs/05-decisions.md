@@ -63882,3 +63882,251 @@ not degraded; otherwise the first stands. At most two reads, the second only on
 a degraded census, named in `docs/06-limits.md`.
 
 **Evidence.** ZX-69.
+### D-2570 — The store page's axis docs stop saying the surface is two indices — 2026-10-06
+
+**The finding.** Z1-slice12-F2. `census::held_series` and `census::swept_series`
+said `CLAUDE.md` §1 fixes the engine surface "at exactly these two" indices.
+D-0506 widened §1 to the cash equities of the 208 F&O underlyings that are
+shares (counted by D-0682), so both comments were false. D-2690 corrected three
+other operator texts with this defect and not these.
+
+**The decision.** Doc only. The two indices stay the always-on rows of the
+`/store` axis; the comments now say the surface is wider and that an unheld
+swept equity has no row until a census holds it. Seeding all 210 always-on rows
+is a product choice left to the owner; nothing here makes it.
+
+**Evidence.** `api::census::tests::the_axis_docs_do_not_say_the_surface_is_two_indices`.
+
+### D-2571 — A capped folder walk keeps the same folders on every machine — 2026-10-06
+
+**The finding.** determinism-1. `render::collect_csv_dirs` recursed into
+children in raw `read_dir` order and stops one past `MAX_FOLDER_SUGGESTIONS`,
+so which 61 folders it kept depended on the filesystem's listing order;
+`discover_folders` sorted only after the truncation (§3 rule 5).
+
+**The decision.** Each directory's children are sorted by name before the
+recursion, so the kept set is the lexically first 61 in depth-first order. The
+sort is O(c log c) per directory inside a walk that is already O(entries) and
+startup-only (`docs/06-limits.md` §34).
+
+**Evidence.** ZX-91.
+
+### D-2572 — SIGTERM and SIGHUP take the graceful stop — 2026-10-06
+
+**The finding.** lifecycle-2. `main` passed `tokio::signal::ctrl_c()` alone, so a
+`SIGTERM` (service manager, container stop, `kill`) or `SIGHUP` (terminal
+closed) ended the process with no drain, no `end_runtime` bound and no
+`api.main` exit line.
+
+**The decision.** `api::server::operator_shutdown` registers `SIGTERM` and
+`SIGHUP` handlers when called (before the bind) and resolves on the first of
+those or Ctrl-C. A handler that cannot be installed is printed on stderr naming
+the signal that will still end the process abruptly; that arm then never fires
+rather than firing at once.
+
+**Evidence.** ZX-92.
+
+### D-2573 — The backtest ledger reader takes the shared lock and runs off the workers — 2026-10-06
+
+**The finding.** sweep-3. `backtest::read` opened `results/runs.bin` with no
+lock while `cli::results` appends under an exclusive one in more than one
+write, so a refresh mid-append served `partial_tail: true` on a healthy ledger;
+and the read ran on the async worker.
+
+**The decision.** `read` takes `store::flock::Flock::lock_shared` on the opened
+file, reads, and releases explicitly; a lock or release failure is a refusal
+naming the file. `backtest_json` runs the read in `detail::run` (bounded,
+off the workers) and answers a saturated pool 429 in the ledger's own JSON
+shape.
+
+**Evidence.** ZX-94.
+
+### D-2574 — A press counts only its own feeds' rows — 2026-10-06
+
+**The finding.** press-1. `pullrun::conduct_with` judged idleness and "N bar(s)
+added" from `rows_now`, the total of every vendor's census, while hand pulls on
+other feeds are gated only by their own seat. A hand pull landing on feed B
+reset a press on feed A's idle counter and was reported as the press's bars.
+
+**The decision.** `pullrun::rows_in(site, vendors)` sums only the censuses of
+the store vendors the press's groups name (`press_vendors`); all four counts
+in the conductor (start, ticker, before/after each pass, end) use it.
+`Progress::rows_at_start`/`rows_now` therefore now mean the press's own feeds.
+`rows_now` (all vendors) is unchanged for recovery.
+
+**Evidence.** ZX-95.
+
+### D-2575 — Spot landing is prefix-only: a refused window stops the instrument — 2026-10-06
+
+**The finding.** equity-1. `server::land_spot` recorded a refused cash schedule
+for one fetched window and continued, so a later window could land past the
+hole; the append-only store then refused a re-pull of the hole as earlier than
+its tail, and the month read as done.
+
+**The decision.** The first refused window ends the landing for that
+instrument. That window and every later one are recorded as ONE failure that
+counts all their members and rows and names how many windows did not land
+(`refused_landing_why`), with a `windows not landed` event. No row of them is
+stored. D-2584's partial-day refusal takes the same path.
+
+**Evidence.** ZX-96.
+
+### D-2576 — Reader caches never hold their mutex across a cold open — 2026-10-06
+
+**The finding.** expr-3, cand-2. `expressionsearchjson::render`,
+`booleanjson::render_with_budget` and `candidatejson::trade_page` held a global
+cache mutex (blocking `lock`) across a cold `Reader::open`/`TradeReader::open`,
+reads of up to `MAX_SCAN_BYTES`, inside `detail::run`. Waiters parked holding
+detail permits, so one cold open made every other detail route answer 429.
+
+**The decision.**
+- `candidatejson::trade_page` takes its reader out through
+  `detail::Checkout` (the index-stop caches' shape since D-1912) and pages
+  with the lock released; a reader that refused stays out (D-2763).
+- `expressionsearchjson::render` opens and pages a FIRST page with the lock
+  released and retakes it only to install the session. A snapshot page of an
+  already-open reader still pages under the lock: it is bounded by
+  `MAX_SCAN_BYTES`, and taking it out would refuse a concurrent page of the
+  same snapshot as "expired".
+- `booleanjson::render_with_budget` decides warm or cold under the lock, opens
+  and projects a cold catalog with it released, and retakes it to install.
+- Test builds record, at each cold-open point, whether the mutex was free
+  (`detail::note_slot_free`).
+
+**Evidence.** ZX-97.
+
+### D-2577 — A disconnected audited request finishes its record off the worker — 2026-10-06
+
+**The finding.** log-2. In `operation_audit::request_audited` the armed
+`Attempt` lived in the middleware future, so a client disconnect dropped it on
+the Tokio worker and `Attempt::drop` wrote `Cancelled` (flock, write, fsync)
+synchronously there.
+
+**The decision.** The armed attempt is held by `DropOffWorker`, whose `Drop`
+hands it to the blocking pool when a runtime is current (and drops it in place
+otherwise). The success path takes it out before `run_owed`, unchanged. The
+`Cancelled` record is therefore written shortly after the drop rather than
+inside it; the existing cancellation test now waits for it.
+
+**Evidence.** ZX-97.
+
+### D-2578 — The autopilot re-derives its feed set when the finished day changes — 2026-10-06
+
+**The finding.** clock-1. `autopilot::fly` called `drivable(yesterday)` once; a
+valid-but-wrong boot clock (before a fixed floor) dropped Groww and Zerodha for
+the life of the process, unnamed, and an empty set made "every feed is halted"
+vacuously true.
+
+**The decision.** `admit_newly_drivable(feeds, day)` appends every drivable
+feed not already held, leaving held states (frontier, attempts, halt)
+untouched and never removing one. `fly` calls it whenever the finished day
+differs from the one last derived for, and emits `autopilot feeds admitted`
+when it adds any. O(FEED_COUNT²) per day change.
+
+**Evidence.** ZX-98.
+
+### D-2579 — The stall re-check and the store-probe schedule are measured on a monotonic clock — 2026-10-06
+
+**The finding.** clock-3. `Stall::at_unix`, `Probe::due_unix`, `reconsider` and
+`store_due` compared epoch seconds from `SystemTime::now()`, so an NTP step
+spent or postponed the six-hour stall re-check (AU-08) and the eight-probe
+store schedule.
+
+**The decision.** `autopilot::steady_secs()` — whole seconds since the first
+call on `Instant`, never zero — feeds both production call sites. The fields
+are renamed `Stall::at_secs`, `Probe::due_secs` and `Due::Later { due_secs }`
+so their names stop claiming epoch time; the pure functions' arithmetic is
+unchanged. The page's own `Status::due_unix` stays wall-clock. AU-W1A-a's text
+still says `at_unix`; it is the same field under its old name.
+
+**Evidence.** ZX-98.
+
+### D-2580 — A master is "changed since the parse" by identity, not by an mtime ordered against the clock — 2026-10-06
+
+**The finding.** clock-5. `mastersrun::status_rows` reported
+`newer_than_parse` as `mtime > Parsed::at`. A clock stepped back between the
+parse and a rewrite (or a writer preserving times) gave changed bytes an older
+mtime, so `restart_required` stayed false while the process served old
+masters. MR-20 described this as an ordering.
+
+**The decision.** `Site::load` and `Site::reparse` take each master's
+`mastersrun::FileStamp` (length, mtime, device, inode, inode-change time)
+BEFORE reading, into `Parsed::stamps`. A present master whose stamp differs is
+changed; an absent one is not. The wire name `newer_than_parse` is kept for the
+page. A `Site` built by `Site::new`, which names no directory, records no
+stamps and keeps the ordering test.
+
+**Evidence.** ZX-98.
+
+### D-2581 — The minute counter short-circuit needs every proved day full — 2026-10-06
+
+**The finding.** Z1-slice12-F1. `calendar_of::derive` stamped every day of a
+month full when `records() == proved days × 375`. The counter counts stray
+minutes on days the daily rung does not hold, so a short day padded by strays
+matched and was reported as a full session; the module header claimed the
+match proved regularity "by arithmetic".
+
+**The decision.** The counter path is taken only when, additionally, every
+proved day holds exactly 375 records in its 09:15–15:29 IST window (two
+`BarFile::first_at_or_after` lookups per day) and those counts sum to
+`records()`. Any lookup failure walks the month. The lookups are O(1) per day
+on an indexed month and `ceil(log2(n + 1))` record reads on a legacy one;
+`docs/06-limits.md` states it.
+
+**Evidence.** ZX-90.
+
+### D-2582 — A press holds one telemetry run key for its whole life — 2026-10-06
+
+**The finding.** atomics-1. `server::note_run_started` claims the run key per
+leg; the first leg of a multi-feed press took it and released it when that leg
+ended, under sibling feeds still running. D-0238 said the outermost scope
+takes the key.
+
+**The decision.** `pullrun::conduct_with` claims the key (`PressRun`) before
+its first pass and releases it after its summary, or when its task is
+dropped; legs inside a press then lose their claim and release nothing. A
+guard that lost the claim releases nothing. A `pull.press started` event
+records whether the key was held.
+
+**Evidence.** ZX-99.
+
+### D-2583 — A served process drains its background pulls before it stops — 2026-10-06
+
+**The finding.** autopilot-4, lifecycle-1. After `serve` returned the serve arm
+called `flying.abort()` at once, and the press task's handle was dropped at
+spawn, so runtime teardown cancelled a tick or a press leg between landing
+bars and appending its `/audit` record.
+
+**The decision.** `server::drain_background(site, flying, SHUTDOWN_GRACE)`:
+pause the autopilot (its run stops at the next instrument and journals); set
+the press's own in-memory `stopping` unless a recovery is active; wait for the
+kept press handle (`Site::press_task`) and then for every pull seat to be
+free, against one deadline of `SHUTDOWN_GRACE` (D-1582's existing bound); then
+abort the autopilot task and anything unfinished, naming it on stderr and in
+an `api.server` event. A recovery is NOT stopped: its only stop is durable and
+marks the plan `Blocked`, which would end its boot resume; its reservations
+are durable before each request and an interrupted one is reconciled at the
+next boot, which is the shape D-2761 built. Shutdown may now take up to
+`2 × SHUTDOWN_GRACE` with `end_runtime`'s wait.
+
+**Evidence.** ZX-93.
+
+### D-2584 — Today's intraday answer must reach the session's last minute before it lands — 2026-10-06
+
+**The finding.** clock-2. `finished_day_only` admits today once the host clock
+reads past the session close, with no margin and no look at the data. A fast
+clock, or a request in the close minute, stored a session the vendor was still
+serving, and the store is append-only.
+
+**The decision.** The data-side half, which needs no policy: in `land_spot`,
+a sub-day window holding bars for the clock's today whose newest bar on today
+is before the venue's last session minute (NSE index or NSE cash, from the
+session table) is refused before landing, through D-2575's prefix-only path,
+with a `partial day refused` event. A window with no bar today, a daily rung,
+and a day with no session row are not checked.
+
+**Not decided.** A settle margin after the close (how long a vendor may revise
+its last minute), and a check for a daily bar fetched for today, are owner
+choices and are left as they were.
+
+**Evidence.** ZX-96.

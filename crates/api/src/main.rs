@@ -26,8 +26,10 @@
 ///
 /// The shutdown signal is passed IN rather than installed inside the server,
 /// so that every arm of [`api::server::run`] is drivable from a test without a
-/// signal and without a hard kill. Ctrl-C is what an operator has; an
-/// already-resolved future is what a test has.
+/// signal and without a hard kill. Ctrl-C, `SIGTERM` and `SIGHUP` are what an
+/// operator has (`api::server::operator_shutdown`; lifecycle-2, D-2572 — it
+/// was Ctrl-C alone, so a `SIGTERM` ended the process with no drain and no
+/// exit line); an already-resolved future is what a test has.
 ///
 /// THE RUNTIME IS BUILT AND ENDED BY HAND, not by `#[tokio::main]`, whose
 /// runtime drop waits forever for a running sweep's blocking thread — Ctrl-C
@@ -49,7 +51,7 @@ fn main() -> std::process::ExitCode {
     };
     let code = runtime.block_on(async {
         match text_args(raw) {
-            Ok(args) => api::server::run(&args, Box::pin(tokio::signal::ctrl_c())).await,
+            Ok(args) => api::server::run(&args, api::server::operator_shutdown()).await,
             Err(refusal) => {
                 eprintln!("{refusal}");
                 api::server::MISUSED

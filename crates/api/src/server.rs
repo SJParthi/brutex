@@ -127,6 +127,284 @@ pub(crate) fn shout_line(out: &mut impl std::io::Write, line: std::fmt::Argument
 /// one set of counters. The same reasoning applies to the argument list below.
 pub type Shutdown = std::pin::Pin<Box<dyn Future<Output = std::io::Result<()>> + Send>>;
 
+/// The operator's stop: Ctrl-C, `SIGTERM` or `SIGHUP`, whichever comes first.
+///
+/// # Why not Ctrl-C alone (lifecycle-2, D-2572)
+///
+/// `main` passed `tokio::signal::ctrl_c()` and nothing else, so only `SIGINT`
+/// reached the graceful path. `SIGTERM` — what a service manager and a
+/// container stop send — and `SIGHUP` — what closing the terminal sends — took
+/// the default disposition and ended the process on the spot: no drain of the
+/// HTTP surface, no stop of the backfill, no `end_runtime` bound, and no
+/// `api.main` exit line, so the log of a stopped server read like a crash.
+///
+/// # Registered NOW, not on the first poll
+///
+/// The two handlers are installed when this function is called, before the
+/// server binds, so a `SIGTERM` that arrives between the bind and the first
+/// poll of the stop future is still caught. `ctrl_c` keeps its own lazy
+/// registration, unchanged.
+///
+/// # A handler that cannot be installed is said, not hidden
+///
+/// If either registration fails the process still serves — refusing to serve
+/// over a missing handler would take the surface down for a stop path — but
+/// the failure is printed on stderr naming the signal that will still END the
+/// process without the graceful stop (`CLAUDE.md` §4), and that arm then never
+/// fires rather than firing at once.
+#[must_use]
+pub fn operator_shutdown() -> Shutdown {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let term = signal_or_said(signal(SignalKind::terminate()), "SIGTERM");
+        let hup = signal_or_said(signal(SignalKind::hangup()), "SIGHUP");
+        Box::pin(async move {
+            tokio::select! {
+                stopped = tokio::signal::ctrl_c() => stopped,
+                () = signal_arrival(term) => Ok(()),
+                () = signal_arrival(hup) => Ok(()),
+            }
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        Box::pin(tokio::signal::ctrl_c())
+    }
+}
+
+/// The registered stream, or `None` with the reason on stderr (lifecycle-2).
+#[cfg(unix)]
+fn signal_or_said(
+    made: std::io::Result<tokio::signal::unix::Signal>,
+    name: &str,
+) -> Option<tokio::signal::unix::Signal> {
+    match made {
+        Ok(stream) => Some(stream),
+        Err(why) => {
+            warn_line!(
+                "{name} HANDLER NOT INSTALLED ({why}): a {name} will end this process \
+                 WITHOUT the graceful stop; only Ctrl-C drains it"
+            );
+            None
+        }
+    }
+}
+
+/// Resolves when `stream` delivers one signal; never, if there is no stream
+/// or its driver has gone (a closed stream is not a request to stop).
+#[cfg(unix)]
+async fn signal_arrival(stream: Option<tokio::signal::unix::Signal>) {
+    if let Some(mut stream) = stream {
+        if stream.recv().await.is_some() {
+            return;
+        }
+    }
+    std::future::pending::<()>().await;
+}
+
+/// lifecycle-2, D-2572: the operator's stop answers `SIGTERM` and `SIGHUP`,
+/// not only Ctrl-C.
+#[cfg(all(test, unix))]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod operator_shutdown_tests {
+    use super::*;
+
+    fn drained_site(tag: &str) -> Loaded {
+        let masters = crate::scratch::path(&format!("drain-masters-{tag}"));
+        let _ = std::fs::remove_dir_all(&masters);
+        std::fs::create_dir_all(&masters).expect("mkdir");
+        let store = crate::scratch::path(&format!("drain-store-{tag}"));
+        let _ = std::fs::remove_dir_all(&store);
+        std::fs::create_dir_all(store.join("manifest")).expect("mkdir");
+        Loaded::new(Site::load(&masters, &store))
+    }
+
+    /// autopilot-4, D-2583: the shutdown drain WAITS for a pull that holds its
+    /// feed seat — a tick between landing bars and journaling them — before it
+    /// aborts the autopilot task, and pauses the autopilot first so the tick
+    /// stops at its next instrument. The "tick" holds a seat for 300 ms and
+    /// then writes its record; the drain returns only after that record exists.
+    /// On the old serve arm the autopilot task was aborted at once and nothing
+    /// waited for the seat.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_waits_for_a_tick_holding_its_seat_to_journal() {
+        let site = drained_site("seat");
+        let journaled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (taken, seated) = tokio::sync::oneshot::channel::<()>();
+        let tick = {
+            let site = Loaded::clone(&site);
+            let journaled = std::sync::Arc::clone(&journaled);
+            tokio::spawn(async move {
+                let _seat = site
+                    .autopilot
+                    .take_seat(pull::vendor::Feed::Dhan)
+                    .expect("a free seat");
+                let _ = taken.send(());
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                journaled.store(true, std::sync::atomic::Ordering::SeqCst);
+            })
+        };
+        seated.await.expect("the tick took its seat");
+        let flying = tokio::spawn(std::future::pending::<()>());
+        let abandoned =
+            drain_background(&site, flying, std::time::Duration::from_secs(10)).await;
+        assert!(abandoned.is_empty(), "{abandoned:?}");
+        assert!(
+            journaled.load(std::sync::atomic::Ordering::SeqCst),
+            "the drain returned before the seat holder journaled"
+        );
+        assert!(site.autopilot.is_paused(), "the autopilot was not asked to stop");
+        tick.await.expect("the tick finished");
+    }
+
+    /// A seat held past the grace is named, not waited on for ever; the
+    /// autopilot task is aborted either way.
+    #[tokio::test]
+    async fn a_seat_held_past_the_grace_is_named_as_abandoned() {
+        let site = drained_site("held");
+        let seat = site
+            .autopilot
+            .take_seat(pull::vendor::Feed::Groww)
+            .expect("a free seat");
+        let flying = tokio::spawn(std::future::pending::<()>());
+        let started = std::time::Instant::now();
+        let abandoned =
+            drain_background(&site, flying, std::time::Duration::from_millis(120)).await;
+        assert_eq!(abandoned, vec!["a pull still holding its feed seat"]);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        drop(seat);
+        // Nothing held, nothing running: an immediate, empty drain.
+        let flying = tokio::spawn(std::future::pending::<()>());
+        assert!(
+            drain_background(&site, flying, std::time::Duration::ZERO)
+                .await
+                .is_empty()
+        );
+    }
+
+    /// lifecycle-1, D-2583: a running press is told to stop and its task is
+    /// WAITED for — the press here returns as soon as it sees `stopping`, the
+    /// way the conductor ends at its next leg boundary. With a recovery
+    /// active the in-memory stop is NOT set (its only stop is durable and
+    /// would block the plan's boot resume), so the same press runs past the
+    /// grace and is named. On the old code the press handle was dropped at
+    /// spawn and nothing told it to stop.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_waits_for_a_running_press_to_journal_its_leg() {
+        for recovering in [false, true] {
+            let site = drained_site(if recovering { "press-rec" } else { "press" });
+            let run = {
+                let claimed = crate::pullrun::Progress::claimed();
+                let run = claimed.generation;
+                *site.run.lock().unwrap() = Some(claimed);
+                run
+            };
+            if recovering {
+                *site.recovery_active.lock().unwrap() = Some([1; 32]);
+            }
+            let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let press = {
+                let site = Loaded::clone(&site);
+                let finished = std::sync::Arc::clone(&finished);
+                tokio::spawn(async move {
+                    loop {
+                        let stop = site
+                            .run
+                            .lock()
+                            .unwrap()
+                            .as_ref()
+                            .is_none_or(|p| p.generation != run || p.stopping);
+                        if stop {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                    finished.store(true, std::sync::atomic::Ordering::SeqCst);
+                })
+            };
+            *site.press_task.lock().unwrap() = Some(press);
+            let flying = tokio::spawn(std::future::pending::<()>());
+            let abandoned =
+                drain_background(&site, flying, std::time::Duration::from_millis(400)).await;
+            if recovering {
+                assert_eq!(abandoned, vec!["the pull press"], "recovering");
+                assert!(!site.run.lock().unwrap().as_ref().unwrap().stopping);
+            } else {
+                assert!(abandoned.is_empty(), "{abandoned:?}");
+                assert!(finished.load(std::sync::atomic::Ordering::SeqCst));
+            }
+            assert!(site.press_task.lock().unwrap().is_none());
+        }
+    }
+
+    /// The serve arm drains rather than aborting, and the press is kept.
+    #[test]
+    fn the_serve_arm_drains_and_the_press_handle_is_kept() {
+        let source = include_str!("server.rs");
+        assert!(source.contains("drain_background(&draining, flying, SHUTDOWN_GRACE).await"));
+        assert!(!source.contains(concat!("                flying", ".abort();\n                code")));
+        assert!(!source.contains(concat!("let _flying = tokio::spawn(crate::pullrun::", "conduct(")));
+    }
+
+    /// Each signal resolves a fresh stop future with `Ok`, and the future is
+    /// still pending before the signal arrives. The process signals ITSELF,
+    /// after the handler is registered, so the default disposition (end the
+    /// process) is never reached. On the old code there was no handler for
+    /// either signal and no `operator_shutdown` to call.
+    #[tokio::test]
+    async fn sigterm_and_sighup_take_the_graceful_path() {
+        for (flag, name) in [
+            ("-TERM", "SIGTERM"),
+            ("-HUP", "SIGHUP"),
+            ("-TERM", "SIGTERM again"),
+        ] {
+            let mut stop = operator_shutdown();
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(50), &mut stop)
+                    .await
+                    .is_err(),
+                "{name}: the stop future resolved before any signal"
+            );
+            let sent = std::process::Command::new("kill")
+                .arg(flag)
+                .arg(std::process::id().to_string())
+                .status()
+                .expect("the signal sender runs");
+            assert!(sent.success(), "{name}");
+            let stopped = tokio::time::timeout(std::time::Duration::from_secs(10), stop)
+                .await
+                .unwrap_or_else(|_| panic!("{name} did not resolve the operator's stop"));
+            assert!(stopped.is_ok(), "{name}: {stopped:?}");
+        }
+    }
+
+    /// A stream that could not be registered never fires, rather than firing
+    /// at once and stopping a server nobody asked to stop.
+    #[tokio::test]
+    async fn a_missing_handler_never_stops_the_server() {
+        let gone = signal_or_said(
+            Err(std::io::Error::other("refused for the test")),
+            "SIGTERM",
+        );
+        assert!(gone.is_none());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), signal_arrival(gone))
+                .await
+                .is_err()
+        );
+    }
+
+    /// The binary uses this stop and not the bare Ctrl-C future it used to
+    /// pass. On the old `main.rs` both assertions fail.
+    #[test]
+    fn the_binary_passes_the_operator_stop() {
+        let main = include_str!("main.rs");
+        assert!(main.contains("api::server::operator_shutdown()"), "{main}");
+        assert!(!main.contains(concat!("Box::pin(tokio::signal::", "ctrl_c())")));
+    }
+}
+
 /// What the operator asked the binary to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
@@ -5454,6 +5732,11 @@ pub struct Site {
     pub run: std::sync::Mutex<Option<crate::pullrun::Progress>>,
     /// Active recovery plan for durable STOP routing; normal pulls leave None.
     pub(crate) recovery_active: std::sync::Mutex<Option<[u8; 32]>>,
+    /// The task conducting the current (or last) `/pull/run` press, kept so a
+    /// shutdown can ask it to stop and WAIT for its leg to journal rather than
+    /// dropping it under the runtime's teardown. It was spawned and its handle
+    /// dropped (lifecycle-1, D-2583). See [`drain_background`].
+    pub(crate) press_task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// The browser-started SWEEP, in the same shape as [`Self::run`] and for
     /// the same reasons: one slot per `Site` so concurrent tests do not refuse
     /// each other, `Some` with no `finished_micros` as the one reading of "in
@@ -5616,6 +5899,9 @@ impl Site {
         // A file changed during parsing must remain visibly newer than this
         // snapshot, not be hidden by a timestamp taken after the read.
         let parsed_at = std::time::SystemTime::now();
+        // AND ITS IDENTITY, TAKEN BEFORE THE READ for the same reason, which is
+        // what `/masters/status.json` compares now (clock-5, D-2580).
+        let stamps = crate::mastersrun::stamps_of(masters);
         let read = universe(masters);
         // A PARSE THAT READ NOTHING MUST NOT REPLACE ONE THAT DID. Swapping an
         // empty universe in would take a working page to a blank one because a
@@ -5666,6 +5952,7 @@ impl Site {
         *held = Parsed {
             read,
             at: parsed_at,
+            stamps,
             targets,
             generation,
         };
@@ -5720,6 +6007,7 @@ impl Site {
             // direction: a report with nothing behind it.
             run: std::sync::Mutex::new(None),
             recovery_active: std::sync::Mutex::new(None),
+            press_task: std::sync::Mutex::new(None),
             // NO SWEEP UNTIL SOMEBODY PRESSES RUN, for the reason above it.
             sweep: std::sync::Mutex::new(None),
             reload_lock: std::sync::Mutex::new(()),
@@ -5729,6 +6017,9 @@ impl Site {
                 // question is when THIS universe was read, and a lazily taken
                 // stamp would answer a different one.
                 at: std::time::SystemTime::now(),
+                // NO DIRECTORY IS NAMED HERE; `Site::load` records the stamps
+                // it took before its read (clock-5, D-2580).
+                stamps: Vec::new(),
                 targets,
                 generation: 0,
             }),
@@ -5755,11 +6046,19 @@ impl Site {
     /// The whole site, read off disk once.
     #[must_use]
     pub fn load(masters: &Path, store_root: &Path) -> Self {
-        Self::new(
+        // THE MASTERS' STAMPS BEFORE THEIR READ, so a write racing the read
+        // shows as a change rather than hiding behind it (clock-5, D-2580).
+        let stamps = crate::mastersrun::stamps_of(masters);
+        let mut site = Self::new(
             universe(masters),
             census::read_all(store_root),
             store_root.to_path_buf(),
-        )
+        );
+        site.parsed
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .stamps = stamps;
+        site
     }
 
     /// The same site, permitted to reach a live broker.
@@ -5898,6 +6197,12 @@ pub struct Parsed {
     pub read: Read,
     /// When this process parsed the masters into [`Self::read`].
     pub at: std::time::SystemTime,
+    /// Each master's [`crate::mastersrun::FileStamp`], in `masters::SOURCES`
+    /// order, taken just before the parse read it. Empty for a parse that
+    /// named no directory (`Site::new`). `/masters/status.json` reports a
+    /// master as changed by inequality with this, not by ordering its mtime
+    /// against [`Self::at`] (clock-5, D-2580).
+    pub stamps: Vec<Option<crate::mastersrun::FileStamp>>,
     /// How many instruments each spot target names, counted from [`Self::read`].
     pub targets: [usize; ingest::SpotTarget::ALL.len()],
     /// Zero at load, and moved by every [`Site::reparse`] that swaps a universe
@@ -7130,9 +7435,13 @@ fn note_run_started(asked: &ingest::SpotRequest, instruments: usize) -> Option<u
     // showed one story assembled from two feeds and a second that stopped
     // mid-sentence.
     //
-    // A claim gives the key to the FIRST leg of a press and lets every
-    // concurrent sibling inherit it, which is correct: they are one press. The
-    // losers do not take it and, in `note_run_finished`, do not release it.
+    // A press now claims the key ITSELF, before its first leg, and holds it
+    // until the conductor ends (`pullrun::PressRun`; atomics-1, D-2582): it was
+    // the first LEG that claimed it here, and that leg released it when it
+    // finished, under siblings still running. Inside a press every leg's claim
+    // therefore fails and every leg inherits the press's key; a lone hand pull
+    // or an autopilot round still claims its own here. The losers do not take
+    // it and, in `note_run_finished`, do not release it.
     let claimed = telemetry::global().and_then(|sink| {
         let id = telemetry::now_millis().unsigned_abs();
         sink.claim_run(id).then_some(id)
@@ -7791,8 +8100,36 @@ async fn land_spot(
     // synchronous store I/O that used to hold a Tokio worker the HTTP surface
     // shares for the length of a landing. See [`off_the_workers`].
     let observed_calendar = off_the_workers(|| ingestion_observations(landed, site));
-    for bodies in landed.bodies.chunks(1) {
-        match prepare_cash_schedule(landed, bodies, instrument, site, dated).await {
+    // THE CLOCK'S TODAY, read once per instrument for the partial-day check
+    // below (clock-2, D-2584). An unusable clock checks nothing here; the
+    // request was already refused by `finished_day_only` before any fetch.
+    let today = ingest::ist_day(std::time::SystemTime::now()).ok();
+    for (at, bodies) in landed.bodies.chunks(1).enumerate() {
+        // THE ANSWER ITSELF MUST SHOW TODAY'S SESSION ENDED (clock-2, D-2584).
+        // `finished_day_only` admits today once the host clock reads past the
+        // close, and a clock that runs fast — or a request at the close minute
+        // itself — admitted a session the vendor was still serving. The store
+        // is append-only, so a partial day stored then could never be
+        // completed. A minute answer that holds bars for today but stops
+        // before the session's last minute is now refused before it lands.
+        let ready = match today.and_then(|today| partial_today_refusal(landed, bodies, today)) {
+            Some(why) => {
+                let _noted = telemetry::emit(
+                    &telemetry::Event::error("api.pull", "partial day refused")
+                        .with("why", telemetry::Value::Str(&why)),
+                );
+                Err(why)
+            }
+            None => prepare_cash_schedule(landed, bodies, instrument, site, dated)
+                .await
+                .inspect_err(|why| {
+                    let _noted = telemetry::emit(
+                        &telemetry::Event::error("api.pull", "cash schedule refused")
+                            .with("why", telemetry::Value::Str(why)),
+                    );
+                }),
+        };
+        match ready {
             Ok(schedule) => done.absorb(off_the_workers(|| {
                 land_bodies_observed(
                     landed,
@@ -7803,23 +8140,128 @@ async fn land_spot(
                 )
             })),
             Err(why) => {
+                // A REFUSED SCHEDULE ENDS THE LANDING HERE (equity-1, D-2575).
+                // This used to record the failure and CONTINUE, so a later body
+                // could land past the refused one. The store appends at its
+                // tail only, so the hole was then unfillable — a re-pull of it
+                // is refused as earlier than the tail — while the month read as
+                // done. Landing is now prefix-only, as fetching already is:
+                // this body and every later one are one named failure, and
+                // none of their rows reaches the store.
+                let rest = landed.bodies.get(at..).unwrap_or_default();
+                let why = refused_landing_why(&why, rest.len());
                 let _noted = telemetry::emit(
-                    &telemetry::Event::error("api.pull", "cash schedule refused")
-                        .with("why", telemetry::Value::Str(&why)),
+                    &telemetry::Event::error("api.pull", "windows not landed")
+                        .with("why", telemetry::Value::Str(&why))
+                        .with("windows_not_landed", telemetry::Value::Uint(rest.len() as u64)),
                 );
                 done.absorb(pull::ingest::Ingested {
-                    members: bodies.len(),
-                    rows_read: bodies.iter().map(|(_, body)| body.rows.len()).sum(),
+                    members: rest.len(),
+                    rows_read: rest.iter().map(|(_, body)| body.rows.len()).sum(),
                     failures: vec![pull::ingest::Failure {
                         instrument: instrument.underlying.to_string(),
                         why,
                     }],
                     ..pull::ingest::Ingested::default()
                 });
+                break;
             }
         }
     }
     done
+}
+
+/// Why a fetched intraday window must not land, when it holds bars for
+/// `today` that stop before today's session ended; `None` when it may.
+///
+/// # The check (clock-2, D-2584)
+///
+/// Only a sub-day rung is checked: a daily bar carries no minute to compare.
+/// The venue is the window's own — NSE index or NSE cash, whose closes differ
+/// from 2026-08-03 (D-0151). A venue with no session row for today (a holiday,
+/// a date past the table) has nothing to finish and is not refused here. A
+/// window with no bar on today is not refused either: it stores nothing for
+/// today, so there is no partial day to store. Otherwise the newest bar on
+/// today must sit in the session's last minute or later.
+///
+/// This is the DATA-side half and needs no policy. A settle margin after the
+/// close — how long a vendor may keep revising the last minute — is a separate
+/// choice this does not make (`docs/05-decisions.md` D-2584).
+///
+/// # Cost
+///
+/// One pass over the window's rows, which the landing walks anyway.
+fn partial_today_refusal(
+    landed: &BrokerWindow,
+    bodies: &[(pull::session::Window, pull::fetch::RawWindow)],
+    today: Day,
+) -> Option<String> {
+    if landed.granularity == pull::vendor::Granularity::Day1 {
+        return None;
+    }
+    let venue = match (landed.exchange, landed.segment) {
+        ("NSE", "INDEX") => pull::vendor::Venue::NseIndex,
+        ("NSE", "CASH") => pull::vendor::Venue::NseCash,
+        _ => return None,
+    };
+    let session = venue.hours_on(today).ok()?;
+    let mut newest: Option<u32> = None;
+    for (_, body) in bodies {
+        for row in &body.rows {
+            let Some(moment) = row_epoch_secs(row.timestamp, landed.spec.timestamps)
+                .and_then(|secs| pull::session::IstMoment::from_epoch_secs(secs).ok())
+            else {
+                continue;
+            };
+            if moment.day() == today {
+                let minute = moment.minute_of_day();
+                newest = Some(newest.map_or(minute, |held| held.max(minute)));
+            }
+        }
+    }
+    let newest = newest?;
+    let last = session.close_minute().saturating_sub(1);
+    (newest < last).then(|| {
+        format!(
+            "{}: today's answer ({today}) stops at {:02}:{:02} IST, before the {} session's \
+             last minute {:02}:{:02} — the session was still being served, so this is a \
+             partial day and the append-only store could never complete it. Nothing of \
+             this window was stored; ask again after the close",
+            landed.instrument,
+            newest / 60,
+            newest % 60,
+            venue.label(),
+            last / 60,
+            last % 60
+        )
+    })
+}
+
+/// A vendor row's timestamp as UTC epoch seconds, by the feed's encoding; the
+/// same conversion `observed_cash_source_days` applies. `None` on overflow.
+fn row_epoch_secs(timestamp: i64, encoding: pull::vendor::TimestampEncoding) -> Option<i64> {
+    use pull::vendor::TimestampEncoding;
+    match encoding {
+        TimestampEncoding::EpochMillisUtc => Some(timestamp.div_euclid(1_000)),
+        TimestampEncoding::EpochSecondsUtc | TimestampEncoding::IsoDateTimeOffset => Some(timestamp),
+        TimestampEncoding::IstDateTimeText | TimestampEncoding::IsoDateTimeText => {
+            timestamp.checked_sub(pull::session::IST_OFFSET_SECS)
+        }
+    }
+}
+
+/// The sentence for a refused cash schedule that stopped `windows` fetched
+/// windows (this one and every later one) from landing. equity-1, D-2575.
+fn refused_landing_why(why: &str, windows: usize) -> String {
+    if windows > 1 {
+        format!(
+            "{why}; this window and the {} after it were not landed, so the store \
+             holds no bar past the refusal and a re-pull can still fill it",
+            windows - 1
+        )
+    } else {
+        format!("{why}; this window was not landed")
+    }
 }
 
 fn note_cash_schedule_verified(days: usize, instruments: usize) {
@@ -11461,7 +11903,12 @@ pub(crate) async fn pull_run(
     };
 
     let legs_asked = legs.len();
-    let _flying = tokio::spawn(crate::pullrun::conduct(Loaded::clone(&site), run, legs));
+    // KEPT, NOT DROPPED, so a shutdown can drain it (lifecycle-1, D-2583).
+    let press = tokio::spawn(crate::pullrun::conduct(Loaded::clone(&site), run, legs));
+    *site
+        .press_task
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(press);
     (
         axum::http::StatusCode::ACCEPTED,
         json_headers(),
@@ -19399,6 +19846,97 @@ pub const DEGRADED: u8 = 3;
 /// said, never silent.
 pub const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Stops the background work a served process started, waiting at most
+/// `grace` for each piece to reach a boundary where nothing is half-recorded.
+/// Returns what it gave up on, by name.
+///
+/// # Order (autopilot-4, lifecycle-1, D-2583)
+///
+/// 1. **Ask.** `Control::pause` bumps the stop epoch, so an autopilot run in
+///    flight stops at its next instrument and its tick still journals "stopped
+///    after k of n". A running press is told `stopping`, its own stop, so it
+///    ends at its next leg boundary. A RECOVERY is not told: its only stop is
+///    durable and turns the plan `Blocked`, so a restart would no longer
+///    resume it; its reservations are durable before each request and the next
+///    boot reconciles an interrupted one, which is the shape it was built for.
+/// 2. **Wait for the press** to return, up to the deadline.
+/// 3. **Wait for every pull seat to be free** — no tick, hand pull, press leg
+///    or recovery request between its seat and its journal record — up to the
+///    same deadline. The autopilot's task never RETURNS from a pause (it
+///    dwells), so it is drained by its seats, not by its handle.
+/// 4. **Abort** the autopilot task, which is now dwelling or sleeping, and
+///    whatever did not finish in time — named in the return value.
+///
+/// One deadline for the whole drain, [`SHUTDOWN_GRACE`], the bound D-1582
+/// already set for blocking work at the same moment; the seat poll is every
+/// 50 ms. A stop therefore takes at most `2 × SHUTDOWN_GRACE` with
+/// [`end_runtime`]'s wait after it.
+pub(crate) async fn drain_background(
+    site: &Site,
+    flying: tokio::task::JoinHandle<()>,
+    grace: std::time::Duration,
+) -> Vec<&'static str> {
+    let deadline = tokio::time::Instant::now() + grace;
+    site.autopilot.pause();
+    let recovering = site
+        .recovery_active
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .is_some();
+    if !recovering {
+        let mut held = site
+            .run
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(progress) = held.as_mut()
+            && progress.running()
+        {
+            progress.stopping = true;
+        }
+    }
+    let press = site
+        .press_task
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    let mut abandoned = Vec::new();
+    if let Some(mut press) = press
+        && tokio::time::timeout_at(deadline, &mut press).await.is_err()
+    {
+        press.abort();
+        abandoned.push("the pull press");
+    }
+    while site.autopilot.seats_held() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    if site.autopilot.seats_held() {
+        abandoned.push("a pull still holding its feed seat");
+    }
+    flying.abort();
+    abandoned
+}
+
+/// Says what the shutdown drain gave up on, or that it gave up on nothing.
+fn note_drained(abandoned: &[&'static str]) {
+    if abandoned.is_empty() {
+        let _noted = telemetry::emit(&telemetry::Event::info(
+            "api.server",
+            "background work drained",
+        ));
+        return;
+    }
+    let named = abandoned.join("; ");
+    warn_line!(
+        "STOPPING WITH BACKGROUND WORK CUT SHORT after {}s: {named}. Its bars may be \
+         on disk without their journal record; the next run re-derives from the store.",
+        SHUTDOWN_GRACE.as_secs()
+    );
+    let _noted = telemetry::emit(
+        &telemetry::Event::warn("api.server", "background work abandoned at shutdown")
+            .with("what", telemetry::Value::Str(&named)),
+    );
+}
+
 /// Ends the process's runtime, waiting at most `grace` for blocking work.
 ///
 /// Returns how many engine tasks (sweeps, descents, commands) were still
@@ -20123,6 +20661,9 @@ async fn run_in_over(
                 // window. It holds the same `Arc`, so pause/resume and the
                 // status it publishes are the ones the routes read.
                 let flying = tokio::spawn(autopilot::fly(Loaded::clone(&site)));
+                // Held past `serve`, which consumes `site`, so the drain below
+                // can reach the controls (autopilot-4, lifecycle-1, D-2583).
+                let draining = Loaded::clone(&site);
                 if let Err(why) = crate::recovery::resume(Loaded::clone(&site)) {
                     note_recovery_not_resumed(&why);
                     warn_line!("Recovery NOT resumed: {why}");
@@ -20136,12 +20677,16 @@ async fn run_in_over(
                     .await,
                     clean,
                 );
-                // Ctrl-C stopped the HTTP surface; stop the backfill too. A
-                // sweep aborted mid-append is safe by construction — the bar
-                // file commits its header after the records are synced, so a
-                // torn write leaves bytes past `n_valid` that the next run
-                // overwrites.
-                flying.abort();
+                // THE STOP STOPPED THE HTTP SURFACE; THE BACKGROUND WORK IS
+                // DRAINED, NOT DROPPED (autopilot-4, lifecycle-1, D-2583). This
+                // was `flying.abort()` at once: a tick between landing its bars
+                // and appending its `/audit` record was cancelled there, and a
+                // press's handle had been dropped at spawn so runtime teardown
+                // cut its leg the same way — bars on disk with no journal row.
+                // A torn APPEND is still safe by construction (the header
+                // commits after the records sync); a torn JOURNAL was not.
+                let abandoned = drain_background(&draining, flying, SHUTDOWN_GRACE).await;
+                note_drained(&abandoned);
                 code
             }
             Err(e) => {
@@ -21899,6 +22444,204 @@ mod tests {
         landed.bodies[0].0 = landed.window;
         landed.bodies[0].1.rows.drain(..360);
         (site, landed, key)
+    }
+
+    /// equity-1, D-2575: a cash schedule refused for the FIRST of two bodies
+    /// lands neither. Two days' masters are installed; the earlier day's
+    /// payload is then removed (its receipt stays), so that body's schedule is
+    /// refused as an incomplete cache — locally, with no download. On the old
+    /// loop the refusal was recorded and the SECOND body still landed its 360
+    /// bars past the hole, which a later re-pull cannot fill; here nothing is
+    /// committed, both bodies are counted, and one failure names both.
+    #[tokio::test]
+    async fn a_refused_cash_schedule_lands_no_later_body() {
+        use pull::fetch::{RawRow, RawWindow};
+        use pull::session::{IST_OFFSET_SECS, Window};
+        use pull::vendor::{Feed, Granularity, Listing, Transport};
+        // The same synthetic NSE-format master `cash_month_replay_fixture`
+        // installs: RELIANCE, EQ, INE002A01018, CAS eligible.
+        const MASTER: &[u8] = &[
+            31, 139, 8, 0, 0, 0, 0, 0, 0, 3, 5, 193, 65, 10, 128, 32, 16, 0, 192, 123, 111, 217,
+            131, 10, 129, 87, 145, 13, 22, 66, 168, 237, 5, 26, 72, 164, 30, 116, 59, 248, 251,
+            102, 182, 167, 81, 27, 210, 43, 221, 112, 165, 183, 243, 172, 17, 56, 201, 228, 62,
+            128, 152, 2, 96, 201, 177, 200, 244, 101, 100, 247, 37, 105, 60, 218, 98, 172, 93, 225,
+            196, 157, 92, 240, 8, 120, 0, 5, 84, 202, 56, 165, 149, 182, 160, 151, 31, 144, 83,
+            148, 134, 86, 0, 0, 0,
+        ];
+        let (site, _) = readiness_fixture("equity1-prefix-landing", "INE002A01018");
+        let early = day(2026, 8, 3);
+        let late = day(2026, 8, 24);
+        let masters_root = site.store_root.join("session-masters");
+        for date in [early, late] {
+            pull::cash_session_cache::install(&masters_root, date, MASTER).unwrap();
+        }
+        // The earlier day's payload goes; its receipt stays. Refused locally.
+        std::fs::remove_file(masters_root.join("NSE_CM_security_03082026.csv.gz")).unwrap();
+        let key = brutex_core::instrument::InstrumentKey::cash(
+            brutex_core::instrument::Exchange::Nse,
+            "RELIANCE",
+        )
+        .unwrap();
+        let Transport::Http(spec) = Feed::Zerodha.descriptor().transport else {
+            panic!("HTTP descriptor")
+        };
+        let body_of = |date: Day| {
+            let open = i64::from(date.days_from_epoch()) * 86_400 - IST_OFFSET_SECS + 555 * 60;
+            let rows = (0..360)
+                .map(|minute| RawRow {
+                    timestamp: open + minute * 60,
+                    open: 100,
+                    high: 100,
+                    low: 100,
+                    close: 100,
+                    volume: 1,
+                    open_interest: None,
+                })
+                .collect();
+            (Window::new(date, date).unwrap(), RawWindow { rows })
+        };
+        let landed = BrokerWindow {
+            listing: Listing::Equity,
+            contract: None,
+            unfetched: None,
+            instrument: "RELIANCE".to_owned(),
+            origin: "test only".to_owned(),
+            spec,
+            exchange: "NSE",
+            segment: "CASH",
+            store_vendor: Vendor::Zerodha,
+            window: Window::new(early, late).unwrap(),
+            granularity: Granularity::Minute1,
+            bodies: vec![body_of(early), body_of(late)],
+        };
+        let mut dated = std::collections::HashMap::new();
+        let done = super::land_spot(&landed, &key, &site, &mut dated).await;
+        assert_eq!(done.bars_committed, 0, "a body landed past a refusal: {done:?}");
+        assert_eq!(done.members, 2, "both bodies are counted: {done:?}");
+        assert_eq!(done.rows_read, 720);
+        assert_eq!(done.failures.len(), 1, "{:?}", done.failures);
+        assert!(
+            done.failures[0].why.contains("the 1 after it were not landed"),
+            "{:?}",
+            done.failures
+        );
+        assert!(
+            !site.store_root.join("bars/zerodha/NSE/CASH/RELIANCE").exists(),
+            "no RELIANCE month file may exist"
+        );
+    }
+
+    /// clock-2, D-2584: today's minute window that stops before the session's
+    /// last minute is refused and nothing is stored, even though the clock
+    /// (as `finished_day_only` saw it) said the session had closed. The fake
+    /// answer for "today" holds 09:15..10:04; the check names it partial. On
+    /// the old landing nothing looked at the answer: the 50 bars landed. The
+    /// boundaries: an answer through 15:29 lands; one through 15:28 is
+    /// refused; a day other than today, a daily rung and a window with no bar
+    /// on today are never refused; and a holiday (no session row) is not.
+    #[test]
+    fn todays_window_is_refused_when_the_answer_stops_before_the_session_close() {
+        use pull::fetch::{RawRow, RawWindow};
+        use pull::session::{IST_OFFSET_SECS, Window};
+        use pull::vendor::{Feed, Granularity, Listing, Transport};
+        let today = day(2026, 8, 24);
+        let other = day(2026, 8, 21);
+        let Transport::Http(spec) = Feed::Zerodha.descriptor().transport else {
+            panic!("HTTP descriptor")
+        };
+        let rows = |date: Day, from: i64, to: i64| -> Vec<RawRow> {
+            let midnight = i64::from(date.days_from_epoch()) * 86_400 - IST_OFFSET_SECS;
+            (from..=to)
+                .map(|minute| RawRow {
+                    timestamp: midnight + minute * 60,
+                    open: 100,
+                    high: 100,
+                    low: 100,
+                    close: 100,
+                    volume: 1,
+                    open_interest: None,
+                })
+                .collect()
+        };
+        let window = |segment: &'static str, granularity, body: Vec<RawRow>, date: Day| {
+            let span = Window::new(date, date).unwrap();
+            BrokerWindow {
+                listing: Listing::Equity,
+                contract: None,
+                unfetched: None,
+                instrument: "RELIANCE".to_owned(),
+                origin: "test only".to_owned(),
+                spec,
+                exchange: "NSE",
+                segment,
+                store_vendor: Vendor::Zerodha,
+                window: span,
+                granularity,
+                bodies: vec![(span, RawWindow { rows: body })],
+            }
+        };
+        let close = pull::vendor::Venue::NseCash
+            .hours_on(today)
+            .expect("a cash session on 2026-08-24")
+            .close_minute();
+        let last = i64::from(close) - 1;
+        let partial = window("CASH", Granularity::Minute1, rows(today, 555, 604), today);
+        let why = super::partial_today_refusal(&partial, &partial.bodies, today)
+            .expect("a partial day is refused");
+        assert!(why.contains("10:04"), "{why}");
+        assert!(why.contains("partial day"), "{why}");
+        let whole = window("CASH", Granularity::Minute1, rows(today, 555, last), today);
+        assert_eq!(super::partial_today_refusal(&whole, &whole.bodies, today), None);
+        let short = window("CASH", Granularity::Minute1, rows(today, 555, last - 1), today);
+        assert!(super::partial_today_refusal(&short, &short.bodies, today).is_some());
+        let yesterday = window("CASH", Granularity::Minute1, rows(other, 555, 604), other);
+        assert_eq!(super::partial_today_refusal(&yesterday, &yesterday.bodies, today), None);
+        let daily = window("CASH", Granularity::Day1, rows(today, 555, 555), today);
+        assert_eq!(super::partial_today_refusal(&daily, &daily.bodies, today), None);
+        let empty = window("CASH", Granularity::Minute1, Vec::new(), today);
+        assert_eq!(super::partial_today_refusal(&empty, &empty.bodies, today), None);
+        let foreign = window("FNO", Granularity::Minute1, rows(today, 555, 604), today);
+        assert_eq!(super::partial_today_refusal(&foreign, &foreign.bodies, today), None);
+        // The index's own close, not the cash one.
+        let index_close = pull::vendor::Venue::NseIndex
+            .hours_on(today)
+            .expect("an index session")
+            .close_minute();
+        let index = window(
+            "INDEX",
+            Granularity::Minute1,
+            rows(today, 555, i64::from(index_close) - 1),
+            today,
+        );
+        assert_eq!(super::partial_today_refusal(&index, &index.bodies, today), None);
+        // Timestamp encodings: overflow is skipped, not wrapped.
+        assert_eq!(
+            super::row_epoch_secs(i64::MIN, pull::vendor::TimestampEncoding::IstDateTimeText),
+            None
+        );
+        assert_eq!(
+            super::row_epoch_secs(1_500, pull::vendor::TimestampEncoding::EpochMillisUtc),
+            Some(1)
+        );
+        assert_eq!(
+            super::row_epoch_secs(-1, pull::vendor::TimestampEncoding::EpochMillisUtc),
+            Some(-1)
+        );
+    }
+
+    /// The refusal sentence names how many windows did not land: one, two,
+    /// and a large count, with the cause first.
+    #[test]
+    fn a_refused_landing_names_every_window_it_stopped() {
+        assert_eq!(
+            super::refused_landing_why("cause", 1),
+            "cause; this window was not landed"
+        );
+        assert_eq!(super::refused_landing_why("cause", 0), "cause; this window was not landed");
+        let two = super::refused_landing_why("cause", 2);
+        assert!(two.starts_with("cause; ") && two.contains("the 1 after it"), "{two}");
+        let many = super::refused_landing_why("cause", usize::MAX);
+        assert!(many.contains(&format!("the {} after it", usize::MAX - 1)), "{many}");
     }
 
     fn cash_month_files(site: &Site) -> Vec<(PathBuf, Vec<u8>)> {

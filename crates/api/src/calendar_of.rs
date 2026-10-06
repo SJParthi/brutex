@@ -38,9 +38,21 @@
 //! answer a question.
 //!
 //! So this asks the **counter** first. `BarFile::records()` is one header read,
-//! O(1) per month, and a month whose minute count is exactly
-//! `sessions × 375` has no irregular day in it by arithmetic — there is nothing
-//! a full read could discover. Only a month that fails that check is walked.
+//! O(1) per month. A month whose minute count is exactly `sessions × 375` is
+//! NOT proved regular by that alone: the counter counts every minute in the
+//! file, stray minutes on a day the daily rung does not hold included, so a
+//! short day padded by strays matched it and was stamped a full session
+//! (Z1-slice12-F1, D-2581 — this paragraph said "no irregular day in it by
+//! arithmetic"). The counter path is now taken only when, for every day the
+//! daily rung proves, the minutes inside that day's 09:15–15:29 window number
+//! exactly 375 — two `BarFile::first_at_or_after` lookups per day — AND those
+//! per-day counts add up to the whole file, so no minute lies outside them.
+//! Only a month that fails either check is walked.
+//!
+//! The lookups are O(1) per day on a month with a time index and
+//! `ceil(log2(n + 1))` record reads on a legacy month (`docs/06-limits.md`,
+//! D-2581); they are not counted in [`Report::records_read`], which counts the
+//! walk's positional reads.
 //!
 //! Measured against the operator's store: **81 months, of which 14 fail the
 //! check**. So the walk touches roughly a sixth of the records, and the other
@@ -404,10 +416,12 @@ pub fn derive(
             Timeframe::MINUTE_1,
             *month,
         ) {
-            Ok(file) if file.records() == expected => {
-                // EVERY DAY IN THIS MONTH IS A FULL SESSION, by arithmetic. A
-                // walk could find nothing a subtraction has not already proved,
-                // so it is not made.
+            Ok(file) if file.records() == expected && every_proved_day_is_full(&file, own) => {
+                // EVERY DAY IN THIS MONTH IS A FULL SESSION: each proved day
+                // holds exactly 375 minutes inside its window and no minute
+                // lies outside those windows (Z1-slice12-F1, D-2581). A walk
+                // could find nothing these counts have not already proved, so
+                // it is not made.
                 report.months_by_counter = report.months_by_counter.saturating_add(1);
                 for day in own {
                     if let Some(slot) = traded.get_mut(day) {
@@ -669,6 +683,52 @@ fn read_minute_spans(file: &store::file::BarFile, month: YearMonth) -> Result<Da
         ));
     }
     Ok(runs.into_iter().collect())
+}
+
+/// Whether every day in `own` holds exactly [`FULL`] minutes inside its
+/// 09:15–15:29 IST window, and those minutes are every record in `file`.
+///
+/// The second half is what the bare counter lacked: a month whose total was
+/// `days × 375` could be a short day plus stray minutes on a day the daily rung
+/// does not hold, and was stamped full. A lookup that fails answers `false`, so
+/// the month is walked and the walk names what it could not read
+/// (Z1-slice12-F1, D-2581).
+///
+/// # Cost
+///
+/// Two `first_at_or_after` lookups per day in `own`: O(1) each on an indexed
+/// month, `ceil(log2(n + 1))` record reads on a legacy one. `docs/06-limits.md`
+/// D-2581.
+fn every_proved_day_is_full(file: &store::file::BarFile, own: &[i64]) -> bool {
+    let mut inside = 0_u64;
+    for &day in own {
+        let (Some(open), Some(end)) = (
+            minute_stamp(day, pull::calendar::OPEN_MINUTE),
+            minute_stamp(day, pull::calendar::LAST_MINUTE.saturating_add(1)),
+        ) else {
+            return false;
+        };
+        let (Ok(first), Ok(past)) = (file.first_at_or_after(open), file.first_at_or_after(end))
+        else {
+            return false;
+        };
+        let held = past.saturating_sub(first);
+        if held != FULL {
+            return false;
+        }
+        inside = inside.saturating_add(held);
+    }
+    inside == file.records()
+}
+
+/// The UTC micros stamp of minute-of-day `minute` on IST day `day`; the
+/// inverse of [`ist`]. `None` where the arithmetic would overflow.
+fn minute_stamp(day: i64, minute: u16) -> Option<i64> {
+    const IST_OFFSET_SECS: i64 = 5 * 3600 + 30 * 60;
+    day.checked_mul(86_400)?
+        .checked_add(i64::from(minute) * 60)?
+        .checked_sub(IST_OFFSET_SECS)?
+        .checked_mul(1_000_000)
 }
 
 /// The IST day and minute-of-day of a micros-since-epoch stamp.
@@ -1577,6 +1637,96 @@ pub(crate) mod tests {
             calls <= 48,
             "{calls} classifications with two counter-matched months"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Z1-slice12-F1, D-2581: a minute month whose COUNT matches
+    /// `proved days × 375` only because stray minutes on a day the daily rung
+    /// does not hold pad a short day is walked, not stamped full. Daily rung:
+    /// 2026-01-05 and 01-06. Minute rung: a full 01-05, 01-06 missing 12:00–
+    /// 12:04, and five minutes on 01-07 — 375 + 370 + 5 = 750 = 2 × 375. On the
+    /// old counter test it was `months_by_counter == 1` and 01-06 read as one
+    /// full window; now it is walked and 01-06 shows the hole.
+    #[test]
+    fn a_counter_match_padded_by_stray_minutes_is_walked() {
+        let root = crate::scratch::path("calendar-of-padded-counter");
+        let _ = std::fs::remove_dir_all(&root);
+        let january = YearMonth::new(2026, 1).expect("a real month");
+        let (jan5, jan6, jan7) = (
+            epoch_day(2026, 1, 5),
+            epoch_day(2026, 1, 6),
+            epoch_day(2026, 1, 7),
+        );
+        write_bars(
+            &root,
+            Timeframe::DAY_1,
+            january,
+            &[stamp(jan5, OPEN), stamp(jan6, OPEN)],
+        );
+        let mut minutes = minutes_of(jan5, &[(OPEN, LAST)]);
+        minutes.extend(minutes_of(jan6, &[(OPEN, 719), (725, LAST)]));
+        minutes.extend(minutes_of(jan7, &[(OPEN, OPEN + 4)]));
+        assert_eq!(minutes.len(), 750, "the counter alone matches 2 x 375");
+        write_bars(&root, Timeframe::MINUTE_1, january, &minutes);
+
+        let (cal, report) = derive(&root, Vendor::Zerodha, "NSE", "INDEX", "NIFTY", &[january]);
+        assert_eq!(
+            (report.months_by_counter, report.months_walked),
+            (0, 1),
+            "{report:?}"
+        );
+        assert_eq!(windows_of(&cal, jan6), vec![(OPEN, 719), (725, LAST)]);
+        assert_eq!(cal.expected_bars(jan6), Some(370));
+        assert_eq!(cal.expected_bars(jan5), Some(375));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The counter path's two checks at their boundaries: every proved day
+    /// full and nothing else is the counter path; one minute moved from inside
+    /// a window to just outside it (15:30) keeps the total and is walked; an
+    /// empty month with no proved day is the counter path with nothing to
+    /// stamp; and `minute_stamp` refuses the overflowing day rather than
+    /// wrapping.
+    #[test]
+    fn the_counter_path_needs_every_proved_day_full_and_nothing_outside() {
+        let root = crate::scratch::path("calendar-of-counter-boundaries");
+        let _ = std::fs::remove_dir_all(&root);
+        let (january, february) = (
+            YearMonth::new(2026, 1).expect("a real month"),
+            YearMonth::new(2026, 2).expect("a real month"),
+        );
+        let (jan5, feb2) = (epoch_day(2026, 1, 5), epoch_day(2026, 2, 2));
+        write_bars(&root, Timeframe::DAY_1, january, &[stamp(jan5, OPEN)]);
+        write_bars(
+            &root,
+            Timeframe::MINUTE_1,
+            january,
+            &minutes_of(jan5, &[(OPEN, LAST)]),
+        );
+        write_bars(&root, Timeframe::DAY_1, february, &[stamp(feb2, OPEN)]);
+        // 09:16..15:30: 375 minutes, the last one past the session's end.
+        write_bars(
+            &root,
+            Timeframe::MINUTE_1,
+            february,
+            &minutes_of(feb2, &[(OPEN + 1, LAST + 1)]),
+        );
+        let (_, report) = derive(
+            &root,
+            Vendor::Zerodha,
+            "NSE",
+            "INDEX",
+            "NIFTY",
+            &[january, february],
+        );
+        assert_eq!(
+            (report.months_by_counter, report.months_walked),
+            (1, 1),
+            "{report:?}"
+        );
+        assert_eq!(minute_stamp(i64::MAX, 0), None);
+        assert_eq!(minute_stamp(i64::MIN, 0), None);
+        assert_eq!(minute_stamp(jan5, OPEN), Some(stamp(jan5, OPEN)));
         let _ = std::fs::remove_dir_all(&root);
     }
 

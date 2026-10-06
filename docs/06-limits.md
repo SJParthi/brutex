@@ -15723,3 +15723,23 @@ does not bound the store:
   `api::census::read_vendor` reads a manifest that loads degraded once more,
   one more bounded `MAX_MANIFEST_BYTES` read, so a genuinely damaged census
   costs two reads on every request that misses the census cache. Unmeasured.
+## The calendar's minute counter now costs two lookups per proved day — D-2581, 6 October 2026
+
+- **What changed.** `calendar_of::derive` took a minute month's counter path
+  on one header read. It now also asks `BarFile::first_at_or_after` twice for
+  every day the daily rung proves (Z1-slice12-F1), so a month of ~22 trading
+  days costs ~44 lookups more before it is trusted.
+- **The bound.** O(1) per lookup on a month with a time index; on a legacy
+  month without one, the D-1434 bisection at `ceil(log2(n + 1))` record reads
+  per lookup. The lookups are not counted in `Report::records_read`, which
+  counts the walk's positional reads. UNVERIFIED as a measurement: no bench
+  times a derivation.
+
+## A served stop can wait twice `SHUTDOWN_GRACE` — D-2583, 6 October 2026
+
+- `server::drain_background` waits up to `SHUTDOWN_GRACE` (10 s) for a press
+  and for every pull seat to be free before the runtime ends, and
+  `end_runtime` then waits up to the same bound for blocking work. A stop
+  during a pull can therefore take up to 20 s; a stop with nothing running
+  costs one 50 ms-free pass. A recovery request holding a seat is waited on to
+  the deadline and then abandoned by name. Not timed.

@@ -501,6 +501,29 @@ pub fn credential_fault_in_page(html: &str) -> bool {
     VENDOR_SPELLINGS.iter().any(|m| lower.contains(m))
 }
 
+/// Whole seconds on this process's monotonic clock, counted from one at the
+/// first call.
+///
+/// # Why the autopilot's waits are not measured on the wall clock (clock-3, D-2579)
+///
+/// The stall re-check ([`STALL_RECHECK_SECS`], AU-08) and the store-probe
+/// schedule ([`probe_secs`], eight probes over 2 h 03 m) are ELAPSED times. They
+/// were stamped and compared in epoch seconds, so an NTP step forward spent them
+/// at once — every allowance consumed in one pass — and a step back postponed
+/// them by the size of the step. `Instant` does not step. The wall clock still
+/// stamps what the PAGE shows (`Status::due_unix`); only the comparisons moved.
+///
+/// Never zero: zero is a [`Stall`]'s "never stamped" and a [`Probe`]'s "due at
+/// once", and neither may be confused with a real reading.
+#[must_use]
+pub fn steady_secs() -> i64 {
+    static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    let origin = *ORIGIN.get_or_init(std::time::Instant::now);
+    i64::try_from(origin.elapsed().as_secs())
+        .unwrap_or(i64::MAX)
+        .saturating_add(1)
+}
+
 /// The wait before store probe number `made + 1`: 60 s, 120 s, 240 s … capped
 /// at one hour.
 ///
@@ -522,7 +545,7 @@ pub const fn probe_secs(made: u32) -> u64 {
 
 /// Whether a store-halted feed may probe its disk again, right now.
 ///
-/// Pure over `(probe, now_unix)`. `None` for the probe is a feed that never
+/// Pure over `(probe, now_secs)`. `None` for the probe is a feed that never
 /// armed one — a feed halted for a class that has no probe, or one not halted
 /// at all — and it answers [`Due::Spent`] with a sentence saying exactly that,
 /// so a caller cannot read "no probe" as "probe now".
@@ -531,7 +554,7 @@ pub const fn probe_secs(made: u32) -> u64 {
 ///
 /// Two integer comparisons. Nothing here opens a file.
 #[must_use]
-pub fn store_due(probe: Option<&Probe>, now_unix: i64) -> Due {
+pub fn store_due(probe: Option<&Probe>, now_secs: i64) -> Due {
     let Some(probe) = probe else {
         return Due::Spent {
             saying: String::from(
@@ -550,9 +573,9 @@ pub fn store_due(probe: Option<&Probe>, now_unix: i64) -> Due {
             ),
         };
     }
-    if now_unix < probe.due_unix {
+    if now_secs < probe.due_secs {
         return Due::Later {
-            due_unix: probe.due_unix,
+            due_secs: probe.due_secs,
         };
     }
     Due::Now { made: probe.made }
@@ -898,13 +921,18 @@ pub struct Stall {
     /// the page rather than leaving the list looking as though something is
     /// still going to happen.
     pub retried: u8,
-    /// Epoch seconds this stall was last acted on: stamped when the idle ladder
-    /// first sees it, and re-stamped on every reconsideration.
+    /// [`steady_secs`] when this stall was last acted on: stamped when the idle
+    /// ladder first sees it, and re-stamped on every reconsideration.
+    ///
+    /// A MONOTONIC second, not an epoch one (clock-3, D-2579). The re-check
+    /// interval [`STALL_RECHECK_SECS`] is an elapsed time, and measured on the
+    /// wall clock an NTP step forward spent it at once and a step back
+    /// postponed it by the size of the step. This was `at_unix`.
     ///
     /// **Zero means never stamped**, which is the state a fresh stall is pushed
     /// in — [`FeedState::observe`] reads no clock, deliberately, so that every
     /// arm of it is drivable from a test with no vendor, no store and no clock.
-    pub at_unix: i64,
+    pub at_secs: i64,
     /// Which rung of the ladder stalled at [`Self::month`].
     ///
     /// Part of the stall's key with the month: the day rung and the minute rung
@@ -1115,9 +1143,11 @@ impl Halt {
 pub struct Probe {
     /// How many probes have been made. Never exceeds [`STORE_PROBES`].
     pub made: u32,
-    /// Epoch seconds the next probe is due. Zero on the pass that arms it,
-    /// which makes the first probe due immediately.
-    pub due_unix: i64,
+    /// [`steady_secs`] at which the next probe is due. Zero on the pass that
+    /// arms it, which makes the first probe due immediately. Monotonic, not
+    /// epoch, so a wall-clock step neither spends nor delays the 60 s … 1 h
+    /// schedule (clock-3, D-2579). This was `due_unix`.
+    pub due_secs: i64,
 }
 
 /// Whether a store-halted feed is due for another probe.
@@ -1134,7 +1164,7 @@ pub enum Due {
     /// Not yet. The next probe is due at this epoch second.
     Later {
         /// When.
-        due_unix: i64,
+        due_secs: i64,
     },
     /// The allowance is spent and the reason says so.
     ///
@@ -1293,7 +1323,7 @@ impl FeedState {
     /// Record that the live rung's frontier month stalled.
     ///
     /// A month already on the list for this rung is UPDATED: its attempts are
-    /// added (saturating), its reason replaced, and its `retried` and `at_unix`
+    /// added (saturating), its reason replaced, and its `retried` and `at_secs`
     /// kept. Pushing a fresh entry with `retried: 0` instead was W1-api1-8: each
     /// reconsideration that failed minted a full new allowance, so retries were
     /// unbounded and the list grew without limit.
@@ -1318,10 +1348,10 @@ impl FeedState {
             reason: why.to_owned(),
             // NEITHER FIELD IS STAMPED HERE. `observe` reads no clock,
             // deliberately — see its doc comment — so the idle ladder stamps
-            // `at_unix` the first time it sees the stall and `reconsider` is
+            // `at_secs` the first time it sees the stall and `reconsider` is
             // what moves `retried`.
             retried: 0,
-            at_unix: 0,
+            at_secs: 0,
             rung,
         });
     }
@@ -1358,7 +1388,7 @@ impl FeedState {
         self.probe = match kind {
             Halt::Store => Some(Probe {
                 made: 0,
-                due_unix: 0,
+                due_secs: 0,
             }),
             Halt::Credential | Halt::Configuration | Halt::Census => None,
         };
@@ -1561,8 +1591,8 @@ impl FeedState {
 ///
 /// # First sighting stamps, and never retries
 ///
-/// A fresh stall carries `at_unix == 0` because [`FeedState::observe`] reads no
-/// clock. The first idle pass that sees one stamps it with `now_unix` and does
+/// A fresh stall carries `at_secs == 0` because [`FeedState::observe`] reads no
+/// clock. The first idle pass that sees one stamps it with `now_secs` and does
 /// **not** reconsider it — `now - now` is zero, which is below the threshold. So
 /// the wait is always at least [`STALL_RECHECK_SECS`] and never less.
 ///
@@ -1570,13 +1600,13 @@ impl FeedState {
 ///
 /// One pass over the stall list of every non-terminal feed. Nothing here reads
 /// the store, opens a socket or takes a lock.
-pub fn reconsider(feeds: &mut [FeedState], now_unix: i64) -> Option<String> {
+pub fn reconsider(feeds: &mut [FeedState], now_secs: i64) -> Option<String> {
     // FIRST SIGHTING. Stamping is separate from choosing so that a stall
     // recorded this second cannot also be retried this second.
     for state in feeds.iter_mut() {
         for stall in &mut state.stalls {
-            if stall.at_unix == 0 {
-                stall.at_unix = now_unix;
+            if stall.at_secs == 0 {
+                stall.at_secs = now_secs;
             }
         }
     }
@@ -1588,7 +1618,7 @@ pub fn reconsider(feeds: &mut [FeedState], now_unix: i64) -> Option<String> {
             continue;
         }
         for (nth, stall) in state.stalls.iter().enumerate() {
-            let due = now_unix.saturating_sub(stall.at_unix) >= STALL_RECHECK_SECS;
+            let due = now_secs.saturating_sub(stall.at_secs) >= STALL_RECHECK_SECS;
             if stall.retried >= STALL_RETRIES || !due {
                 continue;
             }
@@ -1603,7 +1633,7 @@ pub fn reconsider(feeds: &mut [FeedState], now_unix: i64) -> Option<String> {
     let feed = state.feed.display().to_owned();
     let stall = state.stalls.get_mut(nth)?;
     stall.retried = stall.retried.saturating_add(1);
-    stall.at_unix = now_unix;
+    stall.at_secs = now_secs;
     let month = stall.month;
     let rung = stall.rung;
     let retried = stall.retried;
@@ -2218,6 +2248,15 @@ impl Control {
         control
     }
 
+    /// Whether any feed's pull seat is held right now — an autopilot tick, a
+    /// hand pull, a press leg or a recovery request is between taking its seat
+    /// and journaling its record. One atomic load. The shutdown drain waits on
+    /// this (autopilot-4, lifecycle-1, D-2583).
+    #[must_use]
+    pub fn seats_held(&self) -> bool {
+        self.seats.load(Ordering::Acquire) != 0
+    }
+
     /// The current stop generation, captured by a run when it starts.
     #[must_use]
     pub fn epoch(&self) -> u64 {
@@ -2660,6 +2699,60 @@ pub fn drivable(yesterday: Day) -> Vec<FeedState> {
         .collect()
 }
 
+/// Appends every feed [`drivable`] answers for `yesterday` that `feeds` does
+/// not already hold, and returns how many it added. A feed already held keeps
+/// its state — frontier, attempts, backoff and halt — untouched.
+///
+/// # Why the feed set is re-derived (clock-1, D-2578)
+///
+/// `fly` derived its feeds ONCE, after the clock-wait loop, and `drivable`
+/// drops a feed whose floor cannot be reached from the clock's today. A boot
+/// clock that was valid but wrong — a year before a fixed floor — therefore
+/// dropped Groww and Zerodha for the life of the process: nothing named them on
+/// the page, and an empty set made "every feed is halted" vacuously true. The
+/// loop now calls this whenever the finished day changes, so a feed the clock
+/// once hid is admitted once the clock is right. A feed is never REMOVED here:
+/// one already driving is not dropped by a later clock step back.
+///
+/// # Cost
+///
+/// O(`FEED_COUNT`²) — five feeds — once per finished-day change, not per tick.
+pub fn admit_newly_drivable(feeds: &mut Vec<FeedState>, yesterday: Day) -> usize {
+    let mut added = 0_usize;
+    for state in drivable(yesterday) {
+        let mut held = false;
+        for have in feeds.iter() {
+            if have.feed == state.feed {
+                held = true;
+                break;
+            }
+        }
+        if !held {
+            feeds.push(state);
+            added = added.saturating_add(1);
+        }
+    }
+    added
+}
+
+/// [`admit_newly_drivable`] once per new finished day, with the event that
+/// says it admitted anything. Split from `fly` to keep it under the line
+/// ceiling. clock-1, D-2578.
+fn rederive_on_new_day(feeds: &mut Vec<FeedState>, derived_for: &mut Day, day: Day) {
+    if day == *derived_for {
+        return;
+    }
+    let admitted = admit_newly_drivable(feeds, day);
+    *derived_for = day;
+    if admitted > 0 {
+        let _noted = telemetry::emit(
+            &telemetry::Event::info("autopilot", "feeds admitted")
+                .with("count", telemetry::Value::Uint(admitted as u64))
+                .with("day", telemetry::Value::Str(&day.to_string())),
+        );
+    }
+}
+
 /// Yesterday, in IST, from a moment.
 ///
 /// **Never today.** A session still running yields a partial day the
@@ -2775,6 +2868,8 @@ pub async fn fly(site: Loaded) {
     let mut cache = SeriesCache::default();
     let instruments = cache.get(&site, timeframe).len();
     let mut feeds = drivable(yesterday);
+    // The finished day the feed set was last derived for (clock-1, D-2578).
+    let mut derived_for = yesterday;
     // THE TARGET IS PUBLISHED BEFORE THE GRACE WINDOW, NOT AFTER THE FIRST
     // ROUND.
     //
@@ -2822,6 +2917,11 @@ pub async fn fly(site: Loaded) {
         // rung (`Place`, D-0949), which `round` swaps in.
         let now = yesterday_ist(std::time::SystemTime::now())
             .map(|day| (day, site.universe().generation));
+        // A NEW FINISHED DAY RE-DERIVES THE FEED SET, so a feed a wrong boot
+        // clock hid is admitted once the clock is right (clock-1, D-2578).
+        if let Some((day, _)) = now {
+            rederive_on_new_day(&mut feeds, &mut derived_for, day);
+        }
         let rung = rung_for(day_clear, now);
         // THE SERIES IS PER RUNG. `tracked_series` answers "which
         // instrument-months does this timeframe still owe", and the day rung
@@ -3086,7 +3186,8 @@ fn survey(
 /// A feed that is not store-halted costs one enum comparison.
 fn probe_store_halts(site: &Loaded, feeds: &mut [FeedState]) -> String {
     use std::fmt::Write as _;
-    let now = ingest::epoch_secs(std::time::SystemTime::now());
+    // ELAPSED TIME, ON THE MONOTONIC CLOCK (clock-3, D-2579).
+    let now = steady_secs();
     let mut said = String::new();
     for state in feeds.iter_mut() {
         if state.halt_kind != Some(Halt::Store) {
@@ -3114,7 +3215,7 @@ fn probe_store_halts(site: &Loaded, feeds: &mut [FeedState]) -> String {
                         let wait = probe_secs(made);
                         state.probe = Some(Probe {
                             made: attempt,
-                            due_unix: now.saturating_add(i64::try_from(wait).unwrap_or(i64::MAX)),
+                            due_secs: now.saturating_add(i64::try_from(wait).unwrap_or(i64::MAX)),
                         });
                         // THE LAST PROBE NAMES NO NEXT ONE. `made` reaches
                         // `STORE_PROBES` here and the next pass answers
@@ -3138,8 +3239,8 @@ fn probe_store_halts(site: &Loaded, feeds: &mut [FeedState]) -> String {
                     }
                 }
             }
-            Due::Later { due_unix } => {
-                let left = due_unix.saturating_sub(now).max(0);
+            Due::Later { due_secs } => {
+                let left = due_secs.saturating_sub(now).max(0);
                 let made = state.probe.map_or(0, |p| p.made);
                 let _ = write!(
                     said,
@@ -3417,7 +3518,8 @@ async fn round(
         let retrying = if terminal {
             None
         } else {
-            reconsider(feeds, ingest::epoch_secs(std::time::SystemTime::now()))
+            // Elapsed time, on the monotonic clock (clock-3, D-2579).
+            reconsider(feeds, steady_secs())
         };
         let note = stall_note(feeds);
         let carry_on = retrying.is_some();
@@ -4576,6 +4678,114 @@ mod tests {
             )),
             "only HTTP feeds are driven"
         );
+    }
+
+    /// clock-1, D-2578: a feed the boot clock's day dropped is admitted once
+    /// the finished day is one its floor reaches, and a feed already held keeps
+    /// its state. A day before every fixed floor drops Groww and Zerodha; the
+    /// re-derivation over a 2026 day appends both after the Dhan state that was
+    /// already driving, whose attempts are not reset. On the old `fly` there
+    /// was no re-derivation: the dropped feeds stayed dropped.
+    #[test]
+    fn a_feed_dropped_by_a_wrong_boot_clock_is_admitted_once_the_clock_is_right() {
+        let wrong = Day::new(1999, 12, 31).expect("1999-12-31");
+        let right = Day::new(2026, 10, 5).expect("2026-10-05");
+        let early: Vec<pull::vendor::Feed> = drivable(wrong).into_iter().map(|f| f.feed).collect();
+        assert!(!early.contains(&pull::vendor::Feed::Groww), "{early:?}");
+        assert!(!early.contains(&pull::vendor::Feed::Zerodha), "{early:?}");
+
+        let mut dhan = drivable(right)
+            .into_iter()
+            .next()
+            .expect("Dhan is drivable on a right clock");
+        assert_eq!(dhan.feed, pull::vendor::Feed::Dhan);
+        dhan.attempts = 7;
+        let mut feeds = vec![dhan];
+        assert_eq!(admit_newly_drivable(&mut feeds, right), 2);
+        let driven: Vec<pull::vendor::Feed> = feeds.iter().map(|f| f.feed).collect();
+        assert_eq!(
+            driven,
+            vec![
+                pull::vendor::Feed::Dhan,
+                pull::vendor::Feed::Groww,
+                pull::vendor::Feed::Zerodha,
+            ]
+        );
+        assert_eq!(feeds[0].attempts, 7, "a held feed's state was replaced");
+        // Idempotent: the same day, and a later one, add nothing.
+        assert_eq!(admit_newly_drivable(&mut feeds, right), 0);
+        let later = Day::new(2026, 10, 6).expect("2026-10-06");
+        assert_eq!(admit_newly_drivable(&mut feeds, later), 0);
+        // A clock stepping BACK never removes a feed already driving.
+        assert_eq!(admit_newly_drivable(&mut feeds, wrong), 0);
+        assert_eq!(feeds.len(), 3);
+        // From nothing, the whole drivable set, in descriptor order.
+        let mut empty = Vec::new();
+        assert_eq!(admit_newly_drivable(&mut empty, right), 3);
+        // And the loop calls it: a source check on `fly`.
+        let source = include_str!("autopilot.rs");
+        let fly = source
+            .split_once("pub async fn fly(")
+            .expect("fly")
+            .1;
+        let fly = &fly[..fly.find("\n}\n").expect("fly ends")];
+        assert!(fly.contains("rederive_on_new_day(&mut feeds, &mut derived_for, day)"));
+        // The helper only acts on a CHANGED day.
+        let mut some = Vec::new();
+        let mut derived = right;
+        rederive_on_new_day(&mut some, &mut derived, right);
+        assert!(some.is_empty(), "the same day re-derived");
+        rederive_on_new_day(&mut some, &mut derived, later);
+        assert_eq!((some.len(), derived), (3, later));
+    }
+
+    /// clock-3, D-2579: the store-probe schedule and the stall re-check are
+    /// measured on the monotonic clock. `steady_secs` is never zero and never
+    /// goes back; the two production sites that feed `store_due` and
+    /// `reconsider` read it and not the wall clock. On the old code both sites
+    /// passed `ingest::epoch_secs(SystemTime::now())`, which a clock step
+    /// moves, so the source assertions fail there. The pure functions keep
+    /// their arithmetic: a probe armed at steady second `t` is `Later` at
+    /// `t + 59` and `Now` at `t + 60`, whatever a wall clock would read.
+    #[test]
+    fn a_clock_step_neither_spends_nor_delays_the_store_probe_schedule() {
+        let first = steady_secs();
+        assert!(first >= 1, "zero is the never-stamped value");
+        let second = steady_secs();
+        assert!(second >= first, "the steady clock went back");
+
+        let armed_at = 1_000_i64;
+        let probe = Probe {
+            made: 1,
+            due_secs: armed_at.saturating_add(i64::try_from(probe_secs(0)).unwrap()),
+        };
+        assert_eq!(probe_secs(0), 60);
+        assert_eq!(
+            store_due(Some(&probe), armed_at + 59),
+            Due::Later {
+                due_secs: armed_at + 60
+            }
+        );
+        assert_eq!(store_due(Some(&probe), armed_at + 60), Due::Now { made: 1 });
+        assert_eq!(store_due(Some(&probe), i64::MAX), Due::Now { made: 1 });
+        assert!(matches!(
+            store_due(Some(&probe), i64::MIN),
+            Due::Later { .. }
+        ));
+
+        let source = include_str!("autopilot.rs");
+        let probes = source
+            .split_once("fn probe_store_halts(")
+            .expect("probe_store_halts")
+            .1;
+        let probes = &probes[..probes.find("\n}\n").expect("ends")];
+        assert!(probes.contains("let now = steady_secs();"));
+        assert!(!probes.contains(concat!("epoch_secs(std::time::", "SystemTime::now())")));
+        assert!(source.contains("reconsider(feeds, steady_secs())"));
+        assert!(!source.contains(concat!(
+            "reconsider(feeds, ingest::epoch_secs(std::time::",
+            "SystemTime::now()))"
+        )));
     }
 
     /// **WHICH FEEDS THE PULL LOOP ACTUALLY DRIVES, BY NAME.**
@@ -7015,17 +7225,17 @@ mod tests {
             store_due(
                 Some(&Probe {
                     made: 3,
-                    due_unix: 1_000
+                    due_secs: 1_000
                 }),
                 999
             ),
-            Due::Later { due_unix: 1_000 }
+            Due::Later { due_secs: 1_000 }
         );
 
         // AND THE ALLOWANCE IS EXHAUSTED, one probe at a time, to the bound.
         let mut probe = Probe {
             made: 0,
-            due_unix: 0,
+            due_secs: 0,
         };
         let mut now = 0i64;
         for expected in 0..STORE_PROBES {
@@ -7037,7 +7247,7 @@ mod tests {
             now = now.saturating_add(i64::try_from(wait).expect("a small wait"));
             probe = Probe {
                 made: made.saturating_add(1),
-                due_unix: now,
+                due_secs: now,
             };
         }
         // THE (STORE_PROBES + 1)th IS REFUSED, AND LOUDLY.
@@ -7157,7 +7367,7 @@ mod tests {
             first.probe,
             Some(Probe {
                 made: 0,
-                due_unix: 0
+                due_secs: 0
             }),
             "a store halt arms a probe due immediately"
         );
@@ -7193,14 +7403,14 @@ mod tests {
 
     /// A feed carrying one stalled month, stamped as though it happened
     /// `age` seconds ago.
-    fn stalled(month_at: YearMonth, retried: u8, at_unix: i64) -> FeedState {
+    fn stalled(month_at: YearMonth, retried: u8, at_secs: i64) -> FeedState {
         FeedState {
             stalls: vec![Stall {
                 month: month_at,
                 attempts: MAX_MONTH_ATTEMPTS,
                 reason: String::from("attempted 3 times and never completed: timed out"),
                 retried,
-                at_unix,
+                at_secs,
                 rung: pull::vendor::Granularity::Day1,
             }],
             ..FeedState::new(
@@ -7235,7 +7445,7 @@ mod tests {
             None,
             "the pass that first sees a stall stamps it and waits"
         );
-        assert_eq!(feeds[0].stalls[0].at_unix, now);
+        assert_eq!(feeds[0].stalls[0].at_secs, now);
         assert_eq!(feeds[0].stalls[0].retried, 0);
 
         // AND IT STAYS WAITING UNTIL THE FULL INTERVAL HAS PASSED.
@@ -7416,7 +7626,7 @@ mod tests {
                 month(2020, 5),
             );
             state.halt(Halt::Store, String::from("disk full"));
-            state.probe = Some(Probe { made, due_unix: 0 });
+            state.probe = Some(Probe { made, due_secs: 0 });
             let said = probe_store_halts(&site, std::slice::from_mut(&mut state));
             assert_eq!(state.probe.map(|probe| probe.made), Some(made + 1));
             said
@@ -7436,7 +7646,7 @@ mod tests {
             store_due(
                 Some(&Probe {
                     made: STORE_PROBES,
-                    due_unix: 0
+                    due_secs: 0
                 }),
                 0
             ),
@@ -7534,7 +7744,7 @@ mod tests {
             attempts: MAX_MONTH_ATTEMPTS,
             reason: String::from("attempted 3 times and never completed: connection reset"),
             retried: 0,
-            at_unix: now.saturating_sub(STALL_RECHECK_SECS * 2),
+            at_secs: now.saturating_sub(STALL_RECHECK_SECS * 2),
             rung: pull::vendor::Granularity::Minute1,
         });
 

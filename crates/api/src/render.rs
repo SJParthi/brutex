@@ -3247,6 +3247,15 @@ fn collect_csv_dirs(dir: &std::path::Path, depth: usize, out: &mut Vec<String>) 
     if has_csv {
         out.push(dir.to_string_lossy().into_owned());
     }
+    // CHILDREN IN NAME ORDER, SO A CAPPED WALK TAKES THE SAME FOLDERS ON EVERY
+    // MACHINE. `read_dir` order is the filesystem's — hashed on one, creation
+    // order on another — and the walk stops one past the cap, so WHICH sixty-one
+    // folders it kept depended on it; `discover_folders` sorted only after the
+    // truncation had already chosen (§3 rule 5; determinism-1, D-2571). Sorted,
+    // the kept set is the first sixty-one in lexical depth-first order. The
+    // sort is O(c log c) in one directory's children, inside a walk that is
+    // already O(entries) and startup-only (`docs/06-limits.md` §34).
+    children.sort();
     for c in children {
         collect_csv_dirs(&c, depth - 1, out);
     }
@@ -3325,6 +3334,69 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// determinism-1, D-2571: a walk past the cap keeps the SAME folders
+    /// whatever order the filesystem lists them in. Two trees of seventy CSV
+    /// folders, one created in ascending and one in descending name order, both
+    /// keep exactly the lexically first sixty-one. On the old walk (children
+    /// recursed in raw `read_dir` order) at least one of the two fails on any
+    /// filesystem whose listing follows creation order, and a hashed listing
+    /// fails both. A nested tree pins the depth-first shape; a tree holding
+    /// exactly the cap, one past it, and none pins the boundaries.
+    #[test]
+    fn a_capped_folder_walk_offers_the_same_folders_whatever_the_directory_order() {
+        let made = 70;
+        let keep = MAX_FOLDER_SUGGESTIONS + 1;
+        for descending in [false, true] {
+            let root = std::env::temp_dir().join(format!(
+                "brutex-det1-{}-{descending}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).unwrap();
+            let order: Vec<usize> = if descending {
+                (0..made).rev().collect()
+            } else {
+                (0..made).collect()
+            };
+            for i in order {
+                let d = root.join(format!("f{i:03}"));
+                std::fs::create_dir_all(&d).unwrap();
+                std::fs::write(d.join("x.csv"), "a\n").unwrap();
+            }
+            let mut found = Vec::new();
+            collect_csv_dirs(&root, 6, &mut found);
+            let expected: Vec<String> = (0..keep)
+                .map(|i| root.join(format!("f{i:03}")).to_string_lossy().into_owned())
+                .collect();
+            std::fs::remove_dir_all(&root).unwrap();
+            assert_eq!(found, expected, "descending={descending}");
+        }
+        // Depth-first in name order: a parent before its children, and `a/z`
+        // before `b`, whatever was created first.
+        let root = std::env::temp_dir().join(format!("brutex-det1-nest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for rel in ["b", "a/z", "a", "a/m/q"] {
+            let d = root.join(rel);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("x.csv"), "a\n").unwrap();
+        }
+        let mut found = Vec::new();
+        collect_csv_dirs(&root, 6, &mut found);
+        let expected: Vec<String> = ["a", "a/m/q", "a/z", "b"]
+            .iter()
+            .map(|rel| root.join(rel).to_string_lossy().into_owned())
+            .collect();
+        // Boundaries: an empty tree keeps nothing; depth 0 walks nothing.
+        let mut none = Vec::new();
+        collect_csv_dirs(&root.join("absent"), 6, &mut none);
+        let mut zero = Vec::new();
+        collect_csv_dirs(&root, 0, &mut zero);
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(found, expected);
+        assert!(none.is_empty());
+        assert!(zero.is_empty());
     }
 
     /// The store filter bar shows the bar length it was given, one pill per

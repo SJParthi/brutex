@@ -59,6 +59,33 @@ pub const MAX_STORE_READ_CONCURRENT: usize = 8;
 /// D-2327.
 pub const MAX_LOG_READ_CONCURRENT: usize = 4;
 
+#[cfg(test)]
+thread_local! {
+    /// Whether a reader cache's mutex was free when this thread reached its
+    /// cold open, as [`note_slot_free`] last saw it. Test builds only.
+    /// expr-3, cand-2, D-2576.
+    pub(crate) static SLOT_FREE_AT_OPEN: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Records whether `slot` can be locked right now, from the cold-open point
+/// of a reader cache (expr-3, cand-2, D-2576). A cache that still held its own
+/// guard there would park every other detail permit behind one cold open; the
+/// probe retries briefly, so a different thread's momentary take or put-back
+/// is not mistaken for this thread's own hold. Test builds only.
+#[cfg(test)]
+pub(crate) fn note_slot_free<T>(slot: &std::sync::Mutex<T>) {
+    let mut free = false;
+    for _ in 0..10_000 {
+        if !matches!(slot.try_lock(), Err(std::sync::TryLockError::WouldBlock)) {
+            free = true;
+            break;
+        }
+        std::thread::yield_now();
+    }
+    SLOT_FREE_AT_OPEN.with(|cell| cell.set(Some(free)));
+}
+
 static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 static CALENDAR_ACTIVE: AtomicUsize = AtomicUsize::new(0);
 static STORE_READ_ACTIVE: AtomicUsize = AtomicUsize::new(0);

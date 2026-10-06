@@ -198,7 +198,17 @@ pub(crate) async fn request_audited(
         }
     };
     let id = attempt.id();
+    // A DISCONNECT MUST NOT WRITE ON THIS WORKER (log-2, D-2577). The armed
+    // attempt lived in this future, so a client that went away dropped it HERE,
+    // on the Tokio worker, and `Attempt::drop` wrote `Cancelled` through a
+    // flock, a write and an fsync synchronously — the same stall D-1445 moved
+    // the post-handler terminal off the workers to avoid. The guard's `Drop`
+    // hands the armed attempt to the blocking pool instead.
+    let mut armed = DropOffWorker(Some(attempt));
     let mut response = handler.await;
+    let Some(attempt) = armed.0.take() else {
+        return failure("the armed invocation record went missing", true).into_response();
+    };
     let status = response.status();
     let phase = if status.is_server_error() {
         Phase::Failed
@@ -232,6 +242,32 @@ pub(crate) async fn request_audited(
             true,
         )
         .into_response(),
+    }
+}
+
+/// An armed value whose drop runs on the blocking pool, not on the async worker
+/// that drops it. log-2, D-2577.
+struct DropOffWorker<T: Send + 'static>(Option<T>);
+
+impl<T: Send + 'static> Drop for DropOffWorker<T> {
+    fn drop(&mut self) {
+        if let Some(value) = self.0.take() {
+            drop_off_worker(value);
+        }
+    }
+}
+
+/// Drops `value` on Tokio's blocking pool when a runtime is current, and here
+/// otherwise — no runtime means no worker to stall. A runtime already shutting
+/// down drops the closure, and with it `value`, on this thread: the write still
+/// happens, synchronously, which is what it always did. log-2, D-2577.
+fn drop_off_worker<T: Send + 'static>(value: T) {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            let _detached: tokio::task::JoinHandle<()> =
+                handle.spawn_blocking(move || drop(value));
+        }
+        Err(_) => drop(value),
     }
 }
 

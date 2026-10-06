@@ -231,10 +231,11 @@ pub struct Progress {
     pub passes: u32,
     /// How many subsequent passes actually retried at least one failed feed.
     pub retries: u32,
-    /// The store's row count when the run started; `None` when the census
-    /// total does not fit a `u64` (see [`rows_now`]).
+    /// The row count of the press's own feeds' censuses when the run started;
+    /// `None` when that total does not fit a `u64` (see [`rows_in`]). Another
+    /// feed's rows are not in it (press-1, D-2574).
     pub rows_at_start: Option<u64>,
-    /// The store's row count as of the last pass; `None` as above.
+    /// The same count as of the last pass; `None` as above.
     pub rows_now: Option<u64>,
     /// One per vendor, in the order the feeds were ticked.
     pub feeds: Vec<FeedReport>,
@@ -666,6 +667,59 @@ pub(crate) fn rows_now(site: &Site) -> Option<u64> {
     )
 }
 
+/// [`rows_now`], over only the store vendors a press drives.
+///
+/// # Why a press counts only its own feeds (press-1, D-2574)
+///
+/// The pass loop judges a pass idle when the store did not grow. It read the
+/// row total across EVERY vendor's census, and a hand `/pull/spot` or
+/// `/pull/fno` on another feed is gated only by that feed's own seat, not by
+/// the press's run slot. A hand pull on feed B that landed rows during a press
+/// on feed A therefore read as the PRESS's growth: the idle counter reset, the
+/// next pass ran at once instead of counting toward the three-clean-pass stop,
+/// a long hand pull could walk the press to its [`MAX_PASSES`] ceiling, and the
+/// summary's "N bar(s) added" counted bars the press never landed.
+///
+/// A vendor in `vendors` that has no census contributes nothing; an empty
+/// `vendors` sums nothing and answers `Some(0)`, so a press of hand-built legs
+/// naming no feed proves no growth rather than borrowing another feed's.
+///
+/// # Cost
+///
+/// As [`rows_now`], plus one scan of `vendors` per census — at most
+/// `pull::vendor::FEED_COUNT` by [`press_vendors`].
+pub(crate) fn rows_in(site: &Site, vendors: &[brutex_core::vendor::Vendor]) -> Option<u64> {
+    let (censuses, _) = crate::server::census_now(site);
+    rows_total(
+        censuses
+            .iter()
+            .filter(|census| vendors.contains(&census.vendor))
+            .filter_map(census::VendorCensus::counters)
+            .map(|(_months, rows, _entries)| rows),
+    )
+}
+
+/// The store vendors a press's feed groups write under, once each, in group
+/// order. A group whose name is no feed, or whose feed has no store prefix,
+/// adds nothing (`legs_from` already refuses the first; D-0906). press-1,
+/// D-2574.
+pub(crate) fn press_vendors(groups: &[(String, Vec<Leg>)]) -> Vec<brutex_core::vendor::Vendor> {
+    let mut out: Vec<brutex_core::vendor::Vendor> = Vec::new();
+    for (name, _) in groups {
+        for feed in pull::vendor::Feed::ALL {
+            if feed.wire() != name.as_str() {
+                continue;
+            }
+            if let Some(vendor) = feed.store_vendor()
+                && !out.contains(&vendor)
+            {
+                out.push(vendor);
+            }
+        }
+    }
+    out
+}
+
 /// The vendors' row counts added, or `None` when the total does not fit.
 ///
 /// A plain `.sum()` here panicked on overflow, and the release profile aborts
@@ -786,6 +840,51 @@ impl Drop for Finisher {
                 );
             }
         });
+    }
+}
+
+/// The telemetry run key, held by a whole press for as long as it runs.
+///
+/// # Why the press holds it and not its first leg (atomics-1, D-2582)
+///
+/// `server::note_run_started` claims the key once per LEG, and the legs of one
+/// press run concurrently, one chain per feed. The first leg to start took the
+/// key and RELEASED it when that leg finished — while its sibling feeds' legs
+/// were still running — so their later events carried no run, or a fresh id
+/// the next leg claimed, and `/logs?run=` showed one press as several broken
+/// stories. D-0238 said the outermost scope takes the key; the code took it per
+/// leg. The conductor now claims it before the first pass and releases it when
+/// the conductor ends — normally, or when its task is dropped — so every leg's
+/// claim fails while the press holds it, and a leg that did not claim does not
+/// release. A lone hand pull or an autopilot round still claims its own.
+///
+/// A guard that LOST the claim (another run already held the key) holds
+/// nothing and releases nothing: the holder's key is not cleared.
+struct PressRun<'sink> {
+    sink: Option<&'sink telemetry::Sink>,
+    run: Option<u64>,
+}
+
+impl<'sink> PressRun<'sink> {
+    /// Claims `id` on `sink`, if there is one and the key is free.
+    fn claim(sink: Option<&'sink telemetry::Sink>, id: u64) -> Self {
+        let run = sink.filter(|sink| sink.claim_run(id)).map(|_| id);
+        // Emitted after the claim, so it carries the press's own key.
+        let _dropped_when_filtered = telemetry::emit(
+            &telemetry::Event::info("pull.press", "started")
+                .with("run_key_held", telemetry::Value::Bool(run.is_some())),
+        );
+        Self { sink, run }
+    }
+}
+
+impl Drop for PressRun<'_> {
+    fn drop(&mut self) {
+        if let (Some(sink), Some(run)) = (self.sink, self.run) {
+            // `release_run` compares before it clears: a key a later run has
+            // since taken is left alone.
+            sink.release_run(run);
+        }
     }
 }
 
@@ -1123,8 +1222,16 @@ where
         site: Loaded::clone(&site),
         run,
     };
+    // ONE TELEMETRY RUN FOR THE WHOLE PRESS, taken before any leg starts and
+    // dropped before the finisher (atomics-1, D-2582). See `PressRun`.
+    let press_run = PressRun::claim(telemetry::global(), telemetry::now_millis().unsigned_abs());
     let groups = by_feed(legs);
-    let started_rows = rows_now(&site);
+    // THIS PRESS'S FEEDS ONLY. Every row count below — the start, the ticker,
+    // the before/after of each pass and the end — is over the store vendors the
+    // press drives, so a hand pull on another feed cannot reset the idle
+    // counter or be reported as bars this press added (press-1, D-2574).
+    let vendors = press_vendors(&groups);
+    let started_rows = rows_in(&site, &vendors);
     with_progress(&site, run, |progress| {
         progress.rows_at_start = started_rows;
         progress.rows_now = started_rows;
@@ -1140,10 +1247,11 @@ where
 
     let ticker = {
         let site = Loaded::clone(&site);
+        let vendors = vendors.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(ROWS_TICK).await;
-                let seen = rows_now(&site);
+                let seen = rows_in(&site, &vendors);
                 with_progress(&site, run, |progress| progress.rows_now = seen);
             }
         })
@@ -1157,10 +1265,10 @@ where
             break;
         }
         let repairing = outcomes.contains(&PassOutcome::Retry);
-        let before = rows_now(&site);
+        let before = rows_in(&site, &vendors);
         run_pass(&site, run, &groups, &mut outcomes, &checkpoints, &request).await;
         passes = passes.saturating_add(1);
-        let after = rows_now(&site);
+        let after = rows_in(&site, &vendors);
         with_progress(&site, run, |progress| {
             progress.passes = passes;
             progress.rows_now = after;
@@ -1203,7 +1311,7 @@ where
     // handle returns only once the task has actually stopped. D-2760.
     ticker.abort();
     let _cancelled = ticker.await;
-    let current_rows = rows_now(&site);
+    let current_rows = rows_in(&site, &vendors);
     with_progress(&site, run, |progress| {
         progress.rows_now = current_rows;
         progress.finished = Some(run_summary(
@@ -1214,6 +1322,8 @@ where
                 .map(|(now, start)| now.saturating_sub(start)),
         ));
     });
+    // Released after the summary, the last thing the press does.
+    drop(press_run);
 }
 
 /// Terminal feeds remain part of the final verdict even while other feeds
@@ -3021,6 +3131,182 @@ mod tests {
         );
         assert!(passes.respond(&[]).await.is_empty());
         assert_eq!(observed(&passes.site), progress);
+    }
+
+    /// atomics-1, D-2582: a press holds ONE telemetry run key from before its
+    /// first leg until the conductor ends. Two feeds' legs are replayed on a
+    /// standalone sink in the order the defect needs — the fast feed's leg
+    /// starts and finishes while the slow feed's leg is still running — with
+    /// each leg doing exactly what `server::note_run_started` and
+    /// `note_run_finished` do (claim, and release only what it claimed). The
+    /// key stays the press's throughout and is zero only after the press
+    /// guard drops. Without the press guard (the old shape) the fast leg
+    /// claimed the key and its release cleared it under the slow leg.
+    #[test]
+    fn a_press_of_two_feeds_keeps_one_run_key_until_the_last_leg_finishes() {
+        let dir = crate::scratch::path("atomics1-press-run");
+        let _ = std::fs::remove_dir_all(&dir);
+        let sink = telemetry::Sink::open(&telemetry::Config::new(&dir)).expect("a standalone sink");
+        let leg_claims = |id: u64| sink.claim_run(id).then_some(id);
+        let leg_ends = |claimed: Option<u64>| {
+            if let Some(run) = claimed {
+                sink.release_run(run);
+            }
+        };
+
+        // The old shape, for contrast: the fast leg's release empties the key.
+        let fast = leg_claims(11);
+        let slow = leg_claims(12);
+        assert_eq!((fast, slow), (Some(11), None));
+        leg_ends(fast);
+        assert_eq!(sink.run(), 0, "the old shape: the slow leg is left with no run");
+        leg_ends(slow);
+
+        // The press holds it.
+        let press = PressRun::claim(Some(&sink), 7);
+        assert_eq!(press.run, Some(7));
+        let fast = leg_claims(11);
+        let slow = leg_claims(12);
+        assert_eq!((fast, slow), (None, None), "no leg takes a key the press holds");
+        leg_ends(fast);
+        assert_eq!(sink.run(), 7, "the slow feed's events still carry the press");
+        leg_ends(slow);
+        assert_eq!(sink.run(), 7);
+        drop(press);
+        assert_eq!(sink.run(), 0, "released only when the press ends");
+
+        // A guard that lost the claim releases nothing it did not take.
+        assert!(sink.claim_run(99));
+        let loser = PressRun::claim(Some(&sink), 7);
+        assert_eq!(loser.run, None);
+        drop(loser);
+        assert_eq!(sink.run(), 99, "the holder's key survives the loser's drop");
+        sink.release_run(99);
+        // Id zero is never a key; no sink holds nothing.
+        assert_eq!(PressRun::claim(Some(&sink), 0).run, None);
+        assert_eq!(PressRun::claim(None, 7).run, None);
+        assert_eq!(sink.run(), 0);
+
+        // And the conductor takes it before the first pass.
+        let source = include_str!("pullrun.rs");
+        let conduct = source
+            .split_once("async fn conduct_with<")
+            .expect("conduct_with")
+            .1;
+        let claim = conduct.find("PressRun::claim(telemetry::global()").expect("claimed");
+        let first_pass = conduct.find("run_pass(&site").expect("a pass");
+        assert!(claim < first_pass, "the key is claimed after a pass ran");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A census of `rows` one-row months for `vendor`, written over whatever
+    /// that vendor held. Synthetic: no market bar is claimed to exist.
+    fn write_census_rows(site: &Site, vendor: brutex_core::vendor::Vendor, rows: u16) {
+        use brutex_core::instrument::{Exchange, Segment};
+        use brutex_core::symbol::Symbol;
+        use pull::manifest::{Entry, EntryKey, Manifest, manifest_path};
+        use store::path::{Timeframe, YearMonth};
+
+        let mut census = Manifest::open(vendor, &[], &[]).expect("empty fixture");
+        for n in 0..rows {
+            census
+                .record(Entry {
+                    key: EntryKey {
+                        contract: None,
+                        exchange: Exchange::Nse,
+                        segment: Segment::Index,
+                        symbol: Symbol::new("NIFTY").expect("symbol"),
+                        timeframe: Timeframe::MINUTE_1,
+                        month: YearMonth::new(2000 + n / 12, u8::try_from(n % 12 + 1).expect("month"))
+                            .expect("month"),
+                    },
+                    rows: 1,
+                    first_ts_micros: 1,
+                    last_ts_micros: 1,
+                })
+                .expect("record counter");
+        }
+        std::fs::write(manifest_path(&site.store_root, vendor), census.image())
+            .expect("write fixture census");
+    }
+
+    /// press-1, D-2574: rows a hand pull lands on ANOTHER feed during a press
+    /// neither reset the press's idle counter nor count as bars it added. The
+    /// press drives Zerodha only; its leg lands nothing, and the first two
+    /// calls each grow Dhan's census by a row. On the old conductor (every
+    /// vendor's rows) passes 1 and 2 read as growth, so it ran five passes and
+    /// reported `rows_now == Some(2)` from `Some(0)`; now the three clean
+    /// passes stop it at three with nothing added.
+    #[tokio::test]
+    async fn foreign_feed_growth_does_not_reset_the_press_idle_counter() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicU16::new(0));
+        let counted = std::sync::Arc::clone(&calls);
+        let progress = simulated(
+            "press1-foreign-growth",
+            vec![leg("zerodha", "1day")],
+            move |site, _leg| {
+                let n = counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                if n <= 2 {
+                    write_census_rows(&site, brutex_core::vendor::Vendor::Dhan, n);
+                }
+                std::future::ready(receipt(200, "STORED"))
+            },
+        )
+        .await;
+        assert_eq!(progress.passes, CLEAN_EMPTY_PASSES, "{progress:?}");
+        assert_eq!(progress.rows_at_start, Some(0));
+        assert_eq!(progress.rows_now, Some(0), "another feed's rows were counted");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    /// The press's OWN growth still resets the idle counter, so the filter
+    /// did not blind the loop: Zerodha's census grows on the first call.
+    #[tokio::test]
+    async fn the_press_own_feed_growth_still_counts() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicU16::new(0));
+        let counted = std::sync::Arc::clone(&calls);
+        let progress = simulated(
+            "press1-own-growth",
+            vec![leg("zerodha", "1day")],
+            move |site, _leg| {
+                let n = counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                if n == 1 {
+                    write_census_rows(&site, brutex_core::vendor::Vendor::Zerodha, 1);
+                }
+                std::future::ready(receipt(200, "STORED"))
+            },
+        )
+        .await;
+        assert_eq!(progress.passes, CLEAN_EMPTY_PASSES + 1, "{progress:?}");
+        assert_eq!((progress.rows_at_start, progress.rows_now), (Some(0), Some(1)));
+    }
+
+    /// `press_vendors` over every feed name, an unknown name, a duplicate and
+    /// none; and `rows_in` over the empty set, one vendor, both and a vendor
+    /// with no census.
+    #[test]
+    fn a_press_counts_exactly_its_own_store_vendors() {
+        use brutex_core::vendor::Vendor;
+        let group = |name: &str| (name.to_owned(), vec![leg(name, "1day")]);
+        assert!(press_vendors(&[]).is_empty());
+        assert!(press_vendors(&[group("nobody"), group("")]).is_empty());
+        for feed in pull::vendor::Feed::ALL {
+            let got = press_vendors(&[group(feed.wire()), group(feed.wire())]);
+            assert_eq!(got, feed.store_vendor().into_iter().collect::<Vec<_>>(), "{feed:?}");
+        }
+        let all: Vec<(String, Vec<Leg>)> =
+            pull::vendor::Feed::ALL.iter().map(|feed| group(feed.wire())).collect();
+        assert_eq!(press_vendors(&all).len(), pull::vendor::Feed::ALL.len());
+
+        let held = site("press1-rows-in");
+        write_census_rows(&held, Vendor::Dhan, 2);
+        write_census_rows(&held, Vendor::Zerodha, 3);
+        assert_eq!(rows_in(&held, &[]), Some(0));
+        assert_eq!(rows_in(&held, &[Vendor::Dhan]), Some(2));
+        assert_eq!(rows_in(&held, &[Vendor::Zerodha]), Some(3));
+        assert_eq!(rows_in(&held, &[Vendor::Dhan, Vendor::Zerodha]), Some(5));
+        assert_eq!(rows_in(&held, &[Vendor::Groww]), Some(0));
+        assert_eq!(rows_now(&held), Some(5));
     }
 
     /// A synthetic census change, not an assertion that market bars exist.

@@ -832,11 +832,16 @@ pub fn grid_rows(series: usize) -> usize {
 ///   unreadable contributes nothing and says so elsewhere — [`VendorCensus::note`]
 ///   is already loud about it, and inventing rows for it here would be a
 ///   different lie from the one just fixed.
-/// * **Swept.** `NSE-INDEX-NIFTY` and `NSE-INDEX-BANKNIFTY`, always. `CLAUDE.md`
-///   §1 fixes the engine surface at exactly these two, so their absence is the
-///   single most important thing this page can report. Before the first ingest
-///   there is nothing held at all, and a blank grid would say nothing where
-///   "two rows, neither held" says what to do next.
+/// * **Always on.** `NSE-INDEX-NIFTY` and `NSE-INDEX-BANKNIFTY`, held or not.
+///   They are the two spot indices of the engine surface `CLAUDE.md` §1 names;
+///   the surface is wider than them — it also takes the cash equities of the
+///   208 F&O underlyings that are shares (D-0506, D-0682) — but only the two
+///   indices are seeded here. An equity on the surface that is not held has no
+///   row on `/store`; it appears once a census holds it. Before the first
+///   ingest there is nothing held at all, and a blank grid would say nothing
+///   where "two rows, neither held" says what to do next. (This said §1 fixed
+///   the surface "at exactly" the two indices, which stopped being true at
+///   D-0506; Z1-slice12-F2, D-2570.)
 ///
 /// # Cost
 ///
@@ -1111,10 +1116,14 @@ pub fn held_page(
         .collect()
 }
 
-/// The two series the engine sweeps, as the store spells them.
+/// The two spot-index series the engine sweeps, as the store spells them.
 ///
-/// `CLAUDE.md` §1 fixes the surface at exactly these two. They are always on the
-/// axis, held or not, so an empty store still names what it is missing.
+/// They are the always-on rows of the axis, held or not, so an empty store
+/// still names what it is missing. They are NOT the whole engine surface:
+/// `CLAUDE.md` §1 also sweeps the cash equities of the 208 F&O underlyings that
+/// are shares (D-0506, D-0682), and those are not seeded here — an unheld swept
+/// equity has no row on `/store`. Seeding all 210 would be a product choice the
+/// page has not made (Z1-slice12-F2, D-2570).
 #[must_use]
 pub fn swept_series() -> Vec<Series> {
     ["BANKNIFTY", "NIFTY"]
@@ -1144,6 +1153,32 @@ mod tests {
 
     fn day(y: u16, m: u8, d: u8) -> Day {
         Day::new(y, m, d).expect("a real date")
+    }
+
+    /// Z1-slice12-F2, D-2570: the `held_series` and `swept_series` docs said
+    /// `CLAUDE.md` §1 fixed the engine surface "at exactly these two" indices,
+    /// which D-0506 made false. On the old source the needle is present twice
+    /// and this fails; the needle is split so this test does not match itself.
+    /// The second half pins what the docs now say the function does: two
+    /// always-on rows, both spot indices, no equity seeded.
+    #[test]
+    fn the_axis_docs_do_not_say_the_surface_is_two_indices() {
+        let source = include_str!("census.rs");
+        let needle = concat!("exactly these", " two");
+        assert_eq!(source.matches(needle).count(), 0, "a stale surface claim is back");
+        let stale = concat!("fixes the surface", " at exactly");
+        assert_eq!(source.matches(stale).count(), 0);
+        let swept = swept_series();
+        assert_eq!(swept.len(), 2);
+        for s in &swept {
+            assert_eq!(s.segment, Segment::Index);
+            assert_eq!(s.exchange, Exchange::Nse);
+            assert!(s.contract.is_none());
+        }
+        assert!(swept.contains(&nifty()));
+        assert!(swept.contains(&series(Segment::Index, "BANKNIFTY")));
+        // An empty census list still yields exactly the two always-on rows.
+        assert_eq!(held_series(&[]), swept);
     }
 
     /// The spot index series, as the store spells it.
