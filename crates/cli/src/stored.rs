@@ -3584,7 +3584,11 @@ pub(crate) fn exact_minute_context_from_span(
             "accepted prior IST session {prior_session_day} has no three terminal minutes for GapFib"
         )
     })?;
-    if expected_third < final_window.from
+    // THE THREE TERMINAL MINUTES LIE IN THE FINAL WINDOW: `holds` states that,
+    // where `expected_third < final_window.from` restated half of it with a
+    // comparison no session on the measured calendar can bring to its
+    // boundary (G18-cli-b-27, D-2034). `expected_third` never passes `to`.
+    if !final_window.holds(expected_third)
         || third_last != Some(expected_third)
         || second_last != Some(expected_second)
         || last != Some(last_minute)

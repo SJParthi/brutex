@@ -63379,3 +63379,23 @@ reached them waited without a bound.
   (G18-cli-b-26).
 
 **Rejected.** Raising the mutation timeout. It only makes each hang cost more.
+
+### D-2034 — Exact-minute context states the final window with `holds` — 2026-10-06
+
+**What was observed.** A targeted rerun of the exact-minute condition left two
+mutants alive: `expected_third < final_window.from` with `<` changed to `<=`
+and to `==`. Each differs from the original only when the final window is
+shorter than three minutes. No session on the measured calendar is that short.
+`kind_of` returns either the full 09:15-15:29 session or an entry from its
+literal `IRREGULAR` table, and the shortest final window there is 60 minutes
+(825-884, and the second windows 690-749). No test can supply a shorter one.
+
+**Decided.** The clause is `!final_window.holds(expected_third)`, which says
+"the third-last minute lies in the final window". `expected_third` is
+`last_minute - 2`, and `last_minute` is the window's `to` or a dated cash close
+inside it (914 or 929), so it never passes `to`. Behaviour is therefore
+identical. The `!` is held by every accepting test (G18-cli-b-27). The run
+over the full suite is in RESULT-cli-b.md.
+
+**Rejected.** A calendar entry made up to reach the boundary. The calendar is
+measured data, and §3 rule 1 forbids inventing it.
