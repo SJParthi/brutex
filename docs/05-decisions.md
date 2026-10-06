@@ -64258,3 +64258,22 @@ D-1843 names; on the one-month fixture they are not visible in wall time, and
 on a multi-year span they are UNVERIFIED (not measured). The measurements are
 the ignored tests `cli::tests::o1cli_6_selection_measurement` and
 `cli::audited_stored::tests::o1cli_cost_measurement`.
+
+### D-3695 — The first 370 condition bits are pinned to their names, not only their indices — 2026-10-06
+
+**Finding (gap audit, coordinator's #15; verified here).** V-01 says condition
+bit indices are stable across releases, and CLAUDE.md §3 rule 8 forbids
+renumbering or reusing a bit. No test pinned a NAME to a position at or past
+74: `the_table_is_a_contiguous_run_of_indices` checks index == row, and the
+document check reads positions 74 and up from the code. **Planted and
+confirmed:** on a scratch copy, swapping `plain(366, "is_tuesday")` and
+`plain(367, "is_wednesday")` in `crates/vocab/src/table.rs`, with the two
+`docs/03-vocabulary.md` rows swapped to match, left all 11 `vocab` test
+binaries green, while every stored mask carrying bit 366 would then read as
+a Wednesday.
+
+**The change.** `vocab::table::the_first_370_bits_keep_their_names` pins an
+FNV-1a 64 fingerprint of `index:name` over the first 370 rows. A row
+appended past them does not move it; a renamed, swapped or reused bit does.
+On the same planted swap it fails ("a bit below 370 changed its name").
+Test-only, so it adds no Gate 18 mutant. V-01 names it.

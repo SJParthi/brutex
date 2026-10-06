@@ -1015,3 +1015,41 @@ fn no_condition_names_the_volatility_index() {
         );
     }
 }
+
+/// FNV-1a 64 over `index:name\n` for the first `rows` rows of the table.
+fn names_fingerprint(rows: usize) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for def in TABLE.iter().take(rows) {
+        for byte in format!("{}:{}\n", def.index, def.name).bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    hash
+}
+
+/// **EVERY BIT KEEPS ITS NAME, NOT ONLY ITS INDEX.** V-01, CLAUDE.md §3 rule 8.
+///
+/// `the_table_is_a_contiguous_run_of_indices` checks index == row, and the
+/// document check reads positions 74 and up from the CODE, so swapping two
+/// appended names (366 `is_tuesday` and 367 `is_wednesday`, in the table and
+/// the document together) passed every test while every stored mask carrying
+/// bit 366 began to read as a Wednesday (D-3695). The first 370 rows are
+/// frozen here by a fingerprint of `index:name`; a NEW row past them does not
+/// move it, and a renamed, swapped or reused bit does.
+#[test]
+fn the_first_370_bits_keep_their_names() {
+    const FROZEN_ROWS: usize = 370;
+    const FROZEN: u64 = 5_295_476_529_618_805_606;
+    assert!(TABLE.len() >= FROZEN_ROWS);
+    assert_eq!(
+        names_fingerprint(FROZEN_ROWS),
+        FROZEN,
+        "a bit below {FROZEN_ROWS} changed its name: bits are never renamed, swapped or reused"
+    );
+    // The fingerprint reads names, so the planted swap moves it.
+    assert_ne!(
+        names_fingerprint(FROZEN_ROWS),
+        names_fingerprint(FROZEN_ROWS - 1)
+    );
+}
