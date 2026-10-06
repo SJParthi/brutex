@@ -63139,3 +63139,218 @@ longer be reached, so it was removed. The frontier writer keeps its own
 
 **Rejected.** Changing the test to expect the 4,096 text. That would
 leave the two descent doors with different bounds.
+
+### D-2770 — In-process journal writers queue; only another process is refused — 2026-10-04
+
+**Finding (conc:server1-1).** `Journal::appended` took the audit journal's
+`flock` with `try_lock`. The legs of one Pull press run in parallel and every
+leg appends its run record (and one record per failed member) to the same
+`audit/pull.journal`; `flock` conflicts between two open file descriptions of
+one process, so a leg whose append met another leg's `write_all` + `sync_all`
+window was refused ("this run is NOT in the journal") and its landed bars had
+no `/audit` row.
+
+**Decision.** A process-wide `APPENDING` mutex is held across the whole append,
+taken before the file lock. Writers in this process wait for each other (one
+fsync per queued writer); `Flock::try_lock` is then met only by another
+process, which is still refused by name, as before.
+
+**Proof.** `a_second_writer_in_this_process_waits_for_the_first_instead_of_being_refused`
+in `crates/api/src/audit.rs`; the cross-process refusal stays covered by
+`a_held_journal_lock_refuses_a_second_writer_without_appending`. FB-71.
+
+### D-2771 — Shutdown stops pull walks and bounds the drain — 2026-10-04
+
+**Finding (conc:server1-2).** After Ctrl-C, axum's graceful shutdown waited
+for every in-flight request, and a hand `/pull/spot` or `/pull/fno` answers
+only when its whole walk ends (up to half an hour). Nothing on the shutdown
+path moved the stop epoch `broker_run` checks before each instrument, and
+`ctrl_c` keeps SIGINT, so a second Ctrl-C did nothing and SIGKILL mid-walk
+was the only way out.
+
+**Decision.** The serve arm wraps the signal in `stopping_walks`, which pauses
+the autopilot when the signal fires: the epoch moves, and every spot walk
+(hand, press or autopilot) breaks at its next instrument and journals its
+partial run. `serve_limited` bounds the drain after the signal by
+`ConnectionLimits::drain_timeout` (`SHUTDOWN_GRACE`, 10 s, when served); a
+request still running then is not waited for, and a Warn event plus a stderr
+line say so. The F&O walk has no per-instrument stop check, so it is cut at
+the end of the bounded drain and runtime grace rather than journalling a
+partial run; that remains an honest limit. A second Ctrl-C is still not
+handled; the exit is now bounded without it.
+
+**Proof.** `the_shutdown_signal_stops_a_walk_that_captured_the_epoch_before_it`
+and `a_request_still_running_after_the_signal_does_not_hold_the_server_open`
+in `crates/api/src/server.rs` (`shutdown_tests`). FB-72.
+
+### D-2772 — A front end built after startup is served without a restart — 2026-10-04
+
+**Finding (conc:server2-1).** `Assets::new` resolved `web/build` once. When it
+was absent at startup, every page answered the 503 that names the build
+command, and kept answering it after that command succeeded, until a restart
+the page never mentioned.
+
+**Decision.** `Assets::respond` re-resolves the build directory on the
+not-built branch only (one `canonicalize` per request while nothing is
+built); the branch that found a build at startup costs nothing extra. The
+startup banner and `Build` stay the startup observation they are documented
+as. A build directory that is a symlink retargeted after startup is still
+resolved through the startup root; not changed here.
+
+**Proof.** `a_build_made_after_startup_is_served_without_a_restart` in
+`crates/api/src/assets.rs`. FB-73.
+
+### D-2773 — The in-process serve lock is counted; the last holder releases it — 2026-10-04
+
+**Finding (conc:server2-2).** The in-process set of served roots had no
+count. A second `take_serve_lock` of a root in one process got a
+pass-through whose drop removed the key the first still owned, and the
+first's drop unlocked `serve.lock` while the pass-through still served the
+store, so another process could serve it too.
+
+**Decision.** The set becomes a map from canonical root to a holder count and
+the one file lock. A take of a held root increments the count; a fresh take
+opens, locks and stamps the file while holding the map's lock and inserts the
+entry only on success. `ServeLock`'s drop decrements, and the last holder
+removes the entry and unlocks the file under the map's lock, so no take can
+see the key gone while the file is still locked. `release_root` is removed.
+
+**Proof.** `the_serve_lock_is_released_by_the_last_holder_in_this_process_only`
+in `crates/api/src/server.rs`. FB-74.
+
+### D-2774 — A status probe's look at the execution lease does not refuse a claimant — 2026-10-04
+
+**Finding (conc:runs-2).** `execution_lease::probe`, called by every
+`/backtest/run.json` poll, takes the lease file's exclusive lock for an
+instant. A `Lease::acquire` (CLI sweep or browser launch) that met that
+instant was refused `Busy`, "another sweep owns this store's execution
+lease", with no sweep running.
+
+**Decision.** A second empty file, `.sweep-execution-v1.probe-gate`, beside
+the lease. `acquire` creates it before the lease, tries the lease once, and on
+`Busy` takes the gate (blocking) and tries again; a probe holds the gate
+(blocking) around its look at the lease. Under the gate a refusal can only be
+an owner's (or a non-participating older binary's). Nobody holds the gate
+across a run, so the wait is one probe's open, lock, two stats and unlock.
+A lease file left by a binary that predates the gate is probed without it
+until a current claimant has created the gate. The gate is never removed;
+`verify` applies to it as to the lease.
+
+**Proof.** `a_claim_that_meets_a_probe_mid_look_owns_the_slot_once_the_probe_ends`
+in `crates/cli/src/execution_lease.rs`. FB-75.
+
+### D-2775 — A Stop press persists its STOP with the pull slot free — 2026-10-04
+
+**Finding (conc:runs-3).** `pull_run_stop` held `site.run` (a std mutex, on an
+async worker) through `recovery_control::stop`: directory creation, a journal
+append and three fsyncs. Every chain's progress write and every
+`/pull/run.json` poll blocked its own worker until the disk answered.
+
+**Decision.** The handler sets `stopping` and takes the active-ID lock while
+holding `site.run` (lock order `run` then `recovery_active`, unchanged), then
+drops `site.run` and persists through `recovery_control::stop_active` under
+the active-ID lock alone, which is what already serialises a STOP with a
+clear or an activation. Answers and refusals are unchanged.
+
+**Proof.** `the_stop_is_persisted_with_the_pull_slot_free` in
+`crates/api/src/recovery_control.rs`. FB-76.
+
+### D-2776 — A second browser sweep admission is refused, not queued — 2026-10-04
+
+**Finding (conc:runs-4).** Every sweep POST holds one of the four shared
+`detail::run` permits, then waited on the process-wide `ADMISSION` mutex
+while another admission did unbounded I/O. Three queued presses exhausted the
+pool, and every `detail::run` route (the run's own status poll included)
+answered `Saturated` until the first admission ended.
+
+**Decision.** The admission lock moves onto `Site` (`sweep_admission`) and is
+taken with `try_lock`: a press that meets another admission is refused
+`Busy` (409) at once, which is what the run being admitted would answer it,
+and holds its permit only for that refusal. Per `Site`, so two test sites
+never refuse each other. `docs/06-limits.md` is corrected to say so.
+
+**Proof.** `admission_io_runs_with_the_slot_unlocked_and_admissions_still_exclude_each_other`
+in `crates/api/src/sweeprun.rs`, now asserting the immediate refusal. FB-77.
+
+### D-2777 — An unchanged first page reuses the held search session — 2026-10-04
+
+**Finding (conc:apicache-2).** An unpinned `/expression-search.json` request
+dropped every held session of the same search and checkpoint and held a fresh
+reader that knew only the head, so one viewer's first-page load broke another
+viewer's deep pagination ("search cursor is not linked to this admitted
+snapshot") on any paused, stopped or exhausted search.
+
+**Decision.** `first_page` keeps a held session that observed exactly what
+the fresh reader observes (same root, identity, checkpoint, writer
+observation and interrupted count), moves it to the back of the LRU and
+serves from it; the fresh reader is dropped. Otherwise the old behaviour
+stands: same-checkpoint sessions are dropped, the fresh one held, at most
+eight. A pinned page also moves its session to the back of the LRU, so a
+session a viewer is paging through is not the first evicted by eight first
+pages of other searches (eviction is `pop_front`).
+
+**Proof.** `an_unchanged_first_page_keeps_the_held_session_and_its_learned_cursors`
+and `a_pinned_page_keeps_its_session_from_being_evicted_first` in
+`crates/api/src/expressionsearchjson.rs`. FB-78.
+
+### D-2778 — A finished browser task gives back the execution lease before its slot says finished — 2026-10-04
+
+**Finding (conc:runs-2, the sibling the finding names).** `TaskFinisher::finish`
+wrote the slot with `in_flight == false` and only then dropped itself, which
+is what released its execution lease. A press admitted in that gap passed the
+slot check and was refused `Busy` by `Lease::acquire`, "another sweep owns this
+store's execution lease", for a run that had ended. The abnormal-end path in
+`Drop` had the same order.
+
+**Decision.** Both paths drop the lease before taking the slot lock. Between
+the release and the publish a claimant (a CLI sweep, or the next press once the
+slot is written) may own the lease while the slot still shows the old run in
+flight; that answers a press `Busy` for one slot write, which is true, rather
+than the false "another sweep owns" for a run that ended.
+
+**Proof.** `a_finished_task_frees_the_execution_lease_before_its_slot_says_finished`
+in `crates/api/src/sweeprun.rs`, which holds the slot lock so `finish` stops at
+the publish and requires the lease to be free there. FB-79.
+
+### D-2779 — One serve-lock registry after the PR #74 merge: D-2773's counted map, D-1911's refusal text — 2026-10-06
+
+**Context.** This branch (D-2770..D-2778) was merged with PR #74's head after
+that head took the zero-work branch. Both sides had changed `take_serve_lock`
+in `crates/api/src/server.rs`. Theirs kept the original in-process
+`BTreeSet` of served roots, its `release_root` cleanup on every failed take,
+and its `ServeLock { held: Option<Flock>, root }` pass-through, and added
+`serve_lock_refusal` (locks-1, D-1911), which separates `WouldBlock` (another
+instance holds the lock, so its stamp is quoted) from `TryLockError::Error`
+(the host refused `flock`, and no instance is implied). Ours (D-2773) replaced
+the set with a map from canonical root to a holder count and the one file
+lock.
+
+**Decision.** One registry: D-2773's counted map. The set does not cover
+conc:server2-2. A pass-through's drop still removed the key a live holder
+owned, and the first holder's drop still unlocked the file while the
+pass-through served. So theirs could not stand in for ours. The refusal arm of
+the counted take now returns `serve_lock_refusal(store_root, &path, &refusal)`,
+so D-1911's host/instance split holds unchanged. `release_root` stays removed.
+The counted take holds the map's lock across open, lock and stamp, and inserts
+only on success, so a failed take has nothing to release. A failed stamp drops
+the file lock before the map's guard is released and leaves no entry, which is
+what D-1481's refusal path needs. D-2773's text stands as written; this entry
+is the note that its registry is the one that survived the merge.
+`stamp_serve_lock`'s doc comment, which the zero-work side had left stacked
+above `serve_lock_refusal`, goes back onto its own function.
+
+**Emit counts.** Each side moved `REACHED_IN_SERVER_TESTS` from 20 to 21 for a
+different site: D-1920 (P1-17-02) for the unstamped serve lock's WARN, D-2771
+for the bounded shutdown drain's WARN. Merged, the count is 22. The LIB target
+held 65 sites on their side (D-1765's two included) and 64 on ours, which
+counted D-2771's WARN as 63 -> 64 without D-1765. Merged, it holds 66. Both
+history lines are kept in `crates/api/src/emitted.rs`.
+
+**Proof.** `the_serve_lock_is_released_by_the_last_holder_in_this_process_only`
+(FB-74) and the D-1911 refusal tests in `crates/api/src/server.rs`, together
+with `emitted::tests` accounting for every site.
+
+**The `cli` descent test.** The same merge's first attempt also fixed
+`the_elite_descent_refuses_a_top_the_api_cannot_serve_before_any_read`; PR
+#74's head had meanwhile fixed it as D-2001, so this branch takes D-2001's
+`crates/cli/src/lib.rs` unchanged and adds nothing to it.

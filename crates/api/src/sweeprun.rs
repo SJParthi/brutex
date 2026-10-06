@@ -1473,6 +1473,12 @@ impl TaskFinisher {
                 .into(),
             );
         }
+        // THE LEASE IS GIVEN BACK BEFORE THE SLOT SAYS FINISHED. The other
+        // order published `in_flight == false` while this task still owned
+        // the store's execution lease, so a press admitted in that gap passed
+        // the slot check and was refused `Busy` by a run that had ended.
+        // conc:runs-2, D-2778.
+        drop(self.lease.take());
         let mut slot = self
             .site
             .sweep
@@ -1496,6 +1502,8 @@ impl Drop for TaskFinisher {
             };
             audit.finish(phase, 0).err()
         });
+        // Given back before the slot says ended, as in `finish` (D-2778).
+        drop(self.lease.take());
         let mut slot = self
             .site
             .sweep
@@ -1898,7 +1906,18 @@ type JsonHeaders = [(axum::http::HeaderName, &'static str); 1];
 /// One route answer, as [`refused`] and the handlers build it.
 type Answer = (axum::http::StatusCode, JsonHeaders, String);
 
-/// Serialises browser ADMISSIONS, so the slot's own mutex never has to.
+/// Admits one run: refuses while one is in flight, prepares it with the slot
+/// UNLOCKED, and installs it.
+///
+/// `prepare` does every fallible, I/O-bound admission step and returns the
+/// accepted [`Progress`] with whatever the caller keeps. Under the site's
+/// admission lock nothing else installs into the slot between the busy check and the install,
+/// and a [`TaskFinisher`] only writes a slot whose run is in flight, which the
+/// busy check has just ruled out. A refusal from `prepare` leaves the slot as
+/// it was. The slot's own lock is taken twice, each time for O(1) work:
+/// `api::sweeprun::admission_io_runs_with_the_slot_unlocked_and_admissions_still_exclude_each_other`.
+///
+/// # The admission lock serialises browser ADMISSIONS, so the slot's own mutex never has to
 ///
 /// Admission does file-system work no constant bounds: two canonicalizations,
 /// the execution lease, an external-log walk of up to 8 MiB, a launch
@@ -1910,29 +1929,25 @@ type Answer = (axum::http::StatusCode, JsonHeaders, String);
 /// slot lock was doing there; the slot itself is now held only for one read
 /// and one write.
 ///
-/// Process-wide rather than per-`Site`: a process serves one `Site`, and two
-/// test sites admitting at once only wait for each other, never deadlock,
-/// because nothing takes this lock while holding the slot.
-static ADMISSION: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Admits one run: refuses while one is in flight, prepares it with the slot
-/// UNLOCKED, and installs it.
-///
-/// `prepare` does every fallible, I/O-bound admission step and returns the
-/// accepted [`Progress`] with whatever the caller keeps. Under [`ADMISSION`]
-/// nothing else installs into the slot between the busy check and the install,
-/// and a [`TaskFinisher`] only writes a slot whose run is in flight, which the
-/// busy check has just ruled out. A refusal from `prepare` leaves the slot as
-/// it was. The slot's own lock is taken twice, each time for O(1) work:
-/// `api::sweeprun::admission_io_runs_with_the_slot_unlocked_and_admissions_still_exclude_each_other`.
+/// `try_lock`, NOT `lock`: refused rather than queued. Each POST holds one of
+/// the four shared `detail::run` permits before it gets here, so a press that
+/// WAITED for another admission parked a permit for that admission's whole
+/// I/O, and three such presses answered `Saturated` on every unrelated
+/// `detail::run` route, the run's own status poll included. A press that
+/// meets another admission is refused as `Busy` at once, as it would be by the
+/// run that admission is about to install. The lock is per `Site`
+/// ([`crate::server::Site::sweep_admission`]), so two test sites admitting at
+/// once never refuse each other. conc:runs-4, D-2776.
 fn admit<T>(
     site: &crate::server::Loaded,
     busy: impl FnOnce() -> Answer,
     prepare: impl FnOnce() -> Result<(Progress, T), Answer>,
 ) -> Result<T, Answer> {
-    let _admitting = ADMISSION
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _admitting = match site.sweep_admission.try_lock() {
+        Ok(admitting) => admitting,
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return Err(busy()),
+    };
     let in_flight = site
         .sweep
         .lock()
@@ -3982,9 +3997,10 @@ mod tests {
     /// log walk, the audit `begin` and the marker run. While it is parked: a
     /// poll takes the slot at once (it used to wait out the whole admission on
     /// an async worker); a second admission does not reach its own `prepare`
-    /// and has not answered 50 ms later, because admissions are still one at a
-    /// time. Released, the first installs its in-flight run and the second
-    /// then answers `Busy` without ever preparing. A refusing `prepare` leaves
+    /// and is refused `Busy` at once rather than queued behind the first,
+    /// because admissions are still one at a time and a queued one parked a
+    /// shared `detail::run` permit (conc:runs-4, D-2776). Released, the first
+    /// installs its in-flight run. A refusing `prepare` leaves
     /// a finished slot exactly as it was, and a busy slot never runs `prepare`.
     #[test]
     fn admission_io_runs_with_the_slot_unlocked_and_admissions_still_exclude_each_other() {
@@ -4021,24 +4037,33 @@ mod tests {
                 polled.is_ok_and(|slot| slot.is_none()),
                 "a poll during admission I/O must take the slot at once and see no run yet"
             );
-            let second = scope.spawn(|| {
-                super::admit(&site, busy, || {
+            // REFUSED, NOT QUEUED (conc:runs-4, D-2776). A second admission
+            // that waited parked a shared `detail::run` permit for the
+            // first's whole I/O. The bound only turns a regression (a wait)
+            // into a failure rather than a hang; the fixed path never meets it.
+            let (answered, answer) = std::sync::mpsc::channel();
+            let second_prepared = &second_prepared;
+            let second = scope.spawn(move || {
+                let refused = super::admit(site_ref, busy, || {
                     second_prepared.store(true, Ordering::SeqCst);
                     Ok((running(2), "second"))
-                })
+                });
+                answered.send(()).expect("the test is listening");
+                refused
             });
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            assert!(
-                !second.is_finished(),
-                "a second admission waits for the first"
-            );
-            assert!(!second_prepared.load(Ordering::SeqCst));
+            let refused_at_once = answer
+                .recv_timeout(std::time::Duration::from_mins(1))
+                .is_ok();
             release.send(()).expect("the first admission is waiting");
             assert_eq!(first.join().expect("first").ok(), Some("first"));
             let (status, _, body) = second
                 .join()
                 .expect("second")
-                .expect_err("the first run is in flight");
+                .expect_err("another admission is in progress");
+            assert!(
+                refused_at_once,
+                "a second admission is refused while the first is admitting, not queued"
+            );
             assert_eq!(status, axum::http::StatusCode::CONFLICT, "{body}");
         });
         assert!(!first_busy.load(Ordering::SeqCst));
@@ -4209,6 +4234,66 @@ mod tests {
         let slot = site.sweep.lock().expect("private slot");
         assert!(slot.as_ref().expect("completed").report.is_some());
         drop(slot);
+        std::fs::remove_dir_all(&site.store_root).expect("private cleanup");
+    }
+
+    /// **A finished task gives its execution lease back before its slot says
+    /// finished.** conc:runs-2, D-2778.
+    ///
+    /// The slot was written with `in_flight == false` while the finisher still
+    /// owned the lease, so a press admitted in that gap passed the slot check
+    /// and was refused `Busy` by a run that had ended. The test holds the slot
+    /// lock, so `finish` stops exactly where it publishes; the lease must
+    /// already be free there. The bound only turns a regression (a lease held
+    /// until the slot is written) into a failure rather than a hang.
+    #[test]
+    fn a_finished_task_frees_the_execution_lease_before_its_slot_says_finished() {
+        let (site, _id, guard) = durable_finisher("durable-task-lease-first");
+        let lease = cli::execution_lease::Lease::acquire(&site.store_root).expect("a free store");
+        let guard = guard.with_lease(lease);
+        guard.enter(cli::operation_audit::completed_boundary);
+        let mut done = site
+            .sweep
+            .lock()
+            .expect("private slot")
+            .clone()
+            .expect("started");
+        settle(&mut done, "private lease-order fixture".to_owned(), 10);
+        let slot = site.sweep.lock().expect("private slot");
+        std::thread::scope(|scope| {
+            let finishing = scope.spawn(move || guard.finish(done));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
+            let freed = loop {
+                match cli::execution_lease::Lease::acquire(&site.store_root) {
+                    Ok(next) => break Some(next),
+                    Err(cli::execution_lease::Refusal::Busy)
+                        if std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::yield_now();
+                    }
+                    Err(_) => break None,
+                }
+            };
+            assert!(
+                slot.as_ref().is_some_and(Progress::in_flight),
+                "the premise: the slot has not been published yet"
+            );
+            drop(slot);
+            finishing.join().expect("finish");
+            assert!(
+                freed.is_some(),
+                "the lease is free while the finished run is still being published"
+            );
+        });
+        assert!(
+            !site
+                .sweep
+                .lock()
+                .expect("private slot")
+                .as_ref()
+                .expect("published")
+                .in_flight()
+        );
         std::fs::remove_dir_all(&site.store_root).expect("private cleanup");
     }
 
