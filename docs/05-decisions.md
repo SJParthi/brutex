@@ -63877,3 +63877,22 @@ owner decision rather than built here.
 
 **Rejected.** Claiming the stamp proves the compiled bytes. It proves the
 tree at one instant before compilation.
+
+### D-3603 — A candidate detail file appears under its name only when whole — 2026-10-06
+
+**Finding (conc:cli2-5).** `candidate_trades::write_exact` created the file
+at its final name with `create_new`, then locked and filled it. A reader that
+took the shared lock in between, or met the file after a kill mid-write,
+found it empty or short and refused it as truncated, and every later writer
+met `AlreadyExists` over those bytes and refused the retry for good.
+
+**Decision.** The bytes go to a hidden sibling unique to this process and
+call (`.<name>.<pid>.<n>.partial`), are synced, and are linked into the final
+name with `hard_link`, which refuses an existing name as `create_new` did; a
+writer that loses the link race verifies the winner's bytes exactly as
+before. The sibling is removed after the link, and the directory sync that
+followed the write still follows it. Readers are unchanged. A kill can leave
+a hidden sibling; it never carries the final name.
+
+**Proof.** `a_detail_write_stopped_part_way_leaves_no_torn_file_and_the_retry_lands`
+in `crates/cli/src/candidate_trades/tests.rs`. FB-112.
