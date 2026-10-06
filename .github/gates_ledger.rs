@@ -1557,6 +1557,7 @@ const ALLOW_MEMBER: Allow = &[
     ("crates/api/src/credential_law.rs", 1),
     ("crates/api/src/merge.rs", 2),
     ("crates/api/src/server.rs", 4),
+    ("crates/api/src/spot.rs", 1),
     ("crates/api/src/sweeprun.rs", 5),
     ("crates/cli/src/batch.rs", 1),
     ("crates/cli/src/candidate_universe.rs", 1),

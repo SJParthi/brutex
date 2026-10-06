@@ -254,19 +254,19 @@ pub fn open(
     .map_err(|why| why.message)
 }
 
-enum OpenRefusalKind {
+pub(crate) enum OpenRefusalKind {
     Invalid,
     Absent,
     Unreadable,
 }
 
-struct OpenRefusal {
-    kind: OpenRefusalKind,
-    message: String,
+pub(crate) struct OpenRefusal {
+    pub(crate) kind: OpenRefusalKind,
+    pub(crate) message: String,
 }
 
 /// Preserve absence separately from invalid addresses and unreadable authority.
-fn open_classified(
+pub(crate) fn open_classified(
     store_root: &std::path::Path,
     parts: PathParts<'_>,
 ) -> Result<BarFile, OpenRefusal> {
