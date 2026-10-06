@@ -113,3 +113,14 @@ $283.20 since 07:10. That estimates 80.9%. WS3's cost_usd has not moved since 07
 (+$28.67 since 08:06). PAUSE was sent to all 12 at 08:28. RESUME comes at 12:12
 (trig_01VA1zhRBcZL5kLMKpFrS152), together with the audit workflow relaunch.
 Weekly extrapolation: about 27 + 0.28 x 85 = 51%.
+
+RECALIBRATION 2 (08:56 UTC). Owner meter screenshot: session 53% (resets in 3h15m), weekly
+all models 41%, weekly Fable 0%, plan Max (20x). The $3.5-per-point factor had read 88%, so it
+was far too high: the 08:28 PAUSE was unnecessary. The brutex sum was $656.30 at 08:39 and
+barely moved while paused.
+New estimate: 53 + (sum - 656.30) / 5.8. That is $307 of brutex spend for 53 points; Tickvault
+spends from the same window.
+Lines: stop the audit workflow at 80%; PAUSE every session at 90%. Weekly brake at 85%. The
+weekly moved 27 -> 41 while the window went 99 (prev) + 53 (this one).
+All 12 unfinished sessions got RESUME at 08:56. The audit workflow was relaunched as task
+wrp8x51vb, resumed from run wf_33b651ee-26e with fixboard/pr74-batch4 added.
