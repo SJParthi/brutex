@@ -25,3 +25,22 @@ Head: fd7e3a2 (pushed; tree clean; no cargo-mutants marker in the tree).
 ## Update during pause
 - clippy --workspace --all-targets --locked -D warnings at fd7e3a2: EXIT 101 (3 error lines). Log /tmp/g18bin/clippy.log.
 - m5 last log line: Found 9 mutants to test
+
+- m5 (stored.rs condition block, 9 mutants) finished:
+```
+MISSED   crates/cli/src/stored.rs:3587:23: replace < with <= in exact_minute_context_from_span in 29s build + 0s test
+9 mutants tested in 8m: 2 missed, 7 caught
+EXIT 2
+crates/cli/src/stored.rs:3590:9: replace || with && in exact_minute_context_from_span
+crates/cli/src/stored.rs:3589:9: replace || with && in exact_minute_context_from_span
+crates/cli/src/stored.rs:3588:9: replace || with && in exact_minute_context_from_span
+crates/cli/src/stored.rs:3587:23: replace < with > in exact_minute_context_from_span
+crates/cli/src/stored.rs:3588:23: replace != with == in exact_minute_context_from_span
+crates/cli/src/stored.rs:3589:24: replace != with == in exact_minute_context_from_span
+crates/cli/src/stored.rs:3590:17: replace != with == in exact_minute_context_from_span
+crates/cli/src/stored.rs:3587:23: replace < with == in exact_minute_context_from_span
+crates/cli/src/stored.rs:3587:23: replace < with <= in exact_minute_context_from_span
+
+[exited with code 0]
+```
+- Clippy failed on 2 missing-backticks doc lints in test files (pool_oos_tests.rs:491 `CATALOG_OUT`, selection_v6_tests.rs:631 `AlreadyExists`/`ENAMETOOLONG`). Fix on RESUME, then re-run clippy.
