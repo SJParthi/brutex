@@ -141,11 +141,11 @@ fn the_journal_note_of_a_run_with_decoder_skips_names_them() {
     );
     assert_eq!(record.outcome, audit::Outcome::Stored);
     assert!(
-        record.note.contains("skipped"),
+        record.note.contains("decoder skips"),
         "the note hides the skipped candle: {}",
         record.note
     );
-    assert!(record.note.contains("1 skipped"), "{}", record.note);
+    assert!(record.note.contains("1 decoder skips"), "{}", record.note);
     assert_eq!(
         record.note_bytes as usize,
         record.note.len(),
@@ -162,6 +162,32 @@ fn the_journal_note_of_a_run_with_decoder_skips_names_them() {
     );
     assert_eq!(
         clean.note,
-        "every row accounted for: stored, folded into an open bar, or dropped"
+        "every row accounted for: stored, folded or dropped"
     );
+    assert_eq!(clean.note_bytes as usize, clean.note.len(), "not cut");
+    // THE WIDEST COUNT STILL FITS (D-3128): the note was sized for 68 bytes
+    // and record version 2 holds 60.
+    let widest = pull::fetch::DecodeSkips {
+        null_price: usize::MAX,
+        ..pull::fetch::DecodeSkips::default()
+    };
+    let done = run(0, widest);
+    assert!(done.balances());
+    let record = audit::Record::of_run(
+        audit::Scope::Spot,
+        std::time::SystemTime::UNIX_EPOCH,
+        1,
+        "fixture",
+        window(),
+        &done,
+    );
+    assert!(
+        record
+            .note
+            .ends_with(&format!("{} decoder skips", usize::MAX)),
+        "{}",
+        record.note
+    );
+    assert!(record.note.len() <= audit::NOTE_CAPACITY);
+    assert_eq!(record.note_bytes as usize, record.note.len(), "not cut");
 }

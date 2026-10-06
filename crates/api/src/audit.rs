@@ -792,15 +792,18 @@ impl Record {
                 // This record's stride has no field for the count, so the
                 // note names it rather than claim three places for a row
                 // that is in a fourth.
+                //
+                // WITHIN NOTE_CAPACITY (60 since record version 2, D-2673) FOR
+                // ANY COUNT A usize CAN HOLD, and the clean sentence too: both
+                // were written for 68 bytes, and at 60 the clean one lost its
+                // last word on every run (D-3128).
                 if done.balances() && done.decoder_skips.total() > 0 {
-                    // Within NOTE_CAPACITY for any count a usize can hold.
                     format!(
-                        "every row accounted for; {} skipped by the decoder",
+                        "every row accounted for; {} decoder skips",
                         done.decoder_skips.total()
                     )
                 } else if done.balances() {
-                    "every row accounted for: stored, folded into an open bar, or dropped"
-                        .to_owned()
+                    "every row accounted for: stored, folded or dropped".to_owned()
                 } else {
                     "THE BOOKS DO NOT BALANCE — see the run's own page".to_owned()
                 }

@@ -1,0 +1,7 @@
+
+running 2 tests
+test d_0693_lists_each_bracket_site_at_a_commit_where_its_line_takes_a_lock ... ok
+test every_commit_the_store_records_cite_is_on_main_or_says_why_not ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.22s
+

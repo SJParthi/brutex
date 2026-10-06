@@ -1,0 +1,7 @@
+
+running 2 tests
+test a_directory_that_will_not_open_is_refused_with_the_operating_systems_words ... ok
+test a_member_that_will_not_open_stops_the_walk_and_names_the_member ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 0.00s
+

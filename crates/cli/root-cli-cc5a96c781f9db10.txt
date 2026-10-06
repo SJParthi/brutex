@@ -1,0 +1,32 @@
+
+running 25 tests
+test audited_range_command::settings::boolean_tests::the_prepared_page_over_a_stock_opens_with_its_gross_heading ... ok
+test audited_range_command::settings::boolean_tests::boolean_request_preflight_checks_override_non_utf8_and_actual_prepared_boundary ... ok
+test batch::verb_tests::sweep_all_and_pool_dispatch_refuse_an_all_misfiled_store ... ok
+test audited_stored::tests::recorded_runs_refuse_a_screen_budget_before_reading_or_writing ... ok
+test audited_stored::range::tests::strict_invalid_runtime_settings_refuse_before_real_source_admission_or_preparation ... ok
+test boolean_catalog_command::tests::impossible_statistics_budget_refuses_before_catalog_market_or_output_access ... ok
+test boolean_campaign::tests::a_resumed_refused_rung_prices_its_pinned_family_again ... ok
+test boolean_grammar_campaign::tests::absent_or_insufficient_physical_admission_refuses_before_journal_creation ... ok
+test audited_stored::tests::public_generated_probe_and_screen_agree_with_durable_results ... ok
+test boolean_search_command::integration_tests::generated_selected_search_reads_no_unselected_signal_rungs_and_resumes_exact_scope ... ok
+test checksum_receipts::tests::receipt_fifo_cannot_block_either_read_or_publication ... ok
+test fold_audit::io_tests::fold_command_fails_on_unreadable_authority_and_retains_every_later_verdict ... ok
+test fold_audit::io_tests::fold_command_reports_withheld_buckets_apart_from_disagreements ... ok
+test operator_boundary_tests::a_failed_range_never_claims_that_no_source_was_read ... ok
+test operator_boundary_tests::a_requested_stop_refuses_at_the_next_month_and_names_the_cancellation ... ok
+test operator_boundary_tests::stored_self_check_reports_partial_history_and_missing_feed_as_failures ... ok
+test boolean_campaign::tests::generated_all_eight_campaign_pauses_resumes_exactly_and_refuses_changed_source_or_child ... ok
+test readonly_file::tests::fifo_without_a_writer_refuses_and_the_probe_cannot_hang ... ok
+test research_policy::adversarial_tests::isolated_process_precedence_preserves_owner_selected_path_and_refusals ... ok
+test research_policy::tests::selected_runtime_profile_reaches_v6_preflight_and_preserves_override_refusals ... ok
+test results_report_tests::public_listing_obeys_the_configured_owned_root ... ok
+test tests::the_run_identity_still_folds_the_divided_ceiling_the_ladder_was_given ... ok
+test boolean_grammar_campaign::source_tests::generated_grammar_executes_and_recovers_real_eight_rung_receipts ... ok
+test boolean_search_command::integration_tests::generated_search_recovers_same_ordinal_and_refuses_missing_ancestry has been running for over 60 seconds
+test pool::tests::the_pool_verb_prints_its_whole_page_on_a_generated_store has been running for over 60 seconds
+test boolean_search_command::integration_tests::generated_search_recovers_same_ordinal_and_refuses_missing_ancestry ... ok
+test pool::tests::the_pool_verb_prints_its_whole_page_on_a_generated_store ... ok
+
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 1920 filtered out; finished in 170.20s
+

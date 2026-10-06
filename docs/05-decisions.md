@@ -63614,3 +63614,14 @@ round that owns it. DPM-01, DPM-02.
   D-3116 fixture `2024/01/25` now yields `25`. It is declared in
   `ATTACK_LITERAL`, after the base's groups (`DECLARED` 55).
 - Docs tails of 04, 05, 06 and 11 keep both sides, base first.
+- The journal notes fit record version 2. The base's D-2673 cut
+  `audit::NOTE_CAPACITY` from 68 to 60 bytes. The clean-run note `every row
+  accounted for: stored, folded into an open bar, or dropped` is 68 bytes, so
+  on the base alone every clean run's note was stored as `... an open bar,
+  or`. D-3180's skip note was sized for 68 and no longer fit for a wide count.
+  `the_journal_note_of_a_run_with_decoder_skips_names_them` failed on the merged
+  tree, measured as `left: "every row accounted for: stored, folded into an
+  open bar, or"`. The notes are now `every row accounted for: stored, folded or
+  dropped` (50 bytes) and `every row accounted for; N decoder skips` (at most
+  59 bytes for `usize::MAX`). The test asserts both, plus the widest count,
+  against `NOTE_CAPACITY`. DPR-02 is restated.
