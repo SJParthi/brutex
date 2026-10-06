@@ -153,3 +153,24 @@ Next poll: 12:40.
   failing test first (refute = no failing test, say so). #10 (Gate 18 build-timeout multiplier,
   my own commit 46439dee) is the coordinator's own critical-path item.
 - Weekly brake proposed lower: 75% (was 85%).
+
+## 12:40 UTC — owner approved the recommendations ("whichever is recommended go ahead")
+- Weekly brake is now 75% (was 85%). 5h lines unchanged: PAUSE all at 90%.
+- PARKED after their current step: L1 (attack/observability), L3 (attack/permutations),
+  L4 (attack/one-authority). L2 parks after the findings-ledger fix on attack/o1-p99. Each
+  writes PARK-L<n>.md here. Resume = send RESUME with the PARK note's next step.
+- Gap-audit candidates: hand check against docs/05, 06, 04 and 11.
+  - #11 KNOWN: coverage at 90% lines / 89% regions is a recorded limit (D-0677, D-1610,
+    docs/06-limits.md:237). No action.
+  - #10 coordinator's own: Gate 18 --build-timeout-multiplier 2 (D-2090, integ 46439dee, unpushed).
+    - Run 1283 shard 110 baseline: 598s build + 2045s test (CARGO_BUILD_JOBS=2, rust-cache
+      restored, 195 lock packages).
+    - Worker 2's first build is cold (copy_target=false), so ×2 = 1196s is likely too tight.
+      Measuring cold vs warm-deps locally (/tmp/claude-0/bt-measure.log) before choosing the
+      bound. Not pushing ×2.
+  - Routed, after each session's current hand-over (verify by a failing test first; refuted =
+    say so):
+    - WS2: #1 #16 (D-3680..3683)
+    - WS3: #2 #3 #4 #12 #13 #14 #17 on fixboard/pr74-batch5 (D-3684..3691)
+    - WS4: #7 #8 #9 #15 (D-3692..3695)
+    - WS5: #5 #6 look-ahead (D-3696..3699)
