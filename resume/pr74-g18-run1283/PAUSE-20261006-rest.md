@@ -23,3 +23,17 @@ exit 0
 
 [exited with code 0]
 ```
+
+## PAUSE 09:23 UTC (api untested cases)
+Head of pr74/g18-rest: **fea3659** (clean, pushed). RESULT-rest.md published at 70eca74.
+
+In progress, detached so they keep running: the 126 untested api mutants of run 1283 (every `crates/api` line in untested-mutants-run1283.md, which includes the shard-138 cases), split 63+63, in place with CI flags and `--build-timeout 1500`:
+- api-a in /home/user/wt-g18 (fea3659): log /tmp/claude-0/mut/api-a.log, results /tmp/claude-0/mut/api-a/mutants.out/
+- api-b in /home/user/wt-g18b (fea3659): log /tmp/claude-0/mut/api-b.log, results /tmp/claude-0/mut/api-b/mutants.out/
+Name lists: /tmp/claude-0/api-names.txt; regex args in /tmp/claude-0/api-re-{a,b}.txt.
+
+Next after RESUME:
+1. `grep 'mutants tested' /tmp/claude-0/mut/api-{a,b}.log; cat /tmp/claude-0/mut/api-{a,b}/mutants.out/{missed,timeout}.txt`.
+2. Kill each MISSED/TIMEOUT with a test or restructure (D-3650..3659, then D-3670..3679; rows G18-rest-37 onward). Prove each in place in a wt-g18 worktree, never in /tmp/claude-0 (its root-only permissions break the uid-65534 tests).
+3. Add an "api untested cases" section to RESULT-rest.md; validate, then push.
+Restart a half: `/tmp/claude-0/mut/api-run.sh /home/user/wt-g18 /tmp/claude-0/api-re-a.txt api-a` (and the b variant with wt-g18b).
