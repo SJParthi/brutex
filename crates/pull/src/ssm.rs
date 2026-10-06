@@ -749,6 +749,63 @@ fn refusal_detail(status: u16, body: &str) -> String {
     }
 }
 
+/// The class of a fault AWS NAMED, or `None` for a name this build has no
+/// class for.
+///
+/// # Why the name outranks the status
+///
+/// This used to be decided by `AccessDenied` or 403, then `ParameterNotFound`
+/// or 404, and everything else was `Unreachable`, which the caller reads as
+/// transport. An expired session, an unknown key, a bad signature (a clock
+/// skewed past what AWS accepts lands here) and a malformed request are none of
+/// them fixed by asking again, yet each was told "worth retrying" and every
+/// instrument paid its own read (conc8-3, D-2692). Which HTTP status AWS sends
+/// them under is not recorded in the charter and is not assumed here.
+///
+/// The identity, the signature and the key are the role's problem, so
+/// `AccessDenied`. A missing parameter, a missing version and a request AWS
+/// says is malformed all send the operator to the configured path, so
+/// `NotFound`. A throttle, AWS's own failure and a write conflict are the only
+/// three that a later read can clear.
+const fn fault_kind(name: &str) -> Option<SecretError> {
+    Some(match name.as_bytes() {
+        b"AccessDeniedException"
+        | b"ExpiredTokenException"
+        | b"UnrecognizedClientException"
+        | b"InvalidSignatureException"
+        | b"MissingAuthenticationToken"
+        | b"InvalidKeyId" => SecretError::AccessDenied,
+        b"ParameterNotFound" | b"ParameterVersionNotFound" | b"ValidationException" => {
+            SecretError::NotFound
+        }
+        b"ThrottlingException" | b"InternalServerError" | b"TooManyUpdates" => {
+            SecretError::Unreachable
+        }
+        _ => return None,
+    })
+}
+
+/// Which of the port's meanings a refused read is: the fault AWS named, read
+/// from the same allowlist [`refusal_detail`] echoes, and the status only when
+/// it named none.
+fn refusal_kind(status: u16, body: &str) -> SecretError {
+    // The first listed name the body carries decides; the list is a fixed
+    // twelve, so this is a compile-time bound, not a search over the data.
+    for name in AWS_FAULTS {
+        if body.contains(name) {
+            if let Some(kind) = fault_kind(name) {
+                return kind;
+            }
+            break;
+        }
+    }
+    match status {
+        403 => SecretError::AccessDenied,
+        404 => SecretError::NotFound,
+        _ => SecretError::Unreachable,
+    }
+}
+
 /// AWS fault names this build will repeat back, and nothing else.
 ///
 /// An ALLOWLIST rather than a filter, because the thing being kept out is not a
@@ -972,13 +1029,7 @@ pub async fn get_parameter(
     if !status.is_success() {
         // AWS names its faults in the body; the port's four variants are what
         // an operator acts on. Mapped rather than flattened.
-        let kind = if text.contains("AccessDenied") || status.as_u16() == 403 {
-            SecretError::AccessDenied
-        } else if text.contains("ParameterNotFound") || status.as_u16() == 404 {
-            SecretError::NotFound
-        } else {
-            SecretError::Unreachable
-        };
+        let kind = refusal_kind(status.as_u16(), &text);
         // THE BODY IS NEVER QUOTED, AND THIS IS THE §8 LINE.
         //
         // The 300 characters of `text` that used to be spliced here were the
@@ -1151,6 +1202,45 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
               keep panics out of the crate rather than out of its tests"
 )]
 mod tests {
+    /// **conc8-3: a permanent fault is classed by its NAME, whatever the
+    /// status.** An expired or unknown identity, a bad signature (a skewed
+    /// clock lands here) and a malformed request are not fixed by retrying.
+    /// Classed as `Unreachable` they read as transport, so the run neither
+    /// stopped nor named the fault class. The status AWS sends them under is
+    /// not assumed: each is checked under 400 and under 500.
+    #[test]
+    fn a_permanent_parameter_store_fault_is_classed_by_its_name() {
+        for status in [400, 500] {
+            for (name, kind) in [
+                ("AccessDeniedException", SecretError::AccessDenied),
+                ("ExpiredTokenException", SecretError::AccessDenied),
+                ("UnrecognizedClientException", SecretError::AccessDenied),
+                ("InvalidSignatureException", SecretError::AccessDenied),
+                ("MissingAuthenticationToken", SecretError::AccessDenied),
+                ("InvalidKeyId", SecretError::AccessDenied),
+                ("ParameterNotFound", SecretError::NotFound),
+                ("ParameterVersionNotFound", SecretError::NotFound),
+                ("ValidationException", SecretError::NotFound),
+                ("ThrottlingException", SecretError::Unreachable),
+                ("InternalServerError", SecretError::Unreachable),
+                ("TooManyUpdates", SecretError::Unreachable),
+            ] {
+                let body = format!(r#"{{"__type":"{name}","message":"Refused."}}"#);
+                assert_eq!(refusal_kind(status, &body), kind, "{name} under {status}");
+            }
+        }
+        // EVERY ALLOWLISTED NAME HAS A CLASS OF ITS OWN, so a name added to
+        // `AWS_FAULTS` without one fails here rather than falling to the status.
+        for name in AWS_FAULTS {
+            assert!(fault_kind(name).is_some(), "{name} has no class");
+        }
+        // NO NAME: the status decides, as before.
+        assert_eq!(refusal_kind(403, "{}"), SecretError::AccessDenied);
+        assert_eq!(refusal_kind(404, "{}"), SecretError::NotFound);
+        assert_eq!(refusal_kind(400, "{}"), SecretError::Unreachable);
+        assert_eq!(refusal_kind(503, "<html>"), SecretError::Unreachable);
+    }
+
     /// §8 — the parameter path never reaches the output, whatever AWS says.
     #[test]
     fn a_refusal_never_repeats_the_body_that_names_the_parameter() {

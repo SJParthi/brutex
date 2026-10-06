@@ -558,21 +558,41 @@ fn update(site: &Site, edit: impl FnOnce(&mut Progress)) {
 }
 
 fn claim(site: &Site, recovery: Option<([u8; 32], bool)>) -> Result<(), String> {
+    const TWICE: &str = "a pull already owns the run slot; recovery was not started twice";
+    // THE CLEAR IS PERSISTED BEFORE THE SLOT IS TAKEN, NOT UNDER IT. Its
+    // journal open, append and up to four fsyncs used to run while this
+    // function held `site.run`, so every poll of `/pull/run.json`, every
+    // chain's progress write and the autopilot's round blocked a Tokio worker
+    // on the device for the whole chain. The plan is not active until the slot
+    // is claimed below, so no STOP can target it in the gap: the clear and the
+    // claim stay atomic with respect to `pull_run_stop`. recovery-5, D-2504.
+    if let Some((id, true)) = recovery {
+        if slot_running(site) {
+            return Err(TWICE.to_owned());
+        }
+        crate::recovery_control::clear_stop(site, id)?;
+    }
     let mut held = site
         .run
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if held.as_ref().is_some_and(Progress::running) {
-        return Err("a pull already owns the run slot; recovery was not started twice".to_owned());
+        return Err(TWICE.to_owned());
     }
-    if let Some((id, explicit)) = recovery {
-        if explicit {
-            crate::recovery_control::clear_stop(site, id)?;
-        }
+    if let Some((id, _)) = recovery {
         crate::recovery_control::activate(site, id);
     }
     *held = Some(Progress::claimed());
     Ok(())
+}
+
+/// Whether a run holds the slot, read and released at once.
+fn slot_running(site: &Site) -> bool {
+    site.run
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .is_some_and(Progress::running)
 }
 
 fn stopping(site: &Site) -> bool {
@@ -840,6 +860,20 @@ fn seeded(site: &Site, id: [u8; 32], units: Option<Vec<Record>>) -> Result<Journ
     Ok(journal)
 }
 
+/// The run's own answer and its terminal control append, combined so that a
+/// refused terminal append never hides the error that ended the run.
+///
+/// The usual reason `execute` fails mid-run is a refused plan-journal append,
+/// which poisons the journal; the terminal append then fails with "poisoned",
+/// and returning that alone replaced the root cause (a full disk, an I/O
+/// error) everywhere it is shown. recovery-6, D-2503.
+fn with_terminal<T>(answer: Result<T, String>, terminal: Result<(), String>) -> Result<T, String> {
+    match (answer, terminal) {
+        (Err(ran), Err(sealed)) => Err(format!("{ran}; terminal state not recorded: {sealed}")),
+        (answer, terminal) => terminal.and(answer),
+    }
+}
+
 async fn drive(site: Loaded, id: [u8; 32], prepared: Result<Journal, String>, explicit: bool) {
     // A caught unwind is not a clean finish; durable InFlight reservations are
     // intentionally left for the next process, still charged to their budget.
@@ -862,8 +896,7 @@ async fn drive(site: Loaded, id: [u8; 32], prepared: Result<Journal, String>, ex
         } else {
             Status::Blocked
         };
-        journal.append(control).map_err(failure)?;
-        answer
+        with_terminal(answer, journal.append(control).map_err(failure))
     });
     let result = worker.await.map_err(failure).and_then(|result| result);
     let text = result.unwrap_or_else(|why| format!("Recovery BLOCKED: {why}. Existing source data is preserved; this is not complete coverage."));
@@ -1085,6 +1118,15 @@ fn stored_scope_key(body: &str) -> Result<String, String> {
 /// if the parent's gap has disappeared. A lost receipt never invents new-row
 /// counts or marks the old request clean. Explicit reactivation may retry a
 /// previously blocked unit with its remaining (never refreshed) budget.
+/// The shared ledger's rows in its stable first-appearance order.
+/// recovery-3, D-2503.
+fn pending_in_order(attempts: &Journal) -> impl Iterator<Item = &Record> {
+    attempts
+        .order
+        .iter()
+        .filter_map(|key| attempts.latest.get(key))
+}
+
 async fn reconcile_pending(
     site: &Loaded,
     journal: &mut Journal,
@@ -1105,9 +1147,12 @@ async fn reconcile_pending(
             .or_default()
             .push(asked.window);
     }
-    let pending: Vec<_> = attempts
-        .latest
-        .values()
+    // FIRST-SEEN ORDER, NOT HASH ORDER. `latest` is a `HashMap` with a
+    // per-process seed, so two runs over one attempts.bin reassessed and
+    // appended in different orders and wrote different bytes (§3 rule 5), and
+    // a STOP mid-loop left a different set unreconciled. `order` is the
+    // journal's own stable first-appearance order. recovery-3, D-2503.
+    let pending: Vec<_> = pending_in_order(attempts)
         .filter(|row| {
             matches!(
                 row.status,
@@ -2419,6 +2464,105 @@ mod tests {
         drop(journal);
         std::fs::remove_file(path).unwrap();
         std::fs::remove_dir(dir).unwrap();
+    }
+
+    /// PENDING ROWS ARE RECONCILED IN THE LEDGER'S OWN ORDER. recovery-3,
+    /// D-2503.
+    ///
+    /// The rows came from `HashMap::values`, whose order is per-process
+    /// random, so two runs over the same ledger wrote different bytes. Rows
+    /// appended in a known order must come back in exactly that order.
+    #[test]
+    fn pending_rows_come_back_in_first_seen_order() {
+        let root = crate::scratch::path("recovery-pending-order");
+        let _ignored = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut attempts = Journal::open(&root.join("attempts.bin")).unwrap();
+        let bodies: Vec<String> = (1..=28u8)
+            .map(|day| {
+                canonical(
+                    "NIFTY",
+                    "1day",
+                    Window::new(date(2026, 2, day), date(2026, 2, day)).unwrap(),
+                    "gap",
+                )
+            })
+            .collect();
+        for body in &bodies {
+            attempts.append(record(body.clone())).unwrap();
+        }
+        let seen: Vec<&str> = pending_in_order(&attempts)
+            .map(|row| row.body.as_str())
+            .collect();
+        let wanted: Vec<&str> = bodies.iter().map(String::as_str).collect();
+        assert_eq!(seen, wanted);
+        drop(attempts);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// AN EXPLICIT START PERSISTS ITS CLEAR WITHOUT HOLDING THE RUN SLOT.
+    /// recovery-5, D-2504.
+    ///
+    /// The clear's journal open, append and fsyncs ran under `site.run`, so
+    /// every slot reader waited on the device. The slot is only READ before
+    /// the clear (and released at once); the guard that installs the claim is
+    /// taken after it. Read from `claim`'s own source, because a test cannot
+    /// hold the slot without also blocking the read that must precede the
+    /// clear. The behaviour is pinned beside it: the clear lands, the claim
+    /// succeeds once, and a second explicit claim is refused before it
+    /// persists anything.
+    #[test]
+    fn an_explicit_claim_persists_its_clear_outside_the_run_lock() {
+        let body = include_str!("recovery.rs")
+            .split_once("\nfn claim(")
+            .unwrap()
+            .1
+            .split_once("\n}\n")
+            .unwrap()
+            .0;
+        let cleared = body.find("clear_stop(site, id)").unwrap();
+        let guarded = body.find("let mut held").unwrap();
+        assert!(
+            cleared < guarded,
+            "the clear must be persisted before the run guard is taken"
+        );
+        let root = crate::scratch::path("recovery-claim-unlocked");
+        let _ignored = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let site = Loaded::new(Site::load(&root.join("missing-masters"), &root));
+        let id = key("claim-unlocked");
+        claim(&site, Some((id, true))).unwrap();
+        assert!(!crate::recovery_control::is_stopped(&site, id).unwrap());
+        assert!(slot_running(&site));
+        let twice = claim(&site, Some((id, true))).unwrap_err();
+        assert!(twice.contains("not started twice"), "{twice}");
+        let implicit = claim(&site, None).unwrap_err();
+        assert!(implicit.contains("not started twice"), "{implicit}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A REFUSED TERMINAL APPEND KEEPS THE ERROR THAT ENDED THE RUN.
+    /// recovery-6, D-2503.
+    #[test]
+    fn a_refused_terminal_append_keeps_the_root_cause() {
+        let both = with_terminal::<()>(
+            Err("No space left on device".to_owned()),
+            Err("journal is poisoned".to_owned()),
+        )
+        .unwrap_err();
+        assert_eq!(
+            both,
+            "No space left on device; terminal state not recorded: journal is poisoned"
+        );
+        assert_eq!(
+            with_terminal::<()>(Err("ran".to_owned()), Ok(())),
+            Err("ran".to_owned())
+        );
+        assert_eq!(
+            with_terminal(Ok(1), Err("sealed".to_owned())),
+            Err("sealed".to_owned())
+        );
+        assert_eq!(with_terminal(Ok(7), Ok(())), Ok(7));
     }
 
     /// **A BUSY SEAT COSTS NO ATTEMPT.** D-2761, recovery-1.

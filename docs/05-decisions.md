@@ -63214,3 +63214,86 @@ leave the two descent doors with different bounds.
 - p2run-1. Below two distinct tests the SIGNIFICANCE block said there was no threshold, while FINDINGS judged the one test against `bonferroni_t(1)` = 1.96. The report contradicted itself.
 - `few_hypotheses` prints `-` for the luck floor and the 1.96 bar at one test; zero tests still print `-`.
 - Proved by `runner::report::tests::one_distinct_test_prints_the_bar_findings_judges_it_against` (ZQ-12).
+
+### D-2500 — In-process pull-journal appenders wait for each other; the first record's directory entries are synced — 2026-10-06
+
+- recovery-4, recauto-2 and press-2, ported from `wip/zero/conc-api` 02cdb0d. `audit::Journal::appended` took a non-blocking `flock` on a freshly opened description, and two descriptions of one file conflict under `flock` inside one process too. So a recovery receipt, the recovery member-failure record, the autopilot's tick record and parallel feed legs of one press refused each other by plain scheduling, and the loser's run read "NOT in the journal" with its bars on disk.
+- A process-wide `APPEND_SERIAL` mutex now queues in-process appenders for one write and one fsync (read through poison: it guards no data); the flock stays as the cross-process guard only. The same change closes the in-process half of server1-1, whose row the Fix Board holds.
+- press-2: the append syncs the store root after it creates `audit/`, and syncs `audit/` when the journal is empty, before it writes the record, so a store's first "Recorded: yes" no longer rests on unsynced directory entries. Both happen once per store.
+- Proved by ZC-01 and ZC-02.
+
+### D-2503 — Recovery keeps the root cause past a refused terminal append, and reconciles in ledger order — 2026-10-06
+
+- recovery-6. `drive` returned the terminal control append's error ("poisoned") in place of the error that ended the run; `with_terminal` now reports both ("<cause>; terminal state not recorded: <append error>").
+- recovery-3. `reconcile_pending` walked `HashMap::values`, whose order is seeded per process, so two runs over one ledger reassessed and appended in different orders and wrote different bytes (§3 rule 5). `pending_in_order` walks the journal's stable first-seen `order`.
+- Ported from `wip/zero/conc-api` 02cdb0d. Proved by ZC-05 and ZC-06.
+
+### D-2504 — An explicit recovery claim persists its STOP clear outside the run guard — 2026-10-06
+
+- recovery-5. Recovery's `claim` held the `site.run` std mutex across the STOP journal's open, append and up to four fsyncs, on a Tokio worker, stalling every slot reader (the run poll, each chain's progress write, the autopilot round).
+- `claim` now reads the slot and releases it at once, persists the explicit clear, and only then takes the guard to install the claim. The plan is not active until then, so no STOP can target it in the gap.
+- The `pull_run_stop` half (runs-3) is the Fix Board's row and is not changed here. Ported from `wip/zero/conc-api` 02cdb0d. Proved by ZC-07.
+
+### D-2506 — The autopilot captures its stop generation before its pause check — 2026-10-06
+
+- autopilot-1. `broker_run` captured the stop generation itself, seconds of census reading after `fly` had checked the pause flag, so a pause in that gap bumped the epoch before the capture and a whole month was fetched against it.
+- `fly` reads the epoch, then the flag, and hands the epoch through `round` and `tick` to `server::broker_run_at`; `pause` stores the flag then bumps the epoch, and the flag and epoch accesses are `SeqCst`, so the loop sees either the pause or the old epoch. Hand and recovery pulls keep capturing on entry through `broker_run`.
+- Ported from `wip/zero/conc-api` 02cdb0d. Proved by ZC-09.
+
+### D-2507 — The vendor-down breaker's stop is a failure, not a pause — 2026-10-06
+
+- autopilot-2. `BrokerRun::stopped` is set by the operator's pause and by the vendor-down breaker, and `autopilot::outcome_of` read both as a pause: no attempt counted, no backoff, an immediate unbounded retry against a vendor answering 5xx.
+- `BrokerRun::cancelled` is set only by the stop-generation check; `outcome_of` treats only that as a pause and gives a breaker stop its own sentence as the failure reason, so it reaches the attempt count, the backoff and the stall.
+- Ported from `wip/zero/conc-api` 02cdb0d. `wip/zero/network` c5a21fb carried a competing fix for the same row; it is not taken. Proved by ZC-10.
+
+### D-2508 — Resume is refused only when the backfill task has returned — 2026-10-06
+
+- autopilot-3 and CE-46. `fly`'s clock wait publishes `Phase::Halted` with no feed while the task is alive, and `admit_resume` and `/ingest/status`'s blocked-by sentence read that shape as a returned task, refusing Resume with a false "it has returned".
+- `autopilot::Status` gains `task_returned`, set only on `fly`'s terminal pre-loop exits; both readers use it instead of the phase.
+- Ported from `wip/zero/conc-api` c6d5a5d. Proved by ZC-11.
+
+### D-2509 — A failed telemetry roll is retried, bounded and probed — 2026-10-06
+
+- Extends CE-41 (D-1769). `rotation_broken` was final for the life of the sink, so one transient refusal let the current file grow without bound until a restart.
+- A retry is made once the file has grown one more bound past the failure, and only when a probe (create, rename and unlink of a file of its own) shows the directory accepts writes; a failed probe shifts nothing. At most `keep_files` failed attempts are made, and an attempt that failed after it had already moved or deleted a file ends retries for good, because repeating it is the history shift D-1324 stopped. The `/logs` banner says rotation is paused and retried.
+- Gate 21's declared surface for `sink.rs` gains the probe's `OpenOptions::new`, `rename` and `remove_file` and the roll's `symlink_metadata`, all inside the sink's own directory; `ci.yml` says why beside the list.
+- Ported from `wip/zero/conc-api` c6d5a5d. Proved by ZC-12.
+
+### D-2510 — A sink that cannot resume its numbering says so at open — 2026-10-06
+
+- CE-51. `resume_point` restarted `seq` and run ids at zero in silence when the newest non-empty file could not be read or held no decodable line, and mapped a metadata error to length zero, skipping to an older file.
+- `resume_point` now returns the sentence `Sink::open` reports (into `Health::last_error` and once on stderr), and a metadata error other than absence stops the walk at that file. The metadata-error arm is not driven by a test: a `stat` refusal on a file whose directory is searchable is not producible portably.
+- Ported from `wip/zero/conc-api` c6d5a5d. Proved by ZC-13.
+
+### D-2698 — The spot ladder feeds the vendor-down breaker — 2026-10-06
+
+- conc8-1, ported from `wip/zero/network` c5a21fb, where it was numbered D-2690 (taken on `final/all-fixes` by the sweep-scope texts). `with_retry` is the only ladder under `broker_run`, and its `ServerDown` arm wrote no `VENDOR_DOWN` marker; only `laddered` wrote one, and its refusals never reach `broker_run`. So the streak stayed at zero, `vendor_down_sentence` was unreachable, and a vendor outage cost every instrument the whole 5xx ladder (measured on that branch: five requests and 30 s each, about 6.5 h over ~785 instruments).
+- `with_retry` now marks the refusal, `fetch_chunks` lifts the marker and puts it back at the head as it does `CREDENTIAL_DEAD` (`split_head_markers`), a partly landed window strips it (a later chunk's 5xx is not an outage of the instrument), and the named F&O walk drops it. Measured on that branch against a loopback vendor answering 503: before, four instruments cost 20 requests; after, 15, and the fourth is not asked.
+- `final/all-fixes` fetches up to three instruments together once the vendor has answered (D-3002), so the instrument after the one that trips the breaker was already asked. `Lanes::next` now stays one wide after a refusal carrying `VENDOR_DOWN`, so a failing vendor is asked one instrument at a time and the breaker stops the run before the next request.
+- The breaker's stop reaches the autopilot as a counted, backed-off failure through D-2507's `cancelled` flag (the branch's own `vendor_down` field is not taken; one flag says it).
+- Proved by ZX-40; A-51's text now names `with_retry` as the marker's writer.
+
+### D-2691 — No control marker on the F&O ladder's refusal — 2026-10-06
+
+- conc8-2. `laddered` wrote `VENDOR_DOWN` at the head of `Refusal::detail` and said `broker_run` stripped it; nothing on the discovery or rolling walks did, so `\u{2}` landed after `{label}: ` in the receipt, the log and the journal. `laddered` writes no marker (the refusal's `status` already carries the verdict and those walks keep no breaker), and `fetch_chain_chunks` drops the marker `with_retry` now writes. The `VENDOR_DOWN` and `read_markers` docs name the real writer. ZX-41.
+
+### D-2692 — A Parameter Store refusal is classed by its fault name — 2026-10-06
+
+- conc8-3. `get_parameter` set the kind from `AccessDenied`/403 and `ParameterNotFound`/404 alone, so `ExpiredTokenException`, `UnrecognizedClientException`, `InvalidSignatureException` (a skewed clock lands here), `MissingAuthenticationToken`, `InvalidKeyId` and `ValidationException` were `Unreachable`, which `credential_law::Unreadable::of_secret` reads as transport: the run never stopped and told the operator the fault was worth retrying. `refusal_kind` reads the name from the same `AWS_FAULTS` allowlist `refusal_detail` echoes and classes it (`fault_kind`): the identity, signature and key faults are `AccessDenied`, missing and malformed paths `NotFound`, throttle, internal error and write conflict `Unreachable`; the status decides only when no name was given. The HTTP status AWS uses for these faults is not in the charter and is not assumed; the test checks each name under 400 and 500. ZX-42.
+
+### D-2694 — A settled halt marks its feed — 2026-10-06
+
+- conc6-1. `settle`'s `Halt` arm wrote the phase and detail and left `status.feeds` as the round published it before the tick, with `halted` empty. A Stop let `dwell_paused` overwrite the detail, so the halt reason vanished from `/autopilot.json`, and `admit_resume` read the stale feeds and admitted a resume over a terminal feed. The arm now writes the reason onto the halted feed's report in the same publish. ZX-44.
+
+### D-2695 — The autopilot's Stop reaches only the autopilot's walk — 2026-10-06
+
+- conc6-2. Every `broker_run` caller captured the autopilot's stop generation, so a Stop on the autopilot page cut a hand `/pull/spot`, each `/pull/run` press leg in flight and a recovery unit at their next instrument, journalled them FAILED as "stopped by the operator", while the press asked again a leg later. `broker_run` (hand pulls, press legs, recovery units) carries no stop generation; only the autopilot's tick calls `broker_run_at` with the generation it captured before its pause check (D-2506). A press still stops between legs through `/pull/run/stop`, as before; a hand walk now has no mid-walk stop, which is what it had before the autopilot's control reached it by accident. ZX-45.
+
+### D-2696 — At most one masters refresh queued — 2026-10-06
+
+- conc6-3. Since D-1974 each press of `/masters/refresh` queued a detached full public and credentialed refresh on the FIFO lock, with no bound, while each abandoned page reported nothing landed. `ADMITTED` counts admitted refreshes (`MAX_ADMITTED` = 2: the running one and one queued, which still serves a press made after the running one began); a further press is answered 409 at once naming the refresh already running and `/masters/status.json`. The admission is held by the detached task, so an abandoned page still counts until its refresh has run. ZX-46.
+
+### D-2697 — The stand-off names the run slot's holder — 2026-10-06
+
+- conc6-4. `round` said "a hand-made pull is running" whenever `site.run` was held, including by a recovery the server resumed at boot. It now reads `recovery_active` under the same lock order (run, then active) and says "a recovery plan is running" for a recovery. ZX-47.
+- `wip/zero/network` also carried D-2693 (conc8-4, a 64 KiB Parameter Store read cap). `final/all-fixes` already caps that read at 16 KiB under D-2326, so the duplicate is not taken.

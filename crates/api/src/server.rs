@@ -6697,7 +6697,7 @@ async fn broker_answer(
     // this line is the receipt; everything inside it is the pull.
     // FRESH, NOT `site.censuses`: see `broker_run`. One manifest read against a
     // call that is about to open sockets is free in the only units that matter.
-    let run = broker_run(&asked, site, &census::read_all(&site.store_root)).await;
+    let run = hand_run(&asked, site).await;
 
     // A refusal, recorded and rendered, with the reason it carries.
     let refuse = |facts: Vec<(&'static str, String)>, why: &str, code: axum::http::StatusCode| {
@@ -6920,8 +6920,15 @@ pub(crate) struct BrokerRun {
     /// Distinct from an empty `reached`: nothing was attempted, so nothing can
     /// be concluded about the vendor from it.
     pub blocked: Option<Blocked>,
-    /// Set when the operator stopped the sweep part-way, with the reason.
+    /// Set when the sweep stopped part-way, with the reason: the operator's
+    /// pause, the vendor-down breaker, or a credential stop.
     pub stopped: Option<String>,
+    /// Whether `stopped` was the OPERATOR's pause (the stop generation moved),
+    /// and nothing else. The vendor-down breaker also sets `stopped`, and the
+    /// autopilot read every stop as a pause: no attempt counted, no backoff,
+    /// an immediate retry against a vendor answering 5xx, without bound.
+    /// autopilot-2, D-2507.
+    pub cancelled: bool,
     /// How long it took, in microseconds.
     pub took: u64,
     /// Whether the retry ladder judged the CREDENTIAL dead, structurally.
@@ -6978,6 +6985,12 @@ impl BrokerRun {
         let Some(unfetched) = landed.unfetched.as_mut() else {
             return false;
         };
+        // A LATER CHUNK'S 5xx IS NOT AN OUTAGE OF THIS INSTRUMENT: earlier
+        // chunks landed, so the vendor answered and the breaker resets. The
+        // marker is still removed, so it never reaches the receipt (D-2698).
+        if unfetched.starts_with(VENDOR_DOWN) {
+            *unfetched = unfetched.trim_start_matches(VENDOR_DOWN).to_owned();
+        }
         if !unfetched.starts_with(CREDENTIAL_DEAD) {
             return false;
         }
@@ -7925,10 +7938,45 @@ fn zerodha_isin_cross_check(
     Ok(())
 }
 
+/// A [`broker_run`] the autopilot's Stop does not reach, over a fresh census.
+///
+/// Fresh, not `site.censuses`: see `broker_run`. One manifest read against a
+/// call that is about to open sockets.
+async fn hand_run(asked: &ingest::SpotRequest, site: &Site) -> BrokerRun {
+    broker_run(asked, site, &census::read_all(&site.store_root)).await
+}
+
+/// [`broker_run_at`] for a walk the operator started by hand, or a recovery
+/// unit: it carries no stop generation.
+///
+/// The autopilot's stop generation was captured by EVERY caller, so pressing
+/// Stop on the autopilot page cut an operator's hand `/pull/spot`, every
+/// `/pull/run` press leg in flight, and a recovery unit at their next
+/// instrument, journalled each one FAILED as "stopped by the operator", and
+/// answered that nothing further was asked of any vendor while the press asked
+/// again a leg later (conc6-2, D-2695). A press still stops between legs
+/// through `/pull/run/stop`, as it always has.
 pub(crate) async fn broker_run(
     asked: &ingest::SpotRequest,
     site: &Site,
     censuses: &[census::VendorCensus],
+) -> BrokerRun {
+    broker_run_at(asked, site, censuses, None).await
+}
+
+/// One spot sweep against the stop generation `epoch` the caller captured,
+/// or none for a hand walk (see [`broker_run`]).
+///
+/// The autopilot captures it BEFORE its own pause check, at the top of the loop, so a pause
+/// that lands while its round reads the census and surveys the feeds has
+/// already moved the epoch past the captured value and stops the run at its
+/// first instrument. Captured here, the pause had bumped the epoch before the
+/// capture and a whole month was fetched against it. autopilot-1, D-2506.
+pub(crate) async fn broker_run_at(
+    asked: &ingest::SpotRequest,
+    site: &Site,
+    censuses: &[census::VendorCensus],
+    epoch: Option<u64>,
 ) -> BrokerRun {
     let started = std::time::Instant::now();
     // BEFORE ANY SOCKET. See `Broker` for what this is guarding against and how
@@ -8004,10 +8052,12 @@ pub(crate) async fn broker_run(
         attempted: targets.len(),
         ..BrokerRun::default()
     };
-    // THE STOP GENERATION, CAPTURED ONCE. A run compares against the value it
-    // started with, so a pause that arrives after this run began stops it and a
-    // pause that happened before it began does not.
-    let epoch = site.autopilot.epoch();
+    // THE STOP GENERATION, CAPTURED ONCE, BY THE CALLER, AND ONLY ON THE
+    // AUTOPILOT'S OWN WALK. A run compares against the value its caller
+    // captured, so a pause that arrives after that stops it and a pause that
+    // happened before it does not (see `broker_run_at`, autopilot-1). A hand
+    // walk carries none, so the autopilot's Stop cannot reach it (conc6-2,
+    // D-2695).
 
     // The month these bars are for, named once rather than per instrument.
     let month = asked
@@ -8031,7 +8081,8 @@ pub(crate) async fn broker_run(
         // month is five to thirty-seven minutes on this store, and an operator
         // who presses Pause must not wait out the other seven hundred
         // instruments to be obeyed.
-        if site.autopilot.stopped(epoch) {
+        if epoch.is_some_and(|epoch| site.autopilot.stopped(epoch)) {
+            out.cancelled = true;
             out.stopped = Some(format!(
                 "{} — stopped after {} of {} instruments. The partial month is \
                  refilled on resume, because the resume point is the store's own.",
@@ -8244,7 +8295,7 @@ pub(crate) async fn recovery_spot(
 ) -> Result<BrokerRun, String> {
     let _seat = seat;
     let now = std::time::SystemTime::now();
-    let run = broker_run(asked, site, &census::read_all(&site.store_root)).await;
+    let run = hand_run(asked, site).await;
     let journal = site.journal();
     let origin = spot_audit_origin(asked.cash_identity, &run.origin);
     let record = if let Some(blocked) = &run.blocked {
@@ -8722,12 +8773,15 @@ where
                     credential_dead: false,
                     status: why.status,
                     named: why.named,
-                    // MARKED, SO THE RUN LOOP DOES NOT HAVE TO READ THIS
-                    // SENTENCE TO KNOW WHAT IT SAYS. The marker is stripped in
-                    // `broker_run` before the reason reaches an operator or the
-                    // journal, exactly as `WIRE_REACHED` is.
+                    // NO MARKER. This wrote `VENDOR_DOWN` at the head and
+                    // said `broker_run` stripped it, but no `laddered` refusal
+                    // ever reaches `broker_run`: the discovery and rolling
+                    // walks put `detail` mid-sentence after `{label}: `, so
+                    // the control character landed in the receipt, the log
+                    // and the journal (conc8-2, D-2691). The verdict is the
+                    // `status` this refusal already carries.
                     detail: format!(
-                        "{VENDOR_DOWN}{why} — and its own side has now failed \
+                        "{why} — and its own side has now failed \
                          {answered} time(s) on this {what}, out of \
                          {SERVER_ERROR_ATTEMPTS} allowed. The vendor is \
                          reachable and failing, which is not a blip this walk \
@@ -9188,8 +9242,10 @@ async fn fetch_chunks(
                 // `read_markers` only reads the head. It would have travelled
                 // all the way to the operator's page as an invisible control
                 // character and told nothing downstream anything.
-                let credential_dead = marked_why.starts_with(CREDENTIAL_DEAD);
-                let why = marked_why.trim_start_matches(CREDENTIAL_DEAD);
+                //
+                // `VENDOR_DOWN` is lifted the same way and for the same reason:
+                // it is what `broker_run`'s breaker counts (conc8-1, D-2698).
+                let (head, why) = split_head_markers(&marked_why);
                 let sentence = {
                     // THE VENDOR'S OWN WORDS, IN THEIR OWN FIELD.
                     //
@@ -9230,12 +9286,10 @@ async fn fetch_chunks(
                         nth,
                     )
                 };
-                let sentence = if credential_dead {
-                    format!("{CREDENTIAL_DEAD}{sentence}")
-                } else {
-                    sentence
-                };
-                return prefix_or_refusal(bodies, sentence);
+                // THE ORDER `read_markers` READS: `VENDOR_DOWN`, then
+                // `CREDENTIAL_DEAD`, both inside the `WIRE_REACHED` that
+                // `broker_window` puts outside them.
+                return prefix_or_refusal(bodies, format!("{head}{sentence}"));
             }
         };
         bodies.push((
@@ -9414,6 +9468,20 @@ struct Chunks {
     /// say both. `None` with an EMPTY `bodies` cannot happen: an empty prefix is
     /// the `Err` arm — see [`prefix_or_refusal`].
     unfetched: Option<String>,
+}
+
+/// The markers at the head of a refusal, in the order they arrived, and the
+/// sentence after them.
+///
+/// `VENDOR_DOWN` then `CREDENTIAL_DEAD`, the order `with_retry` can write and
+/// `read_markers` reads. Split so a caller that embeds the sentence mid-string
+/// can put the markers back at the head (conc8-1, D-2698).
+fn split_head_markers(marked: &str) -> (&str, &str) {
+    let rest = marked
+        .trim_start_matches(VENDOR_DOWN)
+        .trim_start_matches(CREDENTIAL_DEAD);
+    let at = marked.len().saturating_sub(rest.len());
+    (marked.get(..at).unwrap_or_default(), rest)
 }
 
 /// The prefix if there is one, or the refusal if there is not.
@@ -9944,8 +10012,14 @@ async fn with_retry(
                     // was asked twice more.
                     Step::Answered => return Err(text),
                     Step::ServerDown { answered } => {
+                        // MARKED, AND THIS IS THE ONE LADDER `broker_run`'s
+                        // BREAKER READS. It was unmarked, so the streak never
+                        // left zero and an outage cost every instrument the
+                        // whole 5xx ladder (conc8-1, D-2698). `fetch_chunks`
+                        // lifts it and puts it back at the head, as it does
+                        // `CREDENTIAL_DEAD`; `read_markers` strips it.
                         return Err(format!(
-                            "{text} — and its own side has now failed {answered} \
+                            "{VENDOR_DOWN}{text} — and its own side has now failed {answered} \
                              time(s) on this chunk, out of {SERVER_ERROR_ATTEMPTS} \
                              allowed. The vendor is reachable and failing, which \
                              is not a blip this run can wait out."
@@ -10105,6 +10179,14 @@ const WIRE_REACHED: &str = "\u{1}";
 /// [`broker_run`]'s instrument loop, to count CONSECUTIVE instruments lost to a
 /// 5xx. See [`VENDOR_DOWN_INSTRUMENTS`] for why a run-level count is what makes
 /// a longer per-instrument ladder affordable at all.
+///
+/// # Who writes it
+///
+/// [`with_retry`]'s `ServerDown` arm, the only ladder under `broker_run`, and
+/// `fetch_chunks` carries it to the head of its own sentence. It was written
+/// by `laddered` alone, whose refusals never reach `broker_run`, so the
+/// breaker could not trip (conc8-1, D-2698). `laddered` and the named F&O walk
+/// keep no breaker and carry no marker (conc8-2, D-2691).
 const VENDOR_DOWN: &str = "\u{2}";
 
 /// The vendor's word for what KIND of instrument is being asked for.
@@ -10227,7 +10309,7 @@ const fn breaker_trips(streak: u32) -> bool {
 ///
 /// # The order is not arbitrary
 ///
-/// [`laddered`] marks the refusal with [`VENDOR_DOWN`], and [`WIRE_REACHED`] is
+/// [`with_retry`] marks the refusal with [`VENDOR_DOWN`], and [`WIRE_REACHED`] is
 /// prepended OUTSIDE it, so they arrive as `\u{1}\u{2}…`. Testing for the
 /// second before the first is stripped finds nothing, and the breaker would
 /// then never fire — silently, because a breaker that never trips looks exactly
@@ -10568,9 +10650,20 @@ impl Lanes {
         // WIDE ONLY AFTER THE VENDOR ANSWERED: a refusal before the wire
         // proved nothing about the token. A rejection narrows it again in
         // `credential_halts`.
-        self.wide = answer
-            .as_ref()
-            .map_or_else(|why| read_markers(why).reached_wire, |_| true);
+        //
+        // AND NARROW WHILE THE VENDOR'S OWN SIDE IS FAILING. A 5xx refusal
+        // carries `VENDOR_DOWN`, which `broker_run`'s breaker counts; fetched
+        // three wide, the instrument after the one that trips the breaker was
+        // already asked, so an outage still cost it a whole ladder. One at a
+        // time, the breaker stops the run before the next request (conc8-1,
+        // D-2698).
+        self.wide = answer.as_ref().map_or_else(
+            |why| {
+                let marked = read_markers(why);
+                marked.reached_wire && !marked.vendor_down
+            },
+            |_| true,
+        );
         answer
     }
 
@@ -12268,6 +12361,12 @@ async fn fetch_chain_chunks(
                 // `CREDENTIAL_DEAD` first; prefixing the symbol in front of it
                 // buried the verdict mid-string, where no reader looks, so
                 // `fno_land` sent the dead token to every remaining contract.
+                //
+                // `VENDOR_DOWN` IS DROPPED HERE. `with_retry` writes it for
+                // `broker_run`'s breaker; the named walk keeps none, so a
+                // marker left on would reach the contract's reason as a
+                // control character (conc8-2, D-2691).
+                let refusal = refusal.trim_start_matches(VENDOR_DOWN);
                 let dead = refusal.starts_with(CREDENTIAL_DEAD);
                 let refusal = refusal.trim_start_matches(CREDENTIAL_DEAD);
                 return FetchedBatch {
@@ -32650,6 +32749,52 @@ mod tests {
         );
     }
 
+    /// A PAUSE BEFORE THE RUN BEGINS, AFTER THE AUTOPILOT CHECKED, STOPS IT.
+    /// autopilot-1, D-2506.
+    ///
+    /// The autopilot checks its pause flag, then reads the census and surveys
+    /// the feeds for seconds before the run starts. `broker_run` captured the
+    /// stop generation itself, after a pause in that gap had already bumped
+    /// it, so the run never saw the pause and fetched the whole month. The
+    /// generation captured before the check is now what the run compares
+    /// against: the pause lands between the capture and the run, and the run
+    /// stops before its first instrument, marked as the operator's cancel
+    /// (autopilot-2, D-2507). No socket is opened either way.
+    #[tokio::test]
+    async fn a_pause_after_the_autopilots_check_stops_the_run_before_any_instrument() {
+        let dir = masters(
+            "pause-gap",
+            Some(&format!(
+                "{GROWW_HEAD}NSE,CASH,,NIFTY,IDX,,NIFTY,,,NSE-NIFTY\n"
+            )),
+            Some(&format!(
+                "{DHAN_HEAD}NSE,I,NA,INDEX,NIFTY,NIFTY,INDEX,NA,0001-01-01,,,1333\n"
+            )),
+        );
+        let site = Site::serving(&dir, &store_root("pause-gap"));
+        let censuses = vec![day_pass_held(Vendor::Dhan, "NIFTY", month_of(2026, 8))];
+        let asked = ingest::parse_spot(
+            "target=swept&from=2026-08-03&to=2026-08-05&granularity=5min",
+            day(2026, 8, 10),
+        )
+        .expect("a real target and a window in the past");
+        site.autopilot.resume();
+        let at = site.autopilot.epoch();
+        assert!(!site.autopilot.is_paused(), "the loop's check saw no pause");
+        site.autopilot.pause();
+        let out = broker_run_at(&asked, &site, &censuses, Some(at)).await;
+        assert!(
+            out.stopped.is_some(),
+            "the pause in the gap was ignored: {out:?}"
+        );
+        assert!(out.cancelled, "the pause is the operator's cancel: {out:?}");
+        assert_eq!(out.reached, 0, "{out:?}");
+        assert!(
+            out.refused.is_empty(),
+            "no instrument was even tried: {out:?}"
+        );
+    }
+
     /// **THE SITE INSIDE `broker_run`'S LOOP, DRIVEN OVER A REAL UNIVERSE.**
     ///
     /// `pull.spot instrument refused` is the last of the three
@@ -33404,7 +33549,7 @@ mod broker_target_tests {
             at[..at.find("\n}\n").expect("it has an end")].to_owned()
         };
         let select = body_of("fn spot_targets(");
-        let run = body_of("pub(crate) async fn broker_run");
+        let run = body_of("pub(crate) async fn broker_run_at(");
         assert!(
             select.contains("asked.target.names(key, entry.universe)"),
             "the selection is built from the chosen target"

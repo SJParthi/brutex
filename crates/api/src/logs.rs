@@ -964,15 +964,17 @@ fn health_banner(health: Option<&telemetry::Health>) -> String {
         let _ = write!(
             out,
             // WHAT THE SINK ACTUALLY DOES AFTER A FAILED ROLL. It stops
-            // rotating for the life of the process (`Sink::rotation_broken`),
-            // so nothing is overwritten after the failure: the file GROWS. The
-            // banner said the opposite and never said a restart resumes
-            // rotation (CE-41, D-1769).
-            "{} roll(s) failed, so rotation has stopped for the life of this \
-             process: the current file is growing past its bound and no later \
-             event overwrites an older one. The failed roll itself may have \
-             removed the oldest retained file. Fix the cause named below and \
-             restart the server to resume rotation. ",
+            // rotating (`Sink::rotation_broken`), so nothing is overwritten
+            // after the failure: the file GROWS. It looks again once the file
+            // has grown one more bound and the directory accepts a probe, a
+            // bounded number of times, unless the failed roll had already
+            // moved a file (CE-41, D-1769, D-2509).
+            "{} roll(s) failed, so rotation is paused: the current file is \
+             growing past its bound and no later event overwrites an older one. \
+             The failed roll itself may have removed the oldest retained file. \
+             Rotation is retried by itself, a bounded number of times, once the \
+             directory accepts writes again; if it stays paused, fix the cause \
+             named below and restart the server. ",
             h.rotation_failures,
         );
     }
@@ -2110,12 +2112,9 @@ mod tests {
     #[test]
     fn a_failed_roll_is_described_as_stopped_rotation_not_overwrite() {
         let page = health_banner(Some(&health(0, 1, Some("rename refused"))));
+        assert!(page.contains("rotation is paused"), "{page}");
         assert!(
-            page.contains("rotation has stopped for the life of this process"),
-            "{page}"
-        );
-        assert!(
-            page.contains("restart the server to resume rotation"),
+            page.contains("Rotation is retried by itself") && page.contains("restart the server"),
             "{page}"
         );
         assert!(

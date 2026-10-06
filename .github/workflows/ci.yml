@@ -2093,11 +2093,21 @@ jobs:
           # non-blocking `flock` on it, so two sinks cannot write one event
           # stream. It writes no byte, reads none, and names no path outside
           # the sink's own directory. D-1458.
-          declared='sink.rs:std::fs::OpenOptions::new:3
+          #
+          # D-2509 (CE-41) adds four, all inside the sink's own directory. A
+          # failed roll is retried only when `directory_accepts_a_roll` can
+          # create, rename and unlink a probe file of its own
+          # (`<dir>/.roll-probe`, then `.roll-probe.moved`): one more
+          # `OpenOptions::new`, `rename` and `remove_file`. The roll itself
+          # asks `symlink_metadata` whether a rotated file is present, so a
+          # failure after a file was moved ends retries for good. None reads
+          # or writes an event byte.
+          declared='sink.rs:std::fs::OpenOptions::new:4
           sink.rs:std::fs::create_dir_all:1
           sink.rs:std::fs::metadata:1
-          sink.rs:std::fs::remove_file:1
-          sink.rs:std::fs::rename:1
+          sink.rs:std::fs::remove_file:2
+          sink.rs:std::fs::rename:2
+          sink.rs:std::fs::symlink_metadata:1
           tail.rs:std::fs::File::open:2'
 
           # D-2312: clauses A and B are `gates_runtime gate21`.
