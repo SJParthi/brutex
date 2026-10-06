@@ -1740,7 +1740,14 @@ jobs:
           # did not pass by testing nothing. Each sits inside
           # `#[cfg(test)] mod tests`, so no production path reaches it, and it
           # is not a diagnostic: nothing is wrong when it prints.
+          #
+          # api/src/server.rs println! 0 -> 4 (D-2779), the same kind: three
+          # are the serve-lock holder child's `SERVE-LOCK-HELD`, `-RELEASED`
+          # and `-REFUSED` lines its parent reads, the fourth the serve-lock
+          # cost test's p50/p99/max line. All four are in `#[cfg(test)] mod
+          # tests`; production output still goes through `say!`/`warn_line!`.
           declared="$declared api/src/booleanlaunch_tests.rs:println!:2
+          api/src/server.rs:println!:4
           api/src/frontierjson.rs:println!:1
           api/src/sweeprun.rs:println!:1
           api/src/trades.rs:println!:2
