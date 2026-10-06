@@ -1,7 +1,9 @@
 #![cfg(test)]
 //! Receipt-last publication: scratch from a cut-short attempt is rewritten,
 //! committed history is compared and kept (D-1760).
-use super::{committed, discard, lost_owner_race, prepare_in_namespace, read_exact, write_or_equal};
+use super::{
+    committed, discard, lost_owner_race, prepare_in_namespace, read_exact, write_or_equal,
+};
 use std::fs;
 use std::path::PathBuf;
 

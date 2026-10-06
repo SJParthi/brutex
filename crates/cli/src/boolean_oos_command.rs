@@ -208,7 +208,10 @@ mod tests {
     fn a_short_argument_list_exits_misused_with_the_usage() {
         let mut out = String::new();
         assert_eq!(command(&[], &mut out), crate::MISUSED);
-        assert!(out.contains("boolean-oos-stored requires 15 explicit arguments"), "{out}");
+        assert!(
+            out.contains("boolean-oos-stored requires 15 explicit arguments"),
+            "{out}"
+        );
         assert!(out.contains(crate::USAGE), "{out}");
     }
 }

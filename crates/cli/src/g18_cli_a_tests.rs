@@ -64,6 +64,8 @@ fn hex_of_spells_every_byte_as_two_lowercase_digits() {
     assert_eq!(hex.len(), 64);
     assert!(hex.starts_with("01abab"), "{hex}");
     assert!(hex.ends_with("abf0"), "{hex}");
+    assert_eq!(hex_of(&[0; 32]), "0".repeat(64));
+    assert_eq!(hex_of(&[0xff; 32]), "f".repeat(64));
 }
 
 /// G18-cli-a-22: understood work exits `OK` unless its page carries a refusal.
@@ -71,6 +73,7 @@ fn hex_of_spells_every_byte_as_two_lowercase_digits() {
 fn work_exit_is_ok_for_an_answer_and_failed_for_a_refusal() {
     assert_eq!(work_exit("TOP 10 BY RUNG\n  60s\n"), OK);
     assert_eq!(work_exit("refused: the store is empty\n"), FAILED);
+    assert_eq!(work_exit(""), OK);
 }
 
 /// G18-cli-a-23: both ledger arms refuse words they do not understand as
@@ -94,7 +97,10 @@ fn the_ledger_arms_exit_misused_on_words_they_do_not_understand() {
     }
     let mut out = String::new();
     assert_eq!(ledger_replay_arm(&mut out, &[]), MISUSED, "{out}");
-    assert!(out.contains("requires training and explicit OOS months"), "{out}");
+    assert!(
+        out.contains("requires training and explicit OOS months"),
+        "{out}"
+    );
     assert!(out.contains(USAGE), "{out}");
 }
 
@@ -168,6 +174,11 @@ fn span_policy_appends_the_span_as_year_month_numbers() {
     assert_eq!(out[..21], policy[..]);
     assert_eq!(out[21], 202_501);
     assert_eq!(out[22], 202_612);
+    // The extremes of the two words: year zero, month one, and the widest year.
+    let edge = span_policy([0; 21], (0, 1), (u16::MAX, 12));
+    assert_eq!(edge[21], 1);
+    assert_eq!(edge[22], 6_553_512);
+    assert_eq!(edge[..21], [0_u64; 21]);
 }
 
 /// G18-cli-a-27: a validation re-run that meets no rule hands back the
@@ -244,8 +255,7 @@ fn record_trades_reports_and_counts_the_rows_it_wrote_then_reuses() {
         report.contains("2 trade(s) prepared and synced"),
         "{report}"
     );
-    let (again, count) =
-        record_trades(&scratch.0, &id, Direction::Long, &chosen).expect("reused");
+    let (again, count) = record_trades(&scratch.0, &id, Direction::Long, &chosen).expect("reused");
     assert_eq!(count, 2);
     assert!(again.contains("2 trade(s) already present"), "{again}");
 }
@@ -326,6 +336,8 @@ fn the_forced_stop_is_the_ceiling_and_none_without_one() {
     assert_eq!(with(-5).forced_stop(), None);
     assert_eq!(with(1).forced_stop(), Some(1));
     assert_eq!(with(30_000).forced_stop(), Some(30_000));
+    assert_eq!(with(i64::MIN).forced_stop(), None);
+    assert_eq!(with(i64::MAX).forced_stop(), Some(i64::MAX));
 }
 
 /// G18-cli-a-15: half rounds away from zero, on both sides of it.
@@ -337,6 +349,39 @@ fn half_rounds_away_from_zero_on_both_signs() {
     assert_eq!(div_round_half_away(-7, 4), -2);
     assert_eq!(div_round_half_away(-1, 3), 0);
     assert_eq!(div_round_half_away(0, 3), 0);
+    // Below, at and above one half, on both signs.
+    assert_eq!(div_round_half_away(4, 10), 0);
+    assert_eq!(div_round_half_away(5, 10), 1);
+    assert_eq!(div_round_half_away(6, 10), 1);
+    assert_eq!(div_round_half_away(-4, 10), 0);
+    assert_eq!(div_round_half_away(-5, 10), -1);
+    assert_eq!(div_round_half_away(-6, 10), -1);
+    // Exact quotients are untouched; a divisor of one is the identity.
+    assert_eq!(div_round_half_away(-9, 3), -3);
+    assert_eq!(div_round_half_away(i64::MIN, 1), i64::MIN);
+    assert_eq!(div_round_half_away(i64::MAX, 1), i64::MAX);
+    // The extremes never overflow.
+    assert_eq!(div_round_half_away(i64::MAX, 2), i64::MAX / 2 + 1);
+    assert_eq!(div_round_half_away(i64::MIN, 2), i64::MIN / 2);
+    assert_eq!(div_round_half_away(i64::MIN + 1, 2), i64::MIN / 2);
+    assert_eq!(div_round_half_away(i64::MAX, i64::MAX), 1);
+    assert_eq!(div_round_half_away(i64::MIN, i64::MAX), -1);
+    // A divisor of zero or below is a caller defect and answers zero.
+    assert_eq!(div_round_half_away(7, 0), 0);
+    assert_eq!(div_round_half_away(7, -2), 0);
+    // DIFFERENTIAL: every small numerator and divisor against the exact
+    // rational rounding, `2|r| >= d` away from zero, computed in i128.
+    for d in 1_i64..=12 {
+        for n in -60_i64..=60 {
+            let (q, r) = (i128::from(n) / i128::from(d), i128::from(n) % i128::from(d));
+            let want = if 2 * r.abs() >= i128::from(d) {
+                q + r.signum()
+            } else {
+                q
+            };
+            assert_eq!(i128::from(div_round_half_away(n, d)), want, "{n}/{d}");
+        }
+    }
 }
 
 fn traded(trades: u64, pessimistic: i64) -> grid::Cell {
@@ -353,11 +398,32 @@ fn traded(trades: u64, pessimistic: i64) -> grid::Cell {
 #[test]
 fn a_shown_cell_that_never_traded_is_not_a_row() {
     let idle = traded(0, 0);
-    assert_eq!(best_shown([("long", Some((idle, true))), ("short", None)]), None);
+    assert_eq!(
+        best_shown([("long", Some((idle, true))), ("short", None)]),
+        None
+    );
     let busy = traded(3, 10);
     assert_eq!(
         best_shown([("long", Some((idle, true))), ("short", Some((busy, false)))]),
         Some(("short", busy, false))
+    );
+    // Neither side shown, or both idle: no row.
+    assert_eq!(best_shown::<&str>([("long", None), ("short", None)]), None);
+    assert_eq!(
+        best_shown([("long", Some((idle, false))), ("short", Some((idle, true)))]),
+        None
+    );
+    // One trade is enough to be a row.
+    let one = traded(1, -5);
+    assert_eq!(
+        best_shown([("long", Some((one, false))), ("short", None)]),
+        Some(("long", one, false))
+    );
+    // An admitted side beats an unadmitted one however much less it made.
+    let rich = traded(9, 1_000_000);
+    assert_eq!(
+        best_shown([("long", Some((rich, false))), ("short", Some((one, true)))]),
+        Some(("short", one, true))
     );
 }
 
@@ -386,6 +452,19 @@ fn pruning_drops_a_cell_that_never_traded() {
         ..grid::Grid::default()
     };
     assert_eq!(prune_cells(full, envelope).cells, vec![busy]);
+    // Order is kept, duplicates of an admitted cell are kept, and an empty
+    // grid stays empty.
+    let one = traded(1, 3);
+    let full = grid::Grid {
+        cells: vec![one, idle, busy, idle, busy],
+        ..grid::Grid::default()
+    };
+    assert_eq!(prune_cells(full, envelope).cells, vec![one, busy, busy]);
+    assert!(
+        prune_cells(grid::Grid::default(), envelope)
+            .cells
+            .is_empty()
+    );
 }
 
 /// G18-cli-a-20: zero is no ceiling and reads no reference; a ceiling
@@ -407,6 +486,20 @@ fn elite_ceiling_is_zero_without_a_reference_and_converted_with_one() {
     );
     let nothing = elite_ceiling_ppm(1, || Ok(200_000_000)).expect_err("zero ppm");
     assert!(nothing.contains("admits nothing"), "{nothing}");
+    // One point at the largest reference that still converts to one ppm, and
+    // one paisa above it.
+    assert_eq!(elite_ceiling_ppm(1, || Ok(100_000_000)), Ok(1));
+    assert!(elite_ceiling_ppm(1, || Ok(100_000_001)).is_err());
+    // A reference of zero or below converts to nothing; so does a negative
+    // ceiling; the largest ceiling saturates rather than wrapping.
+    assert!(elite_ceiling_ppm(5, || Ok(0)).is_err());
+    assert!(elite_ceiling_ppm(5, || Ok(-1)).is_err());
+    assert!(elite_ceiling_ppm(-1, || Ok(2_500_000)).is_err());
+    assert_eq!(
+        elite_ceiling_ppm(i64::MAX, || Ok(1)),
+        Ok(points_to_ppm_at(i64::MAX, 1))
+    );
+    assert!(points_to_ppm_at(i64::MAX, 1) > 0);
 }
 
 /// G18-cli-a-33: only a NEGATIVE ceiling or an out-of-range TOP is refused
@@ -425,10 +518,46 @@ fn screen_in_points_refuses_only_a_negative_ceiling_or_a_bad_top() {
             top,
         )
     };
-    assert!(screen(-1, 10).contains(REFUSAL));
-    assert!(screen(5, 0).contains(REFUSAL));
-    for (max_points, top) in [(0, 10), (5, 10), (5, 1)] {
+    for (max_points, top) in [(-1, 10), (i64::MIN, 10), (5, 0), (0, 1_001), (-1, 0)] {
+        assert!(
+            screen(max_points, top).contains(REFUSAL),
+            "{max_points} {top}"
+        );
+    }
+    for (max_points, top) in [(0, 10), (1, 10), (5, 1), (i64::MAX, 1_000)] {
         let page = screen(max_points, top);
         assert!(!page.contains(REFUSAL), "{max_points} {top}: {page}");
     }
+}
+
+/// G18-cli-a-14: every points-ladder stop rung is a whole point or more and
+/// at most the stop ceiling, over a quiet and a wide synthetic span.
+#[test]
+fn every_points_rung_is_a_point_or_more_and_within_the_ceiling() {
+    // The grid knobs are process-wide; hold them unset for this read.
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    for (spread, close) in [(100_i64, 2_500_000_i64), (5_000, 2_500_000), (1, 15_000)] {
+        let bars: Vec<indicators::Candle> = (0..400)
+            .map(|minute| indicators::Candle {
+                high: close + spread * (1 + minute % 7),
+                low: close - spread * (1 + minute % 5),
+                ..candle(minute, close)
+            })
+            .collect();
+        let rungs = stop_rungs_in_points(&bars);
+        let ceiling = max_stop_points(&bars);
+        assert!(!rungs.is_empty(), "{spread}: a ladder");
+        assert!(
+            rungs.iter().all(|&pt| (1..=ceiling).contains(&pt)),
+            "{spread}: {rungs:?} within 1..={ceiling}"
+        );
+    }
+    // No bars: the reference and the ceiling fall back, and the rule holds.
+    let rungs = stop_rungs_in_points(&[]);
+    assert!(
+        rungs
+            .iter()
+            .all(|&pt| (1..=max_stop_points(&[])).contains(&pt))
+    );
 }

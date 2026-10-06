@@ -448,7 +448,13 @@ fn a_symbolic_link_to_the_held_file_is_refused_by_name() {
     std::os::unix::fs::symlink(&real, &named).expect("symbolic link");
     let file = File::open(&named).expect("open through the link");
     let refused = regular_generation(&file, &named).expect_err("a link is not a regular file");
-    assert!(refused.contains("not a regular file with one link"), "{refused}");
+    assert!(
+        refused.contains("not a regular file with one link"),
+        "{refused}"
+    );
     assert!(refused.contains("(1 links)"), "{refused}");
-    assert!(regular_generation(&file, &real).is_ok(), "the file itself passes");
+    assert!(
+        regular_generation(&file, &real).is_ok(),
+        "the file itself passes"
+    );
 }

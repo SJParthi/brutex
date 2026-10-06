@@ -4272,10 +4272,8 @@ mod tests {
     fn require_binding_accepts_its_own_row_and_refuses_another() {
         let (root, rows, _receipt, prepared) = population_v4_fixture("require-binding");
         let [long, short] = prepared.parameters.clone();
-        let [long_capability, short_capability] = [
-            prepared.capabilities[0],
-            prepared.capabilities[1],
-        ];
+        let [long_capability, short_capability] =
+            [prepared.capabilities[0], prepared.capabilities[1]];
         assert_eq!(long_capability.require_binding(&long, &rows[0]), Ok(()));
         assert_eq!(short_capability.require_binding(&short, &rows[1]), Ok(()));
         assert!(

@@ -860,5 +860,11 @@ mod tests {
         assert_eq!(pbo_ppm(0, 35), Ok(Some(0)));
         assert_eq!(pbo_ppm(1, 3), Ok(Some(333_334)));
         assert_eq!(pbo_ppm(2, 2), Ok(Some(1_000_000)));
+        // The extremes: one in the largest count rounds UP to one ppm, all
+        // of the largest count is certainty, and a numerator above its
+        // denominator is refused rather than projected past a million.
+        assert_eq!(pbo_ppm(1, u64::MAX), Ok(Some(1)));
+        assert_eq!(pbo_ppm(u64::MAX, u64::MAX), Ok(Some(1_000_000)));
+        assert!(pbo_ppm(2, 1).is_err());
     }
 }

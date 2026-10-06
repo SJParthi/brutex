@@ -415,7 +415,11 @@ fn the_pool_oos_arm_refuses_an_overlapping_split_and_bad_words_before_reading() 
             ORDER,
         ),
         (&[(2, "7min")][..], "an unknown rung", RUNG),
-        (&[(4, "13")][..], "a month off the calendar", "MONTH must be 1..=12"),
+        (
+            &[(4, "13")][..],
+            "a month off the calendar",
+            "MONTH must be 1..=12",
+        ),
         (&[(7, "nope")][..], "an unreadable support", "refused: "),
     ] {
         let mut words = base;

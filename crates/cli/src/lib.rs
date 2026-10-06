@@ -85,11 +85,11 @@ mod build_provenance;
 mod commit_stamp;
 #[cfg(test)]
 mod equity_statement_tests;
-#[cfg(test)]
-mod g18_cli_a_tests;
 /// Fixed-stride ledger tails: rollback of a failed append and the writer-side
 /// cut of a torn tail (D-1900, D-1901, D-1902).
 mod fixed_tail;
+#[cfg(test)]
+mod g18_cli_a_tests;
 #[cfg(test)]
 mod operator_boundary_tests;
 mod readonly_file;
@@ -16161,13 +16161,10 @@ fn elite_descend_with_attempt(
     // retained count, warm-up included, would ask the step for fewer hits
     // than the round trips the rules need. A span whose load or column
     // refuses keeps the retained count: every step refuses with that reason.
-    let can_hit =
-        store_root()
-            .ok()
-            .and_then(|root| {
-                screen_swept_in(&root, vendor_word, underlying, known, span, &mut cache)
-            })
-            .unwrap_or(bar_count);
+    let can_hit = store_root()
+        .ok()
+        .and_then(|root| screen_swept_in(&root, vendor_word, underlying, known, span, &mut cache))
+        .unwrap_or(bar_count);
     let floor = match descent_floor(&rules, can_hit, bar_count) {
         Ok(floor) => floor,
         Err(why) => return why,
