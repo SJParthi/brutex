@@ -1040,3 +1040,18 @@ phrase.
 `recorded_row`'s doc, §116's heading, and one `docs/07-o1-architecture.md`
 row. Corrected by D-3321, with every non-test `with_shared_writer(` and
 `.refresh()` caller in `crates/cli/src` read afterwards.
+
+### Attack lens L2, round 15 — the zero round — 2026-10-06
+
+A full review of the branch at `c0b7c8b` found ZERO defects. It covered:
+
+- every statement added or changed across 20 commits and 28 files, checked
+  against the code;
+- older authoritative text, found by call site, for each corrected fact:
+  every caller of `with_shared_writer`, `.refresh()`, `CommittedParents` and
+  `Receipts` in `crates/cli` and `crates/api`; `BarFile::append` callers;
+  `Manifest::entry` callers; audit-read callers; the run-status poll; the
+  campaign route; `AGENTS.md`, `CLAUDE.md`, `docs/01` and `docs/10`;
+- the O1P-01..06 bench code, the capped tail and the gate 14 pins.
+
+This is the lens's exit round.
