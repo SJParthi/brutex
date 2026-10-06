@@ -549,6 +549,25 @@ const fn kind_of(side: OptionSide) -> OptionKind {
 
 /// The model contract for one quote, or the reason there is none.
 fn contract_of(quote: Quote, rate: Rate, basis: YearBasis) -> Result<Contract, PricingError> {
+    contract_from(
+        BarQuote {
+            spot: quote.spot,
+            strike: quote.strike,
+            premium: quote.premium,
+            tenor: quote.tenor,
+            side: quote.side,
+        },
+        rate,
+        basis,
+    )
+}
+
+/// The model contract for one bar's five inputs, or the reason there is none.
+///
+/// The one place a paisa quote becomes a [`Contract`]; [`contract_of`] and
+/// [`bar_greeks`] both come through it, so the two cannot disagree about the
+/// basis check, the positivity screen or the carry.
+fn contract_from(quote: BarQuote, rate: Rate, basis: YearBasis) -> Result<Contract, PricingError> {
     if rate.basis() != basis {
         return Err(PricingError::BasisMismatch {
             rate: rate.basis(),
@@ -580,8 +599,150 @@ fn contract_of(quote: Quote, rate: Rate, basis: YearBasis) -> Result<Contract, P
         // instruments this engine sweeps are spot indices, and §1 pins that to
         // exactly two. A single stock would need a real dividend yield and this
         // field would become the next thing with no source.
+        //
+        // [`bar_greeks`] prices stock options through here too (D-2830), and
+        // `docs/00-charter.md` records no dividend yield for any share, so
+        // for a stock option this zero is NOT a measurement: it is "none
+        // sourced", stated on the wire (`carry`) and in D-2830 rather than
+        // replaced by an invented yield.
         carry: 0.0,
     })
+}
+
+/// One option bar's five model inputs, with no strike ladder.
+///
+/// [`Quote`] carries a [`SweptSlot`] because [`price`] names a moneyness on
+/// the dated ladder, and only the swept underlyings have one. `/db` prices
+/// every stored option — a stock option included — and names its moneyness
+/// from the store's own listed strikes (D-2807), so it needs the model and
+/// not the ladder. D-2830.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BarQuote {
+    /// The underlying's close at the bar's own instant, in paisa.
+    pub spot: i64,
+    /// The contract's strike, in paisa.
+    pub strike: i64,
+    /// The option bar's close, in paisa — the price the volatility is
+    /// solved from.
+    pub premium: i64,
+    /// From the bar's stamp to the close of the expiry day's session.
+    pub tenor: Tenor,
+    /// Call or put.
+    pub side: OptionSide,
+}
+
+/// One option bar's solved volatility and its greeks, in units a reader
+/// reads. D-2830.
+///
+/// # The units, and why they are converted HERE
+///
+/// The model works in paisa, per year and per `1.00` of volatility or rate
+/// (see the module header). A page that converted them would hold a second
+/// copy of the scale facts this module states, so the conversion is done
+/// once, in Rust, beside the model, and the wire carries the converted
+/// figures with their units in their names:
+///
+/// * `delta` — unitless, unchanged.
+/// * `gamma_per_rupee` — the model's per-paisa gamma × 100.
+/// * `theta_rupees_per_day` — the model's per-year theta in paisa, ÷ 100 to
+///   rupees and ÷ the basis's days per year (365 under `Calendar365`).
+/// * `vega_rupees_per_vol_point` — per `1.00` in paisa, ÷ 100 to rupees and
+///   ÷ 100 to one percentage point of volatility.
+/// * `rho_rupees_per_rate_point` — the same two divisions for the rate.
+///
+/// `model` keeps the unconverted figures so nothing is lost on the way.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BarGreeks {
+    /// The volatility that reproduces the premium, as a decimal.
+    pub volatility: f64,
+    /// Model evaluations the solve spent; never above
+    /// `greeks::solver::MAX_ITERATIONS`.
+    pub iterations: u32,
+    /// `dPrice/dSpot`.
+    pub delta: f64,
+    /// `d²Price/dSpot²` per rupee of spot.
+    pub gamma_per_rupee: f64,
+    /// Rupees of premium per calendar day, negative when time decays it.
+    pub theta_rupees_per_day: f64,
+    /// Rupees of premium per one percentage point of volatility.
+    pub vega_rupees_per_vol_point: f64,
+    /// Rupees of premium per one percentage point of the rate.
+    pub rho_rupees_per_rate_point: f64,
+    /// Whether the tenor is below the band `greeks` validates itself in —
+    /// every weekly is. Carried so the caveat travels with the figure.
+    pub below_validated_band: bool,
+    /// The model's own output, unconverted: per paisa, per year, per `1.00`.
+    pub model: Greeks,
+}
+
+/// Paisa in a rupee.
+const PAISA_PER_RUPEE: f64 = 100.0;
+
+/// Percentage points in `1.00` of a volatility or a rate.
+const POINTS_PER_UNIT: f64 = 100.0;
+
+/// Seconds in a calendar day, for the basis's days per year.
+const SECONDS_PER_DAY: f64 = 86_400.0;
+
+/// Solves one option bar's volatility from its own close and evaluates every
+/// greek at it. D-2830.
+///
+/// The rate is whatever the caller measured — `/db` takes it from
+/// [`crate::riskfree::Series::on`] for the bar's own trade day — and the carry
+/// is zero ([`contract_from`] states why, and D-2830 labels it for a share).
+///
+/// # Errors
+///
+/// Every arm of [`PricingError`]: a basis mismatch, a non-positive spot,
+/// strike or premium, and the model's own refusals kept intact — a premium
+/// below the discounted intrinsic and one above the no-arbitrage maximum are
+/// different facts about a bar and are reported as different facts.
+///
+/// # Cost
+///
+/// O(1): one bounded solve (at most `greeks::solver::MAX_ITERATIONS` model
+/// evaluations, a compile-time constant, and the count spent is returned) and
+/// one closed-form greeks evaluation. No allocation.
+///
+/// **UNVERIFIED as a measurement** -- see the module note; `docs/06-limits.md`
+/// (D-2830) carries the one ad hoc timing taken.
+pub fn bar_greeks(bar: BarQuote, rate: Rate, basis: YearBasis) -> Result<BarGreeks, PricingError> {
+    let contract = contract_from(bar, rate, basis)?;
+    let kind = kind_of(bar.side);
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "see contract_of — paisa is exact in f64 at this magnitude"
+    )]
+    let premium = bar.premium as f64;
+    let solved = contract.implied_volatility(premium, kind)?;
+    let model = contract.greeks(solved.volatility, kind)?;
+    #[expect(
+        clippy::float_arithmetic,
+        clippy::cast_precision_loss,
+        reason = "UNIT CONVERSION OF MODEL OUTPUT, NOT A PRICE. §7 keeps prices \
+                  in paisa integers; these are sensitivities, which §7 puts \
+                  with the statistics that keep full precision. Each figure \
+                  is multiplied or divided by an exact power of ten or by the \
+                  basis's day count (a second count under 2^40, exact in \
+                  f64), and the unconverted values stay on `model`"
+    )]
+    let days_per_year = basis.seconds() as f64 / SECONDS_PER_DAY;
+    #[expect(
+        clippy::float_arithmetic,
+        reason = "the same unit conversion as `days_per_year` above"
+    )]
+    let converted = BarGreeks {
+        volatility: solved.volatility,
+        iterations: solved.iterations,
+        delta: model.delta,
+        gamma_per_rupee: model.gamma * PAISA_PER_RUPEE,
+        theta_rupees_per_day: model.theta / PAISA_PER_RUPEE / days_per_year,
+        vega_rupees_per_vol_point: model.vega / PAISA_PER_RUPEE / POINTS_PER_UNIT,
+        rho_rupees_per_rate_point: model.rho / PAISA_PER_RUPEE / POINTS_PER_UNIT,
+        below_validated_band: bar.tenor.below_validated_band(basis),
+        model,
+    };
+    Ok(converted)
 }
 
 /// The volatility that reproduces what the option actually traded at.
@@ -1558,5 +1719,158 @@ mod tests {
             1,
             "the stamp the vendor covered used its number; the other solved"
         );
+    }
+
+    /// The five inputs of [`atm_call`], without its ladder slot.
+    fn bar_of(quote: Quote) -> BarQuote {
+        BarQuote {
+            spot: quote.spot,
+            strike: quote.strike,
+            premium: quote.premium,
+            tenor: quote.tenor,
+            side: quote.side,
+        }
+    }
+
+    /// GK-01 — `bar_greeks` is the greeks crate, by hand: the same contract
+    /// built directly from `greeks::bsm`, solved and evaluated there, gives
+    /// the same volatility and the same greeks, converted only by the stated
+    /// powers of ten and the 365-day year. Invented values, both sides.
+    #[test]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "the hand computation of the tenor under test"
+    )]
+    fn bar_greeks_is_the_greeks_crate_converted_only_by_its_stated_units() {
+        for side in [OptionSide::Call, OptionSide::Put] {
+            let quote = Quote { side, ..atm_call() };
+            let got =
+                bar_greeks(bar_of(quote), test_rate(), YearBasis::Calendar365).expect("solvable");
+
+            // BY HAND, straight from the model crate.
+            let by_hand = Contract {
+                spot: 2_500_000.0,
+                strike: 2_500_000.0,
+                years_to_expiry: quote.tenor.seconds() as f64 / (365.0 * 86_400.0),
+                rate: 0.065,
+                carry: 0.0,
+            };
+            let kind = kind_of(side);
+            let iv = by_hand
+                .implied_volatility(25_000.0, kind)
+                .expect("solvable by hand");
+            let model = by_hand.greeks(iv.volatility, kind).expect("greeks by hand");
+
+            assert_eq!(got.volatility.to_bits(), iv.volatility.to_bits());
+            assert_eq!(got.iterations, iv.iterations);
+            assert_eq!(got.model, model);
+            assert_eq!(got.delta.to_bits(), model.delta.to_bits());
+            assert_eq!(
+                got.gamma_per_rupee.to_bits(),
+                (model.gamma * 100.0).to_bits()
+            );
+            assert_eq!(
+                got.theta_rupees_per_day.to_bits(),
+                (model.theta / 100.0 / 365.0).to_bits()
+            );
+            assert_eq!(
+                got.vega_rupees_per_vol_point.to_bits(),
+                (model.vega / 100.0 / 100.0).to_bits()
+            );
+            assert_eq!(
+                got.rho_rupees_per_rate_point.to_bits(),
+                (model.rho / 100.0 / 100.0).to_bits()
+            );
+            // A seven-day weekly is below the band greeks validates in.
+            assert!(got.below_validated_band);
+            // AND IT ROUND-TRIPS: the model at the solved volatility is the
+            // premium to well inside one paisa.
+            assert!((model.price - 25_000.0).abs() < 0.5, "{}", model.price);
+            // The signs a reader checks first.
+            match side {
+                OptionSide::Call => assert!(got.delta > 0.0 && got.rho_rupees_per_rate_point > 0.0),
+                OptionSide::Put => assert!(got.delta < 0.0 && got.rho_rupees_per_rate_point < 0.0),
+            }
+            assert!(got.gamma_per_rupee > 0.0 && got.vega_rupees_per_vol_point > 0.0);
+            assert!(got.theta_rupees_per_day < 0.0);
+        }
+    }
+
+    /// GK-02 — `bar_greeks` and the ladder path (`solve_iv`) agree exactly on
+    /// the volatility, because both build their contract in `contract_from`.
+    #[test]
+    fn bar_greeks_and_solve_iv_solve_the_same_contract() {
+        let quote = atm_call();
+        let ladder = solve_iv(quote, test_rate(), YearBasis::Calendar365).expect("solvable");
+        let bar = bar_greeks(bar_of(quote), test_rate(), YearBasis::Calendar365).expect("solvable");
+        assert_eq!(bar.volatility.to_bits(), ladder.volatility.to_bits());
+        let greeks = greeks_at(
+            quote,
+            ladder.volatility,
+            test_rate(),
+            YearBasis::Calendar365,
+        )
+        .expect("greeks");
+        assert_eq!(bar.model, greeks);
+    }
+
+    /// GK-03 — a bar the model cannot solve is refused by name, the model's
+    /// own reason kept: a close below intrinsic, a close above the
+    /// no-arbitrage maximum, a non-positive close, spot or strike.
+    #[test]
+    fn a_bar_the_model_cannot_solve_is_refused_with_its_own_reason() {
+        let below = BarQuote {
+            // Deep in the money by 1,000.00 and offered at 1.00.
+            strike: 2_400_000,
+            premium: 100,
+            ..bar_of(atm_call())
+        };
+        let why = bar_greeks(below, test_rate(), YearBasis::Calendar365).expect_err("below");
+        assert!(
+            matches!(
+                why,
+                PricingError::Model(GreeksError::PriceBelowIntrinsic { .. })
+            ),
+            "{why:?}"
+        );
+        assert!(why.to_string().contains("intrinsic"), "{why}");
+
+        let above = BarQuote {
+            // A call worth more than the underlying itself.
+            premium: 2_600_000,
+            ..bar_of(atm_call())
+        };
+        let why = bar_greeks(above, test_rate(), YearBasis::Calendar365).expect_err("above");
+        assert!(matches!(why, PricingError::Model(_)), "{why:?}");
+
+        for (field, broken) in [
+            (
+                "premium",
+                BarQuote {
+                    premium: 0,
+                    ..bar_of(atm_call())
+                },
+            ),
+            (
+                "spot",
+                BarQuote {
+                    spot: -1,
+                    ..bar_of(atm_call())
+                },
+            ),
+            (
+                "strike",
+                BarQuote {
+                    strike: 0,
+                    ..bar_of(atm_call())
+                },
+            ),
+        ] {
+            let why = bar_greeks(broken, test_rate(), YearBasis::Calendar365).expect_err(field);
+            assert!(
+                matches!(why, PricingError::NotPositive { field: f, .. } if f == field),
+                "{field}: {why:?}"
+            );
+        }
     }
 }
