@@ -754,8 +754,10 @@ vendor hold" is a field read of the manifest header —
 **402,568×** on two runs of the same tree, against re-deriving the same number
 from 10,000 entries in the same process on an Apple M4 Pro. "What do I hold for
 this month" is one hash probe into a map reserved from the committed entry
-count, flat to within 1.05× at 100× the census
-(`pull::bench::entry_lookup_is_flat`).
+count, flat to within 1.05× at 100× the census for one repeatedly probed,
+cached key (`pull::bench::entry_lookup_is_flat`). Over random present keys it
+is flat in probes and not in time: p99 1.53× – 1.88× at 10^4 and 4.62× –
+5.91× at 10^5 (O1P-05, D-3307, D-3309).
 
 **The cause of the C-11 spread is NOT established, and D-0035 said it was.**
 That entry, and this section, and `docs/07-o1-architecture.md` all read "a field
@@ -2121,9 +2123,11 @@ converges in three or four steps and never reaches the bisection.
 The closed form has no loop and no input-dependent branch other than the one
 choosing a call from a put. That is a statement about the **code**, not about
 the **cost**: whether the platform's `exp`, `ln` and `sqrt` take the same time
-for every argument is not measured here, and this crate carries no bench that
-would measure it. Any claim that one greek evaluation is constant-time is
-therefore an **EXTRAPOLATION** from the shape of the source.
+for every argument is not measured here. The crate now carries a bench:
+C-G-01 and C-G-02 time a price and the greek set across contracts far apart
+in moneyness and tenor, which samples arguments rather than proving every one
+(D-3316). A claim that one greek evaluation is constant-time for EVERY
+argument is still an **EXTRAPOLATION** from the shape of the source.
 
 What *is* asserted as a number is the solver's iteration count, which is an
 integer and does not move with a scheduler —
@@ -15707,10 +15711,12 @@ sampler, whose cold read could, about once in 196 samples at 10^3, land in the
 block before it; D-3309 removed that.
 
 **Still at the minimum of a mean:** mask evaluation (`C-E-*`, `C-V-*`),
-condition lookup, and every other row in the thirteen benches. The `hits`
-test and the compile-time name table have no size that grows, so there is
-nothing for a 10^3 → 10^6 sweep to vary. The two operations that do grow,
-bar lookup and the k=1 table, are now covered.
+condition lookup, and every other row in the thirteen benches apart from
+C-T-01b and the O1P rows. The `hits` test and the compile-time name table have
+no size that grows, so there is nothing for a 10^3 → 10^6 sweep to vary. The
+two rule-4 operations that do grow, bar lookup and the k=1 table, are now
+covered. Round 2 below adds O1P-05 for the manifest lookup and O1P-06 for
+`tail`.
 
 ### k=1 duplicate rejection leaves the cache past 10^5 offered positions (D-3301)
 

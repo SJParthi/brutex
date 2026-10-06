@@ -63375,3 +63375,14 @@ missed:
 Each now states what the corrected copies state. A grep for the old wording
 across `crates/*/src` and `docs/02-store-format.md` finds no further copies.
 Text only.
+
+### D-3316 — Older "flat" and "no bench" claims the manifest and greeks measurements contradict — 2026-10-06
+
+A ninth review found older text that the round-2 measurement contradicts:
+§17 of `docs/06-limits.md`, the C-12 invariant row, the C-12 bench comment and
+a `Manifest` doc comment each called the census lookup flat at 100× with no
+qualifier. Each is now scoped to the one cached key C-12 probes and points to
+O1P-05. The D-3300 section's "every other row" now names C-T-01b and the O1P
+rows. A sweep for "carries no bench" found the greeks paragraph, written
+before `crates/greeks/benches/ratio.rs` existed. It now names C-G-01 and
+C-G-02 and keeps the per-argument claim an extrapolation. Text only.

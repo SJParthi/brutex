@@ -1001,3 +1001,10 @@ such places. They are corrected by D-3314.
 Three stale copies of claims corrected in rounds 1 and 2: `rebuild_index`,
 `api::census` and an inline comment in `cli::results`. Corrected by D-3315,
 with a grep for each old wording showing no further copies.
+
+### Attack lens L2, round 9 — dispositions — 2026-10-06
+
+Four older statements called the census lookup flat with no qualifier, and
+one paragraph said greeks carried no bench. Corrected by D-3316. A grep for
+"flat to within", "lookup is flat", "100× the census" and "carries no bench"
+was run afterwards across docs, CLAUDE.md, crates/*/src and the benches.

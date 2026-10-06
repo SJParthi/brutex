@@ -313,7 +313,8 @@ fn census_beats_the_scan_it_replaces() -> bool {
     ok
 }
 
-/// C-12 — one entry lookup costs the same at 1×, 10× and 100× the census.
+/// C-12 — one REPEATED entry lookup costs the same at 1×, 10× and 100× the
+/// census. It probes one cached key; random keys are O1P-05 (D-3307).
 ///
 /// The map is reserved from the entry count known before the load walk begins,
 /// so it never rehashes: `docs/07-o1-architecture.md` layer 3, O(1) **worst
