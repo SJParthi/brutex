@@ -133,3 +133,5 @@ Read CLAUDE.md, then the fix-queue branch file resume/pr74-ci-thread.md (last se
   | session_01R51JmkeR6PuVuzyEFgGFXq | L3 permutations + differential | attack/permutations | D-3400..3499 | XPERM- |
   | session_01HjzyWzsojN9XoNtyh6n1Dd | L4 Rust-only/one authority/docs drift | attack/one-authority | D-3500..3599 | ONEAUTH- |
   WS2 overflow range D-3700..3799.
+- 03:47 UTC: Brutex Status Board republished in place (https://claude.ai/artifact/6e7CWygfPUuz3P9Vz6E15f, version 3). It is now a live page backed by the artifact's db (rules: read view, write admin). Collections: board/summary (tiles), workstreams, gates, survivors, speed, rustonly, owner; every row has `order`. Update rows with ArtifactData set/update/batch (pin `if_version`), never by republishing. Seed source: the scratchpad mkseed.py of this session; numbers cited in each row (docs/06-limits.md, run 1283, trackers).
+- Rust-only scan on 969493e1: 1041 tracked files, 0 violations; no native code compiled (ring closed by D-0211); stale ring comment in crates/pull/Cargo.toml handed to lens L4. Evidence: resume/pr74-g18-run1283/rust-only-scan-20261006.md.
