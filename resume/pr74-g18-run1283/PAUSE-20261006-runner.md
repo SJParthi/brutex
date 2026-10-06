@@ -69,3 +69,9 @@ Branch head: **a8d09ad**, pushed and clean.
 2. Re-run cargo-mutants on a8d09ad plus later fixes, for the new `audit.rs` pivot line and every fixed mutant,
    with the same flags as M4. Require 0 missed and 0 timeout.
 3. Run fmt, workspace clippy, runner tests as non-root and the static gates, then push and update RESULT-runner.md.
+
+## M4 finished during the pause
+113 mutants on c216c97: caught 104, missed 1, timeout 1, unviable 7. Missed or timeout:
+  - crates/runner/src/audit.rs:1148:50: replace - with / in grid
+  - crates/runner/src/expression_validation.rs:261:18: replace += with *= in index_folds
+(The audit.rs:1148 `-` -> `/` survivor is already restructured away in a8d09ad, not yet proven.)
