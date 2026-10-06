@@ -46,3 +46,13 @@ Evidence: `cargo fmt --check` clean; `cargo clippy --workspace --all-targets -- 
   5. Transport-level retries (`with_retry`, `laddered`, http `TransportFailed`) unlogged.
   6. `recovery::activate_durable` BLOCKED reason not logged.
   7. `sweeprun` `descend_with`/`command_with_configuration` stamp refusal and `environment_budget_refusal` not emitted (run_with does emit).
+
+## Refuter verdicts on the round-3 web candidates (landed after park): ALL SEVEN STAND
+Not fixed (parked). Fix plan, one shared path where possible; extend D-1789 with a new D-32xx entry:
+- W1 backtest `loadSurface`/`coverNote` (~3498, ~3694): keep `matched:null` and `counted_from`; say "swept count not measured (no master)" instead of "0 of N". Test via the parse-and-extract harness of web/tests/live-top-binding.test.js.
+- W2 census-unreadable 503 shown as a master message: one header helper (e.g. `censusRefusal(headers)` in web/src/lib/refusal.js) used by catalogue-loader.js:48-50, feed-summary.js:9, ingest +page.svelte:4025. Tests: catalogue-loader.test.js, feed-summary.test.js.
+- W3 frontier-pages.js:43-44: `refusalFrom('/frontier.json', response)`; change frontier-pages.test.js:103-107 (it pins the old behaviour) and give the stub `text()`.
+- W4 backtest /live.json 503 (~323-328): `refusalFrom('/live.json', response)`; test in live-top-binding.test.js.
+- W5 sweep-evidence.js:43: `detailRefusal(response, …)`; test sweep-evidence.test.js.
+- W6 run.json?attempt= 503 `running.why`: teach `refusalOf` the `{running:{status:'unknown',why}}` shape, then `refusalFrom` in receipt-batch.js:120, boolean-launch.js:354, index-stop-launch.js:145, backtest pollSweep ~2498. Tests: refusal.test.js, receipt-batch.test.js, boolean-launch.test.js, index-stop-launch.test.js.
+- W7 BooleanLaunch.svelte:75, IndexStopLaunch.svelte:43: `refusalFrom(...)` + " No launch was attempted." Tests: index-stop-launch.test.js harness; copy it into boolean-launch-page.test.js.
