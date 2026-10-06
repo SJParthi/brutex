@@ -183,3 +183,27 @@ checked: none uses D-36xx, and none uses FB-110..149.
     squash merge), and F-A86CB4 says FIXED with no sha. L2 never ran core's tests (its RESULT
     lists touched-crate tests only).
   - Owner of the fix: L2, at the 12:12 RESUME. Nothing is pushed until it passes.
+
+## 13:56 UTC — integration state (coordinator)
+- integ 3694ef66 (local, not pushed) = 969493e1, plus:
+  - D-2090, then D-2091 (Gate 18 build bound ×4; cold 1132s / warm-deps 977s at the
+    integration head; run 1283 shard 110 baseline 598s);
+  - attack/o1-p99 aafe0d2;
+  - attack/permutations 8635409, with its ledger rows converted to IN PROGRESS bullets
+    (8908f88a);
+  - pr74/g18-runner 806a463;
+  - pr74/g18-rest fea3659;
+  - pr74/g18-cli-b 27b77704.
+- Validation at fbfd3e1a: fmt, 29/29 gates and clippy pass. Tests as uid 65534 were 122/125;
+  the 3 failures were:
+  - pull `unit` (root-owned /tmp/brutex-pull);
+  - store `cited_commits` (git dubious ownership as nobody);
+  - core `findings`: the history checks were the same environment cause, but the tally/WITHDRAWN
+    failure was REAL (L3 table rows). Fixed in 8908f88a.
+  All three pass as root: findings 14/14, unit 162/162, cited_commits 6/6.
+- Gap-audit replies so far:
+  - WS2: #1 REFUTED (D-3150/D-3157 already refuse; guard test pinned in 78a4642); #16 FIXED
+    78a4642 (D-3680).
+  - WS4: #7 #8 #9 FIXED 181e9e42 (D-3692..3694); #15 FIXED c936e19c (D-3695).
+  - WS3: #2 #3 #4 #13 #14 #17 reported done, committing.
+  - WS5: #5 #6 being verified.
