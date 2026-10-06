@@ -177,8 +177,14 @@ fn the_launch_configuration_states_what_build_rs_actually_stamps() -> std::io::R
         text.contains("a build from a CLEAN tree records sweeps"),
         "{text}"
     );
+    // P13-03, D-2511: cargo is the program, not an argument to a shell.
+    assert!(text.contains("\"runtimeExecutable\": \"cargo\""), "{text}");
+    assert!(!text.contains("\"runtimeExecutable\": \"sh\""), "{text}");
+    assert!(!text.contains("\"-c\""), "{text}");
     assert!(
-        text.contains("\"exec cargo run --release -p api -- serve\""),
+        text.contains(
+            "\"runtimeArgs\": [\n        \"run\",\n        \"--release\",\n        \"-p\",\n        \"api\",\n        \"--\",\n        \"serve\"\n      ]"
+        ),
         "{text}"
     );
     Ok(())

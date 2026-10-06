@@ -64130,3 +64130,203 @@ its last minute), and a check for a daily bar fetched for today, are owner
 choices and are left as they were.
 
 **Evidence.** ZX-96.
+### D-2511 — `.claude/` holds exactly one file, and the launch runs cargo without a shell — 2026-10-06
+
+**The findings.** P13-02 and P13-03. Gate 1 decided `.claude/` by extension
+alone, so any `.json` at any depth there passed gates 1 and 1b, and a
+force-added `.claude/settings.json` whose hooks start an interpreter would have
+entered through the operator-tooling clause of `CLAUDE.md` section 2. The one
+file that clause names, `.claude/launch.json`, launched the product as
+`sh -c "exec cargo run --release -p api -- serve"`: a shell interpreter handed
+an inline program, kept after D-1970 removed the `BRUTEX_COMMIT` substitution
+that was its only reason.
+
+**The decision.** Gate 1 (`.github/gates_tree.rs`) refuses every tracked path
+under `.claude/` other than exactly `.claude/launch.json`; a second file there is
+a `CLAUDE.md` edit and a decision entry, as D-0210 was. Gate 1's verdict reads
+that file when it is tracked and refuses a `runtimeExecutable` naming a shell or
+wrapper (`sh`, `bash`, `zsh`, `dash`, `ksh`, `fish`, `env`, `busybox`, by name
+or by path), any `-c` argument, a first configuration that does not run
+`cargo`, and any JSON escape other than `\"` and `\\` (so `sh` cannot
+spell a shell). The configuration now runs `cargo` with the arguments
+`run --release -p api -- serve`. The second configuration (`npm --prefix web run
+dev`) is the front-end exception and is unchanged.
+
+**Rejected.** Pinning the whole file byte for byte: the names are prose an
+operator edits. A JSON parser: the check needs the string tokens in order, and
+the `.github/*.rs` tools take no dependency.
+
+**Evidence.** ZX-50.
+
+### D-2512 — Gate 16 reads the forbid in code only; gate 5 counts `unsafe_code` anywhere in a lint list — 2026-10-06
+
+**The finding.** P15-01. Gate 16 layer 1 accepted any line beginning
+`#![forbid(` naming `unsafe_code`, including one inside a `/* */` block comment
+or a multi-line string. Gate 5 counted an exception only when `unsafe_code`
+directly followed `allow(` or `expect(`, so `#[allow(unused, unsafe_code)]`
+counted nothing. Together a crate root could comment its forbid out and enable
+unsafe code with both gates green.
+
+**The decision.** `forbids_unsafe` (`.github/gates_runtime.rs`) reads the file
+after `blank_comments_and_strings`: comments (line, block, nested) and string
+literals (plain, byte, raw) are replaced by spaces with newlines kept,
+character literals are stepped over so `'"'` opens nothing, and only a line
+that is code can carry the attribute. Gate 5 (`.github/gates_jobs.rs`) keeps its
+old count on the raw text (it still counts inside strings and comments, as grep
+did) and adds a count on the same blanked view: every whole-word `unsafe_code`
+inside the list of an `allow(`, `expect(` or `warn(`, at any position and across
+lines; a list ends at its closing parenthesis or at `]`, `;`, `{` or `}`. The
+two counts are merged by byte offset, so no occurrence counts twice. The
+ceiling is unchanged.
+
+**Evidence.** ZX-51.
+
+### D-2513 — `step-runs` refuses a needle after anything that ends or replaces the script — 2026-10-06
+
+**The finding.** P15-02. `swallowed` accepted a needle line after an earlier
+`exit 0` or `return`, after a `trap ... EXIT`, after a one-line function that
+shadows the command (`cargo() { :; }` nets the brace depth to zero), and judged
+a needle line ending in `\` on ` \` alone, missing a `|| true` on the next line.
+
+**The decision.** Script lines are joined across `\` continuations before they
+are judged. Before the needle, any word `exit`, `return` or `exec` whose status
+is not a literal non-zero number, any `trap`, any `alias` or `function`, and any
+word that defines a function (`name()` or a bare `()`) makes the needle not
+decide its step, with the reason named. A word counts at any position, because
+`[ x ] || exit 0` skips the rest as a bare `exit 0` does. A failing `exit 1`
+(the `|| { echo ..; exit 1; }` form ci.yml uses) is still allowed. Such a word
+inside quoted text can be refused falsely; that refusal is loud.
+
+**Evidence.** ZX-52.
+
+### D-2514 — Every `if:` in every workflow is held to the safe-condition list; the probe condition only in job `build` — 2026-10-06
+
+**The findings.** P15-03 and P15-06. `condition_is_safe` accepted
+`steps.probe.outputs.has_crates == 'true'` for a step in any job, where
+`steps.probe` is null and the step is skipped on every run. It was applied only
+inside `step_runs`, for four needle lines: `if: false` under any other gate step
+skipped it, the job stayed `success`, and ci-ok accepted it. The probe itself
+(`gates_jobs probe`) had no test.
+
+**The decision.** `condition_is_safe` takes whether the probe is admitted: true
+only for a step of job `build` (`PROBE_JOB`), false at job level, where the
+`steps` context does not exist. `workflow_findings` (gate 0, every
+`.github/*.yml`) now refuses every job-level and step-level `if:` that is not
+`always()`, `success()`, `!cancelled()` or, on a build step, the probe
+condition. The probe's output line is `has_crates_line(n)`, pinned by a test.
+
+**Evidence.** ZX-53.
+
+### D-2515 — A quoted key and a flow mapping are the key itself — 2026-10-06
+
+**The finding.** P15-04. `continue-on-error` was found only as a plain key at a
+line start, so `"continue-on-error": true` and `- { name: x, continue-on-error:
+true, run: ... }` passed gate 0 and `step_runs`, though YAML reads both as the
+key.
+
+**The decision.** `workflow_findings` reads each comma-separated piece of a
+line with quotes and braces removed, and refuses `continue-on-error:` in any
+piece. A step written as a flow mapping (`- {`) is refused outright, since it
+hides every key from the indentation-based rules. `own_key` reads `"key":` and
+`'key':` as `key:`, so `step_runs` and the `if:` rules see quoted keys too.
+`with: { .. }` is a value, not a step, and is unaffected.
+
+**Evidence.** ZX-54.
+
+### D-2516 — ci-ok's step is compared whole — 2026-10-06
+
+**The finding.** P15-05. The aggregator rule checked that three lines were
+present in ci-ok's steps. A `RESULTS=success` or an `exit 0` before the loop
+left all three present and made ci-ok green whatever the jobs returned.
+
+**The decision.** ci-ok must hold exactly one step, and that step's lines,
+trimmed, with blank and `#` lines left out, must equal `CI_OK_STEP` in
+`.github/source_scan.rs` line for line. A changed ci-ok body is a change to that
+constant, reviewed beside the workflow. A test pins the real workflow against
+it.
+
+**Evidence.** ZX-55.
+
+### D-2517 — Gate 1f reads joined arrays and the unlisted browser members — 2026-10-06
+
+**The finding.** P15-10. `document.getElementsByTagName(..)`, `location.hash`,
+`fetch('/x').then(..)` (only `await fetch(` was listed) and
+`["<scr", "ipt>..."].concat()` all passed the browser scan.
+
+**The decision.** `browser_findings` adds `fetch(` (replacing `await fetch(`),
+`document.getelementsby`, `location.hash`, `location.href`, `location.replace(`
+and `location.assign(`. `browser_scan` joins the string literals of a `[ .. ]`
+group followed by `.concat()`, or by `.join(SEP)` with SEP when it is a literal,
+and reads the result as one string. What stays unseen is stated at the module
+head: formatting (`format!("<{t}>", t = "script")`), pushing piece by piece, and
+a join whose pieces are not literals in one array.
+
+**Evidence.** ZX-56.
+
+### D-2518 — Gates 9 and 9b read the crate's module closure, and gate 9 gives its current reason — 2026-10-06
+
+**The findings.** P15-11 and P15-12. Gates 9 and 9b read only the manifest
+(and, for 9b, `crates/greeks/**/*.rs` by name), so a `#[path]` or `include!`
+compiling another crate's source into `core` or `greeks` declared nothing and
+named nothing they matched: latent, since neither crate has one today. Gate 9's
+reason line said "core is compiled to wasm32 through crates/web. See D-0009." —
+a crate that does not exist and a decision about it.
+
+**The decision.** The gate 9 and 9b steps run `source_scan closure` over the
+crate's roots (`src/lib.rs`, `build.rs`, `tests/*.rs`, `benches/*.rs`,
+`examples/*.rs`) and pass it to the verdict, which refuses any resolved file
+outside `crates/<c>/`, any `UNRESOLVED` line or non-zero status, and a closure
+that does not hold the crate's own `src/lib.rs`. The reason line now says core
+is the shared noun crate other projects take and depends on nothing
+(`docs/10-shared-core.md` section 1, D-0095; `CLAUDE.md` section 5).
+
+**Limit.** The roots are a pathspec in which `*` matches `/`, so a nested test
+helper becomes a root; one that declares `mod x;` as if it were a crate root
+would be refused as unresolved. Neither crate has one.
+
+**Evidence.** ZX-57.
+
+### D-2519 — A process stream opened by its path is a print to gates 17 and 23 — 2026-10-06
+
+**The finding.** P15-14. Gates 17 and 23 matched print macros, `io::stdout` and
+`io::stderr` only, so `OpenOptions::new().append(true).open("/dev/stderr")` then
+`writeln!` in `runner` wrote per-trial output to stderr, invisible to both.
+
+**The decision.** Both gates run `source_scan strings` over the files they
+already read. Gate 17 refuses, in a swept crate, any string literal containing
+`/dev/stderr`, `/dev/stdout`, `/dev/tty`, `/dev/fd/`, `/proc/self/fd/`,
+`/dev/console` or `/dev/pts/`; gate 23 counts each such literal as a `handle` of
+its file, held to the declared handle list. No crate has one today, so the
+declared list is unchanged. A file whose strings cannot be read is refused. A
+path assembled at run time from pieces is not seen.
+
+**Evidence.** ZX-58.
+
+### D-2520 — Gate 26 counts every client spelling, in code only — 2026-10-06
+
+**The finding.** P15-15. Gate 26 counted raw lines holding `Client::builder()`
+against lines holding `ensure_tls_provider()`. `Client::new()`,
+`ClientBuilder::new(` and `reqwest::get(` build a client with no counted site,
+and `// ensure_tls_provider()` counted as a guard. Latent: no such site exists.
+
+**The decision.** The file is read with comments and string literals blanked
+(the walk D-2512 uses), and the occurrences of `Client::builder()`,
+`Client::new()`, `ClientBuilder::new(`, `reqwest::get(` and `blocking::get(` are
+held against the occurrences of `ensure_tls_provider()`. The "cannot see" list
+in ci.yml adds a renamed client type and any other spelling.
+
+**Evidence.** ZX-59.
+
+### D-2521 — Gate 24 refuses `map_raw(` — 2026-10-06
+
+**The finding.** P15-16. `MmapOptions::new().map_raw(&f)?` is a safe call that
+returns a read-write mapping (`CLAUDE.md` section 4 bans one without exception)
+and names neither banned type nor a banned call. Latent: `memmap2` is declared
+in the root `Cargo.toml` workspace table and used by no crate.
+
+**The decision.** `maps_writably` adds `map_raw(` and `map_raw_read_only(`,
+word-bounded on the left like the other calls; the existing spelling test
+`the_writable_map_spellings_match_their_expression` carries both. Removing the
+unused `memmap2 = "0.9"` workspace entry, or banning the package in
+`deny.toml`, is left to the owner: it is a manifest change this finding does
+not require.

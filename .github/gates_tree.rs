@@ -280,6 +280,87 @@ fn gate_0_verdict(workflow: &Scan, aggregator: &Scan, spawns: &Scan, fork: &Scan
 /// CLAUDE.md section 2's extensions outside `web/`.
 const ALLOWED: [&str; 6] = ["rs", "toml", "md", "lock", "html", "css"];
 
+/// The one tracked file under `.claude/` (CLAUDE.md section 2, D-0210).
+const CLAUDE_FILE: &str = ".claude/launch.json";
+
+/// Programs that run a program handed to them as text: a launch
+/// configuration that names one runs an inline script, not the product.
+const LAUNCH_SHELLS: [&str; 8] = ["sh", "bash", "zsh", "dash", "ksh", "fish", "env", "busybox"];
+
+/// The string tokens of a JSON text, in order, or why it cannot be read.
+/// Only `\"` and `\\` are decoded: any other escape is refused, so a
+/// `sh` cannot spell a shell past the check below (P13-03, D-2511).
+fn json_strings(text: &str) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '"' {
+            continue;
+        }
+        let mut s = String::new();
+        loop {
+            match chars.next() {
+                None => return Err("an unterminated string".to_owned()),
+                Some('"') => break,
+                Some('\\') => match chars.next() {
+                    Some(e @ ('"' | '\\')) => s.push(e),
+                    other => {
+                        return Err(format!(
+                            "the escape `\\{}`, which this check does not decode",
+                            other.map_or(String::new(), String::from)
+                        ));
+                    }
+                },
+                Some(ch) => s.push(ch),
+            }
+        }
+        out.push(s);
+    }
+    Ok(out)
+}
+
+/// Why the launch configuration is refused, or nothing (P13-03, D-2511).
+/// The product configuration ran `sh -c "exec cargo run ..."`: a shell
+/// interpreter handed an inline program, kept after D-1970 removed the one
+/// substitution it existed for. Every `runtimeExecutable` must name a program
+/// that is not a shell, no argument may be `-c`, and the first configuration
+/// (the one CLAUDE.md section 2 and `docs/07-plan.md` section 0 call the
+/// application) must run `cargo` itself.
+fn launch_findings(text: &str) -> Vec<String> {
+    let strings = match json_strings(text) {
+        Ok(s) => s,
+        Err(e) => return vec![format!("{CLAUDE_FILE} cannot be read: {e}")],
+    };
+    let mut out = Vec::new();
+    let mut programs = Vec::new();
+    for (i, s) in strings.iter().enumerate() {
+        if s == "runtimeExecutable" {
+            programs.push(strings.get(i + 1).cloned().unwrap_or_default());
+        }
+        if s == "-c" {
+            out.push(format!(
+                "{CLAUDE_FILE} passes `-c`: a program handed to its runtime as text"
+            ));
+        }
+    }
+    for p in &programs {
+        let base = p.rsplit('/').next().unwrap_or(p);
+        if LAUNCH_SHELLS.contains(&base) {
+            out.push(format!(
+                "{CLAUDE_FILE} launches `{p}`, a shell or wrapper that runs an inline program"
+            ));
+        }
+    }
+    match programs.first().map(String::as_str) {
+        Some("cargo") => {}
+        Some(other) => out.push(format!(
+            "{CLAUDE_FILE}'s first configuration runs `{other}`, not cargo"
+        )),
+        None => out.push(format!("{CLAUDE_FILE} names no runtimeExecutable")),
+    }
+    out
+}
+
 /// Which list applies is decided by the PATH, not by the file: `.yml` only
 /// under `.github/`, `.json` only under `.claude/`, anything under `web/`.
 fn extension_ok(f: &str, ext: &str) -> (bool, &'static str) {
@@ -326,6 +407,18 @@ fn gate_1_record(rec: &str, r: &mut Report) {
         ));
         return;
     }
+    // ONE FILE, NOT ONE DIRECTORY (P13-02, D-2511). The `.claude/` clause of
+    // CLAUDE.md section 2 admits operator tooling, and section 2 names
+    // exactly one tracked file that uses it. The extension rule alone took
+    // any `.json` at any depth, so a force-added `.claude/settings.json`
+    // whose hooks start an interpreter passed gates 1 and 1b. A second file
+    // here is a CLAUDE.md edit and a decision entry, as D-0210 was.
+    if f.starts_with(".claude/") && f != CLAUDE_FILE {
+        r.refuse(format!(
+            "FORBIDDEN FILE  {f}  (only {CLAUDE_FILE} is tracked under .claude/; CLAUDE.md section 2, D-0210)"
+        ));
+        return;
+    }
     if named(&[".gitignore", ".gitattributes"]) {
         if !(f == ".gitignore" || f == ".gitattributes" || web) {
             r.refuse(format!(
@@ -354,7 +447,14 @@ fn gate_1_record(rec: &str, r: &mut Report) {
     }
 }
 
-fn gate_1_verdict(staged: &[u8], content: &Scan, orphans: &Scan) -> Result<Report, String> {
+/// `launch` is the text of [`CLAUDE_FILE`] when it is tracked (P13-03,
+/// D-2511), held to [`launch_findings`].
+fn gate_1_verdict(
+    staged: &[u8],
+    content: &Scan,
+    orphans: &Scan,
+    launch: Option<&str>,
+) -> Result<Report, String> {
     let mut r = Report::default();
     let records = nul_names(staged)?;
     for rec in &records {
@@ -365,6 +465,9 @@ fn gate_1_verdict(staged: &[u8], content: &Scan, orphans: &Scan) -> Result<Repor
         return Ok(r);
     }
     r.say(format!("read {} tracked file(s)", records.len()));
+    for f in launch.map(launch_findings).unwrap_or_default() {
+        r.refuse(format!("FORBIDDEN LAUNCH  {f}  (P13-03, D-2511)"));
+    }
     for l in content.lines() {
         r.say(l);
     }
@@ -2663,15 +2766,24 @@ fn gate_2_verdict(
 /// A crate that may declare no dependency of any kind.
 struct Standalone {
     manifest: &'static str,
+    /// The crate's directory, with its trailing slash: every file its roots
+    /// compile must lie under it (P15-11, D-2518).
+    dir: &'static str,
     found: &'static str,
     why: &'static [&'static str],
 }
 
 const CORE: Standalone = Standalone {
     manifest: "crates/core/Cargo.toml",
+    dir: "crates/core/",
     found: "crates/core MUST DEPEND ON NOTHING. Found:",
     why: &[
-        "core is compiled to wasm32 through crates/web. See D-0009.",
+        // P15-12, D-2518: this line named crates/web and D-0009, a crate
+        // that does not exist (CLAUDE.md section 5, gate 7 skips) and a
+        // decision that no longer binds anything.
+        "core is the shared noun crate other projects take, and it depends on",
+        "nothing (docs/10-shared-core.md section 1, D-0095; CLAUDE.md section 5).",
+        "A dependency here is a dependency forced on every consumer.",
         "A DEV-DEPENDENCY IS NOT A TECHNICALITY: it is compiled into every",
         "test and every bench, so a crate that declares one CAN REACH IT",
         "whatever the shipping graph says.",
@@ -2680,6 +2792,7 @@ const CORE: Standalone = Standalone {
 
 const GREEKS: Standalone = Standalone {
     manifest: "crates/greeks/Cargo.toml",
+    dir: "crates/greeks/",
     found: "crates/greeks MUST DEPEND ON NOTHING. Found:",
     why: &["It is shared with another repository by git URL. See D-0046."],
 };
@@ -2744,16 +2857,65 @@ fn greeks_leaks(files: &[(String, Vec<u8>)]) -> Vec<String> {
     out
 }
 
-fn gate_9(tracked: bool, deps: &Scan) -> Report {
+/// `closure` is `source_scan closure` over the crate's roots (its
+/// `src/lib.rs`, `build.rs`, tests, benches and examples). A `#[path]` or
+/// `include!` that reaches another crate's source compiles that source into
+/// this one with no manifest line and no name gate 9b matches (P15-11,
+/// D-2518), so every resolved file must lie under the crate's directory, the
+/// closure must resolve, and it must hold the crate's own `src/lib.rs`, or
+/// it read nothing.
+fn closure_refusals(spec: &Standalone, closure: &Scan, r: &mut Report) {
+    let dir = spec.dir;
+    let lines = closure.lines();
+    let unresolved: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|l| l.starts_with("UNRESOLVED "))
+        .collect();
+    if !closure.ok() || !unresolved.is_empty() {
+        r.refuse(format!(
+            "REFUSED  the module closure of {dir} did not resolve (status {}):",
+            closure.status
+        ));
+        for l in unresolved {
+            r.say(l);
+        }
+    }
+    let lib = format!("{dir}src/lib.rs");
+    if !lines.contains(&lib.as_str()) {
+        r.refuse(format!(
+            "REFUSED  the module closure does not hold {lib}, so it read nothing."
+        ));
+    }
+    let foreign: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|l| !l.is_empty() && !l.starts_with("UNRESOLVED ") && !l.starts_with(dir))
+        .collect();
+    if !foreign.is_empty() {
+        r.refuse(format!(
+            "SOURCE FROM OUTSIDE {dir} IS COMPILED INTO IT (a #[path] or include!):"
+        ));
+        for l in foreign {
+            r.say(l);
+        }
+        r.say("Its manifest declares nothing, and the crate still carries that code.");
+    }
+}
+
+fn gate_9(tracked: bool, deps: &Scan, closure: &Scan) -> Report {
     let mut r = standalone(&CORE, tracked, deps);
+    closure_refusals(&CORE, closure, &mut r);
     if !r.refused {
-        r.say("OK — core declares no dependency of any kind, in any spelling.");
+        r.say("OK — core declares no dependency of any kind, in any spelling,");
+        r.say("     and compiles no source from outside crates/core/.");
     }
     r
 }
 
-fn gate_9b(tracked: bool, deps: &Scan, sources: &[(String, Vec<u8>)]) -> Report {
+fn gate_9b(tracked: bool, deps: &Scan, closure: &Scan, sources: &[(String, Vec<u8>)]) -> Report {
     let mut r = standalone(&GREEKS, tracked, deps);
+    closure_refusals(&GREEKS, closure, &mut r);
     if r.refused {
         return r;
     }
@@ -2932,10 +3094,16 @@ fn run(args: &[String]) -> Result<Report, String> {
         }
         ("gate-1", "verdict") => {
             let w = dir(2)?;
+            let launch = if ls_files(&[CLAUDE_FILE])?.is_empty() {
+                None
+            } else {
+                Some(read_text(Path::new(CLAUDE_FILE))?)
+            };
             gate_1_verdict(
                 &git(&["ls-files", "-s", "-z"])?,
                 &scan_in(&w, "content", a(3)?)?,
                 &scan_in(&w, "orphans", a(4)?)?,
+                launch.as_deref(),
             )
         }
         ("gate-1e", "prepare") => gate_1e_prepare(&dir(2)?, &dir(3)?),
@@ -3086,13 +3254,22 @@ fn run(args: &[String]) -> Result<Report, String> {
         ("gate-9", _) => {
             exactly(a(1)?, CORE.manifest)?;
             let tracked = !ls_files(&[CORE.manifest])?.is_empty();
-            Ok(gate_9(tracked, &Scan::read(a(2)?, a(3)?)?))
+            Ok(gate_9(
+                tracked,
+                &Scan::read(a(2)?, a(3)?)?,
+                &Scan::read(a(4)?, a(5)?)?,
+            ))
         }
         ("gate-9b", _) => {
             exactly(a(1)?, GREEKS.manifest)?;
             let tracked = !ls_files(&[GREEKS.manifest])?.is_empty();
             let sources = read_all(&ls_files(&["crates/greeks/**/*.rs"])?)?;
-            Ok(gate_9b(tracked, &Scan::read(a(2)?, a(3)?)?, &sources))
+            Ok(gate_9b(
+                tracked,
+                &Scan::read(a(2)?, a(3)?)?,
+                &Scan::read(a(4)?, a(5)?)?,
+                &sources,
+            ))
         }
         ("gate-10b", _) => Ok(gate_10b(&read_text(Path::new(INVARIANTS))?)),
         ("gate-7", "prepare") => {
@@ -3284,7 +3461,7 @@ mod tests {
             raw.extend_from_slice(r.as_bytes());
             raw.push(0);
         }
-        gate_1_verdict(&raw, &ok(), &ok()).unwrap()
+        gate_1_verdict(&raw, &ok(), &ok(), None).unwrap()
     }
 
     fn rec(mode: &str, path: &str) -> String {
@@ -3404,7 +3581,10 @@ mod tests {
             ("crates/x.yml", "(extension yml, outside web/)"),
             ("x.json", "(extension json, outside web/)"),
             (".github/x.json", "(extension json, .github/)"),
-            (".claude/x.yml", "(extension yml, .claude/)"),
+            (
+                ".claude/x.yml",
+                "(only .claude/launch.json is tracked under .claude/",
+            ),
             ("Makefile", "(extension <none>, outside web/)"),
             ("crates/x/notes.", "(extension <none>, outside web/)"),
             ("a b.sh", "(extension sh, outside web/)"),
@@ -3418,14 +3598,114 @@ mod tests {
         }
     }
 
+    /// P13-02, D-2511. The old extension rule admitted any `.json` at any
+    /// depth under `.claude/`; each path below passed gate 1 before this.
+    #[test]
+    fn gate_1_admits_exactly_one_file_under_claude() {
+        passed_1("100644", ".claude/launch.json");
+        for p in [
+            ".claude/settings.json",
+            ".claude/settings.local.json",
+            ".claude/a/b.json",
+            ".claude/launch.json.json",
+            ".claude/x/launch.json",
+            ".claude/notes.md",
+            ".claude/tool.rs",
+            ".claude/.gitignore",
+            ".claude/LICENSE",
+            ".claude/",
+        ] {
+            let t = refused_1("100644", p);
+            assert!(
+                t.contains("only .claude/launch.json is tracked under .claude/"),
+                "{p}: {t}"
+            );
+        }
+        // Outside `.claude/` nothing changed: a lookalike prefix is held to
+        // the ordinary list, and `.claudex/` is not `.claude/`.
+        let t = refused_1("100644", ".claudex/launch.json");
+        assert!(t.contains("(extension json, outside web/)"), "{t}");
+        assert!(!t.contains("only .claude/launch.json"), "{t}");
+        passed_1("100644", "web/.claude/settings.json");
+        // A mode outside 100644 is still refused as well.
+        let t = refused_1("100755", ".claude/launch.json");
+        assert!(t.contains("FORBIDDEN MODE"), "{t}");
+    }
+
+    /// P13-03, D-2511. The product configuration ran `sh -c "exec cargo
+    /// run ..."`; the first fixture below is that file's old shape, and it
+    /// passed gate 1 because nothing read the file's content.
+    #[test]
+    fn gate_1_refuses_a_launch_through_a_shell() {
+        let old = "{\"configurations\": [{\"name\": \"x\", \"runtimeExecutable\": \"sh\", \"runtimeArgs\": [\"-c\", \"exec cargo run --release -p api -- serve\"]}, {\"runtimeExecutable\": \"npm\", \"runtimeArgs\": [\"run\"]}]}";
+        let found = launch_findings(old);
+        assert!(
+            found.iter().any(|f| f.contains("launches `sh`")),
+            "{found:?}"
+        );
+        assert!(found.iter().any(|f| f.contains("passes `-c`")), "{found:?}");
+        assert!(
+            found.iter().any(|f| f.contains("runs `sh`, not cargo")),
+            "{found:?}"
+        );
+        let new = "{\"configurations\": [{\"name\": \"x\", \"runtimeExecutable\": \"cargo\", \"runtimeArgs\": [\"run\", \"--release\", \"-p\", \"api\", \"--\", \"serve\"]}, {\"runtimeExecutable\": \"npm\", \"runtimeArgs\": [\"--prefix\", \"web\", \"run\", \"dev\"]}]}";
+        assert_eq!(launch_findings(new), Vec::<String>::new());
+        // Every shell, by name or by absolute path, in any configuration.
+        for shell in LAUNCH_SHELLS {
+            for spelled in [shell.to_owned(), format!("/usr/bin/{shell}")] {
+                let t = new.replacen("\"npm\"", &format!("\"{spelled}\""), 1);
+                let found = launch_findings(&t);
+                assert_eq!(found.len(), 1, "{spelled}: {found:?}");
+                assert!(found[0].contains(&format!("launches `{spelled}`")));
+            }
+        }
+        // A `-c` anywhere, the first configuration not cargo, no program.
+        let t = new.replacen("\"dev\"", "\"-c\"", 1);
+        assert_eq!(launch_findings(&t).len(), 1);
+        let t = new.replacen("\"cargo\"", "\"cargo-x\"", 1);
+        assert!(launch_findings(&t)[0].contains("runs `cargo-x`, not cargo"));
+        assert_eq!(
+            launch_findings("{}"),
+            vec![".claude/launch.json names no runtimeExecutable".to_owned()]
+        );
+        assert_eq!(
+            launch_findings(""),
+            vec![".claude/launch.json names no runtimeExecutable".to_owned()]
+        );
+        // An escape that could spell a shell, and a torn string, are refused.
+        let t = new.replacen("\"cargo\"", "\"\\u0073h\"", 1);
+        assert!(launch_findings(&t)[0].contains("cannot be read"));
+        assert!(launch_findings("{\"runtimeExecutable\": \"car")[0].contains("unterminated"));
+        assert!(launch_findings("\"\\")[0].contains("cannot be read"));
+        // The two escapes decoded are read as themselves.
+        assert_eq!(
+            json_strings("[\"a\\\"b\", \"c\\\\\"]").unwrap(),
+            vec!["a\"b".to_owned(), "c\\".to_owned()]
+        );
+        // The gate refuses through the verdict, and passes the good file.
+        let one = rec("100644", ".claude/launch.json");
+        let raw = format!("{one}\0");
+        let r = gate_1_verdict(raw.as_bytes(), &ok(), &ok(), Some(old)).unwrap();
+        assert!(r.refused);
+        assert!(
+            r.text()
+                .contains("FORBIDDEN LAUNCH  .claude/launch.json launches `sh`")
+        );
+        let r = gate_1_verdict(raw.as_bytes(), &ok(), &ok(), Some(new)).unwrap();
+        assert!(!r.refused, "{}", r.text());
+        // The tracked file itself is clean.
+        let tracked = include_str!("../.claude/launch.json");
+        assert_eq!(launch_findings(tracked), Vec::<String>::new());
+    }
+
     #[test]
     fn gate_1_reports_its_scanners_and_refuses_an_empty_listing() {
-        let r = gate_1_verdict(b"", &ok(), &ok()).unwrap();
+        let r = gate_1_verdict(b"", &ok(), &ok(), None).unwrap();
         assert!(r.refused);
         assert!(r.text().contains("GATE 1 READ NO TRACKED FILE."));
         let one = rec("100644", "a.rs");
         let raw = format!("{one}\0");
-        let r = gate_1_verdict(raw.as_bytes(), &scan("a.rs: NUL byte\n", 1), &ok()).unwrap();
+        let r = gate_1_verdict(raw.as_bytes(), &scan("a.rs: NUL byte\n", 1), &ok(), None).unwrap();
         assert!(r.refused);
         assert!(
             r.text()
@@ -3435,16 +3715,16 @@ mod tests {
             r.text()
                 .contains("Under .claude/: rs toml md lock html css json")
         );
-        let r = gate_1_verdict(raw.as_bytes(), &ok(), &scan("ORPHAN b.rs\n", 1)).unwrap();
+        let r = gate_1_verdict(raw.as_bytes(), &ok(), &scan("ORPHAN b.rs\n", 1), None).unwrap();
         assert!(r.refused);
         assert!(
             r.text()
                 .contains("ORPHAN b.rs\nA TRACKED .rs ABOVE IS COMPILED BY NOTHING")
         );
-        let r = gate_1_verdict(raw.as_bytes(), &ok(), &ok()).unwrap();
+        let r = gate_1_verdict(raw.as_bytes(), &ok(), &ok(), None).unwrap();
         assert!(!r.refused);
         assert!(r.text().starts_with("read 1 tracked file(s)\nOK —"));
-        assert!(gate_1_verdict(b"\xff\0", &ok(), &ok()).is_err());
+        assert!(gate_1_verdict(b"\xff\0", &ok(), &ok(), None).is_err());
     }
 
     // ---- gate 1e ----
@@ -4275,39 +4555,136 @@ mod tests {
 
     // ---- gates 9, 9b ----
 
+    /// The closure `source_scan closure` prints for a crate that compiles
+    /// only its own files.
+    fn own(dir: &str) -> Scan {
+        scan(&format!("{dir}src/lib.rs\n{dir}src/x.rs\n"), 0)
+    }
+
     #[test]
     fn a_standalone_crate_refuses_absence_unreadability_and_any_declaration() {
-        let r = gate_9(false, &ok());
+        let core = own("crates/core/");
+        let greeks = own("crates/greeks/");
+        let r = gate_9(false, &ok(), &core);
         assert!(
             r.text()
                 .contains("REFUSED  crates/core/Cargo.toml is not a tracked file.")
         );
-        let r = gate_9(true, &scan("", 2));
+        let r = gate_9(true, &scan("", 2), &core);
         assert!(r.text().contains("could not be read as TOML"));
         let r = gate_9(
             true,
             &scan("crates/core/Cargo.toml:9:dev-dependencies:x:x\n\n", 0),
+            &core,
         );
         assert!(r.refused);
-        assert!(
-            r.text().contains(
-                "Found:\ncrates/core/Cargo.toml:9:dev-dependencies:x:x\ncore is compiled"
-            )
-        );
-        let r = gate_9(true, &scan("\n", 0));
-        assert!(!r.refused);
+        assert!(r.text().contains(
+            "Found:\ncrates/core/Cargo.toml:9:dev-dependencies:x:x\ncore is the shared noun crate"
+        ));
+        let r = gate_9(true, &scan("\n", 0), &core);
+        assert!(!r.refused, "{}", r.text());
         assert!(r.text().contains("OK — core declares no dependency"));
-        let r = gate_9b(true, &scan("m:1:dependencies:serde:serde\n", 0), &[]);
+        let r = gate_9b(
+            true,
+            &scan("m:1:dependencies:serde:serde\n", 0),
+            &greeks,
+            &[],
+        );
         assert!(
             r.text()
                 .contains("crates/greeks MUST DEPEND ON NOTHING. Found:")
         );
         assert!(r.text().contains("See D-0046."));
-        assert!(gate_9b(false, &ok(), &[]).refused);
+        assert!(gate_9b(false, &ok(), &greeks, &[]).refused);
+    }
+
+    /// P15-12, D-2518. Gate 9's reason named `crates/web` and D-0009: a
+    /// crate that does not exist and a decision about it. The old text
+    /// fails every assertion below.
+    #[test]
+    fn gate_9_gives_the_reason_that_binds_now() {
+        let why = CORE.why.join("\n");
+        assert!(!why.contains("crates/web"), "{why}");
+        assert!(!why.contains("wasm32"), "{why}");
+        assert!(!why.contains("D-0009"), "{why}");
+        assert!(why.contains("docs/10-shared-core.md"), "{why}");
+        assert!(why.contains("D-0095"), "{why}");
+        let r = gate_9(
+            true,
+            &scan("m:1:dependencies:x:x\n", 0),
+            &own("crates/core/"),
+        );
+        assert!(r.text().contains("docs/10-shared-core.md section 1"));
+        assert!(!r.text().contains("D-0009"));
+    }
+
+    /// P15-11, D-2518. A `#[path]` module reaching another crate's source
+    /// declares no dependency and names no type gate 9b matches, so both
+    /// gates passed it: the old gates read no closure at all.
+    #[test]
+    fn gate_9_and_9b_refuse_a_path_module_outside_their_crate() {
+        let none = scan("\n", 0);
+        for (dir, leak) in [
+            ("crates/greeks/", "crates/core/src/blake3.rs"),
+            ("crates/greeks/", "crates/greeks2/src/x.rs"),
+            ("crates/greeks/", "crates/greeksx.rs"),
+            ("crates/greeks/", "web/x.rs"),
+            ("crates/greeks/", ".github/source_scan.rs"),
+            ("crates/core/", "crates/store/src/lib.rs"),
+            ("crates/core/", "crates/corex/src/lib.rs"),
+            ("crates/core/", "crates/cor"),
+        ] {
+            let closure = scan(&format!("{dir}src/lib.rs\n{leak}\n"), 0);
+            let r = if dir == CORE.dir {
+                gate_9(true, &none, &closure)
+            } else {
+                gate_9b(true, &none, &closure, &[])
+            };
+            assert!(r.refused, "{dir} {leak}");
+            let want = format!(
+                "SOURCE FROM OUTSIDE {dir} IS COMPILED INTO IT (a #[path] or include!):\n{leak}\n"
+            );
+            assert!(r.text().contains(&want), "{}", r.text());
+        }
+        // Its own files, at any depth, pass.
+        let deep = scan(
+            "crates/greeks/src/lib.rs\ncrates/greeks/src/a/b/c.rs\ncrates/greeks/tests/t.rs\n",
+            0,
+        );
+        assert!(!gate_9b(true, &none, &deep, &[]).refused);
+        // An unresolved module, a failed scanner and an empty closure are
+        // refusals, never a pass over nothing.
+        let torn = "crates/greeks/src/lib.rs\nUNRESOLVED crates/greeks/src/lib.rs: mod gone\n";
+        let r = gate_9b(true, &none, &scan(torn, 1), &[]);
+        assert!(r.refused);
+        assert!(r.text().contains(
+            "did not resolve (status 1):\nUNRESOLVED crates/greeks/src/lib.rs: mod gone"
+        ));
+        let r = gate_9b(true, &none, &scan("crates/greeks/src/lib.rs\n", 2), &[]);
+        assert!(r.text().contains("did not resolve (status 2)"));
+        let r = gate_9b(
+            true,
+            &none,
+            &scan("crates/greeks/src/lib.rs\nUNRESOLVED x\n", 0),
+            &[],
+        );
+        assert!(r.text().contains("did not resolve (status 0)"));
+        for empty in ["", "\n", "crates/greeks/src/x.rs\n"] {
+            let r = gate_9b(true, &none, &scan(empty, 0), &[]);
+            assert!(r.refused, "{empty:?}");
+            assert!(r.text().contains("does not hold crates/greeks/src/lib.rs"));
+            let r = gate_9(true, &none, &scan(empty, 0));
+            assert!(r.text().contains("does not hold crates/core/src/lib.rs"));
+        }
+        // Another crate's lib.rs is not this crate's.
+        let r = gate_9(true, &none, &scan("crates/greeks/src/lib.rs\n", 0));
+        assert!(r.text().contains("does not hold crates/core/src/lib.rs"));
+        assert!(r.text().contains("SOURCE FROM OUTSIDE crates/core/"));
     }
 
     #[test]
     fn gate_9b_refuses_a_workspace_type_at_a_word_boundary() {
+        let greeks = own("crates/greeks/");
         for l in [
             "pub use brutex_core::price::Paisa;",
             "x: core::price::Paisa",
@@ -4320,7 +4697,7 @@ mod tests {
                 "crates/greeks/src/lib.rs".to_owned(),
                 format!("//! x\n{l}\n").into_bytes(),
             )];
-            let r = gate_9b(true, &ok(), &src);
+            let r = gate_9b(true, &ok(), &greeks, &src);
             assert!(r.refused, "{l}");
             assert!(
                 r.text()
@@ -4336,7 +4713,7 @@ mod tests {
             "std::core::x",
         ] {
             let src = vec![("a.rs".to_owned(), l.as_bytes().to_vec())];
-            assert!(!gate_9b(true, &ok(), &src).refused, "{l}");
+            assert!(!gate_9b(true, &ok(), &greeks, &src).refused, "{l}");
         }
     }
 
