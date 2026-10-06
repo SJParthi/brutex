@@ -1400,7 +1400,6 @@ fn greek_filing_refuses_an_unaddressable_rung_without_claiming_a_write() {
         &fixture.asked,
         &fixture.site,
         &fixture.wire,
-        fixture.asked.window,
     )
     .expect("an unaddressable Greek file must refuse rather than acknowledge");
     assert!(why.contains("no Greek-file timeframe"), "{why}");
@@ -1536,4 +1535,59 @@ async fn a_refused_contract_keeps_the_skipped_candles_of_its_answered_chunks() {
     );
     assert!(body.contains("3 — 3 null price"), "{body}");
     assert_eq!(transport.seen.load(std::sync::atomic::Ordering::Relaxed), 2);
+}
+
+/// ROUND 6 (D-3137). A rolling chunk may cross a month (D-0320, D-1370), and
+/// `file_the_greeks` named its file from the chunk's FIRST day, on the stated
+/// premise that a chunk is one month. A greek stamped in the chunk's second
+/// month was offered to the first month's file and refused as outside it.
+/// Each record now goes to the file of its own IST month.
+#[test]
+fn greeks_in_a_chunk_that_crosses_a_month_are_filed_under_their_own_months() {
+    let fixture = Fixture::new(1);
+    let greek = |ts_micros: i64| store::format::Greek {
+        ts_micros,
+        spot: 2_500_000,
+        volatility: 0.12,
+        delta: 0.5,
+        gamma: 0.01,
+        vega: 0.2,
+        theta: -0.1,
+        rho: 0.05,
+        rate: 0.065,
+        provenance: store::format::Greek::provenance_of(
+            store::format::VOL_FROM_VENDOR,
+            store::format::RATE_FROM_OPERATOR,
+            false,
+            0,
+        ),
+    };
+    // 2025-06-30 15:29 and 2025-07-01 09:15 IST: one chunk, two months.
+    let june = 1_751_277_540_000_000;
+    let july = 1_751_341_500_000_000;
+    let contract = fixture.chain.contracts[0].contract;
+    let why = file_the_greeks(
+        &[greek(june), greek(july)],
+        contract,
+        &fixture.asked,
+        &fixture.site,
+        &fixture.wire,
+    );
+    assert_eq!(why, None, "both months' greeks file");
+    let path = |month: u8| {
+        StorePath::new(PathParts {
+            vendor: fixture.wire.store_vendor,
+            exchange: "NSE",
+            segment: "FNO",
+            symbol: "NIFTY",
+            contract: Some(contract),
+            timeframe: Timeframe::MINUTE_1,
+            month: YearMonth::new(2025, month).expect("month"),
+            file: FileKind::Greeks,
+        })
+        .expect("an address")
+        .to_path_buf(&fixture.root)
+    };
+    assert!(path(6).is_file(), "June's greek is in June's file");
+    assert!(path(7).is_file(), "July's greek is in July's file");
 }

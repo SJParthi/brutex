@@ -12618,14 +12618,7 @@ fn price_chain_month(
 
     let records = greek_records(&out);
     if !records.is_empty()
-        && let Some(why) = file_the_greeks(
-            &records,
-            month_of.found.contract,
-            asked,
-            site,
-            wire,
-            month_of.chunk,
-        )
+        && let Some(why) = file_the_greeks(&records, month_of.found.contract, asked, site, wire)
     {
         // COUNTED AS REFUSED, NOT SILENT. The rows were computed and could not
         // be filed, which is a different fact from "could not be computed" and
@@ -13353,7 +13346,7 @@ async fn roll_one(
         // consequence is scoped to THIS contract-month; scoping the reaction to
         // the whole walk was the same conflation the two `?` above made.
         if !records.is_empty() {
-            match file_the_greeks(&records, contract, asked, site, wire, window) {
+            match file_the_greeks(&records, contract, asked, site, wire) {
                 Some(why) => {
                     note_run_failure(&mut failed, &mut why_not, &format!("{label}: {why}"));
                 }
@@ -13498,10 +13491,21 @@ fn name_the_contract(
         expiry_day.day(),
     )
     .map_err(|why| format!("{label}: {why}"))?;
-    let side = if option_type == "CALL" {
-        brutex_core::instrument::OptionSide::Call
-    } else {
-        brutex_core::instrument::OptionSide::Put
+    // TWO KNOWN WORDS, AND A REFUSAL FOR ANY OTHER (D-3138). This was
+    // `if option_type == "CALL" { Call } else { Put }`, so a vendor spelling
+    // its sides `CE`/`PE` would have had every call filed under the put's
+    // contract, a directory append-only history cannot rename. D-0346 said such
+    // a vendor needs no edit here; that was not true of this line. It is
+    // refused by name instead, so the new spelling is added here on purpose.
+    let side = match option_type {
+        "CALL" => brutex_core::instrument::OptionSide::Call,
+        "PUT" => brutex_core::instrument::OptionSide::Put,
+        other => {
+            return Err(format!(
+                "{label}: the request side {other:?} names no option side this build \
+                 knows (CALL or PUT); refused rather than filed under a guessed side"
+            ));
+        }
     };
     let contract = brutex_core::instrument::Contract::of(brutex_core::instrument::Kind::Option {
         expiry,
@@ -13810,12 +13814,15 @@ fn greek_records(done: &pull::pricing::PricedAll) -> Vec<store::format::Greek> {
 /// filing step on this path — the caller turns it into the run's error with the
 /// contract's label attached, which a bare store error does not carry.
 ///
-/// # Why the month comes from the WINDOW
+/// # Why the month comes from each RECORD, not the window (D-3137)
 ///
-/// `pull::session::split_window` never lets a chunk cross a month boundary, so
-/// one chunk is one month and its first day names it. Taking the month from a
-/// bar's stamp instead would be right for every row and wrong for an empty
-/// batch, which this function is never handed.
+/// This took the month from the chunk's first day, on the premise that
+/// `pull::session::split_window` never lets a chunk cross a month. It has
+/// since D-0320 and D-1370: a capped rolling chunk may, so a greek stamped in
+/// its second month was offered to the first month's file and refused as
+/// outside it. The records are in stamp order, so each run of one IST month
+/// goes to that month's file, exactly as `ingest::from_rows` files the bars
+/// they price (D-3136). An empty batch files nothing.
 ///
 /// # Cost
 ///
@@ -13832,15 +13839,48 @@ fn file_the_greeks(
     asked: &ingest::FnoRequest,
     site: &Site,
     wire: &Wire,
-    window: pull::session::Window,
 ) -> Option<String> {
     let Some(timeframe) = asked.granularity.store_timeframe() else {
         return Some("the requested granularity has no Greek-file timeframe".to_owned());
     };
-    let month = match window.from().year_month() {
-        Ok(month) => month,
-        Err(why) => return Some(format!("the Greek-file month could not be named: {why}")),
-    };
+    let mut rest = records;
+    while let Some(first) = rest.first() {
+        let month = match greek_month(first.ts_micros) {
+            Ok(month) => month,
+            Err(why) => return Some(format!("the Greek-file month could not be named: {why}")),
+        };
+        let run = rest
+            .iter()
+            .take_while(|row| greek_month(row.ts_micros).is_ok_and(|at| at == month))
+            .count();
+        let (these, after) = rest.split_at(run);
+        rest = after;
+        if let Some(why) = file_greek_month(these, contract, asked, site, wire, timeframe, month) {
+            return Some(why);
+        }
+    }
+    None
+}
+
+/// The IST month a greek's stamp falls in, which names its file. D-3137.
+fn greek_month(ts_micros: i64) -> Result<store::path::YearMonth, String> {
+    pull::session::IstMoment::from_epoch_secs(ts_micros.div_euclid(1_000_000))
+        .map_err(|why| why.to_string())?
+        .day()
+        .year_month()
+        .map_err(|why| why.to_string())
+}
+
+/// One IST month's run of greeks, into that month's file.
+fn file_greek_month(
+    records: &[store::format::Greek],
+    contract: brutex_core::instrument::Contract,
+    asked: &ingest::FnoRequest,
+    site: &Site,
+    wire: &Wire,
+    timeframe: store::path::Timeframe,
+    month: store::path::YearMonth,
+) -> Option<String> {
     pull::ingest::write_greeks(
         records,
         pull::ingest::GreekTarget {

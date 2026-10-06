@@ -85,3 +85,21 @@ fn a_credential_stop_is_still_counted_and_its_marker_never_kept() {
     assert_eq!(walk.failed, 2);
     assert_eq!(walk.why, vec![refused(1, "the vendor refused the token")]);
 }
+
+/// ROUND 6 (D-3138). `name_the_contract` made every request word other than
+/// `CALL` a PUT, though D-0346 says a vendor spelling its sides `CE`/`PE` needs
+/// no edit here. Such a vendor's calls would have been filed under the put's
+/// contract, which append-only history cannot rename. An unknown word is now
+/// refused by name.
+#[test]
+fn a_request_side_word_this_build_does_not_know_is_refused_never_filed_as_a_put() {
+    let day = Day::new(2024, 10, 3).expect("an expiry day");
+    let side = |word: &str| name_the_contract(day, 2_500_000, word, "run").map(|(_, side, _)| side);
+    assert_eq!(side("CALL"), Ok(brutex_core::instrument::OptionSide::Call));
+    assert_eq!(side("PUT"), Ok(brutex_core::instrument::OptionSide::Put));
+    for word in ["CE", "PE", "call", "C", "", "PUTS"] {
+        let why = side(word).expect_err("an unknown side word is refused");
+        assert!(why.starts_with("run: "), "{why}");
+        assert!(why.contains(&format!("{word:?}")), "{why}");
+    }
+}

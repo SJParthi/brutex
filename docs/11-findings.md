@@ -987,3 +987,14 @@ tests are named in `docs/04-invariants.md` rows DPR.
   (D-2673), so this needs a calendar that changed after ingest, or a store
   written by another path. Whether the gap ledger should carry an
   "unexpected" count is a design decision.
+- **Round 6 (2026-10-06), all on the Dhan rolling path:**
+  - A contract run across a month end was refused on every run; `from_rows`
+    now files month by month (D-3136, DPM-08).
+  - Its greeks went to the chunk's first month and were refused (D-3137,
+    DPM-09).
+  - A request side word other than `CALL` was filed as a put. Latent: no
+    shipped spec has such a word (D-3138, DPM-10).
+  All three fixed. OPEN, low: the rolling receipt prints rows read and bars
+  stored with no balance line, and discards the session and window drop
+  census. It makes no false claim, but the gap between the two numbers is
+  unexplained.

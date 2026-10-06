@@ -63761,3 +63761,33 @@ caller still returns `Err` only when nothing landed (D-0343, now
 was the span refusal, is removed. `emit_sites`' "not filed" drive used that
 refusal to reach its line; it now reaches it through D-0017's NSE-only
 refusal, a plan naming BSE, at the same `address` stage. DPM-08.
+
+### D-3137 — A rolling run's greeks are filed under their own months, not the chunk's first — 2026-10-06
+
+**Finding (data-path round 6).** `api::server::file_the_greeks` named its Greek
+file from `window.from()`. Its own doc gave the reason: "`split_window` never
+lets a chunk cross a month boundary". That has been false since D-0320 and
+D-1370. A greek stamped in a capped chunk's second month was offered to the
+first month's file and refused. Measured: greeks at 2025-06-30 15:29 and
+2025-07-01 09:15 IST, chunk from 2025-06-20, refused with "batch record 1 is
+stamped 1751341500000000, outside the IST month 2025-06 its file is named
+for". The rolling run counted it as a failure on every rerun.
+
+**Decision.** The records are in stamp order. Each run of one IST month goes
+to that month's file (`greek_month`, `file_greek_month`), as `from_rows` files
+the bars they price (D-3136). The window parameter is gone. The chain path,
+whose chunks are one month, files exactly as before. DPM-09.
+
+### D-3138 — A rolling request side word this build does not know is refused, never filed as a put — 2026-10-06
+
+**Finding (data-path round 6, latent).** `name_the_contract` read
+`if option_type == "CALL" { Call } else { Put }`. D-0346 moved the answer key
+into `RollingSpec::sides` and stated that a vendor spelling its sides
+`CE`/`PE` "needs no edit in `server.rs`". This line was the exception: such a
+vendor's calls would be filed under the put's contract, which append-only
+history cannot rename. The one shipped spec (`CALL`, `PUT`) is unaffected.
+
+**Decision.** `CALL` is a call and `PUT` is a put. Any other word is refused
+by name with the run's label, so a new spelling is a deliberate edit here and
+never a silent misfiling. D-0346's sentence stands corrected by this entry.
+DPM-10.
