@@ -107,3 +107,20 @@ Artifacts.
 ### Prompt for a new session (paste as is)
 Read CLAUDE.md, then the fix-queue branch file resume/pr74-ci-thread.md (last section) in sjparthi/brutex. You are the PR 74 CI thread: drive PR #74 (head final/all-fixes) to ci-ok green. Find the latest CI run on final/all-fixes, fix every red job and every Gate 18 mutation survivor, validate locally before each push, and push only before Gate 18 shards start. Append progress to resume/pr74-ci-thread.md on fix-queue. Do not merge other branches unless a thread hands one over as validated.
 - Update: run 37251141390 on 969493e: W, 1+2 (incl. 1e), 3-6, Gate 8 (D-1465 works), Gate 18 plan all green. Remaining: coverage + Gate 20, Gate 18 shards, ci-ok.
+
+## 2026-10-06 03:15 UTC: coordinator session session_01UGhT9yCM8wk4VFp9A2cjt1 (resumed from START-HERE)
+- final/all-fixes head still 969493e1. Run 1283 (37251141390): W, 1+2, 1e, 3-6, Gate 8, Coverage, Gate 18 plan GREEN. Gate 18 shards: 150 failed, 13 cancelled (11 never got a runner, 2 hit 4 h), 22 green, 23 still running/queued at 03:10.
+- 296 distinct survivors collected from check-run annotations (curl api.github.com/repos/.../check-runs/<job>/annotations works through the proxy; blob log download is 403). Lists: resume/pr74-g18-run1283/survivors-*.md.
+- Parallel sessions started (tag brutex-20261006), prompts in resume/pr74-g18-run1283/prompts/:
+  | session | work | branch | D range |
+  |---|---|---|---|
+  | session_01DJvVUSWVanqmvaJm7Hu57Z | G18 cli-a (73) | pr74/g18-cli-a | D-2002..2019 |
+  | session_015LgncCWJsrUwHGbV78iP4s | G18 cli-b (81) | pr74/g18-cli-b | D-2020..2039 |
+  | session_01DgSCthYoWpqqwsSinpVTQF | G18 api (50) | pr74/g18-api | D-2040..2054 |
+  | session_01RrcitsqaTTNzPaQusAXZmM | G18 runner (45) | pr74/g18-runner | D-2055..2069 |
+  | session_019Rqb9Yi2ndZ4bzvwo7AYFx | G18 rest (47) | pr74/g18-rest | D-2070..2089 |
+  | session_01UunmFW6rqJzr4tvqZ6kcbq | WS2 data path | claude/attack-data-pipeline-hgxmw9 | D-3127..3139 |
+  | session_01CbHGWDcRRiPcQWEMPH5JHg | WS3 Fix Board | fixboard/pr74-batch3 | D-2779, 2795..2799 |
+  | session_01JdvYEitZmXjZfqekdkTn15 | WS4 attack audit | wip/audit-batch3 | D-1842..1849, 2292..2299 |
+  | session_01QLkK4a9pEwwpAEMZhwMK3q | WS5 zero-findings | zero/next | D-2691.., 2500.. |
+- Plan: no push to final/all-fixes until run 1283 ends. Then merge every handed-over branch into final/all-fixes, validate, ONE push.
