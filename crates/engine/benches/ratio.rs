@@ -465,6 +465,175 @@ fn result_append_costs_the_same_however_many_are_held() -> bool {
     ok
 }
 
+/// The sizes the p99 rows sweep: 10^3 to 10^6 offered positions or held
+/// results.
+const P99_SIZES: [usize; 4] = [1_000, 10_000, 100_000, 1_000_000];
+
+/// Rounds per p99 row, samples per round, and operations per sample.
+///
+/// A probe or a push is a few nanoseconds, below what one `Instant` pair
+/// resolves cleanly, so each sample times [`P99_BATCH`] consecutive
+/// operations and the distribution is of those batches. The row gates the
+/// SMALLEST of the rounds' p99s: a shared runner can only make a round
+/// slower, and a tail the operation itself pays lands in every round.
+const P99_ROUNDS: usize = 5;
+const P99_SAMPLES: usize = 10_000;
+const P99_BATCH: usize = 32;
+
+/// One p99 row's shape at one size, nanoseconds per [`P99_BATCH`] operations.
+struct Tail {
+    p50: u128,
+    p99: u128,
+    max: u128,
+}
+
+/// The sample at `permille` thousandths of a sorted round.
+fn rank(sorted: &[u128], permille: usize) -> u128 {
+    let at = (sorted.len() * permille / 1_000).min(sorted.len().saturating_sub(1));
+    sorted.get(at).copied().unwrap_or(0)
+}
+
+/// Times `batch` once per sample; it is handed the sample's number.
+fn tail(mut batch: impl FnMut(u64) -> usize) -> Tail {
+    let mut out = Tail {
+        p50: u128::MAX,
+        p99: u128::MAX,
+        max: 0,
+    };
+    let mut ns = Vec::with_capacity(P99_SAMPLES);
+    let mut call = 0u64;
+    for _ in 0..P99_ROUNDS {
+        ns.clear();
+        for _ in 0..P99_SAMPLES {
+            let start = Instant::now();
+            black_box(batch(call));
+            ns.push(start.elapsed().as_nanos());
+            call = call.wrapping_add(1);
+        }
+        ns.sort_unstable();
+        out.p50 = out.p50.min(rank(&ns, 500));
+        out.p99 = out.p99.min(rank(&ns, 990));
+        out.max = out.max.max(ns.last().copied().unwrap_or(0));
+    }
+    out
+}
+
+/// A fixed-seed generator for the probed positions. `SplitMix64`'s finaliser.
+fn mix(seed: u64) -> u64 {
+    let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Prints one size's p50 / p99 / max and, when `gated`, holds its p99 to
+/// [`CEILING_PERMILLE`] of the 10^3 one in either direction, as [`ratio`]
+/// does. Units are nanoseconds per [`P99_BATCH`] operations, so this prints
+/// its own line rather than [`ratio`]'s per-bar one.
+fn tail_row(label: &str, n: usize, base_p99: u128, at: &Tail, gated: bool) -> bool {
+    println!(
+        "  {label:<44} n={n:>9}  p50 {:>6} ns  p99 {:>6} ns  max {:>8} ns  per {P99_BATCH}",
+        at.p50, at.p99, at.max
+    );
+    if n == P99_SIZES[0] {
+        return true;
+    }
+    if base_p99 == 0 || at.p99 == 0 {
+        println!("  {label} p99 UNMEASURABLE — a side timed at zero");
+        return false;
+    }
+    let up = at.p99 * 1_000 / base_p99;
+    let down = base_p99 * 1_000 / at.p99;
+    let ok = !gated || up.max(down) <= CEILING_PERMILLE;
+    println!(
+        "  {label} p99, {n} against 1000: ratio {}.{:03}x  {}",
+        up / 1_000,
+        up % 1_000,
+        match (gated, ok) {
+            (false, _) => "REPORTED, not gated",
+            (true, true) => "ok",
+            (true, false) => "BREACH",
+        }
+    );
+    ok
+}
+
+/// O1P-03 and O1P-04 — k=1 duplicate rejection and result append are flat AT
+/// p99 from 10^3 to 10^6, not only at the minimum of a mean (D-3300).
+///
+/// C-E-10 rejects position ZERO twenty thousand times, so it times one bucket
+/// the cache already holds; a table whose probe sequences lengthened with its
+/// load would stay green there. O1P-03 rejects a different, uniformly drawn,
+/// already-offered position on every operation, through the production
+/// [`engine::primitives::offer`]. O1P-04 pushes through
+/// [`engine::primitives::append`] into a vector reserved for every push the
+/// round makes — the reservation production makes before a level — so the
+/// distribution is of pushes that fit, which is the claim C-E-11 states.
+///
+/// The append's p99 is about fourteen times its p50 at EVERY size: a
+/// reservation is address space, not memory, and the first push into each
+/// untouched page takes the page fault. Touching the reservation first took
+/// the p99 from 3,019 ns to 780 ns per 32 pushes on the box that measured it
+/// (D-3301). The fault is per page, not per held result, so it is flat and
+/// the row gates it; `docs/06-limits.md` states the constant.
+fn rule_four_primitives_are_flat_at_p99() -> bool {
+    let mut ok = true;
+    let mut base_dup = 0u128;
+    let mut base_push = 0u128;
+    let one = Itemset {
+        mask: candidate(3),
+        hits: 1,
+    };
+    for (step, n) in P99_SIZES.into_iter().enumerate() {
+        let mut set = offered_of(n);
+        let width = u64::try_from(n).unwrap_or(1).max(1);
+        let dup = tail(|call| {
+            let mut rejected = 0usize;
+            for at in 0..P99_BATCH as u64 {
+                let position = u32::try_from(mix(call.wrapping_mul(64) ^ at) % width).unwrap_or(0);
+                if !engine::primitives::offer(&mut set, black_box(position)) {
+                    rejected = rejected.saturating_add(1);
+                }
+            }
+            rejected
+        });
+        drop(set);
+        if dup.p50 == 0 {
+            refuse("O1P-03: a batch of duplicate probes timed at zero");
+        }
+
+        // Held `n` before the first timed push, room for every push after.
+        let mut out: Vec<Itemset> = Vec::with_capacity(n + P99_ROUNDS * P99_SAMPLES * P99_BATCH);
+        for _ in 0..n {
+            engine::primitives::append(&mut out, one);
+        }
+        let push = tail(|_| {
+            for _ in 0..P99_BATCH {
+                engine::primitives::append(&mut out, black_box(one));
+            }
+            out.len()
+        });
+        if step == 0 {
+            base_dup = dup.p99;
+            base_push = push.p99;
+        }
+        // k=1 offers one position per live condition, so its table never
+        // holds more than `ConditionMask::BITS` (384). 10^5 is already 260x
+        // past that and is gated; at 10^6 the table outgrows the cache and
+        // a probe pays a miss, which `docs/06-limits.md` names (D-3301).
+        let in_domain = n <= 100_000;
+        ok &= tail_row(
+            "O1P-03 k=1 duplicate rejection",
+            n,
+            base_dup,
+            &dup,
+            in_domain,
+        );
+        ok &= tail_row("O1P-04 result append", n, base_push, &push, true);
+    }
+    ok
+}
+
 /// C-E-08 — one pair of the join costs the same whatever the frontier holds.
 ///
 /// # The row `DEFAULT_PAIR_BUDGET` cited before it existed
@@ -799,6 +968,7 @@ fn main() {
     ok &= one_subset_probe_costs_the_same_at_every_depth();
     ok &= duplicate_rejection_costs_the_same_however_much_is_seen();
     ok &= result_append_costs_the_same_however_many_are_held();
+    ok &= rule_four_primitives_are_flat_at_p99();
     ok &= live_support_is_flat_across_the_entire_mask_width();
     ok &= a_ladder_walk_does_not_get_dearer_per_bar();
     if ok {

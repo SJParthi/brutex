@@ -528,6 +528,159 @@ fn time_lookup_stays_within_its_budget() -> bool {
     )
 }
 
+/// The month sizes the p99 rows sweep: 10^3 to 10^6 committed bars.
+///
+/// 10^6 one-second bars is 11.6 days, inside the June bench month, and well
+/// under the one-second ceiling of 2,678,400. Every other row in this file
+/// stops at 100,000, so the 10^6 point exists only here.
+const P99_SIZES: [u64; 4] = [1_000, 10_000, 100_000, 1_000_000];
+
+/// Rounds per p99 row, and samples per round.
+///
+/// Each round times every call on its own and keeps every sample; its p99 is
+/// the sample at rank 990/1000. The row reports and gates the SMALLEST of the
+/// rounds' p99s. A shared runner's scheduler can only ever make a round
+/// slower, so one disturbed round cannot breach the row — while a tail that
+/// the operation itself pays (one call in fifty doing O(n) work) lands in
+/// every round and cannot hide. `max` is the largest sample of all rounds and
+/// is printed, never gated: on a shared box it is the scheduler.
+const P99_ROUNDS: usize = 5;
+const P99_SAMPLES: usize = 20_000;
+
+/// One p99 row's shape at one size, nanoseconds.
+struct Tail {
+    p50: u128,
+    p99: u128,
+    max: u128,
+}
+
+/// The sample at `permille` thousandths of a sorted round.
+fn rank(sorted: &[u128], permille: usize) -> u128 {
+    let at = (sorted.len() * permille / 1_000).min(sorted.len().saturating_sub(1));
+    sorted.get(at).copied().unwrap_or(0)
+}
+
+/// Times `op` once per sample, [`P99_ROUNDS`] rounds of [`P99_SAMPLES`].
+///
+/// `op` is handed the sample's number so it can address a different record
+/// or stamp every call; whatever it returns goes through `black_box`.
+fn tail<T>(mut op: impl FnMut(u64) -> T) -> Tail {
+    let mut out = Tail {
+        p50: u128::MAX,
+        p99: u128::MAX,
+        max: 0,
+    };
+    let mut ns = Vec::with_capacity(P99_SAMPLES);
+    let mut call = 0u64;
+    for _ in 0..P99_ROUNDS {
+        ns.clear();
+        for _ in 0..P99_SAMPLES {
+            let start = Instant::now();
+            black_box(op(call));
+            ns.push(start.elapsed().as_nanos());
+            call = call.wrapping_add(1);
+        }
+        ns.sort_unstable();
+        out.p50 = out.p50.min(rank(&ns, 500));
+        out.p99 = out.p99.min(rank(&ns, 990));
+        out.max = out.max.max(ns.last().copied().unwrap_or(0));
+    }
+    out
+}
+
+/// A fixed-seed generator for the sampled positions, so two runs time the
+/// same sequence of records and stamps. `SplitMix64`'s finaliser.
+fn mix(seed: u64) -> u64 {
+    let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// The record index sample `call` reads in an `n`-record file: a uniformly
+/// drawn record in a block OTHER than the one sample `call - 1` read, so the
+/// handle's one-block memory never serves it and every sample pays the cold
+/// verify — the path a random access and a bisection probe pay.
+fn cold_index(n: u64, call: u64) -> u64 {
+    let per_block = Layout::V2.records_per_block();
+    let blocks = n.div_ceil(per_block).max(2);
+    let previous = if call == 0 {
+        blocks - 1
+    } else {
+        mix(call - 1) % blocks
+    };
+    let mut block = mix(call) % blocks;
+    if block == previous {
+        block = (block + 1) % blocks;
+    }
+    let index = block * per_block + mix(call ^ 0x5555) % per_block;
+    index.min(n - 1)
+}
+
+/// The stamp sample `call` looks up in an `n`-bar bench file: uniform in
+/// microseconds over the bars' whole span, so most samples fall between two
+/// bars and none repeats the entry the one before it read.
+fn tail_stamp(n: u64, call: u64) -> i64 {
+    let span = n.saturating_mul(1_000_000);
+    let offset = i64::try_from(mix(call) % span).unwrap_or(0);
+    JUNE_2024_IST_START.saturating_add(offset)
+}
+
+/// Prints one size's p50 / p99 / max and gates its p99 against the 10^3 one.
+fn tail_row(label: &str, n: u64, base_p99: u128, at: &Tail) -> bool {
+    println!(
+        "  {label:<44} n={n:>9}  p50 {:>7} ns  p99 {:>7} ns  max {:>9} ns",
+        at.p50, at.p99, at.max
+    );
+    if n == P99_SIZES[0] {
+        return true;
+    }
+    // `ratio` prints picoseconds; the samples are nanoseconds.
+    ratio(
+        &format!("{label} p99, {n} against 1000"),
+        base_p99.saturating_mul(1_000),
+        at.p99.saturating_mul(1_000),
+    )
+}
+
+/// O1P-01 and O1P-02 — bar lookup and time lookup are flat AT p99, from 10^3
+/// to 10^6 bars.
+///
+/// # Why these rows exist
+///
+/// Every other row in this file is a minimum over trials of a MEAN. A mean
+/// cannot see a tail, and the minimum over trials discards whichever trial
+/// paid one: a read that cost O(n) on one call in fifty would move C-BC-01 by
+/// a fraction and stay green. `CLAUDE.md` §3 rule 4 names bar lookup first,
+/// and `docs/06-limits.md` §1 says each named operation "is O(1) and each is
+/// measured by gate 8" — measured by a statistic that could not fail on a
+/// tail. These rows apply the SAME [`CEILING_PERMILLE`] to the SAME flatness
+/// claim, measured at p99 (D-3300). The C-T-01b row in `crates/telemetry`
+/// did this for `emit`; nothing did it for the store.
+///
+/// O1P-01 is the cold `read_record` (a different block every call); O1P-02 is
+/// `first_at_or_after` through the `.tix` index, at random microseconds.
+fn lookups_are_flat_at_p99() -> bool {
+    let mut ok = true;
+    let mut base_read = 0u128;
+    let mut base_time = 0u128;
+    for (step, n) in P99_SIZES.into_iter().enumerate() {
+        let (file, _dir) = loaded(&format!("p99-{step}"), n);
+        if file.time_lookup() != store::file::TimeLookup::Indexed {
+            refuse("a p99 bench month has no ready time index");
+        }
+        let read = tail(|call| file.read_record(black_box(cold_index(n, call))));
+        let time = tail(|call| file.first_at_or_after(black_box(tail_stamp(n, call))));
+        if step == 0 {
+            base_read = read.p99;
+            base_time = time.p99;
+        }
+        ok &= tail_row("O1P-01 cold read_record", n, base_read, &read);
+        ok &= tail_row("O1P-02 first_at_or_after", n, base_time, &time);
+    }
+    ok
+}
+
 /// C-01 — reading the header costs the same whatever region it is handed.
 ///
 /// The region a caller passes may be a whole read-only mapping of the file, so
@@ -640,6 +793,7 @@ fn main() {
     ok &= cold_record_read_stays_within_its_budget();
     ok &= time_lookup_is_flat_in_the_file();
     ok &= time_lookup_stays_within_its_budget();
+    ok &= lookups_are_flat_at_p99();
     if ok {
         println!("all ratios within the ceiling");
     } else {
