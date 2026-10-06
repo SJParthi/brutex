@@ -11755,7 +11755,7 @@ the one event for those days (the kernel no longer emits a second).
 **Measured, D-1849 (2026-10-06).** `audited_stored::tests::o1cli_cost_measurement`
 (ignored; run explicitly) times one derived `5min` rung (the same run covers o1cli-2 and o1cli-4) on the warmed
 one-month fixture, 15 runs on this 4-core cloud box: base tree
-(`final/all-fixes` 969493e) p50 255.8 / p99 264.5 / max 266.8 ms, this tree
+(`final/all-fixes` before batch 3) p50 255.8 / p99 264.5 / max 266.8 ms, this tree
 248.7 / 275.7 / 321.0 ms. The reads and the second build it removes are
 counted above; on one month they are a small share of the rung, so the wall
 time is within run-to-run noise. Not measured on a multi-year span.
@@ -11860,7 +11860,7 @@ same words the derivation always used.
 **Measured, D-1849 (2026-10-06).** `audited_stored::tests::o1cli_cost_measurement`
 (ignored; run explicitly) times one derived `5min` rung on the warmed
 one-month fixture, 15 runs on this 4-core cloud box: base tree
-(`final/all-fixes` 969493e) p50 255.8 / p99 264.5 / max 266.8 ms, this tree
+(`final/all-fixes` before batch 3) p50 255.8 / p99 264.5 / max 266.8 ms, this tree
 248.7 / 275.7 / 321.0 ms. The reads and the second build it removes are
 counted above; on one month they are a small share of the rung, so the wall
 time is within run-to-run noise. Not measured on a multi-year span.
