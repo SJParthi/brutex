@@ -448,28 +448,43 @@ fn regularized_incomplete_beta(a: f64, b: f64, x: f64) -> f64 {
     }
 }
 
+/// Below this magnitude a Lentz denominator is replaced, so a zero cannot
+/// divide.
+const LENTZ_TINY: f64 = 1e-300;
+
+/// A Lentz denominator, replaced by [`LENTZ_TINY`] when its magnitude is
+/// strictly below it; at the floor itself it is kept, sign and all.
+///
+/// A named function rather than a closure so the boundary is testable: no
+/// fraction this crate evaluates lands on it, so a closure's `<` against `<=`
+/// could not be told apart (G18-runner, D-2058).
+fn lentz_guard(value: f64) -> f64 {
+    if value.abs() < LENTZ_TINY {
+        LENTZ_TINY
+    } else {
+        value
+    }
+}
+
 /// The continued fraction of A&S 26.5.8 by the modified Lentz method.
 fn beta_continued_fraction(a: f64, b: f64, x: f64) -> f64 {
-    /// Below this a Lentz denominator is replaced, so a zero cannot divide.
-    const TINY: f64 = 1e-300;
     /// Convergence: the last factor is within this of one.
     const EPSILON: f64 = 1e-15;
     /// Iterations before the fraction is declared not to converge. The tails
     /// this crate asks for converge in tens of terms at any degrees of freedom.
     const MAX_TERMS: u32 = 100_000;
-    let guard = |value: f64| if value.abs() < TINY { TINY } else { value };
     let mut upper = 1.0;
-    let mut lower = 1.0 / guard(1.0 - (a + b) * x / (a + 1.0));
+    let mut lower = 1.0 / lentz_guard(1.0 - (a + b) * x / (a + 1.0));
     let mut fraction = lower;
     for term in 1..=MAX_TERMS {
         let term = f64::from(term);
         let even = term * (b - term) * x / ((a - 1.0 + 2.0 * term) * (a + 2.0 * term));
-        lower = 1.0 / guard(1.0 + even * lower);
-        upper = guard(1.0 + even / upper);
+        lower = 1.0 / lentz_guard(1.0 + even * lower);
+        upper = lentz_guard(1.0 + even / upper);
         fraction *= lower * upper;
         let odd = -(a + term) * (a + b + term) * x / ((a + 2.0 * term) * (a + 1.0 + 2.0 * term));
-        lower = 1.0 / guard(1.0 + odd * lower);
-        upper = guard(1.0 + odd / upper);
+        lower = 1.0 / lentz_guard(1.0 + odd * lower);
+        upper = lentz_guard(1.0 + odd / upper);
         let step = lower * upper;
         fraction *= step;
         if (step - 1.0).abs() < EPSILON {
@@ -494,10 +509,18 @@ fn ln_gamma(x: f64) -> f64 {
         shift += z.ln();
         z += 1.0;
     }
+    stirling(z) - shift
+}
+
+/// Stirling's series for `ln Γ(z)`, A&S 6.1.41, for `z` already shifted to at
+/// least 10 by [`ln_gamma`]. Separate so the shift's boundary is testable: at
+/// exactly 10 no shift is taken, and `ln_gamma(10.0)` IS this series there
+/// (G18-runner, D-2058).
+fn stirling(z: f64) -> f64 {
     let inv = 1.0 / z;
     let inv2 = inv * inv;
     let series = inv * (1.0 / 12.0 - inv2 * (1.0 / 360.0 - inv2 * (1.0 / 1260.0 - inv2 / 1680.0)));
-    (z - 0.5) * z.ln() - z + 0.5 * core::f64::consts::TAU.ln() + series - shift
+    (z - 0.5) * z.ln() - z + 0.5 * core::f64::consts::TAU.ln() + series
 }
 
 /// Two-sided p-value for a t-statistic, under the normal approximation.
@@ -766,6 +789,72 @@ mod tests {
     };
     use engine::{Frontier, Itemset, Sweep};
     use vocab::ConditionMask;
+
+    /// A Lentz denominator strictly under the floor is replaced by the
+    /// positive floor; the floor itself and everything above keep their own
+    /// value and sign (G18-runner-09, D-2058).
+    #[test]
+    fn the_lentz_guard_replaces_only_magnitudes_strictly_below_the_floor() {
+        use super::{LENTZ_TINY, lentz_guard};
+        for (value, expected) in [
+            (0.0, LENTZ_TINY),
+            (-0.0, LENTZ_TINY),
+            (LENTZ_TINY / 2.0, LENTZ_TINY),
+            (-LENTZ_TINY / 2.0, LENTZ_TINY),
+            (LENTZ_TINY, LENTZ_TINY),
+            (-LENTZ_TINY, -LENTZ_TINY),
+            (0.5, 0.5),
+            (-2.0, -2.0),
+        ] {
+            assert_eq!(
+                lentz_guard(value).to_bits(),
+                expected.to_bits(),
+                "{value:e}"
+            );
+        }
+    }
+
+    /// A value already at 10 takes no shift: `ln_gamma(10.0)` is Stirling's
+    /// series at 10 to the bit, and within its stated error of `ln 9!`
+    /// (G18-runner-10, D-2058).
+    #[test]
+    fn ln_gamma_at_ten_is_the_unshifted_series() {
+        use super::{ln_gamma, stirling};
+        assert_eq!(ln_gamma(10.0).to_bits(), stirling(10.0).to_bits());
+        let ln_9_factorial = (2..=9).map(f64::from).map(f64::ln).sum::<f64>();
+        assert!((ln_gamma(10.0) - ln_9_factorial).abs() < 1e-12);
+        assert!((ln_gamma(9.0) - (ln_9_factorial - 9.0_f64.ln())).abs() < 1e-12);
+    }
+
+    /// The fraction is evaluated on the documented side of
+    /// `x < (a + 1) / (a + b + 2)`, strictly: at the boundary it takes the
+    /// symmetric side. Both sides agree to about 1e-13, so the side is pinned
+    /// to the bit against the explicit formula, and the value against the
+    /// closed form `I_x(1/2, 1/2) = (2/pi) asin(sqrt x)` (G18-runner-11, D-2058).
+    #[test]
+    fn the_incomplete_beta_takes_the_documented_side_of_its_split() {
+        use super::{beta_continued_fraction, ln_beta, regularized_incomplete_beta};
+        let (a, b) = (0.5_f64, 0.5_f64);
+        let front = |x: f64| (a * x.ln() + b * (-x).ln_1p() - ln_beta(a, b)).exp();
+        let closed = |x: f64| core::f64::consts::FRAC_2_PI * x.sqrt().asin();
+        // Below the split (0.5 here): the direct side.
+        let below = 0.2;
+        let direct = front(below) * beta_continued_fraction(a, b, below) / a;
+        assert_eq!(
+            regularized_incomplete_beta(a, b, below).to_bits(),
+            direct.to_bits()
+        );
+        assert!((direct - closed(below)).abs() < 1e-11);
+        // On the split exactly: the symmetric side.
+        let on = 0.5_f64;
+        assert_eq!(on.to_bits(), ((a + 1.0) / (a + b + 2.0)).to_bits());
+        let mirrored = 1.0 - front(on) * beta_continued_fraction(b, a, 1.0 - on) / b;
+        assert_eq!(
+            regularized_incomplete_beta(a, b, on).to_bits(),
+            mirrored.to_bits()
+        );
+        assert!((mirrored - closed(on)).abs() < 1e-11);
+    }
 
     fn level(k: u32, frequent: usize, infrequent: u64) -> Frontier {
         Frontier {
