@@ -665,7 +665,8 @@ fn a_torn_journal_line_is_ignored_and_a_foreign_one_refuses_the_run() {
     put(
         &store,
         "imports/gdfl.journal",
-        b"done indices 2024-04-01 * files=2\ndone ind",
+        // `definition=` names the bar definition that built the day (D-2822).
+        b"done indices 2024-04-01 * definition=2 files=2\ndone ind",
     );
     let got = import(&root, Src::Store, ImportKind::Indices, d1(), d1(), &store);
     assert_eq!(got.days_skipped, 1);
@@ -1297,10 +1298,10 @@ fn an_incomplete_day_is_closed_in_the_journal_and_retried() {
         b"begin indices 2024-04-01 *\nincomplete indices 2024-04-01 * files=1\n",
     );
     let got = import(&root, Src::Store, ImportKind::Indices, d1(), d1(), &store);
-    assert!(
-        got.resumed.is_empty(),
-        "an incomplete day is closed, not crashed"
-    );
+    // ADAPTED (D-2821): an `incomplete` day taken up again is named in
+    // `resumed`, as a crashed one is; it was in no list before.
+    assert_eq!(got.resumed, vec![d1()], "an incomplete day is named");
+    assert!(got.restated.is_empty(), "closed incomplete, not restated");
     assert_eq!(got.days_imported, 1, "and imported again");
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -1394,7 +1395,7 @@ fn the_done_line_states_the_days_exact_counts() {
     let got = import(&root, Src::Store, ImportKind::Indices, d1(), d1(), &store);
     let text = std::fs::read_to_string(journal_path(&store)).unwrap();
     let want = format!(
-        "done indices 2024-04-01 * files={} seconds={} failures=0 late={} late_unresolved={} max_back_s={}",
+        "done indices 2024-04-01 * definition={BAR_DEFINITION} files={} seconds={} failures=0 late={} late_unresolved={} max_back_s={}",
         got.files, got.seconds, got.late_rows, got.late_unresolved, got.max_back_s
     );
     assert!(text.contains(&want), "{text} lacks {want}");

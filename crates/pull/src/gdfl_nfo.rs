@@ -382,6 +382,41 @@ fn strike_paisa(text: &[u8]) -> Option<i64> {
     crate::csv::paisa(text).filter(|&paisa| paisa > 0)
 }
 
+/// The underlying a name's own shape spells, whether or not the name decodes:
+/// the text before the two digits and the month its LAST letters spell, the
+/// split both the dated `DD MON YY STRIKE` and the monthly `YY MON STRIKE`
+/// reading put there. A strike holds no letter, so the month of either
+/// reading is the name's last letters, and the split is found from the end
+/// whatever follows the month. `None` when the name has no `CE`/`PE` side,
+/// its last three letters are no month, no two digits precede them, or
+/// nothing precedes those.
+///
+/// `LTI06APR24100CE` (a Saturday expiry) does not decode, and its shape still
+/// says it is `LTI`'s, never `LT`'s: `crate::gdfl_import` asks this before it
+/// falls back to the longest underlying a shapeless name starts with
+/// (D-2818). Neither does `LTI06APR24100.125CE` nor a name past the length
+/// cap, and they are `LTI`'s too: a reading that asked for a strike that
+/// parsed and a name inside the cap handed such names back to `LT` (D-2823).
+/// Every name the strict readings shape, this shapes at the same split.
+/// O(ticker length), with no cap.
+#[must_use]
+pub(crate) fn shaped_underlying(ticker: &str) -> Option<&str> {
+    let body = ticker
+        .strip_suffix("CE")
+        .or_else(|| ticker.strip_suffix("PE"))?;
+    let bytes = body.as_bytes();
+    let mut last = None;
+    for (at, byte) in bytes.iter().enumerate() {
+        if byte.is_ascii_alphabetic() {
+            last = Some(at);
+        }
+    }
+    let at = last?.checked_sub(4).filter(|&at| at > 0)?;
+    two_digits(bytes.get(at..at + 2)?)?;
+    month_of(bytes.get(at + 2..at + 5)?)?;
+    body.get(..at)
+}
+
 /// The expiry day of the monthly contract of `month` of `year`: the last
 /// Thursday, or the trading day before it when it is not one (NSE's rule,
 /// charter GDFL options section), walked on the calendar. `None` when the
