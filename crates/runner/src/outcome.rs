@@ -1830,17 +1830,25 @@ impl Sides {
         if x > 0 {
             self.wins = self.wins.saturating_add(1);
             self.win_sum = self.win_sum.saturating_add(i128::from(x));
-            if self.min_win == 0 || x < self.min_win {
-                self.min_win = x;
-            }
+            // `min`, not a guarded `x < self.min_win`: an equal `x` stores the
+            // same value, so that guard's `<=` was an equivalent mutant
+            // (G18-runner, D-2059). The zero test opens it on the first win.
+            self.min_win = if self.min_win == 0 {
+                x
+            } else {
+                self.min_win.min(x)
+            };
             self.max_win = self.max_win.max(x);
         } else if x < 0 {
             self.losses = self.losses.saturating_add(1);
             self.loss_sum = self.loss_sum.saturating_add(i128::from(x));
             self.max_loss = self.max_loss.max(x.unsigned_abs());
-            if self.min_loss == 0 || x.unsigned_abs() < self.min_loss {
-                self.min_loss = x.unsigned_abs();
-            }
+            let magnitude = x.unsigned_abs();
+            self.min_loss = if self.min_loss == 0 {
+                magnitude
+            } else {
+                self.min_loss.min(magnitude)
+            };
         }
     }
 }
@@ -4853,6 +4861,55 @@ mod money_tests {
             Availability::Absent,
             Thresholds::CLASSICAL,
         )
+    }
+
+    /// The smallest win and the smallest loss are the smallest MAGNITUDES
+    /// observed, in any order, opened by the first of each and never pinned
+    /// at the zero sentinel (G18-runner-12, D-2059).
+    #[test]
+    fn the_smallest_win_and_loss_are_the_smallest_magnitudes_in_any_order() {
+        for order in [
+            [-5_i64, -3, -7, 4, 2, 9],
+            [-7, -5, -3, 9, 4, 2],
+            [-3, -7, -5, 2, 9, 4],
+        ] {
+            let mut sides = Sides::default();
+            for x in order {
+                sides.observe(x);
+            }
+            assert_eq!(sides.min_loss, 3, "{order:?}");
+            assert_eq!(sides.max_loss, 7, "{order:?}");
+            assert_eq!(sides.min_win, 2, "{order:?}");
+        }
+        let mut one = Sides::default();
+        one.observe(-11);
+        assert_eq!(one.min_loss, 11, "the first loss opens the minimum");
+        one.observe(0);
+        assert_eq!(one.min_loss, 11, "a flat move is neither side");
+    }
+
+    /// A flat mean is not a short: its largest gain is the largest up move
+    /// (G18-runner-13, D-2059).
+    #[test]
+    fn a_flat_mean_reads_the_largest_up_move_as_its_gain() {
+        let edge = |mean_paisa| super::Edge {
+            mean_paisa,
+            max_win_paisa: 500.0,
+            max_loss_paisa: 300.0,
+            ..super::Edge::default()
+        };
+        assert_eq!(
+            edge(0.0).largest_gain_paisa().to_bits(),
+            500.0_f64.to_bits()
+        );
+        assert_eq!(
+            edge(1.0).largest_gain_paisa().to_bits(),
+            500.0_f64.to_bits()
+        );
+        assert_eq!(
+            edge(-1.0).largest_gain_paisa().to_bits(),
+            300.0_f64.to_bits()
+        );
     }
 
     /// GAP16-26: a move is held as the paisa integer it is. 2^53 + 1 is the
