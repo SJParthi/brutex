@@ -63230,3 +63230,35 @@ gap count, 4,092, did not move.
 
 **Rejected.** Rounding the ATR to nearest. That still puts a close on the wrong
 side, multiplied by the band multiple.
+
+### D-3404 — The charter and the evaluator say what the pull does on a Muhurat day — 2026-10-06
+
+**What was observed.** The permutations lens (L3) ran its round-3 special-session
+pass. `docs/00-charter.md` said the pull "keeps any in-hours bar of a Muhurat
+day". `indicators::evaluator`'s day-list header said "an **afternoon** one is
+kept", and that the 43 GAP12-10 bars of 2021-11-04 are "all inside the window,
+so they are kept". Its row comment, its drill comment and a test doc said the
+same. Since D-2670, `pull::session::Window::verdict` asks the calendar first and
+refuses every minute bar of the five unmeasured-length Muhurats by name
+(`SessionLengthUnmeasured`). D-2670 corrected `docs/06-limits.md` §110 and the
+outage row, and missed these sentences. Nothing tracked them.
+
+**Decided.** Each sentence now says what the code does:
+- The pull refuses those minutes.
+- Bars that landed before D-2670 stay, because the store is append-only.
+- The 2025-10-21 hour and the drill Saturdays keep exactly their calendar
+  windows.
+
+The `gap.rs` reason for `div_euclid` was also false, in the same round. It said
+truncation "would round a level on the wrong side of the anchor"; it would not.
+It now says that the floor is the IF-23/D-1861 convention and that the up and
+down ladders are therefore not mirror images by under a paisa. Proof: XPERM-04,
+which failed before the edit with `docs/00-charter.md still says: keeps any
+in-hours bar of a Muhurat day`.
+
+**Refuted in the same round, owner calls.**
+- The gap ladder's floor breaks price-reflection symmetry. It is documented and
+  pinned (IF-23, D-1861, `fib_rung_rounding.rs`). Changing it supersedes those,
+  so it is UNVERIFIED.
+- The SuperTrend seed breaks a close-on-midpoint tie toward Up. Some tie rule is
+  needed and none is sourced, so it is UNVERIFIED.

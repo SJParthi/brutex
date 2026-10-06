@@ -192,9 +192,11 @@ impl GapLeg {
     /// Rung `p`'s price, in paisa. `None` if it leaves `i64`.
     ///
     /// One body for both directions — see the module documentation for the algebra.
-    /// `div_euclid` and not `/`: truncation toward zero would round a level on the
-    /// wrong side of the anchor for a negative product, and the two sheets differ
-    /// exactly in that sign.
+    /// `div_euclid` and not `/`: the level is FLOORED to a whole paisa in both
+    /// directions, the convention IF-23 and D-1861 pin. That is a choice, not a
+    /// necessity — truncation toward zero would also stay between `X1` and `X2` — and it
+    /// makes the two sheets not mirror images: an up gap's rungs round away from `X2`,
+    /// a down gap's toward it, by under one paisa (D-3404).
     ///
     /// `None` rather than a clamp: §7 reserves `i64::MIN` for the open-interest null,
     /// and pinning an out-of-range level onto it would put a sentinel where a price

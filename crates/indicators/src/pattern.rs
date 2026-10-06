@@ -3334,5 +3334,27 @@ mod midpoint_exact {
         let neck = |c0: i64| masks(&[bar(0, 201, 201, 100, 100), bar(1, 90, c0, 90, c0)]);
         assert!(neck(150).get(212), "150 < 150.5");
         assert!(!neck(151).get(212), "151 > 150.5");
+
+        // A WHOLE-paisa midpoint, closed on exactly: strictly beyond is the rule, so
+        // neither star fires on it, and one paisa past it fires. (`>=`/`<=` survived
+        // as mutants until these existed.)
+        let morning_even = |c0: i64| {
+            masks(&[
+                bar(0, 201, 201, 101, 101),
+                bar(1, 90, 91, 89, 90),
+                bar(2, 95, c0, 95, c0),
+            ])
+        };
+        assert!(!morning_even(151).get(163), "151 is ON the 151 midpoint");
+        assert!(morning_even(152).get(163), "152 > 151");
+        let star_even = |c0: i64| {
+            masks(&[
+                bar(0, 100, 202, 100, 202),
+                bar(1, 210, 211, 209, 210),
+                bar(2, 200, 200, c0, c0),
+            ])
+        };
+        assert!(!star_even(151).get(164), "151 is ON the 151 midpoint");
+        assert!(star_even(150).get(164), "150 < 151");
     }
 }
