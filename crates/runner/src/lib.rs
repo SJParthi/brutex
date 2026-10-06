@@ -1891,6 +1891,192 @@ mod tests {
         }
     }
 
+    /// AC-whp-o1-1, D-1844: ranking each level as it retires equals ranking
+    /// the retained sweep, through the engine's streamed walk fresh and
+    /// resumed from every boundary, at both caps and both lenses.
+    #[test]
+    fn the_streamed_checkpoint_rank_equals_the_retained_one() {
+        let bars = synthetic::sessions(8);
+        let signal = Column::build(&bars, &mut evaluator());
+        let bit_column = engine::column::Column::try_from_rows(signal.bits()).expect("rows");
+        let forward = crate::outcome::forward(&bars, &signal, crate::outcome::Horizon::DEFAULT);
+        let ladder = bounded();
+        let retained = ladder
+            .walk_checkpointed(&bit_column, &live_positions(), [7; 32], &mut |_| Ok(()))
+            .expect("retained walk");
+        let mut boundaries = Vec::new();
+        let _ = ladder.walk_checkpointed(&bit_column, &live_positions(), [7; 32], &mut |view| {
+            let mut bytes = Vec::new();
+            view.write_to(&mut bytes)
+                .map_err(|error| error.to_string())?;
+            boundaries.push(bytes);
+            Ok(())
+        });
+        for lens in [crate::rank::Lens::Detectability, crate::rank::Lens::Payoff] {
+            for keep in [0, 10] {
+                let expected = super::rank_checkpointed_sweep(
+                    signal.clone(),
+                    Some(&signal),
+                    &forward,
+                    retained.clone(),
+                    keep,
+                    lens,
+                )
+                .expect("rank retained");
+                let fresh = super::rank_checkpointed_streamed(
+                    signal.clone(),
+                    Some(&signal),
+                    &forward,
+                    keep,
+                    lens,
+                    |on_retire| {
+                        ladder
+                            .walk_checkpointed_streamed(
+                                &bit_column,
+                                &live_positions(),
+                                [7; 32],
+                                &mut |_| Ok(()),
+                                on_retire,
+                            )
+                            .map_err(|error| error.to_string())
+                    },
+                )
+                .expect("rank streamed");
+                for got in std::iter::once(fresh).chain(boundaries.iter().map(|saved| {
+                    let checkpoint = engine::resume::Checkpoint::read_from(
+                        &mut saved.as_slice(),
+                        saved.len() as u64,
+                        [7; 32],
+                    )
+                    .expect("decode");
+                    super::rank_checkpointed_streamed(
+                        signal.clone(),
+                        Some(&signal),
+                        &forward,
+                        keep,
+                        lens,
+                        |on_retire| {
+                            ladder
+                                .resume_checkpointed_streamed(
+                                    &bit_column,
+                                    &live_positions(),
+                                    [7; 32],
+                                    checkpoint,
+                                    &mut |_| Ok(()),
+                                    on_retire,
+                                )
+                                .map_err(|error| error.to_string())
+                        },
+                    )
+                    .expect("rank resumed")
+                })) {
+                    assert_eq!(got.ranked.top, expected.ranked.top);
+                    assert_eq!(got.ranked.closed_top, expected.ranked.closed_top);
+                    assert_eq!(got.ranked.considered, expected.ranked.considered);
+                    assert_eq!(got.ranked.redundant, expected.ranked.redundant);
+                    assert_eq!(got.outcome.trials, expected.outcome.trials);
+                    assert_eq!(
+                        got.outcome.effective_trials,
+                        expected.outcome.effective_trials
+                    );
+                    assert_eq!(
+                        got.outcome.closure_complete,
+                        expected.outcome.closure_complete
+                    );
+                    assert_eq!(got.outcome.sweep.levels, expected.outcome.sweep.levels);
+                    assert_eq!(got.outcome.sweep.streamed, expected.outcome.sweep.streamed);
+                }
+            }
+        }
+        assert!(boundaries.len() >= 2, "a ladder, not one level");
+    }
+
+    /// D-1844: the streamed adapter refuses what the retained one refuses,
+    /// each case alone: a wrong bar count, a level that does not reconcile,
+    /// a skipped depth, an empty level before the last, a walk that ends on a
+    /// non-empty level with no halt, a summary that disagrees with what was
+    /// handed on, and a walk error.
+    #[test]
+    fn the_streamed_checkpoint_rank_refuses_each_inconsistency() {
+        let bars = synthetic::sessions(8);
+        let signal = Column::build(&bars, &mut evaluator());
+        let forward = crate::outcome::forward(&bars, &signal, crate::outcome::Horizon::DEFAULT);
+        let original = Sweeper::new(bounded()).run_prepared(&signal).sweep;
+        assert!(original.levels.len() >= 3, "a ladder deep enough to cut");
+        let summary_of = |levels: &[engine::Frontier], bars: u64| engine::keep::Streamed {
+            levels: levels.iter().map(engine::keep::Tally::of).collect(),
+            excluded: original.excluded.clone(),
+            bars,
+            min_hits: original.min_hits,
+            halted: original.halted,
+            streamed: levels.iter().map(|level| level.frequent.len() as u64).sum(),
+        };
+        let rank = |levels: Vec<engine::Frontier>, bars: u64, extra: usize| {
+            super::rank_checkpointed_streamed(
+                signal.clone(),
+                None,
+                &forward,
+                10,
+                crate::rank::Lens::Detectability,
+                |on_retire| {
+                    for (at, level) in levels.iter().enumerate() {
+                        on_retire(level, levels.get(at + 1));
+                    }
+                    let mut summary = summary_of(&levels, bars);
+                    for _ in 0..extra {
+                        summary.levels.push(engine::keep::Tally::default());
+                    }
+                    Ok(summary)
+                },
+            )
+        };
+        assert!(
+            rank(original.levels.clone(), original.bars, 0).is_ok(),
+            "the control passes"
+        );
+        assert!(
+            rank(original.levels.clone(), original.bars + 1, 0).is_err(),
+            "bar count"
+        );
+        let mut unreconciled = original.levels.clone();
+        unreconciled.first_mut().expect("first").generated += 1;
+        assert!(rank(unreconciled, original.bars, 0).is_err(), "reconcile");
+        assert!(
+            rank(
+                original.levels.get(1..).expect("deeper").to_vec(),
+                original.bars,
+                0
+            )
+            .is_err(),
+            "a walk that does not start at depth one"
+        );
+        let mut empty_early = original.levels.clone();
+        empty_early.swap(0, original.levels.len() - 1);
+        assert!(
+            rank(empty_early, original.bars, 0).is_err(),
+            "an empty level first"
+        );
+        let mut unterminated = original.levels.clone();
+        unterminated.pop();
+        assert!(
+            rank(unterminated, original.bars, 0).is_err(),
+            "no terminal level"
+        );
+        assert!(
+            rank(original.levels.clone(), original.bars, 1).is_err(),
+            "summary length"
+        );
+        let failed = super::rank_checkpointed_streamed(
+            signal.clone(),
+            None,
+            &forward,
+            10,
+            crate::rank::Lens::Detectability,
+            |_| Err("the walk refused".to_owned()),
+        );
+        assert_eq!(failed.err().as_deref(), Some("the walk refused"));
+    }
+
     /// The exact call that OOM-killed this process, now a loud refusal.
     ///
     /// `min_hits(2)` over eight sessions is 0.067% support: nearly all 238
