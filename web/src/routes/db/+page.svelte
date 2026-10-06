@@ -80,6 +80,7 @@
      which, in the `02 Sep 2024` form this product uses everywhere. */
   import { MON, barTimeLabel, dayLabel, monthLabel, stampLabel, timeLabel } from '$lib/dates.js';
   import { store, survey, syncStore, refreshStore, surveyStores } from '$lib/store.svelte.js';
+  import { feedPickerRow } from '$lib/feed-row.js';
   // THE COMPLETENESS ARITHMETIC, OUT OF THE MARKUP AND UNDER A TEST. Two
   // defects lived in these expressions — a denominator taken from whichever
   // rung's row arrived first, and a row that was its own denominator reporting
@@ -797,7 +798,13 @@
   // list it answered for; `surveyStores` is a no-op when that answer is already
   // in hand for this generation, so the common case costs nothing at all.
   $effect(() => {
-    if (loading || error || rows.length || !feeds.all.length) return;
+    if (!feeds.all.length) return;
+    // A FEED WHOSE INGEST IS NOT READY IS STILL VIEWABLE IF ITS STORE HOLDS
+    // BARS, and only the survey can say whether it does — so a list carrying
+    // any not-ready feed is surveyed even while the active feed has rows.
+    // Header-only reads, deduped per store generation by `surveyStores`.
+    const notReady = feeds.all.some((f) => f.ready !== true);
+    if (!notReady && (loading || error || rows.length)) return;
     void nonce; /* a Refresh re-asks it — the store may have gained a feed */
     surveyStores(feeds.all);
   });
@@ -10270,6 +10277,10 @@
 
          EVERY BEHAVIOUR IS KEPT AND NONE RE-IMPLEMENTED:
 
+         * A feed is selectable when its ingest is ready OR its store holds
+           bars (`$lib/feed-row.js`): viewing stored bars never touches the
+           archive folder `/feeds.json`'s `ready` is about. A not-ready feed
+           that holds data carries the ingest reason as a note, not a strike.
          * A refused feed is DRAWN AND DISABLED with `/feeds.json`'s own reason,
            never omitted — `CLAUDE.md` §4, and `Picker`'s `disabled` + `why` is
            the shape every other rung on this page already uses.
@@ -10294,35 +10305,7 @@
           : feeds.active
             ? feedName
             : 'Select a feed'}
-      rows={feeds.all.map((f) => {
-        const ready = f.ready === true;
-        const held = survey.byFeed.get(f.wire);
-        return {
-          key: f.wire,
-          name: f.display,
-          detail: !ready
-            ? 'unavailable'
-            : held?.error
-              ? 'not read'
-              : held
-                ? `${fmt(held.cells)} held`
-                : 'not surveyed',
-          disabled: !ready,
-          why: ready
-            ? undefined
-            : (f.why ??
-              'the server marked this feed not ready and stated no reason, which is itself the thing to fix.'),
-          title: ready
-            ? `Selects ${f.display}. Every count and every row below becomes this feed's, read again from /store.json?feed=${f.wire} and /instruments.json?feed=${f.wire} — nothing is deleted, nothing is merged with the feed you are leaving, and no figure on this page ever puts the two side by side.${
-                held
-                  ? held.error
-                    ? ` Its store could not be read on the last survey: ${held.error}.`
-                    : ` The last survey read ${fmt(held.cells)} instrument-month(s) and ${fmt(held.bars)} bar(s) under it.`
-                  : ' Its store has not been surveyed in this session, so the count beside it is a dash rather than a zero.'
-              }`
-            : `${f.display} is refused by the server, and this is /feeds.json's own reason rather than a paraphrase of it: ${f.why ?? 'no reason stated.'}`
-        };
-      })}
+      rows={feeds.all.map((f) => feedPickerRow(f, survey.byFeed.get(f.wire), fmt))}
       selected={new Set([feeds.active])}
       onchange={(/** @type {Set<string>} */ sel) => {
         const next = [...sel][0];
