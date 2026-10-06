@@ -63362,3 +63362,16 @@ measurements now contradict:
   and their "every other row" scoped to Gate 8 timing rows.
 
 Text only.
+
+### D-3315 — Three more stale copies of corrected claims — 2026-10-06
+
+An eighth review found three copies that D-3302, D-3304 and D-3305 had
+missed:
+
+- `store::file::rebuild_index` said the rebuild is "paid once per month".
+- `api::census` said its walk is "the only" `read_dir` in shipping code.
+- An inline comment in `cli::results` said the append catch-up is "O(delta)".
+
+Each now states what the corrected copies state. A grep for the old wording
+across `crates/*/src` and `docs/02-store-format.md` finds no further copies.
+Text only.

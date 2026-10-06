@@ -18,7 +18,8 @@
 //! `crates/api/src/render.rs` recorded, in the same change that moved that walk
 //! to startup, that it "made `crate::census`'s opening sentence false" — and
 //! nobody came back here. It is one walk, at startup, into `server::Site`, and
-//! it is the only one in shipping code under `crates/api`; the sentence it
+//! it is one of three `read_dir` sites in shipping code under `crates/api`,
+//! with `assets.rs` and `server.rs`'s `archive_ready` (D-3304); the sentence it
 //! falsified is corrected rather than reargued.
 //!
 //! # Read once, rendered many times

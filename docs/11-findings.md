@@ -995,3 +995,9 @@ They are corrected by D-3313, in the commit after `fd95f23`.
 
 A review for older text that this lens's measurements contradict found four
 such places. They are corrected by D-3314.
+
+### Attack lens L2, round 8 — dispositions — 2026-10-06
+
+Three stale copies of claims corrected in rounds 1 and 2: `rebuild_index`,
+`api::census` and an inline comment in `cli::results`. Corrected by D-3315,
+with a grep for each old wording showing no further copies.

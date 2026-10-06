@@ -1061,8 +1061,8 @@ impl Results {
         let stride = stride_of(version);
 
         // ONE PASS AT OPEN. Stated rather than hidden: this is O(runs). Append
-        // may later perform O(delta) catch-up for records written by another
-        // process; direct reads, counts and already-built index probes do not
+        // may later perform O(indexed bytes + delta) catch-up for records
+        // written by another process (D-1560, D-3305); direct reads, counts and already-built index probes do not
         // scan the ledger. None is on the per-bar or per-candidate path §3 rule
         // 4 governs.
         //

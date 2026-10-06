@@ -2770,9 +2770,11 @@ impl BarFile {
 
     /// Rebuilds `index` from every committed bar, because `why`.
     ///
-    /// O(`n_valid`) record reads, through the verified read path, and paid
-    /// once per month: the writer that rebuilt it keeps it in step from then
-    /// on. Logged as a `store.tix` info line naming the reason.
+    /// O(`n_valid`) record reads, through the verified read path. Paid at
+    /// writer open for a month with no index it can confirm, and again by
+    /// `reindex` inside an append whose resume entry is torn (D-3302);
+    /// otherwise the writer keeps the index in step. Logged as a `store.tix`
+    /// info line naming the reason.
     ///
     /// When the bars cannot be indexed — one shares a slot with the bar before
     /// it, lies off its rung's grid or outside the month, or does not read —
