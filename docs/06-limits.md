@@ -15708,3 +15708,17 @@ per-candidate primitive from `CLAUDE.md` §3 rule 4.
 - `ledger_v6::create_durably` issues one directory sync per level between a
   new rung root and the ledger root (two today), once per rung root per run.
   Not timed.
+
+## The build stamp proves the tree as the build script read it — D-3602, 6 October 2026
+
+`crates/cli/build.rs` compares the working tree with HEAD once, when it runs,
+and stamps `BRUTEX_COMMIT` only on a match. rustc reads `cli`'s sources after
+the script exits, and Cargo may compile `cli`'s dependencies (`engine`,
+`runner`, `vocab`, `indicators`, `store`, `pull`, `costs`, `core`) beside it or
+after it. A file saved inside that window (an IDE's autosave does it unasked)
+is compiled into a binary that still carries the clean HEAD's commit, and runs
+it records name a commit whose source did not produce them. The next build
+re-verifies and unstamps; the binary already linked keeps the stamp. Not
+closed here: closing it needs a check after linking (a digest of the verified
+blob set beside the stamp, re-verified by CI and the launcher), which is not
+built. conc:cli3-2.

@@ -63860,3 +63860,20 @@ so nothing reads the partial install as complete.
 
 **Proof.** `one_refused_census_row_does_not_drop_the_batch` in
 `crates/pull/src/ingest.rs`. FB-111.
+
+### D-3602 — The build stamp's check-then-compile window is stated, not closed — 2026-10-06
+
+**Finding (conc:cli3-2).** `crates/cli/build.rs` verifies the working tree
+against HEAD once, before rustc reads `cli`'s sources and possibly before its
+dependencies compile. An edit saved in that window yields a binary stamped
+with a commit its bytes do not match, and §3 rule 3's `commit` term then
+names the wrong source for every run it records.
+
+**Decision.** State the limit where a reader of either file meets it: in the
+`build.rs` header and in `docs/06-limits.md` (§3 rule 6). The fix that would
+close it, a post-link re-verification against a digest of the verified blob
+set emitted beside the stamp, changes the launcher and CI and is left for an
+owner decision rather than built here.
+
+**Rejected.** Claiming the stamp proves the compiled bytes. It proves the
+tree at one instant before compilation.
