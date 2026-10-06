@@ -141,3 +141,15 @@ was near full.
 RESUME went to all 11 paused sessions. L2 got its findings-ledger fix task. L4 had already
 resumed on its own. The audit workflow was relaunched as ww8p80jjb from run wf_33b651ee-26e.
 Next poll: 12:40.
+
+## 12:26 UTC — audit workflow stopped on usage (owner meter: session 13%, weekly 57%)
+- Owner asked whether this many agents is needed. Weekly is the binding limit: 57% on day 1 of 7
+  (resets Mon Oct 12 23:00 UTC). One full 5h window ~ +28 weekly points.
+- Stopped wf_33b651ee-26e (task ww8p80jjb) after Find 7/9 (43 agents, ~797k tokens). The 17
+  candidate findings are saved in audit-find-17.json beside this file. Not started: web and
+  concurrency finders, 34 verify agents, critic, gap round.
+- Replacement verify, no agents: the coordinator checks each candidate against docs/11, 06, 05
+  and 04 by hand, then routes survivors to the owning session, which verifies by writing the
+  failing test first (refute = no failing test, say so). #10 (Gate 18 build-timeout multiplier,
+  my own commit 46439dee) is the coordinator's own critical-path item.
+- Weekly brake proposed lower: 75% (was 85%).

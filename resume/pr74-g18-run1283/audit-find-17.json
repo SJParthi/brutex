@@ -1,0 +1,432 @@
+[
+ {
+  "agent": "agent-a4afb63a657e9d764.jsonl",
+  "result": {
+   "findings": [
+    {
+     "title": "Groww F&O contract reader accepts a zero strike and several spellings of one strike, which D-1311 and the lake reader both refuse",
+     "file": "crates/pull/src/fno.rs",
+     "line": 1280,
+     "rule": "correctness; D-1311 (an option strike must be positive); CLAUDE.md \u00a74 (no fallback that hides a failure); \u00a73 rule 3 (one instrument identity per contract)",
+     "scenario": "In the HTTP F&O discovery path (chain.rs:379 calls read_contract), the strike token goes through fno::paisa_of, which is now just crate::csv::paisa. csv::paisa accepts \"0\" and returns Some(0), so read_contract(\"NSE-NIFTY-27Mar25-0-CE\", 2025-03-27) returns Some(Found) with strike Paisa(0), and Contract::of renders it as the contract \"2025-03-27-0-CE\". chain.rs:409 pushes it as a real contract instead of putting it in `unreadable`. The other two strike readers both refuse this. core::vendor::parse_strike (vendor.rs:1836, `Ok(strike) if strike > Paisa::ZERO`) refuses any strike at or below zero (D-1311: 'a strike is a price level, and a level at or below zero is not one'). lake::contract::parse_strike refuses \"0\" and any leading zero. There is a second effect: csv::paisa also reads \"019200\", \"19200.\", \"19200.0\" and \"19200.00\" all as 1_920_000. Names such as NSE-NIFTY-27Mar25-19200-CE and NSE-NIFTY-27Mar25-019200-CE therefore pass chain.rs's name-level `seen_names` dedup as two different names, yet both resolve to the same InstrumentKey. That is two vendor series filed under one contract, which is the non-injective aliasing lake::contract::parse_strike refuses for exactly this reason. No test in fno.rs covers a zero or non-canonical strike: its paisa_of tests cover only signed and fractional values (lines 680-692).",
+     "evidence": "crates/pull/src/fno.rs:1191 `let strike = brutex_core::price::Paisa::from_raw(paisa_of(strike)?);` (no positivity or canonical-form check); crates/pull/src/fno.rs:1268-1280 `fn paisa_of(text: &str) -> Option<i64> { ... crate::csv::paisa(text) }`; crates/pull/src/csv.rs:397-413 `let (whole, frac) = text.split_once('.').unwrap_or((text, \"\")); ... let rupees: i64 = digits.parse().ok()?; ... let total = rupees.checked_mul(100)?.checked_add(hundredths)?;` (accepts \"0\", leading zeros and an empty or zero fraction); contrast crates/core/src/vendor.rs:1836 `Ok(strike) if strike > Paisa::ZERO => Ok(strike),` and crates/lake/src/contract.rs:351 `if text.starts_with('0') { return Err(bad()); }`",
+     "severity": "low"
+    }
+   ],
+   "covered": [
+    "CLAUDE.md (full)",
+    "crates/core/src/price.rs: Paisa, from_rupees_half_up, from_rupee_text_half_up, checked_add/sub, rupees_trunc/paisa_part",
+    "crates/core/src/vendor.rs: parse_strike",
+    "crates/core/src/instrument.rs: Contract::of/render, strike tests (lines 420-520, 600-700, 1515-1580)",
+    "crates/costs/src/money.rs: scaled, ceil_div, ceil_to_paisa, floor_to_paisa, ceil_to_rupee, levy_ceiling, statutory_levy, narrow",
+    "crates/costs/src/fill.rs: Bar::new, fills_at (all three anchors), worst_case_fills",
+    "crates/costs/src/trip.rs: position, leg_notional, per_leg, charge_stack_legs, signal_only, price",
+    "crates/costs/src/strike.rs: at_the_money, strike_at, into_strike, StrikeStep Display",
+    "crates/costs/src/moneyness.rs: atm_offset, moneyness_steps",
+    "crates/costs/src/lot.rs: contract_quantity, notional",
+    "crates/pull/src/http.rs: one_price, number_text, prices, one_number (i64::MIN refusal), OI array decode (lines 1100-1140, 1440-1600, 2195-2250)",
+    "crates/pull/src/rolling.rs: rupee text snap and negative/zero guards (lines 930-990)",
+    "crates/pull/src/csv.rs: paisa, row decode for price/OI/volume (lines 870-1010)",
+    "crates/pull/src/fetch.rs: RawWindow::decode, OI None\u2192i64::MIN at land",
+    "crates/pull/src/fno.rs: read_contract, expiry_token_agrees, paisa_of",
+    "crates/pull/src/chain.rs: read_contract call site and dedup (lines 360-420)",
+    "crates/pull/src/fold.rs: volume checked_add, OI last-non-null",
+    "crates/pull/src/pricing.rs: f64 uses (greeks/IV statistic path only)",
+    "crates/store/src/format.rs: OI_NULL, oi(), ohlc_is_sane, counts_are_sane, overlay spot/iv sentinel",
+    "crates/runner/src/outcome.rs: forward move computation, Sides::observe, wide() paisa\u2192f64",
+    "crates/runner/src/trade.rs: PrintedExtreme fill wiring, pnl",
+    "crates/runner/src/grid.rs: money accumulators and the D-1147 envelope doc, tally_trade",
+    "crates/cli/src/lib.rs: rupees, div_round_half_away, as_percent, quality_block per_trade/ratio, bp_as_percent, ppm_as_percent, bar_milli",
+    "crates/cli/src/pool.rs: Pooled i128 totals, profit_factor_bp, tail_bp, ratio_cell",
+    "crates/cli/src/index_stop_qualification_numeric.rs: segment_sums bound, CSCV checked sums",
+    "crates/cli/src/ledger_all.rs winners_table; crates/cli/src/research_policy.rs fixed_points",
+    "crates/api/src/bars.rs: rupees, SortKey::of, change folding with OI_NULL, null-last ordering, extremes_of",
+    "crates/api/src/server.rs: basis_points, OI_NULL rendering sites",
+    "crates/api/src/indexstopcandlesjson.rs and indexstopvixjson.rs: raw OI sentinel emission (checked web/src consumers handle it)",
+    "grep sweeps at origin/final/all-fixes (969493e1) for f32/f64 casts near price names, float-to-int casts, unwrap_or(0) defaults, i64::MIN/OI_NULL uses, from_raw/from_rupee* callers, and raw-value arithmetic"
+   ],
+   "notCovered": [
+    "The user's relayed request ('check every session and whether it needs to be resumed and reactivated') is a session-management task, not a code audit; this read-only audit did not check or resume any session, and the orchestrator must handle that request separately",
+    "crates/lake (bar.rs f64 reader, contract.rs): outside the listed surface; only parse_strike was read, for comparison",
+    "Most of crates/cli (selection_v*, population_*, institutional_evidence, execution_disposition_v2, candidate_universe, stored.rs) was only grep-scanned for money arithmetic; it was not read function by function",
+    "Most of crates/api/src/server.rs (34k+ lines) was only grep-scanned; just basis_points and the OI render sites were read",
+    "crates/costs/src/rate.rs, regime.rs, dated.rs, scope.rs, venue.rs, expiry.rs and Charges::validated were not read in full",
+    "crates/runner/src/report.rs, significance.rs, validate.rs and bootstrap.rs were not read (statistics, not money)",
+    "costs::trip::price / worst_case_fills has no production caller (runner/trade.rs tests assert this), so its sub-tick sell floor was not reported as reachable"
+   ]
+  }
+ },
+ {
+  "agent": "agent-a7012f5e28ea52cde.jsonl",
+  "result": {
+   "findings": [
+    {
+     "title": "A pipelined client that stops reading responses holds its connection slot forever; 256 of them stop the server accepting and block Ctrl-C shutdown",
+     "file": "crates/api/src/server.rs",
+     "line": 17916,
+     "rule": "security (slowloris/connection exhaustion); the stated purpose of MAX_CONNECTIONS / HEAD_READ_TIMEOUT / BODY_READ_TIMEOUT (D-1200, D-1510)",
+     "scenario": "A local client opens a connection to the loopback listener. In a single write it sends several thousand pipelined `GET /vocab.json HTTP/1.1\\r\\nHost: 127.0.0.1:PORT\\r\\n\\r\\n` requests (or `/health`), then never reads from the socket. Responses pile up until the socket send and receive buffers are full, and hyper's poll_flush returns Pending. The remaining pipelined requests are still in hyper's read_buf. Two hyper paths then return Pending without touching the IO: hyper-1.11.0 conn.rs:495 (`if self.state.allow_half_close || !self.io.read_buf().is_empty() { return Poll::Pending; }`) and dispatch.rs:627 (`if self.in_flight.is_some() { Poll::Pending }`). So HeadDeadline::poll_read is never called. That function is the only place the alarm is polled (server.rs:17916-17922), and poll_write (17940/17953) has no deadline at all. The state can also be HeadState::Delivered, which has no alarm. Either way the Slot is never dropped. Repeat this on 256 connections (MAX_CONNECTIONS, 17543) and `LimitedListener::accept` waits in `while !self.slots.try_take()` (17729) forever, so every real request from the operator's browser hangs. The same stuck connection also blocks shutdown. `serve_limited` uses `axum::serve(listener, app).with_graceful_shutdown(..)` (18033), and axum-0.8.9 serve/mod.rs:303 waits on `close_tx.closed().await` with no timeout. Ctrl-C therefore never returns from `serve`, `run` never returns, and main never reaches `end_runtime`/SHUTDOWN_GRACE. docs/06-limits.md 'Slow clients' bounds slow heads and slow bodies but never mentions slow readers, so this is not a documented limit.",
+     "evidence": "crates/api/src/server.rs:17916-17924 (the alarm is polled only on a read):\n            Poll::Pending => {\n                ...\n                if let HeadState::Awaiting { partial, .. } = this.state\n                    && this.alarm.as_mut().poll(cx).is_ready()\n                {\n                    return Poll::Ready(Err(this.expire(partial)));\n                }\n\ncrates/api/src/server.rs:17936-17943 (writes carry no deadline; a write only re-arms the head clock):\n        let written = std::pin::Pin::new(&mut this.io).poll_write(cx, buf);\n        if matches!(written, std::task::Poll::Ready(Ok(n)) if n > 0) {\n            this.rearm();\n        }\n        written\n\ncrates/api/src/server.rs:18033-18039:\n    axum::serve(listener, app)\n        .with_graceful_shutdown(async move { let _ = shutdown.await; })\n        .await",
+     "severity": "medium"
+    },
+    {
+     "title": "An interim `100 Continue` re-arms the head deadline, so an Expect request whose handler runs past 10 s is killed mid-handler with a false 408",
+     "file": "crates/api/src/server.rs",
+     "line": 17940,
+     "rule": "correctness (a fallback that hides a failure / wrong refusal, CLAUDE.md \u00a74)",
+     "scenario": "An admitted local client (Host 127.0.0.1:PORT, Origin http://127.0.0.1:PORT) sends `POST /universe/resolve` with `Expect: 100-continue` and the body `feed=dhan`. Hyper writes `HTTP/1.1 100 Continue` when the body is first polled (hyper-1.11.0 conn.rs:410-413). That write goes through HeadDeadline::poll_write, which calls rearm() (server.rs:17940), so the connection returns to HeadState::Awaiting with a fresh 10 s deadline. The body bytes then arrive, and observe() (17810) scans them as if they were a new request head: they contain no blank line, so the state stays Awaiting with partial=true. The handler then runs `pull::resolve::crawl` inline (server.rs:34474, about 300 HTTP fetches), which takes well over 10 s. Meanwhile hyper's dispatcher polls the read side (mid_message_detect_eof with an empty read_buf), so HeadDeadline::poll_read sees the deadline pass (17903). expire(true) writes `408 ... the request head did not arrive in time` into the socket in the middle of the exchange (17883) and returns TimedOut. Hyper drops the connection and the in-flight handler future, which aborts the crawl. The client, whose head did arrive, gets a 408 that names the wrong cause, and the real answer is lost. docs/06-limits.md names only the pipelined-second-request variant of this.",
+     "evidence": "crates/api/src/server.rs:17855-17862:\n    fn rearm(&mut self) {\n        match self.state {\n            HeadState::Delivered => {\n                let deadline = tokio::time::Instant::now() + self.timeout;\n                self.state = HeadState::Awaiting { deadline, progress: 0, partial: false };\n\ncrates/api/src/server.rs:17899-17905:\n        if let HeadState::Awaiting { deadline, partial, .. } = this.state\n            && tokio::time::Instant::now() >= deadline\n        {\n            return Poll::Ready(Err(this.expire(partial)));\n        }\n\ncrates/api/src/server.rs:17883:\n            let _best_effort = self.io.try_write(HEAD_TIMEOUT_REPLY);",
+     "severity": "low"
+    },
+    {
+     "title": "A whole-number `limit` too large for usize is treated as 'not a whole number' and answered with the default instead of being clamped to the ceiling",
+     "file": "crates/api/src/backtest.rs",
+     "line": 1309,
+     "rule": "correctness (documented contract: 'Clamped rather than refused: a bookmarked ?limit=99999 ... the honest answer is everything up to the ceiling')",
+     "scenario": "`GET /backtest.json?limit=99999999999999999999` (20 digits). `parse::<usize>()` fails with an overflow error, so unparseable_limit emits the Warn `limit ignored` with 'not a whole number; answered the default page', and limit_asked returns DEFAULT_LIMIT=500 instead of MAX_RUNS=20000. The operator asked for everything and gets 500 rows, and the log calls a whole number not a whole number. `/logs` and `/logs.json` have the same shape (logs.rs:143-146: `.parse::<usize>().unwrap_or(50).clamp(1, PAGE_LIMIT)`): an overflowing limit gives 50, not PAGE_LIMIT=200.",
+     "evidence": "crates/api/src/backtest.rs:1308-1311:\n    crate::server::param(raw, \"limit\")\n        .parse::<usize>()\n        .unwrap_or(DEFAULT_LIMIT)\n        .clamp(1, MAX_RUNS)\ncrates/api/src/backtest.rs:1317:\n    (!asked.is_empty() && asked.parse::<usize>().is_err()).then_some(asked)",
+     "severity": "low"
+    }
+   ],
+   "covered": [
+    "CLAUDE.md (full)",
+    "crates/api/Cargo.toml",
+    "crates/api/src/main.rs (full)",
+    "crates/api/src/server.rs: param/params/percent_decode/page_number (775-900), instruments page handler (1080-1100), note_header/note_alphabet (4500-4570), credentialed_source/read_credential/broker lanes (10200-10560), bars_get paging (16240-16350), router/audited_router_serving/router_serving/admitted/request_bounds_refusal/form_key_verdict/one_value_per_form_field/repeated_query_key/never_framed (16380-16850), route_table (16850-17190), same_origin_writes_only/cross_origin_refusal/journaled_read_refusal/sole_visible_header/local_host_authority/origin_matches_host/cross_origin_sentence (17190-17450), HEAD/BODY deadlines, DeadlineBody, body_deadline, Slots/LimitedListener/HeadDeadline, serve/serve_limited (17450-18040), SHUTDOWN_GRACE/end_runtime/wait_then_end/run (19200-19330), universe_resolve (34385-34490), pull_spot entry (11462)",
+    "crates/api/src/assets.rs (path decoding, segments, resolve/canonicalize, respond, content_type, shell/typeahead/masters)",
+    "crates/api/src/credential_law.rs (full)",
+    "crates/api/src/operation_audit.rs (AUDITED list, note_request, request_audited, query parse)",
+    "crates/api/src/logs.rs asked()/logs_json and HTML/JSON escaping call sites",
+    "crates/api/src/render.rs escape/json_string/query_value, instruments pager, bars page header",
+    "crates/api/src/backtest.rs limit_asked/unparseable_limit",
+    "crates/api/src/audit_json.rs page handling",
+    "crates/api/src/catalog.rs page/search clamping",
+    "crates/api/src/candidatejson.rs integer/hex parsing",
+    "crates/api/src/selectionv6json.rs query parse and cli::selection_v6_read::read_blocks offset math",
+    "crates/api/src/booleanlaunch.rs numeric/bit validation",
+    "crates/api/src/sweeprun.rs asked_from_wire / descent numeric fields; cli points_to_ppm_at saturating math",
+    "crates/api/src/recovery.rs HTML page escaping (1790-1865)",
+    "crates/api/src/ingest.rs parse_cash_identity",
+    "crates/pull/src/config.rs (constants, check_segment, CredentialPath, CredentialConfig::load/parse/path_for, read_bounded)",
+    "crates/pull/src/ssm.rs (AwsIdentity from_env/discover/from_credentials_file, SigV4 signing, get_parameter, refusal_detail, answer_within, now_stamp)",
+    "crates/pull/src/totp.rs header and call sites (no production caller)",
+    "crates/pull/src/http.rs CredentialPrint",
+    "git grep across crates for env-var reads, token mint paths, literal parameter-path shapes, HeaderValue construction from dynamic data, numeric query parsing, and lint exceptions in non-test api code",
+    "Cargo.toml workspace lints and profiles (overflow-checks=true, panic=abort in release)",
+    "hyper-1.11.0 conn.rs/dispatch.rs/io.rs and axum-0.8.9 serve/mod.rs from the local cargo registry (to verify the slow-reader and 100-continue paths)"
+   ],
+   "notCovered": [
+    "Most of crates/api/src/server.rs (36k lines) outside the regions listed: individual HTML/JSON handlers were not each read for escaping or arithmetic",
+    "crates/api/src/ingest.rs (206 KB) beyond parse_cash_identity, plus pullrun.rs, autopilot.rs, census.rs, calendar_of.rs, coverage.rs, constituents.rs, master.rs, mastersrun.rs, merge.rs, trades.rs, frontierjson.rs, detail.rs, the indexstop*/boolean* JSON modules and livejson.rs, which were not read line by line",
+    "crates/pull/src/secret.rs and the credential paths in crates/pull/src/http.rs (392 KB), beyond CredentialPrint",
+    "CI gate 1c's implementation (the literal-path scan) was not read, so whether that gate can pass while a literal path exists was not checked",
+    "No finding was confirmed by running anything: cargo and the server were not run, per the task constraints. The two connection-handling findings are argued from code reading of this repo plus the hyper/axum sources in the cargo registry"
+   ]
+  }
+ },
+ {
+  "agent": "agent-aa2708ebadfe209d9.jsonl",
+  "result": {
+   "findings": [
+    {
+     "title": "Walk-forward folds search at a support threshold derived from the whole span, test windows included",
+     "file": "crates/cli/src/lib.rs",
+     "line": 15469,
+     "rule": "CLAUDE.md \u00a73 rule 7 (no look-ahead). The repo applies this rule to walk-forward folds itself: GAP4-46 / D-1660, lib.rs:6119-6124, says a whole-span parameter reaching a fold is 'exactly' what rule 7 bans.",
+     "scenario": "Run range-all / one_rung with no named support (support_ppm = None) and validation on. That is the default: validate_from_env() returns true when BRUTEX_VALIDATE is unset. min_hits = max(affordable_min_hits(&column, ...), statistical). affordable_min_hits runs Sweeper::auto over the column built from the WHOLE span, finding the deepest threshold whose Apriori walk completes under the probe ceiling. That threshold depends on how many combinations are frequent across every bar, including the bars in each fold's TEST window. The value goes into ladder_for(min_hits), then into both_shapes(..., ladder, ...), then into walk_forward_core. There, fold_ladder(base, train.len(), bars.len()) rescales base.min_hits() by the length ratio. So fold 0 (trained on bars 0..t0) sweeps at a threshold set partly by bars after t0. Changing bars only in the last fold's test window so more conditions co-occur pushes Sweeper::auto to a higher affordable threshold. Every earlier fold's per_fold min_hits then rises, its training sweep finds a different (smaller) candidate set, and its chosen candidate and FoldResult can change. LBD-01's test (a_test_window_bar_cannot_move_an_earlier_folds_exit_ladder) proves this property only for the rung count, using a fixed ladder. Nothing tests it for the support threshold on the production path.",
+     "evidence": "crates/cli/src/lib.rs:15468-15469 `match affordable_min_hits(&column, &root, &span, digest) {\n            Ok(affordable) => (affordable.max(statistical), can_hit),`\ncrates/cli/src/lib.rs:15117-15126 `let ladder = Ladder::with_min_hits(1)\n        .with_ceiling(probe) ...\n    let found = auto_recorded(root, &run, ladder, column)?;` (column = whole-span column)\ncrates/cli/src/lib.rs:7873-7874 `let validate = validate_from_env();\n    let ladder = ladder_for(min_hits)?;`\ncrates/cli/src/lib.rs:22351-22357 `both_shapes(\n                &bars, validation_execution, horizon, chosen.scored,\n                ladder, ...`\ncrates/runner/src/validate.rs:4558-4561 `let base = sweeper.ladder();\n        ...\n        let per_fold = fold_ladder(base, train.len(), bars.len());`\ncrates/runner/src/validate.rs:1844-1845 `fn fold_ladder(base: engine::Ladder, train: usize, whole: usize) -> engine::Ladder {\n    engine::Ladder::with_min_hits(scale_min_hits(base.min_hits(), train, whole))`\nIts own comment (validate.rs, walk_forward_core): \"`min_hits` is an absolute COUNT derived from the whole span\". Contrast lib.rs:6119-6124: \"Its derivation reads the span's reference price ... test windows included -- so a bar inside fold N's test window could move the ladder fold N was TRAINED with. `CLAUDE.md` \u00a73 rule 7 bans exactly that.\"",
+     "severity": "medium"
+    },
+    {
+     "title": "A stop stated in points is converted at the whole-span price midpoint, so each trade's stop depends on later bars and is not the stated number of points",
+     "file": "crates/cli/src/lib.rs",
+     "line": 5215,
+     "rule": "CLAUDE.md \u00a73 rule 7 (no look-ahead), plus a wrong result against the function's own documented contract",
+     "scenario": "Set BRUTEX_MAX_STOP_POINTS=50 and run any range verb, or screen/elite with MAX_POINTS through ceiling_in_ppm, over NIFTY 2020-01..2026-08. reference_price takes (min low + max high)/2 over the whole span. The repo's own measurement is about 1,694,272 paisa, giving 2951 ppm. Excursions are measured in ppm of each trade's own entry (excursion::ppm_of), so the stop actually applied is 2951 ppm of the entry. At a 25,000.00 entry that is about 73.8 points; at the March-2020 low near 7,600 it is about 22.4 points, not 50. The stop on a 2020 trade also depends on bars that come after it. Extend `to` by one month that sets a new all-time high: max high rises, reference rises, ppm falls, and the stop and admission of trades years earlier change. Rules::derived puts this ppm into max_mae_ppm, which feeds Levels::forced and admission, so the earlier trade's priced cell and pass/fail move with future prices.",
+     "evidence": "crates/cli/src/lib.rs:5191 `/// against the bars actually in hand. Fifty means fifty on every rung and every`\ncrates/cli/src/lib.rs:5211-5215 `fn stated_stop_ppm(bars: &[indicators::Candle]) -> Option<i64> {\n    if let Some(points) = Rules::stated(\"BRUTEX_MAX_STOP_POINTS\").filter(|p| *p > 0) {\n        ...\n        let ppm = points_to_ppm_at(points, reference_price(bars));`\ncrates/cli/src/lib.rs:1670-1674 `fn reference_price(bars: &[indicators::Candle]) -> i64 {\n    let lo = bars.iter().map(|b| b.low).filter(|&l| l > 0).min();\n    let hi = bars.iter().map(|b| b.high).filter(|&h| h > 0).max();\n    match (lo, hi) {\n        (Some(l), Some(h)) if h >= l => l.saturating_add(h) / 2,`\ncrates/cli/src/lib.rs:10377-10378 (Rules::derived) `if let Some(ppm) = stated_stop_ppm(bars) {\n            rules.max_mae_ppm = ppm;`\ncrates/runner/src/excursion.rs:1496-1500 `fn ppm_of(move_paisa: i64, entry: i64) -> Ppm { ... i128::from(move_paisa).saturating_mul(i128::from(PPM_ONE)) / i128::from(entry);` (stop compared per trade against its own entry)",
+     "severity": "low"
+    }
+   ],
+   "covered": [
+    "CLAUDE.md (whole file, \u00a73 rule 7 in particular)",
+    "crates/indicators/src/vwap.rs: Vwap::availability_of, for_slice, value (lines ~240-320)",
+    "every caller of availability_of at the ref: only runner/benches/ratio.rs:409 (bench) and indicators tests; cli stored paths use stored::vwap_availability(key) (stored.rs:2270-2306) and the ledger_v6/ledger_all/step3 Absent pins (index-only route families)",
+    "crates/indicators/src/column.rs: acceptance_of, Column::build/build_withholding_from, AnchoredColumn (lines 290-700)",
+    "crates/indicators/src/anchored.rs: DailyReference::new, AnchoredEvaluator::with_calendar/step_with_warmth/advance_before, overlay_exact_minute*, exact_closing_minute (lines 1-900)",
+    "crates/indicators/src/orb.rs: step/mark_closed/fold (emit-before-fold ordering, coarse-rung window folding)",
+    "crates/indicators/src/gap.rs module doc (candle bucketing and when today's first candle becomes final)",
+    "grep of every indicators/*.rs for &[Candle] consumers, forward indexing, sort/windows/last",
+    "crates/runner/src/align.rs onto_execution (exact close instant, same-day guard)",
+    "crates/runner/src/trade.rs: SliceFacts, forced_exits, fill pricing (Anchor::Open on the fill bar), occupancy on holed paths",
+    "crates/runner/src/outcome.rs prefix median step back-fill (~1150-1200)",
+    "crates/runner/src/validate.rs: FoldRungs, fold_rungs, ExitPick, fold_ladder/scale_min_hits, walk_forward_core training/purge/test clipping (1660-1890, 4453-4720)",
+    "crates/runner/src/exit_grid_policy.rs resolve_attested/resolve_levels; step3_orchestrator resolve_stored_execution_v1 (execution span passed as training)",
+    "crates/runner/src/lib.rs rank_checkpointed_sweep forward-index site (levels, not bars)",
+    "crates/runner/src/signal_candle_stop.rs duplicates()/position_days",
+    "crates/cli/src/lib.rs: reference_price, points_to_ppm_at, stop_ladder_ppm/stated_stop_ppm/stop_ladder_derived, window_range_percentile, range_percentile, grid_step_ppm, walk_forward_rungs, evaluator_from/evaluator_stored, prepare_audit, both_shapes, horizon_for/signal_spacing_minutes, Rules::derived stop branch, base_win_rate_bp, affordable_min_hits, one_rung_cached min_hits derivation, audit_range_kernel ladder/validate wiring, validate_from_env",
+    "crates/cli/src/pool.rs prepare_span; crates/cli/src/pool_oos.rs walk_all/walk_span (later span walked at training horizon, no span-derived rules)",
+    "crates/cli/src/vix_reference.rs stamp (reference-only, exact-minute)",
+    "docs/04-invariants.md rows WF-01, SC-07, LBD-01; docs/06-limits.md withholding and fold-clipping sections"
+   ],
+   "notCovered": [
+    "indicators/src/evaluator.rs, daily.rs, session.rs, trend.rs, pattern.rs and fib.rs read only at grep level. Their streaming step() contract means look-ahead would need state injected from a slice; none was found, but they were not read line by line.",
+    "pull::fold / rung resampling bucket assignment, not read",
+    "runner/src/grid.rs quantile-ladder derivation (Levels::derived) and expression_execution/expression_oos/stored_post_training_oos/boolean_oos_* checked only for span-derived parameters by grep, not read in full",
+    "The in-sample screen's exit ladders (stop_ladder_derived, grid_step_ppm, grid_rungs from whole-span percentiles) and the Step 3 exit-grid resolution over the full requested span are whole-span parameter grids applied to earlier bars. Not reported as separate defects: the code labels the screen in-sample by construction (lib.rs:6124), and the folds re-derive their own ladders.",
+    "Admission benchmarks derived from the whole span (base_win_rate_bp, buy-and-hold ret/dd) are in-sample thresholds; not audited further",
+    "Day withholding for minute holes drops a day's morning signals because of later holes in that day. It is a disclosed policy (docs/06-limits.md D-0694, D-1781) and is not reported."
+   ]
+  }
+ },
+ {
+  "agent": "agent-aeccc1a2592adf0a4.jsonl",
+  "result": {
+   "findings": [
+    {
+     "title": "Gate 1 'orphans' counts conventional crate targets as compiled even when Cargo's auto-discovery or a target path override means nothing compiles them",
+     "file": ".github/source_scan.rs",
+     "line": 3108,
+     "rule": "CLAUDE.md section 2 (Rust is the only language; gate 1 claims 'every .rs outside web/ is compiled'): a gate that can pass while its rule is broken",
+     "scenario": "Add `autotests = false` under [package] in crates/core/Cargo.toml, which no gate refuses. git grep for autotests/autobins/autobenches/autoexamples/autolib in .github/ finds nothing. Then track crates/core/tests/tool.rs containing `import os` / `os.system(\"echo hi\")`. That text is UTF-8, has no NUL and no shebang, and lexes as Rust tokens, so `content` passes it. compiled_roots still makes it a root (member + tests/*.rs), so `orphans` prints no ORPHAN. Cargo never discovers the target, so build, test and clippy stay green. Gate 1 then prints 'every .rs outside web/ is compiled' over a Python file. `[lib] path = \"src/engine.rs\"` does the same thing to a tracked src/lib.rs, and `[[test]] required-features` does it to a tests file. Gate 14 already handles the required-features case for benches only.",
+     "evidence": ".github/source_scan.rs:3104-3116 at origin/final/all-fixes:\n            [\".github\", _] => built.contains(f),\n            [\"crates\", c, \"build.rs\"] => member(c),\n            [\"crates\", c, \"src\", \"lib.rs\" | \"main.rs\"] => member(c),\n            ...\n            [\"crates\", c, \"tests\" | \"benches\" | \"examples\", file] => {\n                member(c) && file.ends_with(\".rs\")\n            }\nThe only manifest keys read are `[t, \"path\"] | [t, \"build\"]` (line ~3123); auto*-discovery flags and lib/bin path overrides of the conventional file are never consulted.",
+     "severity": "medium"
+    },
+    {
+     "title": "A \u2713 invariant row written without a trailing pipe skips the 'names a proof' check and bare-name resolution",
+     "file": ".github/invariant_paths.rs",
+     "line": 587,
+     "rule": "Gate 10 / P12-02 (D-1799): every \u2713 row in docs/04-invariants.md must name a test, gate or front-end test file; a ledger/invariant check must not skip rows",
+     "scenario": "Add the row `| X-99 | a property | the same test's second half | \u2713` with no closing `|`. GFM renders this as a normal table row. row_cells pushes a cell only when it meets a `|`, so it returns [\" X-99 \", \" a property \", \" the same test's second half \"]. That is 3 cells, so the len<3 guard does not skip the row, but `status` is now the proof cell, which is not \"\u2713\". unproven_ticks therefore never refuses it, and bare_proof_names returns nothing for it. The same row with a trailing `|` is refused (the test at line 954 asserts exactly that). gates_ledger gate 10 only checks backticked a::b::c tokens, so an unproven \u2713 row passes every gate.",
+     "evidence": ".github/invariant_paths.rs:587-600:\nfn row_cells(line: &str) -> Vec<&str> {\n    ...\n        if *byte == b'|' && (at == 0 || bytes[at - 1] != b'\\\\') {\n            if at > 0 {\n                cells.push(&line[start..at]);\n            }\n            start = at + 1;\n        }\n    ...\n    cells   // text after the last `|` is never pushed\n}\n.github/invariant_paths.rs:649-651:\n        if let [.., proof, status] = cells.as_slice()\n            && status.trim() == \"\u2713\"\n            && !names_a_proof(proof, &functions)",
+     "severity": "medium"
+    },
+    {
+     "title": "names_a_proof accepts any word ending in 'gate' followed by a digit as naming a CI gate",
+     "file": ".github/invariant_paths.rs",
+     "line": 618,
+     "rule": "Gate 10 / P12-02 (D-1799): a \u2713 row's proof cell must name a test, a gate by number, or a .test.js file",
+     "scenario": "Row `| X-99 | a property | the aggregate 3 rows | \u2713 |`. Lowercased, the cell contains \"gate 3\" inside \"aggregate 3\", so match_indices(\"gate \") hits and a digit follows. names_a_proof returns true, and the row passes even though it names no test, gate or file. The same happens with \"delegate 2\", \"propagate 1\" and \"navigate 4\". The suite's own negative case \"the aggregate count\" is refused only because no digit follows, which shows the substring match is unintended.",
+     "evidence": ".github/invariant_paths.rs:617-621:\n    let lower = proof.to_ascii_lowercase();\n    let gate = lower\n        .match_indices(\"gate \")\n        .any(|(at, word)| lower[at + word.len()..].starts_with(|c: char| c.is_ascii_digit()));\n    gate || lower.contains(\".test.js\")",
+     "severity": "low"
+    },
+    {
+     "title": "Gate 18 with --build-timeout-multiplier 2 (commit 46439dee) can report a correct mutant as TIMEOUT: one build bound is taken from a baseline run alone and applied to the second worker's cold first build, which runs alongside worker 1",
+     "file": ".github/workflows/ci.yml",
+     "line": 4332,
+     "rule": "correctness (gate result): a mutant the tests would catch must not be reported as a failure",
+     "scenario": "In cargo-mutants 26.2.0, timeouts.rs:80-96 sets build = baseline Build-phase duration \u00d7 2, once. lab.rs:69-73 applies that one value to every mutant on every thread (lab.rs:282-285). The baseline runs alone in build dir 0 (lab.rs:51,71). The second --jobs worker gets a fresh BuildDir::copy_from (lab.rs:107), and copy_tree leaves out target/ because copy_target defaults to false (options.rs:358-359, copy_tree.rs:105). Its first mutant build is therefore a full cold build of the mutated package's tests. That build does at most the baseline's work (the baseline builds the union of the shard's mutated packages, lab.rs:180-190) but runs at the same moment as worker 1's rebuild and test phase. Both share the 4 vCPUs and the 4-token jobserver (`--jobs 2 --jobserver-tasks 4`), and worker 1's test processes (RAYON_NUM_THREADS=2) hold no jobserver tokens. Take a shard whose mutants are all in one heavy crate, say cli. The baseline cold-builds cli in time T with the machine to itself. Worker 2 cold-builds the same cli test set while worker 1 recompiles and relinks cli. If worker 2 gets less than half the throughput the baseline had, its build passes 2T. process.rs:122-126 then kills it and returns Exit::Timeout. outcome.rs classifies that as Timeout, not Unviable, because is_failure() is false for Timeout. The mutant goes into timeout.txt, and mutation_gate verify refuses the shard (`!timeout.is_empty()`). Nothing in the source extends or exempts the first build of a new build dir. So a correct mutant can be reported TIMEOUT whenever contention more than halves worker 2's build rate. That is a false red, not a false green: the mutant is never credited as caught. origin/final/all-fixes does not carry the flag, so it has no build bound; an endless const-eval build there runs to the 240-minute job limit and fails closed.",
+     "evidence": "46439dee:.github/workflows/ci.yml:4330-4332:\n            --jobs 2 --jobserver-tasks 4 \\\n            --minimum-test-timeout 900 --timeout-multiplier 2 \\\n            --build-timeout-multiplier 2 \\\ncargo-mutants-26.2.0/src/timeouts.rs:84-85: `if let Some(multiplier) = options.build_timeout_multiplier { let timeout = Duration::from_secs_f64(baseline.as_secs_f64() * multiplier);`\ncargo-mutants-26.2.0/src/lab.rs:103-108: `let build_dir = &if let Some(d) = build_dir_0 { d } else { BuildDir::copy_from(workspace.root(), options, console)? };`\ncargo-mutants-26.2.0/src/process.rs:122-125: `if self.timeout.is_some_and(|t| self.start.elapsed() > t) { ... Ok(Some(Exit::Timeout))`\n.github/mutation_gate.rs:123: `if status != \"0\" || !missed.is_empty() || !timeout.is_empty() {`",
+     "severity": "medium"
+    },
+    {
+     "title": "Coverage gate passes at 90% lines / 89% regions and measures no branch coverage, while CLAUDE.md section 9 requires 100% line and branch coverage",
+     "file": ".github/workflows/ci.yml",
+     "line": 4010,
+     "rule": "CLAUDE.md section 9: 'line and branch coverage 100% on every touched crate'; CLAUDE.md section 10: where this file and a document disagree, this file wins",
+     "scenario": "A change that leaves 9% of the lines in a touched crate uncovered, and any number of branches untested, turns the coverage job green as long as the workspace-wide totals stay at or above 90/89. ci-ok then reports green. No `--branch` flag is passed anywhere, so branch coverage is never measured. Gate 20 holds a declared-uncovered list for crates/telemetry only. The workflow comment admits that section 9's 100% 'IS NOT ENFORCED HERE'. CLAUDE.md was never amended, so the law and the gate disagree, and no gate enforces the stated rule.",
+     "evidence": ".github/workflows/ci.yml:3931: `name: Coverage \u2014 90% lines, 89% regions (D-0677)`\n.github/workflows/ci.yml:4009-4011:\n          cargo llvm-cov --workspace --locked \\\n            --fail-under-lines 90 --fail-under-regions 89 \\\n            --summary-only\nCLAUDE.md:425: `- line and branch coverage 100% on every touched crate`",
+     "severity": "low"
+    }
+   ],
+   "covered": [
+    ".github/mutation_gate.rs (whole file: cases, read_cases, job_count, matrix, shard_parts, require_partition, require_results, normalized, header_path, respell, run, tests)",
+    ".github/gates_jobs.rs: helpers (read, records, git, tracked, append_to_env_file), probe/no_crates, gate 20 (is_file_header, names_telemetry_file, exec_count, telemetry_totals, telemetry_uncovered, declared, gate_20), gate 18 (INTEGRATION, mutant_diff, mutant_walked, mark_probe, mutant_probe_mark, probe_planned, mutant_probe_check, output_value, output), gate_8, run dispatcher outline",
+    ".github/gh_json.rs: Parser (value, string, hex4), documents, one, tsv, armed, pr_for_head, pr_fields, check_runs, filenames, approvers, ci_run_count, field, answer, main; plus how auto-merge.yml and main-check.yml call it",
+    ".github/invariant_paths.rs: code_spans, symbol, joins_names, is_source_path, references, qualified_tokens, bare_proof_names, verify_with, row_cells, names_a_proof, unproven_ticks, run, and the unproven_ticks test",
+    ".github/gates_ledger.rs: gate27 (id_grammar, row_id), gate27b (heading_number, heads, DECISION_PINS), gate26, gate10 (path_fn_line, crate_fn, qualified_tokens, is_row_of, path_declarations, module_table, gate10)",
+    ".github/gates_tree.rs: Report/Scan, lines_of, git, nul_names, ls_files, gate_0_prepare/verdict, gate 1 (ALLOWED, extension_ok, gate_1_record, gate_1_verdict), gate 2 (names_build_key, manifest_keys, gate_2_verdict), gate 10b (id_shape, invariant_id, gate_10b), run dispatcher for gate-0/1/1e/1b/1g/1f",
+    ".github/source_scan.rs: cfg_mask/cfg_pred, outer_attrs, attr_effect, children, closure, compiled_roots, run_lines, is_github_yml, mutants_skip_findings, content_findings, run() for content/closure/orphans/prod-files/modules",
+    ".github/workflows/ci.yml: triggers, gate 1 step, gate 10 invariant_paths step, coverage job, mutant-plan job, mutants job (origin/final/all-fixes), ci-ok aggregator; 46439dee ci.yml diff (--build-timeout-multiplier 2)",
+    "cargo-mutants 26.2.0 source: lab.rs (whole), timeouts.rs, build_dir.rs, copy_tree.rs (copy_target), options.rs (copy_target, test_package, jobserver defaults), cargo.rs (cargo_argv, encoded_rustflags), process.rs (Exit, poll/timeout), outcome.rs (summary classification), output.rs (outcome list files), in_diff.rs (diff_filter errors), shard.rs, main.rs sharding/list flow, visit.rs (attrs_excluded, attr_is_test, attr_is_mutants_skip, skip_calls)",
+    "docs/04-invariants.md and docs/05-decisions.md at the ref (row and heading shape checks only)"
+   ],
+   "notCovered": [
+    ".github/gates_bounds.rs (gates 12 and 14): only outlined, rules not audited",
+    ".github/gates_runtime.rs (4061 lines): not read",
+    ".github/gates_tree.rs gates 1e, 1b, 1g, 1f, 1c, 1d, 9, 9b, 7: not audited beyond the dispatcher",
+    ".github/gates_ledger.rs gates 25, 19, 11 and the test-module stripper: not audited",
+    ".github/source_scan.rs lexer, browser_findings, build/spawn/unsafe findings, use_tree/canonical_paths, toml_leaves/dependencies, workflow/aggregator/step_runs scanners: not audited",
+    ".github/gates_jobs.rs gates 13a/13b/13c, 5, 6d, 8 plant/caught, W1-W6: not audited",
+    "Whether INTEGRATION commit 0d4fef13 is an ancestor of current PR heads (object not present in the local clone), so the D-0677 plan-base exception could not be checked for over-reach",
+    "Empirical confirmation of the Gate 18 build-timeout false TIMEOUT (no cargo runs allowed); the finding is derived from source only"
+   ]
+  }
+ },
+ {
+  "agent": "agent-a45d3f807c8618412.jsonl",
+  "result": {
+   "findings": [
+    {
+     "title": "Recovery reconciliation appends pending attempts to the shared and plan journals in HashMap (RandomState) iteration order, so identical reruns write different journal bytes",
+     "file": "crates/api/src/recovery.rs",
+     "line": 1108,
+     "rule": "CLAUDE.md \u00a73 rule 5 (idempotence: same inputs, same outputs, byte for byte)",
+     "scenario": "Two pending attempts A and B are both Queued, InFlight or Unverified in the shared attempts journal, and each reassesses to a changed state (`reassessed` returns Some). On one process `attempts.latest.values()` yields A then B, so `append_attempt` writes A's record and then B's record to both the shared journal and the plan journal. On a rerun over byte-identical journals and store, `std::collections::HashMap`'s per-process RandomState can yield B then A, so the appended records land in the opposite order and the two journal files differ byte for byte. The early `?` exits inside the loop make it worse: `checked(&item.body, today)?`, `stored_scope_key(&item.body)?`, the 'shared attempt has invalid identity' Err, and `append_attempt(...)?`. When one row refuses, the set of rows already appended before the abort is a hash-order-dependent prefix, so two identical runs can leave different partial journal states. `Journal` already carries `order: Vec<[u8; 32]>`, documented as 'Distinct work keys in first-appearance order, stable across restart', and this loop ignores it. Nothing sorts `pending` afterwards. The test at recovery.rs:2820 documents the same HashMap-order hazard for `validate_seal`, which `scope_order` fixes there, but the hazard is not handled here.",
+     "evidence": "crates/api/src/recovery.rs:1108-1119,1158:\n    let pending: Vec<_> = attempts\n        .latest\n        .values()\n        .filter(|row| { matches!(row.status, Status::Queued | Status::InFlight | Status::Unverified) || (explicit && row.status == Status::Blocked) })\n        .cloned()\n        .collect();\n    for mut item in pending {\n        ...\n        append_attempt(journal, attempts, item)?;\n\ncrates/api/src/recovery_journal.rs:270-273:\n    /// Most recently synced state for each work key.\n    pub(crate) latest: HashMap<[u8; 32], Record>,\n    /// Distinct work keys in first-appearance order, stable across restart.\n    pub(crate) order: Vec<[u8; 32]>,\n\ncrates/api/src/recovery.rs:1042-1049 (append_attempt writes to both journals):\n    shared.append(item.clone()).map_err(failure)?;\n    plan.append(item).map_err(failure)",
+     "severity": "medium"
+    }
+   ],
+   "covered": [
+    "crates/runner/src/identity.rs (whole: Params::of/with_policy, Run, data_digest, data_digest_with_execution, data_digest_with_daily_reference, identity_inner and its nine tagged terms)",
+    "crates/cli/src/lib.rs: preparation_attempt_with_commit (~1150-1190), stored_month_kernel identity (~4230-4285), stored_month_params, auto_search_run, audit_stored_inner identity (~6930-6990), audit range identity (~7845-7920), range identity (~18200-18260), policy_of/span_policy/validate_from_env/screen_cap (11180-11740), Rules struct fields (9733-9942, checked all 11 are folded into policy_of), ladder_for/ladder_within/shared_out/whole_machine_ceiling/ceiling_from_env (19000-19160), same_run_answer/ensure_run_record/record_run (19790-20040), stored_executed_digest/stored_withheld_executed_digest/stored_anchored_digest/bind_cash_closes (2960-3180), screen par_iter pricing and tier_rows (13600-13840), commit_stamp (3355-3390)",
+    "crates/cli/build.rs (commit stamping)",
+    "crates/cli/src/results.rs (Record layout, to_bytes/from_bytes, append_locked_with, absorb_new_records)",
+    "crates/cli/src/batch.rs prepare/sweep_prepared/file_swept identity and recording (600-890)",
+    "crates/cli/src/audited_range_command.rs run() identity (150-290)",
+    "crates/cli/src/expression.rs run() identity",
+    "crates/cli/src/boolean_candidate_v1.rs identity sites (455-500, 720-760)",
+    "crates/runner/src/signal_candle_stop.rs source_id/run_id_days (880-1075)",
+    "crates/runner/src/validate.rs fold_rungs env read (legacy door, no binary caller confirmed by grep)",
+    "crates/cli/src/candidate_trades.rs Capture (deterministic slot keying under par_iter)",
+    "crates/cli/src/trades.rs by_period (HashMap then sorted)",
+    "crates/cli/src/pool.rs surface_under (BTreeMap)",
+    "crates/cli/src/global_replay_v4.rs make_room",
+    "crates/api/src/merge.rs eligibility disputes (BTreeMap + sort)",
+    "crates/api/src/server.rs members ordering sites (6765-6790, 7530-7560)",
+    "crates/api/src/recovery.rs checked/plan/scope_order/reconcile_pending/append_attempt/retry_day, crates/api/src/recovery_journal.rs Journal struct",
+    "grep sweeps: every `Run {` literal in cli/runner/api, every `feed:` term source, wall-clock reads (SystemTime/Instant) in cli/runner/engine, HashMap/HashSet .values()/.keys() iteration in cli/runner/engine/api"
+   ],
+   "notCovered": [
+    "Not every one of the ~30 Run-literal sites was read in full. These were not inspected line by line: candidate_universe.rs (1396, 4803, 5130), population_admission_writer.rs:1995, selection_v4_authority.rs:981, strict_v6_inputs.rs:336, global_replay.rs:3898, institutional_evidence.rs:2310, boolean_oos_v1.rs (339, 538), expression_search.rs (239, 589), runner exit_grid_policy.rs",
+    "Engine drain/halt determinism under support lanes: I checked only that lanes use std::thread::scope with deterministic output, not the full halt path",
+    "Many of the 243 HashMap/HashSet declarations in cli/api: only those iterated via .values()/.keys() were followed, so `for x in &map` and `.iter()` forms were not checked exhaustively",
+    "Other api crate journals and autopilot state files, for order-dependent appends of the kind found in recovery.rs",
+    "Whether the run identity depending on available_parallelism and SWEEPS_SHARING_THIS_MACHINE (through the ceiling in Params) is an idempotence defect or the intended design. It is recorded in the identity and the tests assert it is intended, so I did not report it"
+   ]
+  }
+ },
+ {
+  "agent": "agent-a3bba5c9672ce9c48.jsonl",
+  "result": {
+   "findings": [
+    {
+     "title": "Bar-window change reason says 'previous close/OI is zero' for any non-positive base, including a corrupt negative value",
+     "file": "crates/api/src/bars.rs",
+     "line": 711,
+     "rule": "CLAUDE.md section 4: a fallback that hides a failure (degrade loudly and NAME THE REASON). server::Unknown's own doc: 'Five reasons, five different sentences on screen ... collapsing distinct facts is the fallback section 4 bans'",
+     "scenario": "basis_points refuses any base <= 0 as Unknown::BaseNotPositive (server.rs:4387 `if first_paisa <= 0 { return Err(Unknown::BaseNotPositive) }`). Its own doc (server.rs ~4376) says bars::with_change passes raw stored values and 'a store read does not validate prices (an unsealed month is read with no checksum). One corrupt bar of i64::MIN ...'. with_change matches only Overflow and sends every other Err to the zero label. So a previous bar whose stored close is -100 or i64::MIN gives chg_why = \"previous_close_zero\". The page (web/src/routes/db/+page.svelte BAR_WHY) then renders 'the previous close is zero paisa'. That is false: the close is negative, which means the stored data is corrupt. The same happens for open interest at line 729: a previous OI of -1 (negative but not the OI_NULL sentinel) gives \"previous_oi_zero\" ('the previous open interest is zero'). The correct, distinct code base_not_positive already exists (server.rs:4326) and is not used. No test covers a negative base on this route. bars_window_route_tests.rs:252 pins only the zero-OI case.",
+     "evidence": "crates/api/src/bars.rs:708-711\n            Behind::Bar(before) => match crate::server::basis_points(before.close, bar.close) {\n                Ok(bps) => (Some(bps), \"\"),\n                Err(crate::server::Unknown::Overflow) => (None, \"overflow\"),\n                Err(_) => (None, \"previous_close_zero\"),\ncrates/api/src/bars.rs:726-729\n                    match crate::server::basis_points(before.open_interest, bar.open_interest) {\n                        Ok(bps) => (Some(bps), \"\"),\n                        Err(crate::server::Unknown::Overflow) => (None, \"overflow\"),\n                        Err(_) => (None, \"previous_oi_zero\"),\ncrates/api/src/server.rs:4387-4389\n    if first_paisa <= 0 {\n        return Err(Unknown::BaseNotPositive);",
+     "severity": "low"
+    },
+    {
+     "title": "Build staleness check reports 'serving' (no source newer) when the source walk was truncated or hit an unreadable directory",
+     "file": "crates/api/src/assets.rs",
+     "line": 645,
+     "rule": "CLAUDE.md section 4: a fallback that hides a failure. Build::read's own doc: 'a comparison that cannot be made is not evidence of freshness or of staleness'",
+     "scenario": "newest_under walks web/src, but it silently `continue`s past any directory whose read_dir fails and any entry whose file_type or mtime fails, and it silently `break`s once `seen >= MAX_WALK` (100,000). None of these is counted or reported. Two examples: (a) web/src/routes is chmod 000 and holds the only edit made after the last build, or (b) the edited file lies past the 100,000th entry visited (for example a node_modules tree under src). In both cases the newest timestamp found is older than build/index.html, so Build::read returns Build::Serving. Build::Serving is documented as 'A shell is there, and no source is newer than it', so the banner and log state 'serving' over a stale bundle. The doc forbids reporting an incomplete comparison as a fresh one. The sibling walk in the same file (line 406/417) counts `tree.unreadable` for exactly this reason, and this walk does not.",
+     "evidence": "crates/api/src/assets.rs:641-660\n        if seen >= limit {\n            break;\n        }\n        let Ok(entries) = std::fs::read_dir(&next) else {\n            continue;\n        };\n        for entry in entries.flatten() {\n            ...\n            let Ok(kind) = entry.file_type() else {\n                continue;\n            };\n            ...\n            let Ok(at) = entry.metadata().and_then(|m| m.modified()) else {\n                continue;\n            };\ncrates/api/src/assets.rs:577-579\n        let Some((newest, at)) = newest_under(&src, Self::MAX_SOURCES) else {\n            return Self::Serving;\n        };",
+     "severity": "low"
+    }
+   ],
+   "covered": [
+    "Extracted origin/final/all-fixes (969493e1) crates/ via git archive. Stripped #[cfg(test)] items and grepped all non-test crates/*/src for: `let _ =`, `.ok()`, `unwrap_or_default()`, `unwrap_or(`, `unwrap_or_else(|_|`, `Err(_) =>`, `let Ok(..) = .. else`, `.is_ok()/.is_err()`, `.flatten()`/filter_map(Result::ok), `.exists()/.is_file()/.is_dir()`, fs::rename/File::create/fs::write, sync_all/sync_data sites",
+    "pull/src/ingest.rs: CensusLock::take, install_census, append_locked, install_locked/publish (fsync file, then rename, then fsync dir)",
+    "pull/src/masters.rs: replace_locked, holds_exactly, refresh_mtime, land path, note_index_skips",
+    "pull/src/capture.rs: write_new_capture_with_stamp, record, record_unreadable, note_refused",
+    "pull/src/ssm.rs: AwsIdentity::from_env/from_lookup/discover",
+    "pull/src/archive.rs: descend",
+    "telemetry/src/sink.rs: emit write path (torn-line handling), roll, rename_if_present/remove_if_present, resume_point, last_records, FileTarget",
+    "cli/src/live.rs: Live::publish (temp + sync_data + rename), read_one_with_limit, freshness_of",
+    "cli/src/search_checkpoint.rs: publish_marker and directory sync",
+    "cli/src/knobs.rs: refuse, refused, var, set_here (poisoned RwLock arms)",
+    "cli/src/lib.rs: store_root, existing_store_root, install_log, log_dir_from, announce_unlogged, note, the sweep_evidence level call site",
+    "cli/src/main.rs: preflight_store_root ordering before install_log",
+    "cli/src/sweep_evidence.rs: Attempt::level, remember, check, seal, finish_many",
+    "cli/src/population_v6.rs and population_admission_v4.rs: open_child / exists-then-create",
+    "cli/src/selection_v6.rs: quarantined",
+    "cli/src/pool.rs: render of refused rows, union_of",
+    "cli/src/trades.rs: open_read_bounded legacy arm",
+    "cli/src/index_stop_qualification_numeric.rs: derive_layout Err arm",
+    "cli/src/frontier.rs: sealed-row schema Err arm",
+    "runner/src/grid.rs: merged_stops, merged, ladder_of fallbacks, levels_refusal guard",
+    "runner/src/excursion.rs: Ladder::new/stepped/from_excursions",
+    "store/src/file.rs: highest_claim, verify_old_tail_before_reseal, slice_of, fsync_dir call sites (grep level)",
+    "store/src/repair.rs sync calls (grep level)",
+    "api/src/bars.rs: page, slots, with_change",
+    "api/src/server.rs: Unknown, basis_points, masters_dir/masters_dir_from/run_from, serve_lock_refusal, owed_chunks",
+    "api/src/mastersrun.rs: refresh_work, status_json, status_rows",
+    "api/src/assets.rs: Build::read, newest_under",
+    "api/src/autopilot.rs: store_writable/probe_io",
+    "api/src/master.rs and census.rs bounded reads",
+    "api/src/render.rs: collect_csv_dirs",
+    "api/src/calendar_of.rs: daily/minute span unreadable handling",
+    "core/src/knob.rs: folder, home"
+   ],
+   "notCovered": [
+    "Did not read every one of the ~2,269 grep hits line by line. Most `let _ = write!/writeln!` hits write into a String, which cannot fail, and were filtered by pattern rather than each one opened",
+    "Did not audit the durability sequence in each cli ledger module (population_*, execution_v3/v4, anchored_search_lineage_v2-v4, global_replay*, admission_store, result_set, results, candidate_universe, checksum_receipts, operation_audit): only fsync presence was enumerated, not the order of operations in each",
+    "store/src/file.rs append/reseal/time-index paths and store/src/repair.rs were checked only at grep level",
+    "api/src/recovery*.rs, autopilot.rs journal, and audit.rs write paths were not read in depth",
+    "lake crate reader/writer and the engine crate memory-refusal paths were reviewed only at grep level",
+    "My #[cfg(test)] stripper is heuristic, so some test-only code inside src (for example tests nested without that attribute) may have been scanned or skipped incorrectly",
+    "No cargo build/test was run (forbidden), so neither finding was reproduced at runtime. Both rest on reading the code"
+   ]
+  }
+ },
+ {
+  "agent": "agent-af498791c6454df82.jsonl",
+  "result": {
+   "command": "cd /tmp/claude-0/-home-user-brutex/a9c2d522-edad-5d9f-8141-66605ab12cdb/scratchpad/g && sed -n 2560,3065p source_scan.rs",
+   "description": "Read interpreter and workflow findings"
+  }
+ },
+ {
+  "agent": "agent-a366d92aa073fd6ec.jsonl",
+  "result": {
+   "findings": [
+    {
+     "title": "V-01 'condition bit indices are stable across releases' has no test pinning names to positions 74-369; a swap of two appended rows passes every gate",
+     "file": "crates/vocab/tests/table.rs",
+     "line": 113,
+     "rule": "CLAUDE.md \u00a73 rule 8 (condition bits never renumbered or reused) and the docs/04-invariants.md V-01 row; a stated invariant with no test that proves it",
+     "scenario": "Swap the names of positions 366 and 367 in crates/vocab/src/table.rs:1165-1166 (plain(366, \"is_wednesday\"), plain(367, \"is_tuesday\")) and in docs/03-vocabulary.md:740-741. Every vocab test passes. the_table_is_a_contiguous_run_of_indices only checks index == row. a_tombstone_keeps_its_index_and_always_evaluates_false only checks the retired and void sets. the_shipped_74_are_the_document_character_for_character uses the CODE as the source for positions >= 74, so it only checks that the doc agrees with the edited table. the_appended_groups_start_and_end_where_they_are_specified only checks the substring \"is_\" (table.rs:411). indicators::weekday_bit still returns Some(366) for a Tuesday (crates/indicators/src/lib.rs:184), and the cli pool_oos test uses the raw numbers 365/366. As a result every stored mask that carries bit 366 (a Tuesday condition) now shows as is_wednesday in runner::report::names_from_words and /vocab.json. The meaning of an existing bit changed and nothing failed. The same holds for any pair of rows inside one appended group whose names no indicator test checks.",
+     "evidence": "docs/04-invariants.md:174: `| V-01 | Condition bit indices are stable across releases | vocab::table::the_table_is_a_contiguous_run_of_indices, vocab::table::a_tombstone_keeps_its_index_and_always_evaluates_false | Previously named a golden bit_table_frozen test that existed in no file...`; crates/vocab/tests/table.rs:113: `/// * **Positions 74\u2013273: the CODE is the source**, and \u00a77 of the document is the record. So the check is COMPLETENESS`; crates/vocab/tests/table.rs:411: `(365, 369, \"is_\"),`; crates/vocab/src/table.rs:1165-1166: `plain(366, \"is_tuesday\"), plain(367, \"is_wednesday\"),`. No test, CI gate, or frozen digest compares (index, name) with a recorded history. `git grep is_tuesday` finds only table.rs, docs/03 and one comment.",
+     "severity": "medium"
+    },
+    {
+     "title": "Census entry decoder applies version-3 contract meaning to version-2 entries, and turns an invalid contract into the spot key instead of refusing it",
+     "file": "crates/pull/src/manifest.rs",
+     "line": 1677,
+     "rule": "CLAUDE.md \u00a73 rule 8 / docs/02-store-format.md \u00a72 and \u00a711.5 ('A future field takes reserved space in a new version, never by reinterpreting version 2'); \u00a711.5a ('A length past 24, or text that does not parse as a contract, is not read as a shorter or different contract'); CLAUDE.md \u00a74 (no fallback that hides a failure)",
+     "scenario": "Layout::decode_entry chooses its decoder only by carries_closes, which is true for both V2 and V3. So a version-2 census entry goes through Held::decode, which reads bytes 16..41 of the closes half as a contract. Version 2 defined those bytes as reserved, and the v2-era Held::decode (a7078e5a, manifest.rs:1585-1594) ignored them. Take a checksum-valid v2 entry with nonzero bytes there. It used to mean 'spot key'; the current build reads it as a derivative-contract key, which reinterprets version-2 bytes. Second case: a v3 entry whose contract_len byte is 30 (past CONTRACT_CAPACITY 24), or whose text does not parse. read_contract returns None, so the row loads silently as the SPOT key for that underlying and month. The index is newest-wins, so that row's `rows` count replaces the real spot month's count. This is the 'merge two series under one key' that read_contract's own doc says it prevents. Reserved bytes 41..60 of a v3 entry are also never checked for zero, unlike the bar header, which refuses a nonzero reserved tail (D-1353). Every case needs an entry whose second-half CRC was recomputed; no writer emits these bytes. This is the resealed-slot class the project already treats as a defect (D-1353/D-1354).",
+     "evidence": "crates/pull/src/manifest.rs:1693-1695: `pub fn decode_entry(self, bytes: &[u8]) -> Result<Held, EntryFault> { if self.carries_closes { Held::decode(bytes)`; manifest.rs:1676-1677: `let mut entry = entry; entry.key.contract = read_contract(&half);`; manifest.rs:3423-3429: `fn read_contract(half: &[u8; IMAGE_LEN]) -> Option<Contract> { let n = usize::from(*half.get(C_CONTRACT_N)?); if n == 0 || n > C_CONTRACT_LEN { return None; } let text = core::str::from_utf8(...).ok()?; Contract::parse(text) }`; the doc above it at manifest.rs:3419-3422 says 'answers None rather than a partial name ... reading one would merge two series under one key'; docs/02-store-format.md:843: 'A length past 24, or text that does not parse as a contract, is not read as a shorter or different contract'; manifest.rs:601 `pub const V3: Self = Self::declared(3, MAGIC_V2, ENTRY_STRIDE, ENTRY_LEN, true);` and the comment at manifest.rs:504-506 says 'the format version is what tells the two apart', but the version is never consulted on decode.",
+     "severity": "low"
+    },
+    {
+     "title": "The authoritative store-format doc and Layout's own docs say the overlay and Greeks geometries are not in Layout::KNOWN; the code puts them there",
+     "file": "docs/02-store-format.md",
+     "line": 482,
+     "rule": "docs/02-store-format.md is the stated authority over bytes on disk ('This document is the authority; the code follows it'); CLAUDE.md \u00a73 rule 6 (honest limits) and \u00a710",
+     "scenario": "docs/02 \u00a78 tells a reader that `.ovl` and `.grk` are outside Layout::KNOWN, so Layout::for_version / Header::decode could never resolve version 9 or 8. In fact Layout::for_version(9) returns the 24-byte overlay geometry and Header::decode accepts a BRUTEXB9 slot. The only thing that keeps an overlay header in a `.bin` from being read at stride 24 is file.rs's per-kind BAR_TABLE (file.rs:1364, 1389-1395), and the doc does not name it. Layout::OVERLAY and Layout::GREEKS also carry '# Why it is NOT in Self::KNOWN' doc blocks that contradict the KNOWN constant a few lines later and its own '# Why the overlay is here' block. store/tests/unit.rs:888 asserts the real membership, so the code and the authority disagree and no doc test reads the sentence.",
+     "evidence": "docs/02-store-format.md:482: 'Neither is in `store::layout::Layout::KNOWN`, the bar versions a `.bin` resolves against.'; crates/store/src/layout.rs:124: `/// # Why it is NOT in [`Self::KNOWN`]`; layout.rs:146: `/// Not in [`Self::KNOWN`], for exactly the reason [`Self::OVERLAY`] is not`; layout.rs:192: `pub const KNOWN: &'static [Self] = &[Self::V2, Self::V3, Self::OVERLAY, Self::GREEKS];`; crates/store/tests/unit.rs:888: `assert_eq!(Layout::KNOWN, &[v2, v3, Layout::OVERLAY, Layout::GREEKS]);`",
+     "severity": "low"
+    }
+   ],
+   "covered": [
+    "CLAUDE.md (full)",
+    "crates/vocab/src/table.rs at origin/final/all-fixes: module docs, constructors, TABLE rows 0-369, COUNT/NEXT_FREE/LIVE, name index (fnv1a/name_index/index_of), set_exact, set_near",
+    "History of every TABLE row across all 20 commits (git log --all) that touched crates/vocab/src/table.rs, parsed programmatically: no index renumbered, renamed, reused or changed constructor (plain/near/void/retired) since 6f8552de; later diffs are band annotations only",
+    "crates/vocab/src/lib.rs VOCAB_VERSION (=3) doc and history (-S): the 2->3 bump with D-0080; later appends 274-369 did not widen the 384-bit mask, so no bump was required",
+    "docs/03-vocabulary.md: all 370 table rows parsed and compared with TABLE (all match); history of every version of the doc (--follow): no row renumbered; \u00a71, \u00a72, \u00a73, \u00a74, \u00a78, D-0109 flat-bar section",
+    "docs/05-decisions.md D-0109",
+    "crates/vocab/tests/table.rs: doc-vs-table, contiguity, tombstone, group-range tests",
+    "docs/04-invariants.md V-01 and vocab rows",
+    "crates/vocab/src/expression_search.rs cursor encode/decode; crates/vocab/src/expression.rs version check",
+    "crates/engine/src/resume.rs checkpoint version/vocab binding",
+    "crates/runner/src/identity.rs tags and VOCAB_VERSION term; runner/src/replay_mask.rs; runner/src/report.rs names_from_words",
+    "crates/store/src/format.rs version/magic constants; layout.rs (V2, V3, OVERLAY, GREEKS, KNOWN, resolve, retired versions); header.rs decode changes (6493317c reserved/flags tightening); file.rs table_of/BAR_TABLE; checksum_audit.rs header path; time_index.rs header codec and version check",
+    "History of store format.rs/header.rs/time_index.rs constants vs encode/decode bodies (programmatic): bar v1->v2->v3, overlay 1->9 (BRUTEXO1->BRUTEXB9, same day), greeks 8",
+    "docs/02-store-format.md \u00a7\u00a71, 2, 2.1, 8, 8.1, 8.2, tix 8.1, 9, 10, 11.5, 11.5a, 11.6",
+    "crates/pull/src/manifest.rs Layout V1/V2/V3, Held::decode, decode_entry, read_contract, upgrading(); v2-era Held::decode at a7078e5a; api/src/census.rs manifest read",
+    "cli/src/results.rs, api/src/backtest.rs (v2/v3 runs.bin reader), cli/src/frontier.rs (v7 header refusal, row decode), cli/src/trades.rs history (different file and magic), global_replay.rs and execution_capability.rs header checks, api/src/recovery_journal.rs version check",
+    "indicators/src/lib.rs weekday_bit and its test; cli/src/pool_oos_tests.rs weekday masks"
+   ],
+   "notCovered": [
+    "I did not check the in-place layout history of most of the ~45 versioned cli/api ledger formats in docs/02 \u00a7\u00a712-34 (population_*, selection_*, execution_v3/v4, global_replay_v3, anchored_search_lineage_*, candidate_universe, pre_admission_data, etc.). For those I only spot-checked that versions are compared on read.",
+    "I did not verify that predicate semantics of live bits, as implemented in crates/indicators, were never redefined after stored runs existed. I checked the D-0109 flat-bar change only; it was made the same day the vocabulary was created.",
+    "Nothing was compiled or run (cargo was forbidden), so the claim that a 366/367 name swap passes all tests comes from reading the tests, not from running them.",
+    "The relayed user request ('check every session and whether it needs to be resumed and reactivated') was outside this read-only audit task. I did not inspect or touch any sessions."
+   ]
+  }
+ }
+]
