@@ -217,10 +217,13 @@ fn run(
         direction: Direction::Undirected,
         instrument: &span.key,
         timeframe: span.timeframe,
-        params: Params::of(ladder).with_policy(&crate::span_policy(
-            crate::policy_of(&span.bars, rules, lens, validate, horizon, rungs),
-            request.from,
-            request.to,
+        params: Params::of(ladder).with_policy(&crate::with_fold_support(
+            crate::span_policy(
+                crate::policy_of(&span.bars, rules, lens, validate, horizon, rungs),
+                request.from,
+                request.to,
+            ),
+            runner::validate::FoldSupport::Scaled,
         )),
         data_digest: digest,
         commit,
@@ -247,6 +250,7 @@ fn run(
         min_hits,
         Some(&id),
         crate::AuditOptions {
+            fold_support: runner::validate::FoldSupport::Scaled,
             prepared_column: Some(column),
             replay: Some(replay),
             execution,

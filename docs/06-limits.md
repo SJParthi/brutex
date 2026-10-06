@@ -15810,3 +15810,35 @@ does not bound the store:
   is raised or checked. While the run lives, those months refuse ingest
   writes past the ingest's one-second wait (D-2552). `ledger-v6` itself now
   releases each rung's guards as the rung ends.
+
+## The walk-forward probes its first training window once per shape — D-3696, 6 October 2026
+
+When the range path's support came from the affordability probe, each
+walk-forward shape now runs one more `Sweeper::auto` over its anchoring
+training column (`FoldSupport::FirstTraining`). That is `log2(window)` ladder
+walks over a column the fold already built, bounded by the same probe ceiling
+as the whole-span probe. It is paid once per shape per audited rung, never per
+bar and never per candidate.
+
+Measured on `synthetic::sessions(16)`, both shapes through `cli::both_shapes`
+with the test profile, 15 runs each (p99 is the slowest of 15):
+
+| policy | p50 | p99 | max |
+|---|---:|---:|---:|
+| `Scaled` (before) | 6.75 s | 7.19 s | 7.19 s |
+| `FirstTraining` (after) | 6.12 s | 6.25 s | 6.25 s |
+
+The two runs sweep at different thresholds, so this is the whole stage
+end to end, not the probe's cost in isolation. The probe alone was not
+timed separately. Nothing was measured on a real store span, so the cost
+there is UNVERIFIED.
+
+## A stop stated in points is span-relative in sample — D-3697, 6 October 2026
+
+`BRUTEX_MAX_STOP_POINTS` converts at the whole span's reference price, so it
+is N points only at that price. Each trade applies it as ppm of its own entry:
+about 73.8 points at a 25,000 entry and 22.4 at 7,600 on the 2020-01..2026-08
+NIFTY span. A later bar moves it in sample: doubling the last bar's high of
+`synthetic::sessions(3)` moved it from 1,999 ppm to 1,332. It never reaches a
+walk-forward fold. A per-trade N-point stop needs a per-entry stop in
+`runner::grid`, which is left to the owner.

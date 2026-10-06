@@ -297,6 +297,7 @@ fn generated_audit(cost: CostScope, ceiling: usize, min_hits: u64) -> String {
         min_hits,
         None,
         AuditOptions {
+            fold_support: runner::validate::FoldSupport::Scaled,
             prepared_column: None,
             replay: None,
             execution: None,

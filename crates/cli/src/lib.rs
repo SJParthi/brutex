@@ -95,6 +95,8 @@ mod fixed_tail;
 /// refuses (D-2620; cli1-2, cli1-3, expr-1, expr-2, indexstop-2).
 mod lock_wait;
 #[cfg(test)]
+mod lookahead_tests;
+#[cfg(test)]
 mod operator_boundary_tests;
 mod readonly_file;
 #[cfg(test)]
@@ -5259,8 +5261,26 @@ fn stop_ladder_ppm(bars: &[indicators::Candle], hold: usize) -> Vec<i64> {
 /// is the kind of silent wrongness `CLAUDE.md` §4 bans.
 ///
 /// `BRUTEX_MAX_STOP_POINTS` states the stop in index points and converts here,
-/// against the bars actually in hand. Fifty means fifty on every rung and every
-/// span. This is the same conversion `screen` and `elite` already do for their
+/// against the bars actually in hand. Fifty means fifty points AT THE SPAN'S
+/// [`reference_price`], on every rung, so a typed number no longer has to be
+/// re-derived per span.
+///
+/// # What it does not mean, measured (audit-find-17 #6, D-3697)
+///
+/// It is not fifty points on every trade. The converted ppm is applied to each
+/// trade as a fraction of that trade's OWN entry, so on the 2020-01..2026-08
+/// NIFTY span (reference about 1,694,272 paisa, 2,951 ppm) it is about 73.8
+/// points at a 25,000 entry and 22.4 at 7,600. And the reference is the whole
+/// span's `(min low + max high)/2`, so a later bar moves it: doubling only the
+/// last bar's high of `synthetic::sessions(3)` moved the stop from 1,999 ppm to
+/// 1,332. That is the in-sample screen's whole-span derivation, which D-1660
+/// rules in-sample by construction; no walk-forward fold reads this knob, and
+/// `a_stated_stop_is_span_relative_in_sample_and_never_reaches_a_fold` fails
+/// the build if one starts to. A stop of exactly N points per trade needs a
+/// per-entry stop in `runner::grid`, which is recorded as an owner decision,
+/// not done here.
+///
+/// This is the same conversion `screen` and `elite` already do for their
 /// `MAX_POINTS` argument via `ceiling_in_ppm`; those verbs take it positionally
 /// and the range verbs have no such argument, so the knob is how a `range-all`
 /// states it at all.
@@ -7106,6 +7126,7 @@ fn audit_stored_kernel(request: StoredSweepRequest<'_>) -> Result<String, stored
         min_hits,
         Some(&id),
         AuditOptions {
+            fold_support: runner::validate::FoldSupport::Scaled,
             prepared_column: None,
             replay: Some(StoredReplay {
                 daily: &daily,
@@ -7515,6 +7536,8 @@ struct StoredRangeAuditRequest<'a> {
     min_hits: u64,
     attempt: Option<u64>,
     commit: &'static str,
+    /// Where each walk-forward fold's support comes from (D-3696).
+    fold_support: runner::validate::FoldSupport,
 }
 
 /// Why a range audit refuses in a build with no verified commit stamp.
@@ -7543,6 +7566,7 @@ fn audit_range_inner(
     let vendor = parse_vendor(vendor_word)?;
     let root = store_root()?;
     audit_range_kernel(StoredRangeAuditRequest {
+        fold_support: runner::validate::FoldSupport::Scaled,
         root,
         vendor,
         underlying,
@@ -7864,6 +7888,7 @@ fn audit_range_kernel_cached(
         min_hits,
         attempt,
         commit,
+        fold_support,
     } = request;
     // BEFORE THE SPAN IS READ, as every recorded kernel does, and here it is
     // load-bearing: `column_withholding_at_build` below writes a preparation
@@ -7975,10 +8000,13 @@ fn audit_range_kernel_cached(
         // Same `policy_of` and the same argument order as
         // `screen_range_inner`'s call, so the two paths key identically and a
         // knob added to one cannot be missed by the other.
-        params: Params::of(ladder).with_policy(&span_policy(
-            policy_of(&span.bars, rules, lens, validate, horizon, rungs),
-            from,
-            to,
+        params: Params::of(ladder).with_policy(&with_fold_support(
+            span_policy(
+                policy_of(&span.bars, rules, lens, validate, horizon, rungs),
+                from,
+                to,
+            ),
+            fold_support,
         )),
         // ONE DATA TERM, BOTH SERIES THAT DECIDE THE ANSWER. On a coarse rung
         // `execution` names the separately loaded one-minute path used for every
@@ -8034,6 +8062,7 @@ fn audit_range_kernel_cached(
         min_hits,
         Some(&id),
         AuditOptions {
+            fold_support,
             prepared_column: Some(column.clone()),
             replay: Some(StoredReplay {
                 daily,
@@ -11608,6 +11637,32 @@ const UNVALIDATED: &str = "!! NOT VALIDATED -- walk-forward, PBO and the bootstr
 /// `latest_for` to find (conc7-1, D-2667). The span is what the record is keyed
 /// by, so it is folded into the identity, after the twenty-one policy terms; a
 /// single-month run keeps the twenty-one and its identity is unchanged.
+/// [`span_policy`] with the walk-forward support policy appended: its word, then
+/// the probe ceiling or `u64::MAX` for none, the convention `ceiling_asked`
+/// already uses. Positional and append-only; `with_policy` folds the length
+/// first, so no earlier identity is reinterpreted. D-3696.
+fn with_fold_support(policy: [u64; 23], support: runner::validate::FoldSupport) -> [u64; 25] {
+    let (word, probe) = match support {
+        runner::validate::FoldSupport::Scaled => (FOLD_SUPPORT_SCALED, u64::MAX),
+        runner::validate::FoldSupport::FirstTraining { probe, .. } => (
+            FOLD_SUPPORT_FIRST_TRAINING,
+            u64::try_from(probe.ceiling()).unwrap_or(u64::MAX),
+        ),
+    };
+    let mut out = [0_u64; 25];
+    for (slot, term) in out.iter_mut().zip(policy.into_iter().chain([word, probe])) {
+        *slot = term;
+    }
+    out
+}
+
+/// [`with_fold_support`]'s word for a count rescaled per fold.
+const FOLD_SUPPORT_SCALED: u64 = 1;
+
+/// [`with_fold_support`]'s word for a threshold probed on the first training
+/// window.
+const FOLD_SUPPORT_FIRST_TRAINING: u64 = 2;
+
 fn span_policy(policy: [u64; 21], from: (u16, u8), to: (u16, u8)) -> [u64; 23] {
     let month = |(year, month): (u16, u8)| u64::from(year) * 100 + u64::from(month);
     let mut out = [0_u64; 23];
@@ -15204,13 +15259,7 @@ fn affordable_min_hits(
     // The ratio is what keeps the probe cheap; the CONSTANT was never the
     // point. `PROBE_SHARE` holds the ratio the build assertion already pins, so
     // a bigger machine gets a proportionally bigger probe and the same safety.
-    let probe = whole_machine_ceiling()
-        .checked_div(PROBE_SHARE)
-        .unwrap_or(SEARCH_CEILING)
-        .max(SEARCH_CEILING);
-    let ladder = Ladder::with_min_hits(1)
-        .with_ceiling(probe)
-        .with_support_lanes(shared_support_lanes());
+    let ladder = probe_ladder();
     let commit = commit_stamp().ok_or_else(|| {
         "the build has no verified commit stamp; no support probe will run".to_owned()
     })?;
@@ -15223,6 +15272,19 @@ fn affordable_min_hits(
         found.outcome.sweep.halted.as_ref(),
     ))?;
     found.min_hits.ok_or_else(|| "no nonempty affordable support probe completed; the rung will not silently fall back to a deeper statistical threshold".to_owned())
+}
+
+/// The ladder [`affordable_min_hits`] probes under, and the one the walk-forward
+/// re-probes each shape's first training window under (D-3696), so both
+/// searches spend the same share of this machine.
+fn probe_ladder() -> Ladder {
+    let probe = whole_machine_ceiling()
+        .checked_div(PROBE_SHARE)
+        .unwrap_or(SEARCH_CEILING)
+        .max(SEARCH_CEILING);
+    Ladder::with_min_hits(1)
+        .with_ceiling(probe)
+        .with_support_lanes(shared_support_lanes())
 }
 
 fn one_rung(
@@ -15469,7 +15531,7 @@ fn one_rung_cached(ask: RungAsk<'_>, store: RungStore, cache: &mut AuditCache) -
     // never sweeps can carry no hit (D-2101). `can_hit` is also what the
     // progress events report as `bars`, so their `support_ppm` is the support
     // actually asked of the sweep.
-    let (min_hits, can_hit) = if let Some(ppm) = named_ppm {
+    let (min_hits, can_hit, fold_support) = if let Some(ppm) = named_ppm {
         // THE AUDIT'S OWN COLUMN, read through the cache `audit_range_cached`
         // consults next, so it is built once either way (D-1557). An
         // unstamped build refuses in `audit_range_cached` before any load, and
@@ -15492,7 +15554,12 @@ fn one_rung_cached(ask: RungAsk<'_>, store: RungStore, cache: &mut AuditCache) -
                 .map_or(retained, |inputs| inputs.column.census().swept),
             None => retained,
         };
-        (min_hits_for_swept(can_hit, ppm), can_hit)
+        // A NAMED FRACTION is decided by no bar, so each fold rescales it.
+        (
+            min_hits_for_swept(can_hit, ppm),
+            can_hit,
+            runner::validate::FoldSupport::Scaled,
+        )
     } else {
         // A NAMED SUPPORT READS ONLY THE THREE FACTS ABOVE, so a descent's held
         // span is never copied; the derivation withholds days from its own
@@ -15567,7 +15634,17 @@ fn one_rung_cached(ask: RungAsk<'_>, store: RungStore, cache: &mut AuditCache) -
         let can_hit = column.census().swept;
         let statistical = min_hits_for_swept(can_hit, statistical_support_floor(can_hit));
         match affordable_min_hits(&column, &root, &span, digest) {
-            Ok(affordable) => (affordable.max(statistical), can_hit),
+            // THE SCREEN'S PROBE READ EVERY TEST WINDOW, so the folds re-probe
+            // their first training window instead (audit-find-17 #5, D-3696).
+            // `statistical` reads only how many rows can hit, so it rescales.
+            Ok(affordable) => (
+                affordable.max(statistical),
+                can_hit,
+                runner::validate::FoldSupport::FirstTraining {
+                    probe: probe_ladder(),
+                    floor: statistical,
+                },
+            ),
             Err(why) => {
                 return RungRow {
                     rung,
@@ -15649,7 +15726,14 @@ fn one_rung_cached(ask: RungAsk<'_>, store: RungStore, cache: &mut AuditCache) -
     // The long report is DISCARDED on purpose: nine of them is six thousand
     // lines. The row is read back from the store, which is the point of having
     // one.
-    let text = audit_range_cached(&root, vendor, store.commit, ask, min_hits, cache);
+    let text = audit_range_cached(
+        &root,
+        vendor,
+        store.commit,
+        ask,
+        (min_hits, fold_support),
+        cache,
+    );
     // LIFTED BEFORE `text` GOES OUT OF SCOPE. The two scanners below already
     // read this string for a refusal and for a not-recorded sentence; this is
     // the third question it answers and the only one nothing was asking.
@@ -18386,10 +18470,13 @@ fn screen_range_kernel_cached(
         direction: RunDirection::Undirected,
         instrument: &span.key,
         timeframe: span.timeframe,
-        params: Params::of(ladder).with_policy(&span_policy(
-            policy_of(&span.bars, rules, lens, validate, horizon, rungs),
-            from,
-            to,
+        params: Params::of(ladder).with_policy(&with_fold_support(
+            span_policy(
+                policy_of(&span.bars, rules, lens, validate, horizon, rungs),
+                from,
+                to,
+            ),
+            runner::validate::FoldSupport::Scaled,
         )),
         data_digest: stored_withheld_executed_digest(
             withholding,
@@ -18426,6 +18513,7 @@ fn screen_range_kernel_cached(
         min_hits,
         Some(&id),
         AuditOptions {
+            fold_support: runner::validate::FoldSupport::Scaled,
             prepared_column: column.clone(),
             replay: Some(StoredReplay {
                 daily,
@@ -18481,7 +18569,7 @@ fn audit_range_cached(
     vendor: Vendor,
     commit: Option<&'static str>,
     ask: RungAsk<'_>,
-    min_hits: u64,
+    (min_hits, fold_support): (u64, runner::validate::FoldSupport),
     cache: &mut AuditCache,
 ) -> String {
     // NO RUNG CHECK HERE: every caller's rung is one of `EVERY_RUNG`
@@ -18493,6 +18581,7 @@ fn audit_range_cached(
         .and_then(|commit| {
             audit_range_kernel_cached(
                 StoredRangeAuditRequest {
+                    fold_support,
                     root: root.to_path_buf(),
                     vendor,
                     underlying: ask.underlying,
@@ -18553,6 +18642,7 @@ fn audit_with(
         min_hits,
         None,
         AuditOptions {
+            fold_support: runner::validate::FoldSupport::Scaled,
             prepared_column: None,
             replay: None,
             execution: None,
@@ -18681,6 +18771,12 @@ struct AuditOptions<'a> {
     /// instead of being told, as every stock audit was until this field
     /// existed, that there is no brokerage, STT, stamp or GST.
     cost: audit::CostScope,
+    /// Where each walk-forward fold's support threshold comes from. Every
+    /// caller that hands this audit a count no later bar decided passes
+    /// [`runner::validate::FoldSupport::Scaled`]; the range path whose count
+    /// came from the whole-span affordability probe passes
+    /// [`runner::validate::FoldSupport::FirstTraining`]. D-3696.
+    fold_support: runner::validate::FoldSupport,
 }
 
 /// Borrowed causal evidence for stored walk-forward column rebuilds.
@@ -22007,6 +22103,7 @@ fn audit_bars_work(
         ceiling,
         validate,
         cost,
+        fold_support,
     } = opts;
     let prepared_column = match (prepared_column, replay) {
         (None, Some(replay)) => match replay.column_of(&bars) {
@@ -22514,6 +22611,7 @@ fn audit_bars_work(
                 &fresh,
                 replay,
                 walk_forward_rungs(),
+                fold_support,
                 &|progress| note_validation_fold(recording, progress),
             )
         })
@@ -22738,6 +22836,8 @@ fn both_shapes(
     replay: Option<StoredReplay<'_>>,
     // A POLICY, NOT A COUNT (GAP4-46). The whole-span count read test windows.
     rungs: runner::validate::FoldRungs<'_>,
+    // AND THE SUPPORT IS A POLICY TOO (D-3696): a whole-span probe read test windows.
+    support: runner::validate::FoldSupport,
     on_fold: &(dyn Fn(runner::validate::FoldProgress) + Sync),
 ) -> (runner::validate::Validated, runner::validate::Validated) {
     let splits = walk_forward_splits(bars.len());
@@ -22769,6 +22869,7 @@ fn both_shapes(
             &mut builder,
             runner::split::Shape::Anchored,
             rungs,
+            support,
             on_fold,
         );
         let rolling = runner::validate::walk_forward_projected_prepared_with_rungs(
@@ -22781,6 +22882,7 @@ fn both_shapes(
             &mut builder,
             runner::split::Shape::Rolling,
             rungs,
+            support,
             on_fold,
         );
         (anchored, rolling)
@@ -22795,6 +22897,7 @@ fn both_shapes(
             &mut || *fresh,
             runner::split::Shape::Anchored,
             rungs,
+            support,
             on_fold,
         );
         let rolling = runner::validate::walk_forward_projected_with_rungs(
@@ -22807,6 +22910,7 @@ fn both_shapes(
             &mut || *fresh,
             runner::split::Shape::Rolling,
             rungs,
+            support,
             on_fold,
         );
         (anchored, rolling)

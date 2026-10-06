@@ -65029,3 +65029,123 @@ The zero-findings drafts were written in parallel, and four pairs met on one cod
 - **The backtest ledger read (sweep-3, D-2573; resources-4, D-2593).** Both moved the read off the async workers. D-2593's store-read pool is kept. D-2573's waiting shared lock in `respond` stays, and the 429 answer is D-2593's `not_admitted`.
 - **The VIX month open (indexstop-1, D-2621; replay-1/replay-5, D-2636).** Both made a held lock a transient refusal rather than a saved "unavailable" month. D-2636's `VixOpenRefusal` and its bounded writer wait (`open_waiting`) are kept, and they close indexstop-1 too. D-2621's test `a_locked_vix_month_refuses_publication_and_the_retry_captures_it` is kept, asserting D-2636's "busy, not unavailable" sentence.
 - **The Statistics V2/V3 header (pop2-6, D-2626; conc5-1, D-2644).** D-2644's shared `fixed_tail::init_or_heal_header` is kept. It cuts and re-initialises a torn or all-zero header and remembers a failed header barrier, which covers pop2-6's torn-header heal. D-2626's tests still run against it.
+
+### D-3696 — Walk-forward folds take their support from the first training window, not the whole span — 2026-10-06
+
+**Finding.** audit-find-17 #5 (look-ahead, `CLAUDE.md` §3 rule 7). With no
+named support, `cli`'s range path derives `min_hits` with
+`affordable_min_hits`, a `Sweeper::auto` probe over the WHOLE span's column,
+test windows included. `both_shapes` handed that ladder to every fold, and
+`runner::validate::fold_ladder` only rescaled it by training length, so a bar
+inside the last fold's test window decided the threshold fold 0 trained at.
+Measured before the fix: on `synthetic::sessions(8)`, widening only the last
+fold's test window moved the whole-span probe from 205 hits to 495, so fold 0's
+rescaled threshold moved from 69 to 165. On `sessions(16)` it moved 727 to
+1,073. D-1660 closed the same shape for the exit ladder.
+
+**Decision.** `runner::validate::FoldSupport::{Scaled, FirstTraining { probe,
+floor }}` is a new argument of `walk_forward_core` and of the two projected
+doors `cli` calls. `Scaled` is the old rescale and is right for any count no
+later bar decided: a typed count or a named support fraction. `FirstTraining`
+probes the first fold whose training column has rows, under `probe`'s ceiling,
+and rescales that answer to every later fold by training length. The larger of
+that and the rescaled `floor` wins; `floor` is the statistical floor, which
+reads only how many rows can hit. Training windows end at `width`, `2·width`,
+... in fold order under both shapes, so the probed window ends no later than
+any fold that uses its answer. A window that is all warm-up has nothing to
+probe or sweep, so it sweeps at the rescaled floor and does not anchor. A
+probe that settles nothing over a window that has rows refuses the walk by
+name; the whole-span threshold is never substituted. `cli::one_rung_cached`
+passes `FirstTraining { probe: probe_ladder(), floor: statistical }` on the
+probe path and `Scaled` on the named-support path. Every other caller passes
+`Scaled`. `probe_ladder` is the one ladder `affordable_min_hits` and the folds
+share.
+
+**Identity.** Positional and append-only. `with_fold_support` appends two
+terms after `span_policy`'s 23: the policy word (1 scaled, 2 first-training)
+and the probe ceiling, or `u64::MAX` for none, the convention `ceiling_asked`
+uses. `with_policy` folds the length first, so no earlier identity is
+reinterpreted. All three `span_policy` call sites append it, so the range
+kernel and `screen-range` still key identically when both are `Scaled`.
+
+**Proof.** `a_test_window_bar_cannot_move_an_earlier_folds_support` in
+`crates/runner/src/validate.rs` checks both shapes. A widened last test
+window leaves every fold's training answer unchanged under `FirstTraining`,
+and the old route (`Scaled` at the whole-span probe) moves one. Run once
+with `FirstTraining` reverted to the old rescale, it failed: "assertion `left
+== right` failed: Anchored fold 1: a test-window bar moved a training answer".
+`each_fold_sweeps_at_the_first_windows_probe_rescaled` checks every fold's
+candidate count against an independent sweep at the expected threshold.
+`an_unsettled_first_window_probe_refuses_the_walk` pins the refusal.
+
+**Cost.** One extra `Sweeper::auto` per shape over the anchoring window,
+`log2` walks over a column the fold already built. Off every per-bar and
+per-candidate path. Measured in `docs/06-limits.md`.
+
+**Not changed.** The screen keeps its whole-span threshold, in-sample by
+construction (D-1660). The sealed Admission V2/V3 and Search V4 doors pass
+`Scaled`. Their callers hand them counts their own identities bind, and
+whether any of them reaches a whole-span probe was not checked here, so it is
+UNVERIFIED.
+
+### D-3697 — A stop stated in points is span-relative in sample and never reaches a fold; the doc said otherwise — 2026-10-06
+
+**Finding.** audit-find-17 #6. `stated_stop_ppm` converts
+`BRUTEX_MAX_STOP_POINTS` at `reference_price(bars)`, the whole span's
+`(min low + max high)/2`. Its doc said "Fifty means fifty on every rung and
+every span". Two things were measured:
+
+- Doubling only the last bar's high of `synthetic::sessions(3)` moved the
+  stop from 1,999 ppm to 1,332.
+- The ppm is applied to each trade as a fraction of that trade's own entry.
+  On the 2020-01..2026-08 NIFTY span, 2,951 ppm is about 73.8 points at a
+  25,000 entry and 22.4 at 7,600.
+
+**Verdict.** The measurement is confirmed, but the look-ahead stays in sample.
+The knob feeds `stop_ladder_ppm` and `Rules::derived`, which are the
+whole-span screen. D-1660 rules that screen in-sample by construction, the
+same as its derived stop ladder and grid step. No walk-forward fold reads the
+knob, because fold grids are `Levels::derived` inside `runner::validate`.
+`a_stated_stop_is_span_relative_in_sample_and_never_reaches_a_fold` in
+`crates/cli/src/lookahead_tests.rs` sets the knob and requires both
+walk-forward shapes to be byte-for-byte equal to the unset run. It also pins
+the in-sample movement, so this limit cannot go stale silently.
+
+**Decision.** The false sentence is corrected in place, and the limit is
+recorded in `docs/06-limits.md`. No code path changed. A stop of exactly N
+points on every trade needs a per-entry stop in `runner::grid`, whose ladders
+are ppm shared across trades. That is a product choice for the owner, not a
+minimal fix. Converting at the span's first bar instead would remove the
+in-sample dependence on later bars, but would still not be N points per trade,
+and it would move every stated-stop run for no out-of-sample gain.
+
+### D-2501 — An audit start refused before dispatch settles a sweep launch as failed — 2026-10-06
+
+**Finding.** log-1. When the api's invocation audit cannot start, it answers
+503 with `code: invocation_audit_unavailable` and `handler_completed: false`:
+no handler ran. `sweepSubmission` read anything that was not
+`accepted: false` as "may have started; do not submit it again", so a busy
+journal locked Run for the rest of the session over a request the server says
+it never dispatched.
+
+**Decision.** `web/src/lib/sweep-admission.js` settles exactly that response
+as `failed`, `confirmed: true`, with the refusal as its reason. Every field is
+required to validate: status 503, `schema_version` 1, the exact code,
+`handler_completed === false`, a non-blank refusal of at most 4,096
+characters, no `attempt`, no `attempt_key` and no `started: true`. Anything
+else stays unknown and blocked, as before. `handler_completed: true` means
+the handler ran, so it stays unknown.
+
+**Not changed, and why.** The finding's two cli halves were also reviewed:
+
+- `operation_audit::begin` already waits a bounded second for the index lock
+  (cli1-2, D-2620). In-process callers queue through that wait instead of
+  refusing at once, so a separate in-process mutex was not added.
+- `read`'s `sync_all` under the shared lock was left in place. It holds a
+  writer back for one sync, not across a sweep.
+
+**Proof.** `an audit start refused before dispatch settles the launch as
+failed (log-1, D-2501)` in `web/tests/sweep-admission.test.js` checks the
+exact response and fourteen damaged or wrong-status variants. Run against
+the old `sweep-admission.js`, it failed:
+`not ok 4 - an audit start refused before dispatch settles the launch as failed`.

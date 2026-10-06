@@ -627,6 +627,7 @@ fn actual_audit_refuses_a_failed_capture_before_publishing_its_parent() {
         500,
         Some(&id),
         crate::AuditOptions {
+            fold_support: runner::validate::FoldSupport::Scaled,
             prepared_column: Some(column.clone()),
             replay: None,
             execution: None,

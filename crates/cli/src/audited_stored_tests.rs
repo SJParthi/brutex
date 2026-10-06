@@ -202,6 +202,7 @@ impl Fixture {
 
     fn audit_span(&self, rung: &str, from: (u16, u8), to: (u16, u8)) -> Result<String, String> {
         crate::audit_range_kernel(crate::StoredRangeAuditRequest {
+            fold_support: runner::validate::FoldSupport::Scaled,
             root: self.root.clone(),
             vendor: Vendor::Zerodha,
             underlying: self.symbol,
@@ -1263,6 +1264,7 @@ fn budgeted_recorded_runs_refuse(root: &std::path::Path) -> Result<(), String> {
     });
     assert_eq!(audit, Err(named.to_owned()));
     let range = crate::audit_range_kernel(crate::StoredRangeAuditRequest {
+        fold_support: runner::validate::FoldSupport::Scaled,
         root: root.to_path_buf(),
         vendor: Vendor::Zerodha,
         underlying: "NIFTY",
@@ -1318,6 +1320,7 @@ fn budgeted_audit_transaction_refuses_only_a_recording(
         feed: "zerodha",
     });
     let options = |recording| crate::AuditOptions {
+        fold_support: runner::validate::FoldSupport::Scaled,
         prepared_column: None,
         replay: None,
         execution: None,
@@ -1521,6 +1524,7 @@ impl Traded {
 
     fn range(&self, rung: &str, min_hits: u64) -> Result<String, String> {
         crate::audit_range_kernel(crate::StoredRangeAuditRequest {
+            fold_support: runner::validate::FoldSupport::Scaled,
             root: self.root.clone(),
             vendor: Vendor::Zerodha,
             underlying: self.underlying,
@@ -2685,6 +2689,7 @@ fn a_reused_range_rung_reads_its_own_row_and_not_the_newest_with_its_key() {
     let fixture = Fixture::warmed();
     let at = |commit: &'static str| {
         crate::audit_range_kernel(crate::StoredRangeAuditRequest {
+            fold_support: runner::validate::FoldSupport::Scaled,
             root: fixture.root.clone(),
             vendor: Vendor::Zerodha,
             underlying: fixture.symbol,
@@ -3060,6 +3065,7 @@ fn a_range_descent_prepares_its_stored_inputs_once() {
     // on two identical stores, print the same pages.
     let fresh = Fixture::warmed();
     let request = |root: &std::path::Path, rung, min_hits| crate::StoredRangeAuditRequest {
+        fold_support: runner::validate::FoldSupport::Scaled,
         root: root.to_path_buf(),
         vendor: Vendor::Zerodha,
         underlying: "NIFTY",
