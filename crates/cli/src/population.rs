@@ -3151,7 +3151,7 @@ impl PopulationLedger {
             return Ok(PopulationCommit::Reused);
         }
 
-        self.discard_unreceipted_trailing_block(&receipt.population_id, rows, expected)?;
+        self.discard_unreceipted_trailing_block(&receipt.population_id, rows)?;
         if self.raw_blocks.contains_key(&receipt.population_id) {
             self.require_exact_existing(rows, receipt, expected)?;
             crate::fixed_tail::refuse_after_failed_barrier(&self.row_path)?;
@@ -3229,7 +3229,7 @@ impl PopulationLedger {
             return Ok(PopulationCommit::Reused);
         }
 
-        self.discard_unreceipted_trailing_block(&v2.population_id, rows, expected)?;
+        self.discard_unreceipted_trailing_block(&v2.population_id, rows)?;
         if self.raw_blocks.contains_key(&v2.population_id) {
             self.require_exact_existing(rows, &v2, expected)?;
             crate::fixed_tail::refuse_after_failed_barrier(&self.row_path)?;
@@ -3366,15 +3366,23 @@ impl PopulationLedger {
         &mut self,
         population_id: &[u8; 32],
         rows: &[PopulationRowV1],
-        expected: BlockFacts,
     ) -> Result<(), PopulationRefusal> {
         let Some(actual) = self.raw_blocks.get(population_id).copied() else {
             return Ok(());
         };
-        if self.receipts.contains_key(population_id)
-            || self.receipts_v3.contains_key(population_id)
-            || self.receipts_v4.contains_key(population_id)
-        {
+        // DEFENCE IN DEPTH, NOT A REACHABLE BRANCH: every absorbed receipt is
+        // checked against its block's ordered row digest and the offered rows
+        // against the same receipt, so a receipted block already equals `rows`
+        // and the exact check below would keep it. Only a failed read could
+        // send one to the cut, and an acknowledged block must never be cut.
+        // Written as one membership test so no operator mutant of it exists
+        // that no test could reach (G18-cli-b-11, D-2023).
+        let receipted = [
+            self.receipts.contains_key(population_id),
+            self.receipts_v3.contains_key(population_id),
+            self.receipts_v4.contains_key(population_id),
+        ];
+        if receipted.contains(&true) {
             return Ok(());
         }
         let rows_end = self
@@ -3385,12 +3393,13 @@ impl PopulationLedger {
         if actual.block.first.checked_add(actual.block.count) != Some(rows_end) {
             return Ok(());
         }
-        let mut expected_here = expected;
-        expected_here.block.first = actual.block.first;
-        if actual == expected_here
-            && self
-                .require_exact_block(actual.block, population_id, rows)
-                .is_ok()
+        // THE BYTES ALONE DECIDE: `BlockFacts` is a pure function of `first`
+        // and the row payloads, so equal bytes at `actual.block` are equal
+        // facts, and a facts comparison before them could never disagree
+        // (G18-cli-b-11, D-2023).
+        if self
+            .require_exact_block(actual.block, population_id, rows)
+            .is_ok()
         {
             return Ok(());
         }
@@ -6998,6 +7007,51 @@ mod tests {
                 .expect("committed")
                 .rows,
             rows.to_vec()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// pop1-1, D-1906: an exact receipt-less block is KEPT and only its
+    /// receipt is written; it is never cut and rewritten, so a barrier fault
+    /// armed on the row file never fires. G18-cli-b-11, D-2023.
+    #[test]
+    fn an_exact_receipt_less_block_is_kept_not_rewritten() {
+        use crate::fixed_tail::fault::{Armed, Kind};
+        let root = root("orphan-kept");
+        let _ = std::fs::remove_dir_all(&root);
+        drop(PopulationLedger::open(&root).expect("headers"));
+        let population_id = digest(23);
+        let rows = two_rows(population_id);
+        let mut row_file = OpenOptions::new()
+            .append(true)
+            .open(PopulationLedger::row_path(&root))
+            .expect("row file");
+        for row in rows {
+            row_file
+                .write_all(&row.to_bytes().expect("row bytes"))
+                .expect("orphan row");
+        }
+        row_file.sync_all().expect("orphan sync");
+        drop(row_file);
+        let before = std::fs::read(PopulationLedger::row_path(&root)).expect("orphan bytes");
+        let receipt = receipt(population_id, &rows);
+        let mut ledger = PopulationLedger::open(&root).expect("orphan writer");
+        let armed = Armed::arm(
+            &PopulationLedger::row_path(&root).display().to_string(),
+            Kind::Sync,
+        );
+        assert_eq!(
+            ledger.append_complete(&rows, &receipt),
+            Ok(PopulationCommit::Written)
+        );
+        assert!(
+            Armed::pending(),
+            "the exact orphan was cut and rewritten instead of kept"
+        );
+        drop(armed);
+        assert_eq!(
+            std::fs::read(PopulationLedger::row_path(&root)).expect("kept bytes"),
+            before
         );
         let _ = std::fs::remove_dir_all(&root);
     }

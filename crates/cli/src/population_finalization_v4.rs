@@ -3789,4 +3789,80 @@ mod tests {
             "a writer must not rewrite a header that is already whole"
         );
     }
+
+    /// pop2-4, D-1905: the exact retry KEEPS its receipt-less prefix; a
+    /// same-source prefix with other bytes is discarded and rewritten.
+    /// G18-cli-b-13, D-2024.
+    #[test]
+    fn exact_prefix_is_kept_and_a_same_source_forged_prefix_is_discarded() {
+        use crate::fixed_tail::fault::{Armed, Kind};
+        let admission_root = TestRoot::new("kept-admission");
+        let source = || {
+            admission(
+                admission_root.path(),
+                AdmissionV4FamilyTerminal::Evaluated,
+                AdmissionV4FamilyTerminal::NaturallyExtinct,
+                46,
+            )
+        };
+        let mut first = source();
+        let prepared =
+            prepare_population_finalization_v4(&mut first).expect("prepare Finalization");
+        let records = encoded_block(&prepared, 0).expect("encode Finalization block");
+        assert_eq!(records.len(), 6);
+        let bytes_of = |count: usize| {
+            let mut bytes = header().to_vec();
+            for raw in &records[..count] {
+                bytes.extend_from_slice(raw);
+            }
+            bytes
+        };
+
+        let kept = TestRoot::new("kept-finalization");
+        write_prefix(kept.path(), &records, 3);
+        let armed = Armed::arm(DATA_FILE, Kind::Sync);
+        let refusal = commit_population_finalization_v4(kept.path(), bounds(), first)
+            .err()
+            .unwrap_or_default();
+        assert!(!Armed::pending(), "the evidence barrier was reached");
+        drop(armed);
+        assert!(refusal.contains("injected sync fault"), "{refusal}");
+        assert_eq!(
+            std::fs::read(kept.path().join(DATA_FILE)).expect("read kept prefix"),
+            bytes_of(3),
+            "the exact retry kept its prefix; only its own appended records were cut"
+        );
+        assert!(matches!(
+            commit_population_finalization_v4(kept.path(), bounds(), source())
+                .expect("the rerun completes the kept prefix"),
+            PopulationFinalizationV4Commit::Written(_)
+        ));
+        assert_eq!(
+            std::fs::read(kept.path().join(DATA_FILE)).expect("read completed block"),
+            bytes_of(6)
+        );
+
+        let mut forged = prepared.clone();
+        forged.decisions[0].base_evidence_id = [0x5a; 32];
+        forged.decisions[0].row_id =
+            derive_decision_row_id(&forged.decisions[0]).expect("rederive forged row");
+        forged
+            .validate()
+            .expect("the forged block is itself well formed");
+        assert_eq!(forged.source, prepared.source);
+        let forged_records = encoded_block(&forged, 0).expect("encode forged block");
+        assert_ne!(forged_records[0], records[0]);
+        assert_eq!(forged_records[1..3], records[1..3]);
+        let discarded = TestRoot::new("forged-finalization");
+        write_prefix(discarded.path(), &forged_records, 3);
+        assert!(matches!(
+            commit_population_finalization_v4(discarded.path(), bounds(), source())
+                .expect("a same-source prefix with other bytes is discarded, not completed"),
+            PopulationFinalizationV4Commit::Written(_)
+        ));
+        assert_eq!(
+            std::fs::read(discarded.path().join(DATA_FILE)).expect("read rewritten block"),
+            bytes_of(6)
+        );
+    }
 }

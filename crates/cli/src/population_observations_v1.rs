@@ -2406,13 +2406,14 @@ impl ObservationAuthorityLedgerV1 {
         crate::fixed_tail::sync_or_roll_back(&self.file, &self.file_path, before, File::sync_data)
             .map_err(|why| {
                 let why = format!("cannot sync {label}: {why}");
-                match self.file.metadata() {
-                    Ok(now) if now.len() == before => match self.refresh_snapshot() {
-                        Ok(()) => why,
-                        Err(stale) => format!("{why}; the handle stays stale: {stale}"),
-                    },
-                    _ => why,
+                // The write-failure branch's own shape: a rollback that did
+                // not land leaves the snapshot as it is (G18-cli-b-15, D-2025).
+                if self.file.metadata().is_ok_and(|now| now.len() == before)
+                    && let Err(stale) = self.refresh_snapshot()
+                {
+                    return format!("{why}; the handle stays stale: {stale}");
                 }
+                why
             })
     }
 
@@ -3674,13 +3675,14 @@ impl ObservationAuthorityLedgerV2 {
         crate::fixed_tail::sync_or_roll_back(&self.file, &self.file_path, before, File::sync_data)
             .map_err(|why| {
                 let why = format!("cannot sync {label}: {why}");
-                match self.file.metadata() {
-                    Ok(now) if now.len() == before => match self.refresh_snapshot() {
-                        Ok(()) => why,
-                        Err(stale) => format!("{why}; the handle stays stale: {stale}"),
-                    },
-                    _ => why,
+                // The write-failure branch's own shape: a rollback that did
+                // not land leaves the snapshot as it is (G18-cli-b-15, D-2025).
+                if self.file.metadata().is_ok_and(|now| now.len() == before)
+                    && let Err(stale) = self.refresh_snapshot()
+                {
+                    return format!("{why}; the handle stays stale: {stale}");
                 }
+                why
             })
     }
 
@@ -4952,5 +4954,118 @@ mod tests {
                 .len(),
             OBSERVATION_AUTHORITY_HEADER_BYTES_V2
         );
+    }
+
+    /// A reader never initializes: an empty authority file is refused as
+    /// headerless and stays empty; the root barrier refuses an absent root.
+    /// G18-cli-b-16, D-2025.
+    #[test]
+    fn a_reader_refuses_an_empty_authority_file_and_an_absent_root_cannot_be_synced() {
+        let bounds = authority_bounds();
+        let root = test_dir();
+        drop(
+            ObservationAuthorityLedgerV1::open(root.path(), bounds)
+                .expect("writer creates the lock"),
+        );
+        let path = root.path().join(AUTHORITY_FILE);
+        std::fs::write(&path, []).expect("authority file emptied");
+        let refusal = ObservationAuthorityLedgerV1::open_read(root.path(), bounds)
+            .err()
+            .unwrap_or_default();
+        assert!(refusal.contains("header is absent or corrupt"), "{refusal}");
+        assert_eq!(
+            std::fs::metadata(&path).expect("stat").len(),
+            0,
+            "a reader writes nothing"
+        );
+
+        let refusal = sync_observation_root(&root.path().join("absent"))
+            .expect_err("an absent root cannot be synced");
+        assert!(
+            refusal.contains("cannot sync observation authority root"),
+            "{refusal}"
+        );
+        sync_observation_root(root.path()).expect("an existing root syncs");
+    }
+
+    /// D-1934: a failed Completion barrier after a durable Data rolls back to
+    /// the Data orphan and refreshes the snapshot; the same handle completes it.
+    /// G18-cli-b-15, D-2025.
+    #[test]
+    fn a_failed_v1_completion_barrier_leaves_the_same_handle_able_to_complete() {
+        use crate::fixed_tail::fault::{Armed, Kind};
+        let bounds = authority_bounds();
+        let root = test_dir();
+        let data = authority_data_fixture(52);
+        let mut ledger =
+            ObservationAuthorityLedgerV1::open(root.path(), bounds).expect("writer opens");
+        let armed = Armed::arm_after(AUTHORITY_FILE, Kind::Sync, 1);
+        let refusal = ledger
+            .append_data(&data)
+            .expect_err("the Completion barrier fails");
+        assert!(!Armed::pending(), "the Completion barrier fault fired");
+        drop(armed);
+        assert!(
+            refusal.contains("cannot sync observation authority Completion")
+                && refusal.contains("injected")
+                && !refusal.contains("stays stale"),
+            "{refusal}"
+        );
+        assert_eq!(
+            std::fs::metadata(root.path().join(AUTHORITY_FILE))
+                .expect("stat")
+                .len(),
+            OBSERVATION_AUTHORITY_HEADER_BYTES_V1 + OBSERVATION_AUTHORITY_RECORD_STRIDE_V1,
+            "only the Data orphan remains"
+        );
+        assert!(matches!(
+            ledger
+                .append_data(&data)
+                .expect("the same handle completes the orphan"),
+            ObservationAuthorityCommitV1::Written(_)
+        ));
+        drop(ledger);
+        let mut read =
+            ObservationAuthorityLedgerV1::open_read(root.path(), bounds).expect("reopens");
+        assert!(
+            read.reopen_audit(&data.authority_id)
+                .expect("reads")
+                .is_some()
+        );
+    }
+
+    /// The V2 twin of the V1 Completion-barrier test. G18-cli-b-15, D-2025.
+    #[test]
+    fn a_failed_v2_completion_barrier_leaves_the_same_handle_able_to_complete() {
+        use crate::fixed_tail::fault::{Armed, Kind};
+        let bounds = authority_bounds_v2();
+        let root = test_dir();
+        let (source, commit) =
+            crate::pre_admission_data::observation_v2_zero_production_fixture(87)
+                .expect("zero source fixture derives");
+        let produced = produce_natural_extinction_observation_v2(&source, &commit)
+            .expect("zero source prepares Observation V2");
+        let mut ledger =
+            ObservationAuthorityLedgerV2::open(root.path(), bounds).expect("writer opens");
+        let armed = Armed::arm_after(AUTHORITY_V2_FILE, Kind::Sync, 1);
+        let refusal = ledger
+            .append_data(&produced.value)
+            .expect_err("the Completion barrier fails");
+        assert!(!Armed::pending(), "the Completion barrier fault fired");
+        drop(armed);
+        assert!(
+            refusal.contains("cannot sync Observation V2 Completion")
+                && refusal.contains("injected")
+                && !refusal.contains("stays stale"),
+            "{refusal}"
+        );
+        assert!(matches!(
+            ledger
+                .append_data(&produced.value)
+                .expect("the same handle completes the orphan"),
+            ObservationAuthorityCommitV2::Written(_)
+        ));
+        drop(ledger);
+        drop(ObservationAuthorityLedgerV2::open_read(root.path(), bounds).expect("reopens"));
     }
 }

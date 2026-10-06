@@ -4173,4 +4173,37 @@ mod tests {
             );
         }
     }
+
+    /// A receipt-less block carrying the retry's own Finalization identity
+    /// but other row bytes is not the exact retry: identity alone must not
+    /// let the retry complete it, and nothing may be written.
+    /// G18-cli-b-14, D-2024.
+    #[test]
+    fn a_same_identity_trailing_block_with_other_rows_refuses_without_writing() {
+        let limits = bounds();
+        let value = prepared();
+        let mut forged = prepared();
+        forged.rows[0].candidate_row_digest = digest(95_000);
+        forged.rows[0].row_id = forged.rows[0].derive_row_id().expect("rederive forged row");
+        assert_eq!(forged.finalization_id, value.finalization_id);
+        assert_eq!(forged.rows[0].finalization_id, value.finalization_id);
+        assert_ne!(forged.rows[0], value.rows[0]);
+        let root = TestRoot::new("same-identity-foreign");
+        write_block(root.path(), &forged, false);
+        let before = std::fs::read(root.path().join(ROW_FILE)).expect("read forged rows");
+        assert_refuses(
+            persist_population_finalization_v3(root.path(), limits, &value),
+            "not exact retry",
+        );
+        assert_eq!(
+            std::fs::read(root.path().join(ROW_FILE)).expect("reread forged rows"),
+            before
+        );
+        assert_eq!(
+            std::fs::metadata(root.path().join(COMPLETION_FILE))
+                .expect("stat Completion file")
+                .len(),
+            0
+        );
+    }
 }
