@@ -932,3 +932,19 @@ Narrative only. No row is added to the table above.
   `CLAUDE.md` §10's count of 25 (correct).
 - **`F-67659A`** `unguarded` — A committed cargo-mutants marker passes every static gate: fixed. D-3508, ONEAUTH-09.
 - **`F-E739E5`** `unguarded` — CLAUDE.md section 10 is compared with the docs directory by nothing: fixed. D-3509, ONEAUTH-10.
+- **`F-D47132`** `unguarded` — A nightly toolchain and the manifest keys it
+  unlocks pass every gate: fixed. D-3510, ONEAUTH-11.
+- **`F-F95A6F`** `unguarded` — Gate 0 misses programs run through sed, make,
+  git, find, env and xargs: fixed. D-3511, ONEAUTH-12.
+- **`F-384764`** `unguarded` — The IST offset is re-typed as a literal in seven
+  production places: fixed. D-3512, ONEAUTH-13.
+- **`F-E960DF`** `unguarded` — pull ssm carries an untested private civil date
+  with a false justification: fixed. D-3513, ONEAUTH-14.
+- **`F-5741E4`** `wrong` — The backtest month presets use the 555-minute open
+  as the session length: fixed. D-3514.
+- **Round 2 REFUTED or latent:** the three 09:15 constants (each pinned to
+  555, cross-checked at run time by `pull::fold`); `cli::stored`'s
+  `NSE_OPEN_MINUTE_V2` (a frozen wire constant pinned by its digest test); the
+  hand-encoded index family (every disk decoder refuses an unknown code); the
+  web forced-exit copies (pinned by `FORCED_EXIT_MINUTE == 910`); the
+  auto-merge CODEOWNERS parse (latent, recorded in `docs/06-limits.md`).

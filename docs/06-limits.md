@@ -15657,3 +15657,34 @@ per-candidate primitive from `CLAUDE.md` §3 rule 4.
   a run would need the attempt's origin, which the handler does not receive.
 - **Not timed.** No bench measures a log walk. The 4 MiB per half is the
   configured cap, not a measurement, and the time it takes is UNVERIFIED.
+
+## One-authority lens L4, round 2 — what is recorded rather than fixed — 2026-10-06
+
+- **Civil-date conversions are not one authority (D-3513).** Hinnant's
+  algorithm is written in `telemetry::clock`, `costs::day`, `store::path`,
+  `pull::session`, `cli::stored`, `cli::vix_reference`, `cli::stability` and
+  test helpers in `api` and `indicators`. `indicators` may depend on `vocab`
+  alone (gate 22), and `costs` and `store` do not depend on `telemetry`, so the
+  one authority would have to be in `core`. Each copy is tested where it lives;
+  no test compares them with one another.
+- **The eight-rung list is written by hand about twenty times** (the cost is
+  recorded above; the drift risk was not). `cli::EVERY_RUNG`,
+  `CALENDAR_POLICY_RUNGS_V2`, the `CANONICAL_RUNGS` of the selection and
+  replay versions, `runner::portfolio::SUPPORTED_RUNGS_MINUTES`, and the web's
+  `CAMPAIGN_RUNGS` are not tied to `store::path::Timeframe` by any test. Most
+  drift fails loudly (a rung is refused); the web's index-to-label lookups do
+  not.
+- **`sweep-all`, `pool`, `range-all` and `descend` restart from nothing after
+  an interruption.** Only `sweep-stored` (through `cli::and_checkpoint`) and the
+  expression and Boolean searches resume; `docs/20-sweep-resume.md` says the
+  others do not inherit it, without naming them. A rerun is safe (§3 rule 5) and
+  redoes every month or instrument. Making them resumable needs a per-unit
+  completion journal keyed by run identity — a design change, not a fix.
+- **`auto-merge.yml` reads CODEOWNERS with a text pipeline.** It takes every
+  `@word`, so an e-mail's domain, a mention in a trailing comment and a team's
+  organisation would each count as an approver, and the owners of all paths are
+  pooled. Latent: the file holds three lines, all `@SJParthi`, is read from the
+  base branch, and editing it is itself a sensitive change.
+- **`cargo +toolchain`, `RUSTC_BOOTSTRAP` and the nightly manifest keys are
+  refused by name (D-3510).** A spelling built at run time from pieces is the
+  limit gate 1g's environment-name rule already records.

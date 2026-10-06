@@ -63364,3 +63364,120 @@ existing file, and requires every `.md` under `docs/` to be a row, a numbered
 report inside that range, or under `docs/research-policy/`
 (`every_document_is_classified_by_the_law`). Planting `docs/36-probe.md` turns
 it red. No law text changes: the table, the range and the files agree today.
+
+### D-3510 — Gates 1g and 2 refuse every door to a nightly toolchain — 2026-10-06
+
+**What was observed.** Gate 1g allowlisted the keys of `rust-toolchain.toml`
+and never read `toolchain.channel`'s value, so `"nightly-2026-09-01"` passed.
+`RUSTC_BOOTSTRAP: 1` in a workflow (which turns the pinned stable cargo into a
+nightly one) and `cargo +toolchain` were refused by no gate. Once nightly is
+on, four manifest keys run code cargo picks and no gate read them:
+`cargo-features`, `profile.*.rustflags` (a linker, or `overflow-checks=off`
+past gate 25, which reads only the `overflow-checks` key),
+`profile.*.codegen-backend`, and `package.metabuild` (a build-dependency run as
+a build script, with no `build.rs` for gate 2 to see). The refuter reproduced
+every part on a clone: gates 0, 1g, 13 and 25 all printed OK, and stable
+`cargo metadata` accepted the manifest with `RUSTC_BOOTSTRAP=1`.
+
+**Decided.** Gate 1g refuses a `toolchain.channel` that is not a quoted run of
+one to three dot-separated digit groups (`"1.97.1"`), and its environment-name
+list gains `RUSTC_BOOTSTRAP` and `__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS`;
+its other-door rule refuses `cargo +…`. `source_scan build-keys` prints
+`package.metabuild`, `cargo-features` and any `profile.…rustflags` or
+`profile.…codegen-backend` leaf, so gate 2 (which refuses every line it prints)
+and gate 13 layer 3 refuse them in every TOML spelling. Proved by
+`gate_1g_refuses_every_door_to_a_nightly_toolchain` and
+`a_nightly_only_manifest_key_is_a_build_key`, both red first.
+
+**Needs the owner.** `auto-merge.yml`'s sensitive-path list covers `.github/`,
+`CLAUDE.md` and `CODEOWNERS`, not `rust-toolchain.toml` or `Cargo.toml`, so a
+change to those two alone auto-merges on green CI. Whether they need a
+code-owner review is a policy choice, not a gate defect; UNVERIFIED that it is
+wanted.
+
+### D-3511 — Gate 0 refuses a program run through sed, make, git, find, env or xargs — 2026-10-06
+
+**What was observed.** Gate 0's inline-program reading knew interpreters by
+name. A workflow step could still run a program written inline or assembled at
+run time through tools that are not on that list: GNU sed's `e` command and
+the `e` flag of `s` (`sed "s/.*/$PROG/e"`), `make --eval`, a git `!` alias
+(`git -c alias.x="!$PROG" x`), `find -exec "$PROG"`, `env -S "$PROG"`, and
+`xargs -I{} sh -c '{}'` (a shell's `-c` program that is each input line). The
+refuter ran twelve such lines through `source_scan workflow`; ten passed. And
+gate 12's step still piped the scanner's `fns` output through an inline
+`sed -E` program, which D-2315 calls a second language in a tracked file.
+
+**Decided.** `inline_programs` reads, over the whole unsplit line,
+`runner_programs`: a `sed` script any of whose commands is `e` or an `s` with
+an `e` flag, `make -E`/`--eval`, `git -c alias.…`/`git config alias.…` with a
+`!` value, `find -exec`/`-execdir`/`-ok`/`-okdir` of a `$` word, and `env
+-S`/`--split-string`; a shell's `-c` program holding `{}` counts as assembled
+at run time. Plain `sed 's/a/b/'`, `find … -exec rustfmt {} +` and gate 0's own
+`xargs … "$tool"` stay clean. Gate 12 reads `FILE:LINE:name` through
+`gates-ledger path-declarations`, the reading gate 10 already uses, so no
+inline `sed` program remains in a workflow. Proved by
+`a_program_runner_that_is_not_an_interpreter_is_refused`, red first.
+
+**Not closed.** `xargs "$tool"` and `find -exec "$tool"` cannot be told from a
+hostile `$PROG` by text alone; a named program in a variable is the D-2344
+limit gate 0 already records.
+
+### D-3512 — The IST offset is spelled only by its authorities — 2026-10-06
+
+**What was observed.** `pull::session::IST_OFFSET_SECS` is pinned to
+`store::path::IST_OFFSET_SECS`, and `indicators::IST_OFFSET_MICROS` documents
+itself as "one definition, three crates". Production code re-typed the offset
+as a bare literal in seven places, each agreeing today and none tied to an
+authority: `indicators/src/orb.rs` (a private `IST_OFFSET_MICROS`),
+`pull/src/gaps.rs` (a private `IST_OFFSET_SECS` inside `ist`),
+`cli/src/boolean_oos_reader.rs` (two), `cli/src/boolean_qualification_reader.rs`
+and `runner/src/expression_oos.rs` (two).
+
+**Decided.** Each names an authority it may depend on: `indicators` its own
+constant, `pull` `session`'s, `cli` and `runner` `indicators::IST_OFFSET_MICROS`.
+`crates/core/tests/one_ist_offset.rs` walks every crate's `src/` up to each
+file's first `#[cfg(test)]`, skips `*_tests.rs`, and refuses any spelling of
+19,800 seconds outside the three definitions and `session`'s pin; it listed
+the seven sites before the change. Test fixtures keep their literals.
+
+### D-3513 — `pull::ssm` dates its SigV4 stamp with `telemetry::civil_from_days` — 2026-10-06
+
+**What was observed.** `pull/src/ssm.rs` carried a private Hinnant
+`civil_from_days` whose comment said `pull` "does not take `costs`, and
+`docs/01-architecture.md` gives it `core` and `store` only" — false since
+D-0206 (`costs`), D-0217 (`greeks`) and the `telemetry` arrow. Nothing tested
+it: its only caller, `now_stamp`, reads the clock and runs only against real
+AWS.
+
+**Decided.** `now_stamp` calls a pure `stamp_of(secs)` built on
+`telemetry::civil_from_days`, and the private copy and its comment are gone.
+`the_amz_date_is_the_civil_stamp_of_the_clock` pins the epoch, both ends of a
+leap day, 2000-02-29, the last second of 2100-02-28 (a century year that is
+not a leap year), and a known instant.
+
+**Not closed.** About a dozen other civil-date conversions remain (`costs`,
+`store`, `pull::session`, `cli` and `indicators` test helpers among them).
+Several are forced by the graph — `indicators` may depend on `vocab` alone
+(gate 22), and `costs` and `store` do not depend on `telemetry` — so a single
+authority would have to live in `core`. Recorded in `docs/06-limits.md`.
+
+### D-3514 — The backtest chart's month presets use the 375-minute session — 2026-10-06
+
+**What was observed.** `web/src/routes/backtest/+page.svelte` computed a
+month as `Math.round((555 * 60) / secs) * 21` bars while its doc said "a
+6.25-hour session". 555 is the minute of the 09:15 open past IST midnight; a
+regular session is 375 one-minute bars (`pull::session::BARS_PER_REGULAR_SESSION`).
+Every preset spanned about 1.48 times its label: at one minute "1M" was 11,655
+bars against 7,875, so "3M" showed about 4.4 months.
+
+**Decided.** `web/src/lib/presets.js` holds `barsPerMonth`: a session's bars
+at the rung, rounded up as the fold counts a short last bucket, times 21, one a
+session at daily and wider, and zero for a rung with no length.
+`web/tests/backtest-presets.test.js` pins the fold's per-session counts (375,
+188, 75, 38, 25, 13, 7) from `pull/tests/anchor.rs`; it failed first because
+the module did not exist. `web/build` is rebuilt (Gate W1), with the deferred
+`web/` comments of D-3507 (213 equities, now 208) in the same build.
+svelte-check stays at 0 and W2's 870 tests pass.
+
+**Not closed.** The 375 is a copy in the browser of a fact the api does not
+serve; serving `BARS_PER_REGULAR_SESSION` would make it one authority.

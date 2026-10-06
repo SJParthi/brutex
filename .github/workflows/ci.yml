@@ -3326,8 +3326,10 @@ jobs:
           scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
           rustc --edition=2024 -D warnings .github/invariant_paths.rs -o "$work/invariant-paths"
           git ls-files -z -- 'crates/*.rs' > "$work/sources.z"
+          # D-3511: the `FILE:LINE:name` -> `FILE<TAB>name` reading is gate
+          # 10's `path-declarations`, not an inline sed program.
           xargs -0 -r "$scan" fns < "$work/sources.z" \
-            | sed -E 's/^(.*):[0-9]+:([A-Za-z_][A-Za-z0-9_]*)$/\1\t\2/' > "$work/path-fns"
+            | "${RUNNER_TEMP:-/tmp}/gates-ledger" path-declarations > "$work/path-fns"
           git ls-files -z > "$work/tracked.z"
           "$scan" modules "$work/tracked.z" > "$work/modules"
           xargs -0 -r "$scan" inline-mods < "$work/sources.z" > "$work/inline"

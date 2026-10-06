@@ -2668,6 +2668,140 @@ fn inline_flag(prog: &str, flag: &str) -> bool {
     }
 }
 
+/// D-3511: a word with its outer quotes removed.
+fn unquoted(word: &str) -> &str {
+    word.trim_matches(['"', '\''])
+}
+
+/// Does one `sed` script run a program? GNU sed's `e` command and the `e`
+/// flag of `s` hand the pattern space, or the command's text, to a shell. Each
+/// `;`- or newline-separated command is read after its address.
+fn sed_runs(script: &str) -> bool {
+    script.split([';', '\n']).any(|cmd| {
+        let mut c = cmd.trim_start();
+        loop {
+            let before = c.len();
+            c = c.trim_start_matches(|x: char| {
+                x.is_ascii_digit() || matches!(x, '$' | ',' | '~' | '!' | ' ')
+            });
+            if let Some(rest) = c.strip_prefix('/') {
+                c = rest.split_once('/').map_or("", |(_, after)| after);
+            }
+            if c.len() == before {
+                break;
+            }
+        }
+        if c == "e" || c.starts_with("e ") {
+            return true;
+        }
+        let Some(rest) = c.strip_prefix('s') else {
+            return false;
+        };
+        let Some(d) = rest.chars().next() else {
+            return false;
+        };
+        let mut seen = 0;
+        let mut escaped = false;
+        for (k, x) in rest.char_indices().skip(1) {
+            if escaped {
+                escaped = false;
+            } else if x == '\\' {
+                escaped = true;
+            } else if x == d {
+                seen += 1;
+                if seen == 2 {
+                    let flags = &rest[k + x.len_utf8()..];
+                    return flags
+                        .chars()
+                        .take_while(|f| f.is_ascii_alphanumeric() && *f != 'w')
+                        .any(|f| f == 'e');
+                }
+            }
+        }
+        false
+    })
+}
+
+/// D-3511: tools that are not interpreters but run a program the step writes
+/// inline or assembles: `sed`'s `e`, `make --eval`, a git `!` alias, `find
+/// -exec` of a run-time name, and `env -S`.
+fn runner_programs(words: &[&str]) -> Vec<(String, &'static str)> {
+    let mut out = Vec::new();
+    for (i, w) in words.iter().enumerate() {
+        let rest = &words[i + 1..];
+        match bare_word(w) {
+            "sed" | "gsed" => {
+                let mut scripts = Vec::new();
+                let mut k = 0;
+                while let Some(f) = rest.get(k) {
+                    if let Some(v) = f.strip_prefix("--expression=") {
+                        scripts.push(operand(&[v]).0);
+                        k += 1;
+                    } else if matches!(*f, "-e" | "--expression") {
+                        let (text, n) = operand(&rest[k + 1..]);
+                        scripts.push(text);
+                        k += 1 + n;
+                    } else if matches!(*f, "-f" | "--file") {
+                        k += 2;
+                    } else if f.starts_with('-') {
+                        k += 1;
+                    } else {
+                        break;
+                    }
+                }
+                if scripts.is_empty() {
+                    scripts.push(operand(&rest[k.min(rest.len())..]).0);
+                }
+                if let Some(script) = scripts.iter().find(|t| sed_runs(unquoted(t))) {
+                    out.push((format!("{w} {script}"), "sed's `e` hands text to a shell"));
+                }
+            }
+            "make" | "gmake" => {
+                if let Some(f) = rest
+                    .iter()
+                    .find(|f| **f == "-E" || **f == "--eval" || f.starts_with("--eval="))
+                {
+                    out.push((format!("{w} {f}"), "runs a makefile written inline"));
+                }
+            }
+            "git" => {
+                let alias = rest.windows(2).any(|p| {
+                    (p[0] == "-c" || p[0] == "config") && unquoted(p[1]).starts_with("alias.")
+                }) && rest.iter().any(|x| {
+                    let x = x.replace(['"', '\''], "");
+                    x.starts_with('!') || x.contains("=!")
+                });
+                if alias {
+                    out.push(((*w).to_owned(), "a `!` alias runs a shell program"));
+                }
+            }
+            "find" => {
+                let runtime = rest.windows(2).any(|p| {
+                    matches!(p[0], "-exec" | "-execdir" | "-ok" | "-okdir")
+                        && unquoted(p[1]).starts_with('$')
+                });
+                if runtime {
+                    out.push(((*w).to_owned(), "`-exec` runs a program named at run time"));
+                }
+            }
+            "env" => {
+                if let Some(f) = rest.iter().find(|f| {
+                    f.starts_with("-S")
+                        || **f == "--split-string"
+                        || f.starts_with("--split-string=")
+                }) {
+                    out.push((
+                        format!("{w} {f}"),
+                        "splits a run-time string into a command",
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 /// One quoted shell word that may span several whitespace-split words:
 /// its text and how many words it took.
 fn operand(words: &[&str]) -> (String, usize) {
@@ -2700,6 +2834,12 @@ fn operand(words: &[&str]) -> (String, usize) {
 /// the awk ratchet can count its own.
 fn inline_programs(l: &str) -> Vec<(String, &'static str, Family)> {
     let mut out = Vec::new();
+    // D-3511: read over the whole line, so a `|` inside a quoted sed script
+    // is the script's delimiter rather than a pipe.
+    let whole: Vec<&str> = l.split_whitespace().collect();
+    for (shown, why) in runner_programs(&whole) {
+        out.push((shown, why, Family::Shell));
+    }
     let mut cut = l.to_owned();
     for sep in ["&&", "||", "$(", "`", ";", "|", "<("] {
         cut = cut.replace(sep, "\n");
@@ -2755,7 +2895,9 @@ fn inline_programs(l: &str) -> Vec<(String, &'static str, Family)> {
                 Family::Shell => {
                     if let Some(k) = rest.iter().position(|f| inline_flag(prog, f)) {
                         let program = rest.get(k + 1).copied().unwrap_or("");
+                        // D-3511: `xargs sh -c '{}'` runs each input line.
                         if program.trim_start_matches(['"', '\'']).starts_with('$')
+                            || program.contains("{}")
                             || program.is_empty()
                         {
                             out.push((
@@ -4866,6 +5008,45 @@ mod tests {
             "          sed -e 's/a/b/' f\n",
             "          gh pr merge 1 --auto --squash\n",
             "          sha=$(gh api x | \"$j\" field sha)\n",
+        ] {
+            assert!(workflow_findings("w", good).is_empty(), "refused: {good}");
+        }
+    }
+
+    #[test]
+    fn a_program_runner_that_is_not_an_interpreter_is_refused() {
+        // D-3511 (ONEAUTH-12). Each starts a program the step assembles or
+        // writes inline, through a tool that is not on the interpreter list.
+        for bad in [
+            "          sed 's/.*/date/e' f\n",
+            "          sed -n 'e uname' f\n",
+            "          sed -n '1e echo x' f\n",
+            "          sed \"s/.*/$PROG/e\" f\n",
+            "          sed -E -e 's|a|b|ge' f\n",
+            "          make --eval='all: ; @echo hi' all\n",
+            "          make -E 'all: ; x' all\n",
+            "          git -c alias.x='!echo hi' x\n",
+            "          git -c alias.y=\"!$PROG\" y\n",
+            "          git config alias.z '!sh'\n",
+            "          find . -exec \"$PROG\" \\;\n",
+            "          find . -execdir $P {} +\n",
+            "          xargs -I{} sh -c '{}' < f\n",
+            "          env -S \"$PROG\"\n",
+            "          env --split-string=\"$PROG\"\n",
+        ] {
+            assert!(!workflow_findings("w", bad).is_empty(), "passed: {bad}");
+        }
+        for good in [
+            "          sed -e 's/a/b/' f\n",
+            "          sed -E 's/^(.*):[0-9]+:x/\\1\\t\\2/' f\n",
+            "          sed 's/e/E/g' f\n",
+            "          sed -n '/^end/p' f\n",
+            "          make all\n",
+            "          git -c core.quotepath=off ls-files -z\n",
+            "          git config user.name x\n",
+            "          find . -name '*.rs' -exec rustfmt --check {} +\n",
+            "          xargs -0 -r \"$tool\" workflow < f\n",
+            "          env FOO=1 cargo test\n",
         ] {
             assert!(workflow_findings("w", good).is_empty(), "refused: {good}");
         }
