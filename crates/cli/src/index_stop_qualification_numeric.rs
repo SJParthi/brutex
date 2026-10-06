@@ -652,7 +652,7 @@ fn project<S: Snapshot>(
 }
 /// PBO over the rankable folds, as a ceiling in ppm. No contributing fold
 /// leaves it unmeasured rather than dividing by zero. A function of its own so
-/// the zero boundary is asserted directly (G18-cli-a-08, D-2009): the live
+/// the zero boundary is asserted directly (G18-cli-a-08, D-2005): the live
 /// fixtures always have contributing folds.
 fn pbo_ppm(bottom: u64, contributing: u64) -> Result<Option<u64>, String> {
     if contributing > 0 {
@@ -851,7 +851,7 @@ pub(super) fn daily<S: Snapshot>(
 mod tests {
     use super::pbo_ppm;
 
-    /// G18-cli-a-08, D-2009: no contributing fold is unmeasured; one or more
+    /// G18-cli-a-08, D-2005: no contributing fold is unmeasured; one or more
     /// is the ceiling of `bottom / contributing` in ppm.
     #[test]
     fn pbo_is_unmeasured_without_a_contributing_fold_and_a_ceiling_with_one() {

@@ -434,7 +434,7 @@ fn incomplete_locked_publication_refuses_without_accepting_or_repairing_a_prefix
     );
 }
 
-/// G18-cli-a-06, D-2007: the held handle and the NAMED path must each be a
+/// G18-cli-a-06, D-2002: the held handle and the NAMED path must each be a
 /// regular file. A symbolic link at the path that resolves to the very file
 /// the handle holds, with one link, passes every later generation check, so
 /// only `regular_generation`'s own `named.is_file()` refuses it.

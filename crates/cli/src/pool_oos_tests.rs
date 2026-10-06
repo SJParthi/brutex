@@ -392,7 +392,7 @@ fn the_pool_oos_arm_refuses_an_overlapping_split_and_bad_words_before_reading() 
         "6",
         "/nonexistent/held.catalog",
     ];
-    // G18-cli-a-11, D-2012: each refusal is the ARM's own, named. The work
+    // G18-cli-a-11, D-2002: each refusal is the ARM's own, named. The work
     // refuses most of these too, so `MISUSED` alone could not show that the
     // arm's guard or rung match had let a bad split through.
     const ORDER: &str = "the training months must be ordered";

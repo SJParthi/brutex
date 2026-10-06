@@ -7737,7 +7737,7 @@ fn load_audit_inputs(
     // swept bars and not the folded series, so it is refused by name here as
     // well as by the digest: the column above has rows for that day. D-1781.
     //
-    // TWO CHECKS, NOT ONE `||` (G18-cli-a-17, D-2018): either alone refuses.
+    // TWO CHECKS, NOT ONE `||` (G18-cli-a-17, D-2013): either alone refuses.
     // Joined, a mutant requiring both was invisible, because a withheld day
     // also moves the digest.
     if !unsourceable.is_empty() {
@@ -8406,7 +8406,7 @@ const fn div_round_half_away(n: i64, d: i64) -> i64 {
         // AWAY FROM ZERO BY THE REMAINDER'S OWN SIGN, which is `n`'s. This
         // branch has a non-zero remainder, so `n` is never zero here, and the
         // `n < 0` it replaces could not tell `<` from `<=` (G18-cli-a-15,
-        // D-2016).
+        // D-2011).
         quotient + remainder.signum()
     } else {
         quotient
@@ -9961,7 +9961,7 @@ impl Rules {
     /// stated, and none when `max_mae_ppm` is zero (no ceiling) or negative.
     ///
     /// One spelling for every `Levels::forced` in this file (G18-cli-a-13,
-    /// D-2014). It was written out three times, and `grid::merged` also drops
+    /// D-2009). It was written out three times, and `grid::merged` also drops
     /// a zero level, so a copy that forced `Some(0)` read exactly like `None`
     /// and no test could tell; the boundary is asserted here, once.
     #[must_use]
@@ -10865,7 +10865,7 @@ fn stop_rungs_in_points(bars: &[indicators::Candle]) -> Vec<i64> {
         // at least one, `i` at least one and `per_point` at least one, so the
         // ceiling division is at least one point. The `pt > 0` this carried
         // could not be false, which made its own mutant indistinguishable
-        // (G18-cli-a-14, D-2015).
+        // (G18-cli-a-14, D-2010).
         .filter(|&pt| pt <= ceiling)
         .collect()
 }
@@ -13886,7 +13886,7 @@ fn tier_rows<'a>(
 /// answer than one that did not, however much it made.
 ///
 /// A function of its own so the zero-trade boundary is asserted over plain
-/// cells (G18-cli-a-12, D-2013): no real screen fixture shows a cell that
+/// cells (G18-cli-a-12, D-2008): no real screen fixture shows a cell that
 /// never traded, so no test could see one become a row.
 fn best_shown<P>(priced: [(P, Option<(grid::Cell, bool)>); 2]) -> Option<(P, grid::Cell, bool)> {
     priced
@@ -16562,7 +16562,7 @@ fn elite_descend_in_points_inner(
 /// converts to zero or fewer ppm admits nothing, and is refused by name.
 ///
 /// Split from [`elite_descend_in_points_inner`] so the zero boundary is
-/// asserted without a store (G18-cli-a-20, D-2018): a test build has none, so
+/// asserted without a store (G18-cli-a-20, D-2016): a test build has none, so
 /// that function refused before it ever compared `max_points` with zero.
 fn elite_ceiling_ppm(
     max_points: i64,
@@ -18071,7 +18071,7 @@ impl ScreenCache {
 /// Over a store root already resolved. The one caller resolves the root in
 /// place: a wrapper whose only work was `store_root().ok()?` answered `None`
 /// on every test build, which has no store, so its `None` mutant could not be
-/// told from it (G18-cli-a-19, D-2018).
+/// told from it (G18-cli-a-19, D-2015).
 fn screen_swept_in(
     root: &std::path::Path,
     vendor_word: &str,
@@ -19752,7 +19752,7 @@ fn first_accepted_in_order<'t, T, K: Ord>(
         let cut = window.min(rest.len());
         // SELECTED EVEN WHEN THE WINDOW IS THE WHOLE REST. Skipping that case
         // saved one O(len) pass before the O(len log len) sort below, and no
-        // output could tell the skip from the pass (G18-cli-a-16, D-2017).
+        // output could tell the skip from the pass (G18-cli-a-16, D-2012).
         if let Some(last) = cut.checked_sub(1) {
             rest.select_nth_unstable(last);
         }
@@ -21070,7 +21070,7 @@ impl<'a> GridProgress<'a> {
             // THE HIGHER OF THE TWO, and a write only when that moved it. A
             // count is never equal to one already spoken -- each `done` is a
             // distinct `fetch_add` -- so `>` and `>=` could not be told apart
-            // (G18-cli-a-18, D-2019); `max` has no such twin.
+            // (G18-cli-a-18, D-2014); `max` has no such twin.
             let before = *spoken;
             *spoken = before.max(done);
             if *spoken != before {

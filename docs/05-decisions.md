@@ -63139,3 +63139,165 @@ longer be reached, so it was removed. The frontier writer keeps its own
 
 **Rejected.** Changing the test to expect the 4,096 text. That would
 leave the two descent doors with different bounds.
+
+### D-2002 — Gate 18 run 1283, group cli-a: the survivors that needed only an assertion — 2026-10-06
+
+**What was observed.** Gate 18 on 969493e1 (run 1283) reported 72
+MISSED mutants in `crates/cli` files up to and including `lib.rs`; the
+shard logs show no TIMEOUT among them. Most of them changed behaviour
+that no test looked at. Three `command` doors and both ledger arms were
+never asked to refuse their words, so a constant exit code passed. A
+shorter orphan retry was asserted only as `is_err()`, so it could not
+tell the count refusal from a failed split. `committed` and `discard`
+were never handed an error other than `NotFound`. `regular_generation`
+never saw a symbolic link to the held file. `require_binding`,
+`hex_of`, `work_exit`, `span_policy`, `stored_anchored_digest`,
+`validated_at`, `descend`, `record_trades`, `publish_ranked`,
+`GridProgress::tick`, `note_grid_progress`, `prune_cells` and
+`screen_range_in_points` had no direct assertion, and the results
+listing was never shown exactly forty matching rows (shard 178). The `pool-oos` arm's
+refusals were asserted as `MISUSED`, which the work gives too.
+
+**Decided.** Each one gets a test that fails on the mutant: the exact
+refusal text, the exact code, the exact count or bytes. The rows are
+G18-cli-a-01, -03, -04, -06, -07, -11 and -21 to -34 in
+`docs/04-invariants.md`. No production behaviour changes.
+
+**Rejected.** Excluding or skipping any mutant (D-0192).
+
+### D-2003 — The batch slow seam's choice is a function of its own — 2026-10-06
+
+**What was observed.** `sweep_chunk` held back a month under test with
+`slow.as_deref() == Some(symbol)` inside a `#[cfg(test)]` statement.
+cargo-mutants mutated it, and the ordering test passes whichever month
+is slow, so `!=` survived.
+
+**Decided.** The comparison moves into `#[cfg(test)] fn held_back`,
+which a test pins directly (G18-cli-a-02). cargo-mutants does not mutate
+a test-only function, and the seam's choice is still asserted.
+
+### D-2004 — The candidate-universe reverify is two checks — 2026-10-06
+
+**What was observed.** `append_prepared_and_reverify` refused when the
+reopened block differed from its audit OR from the prepared receipt.
+No fixture can make one differ without the other, so `||` to `&&`
+survived.
+
+**Decided.** Two `if`s, each with its own refusal text. Either
+inequality still refuses alone, and the happy path proves each
+comparison (G18-cli-a-05).
+
+### D-2005 — The single-stop PBO projection is a function of its own — 2026-10-06
+
+**What was observed.** `project` measured PBO only when a fold
+contributed, and no fixture has zero contributing folds, so `>` to `>=`,
+`==` and `<` all survived.
+
+**Decided.** `pbo_ppm(bottom, contributing)` returns `None` at zero and
+the ceiling ppm otherwise, and a test covers zero, one and a remainder
+(G18-cli-a-08). The ceiling projection D-1990 requires is unchanged.
+
+### D-2006 — `FileIdentityV1::of` has one body with the target split inside — 2026-10-06
+
+**What was observed.** The non-Unix `of` was compiled out on the Linux
+test build, so its `Default::default()` mutant compiled and nothing
+could run it.
+
+**Decided.** One `of`, with `#[cfg(unix)]` and `#[cfg(not(unix))]`
+blocks inside it (G18-cli-a-09). On Unix the struct has no `Default`,
+so the mutant does not compile.
+
+### D-2007 — The Top-10 rung grouping is a function of its own — 2026-10-06
+
+**What was observed.** `render_winners` grouped winners into rung
+tables under a guard `open == rung`. The committed selection it walks
+has no cheap fixture, so the guard's mutants survived.
+
+**Decided.** `file_winner` holds the grouping and is tested over plain
+rows (G18-cli-a-10). `render_winners` calls it once per visited winner.
+
+### D-2008 — The shown side of a judged row is a function of its own — 2026-10-06
+
+**What was observed.** `tier_rows` dropped a shown cell with no trades.
+No real screen fixture produces one, so `>` to `>=` survived.
+
+**Decided.** `best_shown` holds the selection and a test hands it a cell
+that never traded (G18-cli-a-12).
+
+### D-2009 — One spelling of the forced stop — 2026-10-06
+
+**What was observed.** `Levels::forced` was spelled
+`(max_mae_ppm > 0).then_some(max_mae_ppm)` three times in `lib.rs`.
+`grid::merged` also drops a zero level, so `>=` was equivalent at
+every site, and `measure_top`'s `==` and `<` survived.
+
+**Decided.** `Rules::forced_stop` is the one spelling in `lib.rs`, and a
+test pins zero, negative and positive ceilings (G18-cli-a-13). Copies
+outside `lib.rs` belong to other files' fixers and are untouched.
+
+### D-2010 — The points ladder's filter drops a guard that could not fail — 2026-10-06
+
+**What was observed.** `stop_rungs_in_points` kept `pt > 0 && pt <=
+ceiling`. The step, the rung index and the per-point ppm are each at
+least one, so the ceiling division is at least one and `pt > 0` was
+always true. Its `>=` mutant was equivalent.
+
+**Decided.** The filter is `pt <= ceiling`, with the reason in a
+comment (G18-cli-a-14).
+
+### D-2011 — Half-away rounding steps by the remainder's sign — 2026-10-06
+
+**What was observed.** `div_round_half_away` chose `quotient - 1` when
+`n < 0`. That branch has a non-zero remainder, so `n` is never zero
+there and `<=` was equivalent.
+
+**Decided.** `quotient + remainder.signum()`, tested on both signs
+(G18-cli-a-15).
+
+### D-2012 — `first_accepted_in_order` always selects its window — 2026-10-06
+
+**What was observed.** The selection was skipped when the window was
+the whole rest. That saved one O(len) pass before an O(len log len)
+sort and changed no output, so `<` to `<=` was equivalent.
+
+**Decided.** The selection runs whenever the window is non-empty
+(G18-cli-a-16). The cost class is unchanged.
+
+### D-2013 — The audit-input recheck is two refusals — 2026-10-06
+
+**What was observed.** `load_audit_inputs` refused on a withheld day OR
+a moved digest. A withheld day also moves the digest, so `||` to `&&`
+survived.
+
+**Decided.** Two checks, and the withheld-day refusal names the day as
+its reason (G18-cli-a-17).
+
+### D-2014 — Grid progress keeps the higher count with `max` — 2026-10-06
+
+**What was observed.** `tick_with` wrote when `done > spoken`. Every
+`done` comes from its own `fetch_add`, so it never equals a spoken
+count and `>=` was equivalent.
+
+**Decided.** `spoken` takes `max(spoken, done)`, and a line is written
+only when that moved it (G18-cli-a-18). The conc9-1 test still proves
+counts only go up.
+
+### D-2015 — `screen_swept`'s root-only wrapper is gone — 2026-10-06
+
+**What was observed.** `screen_swept` only resolved `store_root()` and
+called `screen_swept_in`. A test build has no store, so the wrapper
+answered `None` everywhere and its `None` mutant was equivalent there.
+
+**Decided.** The one caller resolves the root in place
+(G18-cli-a-19). `screen_swept_in` keeps its existing tests.
+
+### D-2016 — `elite`'s ceiling conversion is a function of its own — 2026-10-06
+
+**What was observed.** `elite_descend_in_points_inner` compared
+`max_points` with zero only after resolving the store root, which a test
+build does not have, so `==` to `!=` survived.
+
+**Decided.** `elite_ceiling_ppm` takes the reference as a closure. Zero
+returns zero without reading it, and anything else is converted and
+refused at zero ppm. A test covers each case without a store
+(G18-cli-a-20).

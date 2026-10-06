@@ -4266,7 +4266,7 @@ mod tests {
         fs::remove_dir_all(root).expect("remove fixture root");
     }
 
-    /// G18-cli-a-07, D-2008: `require_binding` accepts exactly its own row
+    /// G18-cli-a-07, D-2002: `require_binding` accepts exactly its own row
     /// under its own parameters and refuses the other side's row by name.
     #[test]
     fn require_binding_accepts_its_own_row_and_refuses_another() {

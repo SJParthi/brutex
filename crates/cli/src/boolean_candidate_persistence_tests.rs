@@ -198,7 +198,7 @@ fn a_file_whose_barrier_failed_is_withdrawn_and_the_rerun_commits() -> Result<()
     Ok(())
 }
 
-/// G18-cli-a-04, D-2005: only a MISSING receipt reads as uncommitted and only
+/// G18-cli-a-04, D-2002: only a MISSING receipt reads as uncommitted and only
 /// a MISSING file as already discarded. Any other failure -- here a regular
 /// file standing where the directory belongs, and a directory standing where
 /// the file belongs -- is a refusal, never a quiet `false` or a quiet success.

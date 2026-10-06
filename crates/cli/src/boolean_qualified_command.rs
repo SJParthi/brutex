@@ -409,7 +409,7 @@ mod tests {
         Ok(())
     }
 
-    /// G18-cli-a-03, D-2004: an argument list this build does not understand
+    /// G18-cli-a-03, D-2002: an argument list this build does not understand
     /// exits `MISUSED` with the usage -- never `OK`, never `FAILED`.
     #[test]
     fn a_short_argument_list_exits_misused_with_the_usage() {

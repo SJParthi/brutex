@@ -988,7 +988,7 @@ type OpenRung = Option<(u32, Vec<(u32, runner::topn::Metrics)>)>;
 /// rung is the same, and a new rung first writes the open table out.
 ///
 /// Split from [`render_winners`] so the grouping is asserted over plain rows
-/// (G18-cli-a-10, D-2011): the committed selection it walks has no cheap
+/// (G18-cli-a-10, D-2007): the committed selection it walks has no cheap
 /// fixture, and no test saw two rungs' rows land in one table.
 fn file_winner(
     out: &mut String,
@@ -1478,7 +1478,7 @@ pub(crate) mod tests {
         OpenRung, PAISA_PER_POINT, file_winner, winners_table,
     };
 
-    /// G18-cli-a-10, D-2011: consecutive winners of one rung share its table,
+    /// G18-cli-a-10, D-2007: consecutive winners of one rung share its table,
     /// and a new rung writes the open table before starting its own.
     #[test]
     fn winners_of_one_rung_share_a_table_and_a_new_rung_closes_it() {

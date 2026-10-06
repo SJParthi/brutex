@@ -893,7 +893,7 @@ struct FileIdentityV1 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct FileIdentityV1;
 
-/// ONE `of`, with the target split inside it (G18-cli-a-09, D-2010). Two
+/// ONE `of`, with the target split inside it (G18-cli-a-09, D-2006). Two
 /// target-gated bodies left the other target's body uncompiled on the build
 /// that tests it, so a mutant of that body compiled and no test could reach it.
 impl FileIdentityV1 {
