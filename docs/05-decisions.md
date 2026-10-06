@@ -63315,3 +63315,21 @@ at least one key, so that many rounds always suffice. The round breaks
 when `top` rows are accepted or no window is left to cut
 (`cut.checked_sub(1)` is `None`). No single mutation can make it spin
 (G18-cli-a-35). Output and cost class are unchanged.
+
+### D-2018 — A test that runs unvalidated checks that premise first — 2026-10-06
+
+**What was observed.** Gate 18 run 1283 timed out `validate_from_env ->
+true` (shard 11, 4100 s) and `validates -> Some(true)` (shard 14, 4122
+s). The default is already "on", so these mutants only change runs that
+set `BRUTEX_VALIDATE=0`. Five stored-range tests set it to stay fast.
+Under the mutants they priced the full validation stack until the
+timeout. The test that pins the switch,
+`an_unexpected_validate_value_stays_on_and_is_named_as_refused`, sorts
+after them, so with `--max-fail=1:immediate` nothing failed first.
+
+**Decided.** Each of the five asserts `!validate_from_env()` right after
+setting the knob, before any work (G18-cli-a-36). The mutant now fails
+that test in milliseconds instead of hanging it.
+
+**Rejected.** Renaming a test so it sorts first. That depends on
+nextest's order rather than on what the test checks.
