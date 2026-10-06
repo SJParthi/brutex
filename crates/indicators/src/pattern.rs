@@ -3217,13 +3217,13 @@ mod midpoint_exact {
     use super::*;
 
     /// One IST session, minute `m`.
-    fn bar(m: i64, o: i64, h: i64, l: i64, c: i64) -> Candle {
+    fn bar(minute: i64, open: i64, high: i64, low: i64, close: i64) -> Candle {
         Candle {
-            ts_micros: (50_000 * 1_440 + 555 + m) * 60_000_000 - 19_800 * 1_000_000,
-            open: o,
-            high: h,
-            low: l,
-            close: c,
+            ts_micros: (50_000 * 1_440 + 555 + minute) * 60_000_000 - 19_800 * 1_000_000,
+            open,
+            high,
+            low,
+            close,
             volume: 0,
             open_interest: i64::MIN,
         }
@@ -3280,17 +3280,18 @@ mod midpoint_exact {
     #[test]
     fn the_rickshaw_man_centre_is_exact() {
         let mut doji = 0_u32;
-        for l in 100..=110_i64 {
-            for h in l..=110 {
-                for o in l..=h {
-                    for c in l..=h {
-                        let m = masks(&[bar(0, o, h, l, c)]);
+        for low in 100..=110_i64 {
+            for high in low..=110 {
+                for open in low..=high {
+                    for close in low..=high {
+                        let m = masks(&[bar(0, open, high, low, close)]);
                         if m.get(224) {
-                            let centred = ((o + c) - (h + l)).abs() * 1000 <= (h - l) * 200;
-                            assert_eq!(m.get(226), centred, "{o} {h} {l} {c}");
+                            let centred =
+                                ((open + close) - (high + low)).abs() * 1000 <= (high - low) * 200;
+                            assert_eq!(m.get(226), centred, "{open} {high} {low} {close}");
                             doji += 1;
                         } else {
-                            assert!(!m.get(226), "226 is a 224: {o} {h} {l} {c}");
+                            assert!(!m.get(226), "226 is a 224: {open} {high} {low} {close}");
                         }
                     }
                 }

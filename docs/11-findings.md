@@ -915,5 +915,5 @@ locked choice, with the wording corrected, D-3401).
 
 | ID | Severity | Title | Where | Disposition |
 |---|---|---|---|---|
-| `F-DBC24E` | `wrong` | EMA sides were decided on the paisa floor of the average, so a close on the floor of a fractional EMA was certified not below it | `crates/indicators/src/trend.rs` (`Ema::value`, `TrendState::emit` bits 0–5) | FIXED SHA_C2 — D-3400, XPERM-01 |
-| `F-25A074` | `wrong` | Candlestick midpoints were floored, so the bearish beyond-the-midpoint clauses and the rickshaw man centre each answered one price the wrong way | `crates/indicators/src/pattern.rs` (`Shape::mid`, positions 162, 164, 212, 226) | FIXED SHA_C2 — D-3402, XPERM-02 |
+| `F-DBC24E` | `wrong` | EMA sides were decided on the paisa floor of the average, so a close on the floor of a fractional EMA was certified not below it | `crates/indicators/src/trend.rs` (`Ema::value`, `TrendState::emit` bits 0–5) | FIXED f9ab789 — D-3400, XPERM-01 |
+| `F-25A074` | `wrong` | Candlestick midpoints were floored, so the bearish beyond-the-midpoint clauses and the rickshaw man centre each answered one price the wrong way | `crates/indicators/src/pattern.rs` (`Shape::mid`, positions 162, 164, 212, 226) | FIXED f9ab789 — D-3402, XPERM-02 |
