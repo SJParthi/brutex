@@ -1,9 +1,0 @@
-
-running 4 tests
-test sink::tests::a_failed_roll_reports_with_the_emit_lock_released ... ok
-test sink::tests::a_tail_that_cannot_be_examined_is_left_exactly_as_it_was_found ... ok
-test sink::tests::a_rotation_error_that_is_not_absence_is_reported_rather_than_swallowed ... ok
-test sink::tests::a_roll_that_cannot_complete_does_not_empty_the_history_one_file_per_event ... ok
-
-test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 125 filtered out; finished in 0.02s
-

@@ -1,9 +1,0 @@
-
-running 4 tests
-test a_directory_flush_the_host_refuses_is_returned_and_named ... ok
-test every_directory_the_writer_creates_has_its_entry_flushed ... ok
-test the_sidecar_flush_follows_the_sidecars_creation_so_a_refused_flush_leaves_the_new_name ... ok
-test a_sidecar_flush_the_host_refuses_is_returned_and_only_an_empty_month_asks_for_one ... ok
-
-test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.05s
-

@@ -1,8 +1,0 @@
-
-running 3 tests
-test every_named_commit_exists ... ok
-test every_named_commit_is_on_main ... ok
-test every_named_commit_is_in_this_branchs_history ... ok
-
-test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.42s
-

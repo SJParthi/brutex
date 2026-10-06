@@ -1,8 +1,0 @@
-
-running 3 tests
-test catalog::catalog_tests::only_an_absent_bars_is_the_empty_store_and_every_other_non_directory_is_refused ... ok
-test catalog::catalog_tests::a_locked_directory_is_one_unreadable_entry ... ok
-test checksum_audit::tests::strict_source_fifo_probe_cannot_wait_for_a_writer ... ok
-
-test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 110 filtered out; finished in 0.06s
-
