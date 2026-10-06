@@ -63334,6 +63334,13 @@ all wrong, so the last check alone refused it. The two `||` mutants survived.
 **Decided.** Prior bars at 920, 928 and 929 make only the third-last minute
 wrong. It must be refused, naming the canonical 927, 928, 929 (G18-cli-b-24).
 
+**Added after the targeted rerun.** The second mutant, on the `|| last` term,
+survived the first test: `&&` binds tighter than `||`, so it reads
+`A || B || (C && D)`, and that test refuses through B. Only a last minute
+wrong on its own kills it. An eligible share with a dated close of 15:14 and
+final minutes 912, 913 and 915 does that, because the session window admits
+915 and no other check refuses it. That case is now a test as well.
+
 ### D-2032 — The V4 ledgers walk a receipt-less prefix over a bounded range — 2026-10-06
 
 **What was observed.** Gate 18 run 1283 timed out on `index += 1` → `index *= 1`
