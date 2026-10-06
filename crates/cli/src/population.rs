@@ -3375,14 +3375,15 @@ impl PopulationLedger {
         // against the same receipt, so a receipted block already equals `rows`
         // and the exact check below would keep it. Only a failed read could
         // send one to the cut, and an acknowledged block must never be cut.
-        // Written as one membership test so no operator mutant of it exists
-        // that no test could reach (G18-cli-b-11, D-2023).
+        // Written as one comparison of the three lookups, so no `||` mutant of
+        // it exists that no test could reach; its `!=` is held by the cut
+        // tests (G18-cli-b-11, D-2023).
         let receipted = [
             self.receipts.contains_key(population_id),
             self.receipts_v3.contains_key(population_id),
             self.receipts_v4.contains_key(population_id),
         ];
-        if receipted.contains(&true) {
+        if receipted != [false; 3] {
             return Ok(());
         }
         let rows_end = self

@@ -63203,8 +63203,9 @@ had no mutant a test could reach:
   disagree with the byte comparison.
 
 **Decided.** The guard stays as defence in depth, because an acknowledged block
-must never be cut. It is now a membership test over the three lookups, which
-has no operator to mutate. The keep is decided by `require_exact_block` alone,
+must never be cut. It is now one comparison of the three lookups against
+`[false; 3]`, so there is no `||` left to mutate, and its `!=` is held by the
+existing cut tests. Gate 11 rule 7 refuses a slice `.contains`. The keep is decided by `require_exact_block` alone,
 and the now-unused `expected` parameter is gone. A new test arms a sync fault on
 the row file and requires that an exact receipt-less block is kept, not cut and
 rewritten (G18-cli-b-11).
