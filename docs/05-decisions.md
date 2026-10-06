@@ -63361,3 +63361,72 @@ set of readers that hold a lock, so the refusal would have become more common.
   at once, as before. A reader still there after the bound is refused by name.
 
 **Evidence.** ZK-09.
+
+### D-2554 — Selection V6's abandoned-tail quarantine is written under a scratch name and keyed by content — 2026-10-06
+
+**The finding.** conc4-1. D-1569 moved a foreign unsealed Selection V6 tail
+into `global-selection-v6.bin.abandoned-<offset>`, created with `create_new`
+under that final name. A failed or killed copy left a partial file there, and
+a second abandoned tail at the same offset met the first one's bytes; either
+way every later `persist` on the rung refused "already holds different bytes",
+the permanent wedge D-1569 had removed, moved into the quarantine.
+
+**The decision.** The copy is written to `<quarantine>.writing` through
+`fixed_tail::write_at_end`, synced, and renamed to
+`<file>.abandoned-<offset>-<blake3 of the tail>`; the directory is synced
+before the ledger is cut, as before. A failed copy removes its scratch file and
+leaves the ledger unchanged, so the rerun repeats the move. Two different
+tails at one offset get two quarantines. An existing quarantine of the same
+name holds the same bytes by construction and is replaced by the rename.
+
+**Evidence.** ZK-02.
+
+Ported from `wip/zero/conc-data` 6a87624. On `final/all-fixes` CE-65 (D-2684) had made the old offset-keyed comparison read through `readonly_file`, so a FIFO could not hold the repair; under the content-keyed name there is no comparison to make, so that reader is removed, and the same protection now sits on the `.writing` scratch name: a stale scratch is unlinked, never opened, and the new one is made with `create_new`. CE-65's test now places FIFOs at both quarantine names and proves the repair still completes within two seconds.
+
+### D-2555 — Population V5 cuts a failed barrier, rewrites its own retried prefix and discards a foreign one — 2026-10-06
+
+**The findings.** conc4-2 (and the Population V5 halves of pop1-4 and
+ledgers-2): V5, written by every `ledger-all` run, synced its rows with a bare
+`sync_data` and left them in place on failure, and the exact retry appended
+nothing and "confirmed" the prefix with a barrier on a fresh descriptor (K2).
+pop2-4 for V5: a receipt-less trailing block of another identity refused every
+later block on the rung ("not an exact canonical prefix"), and a rebuild or new
+data made that refusal permanent.
+
+**The decision.** Rows and Completion barriers go through
+`fixed_tail::sync_or_roll_back`; the reuse path refuses a path whose barrier
+failed in this process. A receipt-less trailing block is withdrawn before the
+append: cut and rewritten whole when it is this exact retry's prefix (bytes
+identical), discarded with a `cli.ledger` warn event otherwise (the D-1905
+rule). `append_rollback`'s module doc no longer says a failed-barrier orphan is
+safe to leave in place.
+
+**Evidence.** ZK-03.
+
+Ported from `wip/zero/conc-data` e295d88.
+
+### D-2556 — Execution V3 and Selection V5 discard a foreign receipt-less tail; Selection V5 cuts a failed barrier — 2026-10-06
+
+**The findings.** pop2-4 and ledgerall-1 at the two `ledger-all` writers D-1905
+did not reach: Execution V3 ("orphan tail is not an exact retry prefix") and
+Selection V5 ("orphan tail is not the exact canonical retry prefix") refused
+every later block on the rung because of a receipt-less tail of another
+identity, and since the identity carries the commit and the data digest, a
+rebuild or new data made that permanent. ledgers-2 at Selection V5: its row and
+Completion barriers were bare `sync_data` calls, and the exact retry re-synced
+its own prefix in place.
+
+**The decision.** The D-1905 rule: under the append lock, a receipt-less tail
+that is not this exact retry is cut back to where it began with
+`fixed_tail::discard_orphan` (a `cli.ledger` warn event names it), in every one
+of Execution V3's three record files; the writer then appends its own block.
+An exact prefix of Execution V3 still resumes: its blocks already went through
+`fixed_tail::append_block` (D-1900), so no failed-barrier bytes can be in it.
+Selection V5's own exact prefix is cut and rewritten whole, its barriers go
+through `fixed_tail::sync_or_roll_back`, and its reuse refuses a path whose
+barrier failed in this process.
+
+**Evidence.** ZK-04. The two former tests that asserted the refusal now assert
+the commit; each failed on the previous code by construction.
+
+Ported from `wip/zero/conc-data` a937341. The same pattern for Candidate Universe, Base Evidence V2 and Pre-Admission (that branch's D-2557, ledgerall-1's other half and cand-1) has no code on any branch and is not claimed here.
