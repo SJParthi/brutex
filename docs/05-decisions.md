@@ -63139,3 +63139,69 @@ longer be reached, so it was removed. The frontier writer keeps its own
 
 **Rejected.** Changing the test to expect the 4,096 text. That would
 leave the two descent doors with different bounds.
+
+### D-3400 — An EMA's side is decided on the held average, not on its paisa floor — 2026-10-06
+
+**What was observed.** The permutations attack (lens L3) found that
+`trend::Ema::value` floors the average, which is held scaled by `SCALE =
+1_000_000`, to a whole paisa, and `TrendState::emit` compared the close with
+that floor. That decides "above" exactly for an integer close, but not
+"below". A close equal to the floor of a fractional average sits below it,
+set neither bit 0 nor bit 1, and `known` still certified both as false.
+Nineteen candles at 100 and one at 95 give an EMA20 of 99.75. A close of 99
+was "neither" before this fix. Positions 2/3 (EMA200) and 4/5 (fast against
+slow, both floored) had the same fault. No document defines the EMA on a
+paisa floor: the module doc says the average is held "to six further digits".
+`docs/26-vwap-mapping.md` does define VWAP as a floor, which is why the VWAP
+twin of this candidate was refuted (D-3401).
+
+**Decided.** `Ema::side_of(price)` compares `price · SCALE` with the held
+`scaled` value exactly, since `i64 · 10^6` fits in `i128`. Bits 4/5 compare
+the two held values. The `value()` checks stay only as the availability gate
+that `known` certifies. The derived cross and ordinal bits (280–283, 314–319)
+read bits 0–3, so they follow. Proof: XPERM-01. Both tests failed before the
+fix, e.g. `period 20, last seed 95, close 99` and `fast above slow:
+ConditionMask([0, 0, 0, 0, 0, 0])`. The all-position evaluator digest in
+`gap::tests::complete_sessions_through_the_evaluator_are_byte_identical` is
+re-taken; the gap count, 4,092, did not move.
+
+**Rejected.** Rounding `value()` to nearest. That moves the error to the
+other side instead of removing it.
+
+### D-3401 — Two lens-L3 candidates refuted, and the SuperTrend warm wording corrected — 2026-10-06
+
+**VWAP below-bias, refuted.** Bits 53/144 cannot fire for a close equal to the
+floor of a fractional VWAP. `docs/26-vwap-mapping.md:19-20` defines the VWAP as
+`floor(sum((h+l+c)·v) / (3·sum(v)))`, and its table compares "Close < mean"
+against that value. The code matches the governing document. Changing the
+definition to the exact rational mean is an owner call, recorded as UNVERIFIED
+under "needs the owner" in the lens result.
+
+**SuperTrend seed carried past warm, refuted as a defect.** At `warm()` the
+ratchet can still hold bar 0's stop. The candidate's example: bar 0 TR 2 gives
+stop 994; nine bars of TR 200 never pass it, and a close of 990 sets 65.
+Seeding at the first candle is the locked choice (D-1542, `trend.rs` module
+doc), and no recorded source defines another seed. Only the wording was
+wrong: `SuperTrend::warm`'s doc and the 64–65 comment implied that a warm
+level is no longer the first candle's. Both now say the gate is on the ATR and
+that the level may still be the seed.
+
+### D-3402 — Candlestick midpoints are compared doubled, never rounded — 2026-10-06
+
+**What was observed.** `pattern::Shape::mid` was `open.midpoint(close)`, which
+rounds a half-paisa midpoint down for positive prices. "Close above the
+midpoint" (161, 163) was therefore exact, but "close below" (162, 164, 212)
+refused a close equal to the floor. The prior body 100→103 has midpoint 101.5,
+and a dark cloud closing at 101 did not fire. The rickshaw man's centredness
+(226) floored both midpoints and accepted a bar 15% off centre (106/110/100/107)
+while refusing its mirror. The module doc says "every ratio is
+cross-multiplied … no division", and no document defines a floored midpoint.
+
+**Decided.** `Shape::mid2` returns `open + close`. Every clause compares
+`2 · close` with it, and 226 tests `|(o+c) − (h+l)| · 1000 <= range · 200`.
+The fields are `i128` widened from `i64`, so no sum can overflow. Proof:
+XPERM-02. All three tests failed before the fix, e.g. `prior 100->103, bar
+104->101` and `101 103 100 101`.
+
+**Rejected.** `(a + b + 1) / 2` (round half up). It moves the bias to the
+bullish twins.
