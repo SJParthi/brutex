@@ -12879,6 +12879,15 @@ row at all accumulated.
     years-to-expiry, both dimensionless ratios feeding Black-Scholes.
     `Rate::annual` and `Tenor::years` are what `greeks` takes; a
     paisa `i64` cannot express 0.0675.
+  pull/pricing.rs 22 -> 35 (D-2830) -- `bar_greeks` and `BarGreeks`:
+    the solved volatility and the five greeks in reading units (gamma
+    per rupee, theta rupees per day, vega and rho rupees per point),
+    the three conversion constants (paisa per rupee, points per unit,
+    seconds per day) and the two paisa-to-f64 widenings at the model
+    boundary. Sensitivities and a volatility -- statistics, not prices;
+    the premium, spot and strike stay paisa `i64` on `BarQuote`.
+  api/optiongreeks.rs 1 (D-2830) -- `Cell::Priced::rate`, the
+    continuous rate carried to the wire beside the greeks it priced.
   pull/riskfree.rs 2 -- `continuous`, which converts the RBI 91-day
     T-bill implicit yield (an integer count of ten-thousandths of a
     percent) into the continuously compounded `f64` that

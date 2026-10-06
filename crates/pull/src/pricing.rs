@@ -1810,7 +1810,7 @@ mod tests {
             test_rate(),
             YearBasis::Calendar365,
         )
-        .expect("greeks");
+        .expect("the greeks at the solved volatility");
         assert_eq!(bar.model, greeks);
     }
 
@@ -1825,7 +1825,8 @@ mod tests {
             premium: 100,
             ..bar_of(atm_call())
         };
-        let why = bar_greeks(below, test_rate(), YearBasis::Calendar365).expect_err("below");
+        let why = bar_greeks(below, test_rate(), YearBasis::Calendar365)
+            .expect_err("a close below intrinsic");
         assert!(
             matches!(
                 why,
@@ -1833,14 +1834,18 @@ mod tests {
             ),
             "{why:?}"
         );
-        assert!(why.to_string().contains("intrinsic"), "{why}");
+        assert!(
+            why.to_string().contains("discounted intrinsic value"),
+            "{why}"
+        );
 
         let above = BarQuote {
             // A call worth more than the underlying itself.
             premium: 2_600_000,
             ..bar_of(atm_call())
         };
-        let why = bar_greeks(above, test_rate(), YearBasis::Calendar365).expect_err("above");
+        let why = bar_greeks(above, test_rate(), YearBasis::Calendar365)
+            .expect_err("a close above the maximum");
         assert!(matches!(why, PricingError::Model(_)), "{why:?}");
 
         for (field, broken) in [
