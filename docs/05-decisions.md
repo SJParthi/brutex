@@ -63139,3 +63139,97 @@ longer be reached, so it was removed. The frontier writer keeps its own
 
 **Rejected.** Changing the test to expect the 4,096 text. That would
 leave the two descent doors with different bounds.
+
+### D-3300 — Gate 8 gates p99 at 10^3 to 10^6 for bar lookup, time lookup, k=1 dedup and append — 2026-10-06
+
+**What was observed.** `docs/06-limits.md` §1 says each operation `CLAUDE.md`
+§3 rule 4 names "is measured by gate 8". Every row except telemetry's C-T-01b
+took the minimum over trials of a mean, a statistic a tail cannot move. A
+planted O(n) scan on one cold `read_record` in fifty left C-BC-01 at 1.20×. A
+planted scan in `offer` for one key in 64 left C-E-10 at 1.08×, because that
+row only ever probes key 0. The rows also stopped at 10^5.
+
+**Decided.** Add O1P-01 (cold `read_record`) and O1P-02
+(`first_at_or_after`) to `crates/store/benches/ratio.rs`, and O1P-03 (k=1
+duplicate rejection on random present keys) and O1P-04 (append into a
+reservation) to `crates/engine/benches/ratio.rs`. Each times every call, or
+every batch of 32, at 10^3, 10^4, 10^5 and 10^6. It takes 5 rounds and gates
+the smallest round p99 against the 10^3 one under the existing 3.0× ceiling.
+No new threshold is invented. The two plants above breach these rows at 9.4×
+to 158.8×. Max is printed, never gated.
+
+**Rejected.** Gating the maximum: on a shared runner it is the scheduler.
+Gating a single round's p99: one disturbed round would fail the build.
+Replacing the minimum-of-mean rows: they bound something different, the
+per-call floor, and other rows divide by them.
+
+### D-3301 — Two p99 facts are named, not gated: the dedup table past the cache, and the reserved append's page fault — 2026-10-06
+
+**What was observed.** At 10^6 offered positions, O1P-03's p99 measured 2.1×
+to 2.9× the 10^3 one, because the table outgrows the cache. O1P-04's p99 is
+about 14× its p50 at every size. Touching the reservation first took it from
+3,019 ns to 780 ns per 32 pushes, so the tail is the first-touch page fault.
+
+**Decided.** O1P-03 gates 10^4 and 10^5 and prints 10^6. k=1 never offers
+more than `ConditionMask::BITS` (384) positions, so 10^5 is already 260× past
+the domain. O1P-04 stays gated: the fault is per page, so it is flat. Both
+are stated in `docs/06-limits.md` with their numbers.
+
+**Rejected.** Gating O1P-03 at 10^6 with a ratio that measured up to 2.9×
+against a 3.0× ceiling, which would turn the build red by luck. Pre-touching
+`drain`'s reservation, which would move the fault cost onto levels that never
+fill it.
+
+### D-3302 — The `.tix` rebuild is O(n_valid) inside an append too, and it is now measured — 2026-10-06
+
+**What was observed.** `store::file::index_batch` calls `reindex` when the
+entry it resumes from no longer agrees with the header, which follows a torn
+index write from a failed append on the same handle. That rebuild reads every
+committed record. `docs/06-limits.md` ("What an append pays") and
+`docs/02-store-format.md` placed the rebuild only at writer open, "once per
+month", and the cost was "timed by nothing".
+
+**Decided.** Name the append-time rebuild in both documents and in the
+function's doc comment. Add the ignored measurement
+`index_rebuild_cost_grows_with_the_month` to `crates/store/tests/tix_latency.rs`:
+0.49 / 1.2 / 7.9 / 80 ms at 10^3 / 10^4 / 10^5 / 10^6 bars, about 80 ns per
+bar.
+
+**Rejected.** Repairing only the torn tail entries instead of rebuilding.
+Locating the last good entry's row without the entry itself is a bisection,
+the recovery path is rare, and changing it is a store-format behaviour change
+outside this lens.
+
+### D-3303 — An audit read's two `fsync`s are named and measured, and kept — 2026-10-06
+
+**What was observed.** `cli::operation_audit::read` syncs the index and the
+invocation's file on every read. `page` reads up to 32 rows, which is up to 64
+`fsync`s per `/backtest/audit.json` GET, and `/backtest/run.json` reaches
+`read` on every poll. D-1445 named the write side's syncs only.
+
+**Decided.** State the read-side syncs in `docs/06-limits.md`, measured by the
+ignored `a_full_audit_page_costs_the_same_at_every_index_size`: a p50 of
+2.42–2.46 ms per 32-row page at 10^2, 10^3 and 10^4 invocations, so the cost
+is flat in the index. The 105 ms maximum is a writeback wait, so the route has
+no latency bound.
+
+**Rejected.** Removing the syncs. That would let the page report a record a
+crash could still take back. It is a change to what the route promises, which
+is the owner's call, not a cost fix.
+
+### D-3304 — Four stale cost and shape claims in `api` and `telemetry` comments, corrected — 2026-10-06
+
+`api::bars`'s module header said "Nothing here scans", although its `window`
+route scans (D-0733). `api::render` called its walk "the only `read_dir`" and
+`api::autopilot` said there were two; `server.rs`'s `archive_ready` is a
+third. `telemetry::sink` said the crate carried no bench after
+`benches/ratio.rs` had landed. Each comment now says what the code does.
+Comments only; no behaviour changed.
+
+### D-3305 — The results ledger's append and refresh are O(indexed bytes + delta) on growth, as D-1560 already said — 2026-10-06
+
+`cli::results`'s module table, `append`'s doc and `refresh`'s doc, and
+`docs/06-limits.md` §100, said O(delta + 1) and O(new rows). D-1560 made the
+growth branch re-hash every byte the handle had indexed, and its own section
+in `docs/06-limits.md` said so, so the documents contradicted each other.
+Every one of them now states the growth-branch cost. The code is unchanged.

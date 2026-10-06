@@ -6472,9 +6472,10 @@ contention even though independent sweeps may compute in parallel.
 The fixed-width ledger append is not unconditionally O(1) either. Once it holds
 the exclusive file lock, `Results::append` absorbs `delta` complete rows written
 by other processes since that handle last scanned, then performs the one-stride
-write and expected-O(1) identity-map update. Its local work is therefore
-O(delta + 1); only the common `delta == 0` single-writer path has fixed local
-work. Lock waiting, seek/write and `sync_all` latency remain filesystem- and
+write and expected-O(1) identity-map update. Since D-1560 a nonzero `delta`
+also re-hashes every byte the handle had already indexed, so its local work is
+O(indexed bytes + delta), not the O(delta + 1) this paragraph said until D-3305;
+only the common `delta == 0` single-writer path has fixed local work. Lock waiting, seek/write and `sync_all` latency remain filesystem- and
 contention-dependent rather than worst-case O(1).
 
 ### §101 — exact browser drill-down arithmetic is a refusal boundary, not an `i64` proof
@@ -12492,7 +12493,13 @@ buckets the batch reaches: a gap of `g` empty slots costs `g / 64` sixteen-byte
 entries. An overnight gap on the one-second rung is about 64,000 slots, so
 about 1,000 entries, 16 KB, once per session. Then one `fsync` of the `.tix`,
 before the header slot (`docs/02-store-format.md` §5 step 3b). The extra
-`fsync` per append is measured by nothing.
+`fsync` per append is measured by nothing. **One append pays O(`n_valid`)**
+(D-3302): when the entry it resumes from no longer agrees with the header —
+a torn index write from an append that failed on the same handle —
+`index_batch` rebuilds the whole index before it writes, the same rebuild a
+writer open pays. This paragraph and `docs/02-store-format.md` placed the
+rebuild only at open, "once per month", until D-3302; see "The `.tix`
+rebuild, measured" below.
 
 **Measured — `x86_64` shared host, 4 cores, load average 5 to 7 from other
 builds, release profile, 2026-10-04.** `crates/store/tests/tix_latency.rs`
@@ -15648,3 +15655,155 @@ per-candidate primitive from `CLAUDE.md` §3 rule 4.
   a run would need the attempt's origin, which the handler does not receive.
 - **Not timed.** No bench measures a log walk. The 4 MiB per half is the
   configured cap, not a measurement, and the time it takes is UNVERIFIED.
+
+## Gate 8 at p99, and the per-operation costs the p99 rows found — D-3300 to D-3305, 6 October 2026
+
+All numbers on this page were measured on a 4-core cloud box (Intel Xeon,
+`nproc` 4, shared), in the release bench profile, on 6 October 2026. They
+are repeated runs, not single ones, and the spread is given wherever it
+matters.
+
+### What §1's "measured by gate 8" meant, and what it means now (D-3300)
+
+§1 says each operation `CLAUDE.md` §3 rule 4 names "is O(1) and each is
+measured by gate 8". Until D-3300 every Gate 8 row except telemetry's C-T-01b
+took the **minimum over trials of a mean**. That statistic cannot fail on a
+tail. The minimum throws away any trial that paid a slow call, and the mean
+spreads a slow call across the reps. Two plants proved it on this box:
+
+- A cold `read_record` that scans O(n) on one call in fifty: C-BC-01 read
+  **1.20×** and stayed green. The new O1P-01 row read **9.4×** at 10^5 and
+  **87×** at 10^6 and breached.
+- An `offer` that scans the whole table for one key in 64: C-E-10 read
+  **1.08×** and stayed green, because it only ever probes key 0. O1P-03 read
+  **11.5×** at 10^4 and **158.8×** at 10^5 and breached.
+
+The new rows time every call (or every batch of 32, for the nanosecond
+primitives) on its own, at **10^3, 10^4, 10^5 and 10^6**. Each size runs 5
+rounds, and the row gates the smallest round p99 against the 10^3 one under
+the same 3.0× ceiling. The other rows stopped at 10^5. Max is printed and
+never gated, because on a shared box the max is the scheduler.
+
+| Row | Operation | p99 at 10^3 / 10^4 / 10^5 / 10^6 | 10^6 / 10^3 |
+|---|---|---|---|
+| O1P-01 | cold `BarFile::read_record` | 3,265 / 3,461 / 3,751 / 4,112 ns | 1.26× |
+| O1P-02 | `BarFile::first_at_or_after` via `.tix` | 276 / 284 / 309 / 303 ns | 1.10× |
+| O1P-03 | k=1 duplicate rejection, per 32 | 463 / 475 / 607 / 1,164 ns | 2.1×–2.9×, **not gated** |
+| O1P-04 | result append into a reservation, per 32 | 3,019 / 2,984 / 2,968 / 3,026 ns | 0.98×–1.04× |
+
+The maxima ran from 22 µs to 340 µs and are not a bound.
+
+**Still at the minimum of a mean:** mask evaluation (`C-E-*`, `C-V-*`),
+condition lookup, and every other row in the thirteen benches. The `hits`
+test and the compile-time name table have no size that grows, so there is
+nothing for a 10^3 → 10^6 sweep to vary. The two operations that do grow,
+bar lookup and the k=1 table, are now covered.
+
+### k=1 duplicate rejection leaves the cache past 10^5 offered positions (D-3301)
+
+`engine::primitives::offer` is one `HashSet<u32>::insert`, an expected-O(1)
+probe. At 10^6 entries the table is several MiB and outgrows the cache, so a
+probe of a random present key pays a memory miss. Its p99 per 32 rejections
+measured **1,123 – 1,280 ns at 10^6** against 463 ns at 10^3, which is
+**2.1× – 2.9×** over three runs. That is the operation count staying the same
+while each probe gets slower in time: it is the memory hierarchy, not the
+algorithm. **No production table reaches that size.** k=1 offers one position
+per live condition, so the table never holds more than `ConditionMask::BITS`,
+384 entries. O1P-03 gates 10^4 and 10^5 and only prints 10^6. Gating 10^6 at
+a ratio this close to 3.0 would make a red build a matter of luck.
+
+### A reserved append's p99 is a page fault, about 14× its p50 (D-3301)
+
+`Vec::with_capacity` reserves address space, not memory. The first push into
+each page that has not been touched yet takes a minor page fault. O1P-04's p50
+is about 216 ns per 32 pushes and its p99 about 3,000 ns at **every** size,
+because the faults recur at a fixed rate per page. Touching the whole
+reservation before timing took the p99 to **780 ns** (and the p50 to 389 ns).
+So the tail is the fault, not the push. It is flat in the number of results
+held, and the row gates that flatness. The constant itself, a few
+microseconds per fresh page, is real and is paid by `engine::drain`'s
+reserved `out` as well. Touching every reserved page ahead of time would move
+that cost to the reservation and make a level that never fills it pay for
+pages it never uses, so it was not done.
+
+### The `.tix` rebuild, measured — and that an append can pay it (D-3302)
+
+`BarFile::rebuild_index` reads every committed record through the verified
+path. Before D-3302 it was described only as a writer-open cost "once per
+month", and as "timed by nothing". Two corrections:
+
+- **An append can pay it too.** `index_batch` rebuilds the index when the
+  entry it resumes from no longer agrees with the header. That happens after a
+  torn index write from an append that failed on the same handle. That one
+  append is O(`n_valid`). The healthy path is still one entry read.
+- **Measured** by `store`'s ignored `index_rebuild_cost_grows_with_the_month`
+  in `tests/tix_latency.rs`. The test times a writer open with the `.tix`
+  removed, 7 samples per size, over two runs:
+
+| Bars | p50 | max |
+|---|---|---|
+| 1,000 | 0.49 ms | 0.60 ms |
+| 10,000 | 1.21 – 1.28 ms | 1.45 ms |
+| 100,000 | 7.9 – 8.0 ms | 9.5 ms |
+| 1,000,000 | 79 – 82 ms | 87 ms |
+
+That is linear, about 80 ns per bar above roughly 0.4 ms of fixed open cost.
+At the one-second ceiling of 2,678,400 bars it would be about **215 ms**.
+**That figure is an extrapolation, not a measurement.** The append-time
+rebuild runs the same function, but no test times it inside an append,
+because reaching it takes a torn write.
+
+### An audit page `fsync`s up to 64 times on a GET (D-3303)
+
+`cli::operation_audit::read` calls `sync_all` on the index and then on the
+invocation's own journal. That is two `fsync`s on a READ path, so that what
+it reports has reached the disk. `page` calls `read` once per row, up to
+`MAX_PAGE` = 32. `/backtest/audit.json` serves a page, and `/backtest/run.json`
+reaches `read` through `persisted_status` on every status poll. D-1445's
+section above counts the `fsync`s that `begin` and the terminal pay and a
+directory lookup at each read. It does not name the read's own two
+`fsync`s.
+
+The cost is bounded by the page, not by the index. cli's ignored
+`a_full_audit_page_costs_the_same_at_every_index_size` measured one 32-row
+page:
+
+| Invocations indexed | p50 | p99 | max |
+|---|---|---|---|
+| 100 | 2.46 ms | 3.23 ms | 3.97 ms |
+| 1,000 | 2.42 ms | 4.16 ms | 105 ms |
+| 10,000 | 2.42 ms | 3.04 ms | 4.49 ms |
+
+That is flat. But an `fsync` waits for whatever writeback the file has
+pending, and the 105 ms maximum is one such wait. **The latency of this GET
+therefore depends on other writers' dirty pages, and it has no bound.** The
+syncs were kept. Dropping them would let the page report a record that a
+crash could still take back, and that is a change to what the route
+promises, not to what it costs. 10^5 and 10^6 invocations were not run,
+because each invocation is its own synced journal. **The size of the index
+does not enter the cost by construction, but that is UNVERIFIED as a
+measurement past 10^4.**
+
+### Five claims that the code contradicted, corrected (D-3302, D-3304, D-3305)
+
+- `cli::results` said its append and `refresh` cost "O(delta + 1)" and
+  "O(new rows)", and so did §100 above. Since D-1560, a handle that finds the
+  file grown re-hashes every byte it had already indexed first, so the cost is
+  O(indexed bytes + delta). The section above on ledger prefix rechecks,
+  D-1560 to D-1567, already said so; the module header did not (D-3305).
+- `api::bars`'s module header said "Nothing here scans". Its own `window`
+  route reads every bar of up to 240 months when sorted by a price column
+  (D-0733). The header now scopes the claim to the page route (D-3304).
+- `api::render` called its startup walk "the only `read_dir` in shipping code
+  under `crates/api`", and `api::autopilot` said there were two. There are
+  three, and the third, `server.rs`'s `archive_ready`, runs on every
+  `/feeds.json` request. It reads at most one entry, so it costs O(1) per
+  feed (D-3304).
+- `telemetry::sink` said "this crate carries no bench" after
+  `benches/ratio.rs` had landed (D-3304).
+- `store::file::index_batch` and `docs/02-store-format.md`, about the
+  append-time rebuild (D-3302, above).
+
+`docs/14-sweep-readiness-20260906.md` still quotes "O(delta + 1)" for the
+cached result append. It is a dated snapshot of 6 September, so it was left
+as written. This section is the correction.

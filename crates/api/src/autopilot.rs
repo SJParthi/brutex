@@ -194,8 +194,9 @@ pub const STORE_PROBE_CEILING_SECS: u64 = 3600;
 ///
 /// A dot-prefixed name directly under the store root, which nothing in this
 /// build reads: `census::read_all` opens one known path per vendor and lists no
-/// directory, and the two `read_dir` sites under `crates/api` are `assets.rs`
-/// (the front-end bundle) and `render.rs` (a bar-file folder). Per vendor
+/// directory, and the `read_dir` sites under `crates/api` are `assets.rs`
+/// (the front-end bundle), `render.rs` (a bar-file folder) and `server.rs`'s
+/// `archive_ready` (one feed's archive directory, D-3304). Per vendor
 /// rather than shared, so two feeds probing in the same pass cannot remove each
 /// other's file and read the removal as a failure.
 pub const STORE_PROBE_PREFIX: &str = ".brutex-write-probe-";

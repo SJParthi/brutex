@@ -19,8 +19,12 @@
 //! at `offset_of(index)` — `docs/07-o1-architecture.md` layer 1, the whole point
 //! of a fixed-stride format. So the row at index 40,000 costs exactly what the
 //! row at index 0 costs, and a page of 200 is 200 reads regardless of which page
-//! it is. Nothing here scans, and nothing here holds a month in memory: a
-//! request for page 5 touches the 200 records of page 5 and no others.
+//! it is. The PAGE route scans nothing and holds no month in memory: a request
+//! for page 5 touches the 200 records of page 5 and no others. The WINDOW
+//! route ([`window`]) is the exception in this module: sorted by a price
+//! column, or asked for extremes, it reads every bar of every month in its
+//! range and holds them, up to `MAX_WINDOW_MONTHS` months —
+//! `docs/06-limits.md`, D-0733. Its `ts` order does not (D-3304).
 //!
 //! `n_valid` comes off the header, so the page count is a division rather than a
 //! walk — the same arithmetic `/store` and `/instruments` page by.
