@@ -126,7 +126,7 @@ impl Off {
 }
 
 /// Every commit the texts cite that `main` does not hold, and why.
-const NOT_ON_MAIN: [(&str, Off); 36] = [
+const NOT_ON_MAIN: [(&str, Off); 37] = [
     ("6a58d7c", Off::Neither),
     ("79b9a1d5", Off::Neither),
     ("224b6760", Off::Neither),
@@ -151,6 +151,9 @@ const NOT_ON_MAIN: [(&str, Off); 36] = [
     ("fd70a1bd", Off::Squashed),
     ("eecca4da", Off::Squashed),
     ("950ead28", Off::Squashed),
+    // GI-21 (D-2822) names the GDFL import's own earlier commit whose
+    // journal form it resumes.
+    ("3cc6b8e0", Off::Squashed),
     ("08a4258", Off::MainsOwnText),
     ("0d4fef13", Off::MainsOwnText),
     ("11feb080", Off::MainsOwnText),
