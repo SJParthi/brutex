@@ -63608,3 +63608,70 @@ screened nor consumed.
 `the_span_loaded_for_one_number_seeds_the_work_it_hands_off`
 (`crates/cli/tests/limits_o1cli_5.rs`) holds the four entries and the kernel to
 that shape.
+
+### D-1840 — A rung prepares once, and the rungs of one command share their minute and daily reads — 2026-10-04
+
+**What was found (o1cli-2, o1cli-3, o1cli-4; each left stated in
+`docs/06-limits.md`).** `one_rung` read a rung's raw signal span and, when no
+support was named, built an anchored column from it to size the affordability
+probe; the audit kernel then read the span and built the column again
+(o1cli-2). `column_withholding_at_build` read the daily and exact-minute
+context spans on every pass, digested the contexts and dropped them, and the
+kernel read both again through `exact_minute_withholding_unsourceable_days`
+and `stored::load_daily_context` to compare a second digest (o1cli-4). And
+every rung of an all-rungs command read the same one-minute execution series
+and context spans for itself: some 24 to 32 reads of identical minutes per
+command (o1cli-3).
+
+**The change.**
+- `column_withholding_at_build` returns a `PreparedColumn`: the column, its
+  preparation digest, the daily and exact-minute contexts of the pass that
+  built, and the IST days it withheld. `load_audit_inputs` sweeps those
+  contexts; the second read, the second digest and its compare are gone, and
+  `exact_minute_withholding_unsourceable_days` and
+  `column_withholding_unsourceable_days`, left without callers, are deleted.
+  The compare could only notice a store changed between the two reads, and
+  the second read was what the sweep then used; the identity now binds the
+  bytes swept by construction, which is the guarantee D-1557 already relies on
+  for a held descent step. The withheld days fill the page's `EXACT-MINUTE
+  HOLES` line and its one telemetry event, which the deleted loop could never
+  fill once the build had succeeded; the build no longer emits its own copy.
+- A `SpanShare` holds, per command, the spans that do not depend on the rung:
+  the `1min` execution series over the signal months (also the `1min` rung's
+  signal), and the `1day` and `1min` spans from the month before. The first
+  ask reads a span under the share's lock, so concurrent rungs wait for the
+  same bytes rather than reading them again; every later ask, refusal
+  included, is handed what was read. At most three keys per command, so the
+  lookup is a scan of at most three. Build passes derive their contexts from
+  the held spans in the order the whole loads refused in before.
+  `sweep_rungs` gives every rung's `AuditCache` the one share
+  (`AuditCache::sharing`); every other caller's cache holds its own.
+- `one_rung_cached` asks `AuditCache::inputs` for the kernel's own
+  preparation instead of reading a raw span, takes the bar count, missing
+  months and exclusion from it, and sizes a derived support's probe on the
+  kernel's column, span and preparation digest. The raw-span slot is removed.
+  The probe now measures the column the sweep runs over, which withholds the
+  measured holed days first; it measured an unwithheld copy before. An
+  unstamped build, which can record nothing, reads the signal span alone so a
+  damaged or missing source is still named first
+  (`a_failed_range_never_claims_that_no_source_was_read`), then refuses with
+  the kernel's own unstamped refusal and prepares nothing.
+
+**What it proves.**
+`cli::audited_stored_tests::rungs_share_their_reads_and_build_their_column_once`
+counts: one derived `5min` rung, one build and three shared reads (two builds
+and seven reads before); `5min` and `1min` unshared, six reads, through one
+share three, and the recorded rows equal but for their wall-clock stamp.
+`cli::audited_stored_tests::a_build_that_withholds_a_day_reads_nothing_more`
+builds a month whose 2025-05-06 lost its last minute twice over the same three
+reads and requires the page to name that day. `a_rung_reads_its_span_and_builds_its_column_once`,
+`the_rungs_of_one_command_read_the_shared_spans_once` and
+`the_kernel_sweeps_the_contexts_its_column_was_built_from` hold the code to
+that shape. Counted, not timed.
+
+**What remains, and why.** Each coarse rung reads its own signal span once:
+the rungs ask different files. The signal months of the minute series are read
+twice per command, as the execution series and inside the warm context span:
+the warm span starts a month earlier and refuses a hole the execution series
+may name, so deriving one from the other would change which refusal a
+partial store meets first.
