@@ -1679,6 +1679,37 @@ mod tests {
         POPULATION_ID_DERIVATIONS.with(std::cell::Cell::get)
     }
 
+    /// One validation per grid, then the O(1)-per-cell entry (D-1834).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the strategy identity's own terms, passed through unchanged"
+    )]
+    fn derive_strategy_digest_v1(
+        population_id: [u8; 32],
+        family: InstrumentFamilyV1,
+        rung: u32,
+        policy: [u8; 32],
+        direction: TradeDirectionV1,
+        resolved: &ResolvedExitGridV1,
+        evaluated: &EvaluatedExitGridV1,
+        ordinal: usize,
+    ) -> Result<[u8; 32], PopulationAdmissionWriterRefusal> {
+        let validated = resolved
+            .validate_evaluation(evaluated)
+            .expect("complete fixture grid validates");
+        derive_strategy_digest_from_validated_v1(
+            population_id,
+            family,
+            rung,
+            policy,
+            direction,
+            resolved,
+            evaluated,
+            &validated,
+            ordinal,
+        )
+    }
+
     /// W2-cli10-2, D-1834: no strategy-digest entry validates the whole grid
     /// per cell. The public `derive_strategy_digest_v1` ran
     /// `validate_evaluation` (O(G)) for every cell it was asked about, so a
@@ -2417,30 +2448,6 @@ mod tests {
         assert!(long_first.grid().cells.get(1).is_some());
         let population_id = [0xB1; 32];
         let evaluation_policy = [0xB2; 32];
-        // One validation per grid, then O(1) per cell (D-1834).
-        let derive_strategy_digest_v1 = |population_id,
-                                         family,
-                                         rung,
-                                         policy,
-                                         direction,
-                                         resolved: &ResolvedExitGridV1,
-                                         evaluated: &EvaluatedExitGridV1,
-                                         ordinal| {
-            let validated = resolved
-                .validate_evaluation(evaluated)
-                .expect("complete fixture grid validates");
-            derive_strategy_digest_from_validated_v1(
-                population_id,
-                family,
-                rung,
-                policy,
-                direction,
-                resolved,
-                evaluated,
-                &validated,
-                ordinal,
-            )
-        };
         let base = derive_strategy_digest_v1(
             population_id,
             InstrumentFamilyV1::Nifty,
