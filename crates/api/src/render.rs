@@ -1682,6 +1682,15 @@ fn feed_select() -> String {
     choices
 }
 
+/// The cash-identity picker. `isin` first and therefore the default; every
+/// value is one `ingest::parse_cash_identity` accepts. D-3314.
+pub(crate) const CASH_IDENTITY_SELECT: &str = "<select name=\"cash_identity\">\
+     <option value=\"isin\" selected>Vendor-supplied ISIN (default; Zerodha supplies none)</option>\
+     <option value=\"zerodha_nse_checked\">Zerodha token + symbol checked against NSE's own ISIN file (no other vendor)</option>\
+     <option value=\"zerodha_cross_checked\">Zerodha token + ISIN cross-check with a Groww or Dhan master</option>\
+     <option value=\"zerodha_symbol\">Zerodha exact token only — NOT ISIN-verified</option>\
+     </select>";
+
 /// The bar-length picker, built the same way and from the same two tables.
 ///
 /// A rung is offered when **some feed declares it** and **the store has a
@@ -1793,6 +1802,14 @@ fn pull_forms(view: &PullView<'_>) -> String {
     // shape. Groww's response shape has never been seen, and the note below
     // says so rather than letting an operator discover it.
     out.push_str(&field("Feed", &feed_select()));
+    // WHICH CASH-IDENTITY ASSURANCE. Without it this form could only send
+    // the default `isin`, which reaches none of the F&O shares on Zerodha
+    // (charter §8). The default stays `isin`; the other three are refused by
+    // `ingest::parse_cash_identity` for any feed but Zerodha. D-3314.
+    out.push_str(&field(
+        "Stock identity — the three Zerodha choices refuse any other feed",
+        CASH_IDENTITY_SELECT,
+    ));
     // WHICH BAR LENGTH, beside the feed rather than in the route. The rung
     // decides the store directory, the fold bucket and whether the session
     // filter applies, and it was `Timeframe::MINUTE_1` written into
@@ -3922,6 +3939,9 @@ mod tests {
         // TWO FORMS. Spot and F&O take different fields, so they are different
         // forms rather than one form with a mode switch.
         assert_eq!(html.matches("<form class=\"pull\"").count(), 2);
+        // The spot form names its cash-identity assurance, once. D-3314.
+        assert_eq!(html.matches(CASH_IDENTITY_SELECT).count(), 1);
+        assert_eq!(html.matches("name=\"cash_identity\"").count(), 1);
         assert_eq!(html.matches("method=\"post\"").count(), 2);
         assert_eq!(html.matches("method=\"get\"").count(), 0);
         assert!(

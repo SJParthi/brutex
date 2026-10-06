@@ -464,6 +464,11 @@ pub struct Read {
     /// second answer to "who is in the NIFTY 200", and the two master-counted
     /// ones share one fold. See [`coverage::Coverage`]. D-0120.
     pub coverage: coverage::Coverage,
+    /// NSE's own Total Market file and the Zerodha dump's landing day, for
+    /// `cash_identity=zerodha_nse_checked`. Read once per masters parse, in
+    /// [`universe`], never on a request. A missing file is held as its reason
+    /// and refuses that one policy; it does not fail the parse. D-3314.
+    pub nse_reference: crate::nse_identity::Reference,
 }
 
 impl Read {
@@ -522,6 +527,7 @@ impl Read {
             catalog,
             constituents,
             coverage,
+            nse_reference: crate::nse_identity::Reference::not_read(),
         }
     }
 
@@ -735,7 +741,11 @@ pub fn universe(dir: &Path) -> Read {
             alone.join(", ")
         ));
     }
-    Read::new(merged, notes, unread, unrecognised, unreadable, non_routine)
+    let mut read = Read::new(merged, notes, unread, unrecognised, unreadable, non_routine);
+    // READ BESIDE THE MASTERS IT IS COMPARED WITH, in the same pass, so a
+    // refresh that lands both re-reads both. D-3314.
+    read.nse_reference = crate::nse_identity::Reference::read(dir);
+    read
 }
 
 /// Liveness plus the decode tallies, so a machine can check what a human sees.
@@ -6379,6 +6389,14 @@ async fn spot_answer(
                 "Cash identity assurance",
                 asked.cash_identity.label().to_owned(),
             ));
+            // WHICH NSE FILE THE ASSURANCE RESTS ON: its landing day, size,
+            // row count and digest. D-3314.
+            if asked.cash_identity == ingest::CashIdentity::ZerodhaNseChecked {
+                facts.push((
+                    "NSE identity file",
+                    site.universe().read.nse_reference.provenance(),
+                ));
+            }
             match asked.feed.descriptor().transport {
                 // THE BROKER PATH. The credential is read from Parameter Store
                 // (D-0051), the descriptor drives the request, and the bars
@@ -6880,6 +6898,9 @@ fn spot_audit_origin(policy: ingest::CashIdentity, origin: &str) -> String {
         }
         ingest::CashIdentity::ZerodhaCrossChecked => {
             format!("zerodha_cross_checked NSE-ISIN current snapshot; {origin}")
+        }
+        ingest::CashIdentity::ZerodhaNseChecked => {
+            format!("zerodha_nse_checked NOT vendor-ISIN; NSE file same day; {origin}")
         }
     }
 }
@@ -7596,7 +7617,7 @@ fn spot_mapping_refusal(
     let mut issues: Vec<String> = expected
         .into_iter()
         .filter(|name| !resolved.contains(name))
-        .map(|name| format!("{name}: no unambiguous vendor ID in the requested target"))
+        .map(|name| unresolved_member(asked, read, name))
         .collect();
     for key in targets {
         if let Err(why) = spot_vendor_identity_for(read, key, vendor, asked.cash_identity) {
@@ -7613,6 +7634,24 @@ fn spot_mapping_refusal(
         asked.feed.display(),
         issues.join("; ")
     ))
+}
+
+/// Why one requested member is not among the targets.
+///
+/// Under `zerodha_nse_checked` the generic sentence would fold "Zerodha lists
+/// no such row" and "Zerodha lists two" into one, and the policy promises to
+/// name them apart. One O(1) confirmation per unresolved member names which.
+/// UNVERIFIED as a gated bound; see `docs/06-limits.md`, D-3314.
+/// A member with no NSE ISIN (an index) keeps the generic sentence: the
+/// policy does not apply to it. D-3314.
+fn unresolved_member(asked: &ingest::SpotRequest, read: &Read, name: &str) -> String {
+    if asked.cash_identity == ingest::CashIdentity::ZerodhaNseChecked {
+        match read.nse_reference.confirm(&read.merged, name) {
+            Err(crate::nse_identity::Refusal::NoMemberIsin) | Ok(_) => {}
+            Err(why) => return why.sentence(name),
+        }
+    }
+    format!("{name}: no unambiguous vendor ID in the requested target")
 }
 
 /// Names the evidence required before cash-minute landing may proceed.
@@ -7921,6 +7960,15 @@ fn spot_vendor_identity_for(
         }
         if policy == ingest::CashIdentity::ZerodhaCrossChecked {
             zerodha_isin_cross_check(read, key)?;
+        }
+        // NSE'S OWN FILE, AND NO OTHER VENDOR'S MASTER. The token `confirm`
+        // finds is the native index's unique one, which the line above has
+        // already required to equal `id`. D-3314.
+        if policy == ingest::CashIdentity::ZerodhaNseChecked {
+            let symbol = key.underlying.as_str();
+            read.nse_reference
+                .confirm(&read.merged, symbol)
+                .map_err(|why| why.sentence(symbol))?;
         }
         return Ok((id, pull::vendor::Listing::Equity));
     }
@@ -21375,6 +21423,198 @@ mod tests {
         );
     }
 
+    const NSE_HEAD: &str = "Company Name,Industry,Symbol,Series,ISIN Code\n";
+    const NSE_RELIANCE: &str = "Reliance Industries Ltd.,Oil,RELIANCE,EQ,INE002A01018\n";
+    const NSE_TCS: &str = "Tata Consultancy Services Ltd.,IT,TCS,EQ,INE467B01029\n";
+    const Z_RELIANCE: &str = "738561,2885,RELIANCE,RELIANCE INDUSTRIES,0,,0,0.05,1,EQ,NSE,NSE\n";
+    const Z_TCS: &str = "2953217,11723,TCS,TATA CONSULTANCY,0,,0,0.05,1,EQ,NSE,NSE\n";
+
+    /// Zerodha's dump and NSE's file, and NO Groww or Dhan master unless a
+    /// test adds one. D-3314.
+    fn nse_checked_fixture(
+        tag: &str,
+        zerodha: &str,
+        nse: Option<&str>,
+        groww: Option<&str>,
+    ) -> (Site, ingest::SpotRequest) {
+        let dir = masters(tag, groww, None);
+        std::fs::write(
+            dir.join(Vendor::Zerodha.master_file()),
+            format!("{ZERODHA_HEAD}{zerodha}"),
+        )
+        .expect("zerodha fixture");
+        let nse_path = dir.join(pull::masters::NSE_TOTAL_MARKET_FILE);
+        match nse {
+            Some(rows) => std::fs::write(&nse_path, format!("{NSE_HEAD}{rows}")).expect("nse"),
+            None => {
+                let _ = std::fs::remove_file(&nse_path);
+            }
+        }
+        let asked = ingest::parse_spot(
+            "vendor=zerodha&target=fno&member=RELIANCE&member=TCS&cash_identity=zerodha_nse_checked&granularity=1day&from=2026-09-01&to=2026-09-04",
+            day(2026, 10, 10),
+        )
+        .expect("request");
+        assert_eq!(asked.cash_identity, ingest::CashIdentity::ZerodhaNseChecked);
+        (site(tag, &dir), asked)
+    }
+
+    fn nse_checked_refusal(site: &Site, asked: &ingest::SpotRequest) -> Option<String> {
+        spot_mapping_refusal(asked, &site.universe().read, &spot_targets(asked, site))
+    }
+
+    #[test]
+    fn nse_checked_identity_resolves_from_zerodha_and_nse_alone() {
+        let (site, asked) = nse_checked_fixture(
+            "nse-checked-good",
+            &format!("{Z_RELIANCE}{Z_TCS}"),
+            Some(&format!("{NSE_RELIANCE}{NSE_TCS}")),
+            None,
+        );
+        let read = &site.universe().read;
+        assert!(
+            !read.merged.contributed.contains(&Vendor::Groww)
+                && !read.merged.contributed.contains(&Vendor::Dhan),
+            "no other vendor's master was read"
+        );
+        assert_eq!(nse_checked_refusal(&site, &asked), None);
+        for (symbol, token) in [("RELIANCE", "738561"), ("TCS", "2953217")] {
+            let key = brutex_core::instrument::InstrumentKey::cash(
+                brutex_core::instrument::Exchange::Nse,
+                symbol,
+            )
+            .expect("key");
+            let (id, listing) = spot_vendor_identity_for(
+                read,
+                &key,
+                Vendor::Zerodha,
+                ingest::CashIdentity::ZerodhaNseChecked,
+            )
+            .expect("confirmed against NSE's own file");
+            assert_eq!(id.as_str(), token);
+            assert_eq!(listing, pull::vendor::Listing::Equity);
+            assert_eq!(
+                read.merged
+                    .by_key
+                    .get(&key)
+                    .and_then(|entry| entry.vendor_isin(Vendor::Zerodha)),
+                None,
+                "D-0517: no ISIN is written into Zerodha's row"
+            );
+            assert!(
+                spot_vendor_identity(read, &key, Vendor::Zerodha).is_err(),
+                "the default isin policy is unchanged"
+            );
+        }
+        assert!(spot_reach_text(&asked, &site).contains("NSE's own ISIN file"));
+        assert!(
+            read.nse_reference
+                .provenance()
+                .contains("ind_niftytotalmarket_list.csv landed")
+        );
+    }
+
+    #[test]
+    fn nse_checked_identity_never_reads_another_vendors_isin() {
+        // A Groww master that disagrees with NSE changes nothing: the policy
+        // reads Zerodha and the exchange, and nothing else.
+        let wrong = format!("{GROWW_HEAD}NSE,CASH,,RELIANCE,EQ,EQ,INE009A01021,,,NSE-RELIANCE\n");
+        let (site, asked) = nse_checked_fixture(
+            "nse-checked-groww-ignored",
+            &format!("{Z_RELIANCE}{Z_TCS}"),
+            Some(&format!("{NSE_RELIANCE}{NSE_TCS}")),
+            Some(&wrong),
+        );
+        assert_eq!(nse_checked_refusal(&site, &asked), None);
+        // And the other policy that DOES read Groww refuses on the same masters.
+        let mut cross = asked.clone();
+        cross.cash_identity = ingest::CashIdentity::ZerodhaCrossChecked;
+        assert!(nse_checked_refusal(&site, &cross).is_some());
+    }
+
+    #[test]
+    fn nse_checked_identity_names_every_required_refusal() {
+        let both_nse = format!("{NSE_RELIANCE}{NSE_TCS}");
+        let cases = [
+            (
+                "nse-checked-zerodha-absent",
+                Z_RELIANCE.to_owned(),
+                Some(both_nse.clone()),
+                "TCS: zerodha_nse_checked refused — Zerodha's dump lists no NSE cash EQ row",
+            ),
+            (
+                "nse-checked-zerodha-two",
+                format!(
+                    "{Z_RELIANCE}{Z_TCS}9999999,11724,TCS,TATA CONSULTANCY,0,,0,0.05,1,EQ,NSE,NSE\n"
+                ),
+                Some(both_nse.clone()),
+                "TCS: zerodha_nse_checked refused — Zerodha's dump lists more than one NSE cash EQ token",
+            ),
+            (
+                "nse-checked-nse-absent",
+                format!("{Z_RELIANCE}{Z_TCS}"),
+                Some(NSE_RELIANCE.to_owned()),
+                "TCS: zerodha_nse_checked refused — NSE's ind_niftytotalmarket_list.csv has no row for this symbol",
+            ),
+            (
+                "nse-checked-other-isin",
+                format!("{Z_RELIANCE}{Z_TCS}"),
+                Some(format!("{NSE_RELIANCE}TCS,IT,TCS,EQ,INE009A01021\n")),
+                "TCS: zerodha_nse_checked refused — NSE's ind_niftytotalmarket_list.csv maps this symbol to INE009A01021, and the universe member is INE467B01029",
+            ),
+            (
+                "nse-checked-file-missing",
+                format!("{Z_RELIANCE}{Z_TCS}"),
+                None,
+                "RELIANCE: zerodha_nse_checked refused — NSE's ind_niftytotalmarket_list.csv is not usable",
+            ),
+        ];
+        for (tag, zerodha, nse, words) in cases {
+            let (site, asked) = nse_checked_fixture(tag, &zerodha, nse.as_deref(), None);
+            let why = nse_checked_refusal(&site, &asked).expect(tag);
+            assert!(why.contains(words), "{tag}: {why}");
+            assert!(why.contains("No vendor was contacted"), "{tag}: {why}");
+        }
+    }
+
+    #[test]
+    fn nse_checked_identity_refuses_an_nse_file_not_landed_beside_the_dump() {
+        let (site, asked) = nse_checked_fixture(
+            "nse-checked-stale",
+            &format!("{Z_RELIANCE}{Z_TCS}"),
+            Some(&format!("{NSE_RELIANCE}{NSE_TCS}")),
+            None,
+        );
+        let dir = crate::scratch::path("server-nse-checked-stale");
+        let two_days_ago = std::time::SystemTime::now() - std::time::Duration::from_hours(48);
+        std::fs::File::options()
+            .write(true)
+            .open(dir.join(pull::masters::NSE_TOTAL_MARKET_FILE))
+            .expect("open")
+            .set_modified(two_days_ago)
+            .expect("backdate the NSE file");
+        let stale = universe(&dir);
+        let why = spot_mapping_refusal(&asked, &stale, &spot_targets(&asked, &site))
+            .expect("a stale NSE file refuses");
+        assert!(why.contains("must be landed on the same IST day"), "{why}");
+        // The other way round is just as stale.
+        std::fs::File::options()
+            .write(true)
+            .open(dir.join(pull::masters::NSE_TOTAL_MARKET_FILE))
+            .expect("open")
+            .set_modified(std::time::SystemTime::now())
+            .expect("restore");
+        std::fs::File::options()
+            .write(true)
+            .open(dir.join(Vendor::Zerodha.master_file()))
+            .expect("open")
+            .set_modified(two_days_ago)
+            .expect("backdate the dump");
+        let why = spot_mapping_refusal(&asked, &universe(&dir), &spot_targets(&asked, &site))
+            .expect("a dump older than the NSE file refuses too");
+        assert!(why.contains("must be landed on the same IST day"), "{why}");
+    }
+
     #[test]
     fn cross_checked_identity_refuses_absent_wrong_or_ambiguous_independent_evidence() {
         let good = format!("{GROWW_HEAD}NSE,CASH,,RELIANCE,EQ,EQ,INE002A01018,,,NSE-RELIANCE\n");
@@ -21403,6 +21643,55 @@ mod tests {
             zerodha_isin_cross_check(&read, &key).is_err(),
             "stale join cannot lend evidence to a changed native token"
         );
+    }
+
+    #[test]
+    fn every_zerodha_policy_refuses_an_equity_key_that_is_not_nse_cash() {
+        // The native token alone names a listing. Only an NSE cash key may
+        // stand for a share under any Zerodha policy, whatever the venue or
+        // segment a listing carries. D-0514, D-3314.
+        let listing = |key: brutex_core::instrument::InstrumentKey, token: &str| {
+            brutex_core::vendor::Listing {
+                vendor_id: brutex_core::vendor::VendorId::new(token).expect("token"),
+                key,
+                isin: None,
+                unsuffixed: None,
+            }
+        };
+        let bse = brutex_core::instrument::InstrumentKey::cash(
+            brutex_core::instrument::Exchange::Bse,
+            "RELIANCE",
+        )
+        .expect("key");
+        let mut fno_segment = brutex_core::instrument::InstrumentKey::cash(
+            brutex_core::instrument::Exchange::Nse,
+            "TCS",
+        )
+        .expect("key");
+        fno_segment.segment = brutex_core::instrument::Segment::Fno;
+        let merged = crate::merge::merge(&[crate::merge::Source {
+            vendor: Vendor::Zerodha,
+            kept: vec![listing(bse, "128083204"), listing(fno_segment, "2953217")],
+            declined: Vec::new(),
+        }]);
+        let read = Read::new(merged, Vec::new(), Vec::new(), 0, 0, 0);
+        for key in [bse, fno_segment] {
+            assert!(
+                read.merged.native_id(Vendor::Zerodha, key).is_some(),
+                "the token is exact and unique, so only the venue or segment can refuse"
+            );
+            for policy in [
+                ingest::CashIdentity::ZerodhaSymbol,
+                ingest::CashIdentity::ZerodhaNseChecked,
+            ] {
+                let why = spot_vendor_identity_for(&read, &key, Vendor::Zerodha, policy)
+                    .expect_err("not an NSE cash key");
+                assert!(
+                    why.contains("no unique exact native NSE cash identity"),
+                    "{policy:?}: {why}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -22475,6 +22764,21 @@ mod tests {
             record
                 .source
                 .starts_with("zerodha_cross_checked NSE-ISIN current snapshot;")
+        );
+        let nse_checked = spot_audit_origin(ingest::CashIdentity::ZerodhaNseChecked, &source);
+        let record = audit::Record::refused(
+            audit::Scope::Spot,
+            audit::Outcome::Failed,
+            std::time::UNIX_EPOCH,
+            &nse_checked,
+            "fixture",
+        );
+        assert!(
+            record
+                .source
+                .starts_with("zerodha_nse_checked NOT vendor-ISIN; NSE file same day;"),
+            "{}",
+            record.source
         );
     }
 

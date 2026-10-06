@@ -63346,3 +63346,103 @@ all-or-nothing contract.
 **Cost.** One census read and one hash probe per month from the floor, only
 for an instrument whose first chunk was empty. This is O(months), not O(1),
 and not timed. `docs/06-limits.md` states the bound. Invariant P-75.
+
+### D-3314 — `cash_identity=zerodha_nse_checked`: a Zerodha NSE EQ row confirmed against NSE's own ISIN file, with no other vendor — 2026-10-06
+
+**What was observed.** Kite's dump has no ISIN column (charter §8), so under
+the default `cash_identity=isin` Zerodha reaches 0 of the 208 F&O shares.
+`zerodha_symbol` (D-0514) reaches 208 and is NOT ISIN-verified.
+`zerodha_cross_checked` (D-0517) reaches 208 but needs an ISIN-bearing Groww
+or Dhan master as its witness. The operator uses only Zerodha and GDFL. On
+the 11:17 IST dump of 6 Oct 2026 every one of the 208 shares has exactly one
+Zerodha row with `exchange=NSE`, `segment=NSE`, `instrument_type=EQ` and that
+tradingsymbol.
+
+**Operator decision (6 Oct 2026).** Build a Zerodha-only, explicitly
+labelled policy that confirms the row against NSE's own ISIN-bearing file,
+with no Groww or Dhan master involved, and pull nothing until it exists.
+
+**Which NSE file, and why one download is added.** The only ISIN-bearing NSE
+file this engine reads is `ind_niftytotalmarket_list.csv` (charter §4c). It
+reaches the engine as the 2026-08-11 transcription in `core::universe`, the
+same source that gives each F&O share its ISIN (`FNO_UNDERLYINGS_ISIN`).
+Checking a Zerodha row against that transcription would compare the member's
+ISIN with itself. It cannot be missing, unreadable or stale, so three of the
+required refusals could never fire. It also could not see a symbol whose
+ISIN changed after August. So the policy needs a current copy, and that copy
+is a new download. It is the same NSE file at the URL charter §4c records,
+added as the fifth master source, `nse_total_market.csv`: public, no token,
+no prime, and landed as received only once `pull::nse::constituents_strict`
+decodes every row. No other new file is fetched.
+
+**Decided.** A fourth `CashIdentity`, `zerodha_nse_checked`, Zerodha only.
+For one F&O share it holds only when all five hold, in this order:
+
+1. The universe member has an NSE ISIN (`core::universe::nse_isin`).
+2. Zerodha's own listings hold exactly one NSE cash EQ token for the symbol,
+   and no other row shares that token (`merge::Merged::native_lookup`).
+3. `nse_total_market.csv` is on disk and decodes, and its modification time
+   falls on the same IST day as `zerodha_instruments.csv`'s.
+4. The file lists the symbol, in series `EQ`.
+5. The ISIN the file prints beside the symbol equals the member's ISIN.
+
+Each failure is a named refusal: Zerodha lists no such row; Zerodha lists
+more than one token or shares it; the NSE file is not usable (missing,
+unreadable, oversized, or not the constituent file, with its own reason);
+the two files were not landed on the same IST day; the Zerodha dump's day
+cannot be read; the NSE file has no row for the symbol; the row is not
+series `EQ`; the printed ISIN is malformed; the printed ISIN is a different
+ISIN. A requested member that is not a target because of its Zerodha row
+gets the Zerodha refusal, not the generic "no unambiguous vendor ID". The
+refusal is all-or-nothing before any vendor work, like the other policies.
+
+**What it is not.** It does not fill Zerodha's ISIN column and never claims
+Zerodha supplied an ISIN (D-0517). It is not `isin`, and the default `isin`
+path is unchanged. No ISIN is joined by name for any other policy (D-0125).
+It reads no Groww or Dhan master: a Groww master that disagrees with NSE
+does not change its answer. It is current-snapshot evidence, not proof of
+historical renames, corporate actions or membership.
+
+**Where it is recorded.** The receipt's `Cash identity assurance` line
+carries its label, and a new `NSE identity file` line names the file's
+landing day, size, row count and a blake3 prefix. The run event carries the
+label, and the bounded audit source starts
+`zerodha_nse_checked NOT vendor-ISIN; NSE file same day;`.
+
+**Forms.** The Ingest page (`/ingest`) offers it as a fourth choice in
+*Stock identity verification*. The page's default stays
+`zerodha_cross_checked`. The server-rendered `/pull` spot form had no
+cash-identity control at all, so it could only send `isin`. It now has a
+`cash_identity` select with `isin` as the default and the three Zerodha
+choices.
+
+**Autopilot.** Unchanged: it still sends `isin` (D-0514). Nothing here
+gives the autopilot this policy. Changing that needs its own decision.
+
+**Recovery.** `api::recovery` still requires `zerodha_cross_checked`. Not
+changed here.
+
+**Verified on real data.** A throwaway local test (not committed) ran the
+check on copies of the 6 Oct 2026 masters:
+
+- The masters directory as it is (no NSE file has ever been landed): 0 of
+  208 shares resolve, and all 208 refuse "NSE's
+  ind_niftytotalmarket_list.csv is not usable … No such file or directory".
+- Zerodha's dump alone, plus an NSE file rebuilt from the 2026-08-11
+  transcription (749 rows; series written as `EQ` because the transcription
+  does not carry series): 208 of 208 resolve, with no Groww or Dhan master
+  read. That second run shows the Zerodha side and the join; it is not the
+  live NSE file, which this change did not download.
+- The five index underlyings carry no NSE ISIN, and the policy does not
+  apply to them: an index resolves as an index listing under every policy.
+  With the rebuilt file, a `target=swept` preflight (208 shares plus NIFTY
+  and BANKNIFTY, 210 targets) passes. A `target=fno` preflight with no
+  members ticked is refused for FINNIFTY, MIDCPNIFTY and NIFTYNXT50, which
+  have no unambiguous Zerodha ID. That refusal is older than this change.
+
+**Cost.** `Reference::read` decodes the file once per masters parse. A
+confirmation is one expected-O(1) probe into Zerodha's native index and one
+into the file's `HashMap`. Measured in that throwaway test (release build,
+M4 Pro, 50 rounds of all 208 shares, 10,400 calls): p50 84–125 ns, p99
+250 ns, max 1.5–10.9 µs. `docs/06-limits.md` records it. Invariants ZNC-01
+to ZNC-09.

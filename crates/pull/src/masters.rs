@@ -87,6 +87,9 @@ pub enum Shape {
     Csv,
     /// NSE's category-to-names JSON, converted before landing.
     NseIndexJson,
+    /// One of NSE's own index constituent CSVs, landed as received once
+    /// `nse::constituents_strict` reads every row. D-3314.
+    NseConstituentCsv,
 }
 
 /// One instrument master, and what it costs to fetch.
@@ -228,6 +231,13 @@ pub fn missing_columns(header: &str, vendor: Vendor) -> Vec<&'static str> {
 /// NSE's own index list — the reference every feed is checked against.
 pub const NSE_INDICES_FILE: &str = "nse_indices.csv";
 
+/// NSE's own NIFTY Total Market constituent file, as the exchange publishes
+/// it: `Company Name,Industry,Symbol,Series,ISIN Code`. The only master this
+/// engine reads that carries an exchange ISIN beside a symbol. It is what
+/// `cash_identity=zerodha_nse_checked` confirms a Zerodha NSE EQ row against.
+/// Source: `docs/00-charter.md` §4c. D-3314.
+pub const NSE_TOTAL_MARKET_FILE: &str = "nse_total_market.csv";
+
 /// The largest body that will be read into memory, in bytes. 256 MiB.
 ///
 /// # The other end of [`MIN_BODY_BYTES`], and it is not symmetric
@@ -256,7 +266,7 @@ pub const MAX_BODY_BYTES: usize = 256 * 1_024 * 1_024;
 /// named by its own filename."* `TrueData` and `Gdfl` are therefore absent by
 /// the same rule that gives them a filename which `master_paths` looks for and
 /// will not find.
-pub const SOURCES: [Source; 4] = [
+pub const SOURCES: [Source; 5] = [
     Source {
         shape: Shape::Csv,
         vendor: Some(Vendor::Dhan),
@@ -324,6 +334,25 @@ pub const SOURCES: [Source; 4] = [
         // UNVERIFIED and shipped regardless, and for what happens when the
         // prime itself refuses.
         prime: Some("https://www.nseindia.com/"),
+        needs_token: false,
+    },
+    Source {
+        // THE EXCHANGE'S OWN ISIN-BEARING FILE, AND THE ONLY ONE THIS ENGINE
+        // READS AT RUN TIME. `core::universe` carries a transcription of this
+        // same file from 2026-08-11; that photograph cannot say whether a
+        // symbol still names the same ISIN today. This copy is landed beside
+        // the Zerodha dump so the two are the same age. D-3314.
+        //
+        // The URL is the one `docs/00-charter.md` §4c records, read from the
+        // exchange rather than composed (charter §4d). No prime: the archive
+        // host served it to a plain HTTPS GET on 2026-08-11, which is the only
+        // observation this repository has of it.
+        shape: Shape::NseConstituentCsv,
+        vendor: None,
+        file: NSE_TOTAL_MARKET_FILE,
+        url: "https://nsearchives.nseindia.com/content/indices/ind_niftytotalmarket_list.csv",
+        mirrors: &[],
+        prime: None,
         needs_token: false,
     },
 ];
@@ -1122,7 +1151,7 @@ pub fn validated_body<'a>(
     // NSE's JSON would refuse it for opening with `{`, which is true of every
     // correct response it will ever give.
     let converted = match source.shape {
-        Shape::Csv => std::borrow::Cow::Borrowed(body),
+        Shape::Csv | Shape::NseConstituentCsv => std::borrow::Cow::Borrowed(body),
         Shape::NseIndexJson => match nse_index_csv(body) {
             Ok(csv) => std::borrow::Cow::Owned(csv),
             Err(why) => {
@@ -1203,6 +1232,13 @@ pub fn validated_body<'a>(
 
     if let Some(vendor) = source.vendor {
         validate_rows(body, vendor).map_err(|why| format!("`{}` — {why}", source.url))?;
+    }
+    // EVERY ROW, NOT ONLY THE HEADER. A constituent file whose fifth column
+    // shifted would put a series where the ISIN belongs, and the identity
+    // check reads exactly that column. D-3314.
+    if source.shape == Shape::NseConstituentCsv {
+        crate::nse::constituents_strict(body)
+            .map_err(|why| format!("`{}` — not NSE's constituent file: {why}", source.url))?;
     }
     Ok(converted)
 }
@@ -1801,8 +1837,9 @@ async fn prime_now<D: crate::chain::Discovery>(
 )]
 mod tests {
     use super::{
-        Landed, MIN_BODY_BYTES, NSE_INDICES_FILE, SOURCES, Transport, free_sources, keep_rejected,
-        land, lock_path_of, lock_source, may_fetch, path_of, rejected_path_of, token_sources,
+        Landed, MIN_BODY_BYTES, NSE_INDICES_FILE, NSE_TOTAL_MARKET_FILE, SOURCES, Transport,
+        free_sources, keep_rejected, land, lock_path_of, lock_source, may_fetch, path_of,
+        rejected_path_of, token_sources, validated_body,
     };
     use brutex_core::vendor::Vendor;
 
@@ -1907,11 +1944,116 @@ mod tests {
                     vendor.master_file(),
                     "{vendor:?} is fetched into a file it is not read from"
                 ),
-                None => assert_eq!(
-                    source.file, NSE_INDICES_FILE,
-                    "the only sourceless master is NSE's own index list"
+                None => assert!(
+                    source.file == NSE_INDICES_FILE || source.file == NSE_TOTAL_MARKET_FILE,
+                    "the only sourceless masters are NSE's own files, not {}",
+                    source.file
                 ),
             }
+        }
+    }
+
+    #[test]
+    fn the_body_ceiling_and_floor_are_exact_bounds() {
+        // A body AT either bound passes that bound and is refused only for
+        // what it holds; one byte past it is refused by the bound itself.
+        // Called on `validated_body` so no 256 MiB file is written. D-3314.
+        let source = &SOURCES[0];
+        let over = "x".repeat(MAX_BODY_BYTES + 1);
+        let why = validated_body(source, &over).expect_err("past the ceiling");
+        assert!(
+            why.contains("ceiling"),
+            "{}",
+            why.chars().take(200).collect::<String>()
+        );
+        drop(over);
+        let at = "x".repeat(MAX_BODY_BYTES);
+        let why = validated_body(source, &at).expect_err("no comma");
+        assert!(
+            !why.contains("ceiling") && why.contains("no comma"),
+            "{}",
+            why.chars().take(200).collect::<String>()
+        );
+        drop(at);
+        let at_floor = "x".repeat(MIN_BODY_BYTES);
+        let why = validated_body(source, &at_floor).expect_err("no comma");
+        assert!(why.contains("no comma"), "{why}");
+        let under = "x".repeat(MIN_BODY_BYTES - 1);
+        let why = validated_body(source, &under).expect_err("under the floor");
+        assert!(why.contains("under the"), "{why}");
+    }
+
+    /// A constituent body in NSE's own header, `rows` real-looking rows long.
+    fn a_constituent_file(rows: usize) -> String {
+        use std::fmt::Write as _;
+        let mut body = String::from("Company Name,Industry,Symbol,Series,ISIN Code\n");
+        for n in 0..rows {
+            let _infallible = writeln!(
+                body,
+                "\"Company {n}, Ltd.\",Industry,SYM{n},EQ,INE{n:06}A01018"
+            );
+        }
+        body
+    }
+
+    #[test]
+    fn the_total_market_source_is_the_charter_url_public_and_lands_as_received() {
+        // D-3314. The one ISIN-bearing NSE file read at run time: public,
+        // vendorless, at the URL charter section 4c records, and landed byte
+        // for byte once every row decodes.
+        let source = SOURCES
+            .iter()
+            .find(|s| s.file == NSE_TOTAL_MARKET_FILE)
+            .expect("the Total Market file is a master");
+        assert_eq!(source.vendor, None);
+        assert!(!source.needs_token);
+        assert_eq!(source.prime, None);
+        assert_eq!(source.shape, super::Shape::NseConstituentCsv);
+        assert_eq!(
+            source.url,
+            "https://nsearchives.nseindia.com/content/indices/ind_niftytotalmarket_list.csv"
+        );
+        let dir = scratch("TotalMarketLands");
+        let body = a_constituent_file(40);
+        assert!(land(&dir, source, &body).is_written());
+        assert_eq!(
+            std::fs::read_to_string(path_of(&dir, source)).expect("landed"),
+            body
+        );
+    }
+
+    #[test]
+    fn a_total_market_body_that_is_not_the_constituent_file_is_refused() {
+        // A well-formed CSV with the wrong header, and a right header whose
+        // rows shift the ISIN column, both clear the shape guards. Neither
+        // may replace the file the identity check reads. D-3314.
+        let source = SOURCES
+            .iter()
+            .find(|s| s.file == NSE_TOTAL_MARKET_FILE)
+            .expect("the Total Market file is a master");
+        let wrong_header = a_constituent_file(40).replacen("ISIN Code", "ISIN", 1);
+        let shifted = format!(
+            "{}A,B,SHIFT,EQ,INE000Z01018,extra\n",
+            a_constituent_file(40)
+        );
+        let duplicate = format!(
+            "{}Company,Industry,SYM0,EQ,INE999A01018\n",
+            a_constituent_file(40)
+        );
+        for (n, (name, body)) in [
+            ("wrong header", wrong_header),
+            ("shifted row", shifted),
+            ("duplicate symbol", duplicate),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let dir = scratch(&format!("TotalMarketRefused{n}"));
+            let Landed::Refused(why) = land(&dir, source, &body) else {
+                panic!("{name} must be refused");
+            };
+            assert!(why.contains("not NSE's constituent file"), "{name}: {why}");
+            assert!(!path_of(&dir, source).exists(), "{name}: nothing written");
         }
     }
 

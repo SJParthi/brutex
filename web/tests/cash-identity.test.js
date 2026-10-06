@@ -28,3 +28,16 @@ test('cash identity is an explicit Zerodha-only choice with separate assurance l
     assert.equal(cashIdentityFor(feed, 'zerodha_symbol'), 'isin');
   }
 });
+
+test('the NSE-checked policy is a Zerodha-only choice the form offers (D-3314)', () => {
+  assert.equal(cashIdentityFor('zerodha', 'zerodha_nse_checked'), 'zerodha_nse_checked');
+  for (const feed of ['dhan', 'groww', 'truedata', 'gdfl', '', undefined, null]) {
+    assert.equal(cashIdentityFor(feed, 'zerodha_nse_checked'), 'isin');
+  }
+  for (const value of ['ZERODHA_NSE_CHECKED', 'zerodha_nse', 'nse_checked', ['zerodha_nse_checked']]) {
+    assert.equal(cashIdentityFor('zerodha', value), 'isin');
+  }
+  const page = readFileSync(new URL('../src/routes/ingest/+page.svelte', import.meta.url), 'utf8');
+  assert.ok(page.includes('<option value="zerodha_nse_checked">'));
+  assert.ok(page.includes("NSE's own Total Market file"));
+});

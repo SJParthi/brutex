@@ -192,10 +192,38 @@ impl Merged {
         vendor: Vendor,
         key: impl std::borrow::Borrow<InstrumentKey>,
     ) -> Option<VendorId> {
+        match self.native_lookup(vendor, key) {
+            NativeLookup::Unique(id) => Some(id),
+            NativeLookup::Absent | NativeLookup::Contested => None,
+        }
+    }
+
+    /// The same exact-native lookup as [`Self::native_id`], with its `None`
+    /// split in two: no listing of this vendor has the key, or listings do
+    /// and they do not agree on one token.
+    ///
+    /// `native_id` folds both into `None`, which is right for a caller that
+    /// only needs an id. A refusal must name which it was: "Zerodha lists no
+    /// NSE EQ row for this symbol" and "Zerodha lists two" send an operator to
+    /// different places. D-3314.
+    ///
+    /// # Cost
+    ///
+    /// One expected-O(1) hash probe on a fixed-width `Copy` key, the same
+    /// probe `native_id` makes. It never scans the listings or the
+    /// assertions. UNVERIFIED as a gated bound: no bench times it; the one
+    /// measurement, from D-3314's throwaway run, is in `docs/06-limits.md`.
+    #[must_use]
+    pub fn native_lookup(
+        &self,
+        vendor: Vendor,
+        key: impl std::borrow::Borrow<InstrumentKey>,
+    ) -> NativeLookup {
         self.native_ids
             .by_key
             .get(&(vendor, *key.borrow()))
             .copied()
+            .unwrap_or(NativeLookup::Absent)
     }
 
     /// The number of distinct instruments.
@@ -297,7 +325,23 @@ impl Merged {
 /// the construction-time checks; `Default` is an empty index.
 #[derive(Debug, Default)]
 pub struct NativeIds {
-    by_key: HashMap<(Vendor, InstrumentKey), VendorId>,
+    /// Every key a vendor listed: `Unique` when its token is unique both
+    /// ways, `Contested` when two tokens claim the key or its token also
+    /// names a different key. A key no listing carried is absent from the
+    /// map. D-3314.
+    by_key: HashMap<(Vendor, InstrumentKey), NativeLookup>,
+}
+
+/// What one vendor's own listings say about one exact key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeLookup {
+    /// Exactly one token, and that token names no other key.
+    Unique(VendorId),
+    /// The vendor lists no row with this key.
+    Absent,
+    /// The vendor lists the key, and its rows do not agree on one token, or
+    /// the token is shared with another key.
+    Contested,
 }
 
 impl NativeIds {
@@ -326,11 +370,13 @@ impl NativeIds {
         }
         let mut by_key = HashMap::with_capacity(capacity);
         for ((vendor, key), id) in forward {
-            if let Some(id) = id
-                && reverse.get(&(vendor, id)) == Some(&Some(key))
-            {
-                by_key.insert((vendor, key), id);
-            }
+            let found = match id {
+                Some(id) if reverse.get(&(vendor, id)) == Some(&Some(key)) => {
+                    NativeLookup::Unique(id)
+                }
+                _ => NativeLookup::Contested,
+            };
+            by_key.insert((vendor, key), found);
         }
         Self { by_key }
     }
@@ -801,6 +847,59 @@ mod tests {
                 assert_eq!(merged.by_key[&a.key].ids[Vendor::Zerodha as usize], None);
             }
         }
+    }
+
+    #[test]
+    fn native_lookup_names_absent_and_contested_apart() {
+        let a = equity("RELIANCE", "INE002A01018");
+        let mut two_tokens = a;
+        two_tokens.vendor_id = VendorId::new("other").unwrap();
+        let mut shares_token = equity("BLUECHIP", "INE657B01025");
+        let mut unique = equity("CHOLAFIN", "INE121A01024");
+        unique.vendor_id = VendorId::new("cholafin-token").unwrap();
+        shares_token.vendor_id = VendorId::new("shared").unwrap();
+        let mut shares_token_too = equity("TCS", "INE467B01029");
+        shares_token_too.vendor_id = shares_token.vendor_id;
+        let merged = merge(&[from(
+            Vendor::Zerodha,
+            vec![
+                a,
+                two_tokens,
+                shares_token,
+                shares_token_too,
+                unique,
+                unique,
+            ],
+        )]);
+        assert_eq!(
+            merged.native_lookup(Vendor::Zerodha, a.key),
+            NativeLookup::Contested
+        );
+        assert_eq!(
+            merged.native_lookup(Vendor::Zerodha, shares_token.key),
+            NativeLookup::Contested
+        );
+        assert_eq!(
+            merged.native_lookup(Vendor::Zerodha, shares_token_too.key),
+            NativeLookup::Contested
+        );
+        assert_eq!(
+            merged.native_lookup(Vendor::Zerodha, unique.key),
+            NativeLookup::Unique(unique.vendor_id)
+        );
+        assert_eq!(
+            merged.native_lookup(Vendor::Groww, unique.key),
+            NativeLookup::Absent,
+            "another vendor's key is absent, not contested"
+        );
+        assert_eq!(
+            merged.native_lookup(Vendor::Zerodha, equity("ABB", "INE117A01022").key),
+            NativeLookup::Absent
+        );
+        assert_eq!(
+            Merged::default().native_lookup(Vendor::Zerodha, a.key),
+            NativeLookup::Absent
+        );
     }
 
     #[test]
