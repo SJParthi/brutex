@@ -11614,9 +11614,26 @@ the counts the tests assert: no bench times the fold.
   Since D-1734 both sorts are in `finish_screen`, which `screen` calls once;
   a tier walk calls it only for a tier whose rows the cell rules admitted,
   and for the last tier.
-  Held to the code by
-  `the_screens_two_full_sorts_are_stated_and_the_full_order_still_read` in
-  `crates/cli/tests/limits_o1cli_6.rs`.
+  (Historical: this bullet describes the code before D-1842; its former test
+  was replaced with the fix.)
+
+**Fixed by D-1842 (2026-10-06).** The objection above did not hold: every
+money term is also a calendar term, and both stable sorts break their last
+ties by input order, which is `rank`. So the screen's final order is one total
+key, `screen_order_key` (the calendar key, then `rank`), and the fallback is
+a minimum under that key, not a walk down a sorted list. `finish_screen` now
+selects the measured band with `least_first` (`select_nth_unstable_by_key`,
+then a sort of the band alone) on `(money_key, rank)`, measures it, selects
+and sorts the printed top the same way on `screen_order_key`, and finds the
+subject with `final_selection_split`: two O(n) minimum scans, taken before
+`calendar_gate` flips `admitted`, with the gate's verdict read through
+`calendar_holds`. Cost O(n + band log band + top log top) per screen, band =
+`measured_band(top)`, instead of two O(n log n) sorts.
+`the_screens_selections_give_exactly_what_its_two_full_sorts_gave` runs the
+old double sort and the new selections over 60 rounds of 48 heavily tied rows
+and every `top` from 1 to 50, both calendar settings, and requires the same
+printed rows in order, the same verdicts and the same subject; it reaches the
+admitted and the fallback subject both. Counted by shape, not timed.
 
 ## Four commands load a span for one number, then load it again (audit o1cli-5)
 

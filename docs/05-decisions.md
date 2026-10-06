@@ -63894,3 +63894,44 @@ a test can name the file without the environment. No answer changes.
 `api::server::tests::indexmap_json_is_built_once_per_catalogue_stamp_and_parse`,
 `api::server::tests::indexmap_json_answers_the_environments_catalogue`.
 AHD-11, AHD-12.
+
+### D-1842 — The screen sorts only the rows it measures and prints — 2026-10-06
+
+**What was found (o1cli-6, stated in `docs/06-limits.md`).** `finish_screen`
+sorted every priced row twice with a stable `sort_by_key`, once on
+`money_key` before `measure_top` and once on the calendar key after it: two
+O(n log n) sorts for up to `SCREEN_CAP_CEILING` (10,000,000) rows, although
+`measure_top` reads only the first `measured_band(top)` rows and the page only
+the first `top`. The limit said a top-first selection was not equivalent
+because `final_selection` falls back past the top rows.
+
+**Why it is equivalent.** The calendar key's last three terms are the money
+key's three terms, and both stable sorts break remaining ties by input order,
+which is `rank` (strictly increasing, one per row). So the final order is the
+one total key `screen_order_key` = (calendar key, `rank`), and the money order
+the band is cut from is `(money_key, rank)`. "The first admitted row that
+traded in that order, else the first that traded" is the minimum under the
+same key over the rows that qualify, and `calendar_gate`'s verdict on a row is
+`calendar_holds`, which reads only that row.
+
+**The change.** `least_first` puts the k least rows first, in order, by
+`select_nth_unstable_by_key` and a sort of the k alone. `finish_screen` uses
+it for the band (`(money_key, rank)`) and for the printed top
+(`screen_order_key`), and `final_selection_split` takes the subject as two
+O(n) minimum scans before the gate flips `admitted`. Cost per screen:
+O(n + band log band + top log top) instead of 2 × O(n log n). No output
+changes: the printed rows, their order, every verdict, the counts and the
+subject are what the two sorts gave. `final_selection` remains for its tests.
+
+**Proof.** `cli::tests::the_screens_selections_give_exactly_what_its_two_full_sorts_gave`
+runs the old double sort and the new selections over 60 rounds of 48 rows
+tied heavily on every money and calendar term, measured and unmeasured,
+admitted or not, zero-trade or not, for every `top` from 1 to 50 under both
+calendar settings, and requires the same measured band, the same printed rows
+in order with the same flags, the same verdicts on every row and the same
+subject; it reaches an admitted subject and the fallback both.
+`the_screen_sorts_only_what_it_keeps` (`crates/cli/tests/limits_o1cli_6.rs`)
+holds the code and the limit to that shape. Counted by shape, not timed. The
+F8 stash `c249ffc` carried only these tests' first draft; the code is new
+here. AU-O1CLI-6.
+

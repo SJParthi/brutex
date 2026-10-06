@@ -11948,6 +11948,7 @@ impl Screened<'_> {
 ///
 /// Rows are still in objective order, so `find` still returns the HIGHEST
 /// earning admitted row. Only the horizon changed.
+#[cfg(test)]
 fn final_selection<'a>(rows: &[Screened<'a>], rules: Rules) -> Option<ScreenSelection<'a>> {
     // THE BEST-RANKED ROW THAT TRADED, admitted or not.
     //
@@ -13989,7 +13990,14 @@ fn finish_screen<'a>(
     //
     // `admitted` is untouched and still REPORTED, so a row that broke a stated
     // rule is ranked where it earned and printed beside the rule it broke.
-    rows.sort_by_key(|r| money_key(&r.cell));
+    //
+    // ONLY THE MEASURED BAND IS ORDERED (o1cli-6, D-1842). `measure_top` reads
+    // the first `measured_band(top)` rows and nothing else reads this order,
+    // so the band is selected in O(n) and sorted alone; the rest stay where
+    // they fall. `rank` breaks ties exactly as the stable sort's input order did.
+    least_first(&mut rows, measured_band(rules.top), |r| {
+        (money_key(&r.cell), r.rank)
+    });
 
     measure_top(&mut rows, bars, column, horizon, rules, facts);
 
@@ -14043,41 +14051,15 @@ fn finish_screen<'a>(
     // shape §4 bans. It is stable in that position, so the money order among
     // the unmeasured tail is preserved exactly as it was.
     //
-    // `sort_by_key` is stable, so rows equal on all five keep the money order
-    // the sort above gave them.
-    rows.sort_by_key(|r| {
-        let (weakest, worst_period) = r.consistency.as_ref().map_or(
-            // The unmeasured floor: worse than any real grain share and any
-            // real period, so measured rows always sort ahead.
-            (i64::MIN, i128::MIN),
-            calendar_terms,
-        );
-        core::cmp::Reverse((
-            // PASS LEADS. A row that cleared the operator's stated policy ranks
-            // above one that did not, whatever its money says.
-            //
-            // This key was removed on the argument that the money order is the
-            // interesting one, and that was right while `admits` could empty the
-            // page -- it cannot any more, because `shown_cell` falls back past it
-            // and `screen_cascade` keeps the ranking. So the two reasons to leave
-            // it out are both gone, and the reason to put it back is measured:
-            // on a real 60-minute run every one of the ten displayed rows failed
-            // the run's OWN win-rate rule by forty points and was still headed
-            // "TOP COMBINATIONS". An operator reading that list cannot tell which
-            // rows he would actually be allowed to trade.
-            //
-            // It leads rather than replaces: inside the admitted group and inside
-            // the refused group, the calendar and money keys order exactly as
-            // before, so nothing about the existing ranking is lost -- the list
-            // is partitioned, not resorted.
-            r.admitted,
-            weakest,
-            worst_period,
-            ranked(r.cell.return_over_drawdown()),
-            ranked(r.cell.reward_to_risk_bp()),
-            r.cell.pessimistic,
-        ))
-    });
+    // Rows equal on all five keep the money order, whose own tiebreak is
+    // `rank`: the key is `screen_order_key`.
+    //
+    // ONLY THE PRINTED TOP IS ORDERED (o1cli-6, D-1842). `screen_table` and
+    // `append_consistency` read the first `rules.top` rows; the selection is a
+    // minimum over every row under the same key, taken BEFORE the gate below
+    // flips `admitted`, because this order was taken before it too.
+    let selected = final_selection_split(&rows, rules);
+    least_first(&mut rows, rules.top, screen_order_key);
 
     calendar_gate(&mut rows, rules);
     // THE RE-SORT THAT STOOD HERE IS GONE, and its absence is the point. It
@@ -14092,7 +14074,6 @@ fn finish_screen<'a>(
     let _ = writeln!(out);
 
     append_consistency(&mut out, &rows, rules.top);
-    let selected = final_selection(&rows, rules);
     // MEASURED FROM THE ROWS, not inferred from `selected`. This is the only
     // place that can answer it, because it is the only place holding them.
     let admitted_any = rows.iter().any(|row| row.admitted);
@@ -14146,6 +14127,90 @@ fn calendar_gate(rows: &mut [Screened<'_>], rules: Rules) {
             None => {}
         }
     }
+}
+
+/// The screen's final order: the calendar key, then `rank`. o1cli-6, D-1842.
+///
+/// It was a stable `sort_by_key` on the first five terms over rows already in
+/// money order, and the money order's own ties fall back to `rank`. Every
+/// money term is also a term here, so two rows tied on all five are tied on
+/// money, and `rank` alone decided between them in both sorts: this key with
+/// `rank` last IS the order the two stable sorts gave.
+///
+/// `admitted` LEADS, read before [`calendar_gate`] flips it, as it was.
+/// An UNMEASURED row takes the floor on both calendar terms, so measured rows
+/// sort ahead and the unmeasured tail keeps its money order.
+fn screen_order_key(
+    r: &Screened<'_>,
+) -> (core::cmp::Reverse<(bool, i64, i128, i64, i64, i64)>, usize) {
+    let (weakest, worst_period) = r.consistency.as_ref().map_or(
+        // The unmeasured floor: worse than any real grain share and any
+        // real period, so measured rows always sort ahead.
+        (i64::MIN, i128::MIN),
+        calendar_terms,
+    );
+    (
+        core::cmp::Reverse((
+            r.admitted,
+            weakest,
+            worst_period,
+            ranked(r.cell.return_over_drawdown()),
+            ranked(r.cell.reward_to_risk_bp()),
+            r.cell.pessimistic,
+        )),
+        r.rank,
+    )
+}
+
+/// Puts the `k` least of `rows` under `key` first, in order, and leaves the
+/// rest unordered. O(n) to select and O(k log k) to sort. o1cli-6, D-1842.
+///
+/// `key` must be total over distinct rows (the screen's keys end in `rank`),
+/// so the unstable selection and sort give the one order a stable sort would.
+fn least_first<T, K: Ord>(rows: &mut [T], k: usize, key: impl Fn(&T) -> K + Copy) {
+    let k = k.min(rows.len());
+    if let Some(last) = k.checked_sub(1)
+        && k < rows.len()
+    {
+        rows.select_nth_unstable_by_key(last, key);
+    }
+    if let Some(head) = rows.get_mut(..k) {
+        head.sort_unstable_by_key(key);
+    }
+}
+
+/// Whether [`calendar_gate`] leaves an admitted row admitted: a measured row
+/// whose weakest grain clears the floor, or an unmeasured one while the rule
+/// is off. D-1842.
+fn calendar_holds(row: &Screened<'_>, rules: Rules) -> bool {
+    match row.consistency {
+        Some(ref c) => c.weakest_bp() >= rules.min_weakest_bp,
+        None => rules.min_weakest_bp <= 0,
+    }
+}
+
+/// [`final_selection`] over rows in ANY order, read before [`calendar_gate`]
+/// runs: the least row under [`screen_order_key`] that stays admitted and
+/// traded, else the least that traded. One pass each, O(n). o1cli-6, D-1842.
+///
+/// [`final_selection`] reads the first such row in the fully sorted order,
+/// after the gate; that row is this minimum, because the order is
+/// `screen_order_key`'s and the gate's verdict is [`calendar_holds`].
+fn final_selection_split<'a>(rows: &[Screened<'a>], rules: Rules) -> Option<ScreenSelection<'a>> {
+    rows.iter()
+        .filter(|row| row.admitted && calendar_holds(row, rules) && row.cell.trades > 0)
+        .min_by_key(|row| screen_order_key(row))
+        .or_else(|| {
+            rows.iter()
+                .filter(|row| row.cell.trades > 0)
+                .min_by_key(|row| screen_order_key(row))
+        })
+        .map(|row| ScreenSelection {
+            scored: row.scored,
+            direction: row.side,
+            cell: row.cell,
+            rules,
+        })
 }
 
 /// The rules banner: every rule that is on, and `off` for every one that is not.
@@ -25213,6 +25278,171 @@ mod tests {
         let mut off = fresh();
         super::calendar_gate(&mut off, rules);
         assert!(off.iter().all(|r| r.admitted && !r.calendar_unmeasured));
+    }
+
+    /// THE SCREEN'S SELECTIONS GIVE EXACTLY WHAT ITS TWO FULL SORTS GAVE.
+    /// o1cli-6, D-1842.
+    ///
+    /// Rows with heavy ties on every money and calendar term, a mix of
+    /// admitted, measured, unmeasured and zero-trade rows, and every `top`
+    /// from 1 past the row count: the old path (stable money sort, stable
+    /// calendar sort, the gate, then `final_selection` over the sorted rows)
+    /// and the new one (`least_first` twice, `final_selection_split` before
+    /// the gate) must print the same top rows in the same order, flip the same
+    /// verdicts and select the same row. Both calendar settings are run.
+    #[test]
+    fn the_screens_selections_give_exactly_what_its_two_full_sorts_gave() {
+        use runner::outcome::Edge;
+        use runner::rank::Scored;
+
+        let evidence: Vec<Scored> = (0..48_u32)
+            .map(|bit| Scored {
+                mask: vocab::ConditionMask::default().with_bit(bit),
+                hits: 100,
+                edge: Edge {
+                    n: 100,
+                    mean_paisa: 1.0,
+                    t: 1.0,
+                    ..Edge::default()
+                },
+            })
+            .collect();
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = move |modulo: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % modulo
+        };
+        let mut checked_admitted = 0_u32;
+        let mut checked_fallback = 0_u32;
+        for round in 0..60_u32 {
+            let shapes: Vec<(u64, u64, i64, i64, bool, Option<(i64, i128)>)> = (0..48)
+                .map(|_| {
+                    let trades = next(4) * 3;
+                    let wins = next(trades + 1);
+                    let pessimistic = (i64::try_from(next(5)).unwrap_or(0) - 2) * 100;
+                    let drawdown = i64::try_from(next(3)).unwrap_or(0) * 50;
+                    let admitted = round % 3 != 2 && next(3) == 0;
+                    let measured = (next(2) == 0).then(|| {
+                        (
+                            i64::try_from(next(3)).unwrap_or(0) * 3_000,
+                            i128::from(next(3)) - 1,
+                        )
+                    });
+                    (trades, wins, pessimistic, drawdown, admitted, measured)
+                })
+                .collect();
+            let build = || -> Vec<super::Screened<'_>> {
+                shapes
+                    .iter()
+                    .zip(&evidence)
+                    .enumerate()
+                    .map(
+                        |(at, (&(trades, wins, pess, dd, admitted, measured), scored))| {
+                            super::Screened {
+                                side: Direction::Long,
+                                scored,
+                                rank: at + 1,
+                                cell: grid::Cell {
+                                    trades,
+                                    wins,
+                                    pessimistic: pess,
+                                    max_drawdown: dd,
+                                    min_win: pess.max(0),
+                                    worst_trade: pess.min(0),
+                                    ..grid::Cell::default()
+                                },
+                                tightest: None,
+                                admitted,
+                                consistency: measured.map(|(weakest, worst_day)| {
+                                    super::Consistency {
+                                        shares_bp: [weakest; crate::stability::GRAINS.len()],
+                                        worst_day,
+                                        years: 1,
+                                    }
+                                }),
+                                steady: true,
+                                calendar_unmeasured: false,
+                            }
+                        },
+                    )
+                    .collect()
+            };
+            for top in 1..=50 {
+                let mut rules = crate::Rules::operator();
+                rules.top = top;
+                rules.min_weakest_bp = if round % 2 == 0 { 0 } else { 3_000 };
+
+                let mut old = build();
+                old.sort_by_key(|r| super::money_key(&r.cell));
+                old.sort_by_key(|r| super::screen_order_key(r).0);
+                super::calendar_gate(&mut old, rules);
+                let old_selected = super::final_selection(&old, rules);
+
+                let mut new = build();
+                super::least_first(&mut new, super::measured_band(top), |r| {
+                    (super::money_key(&r.cell), r.rank)
+                });
+                let band: Vec<usize> = new
+                    .iter()
+                    .take(super::measured_band(top))
+                    .map(|r| r.rank)
+                    .collect();
+                let mut by_money = build();
+                by_money.sort_by_key(|r| super::money_key(&r.cell));
+                let money_band: Vec<usize> = by_money
+                    .iter()
+                    .take(super::measured_band(top))
+                    .map(|r| r.rank)
+                    .collect();
+                assert_eq!(band, money_band, "the measured band and its order");
+                let new_selected = super::final_selection_split(&new, rules);
+                super::least_first(&mut new, top, super::screen_order_key);
+                super::calendar_gate(&mut new, rules);
+
+                let shown = |rows: &[super::Screened<'_>]| -> Vec<(usize, bool, bool, bool)> {
+                    rows.iter()
+                        .take(top)
+                        .map(|r| (r.rank, r.admitted, r.steady, r.calendar_unmeasured))
+                        .collect()
+                };
+                assert_eq!(shown(&new), shown(&old), "round {round}, top {top}");
+                let verdicts = |rows: &[super::Screened<'_>]| -> Vec<(usize, bool)> {
+                    let mut all: Vec<(usize, bool)> =
+                        rows.iter().map(|r| (r.rank, r.admitted)).collect();
+                    all.sort_unstable();
+                    all
+                };
+                assert_eq!(verdicts(&new), verdicts(&old));
+                let pick = |chosen: Option<super::ScreenSelection<'_>>| {
+                    chosen.map(|c| (c.scored.mask, c.cell))
+                };
+                assert_eq!(
+                    pick(new_selected),
+                    pick(old_selected),
+                    "round {round}, top {top}"
+                );
+                if let Some(chosen) = pick(old_selected) {
+                    let admitted = old
+                        .iter()
+                        .any(|r| r.admitted && r.cell.trades > 0 && r.scored.mask == chosen.0);
+                    if admitted {
+                        checked_admitted += 1;
+                    } else {
+                        checked_fallback += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            checked_admitted > 0,
+            "an admitted row was selected somewhere"
+        );
+        assert!(
+            checked_fallback > 0,
+            "the fallback past the rules was exercised"
+        );
     }
 
     /// A broader earlier tier may price more masks than the final tier. The

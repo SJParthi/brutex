@@ -5499,7 +5499,7 @@ the guard. The existing emits test pins the warning's message and level.
 
 | Invariant | Test that proves it | Status |
 |---|---|---|
-| AU-O1CLI-6 — **`docs/06-limits.md` states that `screen` sorts every priced row twice (money key, then the calendar key led by `admitted`), O(n log n) for up to 10,000,000 rows once per screen, and why a top-first selection is not equivalent; and the code still sorts and reads the whole order.** The test reads the section, `SCREEN_CAP_CEILING`, the two `rows.sort_by_key` calls in `screen` around `measure_top`, the `admitted` lead of the calendar key, and `final_selection`'s fallback past the top rows. Removing either reason fails it, so a later top-first selection must withdraw the limit | `the_screens_two_full_sorts_are_stated_and_the_full_order_still_read` in `crates/cli/tests/limits_o1cli_6.rs` | ✓ |
+| AU-O1CLI-6 — **`screen` sorts only what it keeps (D-1842): it selects and sorts the measured band on `(money_key, rank)`, selects and sorts the printed top on `screen_order_key`, and finds its subject with two O(n) minimum scans before the calendar gate; the printed rows, their verdicts and the subject equal what the two full stable sorts gave.** The shape test reads the limit's fix paragraph and the code; the equivalence test runs both paths over tied rows at every `top` | `the_screen_sorts_only_what_it_keeps` in `crates/cli/tests/limits_o1cli_6.rs`; `cli::tests::the_screens_selections_give_exactly_what_its_two_full_sorts_gave` | ✓ |
 
 ### Spans loaded for one number are stated — audit 2026-10-02 o1cli-5
 
