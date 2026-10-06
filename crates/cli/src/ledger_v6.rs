@@ -189,6 +189,40 @@ struct RungRoots {
     selection: PathBuf,
 }
 
+/// Creates `path` beneath `root` and makes every new name durable: each
+/// directory from `path`'s parent up to `root` is synced, so the entries a
+/// power loss could otherwise drop are on disk before a ledger is opened
+/// beneath them. `create_dir_all` alone synced nothing, and a ledger fsynced
+/// inside a directory whose own entry was lost is not there after a restart.
+/// O(depth) syncs, once per rung root per run, never per record.
+/// conc:ledgerv6-3, D-2805.
+fn create_durably(
+    root: &Path,
+    path: &Path,
+    mut sync: impl FnMut(&Path) -> std::io::Result<()>,
+) -> Result<(), String> {
+    std::fs::create_dir_all(path)
+        .map_err(|why| format!("cannot create {}: {why}", path.display()))?;
+    let mut at = path;
+    while at != root {
+        let Some(parent) = at.parent() else {
+            return Err(format!(
+                "{} is not beneath {}",
+                path.display(),
+                root.display()
+            ));
+        };
+        sync(parent).map_err(|why| format!("cannot sync {}: {why}", parent.display()))?;
+        at = parent;
+    }
+    Ok(())
+}
+
+/// Syncs one directory.
+fn sync_dir(path: &Path) -> std::io::Result<()> {
+    std::fs::File::open(path)?.sync_all()
+}
+
 impl RungRoots {
     /// Lays out and creates one rung's roots beneath `root`.
     ///
@@ -201,8 +235,7 @@ impl RungRoots {
         let mut made = Vec::with_capacity(ROUTE_STAGES.len() + 2);
         for stage in ROUTE_STAGES.into_iter().chain(["execution", "selection"]) {
             let path = root.join(stage).join(rung);
-            std::fs::create_dir_all(&path)
-                .map_err(|why| format!("cannot create {}: {why}", path.display()))?;
+            create_durably(root, &path, sync_dir)?;
             made.push(path);
         }
         let [
@@ -730,7 +763,7 @@ fn replay_route(
         .map_err(|_| "Global Replay V4 requires all eight canonical Selection V6 authorities")?;
     let selected = crate::all_rung_selection_v6::AllRungSelectionV6::new(selected)?;
     let root = request.root.join("global-replay-v4");
-    std::fs::create_dir_all(&root).map_err(|why| why.to_string())?;
+    create_durably(&request.root, &root, sync_dir)?;
     let bounds = crate::global_replay_v4::GlobalReplayV4Bounds::new(
         CEILING_BYTES / crate::global_replay_v4::GLOBAL_REPLAY_V4_RECORD_BYTES,
         CEILING_BYTES,
@@ -835,8 +868,8 @@ fn execution_v4_bounds(rung: &str) -> Result<ExecutionV4Bounds, String> {
 )]
 mod tests {
     use super::{
-        LEDGER_V6_VERB, ROUTE_FAMILIES, ROUTE_STAGES, RungRoots, execution_v4_bounds,
-        lineage_bounds,
+        LEDGER_V6_VERB, ROUTE_FAMILIES, ROUTE_STAGES, RungRoots, create_durably,
+        execution_v4_bounds, lineage_bounds, sync_dir,
     };
     use crate::ledger_all::tests::{counts, landed, mark, says};
 
@@ -1212,5 +1245,43 @@ mod tests {
             crate::columns::assert_under(lines[0], lines[1], &[L, R, R, R, R, R, R])
                 .expect("separated and aligned");
         }
+    }
+
+    /// **Every directory a rung root adds is synced up to the ledger root.**
+    /// conc:ledgerv6-3, D-2805.
+    #[test]
+    fn a_created_rung_root_syncs_every_parent_up_to_the_ledger_root() {
+        let root =
+            std::env::temp_dir().join(format!("brutex-ledger-v6-durable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("ledger root");
+        let path = root.join("selection").join("1min");
+        let mut synced = Vec::new();
+        create_durably(&root, &path, |dir| {
+            synced.push(dir.to_path_buf());
+            sync_dir(dir)
+        })
+        .expect("created");
+        assert!(path.is_dir());
+        assert_eq!(synced, vec![root.join("selection"), root.clone()]);
+
+        let refused = create_durably(&root, &root.join("x"), |_| {
+            Err(std::io::Error::other("sync refused"))
+        })
+        .expect_err("a sync that fails refuses");
+        assert!(refused.contains("sync refused"), "{refused}");
+
+        let mut none = 0;
+        create_durably(&root, &root, |_| {
+            none += 1;
+            Ok(())
+        })
+        .expect("the root itself");
+        assert_eq!(none, 0, "nothing new beneath the root, nothing to sync");
+
+        let outside = create_durably(&root.join("selection"), &root.join("elsewhere"), |_| Ok(()))
+            .expect_err("a path outside the root is refused");
+        assert!(outside.contains("is not beneath"), "{outside}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
