@@ -607,7 +607,7 @@ impl HttpSource {
         // source's own governor and clear its charge, so a caller that had no
         // shared instance to give left a budgeted feed ungoverned: no permit
         // was asked for by anyone. The source keeps its own and charges it.
-        // conc:pull1-2, D-2803.
+        // conc:pull1-2, D-2799.
         if let (Some(_), Some(shared)) = (&self.governor, governor) {
             // THE CALLER NOW CHARGES. Sharing a governor and spending from it
             // are one act; both sides calling `admit` is two permits for one
@@ -3954,7 +3954,7 @@ mod tests {
     /// this test is about -- **was the governor asked at all** -- with no sleep,
     /// no ceiling to exhaust, and no race against the second rolling over.
     /// **A source handed no governor keeps its own and charges it.**
-    /// conc:pull1-2, D-2803.
+    /// conc:pull1-2, D-2799.
     #[test]
     fn sharing_nothing_keeps_the_sources_own_governor() {
         let crate::vendor::Transport::Http(spec) = crate::vendor::Feed::Dhan.descriptor().transport

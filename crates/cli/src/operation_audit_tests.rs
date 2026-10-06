@@ -531,7 +531,7 @@ fn an_empty_journal_left_by_a_crash_reads_as_its_unconfirmed_start() {
 }
 
 /// **A status read's momentary shared lock does not refuse a start.**
-/// conc:cli1-2, D-2804. The reader lets go after 50 ms, well inside
+/// conc:cli1-2, D-2799. The reader lets go after 50 ms, well inside
 /// `INDEX_LOCK_WAIT`, and the start then reserves the next ID.
 #[test]
 fn a_start_that_meets_a_status_read_waits_for_it_instead_of_refusing() {

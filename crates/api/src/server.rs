@@ -5348,7 +5348,7 @@ fn shared_governor(site: &Site, feed: pull::vendor::Feed) -> Option<SharedGovern
     // startup; a panic elsewhere while holding the lock cannot have left one
     // half-written. `.ok()?` turned poison into "no governor", and the source
     // then ran with a fresh one of its own, a second instance spending the
-    // same vendor quota. conc:pull1-2, D-2803.
+    // same vendor quota. conc:pull1-2, D-2799.
     site.budgets
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -6953,7 +6953,7 @@ pub(crate) struct BrokerRun {
     /// Whether that stop was the OPERATOR's: the autopilot's stop epoch moved
     /// (Pause, a shutdown). Only this one means "nothing failed, ask again
     /// at once"; the breaker's stop is a vendor failure and must reach the
-    /// backoff. conc:autopilot-2, D-2800.
+    /// backoff. conc:autopilot-2, D-2798.
     pub cancelled: bool,
     /// How long it took, in microseconds.
     pub took: u64,
@@ -21148,7 +21148,7 @@ mod tests {
     }
 
     /// **A poisoned budget table still hands out the shared governor.**
-    /// conc:pull1-2, D-2803.
+    /// conc:pull1-2, D-2799.
     #[test]
     fn a_poisoned_budget_table_still_shares_its_governor() {
         let root = crate::scratch::path("budget-poison");
@@ -21172,7 +21172,7 @@ mod tests {
     }
 
     /// **A vendor-down breaker stop backs off; only an operator's stop retries
-    /// at once.** conc:autopilot-2, D-2800. The breaker used to set the same
+    /// at once.** conc:autopilot-2, D-2798. The breaker used to set the same
     /// `stopped` an operator's Pause sets, and `outcome_of` read every
     /// non-credential stop as a pause: an immediate retry with no attempt
     /// counted and no backoff, straight back into a vendor that had just failed

@@ -848,7 +848,7 @@ fn seeded(site: &Site, id: [u8; 32], units: Option<Vec<Record>>) -> Result<Journ
 /// "No space left on device", and the operator acted on the wrong cause. Both
 /// are kept now: the run's reason first, the record's failure after it. A run
 /// that succeeded but could not record its end is a failure, because the next
-/// process will not see it as finished. conc:recovery-6, D-2799.
+/// process will not see it as finished. conc:recovery-6, D-2798.
 fn terminal_outcome(
     answer: Result<String, String>,
     sealed: Result<(), String>,
@@ -1070,7 +1070,7 @@ fn audit_receipt(site: &Loaded, body: &str, why: &str) -> Result<(), String> {
 /// marked Blocked in it: the next resume found it still Queued and the
 /// operator's plan said nothing about it. The receipt's failure still ends the
 /// pass, loudly and by name; it no longer erases the plan's record.
-/// conc:recauto-2, D-2801.
+/// conc:recauto-2, D-2798.
 fn record_blocked(
     journal: &mut Journal,
     item: Record,
@@ -2385,7 +2385,7 @@ mod tests {
     }
 
     /// **An unresolved window is recorded Blocked in the plan even when its
-    /// `/audit` receipt is refused.** conc:recauto-2, D-2801.
+    /// `/audit` receipt is refused.** conc:recauto-2, D-2798.
     #[test]
     fn a_refused_audit_receipt_does_not_erase_the_blocked_window() {
         let root = crate::scratch::path("recovery-blocked-first");
@@ -2433,7 +2433,7 @@ mod tests {
     }
 
     /// **A failed terminal record never replaces the reason a recovery ended.**
-    /// conc:recovery-6, D-2799. All four combinations.
+    /// conc:recovery-6, D-2798. All four combinations.
     #[test]
     fn a_failed_terminal_record_keeps_the_reason_the_run_ended() {
         let ok = || Ok::<String, String>("Recovery complete".to_owned());

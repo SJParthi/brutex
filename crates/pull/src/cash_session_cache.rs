@@ -401,7 +401,7 @@ fn lock_day(root: &Path, day: Day) -> Result<Flock<File>, String> {
 /// read the same cached day do not refuse each other, while an installer's
 /// exclusive [`lock_day`] still excludes every reader. The read loops took the
 /// exclusive lock, and a second pull over an overlapping window was refused
-/// "unavailable" for a day neither of them was writing. conc:pull2-4, D-2802.
+/// "unavailable" for a day neither of them was writing. conc:pull2-4, D-2799.
 fn lock_day_shared(root: &Path, day: Day) -> Result<Flock<File>, String> {
     let (file, path) = open_day_lock(root, day)?;
     Flock::try_lock_shared(file, path.clone()).map_err(|why| {
@@ -1045,7 +1045,7 @@ mod tests {
     }
 
     /// **Two reads of one cached day do not refuse each other; an installer
-    /// still excludes them.** conc:pull2-4, D-2802.
+    /// still excludes them.** conc:pull2-4, D-2799.
     #[tokio::test]
     async fn concurrent_reads_of_a_cached_day_share_its_lock_and_a_writer_excludes_them() {
         let temp = Temp::new();
@@ -1068,7 +1068,7 @@ mod tests {
             lock_day(&temp.0, day(3)).is_err(),
             "an installer cannot take the day while it is read"
         );
-        other_reader.release().expect("released");
+        other_reader.release().expect("the other reader lets go");
         let writer = lock_day(&temp.0, day(3)).expect("an installer");
         let refused = prepare_with(&temp.0, window(3, 3), |_| async {
             Err("network must not be used".to_owned())
@@ -1076,7 +1076,7 @@ mod tests {
         .await
         .expect_err("a reader waits for nobody and is refused by a writer");
         assert!(refused.contains("unavailable"), "{refused}");
-        writer.release().expect("released");
+        writer.release().expect("the installer lets go");
     }
 
     #[tokio::test]

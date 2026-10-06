@@ -15696,3 +15696,15 @@ per-candidate primitive from `CLAUDE.md` §3 rule 4.
   concurrent take of any root in the same process waits for that one take;
   the wait is the fresh-take cost above. Only one serve per process is the
   production shape.
+
+## A CLI start may wait up to a second for the invocation index — D-2799, 6 October 2026
+
+- `operation_audit::begin` retries the index's exclusive lock every
+  millisecond for up to `INDEX_LOCK_WAIT` (1 s) while another description
+  holds it, so a start that meets a status read waits for that read. The
+  holders it waits for hold one record read or one append; the wait is not
+  timed and not constant-time. A holder that keeps the lock past the second
+  still refuses the start as busy.
+- `ledger_v6::create_durably` issues one directory sync per level between a
+  new rung root and the ledger root (two today), once per rung root per run.
+  Not timed.

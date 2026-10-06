@@ -3732,7 +3732,7 @@ pub(crate) fn outcome_of(
         // vendor-down breaker's stop is a vendor failure too: read as a pause,
         // it retried at once with no attempt counted and no backoff, hammering
         // a vendor that had just failed five instruments in a row
-        // (conc:autopilot-2, D-2800).
+        // (conc:autopilot-2, D-2798).
         stopped: run.cancelled && run.credential_stop.is_none(),
         journal_error,
         credential: run.credential_stop,

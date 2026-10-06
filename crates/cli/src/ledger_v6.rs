@@ -195,7 +195,7 @@ struct RungRoots {
 /// beneath them. `create_dir_all` alone synced nothing, and a ledger fsynced
 /// inside a directory whose own entry was lost is not there after a restart.
 /// O(depth) syncs, once per rung root per run, never per record.
-/// conc:ledgerv6-3, D-2805.
+/// conc:ledgerv6-3, D-2799.
 fn create_durably(
     root: &Path,
     path: &Path,
@@ -763,7 +763,7 @@ fn replay_route(
         .map_err(|_| "Global Replay V4 requires all eight canonical Selection V6 authorities")?;
     let selected = crate::all_rung_selection_v6::AllRungSelectionV6::new(selected)?;
     let root = request.root.join("global-replay-v4");
-    create_durably(&request.root, &root, sync_dir)?;
+    create_durably(request.root, &root, sync_dir)?;
     let bounds = crate::global_replay_v4::GlobalReplayV4Bounds::new(
         CEILING_BYTES / crate::global_replay_v4::GLOBAL_REPLAY_V4_RECORD_BYTES,
         CEILING_BYTES,
@@ -1248,7 +1248,7 @@ mod tests {
     }
 
     /// **Every directory a rung root adds is synced up to the ledger root.**
-    /// conc:ledgerv6-3, D-2805.
+    /// conc:ledgerv6-3, D-2799.
     #[test]
     fn a_created_rung_root_syncs_every_parent_up_to_the_ledger_root() {
         let root =

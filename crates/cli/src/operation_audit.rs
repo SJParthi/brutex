@@ -270,7 +270,7 @@ pub fn is_busy(why: &str) -> bool {
 /// instants was refused "busy" with no writer anywhere (conc:cli1-2). The
 /// holders it waits for hold for one read or one append, microseconds; a
 /// second is far past that and still refuses a holder that does not let go.
-/// D-2804.
+/// D-2799.
 const INDEX_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Retries `take` while it answers `WouldBlock`, every millisecond, until

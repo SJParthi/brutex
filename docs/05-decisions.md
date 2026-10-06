@@ -63735,3 +63735,93 @@ names `/audit/page`, which is what
 `route_variants_cover_every_extensionless_route` reads out of
 `route_table`, so a variant of `/audit/page` is refused and `/audit` stays
 the front end's.
+
+### D-2798 — Recovery and autopilot outcomes are reported as they happened, in a stable order — 2026-10-06
+
+Four Fix Board concurrency rows, one locked choice: a recovery or autopilot
+pass reports the outcome that actually ended it, records what it decided
+before anything else can fail, and walks its work in an order that is the
+same on every run.
+
+- **conc:recovery-3.** `reconcile_pending` walked `attempts.latest`, a
+  `HashMap` seeded per process, so the same interrupted requests went to the
+  vendor, and their plan records were written, in a different order every
+  run (`CLAUDE.md` §3 rule 5). `pending_in_order` walks the journal's own
+  `order` (first appearance, replayed identically on restart), one `get` per
+  key.
+- **conc:recovery-6.** In `drive`, the terminal control append's `?`
+  returned its own error and dropped the run's, so a plan that blocked on a
+  vendor refusal was reported only as the disk error. `terminal_outcome`
+  keeps both, the run's reason first; a run that succeeded but could not
+  record its end is a failure, because the next process will not see it
+  finished.
+- **conc:recauto-2.** In `execute`, a window the plan could not resolve had
+  its `/audit` receipt written before the plan's own Blocked item, so a
+  refused receipt aborted the pass with the window still Queued in the plan.
+  `record_blocked` appends the plan item first; a refused receipt still ends
+  the pass, by name.
+- **conc:autopilot-2.** The vendor-down breaker set the same
+  `BrokerRun::stopped` an operator's Pause sets, and `outcome_of` read every
+  non-credential stop as a pause: an immediate retry, no attempt counted, no
+  backoff. `BrokerRun::cancelled` is set only where the stop epoch moved;
+  `outcome_of` reports `stopped` from it alone, so the breaker's stop is a
+  failure that reaches the backoff.
+
+**Rejected.** For recovery-6, keeping only the run's error: a run whose end
+was never recorded would then look finished to its caller and unfinished to
+the next process.
+
+**Proof.** `interrupted_attempts_are_reconciled_in_journal_order`,
+`a_failed_terminal_record_keeps_the_reason_the_run_ended` and
+`a_refused_audit_receipt_does_not_erase_the_blocked_window` in
+`crates/api/src/recovery.rs`;
+`a_breaker_stop_backs_off_and_only_an_operator_stop_retries_at_once` in
+`crates/api/src/server.rs`. FB-107.
+
+### D-2799 — Readers share, writers wait briefly, governors are kept, and new directories are synced — 2026-10-06
+
+Four Fix Board concurrency rows about locks and durability, one locked
+choice: a reader never takes a lock that refuses another reader, a writer
+that meets a momentary reader waits a bounded time instead of refusing, a
+rate governor is never lost by a caller that had none to share, and a
+directory a ledger is opened in is durable first.
+
+- **conc:pull2-4.** The cash-session cache's two read loops took each day's
+  EXCLUSIVE try-lock, so two pulls over overlapping windows refused each
+  other "unavailable" for a day neither was writing. They take
+  `lock_day_shared`; an installer's exclusive `lock_day` still excludes every
+  reader, and a reader is still refused, not queued, while one installs.
+- **conc:pull1-2.** `HttpSource::sharing(None)` replaced a budgeted source's
+  own governor with none and cleared its charge, so no permit was asked for
+  by anyone. `None` now leaves the source's own governor in place.
+  `server::shared_governor` read the budget table with `.lock().ok()?`, so a
+  poisoned lock meant "no shared governor" and a second instance spent the
+  same vendor quota; it reads through the poison, because the slots are
+  `Arc`s set once at startup.
+- **conc:cli1-2.** `operation_audit::begin` took the invocation index's
+  exclusive lock with one `try_lock`, and every status read holds that
+  index's shared lock for one record read, so a CLI start that met a poll
+  was refused "busy" with no writer alive. `within` retries `WouldBlock`
+  every millisecond for `INDEX_LOCK_WAIT` (1 s); a host refusal is not
+  retried, and a holder that does not let go is still refused as busy.
+- **conc:ledgerv6-3.** `RungRoots::create` and the Global Replay V4 root used
+  `create_dir_all` and synced no parent, so a ledger fsynced inside a
+  directory whose own entry a power loss dropped was not there after the
+  restart. `create_durably` syncs each directory from the new path's parent
+  up to the ledger root: O(depth) syncs, once per rung root per run.
+
+**Rejected.** For cli1-2, a blocking `lock`: an index holder on a hung
+mount would then hold a CLI start forever. For pull1-2, refusing on a
+poisoned budget table: the table cannot be half-written, and a refusal
+would stop every pull for a panic elsewhere.
+
+**Proof.** `concurrent_reads_of_a_cached_day_share_its_lock_and_a_writer_excludes_them`
+in `crates/pull/src/cash_session_cache.rs`;
+`sharing_nothing_keeps_the_sources_own_governor` in `crates/pull/src/http.rs`;
+`a_poisoned_budget_table_still_shares_its_governor` in
+`crates/api/src/server.rs`;
+`a_start_that_meets_a_status_read_waits_for_it_instead_of_refusing` and
+`within_retries_only_a_busy_lock_and_only_until_the_wait_ends` in
+`crates/cli/src/operation_audit_tests.rs`;
+`a_created_rung_root_syncs_every_parent_up_to_the_ledger_root` in
+`crates/cli/src/ledger_v6.rs`. FB-108, FB-109.
