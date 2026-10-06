@@ -961,3 +961,20 @@ tests are named in `docs/04-invariants.md` rows DPR.
   filled every slot and a later, different cause was counted and never named
   (D-3127, DPM-01, DPM-02). Fixed. The Groww chain receipt's verbatim reason
   list is the same class and stays open, unrecorded until a round owns it.
+- **Gate 18 pre-run on the data-path diff (2026-10-06):** three greeks
+  survivors. `from_ladder`'s `level_to_interval` bound had no test exactly at
+  the bound, and `SUBNORMAL_GAP` was a product no test observed (D-3129,
+  DPM-03). Killed.
+- **Round 4 (2026-10-06):** a CSV row skipped for a negative open interest was
+  on no line of a balanced receipt (D-3133, DPM-04). Fixed. Two candidates are
+  recorded OPEN, both needing a decision rather than a test:
+  (a) chain pricing measures tenor from the bar's open stamp
+  (`Tenor::between(bar.ts_micros, ..)` in `api::server`) while it prices the
+  bar's close, so the last minute before expiry is priced at 60 s. When a close
+  premium is observed inside its bar is not a sourced fact, and
+  `tenor.rs`'s own test pins the stamp convention.
+  (b) `fold::complete_minutes_with_calendar` names a withheld observed-day
+  tail only when the next day begins, so the batch's last day never gets the
+  diagnostic, and `cli fold_audit` under-counts it. Flushing it would also
+  flag a day still in progress as needing a store repair; whether such a day
+  can reach the fold is unsettled.
