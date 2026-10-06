@@ -15928,3 +15928,11 @@ a neighbour (PROOF.md, scratch state).
   is not the listing date, which stays UNVERIFIED. A vendor that wrongly
   answers empty before real history, for a series this store holds nothing
   of, is read as "before first bar". The bars land the same either way.
+- **Gate 11 rule 6, `api/src/server.rs` 9 -> 11.** The two linear scans
+  this check adds: `leading_hollow`'s `.iter().position` over one window's
+  chunk bodies, which `fetch_chunks` has already walked, and
+  `store_holds_nothing_in`'s `.iter().find` over the months above, a
+  hash probe each. Both are bounded by the request (its chunks and the
+  floor-to-first-bar months), never by the bars, and run once per such
+  instrument per run. Allowlisted when `fix/masters-mcx` was merged into
+  `feat/app-all`.

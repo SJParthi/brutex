@@ -1546,7 +1546,10 @@ const ALLOW_SCAN: Allow = &[
     ("crates/api/src/expressionsearchjson.rs", 1),
     ("crates/api/src/indexstoprankingjson.rs", 1),
     ("crates/api/src/pullrun.rs", 1),
-    ("crates/api/src/server.rs", 9),
+    // D-3313: `leading_hollow` and `store_holds_nothing_in`, request-bounded
+    // scans over one window's chunks and the floor-to-first-bar months
+    // (`docs/06-limits.md`, the before-first-bar section).
+    ("crates/api/src/server.rs", 11),
     ("crates/api/src/store_wire.rs", 1),
     ("crates/cli/src/boolean_campaign_codec.rs", 2),
     ("crates/cli/src/boolean_qualification_reader.rs", 1),

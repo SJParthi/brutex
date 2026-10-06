@@ -9466,7 +9466,8 @@ fn store_holds_nothing_in(
 /// so it is `Err` and the empty chunks stay a failure. Otherwise one census
 /// read and one hash probe per month — at most ~141 for Zerodha's 2015 floor —
 /// and only for an instrument whose first chunk came back empty. Not O(1) and
-/// not on any per-bar path; `docs/06-limits.md` states it. D-3313.
+/// not on any per-bar path. Its time is UNVERIFIED: no bench times it, as
+/// `docs/06-limits.md` records; P-75 proves the rule, not the cost. D-3313.
 fn nothing_held_before_first_bar(
     asked: &ingest::SpotRequest,
     site: &Site,
