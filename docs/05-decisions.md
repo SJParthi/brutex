@@ -63426,3 +63426,26 @@ unmerged WIP commit e0ced8a (numbered D-1830 there), re-checked on c97ff00.
 **What it changes.** About 5,100 lines of dead code and their tests are gone.
 No output, digest, format or run identity moves.
 
+### D-1834 — The only strategy-digest entry takes the grid's one validation — 2026-10-03
+
+**What was found (W2-cli10-2; stated, not fixed, by D-1639).**
+`pub fn derive_strategy_digest_v1` ran `validate_evaluation` over the whole
+evaluated grid before deriving one cell's digest: O(G) per call, O(G²) for a
+grid derived through it. Production already derived through
+`derive_strategy_digest_from_validated_v1` after one validation; the O(G)
+entry had no caller outside its own test.
+
+**The change.** `derive_strategy_digest_v1` is deleted and
+`derive_strategy_digest_from_validated_v1` is `pub`, so every caller pays the
+O(G) validation once per grid and O(1) per cell. The validated entry already
+refuses a validation of another resolution or evaluation, so nothing a caller
+could pass is checked less. The identity test validates each fixture grid once
+and derives through the validated entry; every digest it compares is
+unchanged. No output, digest or format moves.
+
+**What it proves.**
+`cli::population_admission_writer::tests::no_strategy_digest_entry_validates_the_whole_grid_per_cell`
+failed on c97ff00 (the O(G) entry existed) and passes now; it requires the
+only entry to take a `ValidatedExitGridV1` and to call no
+`validate_evaluation`.
+
