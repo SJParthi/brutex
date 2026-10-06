@@ -22770,7 +22770,10 @@ mod tests {
         };
         let cache = site.store_root.join("session-masters");
         std::fs::create_dir_all(&cache).unwrap();
-        // An unreceipted local entry refuses before any public network call.
+        // An unreceipted local entry is never trusted. Since pull2-3 (D-2533)
+        // a download is attempted to heal it on byte equality, so this test
+        // may reach the public archive; offline it fails to download, online
+        // the bytes conflict, and the landing stops either way.
         std::fs::write(
             cache.join("NSE_CM_security_03082026.csv.gz"),
             b"incomplete fixture",
@@ -22780,10 +22783,14 @@ mod tests {
         let done = super::land_spot(&landed, &key, &site, &mut dated).await;
         assert_eq!(done.rows_read, 2);
         assert_eq!(done.bars_committed, 1);
+        // Since pull2-3 (D-2533) an unreceipted payload is re-installed only
+        // on byte equality with a fresh download, so the refusal is either the
+        // download's failure or a conflict with it; both name the retained
+        // entry that has no receipt.
         assert!(
             done.failures
                 .iter()
-                .any(|failure| failure.why.contains("incomplete cash-session cache")),
+                .any(|failure| failure.why.contains("no receipt")),
             "{:?}",
             done.failures
         );
