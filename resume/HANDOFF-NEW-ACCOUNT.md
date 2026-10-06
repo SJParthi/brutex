@@ -1,12 +1,28 @@
 # HANDOFF to a new Claude account (brutex coordinator)
 
-Refreshed: 2026-10-06 17:46 UTC by the old coordinator (session_01UGhT9yCM8wk4VFp9A2cjt1).
-The old account's weekly limit was 85% at 17:33 UTC (owner meter) and resets Mon 12 Oct 23:00 UTC
-(Tue 13 Oct 04:30 IST). This file is refreshed at every coordinator wake, and always before the old
-account stops at 93%.
+**Last refreshed:** 2026-10-06 17:51 UTC.
+- Weekly usage at this refresh: **87%** (owner meter, 17:49 UTC).
+- PR 74 CI run 1286: running.
+- Refreshed by the old coordinator (session_01UGhT9yCM8wk4VFp9A2cjt1).
 
-The owner pastes the block below into a new session in a Claude Code project (beta) on the new
-account, with GitHub repo `SJParthi/brutex` attached and push access.
+The old account's weekly limit resets Mon 12 Oct 23:00 UTC (Tue 13 Oct 04:30 IST). From 95% the old coordinator
+refreshes this file at every new whole percent (95, 96, 97, 98, 99) and sends it to the owner, until 100%
+stops it.
+
+## Short paste prompt (this never changes; it reads this file, which is always current)
+
+```
+You are the new brutex coordinator, taking over from another Claude account whose weekly limit is nearly used up. Repo: SJParthi/brutex. Use Opus 5.5 for yourself and every agent, subagent and session ("use one and only opus 5.5").
+1. git fetch origin fix-queue. Read resume/HANDOFF-NEW-ACCOUNT.md on that branch completely. It holds the full prompt, my standing rules and the per-workstream table, and it is the latest state.
+2. Before any other write, claim the handoff: create resume/HANDOFF-CLAIM.md on fix-queue ("CLAIMED by the new account at <UTC time>") and push it with fetch, merge, push. Never force-push. The old account's routines see it and stand down.
+3. Then follow the prompt in that file exactly: CLAUDE.md first, then plan steps A to E. One PR only (#74, final/all-fixes). Merge commits only. Rust only except web/. Never guess. Never push GDFL data. Never touch the GDFL or Tickvault work.
+4. Usage: stop starting new work at 75% weekly. At 93%, save state to fix-queue resume/, refresh HANDOFF-NEW-ACCOUNT.md, and stop.
+End every report with a found / fixed / waiting-on-owner table.
+```
+
+The owner pastes either the short prompt above or the full prompt below into a new session in a
+Claude Code project (beta) on the new account. The project needs GitHub repo `SJParthi/brutex`
+attached, with push access.
 
 ---
 

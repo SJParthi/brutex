@@ -261,3 +261,47 @@ Next poll: 12:40.
   - the extra $27.4 is about 5.6 points of the 5h window, ×1.5 = 8.4;
   - weekly ≈ 85 + 0.29 × 8.4 ≈ 87.4%.
   The owner meter overrides.
+
+## 17:51 UTC — OWNER METER 17:49: weekly 87%, 5h session 15% (resets 22:10 UTC). Handoff refreshes 95→100
+- Owner: "once it touches 95 percent, keep updating the prompt for every percentage until it reaches 100".
+- Tickvault is blocked on the owner: "87% weekly usage; awaiting decision on pausing depth build". It is the owner's
+  session, so the coordinator does not touch it.
+- Costs at 17:51: this session $134.88, Tickvault $763.62, other brutex sessions $915.56 (all paused).
+
+### CURRENT FORMULA (re-anchor here on every owner screenshot)
+- Anchor A = 87% at M_A = $1814.06 (17:49 owner meter; M = 915.56 + this session + Tickvault).
+- est = A + (M − M_A) / 7.9.
+- Where 7.9 comes from:
+  - $4.9 per 5h-window point;
+  - weekly ≈ 0.31 × window points (12:24 → 17:49 owner readings);
+  - × 2, because the owner's GDFL bridge session is unmeasured and is assumed to equal the measured spend.
+  It LEANS HIGH. Label every number "est"; the owner meter overrides.
+- If any other brutex session is woken, add its cost change since 17:51 to M.
+- LAST_SENT = none.
+
+### WATCH PROCEDURE (run on every "USAGE WATCH" wake, and inside every CI-check and survivor-round wake)
+1. **Lock.** If origin/fix-queue has resume/HANDOFF-CLAIM.md, the new account has taken over:
+   1. disable every enabled trigger of this session (list_triggers);
+   2. tell the owner in one line;
+   3. stop.
+2. **Measure and estimate.**
+   1. Call get_session with no id (this session) and get_session session_01DysSVGYv7sS3FmL1kmpKwr (Tickvault).
+   2. M = 915.56 + both costs (+ any woken brutex session's change).
+   3. est = CURRENT FORMULA.
+3. **Refresh** if est ≥ 95 and floor(est) > LAST_SENT:
+   1. In resume/HANDOFF-NEW-ACCOUNT.md, update the "Last refreshed" block (UTC time, "weekly ~N% (est)", the anchor).
+   2. Update the CI run 1286 line: actions_get get_workflow_run, plus get_job_logs failed_only=true
+      return_content=false for the failed shard count.
+   3. Update any workstream row whose state changed.
+   4. Push fix-queue: fetch, merge, push.
+   5. Copy the file to the scratchpad, then SendUserFile it and PushNotification
+      "weekly ~N% (est): handoff prompt refreshed".
+   6. Set LAST_SENT = N here.
+4. **93% stop.** If est ≥ 93, no brutex work starts (the survivor round only pauses). Only this watch keeps running.
+5. **Next wake.** Schedule one only if no pending reminder named "usage watch" exists (list_triggers).
+   - Use send_later with name "usage watch" and the message "USAGE WATCH: in /tmp/claude-0/fq fetch and merge
+     origin/fix-queue, then run the WATCH PROCEDURE in resume/pr74-g18-run1283/USAGE-GUARD.md".
+   - Delay: if est ≥ 95, 20 min; otherwise clamp((95 − est) × 15, 20, 120) min.
+6. **Log.** Append one line here (time, M, est, action) and push. Below 95, say nothing to the owner unless asked.
+7. **End.** It ends at 100%: the session can no longer run. The last refresh is the one at 99 (or the last whole
+   percent reached).
