@@ -14,3 +14,14 @@ still running at collection time.
 Fixer sessions: one per file here, each on its own branch `pr74/g18-<group>` off origin/final/all-fixes.
 
 2026-10-06 04:05 UTC addendum: shards 178, 180-184 finished with 13 more distinct survivors (runner 7, api 4, cli-a 1, rest 1), appended to the survivors files above. 17 shards were still running.
+
+2026-10-06 04:40 UTC — TIMEOUTS ARE NOT IN THESE LISTS. cargo-mutants 26.2.0 emits a GitHub `::warning` only for MISSED
+mutants (src/console.rs: `outcome.mutant_missed()`), so the annotation-based lists above hold MISSED cases only. Timed-out
+cases appear only in each shard's log ("TIMEOUT ..." lines and the verify line "surviving=N, timed-out=M"). Example found
+by the coordinator's independent re-run: `crates/telemetry/src/tail.rs:503:15: replace > with >= in walk_back` (u64
+`pos >= 0` never ends; shard 58). The coordinator is reading every failed shard's log for TIMEOUT lines; results will be
+appended here as timeouts-<group>.md. ALWAYS read shard logs, not only annotations, when collecting survivors.
+
+Also 04:40: vocab `fnv1a`/`name_index` endless compile-time loops (shards 146, 150 died at the 240m limit) are fixed by
+pr74/g18-rest 3565e479 (D-2083, recursion; session proof 39 mutants: 13 caught, 26 unviable) and CI gets a build bound
+(coordinator commit 46439dee on local integ, D-2090: --build-timeout-multiplier 2).
