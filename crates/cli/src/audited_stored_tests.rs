@@ -3929,3 +3929,123 @@ fn the_minute_gap_census_asks_the_shares_dated_close() {
     );
     let _ignored = std::fs::remove_dir_all(&store);
 }
+
+/// p50, p99 and max of `samples` nanoseconds, as one line.
+fn o1cli_quantiles(label: &str, samples: &mut [u128]) {
+    samples.sort_unstable();
+    let at = |permille: usize| {
+        samples
+            .get((samples.len().saturating_sub(1) * permille) / 1_000)
+            .copied()
+            .unwrap_or(0)
+    };
+    println!(
+        "O1CLI-MEASURE {label}: n {} p50 {} ns p99 {} ns max {} ns",
+        samples.len(),
+        at(500),
+        at(990),
+        at(1_000)
+    );
+}
+
+/// Times `trials` runs of `run`, each over a fresh warmed fixture.
+fn o1cli_time(label: &str, trials: usize, mut run: impl FnMut(&Fixture)) {
+    let mut samples = Vec::with_capacity(trials);
+    for _ in 0..trials {
+        let fixture = Fixture::warmed();
+        let start = std::time::Instant::now();
+        run(&fixture);
+        samples.push(start.elapsed().as_nanos());
+    }
+    o1cli_quantiles(label, &mut samples);
+}
+
+fn o1cli_ask(rung: &'static str, support_ppm: Option<u64>) -> crate::RungAsk<'static> {
+    crate::RungAsk {
+        vendor_word: "zerodha",
+        underlying: "NIFTY",
+        rung,
+        from: (2025, 5),
+        to: (2025, 5),
+        support_ppm,
+        attempt: None,
+    }
+}
+
+fn o1cli_store(fixture: &Fixture) -> crate::RungStore {
+    crate::RungStore {
+        root: Ok(fixture.root.clone()),
+        commit: Some("generated-o1cli-measure"),
+    }
+}
+
+fn o1cli_screen(fixture: &Fixture) -> crate::StoredScreenRequest<'_> {
+    crate::StoredScreenRequest {
+        root: fixture.root.clone(),
+        vendor: Vendor::Zerodha,
+        underlying: fixture.symbol,
+        rung: "5min",
+        span: ((2025, 5), (2025, 5)),
+        support_ppm: 1_000_000,
+        policy: crate::Policy {
+            rules: crate::Rules::BASELINE,
+            lens: runner::rank::Lens::Detectability,
+            validate: false,
+        },
+        attempt: Some(13),
+        commit: "generated-o1cli-measure",
+    }
+}
+
+/// o1cli-2/3/4/5 wall time on the warmed May-2025 fixture (D-1843, D-1839).
+/// Run explicitly: `--ignored --exact audited_stored::tests::o1cli_cost_measurement --nocapture`.
+#[test]
+#[ignore = "timing measurement; run explicitly"]
+fn o1cli_cost_measurement() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    crate::knobs::set("BRUTEX_VALIDATE", "0");
+    let trials = 15;
+    o1cli_time("o1cli-2/4 derived 5min rung", trials, |fixture| {
+        let row = crate::one_rung_cached(
+            o1cli_ask("5min", None),
+            o1cli_store(fixture),
+            &mut crate::AuditCache::default(),
+        );
+        assert!(row.outcome.is_ok(), "{:?}", row.outcome);
+    });
+    o1cli_time("o1cli-3 5min+1min rungs", trials, |fixture| {
+        o1cli_two_rungs(fixture);
+    });
+    o1cli_time("o1cli-5 bar count then screen", trials, |fixture| {
+        o1cli_count_then_screen(fixture);
+    });
+    crate::knobs::clear_all();
+}
+
+fn o1cli_two_rungs(fixture: &Fixture) {
+    let share = std::sync::Arc::new(crate::SpanShare::default());
+    for rung in ["5min", "1min"] {
+        let row = crate::one_rung_cached(
+            o1cli_ask(rung, Some(600_000)),
+            o1cli_store(fixture),
+            &mut crate::AuditCache::sharing(std::sync::Arc::clone(&share)),
+        );
+        assert!(row.outcome.is_ok(), "{:?}", row.outcome);
+    }
+}
+
+fn o1cli_count_then_screen(fixture: &Fixture) {
+    let key = crate::screen_key(
+        &fixture.root,
+        Vendor::Zerodha,
+        fixture.symbol,
+        "5min",
+        ((2025, 5), (2025, 5)),
+    );
+    let mut cache = crate::ScreenCache::default();
+    let (bars, _) = crate::descent_bar_count_at(key, (0, 1), &mut cache).expect("count");
+    assert!(bars > 0);
+    let page = crate::screen_range_kernel_cached(o1cli_screen(fixture), &mut cache).expect("screen");
+    assert!(page.contains("RESULT RECORDED"), "{page}");
+}

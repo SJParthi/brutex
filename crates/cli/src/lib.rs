@@ -25474,6 +25474,97 @@ mod tests {
         );
     }
 
+    /// o1cli-6 wall time, D-1842: the two full sorts against the selections,
+    /// on the same rows, p50/p99/max over 21 runs at each size. Run
+    /// explicitly with `--ignored --nocapture`.
+    #[test]
+    #[ignore = "timing measurement; run explicitly"]
+    fn o1cli_6_selection_measurement() {
+        use runner::outcome::Edge;
+        use runner::rank::Scored;
+        let scored = Scored {
+            mask: vocab::ConditionMask::default().with_bit(1),
+            hits: 100,
+            edge: Edge {
+                n: 100,
+                mean_paisa: 1.0,
+                t: 1.0,
+                ..Edge::default()
+            },
+        };
+        let mut rules = crate::Rules::operator();
+        rules.top = 10;
+        let band = super::measured_band(rules.top);
+        for n in [10_000_usize, 100_000, 1_000_000] {
+            let build = || -> Vec<super::Screened<'_>> {
+                let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+                (0..n)
+                    .map(|at| {
+                        state ^= state << 13;
+                        state ^= state >> 7;
+                        state ^= state << 17;
+                        let pess = i64::try_from(state % 2_000_001).unwrap_or(0) - 1_000_000;
+                        super::Screened {
+                            side: Direction::Long,
+                            scored: &scored,
+                            rank: at + 1,
+                            cell: grid::Cell {
+                                trades: state % 40,
+                                wins: state % 17,
+                                pessimistic: pess,
+                                max_drawdown: i64::try_from(state % 5_000).unwrap_or(0),
+                                min_win: pess.max(0),
+                                worst_trade: pess.min(0),
+                                ..grid::Cell::default()
+                            },
+                            tightest: None,
+                            admitted: state % 3 == 0,
+                            consistency: (at % 7 == 0).then(|| super::Consistency {
+                                shares_bp: [i64::try_from(state % 10_000).unwrap_or(0);
+                                    crate::stability::GRAINS.len()],
+                                worst_day: i128::from(state % 100),
+                                years: 1,
+                            }),
+                            steady: true,
+                            calendar_unmeasured: false,
+                        }
+                    })
+                    .collect()
+            };
+            let mut before = Vec::new();
+            let mut after = Vec::new();
+            for _ in 0..21 {
+                let mut rows = build();
+                let start = std::time::Instant::now();
+                rows.sort_by_key(|r| super::money_key(&r.cell));
+                rows.sort_by_key(|r| super::screen_order_key(r).0);
+                super::calendar_gate(&mut rows, rules);
+                let old = super::final_selection(&rows, rules).map(|c| c.cell);
+                before.push(start.elapsed().as_nanos());
+                let old_top: Vec<usize> = rows.iter().take(rules.top).map(|r| r.rank).collect();
+                let mut rows = build();
+                let start = std::time::Instant::now();
+                super::least_first(&mut rows, band, |r| (super::money_key(&r.cell), r.rank));
+                let new = super::final_selection_split(&rows, rules).map(|c| c.cell);
+                super::least_first(&mut rows, rules.top, super::screen_order_key);
+                super::calendar_gate(&mut rows, rules);
+                after.push(start.elapsed().as_nanos());
+                let new_top: Vec<usize> = rows.iter().take(rules.top).map(|r| r.rank).collect();
+                assert_eq!((old, old_top), (new, new_top));
+            }
+            for (label, samples) in [("two full sorts", &mut before), ("selections", &mut after)] {
+                samples.sort_unstable();
+                let at = |permille: usize| samples[(samples.len() - 1) * permille / 1_000];
+                println!(
+                    "O1CLI-MEASURE o1cli-6 {label} n {n}: p50 {} ns p99 {} ns max {} ns",
+                    at(500),
+                    at(990),
+                    at(1_000)
+                );
+            }
+        }
+    }
+
     /// A broader earlier tier may price more masks than the final tier. The
     /// final map is replacement, never union, so an unvisited mask cannot be
     /// persisted under rules that never measured it.
