@@ -1654,6 +1654,34 @@ mod tests {
         }
     }
 
+    /// **A PAGE THAT NEEDS NO PARTITION PAYS FOR NONE.** At offset zero there
+    /// is nothing before the page to cut away, and a limit that reaches the end
+    /// of what is left has nothing after it: either partition there is a full
+    /// linear pass that changes no row. Results alone cannot see it, so the
+    /// comparison count is held EXACTLY to that of ordering the rows alone.
+    /// G18-api-04.
+    #[test]
+    fn a_page_needing_no_partition_compares_only_to_order_itself() {
+        let rows: Vec<i64> = (0..64).collect();
+        let plain = std::cell::Cell::new(0_u64);
+        let mut alone = rows.clone();
+        alone.sort_by(|a, b| {
+            plain.set(plain.get() + 1);
+            a.cmp(b)
+        });
+        assert!(plain.get() > 0);
+        // limit == len (no cut after) and limit > len (none either).
+        for limit in [rows.len(), rows.len() + 1] {
+            let compared = std::cell::Cell::new(0_u64);
+            let page = super::page_of(rows.clone(), 0, limit, |a, b| {
+                compared.set(compared.get() + 1);
+                a.cmp(b)
+            });
+            assert_eq!(page, rows, "limit={limit}");
+            assert_eq!(compared.get(), plain.get(), "limit={limit}");
+        }
+    }
+
     #[test]
     fn the_price_table_carries_no_script() {
         let html = table(&[Bar {
@@ -1821,7 +1849,11 @@ mod window_tests {
                 }
             })
             .collect();
-        file.append(&rows).expect("the batch appends");
+        // n = 0 is a month whose file EXISTS and holds nothing: created, never
+        // appended to, since the store refuses an empty batch.
+        if !rows.is_empty() {
+            file.append(&rows).expect("the batch appends");
+        }
     }
 
     /// Midnight UTC on the first of a month, in micros.
@@ -2477,6 +2509,49 @@ mod window_tests {
         let page = window_over(&root, april, SortKey::Ts, false, 0, 1, false);
         assert_eq!(change_at(&page.bars, 1_000), (None, "first_bar_in_file"));
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **AN EMPTY MONTH FILE IS SKIPPED BY THE LOOKBACK, IN BOTH DIRECTIONS.**
+    ///
+    /// A month whose file exists and holds no record has no last bar, so the
+    /// next month's first row stands behind the month before the empty one.
+    /// `earlier_in_time` keeps a file only when `n_valid > 0`; counting an
+    /// empty file as "earlier" gave April's first row `first_bar_in_file`
+    /// mid-window. Ascending and descending seek pages both reach it, one per
+    /// branch of `earlier_in_time`. G18-api-03.
+    #[test]
+    fn an_empty_month_file_between_two_months_does_not_reset_the_lookback() {
+        let root = scratch("cross-month-empty");
+        write_month(&root, YearMonth::new(2026, 2).expect("m"), 10, 2_000);
+        // March's file EXISTS and is empty: zero valid records.
+        write_month(&root, YearMonth::new(2026, 3).expect("m"), 0, 3_000);
+        write_month(&root, YearMonth::new(2026, 4).expect("m"), 10, 4_000);
+        let april = YearMonth::new(2026, 4).expect("m");
+        let feb_to_apr = crate::server::basis_points(2_009, 4_000).expect("a change");
+        let opening = |bars: &[WindowBar]| {
+            let rows = bars
+                .iter()
+                .filter(|row| row.bar.close == 4_000)
+                .map(|row| (row.chg, row.chg_why))
+                .collect::<Vec<_>>();
+            assert_eq!(rows.len(), 1, "April's first row is on the page once");
+            rows[0]
+        };
+        // Ascending: offset 10 is April's first row, the page opens on it.
+        let up = window_over(&root, april, SortKey::Ts, false, 10, 2, false);
+        assert_eq!(up.bars[0].bar.close, 4_000);
+        assert_eq!(opening(&up.bars), (Some(feb_to_apr), ""));
+        // Descending: offsets 8 and 9 are 4001 and 4000.
+        let down = window_over(&root, april, SortKey::Ts, true, 8, 2, false);
+        assert_eq!(
+            down.bars
+                .iter()
+                .map(|row| row.bar.close)
+                .collect::<Vec<_>>(),
+            vec![4_001, 4_000]
+        );
+        assert_eq!(opening(&down.bars), (Some(feb_to_apr), ""));
         let _ = std::fs::remove_dir_all(&root);
     }
 

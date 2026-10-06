@@ -3084,7 +3084,7 @@ fn folder_input(suggestions: &[String]) -> String {
         let _ = write!(out, "<option value=\"{}\">", escape(f));
     }
     out.push_str("</datalist>");
-    match archive_suggestions() {
+    match archive_suggestions(std::env::var_os(ARCHIVE_SWITCH).as_deref()) {
         Ok(true) => {}
         Ok(false) => {
             out.push_str("<p class=\"fine\">Automatic CSV-folder suggestions are disabled for this process (BRUTEX_ARCHIVE_SUGGESTIONS is off). No discovery scan was performed; explicit folder imports remain available.</p>");
@@ -3136,19 +3136,29 @@ const MAX_FOLDER_SUGGESTIONS: usize = 60;
 /// request handler is the defect this function was extracted to make visible.
 ///
 /// `docs/06-limits.md` §34 records the cost and what is not bounded about it.
+///
+/// `var` is the environment lookup, `std::env::var_os` in production. It is a
+/// parameter so a test can hand the walk a `HOME` and a switch of its own
+/// without mutating the process environment, which `unsafe_code` forbids and
+/// which would race every other test reading it. G18-api-12.
 #[must_use]
-pub fn folder_suggestions() -> Vec<String> {
-    folders_when(archive_suggestions() == Ok(true), discover_folders)
+pub fn folder_suggestions(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> Vec<String> {
+    folders_when(
+        archive_suggestions(var(ARCHIVE_SWITCH).as_deref()) == Ok(true),
+        || discover_folders(var("HOME")),
+    )
 }
 
+/// The switch that turns the folder walk off.
+const ARCHIVE_SWITCH: &str = "BRUTEX_ARCHIVE_SUGGESTIONS";
+
 /// `BRUTEX_ARCHIVE_SUGGESTIONS`, read by the shared switch: on unless turned
-/// off, and a word it does not take refused by name (CE-39, D-1769).
-fn archive_suggestions() -> Result<bool, String> {
-    let raw = std::env::var_os("BRUTEX_ARCHIVE_SUGGESTIONS");
+/// off, and a word it does not take refused by name (CE-39, D-1769). `raw` is
+/// the variable's value, read by the caller.
+fn archive_suggestions(raw: Option<&std::ffi::OsStr>) -> Result<bool, String> {
     brutex_core::knob::switch(
-        "BRUTEX_ARCHIVE_SUGGESTIONS",
-        raw.as_deref()
-            .map(|value| value.to_str().unwrap_or("\u{fffd}")),
+        ARCHIVE_SWITCH,
+        raw.map(|value| value.to_str().unwrap_or("\u{fffd}")),
         true,
     )
 }
@@ -3157,12 +3167,12 @@ fn folders_when(enabled: bool, discover: impl FnOnce() -> Vec<String>) -> Vec<St
     if enabled { discover() } else { Vec::new() }
 }
 
-fn discover_folders() -> Vec<String> {
+fn discover_folders(home: Option<std::ffi::OsString>) -> Vec<String> {
     let mut found: Vec<String> = Vec::new();
     // AN EMPTY OR RELATIVE HOME WALKS NOTHING. It used to walk the working
     // directory's `Downloads` (CE-38, D-1769); a convenience list has no
     // refusal to give, so it is simply empty.
-    if let Ok(home) = brutex_core::knob::home(std::env::var_os("HOME")) {
+    if let Ok(home) = brutex_core::knob::home(home) {
         for root in [
             home.join("Downloads"),
             home.join(".brutex").join("vendor-data"),
@@ -3193,6 +3203,57 @@ mod archive_suggestion_tests {
         });
         assert!(called);
         assert_eq!(found, vec!["fixture".to_owned()]);
+    }
+
+    /// **THE WALK FINDS EXACTLY THE CSV FOLDERS UNDER BOTH ROOTS, AND ONLY
+    /// WHEN THE SWITCH IS ON.** A scratch `HOME` holds one CSV folder under each
+    /// root and one folder of plain text, which is not offered. Unset, the
+    /// switch is on and the list is exact and sorted; `off` and an unreadable
+    /// word both leave it empty without walking. G18-api-12.
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a fixture that cannot be written is a failed test, not a case"
+    )]
+    fn folder_suggestions_list_exactly_the_csv_folders_under_home_when_switched_on() {
+        let home = crate::scratch::path("folder-suggestions-home");
+        let _ = std::fs::remove_dir_all(&home);
+        let csv = home.join("Downloads").join("a");
+        let text = home.join("Downloads").join("b");
+        let vendor = home.join(".brutex").join("vendor-data").join("c");
+        for dir in [&csv, &text, &vendor] {
+            std::fs::create_dir_all(dir).expect("fixture folder");
+        }
+        std::fs::write(csv.join("x.csv"), "a\n").expect("csv");
+        std::fs::write(text.join("notes.txt"), "a\n").expect("text");
+        std::fs::write(vendor.join("y.csv"), "a\n").expect("csv");
+        let env = |switch: Option<&'static str>| {
+            let home = home.clone();
+            move |name: &str| match name {
+                "HOME" => Some(home.clone().into_os_string()),
+                ARCHIVE_SWITCH => switch.map(std::ffi::OsString::from),
+                _ => None,
+            }
+        };
+        let expected = vec![
+            vendor.to_string_lossy().into_owned(),
+            csv.to_string_lossy().into_owned(),
+        ];
+        assert_eq!(folder_suggestions(env(None)), expected);
+        assert_eq!(folder_suggestions(env(Some("on"))), expected);
+        assert!(folder_suggestions(env(Some("off"))).is_empty());
+        assert!(folder_suggestions(env(Some("maybe"))).is_empty());
+        assert_eq!(archive_suggestions(None), Ok(true));
+        assert_eq!(archive_suggestions(Some("0".as_ref())), Ok(false));
+        assert!(archive_suggestions(Some("maybe".as_ref())).is_err());
+        // No HOME, or a relative one, walks nothing.
+        assert!(discover_folders(None).is_empty());
+        assert!(discover_folders(Some("relative/home".into())).is_empty());
+        assert_eq!(
+            discover_folders(Some(home.clone().into_os_string())),
+            expected
+        );
+        std::fs::remove_dir_all(&home).expect("cleanup");
     }
 }
 
@@ -3317,7 +3378,7 @@ mod tests {
                 html.matches("<option value=").count(),
                 made.min(MAX_FOLDER_SUGGESTIONS)
             );
-            if archive_suggestions() == Ok(true) {
+            if archive_suggestions(std::env::var_os(ARCHIVE_SWITCH).as_deref()) == Ok(true) {
                 assert_eq!(
                     html.contains(&format!("capped at {MAX_FOLDER_SUGGESTIONS}")),
                     capped,

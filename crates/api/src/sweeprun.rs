@@ -1826,6 +1826,13 @@ pub fn now_micros() -> i64 {
         .unwrap_or(0)
 }
 
+/// [`now_micros`] in whole milliseconds, the unit the rolling log stamps
+/// records in. One function, so the two observation paths cannot divide
+/// differently and a test pins the unit against the system clock. G18-api-22.
+fn now_millis() -> i64 {
+    now_micros() / 1_000
+}
+
 /// Reserves one exact attempt token.
 ///
 /// The append-only invocation index owns the durable sequence space, so a
@@ -2019,10 +2026,7 @@ fn claim_execution(
         }
     })?;
     if let Some(dir) = crate::logs::cli_log_dir() {
-        admit_external(
-            &site.store_root,
-            &observe_elsewhere(&dir, now_micros() / 1_000),
-        )?;
+        admit_external(&site.store_root, &observe_elsewhere(&dir, now_millis()))?;
     }
     Ok(lease)
 }
@@ -2396,7 +2400,7 @@ pub async fn run_json(
     let dir = crate::logs::cli_log_dir();
     let root = site.store_root.clone();
     match crate::detail::run(move || {
-        observed_status_with_admission(&root, local.as_ref(), dir.as_deref(), now_micros() / 1_000)
+        observed_status_with_admission(&root, local.as_ref(), dir.as_deref(), now_millis())
     })
     .await
     {
@@ -3783,8 +3787,78 @@ mod tests {
     use super::{
         ABNORMAL_END, Asked, AskedDescent, EVERY_COMMAND, EVERY_RUNG, KNOBS, Kind, Progress,
         Refusal, TaskFinisher, asked_from, attempt_started_event, command_from, completion_audit,
-        conduct_command, descent_from, marker_refusal, now_micros, settle, stamp_refusal,
+        conduct_command, descent_from, marker_refusal, now_micros, now_millis, settle,
+        stamp_refusal, unterminated_marker,
     };
+
+    /// **THE OBSERVATION CLOCK IS THE SYSTEM CLOCK IN MILLISECONDS.** Read
+    /// between two system-clock readings, it lies between them. G18-api-22.
+    #[test]
+    fn the_observation_clock_is_unix_milliseconds() {
+        let wall = || {
+            i64::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("after the epoch")
+                    .as_millis(),
+            )
+            .expect("fits")
+        };
+        let before = wall();
+        let got = now_millis();
+        let after = wall();
+        assert!(
+            before <= got && got <= after,
+            "{before} <= {got} <= {after}"
+        );
+    }
+
+    /// **ONLY A NAMED SWEEP'S `command started` UNDER A DURABLE ID IS AN
+    /// UNTERMINATED MARKER.** Each of the three conditions is necessary on its
+    /// own: another message, an unnamed sweep, or a run id at or below
+    /// `ID_BASE` answers `None`. G18-api-23.
+    #[test]
+    fn an_unterminated_marker_needs_all_three_conditions() {
+        let durable = cli::operation_audit::ID_BASE + 7;
+        let marker = |message: &str, run: u64| telemetry::Record {
+            seq: 0,
+            run,
+            at_unix_millis: 0,
+            at_utc: String::new(),
+            level: telemetry::Level::Info,
+            target: "cli.command".to_owned(),
+            message: message.to_owned(),
+            fields: vec![(
+                "command".to_owned(),
+                telemetry::OwnedValue::Str("sweep-all".to_owned()),
+            )],
+            cut: false,
+            dropped_fields: 0,
+        };
+        assert_eq!(
+            unterminated_marker(&marker("command started", durable), true),
+            Some((durable, "sweep-all".to_owned()))
+        );
+        assert_eq!(
+            unterminated_marker(&marker("command finished", durable), true),
+            None
+        );
+        assert_eq!(
+            unterminated_marker(&marker("command started", durable), false),
+            None
+        );
+        assert_eq!(
+            unterminated_marker(
+                &marker("command started", cli::operation_audit::ID_BASE),
+                true
+            ),
+            None
+        );
+        assert_eq!(
+            unterminated_marker(&marker("command started", 3), true),
+            None
+        );
+    }
 
     /// SF-13 (P12-02, D-1791): a derived threshold reaches the wire as
     /// `null`, never as a magic zero, and a fixed one as its number.

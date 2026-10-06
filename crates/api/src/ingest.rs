@@ -1329,12 +1329,17 @@ pub fn parse_day_field(body: &str, field: &'static str) -> Result<Day, Refusal> 
     // leading `+` and leading zeros, so `from_m=+8` or `0008` once padded to
     // `08` and walked past the strict-shape refusal D-0905 gives the ISO field
     // (Z1-slice13-F2, D-1762).
+    //
+    // Zero-filled on the LEFT as text, never parsed: a fill only widens, so a
+    // piece already as wide as the field, or wider, comes back unchanged and
+    // still meets `parse_day`'s width refusal. The former `len() > width`
+    // guard and its `>=` mutant agreed on every input (G18-api-07).
     let pad = |text: &str, width: usize| -> String {
-        if text.len() > width || !text.bytes().all(|b| b.is_ascii_digit()) {
-            return text.to_owned();
+        if text.bytes().all(|b| b.is_ascii_digit()) {
+            format!("{text:0>width$}")
+        } else {
+            text.to_owned()
         }
-        text.parse::<u16>()
-            .map_or_else(|_| text.to_owned(), |n| format!("{n:0width$}"))
     };
     parse_day(
         field,

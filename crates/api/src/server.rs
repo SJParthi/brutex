@@ -5695,7 +5695,7 @@ impl Site {
         // `/pull` render and cost 72 ms against `/store`'s 1 ms, growing with
         // `~/Downloads` -- a directory this repository does not own and cannot
         // bound. Same move D-0039 made for the master. See render::folder_suggestions.
-        let folders = render::folder_suggestions();
+        let folders = render::folder_suggestions(|name| std::env::var_os(name));
         // WHAT THE STORE ACTUALLY HOLDS, as rows rather than as a product.
         // The axis above crossed with 36 months is 7,056 cells of which 194
         // are held, so `/store` opened on 36 blank BANKNIFTY rows and the real
@@ -18750,7 +18750,7 @@ mod head_deadline_tests {
 
 /// The banner line naming where the front end is and what state it is in.
 ///
-/// Split out of [`run_in`] for the reason [`announce_log`] is.
+/// Split out of [`run_in`] for the reason [`log_announcement`] is.
 ///
 /// THE STATE, NOT THE BIT. `Assets::built` is true for any directory that
 /// exists, so an empty `build/`, a half-written one, and a bundle older than
@@ -19275,11 +19275,11 @@ pub fn end_runtime(runtime: tokio::runtime::Runtime, grace: std::time::Duration)
 /// process-wide stop, which would cancel the other tests' engine work.
 pub(crate) fn wait_then_end(runtime: tokio::runtime::Runtime, grace: std::time::Duration) -> usize {
     let deadline = std::time::Instant::now() + grace;
-    while crate::sweeprun::engine_tasks_running() > 0 && std::time::Instant::now() < deadline {
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    let abandoned = crate::sweeprun::engine_tasks_running();
-    if abandoned > 0 {
+    let abandoned = wait_out(deadline, crate::sweeprun::engine_tasks_running);
+    // `NonZeroUsize` is the "anything abandoned" test with no operator: the
+    // former `abandoned > 0` against `>= 0`, `== 0` or `< 0` was decided by a
+    // warning no test read (G18-api-15).
+    if let Some(abandoned) = std::num::NonZeroUsize::new(abandoned) {
         warn_line!(
             "STOPPING WITH {abandoned} ENGINE TASK(S) STILL RUNNING: the shutdown wait of \
              {grace:?} ran out, so they end with this process. Their results are not \
@@ -19291,7 +19291,7 @@ pub(crate) fn wait_then_end(runtime: tokio::runtime::Runtime, grace: std::time::
                 "api.main",
                 "engine tasks abandoned at shutdown",
             )
-            .with("abandoned", telemetry::Value::Uint(abandoned as u64))
+            .with("abandoned", telemetry::Value::Uint(abandoned.get() as u64))
             .with(
                 "grace_ms",
                 telemetry::Value::Uint(u64::try_from(grace.as_millis()).unwrap_or(u64::MAX)),
@@ -19300,6 +19300,25 @@ pub(crate) fn wait_then_end(runtime: tokio::runtime::Runtime, grace: std::time::
     }
     runtime.shutdown_timeout(deadline.saturating_duration_since(std::time::Instant::now()));
     abandoned
+}
+
+/// Waits until `running` answers zero or `deadline` passes, and answers what
+/// `running` says then.
+///
+/// NO COMPARISON OF TWO INSTANTS: `now < deadline` and `now <= deadline`
+/// differed only at one unobservable nanosecond (G18-api-15).
+/// `checked_duration_since` is `None` once the deadline has passed, and no
+/// sleep overshoots it. `running` is a parameter so a test drives the wait
+/// with a count of its own rather than the process-wide engine count, which
+/// other tests in the same binary move.
+fn wait_out(deadline: std::time::Instant, running: impl Fn() -> usize) -> usize {
+    while running() > 0 {
+        let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) else {
+            break;
+        };
+        std::thread::sleep(left.min(std::time::Duration::from_millis(20)));
+    }
+    running()
 }
 
 /// Prints the report for `dir` and returns the exit code it earned.
@@ -19720,18 +19739,55 @@ fn served_store_root() -> Result<PathBuf, String> {
 /// is a function whose next refusal gets left out, and this change added one.
 /// The install itself stays in [`run_in`] because the log is opened **before**
 /// the first line is printed, and moving the call would move that.
-fn announce_log(logging: Result<&&'static telemetry::Sink, &String>, level_note: &str) {
+///
+/// Returned rather than printed, so a test reads the banner a run prints
+/// instead of trusting stdout it cannot capture. G18-api-16.
+fn log_announcement(
+    logging: Result<&&'static telemetry::Sink, &String>,
+    level_note: &str,
+) -> String {
     match logging {
-        Ok(sink) => {
-            say!(
-                "  log:     {} (rolling, {} files x {} MiB ceiling)",
-                sink.path().display(),
-                telemetry::DEFAULT_KEEP_FILES,
-                telemetry::DEFAULT_MAX_FILE_BYTES / (1024 * 1024),
-            );
-            say!("  level:   {level_note}");
+        Ok(sink) => format!(
+            "  log:     {} (rolling, {} files x {} MiB ceiling)\n  level:   {level_note}",
+            sink.path().display(),
+            telemetry::DEFAULT_KEEP_FILES,
+            telemetry::DEFAULT_MAX_FILE_BYTES / (1024 * 1024),
+        ),
+        Err(why) => format!("  log:     NOT WRITABLE — {why}"),
+    }
+}
+
+/// The banner line for a first event that did not reach the file, or `None`
+/// when it did. If the FIRST event cannot be written then no later one can
+/// either. Returned rather than printed for [`log_announcement`]'s reason.
+/// G18-api-16.
+fn first_event_note(first: telemetry::Emitted) -> Option<String> {
+    (!first.is_written()).then(|| format!("  log:     FIRST EVENT NOT WRITTEN — {first:?}"))
+}
+
+/// The `opening:` banner line for a server bound at `addr`, after handing
+/// `open` the address unless the port is zero.
+///
+/// PORT ZERO IS NEVER OPENED. `0` is the ask-the-kernel-for-any-port marker,
+/// so the URL built from it addresses nothing — a browser sent there answers
+/// `ERR_UNSAFE_PORT` and nothing else. Every caller that binds `:0` is a
+/// harness rather than an operator, and this guard is why running the suite no
+/// longer opens a window on the desktop of whoever ran it. The check is on the
+/// ADDRESS rather than on a test flag: a flag has to be remembered by every
+/// future harness, and the one that forgets is the one that opens the window.
+/// `open` is a parameter so a test proves that without a browser. G18-api-16.
+fn opening_line(
+    addr: std::net::SocketAddr,
+    open: impl FnOnce(&str) -> Result<(), String>,
+) -> String {
+    let home = format!("http://{addr}/");
+    if addr.port() == 0 {
+        "  opening: skipped — port 0 addresses nothing".to_owned()
+    } else {
+        match open(&home) {
+            Ok(()) => format!("  opening: {home}"),
+            Err(why) => format!("  opening: NOT OPENED ({why}) — go to {home}"),
         }
-        Err(why) => say!("  log:     NOT WRITABLE — {why}"),
     }
 }
 
@@ -19844,7 +19900,7 @@ async fn run_in_over(
                 say!("brutex api listening on http://{addr}/");
                 say!("  masters: {}", dir.display());
                 say!("  store:   {}", store_root.display());
-                announce_log(logging.as_ref(), &level_note);
+                say!("{}", log_announcement(logging.as_ref(), &level_note));
                 // NAMED WHETHER OR NOT IT IS THERE. A front end that silently
                 // is not being served looks exactly like a front end that is
                 // broken, and the operator has no way to tell the two apart
@@ -19936,35 +19992,15 @@ async fn run_in_over(
                         .with("universe", telemetry::Value::Str(universe))
                         .with("autopilot_flies", telemetry::Value::Bool(flying_on_start)),
                 );
-                if !first.is_written() {
-                    say!("  log:     FIRST EVENT NOT WRITTEN — {first:?}");
+                if let Some(note) = first_event_note(first) {
+                    say!("{note}");
                 }
                 // THE LAST STEP OF THE RUN PROCEDURE, PERFORMED RATHER THAN
                 // PRINTED. The listener is already bound above, so the address
                 // handed to the browser answers before the browser can ask —
                 // opening it earlier would race the bind and show a refusal
                 // page on a server that was about to work.
-                let home = format!("http://{addr}/");
-                // PORT ZERO IS NEVER OPENED.
-                //
-                // `0` is the ask-the-kernel-for-any-port marker, so the URL
-                // built from it addresses nothing — a browser sent there
-                // answers `ERR_UNSAFE_PORT` and nothing else. Every caller that
-                // binds `:0` is a harness rather than an operator, and this
-                // guard is why running the suite no longer opens a window on
-                // the desktop of whoever ran it.
-                //
-                // The check is on the ADDRESS rather than on a test flag: a
-                // flag has to be remembered by every future harness, and the
-                // one that forgets is the one that opens the window.
-                if addr.port() == 0 {
-                    say!("  opening: skipped — port 0 addresses nothing");
-                } else {
-                    match open_in_browser(&home) {
-                        Ok(()) => say!("  opening: {home}"),
-                        Err(why) => say!("  opening: NOT OPENED ({why}) — go to {home}"),
-                    }
-                }
+                say!("{}", opening_line(addr, open_in_browser));
                 // SPAWNED, NOT AWAITED. The listener is already bound and
                 // `serve` is entered on the next line, so the first request is
                 // answered while the autopilot is still counting down its grace
@@ -29825,6 +29861,290 @@ mod tests {
         assert!(
             json.starts_with('[') && json.ends_with(']'),
             "and it is an array"
+        );
+    }
+
+    /// **THE COUNTS ARE THE NAMED FEED'S, AND A ROW WITH BARS LEADS.** Groww's
+    /// census holds RELIANCE and every other vendor's holds only NIFTY. Asked
+    /// for `feed=groww`, RELIANCE carries Groww's count and leads the array,
+    /// ahead of the index that sorts first among rows with none; NIFTY reads
+    /// zero, because another feed's bars are not this feed's. G18-api-14.
+    #[tokio::test]
+    async fn the_typeahead_counts_only_the_named_feeds_bars_and_lists_held_rows_first() {
+        use brutex_core::instrument::{Exchange, Segment};
+        use brutex_core::vendor::Vendor;
+        use pull::manifest::{Entry, EntryKey, Manifest, manifest_path};
+        use store::path::{Timeframe, YearMonth};
+
+        let dir = agreeing("tafeedbars");
+        let site = site("tafeedbars", &dir);
+        let write = |vendor: Vendor, symbol: &str, segment: Segment, rows: u64| {
+            let mut census = Manifest::open(vendor, &[], &[]).expect("empty fixture");
+            census
+                .record(Entry {
+                    key: EntryKey {
+                        contract: None,
+                        exchange: Exchange::Nse,
+                        segment,
+                        symbol: brutex_core::symbol::Symbol::new(symbol).expect("symbol"),
+                        timeframe: Timeframe::MINUTE_1,
+                        month: YearMonth::new(2025, 7).expect("month"),
+                    },
+                    rows,
+                    first_ts_micros: 1,
+                    last_ts_micros: 1,
+                })
+                .expect("record counter");
+            std::fs::write(manifest_path(&site.store_root, vendor), census.image())
+                .expect("write fixture census");
+        };
+        write(Vendor::Groww, "RELIANCE", Segment::Cash, 375);
+        for vendor in Vendor::ALL {
+            if vendor != Vendor::Groww {
+                write(vendor, "NIFTY", Segment::Index, 900);
+            }
+        }
+        let loaded: Loaded = std::sync::Arc::new(site);
+        let (_code, _headers, json) = instruments_json(
+            axum::extract::State(loaded),
+            "/instruments.json?feed=groww".parse().expect("a legal uri"),
+        )
+        .await;
+        assert!(
+            json.starts_with(r#"[{"symbol":"RELIANCE","#),
+            "the one row with bars leads: {json}"
+        );
+        let row = |symbol: &str| {
+            let at = json
+                .find(&format!(r#"{{"symbol":"{symbol}","#))
+                .unwrap_or_else(|| panic!("{symbol} is listed: {json}"));
+            let rest = &json[at..];
+            rest[..rest.find('}').expect("the row closes")].to_owned()
+        };
+        assert!(row("RELIANCE").contains(r#""bars":375,"#), "{json}");
+        assert!(row("NIFTY").contains(r#""bars":0,"#), "{json}");
+    }
+
+    /// **A BROWSER HOLDS 2^53 − 1 EXACTLY AND 2^53 NOT AS ITSELF.** The bound
+    /// is the last exact integer, on both signs. G18-api-17.
+    #[test]
+    fn the_browser_exact_bound_is_two_to_the_fifty_three_minus_one() {
+        assert_eq!(BROWSER_EXACT, 9_007_199_254_740_991);
+        assert!(browser_exact(9_007_199_254_740_991));
+        assert!(browser_exact(-9_007_199_254_740_991));
+        assert!(!browser_exact(9_007_199_254_740_992));
+        assert!(!browser_exact(-9_007_199_254_740_992));
+    }
+
+    /// **ONLY A WINDOW CARRYING THE DEATH MARKER IS A DEAD CREDENTIAL.** The
+    /// marker is stripped, the run is marked, and the answer is `true`; no
+    /// unfetched remainder, or one without the marker, answers `false` and
+    /// leaves both the remainder and the run untouched. G18-api-18.
+    #[test]
+    fn only_a_window_carrying_the_death_marker_lifts_a_dead_credential() {
+        use pull::session::Window;
+        use pull::vendor::{Feed, Granularity, Listing, Transport};
+        let Transport::Http(spec) = Feed::Zerodha.descriptor().transport else {
+            panic!("HTTP descriptor");
+        };
+        let window = Window::new(day(2026, 9, 4), day(2026, 9, 4)).unwrap();
+        let landed = |unfetched: Option<String>| BrokerWindow {
+            listing: Listing::Index,
+            contract: None,
+            unfetched,
+            instrument: "NIFTY".to_owned(),
+            origin: "test only".to_owned(),
+            spec,
+            exchange: "NSE",
+            segment: "INDEX",
+            store_vendor: Vendor::Zerodha,
+            window,
+            granularity: Granularity::Day1,
+            bodies: Vec::new(),
+        };
+        let mut run = BrokerRun::default();
+        let mut none = landed(None);
+        assert!(!run.lift_credential_death(&mut none));
+        let mut plain = landed(Some("vendor said no".to_owned()));
+        assert!(!run.lift_credential_death(&mut plain));
+        assert_eq!(plain.unfetched.as_deref(), Some("vendor said no"));
+        assert!(!run.credential_dead);
+        let mut dead = landed(Some(format!("{CREDENTIAL_DEAD}token rejected")));
+        assert!(run.lift_credential_death(&mut dead));
+        assert_eq!(dead.unfetched.as_deref(), Some("token rejected"));
+        assert!(run.credential_dead);
+    }
+
+    /// **A MEMBER'S LANDING IS WHAT `land_spot` LANDED.** One daily NIFTY bar
+    /// through `land_broker_member` is one member and one committed bar, not
+    /// an empty count. G18-api-19.
+    #[tokio::test]
+    async fn a_broker_member_reports_the_bars_it_landed() {
+        use pull::fetch::{RawRow, RawWindow};
+        use pull::session::{IST_OFFSET_SECS, Window};
+        use pull::vendor::{Feed, Granularity, Listing, Transport};
+        let (site, asked) = readiness_fixture("member-landed", "INE002A01018");
+        let date = day(2026, 9, 4);
+        let midnight = i64::from(date.days_from_epoch()) * 86_400 - IST_OFFSET_SECS;
+        let Transport::Http(spec) = Feed::Zerodha.descriptor().transport else {
+            panic!("HTTP descriptor");
+        };
+        let window = Window::new(date, date).unwrap();
+        let landed = BrokerWindow {
+            listing: Listing::Index,
+            contract: None,
+            unfetched: None,
+            instrument: "NIFTY".to_owned(),
+            origin: "test only".to_owned(),
+            spec,
+            exchange: "NSE",
+            segment: "INDEX",
+            store_vendor: Vendor::Zerodha,
+            window,
+            granularity: Granularity::Day1,
+            bodies: vec![(
+                window,
+                RawWindow {
+                    rows: vec![RawRow {
+                        timestamp: midnight,
+                        open: 100,
+                        high: 100,
+                        low: 100,
+                        close: 100,
+                        volume: 0,
+                        open_interest: None,
+                    }],
+                },
+            )],
+        };
+        let key = brutex_core::instrument::InstrumentKey::index(
+            brutex_core::instrument::Exchange::Nse,
+            "NIFTY",
+        )
+        .unwrap();
+        let mut dated = std::collections::HashMap::new();
+        let done =
+            super::land_broker_member(&landed, &key, &site, &mut dated, "2026-09", &asked).await;
+        assert_eq!(done.members, 1, "{done:?}");
+        assert_eq!(done.bars_committed, 1, "{:?}", done.failures);
+    }
+
+    /// **A LANE REACHED THE WIRE WHEN AN ANSWER LANDED OR A REFUSAL SAYS SO.**
+    /// Nothing fetched ahead, or only a refusal before the socket, did not.
+    /// G18-api-20.
+    #[test]
+    fn lanes_reached_the_wire_only_on_a_landed_answer_or_a_marked_refusal() {
+        let mut lanes = Lanes::default();
+        assert!(!lanes.reached_wire(), "nothing fetched ahead");
+        lanes
+            .ahead
+            .push_back(Err("refused before the socket".to_owned()));
+        assert!(!lanes.reached_wire());
+        lanes
+            .ahead
+            .push_back(Err(format!("{WIRE_REACHED}refused by the vendor")));
+        assert!(lanes.reached_wire());
+    }
+
+    /// **THE SHUTDOWN WAIT ENDS AT ZERO TASKS OR AT THE DEADLINE, WHICHEVER
+    /// COMES FIRST, AND SAYS WHAT IS LEFT.** Nothing running returns at once
+    /// however long the grace; work that never ends is waited out to the
+    /// deadline and named. G18-api-15.
+    #[test]
+    fn the_shutdown_wait_ends_at_zero_tasks_or_at_the_deadline() {
+        let now = std::time::Instant::now;
+        let began = now();
+        assert_eq!(
+            wait_out(began + std::time::Duration::from_secs(30), || 0),
+            0
+        );
+        assert!(
+            began.elapsed() < std::time::Duration::from_secs(10),
+            "nothing was running and the wait still ran {:?}",
+            began.elapsed()
+        );
+        let began = now();
+        assert_eq!(
+            wait_out(began + std::time::Duration::from_millis(300), || 2),
+            2
+        );
+        let took = began.elapsed();
+        assert!(took >= std::time::Duration::from_millis(300), "{took:?}");
+        assert!(took < std::time::Duration::from_secs(10), "{took:?}");
+        // A count that drains part-way is waited for, not cut off.
+        let left = std::sync::atomic::AtomicUsize::new(3);
+        let draining = || {
+            left.fetch_sub(1, std::sync::atomic::Ordering::SeqCst)
+                .saturating_sub(1)
+        };
+        assert_eq!(
+            wait_out(now() + std::time::Duration::from_secs(30), draining),
+            0
+        );
+    }
+
+    /// **THE SYMBOL FILTER IS SET ONLY WHEN ONE WAS TYPED, UPPER-CASED.**
+    /// G18-api-21.
+    #[test]
+    fn the_store_symbol_filter_is_set_only_when_a_symbol_is_typed() {
+        assert_eq!(store_filter("").symbol, None);
+        assert_eq!(store_filter("symbol=").symbol, None);
+        assert_eq!(
+            store_filter("symbol=reliance").symbol.as_deref(),
+            Some("RELIANCE")
+        );
+    }
+
+    /// **THE BANNER SAYS WHERE THE LOG IS, OR THAT THERE IS NONE; THAT THE
+    /// FIRST EVENT WAS LOST ONLY WHEN IT WAS; AND OPENS NO BROWSER ON PORT
+    /// ZERO.** G18-api-16.
+    #[test]
+    fn the_serve_banner_lines_say_what_happened() {
+        let sink = crate::emitted::sink();
+        let said = log_announcement(Ok(&sink), "debug (BRUTEX_LOG)");
+        assert_eq!(
+            said,
+            format!(
+                "  log:     {} (rolling, {} files x {} MiB ceiling)\n  level:   debug (BRUTEX_LOG)",
+                sink.path().display(),
+                telemetry::DEFAULT_KEEP_FILES,
+                telemetry::DEFAULT_MAX_FILE_BYTES / (1024 * 1024),
+            )
+        );
+        let why = "permission denied".to_owned();
+        assert_eq!(
+            log_announcement(Err(&why), "info"),
+            "  log:     NOT WRITABLE — permission denied"
+        );
+
+        assert_eq!(first_event_note(telemetry::Emitted::Written), None);
+        assert_eq!(
+            first_event_note(telemetry::Emitted::Dropped).as_deref(),
+            Some("  log:     FIRST EVENT NOT WRITTEN — Dropped")
+        );
+
+        let mut asked = Vec::new();
+        let zero: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+        assert_eq!(
+            opening_line(zero, |url| {
+                asked.push(url.to_owned());
+                Ok(())
+            }),
+            "  opening: skipped — port 0 addresses nothing"
+        );
+        assert!(asked.is_empty(), "port zero handed a browser {asked:?}");
+        let bound: std::net::SocketAddr = "127.0.0.1:8123".parse().unwrap();
+        assert_eq!(
+            opening_line(bound, |url| {
+                asked.push(url.to_owned());
+                Ok(())
+            }),
+            "  opening: http://127.0.0.1:8123/"
+        );
+        assert_eq!(asked, ["http://127.0.0.1:8123/"]);
+        assert_eq!(
+            opening_line(bound, |_| Err("no launcher".to_owned())),
+            "  opening: NOT OPENED (no launcher) — go to http://127.0.0.1:8123/"
         );
     }
 

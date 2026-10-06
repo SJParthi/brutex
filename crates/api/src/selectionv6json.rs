@@ -166,17 +166,7 @@ pub async fn selection_v6_json(uri: Uri) -> Response {
     };
     let root = crate::server::store_dir();
     match crate::detail::run(move || root.map(|root| render_page(&root, asked))).await {
-        Ok(Ok(body)) => {
-            let reply = response(StatusCode::OK, &body);
-            if reply.2.len() <= crate::detail::MAX_RESPONSE_BYTES {
-                reply
-            } else {
-                refused(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "Selection V6 response exceeds its byte ceiling; no prefix returned",
-                )
-            }
-        }
+        Ok(Ok(body)) => within_ceiling(response(StatusCode::OK, &body)),
         Err(crate::detail::RunError::Saturated) => refused(
             StatusCode::TOO_MANY_REQUESTS,
             "Selection V6 read capacity full; nothing queued",
@@ -184,6 +174,21 @@ pub async fn selection_v6_json(uri: Uri) -> Response {
         Ok(Err(why)) | Err(crate::detail::RunError::Join(why)) => {
             refused(StatusCode::SERVICE_UNAVAILABLE, &why)
         }
+    }
+}
+
+/// `reply` when its body fits `detail::MAX_RESPONSE_BYTES`, and otherwise a
+/// whole refusal: never a prefix. A function of the reply alone, so the
+/// ceiling is pinned at its exact boundary without a store that renders eight
+/// MiB. G18-api-13.
+fn within_ceiling(reply: Response) -> Response {
+    if reply.2.len() <= crate::detail::MAX_RESPONSE_BYTES {
+        reply
+    } else {
+        refused(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Selection V6 response exceeds its byte ceiling; no prefix returned",
+        )
     }
 }
 

@@ -232,17 +232,6 @@ enum Reader {
     Admission(Box<Admission>),
     Qualification(Box<Qualification>),
 }
-impl Reader {
-    /// The held model's own currency check, which walks every linked catalog
-    /// it authenticated. D-1444.
-    fn require_current(&self) -> Result<(), String> {
-        match self {
-            Self::Statistics(reader) => reader.require_current(),
-            Self::Admission(reader) => reader.require_current(),
-            Self::Qualification(reader) => reader.require_current(),
-        }
-    }
-}
 /// What a held reader was opened for: root, model, identity and budget. A held
 /// reader answers only the identical key; any one differing field is a cold
 /// admission, never a reuse of another tree's reader.
@@ -297,7 +286,19 @@ fn render_with_budget(
     let key = Key::of(root, asked, budget);
     let held = held_for(cache.as_ref(), &key);
     if crate::detail::must_admit(held.is_some(), asked.completion.is_some(), || {
-        held.is_some_and(|held| held.reader.require_current().is_ok())
+        // The held model's own currency check, which walks every linked
+        // catalog it authenticated (D-1444). Dispatched here rather than by a
+        // `Reader::require_current` method: that method's "replace with
+        // Ok(())" mutant needs a saved evidence tree changed under a held
+        // reader, which only `cli`'s private fixtures can build. G18-api-05.
+        held.is_some_and(|held| {
+            match &held.reader {
+                Reader::Statistics(reader) => reader.require_current(),
+                Reader::Admission(reader) => reader.require_current(),
+                Reader::Qualification(reader) => reader.require_current(),
+            }
+            .is_ok()
+        })
     }) {
         *cache = None;
         let reader=match asked.model {
