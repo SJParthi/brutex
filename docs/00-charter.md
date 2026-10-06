@@ -660,6 +660,51 @@ above. D-0045 first recorded that GDFL appears nowhere in this charter, and
 D-0118 named the same gap for GDFL's granularity floor; the operator statement
 and the one measured day above narrow that gap and do not close it.
 
+## 4h. Risk-free rate — the RBI 91-day Treasury Bill cut-off yield (D-2810)
+
+**Operator choice, 4 October 2026.** For GDFL option IV and greeks, the rate is
+the RBI 91-day Treasury Bill yield, taken as a dated series and cited here.
+Before this section, no page of this charter recorded a rate.
+`pull::pricing::RateSource::Charter` therefore had nothing it could cite, and
+the only rate in use was one supplied by the operator with each request.
+
+**Where the values come from.** Each weekly value comes from RBI's own press
+release *"91-Day ... T-Bill Auction Result: Cut-off"*, on
+`https://www.rbi.org.in/Scripts/BS_PressReleaseDisplay.aspx?prid=<id>`. The
+value is the line *"Cut-off Price and Implicit Yield at Cut-Off Price"* for
+the 91-day column. Each value is cross-checked against the same date's
+*"Treasury Bills: Full Auction Result"* release.
+
+**The values are not in this repository.** The operator keeps them in an
+eight-column tab-separated table outside the tree, and it is read at run time
+from a path the caller passes (`pull::riskfree::Series::read`, no default). The
+table's header is `pull::riskfree::HEADER`. Every row must name its RBI release
+in `source_url`. The table's SHA-256 travels with every rate
+(`pull::riskfree::Series::sha256`). Three sample rows are quoted only so a
+reader can check the reading:
+
+| Release | Cut-off price | Implicit yield | Source |
+|---|---|---|---|
+| 2018-08-01 | ₹98.35 | 6.7292% | [prid 44632](https://www.rbi.org.in/Scripts/BS_PressReleaseDisplay.aspx?prid=44632) |
+| 2020-03-24 | ₹98.7000 | 5.2830% | [prid 49565](https://www.rbi.org.in/Scripts/BS_PressReleaseDisplay.aspx?prid=49565) |
+| 2026-09-30 | ₹98.6425 | 5.5199% | [prid 63694](https://www.rbi.org.in/Scripts/BS_PressReleaseDisplay.aspx?prid=63694) |
+
+| Fact | Value | Lane |
+|---|---|---|
+| What the implicit yield is | A simple yield on price, annualised by 365/91: `(100 − P)/P × 365/91`. It is not a discount yield. Every one of the operator's 419 rows from 2018-08-01 to 2026-09-30 matches this to within one unit in the fourth decimal, and the parser refuses any row that does not. | measured against RBI's published pairs, 4 Oct 2026 |
+| When a result becomes known | Results are announced on the auction day itself, after competitive bidding closes. The source says: *"Results will be announced on the same day"* ([prid 44674](https://www.rbi.org.in/Scripts/BS_PressReleaseDisplay.aspx?prid=44674)). Bidding closes at 12:00 noon in 2018 and at 11:30 am later. The time of the announcement is **not** stated. | documented; the announcement time is UNVERIFIED |
+| Weeks with no 91-day value | Some weeks have no value: auctions cancelled (2024-09-18 and 2024-09-25, [prid 58686](https://www.rbi.org.in/Scripts/BS_PressReleaseDisplay.aspx?prid=58686)), 91-day cut-off "NA" (2023-03-29, 2025-02-20, 2026-03-25), and three weeks with no auction announced. | documented per release |
+| Continuous compounding | A simple rate `y` over `τ = 91/365` years becomes `r = ln(1 + y·τ)/τ`. This is the rule `R_c = m·ln(1 + R_m/m)` from J. C. Hull, *Options, Futures, and Other Derivatives*, chapter 4 "Interest Rates", subsection "Continuous Compounding" (the section number varies by edition), with `m = 365/91`. | textbook identity |
+| Year basis | 365 calendar days. This is the same basis as `pull::tenor::YearBasis::Calendar365`, and the same basis RBI uses to annualise the yield. | follows from the row above |
+
+**The as-of rule, and why it is "strictly before".** A trade on day `D` uses
+the latest result whose release is dated **strictly before** `D`. A result
+dated `D` is announced during `D`'s session, at a time the release does not
+state, so using it on `D` would be look-ahead (`CLAUDE.md` §3 rule 7). A
+release more than 14 days old is refused as stale, not carried forward
+(`pull::riskfree::MAX_AGE_DAYS`). A day on or before the first release is
+refused as before the series. D-2810.
+
 ## 5. Run identity
 
 ```

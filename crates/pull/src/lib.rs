@@ -200,6 +200,10 @@ pub mod refusal;
 /// Every file in a pass is the same age, and a snapshot is published whole or
 /// not at all.
 pub mod resolve;
+/// The risk-free rate as a dated series -- the RBI 91-day Treasury Bill
+/// cut-off yield, as of the latest release strictly before the trade day,
+/// read from a table the operator supplies by path. D-2810.
+pub mod riskfree;
 /// Dhan's ATM-relative expired-options driver — the shape `chain` is not.
 pub mod rolling;
 /// THE COUNTER, CHECKED AGAINST THE FILES IT COUNTS -- the one thing in this

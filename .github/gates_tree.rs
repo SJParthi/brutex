@@ -2176,9 +2176,17 @@ const AUDIT_LITERAL: &str = "-354 -7 repeats";
 // tick store's tree words (`ts`, `zips`). None names an account, an
 // environment, a vendor credential or a field of a parameter path.
 const GDFL_IMPORT_LITERAL: &str = "-10000 -3 -42 00 0100 04 06 10 10500 18 19 195 1x 20 22000 24 26 30 31 5 99 9a _ _search a9 begin c calendar clean crashed days done f filed futures import-ambiguous import-both import-census import-cm-refusal import-corrupt import-crash import-days import-derive import-edges import-journal import-journal-write import-kind import-only import-order import-rerun imports indices invented j journal listing missing nfo-both nfo-faults only parents plain seconds stocks ts w zips -inf 09-15-00 1260 1927000 1e3 2012- 27000 d import-done-line import-huge import-incomplete inc inf mended n nan r2-era r2-filter-claim r2-filter-claim-store r2-fold-count r2-journal r2-race r2-stocks r2-world seconds-edges seconds-filter seconds-filter-ok seconds-idem seconds-lookup seconds-nfo-prefix seconds-rename seconds-spike seconds-torn seconds-twins twin y";
+// D-2810: `pull::riskfree`, the dated RBI 91-day T-bill rate. `cut_off_price`,
+// `implicit_yield_pct` and `released` are columns of the operator's rate table
+// and the field names its refusals carry. The seven malformed dates, `98`,
+// `published` (a wrong header word) and `gone` (an invented OS reason) are
+// parser fixtures. `removed`, `solved` and `written` are test `expect` labels.
+// None is a parameter-path segment.
+const RISKFREE_LITERAL: &str = "cut_off_price implicit_yield_pct released 2020-01-01-01 \
+     2020-01-xx 2020-0a-01 2020-1-01 20200-01-01 2020-01-1 20200101 abcd-01-01 98 published gone removed solved written";
 
 /// Every declared group, in the order the step joined them.
-const DECLARED: [&str; 50] = [
+const DECLARED: [&str; 51] = [
     SEG_SHAPE,
     VENDOR_WIRE,
     CLAIM_STANDING,
@@ -2229,6 +2237,7 @@ const DECLARED: [&str; 50] = [
     FOLD_LITERAL,
     AUDIT_LITERAL,
     GDFL_IMPORT_LITERAL,
+    RISKFREE_LITERAL,
 ];
 
 fn declared() -> BTreeSet<&'static str> {

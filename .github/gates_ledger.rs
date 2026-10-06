@@ -1309,6 +1309,7 @@ const ALLOW_FLOAT: Allow = &[
     ("crates/greeks/src/solver.rs", 14),
     ("crates/greeks/src/moneyness.rs", 6),
     ("crates/pull/src/pricing.rs", 22),
+    ("crates/pull/src/riskfree.rs", 2),
     ("crates/pull/src/tenor.rs", 5),
     ("crates/runner/src/grid.rs", 4),
     ("crates/runner/src/significance.rs", 21),
