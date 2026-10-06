@@ -2212,10 +2212,16 @@ mod tests {
     /// **p10num-1, the other half. AN INDEX FILE KEEPS EVERY ROW**: every
     /// column after `LTP` is zero on an index (`docs/00-charter.md`), so `LTQ`
     /// 0 is the norm there and `LTP` is the index level.
+    ///
+    /// The row is joined at run time, never one literal: a capital-market row
+    /// pasted whole is what `gdfl_cm`'s `fixtures_are_built_not_pasted` refuses
+    /// anywhere under `crates/` (D-0808).
     #[test]
     fn a_gdfl_index_row_is_kept_though_its_ltq_is_zero() {
-        let body =
-            format!("{GDFL_HEADER}\nNIFTY 50.NSE_IDX,26/05/2026,09:15:00,24000.00,0,0,0,0,0,0\n");
+        let body = format!(
+            "{GDFL_HEADER}\n{}{}\n",
+            "NIFTY 50.NSE_IDX", ",26/05/2026,09:15:00,24000.00,0,0,0,0,0,0"
+        );
         let rows = decode(&body, Columns::Gdfl).expect("an index row decodes");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].close, 2_400_000);
@@ -2231,8 +2237,10 @@ mod tests {
         let rows = decode("20221003,09:15:00,100.00,0,0\n", Columns::TrueDataIndex)
             .expect("an index row decodes");
         assert_eq!(rows[0].open_interest, None);
-        let body =
-            format!("{GDFL_HEADER}\nNIFTY BANK.NSE_IDX,26/05/2026,09:15:00,52000.00,0,0,0,0,0,0\n");
+        let body = format!(
+            "{GDFL_HEADER}\n{}{}\n",
+            "NIFTY BANK.NSE_IDX", ",26/05/2026,09:15:00,52000.00,0,0,0,0,0,0"
+        );
         let rows = decode(&body, Columns::Gdfl).expect("an index row decodes");
         assert_eq!(rows[0].open_interest, None);
         // A traded instrument's zero stays a measured zero.

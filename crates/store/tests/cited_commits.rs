@@ -126,13 +126,25 @@ impl Off {
 }
 
 /// Every commit the texts cite that `main` does not hold, and why.
-const NOT_ON_MAIN: [(&str, Off); 27] = [
+const NOT_ON_MAIN: [(&str, Off); 36] = [
     ("6a58d7c", Off::Neither),
     ("79b9a1d5", Off::Neither),
     ("224b6760", Off::Neither),
     ("28c362c1", Off::Neither),
     ("da28ae95", Off::Neither),
     ("b1d9ac70", Off::Neither),
+    // The GDFL line's docs/07-plan.md rows (D-0808, round-3 and round-5
+    // repairs): a branch history squashed before it landed; none of the nine
+    // is an ancestor of this branch either.
+    ("266561f2", Off::Neither),
+    ("51518fdc", Off::Neither),
+    ("e8f0d281", Off::Neither),
+    ("1457dd29", Off::Neither),
+    ("76d5c4f8", Off::Neither),
+    ("5a55340c", Off::Neither),
+    ("14133fa3", Off::Neither),
+    ("4f19b981", Off::Neither),
+    ("bfee2e39", Off::Neither),
     ("7f617f01", Off::Squashed),
     ("9fc9233b", Off::Squashed),
     ("f6716814", Off::Squashed),

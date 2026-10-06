@@ -562,11 +562,28 @@ fn every_kind_lands_at_one_second_and_both_sources_leave_the_same_store() {
         "byte for byte, census and journal included"
     );
     // Only the one-second rung exists, for every kind (D-2802).
-    for path in tree(&a).keys() {
+    let files = tree(&a);
+    for path in files.keys() {
         let text = path.to_string_lossy();
         if text.starts_with("bars/") {
             assert!(text.contains("/1s/"), "{text}");
         }
+    }
+    // The import files through the store's one writer, so every one-second
+    // month it lands carries the `.tix` time index that writer keeps on each
+    // append (D-2329): no side door leaves a month the index does not cover.
+    let months: Vec<_> = files
+        .keys()
+        .filter(|p| p.starts_with("bars") && p.to_string_lossy().ends_with(".bin"))
+        .collect();
+    assert!(!months.is_empty(), "the import landed no bar month");
+    for bin in months {
+        let tix = bin.with_extension("tix");
+        assert!(
+            files.get(&tix).is_some_and(|bytes| !bytes.is_empty()),
+            "{} has no time index beside it",
+            bin.display()
+        );
     }
     let nifty = bars(&a, "INDEX", "NIFTY", None);
     // Pre-open and post-close rows are not session bars.
