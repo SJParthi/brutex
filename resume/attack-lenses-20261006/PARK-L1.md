@@ -56,3 +56,12 @@ Not fixed (parked). Fix plan, one shared path where possible; extend D-1789 with
 - W5 sweep-evidence.js:43: `detailRefusal(response, …)`; test sweep-evidence.test.js.
 - W6 run.json?attempt= 503 `running.why`: teach `refusalOf` the `{running:{status:'unknown',why}}` shape, then `refusalFrom` in receipt-batch.js:120, boolean-launch.js:354, index-stop-launch.js:145, backtest pollSweep ~2498. Tests: refusal.test.js, receipt-batch.test.js, boolean-launch.test.js, index-stop-launch.test.js.
 - W7 BooleanLaunch.svelte:75, IndexStopLaunch.svelte:43: `refusalFrom(...)` + " No launch was attempted." Tests: index-stop-launch.test.js harness; copy it into boolean-launch-page.test.js.
+
+## Gate 18 pre-run stopped at the 2 h background limit (14:27 UTC)
+Combined diff 202a351, tests filtered to touched modules, run in worktree /tmp/claude-0/mut (reset clean afterwards; never committed from).
+- pull: caught=5 missed=0 timeout=0 unviable=2
+- cli: caught=11 missed=1 timeout=0 unviable=1
+  - MISSED: crates/cli/src/lib.rs:2403:32: replace == with != in run_with_sink
+- api: caught=5 missed=0 timeout=0 unviable=0
+- api before the pause (6 of 22): 5 caught, 1 unviable, 0 missed.
+- Not run: the remaining api mutants not reached above. Resume: same command for api with --exclude-re for every mutant already in caught/unviable, with a longer timeout or in chunks (`--shard k/n`).
