@@ -509,18 +509,10 @@ fn ln_gamma(x: f64) -> f64 {
         shift += z.ln();
         z += 1.0;
     }
-    stirling(z) - shift
-}
-
-/// Stirling's series for `ln Γ(z)`, A&S 6.1.41, for `z` already shifted to at
-/// least 10 by [`ln_gamma`]. Separate so the shift's boundary is testable: at
-/// exactly 10 no shift is taken, and `ln_gamma(10.0)` IS this series there
-/// (G18-runner, D-2058).
-fn stirling(z: f64) -> f64 {
     let inv = 1.0 / z;
     let inv2 = inv * inv;
     let series = inv * (1.0 / 12.0 - inv2 * (1.0 / 360.0 - inv2 * (1.0 / 1260.0 - inv2 / 1680.0)));
-    (z - 0.5) * z.ln() - z + 0.5 * core::f64::consts::TAU.ln() + series
+    (z - 0.5) * z.ln() - z + 0.5 * core::f64::consts::TAU.ln() + series - shift
 }
 
 /// Two-sided p-value for a t-statistic, under the normal approximation.
@@ -819,8 +811,15 @@ mod tests {
     /// (G18-runner-10, D-2058).
     #[test]
     fn ln_gamma_at_ten_is_the_unshifted_series() {
-        use super::{ln_gamma, stirling};
-        assert_eq!(ln_gamma(10.0).to_bits(), stirling(10.0).to_bits());
+        use super::ln_gamma;
+        // A&S 6.1.41 at z = 10, written out as `ln_gamma` evaluates it.
+        let z = 10.0_f64;
+        let inv = 1.0 / z;
+        let inv2 = inv * inv;
+        let series =
+            inv * (1.0 / 12.0 - inv2 * (1.0 / 360.0 - inv2 * (1.0 / 1260.0 - inv2 / 1680.0)));
+        let unshifted = (z - 0.5) * z.ln() - z + 0.5 * core::f64::consts::TAU.ln() + series;
+        assert_eq!(ln_gamma(10.0).to_bits(), unshifted.to_bits());
         let ln_9_factorial = (2..=9).map(f64::from).map(f64::ln).sum::<f64>();
         assert!((ln_gamma(10.0) - ln_9_factorial).abs() < 1e-12);
         assert!((ln_gamma(9.0) - (ln_9_factorial - 9.0_f64.ln())).abs() < 1e-12);

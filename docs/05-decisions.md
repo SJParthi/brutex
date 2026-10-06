@@ -63160,7 +63160,7 @@ that sign; `rupees` signs only a negative amount (`0.00`, `-0.05`,
 **Rejected.** Leaving `ratio < 0` and calling the `<=` mutant equivalent:
 D-0192 forbids a skip, and the restructure costs nothing.
 
-### D-2056 — The grid table orders its two rescued rows by a two-slot sort — 2026-10-06
+### D-2056 — The grid table orders its two rescued rows by min and max on the key — 2026-10-06
 
 **What was observed.** `runner::audit::grid` put the two marked rows below the
 cut in key order with `(Some(a), Some(b)) if key(b) < key(a)`. Run 1283 left
@@ -63168,11 +63168,14 @@ cut in key order with `(Some(a), Some(b)) if key(b) < key(a)`. Run 1283 left
 cells, because it ends on the index, so `<=` could never differ, and no test
 put both marks below the cut.
 
-**Decided.** The two slots are sorted by `key` with `sort_unstable_by_key`,
-which has no comparison operator to mutate. `None` sorts first and prints
-nothing. `two_chosen_rows_below_the_cut_print_in_key_order` feeds both cell
-orders with a cut of one and checks that `best()`'s row prints before
-`SHARPEST`'s. Invariant G18-runner-01.
+**Decided.** The first slot is `core::cmp::min_by_key` of the two and the
+second is `max_by_key`, both on `key`. Neither has a comparison operator to
+mutate. `None` orders first and prints nothing. A two-slot
+`sort_unstable_by_key` was tried first. Gate 11 rule 4 refuses any `.sort_*(`
+on a production path, and two elements do not need one.
+`two_chosen_rows_below_the_cut_print_in_key_order` feeds both cell orders with
+a cut of one and checks that `best()`'s row prints before `SHARPEST`'s.
+Invariant G18-runner-01.
 
 **Rejected.** A test alone. It cannot kill the `<=` mutant, because equal keys
 never occur.
@@ -63213,15 +63216,16 @@ compared closer than that. No fraction this crate evaluates lands on the
 guard's floor.
 
 **Decided.** The guard is the named function `lentz_guard` beside
-`LENTZ_TINY`, and Stirling's series is the named function `stirling`. Both
-give the same bits as the closure and the inline expression they replace.
-Three tests pin the boundaries to the bit, which §3 rule 5 already requires
-of every output: the guard keeps `±LENTZ_TINY` and replaces only magnitudes
-strictly below it; `ln_gamma(10.0)` is `stirling(10.0)` with no shift; and
-`I_x(1/2, 1/2)` at x = 0.2 is the direct side and at x = 0.5, exactly on the
-split, the symmetric side. Each is also checked against the closed form
-`(2/pi) asin(sqrt x)` or `ln 9!` within 1e-11 or 1e-12. Invariants
-G18-runner-09 to 11.
+`LENTZ_TINY`, and it gives the same bits as the closure it replaces.
+`ln_gamma` is unchanged. A separate `stirling` function was tried first, but
+it put one more `f64` line in the file than Gate 11 rule 2's count of 41
+allows, so the test writes the series out at z = 10 instead. Three tests pin
+the boundaries to the bit, which §3 rule 5 already requires of every output:
+the guard keeps `±LENTZ_TINY` and replaces only magnitudes strictly below it;
+`ln_gamma(10.0)` equals the series at 10 with no shift; and `I_x(1/2, 1/2)` is
+on the direct side at x = 0.2 and on the symmetric side at x = 0.5, exactly on
+the split. Each is also checked against the closed form `(2/pi) asin(sqrt x)`
+or against `ln 9!`, within 1e-11 or 1e-12. Invariants G18-runner-09 to 11.
 
 **Rejected.** A tolerance test. Both sides pass any tolerance the series
 supports, so it cannot kill these mutants.

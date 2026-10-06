@@ -1189,14 +1189,16 @@ pub fn grid(out: &mut String, g: &Grid, keep: usize) {
         // (one per selector), so those are put in key order by one comparison
         // instead of by sorting the tail.
         //
-        // A two-slot sort, not a guarded swap: the key is total over distinct
-        // cells, so a `key(b) < key(a)` guard's `<=` boundary could never be
-        // reached and was an equivalent mutant (G18-runner, D-2056). `None`
-        // sorts first and prints nothing, so one or zero marks still work.
+        // `min_by_key` and `max_by_key`, not a guarded swap: the key is total
+        // over distinct cells, so a `key(b) < key(a)` guard's `<=` boundary
+        // could never be reached and was an equivalent mutant (G18-runner,
+        // D-2056). `None` orders first and prints nothing, so one or zero
+        // marks still work.
         let mut marked = tail.iter().filter(|&&(_, c)| !mark_for(c).is_empty());
-        let mut pair = [marked.next(), marked.next()];
-        pair.sort_unstable_by_key(|slot| slot.map(key));
-        for &(_, c) in pair.into_iter().flatten() {
+        let (a, b) = (marked.next(), marked.next());
+        let first = core::cmp::min_by_key(a, b, |slot| slot.map(key));
+        let second = core::cmp::max_by_key(a, b, |slot| slot.map(key));
+        for &(_, c) in first.into_iter().chain(second) {
             grid_row(out, c, mark_for(c));
         }
     }
