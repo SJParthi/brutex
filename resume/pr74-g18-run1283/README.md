@@ -12,3 +12,5 @@ Not tested on this run (infra): shards 125,126,128,131,132,136,140,141,142,144,1
 still running at collection time.
 
 Fixer sessions: one per file here, each on its own branch `pr74/g18-<group>` off origin/final/all-fixes.
+
+2026-10-06 04:05 UTC addendum: shards 178, 180-184 finished with 13 more distinct survivors (runner 7, api 4, cli-a 1, rest 1), appended to the survivors files above. 17 shards were still running.
