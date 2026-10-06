@@ -328,3 +328,17 @@ fn the_authority_reader_reads_the_table_and_the_range() {
     assert!(!classified("docs/11-x.md", &rows, range));
     assert!(!classified("docs/notes.md", &rows, range));
 }
+
+/// `AGENTS.md`, whose §10 is a second copy of the authority table.
+const AGENTS: &str = include_str!("../../../AGENTS.md");
+
+/// D-3515 (ONEAUTH-10). `AGENTS.md` §10 repeats `CLAUDE.md` §10's table and
+/// report range; two copies of one statement must say the same thing, or the
+/// unchecked one is a second, silent answer.
+#[test]
+fn the_agents_copy_of_the_authority_table_is_the_laws() {
+    let (law_rows, law_range) = authority_table(LAW);
+    let (agents_rows, agents_range) = authority_table(AGENTS);
+    assert_eq!(agents_rows, law_rows);
+    assert_eq!(agents_range, law_range);
+}

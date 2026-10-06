@@ -63159,9 +63159,11 @@ token first, and refuses: `Command :: new` not followed by `(`; `Command >`
 followed by `::`; `for [path ::] Command` followed by `{` or `where`; and any
 statement opening with `[pub [(..)]] type` that holds the token. Each refusal
 names the spelling. Type positions crate code uses (`&mut Command`,
-`-> Command`, `Option<Command>`, a field, a `use` group, a local `enum
-Command` and its inherent `impl`) stay clean; the whole tree is clean under the
-widened scan. Proved by
+`-> Command`, `Option<Command>`, `Vec::<Command>`, a field, a `use` group, and
+every impl of a file's own `enum` or `struct Command`) stay clean; the whole
+tree is clean under the widened scan. Round 3 (D-3515) added the attribute-led
+alias, the turbofish `Command::<>::new`, `impl .. for (Command)` and
+`Command<>`, and `<$c>::new` in a macro. Proved by
 `a_spawn_through_another_spelling_of_the_constructor_is_refused`, which failed
 first on the type-alias line.
 
@@ -63316,7 +63318,8 @@ two-element table", "a TWO-ROW table" or "two instruments".
 candidate filtered through `is_sweepable`;
 `the_swept_surface_is_exactly_what_is_sweepable_admits` compares it with the
 predicate over every index and cash key the universe can spell on both
-exchanges. `swept_series` maps it and sorts. An empty store's gaps view is now
+exchanges. `swept_series` maps it, and `held_series` sorts the axis it joins.
+An empty store's gaps view is now
 210 rows × 36 months = 7,560 cells over 38 pages of 200; the indices sort
 first, so page 1 still opens on them. Nine tests that encoded the two-row
 axis were re-derived (grid rows 360 → 7,848, page counts, the clamp's last
@@ -63412,8 +63415,12 @@ gate 12's step still piped the scanner's `fns` output through an inline
 an `e` flag, `make -E`/`--eval`, `git -c alias.…`/`git config alias.…` with a
 `!` value, `find -exec`/`-execdir`/`-ok`/`-okdir` of a `$` word, and `env
 -S`/`--split-string`; a shell's `-c` program holding `{}` counts as assembled
-at run time. Plain `sed 's/a/b/'`, `find … -exec rustfmt {} +` and gate 0's own
-`xargs … "$tool"` stay clean. Gate 12 reads `FILE:LINE:name` through
+at run time. Round 3 (D-3515) found that reading sed scripts leaks (attached
+`-e`, `{` blocks, `I` address flags, `\%re%` addresses, `-f -`), so `sed`,
+`make`, `rustup`, `git -c`, `git --config-env` and `git config` — none used by
+any workflow — are refused outright, `env -S` in any flag cluster, and an
+`xargs -I R` whose shell `-c` program holds `R`. `find … -exec rustfmt {} +`,
+gate 6d's `xargs -I{} env {}` and gate 0's own `xargs … "$tool"` stay clean. Gate 12 reads `FILE:LINE:name` through
 `gates-ledger path-declarations`, the reading gate 10 already uses, so no
 inline `sed` program remains in a workflow. Proved by
 `a_program_runner_that_is_not_an_interpreter_is_refused`, red first.
@@ -63435,10 +63442,15 @@ and `runner/src/expression_oos.rs` (two).
 
 **Decided.** Each names an authority it may depend on: `indicators` its own
 constant, `pull` `session`'s, `cli` and `runner` `indicators::IST_OFFSET_MICROS`.
-`crates/core/tests/one_ist_offset.rs` walks every crate's `src/` up to each
-file's first `#[cfg(test)]`, skips `*_tests.rs`, and refuses any spelling of
-19,800 seconds outside the three definitions and `session`'s pin; it listed
-the seven sites before the change. Test fixtures keep their literals.
+`crates/core/tests/one_ist_offset.rs` walks every crate's `src/`, skips
+`*_tests.rs` and each column-0 `#[cfg(test)] mod` (past multi-line
+attributes), and refuses any spelling of 19,800 seconds outside the three
+definitions and `session`'s pin; it listed the seven sites before the change.
+Round 3 (D-3515) found the first reader stopped at an indented
+`#[cfg(test)]` statement and missed `api/src/bars.rs` (two, spelled
+`5 * 3600 + 1800`), `api/src/calendar_of.rs` (two) and
+`runner/src/expression_validation.rs`; those name the authority now too. Test
+fixtures keep their literals.
 
 ### D-3513 — `pull::ssm` dates its SigV4 stamp with `telemetry::civil_from_days` — 2026-10-06
 
@@ -63481,3 +63493,35 @@ svelte-check stays at 0 and W2's 870 tests pass.
 
 **Not closed.** The 375 is a copy in the browser of a fact the api does not
 serve; serving `BARS_PER_REGULAR_SESSION` would make it one authority.
+
+### D-3515 — Round 3 of lens L4: the lens's own gates, attacked and corrected — 2026-10-06
+
+**What was observed.** A fresh-eyes adversarial review of D-3500..D-3514
+proved each new gate leaky or wrong in places, by running the tools on crafted
+input: the spawn scan passed `#[allow(..)] type C = Command;`,
+`Command::<>::new`, `impl .. for (Command)`, `Command<>` and `<$c>::new` in a
+macro, and refused `Vec::<Command>` and a local `enum Command`'s `Display`
+impl; gate 0 passed eleven sed, git, env, make and xargs forms (each run and
+seen to execute); gate 1g passed `"cargo" +nightly`, `cargo '+nightly'` and a
+`\` continuation; gates 10b and 27 still skipped six `| C4-RUNNER-0N: claim |`
+rows; the IST-offset test stopped at an indented `#[cfg(test)]` and missed
+five production sites; and `cli/tests/one_path_authority.rs` counted only
+`.join("runs.bin")`.
+
+**Decided.** Each is closed in its own gate and proved by its test, the
+review's inputs added to the refused lists: the spawn scan reads past
+attributes, refuses the turbofish, the parenthesised and `<>` impl targets and
+the metavariable constructor, requires a qualified self `<` not preceded by
+`::`, and exempts impls in a file declaring its own `Command`; gate 0 refuses
+the six tools by name and the three forms by shape (D-3511); gate 1g reads
+`cargo +` with quotes removed and continuations joined; the id readers take
+` — `, ` – ` and `: `; the IST test skips only test modules (D-3512); and the
+path test counts any production string literal ending in either name, skipping
+test modules, with a planted `"x/results/runs.bin"` in `api` turning it red.
+
+**Recorded.** The D-0370 and D-0372 duplicate headings the coordinator asked
+about are D-0684's: issued twice on 2026-08-29, tabled there with subject and
+writing commit, kept because the ledger is append-only and citations name
+them, and pinned by gate 27b to exactly two headings each while every other
+number must head one. No change is needed; gate 27b is the gate that refuses
+duplicate decision ids.

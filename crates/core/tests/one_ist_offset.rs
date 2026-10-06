@@ -88,11 +88,11 @@ fn production_lines(text: &str) -> Vec<(usize, &str)> {
             // Past every further attribute, however many lines it spans.
             let mut item = n + 1;
             while lines.get(item).is_some_and(|l| l.starts_with("#[")) {
-                let mut depth = 0_i64;
+                let mut depth = 0_usize;
                 while let Some(l) = lines.get(item) {
-                    depth += l.matches('[').count() as i64 - l.matches(']').count() as i64;
+                    depth = (depth + l.matches('[').count()).saturating_sub(l.matches(']').count());
                     item += 1;
-                    if depth <= 0 {
+                    if depth == 0 {
                         break;
                     }
                 }

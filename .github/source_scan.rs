@@ -3462,6 +3462,10 @@ fn mutants_skip_findings(path: &str, src: &str) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
+/// The text cargo-mutants writes into a mutated line, in two pieces so this
+/// file does not hold it whole and refuse itself (D-3508).
+const MUTANT_MARKER: [&str; 2] = ["changed by cargo-", "mutants"];
+
 /// What gate 1 refuses by CONTENT in a tracked file outside `web/`: a NUL
 /// byte (no allowed extension is binary, and a NUL makes grep skip the file),
 /// bytes that are not UTF-8, a `.rs` that opens with a shebang (a script
@@ -3472,10 +3476,6 @@ fn mutants_skip_findings(path: &str, src: &str) -> Result<Vec<String>, String> {
 /// into two lines for every line-oriented check, and git C-quotes the other
 /// three in any listing read without `-z`, so a quoted name's real ending
 /// was invisible to every gate that greps a listing.
-/// The text cargo-mutants writes into a mutated line, in two pieces so this
-/// file does not hold it whole and refuse itself (D-3508).
-const MUTANT_MARKER: [&str; 2] = ["changed by cargo-", "mutants"];
-
 fn content_findings(path: &str, bytes: &[u8]) -> Vec<String> {
     if path.starts_with("web/") {
         return Vec::new();

@@ -948,3 +948,4 @@ Narrative only. No row is added to the table above.
   hand-encoded index family (every disk decoder refuses an unknown code); the
   web forced-exit copies (pinned by `FORCED_EXIT_MINUTE == 910`); the
   auto-merge CODEOWNERS parse (latent, recorded in `docs/06-limits.md`).
+- **`F-616724`** `unguarded` — The lens's own gates leak: spawn spellings, sed and git forms, quoted cargo +, unread id cells, a blind IST reader: fixed. D-3515, ONEAUTH-01/04/11/12/13/15.
