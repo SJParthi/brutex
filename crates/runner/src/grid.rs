@@ -879,15 +879,19 @@ impl Cell {
 ///
 /// # What this computes
 ///
-/// The Wilson lower bound rises with `n` at a fixed rate, so there is a smallest
-/// `n` at which a record of `win_rate_bp` still clears `assurance_bp`. Below it,
-/// **no combination can pass however good it is** — so descending further buys
-/// nothing, and stopping earlier discards reachable answers.
+/// The FEWEST trades `n` at which a record of `win_rate_bp` clears `assurance_bp`,
+/// the record being `Cell::at_rate`'s: wins rounded UP, because a rate is a floor.
+/// Below `n`, a record at that rate cannot pass.
 ///
-/// Measured on the shipped bound, 80% observed against a coin-flip floor: eleven
-/// trades. Against an 80% floor: about a hundred and twenty. The difference
-/// between those two is the difference between a search that can find a rare
-/// setup and one that cannot.
+/// **It is not a threshold above which every record at the rate passes** (D-3408).
+/// The rounding makes small samples better than the rate: 80% of four trades is
+/// 4/4, whose bound clears a coin-flip floor, while 80% of five is 4/5 and does
+/// not. Measured on the shipped function: `(8_000, 5_000)` returns 4,
+/// `(8_000, 6_500)` returns 29, and `(6_000, 5_000)` returns 82 while 83 fails
+/// again. An assurance at or above the rate itself is never reached, because the
+/// lower bound stays under the observed rate, so `(8_000, 8_000)` returns the cap.
+/// This doc used to quote 11 and roughly 120 for the first and the last: the
+/// unrounded proportion's bound, not a measurement of this function.
 ///
 /// # Bounded, and it returns the cap rather than looping
 ///
@@ -10962,4 +10966,46 @@ fn thin_to_budget(targets: Ladder, stops: usize, trails: usize) -> Ladder {
     let stride = have.div_ceil(keep).max(1);
     let thinned: Vec<Ppm> = targets.rungs().iter().step_by(stride).copied().collect();
     Ladder::new(thinned).unwrap_or(targets)
+}
+
+// XPERM-08 (D-3408): `trades_needed_for`'s documented values are the ones it returns,
+// and the documented premise matches what the ceiling-rounded record does.
+#[cfg(test)]
+mod trades_needed_doc {
+    use super::{Cell, trades_needed_for};
+
+    /// The doc quoted 11 trades at 80% against a coin-flip floor and roughly 120
+    /// against an 80% floor, and called the answer a threshold the bound rises
+    /// through. `Cell::at_rate` rounds wins UP, so at four trades 80% is 4/4, which
+    /// clears 5,000 bp; 4/5 then does not. The function is the FEWEST trades at
+    /// which a record at the rate clears, not a threshold above which every record
+    /// does; an 80% floor is never reached by an 80% record, so the cap is returned.
+    #[test]
+    fn the_documented_values_are_the_returned_ones_and_the_answer_is_not_a_threshold() {
+        assert_eq!(trades_needed_for(8_000, 5_000, 5_000), 4);
+        assert_eq!(trades_needed_for(8_000, 8_000, 5_000), 5_000);
+        assert_eq!(trades_needed_for(8_000, 6_500, 5_000), 29);
+        assert!(
+            Cell::at_rate(4, 8_000).assurance_bp() >= 5_000,
+            "4/4 clears"
+        );
+        assert!(
+            Cell::at_rate(5, 8_000).assurance_bp() < 5_000,
+            "4/5 does not"
+        );
+        // Comment markers dropped, so a sentence that wraps across `///` lines is
+        // still one sentence.
+        let doc = include_str!("grid.rs")
+            .split_whitespace()
+            .filter(|word| !matches!(*word, "//" | "///" | "//!"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        for stale in [
+            concat!("coin-flip floor: eleven", " trades"),
+            concat!("about a hundred", " and twenty"),
+            concat!("rises with `n` at a fixed rate, so", " there is a smallest"),
+        ] {
+            assert!(!doc.contains(stale), "grid.rs still says: {stale}");
+        }
+    }
 }

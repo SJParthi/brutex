@@ -63334,3 +63334,41 @@ Every shipped path reprojects onto the 60-second Fill cadence, where the exit
 is at most `i + H`. Only `Sweeper::run_ranked` (test callers) and the public
 `edge` reach a Signal column. It is a hardening candidate for its owner, not a
 shipped defect: clamp or assert `exit <= source + H`.
+
+### D-3408 — `trades_needed_for` documents the values it returns, and that it is not a threshold — 2026-10-06
+
+**What was observed.** The permutations lens (L3) ran a round-5 pass over the
+`runner` numeric gates. `trades_needed_for`'s doc said "Measured on the shipped
+bound, 80% observed against a coin-flip floor: eleven trades. Against an 80%
+floor: about a hundred and twenty." It also said the Wilson bound "rises with
+`n` at a fixed rate, so there is a smallest `n`". The shipped function, run on
+this branch, returns:
+
+| Rate, assurance | Returned |
+|---|---|
+| (8_000, 5_000) | 4 |
+| (8_000, 8_000) | 5,000 (the cap) |
+| (8_000, 6_500) | 29 |
+| (6_000, 5_000) | 82 |
+
+`Cell::at_rate` rounds wins up, so 80% of four trades is 4/4, which clears
+5,000 bp, and 80% of five is 4/5, which does not. So the result is the fewest
+trades at which a record clears, not a threshold. For (6_000, 5_000), 83 fails
+again. An assurance at or above the rate is never reached; the repo says so
+elsewhere ("approaches the observed rate FROM BELOW and never arrives"). The
+quoted 11 is the unrounded proportion's bound. Under §3 rule 6 the doc claimed
+a measurement this function does not reproduce.
+
+**Decided.** This is a documentation fix only. The rounding rule ("a rate is a
+floor") is unchanged, because changing it moves the descent's support floors,
+and that is an owner call. The doc now states the real values, the ceiling
+rounding and the non-threshold shape. XPERM-08 pins the values and the 4/4
+versus 4/5 case, and refuses the stale sentences. It failed before the edit
+with `grid.rs still says: coin-flip floor: eleven trades`. The three source-text
+tests this lens added (XPERM-04, -05, -08) now drop comment markers before
+matching, so a sentence that wraps across `///` lines is still caught.
+
+**Needs the owner.** `cli`'s `statistical_floor_ppm` doc repeats "no
+combination passes however good it is" for records below the floor. That holds
+only for a record at exactly the sizing rate; a better record can clear sooner.
+Whether that floor should change is UNVERIFIED and is not touched here.

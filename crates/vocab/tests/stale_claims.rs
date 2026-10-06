@@ -469,6 +469,7 @@ fn every_crossing_row_states_the_last_definite_side_rule() {
     ] {
         let flat = read(source)
             .split_whitespace()
+            .filter(|word| !matches!(*word, "//" | "///" | "//!"))
             .collect::<Vec<_>>()
             .join(" ");
         for stale in [

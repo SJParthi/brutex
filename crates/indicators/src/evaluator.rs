@@ -3978,7 +3978,13 @@ mod muhurat_claims {
         let charter = include_str!("../../../docs/00-charter.md");
         let evaluator = include_str!("evaluator.rs");
         for (name, text) in [("docs/00-charter.md", charter), ("evaluator.rs", evaluator)] {
-            let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            // Comment markers dropped, so a sentence that wraps across `///` or `//`
+            // lines is still one sentence.
+            let flat = text
+                .split_whitespace()
+                .filter(|word| !matches!(*word, "//" | "///" | "//!"))
+                .collect::<Vec<_>>()
+                .join(" ");
             // Each sentence is split across `concat!` so this test's own source, which
             // is part of `evaluator.rs`, never contains the sentence it refuses.
             for stale in [
