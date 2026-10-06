@@ -211,11 +211,16 @@ It is therefore absent rather than guessed.
 
 Evidence lane is recorded per row and is never promoted while copying.
 
-**Corporate-action adjustment is UNVERIFIED for every feed.** Each feed's table
-below carries its own row; TrueData, which has a descriptor in `pull::vendor`
-and no section here, is UNVERIFIED on the same question. The store keeps the
-vendor's prices as served (`docs/02-store-format.md` §3) and records no
-adjustment basis. numeric-pass16 p16num-2, D-1969.
+**Corporate-action adjustment is MEASURED for Zerodha and GDFL, and
+UNVERIFIED for every other feed.** Zerodha's share prices are back-adjusted by
+the vendor as of the day each month was pulled, with volume on a basis of its
+own; GDFL's are as traded (§4z, §4g, D-3323). This paragraph said every feed
+was UNVERIFIED until 7 Oct 2026 (D-3348). Groww, Dhan and TrueData (which has a
+descriptor in `pull::vendor` and no section here) stay UNVERIFIED; the
+operator excluded all three from use on 6 Oct 2026 (D-3338). The store keeps
+the vendor's prices as served (`docs/02-store-format.md` §3); the basis is a
+descriptor fact (D-3323), and the day each month was pulled is its
+provenance (D-3334). numeric-pass16 p16num-2, D-1969.
 
 ### Groww — primary
 
@@ -309,7 +314,12 @@ lane above applies only to the history depth, which that page still does not sta
 | Response | `{status, data:{candles:[[ts,o,h,l,c,volume(,oi)]]}}` — an array of ARRAYS, positional | documented |
 | Timestamp | `2017-12-15T09:15:00+0530` — ISO **carrying an offset** | documented |
 | Prices | decimal rupees (`1704.5`) | documented |
-| Cash-equity candles adjusted for splits, bonuses or other corporate actions | **UNVERIFIED** for `minute` and `day` alike. The historical page read for this table does not say whether candles are back-adjusted after an action, and none was measured. numeric-pass16 p16num-2, D-1969. | unverified |
+| Cash-equity candles adjusted for splits, bonuses or other corporate actions | **MEASURED: back-adjusted by the vendor, as of the day the month was pulled, for `minute` and `day` alike.** The historical page still does not say so; this is a measurement, not a vendor statement. **101 of 208** F&O shares have at least one run of three or more common sessions in which the GDFL raw first print ÷ the Zerodha `1day` open differs from 1 by more than 0.2%: a scan of every common day 2018-09-03..2026-09-24, run read-only on **6 Oct 2026** by the /db audit (its result file is held outside this repository) over the operator's store, `bars/zerodha/NSE/CASH/<SYM>/1day/` against `bars/gdfl/NSE/CASH/<SYM>/1s/`, and the count re-derived from that file on 7 Oct 2026. Re-measured on **7 Oct 2026** through a read-only shadow of the same store: HDFCBANK 2019-06-03 open ₹606.80 (Zerodha) against ₹2,427.00 (GDFL); RELIANCE 2019-05-30 close ₹633.75 against the last print ₹1,330.00; BRITANNIA 2018-11-28, the day before its bonus, close ₹2,980.87, off the 5-paisa tick, against ₹5,991.00. Examples of a run's factor (GDFL ÷ Zerodha): RELIANCE 2.0981 to 2023-07-19, then 2.0 to 2024-10-25, then 1; EICHERMOT 10.0; NESTLEIND 20.0; INFY 1.0216 to 2026-06-09. Which corporate actions the vendor applied is not stated anywhere read and is UNVERIFIED. D-3323. | measured 6–7 Oct 2026 |
+| The adjustment is not always proportional | **MEASURED.** ASHOKLEY's minute close is GDFL ÷ 2 − ₹2.48: on 2019-06-10, over 375 minutes of `bars/zerodha/NSE/CASH/ASHOKLEY/1min/2019-06.bin` against the GDFL `1s` fold, the offset's p10/p50/p90 are 245/247.5/250 paisa (7 Oct 2026; the audit found the same on seven sampled days 2018–2024). Other factors change from run to run instead of stepping once: CANBK 359 runs between 1.03 and 6.74 over 1,913 sessions, BANKBARODA 357 runs between 1.03 and 1.34 over 1,908, BPCL 152 runs between 1.03 and 2.36 over 1,826 (6 Oct 2026 scan, 2018-09-03 onward). On such a run a percentage move is not the traded one: the audit measured CANBK 2020-05-11 open-to-close −2.008% on Zerodha against −1.561% on GDFL. D-3323. | measured 6–7 Oct 2026 |
+| Adjusted prices are quantised coarser than the tick | **MEASURED.** Every BAJFINANCE Zerodha `1min` open, high, low and close on 2019-06-03 and 2023-06-15 (375 bars each) is a multiple of 50 paisa, while GDFL's raw prices those days are on the 5-paisa grid, consistent with the raw price ÷ 10 rounded to 50 paisa (the audit's example, 2019-06-03 09:15: GDFL high ₹3,478.35, Zerodha ₹348.00). From the 2025-06-16 ex-date the two feeds agree; GDFL's own raw prices were on a 50-paisa grid on 2025-06-13 and 2025-06-16 and on 5 paisa again by 2025-07-01. Read 7 Oct 2026 through the shadow store, `bars/zerodha/NSE/CASH/BAJFINANCE/1min/` and `bars/gdfl/NSE/CASH/BAJFINANCE/1s/`. The audit found BAJAJ-AUTO and BSE on the same 50-paisa grid. D-3323. | measured 7 Oct 2026 |
+| Volume basis of share candles | **MEASURED: on its own basis, not scaled with price.** In **45 of the 101** adjusted shares, one probe day in some run shows the Zerodha `1day` volume ÷ the sum of GDFL `1s` volume differing from that run's price factor by more than 2% (one probe day in each of up to eight runs per share, 7 Oct 2026, through the shadow store: `bars/zerodha/NSE/CASH/<SYM>/1day/` against `bars/gdfl/NSE/CASH/<SYM>/1s/`; 100 of the 101 had a common day to probe). Examples: EICHERMOT 2019-08-28 price ×10.00, volume ×1.0004; CHOLAFIN 2019-03-12 price ×4.98, volume ×1.0003; CANBK 2020-05-11 price ×6.73, volume ×5.00. Where neither side is adjusted the ratio is about 1.0002 (RELIANCE 2026-09-22: 10,684,376 against 10,681,733). So price × volume on an adjusted span is not a traded value. D-3323. | measured 7 Oct 2026 |
+| `day` close | **MEASURED: the official close, not the last print.** NIFTY `day` close differs from the last `minute` close of the same day on **2,081 of 2,126** common days of 2018-01..2026-09 (median 4.69 bps, p99 33.4, maximum 109.0 on 2021-02-24, the outage day of §3, whose minutes stop at 10:08); BANKNIFTY 2,083 of 2,126 (median 6.44 bps, p99 44.1, maximum 231.8 the same day). From 2026-08-03 the two are equal on all 42 common days for both. Read 7 Oct 2026 through the shadow store, the `1day` and `1min` files under `bars/zerodha/NSE/INDEX/NIFTY/` and `.../BANKNIFTY/`. How the exchange forms its official close is not sourced here. The `day` bar is not a fold of its minutes (D-3001, D-3347). D-3324. | measured 7 Oct 2026 |
+| `minute` candles of a CAS-eligible share from 2026-08-03 | **MEASURED: they end at 15:14.** RELIANCE holds 360 `minute` bars on 2026-09-24 (09:15–15:14) and 375 on 2026-07-31 (09:15–15:29), `bars/zerodha/NSE/CASH/RELIANCE/1min/`, read 7 Oct 2026. The landing drops bars from 15:15 for an eligible share (`fetch::cash_close_verdict`, §9), so this is the store's rule as much as the vendor's. The `day` close that day, ₹1,219.20, is the closing-auction price (§9 below). D-3320. | measured 7 Oct 2026 |
 | Expired F&O | `continuous=1` returns **day** candles for expired contracts of a live token's underlying, NFO and MCX futures | documented |
 | Window cap | **NOW STATED, AND NOT BY THE PAGE.** The historical page still states no span limit at any interval — that half of the old row was and remains true. The figures come from Zerodha's own Kite Connect developer forum, thread `kite.trade/forum/discussion/7756`, posted by staff member `rakeshr` in May 2020, which other forum threads and Zerodha staff cite as the canonical reference. Max days per single request: `minute` **60** · `3minute` **100** · `5minute` **100** · `10minute` **100** · `15minute` **200** · `30minute` **200** · `60minute` **400** · `day` **2000**. A request spanning more than the permitted days for its interval FAILS, so a backfill must chunk to them. Captured 19 Aug 2026. | forum-sourced, authoritative-but-unversioned |
 | Rate limit | **3 requests/second** on the historical candle endpoint | documented |
@@ -663,10 +673,10 @@ statement and does not say what any other day holds.
 | Whether the layout, density, gaps and backward steps above hold on every other day, for every needed series | UNVERIFIED — one day read |
 | Whether every needed day is present and non-empty across the tested history | operator-stated (above); per day UNVERIFIED, so a window with no GDFL seconds still refuses at run time |
 | Clock basis of the CSV `Time` column (exchange time, vendor receive time or other), and whether `hh:mm:ss` means `[ss, ss+1)` | UNVERIFIED — D-0015 records GDFL epoch-second fields `LastTradeTime` and `ServerTime` (documented); neither name is in the CSV |
-| Alignment of GDFL seconds with Zerodha minutes and folded rungs | UNVERIFIED — no day has been read from both |
-| GDFL's naming for every F&O underlying's cash series, and its mapping to `InstrumentKey` | UNVERIFIED — three tickers seen on one day: `NIFTY 50.NSE_IDX`, `NIFTY BANK.NSE_IDX`, `RELIANCE.NSE` |
-| Whether GDFL's and Zerodha's price series agree in level, including corporate-action adjustment for the cash equities | UNVERIFIED |
-| Whether GDFL's own cash-equity series is adjusted for splits, bonuses or other corporate actions | UNVERIFIED — nothing read states it (numeric-pass16 p16num-2, D-1969) |
+| Alignment of GDFL seconds with Zerodha minutes and folded rungs | **Partly measured since (7 Oct 2026, D-3324).** NIFTY on 2026-09-24: Zerodha `1day`, the last Zerodha `1min` bar and the last GDFL `1s` bar all close at 23,063.10, and open, high and low agree; on 2019-06-14 open, high and low agree and the close does not (official 11,823.30, last GDFL second 11,809.50). Read through a read-only shadow of the operator's store, `bars/{zerodha,gdfl}/NSE/INDEX/NIFTY/`. Minute-by-minute alignment over the whole history is still unmeasured |
+| GDFL's naming for every F&O underlying's cash series, and its mapping to `InstrumentKey` | UNVERIFIED here; measured over the whole copy in "GDFL capital-market tick files" below, and the index names sourced in "Index aliases and symbol changes" below (D-3332) |
+| Whether GDFL's and Zerodha's price series agree in level, including corporate-action adjustment for the cash equities | **MEASURED (6–7 Oct 2026, D-3323, D-3324): an index level is not adjusted, and 101 of 208 shares differ by the vendor's back-adjustment.** §4z gives the share counts, store paths and examples. Index levels: NIFTY open, high and low agree on all 19 days of 2019-03 and the close on none (official against last print), and the open agrees on 12 of 17 common days of 2026-09 (the /db audit); every field agrees on 2026-09-24 (row above) |
+| Whether GDFL's own cash-equity series is adjusted for splits, bonuses or other corporate actions | **MEASURED: raw, as traded (7 Oct 2026, D-3323).** GDFL's price steps by the action's factor on the ex-date (BRITANNIA 2018-11-28 last print ₹5,991.00 before a 1:1 bonus; BAJFINANCE first print ₹9,150.00 on 2025-06-13 and ₹956.00 on 2025-06-16, the ex-date), its option strikes are renamed to adjusted values on the ex-date (D-3331), and its volume is the sum of traded quantities. Read through the shadow store, `bars/gdfl/NSE/CASH/<SYM>/1s/`. No vendor page states it |
 | The price of the data | not recorded; the operator states it is in hand |
 | Licence terms for this use | UNVERIFIED |
 
@@ -824,6 +834,22 @@ visible, with no fabricated bars. Auction execution-report absence does not
 establish non-eligibility. The cash policy does not change index hours or the
 separately cited derivatives schedule.
 
+**What both feeds hold from 2026-08-03 — measured 7 Oct 2026 (D-3320).** Read
+through a read-only shadow of the operator's store. Zerodha: RELIANCE `1min`
+holds 360 bars on 2026-09-24, 09:15 to 15:14, and 375 on 2026-07-31, 09:15 to
+15:29 (`bars/zerodha/NSE/CASH/RELIANCE/1min/`); the landing drops an eligible
+share's bars from 15:15 (`fetch::cash_close_verdict`). GDFL: RELIANCE `1s` on
+2026-09-24 holds its last continuous bar at 15:14:59, one bar at 15:15:00
+(volume 65), and one at 15:28:07 (volume 346,818, close ₹1,219.20)
+(`bars/gdfl/NSE/CASH/RELIANCE/1s/`). ₹1,219.20 is Zerodha's `1day` close of
+that day. The /db audit found the same single late print, with zero bid and
+ask and equal to the Zerodha day close, for AXISBANK and BAJFINANCE that day,
+on every session from 2026-08-03 and on none before. Calling that print the
+closing auction's is an inference from those measurements and §9's rule; no
+vendor page labels it. It is kept as an auction observation, never as a
+continuous trade (D-3320). Whether an index level freezes during the auction
+is UNVERIFIED.
+
 ### FORCEMOT NSE interruption — verified 2026-09-06
 
 [NSE circular CML58560](https://archives.nseindia.com/content/circulars/CML58560.pdf)
@@ -875,6 +901,21 @@ those dates under the existing regular-day model; this does not establish
 provider fault. Do not infer precise exchange windows from one stock's missing
 timestamps, or count every such absence as a minute the provider must supply.
 No calendar override is made from publication timestamps or news summaries.
+
+**Searched again on 7 Oct 2026, and still UNVERIFIED (D-3320).** A search of
+nseindia.com, nsearchives.nseindia.com, archives.nseindia.com and
+sebi.gov.in for a dated NSE circular or press release of the 13 March or
+23 March 2020 halt found none; only the general circuit-breaker rule page
+above and news reports, which this charter does not take as a source. What
+the store holds is measured, not sourced: on 2020-03-13 GDFL NIFTY `1s` holds
+3,567 bars from 09:21:30 to 10:20:59 with volume 0, frozen at 8,624.05 to
+10:05:59, then varying values to 10:13, and no stock in either feed has a bar
+from 09:21:08 to 10:21:00; on 2020-03-23 every stock is absent from 09:59 to
+10:56 in both feeds (the /db audit of 6 Oct 2026, over
+`bars/{gdfl,zerodha}/NSE/{INDEX,CASH}/`). D-3320 carries both days in
+`pull::calendar` as **suspected** halts with those measured windows (WP-14);
+they stay suspected until a circular is recorded here, and a suspected halt's
+minutes are neither owed nor excused (D-3336).
 
 ## VWAP applicability evidence — reviewed 2026-09-06
 
@@ -975,6 +1016,8 @@ GDFL capital-market rows).
 | Member methods | every day zip is STORED (method 0) in the outer archive, so each is one contiguous byte range; the members inside a day zip are DEFLATED (method 8), e.g. `GFDLCM_STOCK_TICK_19012023/<NAME>.NSE.csv` in `STOCKS/2023/JAN_2023/GFDLCM_STOCK_TICK_19012023.zip`, and `INDICES/2026/JUN_2026/GFDLCM_INDICES_TICK_11062026.zip` is stored | the GDFL build thread's read of the central directories, relayed 2026-10-04 (D-2800); the stored day zips were already relied on by D-0812 | measured (relayed) |
 | The verified tick store's format | version 1 (`BRTXTS01`, frozen 2026-10-04): one `.bts` file per vendor day zip at `cm/<TREE>/<yyyy>/<MON_yyyy>/<day folder>.bts` under the store root, holding every entry of that zip in its central-directory order with the zip's own size, CRC-32 and DOS time per entry; file layout, footer, index and block encodings (directory, columnar, raw zstd) as its §3 and §4 state; `*.bts.tmp` incomplete and ignored. Specified in `/Volumes/WD_BLACK/brutex/tickstore-data/FORMAT.md`, sha256 `6edc62a772b257a2aa1b45c0785a23936d9bff47b87648bbb1d9a84ab7063259` | read 2026-10-04, `shasum -a 256`; the operator's specification, not a vendor statement (D-2800, D-2801) | specification |
 | Tick store against the zip | the 21 index day files of August 2026 (`cm/INDICES/2026/AUG_2026/`): all 2,982 entries carry the zip's names, order, sizes and CRC-32s, and all 2,961 files (11,048,377,844 bytes) rebuild byte for byte to what the zip source inflates | a read-only probe through `pull::gdfl_tickstore::TickStore` and `pull::gdfl_archive::Archive`, both `CmSource`s, 2026-10-04; the probe was not committed and no byte of either copy is | measured, August 2026 index days (D-2801) |
+| What the store holds from the archive, and at which rung | **One second only (D-2802), 2018-09-03 to 2026-09-24.** GDFL NIFTY's first stored bar is 2018-09-03 09:15:00 and its last 2026-09-24 15:29:59, in 97 month files each for NIFTY and BANKNIFTY (`bars/gdfl/NSE/INDEX/NIFTY/1s/` and `.../BANKNIFTY/1s/`); the import journal closes 1,985 index days and 1,986 stock days `done`; the store holds 208 share series and option series for 219 underlyings. The tick store also holds 2026-09-25, 28, 29 and 30, which the zip archive lacks (DB-G56); the store's months come from the zip and stop at 2026-09-24. Read on 7 Oct 2026, read-only, from the operator's store and `imports/gdfl.journal` | `ls` and `wc` of the month files; one-row reads through a read-only shadow; `awk` over the journal | measured, 7 Oct 2026 |
+| The options import's state when the operator stopped it | **Stopped at 23:23 IST on 6 Oct 2026, inside 2020-09-16** (the journal's last line is that day's `begin`, unclosed). 288 options days are `done` (2018-09-03 to 2019-11-13, and 2019-12-27); 212 are `incomplete`: 2018-11-06 and 2018-11-09 (vendor refusals) and every options day from 2019-11-14 to 2020-09-15 (210), whose bars are on disk and whose census append was refused at the manifest's ceiling (D-3316, D-3317) | `awk` over `imports/gdfl.journal`, 7 Oct 2026 | measured, 7 Oct 2026 |
 | Licence terms for keeping a converted copy, and for fixtures | UNVERIFIED (D-0802 consequence 10, on its unlanded branch). So no GDFL row is committed (D-0808 item 9) | — | UNVERIFIED |
 
 ## NSE trading holidays 2018-2019 and September-October 2026 — read 2026-10-04 (D-2805)
@@ -1030,3 +1073,84 @@ sourced from 36475 alone; no local data corroborates it.
   holiday. The name census of the GDFL build thread found this rule equal to
   the vendor's last-trade day and its dated twins for every month 2018-09 to
   2022-12.
+
+## Index aliases and symbol changes — read 7 Oct 2026 (D-3332)
+
+`CLAUDE.md` §3 rule 1 requires every name mapping `core::alias` applies to
+trace to a source recorded here. These were read on 7 Oct 2026 (IST) over
+HTTPS, at the operator's instruction to look up the exchange's own sources
+(D-3332). The digests are of the bytes read; a live page may serve different
+bytes later.
+
+**F&O index symbols.** Each row joins three sources and one measurement: the
+NSE derivatives product page names the F&O symbol and the index it is based
+on; NSE's own index list (`https://www.nseindia.com/api/allIndices`, 139
+indices, its timestamp `06-Oct-2026 15:30`, sha256
+`563bf499d9815fb97198c50ffc1b8fe78c17ac0e879d389b5e1f8bcf460b25cd`) gives the
+index's `index` name and its `indexSymbol`; and the `indexSymbol` is the GDFL
+index file stem (`<indexSymbol>.NSE_IDX.csv`, measured by the /db audit in
+the vendor's capital-market zips, DB-G26, DB-G53) and, with its spaces
+removed, the Zerodha store key (`bars/zerodha/NSE/INDEX/<key>/`, present on
+7 Oct 2026).
+
+| F&O symbol | Product page (sha256 of the page read) | allIndices `index` | `indexSymbol` = GDFL stem | Zerodha store key |
+|---|---|---|---|---|
+| `FINNIFTY` | `https://www.nseindia.com/static/products-services/equity-derivatives-finnifty` (`60cd6ddf540a2771c4af76353ad2c0ea60fcada964ee77a0c427c8d8dc6aef44`): "Underlying symbol denotes the underlying index, which is FINNIFTY"; "The underlying index is Nifty Financial Services Index" | NIFTY FINANCIAL SERVICES | `NIFTY FIN SERVICE` | `NIFTYFINSERVICE` |
+| `MIDCPNIFTY` | `.../equity-derivatives-nifty-midcap-select` (`d3930bfad0f56cba53e19935e05edbef000b96644be0f2c5be83e5e789ada710`): "futures contracts on MIDCPNIFTY"; "The underlying index is NIFTY Midcap Select Index" | NIFTY MIDCAP SELECT | `NIFTY MID SELECT` | `NIFTYMIDSELECT` |
+| `NIFTYNXT50` | `.../equity-derivatives-nifty-next50` (`ca5f1c41a3856ce808921c30e602fb9262dcde62855caa19ee9b5fdfd599a2f0`): "Symbol : NIFTYNXT50 Underlying: Nifty Next 50 Index" | NIFTY NEXT 50 | `NIFTY NEXT 50` | `NIFTYNEXT50` |
+| `NIFTYIT` | `.../equity-derivatives-niftyit` (`3c99c7b3a40fc47ded2316bb38aab584fbbba87ce33c6392f7b3e21bd1ddb6e6`): "Underlying : NIFTYIT"; "The underlying index is Nifty IT" | NIFTY IT | `NIFTY IT` | `NIFTYIT` |
+| `NIFTYFPI` | `.../equity-derivatives-nifty-india-fpi` (`ee0c9e1f89df9cb48af432a17be04a5298f7d4e095fb1826f8358e413e9a070b`): "the underlying index, which is NIFTYFPI"; "The underlying index is Nifty India FPI 150 Index" | NIFTY INDIA FPI 150 | `NIFTY FPI 150` | `NIFTYFPI150` |
+| `NIFTYCPSE` | `.../equity-derivatives-niftycpse` (`81c632e8fcc201d6dc7dccec1b4a434482212e42fdd017edd64ef00656bc9e8e`): "Underlying : NIFTYCPSE"; "The underlying index is NIFTY CPSE" | NIFTY CPSE | `NIFTY CPSE` | `NIFTYCPSE` |
+| `NIFTY`, `BANKNIFTY` | already aliased (`NIFTY 50`, `NIFTY BANK`) | NIFTY 50, NIFTY BANK | `NIFTY 50`, `NIFTY BANK` | `NIFTY`, `BANKNIFTY` |
+| — (reference only, `CLAUDE.md` §1) | none: VIX has no F&O symbol in this table | INDIA VIX | `INDIA VIX` | `INDIAVIX` |
+
+The product pages' `...` stands for `https://www.nseindia.com/static/products-services/`.
+allIndices also lists `NIFTY FINANCIAL SERVICES 25/50` (`NIFTY FINSRV25 50`)
+and `NIFTY FINANCIAL SERVICES EX-BANK` (`NIFTY FINSEREXBNK`): they are other
+indices, which is why an abbreviation match alone could not decide FINNIFTY's
+index (DB-G25), and why this table rests on the product page.
+
+**Symbol changes.** NSE's `symbolchange.csv`,
+`https://nsearchives.nseindia.com/content/equities/symbolchange.csv` (69,052
+bytes, 1,065 lines, sha256
+`948ccc56f46555bc6553538047d7b967e99a9250c58b7bf0a1d66a7e1f033e10`), one row
+per change: company, old symbol, new symbol, date. The rows below are those
+whose old or new symbol the store holds as a GDFL share or option series
+(checked on 7 Oct 2026). One was also read in its own circular:
+[NSE/CML/67420](https://nsearchives.nseindia.com/content/circulars/CML67420.pdf),
+Circular Ref. 0518/2025, 3 April 2025 (sha256
+`f0ee1ddfa019753b0c04718e3e55761e74dafef34c5763be3d28000e9759afd4`): ZOMATO to
+ETERNAL, Zomato Limited to ETERNAL LIMITED, effective 9 April 2025.
+
+| Old symbol | New symbol | Date in the file |
+|---|---|---|
+| `IDFCBANK` | `IDFCFIRSTB` | 2019-01-16 |
+| `NIITTECH` | `COFORGE` | 2020-08-20 |
+| `INFRATEL` | `INDUSTOWER` | 2020-12-18 |
+| `CADILAHC` | `ZYDUSLIFE` | 2022-03-07 |
+| `MOTHERSUMI` | `MOTHERSON` | 2022-06-09 |
+| `LTI` | `LTIM` | 2022-12-05 |
+| `SRTRANSFIN` | `SHRIRAMFIN` | 2022-12-20 |
+| `IIFLWAM` | `360ONE` | 2023-01-23 |
+| `PVR` | `PVRINOX` | 2023-05-12 |
+| `ADANITRANS` | `ADANIENSOL` | 2023-08-24 |
+| `AMARAJABAT` | `ARE&M` | 2023-10-27 |
+| `L&TFH` | `LTF` | 2024-04-23 |
+| `MCDOWELL-N` | `UNITDSPR` | 2024-06-07 |
+| `IBULHSGFIN` | `SAMMAANCAP` | 2024-07-26 |
+| `GMRINFRA` | `GMRAIRPORT` | 2024-12-11 |
+| `ZOMATO` | `ETERNAL` | 2025-04-09 |
+| `TATAMOTORS` | `TMPV` | 2025-10-24 |
+| `LTIM` | `LTM` | 2026-02-27 |
+
+The GDFL share series of each new symbol starts at its date (360ONE 2023-01,
+ETERNAL 2025-04, TMPV 2025-10, LTM 2026-02, UNITDSPR 2024-06, SHRIRAMFIN
+2022-12, ZYDUSLIFE 2022-03, COFORGE 2020-08, MOTHERSON 2022-06; the /db audit,
+DB-071), which agrees with the file. A symbol change does not say a series is
+economically continuous: a demerger or a merger can sit on the same day, and
+the change refusals of D-3325 still apply. **A symbol with no row in the file
+is not aliased**: HDFC and MINDTREE, whose options the store holds, have none;
+their share files are filed under their own keys (D-3333), and why each
+stopped trading is not recorded here (UNVERIFIED). Rows of the file not listed here are not
+needed by any stored series today; `core::alias` may transcribe them later
+from the same file and digest.

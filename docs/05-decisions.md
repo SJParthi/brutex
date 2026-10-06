@@ -65289,3 +65289,1226 @@ reaches the rungs derived from it.
 **Proof.** `pull::daycheck::tests::a_difference_is_counted_by_kind_and_only_an_exceeded_day_contradicts`
 and `pull::ingest::tests::the_day_check_line_warns_only_on_a_contradiction`.
 Invariant ZPO-06.
+
+### D-3316 — The census is partitioned per vendor and segment, carries its own capacity, and is compacted by installing a new file beside the old one — 2026-10-07
+
+**The /db fix round.** D-3316 to D-3343 open the fix round for the read-only
+/db audit of 6 Oct 2026: 185 findings, each confirmed by two auditors, and a
+fix plan splitting them into work packages (`WP-xx`) with non-overlapping
+files. The audit and the plan are held outside this repository. Each entry
+below names the package that implements it and the findings it covers, and
+fixes the names it puts on a wire, in a journal or in a ledger, so a reader
+and a writer built by different packages agree on them. An entry that names
+a field fixes its NAME and MEANING; where it fixes bytes it says so. Where an
+entry depends on an answer of the operator, the answer is the one relayed to
+this round on 6–7 Oct 2026 (the round's context file, held outside this
+repository); the operator can still override it, and an override is a new
+entry.
+
+**Implemented by** WP-10 (the writer, the migration and the recount verb) and
+WP-30 (the reader). **Findings** DB-058, DB-G01, DB-G05, DB-G08, DB-G09 (the
+recount half), DB-G10, DB-G49, DB-G60, DB-G78.
+
+**What was observed.** `manifest/gdfl.man` is an append-only log of one
+128-byte entry per committed write, not per key. Measured read-only on
+6 Oct 2026: 268,430,208 bytes, which is 32,768 + 2,096,855 × 128, against
+`MAX_ENTRIES` 2,097,152, holding 242,341 distinct keys — about 8.6 log
+entries per key. From import day 2019-11-14 every options day's census
+append was refused (`n_valid is 2097153; this build holds at most 2097152`)
+while its bars were still written. On 7 Oct 2026 `imports/gdfl.journal`
+holds 210 options days closed `incomplete` from 2019-11-14 to 2020-09-15
+(plus 2018-11-06 and 2018-11-09, which are vendor refusals), 288 closed
+`done`, and an unclosed `begin options 2020-09-16 *`: the operator stopped
+the run at 23:23 IST on 6 Oct 2026. The API's readable size was derived at
+compile time from the writer's constant (DB-G08), so a writer built with a
+larger cap would have made every gdfl row vanish from a running API.
+
+**Decision.**
+
+1. **Format version 4, one file per (vendor, segment, epoch).** The path is
+   `manifest/v4/<vendor>/<SEGMENT>/<epoch>.man`, `<SEGMENT>` one of `INDEX`,
+   `CASH`, `FNO`, `<epoch>` six decimal digits from `000001`. The lock is
+   `manifest/v4/<vendor>/<SEGMENT>.lock`. A Zerodha write never opens a gdfl
+   file, and options are their own file.
+2. **The current epoch is the highest-numbered `<epoch>.man` present.** A
+   `*.man.tmp` is incomplete and is never read. An older epoch is an
+   immutable generation: it is never written again and never deleted
+   (`CLAUDE.md` §3 rule 8).
+3. **The header carries the file's own capacity.** Version 4 keeps the 64-byte
+   slot of `docs/02-store-format.md` §11.3 and gives meaning to its reserved
+   runs: bytes `12..16` are `capacity`, a `u32` count of entries this file may
+   hold, and byte `56` is the `segment` code (`INDEX` 1, `CASH` 2, `FNO` 3, the
+   same codes as the entry), a cross-check against the path; `57..60` stay
+   zero. A reader bounds the entry region by the header's `capacity` and the
+   file's length, never by a constant compiled into the reader. The entry is
+   version 3's 128 bytes unchanged (§11.5a), and the magic stays `BRUTEXM2`,
+   because the geometry did not change. WP-10 writes these bytes into
+   `docs/02-store-format.md` §11.
+4. **Compaction installs a new epoch.** Under the lock, the writer writes
+   `<epoch+1>.man.tmp` holding the newest `Held` entry of every key in key
+   order, syncs it, renames it to `<epoch+1>.man` and syncs the directory. The
+   new epoch's `capacity` is the larger of the segment's floor and twice its
+   key count. Floors: `INDEX` and `CASH` 1,048,576; `FNO` 8,388,608, which is
+   more than twice the about 2.2 million option contract-months the GDFL
+   archive holds (DB-G05, DB-G60). Every committed entry's newest `Held` is in
+   the new epoch, so totals before and after are equal; WP-10 proves it.
+5. **An append that does not fit is refused before anything is published.**
+   `record_all` compares `n_valid + batch` with `capacity` first. If the batch
+   does not fit, it compacts once; if the compacted epoch still cannot take
+   the batch, it refuses with `ManifestError::TooManyEntries` naming the
+   file's `n_valid`, the batch size and the free slots, and publishes nothing
+   (DB-G10). The import treats that refusal as a run-level refusal (D-3317).
+6. **Migration and recount are verbs, never a side effect of a read.** `cli
+   census-migrate <feed>` writes epoch `000001` of each segment from the
+   version-3 file's newest `Held` per key; the version-3 file stays byte for
+   byte as it was. `cli census-recount <feed> --from <day> --to <day>` walks
+   the bar-file headers of every instrument-month whose month overlaps the
+   range and appends a `Held` row for each from the header's own `n_valid`,
+   first and last stamps and closes: O(files), with no vendor read
+   (DB-G09). It then closes the range's census-refused days in the import
+   journal (D-3317's `recounted` line).
+7. **Readers prefer version 4.** For a vendor with a `manifest/v4/<vendor>/`
+   directory the API reads only it; otherwise it reads `manifest/<vendor>.man`
+   as before. **Ordering rule (DB-G08):** WP-30's version-4 reader is deployed
+   before any migration runs, so a running API never meets a file it cannot
+   read. Both writes are WP-80 steps the operator approves.
+8. **The stopped run** (the operator's answer: count what was written without
+   re-reading the vendor, then resume). The recount covers 2019-11-14 to
+   2020-09-15; the import then resumes from 2020-09-16, whose unclosed `begin`
+   is a crashed day and is imported again, the store keeping what it holds and
+   appending the rest (D-2803).
+
+**Rejected.** Raising `MAX_ENTRIES` alone: it keeps every census miss
+proportional to the log length (DB-G05, DB-G59) and binds every reader to the
+writer's compiled size (DB-G08). Compacting in place: an in-place rewrite of
+a committed file is what §3 rule 8 refuses. One entry per instrument-month per
+batch: it still grows with the import, only more slowly.
+
+**Cost.** Compaction is O(entries) once per fill, about one in every
+`capacity − keys` appends; an old epoch keeps its bytes (about 280 MB for a
+full options epoch). Lookup and append stay as `docs/06-limits.md` states
+them for version 3. Not measured yet; WP-10 records the bench, WP-99 the
+limits row.
+
+**Proof.** Named by WP-10 and WP-30. WP-99 records the invariants.
+
+### D-3317 — The import journal says why a day is not done, stops a run at a census refusal, and records the run's source — 2026-10-07
+
+**Implemented by** WP-11a (writer and loader), WP-10 (the `recounted` line)
+and WP-33a (the `/imports.json` reader). **Findings** DB-G01, DB-G09, DB-G10,
+DB-G56 (the journal half), DB-025, DB-058.
+
+**What was observed.** Every census-refused options day closed
+`incomplete ... failures=1`, exactly like a vendor-refused one; a day whose
+files were all refused got no closing line at all (`done indices 2022-03-04`
+is followed by `begin indices 2022-03-08`); the run kept going after the
+census refused, writing about one options day a minute of bars no census row
+counts, and logged each such day at info as `day imported`; and no line said
+whether the bars came from the zip or the tick store (D-2803 had made that a
+property: "the journal carries no source name").
+
+**Decision.** The journal stays `<store>/imports/gdfl.journal`, one line per
+event, fields separated by one space, every field after the key
+`name=value`. A value never holds a space or a newline: a free-text value is
+percent-encoded (every byte outside `A–Z a–z 0–9 - . _ ~ /` written `%XX`,
+upper-case hex). `<key>` is `<kind> <day> <filter>` as before.
+
+1. **`begin <key>` is unchanged** (exactly four fields), so the loader's
+   crash rule (D-2803) is unchanged.
+2. **`done <key> <stats>` and `incomplete <key> <stats>` gain fields.** Every
+   closing line written by this build carries `run=<run>` (the run line it
+   belongs to). An `incomplete` line carries `stage=<stage>` and
+   `reason=<code>` of its first failure. A `done` line whose day had failures,
+   all of them refusals of the vendor's own bytes at stage `vendor`, carries
+   `vendor_refused=<n>` and `reason=<code>`: that is **done with refusals**.
+   It is done (a re-run skips it, D-2803), because the same archive member
+   refuses the same way every time under the same reader (2018-11-06,
+   line 13668; 2018-11-09, line 451). A run given `--retry-refused`
+   re-attempts such days, which is how a day is re-read after a reader learns
+   to accept what it refused; `/imports.json` lists them, so none is
+   forgotten.
+3. **`refused <key> definition=<n> stage=<stage> reason=<code> failures=<n>
+   run=<run>`** closes a day that wrote nothing: every file refused, the
+   calendar refused it, or the run stopped at it. It is not done: a later run
+   re-attempts it and names it in `resumed`, as for `incomplete`.
+4. **`run <run> source=<zip|tickstore> archive=<path> archive_bytes=<n>
+   commit=<sha> started=<unix_s>`**, with `archive_cd_blake3=<hex>` (the
+   BLAKE3 of the outer zip's central directory, which records every member's
+   size and CRC-32) for a zip source and `format_sha256=<hex>` (the tick
+   store's `FORMAT.md`) for a tick store. `<run>` is `started` in decimal,
+   raised by one while an earlier `run` line holds the same value.
+   It is written before the run's first `begin`, so a run that skips every
+   day writes nothing and the store stays byte-identical (D-2803). The bars
+   are identical whichever source built them; the journal now says which did.
+5. **`recounted <key> definition=<n> months=<n> run=<run>`** is written by
+   `cli census-recount` (D-3316) for a day in its range that is closed
+   `incomplete`, after the census holds every month the day touched. It
+   closes the day as done. Lines written before this entry carry no `stage`,
+   so the recount cannot tell a census refusal from another one by the line:
+   it closes only the days of the range the operator names, and that range
+   must exclude days refused for any other reason (2018-11-06 and 2018-11-09).
+6. **`<stage>`** is one of `calendar` (the day gate), `vendor` (listing,
+   member or row of the vendor's bytes), `file` (the store refused a write),
+   `census` (the manifest refused the append), `journal`. **`<code>`** is the
+   snake-case name of the refusal variant that refused: `CmRefusal`,
+   `NfoRefusal`, `ImportRefusal`, `ManifestError` or the store's file error,
+   for example `malformed_row`, `price_refused`, `calendar_unmeasured`,
+   `calendar_not_regular`, `too_many_entries`. A new variant adds a code by
+   existing; a code is never renamed or reused.
+7. **A census refusal stops the run.** `ManifestError::TooManyEntries` from the
+   day's census append is a run-level `ImportRefusal::CensusFull` naming the
+   file's `n_valid`, the batch and the free slots. The day closes `incomplete
+   ... stage=census reason=too_many_entries`, is logged at `error` (never `day
+   imported`), is not counted in `days_imported`, and no later day begins.
+8. **The loader** accepts every line above and still refuses any other line
+   (D-2814). A journal written by this build is refused by an older build's
+   loader, by name; that is the intended direction.
+
+**Rejected.** A second journal for reasons: two files for one day's outcome
+can disagree. Free-text reasons in the journal: a reason sentence belongs to
+the log and the audit stream (D-3341); the journal carries the code.
+
+**Proof.** Named by WP-11a, WP-10 and WP-33a. WP-99 records the invariants.
+
+### D-3318 — A bad capital-market row is refused by name and counted; the rest of the file is imported — 2026-10-07
+
+**Implemented by** WP-12a. **Findings** DB-024; the re-import is WP-80
+step 3.
+
+**What was observed.** `NIFTY 50` on 2022-03-07 (44,168 lines) was refused
+whole over four zero-LTP rows, `NIFTY BANK` over two (charter, the GDFL
+capital-market section, "An LTP of zero"). The whole index day is absent on
+both indices, about 22,220 and 19,326 in-session bars, and every NIFTY and
+BANKNIFTY option bar of that day has no spot. Zerodha holds the day (372
+one-minute bars).
+
+**Decision.** In `pull::gdfl_cm`, a row whose LTP is zero, off the
+two-decimal grid, or malformed is refused by name, counted, and not kept;
+the file's other rows are imported. Counts per file: `rows_refused_zero_ltp`,
+`rows_refused_off_grid`, `rows_refused_malformed`, summed into the day's
+`rows_refused` in the day ledger (D-3335) and named in the log with the
+file, line and reason. A file whose refused rows exceed both 64 and one in
+every 1,000 of its rows is still refused whole (`too_many_bad_rows`): a file
+that is mostly bad is not a file. The bound is chosen, not sourced; the
+measured worst case is 4 of 44,168. What a zero LTP means is UNVERIFIED and
+is not guessed; the row is refused, not repaired.
+
+**Not decided here.** Options files (`pull::gdfl_nfo`, WP-12b's file) keep
+refusing a file whole. Their two lost contract-days close as done with
+refusals (D-3317). Extending per-row refusal to them is not assigned in this
+round.
+
+**The re-import.** 2022-03-07 lies inside months whose files already hold
+later days, so offering it is a prefix the append-only store refuses. It is
+re-imported as a new generation of each affected month (WP-80 step 3), with
+the operator's approval, never in place.
+
+**Proof.** Named by WP-12a. WP-99 records the invariant.
+
+### D-3319 — Special sessions are recorded with their windows and imported inside them; a minute pull withholds one day, never its answer — 2026-10-07
+
+**Implemented by** WP-14 (the calendar), WP-12a (GDFL admission), WP-13b
+(Zerodha). **Findings** DB-012, DB-072, DB-G33, DB-G55, DB-G69, DB-G87.
+
+**What was observed.** The GDFL import refused every special session whole:
+`session_gate` admits only a full regular day. The stocks run refused 9
+special-session days, whose vendor zips hold 69,905 option files, the index
+run refused the same kind of day (DB-072), and the options run so far refused
+2018-11-07 and 2019-10-27 (DB-G55). They are the Muhurat sessions, the
+disaster-recovery drills 2024-03-02 and 2024-05-18, and the 2021-02-24
+outage day. Zerodha holds those days (for example 60 1min bars on
+2025-10-21, 105 on each drill, 54 on 2021-02-24). Zerodha's five 60-day
+minute holes around the Muhurat days of 2020–2024 were D-3344's defect and
+are fixed: measured on 7 Oct 2026 through a shadow of the operator's store,
+Zerodha NIFTY 1min holds 7,875 bars in 2020-10, 7,124 in 2020-11, 7,125 in
+2021-11, 7,500 in 2023-10 and 8,250 in 2024-10.
+
+**Decision.**
+
+1. **`pull::calendar` records each special session's windows** in its
+   irregular table, from charter sources only: the Muhurat sessions of the
+   charter §3 table (2020-11-14 to 2025-10-21), the two drills (09:15–09:59
+   and 11:30–12:29, charter §3, measured) and 2021-02-24 (09:15–11:39 and
+   15:45–16:59, charter §3, SEBI order). The Muhurat sessions of 2018-11-07
+   and 2019-10-27 have no window in the charter; they stay
+   `OpenLengthUnmeasured` and are refused by name until a window is sourced or
+   measured and recorded there.
+2. **The GDFL import admits a `DayKind::Open(session)` day** and keeps a row
+   only inside its windows, through `Window::verdict`, the one session
+   authority. A day of unmeasured length stays refused, by name, and closes
+   `refused ... stage=calendar reason=calendar_unmeasured` (D-3317).
+3. **Zerodha.** D-3344 already refuses only the day. WP-13b keeps that rule,
+   lands the day itself once its window is recorded, and writes the withheld
+   day into the Zerodha gap ledger (D-3335) with `why=withheld_unmeasured_session`.
+4. **Days already refused** are imported as new months or generations by
+   WP-80 step 3, never in place.
+
+**Proof.** Named by WP-14, WP-12a and WP-13b, one test per listed day.
+
+### D-3320 — Exchange halts are calendar events marked suspected until sourced; the closing auction is a phase, and its print is kept apart from trades — 2026-10-07
+
+**Implemented by** WP-14 (calendar events and the phase function), WP-13a
+(the cash session ends at 15:15 for eligible shares from 2026-08-03), WP-12a
+(the auction print), WP-31 (change refusals at a phase boundary), WP-54 and
+WP-55 (display). **Findings** DB-028, DB-034, DB-082, DB-G42, DB-G47.
+
+**What was observed.** On 2020-03-13 GDFL NIFTY holds 3,567 one-second bars
+from 09:21:30 to 10:20:59 with volume 0, frozen at 8,624.05 until 10:05:59,
+then indicative values, then a jump at 10:21:01; no stock has a bar from
+09:21:08 to 10:21:00 in either feed. On 2020-03-23 every stock is absent from
+09:59 to 10:56 in both feeds. From 2026-08-03 a CAS-eligible share's
+continuous trading ends at 15:15 (charter §7, §9): measured on 7 Oct 2026,
+Zerodha RELIANCE 1min holds 360 bars on 2026-09-24 (09:15–15:14) and 375 on
+2026-07-31; GDFL RELIANCE 1s holds a bar at 15:15:00 (volume 65) and one at
+15:28:07 (volume 346,818, close 1,219.20), which equals Zerodha's 1day close
+of that day.
+
+**Decision.**
+
+1. **Halts.** `pull::calendar` carries halt events with a window and a
+   standing: `suspected` (no exchange source recorded; the window is measured
+   from stored bars of both feeds) or `sourced` (a circular is recorded in the
+   charter). 2020-03-13 and 2020-03-23 are `suspected`. A search of
+   nseindia.com, nsearchives.nseindia.com and sebi.gov.in on 7 Oct 2026 found
+   no dated NSE notice of either halt (charter, "Historical circuit-breaker
+   evidence boundary"). A suspected halt's minutes are neither owed nor
+   excused: coverage counts them apart (D-3336), and change across one is
+   refused (D-3325).
+2. **Phases.** A phase function per segment and day answers one of
+   `pre_open`, `continuous`, `cas`, `post_close`. For a CAS-eligible share
+   (charter §9 file) from 2026-08-03, `continuous` is `[09:15:00, 15:15:00)`
+   and `cas` is `[15:15:00, 15:30:00)`; the auction's internal sub-phases are
+   not in the charter and are not modelled. Indices stay `[09:15, 15:30)` and
+   derivatives follow the dated schedule already in `pull::vendor`. Whether an
+   index level freezes during CAS has no source; it is UNVERIFIED and not
+   modelled.
+3. **The auction print is kept, labelled, and never a trade** (the operator's
+   answer). In GDFL capital-market data, from 2026-08-03, for a CAS-eligible
+   share, a row at or after 15:15:00 whose bid and ask are both zero and whose
+   LTQ is positive is an auction observation. It is filed in an append-only
+   sidecar beside the month's 1s bar file, `<month>.auc`, version 1, one
+   fixed-size record per print (`t_micros`, `price_paisa`, `quantity`,
+   `rows`). WP-12a implements it and states its bytes in its module; WP-99
+   transcribes them into `docs/02-store-format.md` §8. It is never folded
+   into a 1s bar. Any other row of an eligible share in `cas` is an ordinary
+   bar whose phase is `cas`. Zerodha's landing already drops minutes from
+   15:15 for eligible shares
+   (`fetch::cash_close_verdict`); its 1day close is the auction price,
+   measured above.
+4. **Months already stored** (GDFL CASH 2026-08 and 2026-09) hold the auction
+   print as an ordinary bar. They are re-imported as new generations by
+   WP-80; until then `/bars/window.json` labels a bar of an eligible share in
+   `cas` with `phase: "cas"`.
+
+**Rejected.** Dropping the print at import, as Zerodha's minutes do: the
+operator chose to keep it, and a silent drop is the fault §4 bans.
+
+**Proof.** Named by WP-14, WP-12a, WP-13a and WP-31.
+
+### D-3321 — Derived rungs fold every recorded session, and each derived month says what it withheld — 2026-10-07
+
+**Implemented by** WP-13b; displayed by WP-54 and WP-60. **Findings** DB-013,
+DB-G12, DB-G35, DB-G36.
+
+**What was observed.** Before D-3346 the derived 2–60min rungs held only
+2019-12..2026-09-04. D-3346 made the ingest calendar answer the sourced spans,
+so 2018-01..2019-11 and 2026-09-05..30 now fold on the next derive. What
+remains: exceptional sessions are withheld at every derived rung (BANKNIFTY
+2024-03-02: 105 1min bars, 0 at 2/5/15/60min); a share's bucket is withheld
+whenever one of its minutes has no candle, although GDFL shows no trade in
+that minute either (360ONE 60min held at 74.6% of expected); and nothing
+tells /db a derived month is partial.
+
+**Decision.**
+
+1. A special session folds inside its recorded windows (D-3319), with the
+   same bucket grid as the regular session's.
+2. For a CASH series, a minute with no candle inside an open session is a
+   minute with no trade, not missing source: the bucket folds over the
+   minutes that have candles and is counted `partial`. For an INDEX series
+   every minute of a session is owed, and a bucket missing a minute is
+   withheld, as now.
+3. Each derived instrument-month writes one `derive` line to the Zerodha
+   ledger (D-3335) with `days`, `buckets`, `withheld` and `partial`, so a
+   reader learns a derived month is partial with one probe and no fold.
+4. Refolding 2018-01..2019-11 and 2026-09 writes new months, or extends a
+   month at its tail; nothing derived is rewritten (WP-80 step 5).
+
+**Proof.** Named by WP-13b.
+
+### D-3322 — Open interest is not applicable to an index or a share, on every feed — 2026-10-07
+
+**Implemented by** WP-13a (the write boundary), WP-31 (the read), WP-52
+(display). **Findings** DB-036, DB-057, DB-G28, DB-G44, DB-G100.
+
+**What was observed.** Every Zerodha index and share bar stores open interest
+0; GDFL stores `OI_NULL` for the same instruments. /db printed `0` with
+"zero, and stored as zero" for one feed and a dash for the other, and every
+Zerodha row's OI change read `previous_oi_zero`. `CLAUDE.md` §7: `i64::MIN`
+is the null, and zero means zero.
+
+**Decision.**
+
+1. **New data.** The Kite decode writes `OI_NULL` for `INDEX` and `CASH` bars.
+   Stored months are not rewritten.
+2. **Every read.** For a bar of segment `INDEX` or `CASH`, on every feed,
+   `/bars/window.json` and `/bars.json` serve `"oi": null` and
+   `"oichg_why": "not_a_derivative"`, whatever the stored value. A stored
+   Zerodha zero is not presented as a measurement; nothing hides it either:
+   the reason is on every row.
+3. **Index volume.** An index has no traded volume (D-2802). A bar of segment
+   `INDEX` carries `"v_why": "index_no_volume"` beside its stored `v`; other
+   bars carry `"v_why": null`.
+4. **Option volume and OI are in shares** (D-3343).
+
+**Proof.** Named by WP-13a and WP-31.
+
+### D-3323 — Each feed's price and volume basis is a recorded fact: Zerodha shares are vendor back-adjusted, GDFL is raw — 2026-10-07
+
+**Implemented by** WP-13a (the descriptor and `/feeds.json`), WP-55 (the
+badge), WP-37 (the factor column). The measured facts are in
+`docs/00-charter.md` §4 and summarised in `docs/08-vendor-samples.md`.
+**Findings** DB-017, DB-033, DB-G38, DB-G39, DB-G40, DB-G43 (the label half),
+DB-G58, DB-G75.
+
+**What was measured.** Zerodha `1day` and `1min` share prices are vendor
+back-adjusted as of the day they were pulled; GDFL's are as traded. On
+6 Oct 2026 a scan of all 208 F&O shares over every common day (the Zerodha
+`1day` open against the first GDFL `1s` print of the same day, 2018-09-03 to
+2026-09-24) found 101 of 208 with at least one run of three or more common
+sessions whose factor differs from 1 by more than 0.2%. Some runs are not
+proportional (ASHOKLEY is GDFL ÷ 2 − ₹2.48, measured again on 2019-06-10:
+p10/p50/p90 of the offset 245/247.5/250 paisa over 375 minutes; CANBK,
+BANKBARODA and BPCL drift day to day), and some are quantised (every
+BAJFINANCE Zerodha price on 2019-06-03 and 2023-06-15 is a multiple of
+50 paisa, where GDFL's raw prices are on the 5-paisa grid). On 7 Oct 2026, 45
+of the 101 have a run in which Zerodha's volume factor differs from its price
+factor by more than 2% (one probe day in each of up to eight runs per share):
+volume is on its own basis. Charter §4 gives the dates, store paths and
+counts.
+
+**Decision.**
+
+1. **The descriptor carries the basis per feed, segment and rung**, and
+   `/feeds.json` serves it as `basis`, an array of
+   `{segment, rung, price, volume, adjusted_as_of, source}`:
+   - `price`: `raw` (as traded: GDFL `CASH` and `FNO`), `as_published` (an
+     index level, both feeds) or `vendor_adjusted` (Zerodha `CASH`, every
+     rung).
+   - `volume`: `raw` (GDFL), `vendor_own` (Zerodha `CASH`: measured as
+     neither raw nor scaled with price on 45 shares), `none` (`INDEX`).
+   - `adjusted_as_of`: `pull_date` for `vendor_adjusted`, else `null`. The day
+     each month was pulled is that month's provenance (D-3334).
+   - `source`: the charter section the row rests on.
+2. **/db labels every `CASH` row** with its basis: "back-adjusted by Zerodha as
+   of the pull date <day>" or "raw, as traded" (WP-55).
+3. **A Zerodha share price is never set beside a GDFL one as a disagreement**:
+   where the bases differ, All sources shows the factor (D-3339). A GDFL strike
+   is never priced against a Zerodha spot; `/spot.json` already answers on the
+   option's own feed only.
+4. **Turnover is not derived from a Zerodha share's price and volume** on any
+   surface this round builds.
+
+**Not decided here.** What the equity sweep does with vendor-adjusted,
+non-proportional or quantised runs. Within one session a constant factor
+leaves a price-against-VWAP comparison unchanged, but a percentage threshold
+on a non-proportional run is distorted and a tick-level distance on a
+quantised run is coarser than the exchange's. Which runs research must
+exclude, or whether it should move to GDFL raw prices with a sourced
+corporate-action table, is the operator's decision and is not assigned in
+this round. D-1969's "no feed's adjustment is verified" is superseded for
+Zerodha and GDFL by this measurement; Groww, Dhan and TrueData stay
+UNVERIFIED.
+
+**Proof.** Named by WP-13a and WP-55.
+
+### D-3324 — A day bar's close is the official close; an intraday close is the last print; the two are labelled and never presented as one — 2026-10-07
+
+**Implemented by** WP-13a (the descriptor), WP-55 (the label), WP-37 (the day
+reconciliation). **Findings** DB-035, DB-G41, DB-G99.
+
+**What was measured.** On 7 Oct 2026, through a shadow of the operator's
+store, Zerodha NIFTY `1day` close differs from the last `1min` close of the
+same day on 2,081 of 2,126 common days of 2018-01..2026-09: median 4.69 bps,
+p99 33.4, maximum 109.0 on 2021-02-24, where the minute file stops at 10:08
+because the session resumed at 15:45, outside the pull window (charter §3).
+BANKNIFTY: 2,083 of 2,126, median 6.44, p99 44.1, maximum 231.8 on the same
+day. From 2026-08-03 the two are equal on all 42 common days for both
+indices. The charter does not source how the exchange forms its official
+close, and none is asserted here.
+
+**Decision.** The descriptor carries `close` per feed and rung, served in
+`/feeds.json` beside `basis`: `official` for Zerodha `1day` (every segment),
+`last_print` for Zerodha `1min` and every derived rung and for GDFL `1s`.
+Zerodha's `1day` also carries `"day_is_fold": false`: it is not a fold of its
+minutes (D-3001, D-3347). /db labels a day close "official close" and an
+intraday close "last print". Nothing presents a fold of minutes as equal to
+the day bar; All sources shows both with the difference counted (D-3339).
+
+**Proof.** Named by WP-13a and WP-55.
+
+### D-3325 — A bar's change is refused, by name, wherever the bar before it is not the comparable one — 2026-10-07
+
+**Implemented by** WP-31 (the server), WP-52 (the words on /db).
+**Findings** DB-010, DB-011, DB-012 (change across a hole), DB-028, DB-032,
+DB-034, DB-081, DB-G43 (the change half), DB-G65, DB-G66, DB-G71, DB-G74,
+DB-G77, DB-G90.
+
+**What was observed.** `with_change` applied to every segment: GDFL
+BAJFINANCE 1s 2025-06-16 09:15:01 served `chg = −8976` bps with no reason, the
+fake crash D-0018 forbids, while the census refused the same month's change as
+`corporate_action_unverified`. Zerodha NIFTY 1min 2020-12-16 09:15 measured
++15.97% against 2020-10-16 15:29 across a two-month hole (before the hole
+was re-pulled under D-3344). The first bar of every month in a one-month
+request said `first_bar_in_file`, also when an earlier stored bar existed. Every index option's month change was refused as
+an equity hazard.
+
+**Decision.** `chg_why` and `oichg_why` stay `null` beside a number, or a code
+beside `null`. The codes, checked in this order (the first that applies
+wins):
+
+1. `not_a_derivative` (OI only, D-3322).
+2. `contract_adjusted`: the first bar of a contract after a lineage ex-date
+   (D-3331).
+3. `corporate_action_unverified`: the first bar of an IST session on a
+   segment that can be rebased, `CASH` on every feed and `FNO` whose
+   underlying is a share. An index option is not refused here (D-0018: an
+   index never splits); the underlying's segment comes from D-3332.
+4. `previous_session_not_adjacent`: the previous stored bar is in a session
+   earlier than the calendar session immediately before this bar's.
+5. `halt_suspected`: a suspected halt (D-3320) lies between the two bars.
+6. `phase_boundary`: the two bars are in different phases of one session
+   (D-3320).
+7. `previous_bar_not_adjacent`: on a rung of one minute or coarser of an
+   `INDEX` series, the previous stored bar is not the previous bucket of the
+   same session. A share's missing minute is a minute with no trade (D-3321)
+   and is not refused.
+8. `vendor_oi_unadjusted` (OI only): the bar's OI is the vendor's
+   pre-ex-date value carried unscaled (D-3331).
+9. `previous_close_zero`, `oi_null`, `oi_null_before`, `previous_oi_zero`:
+   unchanged.
+10. **The first-bar code splits.** The server reads the previous stored bar of
+    the series even when it lies in a month or day the request did not ask
+    for: one extra record read per series per page. When none exists the code
+    is `no_earlier_stored_bar`. `earlier_month_not_read` and
+    `first_bar_in_window` are emitted only when a request turns the lookback
+    off (`lookback=0`). `first_bar_in_file` is no longer emitted; a reader
+    keeps accepting it for bodies cached before the change.
+
+**Month change.** `month_change` decides the equity refusal on the
+underlying's segment, so an index option's month shows a number. Each month
+row gains `vs_prev_close_bps` and `vs_prev_close_why` (the change from the
+previous held month's last close to this month's last close; codes
+`no_earlier_month`, `not_recorded`, `corporate_action_unverified`,
+`previous_month_not_adjacent`) beside the existing `chg_bps` and
+`prev_chg_bps`.
+
+**Rejected.** A threshold that refuses only a large overnight move: no
+threshold is sourced (D-0018), and a 1:2 bonus and a 49% crash are
+indistinguishable by size.
+
+**Proof.** Named by WP-31: one test per code on synthetic fixtures, and a
+check on the shadow store of GDFL RELIANCE 2024-10-28 09:15:00, GDFL
+BAJFINANCE 2025-06-16 09:15:01 and Zerodha NMDC 2022-10-27.
+
+### D-3326 — One request reads several series, ordered and paged on the server, with the costs that are not constant stated — 2026-10-07
+
+**Implemented by** WP-31 (`/bars/window.json`, `/bars.json`), WP-52 (the /db
+data path). **Findings** DB-002, DB-003, DB-004, DB-005, DB-006, DB-007,
+DB-047, DB-048, DB-049, DB-061, DB-062, DB-063, DB-065, DB-066, DB-G02,
+DB-G16, DB-G48, DB-G61, DB-G82, DB-G83, DB-G91, DB-G92, DB-G93, DB-G94,
+DB-G95, DB-G101, DB-G102, DB-G103.
+
+**What was observed.** /db asked each contract separately with the same
+offset and limit and re-sorted the union of the pages it held: page 2 of an
+80-series close sort overlapped the true page 2 on 22 of 50 rows, the total
+was the first series' alone, a CE+PE pair was concatenated rather than merged
+by time, the time-of-day filter read only the newest month, Go to opened the
+wrong page, and Volume and Time sorts read every month whole into the
+browser.
+
+**Decision.** `/bars/window.json` takes, in addition to today's parameters:
+
+- `key=<instrument key>`, repeatable, up to `MAX_SERIES` = 1,024 series;
+  more is refused `too_many_series`. With one series the old parameters still
+  name it.
+- `at=<unix seconds>` (with `sort=ts` only): the answer carries `at_index`,
+  the global index, in the request's direction, of the first bar at or after
+  the instant (ascending) or at or before it (descending). The page is
+  `at_index / limit`.
+- `from_day` and `to_day` (`YYYY-MM-DD`, IST, inclusive) and `tod_from` and
+  `tod_to` (`HH:MM:SS`, IST seconds of day, inclusive), applied on the server
+  to every series; `total` is the filtered total.
+- `sort=tod` (IST second of day), beside `ts`, `o`, `h`, `l`, `c`, `v`, `oi`.
+
+The answer gains `series_totals` (`[{key, total}]`), and each bar gains `key`
+when more than one series was asked and `month` (its own IST `YYYY-MM`)
+always, so a bar's spot and greeks are asked in its own month (DB-009).
+`extremes` gains `{v, t, key}` for `close_max`, `close_min`, `high_max`,
+`low_min`, `range_max` and `volume_max`, folded over the whole query and
+cached per (series, months, census generation); `range` and `volume` stay.
+`months_missing` stays, and `missing_months` names up to 24 of them.
+
+**Costs, stated, not hidden.** A time-ordered page over k series is a merge by
+time bisection through `.tix`, O(k · log T) per page. A non-time sort streams
+each series once with a bounded heap of `offset + limit` rows; it is O(bars)
+in time and O(offset + limit) in memory. Past `MAX_SCAN_BARS` bars it is
+refused `scan_budget_exceeded`, and past `MAX_SORT_DEPTH` rows of
+`offset + limit` it is refused `sort_too_deep`, each naming what it would
+need. A time-of-day filter is O(days) through `.tix`. WP-31 fixes the values
+of `MAX_SCAN_BARS` and `MAX_SORT_DEPTH`, and WP-99 records them and the
+measured p50/p99 in `docs/06-limits.md`. Every handler runs on the blocking
+pool behind admission, and scans run in a pool of their own, so a seek never
+waits behind a scan (DB-066).
+
+**/db** sends one request per page for any multi-series selection, takes its
+total from the server, takes "newest close" from the census, sends Volume as
+`v`, removes the whole-month `/bars.json` fallback, and exports the rows it
+shows with `feed` and the option analytics columns (WP-52).
+
+**Proof.** Named by WP-31 and WP-52, with WP-31's p50/p99 rows.
+
+### D-3327 — The census is cached per vendor, says when it is capped or behind, and is served to a page by facets — 2026-10-07
+
+**Implemented by** WP-30 (the API), WP-56 (the /db client). **Findings**
+DB-022, DB-041, DB-042, DB-043, DB-059, DB-060, DB-G03, DB-G06, DB-G07,
+DB-G08 (the state half), DB-G11, DB-G29, DB-G59, DB-G70, DB-G79, DB-G80,
+DB-G84.
+
+**What was observed.** One cache keyed on every vendor's manifest stamp: each
+Zerodha commit re-read gdfl's 268 MB log, and `/store.json?feed=gdfl` measured
+p50 700 ms and p99 816 ms during the pull. The census refused every options
+day from 2019-11-14 while `/store.json` still said `held` with an empty
+degraded header. /db downloaded the whole 21 MB census on every load and froze
+its main thread for about 1.3 s.
+
+**Decision.**
+
+1. One cache per vendor, keyed on that vendor's own manifest stamp, decoding
+   only the entries past the last loaded `n_valid`, single-flighted, encoding
+   and hashing outside the mutex, keeping the body and ETag per (vendor,
+   format, stamp).
+2. `x-brutex-census-state` gains two words beside `held`, `absent` and
+   `unreadable`: `capped` (headroom below `CAPPED_HEADROOM` = 16,384 entries,
+   or an append refused since the last compaction) and `behind` (the import
+   journal names census-refused days not yet `recounted`, D-3317). New
+   headers on `/store.json` and its `HEAD`: `x-brutex-census-capacity`,
+   `x-brutex-census-headroom`, `x-brutex-census-generation`,
+   `x-brutex-census-epoch`, `x-brutex-census-behind-days` and
+   `x-brutex-census-behind-from` (the first such day). `/audit.json` carries
+   the same as `capacity`, `headroom`, `behind_days`, `behind_from`.
+3. `/census/facets.json?feed&segment[&underlying][&expiry][&since=<generation>]`
+   answers `{generation, state, underlyings, expiries, strikes, months}` for
+   the selection: each underlying with its months, rows per rung, first and
+   last stamp and last close; each expiry with its weekday, contract count and
+   span; each strike with its CE and PE first stamp, last stamp and rows. Every
+   list comes from map probes over the cached census, not from a walk of it.
+   With `since`, it answers only the rows changed after that generation, or
+   refuses `since_too_old` when it no longer holds them. The whole tuples body
+   is sent only on a cold load.
+4. `/instruments.json` counts rows per rung (`rows_by_rung`), cached per (feed,
+   generation), with rows derived from the census for a feed with no master
+   (`master: null`, never "in this master"). `/universes.json` joins Zerodha
+   membership by symbol under D-3314 and says `unverifiable`, never `lacks`,
+   where no ISIN can be compared.
+
+**Proof.** Named by WP-30 and WP-56, with p50/p99 rows.
+
+### D-3328 — An option's spot may be the underlying's last bar at or before the instant, opted in, with its age; never a later bar, never another month — 2026-10-07
+
+**Implemented by** WP-32 (`/spot.json`, `/greeks.json`), WP-53 (display).
+**Findings** DB-009, DB-039, DB-068.
+
+**What was observed.** `/spot.json` answered `no_spot_bar` unless the
+underlying printed in the exact second (D-2807): 16.5% of one NIFTY contract's
+instants, 21% to 34% of RELIANCE options', because a share's 1s series holds
+only seconds that traded. An instant outside the asked month was answered as
+a held absence instead of a wrong question.
+
+**Decision** (the operator's answer: exact second stays the default; an
+opt-in "last spot at or before t" always shows its age; never a later spot).
+
+1. `asof=prev` on `/spot.json` and `/greeks.json` joins the underlying's last
+   bar at or before `t` within the same IST session: one extra bisection. The
+   answer carries `spot_t` (the stamp used) and `spot_age_s` (`t − spot_t`, 0
+   for an exact hit) on every instant, and `asof` (`exact` or `prev`). No bar
+   in the session at or before `t` answers `no_spot_in_session`. Without
+   `asof`, D-2807's exact-second rule is unchanged.
+2. An instant whose IST month is not the asked `month` answers
+   `t_outside_month`; `no_spot_bar` and `no_option_bar` are answered only for
+   an instant inside the month (DB-039).
+3. /db asks each bar in its own month (D-3326's per-bar `month`).
+
+**Rejected.** A nearest bar either side: a later bar is a future price
+(`CLAUDE.md` §3 rule 7).
+
+**Proof.** Named by WP-32.
+
+### D-3329 — Moneyness at an instant is counted over the strikes stored by then — 2026-10-07
+
+**Implemented by** WP-32 (`/chain.json`), WP-53 (display and the filter).
+**Findings** DB-008, DB-037, DB-075, DB-G04, DB-G62, DB-G73.
+
+**What was observed.** /db counted moneyness rungs over every strike the whole
+census ever held for an expiry, from any month and even from other
+underlyings: the NIFTY 2019-03-28 11,500 CE at spot 11,243.50 read OTM+5,
+where over the strikes stored by that instant it is OTM+1; a 2018 bar's rung
+moved as the import reached 2020; and a frozen census truncated the chain.
+
+**Decision.** `/chain.json?feed&underlying&expiry&at=<unix seconds>` answers
+`{at, basis, generation, strikes, step_local, atm, refusal}`. `basis` is
+`stored_by_then`: a strike is in the chain at `t` when its first stored bar is
+at or before `t` and no lineage record (D-3331) renamed it away before `t`.
+Exchange listing dates are not sourced, so "listed by then" is not claimed.
+`step_local` is the smaller gap from the strike nearest spot to its
+neighbours. A rung is `ATM`, `ITM-k` or `OTM+k` along that chain. `refusal` is
+`ladder_too_sparse` when the nearest strike is more than `step_local` from
+spot, and `census_behind` when the census state is `behind` (D-3327) and the
+expiry is on or after `x-brutex-census-behind-from`. The chain is built per
+(underlying, expiry) and census generation. The Moneyness filter on /db uses
+these rungs.
+
+**Proof.** Named by WP-32 and WP-53.
+
+### D-3330 — Greeks say when their inputs are out of range: tenor in years, a rate shorter than the tenor, and the zero-carry bound — 2026-10-07
+
+**Implemented by** WP-32, WP-53. **Findings** DB-038, DB-067, DB-G64.
+
+**What was observed.** A 4.55-year contract was solved with the 91-day T-bill
+rate and zero carry, and 943 of 1,000 of its bars answered `iv_unsolved`
+because the premium was below the zero-carry discounted intrinsic. The page
+read that as a bad print. The rate table was re-read and re-hashed on every
+request.
+
+**Decision.** Each `/greeks.json` answer adds `tenor_y` (365-day years,
+D-2831) and `above_rate_tenor` (`true` when the tenor exceeds 91 days, the
+rate's own maturity, D-2810). A premium at or below the zero-carry discounted
+intrinsic answers `below_zero_carry_bound`, apart from `iv_unsolved`. The rate
+table is loaded once, reloaded when its file stamp changes, and every answer
+carries `rate_sha256`. /db shows a refused cell's code, styled apart from
+`n/a` and pending, and a tally of codes per page; `below_band`,
+`above_rate_tenor` and `below_zero_carry_bound` are flagged on the cell.
+Carry stays zero: no dividend or carry source is recorded.
+
+**Proof.** Named by WP-32 and WP-53.
+
+### D-3331 — An option is filed under the expiry it settled on, an impossible strike is refused, and a contract renamed at an ex-date is linked, never silently stitched — 2026-10-07
+
+**Implemented by** WP-12b (decoder, alias table, lineage detector), WP-11b
+(wiring into the import), WP-31 (`contract_adjusted`,
+`vendor_oi_unadjusted`), WP-54 (display). **Findings** DB-018, DB-027,
+DB-G50, DB-G51, DB-G52, DB-G71, DB-G72, DB-G77.
+
+**What was observed.** The decoder keeps the stated expiry as identity. The
+vendor re-dates live contracts (`30MAR23` through 2022-12-21, then `29MAR23`;
+`29JUN23` through 2023-06-27, then `28JUN23`; and at the weekday-regime
+changes of 2023-09, 2024-03, 2025-01 and 2025-08), so one contract would be
+filed as two series, one of them on a closed day. MIDCPNIFTY `22JAN24` settled
+in the Saturday session of 2024-01-20 and is keyed 2024-01-22, a holiday, so
+its tenor on expiry day is 172,801 s instead of about 1 s. Three NIFTY names of
+2019-05-30 decode to strikes of ₹19,12,500 to ₹19,13,000 and are stored. At a
+share's bonus or split the vendor renames each strike to its adjusted value
+and may reuse a pre-ex name for another contract: 57 stored series hold two
+exchange contracts and 507 pre-ex series end early with no link, over the 11
+ex-dates in the imported range.
+
+**Decision.**
+
+1. **Settled expiry.** A day-form expiry that falls on a day
+   `calendar::sourced_kind_of` calls closed maps to the previous open session,
+   the rule the charter's NSE contract specification states ("If the last
+   Thursday is a trading holiday, then the expiry day is the previous trading
+   day"). A vendor re-dating of a whole expiry (every contract of one
+   underlying and stated expiry moves to one new expiry on one day, within
+   6 days) is an alias measured from the vendor's names. Both are rows of
+   `pull::expiry_alias`, each with its kind (`closed_day` or
+   `vendor_redated`), its first day and its contract count; a recorded NSE
+   circular upgrades a `vendor_redated` row's standing. The store key uses the
+   settled expiry, and the vendor's text is kept as an `alias` line (below).
+   Tenor is measured to the settled expiry.
+2. **`StrikeImplausible`.** A strike more than `k` = 10 times the day's median
+   strike of the same underlying is refused by name (`strike_implausible`,
+   D-3317). The observed real maximum is 5.75 (DB-G52, 2019-02..2026-09), and
+   the three refused names are about 160 times. `k` is chosen from that
+   measurement, not sourced.
+3. **Lineage is a ledger, not a rewrite.** `<store>/imports/gdfl.lineage`,
+   append-only text with D-3317's line rules:
+   - `alias <underlying> stated=<YYYY-MM-DD> settled=<YYYY-MM-DD> kind=<closed_day|vendor_redated> first_day=<YYYY-MM-DD> contracts=<n> v=1`
+   - `lineage <old_key> <new_key> ex=<YYYY-MM-DD> factor=<num>/<den> lot_old=<n> lot_new=<n> oi_unadjusted_until=<unix_s|0> v=1`
+   - `stitched <key> ex=<YYYY-MM-DD> before=<contract> after=<contract> v=1`
+   The detector reads the data: on an ex-date the option LTQ unit step equals
+   the factor, and each new strike is the old one divided by the factor,
+   rounded to 0.05 (DB-G71). A key whose name the vendor reused for another
+   contract after the ex-date is not split, because the store key has no form
+   for two contracts under one name; it is recorded `stitched`. A key form that
+   splits them is a store-format change for a later entry.
+4. **What the reads do with it.** At the first bar after `ex` of a `lineage`
+   new key or a `stitched` key, `chg_why` and `oichg_why` are
+   `contract_adjusted` (D-3325). Up to `oi_unadjusted_until`, `oichg_why` is
+   `vendor_oi_unadjusted` (BAJFINANCE 2025-06-16: 18 of 83 renamed contracts
+   carried the pre-ex OI until 13:53:40). /db says "renamed at the ex-date,
+   continues as <new key>" on the old key's last bar.
+
+**Proof.** Named by WP-12b on synthetic names, and by WP-11b and WP-31.
+
+### D-3332 — One sourced table maps F&O symbols, NSE index names, vendor names and dated symbol changes — 2026-10-07
+
+**Implemented by** WP-20 (`core::alias`, `/aliases.json`, `indexmap`), WP-51
+(search), WP-32 (spot resolution). **Findings** DB-040, DB-071, DB-G25,
+DB-G26, DB-G27, DB-G53, DB-G54.
+
+**What was observed.** Only `NIFTY50 → NIFTY` and `NIFTYBANK → BANKNIFTY` were
+aliased. `/spot.json` looked for `INDEX/FINNIFTY` and found nothing on any
+feed, NIFTYIT and NIFTYFPI options were resolved as shares, a search for
+ZOMATO or TATAMOTORS found nothing, and GDFL share history starts at each
+rename.
+
+**The sources** (operator's answer: WP-02 may look them up; recorded in
+`docs/00-charter.md`, "Index aliases and symbol changes — read 7 Oct 2026"):
+
+- NSE's own index list, `https://www.nseindia.com/api/allIndices`, read on
+  7 Oct 2026: each index's `index` name and `indexSymbol`. The `indexSymbol`
+  is the GDFL index file stem (measured, DB-G26, DB-G53) and, with its spaces
+  removed, the Zerodha store key (measured on the store, 7 Oct 2026).
+- NSE's derivatives product pages for FINNIFTY, MIDCPNIFTY, NIFTYNXT50,
+  NIFTYIT, NIFTYFPI and NIFTYCPSE, read on 7 Oct 2026: each names the F&O
+  symbol and the index it is based on.
+- NSE's `symbolchange.csv`, `https://nsearchives.nseindia.com/content/equities/symbolchange.csv`,
+  read on 7 Oct 2026: old symbol, new symbol and date of each change, and
+  circular NSE/CML/67420 (ZOMATO to ETERNAL, effective 9 Apr 2025), read the
+  same day.
+
+**Decision.**
+
+1. `core::alias` is one table, each row with its kind and its charter source:
+   `index` rows (F&O symbol ↔ NSE index name ↔ `indexSymbol` ↔ store key) and
+   `symbol_change` rows (old symbol, new symbol, effective date). A row without
+   a source stays UNVERIFIED and is not applied. `FNO_UNDERLYINGS` remains the
+   only list naming the F&O universe.
+2. **A symbol with no row in NSE's file is not an alias.** HDFC and MINDTREE,
+   whose options the store holds, have none; they keep their own keys
+   (D-3333), and no successor is guessed for them.
+3. `/aliases.json` serves the table with each row's source. Search (WP-51)
+   resolves an old symbol to the current one and shows "formerly X until
+   <date>". `/spot.json` resolves an option's underlying through the table, on
+   the same feed only (D-3323): an index option's spot is read from `INDEX`,
+   and an option bar dated before a symbol change reads the current key's
+   months, which hold the old stem's data after D-3333.
+4. `indexmap` carries the names of an ambiguous row's candidates (DB-G27) and
+   builds from the census for a feed with no master.
+
+**Proof.** Named by WP-20, WP-51 and WP-32.
+
+### D-3333 — GDFL's other F&O index files, INDIA VIX and the old-name share files are imported, stored and never swept — 2026-10-07
+
+**Implemented by** WP-12a; written to the store by WP-80 step 4.
+**Findings** DB-069, DB-070, DB-071 (the import half), DB-G26 (the import
+half), DB-G53.
+
+**What was observed.** Each GDFL index day imported 2 of about 79 files, and
+the share import took the 208 current F&O names only, so 97 option
+underlyings had no spot: 16,166,396 of 223,472,654 stored option bars (7.2%).
+The vendor's capital-market zips hold the missing series (`NIFTY FIN SERVICE`,
+`NIFTY MID SELECT`, `NIFTY NEXT 50`, `NIFTY IT`, `NIFTY CPSE`, `NIFTY FPI 150`
+and `INDIA VIX` index files; `TATAMOTORS`, `ZOMATO`, `HDFC`, `MCDOWELL-N` and
+other share files).
+
+**Decision** (the operator's answer: yes, stored, not swept).
+
+1. The index import also takes the files whose stem is an `index` row of
+   D-3332, filed under that row's store key: NIFTYFINSERVICE, NIFTYMIDSELECT,
+   NIFTYNEXT50, NIFTYIT, NIFTYCPSE, NIFTYFPI150, and INDIAVIX, which is
+   reference only (`CLAUDE.md` §1).
+2. The share import is widened from `FNO_UNDERLYINGS` to every stored option
+   underlying. A stem that is the old symbol of a `symbol_change` row is filed
+   under the key of the newest symbol its chain of rows reaches (LTI, then
+   LTIM, files under LTM) for days before each change; a stem with no
+   symbol-change row (HDFC, MINDTREE and the like) is filed under its own key.
+3. **Stored, never swept.** `CLAUDE.md` §1 is unchanged: none of these enters
+   the sweep, and run identity is untouched.
+4. Every write is a new month, or a new generation of a month that already
+   holds later days, never an in-place change (WP-80 step 4).
+
+**Proof.** Named by WP-12a on synthetic fixtures.
+
+### D-3334 — Every stored month says where its bars came from, in an append-only sidecar — 2026-10-07
+
+**Implemented by** WP-38a (the store format), WP-11b and the Zerodha landing
+(writers), WP-38b (`/provenance.json`), WP-55 (the Source column).
+**Findings** DB-078, DB-G56.
+
+**What was observed.** No row said where its number came from: no feed column,
+nothing tying a bar to its archive member or pull run, and nothing telling a
+zip-built month from a tick-store-built one, although the two sources differ
+(the tick store holds 2026-09-25, 28, 29 and 30, which the zip lacks).
+
+**Decision.**
+
+1. **`<month>.prv`**, a new sibling of a month's bar file at its own format
+   version 1, append-only, fixed-size records, one per landing that appended
+   to the month. Bar files are never touched; a bar file's digest is equal
+   before and after its sidecar is written.
+2. **Fields of a record:** `vendor`; `source_kind` (`archive_member`,
+   `tickstore_day` or `vendor_endpoint`); `source_bytes`; `source_crc32` (the
+   member's CRC-32 from the archive's directory, or 0); `source_name_blake3`
+   (the member's name or the endpoint path); `ist_day`; `first_index` and
+   `n_bars` (the bars this landing appended); `bar_definition` (D-2822);
+   `journal_ordinal` (the line of `imports/gdfl.journal` or the record of
+   `audit/pull.journal`); `bar_file_generation`; `commit`; `landed_at`. WP-38a
+   fixes the bytes in `docs/02-store-format.md` §8.
+3. **Reading is a path probe.** `/provenance.json?feed&instrument&timeframe&month[&t]`
+   opens one sidecar; with `t` it answers the record whose bar range holds
+   `t`'s bar (a month holds at most a few dozen records). Where no sidecar
+   exists, the answer is rebuilt from the journal and labelled
+   `"reconstructed": true` and "reconstructed, member digest unknown".
+
+**Proof.** Named by WP-38a, WP-11b and WP-38b.
+
+### D-3335 — Each feed keeps a per-day ledger of what the vendor gave and what was refused; the field names are fixed here — 2026-10-07
+
+**Implemented by** WP-11b (GDFL writer and `cli gdfl-dayflags`), WP-12a
+(the counts it adds), WP-13b (Zerodha writer), WP-33b (`/dayflags.json`),
+WP-54 (the day band). **Findings** DB-016, DB-025, DB-026, DB-029, DB-030,
+DB-031, DB-053, DB-056, DB-G36 (the count half), DB-G37, DB-G46 (the ledger
+half), DB-G96.
+
+**What was observed.** 30 May 2019 is a degraded vendor day: the options zip
+is 44,399,449 bytes against at least 88 MB on every other 2019 day, its rows
+carry zero bid and ask, 10,435 of 10,453 traded files lead with LTQ = 1
+marker rows, the index files are stamped `HH:MM:59` (minute data), and the
+first share prints carry a cumulative morning volume (GDFL RELIANCE's first
+bar that day is at 11:57:48 with volume 3,240,155, measured on 7 Oct 2026).
+Late rows deferred under D-2802 leave holes and merged bars (2021-05-21; the
+October 2020 bursts stamped in UTC). 2022-03-07 has a 23-minute hole shared by
+every sampled share. Three seconds of NIFTY on 2019-03-28 carry two values
+22.75 points apart. Zerodha's minute files have gaps on days GDFL traded.
+None of this was recorded anywhere a page could read.
+
+**Decision.** Bars are never altered by any of this (the operator's answer:
+the LTQ = 1 marker rows and the LTQ = 0 rows carrying a new price are flagged
+only).
+
+**1. GDFL day ledger, `<store>/imports/gdfl.dayflags`.** Append-only text,
+D-3317's line rules, the last line of a key wins:
+
+`flags <kind> <day> <scope> v=1 src=<import|rescan> definition=<n> <fields>`
+
+`<kind>` is `indices`, `stocks` or `options`; `<scope>` is the store symbol
+for an index (`NIFTY`, `BANKNIFTY`, and the indices of D-3333) and `*` for the
+whole kind-day of stocks or options. Every field is a decimal count unless
+said otherwise, and every field of a kind is always present for that kind:
+
+- every kind: `member_bytes` (the day zip's size), `late`, `max_back_s`,
+  `deferred_s` (seconds that took at least one late row), `rows_refused`
+  (D-3318).
+- `indices`: `rows`, `seconds` (session seconds held), `session_s` (session
+  seconds the calendar owes), `ss_distinct` (distinct second-of-minute values
+  among session rows: 60 on a normal day, 1 on 2019-05-30), `holes_5s`
+  (in-session holes longer than 5 s), `hole_max_s`, `hole_max_at`
+  (`HH:MM:SS` or `-`), `dual_spread_s` (seconds whose same-second rows span at
+  least 10 bps of the lower value), `dual_spread_max_bps`, `zero_ltp_rows`.
+- `stocks`: `files`, `files_traded`, `first_trade_p50` (median `HH:MM:SS` of
+  the first traded row over files, or `-`), `shared_holes` (in-session
+  intervals of at least 300 s with no traded row in at least 90% of the day's
+  traded files), `shared_hole_max_s`, `shared_hole_max_at`,
+  `ltq0_new_ltp_rows` (LTQ = 0 rows whose LTP differs from the file's last
+  traded LTP), `auction_prints` (D-3320).
+- `options`: `files`, `files_traded`, `zero_quote_files` (every row's bid and
+  ask zero), `ltq1_lead_files` (files whose first traded row has LTQ = 1),
+  `ltq1_lead_rows`, `ltq0_new_ltp_rows`, `first_trade_p50`.
+
+The thresholds (5 s, 300 s, 90%, 10 bps) are chosen, not sourced; a field
+counts, and the ledger never decides. `src=rescan` lines are written by `cli
+gdfl-dayflags <kind> <from> <to>`, which reads the vendor zips read-only for
+days already imported and writes only this ledger (WP-80 step 6).
+
+**2. Zerodha ledger, `<store>/audit/zerodha.gaps`.** Same line rules, written
+as each member lands:
+
+- `gap <instrument_key> <day> v=1 rung=1min owed=<n> held=<n> missing=<n> first_missing=<HH:MM|-> runs=<n> longest=<n> longest_at=<HH:MM|-> why=<code> run=<ordinal>`,
+  `why` one of `vendor_empty` (the vendor answered no candle),
+  `withheld_unmeasured_session` (D-3344), `refused_day`, `refused_front`
+  (D-3315's refused span before a held month).
+- `derive <instrument_key> <rung> <YYYY-MM> v=1 days=<n> buckets=<n> withheld=<n> partial=<n> run=<ordinal>`
+  (D-3321).
+
+**3. `/dayflags.json?feed&instrument&from&to`** answers one constant-size
+record per (feed, instrument, day), paged by days, with these keys: `feed`,
+`instrument`, `day`, `calendar` (D-3336's day code), `events` (halts and
+phases, D-3320), `import` (`{outcome, stage, reason, files, failures, run}`
+from the journal, D-3317; `outcome` one of `done`, `done_with_refusals`,
+`incomplete`, `refused`, `recounted`, `none`), `quality` (the ledger fields
+above), `gaps` (the Zerodha `gap` line), `junk` (codes found on the day's
+stored bars: `zero_price`, `off_calendar`, `impossible_jump`,
+`zero_volume_peer_traded`), `refused_front` (boolean), and `peer`
+(`{feed, bars}`: the other feed's bar count that day). A reader names a day
+**degraded** when, for options, `zero_quote_files` or `ltq1_lead_files` is at
+least half of `files_traded`; for an index, `ss_distinct` is 2 or less; for
+stocks, `first_trade_p50` is 10:15:00 or later. These are display rules,
+chosen, and named on the page.
+
+**Rejected.** Fields in the import journal itself: a backfill of days already
+imported would then have to write into the import's own state.
+
+**Proof.** Named by WP-11b, WP-13b and WP-33b; WP-33b builds against fixtures
+in this format without waiting for the writers.
+
+### D-3336 — Coverage is measured against the bars the calendar owes, never against the fullest peer — 2026-10-07
+
+**Implemented by** WP-35 (`/calendar.json`, `/gaps.json`), WP-54 (the coverage
+grid and calendar). **Findings** DB-014, DB-015, DB-073, DB-G29, DB-G34,
+DB-G47 (the coverage half), DB-G48, DB-G63, DB-G85.
+
+**What was observed.** Each coverage row was judged against the fullest series
+at the same month and rung, so a hole every index shares read "full", a share
+in a CAS month read short against the index, and a trade-driven 1s option read
+0.0065% covered. Zerodha's peer-voted calendar counted 74 Saturdays and 71
+Sundays and took up to 33.5 s; GDFL's calendar was empty.
+
+**Decision.**
+
+1. **Owed bars per (month, rung, segment)** = the sum, over the sessions
+   `pull::calendar` sources in the month, of the bars that session owes at
+   that rung: 375 per regular 1min session; 360 for a CAS-eligible share from
+   2026-08-03 (Zerodha's landing ends at 15:14, D-3320); a special session by
+   its windows (D-3319); a derived rung, the buckets `pull::fold` makes from a
+   complete session; 22,500 per regular `1s` index session. Minutes inside a
+   suspected halt are counted apart (`halt_suspected`) and are neither owed
+   nor missing.
+2. **Trade-driven series** (`1s` shares and options) have no owed bar count:
+   they are labelled `trade_driven` and measured by days held against
+   sessions in the contract's life.
+3. **`/calendar.json?feed&rung`** is built from `pull::calendar` once per
+   vendor generation and answers a dense day-status string: `days`, one
+   character per day from `from` to `to`: `.` closed, `R` regular session,
+   `X` regular with the closing auction for eligible shares, `P` special
+   session with recorded windows, `U` session of unmeasured length, `H`
+   session with a suspected halt, `-` outside the calendar's span. GDFL
+   answers for `1s`, or `withheld` with its reason, never an empty list.
+4. **`/gaps.json` gains a `1s` mode**: seconds are folded to minutes with
+   `pull::fold`, a minute with no print in a trade-driven series is classed
+   apart from a vendor hole, and the message calls `1s` finer, not coarser.
+
+**Proof.** Named by WP-35 and WP-54, with p50/p99 rows.
+
+### D-3337 — /db selects an exact instrument key, opens on NIFTY spot at the finest rung newest first, and keeps its selection in the URL — 2026-10-07
+
+**Implemented by** WP-50 (selection, controls, URL state), WP-51 (search).
+**Findings** DB-001, DB-019, DB-020, DB-021, DB-044, DB-045, DB-046, DB-050,
+DB-074, DB-076, DB-077, DB-G67, DB-G89, DB-G97, DB-G98.
+
+**What was observed.** Picking NIFTY filtered by prefix and brought in
+NIFTY100 rows; a feed or segment switch kept picks the new view could not
+hold; the page number survived changes of what rows exist; and nothing was in
+the URL.
+
+**Decision** (the operator's answer: /db opens on NIFTY · Spot · the feed's
+finest timeframe · newest first).
+
+1. Picking a row sets an exact instrument key, separate from the search text.
+2. The defaults are NIFTY, Spot, the feed's finest held rung, sort `ts`
+   descending, page 1. The feed is the persisted choice, else the held feed
+   with the most bars, as now.
+3. A feed change re-seeds every pick the new feed's census lacks and returns
+   to page 1; a segment change drops the picks the segment hides; any change
+   to which rows exist returns to page 1; each view keeps its own page.
+4. **The URL** carries the selection as query parameters with these names:
+   `feed`, `seg`, `sym`, `key`, `tf`, `exp`, `k` (a strike in paisa,
+   repeatable), `side`, `from`, `to` (`YYYY-MM-DD`), `tfrom`, `tto`
+   (`HH:MM:SS`), `sort`, `dir`, `page`, `view`, `oow` (D-3338). /gaps, /audit,
+   /logs and /sources link into /db with them.
+5. A day window narrows a contract too, and the labels say so (DB-046, DB-G89).
+   Time pickers list the rung's session grid, with `HH:MM:SS` on `1s`. Strikes
+   are multi-select. Expiries are tagged weekly or monthly with the weekday and
+   any holiday shift (D-3331).
+6. **Segment words say what the store holds.** "Expired options" holds only
+   contracts whose settled expiry is before today's IST day; contracts
+   expiring today or later, and contracts whose life runs past the archive's
+   last day (2026-09-24), are listed apart and say so. The segment note counts
+   held option instrument-months and names how they were imported; the "503 —
+   no transport in this build" clause appears only for a feed whose store
+   holds no contract.
+
+**Proof.** Named by WP-50 and WP-51.
+
+### D-3338 — Only Zerodha and GDFL are offered; Zerodha months outside the operator's window are hidden behind a labelled toggle — 2026-10-07
+
+**Implemented by** WP-13a (descriptors, `/feeds.json`), WP-50, WP-56 and
+WP-61 (every picker). **Findings** DB-051, DB-052, DB-G14, DB-G24, DB-G68.
+
+**What was observed.** Pickers offered Dhan, Groww and TrueData; `/feeds.json`
+called GDFL not ready ("no folder at ~/.brutex/vendor-data/gdfl yet") while
+its store held about 3.1 billion bars, and listed `1min` and `1day` rungs it
+does not serve. 115 Zerodha indices hold 82,079 `1day` bars dated before
+2018-01-01 from an earlier run, shown as ordinary months.
+
+**Decision** (the operator's answers: Dhan, Groww and TrueData are removed from
+every picker; the 2015–2017 bars are hidden by default, shown on a visible
+toggle labelled "outside your window", never deleted).
+
+1. `/feeds.json` gives each feed `offered` (`true` for `zerodha` and `gdfl`)
+   and, for the others, `excluded_by: "operator"` and
+   `excluded_on: "2026-10-06"`. Every picker lists offered feeds only. The
+   descriptors and their code stay.
+2. GDFL's descriptor carries `rungs: ["1s"]` (D-2802) and
+   `archive: {from: "2018-09-03", to: "2026-09-24"}` (charter, measured), and
+   its readiness is derived from the store, not from a folder probe.
+3. Zerodha's descriptor carries `window: {from: "2018-01-01", to: "2026-09-30",
+   standing: "operator"}`. A month outside it is hidden on /db unless `oow=1`
+   (D-3337), and when shown it is labelled "outside your window" with its pull
+   run (D-3334). Nothing is deleted.
+
+**Proof.** Named by WP-13a and WP-50.
+
+### D-3339 — All sources sets every feed's rungs for one instrument side by side, tagged by source, with a factor where the bases differ — 2026-10-07
+
+**Implemented by** WP-37 (`/sources.json`, `/sources/bars.json`,
+`/sources/day.json`), WP-58 (`/sources`). **Findings** DB-079, DB-G41,
+DB-G58, DB-G99, and the cross-feed halves of DB-035, DB-G38, DB-G39, DB-G40
+and DB-G75.
+
+**Decision.** Storage stays per vendor (`CLAUDE.md` §3 rule 3, D-0225), and
+nothing is merged on disk.
+
+1. **Row tags**: `zerodha_stored`, `zerodha_derived`, `gdfl_1s`, `gdfl_fold`
+   (GDFL seconds folded to the asked rung by `pull::fold`, bounded by the page
+   and read through `.tix`).
+2. **Tolerances**: index and option prices disagree when they differ by more
+   than 1 bp; volume when it differs by more than 0.5%. A day close is never
+   compared with a last print as a disagreement: each is labelled (D-3324)
+   and the difference is shown.
+3. **Factor.** For `CASH`, `factor` = GDFL close ÷ Zerodha close at the same
+   rung and time. A factor that differs from 1 by more than 0.2% replaces a
+   disagreement flag with `basis_differs`; a change of the factor by more than
+   0.2% between consecutive common days is `basis_step`. These are the
+   thresholds that reproduce the 101 of 208 of D-3323; they are chosen, not
+   sourced.
+4. **The day table** (`/sources/day.json`, at most 31 days a page, cached per
+   generations, symbol and day) gives, per day: Zerodha `1day` OHLCV, the fold
+   of Zerodha `1min`, the fold of GDFL `1s`, the first and last print, minute
+   volume ÷ day volume, minute extremes outside the day range, open
+   mismatches, and the CAS, halt and refused marks of D-3335.
+
+**Proof.** Named by WP-37 and WP-58, with p50/p99 rows.
+
+### D-3340 — Every index one-second month carries a time index; one is built for the 142 that lack it, and a missing one is named once — 2026-10-07
+
+**Implemented by** WP-15. **Findings** DB-064, DB-G81, DB-G88 (the warning
+half).
+
+**What was observed.** Measured read-only on 7 Oct 2026: GDFL NIFTY and
+BANKNIFTY hold 97 `1s` months each, and only 2024-08..2026-09 (26 each) have a
+`.tix`; the 71 each from 2018-09 to 2024-07 do not, so a spot lookup there
+bisects (about 35 µs an instant against 0.85 µs) and every request logs
+"time lookup falls back to bisection".
+
+**Decision.** `cli tix-rebuild <feed> <instrument> <rung> <from> <to>` builds
+the `.tix` of each named month through the store's writer-open path (D-2329),
+refuses a file another process holds, and changes no bar file. The CM index
+writer seals a `.tix` on every new month. The fallback warning is emitted once
+per file per process. The 142-file write is WP-80 step 2, run while nothing
+writes those files.
+
+**Proof.** Named by WP-15; p50/p99 of a 400-instant spot request before and
+after.
+
+### D-3341 — Logs keep refusals and runs durably, count repeats instead of repeating them, and stamp each failure with its own month — 2026-10-07
+
+**Implemented by** WP-10 (`Failure` carries its month and day), WP-13b
+(aggregation), WP-33a (audit stream, `/logs.json` filters, `/audit.json`
+scope), WP-34 (run surfaces). **Findings** DB-023, DB-054, DB-055, DB-G07
+(the audit half), DB-G19, DB-G20, DB-G21, DB-G22, DB-G23, DB-G30, DB-G31,
+DB-G45, DB-G46 (the log half), DB-G88.
+
+**What was observed.** The rolling log covered 4 to 12 minutes during a pull.
+One instrument produced 31,625 "rung not derived" events. All 48,396 "member
+did not land" events were stamped `month=2018-01`, the window's start.
+`/audit.json?feed=gdfl` showed Zerodha's pull runs and never the import.
+
+**Decision.**
+
+1. `pull::ingest::Failure` carries the failure's own `month` and `day`; logs,
+   the autopilot ring and the journal use them.
+2. Repeated per-day refusals are one event per (instrument, month, reason)
+   with `count`, `first_day` and `last_day`. A read of a month before a
+   series' first held month is a counted expected absence, not a warning.
+3. **The audit stream**: refusals and run lifecycle events also go to
+   `<store>/telemetry/audit.ndjson`, rolled at 64 MiB and kept 16 files, apart
+   from the rolling event ring, with `<store>/telemetry/audit.idx`, a
+   (feed, instrument, day) index of fixed-size records. `/logs.json` gains the
+   filters `feed`, `instrument`, `day` and `contract`, each answered by an
+   index probe.
+4. `/audit.json` scopes runs by each record's vendor; for `gdfl` it lists the
+   import journal's runs and days (D-3317). `/ingest/status.json` carries
+   `now.feed`, `now.timeframe`, `now.elapsed_ms` and `now.window`, and the
+   manual run's target apart from the paused autopilot's. `/backtest/run.json`
+   answers `"status": "no_sweep_has_run"` with the active CLI command named
+   when no sweep has run.
+
+**Proof.** Named by WP-10, WP-13b, WP-33a and WP-34.
+
+### D-3342 — A one-second option bar's open interest is the last row of its second — 2026-10-07
+
+**Implemented by** WP-13b (`pull::fold`), WP-11b (the definition number), and
+WP-80 for months already stored. **Findings** DB-083.
+
+**What was observed.** D-2802 says the bar's open interest is "the last one of
+the second", and the fold takes it from the last traded row: of 545,134 bars
+measured, 235 have a later untraded row in the same second with a different
+OI (BANKNIFTY28MAR1926500CE at 14:14:30: 6,420 against 6,400).
+
+**Decision** (the operator's answer: the last row of the second, bar-close
+semantics). A kept bar's open interest is the OI of the last row placed in
+its second (D-2802's placement, file order), traded or not. A second with no
+traded row still has no bar. This changes the bars a file builds, so
+`BAR_DEFINITION` becomes 3 (D-2822), and it applies to new imports. Months
+built under definition 2 are re-imported as new generations by WP-80, with
+the operator's approval; until then a month's definition is in its provenance
+(D-3334). A month that receives definition-3 days after definition-2 days
+holds both until WP-80 regenerates it, and its sidecar says which landing is
+which. Index and share OI stays `OI_NULL`.
+
+**Proof.** Named by WP-13b and WP-11b.
+
+### D-3343 — Option volume and open interest are labelled in shares; a lot is shown only where sourced or inferred, and says which — 2026-10-07
+
+**Implemented by** WP-12b (the inferred lot), WP-52 (labels and the lots
+column). **Findings** DB-057 (the option half), DB-G76.
+
+**What was observed.** No field carries a lot size. GDFL option volume and OI
+are in shares, the /db tooltip said "75 shares" as if a lot, and the implied
+lot jumps by the factor at every ex-date (BRITANNIA 100 to 200, HDFCBANK 250
+to 500).
+
+**Decision.** /db labels GDFL option volume and OI "shares". A lot is shown
+only where `costs::lot` sources it (NIFTY and BANKNIFTY from 2021-01-01), or
+where an inferred lot exists, labelled "inferred". The inferred lot of a
+contract is the greatest common divisor of its traded rows' LTQ on a day,
+leaving out the LTQ = 1 marker rows of D-3335. It is an upper bound: the true
+lot divides it, and a day with few trades can overstate it, so a later,
+smaller value supersedes it within the same lineage. It is recorded when first seen
+and when it changes, in `<store>/imports/gdfl.lots`, D-3317's line rules:
+`lot <instrument_key> from=<YYYY-MM-DD> lot=<n> basis=ltq_gcd v=1`. `lots =
+volume ÷ lot(day)` is shown only beside such a lot.
+
+**Proof.** Named by WP-12b and WP-52.
+
+### D-3348 — The charter records the measured vendor facts, and no vendor row is quoted in the documents — 2026-10-07
+
+**Implemented by** WP-02 (this entry). **Findings** the charter halves of
+DB-017, DB-033, DB-035, DB-G38, DB-G39, DB-G40, DB-G43 and DB-G75.
+
+**What changed.** `docs/00-charter.md` §4 said corporate-action adjustment was
+UNVERIFIED for every feed and "none was measured", for Zerodha and for GDFL.
+Both are now measured (D-3323), with the date, store path and count of each
+measurement; so are the close semantics (D-3324), the closing auction in both
+feeds (D-3320), the GDFL archive's window, and the sources of D-3332. The
+2020-03 halts stay UNVERIFIED, with the search that did not find a circular.
+`docs/08-vendor-samples.md` quoted three raw vendor rows (two TrueData, one
+GDFL) while the charter says no GDFL row is quoted anywhere in this
+repository; they are replaced by a description of their shape, and the file
+gains a summary of the measured basis facts. No raw vendor row is quoted in
+any document under `docs/`.
+
+**Proof.** `grep` for a vendor row's shape under `docs/` returns nothing; the
+charter rows each name their date, path and count.
