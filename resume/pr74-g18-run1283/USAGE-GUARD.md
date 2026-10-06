@@ -226,3 +226,16 @@ Next poll: 12:40.
     1285 was cancelled by concurrency. Gate 18 (202 shards, max-parallel 20) is expected to take
     ~30 h.
   - Cheap CI check armed for 19:50 UTC.
+
+## ~17:33 UTC — OWNER METER (truth): 5h session 9% (resets 22:10 UTC), WEEKLY 85% (resets Tue 13 Oct 04:30 IST)
+- Calibration: from 12:24 (weekly 57%, session 13%) to now, session +96 points (13→100, then 0→9)
+  and weekly +28, so weekly ≈ 0.29 × session points. Confirmed.
+- 15% weekly is left for ~6.2 days, about half of one 5h window in total.
+- The brutex fleet stays PAUSED (past the 80% hard cap). The coordinator does only cheap CI
+  checks (19:50, then ~10 h apart).
+- The 9% of this window used since 17:10 is mostly the owner's GDFL session (active: "audit
+  fix-plan + Zerodha 1m pull") plus the coordinator. Tickvault resumes itself at 00:18 IST. Both
+  draw on the same weekly 15%.
+- Option for the owner (NOT taken without a yes): when run 1286 finishes (~Oct 7 evening UTC),
+  spend up to ~8% of the weekly waking only the owners of named survivors, so PR 74 can go green
+  before the reset. Default is to hold until Tue 04:30 IST.
