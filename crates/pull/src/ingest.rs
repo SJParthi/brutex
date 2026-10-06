@@ -4154,13 +4154,19 @@ mod tests {
                 crate::manifest::Closes::UNKNOWN,
             )
         };
-        assert_eq!(record_held(&root, Vendor::Groww, &[held("NIFTY", 9_999)]), None);
+        assert_eq!(
+            super::record_held(&root, Vendor::Groww, &[held("NIFTY", 9_999)]),
+            None
+        );
         let fresh = held("BANKNIFTY", 2);
-        let why = record_held(&root, Vendor::Groww, &[held("NIFTY", 2), fresh])
+        let why = super::record_held(&root, Vendor::Groww, &[held("NIFTY", 2), fresh])
             .expect("the backwards row is still reported");
         assert!(!why.is_empty());
-        let census = read_census(&crate::manifest::manifest_path(&root, Vendor::Groww), Vendor::Groww)
-            .expect("the census reads");
+        let census = super::read_census(
+            &crate::manifest::manifest_path(&root, Vendor::Groww),
+            Vendor::Groww,
+        )
+        .expect("the census reads");
         assert_eq!(
             census.held(&fresh.entry.key),
             Some(fresh),

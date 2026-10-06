@@ -23344,7 +23344,7 @@ mod tests {
     /// `screen` or any expression or Boolean search verb left `/logs` unable
     /// to say why -- the gap OBSV-07 closed for `sweep-stored` alone.
     #[test]
-    fn a_refused_command_finishes_with_its_reason_and_a_completed_one_without() {
+    fn a_refused_command_finishes_with_its_reason() {
         let root = std::env::temp_dir().join(format!(
             "brutex-command-reason-{}-{:?}",
             std::process::id(),
@@ -23376,17 +23376,32 @@ mod tests {
             .lines()
             .find(|line| line.starts_with("refused"))
             .expect("the page names its refusal");
-        // A misuse, whose page has no `refused` line: its last line stands in.
-        let mut misused = String::new();
-        assert_eq!(
-            super::run_with_sink(&argv(&["scrreen"]), &mut misused, Some(&sink)),
-            MISUSED
+        // A page with no `refused` line at column zero: `sweep-audited-stored`
+        // prints `<label> REFUSED: …`, so its last non-blank line stands in.
+        let mut audited = String::new();
+        let code = super::run_with_sink(
+            &argv(&[
+                "sweep-audited-stored",
+                "groww",
+                "NIFTY",
+                "1min",
+                "2026",
+                "6",
+                "100",
+                "/nonexistent-receipts",
+                "1024",
+                "1",
+            ]),
+            &mut audited,
+            Some(&sink),
         );
-        let last = misused
+        assert_ne!(code, OK, "{audited}");
+        assert!(super::refusal_reason(&audited).is_none(), "{audited}");
+        let last = audited
             .lines()
             .rev()
             .find(|line| !line.trim().is_empty())
-            .expect("a usage page")
+            .expect("a page")
             .trim();
 
         let events = finished(&sink);
@@ -23402,11 +23417,12 @@ mod tests {
             reason(first).is_some_and(|got| !got.is_empty() && line.starts_with(got.as_str())),
             "the refusal's own line: {first:?} vs {line}"
         );
-        let second = events.get(1).expect("scrreen");
+        let second = events.get(1).expect("sweep-audited-stored");
         assert!(
             reason(second).is_some_and(|got| !got.is_empty() && last.starts_with(got.as_str())),
-            "the misuse's last line: {second:?} vs {last}"
+            "the page's last line: {second:?} vs {last}"
         );
+
         drop(sink);
         let _ = std::fs::remove_dir_all(&root);
     }
