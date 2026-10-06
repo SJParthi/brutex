@@ -35,8 +35,9 @@ use runner::admission::{
     CompletenessV1, ObservedI64V1, ObservedU64V1,
 };
 use runner::exit_grid_policy::{
-    EvaluatedExitGridV1, ExecutionDispositionV1, ExecutionRunV1, ExecutionSeriesV1,
-    InstrumentFamilyV1 as RunnerInstrumentFamilyV1, ResolvedExitGridV1, ValidatedExitGridV1,
+    AttestedTrainingV1, EvaluatedExitGridV1, ExecutionDispositionV1, ExecutionRunV1,
+    ExecutionSeriesV1, InstrumentFamilyV1 as RunnerInstrumentFamilyV1, ResolvedExitGridV1,
+    ValidatedExitGridV1,
 };
 use runner::grid::{Cell, Chosen};
 use runner::outcome::Horizon;
@@ -560,9 +561,20 @@ where
 {
     let population_id = derive_population_id_v1(&authority)?;
     let mut evaluated_sides = Vec::new();
+    // ONE TRAINING ATTESTATION PER SIDE, taken at that side's first closed
+    // mask (W3-runner4-1, D-1837). `evaluate_training_grid_attested` per mask
+    // re-validated, re-hashed and re-indexed the same execution slice and
+    // column for every closed mask and side: O(B) per candidate.
+    let mut attested = SideAttestations::default();
     let population_run =
         sweeper.run_prepared_population_by_reporting(signal_column, on_level, |member| {
-            evaluate_population_member(&authority, member, &mut evaluated_sides, &mut execution_run)
+            evaluate_population_member(
+                &authority,
+                member,
+                &mut attested,
+                &mut evaluated_sides,
+                &mut execution_run,
+            )
         })?;
     let expanded_cell_count = evaluated_cell_count(&evaluated_sides)?;
     let reconciliation =
@@ -749,9 +761,18 @@ pub fn commit_population_admission_v1(
     })
 }
 
-fn evaluate_population_member<RunAuthority>(
-    authority: &CompletePopulationAuthorityV1<'_>,
+/// Each side's TRAINING attestation, taken once at its first closed mask and
+/// reused for every later one (D-1837).
+#[derive(Default)]
+struct SideAttestations<'a> {
+    long: Option<AttestedTrainingV1<'a>>,
+    short: Option<AttestedTrainingV1<'a>>,
+}
+
+fn evaluate_population_member<'a, RunAuthority>(
+    authority: &CompletePopulationAuthorityV1<'a>,
     member: PopulationMember,
+    attested: &mut SideAttestations<'a>,
     evaluated_sides: &mut Vec<EvaluatedPopulationSideV1>,
     execution_run: &mut RunAuthority,
 ) -> Result<(), PopulationAdmissionWriterRefusal>
@@ -770,6 +791,7 @@ where
                 member,
                 TradeDirectionV1::Long,
                 authority.long_exit_grid,
+                &mut attested.long,
                 evaluated_sides,
                 execution_run,
             )?;
@@ -778,6 +800,7 @@ where
                 member,
                 TradeDirectionV1::Short,
                 authority.short_exit_grid,
+                &mut attested.short,
                 evaluated_sides,
                 execution_run,
             )
@@ -785,11 +808,12 @@ where
     }
 }
 
-fn evaluate_population_side<RunAuthority>(
-    authority: &CompletePopulationAuthorityV1<'_>,
+fn evaluate_population_side<'a, RunAuthority>(
+    authority: &CompletePopulationAuthorityV1<'a>,
     member: PopulationMember,
     direction: TradeDirectionV1,
     resolved: &ResolvedExitGridV1,
+    attested: &mut Option<AttestedTrainingV1<'a>>,
     evaluated_sides: &mut Vec<EvaluatedPopulationSideV1>,
     execution_run: &mut RunAuthority,
 ) -> Result<(), PopulationAdmissionWriterRefusal>
@@ -810,20 +834,32 @@ where
             direction_name(direction)
         ));
     }
-    let evaluated = resolved
-        .evaluate_training_grid_attested(
-            authority.execution_series,
-            authority.execution_column,
-            authority.horizon,
-            run,
+    let refused = |why: runner::exit_grid_policy::ExitGridErrorV1| {
+        format!(
+            "{} complete exit-grid evaluation refused mask {:?}: {why:?}",
+            direction_name(direction),
+            member.item.mask.words()
         )
-        .map_err(|why| {
-            format!(
-                "{} complete exit-grid evaluation refused mask {:?}: {why:?}",
-                direction_name(direction),
-                member.item.mask.words()
+    };
+    let attested = match attested {
+        Some(attested) => attested,
+        None => {
+            #[cfg(test)]
+            tests::ATTESTATIONS.with(|count| count.set(count.get() + 1));
+            attested.insert(
+                resolved
+                    .attest_training(
+                        authority.execution_series,
+                        authority.execution_column,
+                        authority.horizon,
+                    )
+                    .map_err(refused)?,
             )
-        })?;
+        }
+    };
+    let evaluated = resolved
+        .evaluate_with_attested(attested, run)
+        .map_err(refused)?;
     let cell_count = u64::try_from(evaluated.grid().cells.len())
         .map_err(|_| "evaluated exit-cell count does not fit u64".to_owned())?;
     if cell_count != resolved.cell_count() {
@@ -1672,6 +1708,9 @@ mod tests {
         /// probe, D-1835).
         pub(super) static POPULATION_ID_DERIVATIONS: std::cell::Cell<u64> =
             const { std::cell::Cell::new(0) };
+        /// TRAINING attestations the population producer took on this thread
+        /// (test-only probe, D-1837).
+        pub(super) static ATTESTATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     }
 
     /// [`super::derive_population_id_v1`] calls made on this thread so far.
@@ -2656,6 +2695,42 @@ mod tests {
             derived, 2,
             "{cells} cells: evidence binding once, writer once"
         );
+    }
+
+    /// **A population attests its TRAINING slice once per side, not once per
+    /// closed mask and side (W3-runner4-1, D-1837).** Counted over a complete
+    /// population with many closed masks: two attestations. The rows equal
+    /// the ones a fresh run of the same population produces.
+    #[test]
+    fn a_population_attests_its_training_slice_once_per_side() {
+        let bars = runner::synthetic::sessions(8);
+        let instrument = instrument("NIFTY");
+        let mut evaluator = evaluator();
+        let column = Column::build(&bars, &mut evaluator);
+        let (series, long, short) = resolved_grids(&instrument, &bars);
+        let policy = admission_policy();
+        let authority = authority(&bars, &column, series, &long, &short, &policy);
+        let ladder = Ladder::with_min_hits(600).with_ceiling(50_000);
+        let produce = || {
+            produce_population_admission_v1(
+                &Sweeper::new(ladder),
+                column.clone(),
+                authority,
+                &|_, _, _| {},
+                |words, direction| execution_run(&instrument, &bars, ladder, words, direction),
+                |context| Ok(cell_evidence(&context)),
+            )
+            .expect("complete population")
+        };
+        let before = ATTESTATIONS.with(std::cell::Cell::get);
+        let first = produce();
+        let attestations = ATTESTATIONS.with(std::cell::Cell::get) - before;
+        assert!(
+            first.population_run().closed > 1,
+            "more than one closed mask"
+        );
+        assert_eq!(attestations, 2, "one per side");
+        assert_eq!(produce().prepared().rows(), first.prepared().rows());
     }
 
     /// A bound population still refuses, per cell and in O(1), a foreign
