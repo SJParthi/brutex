@@ -17628,7 +17628,9 @@ const IN_SAMPLE_WARNING: &str = "\n  \
 /// already-indexed ledger handle ([`results::with_shared_writer`]), the same
 /// handle `ensure_run_record` committed through. Its `refresh` absorbs only
 /// the rows appended since it was last used, so the cost per rung is
-/// O(rows appended since the handle's last use) plus one O(1)-expected hash
+/// O(rows appended since the handle's last use), or O(indexed bytes + delta)
+/// when another writer grew the ledger (D-1560, D-3305, D-3321), plus one
+/// O(1)-expected hash
 /// probe and one fixed-width read. The handle's first open in a process is
 /// still the O(runs) index build `Results::open` states; that is paid once per
 /// process and root, not once per rung. `docs/06-limits.md` states it.

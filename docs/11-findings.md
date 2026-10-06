@@ -1034,3 +1034,9 @@ searched.
 §116 and `api::frontierjson`, plus the borderline `api::topjson` header.
 Corrected by D-3320, which also records a search by call site rather than by
 phrase.
+
+### Attack lens L2, round 14 — dispositions — 2026-10-06
+
+`recorded_row`'s doc, §116's heading, and one `docs/07-o1-architecture.md`
+row. Corrected by D-3321, with every non-test `with_shared_writer(` and
+`.refresh()` caller in `crates/cli/src` read afterwards.

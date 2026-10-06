@@ -63441,3 +63441,21 @@ ledger: `backtest`, `detail`, `frontierjson`, `lib`, `mastersrun`,
 cost statements, and searched `crates/cli/src` for cost comments beside
 `with_shared_writer`, `ensure_detail_receipt` and `Receipts::`. No other
 statement claims a refresh cost without the re-hash. Text only.
+
+### D-3321 — `recorded_row`'s ledger-refresh cost, and two of this lens's own captions — 2026-10-06
+
+A fourteenth review found three things:
+
+- `cli`'s `recorded_row` doc still called the shared ledger handle's refresh
+  O(rows appended). Its `docs/06-limits.md` twin was corrected by D-3317.
+- §116's heading said "bounded by new history" over a body that now names the
+  receipts' growth re-hash.
+- A `docs/07-o1-architecture.md` row said "every other Gate 8 timing row" was
+  a minimum of means, directly under O1P-05's p99 row.
+
+All three are corrected. Every `with_shared_writer(` and `.refresh()` call in
+`crates/cli/src` outside tests was then listed. Each caller's surrounding doc
+was read for a cost claim about the results or receipt handle, and none
+remains unqualified; the other `.refresh()` calls belong to execution,
+selection, frontier and trades files, which have no prefix recheck. Text
+only.

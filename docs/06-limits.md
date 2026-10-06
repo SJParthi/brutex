@@ -6885,7 +6885,7 @@ check. Moving every numeric field to canonical strings and `BigInt` would be a
 new versioned wire contract; D-0425 deliberately refuses unsafe rows rather
 than inventing that migration inside the browser.
 
-### §116 — refreshed detail recovery is bounded by new history, not O(1) end to end
+### §116 — refreshed detail recovery is bounded by new history (receipts: indexed bytes on growth), not O(1) end to end
 
 A frontier or chosen-trade handle opens by indexing every existing row, and a
 receipt handle opens by indexing every receipt. Those cold paths are O(F), O(T)
