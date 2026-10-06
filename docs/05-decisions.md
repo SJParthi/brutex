@@ -63651,3 +63651,21 @@ three greeks survivors:
   counts an `f64` token on that line in production code.
 
 DPM-03.
+
+### D-3133 — A CSV row skipped for negative open interest is on the receipt — 2026-10-06
+
+**Finding (data-path round 4).** D-3125 carried the CSV rows `csv::decode`
+skips for a negative volume into `DecodeSkips`, so the archive door's receipt
+counts them. A row with a negative open interest is skipped by the same pass
+(D-2683), but `decode_counted` built its `DecodeSkips` from the volume count
+alone. The negative-open-interest count reached only the "file decoded" log
+line. Measured on 8b851eb: a `TrueDataFno` member of two rows, one with open
+interest `-5`, gave `negative_open_interest 0` and `total() 0`, so
+`rows_read` was 1 of 2 offered and the run balanced over a row that appeared
+on no line of its receipt.
+
+**Decision.** `decode_counted` carries both counts. `ingest::from_members`
+already adds `DecodeSkips::total()` to `rows_read` and `decoder_skips`, and
+the receipt already names every reason that fired, so nothing else changes.
+GDFL quote rows (`Tally::quote_rows`, D-2688) are left as they are: D-2688
+rules them "not a degrade", and they are not skips. DPM-04.

@@ -766,8 +766,13 @@ pub fn decode_counted(
     match decode_rows(body, columns, &mut tally) {
         Ok(rows) => {
             note_decoded(columns, tally, rows.len());
+            // BOTH ROW SKIPS, NOT ONE (D-3133). A negative open interest
+            // skips its row exactly as a negative volume does (D-2683); only
+            // the volume reached the receipt until D-3133.
             let skipped = crate::fetch::DecodeSkips {
                 negative_volume: usize::try_from(tally.negative_volume).unwrap_or(usize::MAX),
+                negative_open_interest: usize::try_from(tally.negative_open_interest)
+                    .unwrap_or(usize::MAX),
                 ..crate::fetch::DecodeSkips::default()
             };
             Ok((rows, skipped))
