@@ -305,3 +305,17 @@ Next poll: 12:40.
 6. **Log.** Append one line here (time, M, est, action) and push. Below 95, say nothing to the owner unless asked.
 7. **End.** It ends at 100%: the session can no longer run. The last refresh is the one at 99 (or the last whole
    percent reached).
+
+## 19:53 UTC — USAGE WATCH (CI check wake): weekly ~98% est (lower bound); handoff refreshed and sent
+- Costs: this session $135.59, Tickvault $935.15 (+$171.5 since 17:51), other brutex $915.56. M = $1986.30;
+  ΔM = +$172.24 since the anchor.
+- FORMULA CORRECTION: the ×2 GDFL factor assumed GDFL equals the measured spend. It does not hold when Tickvault
+  dominates: it gives 108.8%, which is impossible because sessions are still allowed.
+- CURRENT FORMULA (replaces the 17:51 one):
+  - est_low = 87 + ΔM / 15.8, where 15.8 = $4.9 per window point ÷ 0.31; measured spend only.
+  - Now est_low = 97.9. The real figure is ≥ est_low because GDFL is not counted.
+  - Anchor stays 87% at M_A = $1814.06.
+  - LAST_SENT = 97.
+- CI run 1286: in progress, 6 jobs, 0 failed; Gate 18 shards not started yet.
+- WS3 (8a41aa26): the line-1358 survivors are killed, 6/6 caught; line 1337 and api Gate 18 are still open.
+- Next usage watch in 20 min.

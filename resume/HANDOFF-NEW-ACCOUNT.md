@@ -1,8 +1,13 @@
 # HANDOFF to a new Claude account (brutex coordinator)
 
-**Last refreshed:** 2026-10-06 17:51 UTC.
-- Weekly usage at this refresh: **87%** (owner meter, 17:49 UTC).
-- PR 74 CI run 1286: running.
+**Last refreshed:** 2026-10-06 19:53 UTC.
+- Weekly usage: **~98% (est)**.
+  - This is a lower bound: measured spend since the 87% owner reading at 17:49 is +$172. Tickvault alone is
+    +$171.5 in 2 h (about $85/h, roughly 5% weekly per hour).
+  - GDFL is not counted, so the real figure may be higher.
+  - The weekly limit can hit 100% at any moment.
+- PR 74 CI run 1286: running. 6 jobs so far, 0 failed. Coverage is still running and no Gate 18 shard has
+  started.
 - Refreshed by the old coordinator (session_01UGhT9yCM8wk4VFp9A2cjt1).
 
 The old account's weekly limit resets Mon 12 Oct 23:00 UTC (Tue 13 Oct 04:30 IST). From 95% the old coordinator
@@ -156,7 +161,7 @@ USAGE on this account:
 | G18 survivors runner | `pr74/g18-runner` @ 806a4637 | `RESULT-runner.md` | merged | Same |
 | G18 survivors rest | `pr74/g18-rest` @ fea36592 | `RESULT-rest.md` | merged | Same |
 | WS2 data-path attack | `claude/attack-data-pipeline-hgxmw9` @ 66eb9ebc | `resume/data-path-attack-20261004/PAUSE-WS2-1444.md` | Tests and gates yes. Gate 18 pre-run partial: greeks 29/0 missed, store 32/0, api shard 0 of 8 (8 caught, 1 unviable) | Run api shards 1–7, then pull shards 0–7 of the in-diff pre-run; kill every survivor; then round 8 |
-| WS3 Fix Board | `fixboard/pr74-batch3` @ 289ea4ab, `fixboard/pr74-batch4` @ e0709bd3, `fixboard/pr74-batch5` @ 7dd8f8d1 | `resume/fix-board/PAUSE-WS3-1444.md` | batch3 code yes. batch4 no: two cli TIMEOUTs in `candidate_trades::write_exact_via` (lines 1337 NotFound guard, 1358 AlreadyExists guard; e0709bd3 covers 1358). batch5 no | Kill the line-1337 timeout with an ENOTDIR test; merge batch4 into batch5; full non-root api run; Gate 18 for cli and api (152) and for batch5's own diff |
+| WS3 Fix Board | `fixboard/pr74-batch3` @ 289ea4ab, `fixboard/pr74-batch4` @ e0709bd3, `fixboard/pr74-batch5` @ 7dd8f8d1 | `resume/fix-board/PAUSE-WS3-1444.md` | batch3 code yes. batch4 no. The line-1358 AlreadyExists survivors are killed (18:08 targeted Gate 18 on e0709bd3: 6/6 caught). Still open: the line-1337 NotFound-guard TIMEOUT and api Gate 18. batch5 no | Kill the line-1337 timeout with an ENOTDIR test; merge batch4 into batch5; full non-root api run; Gate 18 for cli and api (152) and for batch5's own diff |
 | WS4 attack audit | `wip/audit-batch3` @ 181e9e42 | `resume/attack-audit-20261004/PAUSE-WS4-1444.md` | No. 5 cli survivors unfixed: lib.rs:14190 least_first `<`→`<=`; 14203 calendar_holds →true and →false; 14205 `<=`→`>`; 14218 final_selection_split `>`→`<`. Chunks B, C, D not run | Kill the 5; run chunks B, C, D (functions listed in the note); write RESULT-20261006.md |
 | WS5 zero rounds | `zero/next` @ 8db2fa83 | `resume/zero-rounds/PAUSE-WS5-1444.md` | Tests and gates yes. Gate 18 pre-run NOT run | Pre-run `git diff ca93445 8db2fa83 -- crates` (runner, then cli); re-apply conc14-2; ledgerall-1/cand-1 (D-2557); rangeall-2; ledgerall-3; G6 M rows; merge newest final/all-fixes |
 | L1 observability | `attack/observability` @ 838f5e6c | `resume/attack-lenses-20261006/PARK-L1.md` | No. api pre-run 11 of 22 tested (10 caught, 1 unviable, 0 missed); round 3 open (W1–W7 web, seven api/pull candidates to refute first) | Finish the api pre-run; refute then fix the round-3 candidates; round 4 |
