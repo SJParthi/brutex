@@ -63371,3 +63371,50 @@ a record against itself and against a copy, and both match. It then moves each
 of the three fields by one in each direction, to `i64::MIN`, to `i64::MAX` and
 to the null sentinel. Every one of those must fail to match, in both
 directions.
+
+### D-2083 — The vocabulary's compile-time constants have no loop a mutant can stall — 2026-10-06
+
+**What was observed.** `MAX_NAME_BYTES`, `fnv1a` and `name_index` are
+evaluated at compile time for `static NAME_INDEX`, and each was a `while`
+loop. Several single mutations stop a loop's progress:
+
+- `row += 1` or `i += 1` turned to `*=`;
+- `at + 1` turned to `at * 1`;
+- `slots[at] != 0` turned to `== 0`, which probes empty slots forever;
+- `- 1` turned to `/ 1` in the probe mask.
+
+Gate 18 compiles with `--cap-lints true`, which lowers rustc's long-running
+const-evaluation lint to a warning, so those mutants never finished building.
+Shards 146 and 150 of run 1283 hit the four-hour job limit, and the 30 other
+mutants they held were never examined. The coordinator reproduced an 11-minute
+hang in `nextest --no-run`.
+
+**Decided.** All three are recursions:
+
+- `longest_name` halves the rows.
+- `fnv1a_from` consumes the byte slice one byte per frame.
+- `place_rows` halves the row range and inserts in row order.
+- `free_slot` probes one slot per frame.
+
+A mutant that stops progress now exceeds the const evaluator's stack-frame
+limit. That is a hard error, not a lint, so the mutant fails to build. At run
+time, where `fnv1a` and `name_index` are also called, it overflows the stack
+and its test fails.
+
+Depth stays shallow. Halving 370 rows goes about nine frames deep. A name is
+at most `MAX_NAME_BYTES` frames, and `index_of` refuses a longer token before
+hashing it. A probe is at most four slots, measured by
+`every_name_is_found_by_its_index_and_no_other_token_is`.
+
+Two tests hold the result:
+
+- `table::tests::the_name_index_is_exactly_what_a_plain_loop_builds`
+  (G18-rest-28) pins `NAME_INDEX` slot for slot against an independent
+  runtime reference. It also pins FNV-1a to its published 64-bit vectors for
+  "", "a" and "foobar". The reference is the old loop algorithm, so the index
+  is byte-identical to the one it replaces.
+- `table::tests::the_empty_cases_answer_without_recursing` (G18-rest-29)
+  reaches the base cases that building `NAME_INDEX` never visits.
+
+**Rejected.** A counter guard on each loop. Every mutation of the guard
+itself leaves behaviour unchanged, so those mutants would be MISSED.
