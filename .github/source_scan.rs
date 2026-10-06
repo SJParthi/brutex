@@ -3201,7 +3201,15 @@ fn build_key_leaves(src: &str) -> Result<Vec<Leaf>, String> {
         .into_iter()
         .filter(|l| {
             let p: Vec<&str> = l.path.iter().map(String::as_str).collect();
-            matches!(p.as_slice(), ["package", "build" | "links"])
+            // D-3510: `metabuild`, `cargo-features` and a profile's `rustflags`
+            // or `codegen-backend` each make cargo run code it chose, given a
+            // nightly cargo; none is needed by a stable workspace.
+            matches!(
+                p.as_slice(),
+                ["package", "build" | "links" | "metabuild"] | ["cargo-features"]
+            ) || (p.len() >= 3
+                && p[0] == "profile"
+                && matches!(p[p.len() - 1], "rustflags" | "codegen-backend"))
         })
         .collect())
 }
@@ -4345,6 +4353,28 @@ mod tests {
             "[dependencies]\nbuild = \"1\"\n",
             "[[bench]]\nname = \"build\"\n",
             "[package]\ndescription = \"\"\"\nbuild = 1\n\"\"\"\n",
+        ] {
+            assert!(build_key_leaves(src).unwrap().is_empty(), "refused: {src}");
+        }
+    }
+
+    #[test]
+    fn a_nightly_only_manifest_key_is_a_build_key() {
+        // D-3510 (ONEAUTH-11): each runs code cargo picks, on a nightly cargo.
+        for src in [
+            "cargo-features = [\"profile-rustflags\"]\n[package]\nname = \"a\"\n",
+            "[package]\nname = \"a\"\nmetabuild = [\"mb\"]\n",
+            "[profile.dev]\nrustflags = [\"-C\", \"linker=x.rs\"]\n",
+            "[profile.release.package.\"*\"]\nrustflags = [\"-C\", \"link-arg=x\"]\n",
+            "[profile.dev]\ncodegen-backend = \"/tmp/x.so\"\n",
+            "profile.bench.codegen-backend = \"x\"\n",
+        ] {
+            assert_eq!(build_key_leaves(src).unwrap().len(), 1, "missed: {src}");
+        }
+        for src in [
+            "[profile.release]\noverflow-checks = true\npanic = \"unwind\"\n",
+            "[dependencies]\nmetabuild = \"1\"\n",
+            "[package.metadata.rustflags]\nx = 1\n",
         ] {
             assert!(build_key_leaves(src).unwrap().is_empty(), "refused: {src}");
         }

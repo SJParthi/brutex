@@ -668,6 +668,24 @@ fn toml_key(line: &str) -> &str {
     shaped().unwrap_or(line)
 }
 
+/// D-3510: the value of a `toolchain.channel` scanner line is a quoted stable
+/// release, one to three dot-separated runs of digits (`"1.97.1"`). `nightly`,
+/// `beta`, a date, a host triple or the moving `stable` name are refused:
+/// each either unlocks nightly-only manifest keys or stops being a pin.
+fn stable_release(line: &str) -> bool {
+    let Some((_, value)) = line.split_once(" = ") else {
+        return false;
+    };
+    let Some(inner) = value.strip_prefix('"').and_then(|v| v.strip_suffix('"')) else {
+        return false;
+    };
+    let parts: Vec<&str> = inner.split('.').collect();
+    (1..=3).contains(&parts.len())
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+}
+
 /// A tool file may carry only the keys its allowlist names.
 fn check_keys(file: &str, present: bool, keys: &Scan, allow: fn(&str) -> bool, r: &mut Report) {
     if !present {
@@ -704,7 +722,8 @@ fn then_sets(c: &[char], mut i: usize, space: &dyn Fn(char) -> bool) -> bool {
     matches!(c.get(i), Some(':' | '='))
 }
 
-const WRAPPERS: [&str; 11] = [
+// D-3510: the last two turn a stable toolchain into a nightly one.
+const WRAPPERS: [&str; 13] = [
     "RUSTC_WRAPPER",
     "RUSTC_WORKSPACE_WRAPPER",
     "CARGO_BUILD_RUSTC_WRAPPER",
@@ -716,6 +735,8 @@ const WRAPPERS: [&str; 11] = [
     "RUSTC_LINKER",
     "RUSTUP_TOOLCHAIN",
     "RUSTUP_HOME",
+    "RUSTC_BOOTSTRAP",
+    "__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS",
 ];
 
 /// `(^|[^A-Z0-9_])(<WRAPPERS>|CARGO_TARGET_[A-Z0-9_]+_(RUNNER|LINKER))([^A-Za-z0-9_]|$)`:
@@ -865,6 +886,17 @@ fn other_door_line(line: &str) -> bool {
         })
     });
     let runtool = holds(&c, "--runtool") || holds(&c, "--test-runtool");
+    // D-3510: `cargo +toolchain` picks a toolchain past rust-toolchain.toml.
+    let plus = (0..c.len()).any(|i| {
+        if (i > 0 && ident_char(c[i - 1])) || !at(&c, i, "cargo") {
+            return false;
+        }
+        let mut p = i + "cargo".len();
+        while c.get(p).is_some_and(|x| ascii_space(*x)) {
+            p += 1;
+        }
+        p > i + "cargo".len() && c.get(p) == Some(&'+')
+    });
     let nextest = reaches(&c, "nextest", &['#', '|', ';'])
         .iter()
         .any(|seg| holds(seg, "--config-file") || holds(seg, "--tool-config-file"));
@@ -882,6 +914,7 @@ fn other_door_line(line: &str) -> bool {
     };
     flags
         || runtool
+        || plus
         || nextest
         || holds(&c, "GITHUB_PATH")
         || either_space(|sp| home(sp) || computed_name(&c, sp) || printf_v(sp))
@@ -993,6 +1026,15 @@ fn gate_1g_verdict(
         toolchain_key,
         &mut r,
     );
+    if tools.toolchain.0 && tools.toolchain.1.ok() {
+        for l in tools.toolchain.1.lines() {
+            if toml_key(l) == "toolchain.channel" && !stable_release(l) {
+                r.refuse(format!(
+                    "REFUSED  {TOOLCHAIN} pins a channel that is not a pinned stable release: {l}"
+                ));
+            }
+        }
+    }
     check_keys(
         NEXTEST,
         tools.nextest.0,
@@ -3678,6 +3720,70 @@ mod tests {
                 .contains("REFUSED  rust-toolchain.toml is not TOML this gate can read")
         );
         assert!(!r.text().contains(".config/nextest.toml"));
+    }
+
+    #[test]
+    fn gate_1g_refuses_every_door_to_a_nightly_toolchain() {
+        // D-3510 (ONEAUTH-11). A nightly channel, or a stable one told to
+        // behave as nightly, unlocks manifest keys (`cargo-features`, profile
+        // `rustflags`, `codegen-backend`, `metabuild`) no gate read.
+        for channel in [
+            "\"nightly\"",
+            "\"nightly-2026-09-01\"",
+            "\"beta\"",
+            "\"stable\"",
+            "\"1.97.1-x86_64-unknown-linux-gnu\"",
+            "\"1..2\"",
+            "\".1\"",
+            "\"\"",
+            "1",
+        ] {
+            let t = scan(
+                &format!("rust-toolchain.toml:4:toolchain.channel = {channel}\n"),
+                0,
+            );
+            let n = ok();
+            let tools = ToolFiles {
+                toolchain: (true, &t),
+                nextest: (false, &n),
+            };
+            let r = gate_1g_verdict(&names(&["a"]), &tools, &[("w".into(), String::new())]);
+            assert!(r.refused, "{channel}");
+            assert!(
+                r.text().contains("not a pinned stable release"),
+                "{}",
+                r.text()
+            );
+        }
+        for channel in ["\"1.97.1\"", "\"1.97\"", "\"1\""] {
+            let t = scan(
+                &format!("rust-toolchain.toml:4:toolchain.channel = {channel}\n"),
+                0,
+            );
+            let n = ok();
+            let tools = ToolFiles {
+                toolchain: (true, &t),
+                nextest: (false, &n),
+            };
+            let r = gate_1g_verdict(&names(&["a"]), &tools, &[("w".into(), String::new())]);
+            assert!(!r.refused, "{channel}: {}", r.text());
+        }
+        for l in [
+            "      RUSTC_BOOTSTRAP: 1",
+            "    env RUSTC_BOOTSTRAP=1 cargo build",
+            "  __CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS: nightly",
+            "    cargo +nightly build --workspace",
+            "    cargo  +1.98.0 test",
+        ] {
+            assert!(gate_1g_of(&["a"], l).refused, "{l}");
+        }
+        for l in [
+            "    cargo build # +nightly in prose",
+            "    a+b",
+            "  MY_RUSTC_BOOTSTRAP_NOTE: x",
+        ] {
+            assert!(!gate_1g_of(&["a"], l).refused, "{l}");
+        }
     }
 
     #[test]
