@@ -21,3 +21,7 @@ Head: fd7e3a2 (pushed; tree clean; no cargo-mutants marker in the tree).
 2. Re-run the full cli lib tests as non-root and the static gates (/tmp/g18bin/gates/*.sh, skipping 03) at head.
 3. Re-check origin/final/all-fixes and merge if it moved. Push.
 4. Write RESULT-cli-b.md (item | fixed? | commit | evidence).
+
+## Update during pause
+- clippy --workspace --all-targets --locked -D warnings at fd7e3a2: EXIT 101 (3 error lines). Log /tmp/g18bin/clippy.log.
+- m5 last log line: Found 9 mutants to test
