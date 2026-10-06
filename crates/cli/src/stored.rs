@@ -6597,4 +6597,28 @@ mod tests {
         let why = swept_index("NIFTY\u{3000}X").expect_err("no instrument");
         assert!(why.starts_with("`NIFTY\\u{3000}X` is not"), "{why:?}");
     }
+
+    /// A gap before the last two prior minutes is refused even though the
+    /// final two sit on the canonical close: each terminal minute is checked,
+    /// not just the last. G18-cli-b-24, D-2031.
+    #[test]
+    fn exact_minute_context_refuses_a_gap_before_the_last_two_prior_minutes() {
+        let signal = [minute_on_ist_day(OPEN_TUESDAY_2026_08_04, 555, 2_600_000)];
+        let gapped = minute_span(vec![
+            minute_on_ist_day(OPEN_MONDAY_2026_08_03, 920, 2_500_000),
+            minute_on_ist_day(OPEN_MONDAY_2026_08_03, 928, 2_500_100),
+            minute_on_ist_day(OPEN_MONDAY_2026_08_03, 929, 2_500_200),
+            minute_on_ist_day(OPEN_TUESDAY_2026_08_04, 555, 2_600_000),
+        ]);
+        let why = exact_minute_context_from_span(gapped, &signal, Path::new(NO_STORE))
+            .expect_err("a third-last minute off the canonical geometry cannot seed GapFib");
+        assert!(
+            why.contains("terminal-minute geometry 927, 928, 929"),
+            "{why}"
+        );
+        assert!(
+            why.contains("observed final three were Some(920), Some(928), Some(929)"),
+            "{why}"
+        );
+    }
 }

@@ -559,3 +559,200 @@ fn the_display_reader_decodes_the_authoritys_winners_and_refuses_any_other_famil
     assert_eq!(selection_v6_family("NIFTY"), Ok("NIFTY"));
     assert_eq!(selection_v6_family("BANKNIFTY"), Ok("BANKNIFTY"));
 }
+
+/// Exact reuse with no tail sets nothing aside; the record ceiling binds even
+/// when the byte ceiling has room; an existing quarantine holding exactly the
+/// abandoned bytes is accepted and one holding other bytes refuses. D-1569.
+/// G18-cli-b-19, D-2027.
+#[test]
+fn reuse_sets_nothing_aside_records_bind_and_an_identical_quarantine_is_accepted() {
+    let quarantines = |root: &Path| {
+        std::fs::read_dir(root)
+            .expect("scratch lists")
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .expect("entry reads")
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".abandoned-")
+            })
+            .count()
+    };
+    let scratch = Scratch::new();
+    let first = frame(21);
+    assert!(persist(&scratch.0, bounds(2), &first).expect("first write"));
+    assert!(!persist(&scratch.0, bounds(2), &first).expect("exact reuse"));
+    assert_eq!(
+        quarantines(&scratch.0),
+        0,
+        "a whole-block ledger has no tail to set aside"
+    );
+
+    let roomy = SelectionV6Bounds::new(1, 2 * BLOCK_BYTES).expect("bytes above the record ceiling");
+    let before = std::fs::read(scratch.0.join(FILE_NAME)).expect("one committed");
+    let refusal = persist(&scratch.0, roomy, &frame(22)).expect_err("the record ceiling binds");
+    assert!(
+        refusal.contains("no space inside declared record bounds"),
+        "{refusal}"
+    );
+    assert_eq!(
+        std::fs::read(scratch.0.join(FILE_NAME)).expect("unchanged"),
+        before
+    );
+
+    let scratch = Scratch::new();
+    let expected = frame(23);
+    let foreign = frame(24);
+    let path = scratch.0.join(FILE_NAME);
+    let quarantine = scratch.0.join(format!("{FILE_NAME}.abandoned-0"));
+    std::fs::write(&path, &foreign[..4096]).expect("foreign prefix");
+    let mut other = foreign[..4096].to_vec();
+    other[0] ^= 1;
+    std::fs::write(&quarantine, &other).expect("a same-length quarantine of other bytes");
+    let refusal = persist(&scratch.0, bounds(1), &expected).expect_err("other bytes refuse");
+    assert!(
+        refusal.contains("already holds different bytes"),
+        "{refusal}"
+    );
+    assert_eq!(
+        std::fs::read(&path).expect("ledger").len(),
+        4096,
+        "nothing repaired"
+    );
+    std::fs::write(&quarantine, &foreign[..4096]).expect("an earlier repair's identical copy");
+    assert!(
+        persist(&scratch.0, bounds(1), &expected).expect("the identical quarantine is accepted")
+    );
+    assert_eq!(std::fs::read(&path).expect("completed"), expected);
+    assert_eq!(std::fs::read(&quarantine).expect("kept"), &foreign[..4096]);
+}
+
+/// A quarantine that cannot be created (here ENAMETOOLONG, not AlreadyExists)
+/// refuses with the create error and is never compared as an existing copy.
+/// G18-cli-b-19, D-2027.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_quarantine_that_cannot_be_created_refuses_with_the_create_error() {
+    let scratch = Scratch::new();
+    let mut root = std::fs::canonicalize(&scratch.0).expect("scratch resolves");
+    // root + '/' + FILE_NAME = 4,090 bytes: the ledger opens under the
+    // 4,096-byte PATH_MAX, and the quarantine name, 12 bytes longer, does not.
+    let target = 4_089 - FILE_NAME.len();
+    while target - root.as_os_str().len() > 255 {
+        root.push("d".repeat(128));
+    }
+    let last = target - root.as_os_str().len() - 1;
+    root.push("d".repeat(last));
+    assert_eq!(root.join(FILE_NAME).as_os_str().len(), 4_090);
+    std::fs::create_dir_all(&root).expect("a deep root under PATH_MAX");
+    let path = root.join(FILE_NAME);
+    std::fs::write(&path, &frame(26)[..4096]).expect("foreign prefix");
+    let why = persist(&root, bounds(1), &frame(25)).expect_err("the quarantine cannot be created");
+    assert!(
+        why.starts_with("Selection V6 abandoned tail quarantine: "),
+        "{why}"
+    );
+    assert!(!why.contains("nothing repaired"), "{why}");
+    assert_eq!(
+        std::fs::read(&path).expect("ledger").len(),
+        4096,
+        "the ledger is not cut"
+    );
+}
+
+/// A sealed block the display decoder accepts: both family envelopes valid,
+/// `winners` NIFTY-long winners, the given Top-10 count, and each winner's
+/// loss-ratio and reward-to-risk (definedness, value) words.
+fn decodable(winners: u64, top_ten: u64, loss: (u64, u64), reward: (u64, u64)) -> Block {
+    fn put(block: &mut Block, at: usize, value: u64) {
+        block[at..at + 8].copy_from_slice(&value.to_le_bytes());
+    }
+    let mut block = frame(0);
+    put(&mut block, 672, 1); // NIFTY envelope
+    put(&mut block, 680, 1); // evaluated
+    put(&mut block, 840, 2); // BANKNIFTY envelope
+    put(&mut block, 848, 1); // evaluated
+    put(&mut block, 912, winners);
+    put(&mut block, 920, top_ten);
+    for rank in 0..winners {
+        let at = 960 + 296 * usize::try_from(rank).expect("a small rank");
+        put(&mut block, at + 96, 1); // NIFTY
+        put(&mut block, at + 128, 1); // long
+        put(&mut block, at + 264, loss.0);
+        put(&mut block, at + 272, loss.1);
+        put(&mut block, at + 280, reward.0);
+        put(&mut block, at + 288, reward.1);
+    }
+    resealed(block)
+}
+
+/// The display decoder admits exactly the winner counts the encoder writes,
+/// a full Top-25 included, and keeps a defined ratio's value distinct from an
+/// undefined one. G18-cli-b-20, D-2027.
+#[test]
+fn the_display_decoder_admits_only_the_encoders_counts_and_ratio_words() {
+    let full = read::decode_block(&decodable(25, 10, (1, 7), (0, 0)))
+        .expect("a full Top-25 with its Top-10 prefix decodes");
+    assert_eq!(full.winners.len(), 25);
+    for winner in &full.winners {
+        assert_eq!((winner.family, winner.direction), ("NIFTY", "long"));
+        assert_eq!(
+            winner.loss_ratio_ppm,
+            Some(7),
+            "a defined ratio keeps its value"
+        );
+        assert_eq!(
+            winner.reward_to_risk_ppm, None,
+            "undefined is not a measured zero"
+        );
+    }
+    let one = read::decode_block(&decodable(1, 1, (1, 0), (1, 1))).expect("one winner");
+    assert_eq!(
+        (
+            one.winners[0].loss_ratio_ppm,
+            one.winners[0].reward_to_risk_ppm
+        ),
+        (Some(0), Some(1))
+    );
+    for (winners, top_ten) in [(26, 10), (1, 0), (12, 12)] {
+        let why = read::decode_block(&decodable(winners, top_ten, (1, 7), (0, 0)))
+            .expect_err("a count the encoder cannot write");
+        assert!(
+            why.contains(&format!("{winners} winner(s) and a Top-10 of {top_ten}")),
+            "{why}"
+        );
+    }
+    for bad in [(0, 5), (2, 0)] {
+        let why = read::decode_block(&decodable(1, 1, bad, (0, 0)))
+            .expect_err("a definedness word the encoder cannot write");
+        assert!(why.contains("invalid definedness word"), "{why}");
+    }
+}
+
+/// A rung whose path cannot be inspected for any reason but absence is
+/// refused by name, never shown as "no record yet". G18-cli-b-20, D-2027.
+#[test]
+fn an_uninspectable_rung_path_is_refused_not_reported_absent() {
+    let root = Scratch::new();
+    std::fs::create_dir(root.0.join("selection")).expect("selection directory");
+    let blocked = crate::ledger_all::LEDGER_RUNGS[0];
+    std::fs::write(root.0.join("selection").join(blocked), b"not a directory")
+        .expect("a regular file where the rung directory belongs");
+    let mut refused = 0;
+    for (rung, read) in read_stored_selection_v6(&root.0, 0, 4) {
+        match read {
+            StoredSelectionV6Rung::Refused(why) => {
+                assert_eq!(rung, blocked, "{why}");
+                assert!(
+                    why.contains(&format!("selection/{rung}/{FILE_NAME}")),
+                    "{why}"
+                );
+                refused += 1;
+            }
+            StoredSelectionV6Rung::Absent(path) => assert_ne!(rung, blocked, "{path}"),
+            StoredSelectionV6Rung::Records { .. } => panic!("{rung}: records in an empty root"),
+        }
+    }
+    assert_eq!(refused, 1);
+}
