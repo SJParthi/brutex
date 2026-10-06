@@ -23130,10 +23130,14 @@ mod tests {
         let stdout = child.stdout.take().expect("its output");
         let (send, lines) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
+            // The harness prints `test <name> ... ` before the test's own
+            // output on the same line, so the marker is found, not prefixed.
             for line in
                 std::io::BufRead::lines(std::io::BufReader::new(stdout)).map_while(Result::ok)
             {
-                if line.starts_with("SERVE-LOCK-") && send.send(line).is_err() {
+                if let Some(at) = line.find("SERVE-LOCK-")
+                    && send.send(line[at..].to_owned()).is_err()
+                {
                     break;
                 }
             }

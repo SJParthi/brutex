@@ -63350,6 +63350,36 @@ history lines are kept in `crates/api/src/emitted.rs`.
 (FB-74) and the D-1911 refusal tests in `crates/api/src/server.rs`, together
 with `emitted::tests` accounting for every site.
 
+**Adversarial matrix (2026-10-06).** The one mechanism is attacked where
+the earlier tests only stood a second open file description in for the
+other process. `another_process_is_refused_while_the_holder_lives_and_admitted_once_it_is_killed`
+runs the other `brutex api` as a real child process with its own
+registry: while it holds, this process is refused naming the child's pid
+and keeps no key; SIGKILL while holding frees the store with no unlock
+having run, and the dead holder's stamp is replaced, never quoted; while
+this process holds, the child is refused naming this pid; a child that
+releases and exits frees the store again.
+`racing_serves_in_one_process_share_one_lock_and_any_release_order_frees_it_last`
+takes the root from sixteen threads at once behind a barrier, so takes
+meet takes in progress, then releases in an interleaved order (odd
+indices, then even from the back): the file stays locked exactly while one
+holder is left. `a_serve_lock_the_host_will_not_open_is_refused_and_registers_nothing`
+runs where mode bits bind (D-0995): a root that cannot gain a lock file and
+a lock file that cannot be opened are each refused with the host's words,
+imply no other instance, register nothing, and the store is served once the
+permission is back. Crash while stamping is D-1481's existing test, stale
+stamps D-1446's.
+
+**Measured cost.** `the_serve_lock_take_and_release_are_measured`, 2,000
+rounds each, on the 4-core build box (run as uid 65534, debug-optimised
+test profile), three runs, microseconds p50/p99/max: a fresh take plus the
+last release 5/16/56, 5/21/119 and 5/18/85; a join of a held root plus its
+release 1/2/33, 1/6/82 and 1/6/21. The take runs once per `serve`, never
+per request, and is a canonicalize, an open, one `flock`, one stamp write
+and one map insert; the map holds one entry per served root. It is
+recorded in `docs/06-limits.md`, not claimed O(1): `canonicalize` walks the
+path's components.
+
 **The `cli` descent test.** The same merge's first attempt also fixed
 `the_elite_descent_refuses_a_top_the_api_cannot_serve_before_any_read`; PR
 #74's head had meanwhile fixed it as D-2001, so this branch takes D-2001's

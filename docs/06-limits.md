@@ -15678,3 +15678,21 @@ per-candidate primitive from `CLAUDE.md` §3 rule 4.
 - **A claimant may wait for one probe's look at the execution lease
   (D-2774).** The wait is one open, one lock, two stats and one unlock on the
   store's file system: not constant-time, not timed.
+
+## The serve lock's take is once per serve, measured, and not constant-time — D-2779, 6 October 2026
+
+- **A fresh take is not O(1), and is not on any per-request path.**
+  `take_serve_lock` canonicalizes the configured root (one `stat`-like step
+  per path component), opens `serve.lock`, takes one `flock`, writes and
+  cuts the stamp, and inserts one entry in a map keyed by served root (one
+  entry per root this process serves, in practice one). It runs once per
+  `serve`. Measured by `the_serve_lock_take_and_release_are_measured`
+  (2,000 rounds, 4-core build box, uid 65534, test profile), microseconds
+  p50/p99/max over three runs: fresh take plus last release 5/16/56,
+  5/21/119, 5/18/85; join of a held root plus release 1/2/33, 1/6/82,
+  1/6/21. The p99 and max move with the host's file-system latency; no bound
+  is enforced.
+- **A take holds the registry's mutex across its open, lock and stamp.** A
+  concurrent take of any root in the same process waits for that one take;
+  the wait is the fresh-take cost above. Only one serve per process is the
+  production shape.
