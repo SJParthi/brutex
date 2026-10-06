@@ -7485,7 +7485,13 @@ fn ladder_refusal(
             needs.label(),
             at.as_str(),
         )),
-        Gate::RungFirst { needs, missing, of } => Some(format!(
+        Gate::RungFirst {
+            needs,
+            missing,
+            of,
+            owed,
+            runs,
+        } => Some(format!(
             // 5.8× is 81 minute-windows against 14 day-windows per instrument
             // for the same span — `crate::ladder`'s module doc, from
             // `crates/store`'s own arithmetic rather than from this sentence.
@@ -7493,7 +7499,8 @@ fn ladder_refusal(
              are not held at {first}. Nothing was asked for. Pull {first} over \
              this same window, then run this — the cheap pass is 5.8× fewer \
              requests for the same span, and it is what finds a wrong symbol or \
-             date range before the expensive one pays for it.",
+             date range before the expensive one pays for it. {}",
+            owed_sentence(&owed, runs),
             first = needs.as_str(),
         )),
         Gate::SegmentFirst {
@@ -7511,6 +7518,44 @@ fn ladder_refusal(
             needs.as_str(),
         )),
     }
+}
+
+/// The owed instrument-months of a [`crate::ladder::Gate::RungFirst`], named.
+///
+/// Every run is `SYMBOL (SEGMENT) from..=to, N month(s), why`. The months
+/// before a series' first held month are never among them (D-0319), and the
+/// sentence says so, because that is what an operator reading only a count
+/// assumed they were. At most [`crate::ladder::OWED_NAMED`] runs are named;
+/// the rest are counted. D-3315.
+fn owed_sentence(owed: &[crate::ladder::Owed], runs: usize) -> String {
+    let named: Vec<String> = owed
+        .iter()
+        .map(|o| {
+            format!(
+                "{} ({}) {}..={}, {} month(s), {}",
+                o.symbol,
+                o.segment.as_str(),
+                o.from,
+                o.to,
+                o.months,
+                o.why.label(),
+            )
+        })
+        .collect();
+    let rest = runs.saturating_sub(owed.len());
+    let more = if rest == 0 {
+        String::new()
+    } else {
+        format!("; and {rest} more run(s)")
+    };
+    format!(
+        "Owed, in {runs} run(s): {}{more}. Months before a series' first held \
+         month are not owed and are not counted here. A hole after it means \
+         the day pass did not land that month — or the vendor served nothing \
+         there, which the store cannot tell apart — so the minute pass stays \
+         shut until it is held or the instrument is left out of the request.",
+        named.join("; "),
+    )
 }
 
 /// Whether this feed's own master gives this instrument an id.
@@ -20520,7 +20565,42 @@ mod tests {
                 why.contains("Nothing was asked for"),
                 "and says plainly that no socket was opened: {why}"
             );
+            // AND IT NAMES WHICH MONTH, AND WHY (D-3315).
+            assert!(
+                why.contains(
+                    "Owed, in 1 run(s): NIFTY (INDEX) 2026-08..=2026-08, 1 month(s), \
+                     nothing of the series is held in this window."
+                ),
+                "the refusal names the owed run and its class: {why}"
+            );
         }
+
+        // EVERY CLASS HAS ITS OWN WORDS, AND RUNS PAST THE NAMED ONES ARE
+        // COUNTED (D-3315).
+        let run = |why| crate::ladder::Owed {
+            symbol: brutex_core::symbol::Symbol::new("X").expect("a legal symbol"),
+            exchange: brutex_core::instrument::Exchange::Nse,
+            segment: brutex_core::instrument::Segment::Cash,
+            from: month_of(2019, 1),
+            to: month_of(2019, 2),
+            months: 2,
+            why,
+        };
+        let said = owed_sentence(
+            &[
+                run(crate::ladder::OwedWhy::Interior),
+                run(crate::ladder::OwedWhy::AfterLast),
+            ],
+            5,
+        );
+        assert!(
+            said.starts_with(
+                "Owed, in 5 run(s): X (CASH) 2019-01..=2019-02, 2 month(s), a hole \
+                 between held months; X (CASH) 2019-01..=2019-02, 2 month(s), after \
+                 the series' last held month; and 3 more run(s). Months before"
+            ),
+            "{said}"
+        );
 
         // AND WITH IT HELD, THE SAME REQUEST IS OPEN.
         let held = [day_pass_held(Vendor::Dhan, "NIFTY", month_of(2026, 8))];

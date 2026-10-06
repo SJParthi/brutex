@@ -64986,3 +64986,107 @@ into the file's `HashMap`. Measured in that throwaway test (release build,
 M4 Pro, 50 rounds of all 208 shares, 10,400 calls): p50 84–125 ns, p99
 250 ns, max 1.5–10.9 µs. `docs/06-limits.md` records it. Invariants ZNC-01
 to ZNC-09.
+
+### D-3315 — The minute pass's refusal names each owed run of day months, and why it is owed — 2026-10-06
+
+**What was observed.** On 6 Oct 2026 the operator finished a Zerodha 1day
+pass over 2018-01-01..=2026-09-30 for `target=indices` (136 reached) and
+`target=swept` (210 reached, 0 failed). A 1min `POST /pull/spot` over the
+same window was then refused before any request: "the 1day pass comes
+first: 315 of 14280 instrument-months are not held at 1day" (indices) and
+"29 of 22050" (swept). The operator read the 315 as months before young
+indices' first bars, the ones D-3313 had just logged as before first bar.
+
+**What they actually were.** Measured read-only on a copy of the operator's
+Zerodha census (`manifest/zerodha.man`, 6 Oct 2026 16:21 IST): 37,244 spot
+1day keys, the same set as the 1day `.bin` month files under
+`bars/zerodha/NSE`, and both refusal counts reproduce exactly. **None of the
+344 is before a series' first held month.** The gate has excused those
+since D-0319 (MR-36), so the before-first-bar indices D-3313 logged —
+`NIFTYCHEMICALS`, `NIFTYWAVES`, `NIFTYINTERNET` and the rest — owe nothing
+here. Every owed month is after the first held one:
+
+- **Swept, 29 — holes between held months.** `MAZDOCK` 2018-08..=2020-09
+  (26) and `FORCEMOT` 2023-11..=2024-01 (3). `MAZDOCK`'s "first held
+  month" is suspect: 2018-01..=2018-07 each hold ONE row, stamped on a
+  Monday 00:00 IST at the start of the month, and real daily rows begin
+  2020-10-12. If those seven rows are not real sessions, the 26 months are
+  the span before the share's first bar, not a hole. The listing date is
+  UNVERIFIED (no charter source), so this is not acted on.
+- **Indices, 82 — holes between held months.** `NIFTY50EQLWGT`
+  2018-12..=2020-11 (24), `NIFTY50DIVPOINT` in four runs between 2018-12
+  and 2026-03 (28), `NIFTYGROWSECT15` 2020-01..=2020-11 (11),
+  `NIFTY100ESGSECLDR` and `NIFTYM150QLTY50` 2023-07..=2023-12 (6 each),
+  `NIFTYDIVOPPS50`, `NIFTYINFRA` and `NIFTYSERVSECTOR` 2018-12..=2019-01
+  (2 each), and `NIFTYGS15YRPLUS` 2018-03 (1).
+- **Indices, 128 — after the series' last held month.**
+  `HANGSENGBEES-NAV` 2018-12..=2026-09 (94; last row 2018-11),
+  `NIFTYTATA25CAP` 2024-05..=2026-09 (29; last row 2024-04) and
+  `NIFTY50DIVPOINT` 2026-05..=2026-09 (5).
+- **Indices, 105 — one series holding nothing.** `NIFTYCONGLOMERATE` (a
+  Zerodha `INDICES` row; the other 135 targets are all in the census) has
+  no 1day month at all, so all 105 months of the window are owed. No first
+  bar exists for D-3313 or D-0319 to start from.
+
+82 + 128 + 105 = 315.
+
+**One before-first-bar case the gate excuses, which should not be read as
+empty.** `NIFTYOILANDGAS` is held 2023-06..=2026-09 (40 months). Its 1day
+pull logged "conflicting vendor candles at 1578853800" (2020-01-13 IST),
+refused before append. So the vendor did serve rows before 2023-06, and the
+store holds none of them. Because the first held month is 2023-06, the
+gate counts 2018-01..=2023-05 as before the first bar and owes nothing for
+them. This is D-0319's known limit: it reads the store only, and a refused
+span at the front of a series looks exactly like a series that had not
+started. It is not changed here. The pull receipt and `/logs` named that
+refusal when it happened.
+
+So the request was refused for the reason the gate exists: a month after a
+series' first bar that the day pass did not land. The store cannot tell
+"not landed yet" from "the vendor served nothing there", because an empty
+answer writes no census entry (`an_empty_answer_stores_nothing_and_writes_no_census`).
+Excusing those months would let the minute pass run over a day pass that
+may genuinely have failed, which D-0319 and MR-37 refuse.
+
+**The defect.** The refusal carried a count and no names. With only a
+count, an operator could not see that these were not before-first-bar
+months, which series they were, or that leaving those series out of the
+request (`members`) would open it.
+
+**Decided.** `ladder::Gate::RungFirst` carries the owed months as runs:
+one `Owed` per run of consecutive owed months of one instrument, each
+classed as `NothingHeld` (no month of the window held at the rung below),
+`Interior` (between the first and the last held month) or `AfterLast`
+(after the last held month). At most `OWED_NAMED` (12) runs are kept, in
+the caller's order; `runs` counts all of them. The `/pull/spot` refusal
+names them, for example `NIFTY (INDEX) 2026-08..=2026-08, 1 month(s),
+nothing of the series is held in this window`, says that months before a
+series' first held month are not owed and not counted, and says the
+minute pass stays shut until each run is held or its instrument is left
+out of the request.
+
+**What did not change.** Which months are owed. The count, the 409, the
+before-first-bar excusal (D-0319), the interior refusal (MR-37), D-3000's
+day-first order and D-3313's receipt note are all unchanged. A month the
+vendor really serves nothing for, after a series' first bar, still holds
+the minute pass shut. Excusing it needs evidence the store does not keep
+— a record that the vendor answered that month empty — and that is a
+store-format and operator decision, not this one.
+
+**The minute pass and months before the first bar.** It still asks the
+vendor from the window's start, not from each series' first held day
+month. Its leading empty chunks are recorded as `BEFORE FIRST BAR` by
+D-3313, at the minute rung's own floor. Trimming each instrument's window
+to its first held day month would save those requests. It is not done
+here.
+
+**Cost.** The gate already walked the caller's list twice with one census
+probe per instrument-month in each pass. The first pass now also keeps the
+latest held month beside the earliest (one more compare), and the second
+classes and folds each owed month into a run (a few compares). Still one
+probe per instrument-month per pass, never a walk of the census. Not
+timed. `docs/06-limits.md`.
+
+**Proof.** `api::ladder::tests::the_rung_refusal_names_each_owed_run_and_why`
+and `api::server::tests::a_minute_run_is_refused_until_the_day_pass_has_landed`.
+Invariant MR-45.

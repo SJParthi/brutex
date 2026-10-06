@@ -15973,3 +15973,31 @@ a neighbour (PROOF.md, scratch state).
   file's first line, so it is cut to its first 120 and last 240 characters.
   The same reason is then repeated once per refused member on the receipt:
   with no file, that is 208 lines.
+
+## The minute pass's refusal classes owed months in the same two passes — D-3315, 6 October 2026
+
+- **When it runs.** Only on a gated feed's minute request, once per request,
+  before any socket. Never per bar or per row.
+- **Cost.** `ladder::gate`'s rung check already walked the caller's list
+  twice with one `Manifest::entry` probe per instrument-month in each pass.
+  It still does. The first pass now keeps the latest held month beside the
+  earliest (one more compare in the same map entry). The second classes
+  each owed month and folds it into a run (a few compares). At most 12 runs
+  are copied into the refusal. So the work is O(instrument-months asked),
+  never O(census), and the per-month step is constant. For the operator's
+  `target=indices` window that is 14,280 instrument-months.
+- **Not timed.** No bench measures it, as for the gate before it (C-03).
+  The time is UNVERIFIED. The bound above is a count of probes, not a
+  measurement.
+- **What it cannot see.** It reads the census, not the vendor. A month after
+  a series' first held month that the vendor really served nothing for
+  looks exactly like a month the day pass has not landed, and stays owed.
+  A refused span at the FRONT of a series (`NIFTYOILANDGAS`, 2018-01 to
+  2023-05, after a conflicting-candle refusal) looks exactly like the span
+  before a first bar, and is excused (D-0319). Telling either apart needs a
+  record that the vendor answered a month empty, which the store does not
+  keep.
+- **Order dependence.** Runs fold only adjacent entries. `ladder_refusal`
+  emits each instrument's months in ascending order, so its runs are
+  maximal. A caller that interleaved instruments would get more, shorter
+  runs. The counts would not change.
