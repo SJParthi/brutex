@@ -2,13 +2,21 @@
 //
 // `node --test web/tests/` — the runner is node's own, so this costs no
 // dependency and no toolchain. It runs the same module `routes/db/+page.svelte`
-// imports; nothing here is a copy of the page's arithmetic.
+// imports (`denominators`, `isSole`, `rollUpMonths`, `monthVerdict`).
+//
+// `deco` and `decorate` below ARE LOCAL COPIES of the page's decoration, and
+// this header used to claim the file held no copy of the page's arithmetic
+// (P19-06, D-2565). The copies only shape fixture rows for the module under
+// test; the page's real `decorateRow` is driven by
+// `database-preparation.test.js` through `database-page-fixture.js`, so a
+// `pct`/`short` assertion here proves the module, not the page.
 //
 // Both cases below were REPRODUCED against the shipped page before the fix, by
 // running its own expressions over these exact rows.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import {
   denominators,
@@ -165,4 +173,17 @@ test('a month verdict over an empty set claims nothing', () => {
   });
   assert.deepEqual(rollUpMonths([]), []);
   assert.deepEqual(rollUpMonths(undefined), []);
+});
+
+test('this file says which of its helpers are copies, and the real decoration is driven elsewhere (P19-06)', () => {
+  const self = readFileSync(new URL(import.meta.url), 'utf8');
+  const header = self.slice(0, self.indexOf("import { test } from 'node:test';"));
+  // The false claim the header carried while `deco` below copied the page.
+  assert.doesNotMatch(header, /nothing here is a copy/i);
+  assert.match(self, /^function deco\(/m, 'the local copy this header names still exists');
+  assert.match(header, /`deco` and `decorate` below ARE LOCAL COPIES/);
+  // And the place the header sends a reader does drive the page's own code.
+  const preparation = readFileSync(new URL('./database-preparation.test.js', import.meta.url), 'utf8');
+  assert.match(preparation, /page\.decorateRow\(/);
+  assert.match(preparation, /import \{ databasePage, generatedMonth \} from '\.\/database-page-fixture\.js'/);
 });

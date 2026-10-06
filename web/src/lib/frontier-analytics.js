@@ -6,7 +6,6 @@ const ROW_INTEGERS = Object.freeze([
   'n',
   'mean_milli_paisa',
   't_milli',
-  'payoff_bp',
   'edge_wins',
   'trades',
   'wins',
@@ -21,7 +20,14 @@ const ROW_INTEGERS = Object.freeze([
   'gross_win',
   'gross_loss'
 ]);
+// `payoff_bp` IS NULLABLE (p5num-5, D-2568). `/frontier.json` sends `null` for
+// the payoff of a row that never gave anything back (`Edge::payoff_bp` returns
+// `i64::MAX`, which no JavaScript number holds exactly, so a bare 2^63-1 used to
+// refuse the WHOLE frontier here) and for a row of fewer than two observations
+// (a refusal the store holds as 0, which read as a measured zero). Nothing in
+// the browser ranks on it; it is validated, never computed with.
 const NULLABLE_ROW_INTEGERS = Object.freeze([
+  'payoff_bp',
   'reward_to_risk_bp',
   'return_over_drawdown'
 ]);
@@ -245,6 +251,12 @@ export function validateFrontierPayload(input, expectedIdentity = undefined) {
     seenRanks.add(row.rank);
     if (row.edge_wins > row.n || row.n > row.hits) {
       return refused(`/frontier.json rows[${at}] does not satisfy edge_wins <= n <= hits.`);
+    }
+    // One observation is not a distribution, so the payoff is a refusal and the
+    // route sends `null` for it (p5num-5, D-2568). A number there would be the
+    // refusal read back as a measurement.
+    if (row.n < 2 && row.payoff_bp !== null) {
+      return refused(`/frontier.json rows[${at}].payoff_bp must be null below two observations.`);
     }
     if (row.wins > row.trades || row.losses !== row.trades - row.wins) {
       return refused(`/frontier.json rows[${at}] does not satisfy wins + losses = trades.`);

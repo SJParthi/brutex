@@ -63497,3 +63497,175 @@ Ported from `wip/zero/conc-data` a937341. The same pattern for Candidate Univers
 
 - P9-02. `crates/costs` `lot.rs`, `strike.rs` and `expiry.rs` cite `TRACK2_OPTIONS_SPEC`, a predecessor document; `docs/00-charter.md` has no row for a lot size or an expiry weekday and its strike-interval row says no source states them. The hunt-costs-5 limit (D-1535) named cost rates only, and `docs/06-limits.md` §26 tabulated the refusal windows without saying the in-window values are unsourced.
 - Documentation only: the hunt-costs-5 limit is widened to the three contract tables and §26 states the in-window values are UNVERIFIED under `CLAUDE.md` §3 rule 1. No value changes. Sourcing them — a charter row per SEBI/NSE circular, retrieved and checked — is the operator's.
+
+### D-2560 — The backtest ranking is tested by evaluating the page's own `rankRows` — 2026-10-06
+
+P19-01. `rankRows` orders the backtest page's "best of these" table by the
+operator's eleven weighted criteria and is declared inside
+`web/src/routes/backtest/+page.svelte`. D-2750's
+`rank-rows-unmeasurable.test.js` extracts and drives it, but only with the
+loss-ratio and reward-to-risk weights and with no constant column, so inverting
+"less drawdown is better" (M45), scoring a constant column 0 instead of 0.5
+(M46) and the direction of the other nine criteria stayed unpinned.
+`web/tests/rank-rows.test.js` extracts the same `losingPct`, `lossRatio` and
+`rankRows` through `svelte/compiler` (the `declarations` helper of D-2564) and
+pins the direction of all eleven criteria over every input order, the 0.5 a
+constant column contributes per unit weight, the GENERIC unmeasurable rule
+(null, undefined and NaN excluded from a range and scored 0.5, on a criterion
+D-2750 does not special-case) beside D-2750's unbounded rule, ties broken on the
+server's rank, unpriced rows dropped, and the `n` bound.
+
+**Rejected.** Moving `rankRows` into `src/lib/rank-rows.js` (the finding's
+first suggestion): it is the larger change and is not needed for the test to
+drive the shipped code; the extraction fails loudly the day the declaration
+moves. No behaviour changed. Invariant ZX-80.
+
+### D-2561 — `impliedConditions` is tested, and its direction rule is the module's — 2026-10-06
+
+P19-02. No test imported `web/src/lib/condition-groups.js`, so flipping the
+comparison in `impliedConditions` dimmed the informative pivot level while the
+page printed the same "N of M carry the setup" count (M51 survived).
+`web/tests/condition-groups.test.js` drives the shipped module: above s2 + s3
+implies s3; below s1 + s2 implies s1; opposite sides imply nothing; `_band` is
+stripped; non-ladder families and `near` imply nothing; malformed input; and
+every subset of the twelve-level ladder on each side, in both input orders,
+keeps exactly its tightest level.
+
+**A correction to the finding's sketch, stated.** The research note said
+"below s1+s2 (s2 implied)". That reverses the inequality: s2 lies below s1, so
+"below s2" is the tighter claim and implies "below s1". The module keeps the
+lowest level for `below` and is right; the test pins the module, not the note.
+No behaviour changed. Invariant ZX-81.
+
+### D-2562 — The browser's frontier validator is held to a Wilson table Rust also pins — 2026-10-06
+
+P19-03. `web/src/lib/frontier-analytics.js` re-derives `meets.assurance` from
+`wins`/`trades` with its own copy of `runner::grid::Cell::assurance_bp`, and
+the only fixture (3/4 against a 3,000 bp rule) let z = 1.645 (M36), trunc →
+round (M41), dropping the `count > rules.top` check (M38), accepting any wire
+value where Rust sends null (M39) and dropping the `rank !== at + 1` check
+(M34) all survive. Added: a table of fourteen (wins, trades, bound) rows at
+which those drifts move the answer, asserted at `bound - 1`, `bound` and
+`bound + 1` in both verdict directions; refusals for `count > top` with `top`
+itself admitted; skipped, shifted, reversed and repeated ranks; and a finite
+ratio where Rust sends null and null where Rust sends a number.
+
+**One table, two copies.** The bounds were computed in IEEE double with the
+same operation order as both implementations, and
+`runner::grid::tests::the_wilson_table_the_browser_copy_is_checked_against`
+pins the same fourteen rows against the Rust function, so a drift on either side
+fails a build rather than a browser refusal in front of the operator. No
+production behaviour changed. Invariants ZX-82 (browser) and ZX-89 (Rust).
+
+### D-2563 — Missing session evidence is pinned as `absent`, not just as `unverified` — 2026-10-06
+
+P19-04. `monthVerdict` returns `{ word: 'unverified', kind: 'absent' }` when a
+month carries `evidence_error`, and the tests checked only `.word`, so changing
+the kind to `'bad'` (red, "damaged") survived (M17). `web/tests/gap-verdict.test.js`
+now asserts the whole verdict, and a new case pins `absent` for every
+combination of `expected`, `lost_minutes` and `unmeasured_minutes` beside an
+evidence error, with the earlier-precedence faults keeping their own words. No
+behaviour changed. Invariant ZX-83.
+
+### D-2564 — Page tests match comment-free code, and evaluate where they claim behaviour — 2026-10-06
+
+P19-05. Tests that `assert.match` a raw `+page.svelte` file are satisfied by the
+same characters inside a comment: commenting out the board effect's cleanup
+(M48) and rendering `/ {n(r.exp)}` with the guarded expression kept in an HTML
+comment (M49) both stayed green. `web/tests/page-code-fixture.js` adds
+`codeOf` (every script comment found by acorn's own tokenizer, every `<!-- -->`
+found by `svelte/compiler`, blanked with offsets kept), `declarations`,
+`effects` and `templateExpressions`, with a self-test in
+`page-code-fixture.test.js`. The two named tests are rewritten over it: the
+comparison-board `$effect` is EXECUTED and its returned cleanup must invalidate
+and abort; the ingest denominator cell is found among the rendered `{…}`
+expressions and evaluated for an unknown and a known total.
+
+**Scope, stated.** The finding counts about eighteen more tests of the same
+shape. Only the two it named are rewritten here; the rest are unchanged and
+remain text matches. `acorn` is `svelte`'s own parser, installed by the lockfile
+at `node_modules/acorn`, and is imported without being added to
+`package.json`. Invariant ZX-84.
+
+### D-2565 — The calendar test drives the shipped epoch-day converter, and a test header stops claiming no copies — 2026-10-06
+
+P19-06. D-2732 already moved `isoOfEpochDay` into `web/src/lib/calendar-owed.js`
+and `calendar-loader.test.js` drives it at two days. `calendar-owed.test.js`
+still declared its own `isoOf` with the same body and fed it to `withheldDays`,
+so those tests passed whatever the module's converter did. The local copy is
+now `const isoOf = isoOfEpochDay`, and new tests pin the converter at fixed days
+from 0001-01-01 through 2025-01-01 and a leap day, twenty consecutive days
+(which a one-millisecond shift, M54, breaks), the `RangeError` outside `Date`'s
+range, and that the file declares no copy. `completeness.test.js`'s header
+claimed it held no copy of the page's arithmetic while `deco`/`decorate` are
+copies; it now says so and names `database-preparation.test.js` as the place
+the page's real `decorateRow` is driven, and a test holds the header to that.
+No production code changed. Invariant ZX-85.
+
+### D-2566 — The `ask` timeout test holds the event loop itself — 2026-10-06
+
+P19-07. `ask` arms `AbortSignal.timeout`, whose timer is unref'd, against a
+fake `fetch` that never settles; on Node 22 and earlier the loop drained before
+the deadline and `node --test` cancelled that test and the two after it, exiting
+1 for a non-defect on the Node 22 toolchain D-1507 records (reproduced by the
+P19 audit on Node 20, 21 and 22; CI pins Node 24 and `web/package.json` names
+no engine). The test now runs inside
+`holdingTheLoop`, a ref'd interval cleared in `finally`. Added: the shortest
+deadlines (0, 1, 999, 1,000, 1,499 ms) each end in a named timeout with the
+rounded seconds, and a throwing body still releases the hold.
+
+**Rejected.** `"engines": { "node": ">=24" }` in `web/package.json`: it would
+make a local Node 22 run refuse to install rather than pass, and changing the
+manifest without regenerating the lockfile is a second change this row does not
+need. No production code changed. Invariant ZX-86.
+
+### D-2567 — A hidden backtest tab stops polling the audited status routes — 2026-10-06
+
+conc17-2, web half. The backtest page's status owner (`statusRequests`) polled
+`/backtest/run.json` every two seconds and, on each running tick, `/live.json`,
+whether or not the tab was visible; both routes are journaled by
+`api::operation_audit::audited_route`, so a background tab wrote about two
+invocation records every two seconds for the life of a run.
+`createPageRequests` (`web/src/lib/page-requests.js`) takes two optional
+options, `visible` and `listen`. A scheduled read whose timer comes due while
+`visible()` is false is parked and issues no request and no reschedule; the
+first wake that finds the page visible runs it at once. A newer `schedule`, a
+direct `run`, `cancel` and `dispose` discard a parked read; `dispose` removes
+the listener once. Without the options nothing changes. The backtest page passes
+`document.visibilityState === 'visible'` and a `visibilitychange` listener.
+`watchVisible` now hands `createPageRequests` only its clock, so it still owns
+the single listener it always had.
+
+**Why not `watchVisible`.** That helper repeats one `work`; this owner schedules
+`pollSweep`, `adoptRunning` and `refreshCurrentAdmission` from many call sites.
+
+**What this does not do — owner decision.** It cuts the RATE while hidden; it
+does not BOUND the journal. A visible tab still writes about two records every
+two seconds, and the journal has no retention (D-1445 states the growth and
+gives no rate). Bounding it means either
+dropping the two GET status reads from `audited_route` (which also changes the
+cross-site admission that reads the same list, D-0687) or a bounded ring for
+reads; either changes what the audit records and needs an owner entry.
+`docs/06-limits.md` states it. Invariant ZX-87.
+
+### D-2568 — `payoff_bp` is `null` on the wire when unbounded or below two observations — 2026-10-06
+
+p5num-5. `/frontier.json` and `/live.json` emitted `row.payoff_bp` raw.
+`runner::outcome::Edge::payoff_bp` answers `i64::MAX` for a combination that
+never gave anything back and `0` for fewer than two observations. The first,
+`2^63 - 1`, is not an exact JavaScript number, and `validateFrontierPayload`
+listed `payoff_bp` among the integers that must be exact, so one honest
+unbounded row refused the whole combinations panel; the second read as a
+measured zero. `api::frontierjson::payoff_on_wire` now sends `null` for `n < 2`
+and for `i64::MAX` (through the existing `measurable`), used by both routes;
+`frontier-analytics.js` moves `payoff_bp` to the nullable integers and refuses a
+number below two observations. Nothing in the browser ranks on it.
+
+**What is left to an owner, stated.** The method's third absence -- no
+observation moved in the position's favour -- is also stored as `0` in the
+frontier file, and the stored row keeps no count that separates it from a
+payoff that truncated to zero (`direction` is the priced side, not the evidence
+side). Telling them apart needs the refusal persisted beside the value, a
+frontier file-format change under `CLAUDE.md` §3 rule 8, and is not made here.
+The stored bytes, the ranking and run identity are unchanged. Invariants ZX-88
+(api) and ZX-82 (browser).

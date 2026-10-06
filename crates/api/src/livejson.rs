@@ -221,7 +221,10 @@ fn write_row(out: &mut String, row: &cli::frontier::Row, summary: &cli::live::Su
             row.n,
             row.mean_milli_paisa,
             row.t_milli,
-            row.payoff_bp,
+            // NULL FOR AN UNBOUNDED OR REFUSED PAYOFF, the one rule
+            // `/frontier.json` follows (p5num-5, D-2568): a bare `i64::MAX`
+            // is the same 64-bit-unsafe number the comment above refuses.
+            crate::frontierjson::payoff_on_wire(row.n, row.payoff_bp),
             row.wins,
             // THE COMPARISON, MADE HERE RATHER THAN LEFT TO THE READER. Both
             // figures are on the wire beside it, so this adds no fact -- it
@@ -433,6 +436,55 @@ mod tests {
                 cli::live::clears_bar(&row(n, t_milli), &summary),
                 clears,
                 "n {n} t {t_milli}"
+            );
+        }
+    }
+
+    /// p5num-5 (D-2568): the in-flight row follows `/frontier.json`'s payoff
+    /// rule. Before the fix an unbounded row carried a bare
+    /// `9223372036854775807` here, the 64-bit-unsafe number this module's own
+    /// row comment refuses for the mask words.
+    #[test]
+    fn an_in_flight_row_carries_a_null_payoff_where_the_method_has_none() {
+        let summary = cli::live::Summary {
+            trials: 3_689,
+            bar_milli: 4_352,
+            priced: 0,
+        };
+        for (n, payoff, expected) in [
+            (4_070_u64, 140_i64, r#""payoff_bp":140,"#),
+            (4_070, i64::MAX, r#""payoff_bp":null,"#),
+            (2, 0, r#""payoff_bp":0,"#),
+            (1, 0, r#""payoff_bp":null,"#),
+            (0, 0, r#""payoff_bp":null,"#),
+        ] {
+            let row = cli::frontier::Row {
+                identity: [0x7d_u8; 32],
+                rank: 1,
+                mask_words: [9, 0, 0, 0, 0, 0],
+                hits: 4_395,
+                n,
+                mean_milli_paisa: 12_300,
+                t_milli: 1_802,
+                payoff_bp: payoff,
+                wins: 0,
+                trades: 0,
+                cell_wins: 0,
+                pessimistic: 0,
+                worst_trade: 0,
+                max_drawdown: 0,
+                min_win: 0,
+                gross_win: 0,
+                gross_loss: 0,
+                direction: cli::frontier::Direction::Short,
+                rules: cli::Rules::elite(400, 25),
+            };
+            let mut out = String::new();
+            super::write_row(&mut out, &row, &summary);
+            assert!(out.contains(expected), "n {n} payoff {payoff}: {out}");
+            assert!(
+                !out.contains("9223372036854775807"),
+                "no bare i64::MAX reaches the wire: {out}"
             );
         }
     }

@@ -10458,6 +10458,46 @@ mod tests {
             previous = bound;
         }
     }
+
+    /// THE TABLE THE BROWSER'S COPY OF THIS BOUND IS HELD TO (P19-03, D-2562).
+    ///
+    /// `web/src/lib/frontier-analytics.js` re-derives `meets.assurance` from
+    /// `wins` and `trades` and refuses the whole frontier when its answer and
+    /// this one disagree. Its test, `web/tests/frontier-analytics.test.js`,
+    /// checks that copy against the SAME rows pinned here, so a drift on either
+    /// side fails a build. The rows sit where a drifted copy moves: `z = 1.96`
+    /// moves 3/3 and 4/4 by one basis point, rounding instead of truncating
+    /// moves 1/4, 7/9, 2/3, 19/20 and 1000/1000.
+    #[test]
+    fn the_wilson_table_the_browser_copy_is_checked_against() {
+        for (wins, trades, expected) in [
+            (0_u64, 1_u64, 0_i64),
+            (1, 1, 2_065),
+            (1, 2, 945),
+            (2, 3, 2_076),
+            (3, 3, 4_385),
+            (1, 4, 455),
+            (3, 4, 3_006),
+            (4, 4, 5_101),
+            (7, 9, 4_525),
+            (19, 20, 7_638),
+            (50, 100, 4_038),
+            (99, 100, 9_455),
+            (100, 100, 9_630),
+            (1_000, 1_000, 9_961),
+        ] {
+            let cell = Cell {
+                trades,
+                wins,
+                ..Cell::default()
+            };
+            assert_eq!(
+                cell.assurance_bp(),
+                expected,
+                "{wins}/{trades}: the browser's table says {expected}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

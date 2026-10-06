@@ -15685,3 +15685,25 @@ per-candidate primitive from `CLAUDE.md` §3 rule 4.
   a run would need the attempt's origin, which the handler does not receive.
 - **Not timed.** No bench measures a log walk. The 4 MiB per half is the
   configured cap, not a measurement, and the time it takes is UNVERIFIED.
+
+## A visible backtest tab still journals its status poll — D-2567, 6 October 2026
+
+conc17-2. The backtest page's status owner now issues no read while the tab is
+hidden (`web/src/lib/page-requests.js`, invariant ZX-87). That cuts the rate; it
+does not bound the store:
+
+- **While visible, the poll still writes.** Each running tick reads
+  `/backtest/run.json` and `/live.json`, and `api::operation_audit::audited_route`
+  journals both, so a visible tab adds about two invocation records every two
+  seconds plus request latency for as long as a run lasts. That is at most about
+  86,400 records a day per visible tab. This is an extrapolation from the poll
+  cadence, not a measurement; no bench covers it.
+- **The invocation journal has no retention** (D-1445), so its directory grows with the
+  number of status reads ever served, and the cost of a directory insert or
+  lookup then depends on an entry count that only grows. Not timed.
+- **Each open visible tab multiplies the rate.** Nothing coordinates polls
+  across tabs.
+- **Bounding it is an owner decision.** Dropping the two GET status reads from
+  `audited_route` also changes the cross-site admission that reads the same list
+  (D-0687); a bounded ring for reads changes what the audit records. Neither is
+  made here.
