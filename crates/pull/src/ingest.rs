@@ -2264,7 +2264,7 @@ fn derive_all(
         None
     };
     if let Some(minutes) = history.as_deref() {
-        check_day(minutes, instrument, store_root, symbol_id, &into);
+        let _level = check_day(minutes, instrument, store_root, symbol_id, &into);
     }
     let source_bars = history.as_deref().unwrap_or(source_bars);
     for rung in derived_from(source) {
@@ -2494,16 +2494,18 @@ fn derived_from(source: Timeframe) -> impl Iterator<Item = Timeframe> {
 ///
 /// One read of the month's day file, `O(days)`, then [`crate::daycheck::compare`],
 /// `O(minutes + days)`. Once per instrument-month after its minute bars land.
+///
+/// Answers the level of the line it emitted, or `None` for a vendor it does
+/// not check, so a test can tell a check that ran from one that did nothing
+/// without reading the log back (G18-rest-35, D-2087).
 fn check_day(
     minutes: &[Bar],
     instrument: &str,
     store_root: &Path,
     symbol_id: u32,
     into: &DeriveInto<'_>,
-) {
-    let Some(found) = day_check_of(minutes, store_root, symbol_id, into) else {
-        return;
-    };
+) -> Option<telemetry::Level> {
+    let found = day_check_of(minutes, store_root, symbol_id, into)?;
     let month = into.month.to_string();
     let event = daycheck_headline(&found)
         .with("instrument", telemetry::Value::Str(instrument))
@@ -2522,6 +2524,7 @@ fn check_day(
         Err(why) => event.with("why", telemetry::Value::Str(why)),
     };
     let _dropped_when_filtered = telemetry::emit(&event);
+    Some(event.level())
 }
 
 /// The level and sentence of [`check_day`]'s line: `Info` only when the
@@ -3947,11 +3950,14 @@ mod tests {
         )]
         let symbol_id = brutex_core::universe::fnv1a("NIFTY") as u32;
         let zerodha = into(Vendor::Zerodha);
+        let level = |bars: &[Bar], vendor: &DeriveInto<'_>| {
+            check_day(bars, "NIFTY", &root, symbol_id, vendor)
+        };
 
         // NO PULLED DAY FILE: a reason, never a silent pass.
         let found = day_check_of(&minutes, &root, symbol_id, &zerodha).expect("zerodha is checked");
         assert!(found.is_err(), "{found:?}");
-        check_day(&minutes, "NIFTY", &root, symbol_id, &zerodha);
+        assert_eq!(level(&minutes, &zerodha), Some(telemetry::Level::Warn));
 
         // THE PULLED DAY MATCHES THE FOLD.
         let _ = write_and_count(
@@ -3967,7 +3973,7 @@ mod tests {
             .expect("the day file reads");
         assert_eq!((report.agreed, report.differed), (1, 0));
         assert!(report.clean());
-        check_day(&minutes, "NIFTY", &root, symbol_id, &zerodha);
+        assert_eq!(level(&minutes, &zerodha), Some(telemetry::Level::Info));
 
         // A MINUTE THAT MOVED THE HIGH is named with both values.
         let mut moved = minutes;
@@ -3983,13 +3989,13 @@ mod tests {
             .clone()
             .expect("the first disagreement is named");
         assert!(first.contains("high pulled 120 folded 125"), "{first}");
-        check_day(&moved, "NIFTY", &root, symbol_id, &zerodha);
+        assert_eq!(level(&moved, &zerodha), Some(telemetry::Level::Warn));
 
         // ANY OTHER VENDOR IS NOT CHECKED: its day bar follows its own
         // convention (D-0077).
         let dhan = into(Vendor::Dhan);
         assert!(day_check_of(&moved, &root, symbol_id, &dhan).is_none());
-        check_day(&moved, "NIFTY", &root, symbol_id, &dhan);
+        assert_eq!(level(&moved, &dhan), None);
 
         let _ = std::fs::remove_dir_all(&root);
     }

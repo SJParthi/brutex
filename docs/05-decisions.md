@@ -63504,3 +63504,24 @@ uid 65534 ran, and found four survivors:
   (G18-rest-34). With the root and its parent both absent, `root/a/b` counts
   `root/a` and `root/a/b` and stops at the root. A directory outside the root
   counts nothing.
+
+### D-2087 — `check_day` answers the level of the line it emitted — 2026-10-06
+
+**What was observed.** The run over this group's own changed lines
+(`cargo mutants --in-diff` of 969493e1..d170a21) found one MISSED mutant:
+`check_day` replaced with `()`. D-2075 moved its body into the diff.
+`check_day` emits one `pull.daycheck` line and returned nothing. The Zerodha
+test called it four times and observed none of them, so deleting the whole
+check was invisible.
+
+**Decided.** `check_day` returns `Option<telemetry::Level>`: the level of the
+line it emitted, or `None` for a vendor it does not check. The caller in
+`ingest` discards it. Nothing about what is logged changes.
+
+The test
+`ingest::tests::zerodha_minutes_are_checked_against_the_pulled_day_and_no_other_vendor_is`
+(G18-rest-35) now asserts four results:
+- a missing day file gives `Warn`;
+- a matching day gives `Info`;
+- a moved high gives `Warn`;
+- Dhan gives `None`.
