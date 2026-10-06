@@ -1354,7 +1354,10 @@ mod tests {
         let first = install_and_read_with(&temp.0, day(3), &bytes, failing)
             .expect_err("the first directory sync failed");
         assert!(first.contains("crash durability UNVERIFIED"), "{first}");
-        assert_eq!(read_entry(&temp.0, day(3)).expect("visible"), Some(bytes.clone()));
+        assert_eq!(
+            read_entry(&temp.0, day(3)).expect("the entry reads back"),
+            Some(bytes.clone())
+        );
 
         let again = install_and_read_with(&temp.0, day(3), &bytes, failing)
             .expect_err("a read is not a directory sync");

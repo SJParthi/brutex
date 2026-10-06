@@ -1928,7 +1928,10 @@ mod tests {
     fn since_bounds_a_run_poll_to_the_run_and_off_older_damage() {
         let (dir, sink) = sink_in("since-bound");
         for _ in 0..40 {
-            let _ = sink.emit(&telemetry::Event::info("api.serve", "older unrelated history"));
+            let _ = sink.emit(&telemetry::Event::info(
+                "api.serve",
+                "older unrelated history",
+            ));
         }
         drop(sink);
         // A crash fragment: no newline. The next open terminates it into a
@@ -1955,7 +1958,11 @@ mod tests {
 
         let unbounded = asked("limit=200&run=77");
         assert!(unbounded.ignored.is_empty());
-        let walked = super::both_halves(&dir, Some(&cli), &unbounded.query.clone().scanning_at_most(1024));
+        let walked = super::both_halves(
+            &dir,
+            Some(&cli),
+            &unbounded.query.clone().scanning_at_most(1024),
+        );
         assert!(
             walked.malformed == 1 || walked.hit_scan_cap,
             "the unbounded poll reads the older damage or its cap: {walked:?}"
@@ -1966,15 +1973,25 @@ mod tests {
         let bounded = asked(&format!("limit=200&run=77&since={since}"));
         assert!(bounded.ignored.is_empty(), "{:?}", bounded.ignored);
         assert_eq!(bounded.since, Some(since));
-        let tail = super::both_halves(&dir, Some(&cli), &bounded.query.clone().scanning_at_most(1024));
+        let tail = super::both_halves(
+            &dir,
+            Some(&cli),
+            &bounded.query.clone().scanning_at_most(1024),
+        );
         assert_eq!(tail.records.len(), 5, "every event of the run");
         assert_eq!(tail.malformed, 0, "the older torn line is never read");
-        assert!(!tail.hit_scan_cap, "the walk ended at the run's start: {tail:?}");
+        assert!(
+            !tail.hit_scan_cap,
+            "the walk ended at the run's start: {tail:?}"
+        );
         let json = json_over(&dir, Some(&cli), &bounded, None);
         assert!(json.contains(&format!(r#""since":{since},"#)), "{json}");
         assert!(json.contains(r#""malformed":0,"#), "{json}");
         assert!(page_shell(&bounded, "").contains(&format!(r#"name="since" value="{since}""#)));
-        assert!(page_shell(&bounded, "").contains(&format!("&amp;since={since}")) || page_shell(&bounded, "").contains(&format!("&since={since}")));
+        assert!(
+            page_shell(&bounded, "").contains(&format!("&amp;since={since}"))
+                || page_shell(&bounded, "").contains(&format!("&since={since}"))
+        );
     }
 
     /// OBSV-05: `since` is read the way `run` is -- canonical digits only, at
@@ -1997,7 +2014,11 @@ mod tests {
             assert_eq!(asked.query.since_unix_millis, None, "{bad}");
             assert_eq!(asked.ignored, vec![("since", bad.to_owned())], "{bad}");
         }
-        for (good, ms) in [("0", 0_i64), ("1786197791427", 1_786_197_791_427), ("9223372036854775807", i64::MAX)] {
+        for (good, ms) in [
+            ("0", 0_i64),
+            ("1786197791427", 1_786_197_791_427),
+            ("9223372036854775807", i64::MAX),
+        ] {
             let asked = asked(&format!("since={good}"));
             assert_eq!(asked.since, Some(ms), "{good}");
             assert_eq!(asked.query.since_unix_millis, Some(ms), "{good}");

@@ -63139,3 +63139,127 @@ longer be reached, so it was removed. The frontier writer keeps its own
 
 **Rejected.** Changing the test to expect the 4,096 text. That would
 leave the two descent doors with different bounds.
+
+### D-3200 — The merged `/logs` page is not complete when its limit cut records it read — 2026-10-06
+
+**What was observed.** `logs::merged` truncates the union of the served and
+`cli` halves to `limit`, then set `reached_oldest` to the AND of the two
+halves. With three events in each half and `limit=4`, each half read its
+whole file and said `true`, the union dropped two events it had read, and
+the page said `"reached_oldest":true` and withheld "Older events exist".
+`telemetry::Tail` documents `false` as "events older than these exist and
+are not on the page", and one half alone already says `false` when its own
+limit stops it short.
+
+**Decided.** A cut is an unreached oldest: `merged` records whether the
+truncation dropped anything and ANDs `!cut` into `reached_oldest`. Exactly
+at the limit nothing is cut and the flag stays `true`. OBSV-01.
+
+**Rejected.** Making the merged flag always `false` under a limit. That is
+the over-cautious answer the field's own history (`Stop::Exhausted`) was
+fixed to stop giving on full pages.
+
+### D-3201 — `/masters/status.json` names a master it cannot read — 2026-10-06
+
+**What was observed.** `status_rows` used `std::fs::metadata(&path).ok()`,
+so a denied directory, a symlink loop or an I/O error rendered exactly as an
+absent file (`"present":false`), with no reason, and `/mapping` told the
+operator to fetch a file that was on disk. `CLAUDE.md` §4 bans that fallback.
+
+**Decided.** Only `NotFound` is absent. Any other error renders
+`"present":null` with `"unreadable":"<the OS reason>"`; every row carries
+`unreadable` (`null` when readable or absent). While any row is unreadable,
+`restart_required` is `null` (unknown) rather than a guessed `false`.
+`/mapping` shows "unreadable" with the reason and keeps the restart flag
+unknown. OBSV-02.
+
+**Rejected.** Answering the whole route with a 503. One unreadable master
+would hide the three that can be read.
+
+### D-3202 — A cash-session cache entry that matches is synced before it is confirmed — 2026-10-06
+
+**What was observed.** `install_and_read` lands payload and receipt, then
+syncs the cache directory; when that sync fails it says "crash durability
+UNVERIFIED". A retry of the same bytes found both files, matched them and
+returned `Ok` without syncing anything, so the entry was reported durable on
+the strength of a read. `docs/02-store-format.md` says payload, receipt and
+directory are synced, and `masters::refresh_mtime` refuses the same shortcut
+(D-2374).
+
+**Decided.** The matching-entry branch runs the same directory sync before
+it releases the lock and confirms, with the same "UNVERIFIED" wording on
+failure. The sync is a parameter of `install_and_read_with`, so a test can
+make it fail; production passes the real `sync_all`. OBSV-03.
+
+**Rejected.** Syncing the parent of the cache root too. A lost cache root is
+a clean miss and a refetch, never a wrong answer (refuted in round 1).
+
+### D-3203 — A failed census append names how many entries landed — 2026-10-06
+
+**What was observed.** `append_locked` failed with "could not be appended to
+after N entry write(s)" where N was the number ASKED for. A failure at the
+open lands none and a failure at append `i` leaves `i` committed slots, so
+the sentence told the operator entries had been written that had not.
+
+**Decided.** `write_appends_observed` returns the landed count with its
+error: `0` at the open, `i` at append `i`, all of them when only the final
+modification-time step fails. The sentence reads "after L of N entry
+write(s)". OBSV-04.
+
+**Rejected.** Dropping the count. It is the one number an operator
+reconciling the census against the error needs.
+
+### D-3204 — `/logs.json` takes `since`, and the live poll bounds itself to its run — 2026-10-06
+
+**What was observed.** The backtest page polls
+`/logs.json?limit=200&run=<attempt>`. `run=` is a skip-filter, so a run with
+fewer than 200 events had both halves read to the oldest line or to the
+4 MiB scan cap (D-2327). `live-progress.ts` refuses on `hit_scan_cap` and on
+any `malformed` count, and `terminate_torn_tail` leaves a crash's fragment as
+a standing malformed line. A healthy run's live view was refused for history
+it had no part in: always, once the other half passed 4 MiB, and after any
+earlier crash whose torn line was still in the walk. `telemetry::Query::since`,
+the one filter that ends a walk, had no production caller.
+
+**Decided.** `/logs` and `/logs.json` read `since` (canonical non-negative
+integer milliseconds, at most `i64::MAX`, inclusive), apply it with
+`Query::since`, echo it as `"since"`, carry it in the "as JSON" link and the
+form, and name an unreadable value in `ignored` as `level` and `run` are
+(D-1765). The live poll passes `since=floor(started_micros / 1000)`: the
+start marker is emitted after `started_micros` is read and the sink stamps
+no line earlier than the clock (`Sink::emit` clamps `ms` to `last_at`), so no
+event of the attempt is older. Without a usable `started_micros` the poll is
+the unbounded one it was. The fold's own refusals on cap, malformed and
+missing are unchanged. OBSV-05.
+
+**Rejected.** Relaxing `recordsOf` to ignore the cap and malformed counts.
+Neither can be attributed to a run, so ignoring them could hide a lost event
+of this run.
+
+### D-3205 — A `sweep-all` month that refuses is one Warn event with its reason — 2026-10-06
+
+**What was observed.** `sweep_chunk` emitted "stored month swept" per swept
+month and nothing for a month refused before its sweep, nor for a month that
+swept and then refused while being filed ("not recorded: …"). The report's
+`REFUSED` row was the only trace; D-0226 named "not a refusal" as a thing
+the read half failed to log.
+
+**Decided.** After each month's row is formed, in input order, a refused row
+emits `cli.sweep` Warn "stored month refused" with `feed`, `label`,
+`identity` (empty when none was formed), `swept` (whether the sweep ran) and
+`reason`. One event per instrument-month, the granularity gate 17 prescribes.
+OBSV-06.
+
+**Rejected.** Moving "stored month swept" after filing. It reports the
+sweep, which did happen; the refusal is a second fact, not a correction.
+
+### D-3206 — A refused `sweep-stored` logs its reason — 2026-10-06
+
+**What was observed.** `sweep_stored` printed `refused: <why>` and the log
+held only `run_with_sink`'s "command finished" with `phase=refused` and no
+reason.
+
+**Decided.** The refusal emits the same `cli.sweep` Warn "stored month
+refused" as `sweep-all`, with `feed`, `label` (`feed underlying rung
+YYYY-MM`) and `reason`, so one search on `/logs` finds both verbs'
+refusals. OBSV-07.

@@ -3834,7 +3834,22 @@ pub fn sweep_stored(
 ) -> String {
     match sweep_stored_inner(vendor_word, underlying, rung, year, month, min_hits) {
         Ok(text) => text,
-        Err(why) => format!("refused: {why}\n"),
+        Err(why) => {
+            // THE REASON REACHES THE LOG, not only the terminal: the generic
+            // "command finished" carries `phase=refused` and no reason, so
+            // `/logs` could not say why a month refused (OBSV-07, D-3206).
+            // The event and label are `sweep-all`'s, so one search finds both.
+            note(
+                &telemetry::Event::warn("cli.sweep", "stored month refused")
+                    .with("feed", vendor_word)
+                    .with(
+                        "label",
+                        format!("{vendor_word} {underlying} {rung} {year}-{month:02}").as_str(),
+                    )
+                    .with("reason", why.as_str()),
+            );
+            format!("refused: {why}\n")
+        }
     }
 }
 

@@ -1285,17 +1285,52 @@ mod tests {
         assert_eq!(mine.len(), 2, "one event per refused month: {events:?}");
         for event in mine {
             assert_eq!(event.level, telemetry::Level::Warn);
-            assert!(crate::ledger_all::tests::says(event, "feed", "groww"), "{event:?}");
+            assert!(
+                crate::ledger_all::tests::says(event, "feed", "groww"),
+                "{event:?}"
+            );
             assert!(
                 crate::ledger_all::tests::says(event, "reason", "could not be read from the store"),
                 "the month's own reason: {event:?}"
             );
             assert_eq!(
-                event.field("swept").and_then(telemetry::OwnedValue::as_bool),
+                event
+                    .field("swept")
+                    .and_then(telemetry::OwnedValue::as_bool),
                 Some(false),
                 "refused BEFORE sweeping: {event:?}"
             );
         }
+    }
+
+    /// OBSV-07 (D-3206): **`sweep-stored`'s refusal is one Warn event with its
+    /// reason.** The verb printed `refused: …` and the log held only the
+    /// generic "command finished" with `phase=refused` and no reason, so
+    /// `/logs` could not say why a single-month sweep refused.
+    #[test]
+    fn a_refused_sweep_stored_is_logged_with_its_reason() {
+        let from = crate::ledger_all::tests::mark();
+        let text = crate::sweep_stored("groww", "NIFTY", "2min", 2026, 3, 100);
+        assert!(text.starts_with("refused: "), "{text}");
+        let events: Vec<telemetry::Record> = swept_events(from, "stored month refused")
+            .into_iter()
+            .filter(|e| crate::ledger_all::tests::says(e, "label", "groww NIFTY 2min 2026-03"))
+            .collect();
+        assert_eq!(events.len(), 1, "{events:?}");
+        let event = events.first().expect("one");
+        assert_eq!(event.level, telemetry::Level::Warn);
+        assert!(
+            crate::ledger_all::tests::says(event, "feed", "groww"),
+            "{event:?}"
+        );
+        let reason = text
+            .trim_end()
+            .strip_prefix("refused: ")
+            .expect("the printed reason");
+        assert!(
+            crate::ledger_all::tests::says(event, "reason", reason.get(..60).unwrap_or(reason)),
+            "the same reason the operator was shown: {event:?} vs {text}"
+        );
     }
 
     /// **A walk whose one swept month could not be filed says it swept, and
@@ -1357,9 +1392,14 @@ mod tests {
             .collect();
         assert_eq!(unfiled.len(), 1, "{unfiled:?}");
         let unfiled = unfiled.first().expect("one");
-        assert!(crate::ledger_all::tests::says(unfiled, "reason", "not recorded: "), "{unfiled:?}");
+        assert!(
+            crate::ledger_all::tests::says(unfiled, "reason", "not recorded: "),
+            "{unfiled:?}"
+        );
         assert_eq!(
-            unfiled.field("swept").and_then(telemetry::OwnedValue::as_bool),
+            unfiled
+                .field("swept")
+                .and_then(telemetry::OwnedValue::as_bool),
             Some(true),
             "it swept, then refused while being filed: {unfiled:?}"
         );

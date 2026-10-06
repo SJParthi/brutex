@@ -904,3 +904,41 @@ Narrative only. No row is added to the table above.
   integer annotation are refused by name. D-2270, AHC-01.
 - **h-pull-2**: fixed. The TOTP base32 decoder refuses an impossible length
   and non-zero bits past the last whole byte. D-2271, AHC-02.
+
+### Observability lens L1 (attack/observability) — dispositions — 2026-10-06
+
+Narrative only. No row is added to the table above. Each id is `F-` and the
+first six hex digits of the SHA-256 of the title as written here. Each fix is
+`IN PROGRESS` on `attack/observability` until it merges to `main`; each has a
+test recorded failing against the pre-fix code.
+
+- **F-ECBE65** `wrong` — The merged /logs page claimed reached_oldest after its
+  limit cut read records. `crates/api/src/logs.rs` `merged`. IN PROGRESS.
+  D-3200, OBSV-01.
+- **F-24EDBD** `law` — /masters/status.json reported an unreadable master as
+  absent (§4 fallback). `crates/api/src/mastersrun.rs` `status_rows`.
+  IN PROGRESS. D-3201, OBSV-02.
+- **F-8AEE77** `wrong` — A cash-session cache reinstall reported durable on the
+  strength of a read. `crates/pull/src/cash_session_cache.rs`
+  `install_and_read`. IN PROGRESS. D-3202, OBSV-03.
+- **F-08BBA7** `wrong` — A failed census append named the requested entry
+  count, not the landed one. `crates/pull/src/ingest.rs` `append_locked`.
+  IN PROGRESS. D-3203, OBSV-04.
+- **F-6EF086** `wrong` — Live sweep progress refused on log history older than
+  the run. `web/src/lib/live-progress.ts`, `crates/api/src/logs.rs` `asked`.
+  IN PROGRESS. D-3204, OBSV-05.
+- **F-C27563** `gap` — A sweep-all month refused before or while filing left no
+  log event. `crates/cli/src/batch.rs` `sweep_chunk`. IN PROGRESS. D-3205,
+  OBSV-06.
+- **F-B26F07** `gap` — A refused sweep-stored left no reason in the log.
+  `crates/cli/src/lib.rs` `sweep_stored`. IN PROGRESS. D-3206, OBSV-07.
+- REFUTED in round 1, with reasons: a pull refused at 400/409 before the pull
+  journal (the handler's "a refusal is recorded too" covers parse refusals
+  only, and `note_request` logs the 4xx); `Attempt::finish` returning its error
+  rather than emitting (callers surface it; a start without a terminal is
+  documented as unconfirmed); a leftover `.man.writing` (never read, truncated
+  by the next install); the cash-cache root's parent never synced (a lost
+  root is a refetch); unknown `/logs` parameters not named (D-1765's scope is
+  narrowings the route offers); the pull, autopilot and resolve routes having
+  no invocation-journal row (EXEMPT under D-0568, and autopilot pause/resume
+  emit their own events).

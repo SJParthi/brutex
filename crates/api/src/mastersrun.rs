@@ -1686,10 +1686,7 @@ mod tests {
         std::os::unix::fs::symlink(&looped, &looped).expect("a symlink loop");
 
         let json = super::status_rows(&dir, std::time::SystemTime::UNIX_EPOCH);
-        let first = json
-            .split(r#"{"file":"#)
-            .nth(1)
-            .expect("the first row");
+        let first = json.split(r#"{"file":"#).nth(1).expect("the first row");
         assert!(
             first.contains(r#""present":null"#) && first.contains(r#""unreadable":""#),
             "an unreadable master is neither present nor absent, and says why: {json}"

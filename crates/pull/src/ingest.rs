@@ -3610,7 +3610,9 @@ fn write_appends_observed(
         let written = file.metadata()?.modified()?;
         let past = written
             .checked_add(std::time::Duration::from_nanos(1))
-            .ok_or_else(|| std::io::Error::other("the census's modification time cannot advance"))?;
+            .ok_or_else(|| {
+                std::io::Error::other("the census's modification time cannot advance")
+            })?;
         file.set_modified(std::time::SystemTime::now().max(past))
     };
     stamp().map_err(|why| (all, why))
@@ -4110,7 +4112,7 @@ mod tests {
     /// against it was told two entries had been written.
     #[test]
     fn a_failed_append_names_how_many_entries_landed() {
-        let root = scratch("census-landed");
+        let root = scratch("census-stamp");
         let census = root.join("manifest").join("dhan.man");
         std::fs::write(&census, vec![0_u8; 4096]).expect("a census file");
         let at = |offset: u64, slot: u64| super::Append {
