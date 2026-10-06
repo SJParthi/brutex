@@ -28,3 +28,17 @@ Base origin/final/all-fixes 969493e (merge newest before the validated push).
 ## Restart
 git fetch origin attack/one-authority final/all-fixes fix-queue && git checkout attack/one-authority
 cargo-mutants 26.2.0 + cargo-nextest installed here; `--jobs` is refused together with `--in-place` (omit it).
+
+## Background result: non-root tests on 2f4be13
+```
+FAIL-nobody core findings-d1a517611526752b test result: FAILED. 10 passed; 4 failed; 0 ignored; 0 measured; 0 fil
+test every_named_commit_exists ... FAILED
+test every_named_commit_is_in_this_branchs_history ... FAILED
+test only_a_tree_with_no_git_dir_skips_the_history ... FAILED
+test every_named_commit_is_on_main ... FAILED
+test result: FAILED. 10 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+   as root: test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtere
+FAIL=0
+DONE
+ok binaries: 77
+```
