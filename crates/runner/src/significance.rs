@@ -506,7 +506,16 @@ fn ln_beta(a: f64, b: f64) -> f64 {
 fn ln_gamma(x: f64) -> f64 {
     let mut z = x;
     let mut shift = 0.0;
-    while z < 10.0 {
+    // AT MOST TEN SHIFTS, BY A FIXED RANGE, NOT BY THE DATA (G18-runner,
+    // D-2064). Every `x > 0` reaches 10 within ten unit steps, so this takes
+    // exactly the shifts the old `while z < 10.0` took, in the same order and
+    // to the same bits. What it removes is the unbounded loop: under that
+    // `while`, flipping the comparison or the `+= 1.0` step (both mutated by
+    // Gate 18, run 1283) never reached the bound and ran past an hour.
+    for _ in 0..10 {
+        if z >= 10.0 {
+            break;
+        }
         shift += z.ln();
         z += 1.0;
     }
@@ -824,6 +833,46 @@ mod tests {
         let ln_9_factorial = (2..=9).map(f64::from).map(f64::ln).sum::<f64>();
         assert!((ln_gamma(10.0) - ln_9_factorial).abs() < 1e-12);
         assert!((ln_gamma(9.0) - (ln_9_factorial - 9.0_f64.ln())).abs() < 1e-12);
+    }
+
+    /// The bounded shift is the old unbounded `while z < 10.0` loop to the bit
+    /// on every `x > 0` (G18-runner-18, D-2064): the smallest positive values,
+    /// each side of every integer up to 11, every tenth to 20, and large and
+    /// extreme values. The reference is the loop as it stood.
+    #[test]
+    fn the_bounded_gamma_shift_is_the_unbounded_loop_to_the_bit() {
+        use super::ln_gamma;
+        let reference = |x: f64| {
+            let mut z = x;
+            let mut shift = 0.0;
+            while z < 10.0 {
+                shift += z.ln();
+                z += 1.0;
+            }
+            let inv = 1.0 / z;
+            let inv2 = inv * inv;
+            let series =
+                inv * (1.0 / 12.0 - inv2 * (1.0 / 360.0 - inv2 * (1.0 / 1260.0 - inv2 / 1680.0)));
+            (z - 0.5) * z.ln() - z + 0.5 * core::f64::consts::TAU.ln() + series - shift
+        };
+        let mut xs = vec![
+            f64::MIN_POSITIVE,
+            5e-324,
+            1e-300,
+            1e-17,
+            0.5,
+            1e6,
+            1e300,
+            f64::MAX,
+        ];
+        for whole in 1..=11_u32 {
+            let at = f64::from(whole);
+            xs.extend([at.next_down(), at, at.next_up()]);
+        }
+        xs.extend((1..=200_u32).map(|tenth| f64::from(tenth) / 10.0));
+        for x in xs {
+            assert_eq!(ln_gamma(x).to_bits(), reference(x).to_bits(), "x = {x:e}");
+        }
     }
 
     /// The fraction is evaluated on the documented side of

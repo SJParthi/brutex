@@ -63306,3 +63306,29 @@ so the research resolution succeeds, and `4 x bars x max high` passes
 `i64::MAX`. Attestation must then fail with `ArithmeticEnvelopeExceeded("aggregate paisa accumulator")`.
 `an_attested_training_slice_debug_prints_its_identity` checks the printed
 field names. Invariants G18-runner-16 and 17.
+
+### D-2064 — `ln_gamma` shifts at most ten times, so no single mutation can loop it forever — 2026-10-06
+
+**What was observed.** Gate 18 on run 1283 timed out three `ln_gamma`
+mutants, after 3,635 to 4,107 seconds of testing each: `while z < 10.0` with
+`<` as `>`, and `z += 1.0` as `-=` and as `*=`. Each makes the shift loop
+unbounded. A timeout is never credited as a catch, so none of the three was
+killed. cargo-mutants does not annotate a timeout, so the coordinator read
+these three from the shard logs, not from the survivor list.
+
+**Decided.** The shift is `for _ in 0..10 { if z >= 10.0 { break; } ... }`.
+Every `x > 0` reaches 10 within ten unit steps. `x` in (0, 1) takes exactly
+ten, and `x = 1e-17` rounds to 1.0 on its first step. So the loop takes the
+same shifts, in the same order, as the old `while`. A mutated comparison or
+step can now change the answer but cannot stop the loop ending.
+`the_bounded_gamma_shift_is_the_unbounded_loop_to_the_bit` compares it with
+the old loop, kept as the reference in the test. The inputs are the smallest
+positive values, each side of every integer up to 11, every tenth up to 20,
+and values up to `f64::MAX`. `ln_gamma` is only called by `ln_beta`, on
+`a, b > 0`. A non-positive `x` is outside the documented domain, and it is
+the only input the ten-step cap could answer differently. Invariant
+G18-runner-18.
+
+**Rejected.** Computing the shift count from `x` with `ceil`. The fixed range
+is simpler, and it keeps the old summation order, which a closed-form count
+would also have to replicate exactly.
