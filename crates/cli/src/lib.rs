@@ -89,6 +89,8 @@ mod equity_statement_tests;
 /// cut of a torn tail (D-1900, D-1901, D-1902).
 mod fixed_tail;
 #[cfg(test)]
+mod g18_cli_a_tests;
+#[cfg(test)]
 mod operator_boundary_tests;
 mod readonly_file;
 #[cfg(test)]
@@ -7586,6 +7588,11 @@ fn audit_range_kernel(request: StoredRangeAuditRequest<'_>) -> Result<String, st
     audit_range_kernel_cached(request, &mut AuditCache::default())
 }
 
+/// The refusal [`load_audit_inputs`] gives when the inputs it prepared
+/// moved before the audit identity was published.
+const AUDIT_INPUTS_CHANGED: &str =
+    "stored preparation inputs changed before audit identity publication; no search ran";
+
 /// The support-independent half of a stored range audit: both spans, the
 /// withholding, the anchored column under its preparation evidence, both
 /// contexts and the executed-data digest. Loaded once per [`AuditCache`] key.
@@ -7734,16 +7741,18 @@ fn load_audit_inputs(
     // A DAY THE OVERLAY LOAD WITHHELD AFTER THE COLUMN WAS BUILT changes the
     // swept bars and not the folded series, so it is refused by name here as
     // well as by the digest: the column above has rows for that day. D-1781.
-    if !unsourceable.is_empty()
-        || crate::minute_gaps::bind_withheld(
-            stored_anchored_digest(&folded, &exact_minute, &daily)?,
-            &withheld_days,
-        ) != preparation_digest
-    {
-        return Err(
-            "stored preparation inputs changed before audit identity publication; no search ran"
-                .to_owned(),
-        );
+    //
+    // TWO CHECKS, NOT ONE `||` (G18-cli-a-17, D-2013): either alone refuses.
+    // Joined, a mutant requiring both was invisible, because a withheld day
+    // also moves the digest.
+    if !unsourceable.is_empty() {
+        return Err(format!(
+            "{AUDIT_INPUTS_CHANGED}: the overlay withheld a swept day"
+        ));
+    }
+    let digest = stored_anchored_digest(&folded, &exact_minute, &daily)?;
+    if crate::minute_gaps::bind_withheld(digest, &withheld_days) != preparation_digest {
+        return Err(AUDIT_INPUTS_CHANGED.to_owned());
     }
     let execution_slice = execution.map_or(span.bars.as_slice(), |exec| exec.bars);
     let executed_digest = stored_withheld_executed_digest(
@@ -8391,7 +8400,11 @@ const fn div_round_half_away(n: i64, d: i64) -> i64 {
     let quotient = n / d;
     let remainder = n % d;
     if remainder.unsigned_abs().saturating_mul(2) >= d.unsigned_abs() {
-        if n < 0 { quotient - 1 } else { quotient + 1 }
+        // AWAY FROM ZERO BY THE REMAINDER'S OWN SIGN, which is `n`'s. This
+        // branch has a non-zero remainder, so `n` is never zero here, and the
+        // `n < 0` it replaces could not tell `<` from `<=` (G18-cli-a-15,
+        // D-2011).
+        quotient + remainder.signum()
     } else {
         quotient
     }
@@ -9653,7 +9666,7 @@ fn trade_and_screen<'a>(
         grid::Levels {
             rungs: grid_rungs(bars),
             step_ppm: Some(grid_step_ppm(bars, horizon.as_bars() as usize)),
-            forced: (selected.rules.max_mae_ppm > 0).then_some(selected.rules.max_mae_ppm),
+            forced: selected.rules.forced_stop(),
             ratios: true,
             stops_ppm: &stop_rungs,
         },
@@ -9941,6 +9954,22 @@ pub struct Rules {
 }
 
 impl Rules {
+    /// The stop the grid is FORCED to try: the ceiling itself when one is
+    /// stated, and none when `max_mae_ppm` is zero (no ceiling) or negative.
+    ///
+    /// One spelling for every `Levels::forced` in this file (G18-cli-a-13,
+    /// D-2009). It was written out three times, and `grid::merged` also drops
+    /// a zero level, so a copy that forced `Some(0)` read exactly like `None`
+    /// and no test could tell; the boundary is asserted here, once.
+    #[must_use]
+    pub const fn forced_stop(&self) -> Option<i64> {
+        if self.max_mae_ppm > 0 {
+            Some(self.max_mae_ppm)
+        } else {
+            None
+        }
+    }
+
     /// Whether a variant satisfies every rule. All of them, not a score.
     ///
     /// A rule broken once is a disqualification and not a lower rank: a stop
@@ -10829,7 +10858,12 @@ fn stop_rungs_in_points(bars: &[indicators::Candle]) -> Vec<i64> {
             // Ceiling division into whole points.
             ppm.saturating_add(per_point - 1) / per_point
         })
-        .filter(|&pt| pt > 0 && pt <= ceiling)
+        // AT MOST THE CEILING, and nothing else to check: `grid_step_ppm` is
+        // at least one, `i` at least one and `per_point` at least one, so the
+        // ceiling division is at least one point. The `pt > 0` this carried
+        // could not be false, which made its own mutant indistinguishable
+        // (G18-cli-a-14, D-2010).
+        .filter(|&pt| pt <= ceiling)
         .collect()
 }
 
@@ -13606,7 +13640,7 @@ fn price_grids(
     let levels = grid::Levels {
         rungs,
         step_ppm: Some(step_ppm),
-        forced: (envelope.max_mae_ppm > 0).then_some(envelope.max_mae_ppm),
+        forced: envelope.forced_stop(),
         ratios: true,
         stops_ppm: &stop_rungs,
     };
@@ -13809,31 +13843,7 @@ fn tier_rows<'a>(
                 Ok((priced, shown))
             });
             let [long, short] = priced;
-            let priced = [long.ok()?, short.ok()?];
-            // THE BEST VARIANT THAT SATISFIES THE RULES, falling back to the best
-            // overall only so a failing combination can still be SHOWN with the rule
-            // it broke. Asking `best()` first and judging that was the error: the
-            // profit-maximising cell is the one with no stop at all, so every
-            // combination failed a stop rule by construction.
-            //
-            // An ADMITTED side beats an unadmitted one outright, before any
-            // money is compared: a side that broke a stated rule is not a better
-            // answer than one that did not, however much it made.
-            let best = priced
-                .into_iter()
-                .filter_map(|(priced, shown)| {
-                    shown.map(|(cell, admitted)| (priced, cell, admitted))
-                })
-                .filter(|&(_, cell, _)| cell.trades > 0)
-                .max_by_key(|&(_, cell, admitted)| {
-                    (
-                        admitted,
-                        ranked(cell.return_over_drawdown()),
-                        ranked(cell.reward_to_risk_bp()),
-                        cell.pessimistic,
-                    )
-                });
-            let (priced, cell, admitted) = best?;
+            let (priced, cell, admitted) = best_shown([long.ok()?, short.ok()?])?;
             Some(Screened {
                 rank: rank.saturating_add(1),
                 // THE SIDE THE CELL WAS PRICED WITH, not a second reading of
@@ -13857,6 +13867,37 @@ fn tier_rows<'a>(
         capture.check()?;
     }
     Ok(rows)
+}
+
+/// The side a judged row shows, of the two priced: the best SHOWN cell that
+/// traded, or none when neither side traded.
+///
+/// THE BEST VARIANT THAT SATISFIES THE RULES, falling back to the best
+/// overall only so a failing combination can still be SHOWN with the rule
+/// it broke. Asking `best()` first and judging that was the error: the
+/// profit-maximising cell is the one with no stop at all, so every
+/// combination failed a stop rule by construction.
+///
+/// An ADMITTED side beats an unadmitted one outright, before any
+/// money is compared: a side that broke a stated rule is not a better
+/// answer than one that did not, however much it made.
+///
+/// A function of its own so the zero-trade boundary is asserted over plain
+/// cells (G18-cli-a-12, D-2008): no real screen fixture shows a cell that
+/// never traded, so no test could see one become a row.
+fn best_shown<P>(priced: [(P, Option<(grid::Cell, bool)>); 2]) -> Option<(P, grid::Cell, bool)> {
+    priced
+        .into_iter()
+        .filter_map(|(priced, shown)| shown.map(|(cell, admitted)| (priced, cell, admitted)))
+        .filter(|&(_, cell, _)| cell.trades > 0)
+        .max_by_key(|&(_, cell, admitted)| {
+            (
+                admitted,
+                ranked(cell.return_over_drawdown()),
+                ranked(cell.reward_to_risk_bp()),
+                cell.pessimistic,
+            )
+        })
 }
 
 /// The rest of a screen over judged rows: the priced map, the two sorts, the
@@ -14499,7 +14540,7 @@ fn measure_top(
                 grid::Levels {
                     rungs: rungs_again,
                     step_ppm: Some(step_ppm_again),
-                    forced: (rules.max_mae_ppm > 0).then_some(rules.max_mae_ppm),
+                    forced: rules.forced_stop(),
                     ratios: true,
                     stops_ppm: &stop_rungs_again,
                 },
@@ -16117,8 +16158,10 @@ fn elite_descend_with_attempt(
     // retained count, warm-up included, would ask the step for fewer hits
     // than the round trips the rules need. A span whose load or column
     // refuses keeps the retained count: every step refuses with that reason.
-    let can_hit =
-        screen_swept(vendor_word, underlying, known, span, &mut cache).unwrap_or(bar_count);
+    let can_hit = store_root()
+        .ok()
+        .and_then(|root| screen_swept_in(&root, vendor_word, underlying, known, span, &mut cache))
+        .unwrap_or(bar_count);
     let floor = match descent_floor(&rules, can_hit, bar_count) {
         Ok(floor) => floor,
         Err(why) => return why,
@@ -16477,47 +16520,29 @@ fn elite_descend_in_points_inner(
         Ok(vendor) => vendor,
         Err(why) => return format!("refused: {why}\n"),
     };
-    // NO CEILING NEEDS NO CONVERSION, so no reference and no extra span load:
-    // `max_mae_ppm == 0` is the value `Rules::admits` and `Levels::forced`
-    // both read as "the derived stop ladder stands alone" (D-1721).
-    if max_points == 0 {
-        return elite_descend_with_attempt(
-            vendor_word,
-            underlying,
-            rung,
-            (from, to),
-            (0, top),
-            lens,
-            attempt,
-        );
-    }
     // THE REFERENCE IS READ FROM THE BARS THIS RUN WILL SWEEP, not from a
     // constant and not from a different rung. A span that refuses here refuses
     // before any threshold is derived, which is the honest order: a floor
     // computed from bars nobody could load is arithmetic on an assumption.
-    let span = match stored::load_span(&root, vendor, underlying, rung, from, to) {
-        Ok(span) => span,
-        Err(why) => {
-            return format!(
-                "refused before the ceiling could be converted, so no descent \
-                 began: {why}\n"
-            );
+    let reference = || match stored::load_span(&root, vendor, underlying, rung, from, to) {
+        // Dropped before the walk: `elite_descend` loads its own, and holding
+        // a second copy of a multi-year span for the length of a descent is
+        // memory nothing reads. Same reasoning `elite_descend` states for its
+        // own seed.
+        Ok(span) => {
+            let reference = reference_price(&span.bars);
+            drop(span);
+            Ok(reference)
         }
+        Err(why) => Err(format!(
+            "refused before the ceiling could be converted, so no descent \
+             began: {why}\n"
+        )),
     };
-    let reference = reference_price(&span.bars);
-    // Dropped before the walk: `elite_descend` loads its own, and holding a
-    // second copy of a multi-year span for the length of a descent is memory
-    // nothing reads. Same reasoning `elite_descend` states for its own seed.
-    drop(span);
-    let max_mae_ppm = points_to_ppm_at(max_points, reference);
-    if max_mae_ppm <= 0 {
-        return format!(
-            "refused: {max_points} point(s) against a reference of {reference} \
-             paisa converts to {max_mae_ppm} ppm, which admits nothing. This is \
-             the unit slip `reference_price` documents, caught rather than \
-             swept with.\n"
-        );
-    }
+    let max_mae_ppm = match elite_ceiling_ppm(max_points, reference) {
+        Ok(ppm) => ppm,
+        Err(why) => return why,
+    };
     elite_descend_with_attempt(
         vendor_word,
         underlying,
@@ -16527,6 +16552,37 @@ fn elite_descend_in_points_inner(
         lens,
         attempt,
     )
+}
+
+/// `elite`'s stop ceiling in ppm: zero stays zero, and anything else is
+/// converted against the reference `reference` reads.
+///
+/// NO CEILING NEEDS NO CONVERSION, so no reference and no extra span load:
+/// `max_mae_ppm == 0` is the value `Rules::admits` and `Levels::forced` both
+/// read as "the derived stop ladder stands alone" (D-1721). A ceiling that
+/// converts to zero or fewer ppm admits nothing, and is refused by name.
+///
+/// Split from [`elite_descend_in_points_inner`] so the zero boundary is
+/// asserted without a store (G18-cli-a-20, D-2016): a test build has none, so
+/// that function refused before it ever compared `max_points` with zero.
+fn elite_ceiling_ppm(
+    max_points: i64,
+    reference: impl FnOnce() -> Result<i64, String>,
+) -> Result<i64, String> {
+    if max_points == 0 {
+        return Ok(0);
+    }
+    let reference = reference()?;
+    let max_mae_ppm = points_to_ppm_at(max_points, reference);
+    if max_mae_ppm <= 0 {
+        return Err(format!(
+            "refused: {max_points} point(s) against a reference of {reference} \
+             paisa converts to {max_mae_ppm} ppm, which admits nothing. This is \
+             the unit slip `reference_price` documents, caught rather than \
+             swept with.\n"
+        ));
+    }
+    Ok(max_mae_ppm)
 }
 
 /// A stop ceiling in index points, as ppm of the instrument's own price.
@@ -18014,24 +18070,11 @@ impl ScreenCache {
 /// swept. An unstamped build
 /// still loads here, as nothing in the load writes; its first step refuses
 /// for the stamp and the inputs go unused.
-fn screen_swept(
-    vendor_word: &str,
-    underlying: &str,
-    rung: &str,
-    span: ((u16, u8), (u16, u8)),
-    cache: &mut ScreenCache,
-) -> Option<u64> {
-    screen_swept_in(
-        &store_root().ok()?,
-        vendor_word,
-        underlying,
-        rung,
-        span,
-        cache,
-    )
-}
-
-/// [`screen_swept`] over a store root already resolved.
+///
+/// Over a store root already resolved. The one caller resolves the root in
+/// place: a wrapper whose only work was `store_root().ok()?` answered `None`
+/// on every test build, which has no store, so its `None` mutant could not be
+/// told from it (G18-cli-a-19, D-2015).
 fn screen_swept_in(
     root: &std::path::Path,
     vendor_word: &str,
@@ -19710,15 +19753,27 @@ fn first_accepted_in_order<'t, T, K: Ord>(
         .map(|(at, item)| (key(item), at))
         .collect();
     let mut out: Vec<&'t T> = Vec::with_capacity(top.min(items.len()));
+    // BOUNDED BY THE KEYS, NOT BY A CONDITION (G18-cli-a-35, D-2017). Every
+    // round below consumes at least one key, so `keyed.len()` rounds always
+    // suffice. The `while` this replaces ran on `out.len() < top &&
+    // !rest.is_empty()`, and a single mutation of that guard (`||`, `<=`)
+    // spun on an empty rest until Gate 18 timed it out; a counted loop cannot.
+    let rounds = keyed.len();
     let mut rest: &mut [(K, usize)] = &mut keyed;
     let mut window = top;
-    while out.len() < top && !rest.is_empty() {
-        let cut = window.min(rest.len());
-        if let Some(last) = cut.checked_sub(1)
-            && cut < rest.len()
-        {
-            rest.select_nth_unstable(last);
+    for _ in 0..rounds {
+        if out.len() == top {
+            break;
         }
+        // An empty rest, or a TOP of zero, leaves no window to cut.
+        let cut = window.min(rest.len());
+        let Some(last) = cut.checked_sub(1) else {
+            break;
+        };
+        // SELECTED EVEN WHEN THE WINDOW IS THE WHOLE REST. Skipping that case
+        // saved one O(len) pass before the O(len log len) sort below, and no
+        // output could tell the skip from the pass (G18-cli-a-16, D-2012).
+        rest.select_nth_unstable(last);
         let (head, tail) = core::mem::take(&mut rest).split_at_mut(cut);
         head.sort_unstable();
         for (_, at) in head.iter() {
@@ -21030,8 +21085,13 @@ impl<'a> GridProgress<'a> {
                 .spoken
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if done > *spoken {
-                *spoken = done;
+            // THE HIGHER OF THE TWO, and a write only when that moved it. A
+            // count is never equal to one already spoken -- each `done` is a
+            // distinct `fetch_add` -- so `>` and `>=` could not be told apart
+            // (G18-cli-a-18, D-2014); `max` has no such twin.
+            let before = *spoken;
+            *spoken = before.max(done);
+            if *spoken != before {
                 write(done);
             }
         }

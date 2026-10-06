@@ -4266,6 +4266,29 @@ mod tests {
         fs::remove_dir_all(root).expect("remove fixture root");
     }
 
+    /// G18-cli-a-07, D-2002: `require_binding` accepts exactly its own row
+    /// under its own parameters and refuses the other side's row by name.
+    #[test]
+    fn require_binding_accepts_its_own_row_and_refuses_another() {
+        let (root, rows, _receipt, prepared) = population_v4_fixture("require-binding");
+        let [long, short] = prepared.parameters.clone();
+        let [long_capability, short_capability] =
+            [prepared.capabilities[0], prepared.capabilities[1]];
+        assert_eq!(long_capability.require_binding(&long, &rows[0]), Ok(()));
+        assert_eq!(short_capability.require_binding(&short, &rows[1]), Ok(()));
+        assert!(
+            long_capability.require_binding(&long, &rows[1]).is_err(),
+            "the short row is not the long capability's row"
+        );
+        let mut forged = rows[0];
+        forged.sequence = rows[1].sequence;
+        let refusal = long_capability
+            .require_binding(&long, &forged)
+            .expect_err("a moved row sequence is refused");
+        assert!(refusal.contains("differs"), "{refusal}");
+        fs::remove_dir_all(root).expect("remove fixture root");
+    }
+
     #[test]
     fn execution_ledger_reopens_reuses_and_retains_valid_orphan_evidence() {
         let (root, rows, receipt, prepared) = population_v4_fixture("append-reopen-orphan");

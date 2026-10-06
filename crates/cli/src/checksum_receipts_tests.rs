@@ -433,3 +433,28 @@ fn incomplete_locked_publication_refuses_without_accepting_or_repairing_a_prefix
         expected
     );
 }
+
+/// G18-cli-a-06, D-2002: the held handle and the NAMED path must each be a
+/// regular file. A symbolic link at the path that resolves to the very file
+/// the handle holds, with one link, passes every later generation check, so
+/// only `regular_generation`'s own `named.is_file()` refuses it.
+#[cfg(unix)]
+#[test]
+fn a_symbolic_link_to_the_held_file_is_refused_by_name() {
+    let fixture = Fixture::new(0);
+    let real = fixture.root.join("real.bin");
+    let named = fixture.root.join("named.bin");
+    fs::write(&real, b"receipt").expect("real file");
+    std::os::unix::fs::symlink(&real, &named).expect("symbolic link");
+    let file = File::open(&named).expect("open through the link");
+    let refused = regular_generation(&file, &named).expect_err("a link is not a regular file");
+    assert!(
+        refused.contains("not a regular file with one link"),
+        "{refused}"
+    );
+    assert!(refused.contains("(1 links)"), "{refused}");
+    assert!(
+        regular_generation(&file, &real).is_ok(),
+        "the file itself passes"
+    );
+}

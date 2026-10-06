@@ -550,3 +550,36 @@ fn the_one_pass_listing_matches_the_removed_newest_first_walk()
     }
     Ok(())
 }
+
+/// G18-cli-a-34, D-2002: the omitted-row line appears only when MORE than
+/// `LIST_ROWS` (40) rows match. At exactly 40 every row is shown and no
+/// "0 further row(s)" line is printed; at 41 one row is named as hidden.
+#[test]
+fn the_omitted_row_line_starts_one_row_past_the_listing() -> Result<(), Box<dyn std::error::Error>>
+{
+    for (matching, hidden) in [
+        (1_u8, None),
+        (39, None),
+        (40, None),
+        (41, Some(1)),
+        (42, Some(2)),
+    ] {
+        let rows: Vec<Record> = (1..=matching).map(|id| row(id, 100, 2)).collect();
+        let fixture = Fixture::new(&rows)?;
+        let listing = crate::results_at(&fixture.0, None, None);
+        assert!(
+            listing.contains(&format!(
+                "  matching                                {matching}\n"
+            )),
+            "{listing}"
+        );
+        match hidden {
+            None => assert!(!listing.contains("NOT SHOWN"), "{matching}: {listing}"),
+            Some(hidden) => assert!(
+                listing.contains(&format!("  ... {hidden} further row(s) NOT SHOWN.")),
+                "{matching}: {listing}"
+            ),
+        }
+    }
+    Ok(())
+}

@@ -435,3 +435,13 @@ fn a_whole_store_sweep_emits_one_progress_event_per_instrument_month_not_per_bar
         "events are per month, so far fewer than bars: {mine:?}"
     );
 }
+
+/// G18-cli-a-02, D-2003: the slow seam holds back exactly the named symbol.
+/// `a_chunk_files_its_months_in_input_order_whatever_order_they_finish` passes
+/// whichever month is slow, so the seam's own choice is pinned here.
+#[test]
+fn the_slow_seam_holds_back_exactly_the_named_symbol() {
+    assert!(held_back(Some("NIFTY"), "NIFTY"));
+    assert!(!held_back(Some("NIFTY"), "BANKNIFTY"));
+    assert!(!held_back(None, "NIFTY"));
+}

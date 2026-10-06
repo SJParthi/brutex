@@ -1,7 +1,9 @@
 #![cfg(test)]
 //! Receipt-last publication: scratch from a cut-short attempt is rewritten,
 //! committed history is compared and kept (D-1760).
-use super::{committed, lost_owner_race, prepare_in_namespace, read_exact, write_or_equal};
+use super::{
+    committed, discard, lost_owner_race, prepare_in_namespace, read_exact, write_or_equal,
+};
 use std::fs;
 use std::path::PathBuf;
 
@@ -194,4 +196,23 @@ fn a_file_whose_barrier_failed_is_withdrawn_and_the_rerun_commits() -> Result<()
         assert!(committed(&directory)?, "{name}");
     }
     Ok(())
+}
+
+/// G18-cli-a-04, D-2002: only a MISSING receipt reads as uncommitted and only
+/// a MISSING file as already discarded. Any other failure -- here a regular
+/// file standing where the directory belongs, and a directory standing where
+/// the file belongs -- is a refusal, never a quiet `false` or a quiet success.
+#[test]
+fn only_not_found_is_quiet_for_committed_and_discard() {
+    let root = scratch("g18-not-found-only");
+    assert_eq!(committed(&root.join("absent")), Ok(false));
+    let file = root.join("plain");
+    assert!(fs::write(&file, b"x").is_ok(), "plain file is writable");
+    assert!(committed(&file).is_err(), "a file is not a directory");
+    assert_eq!(discard(&root.join("absent")), Ok(()));
+    let directory = root.join("held");
+    assert!(fs::create_dir(&directory).is_ok(), "directory is creatable");
+    assert!(discard(&directory).is_err(), "a directory is not a file");
+    assert!(directory.is_dir(), "a refused discard removed nothing");
+    let _ = fs::remove_dir_all(&root);
 }

@@ -2524,12 +2524,21 @@ mod tests {
                 "a retry whose prefix differs must refuse"
             );
             let shorter = decisions.get(..written - 1).expect("shorter").to_vec();
-            assert!(
-                reopened
-                    .commit(population_id, digest(8), &policy, &shorter)
-                    .is_err(),
-                "a retry shorter than the stored prefix must refuse"
-            );
+            let refused = reopened
+                .commit(population_id, digest(8), &policy, &shorter)
+                .expect_err("a retry shorter than the stored prefix must refuse");
+            // G18-cli-a-01, D-2002: a non-empty retry SHORTER than the stored
+            // prefix is the count refusal of `verify_supplied_decisions`, not
+            // an orphan completion that fails to split.
+            if !shorter.is_empty() {
+                assert!(
+                    refused.contains(&format!(
+                        "stored {written} admission decisions but the rerun supplied {}",
+                        written - 1
+                    )),
+                    "{refused}"
+                );
+            }
             assert_eq!(std::fs::read(&path).expect("unchanged"), prefix_bytes);
             assert!(matches!(
                 reopened.commit(population_id, digest(8), &policy, &decisions),

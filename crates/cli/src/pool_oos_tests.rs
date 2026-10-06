@@ -392,19 +392,35 @@ fn the_pool_oos_arm_refuses_an_overlapping_split_and_bad_words_before_reading() 
         "6",
         "/nonexistent/held.catalog",
     ];
-    for (changes, why) in [
+    // G18-cli-a-11, D-2002: each refusal is the ARM's own, named. The work
+    // refuses most of these too, so `MISUSED` alone could not show that the
+    // arm's guard or rung match had let a bad split through.
+    let order = "the training months must be ordered";
+    let rung_refusal = "is not a rung this engine sweeps";
+    for (changes, why, named) in [
         (
             &[(9, "3")][..],
             "the later span starts in the training span's last month",
+            order,
         ),
         (
             &[(8, "2024")][..],
             "the later span precedes the training span",
+            order,
         ),
-        (&[(11, "3")][..], "the later span runs backwards"),
-        (&[(2, "7min")][..], "an unknown rung"),
-        (&[(4, "13")][..], "a month off the calendar"),
-        (&[(7, "nope")][..], "an unreadable support"),
+        (&[(11, "3")][..], "the later span runs backwards", order),
+        (
+            &[(3, "2026")][..],
+            "the training span runs backwards",
+            order,
+        ),
+        (&[(2, "7min")][..], "an unknown rung", rung_refusal),
+        (
+            &[(4, "13")][..],
+            "a month off the calendar",
+            "MONTH must be 1..=12",
+        ),
+        (&[(7, "nope")][..], "an unreadable support", "refused: "),
     ] {
         let mut words = base;
         for (at, word) in changes {
@@ -413,6 +429,7 @@ fn the_pool_oos_arm_refuses_an_overlapping_split_and_bad_words_before_reading() 
         let (status, page) = run(&words);
         assert_eq!(status, crate::MISUSED, "{why}: {page}");
         assert!(page.starts_with("refused: "), "{why}: {page}");
+        assert!(page.contains(named), "{why}: {page}");
         assert!(
             !page.contains(crate::STORED_PROVENANCE),
             "{why}: nothing was read"
@@ -420,6 +437,24 @@ fn the_pool_oos_arm_refuses_an_overlapping_split_and_bad_words_before_reading() 
     }
     let (status, page) = run(&base[..12]);
     assert_eq!(status, crate::MISUSED, "a missing CATALOG_OUT: {page}");
+    // An ordered split -- including a one-month training span and a one-month
+    // later span starting the month after it -- passes the arm, whatever the
+    // work then answers.
+    for (changes, why) in [
+        (&[][..], "the base split"),
+        (
+            &[(6, "1"), (9, "2"), (11, "2")][..],
+            "one training month, then one later month",
+        ),
+    ] {
+        let mut words = base;
+        for (at, word) in changes {
+            words[*at] = word;
+        }
+        let (_, page) = run(&words);
+        assert!(!page.contains(order), "{why}: {page}");
+        assert!(!page.contains(rung_refusal), "{why}: {page}");
+    }
 }
 
 /// **The verb's own split check: strict after, single months admitted.**

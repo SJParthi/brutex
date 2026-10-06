@@ -3988,9 +3988,19 @@ fn append_prepared_and_reverify(
     let expected = committed.audit();
     let reopened = ledger.reverify_committed(&committed)?;
     drop(ledger);
-    if reopened != expected || reopened.receipt() != prepared.receipt {
+    // TWO CHECKS, NOT ONE `||` (G18-cli-a-05, D-2004). Either inequality alone
+    // refuses; a joined guard let a mutant require both, and no honest fixture
+    // can make the committed block reopen differently from its own audit. Each
+    // comparison now stands alone, so the happy path itself proves each one.
+    if reopened != expected {
         return Err(format!(
             "candidate production universe {} did not reopen with the exact prepared semantic bytes",
+            hex32(expected.universe_id())
+        ));
+    }
+    if reopened.receipt() != prepared.receipt {
+        return Err(format!(
+            "candidate production universe {} reopened with a receipt other than the prepared one",
             hex32(expected.universe_id())
         ));
     }

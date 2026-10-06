@@ -201,4 +201,17 @@ mod tests {
         assert!(parse(args.get(..14).ok_or("test prefix")?).is_err());
         Ok(())
     }
+
+    /// G18-cli-a-03, D-2002: an argument list this build does not understand
+    /// exits `MISUSED` with the usage -- never `OK`, never `FAILED`.
+    #[test]
+    fn a_short_argument_list_exits_misused_with_the_usage() {
+        let mut out = String::new();
+        assert_eq!(command(&[], &mut out), crate::MISUSED);
+        assert!(
+            out.contains("boolean-oos-stored requires 15 explicit arguments"),
+            "{out}"
+        );
+        assert!(out.contains(crate::USAGE), "{out}");
+    }
 }

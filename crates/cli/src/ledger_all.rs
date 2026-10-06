@@ -961,7 +961,7 @@ pub(crate) fn render_winners(
     out.push_str(
         "\nTOP 10 BY RUNG -- paisa unless a column says ppm; profit is the PESSIMISTIC fill\n",
     );
-    let mut current: Option<(u32, Vec<(u32, runner::topn::Metrics)>)> = None;
+    let mut current: OpenRung = None;
     selection.into_successor_set()?.visit_canonical(|winner| {
         let row = winner.row();
         let rank = row.rank();
@@ -972,22 +972,40 @@ pub(crate) fn render_winners(
         if u64::from(rank) > crate::all_rung_selection_v5::TOP_TEN_U64 {
             return Ok(());
         }
-        let rung = row.rung_seconds();
-        match current {
-            Some((open, ref mut rows)) if open == rung => rows.push((rank, row.metrics())),
-            _ => {
-                if let Some((open, rows)) = current.take() {
-                    winners_table(out, open, &rows);
-                }
-                current = Some((rung, vec![(rank, row.metrics())]));
-            }
-        }
+        file_winner(out, &mut current, row.rung_seconds(), rank, row.metrics());
         Ok(())
     })?;
     if let Some((open, rows)) = current {
         winners_table(out, open, &rows);
     }
     Ok(())
+}
+
+/// The rung table being filled and its rows, in visit order.
+type OpenRung = Option<(u32, Vec<(u32, runner::topn::Metrics)>)>;
+
+/// Files one visited winner under its rung: the open table takes it when the
+/// rung is the same, and a new rung first writes the open table out.
+///
+/// Split from [`render_winners`] so the grouping is asserted over plain rows
+/// (G18-cli-a-10, D-2007): the committed selection it walks has no cheap
+/// fixture, and no test saw two rungs' rows land in one table.
+fn file_winner(
+    out: &mut String,
+    current: &mut OpenRung,
+    rung: u32,
+    rank: u32,
+    metrics: runner::topn::Metrics,
+) {
+    match current {
+        Some((open, rows)) if *open == rung => rows.push((rank, metrics)),
+        _ => {
+            if let Some((open, rows)) = current.take() {
+                winners_table(out, open, &rows);
+            }
+            *current = Some((rung, vec![(rank, metrics)]));
+        }
+    }
 }
 
 /// One rung's Top-10 block: its heading, the column header and one row per
@@ -1457,8 +1475,38 @@ pub(crate) fn build_sweepers(
 pub(crate) mod tests {
     use super::{
         ALL_GATES, LEDGER_ALL_VERB, LEDGER_RUNGS, LEDGER_TARGET, LedgerAllRequest, LedgerTree,
-        PAISA_PER_POINT,
+        OpenRung, PAISA_PER_POINT, file_winner, winners_table,
     };
+
+    /// G18-cli-a-10, D-2007: consecutive winners of one rung share its table,
+    /// and a new rung writes the open table before starting its own.
+    #[test]
+    fn winners_of_one_rung_share_a_table_and_a_new_rung_closes_it() {
+        let metrics = |profit: i64| runner::topn::Metrics {
+            drawdown: 1,
+            worst_loss: 2,
+            losing_rate_ppm: 0,
+            losing_trades: 0,
+            loss_ratio_ppm: None,
+            pessimistic_profit: profit,
+            winning_trades: 1,
+            win_rate_ppm: 1_000_000,
+            reward_to_risk_ppm: None,
+            average_win: 3,
+            average_loss: 0,
+            assurance_ppm: 0,
+        };
+        let mut out = String::new();
+        let mut current: OpenRung = None;
+        file_winner(&mut out, &mut current, 60, 1, metrics(111));
+        file_winner(&mut out, &mut current, 60, 2, metrics(222));
+        assert!(out.is_empty(), "one rung open: nothing written yet: {out}");
+        file_winner(&mut out, &mut current, 300, 1, metrics(333));
+        let mut first = String::new();
+        winners_table(&mut first, 60, &[(1, metrics(111)), (2, metrics(222))]);
+        assert_eq!(out, first, "the 60s table holds both of its rows, alone");
+        assert_eq!(current, Some((300, vec![(1, metrics(333))])));
+    }
 
     /// The one telemetry sink this crate's test binary installs.
     ///
