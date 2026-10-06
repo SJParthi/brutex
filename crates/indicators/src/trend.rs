@@ -493,7 +493,7 @@ impl SuperTrend {
     }
 }
 
-/// The denominator the SuperTrend stop is held over: `2 · SCALE · 1000`, so the
+/// The denominator the `SuperTrend` stop is held over: `2 · SCALE · 1000`, so the
 /// midpoint's half, the ATR's six digits and the multiplier's thousandths are all
 /// whole numbers (D-3403).
 const STOP_UNIT: i128 = 2 * SCALE * 1000;
@@ -2803,7 +2803,7 @@ mod supertrend_exact {
         vocab::tolerance::pinned_fib().expect("the pinned fib width is valid")
     }
 
-    /// A naive SuperTrend over exact fractions. The ATR is the documented one —
+    /// A naive `SuperTrend` over exact fractions. The ATR is the documented one —
     /// a running mean of the true range, then Wilder's `1/n`, held to six digits
     /// below a paisa — recomputed here independently; everything after it is
     /// exact: the stop is kept as a numerator over `2 · 10^6 · 1000`.
@@ -2916,7 +2916,7 @@ mod supertrend_exact {
             let close = low + next(high - low + 1);
             let candle = bar(minute, high, low, close);
             let mask = t.step(&candle, tol()).expect("sane");
-            if minute >= thresholds.atr_period as i64 {
+            if minute >= i64::try_from(thresholds.atr_period).expect("a small period") {
                 let stop = naive.stop.expect("seeded on the first bar");
                 let exact = i128::from(close) * UNIT;
                 assert_eq!(
