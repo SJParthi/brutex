@@ -15930,9 +15930,10 @@ not timed.**
 ### `/boolean-campaign.json` opens the campaign twice per request (D-3312)
 
 `booleancampaignjson::render` calls `cli::boolean_campaign::Reader::open`.
-That is a `read_dir` over the campaign's checkpoint directory (`discover_through`,
-capped at `DIRECTORY_LIMIT` entries and `MAX_CHECKPOINTS` = 1,024 in
-sequence), a read of the latest snapshot, and one flock and 112-byte read per
+That is a `read_dir` over the campaign's checkpoint directory
+(`discover_through`, which refuses past `DIRECTORY_LIMIT` = 1,000,000 entries;
+`open` then refuses a latest or interrupted sequence at or past
+`MAX_CHECKPOINTS` = 1,024, after the walk), a read of the latest snapshot, and one flock and 112-byte read per
 recorded child receipt. Then `Reader::require_current` runs the whole `open`
 again to prove nothing changed while the body was built.
 
