@@ -932,6 +932,24 @@ test recorded failing against the pre-fix code.
   OBSV-06.
 - **F-B26F07** `gap` — A refused sweep-stored left no reason in the log.
   `crates/cli/src/lib.rs` `sweep_stored`. IN PROGRESS. D-3206, OBSV-07.
+- **F-E995C5** `gap` — A refused command's command finished event carried no
+  reason. `crates/cli/src/lib.rs` `run_with_sink`. IN PROGRESS. D-3207,
+  OBSV-08.
+- **F-21160A** `wrong` — The ingest page called a stop taken but not persisted
+  undelivered and dropped its warning. `web/src/routes/ingest/+page.svelte`
+  `stopWatching`. IN PROGRESS. D-3208, OBSV-09 (front-end test
+  `web/tests/ingest-errors.test.js`).
+- **F-FC80BC** `wrong` — The audit page counted an older page it could not read
+  as held and never showed why. `web/src/routes/audit/+page.svelte`
+  `readOlder`. IN PROGRESS. D-3209, OBSV-10 (front-end test
+  `web/tests/audit-pages.test.js`).
+- **F-DC087B** `wrong` — One refused census row dropped every other row of a
+  rolling batch. `crates/pull/src/ingest.rs` `record_all`. IN PROGRESS.
+  D-3210, OBSV-11.
+- REFUTED in round 2: a `BarFile` genesis re-initialised without a log line
+  (such a file provably holds no record, D-1521); `/universe/resolve` leaving no
+  Info line on success (it writes nothing; failures are logged); the masters
+  directory's parent never synced (a lost directory is a refetch).
 - REFUTED in round 1, with reasons: a pull refused at 400/409 before the pull
   journal (the handler's "a refusal is recorded too" covers parse refusals
   only, and `note_request` logs the 4xx); `Attempt::finish` returning its error

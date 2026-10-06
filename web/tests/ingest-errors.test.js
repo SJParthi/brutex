@@ -38,14 +38,14 @@ function ingest() {
     let showProblems=false, problems=[], phase='idle', pressing=false, receipt=null, receipts=[], outcomes=[],
       outcomeIndex=new Map(), samples=[], netError=null, pollError=null, aborted=false, passSummary=null,
       runState=null, askedKeys=new Set(), sent=null, baseline=null, live=null, startedAt=0, lastGrowthAt=0,
-      finishedAt=0, seenRead=0, controller=null, stopAsked=false, releases=0;
+      finishedAt=0, seenRead=0, controller=null, stopAsked=false, stopWarning='', releases=0;
     let releaseWatch=null;
     const ticked=[{key:'K'}], allBodies=[{dir:'1min',label:'1 min',body:'b',vendor:'v'}], store={reads:0};
     const watchStore=()=>()=>{releases++;};
     const snapshot=()=>hooks.snapshot(), request=(url,o)=>hooks.request(url,o);
     const watchRun=async()=>{hooks.watched++;}, resumeRun=async()=>{hooks.resumed++;};
     ${functions(['start', 'runPull', 'stopWatching'])}
-    return {start,runPull,stopWatching,state:()=>({phase,pressing,netError,pollError,aborted,stopAsked,releases}),
+    return {start,runPull,stopWatching,state:()=>({phase,pressing,netError,pollError,aborted,stopAsked,stopWarning,releases}),
       running:()=>{phase='running';}};
   `);
   const hooks = { snapshots: /** @type {any[]} */ ([]), posts: 0, watched: 0, resumed: 0,
@@ -89,5 +89,42 @@ test('netError and pollError are rendered as alerts in the run card, whatever th
     assert.match(body, new RegExp(`\\{${name}\\}`));
     const gated = up.filter((/** @type {any} */ a) => a.type === 'IfBlock' && /phase/.test(source.slice(a.test.start, a.test.end)));
     assert.deepEqual(gated, [], `${name} must not be hidden behind a phase test`);
+  }
+});
+
+test('a Stop the server took in memory but could not persist says so, and stays taken', async () => {
+  // OBSV-09, D-3208. `POST /pull/run/stop` answers 503 with `stopping:true,
+  // stop_persisted:false` AFTER setting the in-memory flag. The page threw on
+  // `!r.ok`, re-enabled Stop and said the stop "could not be delivered", while
+  // the run was winding down -- and the server's own warning, that the STOP
+  // will not survive a restart, never reached the operator.
+  const { app, hooks } = ingest();
+  hooks.request = async () => Response.json(
+    { stopping: true, stop_persisted: false, error: 'Recovery STOP was not durably recorded: EIO' },
+    { status: 503 }
+  );
+  app.running();
+  await app.stopWatching();
+  assert.equal(app.state().stopAsked, true, 'the stop was taken');
+  assert.equal(app.state().aborted, true);
+  // Its own state: the next poll's `pollError = null` cannot wipe it.
+  assert.match(app.state().stopWarning, /not durably recorded: EIO/);
+  assert.equal(app.state().pollError, null);
+  assert.match(source, /\{#if stopWarning\}[\s\S]*?role="alert"[\s\S]*?\{stopWarning\}/);
+
+  // A failure whose body does not say the stop was taken is still undelivered.
+  for (const reply of [
+    () => new Response('gateway down', { status: 502 }),
+    () => Response.json({ stopping: false, error: 'x' }, { status: 503 }),
+    () => Response.json({ stopping: true, stop_persisted: true }, { status: 500 })
+  ]) {
+    const again = ingest();
+    again.hooks.request = async () => reply();
+    again.app.running();
+    await again.app.stopWatching();
+    assert.equal(again.app.state().stopAsked, false);
+    assert.equal(again.app.state().aborted, false);
+    assert.match(String(again.app.state().pollError), /could not be delivered/);
+    assert.equal(again.app.state().stopWarning, '');
   }
 });

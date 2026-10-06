@@ -63263,3 +63263,70 @@ reason.
 refused" as `sweep-all`, with `feed`, `label` (`feed underlying rung
 YYYY-MM`) and `reason`, so one search on `/logs` finds both verbs'
 refusals. OBSV-07.
+
+### D-3207 — A refused command's `command finished` event carries its reason — 2026-10-06
+
+**What was observed.** Every `cli` verb ends in one `cli.lifecycle` event,
+"command finished", and a refused one said only `phase=refused` and an exit
+code. `audit-stored`, `auto-stored`, `sweep-audited-stored`, `range-all`,
+`range-rung`, `audit-range`, `screen`, `descend` and every expression and
+Boolean search verb refuse before their first own event, so `/logs` could not
+say why any of them refused (round 2 of the observability lens).
+
+**Decided.** One fix on the one path every verb shares: `run_with_sink` adds a
+`reason` field when the exit code is not `OK`, taken from the page's refusal
+line (`refusal_reason`, the predicate the exit codes already use) or, when
+the page has none, its last non-blank line (a misuse prints usage;
+`sweep-audited-stored` prints `<label> REFUSED: …`). The sink cuts a long
+reason at its value ceiling and marks it cut. OBSV-08.
+
+**Rejected.** An event in each verb's refusal arm. Fifteen arms is fifteen
+places for the next verb to forget; the shared event cannot be skipped.
+
+### D-3208 — The ingest page reads a 503 that says the stop was taken — 2026-10-06
+
+**What was observed.** `pull_run_stop` sets the in-memory stop and, when it
+cannot record the STOP durably, answers 503
+`{"stopping":true,"stop_persisted":false,"error":…}`. The `/ingest` page threw
+on `!r.ok` without reading the body, re-enabled Stop, unmarked the run as
+aborted and said the stop "could not be delivered" while the run wound down,
+and the server's warning that the STOP will not survive a restart never
+reached the operator.
+
+**Decided.** On a non-2xx, the page reads the body; `stopping:true` with
+`stop_persisted:false` is a stop taken, kept as taken, with the server's own
+error shown in `stopWarning`, a state of its own so the next poll's
+`pollError = null` cannot wipe it. Any other failure is still "could not be
+delivered". OBSV-09.
+
+### D-3209 — An older `/audit` page the server could not read is named, not counted — 2026-10-06
+
+**What was observed.** `/audit.json` answers 200 with `runs:[]` and
+`runs_error` when its page read fails. `readOlder` appended the empty list and
+counted a page held, and `runs_error` was rendered only while no run was on
+screen, so an older page's failure was never shown and spent one of
+`MAX_PAGES`; with two pages the button vanished and the footer said "holding 2
+page(s) of 2".
+
+**Decided.** `audit-pages.js` `olderPageOf` turns a body into rows or a named
+error (a `runs_error`, or a body with no `runs` list); `readOlder` shows the
+error as an alert beside the button and counts nothing held. OBSV-10.
+
+### D-3210 — One refused census row does not drop the rest of a rolling batch — 2026-10-06
+
+**What was observed.** `record_all` (`record_held`, the rolling path)
+returned at the first row `count` refused — a count that went backwards,
+timestamps out of order, an overflow — before `install_census`, so every other
+contract's row in that vendor answer was dropped though its bars were on
+disk. A backwards count never heals, so the same answer dropped the same
+siblings on every roll; the months read as absent and were refetched. The
+lock and read refusals and the per-row refusal emitted nothing, while the
+folder path (`from_members_inner`) names each and carries on.
+
+**Decided.** `record_all` names a refused row with `pull.census` "bars not
+counted" and carries on; the rest are installed and the first reason is
+returned. A lock or read refusal emits `pull.census` "not published" before
+returning, as the install refusal already did. OBSV-11.
+
+**Rejected.** Refusing the whole batch louder. The siblings' bars are on disk
+and their rows are sound; dropping them is the loss, not the noise.

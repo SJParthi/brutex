@@ -1204,28 +1204,50 @@ fn broker_stamp_on_grid(
 /// measurement, however sound it is.
 fn record_all(store_root: &Path, vendor: Vendor, held: &[Held]) -> Option<String> {
     let census_path = crate::manifest::manifest_path(store_root, vendor);
+    // A REFUSAL BEFORE THE READ IS LOGGED as the install refusal is: the
+    // receipt carried it and `/logs` did not (OBSV-11, D-3210).
     let lock = match CensusLock::take(&census_path) {
         Ok(lock) => lock,
-        Err(why) => return Some(why.clone()),
+        Err(why) => {
+            note_census_unpublished(&census_path, held.len(), &why);
+            return Some(why.clone());
+        }
     };
     let mut census = match read_census(&census_path, vendor) {
         Ok(census) => census,
-        Err(why) => return Some(why),
+        Err(why) => {
+            note_census_unpublished(&census_path, held.len(), &why);
+            return Some(why);
+        }
     };
     // RESERVED FROM THE BOUND IN HAND — at most one append per entry offered.
     let mut appends: Vec<Append> = Vec::with_capacity(held.len());
+    // ONE REFUSED ROW REFUSES ITSELF, NOT THE BATCH. Returning here dropped
+    // every other row's append though their bars were on disk, on every roll,
+    // because a backwards count never heals. The folder path has always named
+    // the row and carried on; so does this, and the first reason is returned
+    // once the rest are installed (OBSV-11, D-3210).
+    let mut first: Option<String> = None;
     for one in held {
         match count(&mut census, *one) {
             Ok(Some(append)) => appends.push(append),
             Ok(None) => {}
-            Err(why) => return Some(why),
+            Err(why) => {
+                let key = &one.entry.key;
+                note_bars_not_counted(
+                    &format!("{} {} {}", key.symbol, key.timeframe.as_str(), key.month),
+                    one.entry.rows,
+                    &why,
+                );
+                first.get_or_insert(why);
+            }
         }
     }
     if let Err(why) = install_census(&lock, &census_path, &census, &appends, false) {
         note_census_unpublished(&census_path, appends.len(), &why);
         return Some(why);
     }
-    None
+    first
 }
 
 /// Writes a batch of census rows in ONE cycle — one lock, one read, one install.
@@ -4105,6 +4127,48 @@ mod tests {
     /// kernel moved the times before copying the bytes, and nothing after the
     /// slot moved them again. Before D-2766 the final stamp WAS that stamp, so
     /// the api's cache kept whatever that reader saw under it indefinitely.
+    /// OBSV-11 (D-3210): **one refused row does not drop the rest of the
+    /// batch.** `record_all` returned at the first `count` refusal, before
+    /// `install_census`, so every OTHER contract's row in that rolling answer
+    /// was dropped though its bars were on disk -- "the worst outcome there
+    /// is", in the folder path's own words, repeated on every roll because a
+    /// backwards count never heals -- and the log said nothing.
+    #[test]
+    fn one_refused_row_does_not_drop_the_rest_of_the_batch() {
+        let root = scratch("census-stamp");
+        let held = |symbol: &str, rows: u64| {
+            crate::manifest::Held::new(
+                crate::manifest::Entry {
+                    key: crate::manifest::EntryKey {
+                        contract: None,
+                        exchange: brutex_core::instrument::Exchange::Nse,
+                        segment: brutex_core::instrument::Segment::Index,
+                        symbol: brutex_core::symbol::Symbol::new(symbol).expect("legal"),
+                        timeframe: store::path::Timeframe::MINUTE_1,
+                        month: store::path::YearMonth::new(2022, 10).expect("legal"),
+                    },
+                    rows,
+                    first_ts_micros: 1_664_775_000_000_000,
+                    last_ts_micros: 1_664_775_060_000_000,
+                },
+                crate::manifest::Closes::UNKNOWN,
+            )
+        };
+        assert_eq!(record_held(&root, Vendor::Groww, &[held("NIFTY", 9_999)]), None);
+        let fresh = held("BANKNIFTY", 2);
+        let why = record_held(&root, Vendor::Groww, &[held("NIFTY", 2), fresh])
+            .expect("the backwards row is still reported");
+        assert!(!why.is_empty());
+        let census = read_census(&crate::manifest::manifest_path(&root, Vendor::Groww), Vendor::Groww)
+            .expect("the census reads");
+        assert_eq!(
+            census.held(&fresh.entry.key),
+            Some(fresh),
+            "a sibling row's census append survives one row's refusal"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// OBSV-04 (D-3203): the refusal names the entries that LANDED, not the
     /// ones asked for. A failure at the open lands none and a failure at the
     /// second append leaves exactly one committed slot, yet the sentence said
