@@ -2459,14 +2459,17 @@ impl PopulationFinalizationV4Ledger {
                 return Err("Finalization V4 trailing prefix is not the exact retry".to_owned());
             }
             let mut exact = same_source;
-            let mut index = 0;
-            while exact && index < record_count {
+            // A BOUNDED RANGE, NOT A HAND-STEPPED COUNTER: no single mutation
+            // of the step can stall the walk (G18-cli-b-25, D-2032).
+            for index in 0..record_count {
+                if !exact {
+                    break;
+                }
                 let stored = read_record_at(&mut self.data_file, first_record + index)?;
                 exact = usize::try_from(index)
                     .ok()
                     .and_then(|index| records.get(index))
                     == Some(&stored);
-                index += 1;
             }
             if exact {
                 record_count

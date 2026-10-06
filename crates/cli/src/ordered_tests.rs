@@ -288,3 +288,60 @@ fn a_lane_never_waits_on_its_own_slot() {
         "a lane past the end is not held"
     );
 }
+
+/// **Every lane gets its turns in round-then-input order, and a lane that
+/// finishes early never holds the others, within a deadline.**
+/// G18-cli-b-26, D-2033.
+///
+/// The fan-out runs on its own thread and its answer is awaited with
+/// `recv_timeout`, so a turn that never comes (an update that changes nothing,
+/// a finished lane never marked finished, a wait taken when ready) fails this
+/// test at the deadline instead of hanging the suite.
+#[test]
+fn turns_are_granted_in_round_then_input_order_within_a_deadline() {
+    use std::sync::{Arc, Mutex, mpsc};
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let (send, receive) = mpsc::channel();
+    let lanes = Arc::clone(&log);
+    std::thread::spawn(move || {
+        // Lane 0 takes one turn and finishes; lanes 1-3 take three each.
+        let items: Vec<u8> = (0..4).collect();
+        let done = crate::ordered::map(&items, |lane| {
+            let rounds = if *lane == 0 { 1 } else { 3 };
+            for round in 0..rounds {
+                let _turn = crate::ordered::turn();
+                lanes
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push((round, *lane));
+            }
+            *lane
+        });
+        let _ = send.send(done);
+    });
+    let done = receive
+        .recv_timeout(Duration::from_secs(30))
+        .expect("every lane was granted its turns before the deadline")
+        .expect("every lane starts");
+    assert_eq!(done, [0, 1, 2, 3], "results come back in input order");
+    let log = log
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    assert_eq!(
+        log,
+        [
+            (0, 0),
+            (0, 1),
+            (0, 2),
+            (0, 3),
+            (1, 1),
+            (1, 2),
+            (1, 3),
+            (2, 1),
+            (2, 2),
+            (2, 3),
+        ],
+        "round by round, lanes in input order"
+    );
+}

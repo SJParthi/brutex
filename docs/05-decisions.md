@@ -63333,3 +63333,42 @@ all wrong, so the last check alone refused it. The two `||` mutants survived.
 
 **Decided.** Prior bars at 920, 928 and 929 make only the third-last minute
 wrong. It must be refused, naming the canonical 927, 928, 929 (G18-cli-b-24).
+
+### D-2032 — The V4 ledgers walk a receipt-less prefix over a bounded range — 2026-10-06
+
+**What was observed.** Gate 18 run 1283 timed out on `index += 1` → `index *= 1`
+in Admission V4 and Finalization V4 `append_locked`. With the counter held at
+zero, the `while exact && index < record_count` loop re-read record 0 forever
+whenever it matched.
+
+**Decided.** The walk is `for index in 0..record_count`, which breaks once the
+prefix stops matching. There is no compound step left to mutate. The bound is
+the same as before (`record_count` reads at most), and so is the result. The
+exact-prefix tests (G18-cli-b-12, -13) still pin the keep and the discard
+(G18-cli-b-25).
+
+**Rejected.** A test that only waits out the loop. A hang is not a kill.
+
+### D-2033 — `ordered::map`'s turns are tested under a deadline — 2026-10-06
+
+**What was observed.** Gate 18 run 1283 timed out on several `ordered.rs`
+mutants:
+
+- `Turns::ready` returning false, its `||`s, and its `round - 1`;
+- `Turns::update` replaced with `()`;
+- `Finished::drop` replaced with `()`;
+- the `!` deleted in `turn`.
+
+Each makes a lane wait for a turn that never comes, and the only tests that
+reached them waited without a bound.
+
+**Decided.** Two tests:
+
+- The pure-rule test (G18-cli-b-02, D-2021) covers `ready` with no thread.
+- A fan-out test runs `ordered::map` on its own thread and awaits the result
+  with `recv_timeout(30 s)`. One lane takes one turn and finishes; three take
+  three each. The test asserts the round-by-round, input-order log. A mutant
+  that never grants a turn fails at the deadline instead of hanging the shard
+  (G18-cli-b-26).
+
+**Rejected.** Raising the mutation timeout. It only makes each hang cost more.
