@@ -691,7 +691,7 @@ fn a_month_filled_session_by_session_rederives_linearly() -> bool {
     let ok = sessions > 1 && last <= envelope;
     println!(
         "rederive: last p50 {last} ns against a linear envelope of {envelope} ns ({})",
-        if ok { "within" } else { "BREACH" }
+        if ok { "WITHIN" } else { "BREACH" }
     );
     ok
 }

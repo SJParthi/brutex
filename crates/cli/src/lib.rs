@@ -901,6 +901,11 @@ struct FoldedSeries<'a> {
     bars: &'a mut Vec<indicators::Candle>,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the seven build inputs plus the command's span share (D-1843); the retry loop keeps the context derivation, the attempt record and the withholding adjacent"
+)]
 fn column_withholding_at_build(
     root: &std::path::Path,
     vendor: brutex_core::vendor::Vendor,
@@ -7571,6 +7576,10 @@ fn audit_range_kernel(request: StoredRangeAuditRequest<'_>) -> Result<String, st
 /// withholding, the anchored column under its preparation evidence, both
 /// contexts and the executed-data digest. Loaded once per [`AuditCache`] key.
 /// audit-20261003 o1surface2-1, D-1557.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the six audit inputs plus the command's span share and the raw span its rung already read (D-1843)"
+)]
 fn load_audit_inputs(
     root: &std::path::Path,
     vendor: Vendor,
@@ -7747,13 +7756,13 @@ fn load_audit_inputs(
         signal_length,
         execution_bars,
         column,
+        preparation_digest,
         exact_minute,
         unsourceable,
         daily,
         executed_digest,
         folded,
         withheld_days,
-        preparation_digest,
     })
 }
 
@@ -14136,6 +14145,9 @@ fn calendar_gate(rows: &mut [Screened<'_>], rules: Rules) {
     }
 }
 
+/// [`screen_order_key`]'s key: the calendar key in `Reverse`, then `rank`.
+type ScreenOrder = (core::cmp::Reverse<(bool, i64, i128, i64, i64, i64)>, usize);
+
 /// The screen's final order: the calendar key, then `rank`. o1cli-6, D-1842.
 ///
 /// It was a stable `sort_by_key` on the first five terms over rows already in
@@ -14147,9 +14159,7 @@ fn calendar_gate(rows: &mut [Screened<'_>], rules: Rules) {
 /// `admitted` LEADS, read before [`calendar_gate`] flips it, as it was.
 /// An UNMEASURED row takes the floor on both calendar terms, so measured rows
 /// sort ahead and the unmeasured tail keeps its money order.
-fn screen_order_key(
-    r: &Screened<'_>,
-) -> (core::cmp::Reverse<(bool, i64, i128, i64, i64, i64)>, usize) {
+fn screen_order_key(r: &Screened<'_>) -> ScreenOrder {
     let (weakest, worst_period) = r.consistency.as_ref().map_or(
         // The unmeasured floor: worse than any real grain share and any
         // real period, so measured rows always sort ahead.
@@ -16193,6 +16203,7 @@ fn elite_descend_with_attempt(
 /// it a second time. D-1839, o1cli-5.
 #[expect(
     clippy::too_many_arguments,
+    clippy::too_many_lines,
     reason = "the seven descent inputs plus the input cache its caller may have seeded (D-1839); the cache is state, not part of the question"
 )]
 fn elite_descend_seeded(
@@ -25320,6 +25331,10 @@ mod tests {
     /// the gate) must print the same top rows in the same order, flip the same
     /// verdicts and select the same row. Both calendar settings are run.
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one generator, both paths and every comparison stay in one place so the equivalence reads in order"
+    )]
     fn the_screens_selections_give_exactly_what_its_two_full_sorts_gave() {
         use runner::outcome::Edge;
         use runner::rank::Scored;
@@ -25346,7 +25361,8 @@ mod tests {
         let mut checked_admitted = 0_u32;
         let mut checked_fallback = 0_u32;
         for round in 0..60_u32 {
-            let shapes: Vec<(u64, u64, i64, i64, bool, Option<(i64, i128)>)> = (0..48)
+            type Shape = (u64, u64, i64, i64, bool, Option<(i64, i128)>);
+            let shapes: Vec<Shape> = (0..48)
                 .map(|_| {
                     let trades = next(4) * 3;
                     let wins = next(trades + 1);
@@ -25401,7 +25417,7 @@ mod tests {
             for top in 1..=50 {
                 let mut rules = crate::Rules::operator();
                 rules.top = top;
-                rules.min_weakest_bp = if round % 2 == 0 { 0 } else { 3_000 };
+                rules.min_weakest_bp = if round.is_multiple_of(2) { 0 } else { 3_000 };
 
                 let mut old = build();
                 old.sort_by_key(|r| super::money_key(&r.cell));
@@ -25518,8 +25534,8 @@ mod tests {
                                 ..grid::Cell::default()
                             },
                             tightest: None,
-                            admitted: state % 3 == 0,
-                            consistency: (at % 7 == 0).then(|| super::Consistency {
+                            admitted: state.is_multiple_of(3),
+                            consistency: at.is_multiple_of(7).then(|| super::Consistency {
                                 shares_bp: [i64::try_from(state % 10_000).unwrap_or(0);
                                     crate::stability::GRAINS.len()],
                                 worst_day: i128::from(state % 100),
@@ -25554,7 +25570,12 @@ mod tests {
             }
             for (label, samples) in [("two full sorts", &mut before), ("selections", &mut after)] {
                 samples.sort_unstable();
-                let at = |permille: usize| samples[(samples.len() - 1) * permille / 1_000];
+                let at = |permille: usize| {
+                    samples
+                        .get((samples.len() - 1) * permille / 1_000)
+                        .copied()
+                        .unwrap_or(0)
+                };
                 println!(
                     "O1CLI-MEASURE o1cli-6 {label} n {n}: p50 {} ns p99 {} ns max {} ns",
                     at(500),

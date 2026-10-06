@@ -223,6 +223,10 @@ fn a_finalization_v3_row_read_hashes_both_files_four_times_and_its_docs_say_so()
 /// W2-cli11-0. `append_locked` ends by hashing the data file and, since
 /// D-1845, validating only the block it wrote: it no longer rescans.
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the code shape, the rustdoc and the limits for one call are read together"
+)]
 fn a_finalization_v4_append_validates_only_its_block_and_its_docs_say_so() {
     let append = body(FINALIZATION_V4, "", "fn append_locked(");
     let tail = append

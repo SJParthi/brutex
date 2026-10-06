@@ -64237,7 +64237,9 @@ from the merged `web/src`. Three F8 changes did not land as written:
   merge kept the base and D-1843 re-applies it.
 F8's deletion of Search Lineage V2/V3 (D-1832) is kept over F10's rollback
 hunks in them, as the RESUME notes required; their Gate 11 allowlist rows were
-removed from `.github/gates_ledger.rs`.
+removed from `.github/gates_ledger.rs`. Invariant AHA-05 named the two
+deleted modules' pair-append tests; its V2/V3 half is withdrawn (the ledgers no
+longer exist) and the row keeps `append_rollback::append_all`'s own proof.
 
 **Measured before and after (owner rule 3).** On this 4-core cloud box, base
 = `final/all-fixes` 969493e built in a separate worktree, after = this branch;
