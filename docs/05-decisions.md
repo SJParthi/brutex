@@ -63262,3 +63262,49 @@ in-hours bar of a Muhurat day`.
   so it is UNVERIFIED.
 - The SuperTrend seed breaks a close-on-midpoint tie toward Up. Some tie rule is
   needed and none is sourced, so it is UNVERIFIED.
+
+### D-3405 — The bit table defines a crossing by the last definite side, as CX-01 does — 2026-10-06
+
+**What was observed.** The permutations lens (L3) ran its round-4 derived-bits
+pass. `docs/03-vocabulary.md` defined all 34 crossing rows (bits 280–313), and
+the prose above them, by the PREVIOUS bar: "`close_above_X` was clear on the
+previous bar and is set now". `vocab::table`'s `LevelCrossing` and `CROSSINGS`
+docs said the same, and so did `Evaluator::crossings_of`'s own doc. The D-0244
+amendment and CX-01 lock a different rule: a crossing is set when this bar's
+side differs from the LAST DEFINITE side earlier in the session, and a bar on
+neither side records nothing. `crossings_of` implements that rule, and
+`a_touch_is_known_false_but_cannot_erase_the_side_or_count_across_it` pins it.
+They give different answers on many bars. Take closes 1000, 1010, 1000, 1010
+against the session open (276/277): the code reports no crossing, while the
+table's rule reports two. D-1448 corrected CX-01's wording and missed the table.
+The bit table is the document with authority over what a bit means, so a reader
+decoding a mask got the rejected rule.
+
+**Decided.** Each row now reads "`close_above_X` is set now, and the last
+definite side earlier in this session was below", or the mirror for down. The
+prose and the three code docs say the same. Proof: XPERM-05, which failed before
+the edit with `row 280 still says: ... was clear on the previous bar and is set
+now`. The ordinal rows (314–364) inherit the definition and were already
+correct.
+
+### D-3406 — The vocabulary's stated counts and kinds are the table's, and a test computes them — 2026-10-06
+
+**What was observed.** The permutations lens (L3) ran its round-4 exhaustive
+diff of `docs/03-vocabulary.md` against `vocab::table::TABLE`. All 370 names,
+statuses and live kinds agree, and every family's `known` covers exactly its own
+positions. Five statements did not agree:
+- The 13 void `near_forming_pivot_*` rows (235–271) showed `—` under "Needs a
+  tolerance". The table declares them `Kind::Near`, and §8's own "97 allocated"
+  counts them.
+- CX-04 and the crossings section said "Sixteen `close_above_` names are `void`
+  … and two more are the VWAP pair". The table has thirteen void ones, and five
+  one-sided VWAP rows (52, 143, 146, 148, 193). The section's sentence also
+  stopped mid-way, and the crossings table under it had no header row.
+- CX-05 said the assertion pins "the 70 remaining positions". It pins 14, and
+  the cited test's own comment said both nineteen and fourteen.
+- `table.rs`'s "What is here" table stopped at 273, leaving 96 positions out.
+
+**Decided.** Each statement now says what the table holds. XPERM-06 computes
+every one of these numbers from `TABLE` rather than restating them, so the next
+append fails the test instead of leaving the documents stale. It failed before
+the edit with `row 235 near_forming_pivot_pivot says — for a Near position`.

@@ -27,6 +27,11 @@
 //! | 190–197 | 8 | VWAP bands 2 and 3, completed |
 //! | 198–234 | 37 | the rest of the classical candlestick set |
 //! | 235–273 | 39 | the current-FORMING-day pivot family, 13 levels x 3 relations |
+//! | 274–275 | 2 | the CPR width class as two more positions |
+//! | 276–279 | 4 | the session open and the structure in force |
+//! | 280–313 | 34 | crossing edges, 17 levels x 2 directions (CX-01) |
+//! | 314–364 | 51 | crossing ordinals, 17 levels x first / second / later |
+//! | 365–369 | 5 | the weekday |
 //!
 //! # Tombstones
 //!
@@ -1173,8 +1178,8 @@ pub const TABLE: [BitDef; 370] = [
 ///
 /// Each tuple is `(above, below, crossed_up, crossed_down)`. The first two are
 /// the shipped state positions; the last two are set by
-/// `indicators::Evaluator` when the corresponding state position was clear on
-/// the previous bar and is set on this one.
+/// `indicators::Evaluator` when the corresponding state position is set on this
+/// bar and the last definite side earlier in the session was the other one (CX-01).
 ///
 /// # Why this lives in `vocab` and not in `indicators`
 ///
@@ -1206,7 +1211,8 @@ pub struct LevelCrossing {
     pub above: u16,
     /// `close_below_X` — the state on the other side.
     pub below: u16,
-    /// `crossed_up_X` — the EDGE: `above` clear on the previous bar, set now.
+    /// `crossed_up_X` — the EDGE: `above` set now, and the last definite side earlier in
+    /// this session was `below` (CX-01). A bar on neither side changes nothing.
     pub up: u16,
     /// `crossed_down_X` — the same for `below`.
     pub down: u16,

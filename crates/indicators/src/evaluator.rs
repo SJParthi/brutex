@@ -1097,9 +1097,9 @@ impl Evaluator {
     ///
     /// # What a crossing is here, exactly
     ///
-    /// `crossed_up_X` is set when `close_above_X` was CLEAR on the previous bar
-    /// of this session and is SET on this one. `crossed_down_X` is the same for
-    /// `close_below_X`. Nothing else qualifies: a level that was already above
+    /// `crossed_up_X` is set when `close_above_X` is SET on this bar and the last
+    /// DEFINITE side of `X` earlier in this session was below (CX-01). `crossed_down_X`
+    /// is the same for `close_below_X`. Nothing else qualifies: a level that was already above
     /// and stays above is not a crossing, and neither is a level that has been
     /// above since the open.
     ///
