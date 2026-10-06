@@ -505,7 +505,7 @@ fn dated_cash_close_filters_auction_and_derives_the_same_continuous_session() {
 fn eligibility_does_not_certify_an_unmeasured_calendar_but_source_is_preserved() {
     use pull::session::{Day, IST_OFFSET_SECS, Window};
     let scratch = Scratch::new("cash-unmeasured-calendar");
-    let day = Day::new(2026, 9, 11).unwrap();
+    let day = Day::new(2026, 10, 9).unwrap();
     let mut req = request();
     req.window = Window::new(day, day).unwrap();
     req.listing = pull::vendor::Listing::Equity;
@@ -534,7 +534,8 @@ fn eligibility_does_not_certify_an_unmeasured_calendar_but_source_is_preserved()
 /// **A WINDOW PAST THE CALENDAR IS ONE CLAUSE PER DAY IN EACH RUNG'S
 /// REFUSAL, NOT ONE PER BUCKET.** o1api-44, D-1201.
 ///
-/// Five weekdays from 2026-09-07, a whole session each. The minute bars are
+/// Five weekdays from 2026-10-05, past the sourced calendar (D-3346), a
+/// whole session each. The minute bars are
 /// stored and no derived rung is. On main each rung's refusal joined one
 /// "incomplete or invalid minute coverage" clause per bucket (900 at two
 /// minutes, 1,875 at one) after the day sentences, and each clause was also a
@@ -543,13 +544,13 @@ fn eligibility_does_not_certify_an_unmeasured_calendar_but_source_is_preserved()
 fn a_window_past_the_calendar_names_each_day_once_per_rung() {
     use pull::session::{Day, IST_OFFSET_SECS, Window};
     let scratch = Scratch::new("PAST-CALENDAR-WINDOW");
-    let first = Day::new(2026, 9, 7).unwrap();
-    let last = Day::new(2026, 9, 11).unwrap();
+    let first = Day::new(2026, 10, 5).unwrap();
+    let last = Day::new(2026, 10, 9).unwrap();
     let mut req = request();
     req.window = Window::new(first, last).unwrap();
     let mut rows = Vec::new();
-    for d in 7..=11 {
-        let day = Day::new(2026, 9, d).unwrap();
+    for d in 5..=9 {
+        let day = Day::new(2026, 10, d).unwrap();
         let open = i64::from(day.days_from_epoch()) * 86_400 - IST_OFFSET_SECS + 555 * 60;
         let mut member = session_member();
         for (index, row) in member.rows.iter_mut().enumerate() {
@@ -625,8 +626,8 @@ fn runtime_observations_cannot_authorize_a_new_session_or_close_an_absent_day() 
     use pull::calendar::{Calendar, Observed, Runtime};
     use pull::session::{Day, IST_OFFSET_SECS, Window};
     let scratch = Scratch::new("runtime-unverified");
-    let first = Day::new(2026, 9, 9).unwrap();
-    let last = Day::new(2026, 9, 11).unwrap();
+    let first = Day::new(2026, 10, 7).unwrap();
+    let last = Day::new(2026, 10, 9).unwrap();
     let observed = Calendar::from_observed(&[
         Observed::from_runs(i64::from(first.days_from_epoch()), &[(555, 929)]),
         Observed::from_runs(i64::from(last.days_from_epoch()), &[(555, 929)]),
@@ -662,7 +663,7 @@ fn runtime_observations_cannot_authorize_a_new_session_or_close_an_absent_day() 
     assert_eq!(audit.len(), 3);
     assert!(audit[0].why.contains("observed trading does not attest"));
     assert!(
-        audit[1].why.contains("2026-09-10")
+        audit[1].why.contains("2026-10-08")
             && audit[1]
                 .why
                 .contains("absent observations do not prove closure")
@@ -1397,12 +1398,18 @@ fn d_0955_derivation_rereads_the_whole_month_and_the_register_says_so() {
         "W1-pull2-3",
         &["`derive_all`", "`AlreadyPresent`", "`write_and_count`"],
     );
+    // `one` writes each month through `write_month` since D-3345, which is
+    // `write_and_count` with the month's refusal kept to that month.
     let (_, after_write) = item(INGEST, "fn one(")
-        .split_once("write_and_count(")
+        .split_once("write_month(")
         .expect("one writes the pulled rung");
     assert!(
         after_write.contains("failures.extend(derive_all("),
         "derivation runs after the write, whatever it wrote"
+    );
+    assert!(
+        item(INGEST, "fn write_month(").contains("write_and_count("),
+        "through the one write door"
     );
 }
 
@@ -1484,4 +1491,234 @@ fn d_0955_cash_days_and_masters_are_read_per_request_and_the_register_says_so() 
         per_day.contains("read_entry(root, day)") && per_day.contains("decode(&bytes)"),
         "each day reads and decodes its master, cached or not"
     );
+}
+
+/// Whole 09:15–15:29 sessions on each of `days`, as broker rows: one row per
+/// minute, the same shape as [`session_member`].
+fn sessions_on(days: &[pull::session::Day]) -> Vec<RawRow> {
+    let mut rows = Vec::new();
+    for day in days {
+        let open =
+            i64::from(day.days_from_epoch()) * 86_400 - pull::session::IST_OFFSET_SECS + 555 * 60;
+        for (index, row) in session_member().rows.into_iter().enumerate() {
+            rows.push(RawRow {
+                timestamp: open + i64::try_from(index).unwrap() * 60,
+                ..row
+            });
+        }
+    }
+    rows
+}
+
+/// **A DAY OF THE SOURCED SPANS DERIVES EVERY RUNG AND AUDITS CLEAN (D-3346).**
+///
+/// 2018-01-05 and 2018-01-08 and the week 2026-09-07..=11 are outside the measured calendar
+/// and inside the D-2805 circular-sourced spans. Until the ingest calendar
+/// answered those spans, every one of them was withheld at all seven derived
+/// rungs and named UNVERIFIED by the request audit, so the operator's store held
+/// no derived month before 2019-12 and nothing after 2026-09-04. A whole session
+/// now lands, folds to all seven rungs and leaves no failure; a weekend and a
+/// sourced holiday inside the window are closed, not UNVERIFIED.
+#[test]
+fn a_sourced_span_session_derives_every_rung_and_audits_clean() {
+    use pull::session::{Day, Window};
+    let early = [Day::new(2018, 1, 5).unwrap(), Day::new(2018, 1, 8).unwrap()];
+    let late: Vec<Day> = (7..=11).map(|d| Day::new(2026, 9, d).unwrap()).collect();
+    for (tag, days, from, to) in [
+        ("SOURCED-2018", &early[..], early[0], early[1]),
+        (
+            "SOURCED-2026",
+            &late[..],
+            Day::new(2026, 9, 5).unwrap(),
+            Day::new(2026, 9, 14).unwrap(),
+        ),
+    ] {
+        assert!(
+            pull::calendar::kind_of(i64::from(days[0].days_from_epoch()))
+                == pull::calendar::DayKind::Unmeasured,
+            "the premise: {tag} is outside the measured calendar"
+        );
+        let scratch = Scratch::new(tag);
+        let mut req = request();
+        req.window = Window::new(from, to).unwrap();
+        let raw = pull::fetch::RawWindow {
+            rows: sessions_on(days),
+        };
+        let done = pull::ingest::from_window(&raw, "NIFTY", "test", &scratch.0, plan(&req));
+        assert!(done.failures.is_empty(), "{tag}: {:?}", done.failures);
+        assert_eq!(done.bars_committed, days.len() * 375, "{tag}");
+        assert_eq!(done.derived_files, 7, "{tag}: every rung is derived");
+        assert!(done.balances(), "{tag}");
+    }
+}
+
+/// **A MUHURAT BAR REFUSES ITS DAY, NEVER THE WINDOW (D-3344).**
+///
+/// 2020-11-14 is a Muhurat whose session length the calendar never measured.
+/// A Zerodha minute answer covers 60 days, and one bar on that day used to
+/// refuse the whole answer: on the operator's store, 41 sessions of every
+/// instrument around each of five such days, six months absent outright. Here
+/// the sessions either side land, all seven rungs are derived from them, the
+/// Muhurat's own rows are refused and named once with their count, and the
+/// request audit names that day once more as UNVERIFIED. Nothing else fails,
+/// and a re-run writes nothing.
+#[test]
+fn a_muhurat_minute_refuses_its_day_and_never_the_window() {
+    use pull::session::{Day, IST_OFFSET_SECS, Window};
+    let scratch = Scratch::new("MUHURAT-DAY");
+    let friday = Day::new(2020, 11, 13).unwrap();
+    let muhurat = Day::new(2020, 11, 14).unwrap();
+    // 2020-11-15 is a Sunday and 2020-11-16 a trading holiday, both closed.
+    let tuesday = Day::new(2020, 11, 17).unwrap();
+    assert_eq!(
+        pull::calendar::kind_of(i64::from(muhurat.days_from_epoch())),
+        pull::calendar::DayKind::OpenLengthUnmeasured,
+        "the premise"
+    );
+    let mut rows = sessions_on(&[friday]);
+    // Sixty evening minutes on the Muhurat, 18:15 to 19:14 IST.
+    let evening =
+        i64::from(muhurat.days_from_epoch()) * 86_400 - IST_OFFSET_SECS + (18 * 60 + 15) * 60;
+    rows.extend((0..60).map(|m| RawRow {
+        timestamp: evening + m * 60,
+        open: 2_550_000,
+        high: 2_550_100,
+        low: 2_549_900,
+        close: 2_550_000,
+        volume: 7,
+        open_interest: None,
+    }));
+    rows.extend(sessions_on(&[tuesday]));
+    let mut req = request();
+    req.window = Window::new(friday, tuesday).unwrap();
+    let raw = pull::fetch::RawWindow { rows };
+
+    // The landing alone: the day is reported, nothing is an error.
+    let landed = pull::fetch::land_rows(
+        &raw.rows,
+        &req,
+        pull::vendor::TimestampEncoding::EpochSecondsUtc,
+        pull::vendor::PriceScale::Paisa,
+        None,
+    )
+    .expect("one Muhurat bar no longer refuses the window");
+    assert_eq!(landed.bars.len(), 750);
+    assert_eq!(
+        landed.refused_days,
+        vec![pull::fetch::RefusedDay {
+            day: muhurat.days_from_epoch(),
+            rows: 60
+        }]
+    );
+    assert_eq!(landed.census.total(), 0, "refused rows are not drops");
+
+    let done = pull::ingest::from_window(&raw, "NIFTY", "test", &scratch.0, plan(&req));
+    assert_eq!(done.bars_committed, 750, "both regular sessions land");
+    assert_eq!(done.derived_files, 7, "and every rung is derived from them");
+    let refused: Vec<_> = done
+        .failures
+        .iter()
+        .filter(|f| f.why.starts_with("2020-11-14: 60 minute row(s) refused"))
+        .collect();
+    assert_eq!(refused.len(), 1, "{:?}", done.failures);
+    assert!(
+        refused[0].why.contains("this day only"),
+        "{}",
+        refused[0].why
+    );
+    let audit: Vec<_> = done
+        .failures
+        .iter()
+        .filter(|f| f.why.starts_with("request minute coverage"))
+        .collect();
+    assert_eq!(audit.len(), 1, "{:?}", done.failures);
+    assert!(audit[0].why.contains("2020-11-14"), "{}", audit[0].why);
+    assert_eq!(done.failures.len(), 2, "{:?}", done.failures);
+
+    let again = pull::ingest::from_window(&raw, "NIFTY", "test", &scratch.0, plan(&req));
+    assert_eq!(again.bars_committed, 0);
+    assert_eq!(again.failures, done.failures);
+
+    // A window holding nothing but the Muhurat still says why it stored nothing.
+    let only = Scratch::new("MUHURAT-ONLY");
+    let mut req = request();
+    req.window = Window::new(muhurat, muhurat).unwrap();
+    let raw = pull::fetch::RawWindow {
+        rows: raw
+            .rows
+            .iter()
+            .copied()
+            .filter(|row| (row.timestamp - evening).abs() < 3_600)
+            .collect(),
+    };
+    let done = pull::ingest::from_window(&raw, "NIFTY", "test", &only.0, plan(&req));
+    assert_eq!(done.bars_committed, 0);
+    assert!(
+        done.failures
+            .iter()
+            .any(|f| f.why.starts_with("2020-11-14: 60 minute row(s) refused")),
+        "{:?}",
+        done.failures
+    );
+}
+
+/// **A REFUSED MONTH IS THAT MONTH'S ALONE; THE OTHERS LAND AND ARE COUNTED
+/// (D-3345).**
+///
+/// The shape every re-pull of a Muhurat window meets: the month after it is
+/// already held from its sixteenth, so the window's first days of that month
+/// are a prefix the append-only store refuses. That refusal used to end the
+/// member AFTER the month before it was appended, and the appended month's
+/// census rows were dropped with it — bars on disk the census does not count,
+/// on every attempt. Now the earlier month lands, derives and is counted, and
+/// the refused month is named and left byte for byte as it was.
+#[test]
+fn a_refused_month_is_that_months_alone_and_the_others_are_counted() {
+    use pull::session::{Day, Window};
+    let scratch = Scratch::new("REFUSED-MONTH");
+    let held = [Day::new(2020, 12, 16).unwrap()];
+    let mut req = request();
+    req.window = Window::new(held[0], held[0]).unwrap();
+    let raw = pull::fetch::RawWindow {
+        rows: sessions_on(&held),
+    };
+    let first = pull::ingest::from_window(&raw, "NIFTY", "test", &scratch.0, plan(&req));
+    assert!(first.failures.is_empty(), "{:?}", first.failures);
+    let december = scratch
+        .0
+        .join("bars/truedata/NSE/INDEX/NIFTY/1min/2020-12.bin");
+    let before = fs::read(&december).unwrap();
+
+    // 2020-11-30 is a trading holiday, so November's last session is the 27th.
+    let offered = [
+        Day::new(2020, 11, 27).unwrap(),
+        Day::new(2020, 12, 1).unwrap(),
+    ];
+    let mut req = request();
+    req.window = Window::new(offered[0], offered[1]).unwrap();
+    let raw = pull::fetch::RawWindow {
+        rows: sessions_on(&offered),
+    };
+    let done = pull::ingest::from_window(&raw, "NIFTY", "test", &scratch.0, plan(&req));
+    assert_eq!(done.bars_committed, 375, "November lands");
+    assert_eq!(
+        done.bars_stored, 375,
+        "December's bars are not called stored"
+    );
+    assert_eq!(done.derived_files, 7, "and derives");
+    assert_eq!(done.counted, 8, "and its eight files are counted");
+    let refused: Vec<_> = done
+        .failures
+        .iter()
+        .filter(|f| f.why.contains("NIFTY: 2020-12: ") && f.why.contains("this month only"))
+        .collect();
+    assert_eq!(refused.len(), 1, "{:?}", done.failures);
+    assert_eq!(done.failures.len(), 1, "{:?}", done.failures);
+    assert!(
+        scratch
+            .0
+            .join("bars/truedata/NSE/INDEX/NIFTY/1min/2020-11.bin")
+            .is_file()
+    );
+    assert_eq!(fs::read(&december).unwrap(), before, "December untouched");
 }

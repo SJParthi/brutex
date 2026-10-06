@@ -185,8 +185,8 @@ pub const MAX_REPORTED: usize = 8;
 /// runtime calendar — the authority `pull::ingest::derive` calls. The runtime
 /// calendar's observations change only diagnostic wording, never which bars
 /// are written (`pull::calendar::Runtime::kind_of` returns the static
-/// `kind_of`). Pure, so the comparison itself is testable without a store on
-/// disk.
+/// `sourced_kind_of`, the same answer the pull's derive uses, D-3346). Pure,
+/// so the comparison itself is testable without a store on disk.
 ///
 /// # Errors
 ///

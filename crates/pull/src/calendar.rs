@@ -475,7 +475,8 @@ pub fn sessions_between(first: i64, last: i64) -> Option<u32> {
 // `FIRST_DAY`, `LAST_DAY` and `kind_of` of every day in between into run
 // identity, so widening it would re-key every recorded run, which is the
 // operator's decision and not an importer's. The GDFL readers ask
-// `sourced_kind_of` instead; every other reader is unchanged.
+// `sourced_kind_of` instead, and so does the ingest calendar `Runtime`
+// (D-3346), which no run identity hashes; every other reader is unchanged.
 
 /// First day [`sourced_kind_of`] answers: **2018-01-01**.
 pub const SOURCED_FIRST_DAY: i64 = 17_532;
@@ -577,7 +578,16 @@ fn sourced_kind(epoch_day: i64) -> DayKind {
 
 /// [`kind_of`] inside the measured window, the circular-sourced spans of
 /// D-2805 from [`SOURCED_FIRST_DAY`] to [`SOURCED_LAST_DAY`] outside it, and
-/// `Unmeasured` beyond them. The GDFL readers' calendar.
+/// `Unmeasured` beyond them. The GDFL readers' calendar, and the ingest
+/// calendar [`Runtime`]'s (D-3346).
+///
+/// **Corroborated by the Zerodha store, 6 Oct 2026 (D-3346).** Over the 726
+/// days of the two spans (2018-01-01..=2019-12-01 and 2026-09-05..=2026-09-30)
+/// the `1day` files of NIFTY, BANKNIFTY and NIFTYIT hold a bar on exactly the
+/// 487 days this answers open (485 regular sessions and the two Muhurats) and
+/// on no other; INDIAVIX agrees except that it has no bar on 2019-07-02, a
+/// session the other three traded. NIFTY's and BANKNIFTY's minute files hold the
+/// full 09:15–15:29 grid on 481 of the 485 regular sessions.
 #[must_use]
 pub fn sourced_kind_of(epoch_day: i64) -> DayKind {
     let (FIRST_DAY..=LAST_DAY) = epoch_day else {
@@ -1292,6 +1302,19 @@ pub struct Calendar {
 /// Calendar input for ingestion, distinct from the observed display calendar.
 /// Observations carry no validated schedule provenance: neither their windows
 /// nor their absent rows may override the static calendar or extend its authority.
+///
+/// **Its authority is [`sourced_kind_of`], not [`kind_of`] (D-3346).** The two
+/// agree on every day of the measured window. Outside it, `kind_of` answers
+/// `Unmeasured`, so every Zerodha day from 2018-01-01 to 2019-12-01 and from
+/// 2026-09-05 was withheld at every derived rung and named UNVERIFIED by the
+/// request audit, although NSE's own holiday circulars place every one of them
+/// (D-2805). This type is read only by ingestion — the request-minute audit, the
+/// derived-rung completeness fold (`fold::complete_minutes_with_calendar`) and
+/// `cli::fold_audit`'s reference to that fold — and is hashed into no run
+/// identity, so it may answer the sourced spans where `kind_of`, which
+/// `cli::stored::calendar_policy_digest_v2` hashes, may not. `kind_of`, the
+/// landing verdict (`session::Window::verdict`) and every stored reader are
+/// unchanged.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Runtime<'a> {
     observed: Option<&'a Calendar>,
@@ -1306,10 +1329,23 @@ impl<'a> Runtime<'a> {
         }
     }
 
-    /// Preserve all static answers, including unknown session lengths.
+    /// The sourced answer for `day`: [`kind_of`] inside the measured window,
+    /// the D-2805 circular-sourced spans outside it, `Unmeasured` beyond them.
+    /// Every static answer is preserved, including unknown session lengths;
+    /// observations never change it. D-3346.
+    ///
+    /// # Cost
+    ///
+    /// [`sourced_kind_of`]: inside the measured window `kind_of`'s at most
+    /// nine comparisons; in a sourced span one walk of the two-entry
+    /// [`SOURCED_SPECIAL`] and one of the 34-entry [`SOURCED_HOLIDAYS`], both
+    /// compile-time constants. O(1), no allocation. **UNVERIFIED as a
+    /// gated measurement**: timed once in a throwaway release run
+    /// (`docs/06-limits.md`, D-3346) and by no bench, so a regression would
+    /// not fail a gate.
     #[must_use]
     pub fn kind_of(self, day: i64) -> DayKind {
-        kind_of(day)
+        sourced_kind_of(day)
     }
 
     /// Why an unknown date cannot support a completeness claim.
@@ -1341,8 +1377,8 @@ mod runtime_tests {
         ]);
         let runtime = Runtime::from_observed(&observed);
         for day in FIRST_DAY - 2..=LAST_DAY + 4 {
-            assert_eq!(runtime.kind_of(day), kind_of(day), "day {day}");
-            assert_eq!(Runtime::default().kind_of(day), kind_of(day));
+            assert_eq!(runtime.kind_of(day), sourced_kind_of(day), "day {day}");
+            assert_eq!(Runtime::default().kind_of(day), sourced_kind_of(day));
         }
         assert_eq!(runtime.kind_of(i64::MIN), DayKind::Unmeasured);
         assert_eq!(runtime.kind_of(i64::MAX), DayKind::Unmeasured);
@@ -1429,16 +1465,42 @@ mod runtime_tests {
         );
     }
 
+    /// **THE INGEST CALENDAR ANSWERS THE SOURCED SPANS, AND ONLY THEM (D-3346).**
+    ///
+    /// Inside the measured window it is `kind_of`, day for day. Outside it, it
+    /// is `sourced_kind_of`: a regular weekday, a listed holiday, a weekend and
+    /// a sourced Muhurat each get the circulars' answer, and a day past either
+    /// sourced end is still `Unmeasured`. `kind_of` itself, which run identity
+    /// hashes, still answers `Unmeasured` on every one of those days.
+    #[test]
+    fn the_ingest_calendar_answers_the_sourced_spans_and_kind_of_is_unchanged() {
+        let runtime = Runtime::default();
+        for day in FIRST_DAY..=LAST_DAY {
+            assert_eq!(runtime.kind_of(day), kind_of(day), "day {day}");
+        }
+        for (day, want) in [
+            (17_532, DayKind::Open(Session::full())), // 2018-01-01 Mon
+            (17_557, DayKind::Closed),                // 2018-01-26 Republic Day
+            (17_538, DayKind::Closed),                // 2018-01-07 Sun
+            (17_842, DayKind::OpenLengthUnmeasured),  // 2018-11-07 Muhurat
+            (18_231, DayKind::Closed),                // 2019-12-01 Sun
+            (20_703, DayKind::Open(Session::full())), // 2026-09-07 Mon
+            (20_710, DayKind::Closed),                // 2026-09-14 holiday
+            (SOURCED_LAST_DAY + 1, DayKind::Unmeasured),
+            (SOURCED_FIRST_DAY - 1, DayKind::Unmeasured),
+        ] {
+            assert_eq!(runtime.kind_of(day), want, "day {day}");
+            assert_eq!(kind_of(day), DayKind::Unmeasured, "kind_of {day}");
+        }
+    }
+
     #[test]
     fn unknown_observed_lengths_and_empty_calendars_carry_no_authority() {
-        let observed = Calendar::from_observed(&[Observed::from_runs(LAST_DAY + 1, &[])]);
+        let past = SOURCED_LAST_DAY + 1;
+        let observed = Calendar::from_observed(&[Observed::from_runs(past, &[])]);
         let runtime = Runtime::from_observed(&observed);
-        assert_eq!(runtime.kind_of(LAST_DAY + 1), DayKind::Unmeasured);
-        assert!(
-            runtime
-                .unverified_reason(LAST_DAY + 1)
-                .contains("observed trading")
-        );
+        assert_eq!(runtime.kind_of(past), DayKind::Unmeasured);
+        assert!(runtime.unverified_reason(past).contains("observed trading"));
         let empty = Calendar::from_observed(&[]);
         assert!(
             Runtime::from_observed(&empty)
@@ -1447,7 +1509,7 @@ mod runtime_tests {
         );
         assert!(
             Runtime::default()
-                .unverified_reason(LAST_DAY + 1)
+                .unverified_reason(past)
                 .contains("calendar authority missing")
         );
     }

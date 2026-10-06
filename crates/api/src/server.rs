@@ -7838,17 +7838,23 @@ fn observed_cash_source_days(
             let day = pull::session::IstMoment::from_epoch_secs(epoch)
                 .map_err(|why| why.to_string())?
                 .day();
-            if day >= window.from()
-                && day <= window.to()
-                && window
-                    .verdict(
-                        epoch,
-                        pull::session::Cadence::Minute,
-                        pull::vendor::Venue::NseCash,
-                    )
-                    .map_err(|why| why.to_string())?
-                    .is_none()
-            {
+            if day < window.from() || day > window.to() {
+                continue;
+            }
+            let kept = match window.verdict(
+                epoch,
+                pull::session::Cadence::Minute,
+                pull::vendor::Venue::NseCash,
+            ) {
+                Ok(verdict) => verdict.is_none(),
+                // A DAY OF UNMEASURED SESSION LENGTH OWES NO ELIGIBILITY: the
+                // landing refuses that day alone and names it (D-3344). Taking
+                // it as a refusal here refused the whole body's schedule, and
+                // with it every other day of the answer.
+                Err(pull::session::SessionError::SessionLengthUnmeasured { .. }) => false,
+                Err(why) => return Err(why.to_string()),
+            };
+            if kept {
                 days.insert(day.days_from_epoch());
             }
         }
@@ -21944,6 +21950,59 @@ mod tests {
         );
     }
 
+    /// **A MUHURAT ROW IN A CASH BODY IS SKIPPED, NOT A REFUSAL OF THE BODY
+    /// (D-3344).**
+    ///
+    /// 2021-11-04 is a Muhurat whose length the calendar never measured, so the
+    /// verdict on any minute of it is `SessionLengthUnmeasured`. This took that
+    /// as a refusal of the whole body's dated schedule, and with it every day
+    /// of a 60-day cash answer: the same whole-window loss `fetch::land_rows`
+    /// had. The landing now refuses that day alone, so the day owes no
+    /// eligibility and is simply not a source day; every other day still is,
+    /// and a genuinely unreadable stamp still refuses.
+    #[test]
+    fn a_muhurat_row_in_a_cash_body_is_skipped_not_a_refusal_of_the_body() {
+        use pull::fetch::{RawRow, RawWindow};
+        use pull::session::{IST_OFFSET_SECS, Window};
+        use pull::vendor::TimestampEncoding;
+        let before = day(2021, 11, 3);
+        let muhurat = day(2021, 11, 4);
+        let at = |d: Day, minute: i64| {
+            i64::from(d.days_from_epoch()) * 86_400 - IST_OFFSET_SECS + minute * 60
+        };
+        let row = |timestamp| RawRow {
+            timestamp,
+            open: 100,
+            high: 100,
+            low: 100,
+            close: 100,
+            volume: 1,
+            open_interest: None,
+        };
+        let window = Window::new(before, muhurat).unwrap();
+        let rows = vec![row(at(before, 555)), row(at(muhurat, 18 * 60 + 15))];
+        assert_eq!(
+            super::observed_cash_source_days(
+                &[(window, RawWindow { rows })],
+                TimestampEncoding::EpochSecondsUtc
+            )
+            .unwrap(),
+            vec![before]
+        );
+        assert!(
+            super::observed_cash_source_days(
+                &[(
+                    window,
+                    RawWindow {
+                        rows: vec![row(i64::MAX)]
+                    }
+                )],
+                TimestampEncoding::EpochSecondsUtc
+            )
+            .is_err()
+        );
+    }
+
     #[tokio::test]
     async fn missing_later_cash_evidence_preserves_earlier_chunks_and_counts_refused_rows() {
         use pull::fetch::{RawRow, RawWindow};
@@ -22027,7 +22086,10 @@ mod tests {
         use pull::vendor::{Feed, Granularity, Listing, Transport};
         for (tag, date, verified) in [
             ("runtime-calendar-bounded", day(2026, 9, 4), true),
-            ("runtime-calendar-beyond", day(2026, 9, 11), false),
+            // A DAY OF THE D-2805 SOURCED SPAN IS ATTESTED BY THE INGEST CALENDAR
+            // (D-3346); a day after it ends on 2026-10-04 still is not.
+            ("runtime-calendar-sourced", day(2026, 9, 11), true),
+            ("runtime-calendar-beyond", day(2026, 10, 9), false),
         ] {
             let (site, _) = readiness_fixture(tag, "INE002A01018");
             let midnight = i64::from(date.days_from_epoch()) * 86_400 - IST_OFFSET_SECS;
