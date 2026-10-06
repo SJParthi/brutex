@@ -950,4 +950,19 @@ one-in-fifty O(n) tails" was two plants, a one-in-fifty tail in
 
 | ID | Severity | Finding | Where | Disposition |
 |---|---|---|---|---|
-| `F-61001B` | `wrong` | The lens's own p99 rows misdescribed what they measured: O1P-01 could re-read the previous block, O1P-05 cycled 4,096 keys while claiming uniform draws, and three sets of quoted numbers disagreed | `crates/store/benches/ratio.rs` `cold_index`; `crates/pull/benches/ratio.rs` O1P-05; `docs/04`, `06`, `07` | FIXED (D-3309), commit named in round 4 below |
+| `F-61001B` | `wrong` | The lens's own p99 rows misdescribed what they measured: O1P-01 could re-read the previous block, O1P-05 cycled 4,096 keys while claiming uniform draws, and three sets of quoted numbers disagreed | `crates/store/benches/ratio.rs` `cold_index`; `crates/pull/benches/ratio.rs` O1P-05; `docs/04`, `06`, `07` | FIXED 7ebc0a9e (D-3309) |
+
+### Attack lens L2, round 4 — dispositions — 2026-10-06
+
+A second adversarial review of the whole branch diff confirmed D-3309's two
+sampler fixes. It found four leftover statements that did not match the
+code or the D-3309 numbers:
+
+- O1P-03's 10^5 ratio in `docs/04-invariants.md`.
+- The pull bench's in-code comment on O1P-05.
+- F-61001B pointing at a section that did not exist.
+- `tail_stamp`'s "none repeats the entry" claim.
+
+All four were corrected in the commit after `7ebc0a9e` (D-3310). None
+changes what a row gates or measures. A separate router-first pass over the
+api GET handlers is recorded with the next round.

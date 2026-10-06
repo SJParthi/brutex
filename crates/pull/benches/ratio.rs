@@ -478,10 +478,10 @@ fn entry_lookup_is_flat_at_p99() -> bool {
             base = p99;
             continue;
         }
-        // GATED AT 10^4, PRINTED AT 10^5 (D-3307). At 10^5 months the map
-        // is tens of MiB, a random key's slot is a cache miss, and p99
-        // measured 2.0x to 4.1x the 10^3 one over three runs while C-12's
-        // one cached key stayed at 1.0x on the same tables. The probe count
+        // GATED AT 10^4, PRINTED AT 10^5 (D-3307, D-3309). At 10^5 months
+        // the map is tens of MiB, a random key's slot is a cache miss, and
+        // p99 measured 4.62x to 5.91x the 10^3 one over three runs while
+        // C-12's one cached key read 0.90x to 1.04x on the same tables. The probe count
         // does not grow — the reservation keeps the load factor the same at
         // every size — the memory a probe touches does. `docs/06-limits.md`
         // names it rather than this row hiding it behind a looser ceiling.

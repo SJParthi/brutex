@@ -615,7 +615,9 @@ fn cold_index(n: u64, call: u64, previous: u64) -> (u64, u64) {
 
 /// The stamp sample `call` looks up in an `n`-bar bench file: uniform in
 /// microseconds over the bars' whole span, so most samples fall between two
-/// bars and none repeats the entry the one before it read.
+/// bars. Draws are independent, so a sample can read the same 64-slot index
+/// entry as the one before it — about 1 in 16 at 10^3 bars, far fewer above.
+/// That warms the 10^3 baseline, which makes the gate stricter, not looser.
 fn tail_stamp(n: u64, call: u64) -> i64 {
     let span = n.saturating_mul(1_000_000);
     let offset = i64::try_from(mix(call) % span).unwrap_or(0);

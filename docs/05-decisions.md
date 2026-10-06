@@ -63300,3 +63300,18 @@ only; no behaviour changed.
 
 D-3301, D-3306 and D-3307 stand as written; this entry supersedes their
 numbers.
+
+### D-3310 — Four leftover statements in the p99 rows' text, corrected — 2026-10-06
+
+A second review of this lens's diff found four statements that did not match
+the code or D-3309's numbers:
+
+- O1P-03's 10^5 ratio in `docs/04-invariants.md`. It now says 1.03× to
+  1.41× at 10^4 and 1.29× to 1.39× at 10^5, each run against its own 10^3.
+- The pull bench's comment, which quoted the 4,096-key numbers.
+- F-61001B's disposition, which pointed at a missing section.
+- `tail_stamp`'s claim that no sample repeats the previous index entry.
+  Independent draws repeat about 1 in 16 at 10^3, and that only makes the
+  gate stricter.
+
+Text only.
