@@ -63205,3 +63205,59 @@ D-0329 defect: `NSE` drifting to `NSE_EQ` would decline every row and
 report `ok`. Adding the codes to `Exchange::parse` would make every
 caller of that function, including the store layout, accept a venue the
 engine does not store.
+
+### D-3311 — NSEIX is a known Kite exchange; a refused master body is kept beside the master; an unread segment or type code is named — 2026-10-06
+
+**What was observed.** The D-3310 build was deployed on `:8080` and
+refreshed. Zerodha's dump (`api.kite.trade/instruments`, HTTP 200,
+6 Oct 2026 about 10:36 IST) got past line 2 and then refused at
+``line 25963: unrecognised exchange `NSEIX` ``. Each unknown code
+cost one Kite fetch, which is made with the session token. Only the
+first unknown code in the file was ever named. Two other gaps had the
+same shape:
+- A segment or instrument-type code that `segment_of` or `type_of` cannot
+  read still refused as `line N: malformed instrument identifier`, with
+  no code.
+- A refused body was thrown away, so nothing was left to read for
+  diagnosis.
+
+**Decided.**
+
+1. `NSEIX` joins Zerodha's known non-stored exchange codes and declines as
+   `ForeignExchange`. Its sources are the live dump, as the operator's
+   app observed it (charter §4z), and Zerodha staff on the forum in
+   March 2025: "`NSEIX` for GIFT NIFTY". `GLOBAL` is not added. No
+   source read shows it as a dump `exchange` value, so it is UNVERIFIED.
+2. When a master body is refused, the received body is kept at
+   `<master>.rejected` beside the masters, for example
+   `zerodha_instruments.csv.rejected`. It is kept in two places: in the
+   refresh ladder's validation (`api::mastersrun::obtain`) and in
+   `pull::masters::land`. The refusal names the path and the byte count,
+   and a `pull.masters` warning event is logged.
+   - There is one copy per source, overwritten by each refusal. It is
+     written under the source's lock through a `.partial` and a rename.
+   - It is never read as a master. Every reader opens a master by the
+     exact file name (`path_of`), and no reader lists the directory. The
+     name does not end in `.csv`.
+   - The live master is untouched, as MR-01 requires.
+   - A body over `MAX_BODY_BYTES` is not kept. If the copy cannot be
+     written, the refusal says "NOT kept" and why.
+   - The masters directory is outside the repository, so the copy is
+     never tracked.
+   - The copy is not deleted when a later refresh succeeds. A stale
+     `.rejected` file means only that some earlier refresh refused; its
+     modification time says when.
+3. `core::vendor::unread_master_code` names the segment or
+   instrument-type code that `decode_master_row` could not read. It
+   checks the decoder's gates in the decoder's order, and answers only
+   for an NSE row within the width bound. `validate_rows` appends it to a
+   `Malformed` refusal, for example
+   ``line 3: malformed instrument identifier — unrecognised segment `NSE-NEW` ``.
+
+**Checked first.** No decision forbids keeping a refused body. D-2684 and
+OD-5 (D-2374) govern how the live master is read and replaced; this copy
+changes neither.
+
+**Rejected.** Making the whole-file refusal tolerate unknown codes. D-0329
+and D-3310 keep that policy. The kept body is what makes the refusal cheap
+to act on.

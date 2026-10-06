@@ -2287,6 +2287,13 @@ const DATA_EDGES: &str = "
     census-ceiling census-not-regular masters-not-regular 1234 mkfifo
     folds
 ";
+// D-3311: `kept_at`, the telemetry field key this repository chose for
+// the refused-master-body line; three scratch-directory tags in
+// `pull::masters`' tests; and `blocker`, an expect() message. None names
+// an account, an environment or a vendor field.
+const MASTERS_REJECTED: &str = "
+    kept_at rejected-ceiling rejected-kept rejected-unkept blocker
+";
 // D-1931: telemetry field keys this repository chose for the P-03
 // closed-day drop (`on_closed_day`, `kept_unclassified_day` on the fetch
 // census line, D-2673); the JSON number texts P10-07a's test reads
@@ -2308,7 +2315,7 @@ const LATE_PIECES: &str = "
 const LATE_LABEL: &str = "stamp body reliance";
 
 /// Every declared group, in the order the step joined them.
-const DECLARED: [&str; 54] = [
+const DECLARED: [&str; 55] = [
     SEG_SHAPE,
     VENDOR_WIRE,
     CLAIM_STANDING,
@@ -2361,6 +2368,7 @@ const DECLARED: [&str; 54] = [
     LATE_FIXTURE,
     JOINED_PIECE,
     DATA_EDGES,
+    MASTERS_REJECTED,
     LATE_PIECES,
     LATE_LABEL,
 ];

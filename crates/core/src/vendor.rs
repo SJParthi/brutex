@@ -1416,8 +1416,14 @@ impl Vendor {
             // `NFO CDS BCD MCX`: Kite's orders page, "Name of the exchange (NSE,
             // BSE, NFO, CDS, BCD, MCX)". `BFO`: the vendor's own SDK constant
             // `EXCHANGE_BFO`. `NCO`: Zerodha staff on the Kite forum, April
-            // 2024, "the NSE-Commodity exchange". All in charter §4z.
-            Self::Zerodha => matches!(code, "NFO" | "CDS" | "BCD" | "BFO" | "MCX" | "NCO"),
+            // 2024, "the NSE-Commodity exchange". `NSEIX`: the live dump itself,
+            // line 25963 on 6 Oct 2026 (the refusal D-3310 made name it), and
+            // Zerodha staff on the forum, March 2025, "`NSEIX` for GIFT NIFTY"
+            // (D-3311). All in charter §4z.
+            Self::Zerodha => matches!(
+                code,
+                "NFO" | "CDS" | "BCD" | "BFO" | "MCX" | "NCO" | "NSEIX"
+            ),
             // No master, so no exchange column to read.
             Self::TrueData | Self::Gdfl => false,
         }
@@ -1491,6 +1497,44 @@ impl Vendor {
             Self::Groww | Self::Dhan | Self::TrueData | Self::Gdfl => None,
         }
     }
+}
+
+/// The coded field [`decode_master_row`] could not read on this row, named
+/// with the vendor's own value, or `None` when no segment or instrument-type
+/// code is the reason.
+///
+/// # Why
+///
+/// `decode_master_row` refuses an unknown segment or type code as
+/// [`InstrumentError::Malformed`], a `Copy` error that cannot carry the text.
+/// So a master refused for one said `line N: malformed instrument
+/// identifier` and not which code arrived -- the same blindness D-3310 removed
+/// from the exchange gate. A refusal reporter asks this after a `Malformed`
+/// and appends the answer. D-3311.
+///
+/// It walks the gates in `decode_master_row`'s own order and answers only
+/// where that function would reach them: an over-wide row (refused by width
+/// before any code is read) and a row on any exchange but `NSE` (declined
+/// before the segment is read) answer `None`, so the field named is never one
+/// the decoder did not judge. Constant time: the same literal matches.
+#[must_use]
+pub fn unread_master_code<'a>(
+    vendor: Vendor,
+    row: &MasterRow<'a>,
+) -> Option<(&'static str, &'a str)> {
+    if row.over_wide().is_some() || Exchange::parse(row.exchange) != Ok(Exchange::Nse) {
+        return None;
+    }
+    if vendor.segment_of(row.segment).is_err() {
+        return Some(("segment", row.segment));
+    }
+    if vendor
+        .type_of(row.instrument_type, row.option_side)
+        .is_err()
+    {
+        return Some(("instrument type", row.instrument_type));
+    }
+    None
 }
 
 /// Reads one master row into a canonical key.
@@ -2144,6 +2188,49 @@ mod tests {
     }
 
     #[test]
+    fn an_unknown_segment_or_type_code_is_named_where_the_decoder_judged_it() {
+        // D-3311. Each named case IS a `Malformed` from the decoder, so the
+        // name is attached to exactly the refusal it explains.
+        let unknown_segment = row("NSE", "NSEZ", "NIFTY", "FUT", "2026-08-05", "");
+        assert_eq!(
+            decode_master_row(Vendor::Zerodha, unknown_segment),
+            Err(InstrumentError::Malformed)
+        );
+        assert_eq!(
+            unread_master_code(Vendor::Zerodha, &unknown_segment),
+            Some(("segment", "NSEZ"))
+        );
+        let unknown_type = row("NSE", "NSE", "NIFTY", "SPOT", "", "");
+        assert_eq!(
+            decode_master_row(Vendor::Zerodha, unknown_type),
+            Err(InstrumentError::Malformed)
+        );
+        assert_eq!(
+            unread_master_code(Vendor::Zerodha, &unknown_type),
+            Some(("instrument type", "SPOT"))
+        );
+
+        // Nothing is named where the decoder never read a code: a readable
+        // row, a row declined at the exchange gate, an over-wide row.
+        let readable = row("NSE", "NSE", "NIFTY", "FUT", "2026-08-05", "");
+        assert_eq!(unread_master_code(Vendor::Zerodha, &readable), None);
+        let foreign = row("NFO", "NSEZ", "NIFTY", "SPOT", "", "");
+        assert_eq!(unread_master_code(Vendor::Zerodha, &foreign), None);
+        let wide_value = "W".repeat(MAX_FIELD_BYTES + 1);
+        let mut wide = row("NSE", "NSEZ", "NIFTY", "SPOT", "", "");
+        wide.expiry = &wide_value;
+        assert!(decode_master_row(Vendor::Zerodha, wide).is_err());
+        assert_eq!(unread_master_code(Vendor::Zerodha, &wide), None);
+        // At exactly the bound it is not over-wide, so the segment is named.
+        let edge_value = "W".repeat(MAX_FIELD_BYTES);
+        wide.expiry = &edge_value;
+        assert_eq!(
+            unread_master_code(Vendor::Zerodha, &wide),
+            Some(("segment", "NSEZ"))
+        );
+    }
+
+    #[test]
     fn every_known_non_nse_exchange_code_is_the_routine_foreign_decline() {
         // D-3310. Kite's dump files derivatives under `NFO`, commodities under
         // `MCX`, and so on; each of those rows refused the whole master as an
@@ -2154,12 +2241,15 @@ mod tests {
         // code listed for ANY vendor is unknown at a vendor that does not
         // list it -- so no arm can quietly grow or shrink.
         let all = [
-            "NFO", "CDS", "BCD", "BFO", "MCX", "NCO", "NSE", "BSE", "XYZ",
+            "NFO", "CDS", "BCD", "BFO", "MCX", "NCO", "NSEIX", "NSE", "BSE", "XYZ", "GLOBAL",
         ];
         let expected: [(Vendor, &[&str]); 5] = [
             (Vendor::Groww, &["MCX"]),
             (Vendor::Dhan, &["MCX"]),
-            (Vendor::Zerodha, &["NFO", "CDS", "BCD", "BFO", "MCX", "NCO"]),
+            (
+                Vendor::Zerodha,
+                &["NFO", "CDS", "BCD", "BFO", "MCX", "NCO", "NSEIX"],
+            ),
             (Vendor::TrueData, &[]),
             (Vendor::Gdfl, &[]),
         ];
@@ -2172,7 +2262,7 @@ mod tests {
                 );
             }
         }
-        for code in ["NFO", "CDS", "BCD", "BFO", "MCX", "NCO"] {
+        for code in ["NFO", "CDS", "BCD", "BFO", "MCX", "NCO", "NSEIX"] {
             let decoded = decode_master_row(
                 Vendor::Zerodha,
                 row(code, "NFO-FUT", "NIFTY", "FUT", "2026-08-05", ""),
@@ -2205,6 +2295,8 @@ mod tests {
             (Vendor::Zerodha, " MCX"),
             (Vendor::Zerodha, "MCX "),
             (Vendor::Zerodha, "NSEIX-UNREAD"),
+            (Vendor::Zerodha, "nseix"),
+            (Vendor::Groww, "NSEIX"),
         ] {
             let decoded = decode_master_row(
                 vendor,
