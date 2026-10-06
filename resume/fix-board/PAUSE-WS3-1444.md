@@ -31,3 +31,4 @@
 4. Update RESULT-20261006.md.
 - 14:45 UTC: the Gate 18 cli run (old tree a08d2ec4) also reports `candidate_trades.rs:1358 AlreadyExists guard -> false` as not caught (missed or timeout); e0709bd3's `linked_or_lost_race` test covers both the true and false variants.
 - 15:04 UTC: the old-tree cli run also reports `candidate_trades.rs:1358 == -> !=` (same AlreadyExists guard) as not caught; also covered by e0709bd3's direct test (each io::ErrorKind asserted).
+- 18:08 UTC: re-run of the targeted Gate 18 check on e0709bd3 (fixboard/pr74-batch4): 6 mutants, **6 caught, 0 missed, 0 timeout**. All three AlreadyExists survivors (true, false, ==→!=) are killed by `only_a_lost_link_race_is_not_a_failure`. Still open on batch4: the line 1337 NotFound-guard TIMEOUT, and api Gate 18.
