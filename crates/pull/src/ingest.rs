@@ -214,7 +214,7 @@ pub struct Ingested {
     /// filing several contracts from one vendor answer collects these and calls
     /// [`record_held`] once — see `record_all`'s cost note for what paying it
     /// per contract cost.
-    pub pending: Option<crate::manifest::Held>,
+    pub pending: Vec<crate::manifest::Held>,
     /// Bars this run actually WROTE — `Appended::Committed` only.
     ///
     /// Zero on a re-run of a month already held, which is the number that makes
@@ -1370,19 +1370,21 @@ pub fn from_rows(
     if bars.is_empty() {
         return done;
     }
-    let Some((first, last)) = bars.first().zip(bars.last()) else {
-        return done;
-    };
-    let addressed = month_of(first, last).and_then(|ym| {
+    // ONE FILE PER MONTH, AS THE SPOT DOOR FILES (D-3136). A capped rolling
+    // chunk may cross a month boundary on purpose (D-0320, D-1370), and a
+    // contract run inside it with it. This addressed ONE month from the
+    // first and last bar and refused a batch spanning two, so such a run never
+    // landed and every rerun refused it again.
+    let addressed = months_in(bars).and_then(|months| {
         plan.timeframe().and_then(|timeframe| {
             identify(instrument, plan.exchange, plan.segment)
-                .map(|identity| (ym, timeframe, identity))
+                .map(|identity| (months, timeframe, identity))
         })
     });
     // THREE REFUSALS, ONE ARM. Each was its own `match` with an identical
     // four-line error branch, which is three chances to get the recording
     // wrong and, in this function, three copies of the same paragraph.
-    let (ym, timeframe, identity) = match addressed {
+    let (months, timeframe, identity) = match addressed {
         Ok(three) => three,
         Err(why) => {
             note_not_filed(instrument, "address", &why);
@@ -1400,86 +1402,82 @@ pub fn from_rows(
         symbol_id,
     } = identity;
 
-    let parts = PathParts {
-        vendor: plan.vendor,
-        exchange: exchange.as_str(),
-        segment: segment.as_str(),
-        symbol: symbol.as_str(),
-        contract: plan.contract,
-        timeframe,
-        month: ym,
-        file: FileKind::Bars,
-    };
-    let held = write_and_count(
-        bars,
-        store_root,
-        symbol_id,
-        parts,
-        EntryKey {
+    // The overlays are in stamp order with the bars, so each month's run of
+    // them is the next slice; one the month file does not admit is refused
+    // there, loudly, never filed under the wrong month.
+    let mut overlay_at = 0usize;
+    for (ym, month_bars) in months {
+        let parts = PathParts {
+            vendor: plan.vendor,
+            exchange: exchange.as_str(),
+            segment: segment.as_str(),
+            symbol: symbol.as_str(),
             contract: plan.contract,
-            exchange,
-            segment,
-            symbol,
             timeframe,
             month: ym,
-        },
-    );
-    let one = match held {
-        Ok((one, committed)) => {
-            done.bars_stored = bars.len();
-            done.bars_committed = committed;
-            one
+            file: FileKind::Bars,
+        };
+        let overlay_from = overlay_at;
+        while let Some(row) = overlays.get(overlay_at)
+            && month_at_micros(row.ts_micros).is_ok_and(|at| at == ym)
+        {
+            overlay_at = overlay_at.saturating_add(1);
         }
-        Err(why) => {
-            note_not_filed(instrument, "bars", &why);
+        let month_overlays = overlays.get(overlay_from..overlay_at).unwrap_or_default();
+        let held = write_and_count(
+            month_bars,
+            store_root,
+            symbol_id,
+            parts,
+            EntryKey {
+                contract: plan.contract,
+                exchange,
+                segment,
+                symbol: symbol.clone(),
+                timeframe,
+                month: ym,
+            },
+        );
+        match held {
+            Ok((one, committed)) => {
+                done.bars_stored = done.bars_stored.saturating_add(month_bars.len());
+                done.bars_committed = done.bars_committed.saturating_add(committed);
+                // THE CENSUS ROW IS HANDED BACK, NOT WRITTEN HERE.
+                //
+                // A caller filing SEVERAL contracts from one vendor answer —
+                // which is every rolling answer, since one spans four or five
+                // weekly contracts and steps strike with spot — would
+                // otherwise pay a full census cycle per contract. `roll_one`
+                // collects every month's row and records them once.
+                done.pending.push(one);
+            }
+            Err(why) => {
+                note_not_filed(instrument, "bars", &why);
+                done.failures.push(Failure {
+                    instrument: instrument.to_owned(),
+                    why,
+                });
+                continue;
+            }
+        }
+        // THE OVERLAY AFTER THE BARS, NEVER BEFORE. If the bar write fails
+        // there is nothing for an overlay row to be a column of, and a sidecar
+        // describing bars that are not there is worse than no sidecar: the
+        // next reader joins on a stamp that has no bar.
+        if let Err(why) = write_overlay(month_overlays, store_root, symbol_id, parts) {
+            note_not_filed(instrument, "overlay", &why);
             done.failures.push(Failure {
                 instrument: instrument.to_owned(),
                 why,
             });
-            return done;
         }
-    };
-
-    // THE CENSUS ROW IS HANDED BACK, NOT WRITTEN HERE.
-    //
-    // A caller filing SEVERAL contracts from one vendor answer — which is every
-    // rolling answer, since one spans four or five weekly contracts and steps
-    // strike with spot — would otherwise pay a full census cycle per contract:
-    // lock, read the whole manifest, decode every entry, install, fsync. Thirty
-    // groups is thirty walks, against 252 requests a month, while the manifest
-    // grows by that same count. `from_rows` below records the one entry it has;
-    // `roll_one` collects and records once.
-    done.pending = Some(one);
-    // COUNTED, BECAUSE IT WILL BE — **and the reason given here was wrong.**
-    //
-    // This said: *"the caller returns an error if the batch cannot be
-    // published, so there is no path where this reports counted and the census
-    // does not hold it."* The overlay write below WAS that path. It runs after
-    // `pending` and `counted` are set; its failure went into `failures`; and
-    // `land_rolling_group` returned `Err` on any failure, so the caller's `Err`
-    // arm skipped `census_rows.extend(pending)` entirely. Bars on disk, census
-    // row dropped, `counted: 1` a lie — and every retry repeated it, because
-    // the bars come back `AlreadyPresent` and the overlay refuses again.
-    //
-    // The property holds now, and it holds because the CALLER was fixed rather
-    // than because this line was right: `land_rolling_group` returns `Err` only
-    // when `pending.is_none()` — which is the honest test for "nothing landed",
-    // since the early return above leaves it unset when the BAR write fails —
-    // and otherwise publishes the row with the reason travelling beside it.
-    // D-0343.
-    done.counted = 1;
-
-    // THE OVERLAY AFTER THE BARS, NEVER BEFORE. If the bar write fails there is
-    // nothing for an overlay row to be a column of, and a sidecar describing
-    // bars that are not there is worse than no sidecar: the next reader joins
-    // on a stamp that has no bar.
-    if let Err(why) = write_overlay(overlays, store_root, symbol_id, parts) {
-        note_not_filed(instrument, "overlay", &why);
-        done.failures.push(Failure {
-            instrument: instrument.to_owned(),
-            why,
-        });
     }
+    // COUNTED WHEN ANY MONTH'S CENSUS ROW IS HANDED BACK. The caller publishes
+    // every row in `pending` whatever failed beside it, and returns `Err` only
+    // when `pending` is empty — the honest test for "nothing landed" (D-0343).
+    // An overlay refused after month 1 landed USED to be the path that
+    // dropped the row; that is the caller's fix, and it holds per month.
+    done.counted = usize::from(!done.pending.is_empty());
     name_the_origin(&mut done, origin);
     done
 }
@@ -2025,7 +2023,7 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
 ///
 /// # Errors
 ///
-/// A timestamp that is not a moment on the IST calendar, from [`month_of`].
+/// A timestamp that is not a moment on the IST calendar, from [`month_at`].
 fn months_in(
     bars: &[store::format::Bar],
 ) -> Result<Vec<(store::path::YearMonth, &[store::format::Bar])>, String> {
@@ -2052,7 +2050,7 @@ fn months_in(
 
 /// The month ONE bar falls in.
 ///
-/// # Why this is separate from [`month_of`], which takes two
+/// # Why this is not the two-ended `month_of` it replaced
 ///
 /// `months_in` groups a batch by month and asked `month_of(bar, bar)` for every
 /// bar in it. That function exists to check a SPAN — it converts both ends and
@@ -2066,39 +2064,25 @@ fn months_in(
 /// `store::file::read_row`, and invisible to the same gates for the same
 /// reason — a ratio cannot see work that is doubled uniformly.
 ///
-/// [`month_of`] keeps the span check, which is a real refusal and has real
-/// callers: a batch straddling a month boundary needs two files and splitting
-/// it is the caller's decision.
+/// `month_of` kept a span check for `from_rows`, which refused a batch
+/// straddling a month boundary. That door now splits by month itself, as this
+/// one's callers do, and `month_of` is gone (D-3136).
 ///
 /// # Errors
 ///
 /// A timestamp outside the range [`crate::session::IstMoment`] can name, or a
 /// day with no month in the store's addressing.
 fn month_at(bar: &store::format::Bar) -> Result<store::path::YearMonth, String> {
-    crate::session::IstMoment::from_epoch_secs(bar.ts_micros.div_euclid(1_000_000))
+    month_at_micros(bar.ts_micros)
+}
+
+/// The IST month the instant `ts_micros` falls in.
+fn month_at_micros(ts_micros: i64) -> Result<store::path::YearMonth, String> {
+    crate::session::IstMoment::from_epoch_secs(ts_micros.div_euclid(1_000_000))
         .map_err(|why| why.to_string())?
         .day()
         .year_month()
         .map_err(|why| why.to_string())
-}
-
-fn month_of(
-    first: &store::format::Bar,
-    last: &store::format::Bar,
-) -> Result<store::path::YearMonth, String> {
-    let at = crate::session::IstMoment::from_epoch_secs(first.ts_micros.div_euclid(1_000_000))
-        .map_err(|why| why.to_string())?;
-    let ym = at.day().year_month().map_err(|why| why.to_string())?;
-    let end = crate::session::IstMoment::from_epoch_secs(last.ts_micros.div_euclid(1_000_000))
-        .map_err(|why| why.to_string())?;
-    let end_ym = end.day().year_month().map_err(|why| why.to_string())?;
-    if end_ym != ym {
-        return Err(format!(
-            "bars span {ym} to {end_ym}; the store addresses one month per \
-             file and splitting is the caller's decision, not this one's"
-        ));
-    }
-    Ok(ym)
 }
 
 /// A member's identity, parsed once and used by every file it writes.

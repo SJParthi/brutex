@@ -1085,7 +1085,7 @@ fn a_run_balances_only_when_every_row_is_accounted_for() {
 
     let balanced = Ingested {
         decoder_skips: pull::fetch::DecodeSkips::default(),
-        pending: None,
+        pending: Vec::new(),
         bars_committed: 0,
         derived_files: 0,
         members: 1,

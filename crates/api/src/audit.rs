@@ -1867,7 +1867,7 @@ mod tests {
 
     fn run() -> Ingested {
         Ingested {
-            pending: None,
+            pending: Vec::new(),
             bars_committed: 0,
             derived_files: 0,
             members: 194,

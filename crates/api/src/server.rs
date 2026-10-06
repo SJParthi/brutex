@@ -14510,7 +14510,7 @@ fn land_rolling_group(
     endpoint: &str,
     window: pull::session::Window,
     label: &str,
-) -> Result<(usize, Option<pull::manifest::Held>, Option<String>), String> {
+) -> Result<(usize, Vec<pull::manifest::Held>, Option<String>), String> {
     let bars: Vec<store::format::Bar> = group.iter().map(|r| r.bar).collect();
     // ONLY THE OVERLAYS THAT STATE SOMETHING. A contract whose vendor sent
     // neither a spot nor a volatility has nothing to overlay, and a file of
@@ -14570,9 +14570,9 @@ fn land_rolling_group(
     // `/store.json` and `fnowork::owed` read it as absent, and vendor quota is
     // spent on it for ever.
     //
-    // `pending.is_none()` is the honest test for "nothing landed": `from_rows`
-    // returns early without setting it when the BAR write fails, and sets it
-    // only once the bars are on disk. So the row is published either way and
+    // `pending.is_empty()` is the honest test for "nothing landed": `from_rows`
+    // adds a month's row only once that month's bars are on disk (D-3136), and
+    // leaves it empty when no bar write landed. So rows are published either way and
     // the reason travels beside it — which is what the spot path already does,
     // naming *"holds N bar(s) the census does not count"*. It is also the rule
     // this file states one screen up for the greeks: a failure here is this
@@ -14582,7 +14582,7 @@ fn land_rolling_group(
         .first()
         .map(|first| format!("{label}: {}", first.why));
     if let Some(why) = trouble.clone()
-        && done.pending.is_none()
+        && done.pending.is_empty()
     {
         return Err(why);
     }
