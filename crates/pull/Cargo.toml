@@ -88,25 +88,21 @@ telemetry = { path = "../telemetry", version = "0.1.0" }
 
 # THE SOCKET. Taken now and not before, because until this change nothing in
 # this crate could reach a vendor: `pull::fetch::BarSource` had exactly one
-# implementor and it answered from memory. `default-features = false` with
-# `rustls-tls` keeps **OpenSSL** out.
+# implementor and it answered from memory. The workspace `reqwest` line sets
+# `default-features = false` with `rustls-tls-webpki-roots-no-provider`, which
+# keeps **OpenSSL** out AND keeps rustls's default C provider out.
 #
-# IT DOES NOT KEEP C OUT, AND THIS COMMENT USED TO SAY IT DID.
-#
-# `rustls` needs a crypto provider and reaches `ring` 0.17.14, which vendors 17
-# `.c`, 28 `.h`, 73 `.S` and 17 `.asm` files and compiles them through a
-# `build.rs` calling `cc::Build::compile`. Measured on this tree:
-# `nm target/release/api` returns **72 `ring_core` symbols in the shipped
-# binary**. The claim that this line kept "OpenSSL and its C toolchain" out was
-# half true and read as wholly true; `crates/lake/Cargo.toml` states the same
-# fact correctly and the two manifests contradicted each other.
-#
-# CI gate 13 does NOT catch this: it walks `Cargo.lock` for interpreted-runtime
-# names, and `ring` is not one. Whether a cargo dependency that builds native
-# code is the "vendored binding" CLAUDE.md §2 bans is an operator ruling — §2
-# scopes its allowlist to *tracked* files and `ring`'s `build.rs` is not
-# tracked, which is the only reading under which this passes. Recorded in
-# D-0071 and registered in docs/06-limits.md; §2 itself is untouched.
+# THIS COMMENT USED TO SAY THE OPPOSITE, AND FOR A WHILE IT WAS RIGHT. Under the
+# old `rustls-tls` feature rustls reached `ring` 0.17.14, whose `build.rs`
+# compiled 135 vendored C and assembly files into the shipped binary (D-0071).
+# D-0211 moved the feature to `-no-provider` and installed `rustls-graviola`
+# (the line below) through `pull::ensure_tls_provider`; D-0212 made `deny.toml`
+# ban `ring`, `aws-lc-rs`, `aws-lc-sys` and `cc` by name, so neither can return
+# without a red `cargo deny`. `ring` still has a `Cargo.lock` entry -- the lock
+# records every optional edge -- and is in no resolved build graph:
+# `cargo tree --workspace --locked -i ring --target all` prints nothing.
+# D-3501: `core/tests/graph.rs` refuses a manifest comment that names a banned
+# crate without saying it is banned, which is how this paragraph went stale.
 reqwest = { workspace = true }
 rustls-graviola = { workspace = true }
 tokio = { workspace = true }
@@ -126,9 +122,9 @@ serde_json = { workspace = true }
 # SigV4 signature, and SigV4 is HMAC-SHA256 over a canonical string. `reqwest`
 # is already here for the broker; these two are pure-Rust RustCrypto crates
 # with no `asm` feature. Two crates instead of eighty-seven, and **these two
-# add no C** — which is a claim about `hmac` and `sha2` only. The binary is not
-# free of C: `ring` arrives through the `reqwest` line above. See `src/ssm.rs`,
-# D-0051 and D-0071.
+# add no C** — which is a claim about `hmac` and `sha2` only; the TLS provider
+# above is `rustls-graviola` since D-0211, and `deny.toml` bans `aws-lc-rs` and
+# `aws-lc-sys` by name since D-0212. See `src/ssm.rs`, D-0051 and D-0071.
 hmac = { workspace = true }
 sha2 = { workspace = true }
 # Dated NSE MII security masters are gzip CSVs; pure-Rust default backend.

@@ -249,9 +249,12 @@ only after their manifests took them. `cli`'s `pull` and `vocab` arrows, both
 declared on 2026-09-01, were missing here until D-0683: D-0453 drew `pull` in
 `AGENTS.md` and `docs/01-architecture.md` but not in this file, and its own list
 left out `vocab`. Gates 9 and 9b pin one arrow each, and `core/tests/graph.rs`
-checks the table in `docs/01-architecture.md` against all thirteen manifests;
-**nothing parses this block as a whole**, so check it against that gate and the
-manifests rather than trusting it.
+checks the table in `docs/01-architecture.md` against all thirteen manifests.
+**Since D-3502 the same file parses this block, and `AGENTS.md`'s copy, as a
+whole** (`the_law_pictures_of_the_graph_are_the_manifests`): every member and
+every arrow, both ways. Redraw the block when a manifest changes, or the build
+is red; the diagram above `docs/01-architecture.md`'s table is still checked by
+nothing.
 
 **`indicators` and `engine` may not name each other.** Gate 22 clause A pins both
 of their dependency sets to `vocab` alone and ships no allowlist, so a bar cannot

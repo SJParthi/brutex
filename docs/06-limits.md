@@ -9229,6 +9229,11 @@ from all three pictures, and `pull` from `CLAUDE.md`, until D-0683. A gate that
 derives the pictures from `cargo metadata --no-deps` would close this. D-0208
 recorded that option as open, and it is still not built.
 
+**Closed for two of the three pictures by D-3502.** `core/tests/graph.rs`
+parses the `CLAUDE.md` §5 and `AGENTS.md` §5 blocks and compares them with the
+thirteen manifests both ways. The diagram above `docs/01-architecture.md`'s
+table is still checked by nothing.
+
 ## Decision numbers are unique in one tree, not across unmerged branches — D-0684
 
 Gate 27b fails a tree in which a decision number heads more than one entry,
@@ -14687,7 +14692,11 @@ bounds are all nonzero.
   binds it, or the body of the `fn` it calls) and must name only
   `current_exe`, a `CARGO_BIN_EXE_*` path or a listed program; anything it
   cannot resolve is refused. A value threaded through two functions, a field,
-  or another file is not followed, and is refused rather than read. `sh` and
+  or another file is not followed, and is refused rather than read. D-3500:
+  a constructor reached by a `type` alias, `<Command>::new`, the value
+  `Command::new` or an `impl .. for Command` is refused; one reached through a
+  macro that assembles the path, or a trait method on another type returning a
+  `Command`, is still not read. `sh` and
   `bash` are now shadowed on gate 1e's PATH: git starts a shell by the absolute
   path it was built with, and `core`'s `findings` and `store`'s
   `cited_commits` tests ran on 2026-10-04 with both stubbed and invoked

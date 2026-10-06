@@ -63139,3 +63139,76 @@ longer be reached, so it was removed. The frontier writer keeps its own
 
 **Rejected.** Changing the test to expect the 4,096 text. That would
 leave the two descent doors with different bounds.
+
+### D-3500 — Gate 0's spawn scan refuses the constructor reached by another spelling — 2026-10-06
+
+**What was observed.** Lens L4 (one authority) built `.github/source_scan.rs`
+at `969493e` and handed `spawns` five one-line files that each start `sh`:
+a `type` alias of `std::process::Command`, the qualified
+`<std::process::Command>::new`, `Command::new` taken as a value
+(`let f = Command::new; f("sh")`), `["sh"].map(Command::new)`, and an
+`impl .. for Command` whose `Self::new("sh")` is the constructor. Each exited
+0. The scan read only the literal `Command :: new (` token run, so the
+argument of every other spelling was never read. Gate 2 refuses the ident
+`Command` in a build script outright, but crate code outside `build.rs` had
+only this scan, and gate 1e's PATH stubs see only what a build or test
+actually runs.
+
+**Decided.** `spawn_findings` asks `hidden_constructor` about every `Command`
+token first, and refuses: `Command :: new` not followed by `(`; `Command >`
+followed by `::`; `for [path ::] Command` followed by `{` or `where`; and any
+statement opening with `[pub [(..)]] type` that holds the token. Each refusal
+names the spelling. Type positions crate code uses (`&mut Command`,
+`-> Command`, `Option<Command>`, a field, a `use` group, a local `enum
+Command` and its inherent `impl`) stay clean; the whole tree is clean under the
+widened scan. Proved by
+`a_spawn_through_another_spelling_of_the_constructor_is_refused`, which failed
+first on the type-alias line.
+
+**Not closed.** A constructor reached through a macro that builds the path
+from fragments, or through a trait method on another type that returns a
+`Command`, is still not read; gate 1e's runtime stubs remain the second signal.
+
+### D-3501 — A manifest comment naming a banned crate says it is banned — 2026-10-06
+
+**What was observed.** `crates/pull/Cargo.toml` said rustls "reaches `ring`
+0.17.14", that `nm target/release/api` shows "72 `ring_core` symbols", and that
+"the binary is not free of C: `ring` arrives through the `reqwest` line". D-0211
+removed `ring` (the `-no-provider` feature and `rustls-graviola`) and D-0212
+banned it in `deny.toml`. `cargo tree --workspace --locked -i ring --target all`
+prints nothing on `969493e`; `ring` keeps only a `Cargo.lock` entry for an
+optional edge. The coordinator's Rust-only scan raised it; L4 reproduced it.
+
+**Decided.** The two `pull` paragraphs now state the current provider and the
+ban, and `lake`'s `encryption` sentence says `deny.toml` bans `ring`. `deny.toml`
+is the one authority on which native crates may build, so
+`core/tests/graph.rs` reads its `[bans] deny` list and refuses any run of
+manifest comment lines that names a banned crate in backticks without saying
+`deny.toml` (`a_manifest_comment_naming_a_banned_crate_says_it_is_banned`). On
+the old manifests it named five mentions: `lake/Cargo.toml:10 ring`,
+`pull/Cargo.toml:89 ring`, and `pull/Cargo.toml:115` `aws-lc-rs`,
+`aws-lc-sys`, `ring`.
+
+**Rejected.** A test that the resolved graph holds no banned crate: that is
+`cargo deny check`'s job already (D-0212), and a test cannot run cargo
+(D-2344). The defect here was the prose, not the graph.
+
+### D-3502 — `CLAUDE.md` §5 and `AGENTS.md` §5 are checked against the manifests — 2026-10-06
+
+**What was observed.** `docs/06-limits.md` ("The hand-drawn crate graphs are
+checked by nothing — D-0683") recorded that `cli`'s `pull` and `vocab` arrows
+were missing from the law's picture for three weeks while the checked
+`docs/01-architecture.md` table carried both, and that a check deriving the
+pictures from the manifests was "still not built". Lens L4's scope (d) names
+it.
+
+**Decided.** `core/tests/graph.rs` reads the first fenced block of `## 5.` in
+`CLAUDE.md` and `AGENTS.md`: `depends on NOTHING a · b` gives each root no
+arrows, `x y <-- a · b` gives each consumer `{x, y}`, a consumer drawn twice is
+refused, and the drawn map must equal the thirteen manifests' declared
+workspace dependencies both ways
+(`the_law_pictures_of_the_graph_are_the_manifests`). Dropping `vocab` from
+`cli`'s row in `CLAUDE.md` turns it red. §5's sentence "nothing parses this
+block as a whole" is replaced in both files; this entry is that edit's
+authority. The ASCII diagram above `docs/01-architecture.md`'s table is still
+unparsed.

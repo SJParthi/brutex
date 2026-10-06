@@ -904,3 +904,14 @@ Narrative only. No row is added to the table above.
   integer annotation are refused by name. D-2270, AHC-01.
 - **h-pull-2**: fixed. The TOTP base32 decoder refuses an impossible length
   and non-zero bits past the last whole byte. D-2271, AHC-02.
+
+### One-authority lens L4 (attack/one-authority) — dispositions — 2026-10-06
+
+Narrative only. No row is added to the table above.
+
+- **`F-589ABF`** `unguarded` — Gate 0 spawn scan misses the constructor
+  reached by another spelling: fixed. D-3500, ONEAUTH-01.
+- **`F-B96DC3`** `wrong` — Pull manifest comments claim ring is linked after
+  D-0211 removed it: fixed. D-3501, ONEAUTH-02.
+- **`F-AD043C`** `unguarded` — CLAUDE.md and AGENTS.md crate-graph pictures
+  are checked by nothing: fixed. D-3502, ONEAUTH-03.

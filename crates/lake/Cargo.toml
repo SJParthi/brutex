@@ -29,7 +29,8 @@ description  = "Reads the Parquet lake into paisa integers and full-precision gr
 # tidiness — restoring the defaults reintroduces the C compiler.
 #
 # `encryption` is the other fatal feature (it pulls `ring`, which vendors C and
-# assembly). It is not a default and is not enabled here.
+# assembly). It is not a default and is not enabled here, and `deny.toml` bans
+# `ring` by name since D-0212, so enabling it is a red `cargo deny`.
 #
 # See docs/05-decisions.md D-0056 for the full purity proof.
 # ---------------------------------------------------------------------------

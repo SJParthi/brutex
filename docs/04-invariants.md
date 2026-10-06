@@ -6876,3 +6876,11 @@ old line regex the same input and watched it pass.
 | GPORT-13 | Gate 22 clause A2 walks Cargo.lock's package edges from the sweep crates through every transitive dependency and refuses any edge to `store`, `pull`, `lake`, `api`, `telemetry`, `log` or a `tracing` package, an untracked lock and a lock with no edge (P1-08-03, D-2660, D-1937) | `gate22_clause_a2_refuses_a_renamed_or_transitive_store_in_the_lock`, `a_lock_is_read_as_package_edges` in `.github/gates_runtime.rs` | ✓ |
 | GPORT-14 | Gate 23 measures the prints of every production file the closure names outside `src/` beside the `crates/*/src/*.rs` glob, and refuses a closure that did not resolve (P1-08-04, D-2660, D-1937) | `gate23_reads_a_production_file_outside_src` in `.github/gates_runtime.rs` | ✓ |
 | GPORT-15 | Gate 10's pending allowlist no longer exempts P-03, so the row's tests are checked again, while X-13 stays exempt with its closing condition (D-2673, D-1938) | `p_03_left_the_pending_allowlist` in `.github/gates_ledger.rs` | ✓ |
+
+### One authority per fact — lens L4, 2026-10-06
+
+| Id | Invariant | Test that proves it | Status |
+|---|---|---|---|
+| ONEAUTH-01 | Gate 0's spawn scan refuses `Command` renamed by a `type` alias, reached as `<Command>::new`, taken as the value `Command::new`, or given an `impl .. for Command` whose `Self::new` constructs it, and passes the type positions crate code uses (D-3500) | `a_spawn_through_another_spelling_of_the_constructor_is_refused` in `.github/source_scan.rs` | ✓ |
+| ONEAUTH-02 | No member or workspace manifest comment names a crate `deny.toml` bans without saying `deny.toml` (D-3501) | `a_manifest_comment_naming_a_banned_crate_says_it_is_banned` and `the_banned_mention_reader_reads_whole_comment_runs` in `crates/core/tests/graph.rs` | ✓ |
+| ONEAUTH-03 | The `CLAUDE.md` §5 and `AGENTS.md` §5 pictures draw exactly the members and workspace arrows the thirteen manifests declare (D-3502) | `the_law_pictures_of_the_graph_are_the_manifests` and `the_picture_reader_reads_roots_rows_and_repeats` in `crates/core/tests/graph.rs` | ✓ |

@@ -1672,6 +1672,14 @@ fn spawn_findings(path: &str, src: &str) -> Result<Vec<String>, String> {
             ));
             continue;
         }
+        // D-3500: the constructor reached without `Command::new(` -- a type
+        // alias, the qualified `<Command>::new`, `Command::new` taken as a
+        // value, and an impl whose `Self::new` is the constructor -- starts a
+        // program whose name this scan never reads, so each is refused.
+        if let Some(how) = hidden_constructor(t, i) {
+            out.push(format!("{path}:{}: `Command` {how}", tok.line));
+            continue;
+        }
         if !is_path_sep(t, i + 1) || !is_ident(t.get(i + 3), "new") || !is_punct(t.get(i + 4), '(')
         {
             continue;
@@ -1689,6 +1697,48 @@ fn spawn_findings(path: &str, src: &str) -> Result<Vec<String>, String> {
         }
     }
     Ok(out)
+}
+
+/// How the `Command` token at `i` reaches its constructor without the
+/// `Command::new(` spelling [`spawn_findings`] reads, or `None`.
+fn hidden_constructor(t: &[Token], i: usize) -> Option<&'static str> {
+    if is_path_sep(t, i + 1) && is_ident(t.get(i + 3), "new") && !is_punct(t.get(i + 4), '(') {
+        return Some("is constructed through a value, which hides the program it starts");
+    }
+    if is_punct(t.get(i + 1), '>') && is_path_sep(t, i + 2) {
+        return Some("is reached through a qualified path, which hides its spawns from this scan");
+    }
+    // `impl .. for [path::]Command {` or `.. where`: walk back over the path.
+    let mut b = i;
+    while b >= 3
+        && is_path_sep(t, b - 2)
+        && t.get(b - 3).and_then(ident).is_some_and(|s| s != "for")
+    {
+        b -= 3;
+    }
+    if b >= 2 && is_path_sep(t, b - 2) {
+        b -= 2;
+    }
+    if (is_punct(t.get(i + 1), '{') || is_ident(t.get(i + 1), "where"))
+        && b > 0
+        && is_ident(t.get(b - 1), "for")
+    {
+        return Some("has an impl whose `Self::new` hides its spawns from this scan");
+    }
+    // The statement holding the token, from the last `;`, `{` or `}` before it.
+    let start = (0..i)
+        .rev()
+        .find(|&k| is_punct(t.get(k), ';') || is_punct(t.get(k), '{') || is_punct(t.get(k), '}'))
+        .map_or(0, |k| k + 1);
+    let mut k = start;
+    if is_ident(t.get(k), "pub") {
+        k += 1;
+        if is_punct(t.get(k), '(') {
+            k = skip_group(t, k);
+        }
+    }
+    is_ident(t.get(k), "type")
+        .then_some("is renamed by a type alias, which hides its spawns from this scan")
 }
 
 /// `unsafe`, or a foreign block, anywhere in the file's tokens.
@@ -4898,6 +4948,46 @@ mod tests {
             "fn bin() -> PathBuf { PathBuf::from(env!(\"CARGO_BIN_EXE_cli\")) } fn t() { Command::new(bin()); }",
             "fn h() -> (&'static str, u8) { match x { A => (\"open\", 0), _ => (\"xdg-open\", 0) } } fn t() { let (program, args) = h(); Command::new(program); }",
             "fn t() { Command::new(\"git\"); Command::new(\"/usr/bin/mkfifo\"); }",
+        ] {
+            assert_eq!(
+                spawn_findings("t.rs", src).unwrap(),
+                Vec::<String>::new(),
+                "{src}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_spawn_through_another_spelling_of_the_constructor_is_refused() {
+        // D-3500 (ONEAUTH-01). Each line started `sh` and the scan above
+        // returned nothing: the constructor reached without the literal
+        // `Command::new(` token run, so the argument was never read.
+        for src in [
+            "fn t() { type C = std::process::Command; C::new(\"sh\").status(); }",
+            "pub(crate) type C = Command;",
+            "fn t() { <std::process::Command>::new(\"sh\").status(); }",
+            "fn t() { < Command > :: new(\"sh\"); }",
+            "fn t() { let f = std::process::Command::new; f(\"sh\"); }",
+            "fn t() { [\"sh\"].map(Command::new); }",
+            "fn t() { Some(\"sh\").map(Command :: new); }",
+            "impl Go for std::process::Command { fn go() -> Self { Self::new(\"sh\") } }",
+            "impl<T> Go<T> for Command where T: X { fn go() -> Self { Self::new(\"sh\") } }",
+            "impl Go for ::std::process::Command { fn go() -> Self { Self::new(\"sh\") } }",
+        ] {
+            assert!(
+                !spawn_findings("t.rs", src).unwrap().is_empty(),
+                "passed: {src}"
+            );
+        }
+        // The spellings crate code uses and that start nothing on their own.
+        for src in [
+            "use std::process::Command;\nuse std::process::{Command, Stdio};",
+            "fn t(c: &mut Command) -> Command { Command::new(\"git\") }",
+            "fn t() -> Option<Command> { let v: Vec<Command> = Vec::new(); None }",
+            "fn t() { let c: std::process::Command = Command::new(\"git\"); }",
+            "type Out = std::process::Output;",
+            "struct S { c: Command, d: u8 }",
+            "fn t() -> Command { Command::new(\"git\") }\nenum Command { A }\nimpl Command { fn f() {} }",
         ] {
             assert_eq!(
                 spawn_findings("t.rs", src).unwrap(),
