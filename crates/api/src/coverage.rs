@@ -425,7 +425,11 @@ fn from_join(join: &TierJoin, ids: &[VendorId], published: usize) -> Covered {
 /// this target name, and does this vendor's master give each of them an id".
 fn from_master(merged: &Merged, vendor: Vendor, target: SpotTarget) -> Covered {
     let mut matched = 0usize;
-    let mut missing: Vec<String> = Vec::new();
+    // `(listed, symbol)`: `true` for a name a master lists without this
+    // vendor's id, `false` for a roster name no master lists at all, so the
+    // one sort below puts the unlisted names first and each group in name
+    // order.
+    let mut missing: Vec<(bool, String)> = Vec::new();
     let mut named = std::collections::HashSet::with_capacity(merged.by_key.len());
     for (key, entry) in &merged.by_key {
         if !target.names(key, entry.universe) {
@@ -438,38 +442,28 @@ fn from_master(merged: &Merged, vendor: Vendor, target: SpotTarget) -> Covered {
         if entry.ids.get(vendor as usize).copied().flatten().is_some() {
             matched = matched.saturating_add(1);
         } else {
-            missing.push(key.underlying.to_string());
+            missing.push((true, key.underlying.to_string()));
         }
     }
-    // SORTED, because a `HashMap` walk is not ordered and a reason list that
-    // reshuffles between restarts is a list an operator cannot diff.
-    // `CLAUDE.md` §3 rule 5.
-    missing.sort_unstable();
     // A ROSTER NAME NO LOADED MASTER LISTS AT ALL. Only `Swept` reaches here
     // with a roster: it is the engine surface, a compile-time list, and a name
     // the masters dropped (an NSE rename, a refresh that lost a row) used to be
     // in neither `matched` nor `lacks`, so the line read N of N. D-2759.
-    let mut unlisted: Vec<&str> = target
-        .expected()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|name| !named.contains(name))
-        .collect();
-    unlisted.sort_unstable();
-    let lacks = missing.len().saturating_add(unlisted.len());
-    let mut unresolved: Vec<Unresolved> = unlisted
-        .into_iter()
-        .map(|symbol| Unresolved {
-            symbol: symbol.to_owned(),
-            bucket: Bucket::Lacks,
-            why: "no loaded master lists this symbol at all (renamed or delisted?), \
-                  so the swept surface names an instrument no request can reach"
-                .to_owned(),
-        })
-        .collect();
+    missing.extend(
+        target
+            .expected()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|name| !named.contains(name))
+            .map(|name| (false, name.to_owned())),
+    );
+    // SORTED, because a `HashMap` walk is not ordered and a reason list that
+    // reshuffles between restarts is a list an operator cannot diff.
+    // `CLAUDE.md` §3 rule 5. One sort over both kinds of lacking name (D-2796).
+    missing.sort_unstable();
     Covered {
         matched,
-        lacks,
+        lacks: missing.len(),
         ambiguous: 0,
         malformed: 0,
         // NOT A JOIN, SO NEITHER UNJOINABLE BUCKET CAN FILL. No published list
@@ -480,19 +474,25 @@ fn from_master(merged: &Merged, vendor: Vendor, target: SpotTarget) -> Covered {
         // this set, so there is no published count to be short of and a number
         // here would be invention — `CLAUDE.md` §3 rule 1.
         published: None,
-        unresolved: {
-            unresolved.extend(missing.into_iter().map(|symbol| Unresolved {
+        unresolved: missing
+            .into_iter()
+            .map(|(listed, symbol)| Unresolved {
                 symbol,
                 bucket: Bucket::Lacks,
-                why: format!(
-                    "{}'s instrument master lists no id for it, so a request cannot \
-                     name it and this build refuses rather than sending another \
-                     vendor's id",
-                    vendor.as_str()
-                ),
-            }));
-            unresolved
-        },
+                why: if listed {
+                    format!(
+                        "{}'s instrument master lists no id for it, so a request cannot \
+                         name it and this build refuses rather than sending another \
+                         vendor's id",
+                        vendor.as_str()
+                    )
+                } else {
+                    "no loaded master lists this symbol at all (renamed or delisted?), \
+                     so the swept surface names an instrument no request can reach"
+                        .to_owned()
+                },
+            })
+            .collect(),
     }
 }
 

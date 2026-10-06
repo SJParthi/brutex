@@ -63655,3 +63655,40 @@ quarantine name never holds the repair) met D-2790's offset-and-digest
 quarantine name. The name is now built by one function, `quarantine_path`
 in `crates/cli/src/selection_v6.rs`, which the CE-65 test calls so its FIFO
 sits at the name the repair reaches for.
+
+### D-2796 — The swept coverage line sorts its lacking names once — 2026-10-06
+
+**Finding.** Gate 11 rule 4 (docs/07 layer 12) refused
+`crates/api/src/coverage.rs` on the merged branch: D-2759 (CE-92) added a
+second `sort_unstable` to `from_master`, for the roster names no master
+lists, beside the existing sort of names listed without the vendor's id,
+and the allowlist holds one for that file. `fixboard/pr74-ce2` was
+validated with fmt, clippy, tests and the web gates, not the static gates.
+
+**Decision.** Both kinds of lacking name go into one vector of
+`(listed, symbol)` and are sorted once. `false` sorts before `true`, so
+the unlisted names still come first and each group is in name order: the
+same rows, reasons and order as D-2759's two sorts. The allowlist count is
+not raised.
+
+**Proof.** Gate 11 passes; `the_swept_surface_is_counted_per_feed_like_everything_else`
+and the other `coverage::tests` are unchanged and green.
+
+### D-2797 — The search-session cache is scanned through one helper bounded by a named constant — 2026-10-06
+
+**Finding.** Gate 11 rule 6 (a search is bounded by a compile-time table,
+never by the data) refused `crates/api/src/expressionsearchjson.rs` on the
+merged branch: D-2777 (conc:apicache-2) added a second
+`.iter().position(` to the cache of held search sessions, in
+`first_page`, beside the pinned-page lookup the allowlist already counts.
+The scan was bounded all along, by the literal `8` the cache is evicted at,
+but the gate cannot read that.
+
+**Decision.** Both lookups go through `held_at`, the one scan of the
+cache, and the bound is named: `SESSIONS_HELD = 8`, which `first_page`
+evicts at. Behaviour is unchanged. The allowlist count is not raised.
+
+**Proof.** Gate 11 passes;
+`an_unchanged_first_page_keeps_the_held_session_and_its_learned_cursors`
+and `a_pinned_page_keeps_its_session_from_being_evicted_first` are
+unchanged and green.

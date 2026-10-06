@@ -117,14 +117,12 @@ fn render(root: &Path, asked: &Asked) -> Result<String, String> {
         .lock()
         .map_err(|_| "search snapshot cache poisoned")?;
     let index = if let Some(snapshot) = asked.snapshot {
-        let at = sessions
-            .iter()
-            .position(|held| {
-                held.root == root
-                    && held.identity == asked.identity
-                    && held.reader.progress().checkpoint == Some(snapshot)
-            })
-            .ok_or("search snapshot is not admitted or expired; refresh its first page")?;
+        let at = held_at(&sessions, |held| {
+            held.root == root
+                && held.identity == asked.identity
+                && held.reader.progress().checkpoint == Some(snapshot)
+        })
+        .ok_or("search snapshot is not admitted or expired; refresh its first page")?;
         most_recent(&mut sessions, at)
     } else {
         let Some(reader) = Reader::open(root, asked.identity, crate::detail::MAX_SCAN_BYTES)?
@@ -176,15 +174,26 @@ fn first_page<S>(
     unchanged: impl Fn(&S) -> bool,
     superseded: impl Fn(&S) -> bool,
 ) -> usize {
-    if let Some(at) = sessions.iter().position(&unchanged) {
+    if let Some(at) = held_at(sessions, &unchanged) {
         return most_recent(sessions, at);
     }
     sessions.retain(|held| !superseded(held));
-    if sessions.len() == 8 {
+    if sessions.len() == SESSIONS_HELD {
         sessions.pop_front();
     }
     sessions.push_back(fresh);
     sessions.len() - 1
+}
+/// How many search sessions this process holds; the oldest is evicted past it.
+const SESSIONS_HELD: usize = 8;
+/// The index of the first held session `hit` accepts.
+///
+/// THE ONE SCAN OF THE CACHE, BOUNDED BY [`SESSIONS_HELD`], a compile-time
+/// constant, never by the data: [`first_page`] never lets the cache grow past
+/// it. A pinned page and an unpinned first page both look up through here
+/// (D-2777, D-2797).
+fn held_at<S>(sessions: &VecDeque<S>, hit: impl Fn(&S) -> bool) -> Option<usize> {
+    sessions.iter().position(hit)
 }
 /// Moves the session at `at` to the back of the LRU and returns its new index.
 ///
