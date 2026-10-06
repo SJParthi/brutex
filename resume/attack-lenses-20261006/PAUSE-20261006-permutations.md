@@ -18,3 +18,6 @@ Head: `attack/permutations` @ `364ce11` = **WIP (paused, not validated)**. Last 
 
 ## Restart
 `git fetch origin attack/permutations final/all-fixes && git checkout attack/permutations`; tests as non-root via /tmp/claude-0/runtests.sh <crate>.
+
+## Gate 18 final (09a9793, 81 mutants)
+caught 76, missed 2, timeout 0, unviable 3. Missed: crates/indicators/src/pattern.rs:692:31: replace > with >= in Patterns::bits;crates/indicators/src/pattern.rs:700:31: replace < with <= in Patterns::bits;

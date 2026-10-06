@@ -8,9 +8,9 @@ Head: d85fa9d (pushed; tree clean; `git grep "changed by cargo-mutants"` prints 
 - cli lib suite as uid 65534: 1970 passed / 0 failed at 9f4914d. At d85fa9d only the ordered, admission_v4 and finalization_v4 modules were re-run (25 passed).
 - fmt clean. Static gates all exit 0 at 9f4914d (1e skipped).
 
-## In progress (running detached, no usage cost)
-- cargo-mutants over the remaining 97 targets (survivors + timeouts + rewritten V4 loops), jobs 2, --timeout 300. Script /tmp/g18bin/run4.sh; output /tmp/g18bin/m4/mutants.out; log /tmp/g18bin/m4.log.
-- At pause: caught 13, missed 0, timeout 0, unviable 0.
+## In progress (08:30 UTC, running detached)
+- cargo-mutants rerun over the remaining 83 targets (29 already caught or unviable are excluded). It uses CARGO_PROFILE_DEV_OPT_LEVEL=1, DEBUG=0 and INCREMENTAL=true to cut each rebuild from about 7 to about 2 minutes; test semantics are unchanged. Script /tmp/g18bin/run4.sh, output /tmp/g18bin/m4/mutants.out.
+- At pause: caught 14, missed 0, timeout 0. Expected to finish around 09:40 UTC.
 
 ## Next steps on RESUME
 1. Read /tmp/g18bin/m4/mutants.out/{missed,timeout}.txt. Fix anything listed and re-run only those mutants.
