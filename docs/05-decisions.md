@@ -63139,3 +63139,196 @@ longer be reached, so it was removed. The frontier writer keeps its own
 
 **Rejected.** Changing the test to expect the 4,096 text. That would
 leave the two descent doors with different bounds.
+
+### D-2020 — Gate 18 run 1283, cli-b: the survivors that only lacked a test get one — 2026-10-06
+
+**What was observed.** Gate 18 on 969493e1 (run 1283) left mutants alive in
+`live::clears_bar`, `pool::pooled_entries` and `pool_oos` (`write_catalog`,
+`pool_oos`, `run`, `run_under`, `walk_all`, `hand_off`, `render`). Their
+behaviour was right, but nothing in `cli` checked it. `clears_bar` was tested
+only from `api`, which a `cli` mutant run does not build. The pooled-table test
+accepted a row with or without "+N more". `run`'s split check sat behind
+`dispatch`'s own. The rest of the `pool-oos` arm never ran from a test.
+
+**Decided.** One test per behaviour, at its boundary. `clears_bar` is checked
+at `|t|` equal to the bar, one thousandth over, negative, and under the
+observation floor (G18-cli-b-01). The pooled table now requires "+N more" on
+exactly the rows that fired on more instruments than they name (-04). `run` is
+checked on both sides of each split boundary, and `pool_oos` must print `run`'s
+refusal as its page (-05). `run_under` gets an empty store and an existing
+CATALOG_OUT (-06). `walk_all` gets an empty store (-07). `hand_off` gets held,
+unwritable and empty families (-08). `render` gets zero, one and three hidden
+rows (-09). `write_catalog` gets a catalog of exactly `CATALOG_BYTES` and one
+byte over (-10).
+
+**Rejected.** Excluding any mutant (D-0192).
+
+### D-2021 — `Turns::ready` drops the own-slot clause that hid its `<` — 2026-10-06
+
+**What was observed.** `other == at ||` came before
+`if other < at { round } else { round - 1 }`, so `<` and `<=` were never
+compared on the lane's own slot. The `<=` mutant could not be told apart.
+
+**Decided.** The clause goes. A lane's own slot takes the `else` arm, and
+`performed >= performed + 1 - 1` holds, saturation included, so behaviour is
+the same. With `<=` a lane would wait on itself forever. The new test checks
+the pure rule with no thread, so that mutant fails at once and does not time
+out (G18-cli-b-02).
+
+**Rejected.** A fan-out test catching it by timeout. A hang is not a fast kill.
+
+### D-2022 — `price_all` passes `max_mae_ppm` to the grid unguarded — 2026-10-06
+
+**What was observed.** `forced: (rules.max_mae_ppm > 0).then_some(..)` repeated
+the rule `runner::grid::merged` already applies (`forced.filter(|&l| l > 0)`).
+`Some(0)` and `None` give the same ladder, so `>` and `>=` could not be told
+apart.
+
+**Decided.** `forced: Some(rules.max_mae_ppm)` at that call site. The grid's
+zero filter is the single authority (G18-cli-b-03).
+
+**Rejected.** A test of `Some(0)` against `None`. They are equal by design.
+
+### D-2023 — Population's trailing-block cut decides on receipts by membership and on the bytes alone — 2026-10-06
+
+**What was observed.** In `discard_unreceipted_trailing_block`, two branches
+had no mutant a test could reach:
+
+- **The receipt guard (`v2 || v3 || v4`).** Every absorbed receipt is checked
+  against its block's ordered row digest, and the offered rows are checked
+  against the same receipt. So a receipted block already equals the offered
+  rows. The `&&` mutants differed only on a hash collision or a failed read.
+- **`actual == expected && require_exact_block(..)`.** `BlockFacts` is a pure
+  function of `first` and the row bytes, so the facts comparison could never
+  disagree with the byte comparison.
+
+**Decided.** The guard stays as defence in depth, because an acknowledged block
+must never be cut. It is now a membership test over the three lookups, which
+has no operator to mutate. The keep is decided by `require_exact_block` alone,
+and the now-unused `expected` parameter is gone. A new test arms a sync fault on
+the row file and requires that an exact receipt-less block is kept, not cut and
+rewritten (G18-cli-b-11).
+
+**Rejected.** Deleting the guard as unreachable.
+
+### D-2024 — The V4 ledgers' exact-prefix keep and Finalization V3's identity check are tested — 2026-10-06
+
+**What was observed.** In Admission V4 and Finalization V4 `append_locked`,
+keeping an exact receipt-less prefix and cutting-then-rewriting it leave the
+same final bytes. So the source `==`, the record-address `+` and the record
+`==` mutants survived. The loop-bound mutants survived because no test offered
+a same-source prefix with different bytes. In Finalization V3
+`complete_trailing`, no test offered a trailing block with the same identity
+and different rows.
+
+**Decided.** An armed barrier fault rolls back to where the call started
+writing. That shows whether the prefix was kept. A forged decision (new
+`base_evidence_id`, re-derived id, same source) checks that differing bytes are
+compared and discarded (G18-cli-b-12, -13). A forged row under the retry's own
+Finalization V3 identity must refuse and write nothing (-14).
+
+**Rejected.** Treating keep and rewrite as interchangeable. A cut of a kept
+prefix is a write the retry did not need.
+
+### D-2025 — Observation authority: barrier rollback refreshes in the write branch's shape — 2026-10-06
+
+**What was observed.** No test reused the handle after a failed Completion
+barrier. So the `now.len() == before` guard mutants (`!=`, `false`) in both
+`append_synced` copies survived. The guard → `true` mutant differs only when the
+rollback's own `set_len` fails, and no hook can cause that. A read-only open of
+an empty file and `sync_observation_root` were also untested.
+
+**Decided.** Both copies use the write-failure branch's shape:
+`is_ok_and(|now| now.len() == before) && let Err(stale) = refresh`. Behaviour
+is the same and there is no guard to replace. The new tests:
+
+- the same handle completes the Data orphan after a failed Completion barrier
+  (G18-cli-b-15);
+- a reader refuses an empty file without writing to it, and an absent root
+  cannot be synced (-16).
+
+**Rejected.** A `set_len` fault hook only to reach the rollback-failure arm.
+
+### D-2026 — Population Statistics: reservations and parent barriers are tested — 2026-10-06
+
+**What was observed.** The stored-record quotient that sizes the audit index,
+the `rows / width` candidate-column reservation, and both `sync_parent` copies
+had no test that could tell them from their mutants.
+
+**Decided.** The open must reserve at least the stored record count, measured
+off the file. The column's capacity must be exactly `rows / width`. Each
+`sync_parent` must refuse an absent parent (G18-cli-b-17, -18).
+
+**Rejected.** Dropping the pre-reservation. D-1682 sized it on purpose.
+
+### D-2027 — Selection V6: the tail size is one subtraction; the reuse, quarantine and decoder paths are tested — 2026-10-06
+
+**What was observed.** Several branches had no test:
+
+- the `persist` tail and record-ceiling arithmetic;
+- the identical-quarantine comparisons;
+- the non-`AlreadyExists` create error;
+- the display decoder's count and ratio words;
+- a rung path failing for a reason other than absence.
+
+The `tail_bytes` telemetry field repeated `len - committed`, and no `cli` test
+can observe that field.
+
+**Decided.** The subtraction is computed once and used by both the cut and the
+event. The cut's use is killed by the existing partial-tail test. New tests
+cover the rest (G18-cli-b-19, -20):
+
+- exact reuse sets nothing aside;
+- the record ceiling binds below the byte ceiling;
+- an identical quarantine is accepted and a different one refused;
+- an over-long quarantine path refuses with its create error;
+- the decoder admits a full Top-25 and only the encoder's counts;
+- a defined ratio's value is kept apart from an undefined one;
+- a rung path that is a regular file is refused, not reported absent.
+
+**Rejected.** A telemetry capture hook only for this field.
+
+### D-2028 — `readonly_file::regular` is one function with two cfg'd tails — 2026-10-06
+
+**What was observed.** The surviving mutant was in the fallback `regular`
+compiled for unsupported targets. cargo-mutants mutates source regardless of
+`cfg`, and no build on a supported target compiles that body, so nothing could
+kill it.
+
+**Decided.** One function, two cfg'd blocks. Each target compiles the body it
+compiled before, and no compiled-out function body is left
+(G18-cli-b-21).
+
+**Rejected.** Building for an unsupported target in Gate 18.
+
+### D-2029 — `hash_range` is generic over its reader — 2026-10-06
+
+**What was observed.** A regular `File` never returns `Interrupted`, so the
+guard → `false` mutant could not be produced. Under the guard → `true` and `!=`
+mutants, a real error would retry forever, which is a time-out rather than a
+kill. The `PrefixDigest` `Debug` impl was untested.
+
+**Decided.** `hash_range<R: Read + Seek>`. Every caller still passes a `File`.
+A scripted reader that ends at end-of-file checks that `Interrupted` is retried
+and any other error refuses at once, so each mutant fails fast. The `Debug`
+output is pinned (G18-cli-b-22).
+
+**Rejected.** A process-wide fault switch inside the read loop.
+
+### D-2030 — `publish_marker`'s cleanup message is tested both ways — 2026-10-06
+
+**What was observed.** No test reached the cleanup path, so the `NotFound`
+guard mutants survived.
+
+**Decided.** Two cases. A missing reservation directory is one failure: create
+and remove both find nothing. A directory squatting on `complete.tmp` is two
+failures: create refuses, and unlink cannot remove a directory
+(G18-cli-b-23).
+
+### D-2031 — Exact-minute context: a gap before the last two prior minutes is tested — 2026-10-06
+
+**What was observed.** The only refusal test made the last three prior minutes
+all wrong, so the last check alone refused it. The two `||` mutants survived.
+
+**Decided.** Prior bars at 920, 928 and 929 make only the third-last minute
+wrong. It must be refused, naming the canonical 927, 928, 929 (G18-cli-b-24).
