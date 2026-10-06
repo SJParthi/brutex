@@ -220,3 +220,54 @@ fn the_footer_length_must_fit_between_the_magics() {
     assert!(reason(check(b"PAR")).contains("too short"));
     assert!(reason(check(b"")).contains("too short"));
 }
+
+/// G18-rest-05, D-2072: a value that declares exactly the bytes left is
+/// stepped over, and one byte more is refused by the cursor itself, before the
+/// walk's next read would refuse it for a different reason.
+#[test]
+fn a_skip_of_exactly_the_bytes_left_is_admitted_and_one_more_is_not() {
+    let mut cur = Cursor {
+        buf: &[1, 2, 3],
+        pos: 0,
+    };
+    ok(cur.skip(3));
+    assert_eq!(cur.pos, 3, "the skip consumed every byte");
+    let mut cur = Cursor {
+        buf: &[1, 2, 3],
+        pos: 1,
+    };
+    let why = reason(cur.skip(3));
+    assert!(why.contains("declares 3 bytes and only 2 remain"), "{why}");
+    assert_eq!(cur.pos, 1, "a refused skip moves nothing");
+}
+
+/// G18-rest-06, D-2072: a map's keys and values alternate. A map of two
+/// `i32 -> binary` pairs is walked as key, value, key, value; reading the
+/// second key as a binary would take its value 5 as a length past the footer.
+#[test]
+fn a_map_alternates_its_key_and_value_types_for_every_pair() {
+    ok(walk(&[0x1B, 0x02, 0x58, 0x00, 0x00, 0x05, 0x00, 0x00]));
+}
+
+/// G18-rest-07, D-2072: the thrift zigzag decodes a negative field id, so a
+/// long-form id below zero cannot be read as the schema's.
+#[test]
+fn zigzag_decodes_both_signs() {
+    for (raw, id) in [(0, 0), (1, -1), (2, 1), (3, -2), (4, 2), (5, -3)] {
+        assert_eq!(zigzag(raw), id, "raw {raw}");
+    }
+}
+
+/// G18-rest-08, D-2072: a bool INSIDE a list is one byte on the wire; only a
+/// struct field's bool rides in its header. Treating the list's bool like a
+/// field's would leave its byte to be read as the next header.
+#[test]
+fn a_bool_takes_a_byte_in_a_list_and_none_in_a_field() {
+    for (in_field, consumed) in [(true, 0), (false, 1)] {
+        for ty in [BOOL_TRUE, BOOL_FALSE] {
+            let mut cur = Cursor { buf: &[1], pos: 0 };
+            assert!(matches!(value(&mut cur, ty, in_field), Ok(None)));
+            assert_eq!(cur.pos, consumed, "type {ty}, in a field: {in_field}");
+        }
+    }
+}

@@ -500,7 +500,7 @@ fn walk_back(
     // read as four bad lines. D-1320.
     let mut overlong = false;
 
-    while pos > 0 {
+    while pos >= /* ~ changed by cargo-mutants ~ */ 0 {
         // WHAT IS LEFT OF THE BUDGET, and the block is cut to it. Checking the
         // budget and then reading a whole block read up to `READ_BLOCK - 1`
         // bytes past `max_scan_bytes`, which the crate root says a query never
@@ -1799,6 +1799,32 @@ mod tests {
         let out = tail(&dir, 1, &Query::last(MAX_LIMIT));
         assert_eq!(out.records.len(), 1);
         assert_eq!(out.malformed, 1, "a leading run is counted once: {out:?}");
+        assert!(out.reached_oldest);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A LINE OF EXACTLY `MAX_LINE_BYTES` IS A LINE, NOT AN OVERLONG RUN.**
+    /// G18-rest-09, D-2080.
+    ///
+    /// The cap refuses a carry PAST the width, so the widest line the reader
+    /// admits is the width itself. One good record padded with the leading
+    /// space the decoder skips to exactly 65,536 bytes is the whole file: its
+    /// carry reaches the width on the last block, and `>=` or `==` there would
+    /// count it malformed and drop the record.
+    #[test]
+    fn a_line_of_exactly_the_cap_is_decoded_not_dropped() {
+        let dir = scratch("exact-cap");
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let lines = sink_lines("exact-cap-src", 1);
+        let line = &lines[0];
+        let mut file = vec![b' '; MAX_LINE_BYTES + 1 - line.len()];
+        file.extend_from_slice(line);
+        assert_eq!(file.len(), MAX_LINE_BYTES + 1, "the width and its newline");
+        std::fs::write(current_path(&dir), &file).expect("write");
+
+        let out = tail(&dir, 1, &Query::last(MAX_LIMIT));
+        assert_eq!(out.records.len(), 1, "the record is found: {out:?}");
+        assert_eq!(out.malformed, 0, "nothing was overlong: {out:?}");
         assert!(out.reached_oldest);
         let _ignored = std::fs::remove_dir_all(&dir);
     }
