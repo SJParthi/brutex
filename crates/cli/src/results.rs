@@ -1456,9 +1456,12 @@ impl Results {
     ///
     /// # Cost
     ///
-    /// **O(records appended by others)**, which is zero on the overwhelmingly
-    /// common path of one writer — the `while` does not execute and this is a
-    /// length check. It is never per bar and never per candidate.
+    /// **O(records appended by others)** plus, when there are any, a re-hash
+    /// of every byte already indexed (`PrefixDigest::require_unchanged`,
+    /// D-1560, D-3319): O(indexed bytes + delta) on the growth branch. Zero on
+    /// the overwhelmingly common path of one writer — the `while` does not
+    /// execute and this is a length check. It is never per bar and never per
+    /// candidate.
     ///
     /// Revalidate the tail while holding the append lock: another writer can
     /// die after this handle opens. A partial tail is preserved and refused

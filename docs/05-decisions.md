@@ -63410,3 +63410,17 @@ growth (D-1560). D-3317's `with_cached_handle` doc, D-1777's bullet in
 `docs/06-limits.md` and `api::detail`'s `CommittedParents` doc each left the
 receipt file out. Each now names it. D-3317 stands; this entry adds the
 handle it missed. Text only.
+
+### D-3319 — Two more warm-refresh cost claims that omitted the growth re-hash — 2026-10-06
+
+A twelfth review found `api::trades`'s module `# Cost` section calling the
+ledger and receipt refresh "O(new records)". A sweep for every other wording
+then found a second copy: `Results::absorb_new_records`'s own doc, "O(records
+appended by others)", on the very function that calls
+`PrefixDigest::require_unchanged`. Both now state O(indexed bytes + delta) on
+the growth branch. The sweep searched for "O(new records)", "O(appended",
+"O(new entries)", "warm refresh is" and "O(records appended" across
+`crates/*/src`, `docs/0*.md`, `docs/10-shared-core.md` and `CLAUDE.md`. Its
+remaining hits are correct: `PrefixDigest`'s own "O(appended bytes)", scoped
+to the non-growth path, and the D-0523 sentence already qualified by D-3317.
+Text only.

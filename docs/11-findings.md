@@ -1021,3 +1021,10 @@ Corrected by D-3318. A grep for receipt refresh "O(delta)" or "O(new rows)"
 across `docs/0*.md` and `crates/*/src` found no other copies;
 `candidate_universe`'s "O(new rows)" is the write of its own block, not a
 receipt refresh.
+
+### Attack lens L2, round 12 — dispositions — 2026-10-06
+
+`api::trades`'s "O(new records)" warm refresh, plus `absorb_new_records`'s
+own cost doc, found by a wider sweep of wordings. Both corrected by D-3319.
+The round 11 note's "no other copies" held only for the phrasings it
+searched.
