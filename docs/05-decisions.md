@@ -63139,3 +63139,35 @@ longer be reached, so it was removed. The frontier writer keeps its own
 
 **Rejected.** Changing the test to expect the 4,096 text. That would
 leave the two descent doors with different bounds.
+
+### D-2090 — Gate 18 bounds every mutant BUILD, because a compile-time loop can hang it — 2026-10-06
+
+**What was observed.** CI run 1283 (37251141390, head 969493e1) lost shards
+146 and 150 to the 240-minute job limit. Each held a mutant of
+`vocab::table::name_index` (`- with /` in the probe mask, `+= with *=` on the
+row counter). `name_index` and `fnv1a` are `const fn`s evaluated at compile
+time for `static NAME_INDEX`, and several single mutations make their `while`
+loops endless. Gate 18 passes `--cap-lints true` (D-0680), which also caps
+rustc's deny-by-default `long_running_const_eval`, so the mutated build never
+finishes, and nothing in the step bounded a build. Reproduced on the
+coordinator's machine with CI's flags: the `+= with *=` build was still
+running after 11 minutes. The shard's other 30 cases were never tested, and
+the failure read as a cancelled job, not as a named survivor.
+
+**Decided.** The mutants step passes `--build-timeout-multiplier 2`: a mutant
+build may take twice the clean baseline build, then it stops and is recorded
+as a TIMEOUT. `mutation_gate verify` already refuses any timeout by name, so
+the bound never credits a case; it turns an anonymous four-hour cancellation
+into a named refusal within minutes and lets the shard's other cases run.
+Measured with cargo-mutants 26.2.0 and `--build-timeout 60` on the same
+mutant: `TIMEOUT crates/vocab/src/table.rs:1677:13: replace += with *= in
+name_index in 60s build`, listed in `timeout.txt`.
+
+**Not decided here.** The endless-loop mutants themselves. A timeout is a
+refusal, so `fnv1a` and `name_index` still have to be restructured so that no
+single mutation can loop forever (owned by the Gate 18 rest fixer, from
+D-2083).
+
+**Rejected.** Dropping `--cap-lints true` to restore the const-eval lint: it
+would bring back D-0680's false unviables on every parameterised function.
+Skipping the cases: never (D-0192).
