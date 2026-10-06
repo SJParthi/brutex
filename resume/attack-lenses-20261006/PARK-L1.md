@@ -65,3 +65,7 @@ Combined diff 202a351, tests filtered to touched modules, run in worktree /tmp/c
 - api: caught=5 missed=0 timeout=0 unviable=0
 - api before the pause (6 of 22): 5 caught, 1 unviable, 0 missed.
 - Not run: the remaining api mutants not reached above. Resume: same command for api with --exclude-re for every mutant already in caught/unviable, with a longer timeout or in chunks (`--shard k/n`).
+
+## Survivor killed (14:39 UTC)
+- `crates/cli/src/lib.rs:2403:32 replace == with != in run_with_sink` (MISSED above) is now caught: the OBSV-08 test asserts `phase=refused`. Proof: `cargo mutants --baseline skip --in-place -p cli --file crates/cli/src/lib.rs --re "replace == with != in run_with_sink" -- --lib -- tests::a_refused_command` -> "1 mutant tested in 6m: 1 caught". fmt clean, clippy -p cli -D warnings clean.
+- **New head: `838f5e6`** (pushed). Ready to merge: still NO, only because the api Gate 18 pre-run is incomplete (11 of 22 tested: 10 caught, 1 unviable, 0 missed) and round 3 has open survivors (W1-W7 web, seven api/pull candidates).
