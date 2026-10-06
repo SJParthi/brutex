@@ -63212,3 +63212,120 @@ workspace dependencies both ways
 block as a whole" is replaced in both files; this entry is that edit's
 authority. The ASCII diagram above `docs/01-architecture.md`'s table is still
 unparsed.
+
+### D-3503 — Gates 10b and 27 read an id that shares its cell with the claim — 2026-10-06
+
+**What was observed.** Seventeen rows of `docs/04-invariants.md` write the
+id and the claim in one cell, `| AU-O1STORE-2 — **…** | proof | ✓ |`
+(AU-PROBEAPI-6, AU-O1CLI-2..6, AU-O1ENGINE-22..24 and -40, AU-O1STORE-1..2,
+AU-PROBESTORE-4..6, -7a, -7b). `invariant_id` in `.github/gates_tree.rs`
+(gate 10b) and `row_id` in `.github/gates_ledger.rs` (gate 27) take an id only
+when `|` follows it, so these seventeen were never counted and a second row
+with any of their ids passed both gates. D-1185 cites "Invariant
+AU-O1STORE-2", which therefore resolved by eye only.
+
+**Decided.** Both readers take ` — ` (space, em dash, space) after the id as
+the end of the id, exactly like `|`; `| I-1 x |`, `| I-1 - x |` and an em dash
+without the spaces still read nothing. Proved by
+`gate_10b_reads_an_id_that_shares_its_cell_with_the_claim` and
+`gate27_reads_an_id_that_shares_its_cell_with_the_claim`, each red on the old
+reader. The seventeen ids are unique today, so both gates stay green.
+
+**Rejected.** Rewriting the seventeen rows into the four-column shape: it
+reorders cells gate 10 reads for the proof and status, and the next author
+would write the shape again with nothing refusing it.
+
+### D-3504 — Every cited decision heads an entry; every cited `I-` invariant has a row — 2026-10-06
+
+**What was observed.** `docs/06-limits.md` (D-0684) records that gate 27b
+checks uniqueness only: "A number that heads nothing is not reported." Lens L4
+resolved every `D-NNNN` in the tracked tree outside `web/` against the
+ledger's headings and found, besides the known D-0051 and D-0676 and the
+gate-test fixture D-1234, two dangling citations: `docs/04-invariants.md`'s
+heading "Fixboard numeric passes 5 and 6 (D-2710 onward)" (the run starts at
+D-2712) and `.github/source_scan.rs`'s "audit-20261003 (D-1600..D-1619)" (the
+run ends at D-1614). `crates/core/src/vendor.rs` cited invariant `I-41`; the
+`I-` rows ended at `I-39`.
+
+**Decided.** The heading reads D-2712, the range D-1614, and `I-41` gets the
+row its test always proved. `crates/core/tests/citations.rs` walks the root
+documents and manifests, `docs/` but the ledger, `.github/` and `crates/`, and
+fails on any `D-NNNN` that heads nothing unless it is one of three named
+unwritten numbers, each with its reason; it fails on any `I-` id cited under
+`crates/` with no row. On `0edc1a0` it named D-2710, D-1619 and I-41.
+
+**Not closed.** Other invariant prefixes (`C-`, `X-`, `AF-`, …) cited in code
+are not resolved: the same shapes name findings, fixtures and retired rows,
+and no reader yet tells them apart.
+
+### D-3505 — `pull::rolling::shift_six` rounds a negative tie by core's half-up rule — 2026-10-06
+
+**What was observed.** `shift_six` (the implied-volatility reader) says it
+rounds "half-up at the seventh decimal, which is the same rule `CLAUDE.md` §7
+gives for snapping a price — one rounding rule for the whole product". The one
+authority for that rule is `core::price::Paisa::from_rupee_text_half_up`, which
+sends a tie toward positive infinity (`-14.5` is `-14`). `shift_six` added one
+to the magnitude whenever the seventh digit was 5 or more and negated after,
+so `-0.0000005` read as `-1` millionth where the rule gives `0`.
+
+**Decided.** For a negative value the magnitude grows only past the tie (a
+seventh digit above 5, or 5 with a nonzero digit after it); positive values are
+unchanged. `a_negative_tie_rounds_by_the_one_rule_core_gives_a_price` pins six
+named cases and compares 3,100 texts (both signs, two whole parts, fractions of
+seven to nine digits) with core's function applied to the text with the point
+moved four places; it failed first on `-0.0000005`.
+
+**Effect on stored bytes.** Only a vendor implied volatility that is negative
+and an exact tie at the seventh decimal reads differently; files written before
+keep their bytes (append-only), and a re-pull of such a row writes the
+corrected millionth.
+
+### D-3506 — One function builds each shared results path — 2026-10-06
+
+**What was observed.** `results/population-write.lock`, the one lock every
+population, admission, execution and Selection V4 writer and joined reader
+holds, was built in six places: a private `lock_path` in
+`execution_capability.rs`, `admission_store.rs`, `execution_disposition_v2.rs`
+and `population.rs`, and inline in `selection_v4_authority.rs` and
+`admission_join.rs`. `results/runs.bin` was built by
+`cli::results::Results::path` and again by `api::backtest::path_in`. All
+agreed, and nothing kept them agreeing: a renamed lock in one writer would lock
+a file no other writer locks while every write still succeeded. The refuter
+found no divergence today and confirmed nothing guarded it (`unguarded`).
+
+**Decided.** `cli::population::population_write_lock` is the one construction
+of the lock path and the five other sites call it; `api::backtest::path_in`
+calls `Results::path`. `cli/tests/one_path_authority.rs` counts each
+`.join("…")` construction across every crate's `src/` and requires exactly one,
+in its owner's file; it named the six lock sites before the change.
+
+### D-3507 — `InstrumentKey::swept_surface` enumerates the engine surface; `/store` names all 210 — 2026-10-06
+
+**What was observed.** D-0048 makes the `/store` coverage axis "the union of
+what the censuses hold and what the engine sweeps", so a swept instrument the
+store lacks is still a row. D-0506 and D-0682 widened the sweep to the 208 F&O
+shares, and `api::census::swept_series` kept `["BANKNIFTY", "NIFTY"]`, its doc
+quoting a §1 that no longer says it: on an empty store `/store?show=gaps`
+showed two rows, and a swept share nobody had pulled had no row anywhere. Core
+offered `is_sweepable` (a yes or no) but no enumeration, so a caller that
+needed the list wrote its own. Five `api` comments still called the surface "a
+two-element table", "a TWO-ROW table" or "two instruments".
+
+**Decided.** `core::instrument::InstrumentKey::swept_surface` yields the two
+`SWEPT` indices and then each NSE cash equity of `FNO_UNDERLYINGS`, every
+candidate filtered through `is_sweepable`;
+`the_swept_surface_is_exactly_what_is_sweepable_admits` compares it with the
+predicate over every index and cash key the universe can spell on both
+exchanges. `swept_series` maps it and sorts. An empty store's gaps view is now
+210 rows × 36 months = 7,560 cells over 38 pages of 200; the indices sort
+first, so page 1 still opens on them. Nine tests that encoded the two-row
+axis were re-derived (grid rows 360 → 7,848, page counts, the clamp's last
+page) and `A-18` restated. The comments are corrected.
+
+**Cost.** `held_series` stays O(keys log keys) (`docs/06-limits.md` §32) with
+210 more keys; a page still renders 200 cells.
+
+**Not changed.** The `web/` comments that say 213 equities
+(`web/src/routes/terminal/+page.svelte`, `web/src/lib/terminal.svelte.js`) are
+left: a comment edit rebuilds hashed `web/build` chunks Gate W1 compares, and
+that churn belongs with the next `web/` change.

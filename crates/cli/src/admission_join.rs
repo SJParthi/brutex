@@ -140,7 +140,7 @@ impl AdmissionAuthoritativeLedger {
         population_id: [u8; 32],
         max_bytes: Option<u64>,
     ) -> Result<Self, AdmissionJoinRefusal> {
-        let lock_path = root.join("results").join("population-write.lock");
+        let lock_path = crate::population::population_write_lock(root);
         let outer_lock = File::open(&lock_path)
             .map_err(|why| format!("{} could not be opened: {why}", lock_path.display()))?;
         outer_lock.lock_shared().map_err(|why| {

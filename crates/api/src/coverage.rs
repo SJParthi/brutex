@@ -483,8 +483,8 @@ fn target_json(covered: Option<&Covered>, target: SpotTarget) -> String {
         render::json_string(target.slug()),
         render::json_string(target.label()),
         render::json_string(target.note()),
-        // THE BIT, NOT THE SET. `Swept` is `is_sweepable` — two pairs — and its
-        // universe accessor answers `INDEX`, which is a wider set than the
+        // THE BIT, NOT THE SET. `Swept` is `is_sweepable` — 210 keys, D-3507 —
+        // and its universe accessor answers `INDEX`, which is a wider set than the
         // target names. Emitting that token would tell a page these two rows
         // count the same instruments, so a target whose definition is not a
         // single bit says so with a null.

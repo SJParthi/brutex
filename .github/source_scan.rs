@@ -4462,7 +4462,7 @@ mod tests {
         assert_eq!(r.len(), 6);
     }
 
-    // ---- audit-20261003 (D-1600..D-1619) ----
+    // ---- audit-20261003 (D-1600..D-1614) ----
 
     #[test]
     fn a_step_that_swallows_or_skips_its_command_is_refused() {

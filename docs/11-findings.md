@@ -915,3 +915,18 @@ Narrative only. No row is added to the table above.
   D-0211 removed it: fixed. D-3501, ONEAUTH-02.
 - **`F-AD043C`** `unguarded` — CLAUDE.md and AGENTS.md crate-graph pictures
   are checked by nothing: fixed. D-3502, ONEAUTH-03.
+- **`F-9082AA`** `unguarded` — Invariant ids sharing their cell with the claim
+  are invisible to gates 10b and 27: fixed. D-3503, ONEAUTH-04.
+- **`F-F0AAB3`** `unguarded` — Cited decision numbers and invariant ids that
+  resolve to nothing (D-2710, D-1619, I-41): fixed. D-3504, ONEAUTH-05.
+- **`F-B082CC`** `wrong` — shift_six rounds a negative tie away from zero
+  while claiming core's rule: fixed. D-3505, ONEAUTH-06.
+- **`F-624E08`** `unguarded` — The population write lock path is built in six
+  places and the ledger path in two: fixed. D-3506, ONEAUTH-07.
+- **`F-64A53E`** `wrong` — The /store axis names two swept instruments of 210,
+  and core has no surface enumeration: fixed. D-3507, ONEAUTH-08.
+- **REFUTED** (recorded so the next pass does not repeat them): `pull::csv::paisa`
+  vs core's text parser (deliberate strictness, D-1494, refuses loudly);
+  `api::recovery`'s index list and `runner::research_family`'s Total Market gate
+  (D-0682 keeps both as independent checks, identical answers today);
+  `CLAUDE.md` §10's count of 25 (correct).

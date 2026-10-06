@@ -2795,6 +2795,8 @@ fn invariant_id(line: &str) -> Option<&str> {
         .unwrap_or(rest.len());
     let (tok, after) = rest.split_at(end);
     let after = after.strip_prefix('`').unwrap_or(after);
+    // D-3503: `| ID — claim |` shares the cell with its claim and is a row.
+    let after = after.strip_prefix(" — ").map_or(after, |_| "|");
     (id_shape(tok) && after.trim_start_matches(' ').starts_with('|')).then_some(tok)
 }
 
@@ -4388,6 +4390,25 @@ mod tests {
         let r = gate_10b("| ID | Invariant |\n|---|---|\n");
         assert!(r.refused);
         assert!(r.text().contains("GATE 10B READ NO INVARIANT IDENTIFIER"));
+    }
+
+    #[test]
+    fn gate_10b_reads_an_id_that_shares_its_cell_with_the_claim() {
+        // D-3503 (ONEAUTH-04).
+        assert_eq!(
+            invariant_id("| AU-O1CLI-6 — **a** | t | ✓ |"),
+            Some("AU-O1CLI-6")
+        );
+        assert_eq!(
+            invariant_id("|  `AU-PROBESTORE-7b` — x"),
+            Some("AU-PROBESTORE-7b")
+        );
+        for l in ["| I-1 x |", "| I-1 - x |", "| I-1 —x |", "| I-1—x |"] {
+            assert_eq!(invariant_id(l), None, "{l}");
+        }
+        let r = gate_10b("| AU-O1CLI-6 — **a** | t | ✓ |\n| AU-O1CLI-6 | b | t | ✓ |\n");
+        assert!(r.refused);
+        assert!(r.text().contains("AU-O1CLI-6"), "{}", r.text());
     }
 
     // ---- gate 7 ----

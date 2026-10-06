@@ -1002,7 +1002,9 @@ fn paisa(
 /// on every rerun. So the shift is done on the TEXT, in integers.
 ///
 /// Half-up at the seventh decimal, which is the same rule `CLAUDE.md` §7 gives
-/// for snapping a price — one rounding rule for the whole product.
+/// for snapping a price — one rounding rule for the whole product: a tie goes
+/// toward positive infinity, exactly as `core::price::Paisa::from_rupee_text_half_up`
+/// sends `-14.5` to `-14` (D-3505).
 ///
 /// # Cost
 ///
@@ -1058,12 +1060,19 @@ fn shift_six(text: &str) -> Option<i64> {
         out = out.checked_add(digit)?;
     }
     // HALF-UP ON THE SEVENTH, and only when there is a seventh. A value with
-    // six or fewer decimals is exact and must not be nudged.
-    if fraction
-        .as_bytes()
-        .get(PLACES)
-        .is_some_and(|next| *next >= b'5')
-    {
+    // six or fewer decimals is exact and must not be nudged. Half-up is
+    // `core::price`'s rule (D-3505): a tie goes toward positive infinity, so a
+    // negative magnitude grows only past the tie, never on it.
+    let next = fraction.as_bytes().get(PLACES).copied();
+    let past_tie = fraction.bytes().skip(PLACES + 1).any(|b| b != b'0');
+    let round_up = next.is_some_and(|next| {
+        if negative {
+            next > b'5' || (next == b'5' && past_tie)
+        } else {
+            next >= b'5'
+        }
+    });
+    if round_up {
         out = out.checked_add(1)?;
     }
     if negative {
@@ -1453,6 +1462,70 @@ mod tests {
         assert_eq!(of(""), None);
         assert_eq!(of("1.2.3"), None);
         assert_eq!(of("9223372036854775807"), None, "overflow is not a value");
+    }
+
+    /// D-3505 (ONEAUTH-06). The doc above says `shift_six` rounds by the rule
+    /// `CLAUDE.md` §7 gives a price. `core::price::Paisa::from_rupee_text_half_up`
+    /// is that rule's one authority, and it sends a tie toward positive
+    /// infinity: `-14.5` is `-14`. `shift_six` sent a negative tie away from
+    /// zero. Moving the point four places right puts core's two-decimal rounding
+    /// on the sixth decimal, so every case below is compared with the authority.
+    #[test]
+    fn a_negative_tie_rounds_by_the_one_rule_core_gives_a_price() {
+        assert_eq!(
+            shift_six("-0.0000005"),
+            Some(0),
+            "a tie goes toward +infinity"
+        );
+        assert_eq!(shift_six("-1.2345675"), Some(-1_234_567));
+        assert_eq!(
+            shift_six("-1.23456750"),
+            Some(-1_234_567),
+            "zeros are no tail"
+        );
+        assert_eq!(shift_six("-1.23456751"), Some(-1_234_568), "past the tie");
+        assert_eq!(shift_six("-0.0000006"), Some(-1));
+        assert_eq!(
+            shift_six("0.0000005"),
+            Some(1),
+            "a positive tie still rounds up"
+        );
+        let authority = |text: &str| -> Option<i64> {
+            let (sign, rest) = text
+                .strip_prefix('-')
+                .map_or(("", text), |rest| ("-", rest));
+            let (whole, fraction) = rest.split_once('.').unwrap_or((rest, ""));
+            let padded = format!("{fraction:0<4}");
+            let (moved, tail) = padded.split_at(4);
+            let shifted = format!("{sign}{whole}{moved}.{tail}");
+            brutex_core::price::Paisa::from_rupee_text_half_up(&shifted)
+                .ok()
+                .map(brutex_core::price::Paisa::raw)
+        };
+        // Every sign, whole part 0 or 7, and every fraction of six to nine
+        // digits whose sixth to ninth places come from {0, 4, 5, 6, 9}.
+        let digits = [0_u8, 4, 5, 6, 9].map(|d| b'0' + d);
+        let mut compared = 0_u32;
+        for sign in ["", "-"] {
+            for whole in [0_u8, 7] {
+                for len in 7..=9 {
+                    let tails = digits.len().pow(u32::try_from(len - 5).expect("small"));
+                    for code in 0..tails {
+                        let mut fraction = b"12345".to_vec();
+                        let mut rest = code;
+                        for _ in 5..len {
+                            fraction.push(digits[rest % digits.len()]);
+                            rest /= digits.len();
+                        }
+                        let fraction = String::from_utf8(fraction).expect("decimal digits");
+                        let text = format!("{sign}{whole}.{fraction}");
+                        assert_eq!(shift_six(&text), authority(&text), "{text}");
+                        compared += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(compared, 4 * (25 + 125 + 625));
     }
 
     /// **THE VENDOR'S `toDate` IS NON-INCLUSIVE, AND THE SAME CONVERTER OWNS IT.**

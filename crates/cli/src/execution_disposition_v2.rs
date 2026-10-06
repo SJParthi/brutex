@@ -1987,7 +1987,7 @@ impl ExecutionDispositionLedgerV2 {
     }
 
     fn lock_path(root: &Path) -> PathBuf {
-        root.join("results").join("population-write.lock")
+        crate::population::population_write_lock(root)
     }
 
     /// Creates missing V2 files and fully validates every sealed record and

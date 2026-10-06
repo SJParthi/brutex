@@ -25340,16 +25340,19 @@ mod tests {
 
         // PAGING PAST THE END CLAMPS. `?page=999` is a stale bookmark, not an
         // attack, and it must land somewhere real.
+        // Nothing held, so the axis is the 210 swept series (D-3507): 7,560
+        // rows over 38 pages of 200, and page index 37 is the last.
         let first = store_ok(&site, day(2026, 8, 7), 0, "show=gaps");
+        let last = store_ok(&site, day(2026, 8, 7), 37, "show=gaps");
         let past = store_ok(&site, day(2026, 8, 7), 999, "show=gaps");
-        assert_eq!(past, first, "an out-of-range page clamps to the last one");
+        assert_eq!(past, last, "an out-of-range page clamps to the last one");
+        assert!(last.contains("page 38 of 38"), "{last}");
         assert!(
-            past.contains("NSE-INDEX-NIFTY"),
+            past.contains("class=\"num miss\""),
             "and still has rows: {past}"
         );
-        // The fixture's one index × 36 months fits one page, so there is no
-        // pager at all — navigation that leads nowhere is worse than none.
-        assert!(!first.contains("class=\"pager\""), "{first}");
+        assert!(first.contains("NSE-INDEX-NIFTY"), "{first}");
+        assert!(first.contains("class=\"pager\""), "{first}");
     }
 
     /// A Dhan manifest at `root` holding one 1-minute month of each named
@@ -25397,10 +25400,10 @@ mod tests {
         // instruments. Without a fixture that large the paging arms are code no
         // test enters.
         //
-        // EIGHT HELD SERIES ON DISK, PLUS THE TWO SWEPT ONES THE AXIS ALWAYS
-        // NAMES, is ten. This set `site.series` by hand; the gaps view now draws
-        // its axis from the request's own census (UC-20, D-1446), so the ten
-        // rows have to be in a manifest to be on the page.
+        // EIGHT HELD SERIES ON DISK, PLUS THE 210 SWEPT ONES THE AXIS ALWAYS
+        // NAMES (D-3507), is 218. This set `site.series` by hand; the gaps view
+        // now draws its axis from the request's own census (UC-20, D-1446), so
+        // the eight rows have to be in a manifest to be on the page.
         let dir = agreeing("storepager");
         let site = site("storepager", &dir);
         let names: Vec<String> = (0..8).map(|i| format!("IDX{i:02}")).collect();
@@ -25411,20 +25414,23 @@ mod tests {
             store::path::YearMonth::new(2026, 8).expect("a month"),
         );
         let (censuses, _) = census_now(&site);
-        assert_eq!(census::grid_rows(census::held_series(&censuses).len()), 360);
+        assert_eq!(
+            census::grid_rows(census::held_series(&censuses).len()),
+            7_848
+        );
 
         let first = store_ok(&site, day(2026, 8, 7), 0, "show=gaps");
-        assert!(first.contains("page 1 of 2"), "{first}");
+        assert!(first.contains("page 1 of 40"), "{first}");
         assert!(first.contains("next"), "{first}");
         assert!(!first.contains("previous"), "no previous to nowhere");
-        assert!(first.contains("360 instrument-month(s)"), "{first}");
+        assert!(first.contains("7848 instrument-month(s)"), "{first}");
         assert!(first.contains("showing 200"), "{first}");
 
-        let last = store_ok(&site, day(2026, 8, 7), 1, "show=gaps");
-        assert!(last.contains("page 2 of 2"), "{last}");
+        let last = store_ok(&site, day(2026, 8, 7), 39, "show=gaps");
+        assert!(last.contains("page 40 of 40"), "{last}");
         assert!(last.contains("previous"), "{last}");
         assert!(!last.contains("next &rarr;"), "{last}");
-        assert!(last.contains("showing 160"), "the remainder: {last}");
+        assert!(last.contains("showing 48"), "the remainder: {last}");
 
         // And past the end clamps onto that last page exactly.
         assert_eq!(store_ok(&site, day(2026, 8, 7), 99, "show=gaps"), last);
@@ -26342,14 +26348,15 @@ mod tests {
     }
 
     #[test]
-    fn a_site_with_no_universe_still_shows_the_two_instruments_that_matter() {
+    fn a_site_with_no_universe_still_shows_every_swept_instrument() {
         // Nothing has been ingested and no master was read, so the axis has only
-        // the swept pair on it — which is the answer, not an absence of one. The
+        // the 210 swept series on it (D-3507) — which is the answer, not an
+        // absence of one. The
         // grid's axis no longer comes from the masters at all (see
         // `census::held_series`), so an empty merge cannot empty it.
         let empty = masters("nomasters", None, None);
         let site = site("nomasters", &empty);
-        assert_eq!(site.series.len(), 2, "the engine surface, exactly");
+        assert_eq!(site.series.len(), 210, "the engine surface, exactly");
         assert_eq!(
             site.universe().targets,
             [0; ingest::SpotTarget::ALL.len()],
@@ -31916,13 +31923,13 @@ mod tests {
             1,
             "one row is tinted held: {html}"
         );
-        // One index instrument in the fixture universe × 36 months back.
+        // The 210 swept series × 36 months back (D-3507).
         assert!(
-            html.contains("72 instrument-month(s) in the grid"),
+            html.contains("7560 instrument-month(s) in the grid"),
             "{html}"
         );
         assert!(
-            html.contains("<b>1 of 72</b> shown row(s) are held"),
+            html.contains("<b>1 of 200</b> shown row(s) are held"),
             "{html}"
         );
         assert!(html.contains("quartiles of 8250"), "{html}");
@@ -31985,7 +31992,7 @@ mod tests {
 
         let boot = store_ok(&site, today, 0, "show=gaps");
         assert!(
-            boot.contains("72 instrument-month(s) in the grid"),
+            boot.contains("7560 instrument-month(s) in the grid"),
             "{boot}"
         );
         assert!(!boot.contains("class=\"sw q4\""), "nothing held: {boot}");
@@ -32006,8 +32013,8 @@ mod tests {
         }
         let after = store_ok(&site, today, 0, "show=gaps");
         assert!(
-            after.contains("108 instrument-month(s) in the grid"),
-            "three series on the axis, the new one included: {after}"
+            after.contains("7596 instrument-month(s) in the grid"),
+            "211 series on the axis, the new one included: {after}"
         );
         assert!(after.contains("NSE-INDEX-NEWIDX"), "{after}");
         assert_eq!(
@@ -32025,13 +32032,13 @@ mod tests {
         publish_index_months(&site.store_root, &names, august);
         let grown = store_ok(&site, today, 0, "show=gaps");
         assert!(
-            grown.contains("396 instrument-month(s) in the grid"),
+            grown.contains("7884 instrument-month(s) in the grid"),
             "{grown}"
         );
-        assert!(grown.contains("page 1 of 2"), "{grown}");
+        assert!(grown.contains("page 1 of 40"), "{grown}");
         let clamped = store_ok(&site, today, 999, "show=gaps");
-        assert!(clamped.contains("page 2 of 2"), "{clamped}");
-        assert!(clamped.contains("showing 196"), "{clamped}");
+        assert!(clamped.contains("page 40 of 40"), "{clamped}");
+        assert!(clamped.contains("showing 84"), "{clamped}");
         let _ = std::fs::remove_dir_all(&site.store_root);
     }
 
