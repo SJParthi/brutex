@@ -22454,6 +22454,10 @@ mod tests {
             "360 decoded + 5 skipped by the decoder"
         );
         assert_eq!(done.decoder_skips, landed.bodies[0].1.skipped);
+        // THE REFUSED BODY IS STILL A MEMBER OF THE RUN: the receipt's member
+        // count must include the body whose schedule was refused. Gate 18
+        // pre-run survivor, "delete field members" in `land_spot`.
+        assert_eq!(done.members, landed.bodies.len());
     }
 
     #[test]
