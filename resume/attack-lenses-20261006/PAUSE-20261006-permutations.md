@@ -8,7 +8,7 @@ Head: `attack/permutations` @ `24c7e3aa` = **WIP (paused, not validated)**. Last
 - R4 refuted: OverlapWindow exit > i+H (latent; only Signal columns in tests/public edge; hardening note in D-3407).
 
 ## In WIP commit 24c7e3aa (needs validation)
-- F-0486DA (D-3407, XPERM-07): Edge::worst_reward_risk_bp now returns 0 for n<2 (as payoff_bp). Test `runner::outcome::tests::the_worst_case_ratio_is_never_above_the_mean_ratio_on_any_small_sample` failed before (`[-30]: worst 9223372036854775807 above payoff 0`), passes after (5 ms); n=2 assertion added at the pause to kill the `<`→`<=` mutant (not yet run).
+- F-0486DA (D-3407, XPERM-07): Edge::worst_reward_risk_bp now returns 0 for n<2 (as payoff_bp). Test `runner::outcome::tests::the_worst_case_ratio_is_never_above_the_mean_ratio_on_any_small_sample` failed before (`[-30]: worst 9223372036854775807 above payoff 0`), passes after (5 ms); NOT DONE: the n=2 assertion (`edge_of_moves(&[5, 10]).worst_reward_risk_bp() == i64::MAX`, kills the `<`→`<=` mutant on the new guard) failed to apply at the pause; add it first after RESUME.
 - Runner + cli suites (non-root) were running at the pause: log /tmp/claude-0/r4-downstream.log.
 
 ## Next steps after RESUME
