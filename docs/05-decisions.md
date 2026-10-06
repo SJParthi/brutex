@@ -63139,3 +63139,160 @@ longer be reached, so it was removed. The frontier writer keeps its own
 
 **Rejected.** Changing the test to expect the 4,096 text. That would
 leave the two descent doors with different bounds.
+
+### D-2055 — The overnight measure's saturation reads the sign, and its tie, sign and rupee boundaries are tested — 2026-10-06
+
+**What was observed.** Gate 18 on run 1283 (969493e1) left seven mutants
+alive in `runner::audit`'s overnight measure: `ratio < 0` in
+`largest_overnight_move` as `<`, `==`, `<=`; the tie test `>` as `>=`;
+`paisa < 0` in `rupees` as `<=`, `==`, `>`; and `found.ppm < 0` in
+`overnight_line` as `<=`. No test had a tie, a saturated move, a zero move or
+a negative paisa amount. `ratio < 0` against `ratio <= 0` cannot be told
+apart: zero always fits an `i64`, so the fallback is never read there.
+
+**Decided.** The saturation fallback reads `ratio.is_negative()`, which has
+no boundary operator to mutate. Four tests in `audit::overnight_tests` pin the
+rest: a +10% and a -10% overnight tie keeps the earlier session in both
+orders; a move from a 1-paisa close to `i64::MAX` or `i64::MIN` saturates to
+that sign; `rupees` signs only a negative amount (`0.00`, `-0.05`,
+`i64::MIN`); and a zero move prints `+0.00%`. Invariants G18-runner-02 to 05.
+
+**Rejected.** Leaving `ratio < 0` and calling the `<=` mutant equivalent:
+D-0192 forbids a skip, and the restructure costs nothing.
+
+### D-2056 — The grid table orders its two rescued rows by a two-slot sort — 2026-10-06
+
+**What was observed.** `runner::audit::grid` put the two marked rows below the
+cut in key order with `(Some(a), Some(b)) if key(b) < key(a)`. Run 1283 left
+`<` as `<=` and the guard as `true` alive. The key is total over distinct
+cells, because it ends on the index, so `<=` could never differ, and no test
+put both marks below the cut.
+
+**Decided.** The two slots are sorted by `key` with `sort_unstable_by_key`,
+which has no comparison operator to mutate. `None` sorts first and prints
+nothing. `two_chosen_rows_below_the_cut_print_in_key_order` feeds both cell
+orders with a cut of one and checks that `best()`'s row prints before
+`SHARPEST`'s. Invariant G18-runner-01.
+
+**Rejected.** A test alone. It cannot kill the `<=` mutant, because equal keys
+never occur.
+
+### D-2057 — White's p-value keeps one point-mass clause, and the block ceiling is tested on a series longer than it — 2026-10-06
+
+**What was observed.** Run 1283 left eleven `runner::bootstrap` mutants:
+`block > MAX_BLOCK` as `>=` and `==` in `reality_check`, `romano_wolf`,
+`romano_wolf_receipt` and `romano_wolf_adjusted_p_values_v1`; `> 1_000_000`
+on alpha in `romano_wolf_receipt`; `draws > 0` as `>=` in `Verdict::clears`;
+and `||` as `&&` in `reality_check`'s p-value. The ceiling tests used 200
+periods, so `aligned_for` refused a block of 1,000,001 before the ceiling was
+read. The p-value's `draws == 0 || periods < 2 ||` decided nothing: zero draws
+gives `(0 + 1) / (0 + 1)`, and `aligned` makes every row `periods` long, so
+one period is a point mass.
+
+**Decided.** The p-value is `1.0` when `white_null_is_a_point_mass`, and the
+two redundant clauses are removed. Their cases stay pinned by the existing
+zero-draw and single-period tests. `the_ceiling_is_read_on_a_series_longer_than_it`
+runs all four entry points over 1,000,001 periods: a block of 1,000,000 is
+answered (the stepdown rejects the edged series) and 1,000,001 is refused.
+Alpha 1,000,000 ppm is accepted and 1,000,001 refused. `clears` is false at
+zero draws, even at p = 0, and true at one draw and p = 0.05. Invariants
+G18-runner-06 to 08.
+
+**Rejected.** Keeping the clauses for readability. A clause whose removal
+changes no output is the shape D-0192 refuses to leave alive.
+
+### D-2058 — The incomplete beta's side, its Lentz guard and the gamma shift are pinned to the bit — 2026-10-06
+
+**What was observed.** Run 1283 left eight `runner::significance` mutants:
+five on `x < (a + 1.0) / (a + b + 2.0)` in `regularized_incomplete_beta`, two
+on the Lentz guard's `< TINY`, and `z < 10.0` as `<=` in `ln_gamma`. Each
+moves a branch whose two sides agree to about 1e-13. This was measured with a
+copy of the three functions over t-statistics at 1 to 100,000 degrees of
+freedom, where every mutant changed the result by 3e-14 to 3e-11. No test
+compared closer than that. No fraction this crate evaluates lands on the
+guard's floor.
+
+**Decided.** The guard is the named function `lentz_guard` beside
+`LENTZ_TINY`, and Stirling's series is the named function `stirling`. Both
+give the same bits as the closure and the inline expression they replace.
+Three tests pin the boundaries to the bit, which §3 rule 5 already requires
+of every output: the guard keeps `±LENTZ_TINY` and replaces only magnitudes
+strictly below it; `ln_gamma(10.0)` is `stirling(10.0)` with no shift; and
+`I_x(1/2, 1/2)` at x = 0.2 is the direct side and at x = 0.5, exactly on the
+split, the symmetric side. Each is also checked against the closed form
+`(2/pi) asin(sqrt x)` or `ln 9!` within 1e-11 or 1e-12. Invariants
+G18-runner-09 to 11.
+
+**Rejected.** A tolerance test. Both sides pass any tolerance the series
+supports, so it cannot kill these mutants.
+
+### D-2059 — The smallest win and loss are folded with `min`, and every order is tested — 2026-10-06
+
+**What was observed.** Run 1283 left six `runner::outcome` mutants: five on
+`Sides::observe`'s `min_loss` guard (`<` as `>`, `==`, `<=`, `==` as `!=`,
+`||` as `&&`), one on `min_win`'s `<` as `<=`, and `mean_paisa < 0.0` as `<=`
+in `Edge::largest_gain_paisa`. No test read `min_loss`. A guarded
+`x < min` against `x <= min` stores the same value when they are equal.
+
+**Decided.** Both minima are `if min == 0 { x } else { min.min(x) }`.
+`the_smallest_win_and_loss_are_the_smallest_magnitudes_in_any_order` folds
+three orders, and `a_flat_mean_reads_the_largest_up_move_as_its_gain` pins
+the zero mean. Invariants G18-runner-12 and 13.
+
+### D-2060 — The favourable excursion is read on demand, and a ladder refusal keeps its signal count — 2026-10-06
+
+**What was observed.** In `runner::grid::one_variant`,
+`if pess > 0 || trades.is_some() { read } else { 0 }` produced a zero that
+nothing read. The only consumers are the detail row (when requested) and the
+winner sum (when `pess > 0`), so `pess >= 0` changed no output (run 1283).
+`evaluate_timed`'s ladder refusal left "delete field `signals`" alive, because
+no test compared the refused grid's signal count.
+
+**Decided.** `went_for` is a closure, and each gated consumer calls it. A
+winner whose row was requested reads it twice: two loads and a division, on
+the reporting path only, with no scan. `an_invalid_stop_ladder_or_step_is_refused_and_named`
+also asserts that each refused grid carries the sound grid's `signals`.
+Invariant G18-runner-14.
+
+### D-2061 — The legacy walk-forward's rung refusal is a complete struct literal — 2026-10-06
+
+**What was observed.** `walk_forward_shaped` refused a malformed
+`BRUTEX_GRID_RUNGS` with `Validated { refused: Some(why), ..Default }`, and
+run 1283 left "delete field `refused`" alive. That branch is reachable only
+through the process environment, and under `forbid(unsafe_code)` a Rust 2024
+test cannot set it.
+
+**Decided.** The literal names both fields, `folds: Vec::new()` and
+`refused: Some(why)`, the same shape `walk_forward_shaped_with_rungs` uses for
+its own refusals. With no `..base`, there is no field to delete.
+`fold_rungs_from`'s tests still pin the refusal text.
+
+**Rejected.** Setting the variable from a test. That needs `unsafe` and races
+the other tests in the binary.
+
+### D-2062 — `refused_within` is checked against the scan on every short range — 2026-10-06
+
+**What was observed.** `SliceFacts::refused_within`'s `from > to` as `>=` and
+`==` survived run 1283. No test asked about the one-bar range `from == to`
+on a refused record, and for a reversed range `==` is equivalent, because the
+prefix is non-decreasing.
+
+**Decided.** `slice_facts_locate_the_first_refused_record_and_missing_minute`
+already scans every range near a refused record and a missing minute,
+including `from == to` and reversed ones. It now also asserts that
+`refused_within` equals the scan's `is_some()`. Invariant G18-runner-15.
+
+### D-2063 — A training slice past the arithmetic envelope is refused at attestation, and the attestation prints its identity — 2026-10-06
+
+**What was observed.** Run 1283 left `validate_arithmetic_envelope_view`
+replaced with `Ok(())`, `envelope_extremes` replaced with `Ok((0, 1))`,
+`Ok((0, -1))` and `Ok((1, -1))`, and `AttestedTrainingV1`'s `Debug` replaced
+with an empty write. No test in the workspace reached
+`ExitGridErrorV1::ArithmeticEnvelopeExceeded`.
+
+**Decided.** `a_training_slice_past_the_arithmetic_envelope_is_refused_at_attestation`
+scales the generated sessions' prices by 10^9. Ranges in ppm are unchanged,
+so the research resolution succeeds, and `4 x bars x max high` passes
+`i64::MAX`. Attestation must then fail with `ArithmeticEnvelopeExceeded("aggregate paisa accumulator")`.
+`an_attested_training_slice_debug_prints_its_identity` checks the printed
+field names. Invariants G18-runner-16 and 17.
