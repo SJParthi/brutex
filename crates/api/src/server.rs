@@ -23081,6 +23081,300 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// The variable that turns a run of the cross-process test below into the
+    /// OTHER `brutex api`: it names the store root that child serves.
+    const SERVE_LOCK_HOLDER: &str = "BRUTEX_SERVE_LOCK_HOLDER_CHILD";
+
+    /// The other process's half of
+    /// `another_process_is_refused_while_the_holder_lives_and_admitted_once_it_is_killed`:
+    /// takes the lock over `root` and prints one marker line, then holds it
+    /// until its standard input closes. A refusal is printed on one line.
+    fn hold_serve_lock_in_this_child(root: &Path) {
+        let addr: std::net::SocketAddr = "127.0.0.1:9999".parse().expect("an address");
+        match take_serve_lock(root, addr) {
+            Ok(lock) => {
+                println!("SERVE-LOCK-HELD pid={}", std::process::id());
+                let mut line = String::new();
+                let _ = std::io::stdin().read_line(&mut line);
+                drop(lock);
+                println!("SERVE-LOCK-RELEASED");
+            }
+            Err(why) => println!("SERVE-LOCK-REFUSED {}", why.replace('\n', " ")),
+        }
+    }
+
+    /// Starts this test binary as another process serving `root`, and returns
+    /// it with the first `SERVE-LOCK-` line it printed and the rest of its
+    /// output. Waits at most a minute, so a child that hangs fails the test
+    /// rather than the suite.
+    fn serve_lock_child(
+        root: &Path,
+    ) -> (
+        std::process::Child,
+        String,
+        std::sync::mpsc::Receiver<String>,
+    ) {
+        let mut child = std::process::Command::new(std::env::current_exe().expect("this binary"))
+            .args([
+                "--exact",
+                "server::tests::another_process_is_refused_while_the_holder_lives_and_admitted_once_it_is_killed",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(SERVE_LOCK_HOLDER, root)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("the other process starts");
+        let stdout = child.stdout.take().expect("its output");
+        let (send, lines) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in
+                std::io::BufRead::lines(std::io::BufReader::new(stdout)).map_while(Result::ok)
+            {
+                if line.starts_with("SERVE-LOCK-") && send.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        let first = lines
+            .recv_timeout(std::time::Duration::from_mins(1))
+            .expect("the other process says whether it holds the store");
+        (child, first, lines)
+    }
+
+    /// **Two PROCESSES over one store: the second is refused naming the
+    /// first, a holder killed while holding frees the store, and a holder that
+    /// exits frees it too.** The adversarial matrix of D-2779.
+    ///
+    /// Every other serve-lock test stands a second open file description in
+    /// for the other process. This one runs the other process: a child of this
+    /// test binary that takes the lock through `take_serve_lock` itself, so
+    /// its registry is its own and only the file lock stands between the two.
+    #[test]
+    fn another_process_is_refused_while_the_holder_lives_and_admitted_once_it_is_killed() {
+        if let Some(root) = std::env::var_os(SERVE_LOCK_HOLDER) {
+            hold_serve_lock_in_this_child(Path::new(&root));
+            return;
+        }
+        let root = crate::scratch::path("serve-lock-processes");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let key = std::fs::canonicalize(&root).expect("canonical root");
+        let addr: std::net::SocketAddr = "127.0.0.1:9999".parse().expect("an address");
+        let mine = format!("addr={addr} pid={}\n", std::process::id());
+
+        // THE OTHER PROCESS HOLDS: this one is refused, by name, and keeps no key.
+        let (mut other, held, _) = serve_lock_child(&root);
+        let other_pid = other.id();
+        assert_eq!(held, format!("SERVE-LOCK-HELD pid={other_pid}"));
+        let refused = take_serve_lock(&root, addr).expect_err("another process serves it");
+        assert!(refused.contains("already serving this store"), "{refused}");
+        assert!(
+            refused.contains(&format!("pid={other_pid}")),
+            "the refusal names the process that holds it: {refused}"
+        );
+        assert_eq!(serve_lock_holders(&key), 0, "a refused take keeps no key");
+
+        // KILLED WHILE HOLDING: no unlock ran, and the store is free anyway.
+        other.kill().expect("SIGKILL the holder");
+        let _ = other.wait();
+        assert_eq!(
+            std::fs::read_to_string(key.join(SERVE_LOCK)).expect("the dead holder's stamp"),
+            format!("addr={addr} pid={other_pid}\n"),
+            "the killed holder's stamp is still in the file"
+        );
+        let taken = take_serve_lock(&root, addr).expect("a killed holder leaves nothing held");
+        assert_eq!(
+            std::fs::read_to_string(key.join(SERVE_LOCK)).expect("this stamp"),
+            mine,
+            "the dead holder's stale stamp is replaced, never quoted again"
+        );
+
+        // THIS PROCESS HOLDS: the other is refused, naming this one.
+        let (mut other, refused, _) = serve_lock_child(&root);
+        assert!(
+            refused.starts_with("SERVE-LOCK-REFUSED")
+                && refused.contains("already serving this store")
+                && refused.contains(&format!("pid={}", std::process::id())),
+            "{refused}"
+        );
+        assert!(other.wait().expect("the refused process exits").success());
+
+        // RELEASED BY THE LAST HOLDER HERE, the other process may serve; once
+        // it exits on its own, this one may serve again.
+        drop(taken);
+        let (mut other, held, lines) = serve_lock_child(&root);
+        assert_eq!(held, format!("SERVE-LOCK-HELD pid={}", other.id()));
+        assert!(
+            !another_process_could_serve(&key),
+            "the other process holds it"
+        );
+        drop(other.stdin.take());
+        assert_eq!(
+            lines
+                .recv_timeout(std::time::Duration::from_mins(1))
+                .expect("the other process releases"),
+            "SERVE-LOCK-RELEASED"
+        );
+        assert!(other.wait().expect("the holder exits").success());
+        let again = take_serve_lock(&root, addr).expect("free once the other process released");
+        assert_eq!(serve_lock_holders(&key), 1);
+        drop(again);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **Many serves of one store racing in one process share one file lock,
+    /// and only the last release frees it, whatever order they release in.**
+    /// D-2779.
+    ///
+    /// Sixteen threads take at once, so a take meets a take in progress; then
+    /// the holders are dropped in an interleaved order (odd first, then even
+    /// from the back), and the file must stay locked until the very last.
+    #[test]
+    fn racing_serves_in_one_process_share_one_lock_and_any_release_order_frees_it_last() {
+        const SERVES: usize = 16;
+        let root = crate::scratch::path("serve-lock-race");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let key = std::fs::canonicalize(&root).expect("canonical root");
+        let addr: std::net::SocketAddr = "127.0.0.1:9999".parse().expect("an address");
+        let start = std::sync::Arc::new(std::sync::Barrier::new(SERVES));
+        let takers: Vec<_> = (0..SERVES)
+            .map(|_| {
+                let (root, start) = (root.clone(), std::sync::Arc::clone(&start));
+                std::thread::spawn(move || {
+                    start.wait();
+                    take_serve_lock(&root, addr)
+                })
+            })
+            .collect();
+        let mut held: Vec<Option<ServeLock>> = takers
+            .into_iter()
+            .map(|taker| Some(taker.join().expect("a taker").expect("every serve joins")))
+            .collect();
+        assert_eq!(serve_lock_holders(&key), SERVES);
+        assert!(!another_process_could_serve(&key));
+        let order: Vec<usize> = (0..SERVES)
+            .filter(|at| at % 2 == 1)
+            .chain((0..SERVES).rev().filter(|at| at % 2 == 0))
+            .collect();
+        for (released, &at) in order.iter().enumerate() {
+            drop(held.get_mut(at).and_then(Option::take));
+            let left = SERVES - released - 1;
+            assert_eq!(serve_lock_holders(&key), left);
+            assert_eq!(
+                another_process_could_serve(&key),
+                left == 0,
+                "{left} holder(s) left: the file is free exactly when none is"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A serve lock the host will not open is refused by name, registers
+    /// nothing, and does not wedge the store once the permission is back.**
+    /// D-2779. Run where the mode bits bind (D-0995).
+    #[test]
+    #[cfg(unix)]
+    fn a_serve_lock_the_host_will_not_open_is_refused_and_registers_nothing() {
+        crate::isolated::where_permission_binds(
+            "server::tests::a_serve_lock_the_host_will_not_open_is_refused_and_registers_nothing",
+            a_serve_lock_the_host_will_not_open_is_refused_and_registers_nothing_body,
+        );
+    }
+
+    /// The test above, run where the mode bits bind.
+    #[cfg(unix)]
+    fn a_serve_lock_the_host_will_not_open_is_refused_and_registers_nothing_body() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = crate::scratch::path("serve-lock-permission");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let key = std::fs::canonicalize(&root).expect("canonical root");
+        let addr: std::net::SocketAddr = "127.0.0.1:9999".parse().expect("an address");
+        let mode = |path: &Path, bits: u32| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(bits)).expect("chmod");
+        };
+
+        // NO LOCK FILE, AND A ROOT THAT CANNOT GAIN ONE.
+        mode(&root, 0o555);
+        let why = take_serve_lock(&root, addr);
+        mode(&root, 0o755);
+        let why = why.expect_err("a lock file that cannot be created refuses");
+        assert!(why.contains("could not be opened"), "{why}");
+        assert!(why.contains("ermission denied"), "the host's words: {why}");
+        assert_eq!(serve_lock_holders(&key), 0, "nothing registered");
+
+        // A LOCK FILE THAT EXISTS AND CANNOT BE OPENED.
+        std::fs::write(key.join(SERVE_LOCK), b"addr=127.0.0.1:1 pid=1\n").expect("lock file");
+        mode(&key.join(SERVE_LOCK), 0o000);
+        let why = take_serve_lock(&root, addr);
+        mode(&key.join(SERVE_LOCK), 0o644);
+        let why = why.expect_err("an unopenable lock file refuses");
+        assert!(why.contains("could not be opened"), "{why}");
+        assert!(
+            !why.contains("already serving"),
+            "no instance is implied: {why}"
+        );
+        assert_eq!(serve_lock_holders(&key), 0, "nothing registered");
+
+        // THE PERMISSION BACK, the store is served at once.
+        let taken = take_serve_lock(&root, addr).expect("served once the host allows it");
+        assert_eq!(serve_lock_holders(&key), 1);
+        drop(taken);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **What a serve lock costs, measured.** D-2779.
+    ///
+    /// A fresh take (canonicalize, open, `flock`, stamp, register) followed by
+    /// the last release (unregister, unlock), and a join of a held root
+    /// followed by its release, each timed over 2,000 rounds and reported as
+    /// p50, p99 and max in microseconds. The numbers are for the record in
+    /// `docs/06-limits.md`, not a bound this test enforces: the take runs once
+    /// per `serve`, never per request. Each round's state is still asserted.
+    #[test]
+    fn the_serve_lock_take_and_release_are_measured() {
+        const ROUNDS: usize = 2_000;
+        let root = crate::scratch::path("serve-lock-cost");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let key = std::fs::canonicalize(&root).expect("canonical root");
+        let addr: std::net::SocketAddr = "127.0.0.1:9999".parse().expect("an address");
+        let percentiles = |mut micros: Vec<u128>| {
+            micros.sort_unstable();
+            let at = |share: usize| micros[(micros.len() - 1) * share / 100];
+            (at(50), at(99), micros[micros.len() - 1])
+        };
+        let (mut fresh, mut joined) = (Vec::with_capacity(ROUNDS), Vec::with_capacity(ROUNDS));
+        for _ in 0..ROUNDS {
+            let began = std::time::Instant::now();
+            let lock = take_serve_lock(&root, addr).expect("a free store");
+            drop(lock);
+            fresh.push(began.elapsed().as_micros());
+            assert_eq!(serve_lock_holders(&key), 0);
+        }
+        let holder = take_serve_lock(&root, addr).expect("a free store");
+        for _ in 0..ROUNDS {
+            let began = std::time::Instant::now();
+            let lock = take_serve_lock(&root, addr).expect("joins");
+            drop(lock);
+            joined.push(began.elapsed().as_micros());
+            assert_eq!(serve_lock_holders(&key), 1);
+        }
+        drop(holder);
+        assert!(another_process_could_serve(&key));
+        let (fresh, joined) = (percentiles(fresh), percentiles(joined));
+        println!(
+            "serve lock, {ROUNDS} rounds, microseconds p50/p99/max: fresh take+last release {}/{}/{}, join+release {}/{}/{}",
+            fresh.0, fresh.1, fresh.2, joined.0, joined.1, joined.2
+        );
+        assert!(fresh.0 <= fresh.1 && fresh.1 <= fresh.2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// **The serve lock names exactly one holder: the one that holds it.**
     /// R9-api-cx-2, D-1446.
     ///
