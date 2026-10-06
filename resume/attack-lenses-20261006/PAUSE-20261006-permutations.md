@@ -19,3 +19,6 @@ Head: `attack/permutations` @ `24c7e3aa` = **WIP (paused, not validated)**. Last
 
 ## Restart
 `git fetch origin attack/permutations final/all-fixes && git checkout attack/permutations`; tests as non-root via /tmp/claude-0/runtests.sh <crate> (script in PAUSE notes above if /tmp was lost: cargo test --no-run, copy binaries, run via setpriv --reuid=65534 --regid=65534 --clear-groups).
+
+## Background result during pause
+runner + cli suites (non-root) on the WIP source: == runner == runner done == cli == cli done ALLDONE 
