@@ -6876,3 +6876,34 @@ old line regex the same input and watched it pass.
 | GPORT-13 | Gate 22 clause A2 walks Cargo.lock's package edges from the sweep crates through every transitive dependency and refuses any edge to `store`, `pull`, `lake`, `api`, `telemetry`, `log` or a `tracing` package, an untracked lock and a lock with no edge (P1-08-03, D-2660, D-1937) | `gate22_clause_a2_refuses_a_renamed_or_transitive_store_in_the_lock`, `a_lock_is_read_as_package_edges` in `.github/gates_runtime.rs` | ✓ |
 | GPORT-14 | Gate 23 measures the prints of every production file the closure names outside `src/` beside the `crates/*/src/*.rs` glob, and refuses a closure that did not resolve (P1-08-04, D-2660, D-1937) | `gate23_reads_a_production_file_outside_src` in `.github/gates_runtime.rs` | ✓ |
 | GPORT-15 | Gate 10's pending allowlist no longer exempts P-03, so the row's tests are checked again, while X-13 stays exempt with its closing condition (D-2673, D-1938) | `p_03_left_the_pending_allowlist` in `.github/gates_ledger.rs` | ✓ |
+
+### Gate 18 run 1283 survivors, group `rest` (D-2070 to D-2081)
+
+| ID | Invariant | Proven by | Status |
+|---|---|---|---|
+| G18-rest-01 | A regime refusal before two verified rows names the NEARER one's start as `verified_from`, never the later one's (D-2070) | `costs::regime::tests::a_refusal_names_the_nearest_verified_row_not_a_later_one` | ✓ |
+| G18-rest-02 | A straddling trip's GST is charged at the larger of its two days' rates, chosen by `max` with no comparison to mutate (D-2070) | `costs::trip::tests::a_straddling_trip_takes_each_legs_own_levies_and_the_larger_gst` | ✓ |
+| G18-rest-03 | In-neck (bit 211) needs the white bar to open strictly below the prior low: an open one paisa under it lights, an open exactly at it does not (D-2071) | `indicators::pattern::exemplars::in_neck_closes_at_or_just_into_the_prior_body` | ✓ |
+| G18-rest-04 | The `period`-th true range completes Wilder's seed mean exactly rather than taking a smoothing step: TR 4, 0, 0, 0 into ATR(4) is one paisa (D-2071) | `indicators::trend::tests::the_period_th_range_completes_the_seed_mean_exactly` | ✓ |
+| G18-rest-05 | The footer cursor steps over a value declaring exactly the bytes left, and refuses one byte more without moving (D-2072) | `lake::footer::tests::a_skip_of_exactly_the_bytes_left_is_admitted_and_one_more_is_not` | ✓ |
+| G18-rest-06 | A thrift map's key and value types alternate for every pair, so a second key is never read as a value (D-2072) | `lake::footer::tests::a_map_alternates_its_key_and_value_types_for_every_pair` | ✓ |
+| G18-rest-07 | The footer's zigzag decodes negative and positive ids alike (D-2072) | `lake::footer::tests::zigzag_decodes_both_signs` | ✓ |
+| G18-rest-08 | A bool is one byte as a list element and none as a struct field (D-2072) | `lake::footer::tests::a_bool_takes_a_byte_in_a_list_and_none_in_a_field` | ✓ |
+| G18-rest-09 | A telemetry line of exactly `MAX_LINE_BYTES` is decoded, not counted as an overlong run (D-2080) | `telemetry::tail::tests::a_line_of_exactly_the_cap_is_decoded_not_dropped` | ✓ |
+| G18-rest-10 | `where_permission_binds` runs the body in a child whose uid is not root, and a child that ran no test fails the parent, in both `pull` and `store` (D-2073) | `pull::support::tests::the_body_runs_in_a_child_where_the_bits_bind`, `pull::support::tests::a_child_that_ran_no_test_fails_the_parent`, `store::support::tests::the_body_runs_in_a_child_where_the_bits_bind`, `store::support::tests::a_child_that_ran_no_test_fails_the_parent` | ✓ |
+| G18-rest-11 | An archive member's byte cap is 256 MiB by value (D-2074) | `pull::archive::tests::a_member_past_the_byte_cap_is_refused_before_it_is_read` | ✓ |
+| G18-rest-12 | A bar kept on a day the calendar classifies is not counted as kept on an unclassified day (D-2074) | `pull::pipeline::fetching_and_landing_is_one_call_over_the_same_seam` | ✓ |
+| G18-rest-13 | An escaped quote inside a JSON key does not end the key, so a repeat of that key is still found (D-2074) | `pull::http::tests::an_escaped_quote_inside_a_key_does_not_end_the_key` | ✓ |
+| G18-rest-14 | A permit reserved in the future is slept to and counted as absorbed before the request goes out (D-2074) | `pull::http::tests::a_reservation_in_the_future_is_slept_to_and_counted` | ✓ |
+| G18-rest-15 | The day check's line is `Info` only for a clean comparison and `Warn` for a differing day, an absent day or an unreadable file (D-2075) | `pull::ingest::tests::a_clean_day_check_is_info_and_anything_else_warns` | ✓ |
+| G18-rest-16 | An index document that skips only a list element still emits the skip line, naming the category the element sat in (D-2076) | `pull::emit_sites::every_emit_site_in_this_crate_reaches_a_file` | ✓ |
+| G18-rest-17 | `push_pair` escapes characters below 0x20 and sends the space as itself (D-2076) | `pull::rolling::tests::the_control_escape_stops_below_the_space` | ✓ |
+| G18-rest-18 | `open_read_no_follow` is one function whose flag is chosen per target, and it refuses a final symlink (D-2079) | `store::open_flags::the_flag_refuses_a_final_symlink_that_a_plain_open_follows` | ✓ |
+| G18-rest-19 | A lookup on an empty month asks nothing of its index; a lookup on a month with bars decides the index and is served by it (D-2077) | `store::file::tests::a_lookup_asks_the_index_only_when_the_month_holds_bars` | ✓ |
+| G18-rest-20 | An overlap that leaves the held range while held bars remain is `Skipped` at the first one it passed; one that runs out of batch or of held bars at the edge is not a disagreement (D-2078) | `store::file::tests::an_overlap_that_skips_held_bars_names_the_first_it_skipped` | ✓ |
+| G18-rest-21 | A header beginning on its month's first instant and ending before its last is admitted; one microsecond outside either end is refused (D-2078) | `store::file::tests::a_header_may_begin_on_the_first_instant_of_its_month` | ✓ |
+| G18-rest-22 | Removing an index already gone is done; one the host will not unlink is refused (D-2078) | `store::file::tests::removing_an_index_already_gone_is_done_and_one_that_will_not_go_refuses` | ✓ |
+| G18-rest-23 | A symbolic link is refused by name, a file or an absent path is not, and the refusal's sentence names the link (D-2078) | `store::file::tests::a_link_is_refused_by_name_and_a_file_or_nothing_is_not` | ✓ |
+| G18-rest-24 | An index that is present but cannot be opened is `Unreadable`, not `Absent` (D-2077) | `store::tix::an_index_that_cannot_be_opened_is_named_unreadable_not_absent` | ✓ |
+| G18-rest-25 | A writer open of an empty month keeps only an index that is exactly a confirming header, and rewrites a longer one or a damaged one (D-2077) | `store::tix::a_writer_open_of_an_empty_month_rewrites_every_index_but_the_fresh_one` | ✓ |
+| G18-rest-26 | An index damaged under a live writer is rebuilt before its next append, which commits (D-2077) | `store::tix::an_index_damaged_under_a_live_writer_is_rebuilt_before_its_append` | ✓ |

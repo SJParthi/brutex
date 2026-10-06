@@ -63139,3 +63139,221 @@ longer be reached, so it was removed. The frontier writer keeps its own
 
 **Rejected.** Changing the test to expect the 4,096 text. That would
 leave the two descent doors with different bounds.
+
+### D-2070 — Gate 18 survivors in `costs`: the nearest verified row, and GST by `max` — 2026-10-06
+
+**What was observed.** CI run 1283 (Gate 18 on 969493e1) left two `costs`
+mutants alive. `&&` turned to `||` in `RegimeTable::rate_on` survived because
+the only test of the refusal's `verified_from` had one verified row ahead, and
+with one row the last verified row is also the nearest. `>` turned to `>=` in
+`charge_stack_legs` survived because it was equivalent: on equal GST rates both
+arms of the comparison picked the same value.
+
+**Decided.** `costs::regime::tests::a_refusal_names_the_nearest_verified_row_not_a_later_one`
+puts two verified rows ahead of an unverified anchor and requires the refusal to
+name the first (G18-rest-01). The GST rate is `buy.gst().max(sell.gst())`. With
+no comparison left, there is no mutant.
+
+**Rejected.** A test for the GST tie. No input can tell `>` from `>=` there, so
+such a test would assert nothing.
+
+### D-2071 — Gate 18 survivors in `indicators`: one equivalence removed, two boundaries pinned — 2026-10-06
+
+**What was observed.** Run 1283 left four `indicators` mutants alive.
+`GapFib::fold` widened its running candle with `if bar.high > high` and
+`if bar.low < low`, and `>=` and `<=` were equivalent there. `Patterns::bits`
+bit 211 had no test with an open exactly at the prior low. `Atr::fold`'s
+`count > period` had no test where the `period`-th range shows the difference
+between completing the seed mean and taking a smoothing step. For TR 4, 0, 0, 0
+into ATR(4), the mean is exactly one paisa, and the step from the floored
+three-bar mean lands on 0.999999.
+
+**Decided.** The candle widens with `bar.high.max(high)` and `bar.low.min(low)`.
+`pattern::exemplars::in_neck_closes_at_or_just_into_the_prior_body` now checks
+opens of 999 and 1000 against a prior low of 1000 (G18-rest-03). The test
+`trend::tests::the_period_th_range_completes_the_seed_mean_exactly` pins the
+seed (G18-rest-04).
+
+**Rejected.** Seeding the ATR with the smoothing step. Wilder's seed is the
+mean (D-1542), and the floor the step inherits loses a paisa.
+
+### D-2072 — Gate 18 survivors in `lake::footer`: the cursor edge, map alternation, zigzag, list bools — 2026-10-06
+
+**What was observed.** Run 1283 left six `lake::footer` mutants alive. No test
+skipped exactly the bytes that remain. No test walked a map with two pairs of
+different key and value types, so `^=` turned to `|=` went unseen. No test
+decoded a negative zigzag id. No test stepped over a bool that was a list
+element rather than a struct field.
+
+**Decided.** Four tests in `footer_tests.rs` cover these one each
+(G18-rest-05 to 08). Each one drives the private helper directly and asserts
+the cursor position or the decoded value.
+
+### D-2073 — The permission fixture proves its own two promises — 2026-10-06
+
+**What was observed.** Run 1283 left two mutants alive in
+`tests/support/mod.rs`, in both `pull` and `store`.
+`where_permission_binds` could be replaced by `()`. `&&` in `ran` could be
+turned to `||`. Every test that uses the fixture asserts inside the body. Once
+the body never runs, nothing is asserted, and a child that ran no test passed.
+
+**Decided.** The fixture file gets a test module of its own, which compiles
+wherever the file does (G18-rest-10). One test has the child's body leave a
+marker named by the parent's process id. The parent then requires that marker,
+owned by a non-root uid. The other test asks the fixture to run a name that
+matches no test, and requires the parent to panic with "ran no test". The
+child marker `CHILD` moved to module scope so the test can tell the child from
+the parent. The two copies stay byte-identical.
+
+### D-2074 — Gate 18 survivors in `pull`: archive cap, last day, unclassified count, permit wait, escaped keys — 2026-10-06
+
+**What was observed.** Run 1283 left these `pull` mutants alive:
+
+- `MAX_MEMBER_BYTES`' `*` became `+`. Every test named the constant, so a
+  wrong value went unseen.
+- `Calendar::last_day`'s `tail >= 0` guard became `true`. This was
+  equivalent, because adding −1 saturates exactly as subtracting 1 does.
+- `land_rows`' `&&` became `||`. No test kept a bar on a classified day and
+  read `unclassified_kept`.
+- `wait_for_permit`'s `wait == 0` became `!=`. No test reserved a permit in
+  the future.
+- The `\\` arm of `repeated_key` was deleted. No test put an escaped quote
+  inside a key.
+
+**Decided.**
+
+- The archive test pins the cap at 268,435,456 bytes (G18-rest-11).
+- `last_day` is `first.saturating_add(span.saturating_sub(1))`. This is one
+  expression for both shapes, with no guard left to mutate.
+- `pull::pipeline::fetching_and_landing_is_one_call_over_the_same_seam`
+  requires `unclassified_kept() == 0` on 2022-10-03 (G18-rest-12).
+- `http::tests::an_escaped_quote_inside_a_key_does_not_end_the_key`
+  (G18-rest-13).
+- `http::tests::a_reservation_in_the_future_is_slept_to_and_counted`
+  (G18-rest-14). It spends the second's permits at an instant 300 ms ahead,
+  then requires at least 250 ms slept and 250,000 µs counted as absorbed.
+
+### D-2075 — The day check's line is chosen by a function a test can call — 2026-10-06
+
+**What was observed.** Run 1283: `check_day`'s `report.clean()` guard could
+be replaced by `false`. The level and sentence were chosen inside the function
+that emits them. Nothing read the line back, so a clean month logged as a
+warning went unseen.
+
+**Decided.** `daycheck_headline` chooses the line's level and sentence, and
+`check_day` adds the fields and emits it. The test
+`ingest::tests::a_clean_day_check_is_info_and_anything_else_warns` covers four
+cases (G18-rest-15). A clean report, including one with only `minute_absent`,
+is `Info`. A differing day, an absent day and an unreadable file are each
+`Warn`. The line's content is unchanged.
+
+### D-2076 — Gate 18 survivors in `pull`: element-only skips, the space, the session's open — 2026-10-06
+
+**What was observed.** Run 1283 left these `pull` mutants alive:
+
+- `nse_index_csv`'s `!=` became `==`. `note_index_skips`' `==` became `!=`,
+  and its `&&` became `||`. The one emit-site row skipped a whole category,
+  whose name took the `category` field first, so a document that skipped only
+  an element was never driven.
+- `push_pair`'s `< 0x20` became `<=`. No value held a space beside the last
+  control character.
+- `irregular_verdict`'s `minute < w.from` became `<=`. This was equivalent,
+  because the open minute had already returned `None` through `expects`.
+
+**Decided.**
+
+- A second emit-site row drives an element-only skip and requires the line to
+  name `Sectoral` (G18-rest-16).
+- `rolling::tests::the_control_escape_stops_below_the_space` (G18-rest-17).
+- `irregular_verdict` asks about the open first. A minute below the first
+  window is in no window, so no answer changes. The open minute itself now
+  reaches the strict `<`, and the every-minute test
+  `session::tests::the_ingest_verdict_keeps_exactly_what_the_calendar_owes_on_irregular_days`
+  fails on `<=`.
+
+### D-2077 — Gate 18 survivors in `store`'s time index — 2026-10-06
+
+**What was observed.** Run 1283 left these mutants in `store::file` alive:
+
+- `locate`'s `n_valid == 0` became `!=`. No test looked at whether a lookup
+  consulted the index, and both paths give the same answer.
+- `decided`'s `why.is_absent()` guard became `true`. No index existed that
+  was present but could not be opened.
+- `index_on_open`'s `==` became `!=`, and its `&&` became `||`. No empty
+  month's index was too long, or the right length with a damaged header.
+- `reindex` became `Ok(())`. No index was damaged under a live writer.
+
+**Decided.** Four tests cover these:
+
+- `file::tests::a_lookup_asks_the_index_only_when_the_month_holds_bars`
+  (G18-rest-19).
+- `tix::an_index_that_cannot_be_opened_is_named_unreadable_not_absent`
+  (G18-rest-24) uses a directory where the `.tix` belongs.
+- `tix::a_writer_open_of_an_empty_month_rewrites_every_index_but_the_fresh_one`
+  (G18-rest-25).
+- `tix::an_index_damaged_under_a_live_writer_is_rebuilt_before_its_append`
+  (G18-rest-26) cuts the index back to its header under an open writer.
+
+### D-2078 — Gate 18 survivors in `store::file`: overlap tail, header range, unlink, links — 2026-10-06
+
+**What was observed.** Run 1283 left these `store::file` mutants alive:
+
+- Four mutants on `diagnose_overlap`'s trailing
+  `index < n_valid && offered < batch.len()`.
+- `admit_header`'s `first_ts_micros < from` became `<=`.
+- `remove_index`'s `NotFound` guard became `true`, and its `==` became
+  `!=`.
+- `refuse_link` became `Ok(())`, and its `is_symlink()` guard became
+  `false`.
+- `write_symlinked` became `Ok(Default::default())`.
+
+**Decided.** Five tests in `file::tests` cover these (G18-rest-20 to 23):
+
+- An overlap that skips held bar 1 is named `Skipped` at 1. Batches that run
+  out of held bars or of batch exactly at the edge are `None`.
+- A header beginning on its month's first instant is admitted.
+- An absent index is removed, and a directory is refused.
+- A link is refused by name, and the refusal's sentence names it.
+
+### D-2079 — `open_read_no_follow` is one function, its flag chosen per target — 2026-10-06
+
+**What was observed.** Run 1283: the refusing twin of `open_read_no_follow`,
+compiled only on targets this repository never builds, was mutated to
+`Ok(Default::default())`, and the mutant went MISSED. Code that is not
+compiled cannot fail a test, so no test could kill it.
+
+**Decided.** There is one function now. A `cfg`'d `let flags` either names
+`O_NOFOLLOW_NONBLOCK` or returns the `Unsupported` refusal. This is the shape
+`file::open_read` already has. The only remaining whole-body mutant would need
+`File: Default`, so it does not compile (G18-rest-18).
+
+**Rejected.** `mutants::skip`. D-0192 forbids it.
+
+### D-2080 — A telemetry line of exactly `MAX_LINE_BYTES` is a line — 2026-10-06
+
+**What was observed.** Run 1283: in `walk_back`, `carry.len() > MAX_LINE_BYTES`
+became `>=` and `==`, and both survived. No test held a decodable line of
+exactly the cap.
+
+**Decided.** `tail::tests::a_line_of_exactly_the_cap_is_decoded_not_dropped`
+covers it (G18-rest-09). A sink line is padded with the leading spaces the
+decoder skips, to 65,536 bytes. The whole file is that line. The record must
+come back with nothing counted as malformed.
+
+### D-2081 — Two equivalent `vocab` mutants removed by restructuring — 2026-10-06
+
+**What was observed.** Run 1283 left two `vocab` mutants alive, and both were
+equivalent:
+
+- `MAX_NAME_BYTES`' `len > longest` became `>=`. On a tie, both store the
+  same length.
+- `Cursor::place`'s `below_depth >= 2` guard became `true`. With one value on
+  the stack, that value spans the prefix from 0, so the left operand's
+  `checked_sub(1)` already returns `None`.
+
+**Decided.** The longest name is accumulated as
+`longest += len.saturating_sub(longest)`. The join arm has no guard, and its
+depth is `below_depth.checked_sub(1)?`. There is nothing left to mutate
+equivalently. The differential test
+`the_incremental_prefix_check_admits_exactly_what_the_full_rewalk_did` and the
+`MAX_NAME_BYTES` assertions in `table::tests` hold the behaviour.
