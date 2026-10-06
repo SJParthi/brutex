@@ -462,3 +462,27 @@ fn note(feed: pull::vendor::Feed, what: &str, rotated: Option<bool>) {
     };
     let _dropped_when_filtered = telemetry::emit(&event);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Unread, Unreadable};
+    use pull::secret::SecretError;
+
+    /// **ONLY AN UNREACHED PARAMETER STORE IS TRANSPORT.** `Unreachable` is the
+    /// one answer a retry can fix; the other three say the role or the path is
+    /// wrong and send the operator to configuration. Each kind is mapped and
+    /// the reason passes through untouched. G18-api-06.
+    #[test]
+    fn only_an_unreachable_parameter_store_is_a_transport_fault() {
+        for (kind, class) in [
+            (SecretError::Unreachable, Unread::Transport),
+            (SecretError::AccessDenied, Unread::Configuration),
+            (SecretError::NotFound, Unread::Configuration),
+            (SecretError::Empty, Unread::Configuration),
+        ] {
+            let got = Unreadable::of_secret(kind, format!("{kind}"));
+            assert_eq!(got.class, class, "{kind}");
+            assert_eq!(got.why, kind.to_string());
+        }
+    }
+}

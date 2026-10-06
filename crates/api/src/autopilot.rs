@@ -2554,11 +2554,12 @@ where
     // later day of it sat below the place, was never scanned, and the status
     // said the store was complete (CE-23, D-1767). A hint already past it — a
     // place stored before this clamp, or advanced by `settle` — is pulled back.
-    let mut month = if ordinal(hint) > ordinal(last) {
-        last
-    } else {
-        hint
-    };
+    //
+    // `min_by_key`, not `if ordinal(hint) > ordinal(last) { last } else { hint }`:
+    // on an equal ordinal the two branches name the same month, so `>` and `>=`
+    // agreed on every input and that mutant could never be caught. On a tie
+    // `min_by_key` keeps the first argument, the same month. G18-api-02.
+    let mut month = std::cmp::min_by_key(hint, last, |m| ordinal(*m));
     while ordinal(month) <= ordinal(last) {
         if let Some(span) = month_span(month, floor, yesterday)
             && let Some(unit) = next_window(&held, series, month, span)
@@ -2570,14 +2571,7 @@ where
         };
         month = next;
     }
-    (
-        if ordinal(month) > ordinal(last) {
-            last
-        } else {
-            month
-        },
-        None,
-    )
+    (std::cmp::min_by_key(month, last, |m| ordinal(*m)), None)
 }
 
 /// How many months lie between a feed's floor and yesterday, inclusive.

@@ -1197,7 +1197,7 @@ pub async fn note_request(
     };
     // THE FAILED-REQUEST LINES ARE RATIONED ON BOTH PATHS. See
     // [`FAILED_LINES_PER_WINDOW`] and [`LOCAL_FAILED_LINES_PER_WINDOW`].
-    if level != telemetry::Level::Debug {
+    if rationed(level) {
         let now = u64::try_from(telemetry::now_millis()).unwrap_or(0);
         let admit = FAILED_LINES
             .lock()
@@ -1234,6 +1234,16 @@ pub async fn note_request(
             .with("micros", telemetry::Value::Uint(micros)),
     );
     response
+}
+
+/// Whether an `api.request` line at `level` is held to the failed-line ration.
+///
+/// The two levels a failed answer is written at are; the `Debug` line of an
+/// ordinary answer is not, so a flood of successes never spends the budget a
+/// failure needs. A function rather than an inline `!=` so the decision is
+/// pinned by a test without a flood of served requests. G18-api-09.
+fn rationed(level: telemetry::Level) -> bool {
+    level != telemetry::Level::Debug
 }
 
 /// How many `api.request` lines at `Warn` or `Error` one window may write.
@@ -1387,10 +1397,21 @@ impl Ration {
 
 #[cfg(test)]
 mod tests {
+
     // The same exceptions every test module in this workspace takes.
     #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
     use super::*;
+
+    /// Exactly the two levels `note_request` writes a failed answer at are
+    /// rationed, and the level it writes an ordinary answer at is not.
+    /// G18-api-09.
+    #[test]
+    fn only_a_failed_answers_line_is_rationed() {
+        assert!(super::rationed(telemetry::Level::Error));
+        assert!(super::rationed(telemetry::Level::Warn));
+        assert!(!super::rationed(telemetry::Level::Debug));
+    }
 
     /// audit-20261003 hunt-api-3, D-1583: A FLOOD OF FAILED REQUESTS CANNOT
     /// WIPE THE LOG. 100,000 failed requests inside one window write at most
@@ -2147,6 +2168,11 @@ mod tests {
         let page = health_banner(Some(&erred));
         assert!(page.contains("reported a failure"), "{page}");
         assert!(page.contains("floor resumed ahead of the clock"), "{page}");
+        // A loud banner with NO held clock says nothing about one: the clock
+        // sentence is gated on `clock_held > 0`, not on the banner being loud.
+        // G18-api-08.
+        assert!(!page.contains("clock BEHIND"), "{page}");
+        assert!(!page.contains("0 event(s) read a clock"), "{page}");
 
         let quiet = health(0, 0, None);
         assert!(health_banner(Some(&quiet)).contains("Sink healthy"));

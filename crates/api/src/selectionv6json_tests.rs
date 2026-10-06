@@ -103,6 +103,9 @@ fn the_page_selectors_are_bounded_and_strict() {
             limit: 3
         }
     );
+    // The page's own size is a legal limit; one past it is not. G18-api-13.
+    assert_eq!(asked("limit=8").unwrap().limit, PAGE_BLOCKS);
+    assert_eq!(asked("limit=1").unwrap().limit, 1);
     for query in [
         "limit=0",
         "limit=9",
@@ -276,4 +279,25 @@ fn a_record_projects_exactly_and_the_family_selector_narrows_winners() {
         banknifty["winner_count"], 12,
         "the record's own count is kept"
     );
+}
+
+/// **THE BYTE CEILING ADMITS EXACTLY `MAX_RESPONSE_BYTES`.** A body of that
+/// length is served whole; one byte more is a 503 refusal carrying no part of
+/// it. G18-api-13.
+#[test]
+fn a_reply_at_the_byte_ceiling_is_served_and_one_byte_over_is_refused() {
+    let reply = |len: usize| -> Response {
+        (
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            "x".repeat(len),
+        )
+    };
+    let at = within_ceiling(reply(crate::detail::MAX_RESPONSE_BYTES));
+    assert_eq!(at.0, StatusCode::OK);
+    assert_eq!(at.2.len(), crate::detail::MAX_RESPONSE_BYTES);
+    let over = within_ceiling(reply(crate::detail::MAX_RESPONSE_BYTES + 1));
+    assert_eq!(over.0, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(over.2.contains("exceeds its byte ceiling"), "{}", over.2);
+    assert!(!over.2.contains("xxxx"));
 }

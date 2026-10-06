@@ -3026,6 +3026,13 @@ mod tests {
     /// A synthetic census change, not an assertion that market bars exist.
     /// This exercises the real conductor's growth branch without retry sleeps.
     fn grow_synthetic_census(site: &Site) {
+        grow_synthetic_census_to(site, 1);
+    }
+
+    /// [`grow_synthetic_census`] to `rows`, with the manifest's modified time
+    /// set to `rows` seconds past the epoch, so each growth is a distinct
+    /// census stamp whatever the file system's timestamp granularity.
+    fn grow_synthetic_census_to(site: &Site, rows: u64) {
         use brutex_core::instrument::{Exchange, Segment};
         use brutex_core::symbol::Symbol;
         use brutex_core::vendor::Vendor;
@@ -3043,16 +3050,58 @@ mod tests {
                     timeframe: Timeframe::MINUTE_1,
                     month: YearMonth::new(2025, 7).expect("month"),
                 },
-                rows: 1,
+                rows,
                 first_ts_micros: 1,
                 last_ts_micros: 1,
             })
             .expect("record counter");
-        std::fs::write(
-            manifest_path(&site.store_root, Vendor::Zerodha),
-            census.image(),
+        let path = manifest_path(&site.store_root, Vendor::Zerodha);
+        std::fs::write(&path, census.image()).expect("write fixture census");
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .and_then(|file| {
+                file.set_modified(std::time::UNIX_EPOCH + core::time::Duration::from_secs(rows))
+            })
+            .expect("stamp fixture census");
+    }
+
+    /// **THE PASS CEILING IS EXACTLY [`MAX_PASSES`], NEVER ONE MORE.** Every
+    /// pass grows the census, so the loop never idles out and never sleeps; only
+    /// the ceiling ends it. The ceiling is counted by the passes the progress
+    /// reports and by the requests actually made, one per pass. G18-api-10.
+    #[tokio::test]
+    async fn a_run_that_grows_every_pass_stops_at_exactly_the_pass_ceiling() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let counted = std::sync::Arc::clone(&calls);
+        let held = site("pass-ceiling");
+        claim(&held);
+        tokio::time::timeout(
+            core::time::Duration::from_secs(90),
+            conduct_with(
+                Loaded::clone(&held),
+                current(&held),
+                vec![leg("zerodha", "1day")],
+                move |site, _leg| {
+                    let n = counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    grow_synthetic_census_to(&site, n);
+                    std::future::ready(receipt(200, "STORED"))
+                },
+            ),
         )
-        .expect("write fixture census");
+        .await
+        .expect("a growing run never sleeps, so it reaches the ceiling quickly");
+        let progress = observed(&held);
+        assert_eq!(progress.passes, MAX_PASSES);
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            u64::from(MAX_PASSES)
+        );
+        assert_eq!(progress.rows_now, Some(u64::from(MAX_PASSES)));
+        assert!(
+            progress.finished.expect("a summary").contains("ceiling"),
+            "the ceiling, not idleness, ended it"
+        );
     }
 
     #[tokio::test]

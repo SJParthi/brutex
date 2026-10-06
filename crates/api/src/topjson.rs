@@ -378,6 +378,17 @@ mod tests {
             parse("feed=Zerodha&underlying=NIFTY"),
             Ok(Some(("zerodha".to_owned(), "NIFTY".to_owned())))
         );
+        // NAMED BUT EMPTY IS NOT ABSENT. `feed=&underlying=` gave both keys
+        // and no value: a filter asked for and left blank is refused, never
+        // read as the unfiltered page. G18-api-24.
+        for blank in ["feed=&underlying=", "feed=", "underlying="] {
+            let why = parse(blank);
+            assert!(
+                why.as_ref()
+                    .is_err_and(|why| why.contains("filter together")),
+                "{blank}: {why:?}"
+            );
+        }
         let typo = parse("feed=zerodah&underlying=NIFTY");
         assert!(
             typo.as_ref().is_err_and(|why| why.contains("zerodah")),

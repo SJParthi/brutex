@@ -64847,3 +64847,181 @@ that test in milliseconds instead of hanging it.
 
 **Rejected.** Renaming a test so it sorts first. That depends on
 nextest's order rather than on what the test checks.
+### D-2040 — Four Gate 18 survivors in `api` were equivalent mutants, and the code is reshaped so they cannot exist — 2026-10-06
+
+**What was observed.** CI run 1283 (job set 37251141390, head 969493e1) left
+fifty `api` survivors, all MISSED, none TIMEOUT. Four groups agreed with the
+original on every input, so no test could catch them:
+
+- `audit::Drops::peak`, `reason > top` → `>=`. Setting the top to an equal
+  reason leaves it unchanged.
+- `autopilot::frontier`, both `ordinal(a) > ordinal(last)` → `>=`. On an
+  equal ordinal both branches name the same month.
+- `ingest::parse_day_field`'s `pad`, `text.len() > width` → `>=`. A digit
+  string as wide as the field is returned unchanged either way.
+- `server::wait_then_end`, `now < deadline` → `<=`, which differ only at one
+  nanosecond nobody can observe.
+
+**Decided.** `peak` is a fold of `u64::max` ending in `.max(1)`. It is no
+longer `const`, and no caller used it in a const context. `frontier` clamps
+with `std::cmp::min_by_key(.., ordinal)`, which keeps the first argument on
+a tie. `pad` zero-fills a digit string on the left as text with
+`format!("{text:0>width$}")`, which only widens, so a piece as wide as the
+field or wider still meets `parse_day`'s width refusal. The shutdown wait
+moved into `wait_out(deadline, running)`. It sleeps until
+`deadline.checked_duration_since(now)` is `None`, never past the deadline,
+and `wait_then_end` tests "anything abandoned" with `NonZeroUsize::new`.
+None of these has an operator left for a mutant to flip. `wait_out` takes the
+count as a parameter, so its test does not depend on the process-wide engine
+count.
+
+**Rejected.** Excluding or skipping the mutants. D-0192 forbids it.
+
+### D-2041 — The CSV-folder walk takes the environment as an argument — 2026-10-06
+
+**What was observed.** `render::folder_suggestions`,
+`archive_suggestions` and `discover_folders` read `HOME` and
+`BRUTEX_ARCHIVE_SUGGESTIONS` straight from the process. `set_var` is
+`unsafe` under edition 2024 and the crate forbids `unsafe`, so no test could
+run the walk under a known home. Eight mutants survived, including all
+three "replace the result" mutants of each function and `&&` → `||` in
+`collect_csv_dirs`.
+
+**Decided.** `folder_suggestions(var)` takes an environment lookup.
+Production passes `|name| std::env::var_os(name)` once, from `Site::new`.
+`archive_suggestions` takes the variable's value and `discover_folders`
+takes `HOME`'s. A test builds a scratch home with one CSV folder under each
+root and one folder of plain text. It pins the exact sorted list and the
+`on`, unset, `off` and unreadable switch outcomes.
+
+**Rejected.** Mutating the process environment in a test. That needs
+`unsafe`, and it would race every other test that reads the variables.
+
+### D-2042 — The serve banner's log, first-event and opening lines are returned rather than printed — 2026-10-06
+
+**What was observed.** `announce_log` printed with `say!`, and
+`run_in_over` printed `FIRST EVENT NOT WRITTEN` and the `opening:` line
+inline. A test cannot capture stdout in-process, so "replace `announce_log`
+with ()", deleting the `!` on `first.is_written()`, and `addr.port() == 0` →
+`!=` all survived. The last one would open a browser for every harness that
+binds `:0`.
+
+**Decided.** `log_announcement` and `first_event_note` return their text.
+`opening_line(addr, open)` takes the opener as a parameter and returns its
+line. Production passes `open_in_browser`. The caller prints each result
+once, so the output bytes are unchanged. One test pins every line exactly,
+and checks that port zero never calls the opener.
+
+### D-2043 — The Boolean evidence reader's currency check is dispatched at its one call site — 2026-10-06
+
+**What was observed.** `booleanevidencejson::Reader::require_current`
+survived "replace with `Ok(())`". Catching it needs a saved Boolean evidence
+tree that changes under a held reader. Only `cli`'s private fixtures can build
+one, and `api` cannot reach them.
+
+**Decided.** The method is removed, and its three-arm dispatch is written
+inside the `must_admit` closure, which is its only caller. The behaviour is
+unchanged. **Honest limit:** that dispatch is still not driven by a stale
+real tree in `api`'s tests. The per-model readers' `require_current` remain
+proved in `cli`
+(`cold_statistics_pages_conserve_all_candidates_splits_sources_and_exact_read_budget`
+and its siblings).
+
+### D-2044 — Three inline decisions become named functions with exact-boundary tests — 2026-10-06
+
+**What was observed.** `logs::note_request`'s `level != Debug` survived
+`==` because only a flood of served requests could show the ration
+misapplied. `selection_v6_json`'s `len <= MAX_RESPONSE_BYTES` survived `>`
+because no store renders 8 MiB. `sweeprun::claim_execution`'s
+`now_micros() / 1_000` survived `%` and `*`.
+
+**Decided.** These are now `logs::rationed(level)`,
+`selectionv6json::within_ceiling(reply)` and `sweeprun::now_millis()`, and
+both millisecond call sites use `now_millis`. Tests pin each one: the
+rationed levels are exactly `Warn` and `Error`. A body of exactly
+`MAX_RESPONSE_BYTES` is served, and one byte more is a 503 with no prefix.
+`now_millis` lies between two system-clock readings.
+
+### D-2045 — The remaining `api` survivors of run 1283 are killed by tests alone — 2026-10-06
+
+**What was observed.** The other survivors had live behaviour that no test
+asserted. Each got a test that fails on its mutant, and the code did not
+change:
+
+- `bars::earlier_in_time`, both `n_valid > 0` → `>=` (an empty month file
+  between two months, in both directions). The test helper `write_month`
+  now creates an empty file for `n = 0` rather than appending an empty
+  batch the store refuses.
+- `bars::page_of`, `offset > 0` → `>=` and `limit < len` → `<=`. The
+  comparison count equals that of ordering the rows alone.
+- `credential_law::Unreadable::of_secret`'s `Unreachable` arm.
+- `logs::health_banner`'s clock sentence under `clock_held > 0`.
+- `pullrun::conduct_with`'s `passes < MAX_PASSES`. A run that grows the
+  census every pass never sleeps and stops at exactly 400 passes. The test
+  fixture stamps each manifest's mtime so each growth is a new census stamp.
+- `recovery::reconcile_pending`'s window containment, with a pending day
+  each side of the plan window and one at each end of it.
+- `selectionv6json::asked`'s `limit > PAGE_BLOCKS` → `>=` (`limit=8` is
+  legal).
+- `server::instruments_json`'s feed census lookup and held-rows-first order.
+- `BROWSER_EXACT` (2^53 − 1).
+- `BrokerRun::lift_credential_death`.
+- `land_broker_member`.
+- `Lanes::reached_wire`.
+- `store_filter`'s symbol.
+- `sweeprun::unterminated_marker`'s three-part guard.
+- `topjson::parse`'s `seen.is_empty()` guard (`feed=&underlying=` is
+  refused).
+
+### D-2046 — Four later `api` survivors of run 1283 — 2026-10-06
+
+**What was observed.** Shards 183 and 184 finished after the first
+collection and added four survivors:
+
+- `booleanqualification_projection::project`, `asked.offset + n` → `*` and
+  `-`. No api test renders a real qualification page.
+- `server::credential_halts`, `touched_wire || reached_wire()` → `&&`.
+- `bars::seek_page`, the `!` deleted from `!bad.is_empty()`. That made the
+  first CLEAN file the one the `records unreadable` line names.
+
+**Decided.** The page index is `row_index(offset, n)`, pinned by a table of
+exact cases that includes the largest sum that fits. That is the
+`same_coordinate` precedent (D-0731). `touched_wire` gets one authority,
+`BrokerRun::note_wire(reached)`, which uses `|=` and stays true once set. All
+three call sites use it, and its full four-row truth table is a test. The
+seek path is unchanged. A test damages February after a clean January and
+requires the one line to name February's file.
+
+### D-2047 — Three `api` mutants that run 1283 timed out now fail fast — 2026-10-06
+
+**What was observed.** Three mutants timed out in CI instead of failing.
+cargo-mutants does not annotate a timeout, so they were missing from the
+survivor list. They are listed in `timeouts-api.md`:
+
+- `calendar_of::Landing::drop` replaced with `()`.
+- `Slots::try_take` with `<` → `>`.
+- `LimitedListener::accept` with its `!` deleted.
+
+Under CI's `--test-threads=1 --max-fail=1` the bounded tests that catch the
+last two were never reached. Reproduced here on mutated binaries, the first
+test to hang under either server mutant was
+`ingest::route_tests::the_three_routes_answer_and_none_of_them_shadows_the_front_end`.
+Its `exchange` helper read the socket with no timeout, and a server that
+admits nothing never answers. Under the `Landing` mutant the first hang was
+`calendar_of::tests::a_derivation_is_kept_only_when_every_file_it_could_not_open_is_unheld`:
+a flight that is never removed makes the next request wait on it as a
+follower, forever.
+
+**Decided.** `exchange` sets 30 s read and write timeouts, so an unanswered
+request fails that test instead of hanging the binary. A new test,
+`a_calendar_landing_releases_its_flight_and_wakes_its_followers_when_dropped`,
+checks `Landing`'s drop directly with no wait: the flight is `Abandoned`, its
+key is gone, and a follower is woken within a 10 s bound. It sorts ahead of
+every single-flight test in its module, so it fails first under the
+single-threaded order.
+
+**Rejected.** Bounding the production follower wait. A follower that gave up
+on a live leader would derive a second time and lose the single-flight
+guarantee D-1443 exists for. **Honest limit:** the `Landing` kill depends on
+test order. A rename that sorted a single-flight test ahead of it would
+restore the timeout, so the ordering is pinned in the test's own doc.

@@ -2359,6 +2359,66 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// **A PENDING DAY OUTSIDE EVERY PLAN WINDOW IS LEFT ALONE.** The scope
+    /// key is a month, so a plan for 10..12 August shares it with a pending
+    /// attempt for the 7th or the 13th. Only a day inside one of the plan's
+    /// windows is reassessed; one either side of it is skipped and appends
+    /// nothing, while a day inside does. G18-api-11.
+    #[tokio::test]
+    async fn a_pending_day_outside_the_plan_window_is_not_reassessed() {
+        let root = crate::scratch::path("recovery-outside-window");
+        std::fs::create_dir_all(&root).unwrap();
+        let site = Loaded::new(Site::load(&root.join("missing-masters"), &root));
+        std::fs::create_dir_all(super::root(&site)).unwrap();
+        let mut plan = Journal::open(&root.join("plan.bin")).unwrap();
+        let scan = record(canonical(
+            "NIFTY",
+            "1min",
+            Window::new(date(2026, 8, 10), date(2026, 8, 12)).unwrap(),
+            "scan",
+        ));
+        let keys = vec![scan.key];
+        plan.append(scan).unwrap();
+        let day = |d: u8| {
+            record(canonical(
+                "NIFTY",
+                "1min",
+                Window::new(date(2026, 8, d), date(2026, 8, d)).unwrap(),
+                "gap",
+            ))
+        };
+        let path = super::root(&site).join("attempts.bin");
+        let mut attempts = Journal::open(&path).unwrap();
+        // The day before the window opens and the day after it closes.
+        attempts.append(day(7)).unwrap();
+        attempts.append(day(13)).unwrap();
+        let before = std::fs::metadata(&path).unwrap().len();
+        reconcile_pending(&site, &mut plan, &mut attempts, &keys, &None, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            before,
+            "a day outside the plan's window was reassessed"
+        );
+        assert_eq!(attempts.latest[&day(7).key], day(7));
+        assert_eq!(attempts.latest[&day(13).key], day(13));
+        // The control: a day inside the window, its first and its last, IS.
+        for inside in [10, 12] {
+            attempts.append(day(inside)).unwrap();
+            let before = std::fs::metadata(&path).unwrap().len();
+            reconcile_pending(&site, &mut plan, &mut attempts, &keys, &None, false)
+                .await
+                .unwrap();
+            assert!(
+                std::fs::metadata(&path).unwrap().len() > before,
+                "day {inside} lies inside the window and is reassessed"
+            );
+        }
+        drop((plan, attempts));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     /// The scope read from a stored body is the scope the checked parse gives,
     /// so filtering on it first changes which rows are skipped and nothing else.
     #[test]

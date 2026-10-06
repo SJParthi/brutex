@@ -580,22 +580,19 @@ impl Drops {
     }
 
     /// The largest single reason, or one, so a share is never divided by zero.
+    ///
+    /// A fold of `max`, not a ladder of `if reason > top { top = reason }`:
+    /// that ladder's `>` and `>=` agree on every input — an equal reason set
+    /// as the top leaves the top unchanged — so its mutant could never be
+    /// caught. `max` carries no comparison operator to mutate. G18-api-01.
     #[must_use]
-    pub const fn peak(self) -> u64 {
-        let mut top = self.before_open;
-        if self.after_close > top {
-            top = self.after_close;
-        }
-        if self.before_window > top {
-            top = self.before_window;
-        }
-        if self.after_window > top {
-            top = self.after_window;
-        }
-        if self.of(DropReason::OnClosedDay) > top {
-            top = self.of(DropReason::OnClosedDay);
-        }
-        if top == 0 { 1 } else { top }
+    pub fn peak(self) -> u64 {
+        self.before_open
+            .max(self.after_close)
+            .max(self.before_window)
+            .max(self.after_window)
+            .max(self.of(DropReason::OnClosedDay))
+            .max(1)
     }
 }
 
