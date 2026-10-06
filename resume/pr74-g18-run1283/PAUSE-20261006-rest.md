@@ -37,3 +37,10 @@ Next after RESUME:
 2. Kill each MISSED/TIMEOUT with a test or restructure (D-3650..3659, then D-3670..3679; rows G18-rest-37 onward). Prove each in place in a wt-g18 worktree, never in /tmp/claude-0 (its root-only permissions break the uid-65534 tests).
 3. Add an "api untested cases" section to RESULT-rest.md; validate, then push.
 Restart a half: `/tmp/claude-0/mut/api-run.sh /home/user/wt-g18 /tmp/claude-0/api-re-a.txt api-a` (and the b variant with wt-g18b).
+
+## api progress at 11:06Z (2 h wait loop stopped; runs continue detached)
+```
+api-a: running | caught 7 missed 0 timeout 0 unviable 1
+api-b: running | caught 7 missed 0 timeout 0 unviable 0
+processes: 4
+```
