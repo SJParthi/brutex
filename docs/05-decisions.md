@@ -63195,6 +63195,7 @@ leave the two descent doors with different bounds.
 - ind1-2. The trend EMA stepped with `div_euclid`, which floors: an up step fell short and a down step overshot, so after a fall the EMA reached a flat price exactly and `close_below_ema` went silent for good, while after the mirror rise it stalled below. The gap-midpoint side compared `close` with a ROUNDED midpoint, so a close half a paisa below an odd-sum midpoint read as "on" it.
 - EMA steps now truncate toward zero, so a rise and a fall are mirror images, and the gap-mid sides compare `2·close` against `prev_close + today_open` in `i128`. The gap digest test is re-taken; the family count (4,092) is unchanged.
 - Proved by `indicators::trend::tests::a_flat_price_after_a_rise_and_after_a_fall_report_mirror_sides` and `indicators::session::tests::a_close_on_a_rounded_gap_midpoint_is_judged_against_the_exact_one` (ZQ-09).
+- Two downstream pins move with these bits and are re-taken with that reason: `runner::signal_candle_stop::tests::a_tabled_day_window_seals_exactly_what_the_full_row_walk_did` and the index-stop catalog `PINS` in `crates/cli/src/index_stop_tests.rs`. For each, reverting `crates/indicators` alone restores the old value. (The index-stop re-take was missed when this batch was first pushed; the cli suite found it.)
 
 ### D-2614 — A host halt is never checkpointed or replayed — 2026-10-06
 
