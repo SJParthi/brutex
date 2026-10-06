@@ -35,3 +35,14 @@ Evidence: `cargo fmt --check` clean; `cargo clippy --workspace --all-targets -- 
 1. Read the mutation results (`/tmp/claude-0/mutout-{pull,cli,api}/mutants.out/missed.txt`); kill any MISSED with a real test.
 2. Fix the round-3 web survivors that the refuter upheld, through `web/src/lib/refusal.js` `refusalFrom`/`refusalOf` (one helper; extend `refusalOf` for nested `running.why` if upheld), each with a failing node test first; D-3211.., OBSV-12...
 3. Round 4 with fresh read-only agents; repeat until a zero round; write RESULT-observability.md.
+
+## Landed after park (12:4x UTC)
+- Gate 18 partial: pull 5 caught, 2 unviable, 0 missed. cli and api still running.
+- Round-3 api/pull audit candidates (NOT yet refuted by a separate agent, NOT fixed; next session refutes first):
+  1. /pull/run coordinator (pullrun.rs) emits no event for leg failures, halted feeds, dead chains, retry passes or the final verdict; legs refused before broker_run (seat 409, unknown feed 400, clock 500) bypass `note_request` too, since pullrun calls `server::pull_spot`/`pull_fno` directly.
+  2. `broker_run` refusals before `note_run_started` (unreachable broker server.rs~7937, mapping block ~7956, ladder out-of-order ~7999) emit nothing; the autopilot tick journals them but logs nothing.
+  3. Autopilot `fly` exits (broker not Live ~2657, clock allowance spent ~2681, no day dir ~2735) and Halt/Stall verdicts are status-only; the spawned task's JoinHandle (server.rs~19973) is never checked, so a panic leaves status frozen "Running".
+  4. Expired F&O walk: `FnoLanded::record_refusal` (server.rs~11789) does not emit (its spot peer does); `walk_months` partial-month failures unlogged; `pull::http` `Discovery::get`/`post_json` skip `note_answer`.
+  5. Transport-level retries (`with_retry`, `laddered`, http `TransportFailed`) unlogged.
+  6. `recovery::activate_durable` BLOCKED reason not logged.
+  7. `sweeprun` `descend_with`/`command_with_configuration` stamp refusal and `environment_budget_refusal` not emitted (run_with does emit).
