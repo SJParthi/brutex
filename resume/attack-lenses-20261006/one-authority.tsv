@@ -4,3 +4,4 @@ L4-R1a	pushed	0edc1a0	D-3500..D-3502 validated
 L4-R1b	fixing	d02e10a	D-3503..D-3507 WIP, paused (usage guard)
 L4-R1b	branch	7cf031b	D-3503..D-3507 validated (tests) - mutants pending
 L4-R2	branch	7cf031b	D-3508..D-3514, paused 08:07 (usage guard)
+L4-R3	fixing	50051a5	round-3 self-review fixes, paused 08:28 (usage guard), not validated
