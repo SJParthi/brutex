@@ -36,3 +36,7 @@ Base: origin/final/all-fixes 969493e1 (unchanged at pause time; final merge not 
 4. Merge newest origin/final/all-fixes (merge commit), cargo fmt --check, clippy --workspace --all-targets -D warnings,
    runner tests as non-root, static gates; push pr74/g18-runner.
 5. Write RESULT-runner.md here (table item | fixed? | commit | evidence).
+
+## Run #2 finished during the pause (exit 0)
+
+113 targeted mutants on tree fe5c87a: caught 108, missed 0, timeout 1, unviable 4 (unviable = `Some(Default::default())`/`vec![Default::default()]` on types with no Default). Missed: . Timeout: crates/runner/src/significance.rs:509:13: replace < with > in ln_gamma;.
