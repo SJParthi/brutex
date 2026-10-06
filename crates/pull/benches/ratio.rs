@@ -651,7 +651,10 @@ fn a_month_filled_session_by_session_rederives_linearly() -> bool {
             ));
             let took = start.elapsed().as_nanos();
             if !done.failures.is_empty() {
-                println!("BREACH rederive: session {day} refused: {:?}", done.failures);
+                println!(
+                    "BREACH rederive: session {day} refused: {:?}",
+                    done.failures
+                );
                 return false;
             }
             if let Some(samples) = per_session.get_mut(at) {
@@ -661,7 +664,9 @@ fn a_month_filled_session_by_session_rederives_linearly() -> bool {
         let _cleanup = std::fs::remove_dir_all(&root);
     }
     let mut report = |at: usize| {
-        let samples = per_session.get_mut(at).map_or(&mut [][..], Vec::as_mut_slice);
+        let samples = per_session
+            .get_mut(at)
+            .map_or(&mut [][..], Vec::as_mut_slice);
         let (p50, p99, max) = (
             quantile(samples, 500),
             quantile(samples, 990),

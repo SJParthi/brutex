@@ -4755,15 +4755,16 @@ mod tests {
         let populations = [
             prepared_with_statuses(
                 &[AdmissionV3Status::Admitted],
-                &[AdmissionV3Status::Refused],
+                &[AdmissionV3Status::Admitted],
             )
             .0,
             prepared_with_statuses(
-                &[AdmissionV3Status::Refused],
+                &[AdmissionV3Status::Rejected],
                 &[AdmissionV3Status::Admitted],
             )
             .0,
         ];
+        assert_ne!(populations[0].population_id, populations[1].population_id);
         let root = TestRoot::new("append-no-rescan");
         let scans = || SCANS.with(std::cell::Cell::get);
         let mut writer =

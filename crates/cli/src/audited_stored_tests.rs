@@ -4046,6 +4046,7 @@ fn o1cli_count_then_screen(fixture: &Fixture) {
     let mut cache = crate::ScreenCache::default();
     let (bars, _) = crate::descent_bar_count_at(key, (0, 1), &mut cache).expect("count");
     assert!(bars > 0);
-    let page = crate::screen_range_kernel_cached(o1cli_screen(fixture), &mut cache).expect("screen");
+    let page =
+        crate::screen_range_kernel_cached(o1cli_screen(fixture), &mut cache).expect("screen");
     assert!(page.contains("RESULT RECORDED"), "{page}");
 }

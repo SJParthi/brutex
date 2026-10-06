@@ -76,10 +76,10 @@ fn a_single_stop_launch_verifies_every_acknowledged_child() {
     );
     let section =
         limit("## A single-stop search re-verifies its whole acknowledged history on every launch");
-    says(&section, "Argued inherent by D-1846.");
+    says(&section, "Argued inherent by D-1846");
     says(
         &section,
-        "an acknowledged child is a separate durable journal that the parent pins by seal",
+        "acknowledged child is a separate durable journal that the parent pins by seal",
     );
 }
 
@@ -100,7 +100,7 @@ fn a_boolean_search_page_rechecks_its_journals_on_both_sides() {
     assert!(after.contains("self.require_current()?;"));
     let section =
         limit("## A Boolean search detail page rechecks every retained journal record twice");
-    says(&section, "Argued inherent by D-1847.");
+    says(&section, "Argued inherent by D-1847");
     says(
         &section,
         "the closing recheck is what proves the page was read from records that held throughout",
