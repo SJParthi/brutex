@@ -48,14 +48,29 @@
 //! The store itself refuses a duplicate: `BarFile::append` answers
 //! `AlreadyPresent` for bars it holds and appends only a following suffix.
 //! On top of that a journal, `<store>/imports/gdfl.journal`, records `begin`
-//! before a day's first write and `done` after a clean day, keyed by kind,
-//! day and instrument filter. A re-run skips every `done` day without reading
-//! the source (O(1) per day), writes nothing and leaves the store byte for
-//! byte as it was. A `begin` with no `done` is a crashed or incomplete run: it
-//! is named (`resumed`) and the day is imported again, the store keeping what
-//! it holds and appending the rest, the census re-counted. A day older than
-//! what a month file already holds is refused by the store by name, never
-//! inserted.
+//! before a day's first write, `done` after a clean day and `incomplete`
+//! after a begun one with a failure, keyed by kind, day and instrument
+//! filter. A re-run skips every day done under this bar definition without
+//! reading the source (O(1) per day), writes nothing and leaves the store
+//! byte for byte as it was. A `begin` with no closing line is a crashed run,
+//! and a day closed `incomplete` is an unfinished one: each is imported again
+//! and named in [`Report::resumed`], the store keeping what it holds and
+//! appending the rest, the census re-counted (D-2821).
+//!
+//! Every `done` and `incomplete` line carries `definition=<n>`, the
+//! [`BAR_DEFINITION`] that built the day (D-2822). A `done` line with no
+//! `definition=` whose stats are exactly the six fields D-2811 wrote
+//! (`files= seconds= failures= late= late_unresolved= max_back_s=`) was
+//! written by the code of D-2811 and D-2812, which landed together, and is
+//! read as definition 2: a journal an earlier build of this branch wrote is
+//! this store's own and its finished days stay finished. Any other `done`
+//! line naming another definition, or none, is not done: the day is imported
+//! again and named in `resumed` and [`Report::restated`]. The store is
+//! append-only, so it answers `AlreadyPresent` for the same bars and refuses
+//! the file by name for different ones; a day built under an old definition
+//! is never rewritten in place and never passes as a clean result. A day
+//! older than what a month file already holds is refused by the store by
+//! name, never inserted.
 //!
 //! # Refusals
 //!
@@ -205,6 +220,12 @@ pub enum ImportRefusal {
         /// The name as given.
         name: String,
     },
+    /// A row stamped at or past second 86,400 of its day (D-2825): filed,
+    /// it would land on a later day, inside that day's session.
+    StampPastTheDay {
+        /// The stamp, in seconds from the day's midnight.
+        sod: u32,
+    },
 }
 
 impl core::fmt::Display for ImportRefusal {
@@ -225,6 +246,11 @@ impl core::fmt::Display for ImportRefusal {
                 f,
                 "{name:?} is not a symbol as the store files it (A-Z, 0-9, -, _, &, at most 24); \
                  refused before the journal keys a day by it"
+            ),
+            Self::StampPastTheDay { sod } => write!(
+                f,
+                "a row stamped at second {sod} is not a second of the day (0 to 86,399); \
+                 refused, never filed on a later day"
             ),
         }
     }
@@ -330,9 +356,19 @@ fn place(kind: ImportKind, ticks: &[Tick], placement: &mut Placement) -> Vec<(u3
 ///
 /// # Errors
 ///
-/// [`ImportRefusal::VolumeOverflow`] for a quantity or a second's sum past
-/// `i64::MAX`, and [`ImportRefusal::Fold`] for anything else the fold refuses.
+/// [`ImportRefusal::StampPastTheDay`] for a row stamped at or past second
+/// 86,400, [`ImportRefusal::VolumeOverflow`] for a quantity or a second's sum
+/// past `i64::MAX`, and [`ImportRefusal::Fold`] for anything else the fold
+/// refuses.
 pub fn convert(kind: ImportKind, day: Day, ticks: &[Tick]) -> Result<Converted, ImportRefusal> {
+    // Both readers hold a stamp to the day; this runtime is public and holds
+    // it too, every row's, untraded ones included, since each moves the
+    // placement (D-2825, D-2812).
+    for tick in ticks {
+        if tick.sod >= 86_400 {
+            return Err(ImportRefusal::StampPastTheDay { sod: tick.sod });
+        }
+    }
     let mut placement = Placement::default();
     let placed = place(kind, ticks, &mut placement);
     let mut rows = Vec::with_capacity(placed.len());
@@ -416,8 +452,18 @@ pub struct Report {
     pub days_missing: Vec<Day>,
     /// Days refused before any file was read, named in `failures`.
     pub days_refused: usize,
-    /// Days a crashed or incomplete earlier run had begun, imported again.
+    /// EVERY day the journal names that this run takes up again, in day
+    /// order: one an earlier run began and never closed (a crash), one it
+    /// closed `incomplete`, and one closed `done` under another bar
+    /// definition (also in `restated`). Such a day is here whatever this run
+    /// then finds (imported, or in `days_missing` when the source no longer
+    /// holds it); a day the journal does not name is not here, nor is a day
+    /// the calendar declines before the journal is asked (D-2821).
     pub resumed: Vec<Day>,
+    /// The days of `resumed` whose last `done` line names a bar definition
+    /// other than [`BAR_DEFINITION`], or none in a shape no definition-2 code
+    /// wrote (D-2822).
+    pub restated: Vec<Day>,
     /// Instrument files read.
     pub files: usize,
     /// Entries not wanted.
@@ -500,35 +546,126 @@ pub fn journal_path(store_root: &Path) -> PathBuf {
     store_root.join("imports").join("gdfl.journal")
 }
 
+/// The version of the one-second bar definition (the row rule, the
+/// placement and the fold this module applies), written into every `done`
+/// and `incomplete` line as `definition=<n>` (D-2822). Bump it whenever a
+/// change makes one file build different bars: a day closed `done` under
+/// another number is imported again, and the append-only store judges the
+/// result, answering `AlreadyPresent` for the same bars and refusing the file
+/// by name for different ones, never writing over them.
+///
+/// 1 is D-2802 as first written, whose placement took the running maximum
+/// of traded rows only; 2 is D-2812, which takes it over every row.
+pub const BAR_DEFINITION: u32 = 2;
+
+/// The definition the code of D-2811 and D-2812 built under. Both landed in
+/// one commit, so every journal line that code wrote was written under 2.
+const D2811_DEFINITION: u32 = 2;
+
+/// The stats fields, in order, of every `done` and `incomplete` line the
+/// journal wrote from D-2811 until it recorded `definition=` (D-2822).
+/// Before D-2811 a line carried only the first three, under definition 1.
+const D2811_STATS: [&str; 6] = [
+    "files",
+    "seconds",
+    "failures",
+    "late",
+    "late_unresolved",
+    "max_back_s",
+];
+
+/// The `definition=` field of a journal line's stats: `Ok(None)` when it
+/// has none, `Err(())` when it has two or one that is not a number in the
+/// form [`BAR_DEFINITION`] is written in.
+fn definition_of(stats: &[&str]) -> Result<Option<u32>, ()> {
+    let mut found = None;
+    for field in stats {
+        if let Some(text) = field.strip_prefix("definition=") {
+            let value: u32 = text.parse().map_err(|_| ())?;
+            if found.is_some() || value.to_string() != text {
+                return Err(());
+            }
+            found = Some(value);
+        }
+    }
+    Ok(found)
+}
+
+/// The bar definition a `done` line says built its day: its `definition=`
+/// field, else [`D2811_DEFINITION`] when its stats are exactly
+/// [`D2811_STATS`], each a decimal count, as the code of D-2811 wrote them
+/// before the field existed; else `None`, a day no definition is known for
+/// (D-2822). O(fields).
+fn built_under(stats: &[&str]) -> Result<Option<u32>, ()> {
+    if let Some(stated) = definition_of(stats)? {
+        return Ok(Some(stated));
+    }
+    let d2811 = stats.len() == D2811_STATS.len()
+        && stats.iter().zip(D2811_STATS).all(|(field, name)| {
+            field
+                .strip_prefix(name)
+                .and_then(|rest| rest.strip_prefix('='))
+                .is_some_and(|count| !count.is_empty() && count.bytes().all(|b| b.is_ascii_digit()))
+        });
+    Ok(d2811.then_some(D2811_DEFINITION))
+}
+
 /// What closes a torn journal line, so every later load knows it for one
-/// (D-3173). A line ending in it is skipped; no line the journal writes
+/// (D-2814). A line ending in it is skipped; no line the journal writes
 /// whole can end in it, because a key is a kind, a day and symbol names.
 const TORN: &str = " (torn)";
 
 /// Whether `fragment`, a line cut short by a crash, can be the start of a
 /// line the journal writes: a prefix of one of its three verbs and the space
-/// after it, or text that starts with one (D-3169). Anything else at the end
+/// after it, or text that starts with one (D-2814). Anything else at the end
 /// of the file is not a torn journal line but a foreign one.
+///
+/// The close a load writes can itself be cut by a second crash, leaving `d`
+/// followed by part of [`TORN`] (`d (t`), and the next load closes that
+/// again. So every trailing piece of the mark, whole or cut, is taken off
+/// before the verb rule is asked: each is a byte the journal wrote, and
+/// judging `d (t` foreign refused every later run for ever (D-2817). The
+/// mark's seven bytes are all different, so its last byte names the one
+/// piece a fragment can end in. What is left is never empty: a close follows
+/// only a fragment of at least a verb's first letter, which no piece of the
+/// mark ends in. O(fragment length).
 fn torn_fragment(fragment: &str) -> bool {
-    ["begin ", "done ", "incomplete "]
-        .into_iter()
-        .any(|verb| verb.starts_with(fragment) || fragment.starts_with(verb))
+    let mut rest = fragment;
+    'strip: loop {
+        for cut in (1..=TORN.len()).rev() {
+            if let Some(shorter) = TORN.get(..cut).and_then(|piece| rest.strip_suffix(piece)) {
+                rest = shorter;
+                continue 'strip;
+            }
+        }
+        break;
+    }
+    !rest.is_empty()
+        && ["begin ", "done ", "incomplete "]
+            .into_iter()
+            .any(|verb| verb.starts_with(rest) || rest.starts_with(verb))
 }
 
-/// The journal, read once per run: the keys done, and the keys begun and not
-/// finished.
+/// The journal, read once per run: the keys done under [`BAR_DEFINITION`],
+/// the keys begun and not finished, the keys closed `incomplete`, and the
+/// keys whose last `done` line names another definition (D-2821, D-2822).
 #[derive(Debug, Default)]
 struct Journal {
     path: PathBuf,
     done: HashSet<String>,
     open: HashSet<String>,
+    incomplete: HashSet<String>,
+    restated: HashSet<String>,
 }
 
 impl Journal {
     /// Reads the journal at `path`; a missing one is empty. A torn last line
     /// (no newline: a crash mid-write) is ignored and closed before the next
-    /// write. Any other line that is not `begin <key>` or `done <key> ...`
-    /// refuses the run.
+    /// write. The lines it writes are `begin <key>`, `done <key> <stats>` and
+    /// `incomplete <key> <stats>`, where `<key>` is `<kind> <day> <filter>` and
+    /// `<stats>` space-separated `name=value` fields, `definition=` among
+    /// them since D-2822. Any other line, or a `definition=` that is not one
+    /// number as [`BAR_DEFINITION`] is written, refuses the run.
     fn load(path: PathBuf) -> Result<Self, ImportRefusal> {
         let text = match std::fs::read_to_string(&path) {
             Ok(text) => text,
@@ -552,7 +689,7 @@ impl Journal {
         // tail must be the start of a line the journal writes: a foreign file
         // is refused on every run and never touched. Closing first let a
         // one-line foreign file be refused once and then, its line now
-        // "torn", read as an empty journal by every later run (D-3169).
+        // "torn", read as an empty journal by every later run (D-2814).
         if !tail.is_empty() && !torn_fragment(tail) {
             return Err(foreign(tail));
         }
@@ -568,13 +705,26 @@ impl Journal {
                 ["begin", kind, day, only] => {
                     journal.open.insert(format!("{kind} {day} {only}"));
                 }
-                ["done", kind, day, only, ..] => {
+                ["done", kind, day, only, stats @ ..] => {
+                    let definition = built_under(stats).map_err(|()| foreign(line))?;
                     let key = format!("{kind} {day} {only}");
                     journal.open.remove(&key);
-                    journal.done.insert(key);
+                    journal.incomplete.remove(&key);
+                    // The LAST `done` of a key says which definition built
+                    // what the store holds (D-2822).
+                    if definition == Some(BAR_DEFINITION) {
+                        journal.restated.remove(&key);
+                        journal.done.insert(key);
+                    } else {
+                        journal.done.remove(&key);
+                        journal.restated.insert(key);
+                    }
                 }
-                ["incomplete", kind, day, only, ..] => {
-                    journal.open.remove(&format!("{kind} {day} {only}"));
+                ["incomplete", kind, day, only, stats @ ..] => {
+                    definition_of(stats).map_err(|()| foreign(line))?;
+                    let key = format!("{kind} {day} {only}");
+                    journal.open.remove(&key);
+                    journal.incomplete.insert(key);
                 }
                 _ => return Err(foreign(line)),
             }
@@ -583,14 +733,26 @@ impl Journal {
             // Closed with a mark, never a bare newline: a bare one made the
             // torn fragment a whole line that the NEXT load refused as
             // foreign, so one crash mid-write stopped every later run
-            // (D-3173).
-            journal.append(TORN)?;
+            // (D-2814).
+            journal.write(None)?;
         }
         Ok(journal)
     }
 
     /// Appends `line` and a newline, durably.
     fn append(&self, line: &str) -> Result<(), ImportRefusal> {
+        self.write(Some(line))
+    }
+
+    /// Appends `line` and a newline, durably, after closing a torn last line
+    /// with [`TORN`]. A write that failed part way earlier IN THIS RUN left
+    /// such a line, and the run went on: written straight after it, the next
+    /// line was glued to it, a foreign line every later load refused or a
+    /// line that hid the one glued on (D-2826). So the file's last byte is
+    /// read first, one seek and one byte, and a line that does not end in a
+    /// newline is closed exactly as a load closes one. `None` only closes.
+    fn write(&self, line: Option<&str>) -> Result<(), ImportRefusal> {
+        use std::io::{Read as _, Seek as _};
         let refused = |why: std::io::Error| ImportRefusal::Journal {
             why: format!("{}: {why}", self.path.display()),
         };
@@ -598,11 +760,33 @@ impl Journal {
         std::fs::create_dir_all(self.path.with_file_name("")).map_err(refused)?;
         let mut file = std::fs::OpenOptions::new()
             .create(true)
+            .read(true)
             .append(true)
             .open(&self.path)
             .map_err(refused)?;
-        file.write_all(format!("{line}\n").as_bytes())
-            .map_err(refused)?;
+        let mut text = String::new();
+        if file.metadata().map_err(refused)?.len() > 0 {
+            let mut last = [0_u8; 1];
+            file.seek(std::io::SeekFrom::End(-1)).map_err(refused)?;
+            file.read_exact(&mut last).map_err(refused)?;
+            if last != *b"\n" {
+                let shown = self.path.display().to_string();
+                let _dropped_when_filtered = telemetry::emit(
+                    &telemetry::Event::warn(TARGET, "closing a torn journal line")
+                        .with("journal", shown.as_str()),
+                );
+                text.push_str(TORN);
+                text.push('\n');
+            }
+        }
+        if let Some(line) = line {
+            text.push_str(line);
+            text.push('\n');
+        }
+        if text.is_empty() {
+            return Ok(());
+        }
+        file.write_all(text.as_bytes()).map_err(refused)?;
         file.sync_all().map_err(refused)
     }
 }
@@ -739,7 +923,8 @@ fn close_day(
         return;
     }
     let stats = format!(
-        "files={} seconds={} failures={} late={} late_unresolved={} max_back_s={max_back_s}",
+        "definition={BAR_DEFINITION} files={} seconds={} failures={} late={} late_unresolved={} \
+         max_back_s={max_back_s}",
         report.files - before.files,
         report.seconds - before.seconds,
         failures.len(),
@@ -755,7 +940,7 @@ fn close_day(
 
 /// Whether `day` is imported this run: not already done, a regular
 /// session (a closed day is counted, any other calendar answer is a named
-/// failure), and named as resumed when an earlier run began it.
+/// failure), and named as resumed when the journal sends it back.
 fn admit(run: &Run<'_>, journal: &Journal, key: &str, day: Day, report: &mut Report) -> bool {
     if journal.done.contains(key) {
         report.days_skipped += 1;
@@ -776,19 +961,33 @@ fn admit(run: &Run<'_>, journal: &Journal, key: &str, day: Day, report: &mut Rep
             return false;
         }
     }
-    if journal.open.contains(key) {
-        report.resumed.push(day);
-        let day_text = day.to_string();
-        let _dropped_when_filtered = telemetry::emit(
-            &telemetry::Event::warn(
-                TARGET,
-                "resuming a day an earlier run began and did not finish",
-            )
-            .with("kind", run.kind.as_str())
-            .with("day", day_text.as_str()),
-        );
-    }
+    name_retried(journal, run.kind, key, day, report);
     true
+}
+
+/// Names `day` in `resumed` when the journal sends it back, whatever closed
+/// it (D-2821), and in `restated` too when its last `done` was under another
+/// bar definition (D-2822), with a warning either way.
+fn name_retried(journal: &Journal, kind: ImportKind, key: &str, day: Day, report: &mut Report) {
+    let restated = journal.restated.contains(key);
+    if !(restated || journal.open.contains(key) || journal.incomplete.contains(key)) {
+        return;
+    }
+    report.resumed.push(day);
+    if restated {
+        report.restated.push(day);
+    }
+    let day_text = day.to_string();
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::warn(
+            TARGET,
+            "importing again a day an earlier run did not finish under this bar definition",
+        )
+        .with("kind", kind.as_str())
+        .with("day", day_text.as_str())
+        .with("restated", restated)
+        .with("definition", BAR_DEFINITION),
+    );
 }
 
 /// The one runtime: every day of the run through the calendar, the venue,
@@ -1033,9 +1232,18 @@ fn longest_prefix<'a>(ticker: &str, names: impl IntoIterator<Item = &'a str>) ->
 /// the longest underlying it starts with, among the F&O underlyings AND the
 /// filter's own names, is a filter name. `NIFTYNXT50...` is `NIFTYNXT50`'s,
 /// never `NIFTY`'s; `TV18BRDCST...`, a share outside today's F&O list, is a
-/// `TV18BRDCST` filter's, which asked for it by name. O(213 + filter names)
-/// per undecodable name, on the refusal path only.
+/// `TV18BRDCST` filter's, which asked for it by name.
+///
+/// A name whose own shape spells its underlying (two digits and a month
+/// before a tail with no letter) is that underlying's alone, by exact bytes:
+/// `LTI06APR24...` is `LTI`'s, never `LT`'s, though `LTI` is no longer in
+/// the F&O list and `LT` is (D-2818, D-2823). The longest-prefix rule is
+/// only for a name with no such shape. O(213 + filter names) per
+/// undecodable name, on the refusal path only.
 fn claims_undecodable(run: &Run<'_>, ticker: &str) -> bool {
+    if let Some(underlying) = crate::gdfl_nfo::shaped_underlying(ticker) {
+        return run.wants(underlying);
+    }
     let fno = longest_prefix(ticker, brutex_core::universe::FNO_UNDERLYINGS);
     let asked = longest_prefix(ticker, run.only.iter().map(String::as_str));
     asked.is_some_and(|asked| fno.is_none_or(|fno| asked.len() >= fno.len()))
@@ -1138,3 +1346,11 @@ mod seconds_attack_tests;
 #[cfg(test)]
 #[path = "gdfl_r2_attack_tests.rs"]
 mod r2_attack_tests;
+
+#[cfg(test)]
+#[path = "gdfl_r3_attack_tests.rs"]
+mod r3_attack_tests;
+
+#[cfg(test)]
+#[path = "gdfl_r4_attack_tests.rs"]
+mod r4_attack_tests;

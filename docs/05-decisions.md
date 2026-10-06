@@ -64273,6 +64273,179 @@ per-process serial beside the clock (attack D-3177). The day-listing's
 duplicate set is a hash set, so `locate` does not grow with duplicates
 (attack D-3162). **Proven by** GI-15.
 
+### D-2817 — A torn close of a torn journal line is still a torn line — 2026-10-06
+
+**Source.** Cloud attack `claude/attack-gdfl` round 3, commit `631022a0`, its
+D-3196, ported. **Finding.** A crash tore a journal line to `d`; the next load
+closed it with ` (torn)`, and a second crash cut that close to ` (t`. The tail
+`d (t` was judged foreign by D-2814's rule, so every later run was refused for
+ever, the outcome D-2814 exists to prevent. A random crash history found
+`begi (tor` the same way. **Decision.** `torn_fragment` first takes off every
+trailing piece of the mark, whole or cut, and then asks D-2814's verb rule of
+what is left, which must not be empty. The mark's seven bytes are all
+different, so the last byte names the one piece a fragment can end in. A piece
+with nothing the journal writes before it stays foreign. **Proven by** GI-16.
+
+### D-2818 — An undecodable options name is the underlying its shape spells — 2026-10-06
+
+**Source.** Round 3, `631022a0`, its D-3197. **Finding.** `LTI06APR24100CE`
+(a Saturday expiry) does not decode. `LTI` and `NIFTYIT` are not in today's
+F&O list, and `LT` and `NIFTY` are, so D-2815's longest-prefix rule gave such
+a name to `LT` or `NIFTY`: an `LT` run refused another underlying's broken file
+as its own, and a run of filters claimed one more file than the unfiltered
+run. **Decision.** `gdfl_nfo::shaped_underlying` names the text before a
+name's two digits and month; a filtered run claims a shaped name only when a
+filter names that text exactly. A name with no such shape keeps D-2815's
+prefix rule. Round 3 found the split by the strict dated and monthly
+readings; D-2823 replaced that with the last-letters rule, which is what this
+branch carries (round 3's intermediate form was not ported). Whether NSE
+listed `LTI` or `NIFTYIT` options on any day this import reaches is
+UNVERIFIED; the rule does not depend on it. **Proven by** GI-17.
+
+### D-2819 — A columnar tick-store block builds nothing past its stated size — 2026-10-06
+
+**Source.** Round 3, `631022a0`, its D-3198. **Finding.** A raw block is
+decoded to at most one byte past its entry's size, but a columnar block was
+rebuilt whatever the entry stated; only `verify`, after the rebuild, compared
+the length. A 173-byte block stating 64 bytes built 18,000,002 bytes: one
+numeric column of a million one-byte shapes, each rendering seventeen bytes.
+**Decision.** `columnar` takes the entry's size and refuses with
+`TickStoreMalformed` ("a columnar block rebuilds past its entry's stated
+size") before anything is built past it: rows above the size; a header above
+it; a text column whose payload is longer than its text; a numeric column
+whose payload is longer than `9 * rows + 2` or whose rendered text passes its
+stated length; a file that grows past the size field by field. A block that
+rebuilds to exactly its size is unchanged. The unit test
+`a_column_that_is_not_its_rows_refuses` now states a 64-byte size, so each
+refusal it checks is still the column's own. `gdfl_tickstore.rs` was
+byte-identical to the attack's base `64fcdbb2` here, so both rounds' changes
+to it were taken whole. **Proven by** GI-18.
+
+### D-2820 — GDFL round 3: what was tried and found sound — 2026-10-06
+
+**Source.** Round 3, `631022a0`, its D-3199. **Finding.** 400 random index
+worlds and 400 random stock worlds, half under a filter, through the tick
+store and the zips, and 120 options worlds imported by one filter per
+underlying and then unfiltered, against an unfiltered store. The only failure
+was D-2818's double claim. **Decision.** Recorded as GI-19. The attack's
+locate timings (its DPN-04 tests) are not ported: this branch's locate cost is
+`C-GI-01`.
+
+### D-2821 — `Report::resumed` names every day the journal sends back — 2026-10-06
+
+**Source.** Round 4, commit `bda0464f`, its D-3190. **Finding.** A day an
+earlier run closed `incomplete` was imported again and named in no list:
+`resumed` held only days begun and never closed. **Decision.** `resumed` lists
+every day the journal names that a run takes up again, in day order: begun and
+never closed, closed `incomplete`, or closed `done` under another bar
+definition (D-2822). The journal keeps the `incomplete` keys it reads. The
+local test `an_incomplete_day_is_closed_in_the_journal_and_retried`, which
+asserted the old silence, is ADAPTED to the new rule. `cli gdfl-import`
+prints `resumed` as before; it does not print `restated` separately (the
+attack did not change the verb). **Proven by** GI-20.
+
+### D-2822 — The journal records the bar definition that built a day, and reads this branch's own earlier journal as definition 2 — 2026-10-06
+
+**Source.** Round 4, `bda0464f`, its D-3191, ADAPTED for compatibility.
+**Finding.** A `done` line did not say which one-second bar definition built
+its day, so a day done before D-2812 (no look-ahead) was skipped by every
+later run: a silent stale result. **Decision.** `gdfl_import::BAR_DEFINITION`
+(2; 1 is D-2802 as first written, 2 is D-2812) is written into every `done`
+and `incomplete` line as `definition=<n>`, and is bumped whenever a change
+makes a file build different bars. A day whose last `done` line names another
+number is not done: it is imported again and named in `resumed` and
+`Report::restated`; the append-only store answers `AlreadyPresent` for the
+same bars and refuses different ones by name, closing the day `incomplete`
+and never rewriting them. A `definition=` that is empty, signed, zero-padded,
+past `u32` or repeated is a foreign line.
+
+**Where this branch departs from the attack.** The attack read every `done`
+line with no `definition=` as another definition, so every such day would be
+imported again. On this branch that would send back every day of a journal
+written by the code of `9e094a14` to `3cc6b8e0`, including an import running
+from `3cc6b8e0` at the time of this entry with about 3,600 days journalled.
+Those lines are identifiable: that code wrote exactly six stats,
+`files= seconds= failures= late= late_unresolved= max_back_s=`, while the code
+before `9e094a14` wrote only the first three, and D-2811 (the six stats) and
+D-2812 (definition 2) landed in that one commit. So a `done` line with no
+`definition=` whose stats are exactly those six fields, in that order, each a
+decimal count, is read as definition 2 and the day stays done; any other
+`done` line with no field (the three-stat shape of definition 1, or a six-stat
+line bent by one field) is restated. The rules of rounds 3 and 4 change no bar
+a reader can produce: the readers already refuse a time past 23:59:59
+(D-2825), and the columnar and shape changes are refusals and claims, not
+bars, so `BAR_DEFINITION` stays 2 and a day built by `3cc6b8e0` is a day of
+this definition. Limit: a `3cc6b8e0` build that ran from a working tree with
+uncommitted placement changes would not be told apart; none is recorded.
+The older reader of `3cc6b8e0` accepts the new lines too (it ignores every
+field after the key). The attack's `r4_03` case that dropped the field and
+expected a rebuild is ADAPTED out; `r4_11` and `r4_12` (local) hold both
+halves. **Proven by** GI-21.
+
+### D-2823 — An undecodable name's shape is read from its last letters — 2026-10-06
+
+**Source.** Round 4, `bda0464f`, its D-3192. **Finding.** D-2818's shape, as
+round 3 wrote it, needed a strike that parsed and a name inside the 64-byte
+cap. `LTI06APR24100.125CE`, `…100.50CE`, a strike past `i64` and a name past
+the cap were "shapeless", and the prefix rule handed them to `LT`.
+**Decision.** `gdfl_nfo::shaped_underlying` finds the name's last ASCII
+letters, which in either reading are its month because a strike holds no
+letter, and returns the text before the two digits in front of them. It parses
+no strike, has no cap, and is O(ticker length). 300,000 random names confirm
+every decoded name is shaped to its decoded underlying under this branch's
+era rule (D-2806, D-2813). **Proven by** GI-22.
+
+### D-2824 — A columnar block's columns, together, are held to its size — 2026-10-06
+
+**Source.** Round 4, `bda0464f`, its D-3193. **Finding.** D-2819 held each
+column's text to the size one column at a time; a block of 1,000 columns each
+60,000 bytes long, stating 65,536 bytes, decoded 60 MB of columns before any
+check summed them. **Decision.** Every row holds a field of every column, so
+the rebuilt file is longer than the header plus every column's text; that sum
+is kept as columns are read and refused before the column that passes the
+size is decoded. An honest block of many columns at exactly its size still
+rebuilds. **Proven by** GI-23.
+
+### D-2825 — A row stamped past its day is refused — 2026-10-06
+
+**Source.** Round 4, `bda0464f`, its D-3194. **Finding.** `convert` and
+`drive` are public and took a `Tick` whose `sod` was any `u32`; both readers
+hold it below 86,400 (`second_of_day` refuses an hour past 23), the runtime
+did not. A row of 1 April stamped second 122,400 was filed as a bar of
+2 April at 10:00. **Decision.** `convert` refuses a row at or past second
+86,400, traded or not, as `ImportRefusal::StampPastTheDay`, before
+placement. No file a reader hands on can meet it, so no stored day changes.
+The timing test `per_tick_build_and_per_second_lookup_cost` now builds twelve
+ticks a second from midnight. **Proven by** GI-24.
+
+### D-2826 — A journal append closes a torn last line first — 2026-10-06
+
+**Source.** Round 4, `bda0464f`, its D-3195. **Finding.** A journal write that
+fails part way leaves a torn line, is a named failure, and the run continues;
+the next append was glued to the torn bytes, a foreign line every later load
+refused or a line that hid the one glued on. **Decision.** Every append reads
+the journal's last byte first (one seek, one byte) and, when it is not a
+newline, writes ` (torn)` and a newline before its line, with a warning event,
+as a load does; a load's own close is the same write with no line. The journal
+is opened read and append; nothing already written is ever rewritten.
+**Proven by** GI-25.
+
+### D-2827 — Rounds 3 and 4 of the GDFL attack, ported — 2026-10-06
+
+**Decision.** `631022a0` (round 3) and `bda0464f` (round 4) of
+`claude/attack-gdfl` are ported by hand onto this line, renumbered D-3196 to
+D-3199 as D-2817 to D-2820 and D-3190 to D-3195 as D-2821 to D-2826; nothing
+after `bda0464f` (`d40c165a` is unvalidated work in progress) is taken. Their
+tests are `gdfl_r3_attack_tests.rs` and `gdfl_r4_attack_tests.rs`, with
+earlier attack numbers in their comments mapped to this branch's (D-3167,
+D-3175 to D-2815; D-3168, D-3169, D-3173, D-3174 to D-2814; D-3170 to D-2812).
+Adaptations are marked `ADAPTED` with their reason: `r4_03`'s dropped-field
+case (D-2822) and the local `an_incomplete_day_is_closed_in_the_journal_and_retried`
+(D-2821). `r4_11` to `r4_14` are local additions; `r4_13` and `r4_14` hold
+the edges a scoped `cargo mutants` run found unheld (the row bound of a
+columnar block, and a shape with nothing before it). Every value is
+invented; no vendor row is read or quoted. **Proven by** GI-16 to GI-26.
+
 ### D-2810 — The risk-free rate is the RBI 91-day T-bill cut-off yield, as a dated series read by path, as of the latest release strictly before the trade day — 2026-10-04
 
 **Operator choice (4 October 2026).** GDFL option IV and greeks use the RBI

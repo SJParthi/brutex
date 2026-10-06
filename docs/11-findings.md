@@ -904,3 +904,41 @@ Narrative only. No row is added to the table above.
   integer annotation are refused by name. D-2270, AHC-01.
 - **h-pull-2**: fixed. The TOTP base32 decoder refuses an impossible length
   and non-zero bits past the last whole byte. D-2271, AHC-02.
+
+### GDFL attack rounds 3 and 4 (claude/attack-gdfl 631022a0, bda0464f) — dispositions — 2026-10-06
+
+Narrative only. No row is added to the table above. The attack's own
+numbers are given beside this branch's.
+
+- **Round 3: a journal whose torn close was itself torn (`d (t`) refused every
+  later run**: fixed. D-2817 (attack D-3196), GI-16.
+- **Round 3: an undecodable name of a retired underlying (`LTI…`,
+  `NIFTYIT…`) claimed by a shorter filter (`LT`, `NIFTY`)**: fixed. D-2818
+  (attack D-3197), GI-17.
+- **Round 3: a 173-byte columnar tick-store block stating 64 bytes rebuilt
+  18 MB before the size check**: fixed. D-2819 (attack D-3198), GI-18.
+- **Round 3: random index worlds, filtered stock worlds and a run of filters
+  over one store**: no failure beyond D-2818. D-2820 (attack D-3199), GI-19.
+- **Round 4: a day closed `incomplete` and imported again was named in no
+  list**: fixed. D-2821 (attack D-3190), GI-20.
+- **Round 4: a day done before D-2812 was never rebuilt (the journal did not
+  record the bar definition)**: fixed, ADAPTED: a `done` line without
+  `definition=` in the exact six-stat shape this branch's definition-2 code
+  wrote stays done, so a journal written by `3cc6b8e0` resumes as its own;
+  any other line without the field is rebuilt and judged by the append-only
+  store. D-2822 (attack D-3191), GI-21.
+- **Round 4: a shaped name with a strike that does not parse, or past the
+  length cap, claimed by a shorter filter (`LT` for `LTI…`)**: fixed. D-2823
+  (attack D-3192), GI-22.
+- **Round 4: a columnar block of many columns decoded far past its size
+  before any check summed the columns**: fixed. D-2824 (attack D-3193), GI-23.
+- **Round 4: a row stamped past its day filed as a bar of the next day**:
+  fixed. D-2825 (attack D-3194), GI-24.
+- **Round 4: a journal line torn by a failed write inside a run was glued to
+  the next line**: fixed. D-2826 (attack D-3195), GI-25.
+- **Round 4, open, not fixed.** A shapeless undecodable name (no month after
+  two digits) is still claimed by every filter whose name is its longest
+  prefix among the F&O list and that filter, so nested filter names (`LT`,
+  `LTI`) both claim `LTIXYZCE`; a fixed owner needs a fixed universe of names,
+  which D-2815 chose not to have. A tick-store index or raw block is decoded up
+  to the length its footer or entry states, which no sourced fact bounds.
