@@ -1157,6 +1157,23 @@ mod tests {
         assert_eq!(super::stamp_of(1_234_567_890), "20090213T233130Z");
     }
 
+    /// D-3513: `now_stamp` is `stamp_of` the clock — sixteen characters, the
+    /// `T` and `Z` where `SigV4` puts them, digits elsewhere, and a date no
+    /// earlier than this change was written.
+    #[test]
+    fn the_clock_stamp_is_a_sigv4_date_of_now() {
+        let stamp = super::now_stamp().expect("the clock is after the epoch");
+        assert_eq!(stamp.len(), 16, "{stamp}");
+        for (k, c) in stamp.char_indices() {
+            match k {
+                8 => assert_eq!(c, 'T', "{stamp}"),
+                15 => assert_eq!(c, 'Z', "{stamp}"),
+                _ => assert!(c.is_ascii_digit(), "{stamp}"),
+            }
+        }
+        assert!(stamp.as_str() >= "20261006T000000Z", "{stamp}");
+    }
+
     /// §8 — the parameter path never reaches the output, whatever AWS says.
     #[test]
     fn a_refusal_never_repeats_the_body_that_names_the_parameter() {
