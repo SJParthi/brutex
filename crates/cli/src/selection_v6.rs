@@ -419,7 +419,10 @@ fn set_aside_abandoned_tail(
     committed: u64,
     len: u64,
 ) -> Result<(), String> {
-    let tail_len = usize::try_from(len - committed).map_err(|why| why.to_string())?;
+    // ONE SUBTRACTION, read by the cut and the event alike: a second copy in
+    // the event alone was a figure no test can observe (G18-cli-b-19, D-2027).
+    let tail_bytes = len - committed;
+    let tail_len = usize::try_from(tail_bytes).map_err(|why| why.to_string())?;
     let mut tail = vec![0; tail_len];
     file.seek(SeekFrom::Start(committed))
         .map_err(|why| why.to_string())?;
@@ -448,7 +451,7 @@ fn set_aside_abandoned_tail(
     crate::note(
         &telemetry::Event::warn("cli.selection_v6", "abandoned unsealed tail set aside")
             .with("committed_bytes", committed)
-            .with("tail_bytes", len - committed)
+            .with("tail_bytes", tail_bytes)
             .with("quarantine", aside.display().to_string().as_str()),
     );
     Ok(())

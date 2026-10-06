@@ -4207,4 +4207,15 @@ mod tests {
         }
         Ok(())
     }
+
+    /// The parent barrier refuses a directory that is not there.
+    /// G18-cli-b-18, D-2026.
+    #[test]
+    fn the_parent_barrier_refuses_an_absent_directory() {
+        let root = TestDir::new().expect("test root");
+        let refusal = sync_parent(&root.path().join("absent").join(DATA_FILE))
+            .expect_err("an absent parent cannot be synced");
+        assert!(refusal.starts_with("cannot sync "), "{refusal}");
+        sync_parent(&root.path().join(DATA_FILE)).expect("an existing parent syncs");
+    }
 }

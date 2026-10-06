@@ -3584,7 +3584,11 @@ pub(crate) fn exact_minute_context_from_span(
             "accepted prior IST session {prior_session_day} has no three terminal minutes for GapFib"
         )
     })?;
-    if expected_third < final_window.from
+    // THE THREE TERMINAL MINUTES LIE IN THE FINAL WINDOW: `holds` states that,
+    // where `expected_third < final_window.from` restated half of it with a
+    // comparison no session on the measured calendar can bring to its
+    // boundary (G18-cli-b-27, D-2034). `expected_third` never passes `to`.
+    if !final_window.holds(expected_third)
         || third_last != Some(expected_third)
         || second_last != Some(expected_second)
         || last != Some(last_minute)
@@ -6596,5 +6600,61 @@ mod tests {
         }
         let why = swept_index("NIFTY\u{3000}X").expect_err("no instrument");
         assert!(why.starts_with("`NIFTY\\u{3000}X` is not"), "{why:?}");
+    }
+
+    /// A gap before the last two prior minutes is refused even though the
+    /// final two sit on the canonical close: each terminal minute is checked,
+    /// not just the last. G18-cli-b-24, D-2031.
+    #[test]
+    fn exact_minute_context_refuses_a_gap_before_the_last_two_prior_minutes() {
+        let signal = [minute_on_ist_day(OPEN_TUESDAY_2026_08_04, 555, 2_600_000)];
+        let gapped = minute_span(vec![
+            minute_on_ist_day(OPEN_MONDAY_2026_08_03, 920, 2_500_000),
+            minute_on_ist_day(OPEN_MONDAY_2026_08_03, 928, 2_500_100),
+            minute_on_ist_day(OPEN_MONDAY_2026_08_03, 929, 2_500_200),
+            minute_on_ist_day(OPEN_TUESDAY_2026_08_04, 555, 2_600_000),
+        ]);
+        let why = exact_minute_context_from_span(gapped, &signal, Path::new(NO_STORE))
+            .expect_err("a third-last minute off the canonical geometry cannot seed GapFib");
+        assert!(
+            why.contains("terminal-minute geometry 927, 928, 929"),
+            "{why}"
+        );
+        assert!(
+            why.contains("observed final three were Some(920), Some(928), Some(929)"),
+            "{why}"
+        );
+    }
+
+    /// The LAST prior minute is checked on its own: an eligible share whose
+    /// dated close is 15:14 and whose final three minutes are 912, 913 and
+    /// 915 has the right third-last and second-last minutes and a wrong last
+    /// one, and is refused. The session window admits 915, so only this
+    /// check can refuse it. G18-cli-b-24, D-2031.
+    #[test]
+    fn exact_minute_context_refuses_a_last_prior_minute_past_the_dated_close() {
+        let signal = [minute_on_ist_day(OPEN_TUESDAY_2026_08_04, 555, 2_600_000)];
+        let store = root("cas-last-past-close");
+        install_master(&store, OPEN_MONDAY_2026_08_03, 1);
+        let late = Span {
+            key: InstrumentKey::cash(Exchange::Nse, "RELIANCE").expect("a cash key"),
+            ..minute_span(vec![
+                minute_on_ist_day(OPEN_MONDAY_2026_08_03, 912, 2_500_000),
+                minute_on_ist_day(OPEN_MONDAY_2026_08_03, 913, 2_500_100),
+                minute_on_ist_day(OPEN_MONDAY_2026_08_03, 915, 2_500_200),
+                minute_on_ist_day(OPEN_TUESDAY_2026_08_04, 555, 2_600_000),
+            ])
+        };
+        let why = exact_minute_context_from_span(late, &signal, &store)
+            .expect_err("a last minute past the dated close cannot seed GapFib");
+        assert!(
+            why.contains("terminal-minute geometry 912, 913, 914"),
+            "{why}"
+        );
+        assert!(
+            why.contains("observed final three were Some(912), Some(913), Some(915)"),
+            "{why}"
+        );
+        let _ = std::fs::remove_dir_all(&store);
     }
 }

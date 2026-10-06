@@ -675,8 +675,11 @@ impl PrefixDigest {
 }
 
 /// Hashes up to `count` bytes of `file` from `from`, returning how many existed.
-fn hash_range(
-    file: &mut File,
+/// Generic over the reader so a test can script an `Interrupted` read, which a
+/// regular file never returns (G18-cli-b-22, D-2029); every caller passes a
+/// `File`.
+fn hash_range<R: Read + std::io::Seek>(
+    file: &mut R,
     path: &Path,
     from: u64,
     count: u64,
@@ -1745,5 +1748,75 @@ mod tests {
             .require_unchanged(&mut file, &path)
             .expect("the covered prefix is unchanged");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The digest's `Debug` names its coverage and never its hasher state.
+    /// G18-cli-b-22, D-2029.
+    #[test]
+    fn a_prefix_digest_debugs_its_coverage_and_never_its_hasher_state() {
+        let digest = super::PrefixDigest {
+            hasher: brutex_core::blake3::Hasher::new(),
+            covered: 10,
+        };
+        assert_eq!(format!("{digest:?}"), "PrefixDigest { covered: 10, .. }");
+    }
+
+    /// A reader that answers each `read` from its script, then end of file.
+    struct Scripted(std::collections::VecDeque<std::io::Result<&'static [u8]>>);
+    impl std::io::Read for Scripted {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            match self.0.pop_front() {
+                None => Ok(0),
+                Some(Err(why)) => Err(why),
+                Some(Ok(bytes)) => {
+                    buffer
+                        .get_mut(..bytes.len())
+                        .ok_or_else(|| std::io::Error::other("script chunk exceeds the buffer"))?
+                        .copy_from_slice(bytes);
+                    Ok(bytes.len())
+                }
+            }
+        }
+    }
+    impl std::io::Seek for Scripted {
+        fn seek(&mut self, _: std::io::SeekFrom) -> std::io::Result<u64> {
+            Ok(0)
+        }
+    }
+
+    /// An interrupted read is retried and its bytes still hashed; any other
+    /// read error refuses at once and is never retried. The script ends in end
+    /// of file, so a mutant that retries everything fails fast rather than
+    /// spinning. G18-cli-b-22, D-2029.
+    #[test]
+    fn a_prefix_hash_retries_only_an_interrupted_read() {
+        let path = std::path::Path::new("scripted.bin");
+        let mut interrupted = Scripted(std::collections::VecDeque::from([
+            Err(std::io::Error::from(std::io::ErrorKind::Interrupted)),
+            Ok(&b"abc"[..]),
+        ]));
+        let mut hasher = brutex_core::blake3::Hasher::new();
+        assert_eq!(
+            super::hash_range(&mut interrupted, path, 0, 100, &mut hasher),
+            Ok(3)
+        );
+        assert_eq!(hasher.finalize(), brutex_core::blake3::hash(b"abc"));
+
+        let mut failing = Scripted(std::collections::VecDeque::from([
+            Err(std::io::Error::other("disk gone")),
+            Ok(&b"abc"[..]),
+        ]));
+        let why = super::hash_range(
+            &mut failing,
+            path,
+            0,
+            100,
+            &mut brutex_core::blake3::Hasher::new(),
+        )
+        .expect_err("a real read error is never retried");
+        assert!(
+            why.contains("scripted.bin could not be read to hash its validated prefix: disk gone"),
+            "{why}"
+        );
     }
 }

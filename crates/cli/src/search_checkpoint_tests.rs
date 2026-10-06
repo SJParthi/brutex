@@ -625,3 +625,31 @@ fn the_read_only_snapshot_admits_the_and_v2_namespace_the_journal_writes() -> Re
     assert_eq!(snapshot.read(sequence, 1024)?.payload, b"v2 boundary");
     Ok(())
 }
+
+/// A failed marker names its temporary file only when that file could not be
+/// removed: a missing reservation is one failure, a directory squatting on the
+/// temporary name is two. G18-cli-b-23, D-2030.
+#[test]
+fn a_failed_marker_names_its_temporary_only_when_it_could_not_be_removed() -> Result<(), String> {
+    let scratch = Scratch::new().map_err(error)?;
+    let why = publish_marker(&scratch.0.join("absent"), [7; 32])
+        .err()
+        .ok_or("a marker was published into a missing directory")?;
+    assert!(
+        why.starts_with("checkpoint marker was not published: "),
+        "{why}"
+    );
+    assert!(!why.contains("could not be removed"), "{why}");
+    let reservation = scratch.0.join("reservation");
+    fs::create_dir_all(reservation.join("complete.tmp")).map_err(error)?;
+    let why = publish_marker(&reservation, [7; 32])
+        .err()
+        .ok_or("a marker was published over a squatted temporary")?;
+    assert!(
+        why.contains("its temporary file also could not be removed"),
+        "{why}"
+    );
+    assert!(reservation.join("complete.tmp").is_dir());
+    assert!(!reservation.join("complete").exists());
+    Ok(())
+}

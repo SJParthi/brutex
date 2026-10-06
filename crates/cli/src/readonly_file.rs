@@ -41,13 +41,6 @@ pub(crate) fn open(path: &Path) -> std::io::Result<File> {
     Ok(file)
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(
-        target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
-    )
-))]
 /// The cli ledger door (D-1743): open `path` with the caller's `options` plus
 /// `O_NONBLOCK`, so a FIFO or socket at a ledger path can never wait for a
 /// peer, then refuse any handle that is not a regular file. The type is asked
@@ -57,33 +50,47 @@ pub(crate) fn open(path: &Path) -> std::io::Result<File> {
 /// them: a symlink to a regular ledger stays readable and what it reaches is
 /// checked. An absent path keeps its `NotFound` kind. `O_NONBLOCK` stays set
 /// on the handle and has no effect on a regular file's reads, writes or locks.
+///
+/// On any other target it refuses with `Unsupported`. ONE function with two
+/// cfg'd tails, not two functions: a compiled-out body is still a body
+/// cargo-mutants mutates, and no build of this target can compile or kill the
+/// mutant (G18-cli-b-21, D-2028).
 pub(crate) fn regular(options: &mut OpenOptions, path: &Path) -> std::io::Result<File> {
-    use std::os::unix::fs::OpenOptionsExt as _;
-    let file = options
-        .custom_flags(store::open_flags::O_NONBLOCK)
-        .open(path)?;
-    if file.metadata()?.file_type().is_file() {
-        Ok(file)
-    } else {
-        Err(std::io::Error::other(format!(
-            "{} is not a regular file; a ledger is never read from or written to anything else",
-            path.display()
-        )))
+    #[cfg(any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    ))]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let file = options
+            .custom_flags(store::open_flags::O_NONBLOCK)
+            .open(path)?;
+        if file.metadata()?.file_type().is_file() {
+            Ok(file)
+        } else {
+            Err(std::io::Error::other(format!(
+                "{} is not a regular file; a ledger is never read from or written to anything else",
+                path.display()
+            )))
+        }
     }
-}
-
-#[cfg(not(any(
-    target_os = "macos",
-    all(
-        target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
-    )
-)))]
-pub(crate) fn regular(_options: &mut OpenOptions, _path: &Path) -> std::io::Result<File> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "ledger opens require verified macOS or Linux x86_64/aarch64 flags",
-    ))
+    #[cfg(not(any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )))]
+    {
+        let _ = (options, path);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "ledger opens require verified macOS or Linux x86_64/aarch64 flags",
+        ))
+    }
 }
 
 #[cfg(not(any(

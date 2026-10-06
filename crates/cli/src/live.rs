@@ -1134,6 +1134,81 @@ mod tests {
     use crate::frontier::Row;
     use crate::frontier::STRIDE_BYTES;
 
+    /// A row at `n` observations and `t_milli`, every other figure neutral.
+    fn judged_row(n: u64, t_milli: i64) -> Row {
+        Row {
+            identity: [0; 32],
+            rank: 1,
+            mask_words: [1, 0, 0, 0, 0, 0],
+            hits: n,
+            n,
+            mean_milli_paisa: 0,
+            t_milli,
+            payoff_bp: 0,
+            wins: 0,
+            trades: 0,
+            cell_wins: 0,
+            pessimistic: 0,
+            worst_trade: 0,
+            max_drawdown: 0,
+            min_win: 0,
+            gross_win: 0,
+            gross_loss: 0,
+            direction: crate::frontier::Direction::Long,
+            rules: crate::Rules::elite(400, 25),
+        }
+    }
+
+    /// **EACH OF `clears_bar`'S THREE CONDITIONS DECIDES ON ITS OWN.**
+    /// G18-cli-b-01, D-2020.
+    ///
+    /// The bar is set at 6.000 so the carried ceiling, not the Student-t tail
+    /// (5.225 at 29 degrees of freedom and 3,689 trials, about 4.4 at a
+    /// thousand), is what a 1,000-observation row meets: `|t|` exactly AT the
+    /// ceiling does not clear (strictly above), one thousandth over does, and a
+    /// negative `t` is judged by its magnitude. A row under the
+    /// thirty-observation floor never clears however large its `t`, and a row
+    /// over both the floor and the ceiling still fails a Student-t tail it
+    /// does not reach.
+    #[test]
+    fn each_condition_of_clears_bar_decides_on_its_own() {
+        let summary = Summary {
+            trials: 3_689,
+            bar_milli: 6_000,
+            priced: 0,
+        };
+        for (n, t_milli, clears, why) in [
+            (1_000, 6_000, false, "at the ceiling is not above it"),
+            (1_000, -6_000, false, "at the ceiling, negative"),
+            (1_000, 6_001, true, "one thousandth above the ceiling"),
+            (1_000, -6_001, true, "above the ceiling by magnitude"),
+            (1_000, 9_000, true, "far above the ceiling"),
+            (1_000, 5_999, false, "under the ceiling, over the tail"),
+            (29, 1_000_000, false, "under the observation floor"),
+            (
+                super::MIN_JUDGEABLE_OBSERVATIONS,
+                1_000_000,
+                true,
+                "at the floor",
+            ),
+        ] {
+            assert_eq!(
+                super::clears_bar(&judged_row(n, t_milli), &summary),
+                clears,
+                "n {n} t {t_milli}: {why}"
+            );
+        }
+        let low_bar = Summary {
+            bar_milli: 1_000,
+            ..summary
+        };
+        assert!(
+            !super::clears_bar(&judged_row(30, 5_000), &low_bar),
+            "over the floor and the ceiling, short of the Student-t tail"
+        );
+        assert!(super::clears_bar(&judged_row(30, 5_300), &low_bar));
+    }
+
     /// `docs/02-store-format.md` §29 states the live file this build writes:
     /// its magic, version, count slot, summary width and row stride.
     /// P1-16-04, D-1940.

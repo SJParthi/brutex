@@ -6551,6 +6551,18 @@ mod tests {
         assert_eq!(reader.completed_audits(), 1);
         assert!(reader.audits.capacity() >= 1);
         assert!(reader.audits.capacity() < 1_024);
+        // THE STORED RECORDS ARE THE RESERVATION, measured off the file: a
+        // quotient, not a remainder (G18-cli-b-17, D-2026).
+        let stored = (std::fs::metadata(root.path().join(DATA_FILE))
+            .expect("ledger measures")
+            .len()
+            - POPULATION_STATISTICS_V2_HEADER_BYTES)
+            / POPULATION_STATISTICS_V2_RECORD_STRIDE;
+        assert!(stored >= 4, "one audit spans {stored} records");
+        assert!(
+            reader.audits.capacity() >= usize::try_from(stored).expect("small record count"),
+            "the open reserves for the stored records (D-1682)"
+        );
     }
 
     #[test]
@@ -7558,5 +7570,30 @@ mod tests {
             .expect("matched changed pair remains internally valid");
             assert_ne!(changed.manifest.audit_id, base_id);
         }
+    }
+
+    /// A candidate column reserves exactly its own rows: `rows / width`.
+    /// G18-cli-b-17, D-2026.
+    #[test]
+    fn a_candidate_column_reserves_exactly_its_own_rows() {
+        let rows: Vec<u64> = (0..15_u64).map(|row| row % 3).collect();
+        let column = candidate_column(&rows, 1, 3, |row| *row).expect("a whole width-3 layout");
+        assert_eq!(column, vec![1; 5]);
+        assert_eq!(
+            column.capacity(),
+            5,
+            "rows / width, not rows % width or rows x width"
+        );
+    }
+
+    /// The parent barrier refuses a directory that is not there.
+    /// G18-cli-b-18, D-2026.
+    #[test]
+    fn the_parent_barrier_refuses_an_absent_directory() {
+        let root = TempRoot::new("parent-barrier");
+        let refusal = sync_parent(&root.path().join("absent").join(DATA_FILE))
+            .expect_err("an absent parent cannot be synced");
+        assert!(refusal.starts_with("cannot sync "), "{refusal}");
+        sync_parent(&root.path().join(DATA_FILE)).expect("an existing parent syncs");
     }
 }
