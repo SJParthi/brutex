@@ -63825,3 +63825,38 @@ in `crates/pull/src/cash_session_cache.rs`;
 `crates/cli/src/operation_audit_tests.rs`;
 `a_created_rung_root_syncs_every_parent_up_to_the_ledger_root` in
 `crates/cli/src/ledger_v6.rs`. FB-108, FB-109.
+
+### D-3600 — A vendor capture appears under its name only when whole — 2026-10-06
+
+**Finding (conc:pull1-3).** `capture::write_new_capture_with_stamp` created
+each capture at its final `.txt` name with `create_new` and then filled it,
+so a crash or kill mid-write left a torn fixture under a name that says it
+is complete (the failed-write cleanup cannot run after a kill).
+
+**Decision.** The bytes are written to a hidden `.<name>.partial` sibling and
+synced, then linked into the final name with `hard_link`, which refuses an
+existing name exactly as `create_new` did, so no capture is ever
+overwritten. The sibling is then removed and the directory synced. A kill
+can leave a hidden `.partial` file; it never ends in `.txt`, so nothing that
+lists captures takes it for one. A leftover sibling makes that one name
+attempt move to the next, as an existing capture does.
+
+**Proof.** `a_capture_stopped_part_way_never_appears_under_its_final_name` in
+`crates/pull/src/capture.rs`. FB-110.
+
+### D-3601 — One refused census row no longer drops the rows beside it — 2026-10-06
+
+**Finding (conc:pull2-2).** `ingest::record_all` returned on the first row
+`count` refused (for example a month whose row count went backwards), so
+every other row of the batch, one vendor answer's other contracts with their
+bars already landed, was never counted.
+
+**Decision.** Each refusal is collected; every row that counted is installed
+in the one install the batch already makes, and the batch then reports
+`<n> of <m> census row(s) refused; every other row was counted: <reasons>`
+in offered order. A batch whose install itself fails still reports only
+that. Callers already treat any `Some` as the census not covering the run,
+so nothing reads the partial install as complete.
+
+**Proof.** `one_refused_census_row_does_not_drop_the_batch` in
+`crates/pull/src/ingest.rs`. FB-111.
