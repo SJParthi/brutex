@@ -14924,7 +14924,9 @@ new durable authority, and none exists.
   `ensure_trade_rows` and `ensure_detail_receipt` now keep one writer handle
   per process (`cli::with_cached_handle`) and bring it up to date with the
   type's `refresh`, which reads only rows appended since: O(T + delta) per
-  recorded run instead of O(H + T). The full walk remains once per process,
+  recorded run instead of O(H + T). The receipt sidecar's refresh and append
+  are O(indexed bytes + delta) when another writer grew it, because
+  `Receipts::absorb_new` re-hashes the indexed prefix first (D-1560, D-3318). The full walk remains once per process,
   and again whenever the root changes, the path names a different file (by
   device and inode), a refresh is refused or an operation is refused; each of
   those opens fresh. UNVERIFIED as a measurement: no bench times it.

@@ -1013,3 +1013,11 @@ was run afterwards across docs, CLAUDE.md, crates/*/src and the benches.
 
 The pull bench header and two results-ledger "O(delta)" sections. A grep
 afterwards found two more of the latter, and all are corrected by D-3317.
+
+### Attack lens L2, round 11 — dispositions — 2026-10-06
+
+The receipt handle's growth re-hash was left out of three statements.
+Corrected by D-3318. A grep for receipt refresh "O(delta)" or "O(new rows)"
+across `docs/0*.md` and `crates/*/src` found no other copies;
+`candidate_universe`'s "O(new rows)" is the write of its own block, not a
+receipt refresh.

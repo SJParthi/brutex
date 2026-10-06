@@ -19277,9 +19277,11 @@ fn identity_hex(identity: &[u8; 32]) -> String {
 /// the frontier's open does it under the exclusive lock. `frontier`'s own doc
 /// promised the walk "once per process". This keeps one handle and brings it
 /// up to date with its `refresh`, which reads only the rows appended since:
-/// O(delta) per run. `results::with_shared_writer` makes the same trade and
-/// also re-hashes its indexed prefix when another writer grew the ledger
-/// (D-1560, D-3305); trades and frontier have no such recheck.
+/// O(delta) per run for trades and frontier, which have no prefix recheck.
+/// The receipt handle (`result_set::Receipts`), like
+/// `results::with_shared_writer`, also re-hashes its indexed prefix when
+/// another writer grew the file (D-1560, D-3305, D-3318): O(indexed bytes +
+/// delta) on that branch.
 ///
 /// # When it opens fresh instead
 ///

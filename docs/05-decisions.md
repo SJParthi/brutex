@@ -63400,3 +63400,13 @@ Each now states the growth-branch re-hash.
 
 The trades and frontier `O(delta)` statements are correct as written. Those
 ledgers have no prefix recheck, so they were left. Text only.
+
+### D-3318 — The receipt handle re-hashes its prefix too — 2026-10-06
+
+An eleventh review found that `cli`'s `with_cached_handle` caches three
+handles, not two. The third is `result_set::Receipts`, whose `refresh` and
+`append_exact` go through `absorb_new`, which re-hashes the indexed prefix on
+growth (D-1560). D-3317's `with_cached_handle` doc, D-1777's bullet in
+`docs/06-limits.md` and `api::detail`'s `CommittedParents` doc each left the
+receipt file out. Each now names it. D-3317 stands; this entry adds the
+handle it missed. Text only.

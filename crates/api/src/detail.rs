@@ -762,7 +762,8 @@ static PARENTS: Cached<cli::result_set::CommittedParents> = Cached::new();
 /// Refreshes both parent indexes once and returns one owned receipt, with
 /// the instrument its ledger parent names, before the caller refreshes any
 /// child. Cold open is O(history); warm refresh is O(new parent rows), or
-/// O(indexed bytes + new rows) when the ledger grew (D-1560, D-3305), with
+/// O(indexed bytes + new rows) when the ledger or the receipt file grew
+/// (D-1560, D-3305, D-3318), with
 /// each file still subject to the HTTP byte ceiling.
 ///
 /// # Errors
