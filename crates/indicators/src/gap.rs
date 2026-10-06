@@ -192,9 +192,11 @@ impl GapLeg {
     /// Rung `p`'s price, in paisa. `None` if it leaves `i64`.
     ///
     /// One body for both directions — see the module documentation for the algebra.
-    /// `div_euclid` and not `/`: truncation toward zero would round a level on the
-    /// wrong side of the anchor for a negative product, and the two sheets differ
-    /// exactly in that sign.
+    /// `div_euclid` and not `/`: the level is FLOORED to a whole paisa in both
+    /// directions, the convention IF-23 and D-1861 pin. That is a choice, not a
+    /// necessity — truncation toward zero would also stay between `X1` and `X2` — and it
+    /// makes the two sheets not mirror images: an up gap's rungs round away from `X2`,
+    /// a down gap's toward it, by under one paisa (D-3404).
     ///
     /// `None` rather than a clamp: §7 reserves `i64::MIN` for the open-interest null,
     /// and pinning an out-of-range level onto it would put a sentinel where a price
@@ -1530,9 +1532,12 @@ mod tests {
         // all 384 positions, so it moved. The gap family's own count, 4,092,
         // did not, and `complete_sessions_emit_exactly_what_the_three_bar_fold_emitted`
         // above still pins the gap family alone. Was 8_217_985_476_958_011_973.
+        // RE-TAKEN again for D-3402 and D-3403: five candlestick midpoint predicates
+        // and the SuperTrend stop are now decided below a paisa, so the all-position
+        // digest moved and the gap count did not. Was 9_976_369_688_448_099_888.
         assert_eq!(
             (digest, gap_known),
-            (9_976_369_688_448_099_888, 4_092),
+            (1_794_190_917_626_450_722, 4_092),
             "complete sessions no longer emit what the three-bar fold emitted"
         );
     }

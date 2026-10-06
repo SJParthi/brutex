@@ -523,43 +523,43 @@ indicators and the gap-leg spreadsheet the design comes from.
 
 | Bit | Name | Needs a tolerance | Status |
 |---:|---|---|---|
-| 235 | `near_forming_pivot_pivot` | — | **void** |
+| 235 | `near_forming_pivot_pivot` | yes | **void** |
 | 236 | `close_above_forming_pivot_pivot_band` | — | **void** |
 | 237 | `close_below_forming_pivot_pivot_band` | — | **void** |
-| 238 | `near_forming_pivot_cpr_bc` | — | **void** |
+| 238 | `near_forming_pivot_cpr_bc` | yes | **void** |
 | 239 | `close_above_forming_pivot_cpr_bc_band` | — | **void** |
 | 240 | `close_below_forming_pivot_cpr_bc_band` | — | **void** |
-| 241 | `near_forming_pivot_cpr_tc` | — | **void** |
+| 241 | `near_forming_pivot_cpr_tc` | yes | **void** |
 | 242 | `close_above_forming_pivot_cpr_tc_band` | — | **void** |
 | 243 | `close_below_forming_pivot_cpr_tc_band` | — | **void** |
-| 244 | `near_forming_pivot_r1` | — | **void** |
+| 244 | `near_forming_pivot_r1` | yes | **void** |
 | 245 | `close_above_forming_pivot_r1_band` | — | **void** |
 | 246 | `close_below_forming_pivot_r1_band` | — | **void** |
-| 247 | `near_forming_pivot_r2` | — | **void** |
+| 247 | `near_forming_pivot_r2` | yes | **void** |
 | 248 | `close_above_forming_pivot_r2_band` | — | **void** |
 | 249 | `close_below_forming_pivot_r2_band` | — | **void** |
-| 250 | `near_forming_pivot_r3` | — | **void** |
+| 250 | `near_forming_pivot_r3` | yes | **void** |
 | 251 | `close_above_forming_pivot_r3_band` | — | **void** |
 | 252 | `close_below_forming_pivot_r3_band` | — | **void** |
-| 253 | `near_forming_pivot_r4` | — | **void** |
+| 253 | `near_forming_pivot_r4` | yes | **void** |
 | 254 | `close_above_forming_pivot_r4_band` | — | **void** |
 | 255 | `close_below_forming_pivot_r4_band` | — | **void** |
-| 256 | `near_forming_pivot_r5` | — | **void** |
+| 256 | `near_forming_pivot_r5` | yes | **void** |
 | 257 | `close_above_forming_pivot_r5_band` | — | **void** |
 | 258 | `close_below_forming_pivot_r5_band` | — | **void** |
-| 259 | `near_forming_pivot_s1` | — | **void** |
+| 259 | `near_forming_pivot_s1` | yes | **void** |
 | 260 | `close_above_forming_pivot_s1_band` | — | **void** |
 | 261 | `close_below_forming_pivot_s1_band` | — | **void** |
-| 262 | `near_forming_pivot_s2` | — | **void** |
+| 262 | `near_forming_pivot_s2` | yes | **void** |
 | 263 | `close_above_forming_pivot_s2_band` | — | **void** |
 | 264 | `close_below_forming_pivot_s2_band` | — | **void** |
-| 265 | `near_forming_pivot_s3` | — | **void** |
+| 265 | `near_forming_pivot_s3` | yes | **void** |
 | 266 | `close_above_forming_pivot_s3_band` | — | **void** |
 | 267 | `close_below_forming_pivot_s3_band` | — | **void** |
-| 268 | `near_forming_pivot_s4` | — | **void** |
+| 268 | `near_forming_pivot_s4` | yes | **void** |
 | 269 | `close_above_forming_pivot_s4_band` | — | **void** |
 | 270 | `close_below_forming_pivot_s4_band` | — | **void** |
-| 271 | `near_forming_pivot_s5` | — | **void** |
+| 271 | `near_forming_pivot_s5` | yes | **void** |
 | 272 | `close_above_forming_pivot_s5_band` | — | **void** |
 | 273 | `close_below_forming_pivot_s5_band` | — | **void** |
 | 274 | `wide_cpr_day` | — | live |
@@ -617,45 +617,54 @@ from *has been above since this morning*, and a grep for `cross` across the whol
 returned zero. Even the break family is a state — `bos_up` fires on every bar above the
 swing high, not only the first.
 
-A crossing is two states one bar apart, and both states were already here, so these are
-**derived** rather than measured: `crossed_up_X` is `close_above_X` clear on the previous
-bar of this session and set on this one. No indicator module computes anything new.
+A crossing is a change between two states that were already here, so these are
+**derived** rather than measured: `crossed_up_X` is `close_above_X` set on this bar when
+the last definite side earlier in this session was below. A bar on neither side (on the
+level, or inside a band) records nothing and does not erase the remembered side (CX-01,
+the D-0244 amendment; this table said "clear on the previous bar" until D-3405). No
+indicator module computes anything new.
 
-**Seventeen levels, not thirty-five.** Sixteen `close_above_` names are `void` by D-0080,
-| 280 | `crossed_up_ema20` | `close_above_ema20` was clear on the previous bar and is set now |
-| 281 | `crossed_down_ema20` | `close_below_ema20` was clear on the previous bar and is set now |
-| 282 | `crossed_up_ema200` | `close_above_ema200` was clear on the previous bar and is set now |
-| 283 | `crossed_down_ema200` | `close_below_ema200` was clear on the previous bar and is set now |
-| 284 | `crossed_up_pdh` | `close_above_pdh` was clear on the previous bar and is set now |
-| 285 | `crossed_down_pdh` | `close_below_pdh` was clear on the previous bar and is set now |
-| 286 | `crossed_up_pdl` | `close_above_pdl` was clear on the previous bar and is set now |
-| 287 | `crossed_down_pdl` | `close_below_pdl` was clear on the previous bar and is set now |
-| 288 | `crossed_up_supertrend` | `close_above_supertrend` was clear on the previous bar and is set now |
-| 289 | `crossed_down_supertrend` | `close_below_supertrend` was clear on the previous bar and is set now |
-| 290 | `crossed_up_gap_mid` | `close_above_gap_mid` was clear on the previous bar and is set now |
-| 291 | `crossed_down_gap_mid` | `close_below_gap_mid` was clear on the previous bar and is set now |
-| 292 | `crossed_up_pivot_r1_band` | `close_above_pivot_r1_band` was clear on the previous bar and is set now |
-| 293 | `crossed_down_pivot_r1_band` | `close_below_pivot_r1_band` was clear on the previous bar and is set now |
-| 294 | `crossed_up_pivot_r2_band` | `close_above_pivot_r2_band` was clear on the previous bar and is set now |
-| 295 | `crossed_down_pivot_r2_band` | `close_below_pivot_r2_band` was clear on the previous bar and is set now |
-| 296 | `crossed_up_pivot_r3_band` | `close_above_pivot_r3_band` was clear on the previous bar and is set now |
-| 297 | `crossed_down_pivot_r3_band` | `close_below_pivot_r3_band` was clear on the previous bar and is set now |
-| 298 | `crossed_up_pivot_s1_band` | `close_above_pivot_s1_band` was clear on the previous bar and is set now |
-| 299 | `crossed_down_pivot_s1_band` | `close_below_pivot_s1_band` was clear on the previous bar and is set now |
-| 300 | `crossed_up_pivot_s2_band` | `close_above_pivot_s2_band` was clear on the previous bar and is set now |
-| 301 | `crossed_down_pivot_s2_band` | `close_below_pivot_s2_band` was clear on the previous bar and is set now |
-| 302 | `crossed_up_pivot_s3_band` | `close_above_pivot_s3_band` was clear on the previous bar and is set now |
-| 303 | `crossed_down_pivot_s3_band` | `close_below_pivot_s3_band` was clear on the previous bar and is set now |
-| 304 | `crossed_up_pivot_r4_band` | `close_above_pivot_r4_band` was clear on the previous bar and is set now |
-| 305 | `crossed_down_pivot_r4_band` | `close_below_pivot_r4_band` was clear on the previous bar and is set now |
-| 306 | `crossed_up_pivot_s4_band` | `close_above_pivot_s4_band` was clear on the previous bar and is set now |
-| 307 | `crossed_down_pivot_s4_band` | `close_below_pivot_s4_band` was clear on the previous bar and is set now |
-| 308 | `crossed_up_pivot_r5_band` | `close_above_pivot_r5_band` was clear on the previous bar and is set now |
-| 309 | `crossed_down_pivot_r5_band` | `close_below_pivot_r5_band` was clear on the previous bar and is set now |
-| 310 | `crossed_up_pivot_s5_band` | `close_above_pivot_s5_band` was clear on the previous bar and is set now |
-| 311 | `crossed_down_pivot_s5_band` | `close_below_pivot_s5_band` was clear on the previous bar and is set now |
-| 312 | `crossed_up_day_open` | `close_above_day_open` was clear on the previous bar and is set now |
-| 313 | `crossed_down_day_open` | `close_below_day_open` was clear on the previous bar and is set now |
+**Seventeen levels, not thirty-five.** Thirteen `close_above_` names are `void` by D-0080
+(the forming-day pivot levels) and five more are one-sided VWAP rows — 52, 143 and the
+band-1, band-2 and band-3 uppers 146, 148 and 193 — so seventeen two-sided levels remain
+(D-3406; this said sixteen and stopped mid-sentence).
+
+| Bit | Name | Fires when |
+|---|---|---|
+| 280 | `crossed_up_ema20` | `close_above_ema20` is set now, and the last definite side earlier in this session was below |
+| 281 | `crossed_down_ema20` | `close_below_ema20` is set now, and the last definite side earlier in this session was above |
+| 282 | `crossed_up_ema200` | `close_above_ema200` is set now, and the last definite side earlier in this session was below |
+| 283 | `crossed_down_ema200` | `close_below_ema200` is set now, and the last definite side earlier in this session was above |
+| 284 | `crossed_up_pdh` | `close_above_pdh` is set now, and the last definite side earlier in this session was below |
+| 285 | `crossed_down_pdh` | `close_below_pdh` is set now, and the last definite side earlier in this session was above |
+| 286 | `crossed_up_pdl` | `close_above_pdl` is set now, and the last definite side earlier in this session was below |
+| 287 | `crossed_down_pdl` | `close_below_pdl` is set now, and the last definite side earlier in this session was above |
+| 288 | `crossed_up_supertrend` | `close_above_supertrend` is set now, and the last definite side earlier in this session was below |
+| 289 | `crossed_down_supertrend` | `close_below_supertrend` is set now, and the last definite side earlier in this session was above |
+| 290 | `crossed_up_gap_mid` | `close_above_gap_mid` is set now, and the last definite side earlier in this session was below |
+| 291 | `crossed_down_gap_mid` | `close_below_gap_mid` is set now, and the last definite side earlier in this session was above |
+| 292 | `crossed_up_pivot_r1_band` | `close_above_pivot_r1_band` is set now, and the last definite side earlier in this session was below |
+| 293 | `crossed_down_pivot_r1_band` | `close_below_pivot_r1_band` is set now, and the last definite side earlier in this session was above |
+| 294 | `crossed_up_pivot_r2_band` | `close_above_pivot_r2_band` is set now, and the last definite side earlier in this session was below |
+| 295 | `crossed_down_pivot_r2_band` | `close_below_pivot_r2_band` is set now, and the last definite side earlier in this session was above |
+| 296 | `crossed_up_pivot_r3_band` | `close_above_pivot_r3_band` is set now, and the last definite side earlier in this session was below |
+| 297 | `crossed_down_pivot_r3_band` | `close_below_pivot_r3_band` is set now, and the last definite side earlier in this session was above |
+| 298 | `crossed_up_pivot_s1_band` | `close_above_pivot_s1_band` is set now, and the last definite side earlier in this session was below |
+| 299 | `crossed_down_pivot_s1_band` | `close_below_pivot_s1_band` is set now, and the last definite side earlier in this session was above |
+| 300 | `crossed_up_pivot_s2_band` | `close_above_pivot_s2_band` is set now, and the last definite side earlier in this session was below |
+| 301 | `crossed_down_pivot_s2_band` | `close_below_pivot_s2_band` is set now, and the last definite side earlier in this session was above |
+| 302 | `crossed_up_pivot_s3_band` | `close_above_pivot_s3_band` is set now, and the last definite side earlier in this session was below |
+| 303 | `crossed_down_pivot_s3_band` | `close_below_pivot_s3_band` is set now, and the last definite side earlier in this session was above |
+| 304 | `crossed_up_pivot_r4_band` | `close_above_pivot_r4_band` is set now, and the last definite side earlier in this session was below |
+| 305 | `crossed_down_pivot_r4_band` | `close_below_pivot_r4_band` is set now, and the last definite side earlier in this session was above |
+| 306 | `crossed_up_pivot_s4_band` | `close_above_pivot_s4_band` is set now, and the last definite side earlier in this session was below |
+| 307 | `crossed_down_pivot_s4_band` | `close_below_pivot_s4_band` is set now, and the last definite side earlier in this session was above |
+| 308 | `crossed_up_pivot_r5_band` | `close_above_pivot_r5_band` is set now, and the last definite side earlier in this session was below |
+| 309 | `crossed_down_pivot_r5_band` | `close_below_pivot_r5_band` is set now, and the last definite side earlier in this session was above |
+| 310 | `crossed_up_pivot_s5_band` | `close_above_pivot_s5_band` is set now, and the last definite side earlier in this session was below |
+| 311 | `crossed_down_pivot_s5_band` | `close_below_pivot_s5_band` is set now, and the last definite side earlier in this session was above |
+| 312 | `crossed_up_day_open` | `close_above_day_open` is set now, and the last definite side earlier in this session was below |
+| 313 | `crossed_down_day_open` | `close_below_day_open` is set now, and the last definite side earlier in this session was above |
 
 ### Which test of this level this is — bits 314–364, D-0246
 

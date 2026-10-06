@@ -219,18 +219,20 @@ fn set_side(mask: ConditionMask, value: i64, level: i64, above: u16, below: u16)
 ///
 /// # What the pull keeps, and why that is not what protects the anchor
 ///
-/// `pull::fetch::land` asks `session::Window::verdict` for each minute bar, and `verdict`
-/// reads the hours from the listing's venue table (`Venue::hours_on`), not from one
-/// hardcoded close. A bar outside those hours is counted in the receipt and dropped. For
-/// the index and cash venues on every date in this list the table says 09:15–15:30, so an
-/// **evening** Muhurat minute (18:00 or later) is dropped and an **afternoon** one is kept.
+/// `pull::fetch::land` asks `session::Window::verdict` for each minute bar, and since
+/// D-2670 `verdict` asks `pull::calendar::kind_of` first. On a calendar-irregular day it
+/// keeps exactly that day's windows (the 2025-10-21 afternoon hour, the two drill
+/// Saturdays, the outage reopening). On the five Muhurats whose length was never measured
+/// it refuses EVERY minute bar by name, `SessionLengthUnmeasured`, morning or evening
+/// (D-3404).
 ///
 /// That does NOT mean five of the six Muhurat days are absent from every store, and this
 /// header used to say it did. What lands is whatever the vendor sent inside the venue's
 /// hours. Cloud audit GAP12-10 reported that one vendor's (dhan) store holds **43 bars on
 /// 2021-11-04, 14:47–15:29 IST** — the audit's measurement, not one this repository took —
-/// all inside the window, so they are kept. 2025-10-21's 60 bars, 13:45–14:45, land the
-/// same way. On any such day the pull has no opinion about Muhurat: this list is the only
+/// all inside the old window, and they landed before D-2670 made the pull refuse them. A
+/// store that already holds them keeps them: it is append-only. 2025-10-21's 60 bars,
+/// 13:45–14:45, are the calendar's own hour and are kept. On either day this list is the only
 /// thing that keeps that day's OHLC out of the previous-day anchor, `Prev5` and the
 /// previous-session edge. `a_muhurat_session_inside_the_pull_window_does_not_become_yesterday`
 /// pins it for the 43-bar shape. Afternoon Muhurats are now the live pattern, which makes
@@ -243,9 +245,9 @@ fn set_side(mask: ConditionMask, value: i64, level: i64, above: u16, below: u16)
 /// and the mechanism is the only thing the list is about.
 pub const CHARTER_NON_REGULAR_IST_DAYS: [i64; 9] = [
     18_580, // 2020-11-14, 18:15–19:15 IST
-    // 2021-11-04: the ceremony itself, 18:15–19:15, is outside the venue's hours and the
-    // pull drops it. Cloud audit GAP12-10 reported 43 bars dated this day in one vendor's
-    // (dhan) store, 14:47–15:29 IST, inside the hours and therefore kept, so this day IS on
+    // 2021-11-04: every minute bar of this day is refused by the pull since D-2670
+    // (`SessionLengthUnmeasured`). Cloud audit GAP12-10 reported 43 bars dated this day in
+    // one vendor's (dhan) store, 14:47–15:29 IST, landed before that, so this day IS on
     // disk there. The audit measured that shape; this repository did not.
     18_935, // 2021-11-04, 18:15–19:15; 43 in-hours bars reported on disk (above)
     19_289, // 2022-10-24, 18:15–19:15
@@ -257,8 +259,8 @@ pub const CHARTER_NON_REGULAR_IST_DAYS: [i64; 9] = [
     // NSE runs a live-trading DR drill on a Saturday: a short session out of the
     // secondary site, to prove the site works. It is not a market day in any
     // sense the previous-day anchor means, and both land squarely inside the
-    // pull's 09:15-15:30 window, so the pull keeps every one of their bars, as it
-    // keeps any in-hours bar of a Muhurat day. MEASURED in the operator's own store:
+    // pull's 09:15-15:30 window, and the pull keeps exactly their two calendar
+    // windows (D-2670). MEASURED in the operator's own store:
     // 105 bars each, 09:15-09:59 then 11:30-12:29, with a 90-minute hole.
     //
     // WHAT THEY COST WHILE THEY WERE ABSENT FROM THIS LIST, measured by folding
@@ -1095,9 +1097,9 @@ impl Evaluator {
     ///
     /// # What a crossing is here, exactly
     ///
-    /// `crossed_up_X` is set when `close_above_X` was CLEAR on the previous bar
-    /// of this session and is SET on this one. `crossed_down_X` is the same for
-    /// `close_below_X`. Nothing else qualifies: a level that was already above
+    /// `crossed_up_X` is set when `close_above_X` is SET on this bar and the last
+    /// DEFINITE side of `X` earlier in this session was below (CX-01). `crossed_down_X`
+    /// is the same for `close_below_X`. Nothing else qualifies: a level that was already above
     /// and stays above is not a crossing, and neither is a level that has been
     /// above since the open.
     ///
@@ -2884,9 +2886,10 @@ mod tests {
     /// because the pull drops everything outside 09:15–15:30, so the list only mattered
     /// for 2025-10-21. The audit reported a vendor store holding **43 bars of the
     /// 2021-11-04 Muhurat day, 14:47–15:29 IST** — that is the audit's measurement, not
-    /// one taken here — and every one of those minutes is inside the venue's hours, so
-    /// `pull::fetch::land` keeps them. The list, not the pull, is what keeps that day out
-    /// of the anchors.
+    /// one taken here — and every one of those minutes is inside the venue's hours. They
+    /// landed before D-2670, which now refuses them (`SessionLengthUnmeasured`); a store
+    /// that holds them keeps them. The list, not the pull, is what keeps that day out of
+    /// the anchors.
     ///
     /// The fixture is that on-disk shape: a regular session, the 43-bar stub on day
     /// `18_935`, then a regular session. The day after must report the same previous-day
@@ -3957,5 +3960,47 @@ mod tests {
             "the default calendar does not recognise 2025-10-21, the Muhurat session that lies \
              wholly inside the pull's window"
         );
+    }
+}
+
+// XPERM-04 (D-3404): the documents that describe what the pull keeps on a Muhurat day
+// say what `pull::session::Window::verdict` does since D-2670, not what it did before.
+#[cfg(test)]
+mod muhurat_claims {
+    /// The charter and this module's day-list header both said the pull KEEPS an
+    /// in-hours minute of a Muhurat day. Since D-2670 every minute bar of the five
+    /// unmeasured-length Muhurats is refused by name (`SessionLengthUnmeasured`),
+    /// which `pull::session::tests::an_unmeasured_muhurat_minute_is_refused_by_name_not_dropped`
+    /// proves. Each stale sentence is refused here, and each document must name the
+    /// refusal.
+    #[test]
+    fn no_document_says_the_pull_keeps_an_unmeasured_muhurat_minute() {
+        let charter = include_str!("../../../docs/00-charter.md");
+        let evaluator = include_str!("evaluator.rs");
+        for (name, text) in [("docs/00-charter.md", charter), ("evaluator.rs", evaluator)] {
+            // Comment markers dropped, so a sentence that wraps across `///` or `//`
+            // lines is still one sentence.
+            let flat = text
+                .split_whitespace()
+                .filter(|word| !matches!(*word, "//" | "///" | "//!"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            // Each sentence is split across `concat!` so this test's own source, which
+            // is part of `evaluator.rs`, never contains the sentence it refuses.
+            for stale in [
+                concat!("keeps any in-hours bar ", "of a Muhurat day"),
+                concat!("so they ", "are kept"),
+                concat!("an **afternoon** one ", "is kept"),
+                concat!("inside the hours ", "and therefore kept"),
+                concat!("`pull::fetch::land` ", "keeps them"),
+                concat!("the pull has no opinion ", "about Muhurat"),
+            ] {
+                assert!(!flat.contains(stale), "{name} still says: {stale}");
+            }
+            assert!(
+                flat.contains("SessionLengthUnmeasured"),
+                "{name} must name the refusal D-2670 made"
+            );
+        }
     }
 }

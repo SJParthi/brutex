@@ -64104,3 +64104,235 @@ timeout is never credited as a catch.
 so every iteration advances `fold`, and the loop ends no later than `windows.get(fold)` returning `None`. That bounds
 it by the window count, and the walk stays amortised O(1) per bar. The arithmetic is unchanged, because `fold` never
 reaches `usize::MAX`. `fold` is typed `0_usize` so the call resolves.
+### D-3400 — Withdrawn: the EMA side fix duplicated ind1-2 — 2026-10-06
+
+**What happened.** The permutations lens (L3) found the following: the EMA was
+compared with the close on its paisa floor, so "below" lost one price that
+"above" kept (bits 0–5). It pushed a fix in `f9ab789` under this number, with
+invariant XPERM-01. The defect was already tracked as **ind1-2**
+(`resume/numeric-audit/pass1/ind1.md`), which is owned by the numeric-edges
+helper and fixed on `wip/zero/numeric-edges` at `de48df5`. The lens's dedupe
+read the board row `ind1-2 fixing` and not the audit file that names it.
+
+**Decided.** The EMA code, its two tests and XPERM-01 are withdrawn from
+`attack/permutations`. The owner's fix stands. This number stays, so no
+citation silently changes meaning.
+
+### D-3401 — Two lens-L3 candidates refuted, and the SuperTrend warm wording corrected — 2026-10-06
+
+**VWAP below-bias, refuted.** Bits 53/144 cannot fire for a close equal to the
+floor of a fractional VWAP. `docs/26-vwap-mapping.md:19-20` defines the VWAP as
+`floor(sum((h+l+c)·v) / (3·sum(v)))`, and its table compares "Close < mean"
+against that value. The code matches the governing document. Changing the
+definition to the exact rational mean is an owner call, recorded as UNVERIFIED
+under "needs the owner" in the lens result.
+
+**Daily pivot, BC and TC floored, refuted.** `daily.rs:30-40` defines the
+levels as floored once per session ("Integer division, once, at the level
+boundary"). `the_ceiling_is_exact_arithmetic_and_rounding_can_pass_it` pins that
+policy. Exact levels would be an owner call, so this is UNVERIFIED.
+
+**Gap midpoint 66/67, already tracked.** It is ind1-2 and is fixed on
+`wip/zero/numeric-edges` (`de48df5`). Not touched here.
+
+**SuperTrend seed carried past warm, refuted as a defect.** At `warm()` the
+ratchet can still hold bar 0's stop. The candidate's example: bar 0 TR 2 gives
+stop 994; nine bars of TR 200 never pass it, and a close of 990 sets 65.
+Seeding at the first candle is the locked choice (D-1542, `trend.rs` module
+doc), and no recorded source defines another seed. Only the wording was
+wrong: `SuperTrend::warm`'s doc and the 64–65 comment implied that a warm
+level is no longer the first candle's. Both now say the gate is on the ATR and
+that the level may still be the seed.
+
+### D-3402 — Candlestick midpoints are compared doubled, never rounded — 2026-10-06
+
+**What was observed.** `pattern::Shape::mid` was `open.midpoint(close)`, which
+rounds a half-paisa midpoint down for positive prices. "Close above the
+midpoint" (161, 163) was therefore exact, but "close below" (162, 164, 212)
+refused a close equal to the floor. The prior body 100→103 has midpoint 101.5,
+and a dark cloud closing at 101 did not fire. The rickshaw man's centredness
+(226) floored both midpoints and accepted a bar 15% off centre (106/110/100/107)
+while refusing its mirror. The module doc says "every ratio is
+cross-multiplied … no division", and no document defines a floored midpoint.
+
+**Decided.** `Shape::mid2` returns `open + close`. Every clause compares
+`2 · close` with it, and 226 tests `|(o+c) − (h+l)| · 1000 <= range · 200`.
+The fields are `i128` widened from `i64`, so no sum can overflow. Proof:
+XPERM-02. All three tests failed before the fix, e.g. `prior 100->103, bar
+104->101` and `101 103 100 101`.
+
+**Rejected.** `(a + b + 1) / 2` (round half up). It moves the bias to the
+bullish twins.
+
+### D-3403 — The SuperTrend stop is held exactly, not built from three floors — 2026-10-06
+
+**What was observed.** The permutations lens (L3) found, in round 2, that
+`SuperTrend::fold` built the stop from three floored values. It took
+`i128::midpoint(high, low)`, then `Atr::value()` (the six-digit Wilder ATR
+floored to a whole paisa), then a band floored again by `div_euclid(1000)`.
+Bits 64/65 then compared the close with that integer. The error is not limited
+to a close equal to the level: it reaches `mult / 1000` paisa plus a half, and
+it can put the close on the WRONG side. Take CLASSICAL thresholds:
+- bars 0–9 are H101 L100 C101;
+- bar 10 is H97 L96 C96, which flips the trend down with an exact Wilder ATR of
+  1.4, so the stop is 96.5 + 4.2 = 100.7;
+- floored, the stop was 96 + 3 = 99, and a close of 100 set 64 (above).
+No document defines a floored SuperTrend. The module doc holds the ATR "in the
+same scaled form" as the EMA, and D-1542 locks only the seed.
+
+**Decided.** The stop is held as an `i128` numerator over `STOP_UNIT =
+2 · SCALE · 1000`, so `(h + l) / 2` and `atr · mult / 1000` are exact integers.
+`SuperTrend::side_of` compares `close · STOP_UNIT` with it, and 64/65 use that.
+`stop()` still reports the paisa floor. A held stop whose floor does not fit
+`i64` is absent, the policy C4-INDICATORS-01 pins. `Atr::value()` stays the
+availability gate (F-87AB98 unchanged). `Evaluator` grew from 1,776 to 1,792
+bytes; the 1,808 ceiling did not move (docs/10-shared-core.md). Proof:
+XPERM-03. Both tests failed before the fix: `100 < 100.7:
+ConditionMask([0, 1, 0, 0, 0, 0])` and `minute 10: close 10003 against
+20025000000000/2000000000`. The all-position evaluator digest is re-taken; the
+gap count, 4,092, did not move.
+
+**Rejected.** Rounding the ATR to nearest. That still puts a close on the wrong
+side, multiplied by the band multiple.
+
+### D-3404 — The charter and the evaluator say what the pull does on a Muhurat day — 2026-10-06
+
+**What was observed.** The permutations lens (L3) ran its round-3 special-session
+pass. `docs/00-charter.md` said the pull "keeps any in-hours bar of a Muhurat
+day". `indicators::evaluator`'s day-list header said "an **afternoon** one is
+kept", and that the 43 GAP12-10 bars of 2021-11-04 are "all inside the window,
+so they are kept". Its row comment, its drill comment and a test doc said the
+same. Since D-2670, `pull::session::Window::verdict` asks the calendar first and
+refuses every minute bar of the five unmeasured-length Muhurats by name
+(`SessionLengthUnmeasured`). D-2670 corrected `docs/06-limits.md` §110 and the
+outage row, and missed these sentences. Nothing tracked them.
+
+**Decided.** Each sentence now says what the code does:
+- The pull refuses those minutes.
+- Bars that landed before D-2670 stay, because the store is append-only.
+- The 2025-10-21 hour and the drill Saturdays keep exactly their calendar
+  windows.
+
+The `gap.rs` reason for `div_euclid` was also false, in the same round. It said
+truncation "would round a level on the wrong side of the anchor"; it would not.
+It now says that the floor is the IF-23/D-1861 convention and that the up and
+down ladders are therefore not mirror images by under a paisa. Proof: XPERM-04,
+which failed before the edit with `docs/00-charter.md still says: keeps any
+in-hours bar of a Muhurat day`.
+
+**Refuted in the same round, owner calls.**
+- The gap ladder's floor breaks price-reflection symmetry. It is documented and
+  pinned (IF-23, D-1861, `fib_rung_rounding.rs`). Changing it supersedes those,
+  so it is UNVERIFIED.
+- The SuperTrend seed breaks a close-on-midpoint tie toward Up. Some tie rule is
+  needed and none is sourced, so it is UNVERIFIED.
+
+### D-3405 — The bit table defines a crossing by the last definite side, as CX-01 does — 2026-10-06
+
+**What was observed.** The permutations lens (L3) ran its round-4 derived-bits
+pass. `docs/03-vocabulary.md` defined all 34 crossing rows (bits 280–313), and
+the prose above them, by the PREVIOUS bar: "`close_above_X` was clear on the
+previous bar and is set now". `vocab::table`'s `LevelCrossing` and `CROSSINGS`
+docs said the same, and so did `Evaluator::crossings_of`'s own doc. The D-0244
+amendment and CX-01 lock a different rule: a crossing is set when this bar's
+side differs from the LAST DEFINITE side earlier in the session, and a bar on
+neither side records nothing. `crossings_of` implements that rule, and
+`a_touch_is_known_false_but_cannot_erase_the_side_or_count_across_it` pins it.
+They give different answers on many bars. Take closes 1000, 1010, 1000, 1010
+against the session open (276/277): the code reports no crossing, while the
+table's rule reports two. D-1448 corrected CX-01's wording and missed the table.
+The bit table is the document with authority over what a bit means, so a reader
+decoding a mask got the rejected rule.
+
+**Decided.** Each row now reads "`close_above_X` is set now, and the last
+definite side earlier in this session was below", or the mirror for down. The
+prose and the three code docs say the same. Proof: XPERM-05, which failed before
+the edit with `row 280 still says: ... was clear on the previous bar and is set
+now`. The ordinal rows (314–364) inherit the definition and were already
+correct.
+
+### D-3406 — The vocabulary's stated counts and kinds are the table's, and a test computes them — 2026-10-06
+
+**What was observed.** The permutations lens (L3) ran its round-4 exhaustive
+diff of `docs/03-vocabulary.md` against `vocab::table::TABLE`. All 370 names,
+statuses and live kinds agree, and every family's `known` covers exactly its own
+positions. Five statements did not agree:
+- The 13 void `near_forming_pivot_*` rows (235–271) showed `—` under "Needs a
+  tolerance". The table declares them `Kind::Near`, and §8's own "97 allocated"
+  counts them.
+- CX-04 and the crossings section said "Sixteen `close_above_` names are `void`
+  … and two more are the VWAP pair". The table has thirteen void ones, and five
+  one-sided VWAP rows (52, 143, 146, 148, 193). The section's sentence also
+  stopped mid-way, and the crossings table under it had no header row.
+- CX-05 said the assertion pins "the 70 remaining positions". It pins 14, and
+  the cited test's own comment said both nineteen and fourteen.
+- `table.rs`'s "What is here" table stopped at 273, leaving 96 positions out.
+
+**Decided.** Each statement now says what the table holds. XPERM-06 computes
+every one of these numbers from `TABLE` rather than restating them, so the next
+append fails the test instead of leaving the documents stale. It failed before
+the edit with `row 235 near_forming_pivot_pivot says — for a Near position`.
+
+### D-3407 — One move is not a distribution under the asymmetry lens either — 2026-10-06
+
+**What was observed.** The permutations lens (L3) found, in round 4, that
+`Edge::worst_reward_risk_bp` (D-0593) had no guard on `n`. `Edge::payoff_bp`
+answers zero below two observations ("One move is not a distribution"). A
+single win, or a single short move, scored `i64::MAX` here, as a sample that
+never lost. That contradicts the function's own doc, which says it "is ALWAYS
+at or below" `payoff_bp`. `rank::ByAsymmetry` orders on this value first, so
+under `elite --lens asymmetry` a one-observation mask outranked every real
+never-lost sample with a smaller largest move. With the default win-rate floor
+a mask cannot reach n = 1. With `BRUTEX_MIN_WIN_RATE_BP=0`, a floor the code
+explicitly allows, the support floor is one trade and n = 1 masks are ranked.
+
+**Decided.** Below two observations the function returns zero, the guard
+`payoff_bp` already has. Proof: XPERM-07, an exhaustive property over 2,800
+small samples that failed before the fix with `[-30]: worst
+9223372036854775807 above payoff 0`.
+
+**Refuted in the same round.** `OverlapWindow` assumes a forward window spans
+exactly `H` bars, but a downward step of the prefix-median cadence can put a
+Signal column's exit at `i + 2H`. The window then drops a pair that overlaps.
+Every shipped path reprojects onto the 60-second Fill cadence, where the exit
+is at most `i + H`. Only `Sweeper::run_ranked` (test callers) and the public
+`edge` reach a Signal column. It is a hardening candidate for its owner, not a
+shipped defect: clamp or assert `exit <= source + H`.
+
+### D-3408 — `trades_needed_for` documents the values it returns, and that it is not a threshold — 2026-10-06
+
+**What was observed.** The permutations lens (L3) ran a round-5 pass over the
+`runner` numeric gates. `trades_needed_for`'s doc said "Measured on the shipped
+bound, 80% observed against a coin-flip floor: eleven trades. Against an 80%
+floor: about a hundred and twenty." It also said the Wilson bound "rises with
+`n` at a fixed rate, so there is a smallest `n`". The shipped function, run on
+this branch, returns:
+
+| Rate, assurance | Returned |
+|---|---|
+| (8_000, 5_000) | 4 |
+| (8_000, 8_000) | 5,000 (the cap) |
+| (8_000, 6_500) | 29 |
+| (6_000, 5_000) | 82 |
+
+`Cell::at_rate` rounds wins up, so 80% of four trades is 4/4, which clears
+5,000 bp, and 80% of five is 4/5, which does not. So the result is the fewest
+trades at which a record clears, not a threshold. For (6_000, 5_000), 83 fails
+again. An assurance at or above the rate is never reached; the repo says so
+elsewhere ("approaches the observed rate FROM BELOW and never arrives"). The
+quoted 11 is the unrounded proportion's bound. Under §3 rule 6 the doc claimed
+a measurement this function does not reproduce.
+
+**Decided.** This is a documentation fix only. The rounding rule ("a rate is a
+floor") is unchanged, because changing it moves the descent's support floors,
+and that is an owner call. The doc now states the real values, the ceiling
+rounding and the non-threshold shape. XPERM-08 pins the values and the 4/4
+versus 4/5 case, and refuses the stale sentences. It failed before the edit
+with `grid.rs still says: coin-flip floor: eleven trades`. The three source-text
+tests this lens added (XPERM-04, -05, -08) now drop comment markers before
+matching, so a sentence that wraps across `///` lines is still caught.
+
+**Needs the owner.** `cli`'s `statistical_floor_ppm` doc repeats "no
+combination passes however good it is" for records below the floor. That holds
+only for a record at exactly the sizing rate; a better record can clear sooner.
+Whether that floor should change is UNVERIFIED and is not touched here.

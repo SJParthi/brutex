@@ -434,3 +434,150 @@ fn no_weekday_comment_says_nse_never_trades_on_a_weekend() {
         "the charter's count stays"
     );
 }
+
+/// XPERM-05 (D-3405). CX-01 and the D-0244 amendment lock the crossing rule as "this
+/// bar's side differs from the last DEFINITE side earlier in the session", and
+/// `a_touch_is_known_false_but_cannot_erase_the_side_or_count_across_it` pins it. The
+/// bit table — the document with authority over what a bit means — still defined every
+/// crossing row by the previous bar, so a reader decoding a mask got the rule that was
+/// rejected. Every `CROSSINGS` row, both edges, and the `LevelCrossing` doc are held to
+/// the locked rule here.
+#[test]
+fn every_crossing_row_states_the_last_definite_side_rule() {
+    let doc = read("docs/03-vocabulary.md");
+    let stale = concat!("on the previous", " bar");
+    let mut rows = 0_u32;
+    for crossing in vocab::table::CROSSINGS {
+        for position in [crossing.up, crossing.down] {
+            let prefix = format!("| {position} |");
+            let row = doc
+                .lines()
+                .find(|line| line.starts_with(&prefix))
+                .unwrap_or_else(|| panic!("03-vocabulary.md has no row {position}"));
+            assert!(!row.contains(stale), "row {position} still says: {row}");
+            assert!(
+                row.contains("last definite side"),
+                "row {position} must state the CX-01 rule: {row}"
+            );
+            rows += 1;
+        }
+    }
+    assert_eq!(rows, 34, "seventeen levels, two edges each");
+    for source in [
+        "crates/vocab/src/table.rs",
+        "crates/indicators/src/evaluator.rs",
+    ] {
+        let flat = read(source)
+            .split_whitespace()
+            .filter(|word| !matches!(*word, "//" | "///" | "//!"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        for stale in [
+            concat!("clear on the previous", " bar"),
+            concat!("CLEAR on the previous", " bar"),
+            concat!("clear on the", " previous bar and is set"),
+        ] {
+            assert!(!flat.contains(stale), "{source} still documents: {stale}");
+        }
+    }
+}
+
+/// XPERM-06 (D-3406). Every count and kind the documents state about the table is the
+/// table's own, computed here rather than restated: a number written down beside a
+/// table that is appended to is stale the day after the append.
+#[test]
+fn every_count_and_kind_the_documents_state_is_the_tables() {
+    use vocab::table::{BitStatus, COUNT, Kind, TABLE};
+    let doc = read("docs/03-vocabulary.md");
+
+    // (1) The "Needs a tolerance" column says `yes` exactly for a `Near` row, void
+    // and retired rows included — the 13 void `near_forming_pivot_*` rows said `—`.
+    let mut kinds = 0_u32;
+    for line in doc.lines() {
+        let cells: Vec<&str> = line.split('|').map(str::trim).collect();
+        // `| n | name | tolerance | status |` splits into six cells.
+        let [_, index, _, tolerance, _, _] = cells.as_slice() else {
+            continue;
+        };
+        let (Ok(index), true) = (index.parse::<usize>(), ["yes", "—"].contains(tolerance)) else {
+            continue;
+        };
+        let row = TABLE.get(index).expect("a documented row is in the table");
+        assert_eq!(
+            *tolerance == "yes",
+            row.kind == Kind::Near,
+            "row {index} `{}` says `{tolerance}` for a {:?} position",
+            row.name,
+            row.kind
+        );
+        kinds += 1;
+    }
+    assert!(kinds >= 200, "the four-column rows were found: {kinds}");
+
+    // (2) How many `close_above_` names D-0080 voided — CX-04 and the crossings
+    // section said sixteen.
+    let void_above = TABLE
+        .iter()
+        .filter(|row| {
+            row.name.starts_with("close_above_") && matches!(row.status, BitStatus::Void { .. })
+        })
+        .count();
+    assert_eq!(void_above, 13, "re-word CX-04 and §7 if this moves");
+    let invariants = read("docs/04-invariants.md");
+    for (name, text) in [
+        ("03-vocabulary.md", &doc),
+        ("04-invariants.md", &invariants),
+    ] {
+        assert!(
+            !text.contains(concat!("Sixteen `close_above_` names", " are `void`")),
+            "{name} still says sixteen"
+        );
+        assert!(
+            text.contains("Thirteen `close_above_` names are `void`"),
+            "{name} must state the table's thirteen"
+        );
+    }
+    // The crossings table has its header row: the line before bit 280 is a separator.
+    let lines: Vec<&str> = doc.lines().collect();
+    let at = lines
+        .iter()
+        .position(|line| line.starts_with("| 280 |"))
+        .expect("bit 280 is documented");
+    assert!(
+        lines
+            .get(at.wrapping_sub(1))
+            .is_some_and(|line| line.starts_with("|---")),
+        "the crossings table has no header: {:?}",
+        lines.get(at.wrapping_sub(1))
+    );
+
+    // (3) CX-05's remaining positions, and the lib test's own comment.
+    let remaining = vocab::ConditionMask::BITS as usize - COUNT;
+    assert!(
+        invariants.contains(&format!("the {remaining} remaining positions")),
+        "CX-05 must state {remaining} remaining"
+    );
+    let lib = read("crates/vocab/src/lib.rs");
+    assert!(
+        !lib.contains(concat!("NINETEEN", " LEFT")),
+        "lib.rs still says nineteen"
+    );
+
+    // (4) The module's "What is here" table tiles 0..COUNT with no gap.
+    let table = read("crates/vocab/src/table.rs");
+    let mut next = 0_usize;
+    for line in table.lines().filter(|l| l.starts_with("//! | ")) {
+        let cells: Vec<&str> = line.split('|').map(str::trim).collect();
+        let Some((from, to)) = cells.get(1).and_then(|r| r.split_once('–')) else {
+            continue;
+        };
+        let (Ok(from), Ok(to)) = (from.parse::<usize>(), to.parse::<usize>()) else {
+            continue;
+        };
+        let count: usize = cells.get(2).and_then(|c| c.parse().ok()).expect("a count");
+        assert_eq!(from, next, "the group table skips to {from} from {next}");
+        assert_eq!(count, to + 1 - from, "{line}");
+        next = to + 1;
+    }
+    assert_eq!(next, COUNT, "the group table stops at {next} of {COUNT}");
+}

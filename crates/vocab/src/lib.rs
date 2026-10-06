@@ -109,7 +109,7 @@ mod tests {
         // table 280 -> 314 and its ordinals took it 314 -> 365, both against a
         // 384-bit mask, so neither widened and the version holds.
         //
-        // NINETEEN LEFT. The next family that needs more than that cannot be an
+        // Nineteen were left at 365; FOURTEEN now (below). The next family that needs more than that cannot be an
         // append: it widens `ConditionMask::WORDS`, which IS a bump, and re-keys
         // every run ever recorded. That is why this assertion pins all three
         // numbers together rather than only the version -- the version alone

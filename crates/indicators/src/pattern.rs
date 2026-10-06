@@ -177,11 +177,17 @@ impl Shape {
             self.close
         }
     }
-    /// The body's midpoint. `midpoint` and not `(a + b) / 2`: the sum of two
-    /// prices near the edge of the type overflows, and clippy is right that the
-    /// hand-written form is a latent bug even where these values cannot reach it.
-    const fn mid(&self) -> i128 {
-        self.open.midpoint(self.close)
+    /// TWICE the body's midpoint, `open + close`, compared with twice a price.
+    ///
+    /// It was `open.midpoint(close)`, which rounds a half-paisa midpoint DOWN: "close
+    /// below the midpoint" then refused a close equal to that floor though it sits
+    /// below the true midpoint, while "above" stayed exact — the bearish twins
+    /// (162, 164, 212) lost one price the bullish ones kept, and the rickshaw man's
+    /// centre leaned upward (D-3402). Doubling is the module's own cross-multiplied
+    /// form, with no division. The fields are `i128` widened from `i64` prices, so
+    /// neither the sum nor the doubled price can overflow.
+    const fn mid2(&self) -> i128 {
+        self.open + self.close
     }
 
     /// `body * 1000 <= range * permille`, the cross-multiplied form of
@@ -478,8 +484,7 @@ impl Patterns {
         {
             mask = set(mask, 224);
             // A rickshaw man is a long-legged doji whose body sits mid-range.
-            let centred =
-                (bar0.mid() - bar0.high.midpoint(bar0.low)).abs() * 1000 <= bar0.range * 100;
+            let centred = (bar0.mid2() - (bar0.high + bar0.low)).abs() * 1000 <= bar0.range * 200;
             if centred {
                 mask = set(mask, 226);
             }
@@ -576,7 +581,7 @@ impl Patterns {
         if bar1.bearish()
             && bar0.bullish()
             && bar0.open < bar1.low
-            && bar0.close > bar1.mid()
+            && 2 * bar0.close > bar1.mid2()
             && bar0.close < bar1.open
         {
             mask = set(mask, 161);
@@ -584,7 +589,7 @@ impl Patterns {
         if bar1.bullish()
             && bar0.bearish()
             && bar0.open > bar1.high
-            && bar0.close < bar1.mid()
+            && 2 * bar0.close < bar1.mid2()
             && bar0.close > bar1.open
         {
             mask = set(mask, 162);
@@ -654,7 +659,7 @@ impl Patterns {
             && bar0.bullish()
             && bar0.open < bar1.low
             && into_body > band
-            && bar0.close < bar1.mid()
+            && 2 * bar0.close < bar1.mid2()
         {
             mask = set(mask, 212);
         }
@@ -684,7 +689,7 @@ impl Patterns {
             && bar2.is_long(thr)
             && bar1.is_small(thr)
             && bar0.bullish()
-            && bar0.close > bar2.mid()
+            && 2 * bar0.close > bar2.mid2()
         {
             mask = set(mask, 163);
         }
@@ -692,7 +697,7 @@ impl Patterns {
             && bar2.is_long(thr)
             && bar1.is_small(thr)
             && bar0.bearish()
-            && bar0.close < bar2.mid()
+            && 2 * bar0.close < bar2.mid2()
         {
             mask = set(mask, 164);
         }
@@ -1201,7 +1206,7 @@ mod tests {
             "one paisa past the band is thrusting"
         );
 
-        // `bar0.close < bar1.mid()`
+        // `2 * bar0.close < bar1.mid2()`
         assert!(
             !fires(&at(11, 80, 165, 75, 160)),
             "a close ABOVE the midpoint is a full piercing, which is bit 161 -- \
@@ -1321,7 +1326,7 @@ mod tests {
              comparison is strict, and `>=` would accept this"
         );
 
-        // `bar0.close < bar1.mid()`: above it, then exactly at it.
+        // `2 * bar0.close < bar1.mid2()`: above it, then exactly at it.
         assert!(
             !fires(&at(11, 220, 225, 125, 160)),
             "a close ABOVE the prior body's midpoint has not clouded it"
@@ -1434,12 +1439,12 @@ mod tests {
     /// # Two of the five clauses cannot be isolated, and that is arithmetic
     ///
     /// `bar1.bearish()` and `bar0.bullish()` are entangled with the price
-    /// clauses beneath them. The pattern needs `bar0.close` above `bar1.mid()`
+    /// clauses beneath them. The pattern needs `bar0.close` above `bar1.mid2()`
     /// and below `bar1.open`, and `bar0.open` below `bar1.low` — so making
     /// `bar1` bullish moves `bar1.open` below `bar0.close` and breaks a second
     /// clause at the same time, and making `bar0` bearish needs its close below
     /// an open that is already below `bar1.low`, which puts the close under
-    /// `bar1.mid()` too. No single-clause negation exists for either, so they
+    /// `bar1.mid2()` too. No single-clause negation exists for either, so they
     /// are left to the three that do and recorded here rather than faked.
     #[test]
     fn every_price_clause_of_the_piercing_pattern_is_required_on_its_own() {
@@ -1468,7 +1473,7 @@ mod tests {
              still fire this bit"
         );
 
-        // Clause: `bar0.close > bar1.mid()`. 140 is under the 150 midpoint.
+        // Clause: `2 * bar0.close > bar1.mid2()`. 140 is under the 150 midpoint.
         assert!(
             !fires(&at(11, 80, 180, 75, 140)),
             "a close that failed to reclaim the prior body's midpoint has not \
@@ -3207,5 +3212,156 @@ mod exemplars {
             !mask.get(226),
             "the body sits 80 off a 200 range: a rickshaw man's body is mid-range"
         );
+    }
+}
+
+// XPERM-02 (D-3402): every "beyond the midpoint" clause is decided on the doubled
+// sum, never on a midpoint rounded to a paisa. A sibling module for the same reason
+// `degenerate` is one.
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod midpoint_exact {
+    use super::*;
+
+    /// One IST session, minute `m`.
+    fn bar(minute: i64, open: i64, high: i64, low: i64, close: i64) -> Candle {
+        Candle {
+            ts_micros: (50_000 * 1_440 + 555 + minute) * 60_000_000 - 19_800 * 1_000_000,
+            open,
+            high,
+            low,
+            close,
+            volume: 0,
+            open_interest: i64::MIN,
+        }
+    }
+
+    fn masks(bars: &[Candle]) -> ConditionMask {
+        let mut p = Patterns::new(Thresholds::default());
+        let mut last = ConditionMask::ZERO;
+        for b in bars {
+            last = p.step(b).expect("sane bar");
+        }
+        last
+    }
+
+    /// Piercing (161) and dark cloud (162), exhaustively over wickless bars, against
+    /// a naive oracle that compares `2 · close` with `open + close` of the prior body.
+    /// With the midpoint floored, 162 refused a close equal to the floor of a
+    /// half-paisa midpoint, which the exact comparison accepts; 161 was exact only
+    /// by accident of the rounding direction.
+    #[test]
+    fn piercing_and_dark_cloud_agree_with_the_exact_midpoint() {
+        let mut compared = 0_u32;
+        let mut decided_by_the_half = 0_u32;
+        for o1 in 100..=110_i64 {
+            for c1 in 100..=110_i64 {
+                for o0 in 95..=115_i64 {
+                    for c0 in 95..=115_i64 {
+                        let m = masks(&[
+                            bar(0, o1, o1.max(c1), o1.min(c1), c1),
+                            bar(1, o0, o0.max(c0), o0.min(c0), c0),
+                        ]);
+                        let piercing = c1 < o1 && c0 > o0 && o0 < c1 && 2 * c0 > o1 + c1 && c0 < o1;
+                        let cloud = c1 > o1 && c0 < o0 && o0 > c1 && 2 * c0 < o1 + c1 && c0 > o1;
+                        assert_eq!(
+                            (m.get(161), m.get(162)),
+                            (piercing, cloud),
+                            "prior {o1}->{c1}, bar {o0}->{c0}"
+                        );
+                        if cloud && 2 * c0 == o1 + c1 - 1 {
+                            decided_by_the_half += 1;
+                        }
+                        compared += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(compared, 11 * 11 * 21 * 21);
+        assert!(decided_by_the_half > 0, "the half-paisa case was reached");
+    }
+
+    /// Rickshaw man (226) against the exact centredness of a long-legged doji (224):
+    /// `|(open + close) − (high + low)| · 1000 <= range · 200`, every bar over an
+    /// eleven-paisa alphabet.
+    #[test]
+    fn the_rickshaw_man_centre_is_exact() {
+        let mut doji = 0_u32;
+        for low in 100..=110_i64 {
+            for high in low..=110 {
+                for open in low..=high {
+                    for close in low..=high {
+                        let m = masks(&[bar(0, open, high, low, close)]);
+                        if m.get(224) {
+                            let centred =
+                                ((open + close) - (high + low)).abs() * 1000 <= (high - low) * 200;
+                            assert_eq!(m.get(226), centred, "{open} {high} {low} {close}");
+                            doji += 1;
+                        } else {
+                            assert!(!m.get(226), "226 is a 224: {open} {high} {low} {close}");
+                        }
+                    }
+                }
+            }
+        }
+        assert!(doji > 0);
+        // The attack's bar: body mid 106.5 against range mid 105 is 15% off centre.
+        assert!(!masks(&[bar(0, 106, 110, 100, 107)]).get(226));
+        assert!(
+            !masks(&[bar(0, 104, 110, 100, 103)]).get(226),
+            "and its mirror"
+        );
+    }
+
+    /// Evening star (164) and in-neck's bearish sibling (212) at a half-paisa
+    /// midpoint, and the morning star (163) beside them.
+    #[test]
+    fn the_three_bar_and_neck_midpoints_are_exact() {
+        // 164: long up body 100->201 (mid 150.5), small middle, down bar closing 150.
+        let star = |c0: i64| {
+            masks(&[
+                bar(0, 100, 201, 100, 201),
+                bar(1, 210, 211, 209, 210),
+                bar(2, 200, 200, c0, c0),
+            ])
+        };
+        assert!(star(150).get(164), "150 < 150.5");
+        assert!(!star(151).get(164), "151 > 150.5");
+        // 163: long down body 201->100 (mid 150.5), up bar closing 151 and 150.
+        let morning = |c0: i64| {
+            masks(&[
+                bar(0, 201, 201, 100, 100),
+                bar(1, 90, 91, 89, 90),
+                bar(2, 95, c0, 95, c0),
+            ])
+        };
+        assert!(morning(151).get(163), "151 > 150.5");
+        assert!(!morning(150).get(163), "150 < 150.5");
+        // 212: down body 201->100 (mid 150.5), up bar from below the low closing 150.
+        let neck = |c0: i64| masks(&[bar(0, 201, 201, 100, 100), bar(1, 90, c0, 90, c0)]);
+        assert!(neck(150).get(212), "150 < 150.5");
+        assert!(!neck(151).get(212), "151 > 150.5");
+
+        // A WHOLE-paisa midpoint, closed on exactly: strictly beyond is the rule, so
+        // neither star fires on it, and one paisa past it fires. (`>=`/`<=` survived
+        // as mutants until these existed.)
+        let morning_even = |c0: i64| {
+            masks(&[
+                bar(0, 201, 201, 101, 101),
+                bar(1, 90, 91, 89, 90),
+                bar(2, 95, c0, 95, c0),
+            ])
+        };
+        assert!(!morning_even(151).get(163), "151 is ON the 151 midpoint");
+        assert!(morning_even(152).get(163), "152 > 151");
+        let star_even = |c0: i64| {
+            masks(&[
+                bar(0, 100, 202, 100, 202),
+                bar(1, 210, 211, 209, 210),
+                bar(2, 200, 200, c0, c0),
+            ])
+        };
+        assert!(!star_even(151).get(164), "151 is ON the 151 midpoint");
+        assert!(star_even(150).get(164), "150 < 151");
     }
 }

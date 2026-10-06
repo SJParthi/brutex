@@ -1051,3 +1051,22 @@ A full review of the branch at `c0b7c8b` found ZERO defects. It covered:
 - the O1P-01..06 bench code, the capped tail and the gate 14 pins.
 
 This is the lens's exit round.
+### Lens L3, extreme permutations and differential testing — 2026-10-06
+
+Branch `attack/permutations`. These IDs are the first six hex digits of the
+SHA-256 of the title, because the ledger does not record the original scheme.
+Candidates refuted before any fix: the VWAP below-bias and the daily pivot floor
+(each defined as a floor by its document, D-3401) and the SuperTrend seed
+carried past warm (a locked choice, with the wording corrected, D-3401). The gap
+midpoint is ind1-2, already tracked and fixed on its owner's branch.
+
+| ID | Severity | Title | Where | Disposition |
+|---|---|---|---|---|
+| `F-DBC24E` | `wrong` | EMA sides were decided on the paisa floor of the average, so a close on the floor of a fractional EMA was certified not below it | `crates/indicators/src/trend.rs` (`Ema::value`, `TrendState::emit` bits 0–5) | WITHDRAWN — duplicate of ind1-2, fixed on `wip/zero/numeric-edges` de48df5; the lens's EMA change was removed (D-3400) |
+| `F-25A074` | `wrong` | Candlestick midpoints were floored, so the bearish beyond-the-midpoint clauses and the rickshaw man centre each answered one price the wrong way | `crates/indicators/src/pattern.rs` (`Shape::mid`, positions 162, 164, 212, 226) | FIXED f9ab789 — D-3402, XPERM-02 |
+| `F-3B4D5A` | `wrong` | The SuperTrend stop was built from a floored midpoint, a floored ATR and a floored band, so bits 64 and 65 could put a close on the wrong side of it | `crates/indicators/src/trend.rs` (`SuperTrend::fold`, `TrendState::emit` 64–65) | FIXED 30a8cde — D-3403, XPERM-03 |
+| `F-109F13` | `wrong` | The charter and the evaluator header still said the pull keeps an in-hours Muhurat minute after D-2670 made it refuse every minute of an unmeasured Muhurat | `docs/00-charter.md:85-87`; `crates/indicators/src/evaluator.rs` (day-list header, 2021-11-04 row, drill comment, test doc) | FIXED 364ce11 — D-3404, XPERM-04 |
+| `F-36228D` | `wrong` | The bit table defined all 34 crossing rows by the previous bar, the rule the D-0244 amendment rejected, while the code and CX-01 use the last definite side | `docs/03-vocabulary.md:620-658`; `crates/vocab/src/table.rs` (`LevelCrossing`, `CROSSINGS` docs); `crates/indicators/src/evaluator.rs` (`crossings_of` doc) | FIXED 3c5c237d — D-3405, XPERM-05 |
+| `F-8D5073` | `gap` | The vocabulary documents stated counts and kinds the table does not hold: void Near rows marked untoleranced, sixteen void names for thirteen, 70 free positions for 14, and a group table stopping at 273 | `docs/03-vocabulary.md` (rows 235–271, crossings section); `docs/04-invariants.md` CX-04, CX-05; `crates/vocab/src/table.rs:14-29`; `crates/vocab/src/lib.rs` | FIXED 3c5c237d — D-3406, XPERM-06 |
+| `F-0486DA` | `wrong` | worst_reward_risk_bp scored a single observation i64::MAX, above payoff_bp, so one lucky move topped the asymmetry ranking | `crates/runner/src/outcome.rs` (`Edge::worst_reward_risk_bp`); `crates/runner/src/rank.rs` (`ByAsymmetry`) | FIXED 24c7e3a — D-3407, XPERM-07 |
+| `F-1D5275` | `wrong` | trades_needed_for documented measured values its ceiling-rounded record does not return, and a monotone threshold it does not have | `crates/runner/src/grid.rs` (`trades_needed_for` doc, `Cell::at_rate`) | FIXED bc1e1f45 — D-3408, XPERM-08 |

@@ -22580,7 +22580,7 @@ fn both_shapes(
     first: &runner::rank::Scored,
     ladder: engine::Ladder,
     // BY REFERENCE, then copied per fold inside the closure. `Evaluator` is
-    // 1,776 bytes and `Copy`, so passing it by value moves that once per call
+    // 1,792 bytes (D-3403) and `Copy`, so passing it by value moves that once per call
     // for no reason -- the closure needs its own copy either way, and it takes
     // one from the borrow.
     fresh: &Evaluator,
