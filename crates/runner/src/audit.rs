@@ -1143,9 +1143,14 @@ pub fn grid(out: &mut String, g: &Grid, keep: usize) {
     // the index breaks every tie -- so selecting the `keep` smallest first and
     // sorting just those prints exactly the rows, in exactly the order, a full
     // sort did: O(n + keep log keep) rather than O(n log n) over every cell.
+    //
+    // THE PIVOT IS INDEX `shown`, NOT `shown - 1` (G18-runner, D-2065). Either
+    // leaves the `shown` smallest in front, so `shown - 1` against `shown / 1`
+    // could not be told apart; the index `shown` exists whenever any row is
+    // cut, and needs neither the subtraction nor a `shown > 0` guard.
     let shown = ordered.len().min(keep);
-    if shown > 0 && shown < ordered.len() {
-        ordered.select_nth_unstable_by_key(shown - 1, key);
+    if shown < ordered.len() {
+        ordered.select_nth_unstable_by_key(shown, key);
     }
     let (head, tail) = ordered.split_at_mut(shown);
     head.sort_by_key(key);

@@ -63332,3 +63332,16 @@ G18-runner-18.
 **Rejected.** Computing the shift count from `x` with `ceil`. The fixed range
 is simpler, and it keeps the old summation order, which a closed-form count
 would also have to replicate exactly.
+
+### D-2065 — The grid table's selection pivots on index `shown`, so no subtraction is left to mutate — 2026-10-06
+
+**What was observed.** Run 1283 never tested shards 8, 111, 116, 119, 120, 138, 167 and 168. Running their runner cases
+on c216c97 left `shown - 1` as `shown / 1` alive in `runner::audit::grid`:
+`ordered.select_nth_unstable_by_key(shown - 1, key)` under `shown > 0 && shown < ordered.len()`. With either pivot, the
+`shown` smallest rows end up in front, so the two cannot be told apart. The `shown > 0` guard has the same shape: with
+`>=`, it selects at index 0 for an empty head.
+
+**Decided.** The pivot is the index `shown`, which exists whenever a row is cut, under `shown < ordered.len()` alone.
+The printed rows and their order are unchanged, and the existing grid table tests pass unmodified. No subtraction or
+lower guard remains to mutate. `shown < ordered.len()` as `<=` indexes past the end, which the tests with `keep` above
+the cell count catch.
