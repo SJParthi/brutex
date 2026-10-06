@@ -124,7 +124,8 @@ fn a_stored_preparation_over_a_missing_root_refuses() {
         60_000_000,
         "1min",
     );
-    let why = refused.err().expect("no store, no column");
+    assert!(refused.is_err(), "no store, no column");
+    let why = refused.err().unwrap_or_default();
     if commit_stamp().is_none() {
         assert!(why.contains("no verified commit stamp"), "{why}");
     }

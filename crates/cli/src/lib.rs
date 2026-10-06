@@ -7588,6 +7588,11 @@ fn audit_range_kernel(request: StoredRangeAuditRequest<'_>) -> Result<String, st
     audit_range_kernel_cached(request, &mut AuditCache::default())
 }
 
+/// The refusal [`load_audit_inputs`] gives when the inputs it prepared
+/// moved before the audit identity was published.
+const AUDIT_INPUTS_CHANGED: &str =
+    "stored preparation inputs changed before audit identity publication; no search ran";
+
 /// The support-independent half of a stored range audit: both spans, the
 /// withholding, the anchored column under its preparation evidence, both
 /// contexts and the executed-data digest. Loaded once per [`AuditCache`] key.
@@ -7741,21 +7746,13 @@ fn load_audit_inputs(
     // Joined, a mutant requiring both was invisible, because a withheld day
     // also moves the digest.
     if !unsourceable.is_empty() {
-        return Err(
-            "stored preparation inputs changed before audit identity publication: the overlay \
-             withheld a day the column has rows for; no search ran"
-                .to_owned(),
-        );
+        return Err(format!(
+            "{AUDIT_INPUTS_CHANGED}: the overlay withheld a swept day"
+        ));
     }
-    if crate::minute_gaps::bind_withheld(
-        stored_anchored_digest(&folded, &exact_minute, &daily)?,
-        &withheld_days,
-    ) != preparation_digest
-    {
-        return Err(
-            "stored preparation inputs changed before audit identity publication; no search ran"
-                .to_owned(),
-        );
+    let digest = stored_anchored_digest(&folded, &exact_minute, &daily)?;
+    if crate::minute_gaps::bind_withheld(digest, &withheld_days) != preparation_digest {
+        return Err(AUDIT_INPUTS_CHANGED.to_owned());
     }
     let execution_slice = execution.map_or(span.bars.as_slice(), |exec| exec.bars);
     let executed_digest = stored_withheld_executed_digest(
@@ -16532,7 +16529,11 @@ fn elite_descend_in_points_inner(
         // a second copy of a multi-year span for the length of a descent is
         // memory nothing reads. Same reasoning `elite_descend` states for its
         // own seed.
-        Ok(span) => Ok(reference_price(&span.bars)),
+        Ok(span) => {
+            let reference = reference_price(&span.bars);
+            drop(span);
+            Ok(reference)
+        }
         Err(why) => Err(format!(
             "refused before the ceiling could be converted, so no descent \
              began: {why}\n"

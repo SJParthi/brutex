@@ -395,26 +395,26 @@ fn the_pool_oos_arm_refuses_an_overlapping_split_and_bad_words_before_reading() 
     // G18-cli-a-11, D-2002: each refusal is the ARM's own, named. The work
     // refuses most of these too, so `MISUSED` alone could not show that the
     // arm's guard or rung match had let a bad split through.
-    const ORDER: &str = "the training months must be ordered";
-    const RUNG: &str = "is not a rung this engine sweeps";
+    let order = "the training months must be ordered";
+    let rung_refusal = "is not a rung this engine sweeps";
     for (changes, why, named) in [
         (
             &[(9, "3")][..],
             "the later span starts in the training span's last month",
-            ORDER,
+            order,
         ),
         (
             &[(8, "2024")][..],
             "the later span precedes the training span",
-            ORDER,
+            order,
         ),
-        (&[(11, "3")][..], "the later span runs backwards", ORDER),
+        (&[(11, "3")][..], "the later span runs backwards", order),
         (
             &[(3, "2026")][..],
             "the training span runs backwards",
-            ORDER,
+            order,
         ),
-        (&[(2, "7min")][..], "an unknown rung", RUNG),
+        (&[(2, "7min")][..], "an unknown rung", rung_refusal),
         (
             &[(4, "13")][..],
             "a month off the calendar",
@@ -452,7 +452,7 @@ fn the_pool_oos_arm_refuses_an_overlapping_split_and_bad_words_before_reading() 
             words[*at] = word;
         }
         let (_, page) = run(&words);
-        assert!(!page.contains(ORDER), "{why}: {page}");
-        assert!(!page.contains(RUNG), "{why}: {page}");
+        assert!(!page.contains(order), "{why}: {page}");
+        assert!(!page.contains(rung_refusal), "{why}: {page}");
     }
 }
