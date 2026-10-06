@@ -488,7 +488,11 @@ fn beta_continued_fraction(a: f64, b: f64, x: f64) -> f64 {
         upper = guard(1.0 + odd / upper);
         let step = lower * upper;
         fraction *= step;
-        if (step - 1.0).abs() < EPSILON {
+        // `total_cmp`, not `<` (G18-runner, D-2067). Near one, `step - 1.0` is exact and a
+        // multiple of 2^-52, and `1e-15` is not, so the magnitude never EQUALS
+        // `EPSILON` and `<` against `<=` could not be told apart. `is_lt` answers
+        // exactly as `<` did, NaN included, with no operator left to mutate.
+        if (step - 1.0).abs().total_cmp(&EPSILON).is_lt() {
             return fraction;
         }
     }
