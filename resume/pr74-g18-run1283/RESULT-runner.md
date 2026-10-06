@@ -98,3 +98,13 @@ Checks on 460b702:
 - All 13 runner test binaries pass as uid 65534: lib 753 tests and integration 46.
 - The static gates (language-purity job, gate 1e skipped) all PASS.
 - `git grep "changed by cargo-mutants"` is empty.
+
+## Part 3: shard 138's 5 runner cases (from the coordinator's in-place run at 969493e1), 2026-10-06
+Branch head: **806a463**, pushed.
+- `audit.rs:1140:27` `<` -> `<=` in grid (MISSED at 969493e1). This is the old guard, now `audit.rs:1152:14` on 460b702,
+  where M5 caught it (D-2065).
+- `significance.rs:475:31` `<` -> `<=` in beta_continued_fraction (not run at 969493e1). On 460b702 it is line 491, and
+  M6 (CI flags, full suite) MISSED it. It is equivalent: `|step - 1|` is never exactly `1e-15`. It is restructured to
+  `total_cmp(&EPSILON).is_lt()` in 806a463 (D-2067), so it cannot exist. M7 caught both remaining mutants on the line.
+  The runner lib tests pass as uid 65534 (753), and clippy and fmt are clean.
+- The other three (caught, caught, unviable at 969493e1) were not re-run, as the coordinator asked.
