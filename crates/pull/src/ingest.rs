@@ -1402,9 +1402,6 @@ pub fn from_rows(
         symbol_id,
     } = identity;
 
-    // The overlays are in stamp order with the bars, so each month's run of
-    // them is the next slice; one the month file does not admit is refused
-    // there, loudly, never filed under the wrong month.
     let mut overlay_at = 0usize;
     for (ym, month_bars) in months {
         let parts = PathParts {
@@ -1417,13 +1414,7 @@ pub fn from_rows(
             month: ym,
             file: FileKind::Bars,
         };
-        let overlay_from = overlay_at;
-        while let Some(row) = overlays.get(overlay_at)
-            && month_at_micros(row.ts_micros).is_ok_and(|at| at == ym)
-        {
-            overlay_at = overlay_at.saturating_add(1);
-        }
-        let month_overlays = overlays.get(overlay_from..overlay_at).unwrap_or_default();
+        let month_overlays = overlays_in(overlays, &mut overlay_at, ym);
         let held = write_and_count(
             month_bars,
             store_root,
@@ -1433,7 +1424,7 @@ pub fn from_rows(
                 contract: plan.contract,
                 exchange,
                 segment,
-                symbol: symbol.clone(),
+                symbol,
                 timeframe,
                 month: ym,
             },
@@ -1472,11 +1463,8 @@ pub fn from_rows(
             });
         }
     }
-    // COUNTED WHEN ANY MONTH'S CENSUS ROW IS HANDED BACK. The caller publishes
-    // every row in `pending` whatever failed beside it, and returns `Err` only
-    // when `pending` is empty — the honest test for "nothing landed" (D-0343).
-    // An overlay refused after month 1 landed USED to be the path that
-    // dropped the row; that is the caller's fix, and it holds per month.
+    // COUNTED WHEN ANY MONTH'S ROW IS HANDED BACK: the caller publishes every
+    // row and returns `Err` only when `pending` is empty (D-0343).
     done.counted = usize::from(!done.pending.is_empty());
     name_the_origin(&mut done, origin);
     done
@@ -2074,6 +2062,24 @@ fn months_in(
 /// day with no month in the store's addressing.
 fn month_at(bar: &store::format::Bar) -> Result<store::path::YearMonth, String> {
     month_at_micros(bar.ts_micros)
+}
+
+/// The run of `overlays` from `*at` that falls in `ym`, advancing `*at` past
+/// it. The overlays are in stamp order with the bars; one the month file does
+/// not admit is refused there, loudly, never filed under the wrong month.
+/// D-3136.
+fn overlays_in<'a>(
+    overlays: &'a [store::format::Overlay],
+    at: &mut usize,
+    ym: store::path::YearMonth,
+) -> &'a [store::format::Overlay] {
+    let from = *at;
+    while let Some(row) = overlays.get(*at)
+        && month_at_micros(row.ts_micros).is_ok_and(|month| month == ym)
+    {
+        *at = at.saturating_add(1);
+    }
+    overlays.get(from..*at).unwrap_or_default()
 }
 
 /// The IST month the instant `ts_micros` falls in.

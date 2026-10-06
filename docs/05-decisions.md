@@ -63736,3 +63736,28 @@ repair after `write_entries` has synced it, and only then. `recover` refuses
 `first_ts`. The caller then rebuilds the whole index, loudly, which refuses
 the same header through `confirm`. DPM-07; DPM-05's refusal test gains the
 case.
+
+### D-3136 — The decoded-bar door files a batch that crosses a month, one month per file — 2026-10-06
+
+**Finding (data-path round 6).** `split_window` caps a rolling-option chunk at
+45 days. Since D-0320 and D-1370 such a chunk may cross a month boundary on
+purpose, and a constant-strike contract run inside it with it. The spot door
+files such a batch one month per file (`months_in`). The decoded door
+`ingest::from_rows`, which the rolling walk lands through, addressed ONE month
+from the first and last bar and refused a batch spanning two: "bars span
+2025-06 to 2025-07; the store addresses one month per file and splitting is
+the caller's decision". The caller, `land_rolling_group`, never split, so the
+run never landed and every rerun refused it the same way. Measured on 5012e5e:
+two bars, 2025-06-30 15:29 and 2025-07-01 09:15 IST, gave that one failure
+and stored nothing.
+
+**Decision.** `from_rows` walks `months_in(bars)` and files each month's bars,
+and its run of overlays, to that month's file. Each month hands back its own
+census row, so `Ingested::pending` is now a `Vec` (it was an `Option`), and
+`roll_one` records them all in its one census cycle as before. A month whose
+bar write fails is that month's failure; the other months still land, and the
+caller still returns `Err` only when nothing landed (D-0343, now
+`pending.is_empty()`). `counted` stays per member. `month_of`, whose only job
+was the span refusal, is removed. `emit_sites`' "not filed" drive used that
+refusal to reach its line; it now reaches it through D-0017's NSE-only
+refusal, a plan naming BSE, at the same `address` stage. DPM-08.

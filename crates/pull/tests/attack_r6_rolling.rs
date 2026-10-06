@@ -6,7 +6,12 @@
 //! addressed ONE month from the first and last bar and refused a batch whose
 //! bars span two, so a contract run across a month end never landed, and every
 //! rerun refused the same way (D-3136).
-#![allow(clippy::expect_used, clippy::indexing_slicing, clippy::unwrap_used)]
+#![allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::cast_possible_truncation
+)]
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -101,7 +106,7 @@ fn a_decoded_batch_across_a_month_end_is_filed_one_month_per_file() {
         window: Window::new(day(2025, 6, 20), day(2025, 7, 10)).expect("a window"),
         granularity: Granularity::Minute1,
     };
-    let scratch = Scratch::new("month-edge");
+    let scratch = Scratch::new("month-span");
     let bars = [bar(day(2025, 6, 30), 15, 29), bar(day(2025, 7, 1), 9, 15)];
     let done = pull::ingest::from_rows(&bars, &[], "NIFTY", "attack", &scratch.0, plan(&request));
     assert!(done.failures.is_empty(), "{:?}", done.failures);

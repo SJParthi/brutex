@@ -1583,9 +1583,11 @@ fn drive_run_named(scratch: &Scratch) {
 /// entirely. The row asserted against it produced no records at all — an empty
 /// file, which is what a drive on the wrong path looks like.
 ///
-/// Two bars either side of a month boundary. The store addresses ONE month per
-/// file, so a batch needing two is refused at the `address` stage — which is a
-/// real refusal with a real caller, not a fault invented to reach a log line.
+/// A plan naming BSE. D-0017 narrows ingest to NSE, so `ingest::identify`
+/// refuses the member at the `address` stage — a real refusal with a real
+/// caller, not a fault invented to reach a log line. This drive used two bars
+/// either side of a month boundary until D-3136 made `from_rows` file such a
+/// batch one month per file, as the spot door does.
 fn drive_not_filed(scratch: &Scratch) {
     let store = scratch.store();
     let request = request_over(crossing());
@@ -1598,7 +1600,7 @@ fn drive_not_filed(scratch: &Scratch) {
         volume: 1,
         open_interest: i64::MIN,
     };
-    // 2022-10-03 and 2022-11-03, both inside `crossing()`, in two months.
+    // 2022-10-03 and 2022-11-03, both inside `crossing()`.
     let bars = [at(1_664_775_000), at(1_667_453_400)];
     let done = crate::ingest::from_rows(
         &bars,
@@ -1606,13 +1608,15 @@ fn drive_not_filed(scratch: &Scratch) {
         INSTRUMENT,
         "emit-sites",
         &store,
-        plan_over(&request),
+        crate::ingest::Plan {
+            exchange: "BSE",
+            ..plan_over(&request)
+        },
     );
     assert_eq!(
         done.failures.len(),
         1,
-        "a batch spanning two months is one member's refusal, and the store \
-         addresses one month per file"
+        "a member on an exchange this build does not pull is one refusal"
     );
     assert_eq!(
         done.bars_stored, 0,
