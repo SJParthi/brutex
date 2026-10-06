@@ -2176,9 +2176,30 @@ impl ObservationAuthorityLedgerV1 {
                 )
             })?;
         if writable && file.metadata().map_err(|why| why.to_string())?.len() == 0 {
-            file.write_all(&authority_header())
-                .and_then(|()| file.sync_data())
+            // A short header write is truncated back to zero bytes, so the next
+            // open initializes again instead of refusing a torn header (D-1854).
+            crate::append_rollback::append(
+                &mut file,
+                &authority_header(),
+                "observation authority header",
+            )?;
+            file.sync_data()
                 .map_err(|why| format!("cannot initialize observation authority file: {why}"))?;
+            // THE NAMES ARE DURABLE TOO (D-1903, slice24-F2): the lock and
+            // authority files were just created, and a file's own barrier does
+            // not make its directory entry durable.
+            sync_observation_root(&admitted_root)?;
+        }
+        if writable {
+            // ledgers-3, D-1910: the writer cuts a kill-torn tail under its exclusive
+            // lock; the bytes past the last whole record were never acknowledged.
+            crate::fixed_tail::heal_torn_tail(
+                &file,
+                &file_path,
+                OBSERVATION_AUTHORITY_HEADER_BYTES_V1,
+                OBSERVATION_AUTHORITY_RECORD_STRIDE_V1,
+                &authority_header(),
+            )?;
         }
         let bytes = read_bounded_authority_file(&mut file, bounds)?;
         let (audits, data_by_id, orphan) = scan_authority_file(&bytes, bounds)?;
@@ -2226,6 +2247,16 @@ impl ObservationAuthorityLedgerV1 {
     fn append_data(
         &mut self,
         data: &ObservationAuthorityDataV1,
+    ) -> Result<ObservationAuthorityCommitV1, String> {
+        self.append_data_with(data, &mut |file, raw| file.write_all(raw))
+    }
+
+    /// [`Self::append_data`] with the record write supplied, so a test can
+    /// inject a short write into the Data or the Completion append.
+    fn append_data_with(
+        &mut self,
+        data: &ObservationAuthorityDataV1,
+        write: &mut dyn FnMut(&mut File, &[u8]) -> std::io::Result<()>,
     ) -> Result<ObservationAuthorityCommitV1, String> {
         if !self.writable {
             return Err("read-only observation authority ledger cannot append".to_owned());
@@ -2284,11 +2315,7 @@ impl ObservationAuthorityLedgerV1 {
             }
             let sequence = completed;
             let record = data.record()?;
-            self.file
-                .seek(SeekFrom::End(0))
-                .and_then(|_| self.file.write_all(&record))
-                .and_then(|()| self.file.sync_data())
-                .map_err(|why| format!("cannot sync observation authority Data: {why}"))?;
+            self.append_synced(&record, "observation authority Data", &mut *write)?;
             self.orphan = Some((sequence, *data));
             sequence
         };
@@ -2307,11 +2334,11 @@ impl ObservationAuthorityLedgerV1 {
         }
         let completion = ObservationAuthorityCompletionV1::for_data(data, record_sequence)?;
         let completion_record = completion.record()?;
-        self.file
-            .seek(SeekFrom::End(0))
-            .and_then(|_| self.file.write_all(&completion_record))
-            .and_then(|()| self.file.sync_data())
-            .map_err(|why| format!("cannot sync observation authority Completion: {why}"))?;
+        self.append_synced(
+            &completion_record,
+            "observation authority Completion",
+            write,
+        )?;
         let audit = audit_of(data, completion);
         self.audits.insert(data.authority_id, audit);
         self.data_by_id.insert(data.authority_id, *data);
@@ -2331,6 +2358,62 @@ impl ObservationAuthorityLedgerV1 {
             ));
         }
         Ok(())
+    }
+
+    /// Appends one record through the shared rollback, then syncs it (D-1854).
+    ///
+    /// A failed or short write truncates the file back to its length before
+    /// the attempt and refuses, naming the write error and the rollback. When
+    /// the rollback held, the bytes are exactly those this handle last
+    /// authenticated, so its snapshot is refreshed and the same handle can
+    /// append again, as after a successful append. When it did not, the
+    /// snapshot stays stale and the next append refuses. A failed barrier
+    /// after a whole write is cut back as well (D-1900, pop1-2): a record whose
+    /// barrier never returned may sit only in the page cache, and a retry must
+    /// not find it there and "confirm" it. D-1934 composed the two.
+    fn append_synced(
+        &mut self,
+        raw: &[u8],
+        label: &str,
+        write: &mut dyn FnMut(&mut File, &[u8]) -> std::io::Result<()>,
+    ) -> Result<(), String> {
+        let before = self
+            .file
+            .metadata()
+            .map_err(|why| format!("cannot stat {label} append: {why}"))?
+            .len();
+        // Written through `fixed_tail` so a short write is cut back exactly as
+        // a failed barrier is below, and its fault hook reaches this path.
+        let written = crate::fixed_tail::start(&mut self.file, &self.file_path.display())
+            .and_then(|start| {
+                crate::fixed_tail::write_at_end(
+                    &mut self.file,
+                    &self.file_path.display(),
+                    start,
+                    raw,
+                    |file, bytes| write(file, bytes),
+                )
+            })
+            .map_err(|why| format!("cannot append {label}: {why}"));
+        if let Err(why) = written {
+            if self.file.metadata().is_ok_and(|now| now.len() == before)
+                && let Err(stale) = self.refresh_snapshot()
+            {
+                return Err(format!("{why}; the handle stays stale: {stale}"));
+            }
+            return Err(why);
+        }
+        crate::fixed_tail::sync_or_roll_back(&self.file, &self.file_path, before, File::sync_data)
+            .map_err(|why| {
+                let why = format!("cannot sync {label}: {why}");
+                match self.file.metadata() {
+                    Ok(now) if now.len() == before => match self.refresh_snapshot() {
+                        Ok(()) => why,
+                        Err(stale) => format!("{why}; the handle stays stale: {stale}"),
+                    },
+                    _ => why,
+                }
+            })
     }
 
     fn refresh_snapshot(&mut self) -> Result<(), String> {
@@ -2622,7 +2705,31 @@ fn scan_authority_file(
             }
         }
     }
+    // A TRAILING DATA RECORD WHOSE IDENTITY IS ALREADY COMPLETE IS REFUSED
+    // (D-1904, slice24-F3). The writer checks reuse before it writes, so no
+    // crash leaves one; accepting it opened the ledger and then refused every
+    // other append as a foreign orphan, for good.
+    if pending
+        .as_ref()
+        .is_some_and(|(_, orphan)| audits.contains_key(&orphan.authority_id))
+    {
+        return Err(
+            "observation authority trailing Data duplicates a completed authority".to_owned(),
+        );
+    }
     Ok((audits, data_by_id, pending))
+}
+
+/// Makes newly created names in an observation root durable.
+fn sync_observation_root(root: &Path) -> Result<(), String> {
+    File::open(root)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|why| {
+            format!(
+                "cannot sync observation authority root {}: {why}",
+                root.display()
+            )
+        })
 }
 
 fn admit_existing_observation_root(root: &Path) -> Result<PathBuf, String> {
@@ -3366,9 +3473,27 @@ impl ObservationAuthorityLedgerV2 {
                 .len()
                 == 0
         {
-            file.write_all(&observation_v2_header())
-                .and_then(|()| file.sync_data())
+            // Truncated back to zero bytes on a short write (D-1854).
+            crate::append_rollback::append(
+                &mut file,
+                &observation_v2_header(),
+                "Observation V2 header",
+            )?;
+            file.sync_data()
                 .map_err(|why| format!("cannot initialize Observation V2 file: {why}"))?;
+            // The new names are made durable (D-1903, slice24-F2).
+            sync_observation_root(&admitted_root)?;
+        }
+        if writable {
+            // ledgers-3, D-1910: the writer cuts a kill-torn tail under its exclusive
+            // lock; the bytes past the last whole record were never acknowledged.
+            crate::fixed_tail::heal_torn_tail(
+                &file,
+                &file_path,
+                OBSERVATION_AUTHORITY_HEADER_BYTES_V2,
+                OBSERVATION_AUTHORITY_RECORD_STRIDE_V2,
+                &observation_v2_header(),
+            )?;
         }
         let bytes = read_bounded_observation_v2_file(&mut file, bounds)?;
         let (audits, data_by_id, orphan) = scan_observation_v2_file(&bytes, bounds)?;
@@ -3417,6 +3542,16 @@ impl ObservationAuthorityLedgerV2 {
         &mut self,
         prepared: &ObservationAuthorityDataV2,
     ) -> Result<ObservationAuthorityCommitV2, String> {
+        self.append_data_with(prepared, &mut |file, raw| file.write_all(raw))
+    }
+
+    /// [`Self::append_data`] with the record write supplied, so a test can
+    /// inject a short write into the Data or the Completion append.
+    fn append_data_with(
+        &mut self,
+        prepared: &ObservationAuthorityDataV2,
+        write: &mut dyn FnMut(&mut File, &[u8]) -> std::io::Result<()>,
+    ) -> Result<ObservationAuthorityCommitV2, String> {
         if !self.writable {
             return Err("read-only Observation V2 ledger cannot append".to_owned());
         }
@@ -3447,21 +3582,13 @@ impl ObservationAuthorityLedgerV2 {
             self.require_append_capacity(2)?;
             let data = prepared.with_sequence(completed);
             let record = data.record(AUTHORITY_V2_DATA_KIND)?;
-            self.file
-                .seek(SeekFrom::End(0))
-                .and_then(|_| self.file.write_all(&record))
-                .and_then(|()| self.file.sync_data())
-                .map_err(|why| format!("cannot sync Observation V2 Data: {why}"))?;
+            self.append_synced(&record, "Observation V2 Data", &mut *write)?;
             self.orphan = Some(data);
             data
         };
         self.require_append_capacity(1)?;
         let completion = data.record(AUTHORITY_V2_COMPLETION_KIND)?;
-        self.file
-            .seek(SeekFrom::End(0))
-            .and_then(|_| self.file.write_all(&completion))
-            .and_then(|()| self.file.sync_data())
-            .map_err(|why| format!("cannot sync Observation V2 Completion: {why}"))?;
+        self.append_synced(&completion, "Observation V2 Completion", write)?;
         let audit = observation_v2_audit(&data)?;
         self.audits.insert(data.authority_id, audit);
         self.data_by_id.insert(data.authority_id, data);
@@ -3499,6 +3626,62 @@ impl ObservationAuthorityLedgerV2 {
             return Err("Observation V2 file changed after open".to_owned());
         }
         Ok(())
+    }
+
+    /// Appends one record through the shared rollback, then syncs it (D-1854).
+    ///
+    /// A failed or short write truncates the file back to its length before
+    /// the attempt and refuses, naming the write error and the rollback. When
+    /// the rollback held, the bytes are exactly those this handle last
+    /// authenticated, so its snapshot is refreshed and the same handle can
+    /// append again, as after a successful append. When it did not, the
+    /// snapshot stays stale and the next append refuses. A failed barrier
+    /// after a whole write is cut back as well (D-1900, pop1-2): a record whose
+    /// barrier never returned may sit only in the page cache, and a retry must
+    /// not find it there and "confirm" it. D-1934 composed the two.
+    fn append_synced(
+        &mut self,
+        raw: &[u8],
+        label: &str,
+        write: &mut dyn FnMut(&mut File, &[u8]) -> std::io::Result<()>,
+    ) -> Result<(), String> {
+        let before = self
+            .file
+            .metadata()
+            .map_err(|why| format!("cannot stat {label} append: {why}"))?
+            .len();
+        // Written through `fixed_tail` so a short write is cut back exactly as
+        // a failed barrier is below, and its fault hook reaches this path.
+        let written = crate::fixed_tail::start(&mut self.file, &self.file_path.display())
+            .and_then(|start| {
+                crate::fixed_tail::write_at_end(
+                    &mut self.file,
+                    &self.file_path.display(),
+                    start,
+                    raw,
+                    |file, bytes| write(file, bytes),
+                )
+            })
+            .map_err(|why| format!("cannot append {label}: {why}"));
+        if let Err(why) = written {
+            if self.file.metadata().is_ok_and(|now| now.len() == before)
+                && let Err(stale) = self.refresh_snapshot()
+            {
+                return Err(format!("{why}; the handle stays stale: {stale}"));
+            }
+            return Err(why);
+        }
+        crate::fixed_tail::sync_or_roll_back(&self.file, &self.file_path, before, File::sync_data)
+            .map_err(|why| {
+                let why = format!("cannot sync {label}: {why}");
+                match self.file.metadata() {
+                    Ok(now) if now.len() == before => match self.refresh_snapshot() {
+                        Ok(()) => why,
+                        Err(stale) => format!("{why}; the handle stays stale: {stale}"),
+                    },
+                    _ => why,
+                }
+            })
     }
 
     fn refresh_snapshot(&mut self) -> Result<(), String> {
@@ -3647,6 +3830,14 @@ fn scan_observation_v2_file(
             }
             _ => return Err("Observation V2 record kind is foreign".to_owned()),
         }
+    }
+    // A trailing Data record whose identity is already complete is refused
+    // (D-1904, slice24-F3).
+    if pending
+        .as_ref()
+        .is_some_and(|orphan| audits.contains_key(&orphan.authority_id))
+    {
+        return Err("Observation V2 trailing Data duplicates a completed authority".to_owned());
     }
     Ok((audits, data_by_id, pending))
 }
@@ -4019,6 +4210,109 @@ mod tests {
         );
     }
 
+    /// pop1-2 and slice24-F1, D-1900: a short write or failed barrier on the
+    /// Data or the Completion is cut back; committed authority stays readable
+    /// and the exact retry commits.
+    #[test]
+    fn a_failed_authority_append_is_cut_back_and_the_retry_commits() {
+        use crate::fixed_tail::fault::{Armed, Kind};
+        let bounds = authority_bounds();
+        for skip in 0..2 {
+            for kind in [
+                Kind::Write {
+                    keep: AUTHORITY_RECORD_BYTES / 2,
+                },
+                Kind::Sync,
+            ] {
+                let root = test_dir();
+                let committed = authority_data_fixture(50);
+                let next = authority_data_fixture(51);
+                append_authority_data_and_reopen(root.path(), bounds, &committed)
+                    .expect("committed authority writes");
+                let mut ledger =
+                    ObservationAuthorityLedgerV1::open(root.path(), bounds).expect("writer opens");
+                let armed = Armed::arm_after(AUTHORITY_FILE, kind, skip);
+                let refusal = ledger.append_data(&next).expect_err("the fault refuses");
+                assert!(!Armed::pending(), "{skip} {kind:?} fired");
+                drop(armed);
+                assert!(refusal.contains("injected"), "{skip} {kind:?}: {refusal}");
+                drop(ledger);
+                let len = std::fs::metadata(root.path().join(AUTHORITY_FILE))
+                    .expect("authority metadata")
+                    .len();
+                assert_eq!(
+                    (len - OBSERVATION_AUTHORITY_HEADER_BYTES_V1)
+                        % OBSERVATION_AUTHORITY_RECORD_STRIDE_V1,
+                    0,
+                    "{skip} {kind:?} ends on a whole record"
+                );
+                let mut read = ObservationAuthorityLedgerV1::open_read(root.path(), bounds)
+                    .expect("committed authority stays readable");
+                assert!(
+                    read.reopen_audit(&committed.authority_id)
+                        .expect("unchanged")
+                        .is_some()
+                );
+                drop(read);
+                assert!(matches!(
+                    append_authority_data_and_reopen(root.path(), bounds, &next)
+                        .expect("the exact retry commits"),
+                    ObservationAuthorityCommitV1::Written(_)
+                ));
+            }
+        }
+    }
+
+    /// slice24-F3, D-1904: a trailing Data record repeating a completed
+    /// identity is refused at open, read-only and writer alike.
+    #[test]
+    fn a_trailing_data_record_repeating_a_completed_identity_is_refused() {
+        let bounds = authority_bounds();
+        let root = test_dir();
+        let data = authority_data_fixture(60);
+        append_authority_data_and_reopen(root.path(), bounds, &data).expect("commits");
+        let mut raw = OpenOptions::new()
+            .append(true)
+            .open(root.path().join(AUTHORITY_FILE))
+            .expect("authority file reopens");
+        raw.write_all(&data.record().expect("Data encodes"))
+            .and_then(|()| raw.sync_data())
+            .expect("duplicate trailing Data lands");
+        drop(raw);
+        for refusal in [
+            ObservationAuthorityLedgerV1::open_read(root.path(), bounds).err(),
+            ObservationAuthorityLedgerV1::open(root.path(), bounds).err(),
+        ] {
+            let refusal = refusal.unwrap_or_default();
+            assert!(
+                refusal.contains("duplicates a completed authority"),
+                "{refusal}"
+            );
+        }
+    }
+
+    /// slice24-F2, D-1903: both writers sync the root after creating their
+    /// files. Measured on the source because a directory entry's durability
+    /// cannot be observed without a power cut.
+    #[test]
+    fn both_writers_sync_the_root_after_creating_their_files() {
+        let src = include_str!("population_observations_v1.rs");
+        let shipping = src.split("\nmod tests {").next().unwrap_or(src);
+        for header in ["&authority_header()", "&observation_v2_header()"] {
+            let (_, after) = shipping
+                // The header goes through the shared rollback since D-1854.
+                .split_once(&format!("&mut file,\n                {header},"))
+                .expect("the header write exists");
+            let block = after
+                .split_once("let bytes = ")
+                .map_or(after, |(head, _)| head);
+            assert!(
+                block.contains("sync_observation_root(&admitted_root)?"),
+                "{header}: the root is synced after creation"
+            );
+        }
+    }
+
     #[test]
     fn authority_refuses_absent_root_foreign_orphan_corruption_and_stale_bytes() {
         let parent = test_dir();
@@ -4283,6 +4577,104 @@ mod tests {
         ));
     }
 
+    /// pop1-2 / slice24-F1 / slice24-F3 for Observation V2 (D-1900, D-1904).
+    #[test]
+    fn v2_a_failed_append_is_cut_back_and_a_duplicate_trailing_data_is_refused() {
+        use crate::fixed_tail::fault::{Armed, Kind};
+        let bounds = authority_bounds_v2();
+        let (source, commit) =
+            crate::pre_admission_data::observation_v2_zero_production_fixture(86)
+                .expect("zero source fixture derives");
+        let committed = produce_natural_extinction_observation_v2(&source, &commit)
+            .expect("committed source prepares");
+        let (next_source, next_commit) =
+            crate::pre_admission_data::observation_v2_zero_production_fixture(87)
+                .expect("next zero source derives");
+        let next = produce_natural_extinction_observation_v2(&next_source, &next_commit)
+            .expect("next source prepares");
+        for skip in 0..2 {
+            for kind in [
+                Kind::Write {
+                    keep: AUTHORITY_V2_RECORD_BYTES / 2,
+                },
+                Kind::Sync,
+            ] {
+                let root = test_dir();
+                committed
+                    .append_and_reopen(root.path(), bounds)
+                    .expect("committed authority writes");
+                let mut ledger =
+                    ObservationAuthorityLedgerV2::open(root.path(), bounds).expect("writer opens");
+                let armed = Armed::arm_after(AUTHORITY_V2_FILE, kind, skip);
+                let refusal = ledger
+                    .append_data(&next.value)
+                    .expect_err("the fault refuses");
+                assert!(!Armed::pending(), "{skip} {kind:?} fired");
+                drop(armed);
+                assert!(refusal.contains("injected"), "{skip} {kind:?}: {refusal}");
+                drop(ledger);
+                ObservationAuthorityLedgerV2::open_read(root.path(), bounds)
+                    .expect("committed authority stays readable");
+                assert!(matches!(
+                    next.append_and_reopen(root.path(), bounds)
+                        .expect("the exact retry commits"),
+                    ObservationAuthorityCommitV2::Written(_)
+                ));
+            }
+        }
+        let root = test_dir();
+        committed
+            .append_and_reopen(root.path(), bounds)
+            .expect("committed authority writes");
+        let mut raw = OpenOptions::new()
+            .append(true)
+            .open(root.path().join(AUTHORITY_V2_FILE))
+            .expect("authority file reopens");
+        raw.write_all(
+            &committed
+                .value
+                .with_sequence(1)
+                .record(AUTHORITY_V2_DATA_KIND)
+                .expect("Data encodes"),
+        )
+        .and_then(|()| raw.sync_data())
+        .expect("duplicate trailing Data lands");
+        drop(raw);
+        let refusal = ObservationAuthorityLedgerV2::open_read(root.path(), bounds)
+            .err()
+            .unwrap_or_default();
+        assert!(
+            refusal.contains("duplicates a completed authority"),
+            "{refusal}"
+        );
+    }
+
+    /// ledgers-3, D-1910: a kill-torn V1 tail is refused by a reader and cut
+    /// by the next writer, after which both open.
+    #[test]
+    fn a_kill_torn_tail_is_cut_by_the_writer_and_refused_by_a_reader() {
+        let bounds = authority_bounds();
+        let root = test_dir();
+        drop(ObservationAuthorityLedgerV1::open(root.path(), bounds).expect("header initializes"));
+        let path = root.path().join(AUTHORITY_FILE);
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .and_then(|mut file| file.write_all(&[7; 5]))
+            .expect("torn bytes write");
+        assert!(
+            ObservationAuthorityLedgerV1::open_read(root.path(), bounds)
+                .expect_err("a reader refuses")
+                .contains("ragged")
+        );
+        drop(ObservationAuthorityLedgerV1::open(root.path(), bounds).expect("writer heals"));
+        assert_eq!(
+            std::fs::metadata(&path).expect("measure").len(),
+            OBSERVATION_AUTHORITY_HEADER_BYTES_V1
+        );
+        drop(ObservationAuthorityLedgerV1::open_read(root.path(), bounds).expect("reader opens"));
+    }
+
     #[test]
     fn v2_ragged_corrupt_resealed_and_stale_authorities_fail_closed() {
         let bounds = authority_bounds_v2();
@@ -4302,6 +4694,15 @@ mod tests {
             ObservationAuthorityLedgerV2::open_read(ragged_root.path(), bounds)
                 .expect_err("ragged V2 file refuses")
                 .contains("ragged")
+        );
+        // ledgers-3, D-1910: the next writer cuts the never-acknowledged tail.
+        drop(
+            ObservationAuthorityLedgerV2::open(ragged_root.path(), bounds)
+                .expect("the V2 writer cuts the ragged tail"),
+        );
+        drop(
+            ObservationAuthorityLedgerV2::open_read(ragged_root.path(), bounds)
+                .expect("a reader opens the healed V2 ledger"),
         );
 
         let (source, commit) =
@@ -4406,5 +4807,150 @@ mod tests {
                 "replacement of {name} did not fail closed"
             );
         }
+    }
+
+    /// AHA-07 (h-cli-4, D-1854). A failed V1 Data or Completion append is
+    /// truncated back, so the file never ends torn. After a cut Data the file
+    /// is byte-identical; after a cut Completion only the whole Data orphan
+    /// remains. Either way the SAME handle appends again, and the next open
+    /// reads the authority.
+    #[test]
+    fn a_failed_v1_authority_append_truncates_back_and_the_same_handle_appends_again() {
+        let bounds = authority_bounds();
+        let root = test_dir();
+        let mut ledger =
+            ObservationAuthorityLedgerV1::open(root.path(), bounds).expect("V1 initializes");
+        let path = root.path().join(AUTHORITY_FILE);
+        let before = std::fs::read(&path).expect("read before");
+        let data = authority_data_fixture(50);
+        let refusal = ledger
+            .append_data_with(&data, &mut |file, raw| {
+                file.write_all(raw.get(..raw.len() / 2).expect("half a record"))?;
+                Err(std::io::Error::other("injected short write"))
+            })
+            .expect_err("a cut Data refuses");
+        assert!(
+            refusal.contains("observation authority Data")
+                && refusal.contains("injected short write")
+                && refusal.contains(&format!("truncated back to {} bytes", before.len())),
+            "{refusal}"
+        );
+        assert_eq!(std::fs::read(&path).expect("read after Data"), before);
+
+        let mut writes = 0;
+        let refusal = ledger
+            .append_data_with(&data, &mut |file, raw| {
+                writes += 1;
+                if writes == 1 {
+                    return file.write_all(raw);
+                }
+                file.write_all(raw.get(..1).expect("one byte"))?;
+                Err(std::io::Error::other("injected short write"))
+            })
+            .expect_err("a cut Completion refuses");
+        assert!(
+            refusal.contains("observation authority Completion"),
+            "{refusal}"
+        );
+        let stride = usize::try_from(OBSERVATION_AUTHORITY_RECORD_STRIDE_V1).expect("stride");
+        assert_eq!(
+            std::fs::read(&path).expect("read after Completion").len(),
+            before.len() + stride,
+            "only the whole Data orphan remains"
+        );
+        assert!(matches!(
+            ledger
+                .append_data(&data)
+                .expect("the same handle continues the orphan"),
+            ObservationAuthorityCommitV1::Written(_)
+        ));
+        assert_eq!(
+            std::fs::read(&path).expect("read after retry").len(),
+            before.len() + 2 * stride
+        );
+        drop(ledger);
+        let mut reopened =
+            ObservationAuthorityLedgerV1::open_read(root.path(), bounds).expect("reopens");
+        assert!(
+            reopened
+                .reopen_audit(&data.authority_id)
+                .expect("audit reads")
+                .is_some()
+        );
+
+        // A rolled-back header leaves an empty file; the next writer
+        // initializes it rather than refusing a torn header.
+        let empty = test_dir();
+        std::fs::write(empty.path().join(AUTHORITY_FILE), []).expect("empty file");
+        drop(ObservationAuthorityLedgerV1::open(empty.path(), bounds).expect("initializes"));
+        assert_eq!(
+            std::fs::metadata(empty.path().join(AUTHORITY_FILE))
+                .expect("stat")
+                .len(),
+            OBSERVATION_AUTHORITY_HEADER_BYTES_V1
+        );
+    }
+
+    /// AHA-07 (D-1854). The same for Observation V2.
+    #[test]
+    fn a_failed_v2_authority_append_truncates_back_and_the_same_handle_appends_again() {
+        let bounds = authority_bounds_v2();
+        let root = test_dir();
+        let (source, commit) =
+            crate::pre_admission_data::observation_v2_zero_production_fixture(87)
+                .expect("zero source fixture derives");
+        let produced = produce_natural_extinction_observation_v2(&source, &commit)
+            .expect("zero source prepares Observation V2");
+        let mut ledger =
+            ObservationAuthorityLedgerV2::open(root.path(), bounds).expect("V2 initializes");
+        let path = root.path().join(AUTHORITY_V2_FILE);
+        let before = std::fs::read(&path).expect("read before");
+        let refusal = ledger
+            .append_data_with(&produced.value, &mut |file, raw| {
+                file.write_all(raw.get(..raw.len() - 1).expect("all but a byte"))?;
+                Err(std::io::Error::other("injected short write"))
+            })
+            .expect_err("a cut Data refuses");
+        assert!(
+            refusal.contains("Observation V2 Data")
+                && refusal.contains(&format!("truncated back to {} bytes", before.len())),
+            "{refusal}"
+        );
+        assert_eq!(std::fs::read(&path).expect("read after Data"), before);
+
+        let mut writes = 0;
+        let refusal = ledger
+            .append_data_with(&produced.value, &mut |file, raw| {
+                writes += 1;
+                if writes == 1 {
+                    return file.write_all(raw);
+                }
+                Err(std::io::Error::other("injected write that wrote nothing"))
+            })
+            .expect_err("a failed Completion refuses");
+        assert!(refusal.contains("Observation V2 Completion"), "{refusal}");
+        let stride = usize::try_from(OBSERVATION_AUTHORITY_RECORD_STRIDE_V2).expect("stride");
+        assert_eq!(
+            std::fs::read(&path).expect("read after Completion").len(),
+            before.len() + stride
+        );
+        assert!(matches!(
+            ledger
+                .append_data(&produced.value)
+                .expect("the same handle continues the orphan"),
+            ObservationAuthorityCommitV2::Written(_)
+        ));
+        drop(ledger);
+        drop(ObservationAuthorityLedgerV2::open_read(root.path(), bounds).expect("reopens"));
+
+        let empty = test_dir();
+        std::fs::write(empty.path().join(AUTHORITY_V2_FILE), []).expect("empty file");
+        drop(ObservationAuthorityLedgerV2::open(empty.path(), bounds).expect("initializes"));
+        assert_eq!(
+            std::fs::metadata(empty.path().join(AUTHORITY_V2_FILE))
+                .expect("stat")
+                .len(),
+            OBSERVATION_AUTHORITY_HEADER_BYTES_V2
+        );
     }
 }

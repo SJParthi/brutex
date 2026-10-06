@@ -119,6 +119,69 @@ fn shared_durable_writes_follow_the_inputs_not_the_schedule() {
     assert_eq!(rerun, one, "a rerun reordered the store");
 }
 
+/// The order the module doc states, derived from [`worker`]'s own program
+/// order rather than from a run: every lane's shared writes are its events
+/// `1, 2, 3, …`, a window's events land sorted by `(k, i)`, and windows land
+/// one after another. Returns the journal identities and the ledger identities.
+fn stated_order() -> (Vec<[u8; 32]>, Vec<[u8; 32]>) {
+    let workers: Vec<u8> = (0..WORKERS).collect();
+    let mut journal = Vec::new();
+    let mut ledger = Vec::new();
+    for window in workers.chunks(crate::ordered::WINDOW) {
+        // (round, lane, is the ledger row, identity)
+        let mut events = Vec::new();
+        for (lane, &w) in window.iter().enumerate() {
+            let mut lane_events = vec![(false, id(w, 0))];
+            for step in 0..w % 3 {
+                lane_events.push((false, id(w, step + 1)));
+                lane_events.push((false, id(w, step + 1)));
+            }
+            lane_events.push((true, id(w, 0)));
+            lane_events.push((false, id(w, 0)));
+            for (round, (to_ledger, identity)) in lane_events.into_iter().enumerate() {
+                events.push((round, lane, to_ledger, identity));
+            }
+        }
+        events.sort_by_key(|&(round, lane, _, _)| (round, lane));
+        for (_, _, to_ledger, identity) in events {
+            if to_ledger {
+                ledger.push(identity);
+            } else {
+                journal.push(identity);
+            }
+        }
+    }
+    (journal, ledger)
+}
+
+/// **The order is the INPUT order, not merely a repeatable one.** The test
+/// above compares runs only with each other, so lanes that each waited on the
+/// HIGHER lanes instead (`other < at` mutated to `other > at` in
+/// `Turns::ready`) would land every round in reverse input order, the same on
+/// every run, and pass it. P10-02.
+#[test]
+fn shared_durable_writes_land_round_by_round_in_input_order() {
+    let (journal, ledger) = fan_out(WORKERS.into(), |w| {
+        Duration::from_millis(u64::from(WORKERS - w) * 3)
+    });
+    let (stated_journal, stated_ledger) = stated_order();
+    assert_eq!(ledger, stated_ledger, "the ledger is not in (k, i) order");
+    let identities: Vec<[u8; 32]> = journal
+        .iter()
+        .map(|row| row[8..40].try_into().expect("32 bytes"))
+        .collect();
+    assert_eq!(
+        identities, stated_journal,
+        "the journal is not in (k, i) order"
+    );
+    // Round one of the first window is every lane's outer begin, lane 0 first.
+    let first: Vec<[u8; 32]> = (0..WORKERS)
+        .take(crate::ordered::WINDOW)
+        .map(|w| id(w, 0))
+        .collect();
+    assert_eq!(identities[..first.len()], first[..]);
+}
+
 /// The body of `fn name` in `source`, up to the next item at column zero.
 fn body<'a>(source: &'a str, name: &str) -> &'a str {
     let start = source.find(name).unwrap_or_else(|| panic!("{name} exists"));

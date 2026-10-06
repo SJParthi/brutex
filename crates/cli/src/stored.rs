@@ -578,7 +578,16 @@ impl CashCloses {
         let Some(dated) = cas_dated_day(day) else {
             return calendar;
         };
-        match pull::calendar::kind_of(day) {
+        self.dated_close_on(pull::calendar::kind_of(day), dated)
+    }
+
+    /// The dated answer for a CAS-era day the calendar calls `kind`: the
+    /// master's close less one minute on a full session, and `None` on any
+    /// other. No irregular session falls in the CAS era yet, so `kind` is a
+    /// parameter: a test hands it one, and a future special session on a CAS
+    /// day is refused rather than given a full day's close.
+    fn dated_close_on(&self, kind: DayKind, dated: pull::session::Day) -> Option<u16> {
+        match kind {
             DayKind::Open(session) if session == Session::full() => self
                 .schedule
                 .close(dated)
@@ -3174,6 +3183,42 @@ fn daily_eligibility_of(day: i64) -> Result<DailyEligibility, Refusal> {
     }
 }
 
+/// The first signal day's daily context must be anchored to the session it
+/// follows on the canonical calendar (CE-10, D-1769).
+fn anchored_to_prior_session(
+    references: &[DailyReference],
+    first_signal_day: i64,
+) -> Result<(), Refusal> {
+    // THE NEWEST ELIGIBLE RECORD BEFORE THE FIRST SIGNAL DAY MUST BE THE
+    // SESSION THAT DAY FOLLOWS. This asked only for ANY eligible record before
+    // it, and `daily_context_from_span`'s per-day walk covers a day only once a
+    // previous signal day exists, so a previous-month file that ended early
+    // anchored the first day's pivots, previous-day and gap bits to an older
+    // session while GapFib,
+    // which asks `prior_accepted_session`, anchored to the right one (CE-10,
+    // D-1769). Both sides now ask the canonical calendar the same question.
+    let newest_before = references
+        .iter()
+        .rev()
+        .find(|reference| {
+            reference.ist_day() < first_signal_day
+                && reference.eligibility() == DailyEligibility::Eligible
+        })
+        .map(DailyReference::ist_day);
+    let Some(newest_before) = newest_before else {
+        return Err(format!(
+            "the first signal IST day {first_signal_day} has no eligible stored 1day record strictly before it. Same-day OHLCV, a coarse reconstruction, and a guessed holiday are all forbidden; load the preceding daily history"
+        ));
+    };
+    let (prior_session, _) = prior_accepted_session(first_signal_day)?;
+    if newest_before != prior_session {
+        return Err(format!(
+            "the first signal IST day {first_signal_day} follows the accepted session {prior_session}, but the newest eligible stored 1day record before it is {newest_before}. The daily file ends early, and anchoring the first day's previous-day, pivot and gap context to an older session is refused rather than guessed; load the missing daily history"
+        ));
+    }
+    Ok(())
+}
+
 /// Turn a complete stored one-day span into explicit causal reference records.
 pub(crate) fn daily_context_from_span(
     daily: Span,
@@ -3238,14 +3283,7 @@ pub(crate) fn daily_context_from_span(
         eligibility.push(u8::from(decision == DailyEligibility::Eligible));
     }
 
-    if !references.iter().any(|reference| {
-        reference.ist_day() < first_signal_day
-            && reference.eligibility() == DailyEligibility::Eligible
-    }) {
-        return Err(format!(
-            "the first signal IST day {first_signal_day} has no eligible stored 1day record strictly before it. Same-day OHLCV, a coarse reconstruction, and a guessed holiday are all forbidden; load the preceding daily history"
-        ));
-    }
+    anchored_to_prior_session(&references, first_signal_day)?;
 
     // Every regular signal session that is followed by another observed signal
     // session must itself have a stored daily record.  The signal stream is the
@@ -5045,6 +5083,34 @@ mod tests {
         );
     }
 
+    /// CE-10, D-1769: a daily file that ends before the session the first
+    /// signal day follows refuses, instead of anchoring that day to an older
+    /// session. Monday's record exists, Tuesday traded and has none, and the
+    /// first signal day is Wednesday.
+    #[test]
+    fn a_first_signal_day_whose_prior_session_has_no_daily_record_refuses() {
+        let daily = daily_span(vec![candle_on_ist_day(OPEN_MONDAY_2026_08_03, 2_500_000)]);
+        let signal = [candle_on_ist_day(OPEN_WEDNESDAY_2026_08_05, 2_600_100)];
+        let why = daily_context_from_span(daily, &signal)
+            .expect_err("Wednesday follows Tuesday, not Monday");
+        assert!(
+            why.contains(&format!(
+                "follows the accepted session {OPEN_TUESDAY_2026_08_04}"
+            )),
+            "{why}"
+        );
+        assert!(
+            why.contains(&format!("is {OPEN_MONDAY_2026_08_03}")),
+            "{why}"
+        );
+        // And with Tuesday's record present the same first day is accepted.
+        let daily = daily_span(vec![
+            candle_on_ist_day(OPEN_MONDAY_2026_08_03, 2_500_000),
+            candle_on_ist_day(OPEN_TUESDAY_2026_08_04, 2_550_000),
+        ]);
+        daily_context_from_span(daily, &signal).expect("the prior session is on file");
+    }
+
     #[test]
     fn a_non_regular_observed_day_is_not_invented_as_an_eligible_anchor() {
         let non_regular = CHARTER_NON_REGULAR_IST_DAYS[0];
@@ -5372,6 +5438,19 @@ mod tests {
         assert_eq!((none.dated_days(), none.unverified_days()), (0, 1));
         assert!(none.unverified_reason(OPEN_MONDAY_2026_08_03).is_some());
         assert_eq!(yes.session_close_minute(OPEN_MONDAY_2026_08_03), Some(914));
+        // An irregular session on a CAS day is never given the dated close:
+        // the 2025-10-21 Muhurat hour stands in for one, since none falls in
+        // the CAS era yet.
+        let DayKind::Open(muhurat) = pull::calendar::kind_of(20_382) else {
+            panic!("2025-10-21 is the Muhurat session");
+        };
+        assert_ne!(muhurat, Session::full());
+        let cas_day = cas_dated_day(OPEN_MONDAY_2026_08_03).expect("a CAS-era day");
+        assert_eq!(yes.dated_close_on(DayKind::Open(muhurat), cas_day), None);
+        assert_eq!(
+            yes.dated_close_on(DayKind::Open(Session::full()), cas_day),
+            Some(914)
+        );
         assert_eq!(no.session_close_minute(OPEN_MONDAY_2026_08_03), Some(929));
         assert_eq!(none.session_close_minute(OPEN_MONDAY_2026_08_03), None);
         for closes in [&yes, &no, &none] {

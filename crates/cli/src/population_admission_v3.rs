@@ -3980,16 +3980,35 @@ impl PopulationAdmissionV3Ledger {
             return self.reuse_existing(prepared, existing);
         }
         if let Some(trailing) = self.trailing.clone() {
-            return self.complete_trailing(prepared, &trailing);
+            // A whole-row PREFIX of this exact block is completed (D-1906,
+            // pop2-1): a write cut between rows left one, and refusing it
+            // wedged every later append behind it.
+            if trailing.block_id == prepared.source.block_id
+                && prepared.decisions.starts_with(&trailing.decisions)
+            {
+                return self.complete_trailing(prepared, &trailing);
+            }
+            self.discard_trailing(&trailing)?;
         }
         self.require_append_bound(count, 1)?;
         let first = self.decision_records;
+        let block =
+            crate::fixed_tail::start(&mut self.decision_file, &self.decision_path.display())?;
         for decision in &prepared.decisions {
-            append_raw(&mut self.decision_file, &encode_decision(decision)?)?;
+            append_raw(
+                &mut self.decision_file,
+                &self.decision_path,
+                block,
+                &encode_decision(decision)?,
+            )?;
         }
-        self.decision_file
-            .sync_data()
-            .map_err(|why| format!("cannot sync Admission V3 decisions: {why}"))?;
+        crate::fixed_tail::sync_or_roll_back(
+            &self.decision_file,
+            &self.decision_path,
+            block,
+            File::sync_data,
+        )
+        .map_err(|why| format!("cannot sync Admission V3 decisions: {why}"))?;
         self.decision_records = self
             .decision_records
             .checked_add(count)
@@ -3997,10 +4016,21 @@ impl PopulationAdmissionV3Ledger {
         self.refresh_decision_generation()?;
         self.require_unchanged()?;
         let completion = prepared.expected_completion(self.completion_records, first)?;
-        append_raw(&mut self.completion_file, &encode_completion(&completion)?)?;
-        self.completion_file
-            .sync_data()
-            .map_err(|why| format!("cannot sync Admission V3 Completion: {why}"))?;
+        let block =
+            crate::fixed_tail::start(&mut self.completion_file, &self.completion_path.display())?;
+        append_raw(
+            &mut self.completion_file,
+            &self.completion_path,
+            block,
+            &encode_completion(&completion)?,
+        )?;
+        crate::fixed_tail::sync_or_roll_back(
+            &self.completion_file,
+            &self.completion_path,
+            block,
+            File::sync_data,
+        )
+        .map_err(|why| format!("cannot sync Admission V3 Completion: {why}"))?;
         sync_directory(&self.root_file, &self.root)?;
         self.completion_records = self
             .completion_records
@@ -4063,34 +4093,95 @@ impl PopulationAdmissionV3Ledger {
         Ok(PopulationAdmissionV3StructuralCommit::Reused(existing))
     }
 
+    /// Cuts a receipt-less trailing block that is not this exact retry
+    /// (D-1905, pop2-4): no Completion acknowledged it, so it is scratch, and
+    /// refusing every other block because of it wedged the ledger for good.
+    fn discard_trailing(
+        &mut self,
+        trailing: &TrailingDecisionBlockV3,
+    ) -> Result<(), PopulationAdmissionV3Refusal> {
+        let at = trailing
+            .first_decision_record
+            .checked_mul(POPULATION_ADMISSION_V3_DECISION_BYTES as u64)
+            .ok_or_else(|| "Admission V3 trailing offset overflowed".to_owned())?;
+        crate::fixed_tail::discard_orphan(
+            &self.decision_file,
+            &self.decision_path,
+            at,
+            &format!("Admission V3 block {}", hex32(trailing.block_id)),
+        )?;
+        self.decision_records = trailing.first_decision_record;
+        self.trailing = None;
+        self.refresh_decision_generation()?;
+        self.require_unchanged()
+    }
+
     fn complete_trailing(
         &mut self,
         prepared: &PreparedPopulationAdmissionV3,
         trailing: &TrailingDecisionBlockV3,
     ) -> Result<PopulationAdmissionV3StructuralCommit, PopulationAdmissionV3Refusal> {
-        if trailing.block_id != prepared.source.block_id || trailing.decisions != prepared.decisions
-        {
-            return Err(format!(
-                "Admission V3 trailing block {} is not exact retry {}",
-                hex32(trailing.block_id),
-                hex32(prepared.source.block_id)
-            ));
-        }
-        self.require_append_bound(0, 1)?;
+        let missing = prepared
+            .decisions
+            .get(trailing.decisions.len()..)
+            .ok_or_else(|| "Admission V3 trailing block is longer than its retry".to_owned())?;
+        let missing_count = u64::try_from(missing.len())
+            .map_err(|_| "Admission V3 missing decision count does not fit u64".to_owned())?;
+        self.require_append_bound(missing_count, 1)?;
         self.require_unchanged()?;
-        self.decision_file
-            .sync_data()
+        if missing.is_empty() {
+            // A barrier that already failed in this process is never
+            // confirmed by a second one (D-1900, resources-1).
+            crate::fixed_tail::refuse_after_failed_barrier(&self.decision_path)?;
+            self.decision_file
+                .sync_data()
+                .map_err(|why| format!("cannot sync Admission V3 retry decisions: {why}"))?;
+        } else {
+            let block =
+                crate::fixed_tail::start(&mut self.decision_file, &self.decision_path.display())?;
+            for decision in missing {
+                append_raw(
+                    &mut self.decision_file,
+                    &self.decision_path,
+                    block,
+                    &encode_decision(decision)?,
+                )?;
+            }
+            crate::fixed_tail::sync_or_roll_back(
+                &self.decision_file,
+                &self.decision_path,
+                block,
+                File::sync_data,
+            )
             .map_err(|why| format!("cannot sync Admission V3 retry decisions: {why}"))?;
+            self.decision_records = self
+                .decision_records
+                .checked_add(missing_count)
+                .ok_or_else(|| "Admission V3 retry decision count overflowed".to_owned())?;
+            self.refresh_decision_generation()?;
+            self.require_unchanged()?;
+        }
         #[cfg(test)]
         {
             self.trailing_barrier_order_code = 1;
         }
         let completion = prepared
             .expected_completion(self.completion_records, trailing.first_decision_record)?;
-        append_raw(&mut self.completion_file, &encode_completion(&completion)?)?;
-        self.completion_file
-            .sync_data()
-            .map_err(|why| format!("cannot sync Admission V3 retry Completion: {why}"))?;
+        let block =
+            crate::fixed_tail::start(&mut self.completion_file, &self.completion_path.display())?;
+        append_raw(
+            &mut self.completion_file,
+            &self.completion_path,
+            block,
+            &encode_completion(&completion)?,
+        )?;
+        crate::fixed_tail::sync_or_roll_back(
+            &self.completion_file,
+            &self.completion_path,
+            block,
+            File::sync_data,
+        )
+        .map_err(|why| format!("cannot sync Admission V3 retry Completion: {why}"))?;
         #[cfg(test)]
         {
             self.trailing_barrier_order_code = 12;
@@ -4564,33 +4655,17 @@ fn read_fixed_at<const N: usize>(
     Ok(raw)
 }
 
-fn append_raw(file: &mut File, raw: &[u8]) -> Result<(), PopulationAdmissionV3Refusal> {
-    append_with_rollback(file, raw, Write::write_all)
-}
-
-/// Appends one fixed record, and on a write error (ENOSPC, EIO) truncates the
-/// file back to the length it had before this record. Without that a partial
-/// `write_all` left a ragged tail, and every later open, read-only included,
-/// refused the file's already committed authorities as "ragged length".
-fn append_with_rollback(
+/// Appends one record of the block that began at `block`. A write error cuts
+/// the file back to `block`, so no ragged tail survives it (D-1900).
+fn append_raw(
     file: &mut File,
+    path: &Path,
+    block: u64,
     raw: &[u8],
-    write: impl FnOnce(&mut File, &[u8]) -> std::io::Result<()>,
 ) -> Result<(), PopulationAdmissionV3Refusal> {
-    let end = file
-        .seek(SeekFrom::End(0))
-        .map_err(|why| format!("cannot append Admission V3 fixed record: {why}"))?;
-    let Err(why) = write(file, raw) else {
-        return Ok(());
-    };
-    match file.set_len(end) {
-        Ok(()) => Err(format!(
-            "cannot append Admission V3 fixed record: {why}; truncated back to {end} bytes"
-        )),
-        Err(rollback) => Err(format!(
-            "cannot append Admission V3 fixed record: {why}; truncation back to {end} bytes also failed: {rollback}"
-        )),
-    }
+    crate::fixed_tail::write_at_end(file, &path.display(), block, raw, |file, raw| {
+        file.write_all(raw)
+    })
 }
 
 fn open_root_directory(
@@ -4896,6 +4971,18 @@ fn hash_exact_prefix(
 )]
 mod tests {
     use super::*;
+
+    /// The rollback append the shipping path used before D-1902 moved it into
+    /// `fixed_tail`; kept as the test's own seam onto the shared helper.
+    fn append_with_rollback(
+        file: &mut File,
+        raw: &[u8],
+        write: impl FnOnce(&mut File, &[u8]) -> std::io::Result<()>,
+    ) -> Result<(), PopulationAdmissionV3Refusal> {
+        let subject = "Admission V3 fixed record";
+        let block = crate::fixed_tail::start(file, &subject)?;
+        crate::fixed_tail::write_at_end(file, &subject, block, raw, write)
+    }
     use runner::admission::{AdmissionPolicyDraftV1, AdmissionReasonV1, ObservedU64V1, ReasonBits};
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -6344,11 +6431,9 @@ mod tests {
             .open(orphan.path().join(DECISION_FILE))
             .expect("open orphan decisions");
         for decision in &prepared.decisions {
-            append_raw(
-                &mut decisions,
-                &encode_decision(decision).expect("encode orphan"),
-            )
-            .expect("append orphan");
+            decisions
+                .write_all(&encode_decision(decision).expect("encode orphan"))
+                .expect("append orphan");
         }
         decisions.sync_data().expect("sync orphan decisions");
         drop(decisions);
@@ -6373,17 +6458,59 @@ mod tests {
             .append(true)
             .open(partial.path().join(DECISION_FILE))
             .expect("open partial decisions");
-        append_raw(
-            &mut decisions,
-            &encode_decision(prepared.decisions.first().expect("first decision"))
-                .expect("encode first"),
-        )
-        .expect("append first");
+        decisions
+            .write_all(
+                &encode_decision(prepared.decisions.first().expect("first decision"))
+                    .expect("encode first"),
+            )
+            .expect("append first");
         decisions.sync_data().expect("sync partial");
         drop(decisions);
         let mut partial_ledger = PopulationAdmissionV3Ledger::open_write(partial.path(), bounds())
             .expect("open partial ledger");
-        assert!(partial_ledger.append(&prepared).is_err());
+        // pop2-1 / slice23-F1, D-1906: the exact retry completes a whole-row
+        // prefix of its own block instead of refusing it for good.
+        assert!(matches!(
+            partial_ledger
+                .append(&prepared)
+                .expect("the exact retry completes the prefix"),
+            PopulationAdmissionV3StructuralCommit::Written(_)
+        ));
+        drop(partial_ledger);
+        assert_eq!(
+            std::fs::metadata(partial.path().join(DECISION_FILE))
+                .expect("decision file")
+                .len(),
+            prepared.decisions.len() as u64 * POPULATION_ADMISSION_V3_DECISION_BYTES as u64
+        );
+
+        // pop2-4, D-1905: a receipt-less prefix of ANOTHER block is scratch;
+        // the next writer cuts it and commits its own block.
+        let scratch = TestRoot::new("foreign-partial");
+        drop(
+            PopulationAdmissionV3Ledger::open_write(scratch.path(), bounds())
+                .expect("create foreign-partial ledger"),
+        );
+        let mut decisions = OpenOptions::new()
+            .append(true)
+            .open(scratch.path().join(DECISION_FILE))
+            .expect("open foreign-partial decisions");
+        let mut foreign = prepared.decisions.first().expect("first decision").clone();
+        foreign.block_id = [0xEE; 32];
+        foreign.decision_id = foreign.derive_decision_id();
+        decisions
+            .write_all(&encode_decision(&foreign).expect("encode foreign"))
+            .and_then(|()| decisions.sync_data())
+            .expect("foreign prefix lands");
+        drop(decisions);
+        let mut scratch_ledger =
+            PopulationAdmissionV3Ledger::open_write(scratch.path(), bounds()).expect("opens");
+        assert!(matches!(
+            scratch_ledger
+                .append(&prepared)
+                .expect("a foreign prefix is discarded and the block commits"),
+            PopulationAdmissionV3StructuralCommit::Written(_)
+        ));
 
         let corrupted = TestRoot::new("reserved");
         persist_population_admission_v3(corrupted.path(), bounds(), &prepared)
@@ -6419,6 +6546,66 @@ mod tests {
         lock.write_all(&[1]).expect("write forbidden lock byte");
         lock.sync_data().expect("sync lock byte");
         assert!(PopulationAdmissionV3Ledger::open_read(lock_root.path(), bounds()).is_err());
+    }
+
+    /// A trailing prefix of the SAME block whose rows differ from the retry's
+    /// is not an exact retry: it is cut and the block commits with the
+    /// prepared rows, never completed into a block that mixes the two.
+    /// `complete_trailing` appends only the missing tail and never compares
+    /// the rows already held, so the `starts_with` clause in `append_locked`
+    /// is the only thing that refuses it. P10-06: deleting that clause passed
+    /// every other test, because the two fixtures beside it are an exact
+    /// prefix and a foreign block.
+    #[test]
+    fn a_same_block_prefix_with_other_rows_is_cut_not_completed() {
+        let prepared = prepared();
+        assert!(
+            prepared.decisions.len() > 1,
+            "the premise: a tail to append"
+        );
+        let root = TestRoot::new("same-block-other-rows");
+        drop(
+            PopulationAdmissionV3Ledger::open_write(root.path(), bounds()).expect("create ledger"),
+        );
+        let mut altered = prepared.decisions.first().expect("first decision").clone();
+        altered.candidate_row_digest = [0xAB; 32];
+        altered.decision_id = altered.derive_decision_id();
+        assert_eq!(altered.block_id, prepared.source.block_id, "the same block");
+        assert_ne!(&altered, prepared.decisions.first().expect("first"));
+        let mut decisions = OpenOptions::new()
+            .append(true)
+            .open(root.path().join(DECISION_FILE))
+            .expect("open decisions");
+        decisions
+            .write_all(&encode_decision(&altered).expect("encode altered"))
+            .and_then(|()| decisions.sync_data())
+            .expect("altered prefix lands");
+        drop(decisions);
+
+        let mut ledger =
+            PopulationAdmissionV3Ledger::open_write(root.path(), bounds()).expect("opens");
+        assert_eq!(
+            ledger.trailing.as_ref().map(|trailing| trailing.block_id),
+            Some(prepared.source.block_id),
+            "the premise: a same-block trailing prefix is held"
+        );
+        assert!(matches!(
+            ledger
+                .append(&prepared)
+                .expect("the altered prefix is cut and the block commits"),
+            PopulationAdmissionV3StructuralCommit::Written(_)
+        ));
+        drop(ledger);
+        let expected: Vec<u8> = prepared
+            .decisions
+            .iter()
+            .flat_map(|decision| encode_decision(decision).expect("encode"))
+            .collect();
+        assert_eq!(
+            std::fs::read(root.path().join(DECISION_FILE)).expect("decision file"),
+            expected,
+            "exactly the prepared rows, none of the altered prefix"
+        );
     }
 
     #[test]

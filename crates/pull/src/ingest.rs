@@ -1559,7 +1559,14 @@ fn keep_in_session(
         // case `fetch::land` refuses as `TimestampRefused`. Same rule here,
         // same whole-batch refusal, with the stamp and the calendar's words.
         match verdict(bar.ts_micros) {
-            Ok(None) => kept.push(*bar),
+            Ok(None) => {
+                // Kept on a day the calendar cannot classify: counted by name
+                // (P-03, D-2673), never a silent keep.
+                if crate::session::on_unclassified_day(bar.ts_micros.div_euclid(1_000_000)) {
+                    census.count_unclassified_kept();
+                }
+                kept.push(*bar);
+            }
             Ok(Some(reason)) => census.count(reason),
             Err(why) => {
                 return Err(format!(
@@ -2351,6 +2358,9 @@ fn derive_all(
     } else {
         None
     };
+    if let Some(minutes) = history.as_deref() {
+        check_day(minutes, instrument, store_root, symbol_id, &into);
+    }
     let source_bars = history.as_deref().unwrap_or(source_bars);
     for rung in derived_from(source) {
         let parts = PathParts {
@@ -2553,6 +2563,109 @@ fn derived_from(source: Timeframe) -> impl Iterator<Item = Timeframe> {
             && target.secs().is_multiple_of(source.secs())
             && target.secs() != Timeframe::DAY_1.secs()
     })
+}
+
+/// Checks Zerodha's pulled day bars for the month against the days its own
+/// minute bars fold to, and says what it found on the log. D-3001.
+///
+/// # Zerodha only, and why
+///
+/// The operator's rule of 4 Oct 2026 is a Zerodha rule: the day pass over the
+/// whole span first, then the minute pass, then everything rebuilt from the
+/// minutes. For Zerodha the two answers for one day are meant to agree, so a
+/// disagreement is news. Groww's day bar opens at the previous session's
+/// close, measured 181 points from Dhan's on one instrument on one day
+/// (D-0077), so checking it would log every day as different and drown a real
+/// gap in convention noise.
+///
+/// # Never a failure, never a write
+///
+/// The minute bars are already committed and the day bars are what the vendor
+/// served, so nothing here can make either more correct. Agreement is an
+/// `info` line, any disagreement or an unreadable day file a `warn` line, both
+/// under `pull.daycheck` on `/logs`. See [`crate::daycheck`].
+///
+/// # Cost
+///
+/// One read of the month's day file, `O(days)`, then [`crate::daycheck::compare`],
+/// `O(minutes + days)`. Once per instrument-month after its minute bars land.
+fn check_day(
+    minutes: &[Bar],
+    instrument: &str,
+    store_root: &Path,
+    symbol_id: u32,
+    into: &DeriveInto<'_>,
+) {
+    let Some(found) = day_check_of(minutes, store_root, symbol_id, into) else {
+        return;
+    };
+    let month = into.month.to_string();
+    let event = match &found {
+        Ok(report) if report.clean() => telemetry::Event::info(
+            "pull.daycheck",
+            "pulled 1day agrees with the days its 1min bars fold to",
+        ),
+        Ok(_) => telemetry::Event::warn(
+            "pull.daycheck",
+            "pulled 1day differs from the days its 1min bars fold to",
+        ),
+        Err(_) => telemetry::Event::warn(
+            "pull.daycheck",
+            "pulled 1day could not be checked against its 1min bars",
+        ),
+    }
+    .with("instrument", telemetry::Value::Str(instrument))
+    .with("month", telemetry::Value::Str(&month));
+    let count = |n: usize| telemetry::Value::Uint(u64::try_from(n).unwrap_or(u64::MAX));
+    let event = match &found {
+        Ok(report) => event
+            .with("agreed", count(report.agreed))
+            .with("differed", count(report.differed))
+            .with("day_absent", count(report.day_absent))
+            .with("minute_absent", count(report.minute_absent))
+            .with(
+                "why",
+                telemetry::Value::Str(report.first.as_deref().unwrap_or("")),
+            ),
+        Err(why) => event.with("why", telemetry::Value::Str(why)),
+    };
+    let _dropped_when_filtered = telemetry::emit(&event);
+}
+
+/// [`check_day`]'s finding: `None` for any vendor but Zerodha, otherwise the
+/// comparison or the reason the pulled day file could not be read.
+fn day_check_of(
+    minutes: &[Bar],
+    store_root: &Path,
+    symbol_id: u32,
+    into: &DeriveInto<'_>,
+) -> Option<Result<crate::daycheck::Report, String>> {
+    if into.vendor != Vendor::Zerodha {
+        return None;
+    }
+    let read = || -> Result<Vec<Bar>, String> {
+        let path = StorePath::new(PathParts {
+            vendor: into.vendor,
+            exchange: into.exchange.as_str(),
+            segment: into.segment.as_str(),
+            symbol: into.symbol.as_str(),
+            contract: into.contract,
+            timeframe: Timeframe::DAY_1,
+            month: into.month,
+            file: FileKind::Bars,
+        })
+        .map_err(|why| why.to_string())?;
+        let file =
+            BarFile::open_existing(store_root, path, symbol_id).map_err(|why| why.to_string())?;
+        (0..file.header().n_valid)
+            .map(|i| file.read_record(i).map_err(|why| why.to_string()))
+            .collect()
+    };
+    Some(
+        read().and_then(|days| {
+            crate::daycheck::compare(minutes, &days).map_err(|why| why.to_string())
+        }),
+    )
 }
 
 /// Folds one month of minute bars into `rung` and appends them under its own
@@ -2992,22 +3105,6 @@ fn count(census: &mut Manifest, held: Held) -> Result<Option<Append>, String> {
         .map_err(|why| why.to_string())
 }
 
-/// Whether a file of `len` bytes is larger than this build could have written.
-///
-/// A named predicate rather than the comparison written inline, because the
-/// boundary is the whole content of the check and **a file of exactly
-/// [`MAX_CENSUS_BYTES`] is legal**: it is a census at [`MAX_ENTRIES`], which
-/// `ManifestHeader::advance` accepts and refuses only one past. Written as
-/// `>=` it would refuse the largest legal census, and no test that could
-/// afford to build one would ever notice — materialising that file means a
-/// 134 MB allocation, which is not a thing a unit test should do. So the
-/// ceiling is verified as **arithmetic** here, exactly as `pull::manifest`
-/// verifies its own, and `pull::ingest::tests` is the only place that can
-/// reach it without one.
-const fn beyond_ceiling(len: u64) -> bool {
-    len > MAX_CENSUS_BYTES
-}
-
 /// The vendor's census, or why this run must not write.
 ///
 /// # An absent file is a first ingest, and only an absent file
@@ -3030,21 +3127,22 @@ const fn beyond_ceiling(len: u64) -> bool {
 /// measured, is larger than this build could have written, cannot be read, or
 /// is not a census this build accepts.
 fn read_census(path: &Path, vendor: Vendor) -> Result<Manifest, String> {
-    let bytes = match fs::metadata(path) {
-        // THE SIZE IS CHECKED BEFORE THE READ. `read` on a file this process
-        // cannot hold is not an error it can report — it is an allocator
-        // failure or an OOM kill, and neither reaches the operator as "that
-        // census is too big".
-        Ok(found) if beyond_ceiling(found.len()) => {
+    // ONE OPEN, ONE `fstat` OF THAT HANDLE, ONE CAPPED READ (CE-64, D-2684).
+    //
+    // This took `fs::metadata(path).len()` and then `fs::read(path)`. The length
+    // `stat` gives a FIFO or a device is 0, so the ceiling passed, and the read
+    // then blocked for ever on a FIFO with no writer, while this run held the
+    // census lock and the vendor's seat, or read `/dev/zero` until memory ran
+    // out. A file swapped or grown between the two calls was read whole. The
+    // api's reader of this same file refuses all three by name (P-19).
+    let bytes = match read_regular_capped(path, MAX_CENSUS_BYTES) {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(why)) => {
             return Err(format!(
-                "{} is {} bytes; the largest census this build can write is \
-                 {MAX_CENSUS_BYTES} and this reader refuses more",
-                path.display(),
-                found.len()
+                "{} {why}; the largest census this build can write is \
+                 {MAX_CENSUS_BYTES} bytes, and a census is a regular file",
+                path.display()
             ));
-        }
-        Ok(_) => {
-            fs::read(path).map_err(|why| format!("{} could not be read: {why}", path.display()))?
         }
         Err(ref absent)
             if matches!(
@@ -3056,7 +3154,7 @@ fn read_census(path: &Path, vendor: Vendor) -> Result<Manifest, String> {
         }
         Err(why) => {
             return Err(format!(
-                "{} could not be measured: {why}. A census that exists and \
+                "{} could not be measured or read: {why}. A census that exists and \
                  cannot be read is not one that does not exist, and this run \
                  will not start a second census over it",
                 path.display()
@@ -3064,6 +3162,83 @@ fn read_census(path: &Path, vendor: Vendor) -> Result<Manifest, String> {
         }
     };
     Manifest::open_image(vendor, &bytes).map_err(|why| format!("{}: {why}", path.display()))
+}
+
+/// At most `cap` bytes of a **regular** file, read through one handle.
+///
+/// The path is opened once with no-follow and non-blocking flags, so a FIFO
+/// with no writer opens at once instead of waiting and a final symlink is
+/// refused by the host. That handle's `fstat` decides whether it is a regular
+/// file, so nothing can be swapped in between the check and the read, and the
+/// read is capped at one byte past `cap`, so a file that grows under it is
+/// refused rather than held. The shape `api::census::sized` already has (P-19).
+/// CE-64 and CE-65, D-2684; proved by
+/// `pull::ingest::tests::a_census_path_that_is_not_a_regular_file_is_refused_unread_and_never_waits`.
+///
+/// # Errors
+///
+/// The host's own error for an open or `fstat` that fails (an absent path is
+/// `NotFound`, a final symlink `FilesystemLoop`); `Ok(Err(sentence))` for a
+/// path that is not a regular file or holds more than `cap` bytes.
+pub(crate) fn read_regular_capped(
+    path: &Path,
+    cap: u64,
+) -> std::io::Result<Result<Vec<u8>, Unbounded>> {
+    use std::io::Read as _;
+    let file = store::open_flags::open_read_no_follow(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Ok(Err(Unbounded::NotRegular));
+    }
+    // THE HANDLE'S OWN LENGTH FIRST, so a file already past the cap is refused
+    // with nothing read; the capped read below catches one that grows.
+    if meta.len() > cap {
+        return Ok(Err(Unbounded::PastCap {
+            cap,
+            size: meta.len(),
+        }));
+    }
+    let mut bytes = Vec::new();
+    let _ = file.take(cap.saturating_add(1)).read_to_end(&mut bytes)?;
+    let size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    if size > cap {
+        return Ok(Err(Unbounded::PastCap { cap, size }));
+    }
+    Ok(Ok(bytes))
+}
+
+/// Why [`read_regular_capped`] read nothing it would return.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Unbounded {
+    /// The handle's `fstat` is not a regular file: a FIFO, a device or a
+    /// directory. Nothing was read.
+    NotRegular,
+    /// The file holds more than the cap: its length said so before any byte
+    /// was read, or it grew past the cap under a read that stopped one byte
+    /// beyond it.
+    PastCap {
+        /// The cap.
+        cap: u64,
+        /// The bytes the handle's length, or the read, found.
+        size: u64,
+    },
+}
+
+impl std::fmt::Display for Unbounded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotRegular => f.write_str(
+                "is not a regular file (a FIFO, a device or a directory); refused \
+                 unread, because this reader neither waits on a FIFO nor reads a device",
+            ),
+            Self::PastCap { cap, size } => {
+                write!(
+                    f,
+                    "holds {size} bytes, more than the {cap} this reader takes"
+                )
+            }
+        }
+    }
 }
 
 /// Publishes a whole census: write a temporary, flush it, rename it into place.
@@ -3199,58 +3374,15 @@ impl CensusLock {
             //   breaks the file inside it.
             //
             // Both are the §4 fallback that hides a failure, and both went live
-            // the day feeds began running concurrently. Enumerated by kind
-            // rather than inverted into "refuse unless the path is at fault"
-            // because a name past the host's limit is `InvalidFilename`, is the
-            // path's fault, and must keep deferring —
-            // `a_census_that_cannot_be_measured_stops_the_run` builds exactly
-            // that and expects the install's wording.
-            Err(why)
-                if matches!(
-                    why.kind(),
-                    ErrorKind::PermissionDenied | ErrorKind::IsADirectory
-                ) =>
-            {
-                return Err(format!(
-                    "the census lock at {} exists but cannot be opened: {why}. \
-                     Refused rather than run without it -- the census beside it \
-                     is still writable, so this run would have interleaved a \
-                     read-modify-write with any other and silently discarded \
-                     one of them, while the loser's receipt still read 'every \
-                     row accounted for' because its own books balanced. Fix the \
-                     ownership, the permissions or the type of that path and \
-                     try again.",
-                    lock_path.display()
-                ));
-            }
-            // Every other cause is the path's, and the install reports it --
-            // UNLESS SOMETHING THAT IS NOT A FILE OCCUPIES THE NAME (v3b-1,
-            // D-1480). A UNIX socket at this name fails the open with ENXIO,
-            // which is neither kind above, so it deferred here and the run went
-            // unserialised with nothing said: the install never touches this
-            // path. The kind cannot tell a socket from a path failure, but the
-            // name can: `symlink_metadata` that SUCCEEDS on a non-regular entry
-            // means the directory is sound and this one name is misfiled -- a
-            // socket, a device that would not open, a symlink that leads
-            // nowhere or loops. Refused, naming the type. A genuine path
-            // failure (no directory, a file where the directory belongs, a name
-            // past the host's limit) fails `symlink_metadata` too, so it still
-            // defers to the install's wording. A REGULAR file that would not
-            // open for another reason also still defers: its directory is the
-            // install's directory, and the install fails on the same host.
-            Err(why) => match fs::symlink_metadata(&lock_path) {
-                Ok(found) if !found.is_file() => {
-                    return Err(format!(
-                        "the census lock at {} is not a regular file ({}) and \
-                         cannot be opened: {why}. Refused rather than run \
-                         without it: the census beside it is still writable. \
-                         Remove what occupies that name and try again.",
-                        lock_path.display(),
-                        entry_kind(found.file_type())
-                    ));
-                }
-                _ => return Ok(Self { _held: None }),
-            },
+            // the day feeds began running concurrently. A name past the host's
+            // limit is `InvalidFilename`, is the path's fault, and must keep
+            // deferring — `a_census_that_cannot_be_measured_stops_the_run`
+            // builds exactly that and expects the install's wording.
+            //
+            // Every OTHER kind now refuses too while the census directory
+            // stands (pull2-1, D-2765): an EMFILE or an ENOSPC on the lock is
+            // not a failure the install repeats. See [`CensusLock::unopened`].
+            Err(why) => return Self::unopened(&lock_path, &why),
         };
         // A LOCK THAT OPENED BUT IS NOT A REGULAR FILE IS REFUSED BY NAME. A
         // FIFO or a device that opens at this name is a misfiled path, the same
@@ -3279,6 +3411,85 @@ impl CensusLock {
         Flock::try_lock(lock, lock_path.clone())
             .map(|held| Self { _held: Some(held) })
             .map_err(|refusal| lock_refusal(&lock_path, refusal))
+    }
+
+    /// Why the lock file would not open, and whether that may defer.
+    ///
+    /// Split out of [`CensusLock::take`] so its arms can be driven with host
+    /// error kinds a test cannot provoke on demand (EMFILE, ENOSPC). D-2765.
+    fn unopened(lock_path: &Path, why: &std::io::Error) -> Result<Self, String> {
+        if matches!(
+            why.kind(),
+            ErrorKind::PermissionDenied | ErrorKind::IsADirectory
+        ) {
+            return Err(format!(
+                "the census lock at {} exists but cannot be opened: {why}. \
+                 Refused rather than run without it -- the census beside it \
+                 is still writable, so this run would have interleaved a \
+                 read-modify-write with any other and silently discarded \
+                 one of them, while the loser's receipt still read 'every \
+                 row accounted for' because its own books balanced. Fix the \
+                 ownership, the permissions or the type of that path and \
+                 try again.",
+                lock_path.display()
+            ));
+        }
+        // SOMETHING THAT IS NOT A FILE OCCUPIES THE NAME (v3b-1, D-1480). A
+        // UNIX socket at this name fails the open with ENXIO, which is neither
+        // kind above. The kind cannot tell a socket from a path failure, but
+        // the name can: `symlink_metadata` that SUCCEEDS on a non-regular entry
+        // means the directory is sound and this one name is misfiled -- a
+        // socket, a device that would not open, a symlink that leads nowhere or
+        // loops. Refused, naming the type.
+        if let Ok(found) = fs::symlink_metadata(lock_path)
+            && !found.is_file()
+        {
+            return Err(format!(
+                "the census lock at {} is not a regular file ({}) and \
+                 cannot be opened: {why}. Refused rather than run \
+                 without it: the census beside it is still writable. \
+                 Remove what occupies that name and try again.",
+                lock_path.display(),
+                entry_kind(found.file_type())
+            ));
+        }
+        // A REGULAR FILE THAT WOULD NOT OPEN, OR NO FILE AT ALL, IS NOT THE
+        // PATH'S FAULT WHILE ITS DIRECTORY STANDS (pull2-1, D-2765). Both used
+        // to defer to the install on the claim that it "fails on the same
+        // host". It does not: EMFILE, ENFILE and ENOMEM pass by the time the
+        // install runs, and a missing lock that cannot be created on an
+        // inode-exhausted disk leaves an existing census appendable in place.
+        // Each ran the census read-modify-write unserialised. Only a directory
+        // that is not there to hold the census defers now -- absent, a file in
+        // its place, or a name past the host's limit -- because the install
+        // then fails on that same cause, as
+        // `a_broken_directory_defers_because_the_install_fails_on_the_same_cause`
+        // and `a_census_that_cannot_be_measured_stops_the_run` assert.
+        match lock_path.parent().map(fs::metadata) {
+            Some(Ok(dir)) if dir.is_dir() => Err(format!(
+                "the census lock at {} could not be opened: {why}. Refused \
+                 rather than run without it: the directory that holds the \
+                 census stands, so the census may still be writable, and \
+                 running unlocked would interleave this run's \
+                 read-modify-write with any other and silently discard one \
+                 of them. Try again once the host can open that file.",
+                lock_path.display()
+            )),
+            Some(Err(stat))
+                if !matches!(
+                    stat.kind(),
+                    ErrorKind::NotFound | ErrorKind::NotADirectory | ErrorKind::InvalidFilename
+                ) =>
+            {
+                Err(format!(
+                    "the census lock at {} could not be opened: {why}, and \
+                     the directory that holds it could not be measured: \
+                     {stat}. Refused rather than run without the lock.",
+                    lock_path.display()
+                ))
+            }
+            _ => Ok(Self { _held: None }),
+        }
     }
 }
 
@@ -3434,6 +3645,30 @@ fn append_locked(_lock: &CensusLock, path: &Path, appends: &[Append]) -> Result<
 /// made to lie. [`Commit::durable_through`] names the offset, so a writer
 /// cannot claim it did not know which one to flush.
 fn write_appends(path: &Path, appends: &[Append]) -> std::io::Result<()> {
+    write_appends_observed(path, appends, |_| {})
+}
+
+/// [`write_appends`], with a look at the file after its last slot is durable
+/// and before its modification time is moved past it: the instant a lock-free
+/// reader could stamp the census while the slot was still being copied.
+///
+/// # Why the time is moved at the end (census-1, D-2766)
+///
+/// An in-place `write` updates the inode's times BEFORE it copies the bytes,
+/// and a buffered reader takes no lock to copy a page. A reader that stamped
+/// the manifest inside that window and read it before the copy cached the
+/// older census, or a torn and "degraded" one, under the FINAL stamp, because
+/// nothing moved the times again; the api served it until the next manifest
+/// write, possibly the next day. Setting the modification time once more,
+/// after every byte is durable, to a value strictly past the one the writes
+/// left, guarantees that any stamp taken during them differs from the final
+/// one, so the next request reads again. The whole-image install needs none
+/// of this: its rename publishes an inode whose bytes were complete first.
+fn write_appends_observed(
+    path: &Path,
+    appends: &[Append],
+    mut landed: impl FnMut(&fs::File),
+) -> std::io::Result<()> {
     use std::io::{Seek, SeekFrom};
 
     let mut file = fs::OpenOptions::new().read(true).write(true).open(path)?;
@@ -3450,7 +3685,15 @@ fn write_appends(path: &Path, appends: &[Append]) -> std::io::Result<()> {
         file.write_all(&append.commit.bytes)?;
         file.sync_all()?;
     }
-    Ok(())
+    if appends.is_empty() {
+        return Ok(());
+    }
+    landed(&file);
+    let written = file.metadata()?.modified()?;
+    let past = written
+        .checked_add(std::time::Duration::from_nanos(1))
+        .ok_or_else(|| std::io::Error::other("the census's modification time cannot advance"))?;
+    file.set_modified(std::time::SystemTime::now().max(past))
 }
 
 /// The install itself, once the census lock is held.
@@ -3512,9 +3755,12 @@ mod tests {
     use store::format::Bar;
     use store::header::Header;
 
+    use brutex_core::vendor::Vendor;
+    use store::path::Timeframe;
+
     use super::{
-        CensusLock, EntryKey, MAX_CENSUS_BYTES, beyond_ceiling, closes_in_hand, install_locked,
-        lock_refusal, write_and_count,
+        CensusLock, DeriveInto, EntryKey, MAX_CENSUS_BYTES, check_day, closes_in_hand,
+        day_check_of, install_locked, lock_refusal, write_and_count,
     };
 
     /// **A MEMBER'S ROWS ARE LANDED BORROWED, NOT CLONED.** o1api-36, D-1203.
@@ -3680,6 +3926,121 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// **ZERODHA'S PULLED DAY IS CHECKED AGAINST ITS OWN MINUTES, AND NO OTHER
+    /// VENDOR'S IS.** No day file is a reason, not a silence; a day file that
+    /// matches the fold agrees; a minute that moved the high is named; Dhan is
+    /// not checked at all. Each case also drives `check_day`, so every arm of
+    /// the `pull.daycheck` line runs. D-3001.
+    #[test]
+    fn zerodha_minutes_are_checked_against_the_pulled_day_and_no_other_vendor_is() {
+        let root = scratch("DayCheck");
+        let month = store::path::YearMonth::new(2026, 1).expect("a legal month");
+        let parts = |timeframe| store::path::PathParts {
+            vendor: Vendor::Zerodha,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe,
+            month,
+            file: store::path::FileKind::Bars,
+        };
+        let entry = |timeframe| EntryKey {
+            contract: None,
+            exchange: brutex_core::instrument::Exchange::Nse,
+            segment: brutex_core::instrument::Segment::Index,
+            symbol: brutex_core::symbol::Symbol::new("NIFTY").expect("a symbol"),
+            timeframe,
+            month,
+        };
+        let into = |vendor| DeriveInto {
+            calendar: crate::calendar::Runtime::default(),
+            cash_schedule: None,
+            contract: None,
+            vendor,
+            exchange: brutex_core::instrument::Exchange::Nse,
+            segment: brutex_core::instrument::Segment::Index,
+            symbol: brutex_core::symbol::Symbol::new("NIFTY").expect("a symbol"),
+            month,
+        };
+        // 09:15 IST on 2026-01-02 and the two minutes after it.
+        let at = |n: i64| (20_455_i64 * 86_400 - 19_800 + 33_300 + n * 60) * 1_000_000;
+        let minute = |n: i64, open, high, low, close| Bar {
+            ts_micros: at(n),
+            open,
+            high,
+            low,
+            close,
+            volume: 10,
+            open_interest: i64::MIN,
+        };
+        let minutes = [
+            minute(0, 100, 110, 95, 105),
+            minute(1, 105, 120, 100, 115),
+            minute(2, 115, 116, 90, 98),
+        ];
+        let day = Bar {
+            ts_micros: at(0),
+            open: 100,
+            high: 120,
+            low: 90,
+            close: 98,
+            volume: 30,
+            open_interest: i64::MIN,
+        };
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the id is the cross-check `open` folds; any 32 bits serve"
+        )]
+        let symbol_id = brutex_core::universe::fnv1a("NIFTY") as u32;
+        let zerodha = into(Vendor::Zerodha);
+
+        // NO PULLED DAY FILE: a reason, never a silent pass.
+        let found = day_check_of(&minutes, &root, symbol_id, &zerodha).expect("zerodha is checked");
+        assert!(found.is_err(), "{found:?}");
+        check_day(&minutes, "NIFTY", &root, symbol_id, &zerodha);
+
+        // THE PULLED DAY MATCHES THE FOLD.
+        let _ = write_and_count(
+            &[day],
+            &root,
+            symbol_id,
+            parts(Timeframe::DAY_1),
+            entry(Timeframe::DAY_1),
+        )
+        .expect("the day bar lands");
+        let report = day_check_of(&minutes, &root, symbol_id, &zerodha)
+            .expect("zerodha is checked")
+            .expect("the day file reads");
+        assert_eq!((report.agreed, report.differed), (1, 0));
+        assert!(report.clean());
+        check_day(&minutes, "NIFTY", &root, symbol_id, &zerodha);
+
+        // A MINUTE THAT MOVED THE HIGH is named with both values.
+        let mut moved = minutes;
+        if let Some(second) = moved.get_mut(1) {
+            second.high = 125;
+        }
+        let report = day_check_of(&moved, &root, symbol_id, &zerodha)
+            .expect("zerodha is checked")
+            .expect("the day file reads");
+        assert_eq!(report.differed, 1);
+        let first = report
+            .first
+            .clone()
+            .expect("the first disagreement is named");
+        assert!(first.contains("high pulled 120 folded 125"), "{first}");
+        check_day(&moved, "NIFTY", &root, symbol_id, &zerodha);
+
+        // ANY OTHER VENDOR IS NOT CHECKED: its day bar follows its own
+        // convention (D-0077).
+        let dhan = into(Vendor::Dhan);
+        assert!(day_check_of(&moved, &root, symbol_id, &dhan).is_none());
+        check_day(&moved, "NIFTY", &root, symbol_id, &dhan);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// **A LOCK THAT CANNOT BE OPENED IS A REFUSAL, NOT A RUN WITHOUT ONE.**
     ///
     /// The `else` arm this replaces returned a guard holding nothing for *any*
@@ -3765,6 +4126,105 @@ mod tests {
             "nothing was published at the live path either"
         );
 
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// **A LOCK THAT WILL NOT OPEN FOR A TRANSIENT OR SPACE REASON REFUSES.**
+    /// pull2-1, D-2765.
+    ///
+    /// EMFILE, ENFILE and ENOMEM on a regular lock file, and ENOSPC creating a
+    /// missing one, used to hand back a guard holding nothing, and the run did
+    /// its census read-modify-write unserialised: the install does not fail on
+    /// those causes, so concurrent installs lost rows silently. The host's
+    /// kinds are driven directly because no test can make the host return them
+    /// on demand; `OutOfMemory` and `StorageFull` are the kinds std gives
+    /// ENOMEM and ENOSPC.
+    #[test]
+    fn a_transient_or_space_failure_on_the_lock_refuses_while_the_directory_stands() {
+        let root = scratch("lock-transient");
+        let census = root.join("manifest").join("dhan.man");
+        let lock_path = census.with_extension("man.lock");
+        std::fs::write(&census, b"a census that stays writable").expect("a census");
+
+        // NO LOCK FILE YET, and creating it hit a full disk.
+        let full = std::io::Error::from(std::io::ErrorKind::StorageFull);
+        let Err(why) = CensusLock::unopened(&lock_path, &full) else {
+            panic!("a lock that could not be created must refuse, never run unlocked")
+        };
+        assert!(why.contains("man.lock") && why.contains("Refused"), "{why}");
+
+        // A REGULAR LOCK FILE that would not open for want of memory.
+        std::fs::write(&lock_path, b"").expect("a regular lock file");
+        let starved = std::io::Error::from(std::io::ErrorKind::OutOfMemory);
+        let Err(why) = CensusLock::unopened(&lock_path, &starved) else {
+            panic!("a regular lock that would not open must refuse, never run unlocked")
+        };
+        assert!(
+            why.contains("directory that holds the census stands"),
+            "{why}"
+        );
+
+        // THE BOUNDARY: with no directory to hold the census, the same kind
+        // still defers to the install, which fails on that cause.
+        std::fs::remove_dir_all(root.join("manifest")).expect("make room for the file");
+        std::fs::write(root.join("manifest"), b"NOT A DIRECTORY").expect("a file in the way");
+        assert!(
+            CensusLock::unopened(&lock_path, &full).is_ok(),
+            "a broken directory is the install's to report"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// **AN IN-PLACE APPEND ENDS UNDER A STAMP NO READER COULD HAVE TAKEN
+    /// WHILE IT WROTE.** census-1, D-2766.
+    ///
+    /// The hook stamps the census after its last slot is durable, which is the
+    /// latest instant a reader inside the write could have stamped it: the
+    /// kernel moved the times before copying the bytes, and nothing after the
+    /// slot moved them again. Before D-2766 the final stamp WAS that stamp, so
+    /// the api's cache kept whatever that reader saw under it indefinitely.
+    #[test]
+    fn an_in_place_append_moves_the_census_stamp_past_its_own_writes() {
+        let root = scratch("census-stamp");
+        let census = root.join("manifest").join("dhan.man");
+        std::fs::write(&census, vec![0_u8; 4096]).expect("a census file");
+        let append = super::Append {
+            ordinal: 0,
+            offset: 1024,
+            bytes: [7; crate::manifest::ENTRY_LEN],
+            commit: crate::manifest::Commit {
+                slot: 0,
+                offset: 64,
+                bytes: [9; crate::manifest::IMAGE_LEN],
+                durable_through: 1024 + 128,
+                header: crate::manifest::ManifestHeader::genesis(brutex_core::vendor::Vendor::Dhan),
+            },
+        };
+        let mut seen = None;
+        super::write_appends_observed(&census, std::slice::from_ref(&append), |file| {
+            seen = Some(
+                file.metadata()
+                    .and_then(|meta| meta.modified())
+                    .expect("a stamp inside the write"),
+            );
+        })
+        .expect("the append lands");
+        let inside = seen.expect("the hook saw the landed slot");
+        let after = std::fs::metadata(&census)
+            .and_then(|meta| meta.modified())
+            .expect("the final stamp");
+        assert!(
+            after > inside,
+            "the final stamp must differ from any stamp taken during the write: \
+             {inside:?} then {after:?}"
+        );
+        let bytes = std::fs::read(&census).expect("the census");
+        assert_eq!(
+            bytes.get(1024..1152),
+            Some(&[7_u8; 128][..]),
+            "the entry landed"
+        );
+        assert_eq!(bytes.get(64..128), Some(&[9_u8; 64][..]), "the slot landed");
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -4048,23 +4508,86 @@ mod tests {
 
     /// The largest census this build can write is accepted; one byte more is
     /// not.
+    ///
+    /// **A file of exactly the cap is legal**: [`MAX_CENSUS_BYTES`] is a census
+    /// at `MAX_ENTRIES`, which `ManifestHeader::advance` accepts and refuses
+    /// only one past. Written as `>=` the bounded read would refuse the
+    /// largest legal census, and materialising that file means a 268 MB
+    /// allocation, so the boundary is proved on a small cap through the same
+    /// reader the census uses (D-2684).
     #[test]
     fn the_ceiling_admits_the_largest_census_this_build_can_write() {
         assert_eq!(
             MAX_CENSUS_BYTES, 268_468_224,
             "32,768 bytes of header region and 2,097,152 entries of 128 bytes"
         );
-        assert!(
-            !beyond_ceiling(MAX_CENSUS_BYTES),
-            "a census at exactly MAX_ENTRIES is one this build writes, and \
-             refusing it would refuse a legal file"
+        let dir = scratch("census-ceiling");
+        let path = dir.join("manifest").join("four.man");
+        std::fs::write(&path, b"1234").expect("a four-byte file");
+        assert_eq!(
+            super::read_regular_capped(&path, 4).expect("it opens"),
+            Ok(b"1234".to_vec()),
+            "a file of exactly the cap is read whole"
         );
-        assert!(!beyond_ceiling(MAX_CENSUS_BYTES - 1));
-        assert!(
-            beyond_ceiling(MAX_CENSUS_BYTES + 1),
-            "and one byte past it is not a census this build could have made"
+        assert_eq!(
+            super::read_regular_capped(&path, 3).expect("it opens"),
+            Err(super::Unbounded::PastCap { cap: 3, size: 4 }),
+            "and one byte past it is refused"
         );
-        assert!(beyond_ceiling(u64::MAX));
-        assert!(!beyond_ceiling(0), "an empty file is a first ingest");
+        std::fs::write(&path, b"").expect("an empty file");
+        assert_eq!(
+            super::read_regular_capped(&path, 0).expect("it opens"),
+            Ok(Vec::new()),
+            "an empty file is a first ingest"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **CE-64. A CENSUS PATH THAT IS NOT A REGULAR FILE IS REFUSED UNREAD,
+    /// AND A FIFO THERE NEVER HOLDS THE PULL.**
+    ///
+    /// `read_census` took `fs::metadata(path).len()`, which is 0 for a FIFO or
+    /// a device, and then `fs::read` by path: a FIFO with no writer blocked the
+    /// open for ever while this run held the census lock and the vendor's
+    /// seat, and `/dev/zero` read until memory ran out. The api's reader of the
+    /// same file already refuses both by name (P-19, R9-api-cx-1).
+    #[test]
+    fn a_census_path_that_is_not_a_regular_file_is_refused_unread_and_never_waits() {
+        let dir = scratch("census-not-regular");
+        let device = dir.join("manifest").join("device.man");
+        std::os::unix::fs::symlink("/dev/null", &device).expect("a link to a device");
+        let why = super::read_census(&device, brutex_core::vendor::Vendor::Groww)
+            .map(|_| ())
+            .expect_err("a device is not a census, and not an absent one either");
+        assert!(why.contains(&device.display().to_string()), "{why}");
+
+        let fifo = dir.join("manifest").join("fifo.man");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .expect("the test host runs its FIFO fixture")
+                .success()
+        );
+        let (sent, answer) = std::sync::mpsc::channel();
+        let reader = {
+            let fifo = fifo.clone();
+            std::thread::spawn(move || {
+                let _ = sent.send(
+                    super::read_census(&fifo, brutex_core::vendor::Vendor::Groww).map(|_| ()),
+                );
+            })
+        };
+        let read = answer.recv_timeout(std::time::Duration::from_secs(2));
+        if read.is_err() {
+            // Release the stuck open so the suite does not hang, then fail.
+            let _ = std::fs::OpenOptions::new().write(true).open(&fifo);
+        }
+        let _ = reader.join();
+        let why = read
+            .expect("a FIFO at the census path must not hold the read")
+            .expect_err("and it is refused rather than read as a census");
+        assert!(why.contains(&fifo.display().to_string()), "{why}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

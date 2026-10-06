@@ -592,6 +592,36 @@ fn the_candidate_budget_reserves_three_records_per_candidate() {
     assert!(candidate_budget(u64::MAX, u64::MAX).is_err());
 }
 
+/// CE-8, D-1769: the VIX month catalogue is bounded. Opening one month past
+/// the cap drops the earliest held one, so a replay over any span holds at
+/// most `VIX_MONTHS_HELD` months, and the months still held are the newest.
+#[test]
+fn the_vix_month_catalogue_drops_the_oldest_month_at_its_cap() {
+    use brutex_core::vendor::Vendor;
+    use std::collections::HashMap;
+    let month = |year, m| store::path::YearMonth::new(year, m).expect("a month");
+    let mut held: HashMap<(Vendor, store::path::YearMonth), u32> = HashMap::new();
+    for (n, m) in (1..=12).enumerate() {
+        super::make_room(&mut held, super::VIX_MONTHS_HELD);
+        held.insert(
+            (Vendor::Dhan, month(2025, m)),
+            u32::try_from(n).expect("small"),
+        );
+        assert!(held.len() <= super::VIX_MONTHS_HELD, "{n}: {}", held.len());
+    }
+    let mut kept: Vec<_> = held.keys().map(|(_, m)| *m).collect();
+    kept.sort_unstable();
+    assert_eq!(
+        kept,
+        (13 - super::VIX_MONTHS_HELD..=12)
+            .map(|m| month(2025, u8::try_from(m).expect("a month number")))
+            .collect::<Vec<_>>()
+    );
+    // A cap of zero still leaves room for the one month being stamped.
+    super::make_room(&mut held, 0);
+    assert!(held.is_empty());
+}
+
 fn with_quality(mut attempt: Attempt, ambiguous_bars: u64, gap_fills: u64) -> Attempt {
     if let PathProjection::Priceable(price) = &mut attempt.candidate.path {
         price.ambiguous_bars = ambiguous_bars;

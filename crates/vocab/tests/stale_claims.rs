@@ -299,6 +299,31 @@ fn every_test_a_corrected_row_cites_exists() {
     }
 }
 
+/// AHB-01 (h-eng-1, D-1860). `indicators::column` described alignment as "the
+/// first execution bar stamped at or after" a signal's close and cited an
+/// `align` test asserting `[Some(10), Some(10)]`. Since D-0401 `align` maps
+/// only to the bar at EXACTLY the close instant, and no such test exists.
+#[test]
+fn the_column_docs_state_the_exact_close_alignment_rule() {
+    let align = read("crates/runner/src/align.rs");
+    assert!(
+        align.contains("c.ts_micros == deadline"),
+        "align no longer maps to the exact close instant: AHB-01 must be re-derived"
+    );
+    let column = flat(&read("crates/indicators/src/column.rs"));
+    for stale in [
+        "first execution bar stamped at or after",
+        "execution bar stamped at or after each signal's close",
+        "Some(10), Some(10)",
+        "A hole of one bar is enough to collide",
+        "A hole in the execution series: rows 1",
+    ] {
+        assert!(!column.contains(stale), "column.rs says again: {stale}");
+    }
+    assert!(column.contains("returns the execution bar stamped EXACTLY at the"));
+    assert!(column.contains("execution hole therefore DROPS a signal"));
+}
+
 /// UC-6, AC-gates-o1-4 (its `grid_entered_event` half too, D-1486), AC-whp-tb-6, AC-whp-tb-7, ET-o1-proof-coverage-8,
 /// ET-strategies-trades-ranking-costs-9, R9-csr-o1-0: the false sentences, as
 /// they were written, do not come back.

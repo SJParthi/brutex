@@ -17,7 +17,8 @@ import {
   segmentOf,
   strikeExact,
   FUTURE_TAIL,
-  OPTION_TAIL
+  OPTION_TAIL,
+  sweptSymbolOf
 } from '../src/lib/instrument.js';
 
 /**
@@ -175,4 +176,15 @@ test('the tail patterns are anchored, so a symbol cannot be mistaken for one', (
   // An instrument that merely CONTAINS something tail-shaped, not at the end.
   assert.equal(parseKey('NSE-CASH-FUT').underlying, 'FUT', 'a symbol called FUT is a symbol');
   assert.equal(parseKey('NSE-CASH-FUT').kind, 'spot');
+});
+
+test('a swept symbol keeps its own hyphen and a contract row names no swept symbol', () => {
+  // P3-02-02, D-1769: the backtest page took the LAST `-` segment.
+  assert.equal(sweptSymbolOf('NSE-CASH-BAJAJ-AUTO'), 'BAJAJ-AUTO');
+  assert.equal(sweptSymbolOf('NSE-CASH-NAM-INDIA'), 'NAM-INDIA');
+  assert.equal(sweptSymbolOf('NSE-INDEX-NIFTY'), 'NIFTY');
+  assert.equal(sweptSymbolOf('NSE-FNO-NIFTY-2026-07-28-FUT'), null);
+  assert.equal(sweptSymbolOf('NSE-FNO-NIFTY-2026-07-28-2450000-CE'), null);
+  assert.equal(sweptSymbolOf(''), null);
+  assert.equal(sweptSymbolOf(undefined), null);
 });

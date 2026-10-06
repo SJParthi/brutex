@@ -307,6 +307,7 @@ svg.share rect.r0{fill:var(--acc)}\
 svg.share rect.r1{fill:var(--acc2)}\
 svg.share rect.r2{fill:var(--warn)}\
 svg.share rect.r3{fill:var(--bad)}\
+svg.share rect.r4{fill:var(--dim)}\
 svg.share rect.none{fill:var(--line)}\
 .legend{display:flex;gap:15px;flex-wrap:wrap;align-items:center;color:var(--dim);\
 font-size:11.5px;margin:12px 0 0}\
@@ -314,6 +315,7 @@ font-size:11.5px;margin:12px 0 0}\
 .key{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:6px}\
 .key.r0{background:var(--acc)}.key.r1{background:var(--acc2)}\
 .key.r2{background:var(--warn)}.key.r3{background:var(--bad)}\
+.key.r4{background:var(--dim)}\
 td.when{font-variant-numeric:tabular-nums;color:var(--dim);font-size:12.5px}\
 td.verdict{font-weight:820;font-size:11px;letter-spacing:.7px}\
 td.verdict.loud{color:var(--bad)}\
@@ -900,7 +902,7 @@ pub(crate) fn nav(current: &str) -> String {
         // is the defect the `/logs` line below already records once. D-0312.
         ("/masters", "Masters", true),
         ("/pull", "Ingest", true),
-        ("/audit", "Audit", true),
+        ("/audit/page", "Audit", true),
         ("/store", "Store", true),
         // THE LOG, REACHABLE WITHOUT KNOWING THE URL. `crate::logs` existed
         // before this line did, which made it a page only somebody who had
@@ -2001,7 +2003,9 @@ fn capture_panel(capture: Option<Capture<'_>>, absent: &str) -> String {
         "<table><thead><tr><th>Dropped because</th><th>Rows</th><th>Share</th></tr></thead><tbody>",
     );
     for reason in DROP_REASONS {
-        let n = drops.map(|d| d.of(reason));
+        // `recorded`, not `of`: a version-1 record never counted the
+        // closed-day reason, and its row says "not measured" rather than 0.
+        let n = drops.and_then(|d| d.recorded(reason));
         let bar = n.map_or_else(String::new, |v| {
             format!(
                 "<div class=\"cbar\"><span style=\"width:{}%\"></span></div>",
@@ -2051,7 +2055,7 @@ fn journal_note(note: JournalNote<'_>) -> String {
         escape(note.path),
         if note.present {
             format!(
-                "{} record(s), {} byte(s) so far. <a href=\"/audit\">Read them</a>.",
+                "{} record(s), {} byte(s) so far. <a href=\"/audit/page\">Read them</a>.",
                 note.records, note.bytes
             )
         } else {
@@ -2173,7 +2177,7 @@ pub fn receipt_page(receipt: &Receipt<'_>) -> String {
     let _ = write!(
         body,
         "<p class=\"fine\">{} <a href=\"/pull\">Back to the forms</a> · \
-         <a href=\"/audit\">the record of every run</a>.</p>",
+         <a href=\"/audit/page\">the record of every run</a>.</p>",
         escape(receipt.footnote)
     );
     body.push_str("</div></section>");
@@ -2275,6 +2279,39 @@ fn store_filter_bar(filter: &crate::census::StoreFilter, held_only: bool) -> Str
         escape(symbol)
     );
 
+    // ---- BAR LENGTH -----------------------------------------------------
+    // From the store's own rung list, so a rung added there is offered here.
+    // Rendered from the parsed filter like every other control: the store
+    // holds more than one rung, and a narrowing the URL applied but the bar did
+    // not show was the silent filter this bar exists to refuse (D-1765).
+    out.push_str(
+        "<div class=\"fgroup\"><span class=\"flabel\">Bar length</span><div class=\"pills\">",
+    );
+    let all = if filter.timeframe.is_none() {
+        " checked"
+    } else {
+        ""
+    };
+    let _ = write!(
+        out,
+        "<input type=\"radio\" name=\"timeframe\" id=\"t-all\" value=\"\"{all}>\
+         <label for=\"t-all\">All</label>"
+    );
+    for rung in store::path::Timeframe::KNOWN {
+        let value = rung.as_str();
+        let checked = if filter.timeframe == Some(*rung) {
+            " checked"
+        } else {
+            ""
+        };
+        let _ = write!(
+            out,
+            "<input type=\"radio\" name=\"timeframe\" id=\"t-{value}\" value=\"{value}\"{checked}>\
+             <label for=\"t-{value}\">{value}</label>"
+        );
+    }
+    out.push_str("</div></div>");
+
     // ---- MONTHS ---------------------------------------------------------
     // Typed as YYYY-MM. A month is not a date and the calendar picker would be
     // the wrong control: it offers 31 days the store has no opinion about.
@@ -2346,8 +2383,9 @@ fn census_cards(censuses: &[&VendorCensus]) -> String {
 ///
 /// The swatch shades are quartiles of **the page**, not of an invented ideal.
 /// Nobody knows how many one-minute bars a month "should" hold without a
-/// trading calendar, and `crates/pull/src/session.rs` says the calendar filter
-/// does not exist yet (`docs/04-invariants.md` P-03). Shading against a made-up
+/// trading calendar. One now exists (`pull::calendar`, and the closed-day filter
+/// of `docs/04-invariants.md` P-03, D-2673), but this page does not read it yet.
+/// Shading against a made-up
 /// denominator would be exactly the invention `CLAUDE.md` §3 rule 1 forbids, so
 /// the scale is stated on the page as what it is: relative to the fullest month
 /// shown.
@@ -2916,7 +2954,7 @@ pub fn audit_page(view: &AuditView<'_>) -> String {
     // stays reachable. The footer already carries the visible half — "Rendered
     // on the server. No JavaScript" — and this is the half a tab, a bookmark and
     // a history entry can show.
-    let mut body = open("brutex · audit · server-rendered", "/audit");
+    let mut body = open("brutex · audit · server-rendered", "/audit/page");
     body.push_str(&hero(
         "EVERY PULL · ON DISK · SURVIVES A RESTART",
         "What was asked,<br>and what it did.",
@@ -2974,7 +3012,7 @@ pub fn audit_page(view: &AuditView<'_>) -> String {
         body.push_str(&share_legend());
         body.push_str("</section>");
     }
-    body.push_str(&pager("/audit", view.page, view.last_page));
+    body.push_str(&pager("/audit/page", view.page, view.last_page));
     body.push_str(&notes_block(view.notes));
     body.push_str(FOOT);
     body
@@ -3046,9 +3084,23 @@ fn folder_input(suggestions: &[String]) -> String {
         let _ = write!(out, "<option value=\"{}\">", escape(f));
     }
     out.push_str("</datalist>");
-    if !archive_suggestions_enabled() {
-        out.push_str("<p class=\"fine\">Automatic CSV-folder suggestions are disabled for this process (BRUTEX_ARCHIVE_SUGGESTIONS=0). No discovery scan was performed; explicit folder imports remain available.</p>");
-        return out;
+    match archive_suggestions() {
+        Ok(true) => {}
+        Ok(false) => {
+            out.push_str("<p class=\"fine\">Automatic CSV-folder suggestions are disabled for this process (BRUTEX_ARCHIVE_SUGGESTIONS is off). No discovery scan was performed; explicit folder imports remain available.</p>");
+            return out;
+        }
+        // A WORD THE SWITCH DOES NOT TAKE TURNS THE WALK OFF AND SAYS SO. It
+        // used to leave the walk running for anything but a literal `0`, so
+        // `false`, `off` and `no` silently did nothing (CE-39, D-1769).
+        Err(why) => {
+            let _ = write!(
+                out,
+                "<p class=\"fine\">Automatic CSV-folder suggestions are off: {}. No discovery scan was performed; explicit folder imports remain available.</p>",
+                escape(&why)
+            );
+            return out;
+        }
     }
     let _ = write!(
         out,
@@ -3086,11 +3138,19 @@ const MAX_FOLDER_SUGGESTIONS: usize = 60;
 /// `docs/06-limits.md` §34 records the cost and what is not bounded about it.
 #[must_use]
 pub fn folder_suggestions() -> Vec<String> {
-    folders_when(archive_suggestions_enabled(), discover_folders)
+    folders_when(archive_suggestions() == Ok(true), discover_folders)
 }
 
-fn archive_suggestions_enabled() -> bool {
-    std::env::var_os("BRUTEX_ARCHIVE_SUGGESTIONS").as_deref() != Some(std::ffi::OsStr::new("0"))
+/// `BRUTEX_ARCHIVE_SUGGESTIONS`, read by the shared switch: on unless turned
+/// off, and a word it does not take refused by name (CE-39, D-1769).
+fn archive_suggestions() -> Result<bool, String> {
+    let raw = std::env::var_os("BRUTEX_ARCHIVE_SUGGESTIONS");
+    brutex_core::knob::switch(
+        "BRUTEX_ARCHIVE_SUGGESTIONS",
+        raw.as_deref()
+            .map(|value| value.to_str().unwrap_or("\u{fffd}")),
+        true,
+    )
 }
 
 fn folders_when(enabled: bool, discover: impl FnOnce() -> Vec<String>) -> Vec<String> {
@@ -3099,8 +3159,10 @@ fn folders_when(enabled: bool, discover: impl FnOnce() -> Vec<String>) -> Vec<St
 
 fn discover_folders() -> Vec<String> {
     let mut found: Vec<String> = Vec::new();
-    if let Some(home) = std::env::var_os("HOME") {
-        let home = std::path::PathBuf::from(home);
+    // AN EMPTY OR RELATIVE HOME WALKS NOTHING. It used to walk the working
+    // directory's `Downloads` (CE-38, D-1769); a convenience list has no
+    // refusal to give, so it is simply empty.
+    if let Ok(home) = brutex_core::knob::home(std::env::var_os("HOME")) {
         for root in [
             home.join("Downloads"),
             home.join(".brutex").join("vendor-data"),
@@ -3137,10 +3199,23 @@ mod archive_suggestion_tests {
 /// Directories at or under `dir` that directly contain a `.csv`.
 ///
 /// Depth-limited and allocation-bounded. `depth` counts down, so the recursion
-/// cannot outlive the number it was given — there is no cycle check because
-/// there is no cycle a bounded depth can complete.
+/// cannot outlive the number it was given. A linked directory below the root
+/// is not followed, so a link back to an ancestor cannot multiply the walk
+/// (CE-35, D-1769); the depth bound remains the backstop.
 fn collect_csv_dirs(dir: &std::path::Path, depth: usize, out: &mut Vec<String>) {
-    if depth == 0 || out.len() >= MAX_FOLDER_SUGGESTIONS || !dir.is_dir() {
+    // ONE PAST THE CAP, SO THE PAGE CAN TELL A FULL LIST FROM A CAPPED ONE.
+    // The walk stopped at exactly `MAX_FOLDER_SUGGESTIONS`, and `folder_input`
+    // states the cap only when it holds MORE than that — so the notice could
+    // never print and a capped list read as complete (CE-32, D-1769). The one
+    // extra folder is collected and never offered.
+    //
+    // AND A LINK IS NOT A FOLDER TO WALK. `is_dir` followed symlinks, so
+    // `~/Downloads/loop -> ~/Downloads` re-walked the whole tree at every level
+    // to depth six before the server started (CE-35, D-1769). A linked child
+    // directory is now skipped, as `assets` and `store::catalog` already do.
+    // The ROOT may still be a link — `~/Downloads` on an external drive is an
+    // ordinary setup — because a root is followed once, not at every level.
+    if depth == 0 || out.len() > MAX_FOLDER_SUGGESTIONS || !dir.is_dir() {
         return;
     }
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -3160,9 +3235,12 @@ fn collect_csv_dirs(dir: &std::path::Path, depth: usize, out: &mut Vec<String>) 
         {
             continue;
         }
-        if p.is_dir() {
+        let Ok(kind) = e.file_type() else {
+            continue;
+        };
+        if kind.is_dir() {
             children.push(p);
-        } else if p.extension().is_some_and(|x| x == "csv") {
+        } else if !kind.is_symlink() && p.extension().is_some_and(|x| x == "csv") {
             has_csv = true;
         }
     }
@@ -3190,6 +3268,91 @@ mod tests {
     // holds `Drops`, which is the same four counts as a value, because a
     // record read back off disk cannot rebuild a counter without counting.
     use pull::session::{DropCensus, DropReason};
+
+    /// A directory link is not walked, so a link back to an ancestor cannot
+    /// multiply the startup walk (CE-35, D-1769).
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_directory_is_not_walked() {
+        let root = std::env::temp_dir().join(format!("brutex-ce35-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let data = root.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(data.join("x.csv"), "a\n").unwrap();
+        std::os::unix::fs::symlink(&root, data.join("loop")).unwrap();
+        let mut found = Vec::new();
+        collect_csv_dirs(&root, 6, &mut found);
+        // A root that is itself a link is followed once, and the link inside
+        // it is still not walked.
+        let mut through_link = Vec::new();
+        collect_csv_dirs(&data.join("loop"), 6, &mut through_link);
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(found, vec![data.to_string_lossy().into_owned()]);
+        assert_eq!(through_link.len(), 1, "{through_link:?}");
+    }
+
+    /// A tree holding more CSV folders than the cap is walked one past it, so
+    /// the picker offers sixty and SAYS it was capped; a tree holding exactly
+    /// sixty is offered whole with no notice (CE-32, D-1769).
+    #[test]
+    fn a_capped_folder_walk_is_stated_and_an_exact_one_is_not() {
+        for (made, capped) in [
+            (MAX_FOLDER_SUGGESTIONS + 5, true),
+            (MAX_FOLDER_SUGGESTIONS, false),
+        ] {
+            let root =
+                std::env::temp_dir().join(format!("brutex-ce32-{}-{made}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            for i in 0..made {
+                let d = root.join(format!("f{i:03}"));
+                std::fs::create_dir_all(&d).unwrap();
+                std::fs::write(d.join("x.csv"), "a\n").unwrap();
+            }
+            let mut found = Vec::new();
+            collect_csv_dirs(&root, 6, &mut found);
+            let html = folder_input(&found);
+            std::fs::remove_dir_all(&root).unwrap();
+            assert_eq!(found.len(), made.min(MAX_FOLDER_SUGGESTIONS + 1));
+            assert_eq!(
+                html.matches("<option value=").count(),
+                made.min(MAX_FOLDER_SUGGESTIONS)
+            );
+            if archive_suggestions() == Ok(true) {
+                assert_eq!(
+                    html.contains(&format!("capped at {MAX_FOLDER_SUGGESTIONS}")),
+                    capped,
+                    "{html}"
+                );
+            }
+        }
+    }
+
+    /// The store filter bar shows the bar length it was given, one pill per
+    /// rung the store knows, and "All" only when no rung narrows the view
+    /// (P1-02-05, D-1765).
+    #[test]
+    fn the_store_filter_bar_shows_the_bar_length_that_was_applied() {
+        let filter = |timeframe| crate::census::StoreFilter {
+            segment: None,
+            symbol: None,
+            timeframe,
+            from: None,
+            to: None,
+        };
+        let day = store_filter_bar(&filter(Some(store::path::Timeframe::DAY_1)), true);
+        assert!(
+            day.contains(r#"id="t-1day" value="1day" checked>"#),
+            "{day}"
+        );
+        assert!(day.contains(r#"id="t-all" value="">"#), "{day}");
+        for rung in store::path::Timeframe::KNOWN {
+            let pill = format!(r#"name="timeframe" id="t-{0}" value="{0}""#, rung.as_str());
+            assert!(day.contains(&pill), "{pill}");
+        }
+        let all = store_filter_bar(&filter(None), true);
+        assert!(all.contains(r#"id="t-all" value="" checked>"#), "{all}");
+        assert!(!all.contains(r#"value="1day" checked"#), "{all}");
+    }
 
     fn nifty() -> InstrumentKey {
         InstrumentKey::index(Exchange::Nse, "NIFTY").expect("valid")
@@ -4032,8 +4195,8 @@ mod tests {
         }
         assert_eq!(
             DROP_REASONS.len(),
-            4,
-            "a fifth reason must be added to the panel, not silently counted"
+            5,
+            "a sixth reason must be added to the panel, not silently counted"
         );
 
         for forbidden in ["<script", "javascript:", "onclick", "onload", "onerror"] {
@@ -4054,7 +4217,7 @@ mod tests {
         assert!(html.contains("/tmp/store/audit/pull.journal"), "{html}");
         assert!(html.contains("3 record(s), 768 byte(s)"), "{html}");
         assert!(
-            html.contains("href=\"/audit\""),
+            html.contains("href=\"/audit/page\""),
             "and a way to read it: {html}"
         );
 
@@ -4145,6 +4308,7 @@ mod tests {
             after_window: 1,
             before_open: 1,
             after_close: 0,
+            ..Drops::default()
         };
         let svg = share_bar(drops);
         let total: u64 = svg
@@ -4208,6 +4372,7 @@ mod tests {
                 after_close: 170,
                 before_window: 0,
                 after_window: 0,
+                ..Drops::default()
             },
             failures: u64::from(loud),
             took_micros: 4_512_903,
@@ -4386,7 +4551,7 @@ mod tests {
         assert!(html.contains("Nothing here was written to the store"));
         assert!(html.contains("href=\"/pull\""), "a way back: {html}");
         assert!(
-            html.contains("href=\"/audit\""),
+            html.contains("href=\"/audit/page\""),
             "and to the record: {html}"
         );
         assert!(html.contains("badge bad"), "nothing ran: {html}");

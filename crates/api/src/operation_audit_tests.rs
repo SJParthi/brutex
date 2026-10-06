@@ -36,7 +36,7 @@ impl Drop for Scratch {
 pub(crate) const EXEMPT: &[(&str, &str)] = &[
     ("/dashboard", PAGE),
     ("/instruments", PAGE),
-    ("/audit", PAGE),
+    ("/audit/page", PAGE),
     ("/store", PAGE),
     ("/bars", PAGE),
     ("/logs", PAGE),
@@ -259,12 +259,31 @@ fn queries_reject_aliases_duplicates_overflow_and_mixed_exact_pages() {
             limit: 32
         }
     ));
+    let before = ID_BASE + 4;
     assert!(matches!(
-        parse("before=4&limit=2").unwrap(),
+        parse(&format!("before={before}&limit=2")).unwrap(),
         Asked::Page {
-            before: Some(4),
+            before: Some(b),
             limit: 2
-        }
+        } if b == before
+    ));
+    // An id at or below `ID_BASE` names no durable record: a caller error
+    // (400), never the journal's 503 (Z1-slice13-F3, D-1762).
+    for query in [
+        "invocation=5".to_owned(),
+        "before=5".to_owned(),
+        format!("invocation={ID_BASE}"),
+        format!("before={ID_BASE}"),
+    ] {
+        assert_eq!(
+            parse(&query).err().as_deref(),
+            Some("audit IDs must lie in the durable invocation namespace"),
+            "{query}"
+        );
+    }
+    assert!(matches!(
+        parse(&format!("invocation={}", ID_BASE + 1)).unwrap(),
+        Asked::Exact(id) if id == ID_BASE + 1
     ));
 }
 
@@ -388,6 +407,46 @@ async fn cancelled_request_records_cancellation_and_never_completed() {
         journal::read(&root.0, ID_BASE + 1).unwrap().unwrap().phase,
         Phase::Cancelled
     );
+}
+
+/// P3-01-03, D-1973. A write route whose client goes away keeps running to its
+/// real terminal: a launch's admission cannot be cancelled, so the record must
+/// not say `Cancelled` while the handler can still dispatch.
+#[tokio::test]
+async fn a_write_whose_client_goes_away_records_the_handlers_real_outcome() {
+    let _apart = crate::detail::apart_from_slot_owners().await;
+    let root = Scratch::new();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (notify, gate) = (Arc::clone(&entered), Arc::clone(&release));
+    let path = root.0.clone();
+    let connection = tokio::spawn(async move {
+        super::request_audited_detached(path, "POST /backtest/run".to_owned(), async move {
+            notify.notify_one();
+            gate.notified().await;
+            (StatusCode::ACCEPTED, "launched").into_response()
+        })
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
+    // THE CLIENT GOES AWAY mid-admission: hyper drops the handler's future.
+    connection.abort();
+    assert!(connection.await.unwrap_err().is_cancelled());
+    release.notify_one();
+    let mut record = None;
+    for _ in 0..500 {
+        let seen = journal::read(&root.0, ID_BASE + 1).unwrap().unwrap();
+        if seen.phase.terminal() {
+            record = Some(seen);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let record = record.expect("the handler's terminal was recorded");
+    assert_eq!(record.phase, Phase::Completed);
+    assert_eq!(record.response_status, 202);
 }
 
 #[tokio::test]
@@ -730,4 +789,22 @@ fn the_journals_per_request_growth_is_stated_in_the_limits() {
         assert!(section.contains(&format!("`{route}`")), "{route}");
         assert_eq!(route, route.to_lowercase(), "compared lower-cased");
     }
+}
+
+/// BT-12 (P12-02, D-1791): `/backtest` is NOT a registered route and
+/// `/backtest.json` is. A registered route beats the router's fallback
+/// unconditionally, so a Rust page at `/backtest` would make a click and a
+/// reload render two different applications. Read off the same production
+/// route table `every_registered_route_is_audited_or_exempt_by_name` reads.
+#[test]
+fn the_backtest_page_is_not_a_registered_route_and_its_json_is() {
+    let routes = registered_routes();
+    assert!(
+        routes.iter().any(|route| route == "/backtest.json"),
+        "the parser found the table: {routes:?}"
+    );
+    assert!(
+        !routes.iter().any(|route| route == "/backtest"),
+        "`/backtest` belongs to the front end's fallback: {routes:?}"
+    );
 }

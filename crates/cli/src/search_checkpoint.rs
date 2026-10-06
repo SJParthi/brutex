@@ -259,16 +259,13 @@ impl Journal {
             .sync_all()
             .map_err(error)?;
         let path = directory.join("payload");
-        let mut file = Flock::lock(
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create_new(true)
-                .open(&path)
-                .map_err(error)?,
-            path.as_path(),
-        )
-        .map_err(error)?;
+        let mut raw = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(error)?;
+        let mut file = Flock::lock(&mut raw, path.as_path()).map_err(error)?;
         #[cfg(test)]
         tests::payload_locked(&file);
         let header = header_of(self.identity, sequence, length);
@@ -286,17 +283,23 @@ impl Journal {
             .map_err(error)?
             .sync_all()
             .map_err(error)?;
+        // RELEASED BEFORE THE MARKER EXISTS (locks-3, D-1913). The payload is
+        // whole, verified and durable here, and the marker is what makes it
+        // discoverable. Held until after the marker, every reader that found
+        // the new sequence in that window was refused "checkpoint payload is
+        // busy" for bytes already published, through two fsyncs and a full
+        // re-read. Released by name, not by closing: a duplicate a spawned
+        // child still carried kept a closed descriptor's lock alive (D-0693).
+        // A refused release leaves `latest` and `acknowledged` unadvanced and
+        // poisons the writer through `publish`.
+        file.release().map_err(|u| u.to_string())?;
         publish_marker(&directory, seal)?;
-        verify_acknowledged(&mut file, &path, &header, payload, seal)?;
+        #[cfg(test)]
+        tests::marker_visible();
+        verify_acknowledged(&mut raw, &path, &header, payload, seal)?;
         if regular_bytes(&directory.join("complete"), 32)? != seal {
             return Err("checkpoint marker changed before acknowledgment".to_owned());
         }
-        // The payload lock is released by name before the publication is
-        // acknowledged. Closing the descriptor alone left it held by any
-        // duplicate a spawned child still carried, and `latest` then refused
-        // this very checkpoint as busy. A refused release leaves `latest` and
-        // `acknowledged` unadvanced and poisons the writer through `publish`.
-        file.release().map_err(|u| u.to_string())?;
         // Only this acknowledged publication updates the cached latest position.
         // A later reopen validates the marker and all bytes again.
         self.latest = Some(sequence);
@@ -468,6 +471,12 @@ fn error(why: impl std::fmt::Display) -> String {
 #[path = "search_checkpoint_tests.rs"]
 pub(crate) mod tests;
 
+/// Finder's `.DS_Store` and the `._<name>` `AppleDouble` files a copy to a
+/// non-HFS volume writes: operating-system litter, never a reservation.
+fn is_os_litter(name: &str) -> bool {
+    name == ".DS_Store" || name.starts_with("._")
+}
+
 /// `(next, latest, interrupted, acknowledged, entries)`.
 type Discovered = (u64, Option<u64>, u64, u64, usize);
 
@@ -493,13 +502,29 @@ fn discover_through(directory: &Path, through: Option<u64>) -> Result<Discovered
         if name == "owner.lock" {
             continue;
         }
-        let sequence = u64::from_str_radix(&name, 16)
-            .map_err(|_| "invalid checkpoint reservation name".to_owned())?;
+        // MACOS LITTER IS NOT A RESERVATION, AND A STRANGER IS NAMED. Finder
+        // writes `.DS_Store` into a folder it opens, and a copy to a non-HFS
+        // volume writes `._<name>` beside each file; either one refused every
+        // start, resume and dashboard read of this search with a sentence that
+        // named no file (CE-34, D-1769). Those two, as plain files, are passed
+        // over; anything else still refuses, now by its name.
+        if is_os_litter(&name) && entry.file_type().map_err(error)?.is_file() {
+            continue;
+        }
+        let sequence = u64::from_str_radix(&name, 16).map_err(|_| {
+            format!(
+                "invalid checkpoint reservation name {name:?} in {}",
+                directory.display()
+            )
+        })?;
         if sequence == 0
             || name != format!("{sequence:016x}")
             || !entry.file_type().map_err(error)?.is_dir()
         {
-            return Err("invalid checkpoint reservation type or sequence".to_owned());
+            return Err(format!(
+                "invalid checkpoint reservation type or sequence {name:?} in {}",
+                directory.display()
+            ));
         }
         next = next.max(
             sequence
@@ -510,9 +535,12 @@ fn discover_through(directory: &Path, through: Option<u64>) -> Result<Discovered
             continue;
         }
         match fs::symlink_metadata(entry.path().join("complete")) {
-            // The empty marker the pre-D-1740 protocol left when it was killed
-            // between creating `complete` and writing its seal. It never
-            // acknowledged anything: it is an interrupted reservation.
+            // AN EMPTY MARKER IS A TORN CREATE, not an acknowledgment (CE-3,
+            // D-1909): the pre-D-1740 protocol created `complete` and then
+            // wrote its seal, and a kill between the two left 0 bytes. Counted
+            // as interrupted, so `latest` is the newest WHOLE checkpoint. Since
+            // D-1740 a marker appears only by rename, whole, so a SHORT
+            // NON-EMPTY one is damage and `read` refuses it (D-1934).
             Ok(metadata) if metadata.file_type().is_file() && metadata.len() == 0 => {
                 interrupted = interrupted
                     .checked_add(1)

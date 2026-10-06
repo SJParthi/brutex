@@ -321,6 +321,27 @@ function validateRun(candidate, requireSeal) {
 }
 
 /**
+ * The least an unsealed row must carry to be listed as metadata: the server's
+ * index, a canonical identity and its two state booleans, with `sealed`
+ * false. Everything else in it may be damaged bytes (CE-48, D-2664).
+ *
+ * @param {unknown} candidate
+ * @returns {boolean}
+ */
+function unsealedMetadata(candidate) {
+  if (candidate === null || typeof candidate !== 'object' || Array.isArray(candidate)) return false;
+  const run = /** @type {Record<string, any>} */ (candidate);
+  return (
+    run.sealed === false &&
+    typeof run.halted === 'boolean' &&
+    Number.isSafeInteger(run.index) &&
+    run.index >= 0 &&
+    typeof run.identity === 'string' &&
+    /^[0-9a-f]{64}$/.test(run.identity)
+  );
+}
+
+/**
  * The computation door additionally requires the row's integrity seal.
  * Ledger-envelope admission uses the same complete schema check but retains a
  * structurally valid unsealed row as visible, non-computable metadata.
@@ -466,8 +487,17 @@ export function validateLedgerPayload(candidate) {
   if (body.refusal === null && body.hit_scan_cap !== (body.total > body.scanned)) {
     return invalidLedger('the successful read cap does not match `total > scanned`.');
   }
-  if (body.appendable !== (body.version === body.writes_version && body.refusal === null)) {
-    return invalidLedger('`appendable` contradicts the read/write versions or refusal state.');
+  // A RAGGED TAIL IS NOT APPENDABLE (CE-47, D-2664). The server's rule is
+  // `version == VERSION && refusal.is_none() && !partial_tail`
+  // (crates/api/src/backtest.rs, `Ledger::to_json`, D-1762), and the ragged
+  // tail is reported, not fatal: the whole records before it are served. This
+  // copy had no `partial_tail` term, so an interrupted append -- the state the
+  // server calls ordinary -- refused the whole envelope and blanked the page.
+  if (
+    body.appendable !==
+    (body.version === body.writes_version && body.refusal === null && body.partial_tail === false)
+  ) {
+    return invalidLedger('`appendable` contradicts the read/write versions, refusal or tail state.');
   }
   if (body.has_mask !== (body.version >= body.writes_version && body.refusal === null)) {
     return invalidLedger('`has_mask` contradicts the ledger version or refusal state.');
@@ -482,7 +512,19 @@ export function validateLedgerPayload(candidate) {
   for (let at = 0; at < body.runs.length; at += 1) {
     const run = body.runs[at];
     const admitted = validateRun(run, false);
-    if (!admitted.ok) return invalidLedger(`runs[${at}] is invalid: ${admitted.why}`);
+    // A DAMAGED UNSEALED ROW IS SHOWN AND MARKED, NOT FATAL (CE-48, D-2664).
+    // The server decodes every byte of a record whose seal fails and serves it
+    // beside `"sealed":false`, because "one damaged record must not empty the
+    // page of the good ones beside it" (backtest.rs, `Run::sealed`). The full
+    // schema check is exactly what a bit flip in such a row fails, so refusing
+    // the envelope on it blanked every good row. Such a row is kept as
+    // metadata: it is never admitted to a computation (`compareRuns` re-checks
+    // with the seal required, and `best` requires `sealed`), and it still has
+    // to carry the identity, index and state the envelope checks below read.
+    // A SEALED row that fails is still a refusal of the whole envelope.
+    if (!admitted.ok) {
+      if (!unsealedMetadata(run)) return invalidLedger(`runs[${at}] is invalid: ${admitted.why}`);
+    }
     const expectedIndex = body.total - 1 - at;
     if (run.index !== expectedIndex) {
       return invalidLedger(`runs[${at}].index is not the canonical newest-first index ${expectedIndex}.`);

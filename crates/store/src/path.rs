@@ -51,12 +51,14 @@
 //!
 //! [`StorePath::to_path_buf`] guarantees a **lexical** property. No component
 //! is `..`, none is absolute, so the rendered path cannot climb out of
-//! `root/bars/<vendor>/` *as text*. A symlink at any component defeats that,
-//! and nothing in this crate resolves or refuses one — a `bars/groww` symlink
-//! pointing at `bars/dhan` sends every groww write into dhan's files while
-//! satisfying every assertion the isolation test makes. Closing it needs
-//! `openat` with `O_NOFOLLOW` per component in a writer that does not exist
-//! yet. Stated here rather than implied away.
+//! `root/bars/<vendor>/` *as text*. A symlink at any component defeats that —
+//! a `bars/groww` symlink pointing at `bars/dhan` sends every groww write into
+//! dhan's files while satisfying every assertion the isolation test makes.
+//! This type resolves nothing; the bar writer refuses the links it finds
+//! (`crate::file::BarFile::open_or_create`, CE-62, D-2686), and a directory
+//! link swapped in between its walk and its open is the window it leaves,
+//! because per-component `openat` needs `unsafe`. Stated here rather than
+//! implied away.
 //!
 //! `store::unit::vendor_prefix_isolated` is the test X-12 names.
 //!
@@ -178,6 +180,7 @@ const _: () = {
         lock,
         overlay_checksums,
         greek_checksums,
+        time_index,
     ] = FileKind::ALL;
     assert!(bars.extension().len() <= MAX_EXTENSION_LEN);
     assert!(checksums.extension().len() <= MAX_EXTENSION_LEN);
@@ -186,6 +189,7 @@ const _: () = {
     assert!(lock.extension().len() <= MAX_EXTENSION_LEN);
     assert!(overlay_checksums.extension().len() <= MAX_EXTENSION_LEN);
     assert!(greek_checksums.extension().len() <= MAX_EXTENSION_LEN);
+    assert!(time_index.extension().len() <= MAX_EXTENSION_LEN);
 };
 
 /// The length of a rendered path, root excluded, when every segment is at its
@@ -691,11 +695,16 @@ pub enum FileKind {
     OverlayChecksums,
     /// Greek block checksums, isolated from bars and vendor overlays.
     GreekChecksums,
+    /// The bar file's time index: slot occupancy and counts that turn a
+    /// timestamp into a row in a constant number of reads. Derived from the
+    /// bars, maintained by `BarFile::append`, never a record stream itself.
+    /// See [`crate::time_index`]. D-2329.
+    TimeIndex,
 }
 
 impl FileKind {
     /// Every sibling file a month has.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Bars,
         Self::Checksums,
         Self::Overlay,
@@ -703,6 +712,7 @@ impl FileKind {
         Self::Lock,
         Self::OverlayChecksums,
         Self::GreekChecksums,
+        Self::TimeIndex,
     ];
 
     /// The file extension, dot included.
@@ -716,6 +726,7 @@ impl FileKind {
             Self::Lock => ".lock",
             Self::OverlayChecksums => ".ovl.crc",
             Self::GreekChecksums => ".grk.crc",
+            Self::TimeIndex => ".tix",
         }
     }
 
@@ -727,7 +738,11 @@ impl FileKind {
             Self::Bars => Some(Self::Checksums),
             Self::Overlay => Some(Self::OverlayChecksums),
             Self::Greeks => Some(Self::GreekChecksums),
-            Self::Checksums | Self::Lock | Self::OverlayChecksums | Self::GreekChecksums => None,
+            Self::Checksums
+            | Self::Lock
+            | Self::OverlayChecksums
+            | Self::GreekChecksums
+            | Self::TimeIndex => None,
         }
     }
 }
@@ -966,9 +981,9 @@ impl<'a> StorePath<'a> {
     /// redirects the whole subtree: with `root/bars/groww` linked to
     /// `root/bars/dhan`, a write through a groww path lands in dhan's file
     /// while still satisfying `starts_with(root/bars/groww)` and holding no
-    /// `Component::ParentDir`. This crate does not resolve or refuse links —
-    /// that needs `openat` with `O_NOFOLLOW` per component, in a writer that
-    /// does not exist yet, halting loudly and naming the linked component. The
+    /// `Component::ParentDir`. This function does not resolve or refuse
+    /// links; the bar writer refuses the ones it finds and names the linked
+    /// component (CE-62, D-2686), with the window module docs state. The
     /// earlier wording here claimed the filesystem property outright, which
     /// was a failure hidden behind a claim.
     #[must_use]

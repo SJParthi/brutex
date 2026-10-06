@@ -24,10 +24,10 @@
 //! 62 predicates, and changing one is a single edit whose blast radius is the
 //! struct's own documentation.
 //!
-//! Contrast position 63 `narrow_cpr_day`, which this crate refuses to compute at
-//! all: there, "narrow" has no conventional value either, and unlike a hammer the
-//! pattern literature offers none. Refusing is right when no convention exists;
-//! declaring is right when one does.
+//! Position 63 `narrow_cpr_day` took the same route: it was once refused because
+//! "narrow" has no conventional value, and it is now computed from cuts declared
+//! UNVERIFIED in `crate::daily::CprWidth`, beside 274 and 275. (This said the
+//! crate refuses to compute 63 at all; p11num-3, D-1775.)
 //!
 //! # Integers only, and no division
 //!
@@ -104,6 +104,18 @@ impl Thresholds {
         high_wave_shadow: 300,
     };
 }
+
+/// How far into the prior black body an in-neck close may reach, in
+/// thousandths of the PRIOR bar's range. 200 = 20%. **UNVERIFIED**, like every
+/// threshold here: it is the TA-Lib `Near` factor for `CDLINNECK`, taken on
+/// the one prior bar's range rather than on a five-bar average, and no source
+/// `docs/00-charter.md` records sets it.
+///
+/// A module constant and not a [`Thresholds`] field on purpose: the six fields
+/// are encoded into `brutex/eval/v1`, and a seventh would be a new spec
+/// version that re-keys every recorded run. The commit term of run identity
+/// already binds this value. D-1780.
+const IN_NECK_BAND: i128 = 200;
 
 /// One bar reduced to the quantities every predicate is written in.
 ///
@@ -622,18 +634,26 @@ impl Patterns {
         if bar1.bearish() && bar0.bullish() && bar0.open < bar1.low && bar0.close == bar1.low {
             mask = set(mask, 210);
         }
+        // IN-NECK and THRUSTING split the white bar's recovery at the band
+        // [`IN_NECK_BAND`] draws above the prior close: in-neck closes at the
+        // prior close or just into the black body, thrusting closes past that
+        // band and short of the body's midpoint. 211 accepted only the prior
+        // LOWER SHADOW, `low < close <= prior close`, which is neither shape
+        // (p11num-2, D-1780).
+        let into_body = (bar0.close - bar1.close) * 1000;
+        let band = bar1.range * IN_NECK_BAND;
         if bar1.bearish()
             && bar0.bullish()
             && bar0.open < bar1.low
-            && bar0.close > bar1.low
-            && bar0.close <= bar1.close
+            && bar0.close >= bar1.close
+            && into_body <= band
         {
             mask = set(mask, 211);
         }
         if bar1.bearish()
             && bar0.bullish()
             && bar0.open < bar1.low
-            && bar0.close > bar1.close
+            && into_body > band
             && bar0.close < bar1.mid()
         {
             mask = set(mask, 212);
@@ -1123,7 +1143,8 @@ mod tests {
     /// THE PARTIAL-RECOVERY PATTERN: THREE PRICE CLAUSES, EACH AT ITS EDGE.
     ///
     /// Bit 212 needs a bar that gapped below the prior low, closed back above
-    /// the prior close, and yet failed to reach the prior body's midpoint. Those
+    /// the in-neck band over the prior close, and yet failed to reach the
+    /// prior body's midpoint. Those
     /// three prices bracket a narrow window, and each edge of it is a separate
     /// clause — an `&&` turned into `||` makes any one of them sufficient, which
     /// would fire this bit on bars that never recovered at all.
@@ -1134,7 +1155,8 @@ mod tests {
     /// only the threshold itself separates a strict comparison from a loose one.
     #[test]
     fn every_edge_of_the_partial_recovery_window_is_required() {
-        // bar1 bearish: open 200, close 100, low 90, mid 150.
+        // bar1 bearish: open 200, close 100, low 90, mid 150, range 120, so
+        // the in-neck band reaches 100 + 120 * 0.2 = 124.
         let prior = at(10, 200, 210, 90, 100);
         let fires = |bar0: &Candle| -> bool {
             let mut p = Patterns::default();
@@ -1143,32 +1165,40 @@ mod tests {
         };
 
         assert!(
-            fires(&at(11, 80, 125, 75, 120)),
-            "opening at 80 below the 90 low and closing at 120 -- above the 100 \
-             close, below the 150 midpoint -- satisfies all five clauses"
+            fires(&at(11, 80, 135, 75, 130)),
+            "opening at 80 below the 90 low and closing at 130 -- past the 124 \
+             band, below the 150 midpoint -- satisfies all five clauses"
         );
 
         // `bar0.open < bar1.low`
         assert!(
-            !fires(&at(11, 95, 125, 90, 120)),
+            !fires(&at(11, 95, 135, 90, 130)),
             "an open ABOVE the prior low never gapped down, so there is nothing \
              to recover from"
         );
         assert!(
-            !fires(&at(11, 90, 125, 85, 120)),
+            !fires(&at(11, 90, 135, 85, 130)),
             "and an open EXACTLY at the prior low has not gapped below it; `<=` \
              would accept this and `<` must not"
         );
 
-        // `bar0.close > bar1.close`
+        // `into_body > band`
         assert!(
             !fires(&at(11, 80, 125, 75, 95)),
             "a close BELOW the prior close recovered nothing"
         );
         assert!(
-            !fires(&at(11, 80, 125, 75, 100)),
-            "and a close EXACTLY at the prior close recovered nothing either -- \
-             `>=` would call this a recovery and `>` must not"
+            !fires(&at(11, 80, 125, 75, 120)),
+            "a close inside the band is in-neck, bit 211, not thrusting"
+        );
+        assert!(
+            !fires(&at(11, 80, 125, 75, 124)),
+            "and a close EXACTLY at the band's top is still in-neck -- `>=` \
+             would call this thrusting and `>` must not"
+        );
+        assert!(
+            fires(&at(11, 80, 130, 75, 125)),
+            "one paisa past the band is thrusting"
         );
 
         // `bar0.close < bar1.mid()`
@@ -2508,15 +2538,19 @@ mod exemplars {
             want: 211,
             name: "pat_in_neck",
             dark: 210,
-            // Closes just above that low, and no higher than the prior close.
-            bars: &[(1100, 1110, 1000, 1010), (990, 1010, 985, 1005)],
+            // Closes just into the prior black body: one paisa above the prior
+            // close, inside the band of 20% of the prior range (110 * 0.2 = 22).
+            // This fixture closed at 1005, on the prior lower shadow, which is
+            // not the classical shape (p11num-2, D-1780).
+            bars: &[(1100, 1110, 1000, 1010), (990, 1015, 985, 1011)],
         },
         Case {
             want: 212,
             name: "pat_thrusting",
             dark: 211,
-            // Past the prior close, but short of the prior body's midpoint of 1055.
-            bars: &[(1100, 1110, 1000, 1010), (990, 1030, 985, 1020)],
+            // Past the in-neck band (1010 + 22 = 1032), but short of the prior
+            // body's midpoint of 1055.
+            bars: &[(1100, 1110, 1000, 1010), (990, 1045, 985, 1040)],
         },
         Case {
             want: 213,
@@ -2818,6 +2852,39 @@ mod exemplars {
                 assert!(!mask.get(position), "{position} lit on equal bodies");
             }
         }
+    }
+
+    /// IN-NECK IS A CLOSE AT OR JUST INTO THE PRIOR BLACK BODY, NOT ON ITS
+    /// LOWER SHADOW. p11num-2, D-1780.
+    ///
+    /// The prior bar is (1100, 1110, 1000, 1010): range 110, so the band reaches
+    /// 1010 + 22 = 1032. The textbook in-neck closes one paisa above the prior
+    /// close and was filed under thrusting; a close on the lower shadow, which
+    /// is neither shape, was filed under in-neck.
+    #[test]
+    fn in_neck_closes_at_or_just_into_the_prior_body() {
+        let prior = (1100, 1110, 1000, 1010);
+        let lit = |close: i64| {
+            let mask = fold(&[prior, (990, close.max(1015), 985, close)]);
+            (mask.get(211), mask.get(212))
+        };
+        assert_eq!(
+            lit(1012),
+            (true, false),
+            "one paisa into the body is in-neck"
+        );
+        assert_eq!(
+            lit(1010),
+            (true, false),
+            "a close AT the prior close is in-neck"
+        );
+        assert_eq!(lit(1032), (true, false), "the band's top is still in-neck");
+        assert_eq!(lit(1033), (false, true), "past the band is thrusting");
+        assert_eq!(
+            lit(1005),
+            (false, false),
+            "a close on the prior lower shadow is neither"
+        );
     }
 
     /// FOUR PATTERNS FOLLOW THEIR CLASSICAL SHAPES, AND THE SHAPES THEY USED TO

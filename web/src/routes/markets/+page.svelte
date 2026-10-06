@@ -1624,7 +1624,7 @@
       <b>Exchange</b>
       <span
         class="face"
-        title="The engine surface is exactly two instruments on NSE — NSE-NIFTY and NSE-BANKNIFTY. BSE and MCX are stored where they already exist and are never swept."
+        title="The engine surface is NSE only: the two spot indices NSE-NIFTY and NSE-BANKNIFTY, and the cash equities of the 208 F&O underlyings that are shares. BSE and MCX are stored where they already exist and are never swept."
         >{picked ? picked.exchange : '—'}</span
       >
     </div>

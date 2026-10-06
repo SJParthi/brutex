@@ -409,8 +409,8 @@ fn torn_journal(shot: &Path) -> bool {
 }
 
 /// Readers may refuse or report Running, never a completion without its
-/// acknowledged rows; a later writer is refused loudly only by a torn global
-/// journal, and otherwise receives a token no durable start already names.
+/// acknowledged rows; a later writer cuts a torn global journal tail and
+/// receives a token no durable start already names.
 fn judge(shot: &Path, identities: &[[u8; 32]], published: &Published) -> Result<(), String> {
     let mut seen: Vec<Evidence> = identities
         .iter()
@@ -435,22 +435,22 @@ fn judge(shot: &Path, identities: &[[u8; 32]], published: &Published) -> Result<
     }
     let used = used_tokens(shot)?;
     let _quiet = BarrierWatch::modelled(|_| Ok(()));
-    match begin(shot, FRESH, Operation::Sweep) {
-        Ok(attempt) => {
-            assert!(
-                !used.contains(&attempt.token()),
-                "{}: token {} was reused",
-                shot.display(),
-                attempt.token()
-            );
-            std::mem::forget(attempt); // A stopped process writes no terminal.
-        }
-        Err(why) => assert!(
-            torn_journal(shot) && why.contains("torn or short"),
-            "{}: {why}",
-            shot.display()
-        ),
-    }
+    // A torn journal tail names no token, so the next writer cuts it and
+    // continues (D-1901, sweep-2); it used to refuse every later start.
+    let attempt = begin(shot, FRESH, Operation::Sweep)
+        .map_err(|why| format!("{}: a later writer was refused: {why}", shot.display()))?;
+    assert!(
+        !used.contains(&attempt.token()),
+        "{}: token {} was reused",
+        shot.display(),
+        attempt.token()
+    );
+    assert!(
+        !torn_journal(shot),
+        "{}: the writer left the journal torn",
+        shot.display()
+    );
+    std::mem::forget(attempt); // A stopped process writes no terminal.
     Ok(())
 }
 
@@ -690,6 +690,68 @@ fn a_refused_journal_while_dropping_is_loud_and_never_completes() -> Result<(), 
 }
 
 #[test]
+fn a_refused_journal_barrier_cuts_the_rows_it_wrote() -> Result<(), String> {
+    // cli2-1, D-1900: a write or barrier failure on the global journal cuts
+    // the rows that call wrote, so no torn or unconfirmed row is left for a
+    // later start to trust or to refuse.
+    let fixture = Fixture::new()?;
+    let first = {
+        let _quiet = BarrierWatch::modelled(|_| Ok(()));
+        begin(&fixture.0, [98; 32], Operation::Sweep)?
+    };
+    let journal = base(&fixture.0).join("attempts.bin");
+    let before = fs::metadata(&journal).map_err(text)?.len();
+    let refusing = BarrierWatch::modelled(|path| {
+        if path.ends_with("attempts.bin") {
+            Err(std::io::Error::other("injected journal barrier"))
+        } else {
+            Ok(())
+        }
+    });
+    let refusal = begin(&fixture.0, [99; 32], Operation::Sweep)
+        .err()
+        .unwrap_or_default();
+    drop(refusing);
+    assert!(refusal.contains("injected journal barrier"), "{refusal}");
+    assert!(refusal.contains("truncated back to"), "{refusal}");
+    assert_eq!(fs::metadata(&journal).map_err(text)?.len(), before);
+    let _quiet = BarrierWatch::modelled(|_| Ok(()));
+    let next = begin(&fixture.0, [99; 32], Operation::Sweep)?;
+    assert_eq!(
+        next.token(),
+        first.token() + 1,
+        "the refused rows named no token"
+    );
+    std::mem::forget(next);
+    std::mem::forget(first);
+    Ok(())
+}
+
+#[test]
+fn a_torn_journal_tail_is_cut_by_the_writer_and_refused_by_a_reader() -> Result<(), String> {
+    // sweep-2, D-1901: bytes past the last whole row of a journal are never a
+    // row. A reader still refuses them; the next writer under the lock cuts them.
+    let fixture = Fixture::new()?;
+    let path = fixture.0.join("torn-events.bin");
+    let _quiet = BarrierWatch::modelled(|_| Ok(()));
+    {
+        let mut file = open_append(&path)?;
+        assert_eq!(shape::<EVENT_BYTES>(&mut file, &path, EVENTS, true)?, 0);
+        file.seek(SeekFrom::End(0)).map_err(text)?;
+        file.write_all(&[7; 40]).map_err(text)?;
+    }
+    let refused = count_optional::<EVENT_BYTES>(&path, EVENTS, LIMIT)
+        .err()
+        .unwrap_or_default();
+    assert!(refused.contains("torn or short"), "{refused}");
+    let count = append_events(&path, |_, _| Ok(Vec::new()))?;
+    assert_eq!(count, 0);
+    assert_eq!(fs::metadata(&path).map_err(text)?.len(), HEADER);
+    assert_eq!(count_optional::<EVENT_BYTES>(&path, EVENTS, LIMIT)?, 0);
+    Ok(())
+}
+
+#[test]
 fn a_refused_chain_barrier_refuses_the_start_and_is_not_remembered() -> Result<(), String> {
     let fixture = Fixture::new()?;
     let base = base(&fixture.0);
@@ -861,6 +923,19 @@ fn obstructed_group_paths_refuse_before_any_attempt_is_handed_back() -> Result<(
     Ok(())
 }
 
+/// Whether a refusal says its partial write was cut back, in either wording:
+/// D-1741's `append_rolled_back` ("rolled back to byte N") for a header, or
+/// D-1900's `fixed_tail` ("truncated back to N bytes") for rows (D-1934).
+fn rolled_back(why: &str, to: Option<u64>) -> bool {
+    match to {
+        None => why.contains("rolled back to byte") || why.contains("truncated back to"),
+        Some(at) => {
+            why.contains(&format!("rolled back to byte {at}"))
+                || why.contains(&format!("truncated back to {at} bytes"))
+        }
+    }
+}
+
 /// GAP11-1: one short write left a torn tail in a shared evidence file, and
 /// every later attempt in the store refused with "torn or short" forever. The
 /// failed write now rolls back to the length measured under the lock, so the
@@ -883,7 +958,7 @@ fn a_partial_evidence_write_rolls_back_and_never_blocks_the_next_attempt() -> Re
         .err()
         .ok_or("the injected journal write refuses")?;
     drop(fault);
-    assert!(why.contains("rolled back to byte"), "{why}");
+    assert!(rolled_back(&why, None), "{why}");
     assert_eq!(fs::metadata(&journal).map_err(text)?.len(), before);
 
     // A rerun of a known identity: journal, lifecycle start, then the start
@@ -895,7 +970,7 @@ fn a_partial_evidence_write_rolls_back_and_never_blocks_the_next_attempt() -> Re
         .err()
         .ok_or("the injected start-index write refuses")?;
     drop(fault);
-    assert!(why.contains("rolled back to byte"), "{why}");
+    assert!(rolled_back(&why, None), "{why}");
     assert_eq!(fs::metadata(&starts).map_err(text)?.len(), indexed);
     let rerun = begin(&fixture.0, [81; 32], Operation::Sweep)?;
     assert_eq!(
@@ -913,7 +988,7 @@ fn a_partial_evidence_write_rolls_back_and_never_blocks_the_next_attempt() -> Re
         .err()
         .ok_or("the torn level refuses")?;
     drop(fault);
-    assert!(why.contains("rolled back to byte"), "{why}");
+    assert!(rolled_back(&why, None), "{why}");
     assert_eq!(fs::metadata(&levels).map_err(text)?.len(), level_len);
     drop(rerun);
 
@@ -928,7 +1003,7 @@ fn a_partial_evidence_write_rolls_back_and_never_blocks_the_next_attempt() -> Re
         .err()
         .ok_or("the torn ranking refuses")?;
     drop(fault);
-    assert!(why.contains("rolled back to byte 16"), "{why}");
+    assert!(rolled_back(&why, Some(16)), "{why}");
     assert_eq!(
         fs::metadata(&path).map_err(text)?.len(),
         HEADER,
@@ -944,7 +1019,7 @@ fn a_partial_evidence_write_rolls_back_and_never_blocks_the_next_attempt() -> Re
         .err()
         .ok_or("the torn header refuses")?;
     drop(fault);
-    assert!(why.contains("rolled back to byte 0"), "{why}");
+    assert!(rolled_back(&why, Some(0)), "{why}");
     assert_eq!(
         fs::metadata(header.detail("levels")).map_err(text)?.len(),
         0
@@ -976,7 +1051,7 @@ fn a_rolled_back_first_write_leaves_an_empty_file_that_reads_as_no_rows() -> Res
         .err()
         .ok_or("the injected first journal write refuses")?;
     drop(fault);
-    assert!(why.contains("rolled back to byte 0"), "{why}");
+    assert!(rolled_back(&why, Some(0)), "{why}");
     let journal = base(&fixture.0).join("attempts.bin");
     assert_eq!(fs::metadata(&journal).map_err(text)?.len(), 0);
     assert_eq!(latest(&fixture.0, LIMIT)?, None);
@@ -988,6 +1063,37 @@ fn a_rolled_back_first_write_leaves_an_empty_file_that_reads_as_no_rows() -> Res
     assert_eq!(
         read(&fixture.0, [91; 32], LIMIT)?.map(|e| e.completion),
         Some(Completion::Completed)
+    );
+    Ok(())
+}
+
+/// AHA-06 (h-cli-4, D-1854): a reservation whose write tears is rolled back
+/// and its file removed, because the file was created by this call and "no
+/// file" is the state before it; the same token then reserves whole.
+#[test]
+fn a_failed_reservation_leaves_no_file() -> Result<(), String> {
+    let fixture = Fixture::new()?;
+    let _quiet = BarrierWatch::modelled(|_| Ok(()));
+    let attempt = begin(&fixture.0, [0x54; 32], Operation::Sweep)?;
+    let evidence = Evidence {
+        attempt: 9_999,
+        ..attempt.evidence
+    };
+    let fault = fail_write(1, 40);
+    let refusal = reserve_start(&fixture.0, evidence)
+        .err()
+        .ok_or("the torn reservation refuses")?;
+    drop(fault);
+    assert!(
+        refusal.contains("rolled back to byte 0")
+            && refusal.contains("the reservation file was removed"),
+        "{refusal}"
+    );
+    assert!(!start_path(&fixture.0, 9_999).exists());
+    reserve_start(&fixture.0, evidence)?;
+    assert_eq!(
+        last_event(&start_path(&fixture.0, 9_999), LIMIT)?.map(|saved| saved.attempt),
+        Some(9_999)
     );
     Ok(())
 }

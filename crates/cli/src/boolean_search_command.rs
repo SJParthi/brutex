@@ -24,9 +24,14 @@ struct Request<'a> {
     batches: u64,
 }
 pub(crate) fn command(args: &[&str], out: &mut String) -> u8 {
-    match parse(args).and_then(|request| execute(&request, out)) {
+    // Arguments, then work, each with its own code (P8-03, D-2722).
+    let request = match parse(args) {
+        Ok(request) => request,
+        Err(why) => return crate::refuse(out, &why),
+    };
+    match execute(&request, out) {
         Ok(()) => crate::OK,
-        Err(why) => crate::refuse(out, &why),
+        Err(why) => crate::fail(out, &why),
     }
 }
 fn parse<'a>(args: &[&'a str]) -> Result<Request<'a>, String> {
@@ -64,6 +69,7 @@ fn parse<'a>(args: &[&'a str]) -> Result<Request<'a>, String> {
     else {
         return Err("boolean-qualified-search-stored requires 17 explicit arguments: VENDOR SYMBOLS FY FM TY TM BITS HORIZON MAX_POINTS BATCH_PROGRAMS NODE_ALLOWANCE BATCH_ALLOWANCE OUTPUT LATER_FY LATER_FM LATER_TY LATER_TM [TIMEFRAMES comma-separated; omitted means all eight]".into());
     };
+    crate::boolean_catalog_command::words(vendor, symbols)?;
     let from = month(fy, fm)?;
     let to = month(ty, tm)?;
     let later_from = month(lfy, lfm)?;
@@ -410,18 +416,21 @@ fn execute_observed(
                     )?);
                 }
             }
-            // Before a new completion, reconcile previously finished children again.
-            let prior = Reader::open(request.input.output, identity, observe, records)?;
-            for batch in 0..prior.completed_batches() {
-                prior.verify_batch(batch as u64)?;
-            }
+            // ONLY THE NEW COMPLETION IS VERIFIED HERE (CE-66, D-2668). Every
+            // earlier batch was verified at resume or when it completed, and
+            // the invocation's closing pass below reverifies all of them before
+            // any outcome is reported. Re-verifying every earlier batch before
+            // AND after each completion made an invocation's work grow with
+            // the square of its batch count.
             training.require_current()?;
             later.require_current()?;
             journal.publish(&record.encode()?, bytes)?;
             let saved = Reader::open(request.input.output, identity, observe, records)?;
-            for batch in 0..saved.completed_batches() {
-                saved.verify_batch(batch as u64)?;
-            }
+            let newest = saved
+                .completed_batches()
+                .checked_sub(1)
+                .ok_or("search completion missing after publish")?;
+            saved.verify_batch(newest as u64)?;
             training.require_current()?;
             later.require_current()?;
             Ok::<(), String>(())
@@ -439,6 +448,12 @@ fn execute_observed(
         latest = Some(record);
     }
     let saved = Reader::open(request.input.output, identity, observe, records)?;
+    // THE CLOSING PASS: every completed batch, once, before the outcome is
+    // reported, so a child changed while this invocation ran is refused here
+    // rather than at the next completion (CE-66, D-2668).
+    for batch in 0..saved.completed_batches() {
+        saved.verify_batch(batch as u64)?;
+    }
     training.require_current()?;
     later.require_current()?;
     // Outcome is read from the acknowledged journal, never inferred from return prose.

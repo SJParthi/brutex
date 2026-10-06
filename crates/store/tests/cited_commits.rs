@@ -24,7 +24,7 @@
 //! # What it reads
 //!
 //! The D-0681, D-0682, D-0693 and D-0694 entries of `docs/05-decisions.md`, the whole of
-//! `docs/04-invariants.md` and `docs/06-limits.md`, and the comment lines of
+//! `docs/04-invariants.md`, `docs/06-limits.md` and `docs/07-plan.md`, and the comment lines of
 //! `crates/store/tests/tail_proof.rs`. Each is read as sentences, split after
 //! a full stop that a space follows, with every run of whitespace made one
 //! space and the comment markers `//!`, `///` and `//` dropped, so a phrase a
@@ -163,7 +163,15 @@ const MAIN: &str = "refs/remotes/origin/main";
 const ENTRIES: [&str; 4] = ["D-0681", "D-0682", "D-0693", "D-0694"];
 
 /// The documents this file reads whole, from the repository root.
-const WHOLE: [&str; 2] = ["docs/04-invariants.md", "docs/06-limits.md"];
+///
+/// `docs/07-plan.md` joined with P1-18-04 (D-1944): its DONE table named
+/// sixteen commits as each row's proof, and none was an ancestor of `main`.
+/// It was outside this list, so nothing refused them.
+const WHOLE: [&str; 3] = [
+    "docs/04-invariants.md",
+    "docs/06-limits.md",
+    "docs/07-plan.md",
+];
 
 /// The test file whose comment lines this file reads.
 const COMMENTED: &str = "crates/store/tests/tail_proof.rs";

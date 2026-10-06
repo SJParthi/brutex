@@ -234,7 +234,13 @@ fn gate_0_prepare(workflows: &[String], spawns: &[String], work: &Path) -> Resul
     Ok(r)
 }
 
-fn gate_0_verdict(workflow: &Scan, aggregator: &Scan, spawns: &Scan) -> Report {
+/// `fork` is `source_scan fork-refusal .github/workflows/auto-merge.yml`
+/// (P1-09-01, D-2660, carried here by D-1935). On `workflow_run` and
+/// `pull_request_target` the auto-merge token can WRITE whoever wrote the
+/// pull request, so its `isCrossRepository` refusal is the only thing between
+/// a fork and an armed merge; deleting it as "redundant with a read-only
+/// token" is a red build.
+fn gate_0_verdict(workflow: &Scan, aggregator: &Scan, spawns: &Scan, fork: &Scan) -> Report {
     let mut r = Report::default();
     let checks = [
         (
@@ -248,6 +254,10 @@ fn gate_0_verdict(workflow: &Scan, aggregator: &Scan, spawns: &Scan) -> Report {
         (
             spawns,
             "GATE 0 FAILED: crate code above starts a shell or interpreter. D-1603.",
+        ),
+        (
+            fork,
+            "GATE 0 FAILED: auto-merge can arm a fork's pull request. D-2660.",
         ),
     ];
     for (scan, why) in checks {
@@ -298,9 +308,24 @@ fn gate_1_record(rec: &str, r: &mut Report) {
             "FORBIDDEN MODE  {f}  ({mode}; only 100644 outside web/)"
         ));
     }
-    // The old test was a line grep of the basename, so a name holding a
-    // newline matched on any of its lines; that reading is kept.
-    let named = |names: &[&str]| base.split('\n').any(|l| names.contains(&l));
+    // WHOLE-STRING MATCHES (P1-07-03, D-2660, carried here by D-1935). The
+    // old step's line grep of the basename matched if ANY LINE of a name
+    // matched, so `.gitignore<LF>x.y` took the early return below as a git
+    // file and was never held to the extension list. The name is compared
+    // whole, and `source_scan content` refuses a control character in any
+    // name outside web/.
+    let named = |names: &[&str]| names.contains(&base);
+    // The whole-string match must not be the looser reading: a name holding
+    // a control character (`crates/LICENSE<LF>foo.rs`, which the line grep
+    // refused as a misplaced licence) is refused here by name as well as by
+    // `source_scan content`.
+    if !web && f.chars().any(char::is_control) {
+        r.refuse(format!(
+            "FORBIDDEN NAME  {}  (a control character; git quotes it in every listing read without -z)",
+            f.escape_default()
+        ));
+        return;
+    }
     if named(&[".gitignore", ".gitattributes"]) {
         if !(f == ".gitignore" || f == ".gitattributes" || web) {
             r.refuse(format!(
@@ -693,17 +718,26 @@ const WRAPPERS: [&str; 11] = [
     "RUSTUP_HOME",
 ];
 
-/// `(^|[^A-Za-z0-9_])(<WRAPPERS>|CARGO_TARGET_[A-Z0-9_]+_(RUNNER|LINKER))[[:space:]]*[:=]`.
-/// `[A-Z0-9_]+` is maximal here because the character after `_RUNNER` must be
-/// a space, `:` or `=`, none of which it can absorb.
-fn sets_wrapper(c: &[char], space: &dyn Fn(char) -> bool) -> bool {
+/// `(^|[^A-Z0-9_])(<WRAPPERS>|CARGO_TARGET_[A-Z0-9_]+_(RUNNER|LINKER))([^A-Za-z0-9_]|$)`:
+/// the NAME in any position, not only before `[:=]` (P15-08, D-2322). A
+/// `printf '%s=%s\n' RUSTC_WRAPPER /tmp/z >> "$GITHUB_ENV"`, or a value
+/// assembled on one line and written to `GITHUB_ENV` by a sanctioned line
+/// later, sets the variable without the name ever being followed by `=`. No
+/// workflow line names one of these for any other reason. The left boundary
+/// is an upper-case environment-name character, so `$'x\nRUSTC=y'` (the
+/// escape's `n` before the name) is read too, and `MY_RUSTC` is still another
+/// variable. `[A-Z0-9_]+` is maximal, so the character after `_RUNNER` is
+/// never one it could absorb.
+fn names_wrapper(c: &[char]) -> bool {
+    let env_char = |x: char| x.is_ascii_uppercase() || x.is_ascii_digit() || x == '_';
+    let ends = |k: usize| !c.get(k).is_some_and(|x| ident_char(*x));
     (0..c.len()).any(|i| {
-        if i > 0 && ident_char(c[i - 1]) {
+        if i > 0 && env_char(c[i - 1]) {
             return false;
         }
         if WRAPPERS
             .iter()
-            .any(|w| at(c, i, w) && then_sets(c, i + w.chars().count(), space))
+            .any(|w| at(c, i, w) && ends(i + w.chars().count()))
         {
             return true;
         }
@@ -712,16 +746,11 @@ fn sets_wrapper(c: &[char], space: &dyn Fn(char) -> bool) -> bool {
         }
         let from = i + "CARGO_TARGET_".len();
         let mut end = from;
-        while c
-            .get(end)
-            .is_some_and(|x| x.is_ascii_uppercase() || x.is_ascii_digit() || *x == '_')
-        {
+        while c.get(end).is_some_and(|x| env_char(*x)) {
             end += 1;
         }
         let run: String = c[from..end].iter().collect();
-        run.len() >= 8
-            && (run.ends_with("_RUNNER") || run.ends_with("_LINKER"))
-            && then_sets(c, end, space)
+        run.len() >= 8 && (run.ends_with("_RUNNER") || run.ends_with("_LINKER")) && ends(end)
     })
 }
 
@@ -806,7 +835,7 @@ fn computed_name(c: &[char], space: &dyn Fn(char) -> bool) -> bool {
 /// environment name, or `cargo --config`. Read on comment lines too.
 fn wrapper_line(line: &str) -> bool {
     let c: Vec<char> = line.chars().collect();
-    either_space(|sp| sets_wrapper(&c, sp) || cargo_config(&c, sp))
+    names_wrapper(&c) || either_space(|sp| cargo_config(&c, sp))
 }
 
 /// D-1612 and D-2346: the same doors by other names. Comment lines skipped.
@@ -1057,10 +1086,40 @@ fn credential_path(line: &str) -> bool {
     })
 }
 
-fn gate_1c(tracked: &[String], read: &dyn Fn(&str) -> Result<Vec<u8>, String>) -> Report {
+/// The `.rs` files outside web/ whose string literals gate 1c decodes.
+fn gate_1c_sources(tracked: &[String]) -> Vec<String> {
+    tracked
+        .iter()
+        .filter(|f| f.ends_with(".rs") && !f.starts_with("web/"))
+        .cloned()
+        .collect()
+}
+
+/// `decoded` is `source_scan strings` over [`gate_1c_sources`]: every string
+/// literal with its escapes resolved (P1-07-02, D-2660, carried here by
+/// D-1935). The pattern reads source BYTES, so one Rust escape -- `\x70rod`,
+/// `pr\u{6f}d` -- hid a standard environment word from it; the same pattern
+/// now runs over the decoded literals too. A scanner that failed, or decoded
+/// no literal at all, is a refusal.
+fn gate_1c(
+    tracked: &[String],
+    read: &dyn Fn(&str) -> Result<Vec<u8>, String>,
+    decoded: &Scan,
+) -> Report {
     let mut r = Report::default();
     if tracked.is_empty() {
         r.refuse("GATE 1C READ NO TRACKED FILE.");
+        return r;
+    }
+    if !decoded.ok() {
+        r.refuse("GATE 1C: source_scan strings failed, so no decoded literal can be vouched for.");
+        for l in decoded.lines() {
+            r.say(l);
+        }
+        return r;
+    }
+    if decoded.lines().is_empty() {
+        r.refuse("GATE 1C READ NO STRING LITERAL.");
         return r;
     }
     let mut hits = Vec::new();
@@ -1077,6 +1136,13 @@ fn gate_1c(tracked: &[String], read: &dyn Fn(&str) -> Result<Vec<u8>, String>) -
             Err(e) => hits.push(format!("UNREADABLE {e}")),
         }
     }
+    hits.extend(
+        decoded
+            .lines()
+            .into_iter()
+            .filter(|l| credential_path(l))
+            .map(|l| format!("decoded {l}")),
+    );
     if !hits.is_empty() {
         r.refuse("LITERAL CREDENTIAL PATH IN A TRACKED FILE:");
         for h in hits {
@@ -1395,10 +1461,13 @@ const WIRE_DATE: &str = "20250701 01072025";
 // changing them to something invented would delete that proof.
 // CLAUDE.md §8 names ap-south-1 as the region this repository reads
 // from; us-east-1 appears nowhere but inside those vectors.
+// `iam` is the service AWS's published signing-key example is derived
+// for; ssm.rs pins that vector through `signing_key_for` and never signs a
+// request for it (P1-14-01, D-1920).
 const AWS_SIGV4: &str = "
     ssm aws4_request authorization content-type host
     x-amz-date x-amz-target x-amz-security-token
-    us-east-1 20150830 20150831
+    us-east-1 20150830 20150831 iam
 ";
 
 // ---- group 14: the AWS shared-credentials file format. These are the
@@ -1597,11 +1666,16 @@ const TELEMETRY_FIELD: &str = "
     field file kept loaded max rotated vendors
     asked blank byte_len chars duplicate fault
     about census rows_read slices
-    not-base32 too-long hmac-refused
+    not-base32 too-long hmac-refused trailing-bits
     at
     unreadable_volume unreadable_oi
     timeframe
+    agreed differed day_absent minute_absent
 ";
+
+// `agreed differed day_absent minute_absent` — `ingest.rs`'s
+// `pull.daycheck` line (D-3001): four COUNTS of days, the pulled day bar
+// against the days its minute bars fold to. Integers on the right.
 
 // THE SECOND BATCH, and why each is not a path segment. The emit
 // sites in `secret.rs`, `totp.rs`, `work.rs` and `config.rs` landed
@@ -1620,6 +1694,8 @@ const TELEMETRY_FIELD: &str = "
 //     that gate 11 names in this file became a refusal: it says the
 //     BUILD is wrong, not the operator's secret, which is why it is a
 //     separate word rather than folded into one of the other three.
+//   trailing-bits               — `totp.rs`: a secret whose bits do not
+//     end on a whole byte (h-pull-2, D-2271). A failure, not a place.
 //   file loaded vendors         — `config.rs`, reporting that the
 //     untracked local configuration was read and how many vendors it
 //     named. The count, never the contents.
@@ -1939,6 +2015,10 @@ const ROLLING_SCAFFOLD: &str = "contractpath bin call put 9223372036854775807";
 //     for the duplicated census-lock descriptor it arranges: a second
 //     reference to the lock's open file description, the model of a
 //     spawned child's copy (D-0693).
+//   lock-transient census-stamp  scratch roots in `ingest.rs` (D-2766):
+//     the first arranges a transient or out-of-space failure on the
+//     census lock, the second an in-place append whose final stamp must
+//     move past its own writes. Named for the fault, not a place.
 //   interleaved                  a word asserted to appear IN a refusal
 //     sentence, so the message keeps naming the condition it refused.
 //   feed                         a scratch subdirectory in
@@ -1957,7 +2037,7 @@ const ROLLING_SCAFFOLD: &str = "contractpath bin call put 9223372036854775807";
 // has the same shape as a path segment whatever it means.
 const PULL_FIXTURE: &str = "
     dir-is-a-file lock-is-a-dir census-lock-dup interleaved
-    feed t z zzz
+    feed t z zzz lock-transient census-stamp
 ";
 
 // SIXTY-SEVEN MORE, IN FOUR GROUPS, ALL OF THEM ACCUMULATED WHILE THIS
@@ -2166,6 +2246,66 @@ const FOLD_LITERAL: &str = "-0 -5 -0945 -1400 -token --exact --nocapture";
 // fno.rs. `repeats` is a refusal word asserted in http.rs and prose
 // in a session.rs reason string. None is a path segment.
 const AUDIT_LITERAL: &str = "-354 -7 repeats";
+// Red at 1f4de71 and declared with the P1-07-02 change (D-2660):
+// `rel` and `relative` are folder.rs's relative-HOME refusal test,
+// `junk`, `1e-7` and the twenty nines are rolling.rs's malformed
+// number fixtures, `post_json` is an http.rs diagnostic label, and
+// `one-wrapper` a scratch directory in tests/folder.rs.
+const LATE_FIXTURE: &str = "rel relative junk 1e-7 99999999999999999999 post_json one-wrapper";
+// THE PIECES OF A JOINED LITERAL (P1-07-02, D-2660). Gate 1d splits
+// every decoded literal that holds `/` and no whitespace, and checks
+// each segment-shaped piece, so a whole credential path is no longer
+// invisible because the WHOLE literal is not segment-shaped. These are
+// the pieces that split produced at 1f4de71, and none is an account, an
+// environment or a field: public NSE and vendor URL components (`api`,
+// `api-data`, `content`, `circulars`, `equity`, `equity-master`,
+// `indices`, `broad-based-indices`, `strategy-indices`,
+// `thematic-indices`, `nifty-auto`, `wp-content`, `uploads`,
+// `all-reports`, `cm`, `futures`, `application`, `json`, `list`,
+// `support`, `evidence`, `1m`, and date pieces `02 03 07 2021 2024
+// 2025`); filesystem fixtures (`home`, `tmp`, `usr`, `dev` from
+// `/dev/null`, `mkfifo`, `crates`, `src`, `tests`, `docs`); and test
+// placeholders (`bare`, `bought`, `c`, `d`, `g`, `y`, `ghi`, `else`,
+// `never`, `nowhere`, `somewhere`, `parameter`, `zero`).
+const JOINED_PIECE: &str = "
+    02 03 07 1m 2021 2024 2025 all-reports api api-data
+    application bare bought broad-based-indices c circulars cm content
+    crates d dev docs else equity equity-master evidence futures g ghi
+    home indices json list mkfifo never nifty-auto nowhere parameter
+    somewhere src strategy-indices support tests thematic-indices tmp
+    uploads usr wp-content y zero
+";
+// D-2680..D-2689 (CE-56..CE-65, p10num-1/2): telemetry field keys this
+// repository chose (`category`, `categories`, `elements` on the
+// index-skip line; `negative_oi`, `quote_rows` on the CSV line),
+// scratch-directory tags and a four-byte fixture body in tests,
+// `mkfifo` (the coreutils command the FIFO tests run, as the api's
+// census test already does), and `folds` from an expect() message. None
+// names an account, an environment or a vendor field.
+const DATA_EDGES: &str = "
+    category categories elements negative_oi quote_rows
+    census-ceiling census-not-regular masters-not-regular 1234 mkfifo
+    folds
+";
+// D-1931: telemetry field keys this repository chose for the P-03
+// closed-day drop (`on_closed_day`, `kept_unclassified_day` on the fetch
+// census line, D-2673); the JSON number texts P10-07a's test reads
+// (`5e-1`, `2.5e-1`, `-5e-1`, `0e-1`); a day count (`18935`) in a
+// session-length test; and the word `length` from three refusal
+// messages. None names an account, an environment or a vendor field.
+const LATE_PIECES: &str = "
+    on_closed_day kept_unclassified_day 5e-1 2.5e-1 -5e-1
+    0e-1 length 18935
+";
+// Red on the merged tree before D-1935 and declared with it: `stamp` and
+// `body` are field labels `Signable`'s redacting `Debug` prints, beside the
+// SigV4 timestamp and beside `<redacted>` (P11-02, D-1776), the same case as
+// `DEBUG_LABEL` above, and
+// `reliance` is the lower-case file stem tests/folder.rs feeds the census
+// beside `RELIANCE` to prove two stems differing only in case are one
+// series (CE-67, D-1772). Neither names an account, an environment or a
+// vendor field.
+const LATE_LABEL: &str = "stamp body reliance";
 // Met when the data-path attack rounds 1 and 2 landed (D-3100..D-3181)
 // and declared in round 3 (D-3185). Every word was read where it sits
 // (`source_scan strings`, 2026-10-05); all but two are in the new
@@ -2192,6 +2332,10 @@ const AUDIT_LITERAL: &str = "-354 -7 repeats";
 //     substrings a refusal or a receipt must contain.
 //   clean -- a round-3 scratch-directory name in attack_r3_ingest.rs
 //     (D-3125).
+//   25 -- the day piece of the slash-spelled expiry `2024/01/25` that
+//     chain.rs's D-3116 test must refuse; gate 1d splits joined literals
+//     on `/` since D-2660, and the merge of final/all-fixes met it there
+//     (D-3128).
 const ATTACK_LITERAL: &str = "
     - -- n nse 019200 99999999999 00
     10 11 12 5 1_000 0x10 1e30 1e308 9223372036854775808 18446744073709551615
@@ -2202,10 +2346,11 @@ const ATTACK_LITERAL: &str = "
     above below alive cited derived disagree impossible intrinsic leap
     midnight repeated solved swept withheld
     clean
+    25
 ";
 
 /// Every declared group, in the order the step joined them.
-const DECLARED: [&str; 50] = [
+const DECLARED: [&str; 55] = [
     SEG_SHAPE,
     VENDOR_WIRE,
     CLAIM_STANDING,
@@ -2255,6 +2400,11 @@ const DECLARED: [&str; 50] = [
     SIGNED_NUMBER,
     FOLD_LITERAL,
     AUDIT_LITERAL,
+    LATE_FIXTURE,
+    JOINED_PIECE,
+    DATA_EDGES,
+    LATE_PIECES,
+    LATE_LABEL,
     ATTACK_LITERAL,
 ];
 
@@ -2310,6 +2460,23 @@ fn iso_date(w: &str) -> bool {
         })
 }
 
+/// The segment-shaped pieces of a joined literal (P1-07-02, D-2660, carried
+/// here by D-1935): a value holding `/` and no `[[:space:]]` is split on `/`
+/// and each whole-segment piece is kept. A literal holding a whole path,
+/// `/acmeorg/prd/vendor/field`, is not segment-shaped in whole, so its
+/// segments were never compared with the list -- while docs/06-limits.md
+/// section 18 names this gate as the check for a joined path gate 1c's ten
+/// words miss. Prose, which holds a space, is not split.
+fn joined_pieces(v: &str) -> Vec<&str> {
+    if !v.contains('/')
+        || v.bytes()
+            .any(|b| matches!(b, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r'))
+    {
+        return Vec::new();
+    }
+    v.split('/').filter(|p| whole_segment(p)).collect()
+}
+
 /// `cut -d: -f3-` on one `source_scan strings` line: `file:line:value`.
 fn value_of(line: &str) -> &str {
     match line.split_once(':') {
@@ -2345,6 +2512,7 @@ fn gate_1d_verdict(
             words.push(v.to_owned());
         }
         words.extend(quoted_words(v.as_bytes(), b"\\\""));
+        words.extend(joined_pieces(v).into_iter().map(str::to_owned));
     }
     let found: BTreeSet<String> = words.into_iter().filter(|w| !iso_date(w)).collect();
     let allowed = declared();
@@ -2444,11 +2612,17 @@ fn is_manifest(name: &str) -> bool {
     name == "Cargo.toml" || name.ends_with("/Cargo.toml")
 }
 
+/// `keys` is `source_scan build-keys` over every manifest: `package.build`
+/// and `package.links` read as TOML, so `"build" = ..`, `package.build = ..`
+/// and `package = { build = .. }` are each the key they are (P1-07-01,
+/// D-2660, carried here by D-1935). The line reading the step had, which saw
+/// one spelling of those four, is kept beside it: either one is a refusal.
 fn gate_2_verdict(
     roots: &[String],
     closure: &Scan,
     build: &Scan,
     manifests: &[(String, Vec<u8>)],
+    keys: &Scan,
 ) -> Report {
     let mut r = Report::default();
     r.say("every file compiled into a build script:");
@@ -2481,9 +2655,25 @@ fn gate_2_verdict(
             r.say("something else. That is the side door. See CLAUDE.md section 2.");
         }
     }
+    if !keys.ok() {
+        r.refuse("A MANIFEST COULD NOT BE READ AS TOML, so its build keys cannot be vouched for:");
+        for l in keys.lines() {
+            r.say(format!("  {l}"));
+        }
+    }
+    let mut parsed: Vec<String> = keys
+        .lines()
+        .into_iter()
+        .filter(|l| !l.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if !keys.ok() {
+        parsed.clear();
+    }
     let keys: Vec<String> = manifests
         .iter()
         .flat_map(|(n, b)| manifest_keys(n, b))
+        .chain(parsed)
         .collect();
     if !keys.is_empty() {
         r.refuse("A MANIFEST NAMES A BUILD SCRIPT OR A NATIVE LIBRARY:");
@@ -2623,29 +2813,32 @@ fn gate_9b(tracked: bool, deps: &Scan, sources: &[(String, Vec<u8>)]) -> Report 
 
 const INVARIANTS: &str = "docs/04-invariants.md";
 
-/// `^\| [A-Z]+-[0-9]+[a-z]? `, the identifier without its bar and spaces.
+/// `[A-Z][A-Z0-9]*(-[A-Za-z0-9]+)+`, the whole token: the id shape gate 27
+/// reads (D-2667, P6-04, carried here by D-1936). The old `[A-Z]+-[0-9]+[a-z]?`
+/// could not see `FV4-01`, `S-30-session`, `RUST-UC7-a` or
+/// `CU-SV4-CLOSE-D0961`, so a duplicate among them passed.
+fn id_shape(tok: &str) -> bool {
+    let Some((head, tail)) = tok.split_once('-') else {
+        return false;
+    };
+    let mut h = head.bytes();
+    h.next().is_some_and(|c| c.is_ascii_uppercase())
+        && h.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+        && tail
+            .split('-')
+            .all(|g| !g.is_empty() && g.bytes().all(|c| c.is_ascii_alphanumeric()))
+}
+
+/// `^\| *`?ID`? *\|`, the identifier without its bar, spaces and ticks.
 fn invariant_id(line: &str) -> Option<&str> {
-    let rest = line.strip_prefix("| ")?;
-    let b = rest.as_bytes();
-    let mut i = 0;
-    while b.get(i).is_some_and(u8::is_ascii_uppercase) {
-        i += 1;
-    }
-    if i == 0 || b.get(i) != Some(&b'-') {
-        return None;
-    }
-    i += 1;
-    let digits = i;
-    while b.get(i).is_some_and(u8::is_ascii_digit) {
-        i += 1;
-    }
-    if i == digits {
-        return None;
-    }
-    if b.get(i).is_some_and(u8::is_ascii_lowercase) && b.get(i + 1) == Some(&b' ') {
-        i += 1;
-    }
-    (b.get(i) == Some(&b' ')).then(|| &rest[..i])
+    let rest = line.strip_prefix('|')?.trim_start_matches(' ');
+    let rest = rest.strip_prefix('`').unwrap_or(rest);
+    let end = rest
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+        .unwrap_or(rest.len());
+    let (tok, after) = rest.split_at(end);
+    let after = after.strip_prefix('`').unwrap_or(after);
+    (id_shape(tok) && after.trim_start_matches(' ').starts_with('|')).then_some(tok)
 }
 
 fn gate_10b(text: &str) -> Report {
@@ -2685,40 +2878,32 @@ fn gate_10b(text: &str) -> Report {
 
 const WEB_MANIFEST: &str = "crates/web/Cargo.toml";
 
-/// The first field of every line with an `=` inside a flat `[dependencies]`
-/// table, exactly the old reading -- dotted keys and other tables included
-/// in what it does not see. The crate does not exist (D-0052), so the gate
-/// skips; this keeps its rule for the day a crate of this name returns.
-fn web_dependencies(text: &str) -> Vec<&str> {
-    let mut inside = false;
-    let mut out = Vec::new();
-    for l in lines_of(text) {
-        if l.starts_with("[dependencies]") {
-            inside = true;
-            continue;
-        }
-        if l.starts_with('[') {
-            inside = false;
-        }
-        if inside
-            && l.contains('=')
-            && let Some(w) = l.split([' ', '\t']).find(|w| !w.is_empty())
-        {
-            out.push(w);
-        }
-    }
-    out
-}
-
-fn gate_7(manifest: Option<&str>) -> Report {
+/// `deps` is `source_scan deps crates/web/Cargo.toml`, one
+/// `file:line:kind:name:package` line per declaration, or `None` when the
+/// manifest is not a file. READ AS TOML, BY PACKAGE (P1-08-05, D-2660,
+/// carried here by D-1936): this was the flat `[dependencies]` reading D-1107
+/// removed from gates 9 and 9b, so `[dependencies.store]`, a dotted key, a
+/// target table or a dev-dependency printed nothing and the step said OK.
+/// Any declaration whose package is not `core` is refused, and a manifest
+/// the scanner cannot read is a refusal. The crate does not exist (D-0052),
+/// so the gate skips; this keeps its rule for the day a crate of this name
+/// returns.
+fn gate_7(deps: Option<&Scan>) -> Report {
     let mut r = Report::default();
-    let Some(text) = manifest else {
+    let Some(deps) = deps else {
         r.say("skip — crates/web does not exist (D-0052 moved it to web/)");
         return r;
     };
-    let extra: Vec<&str> = web_dependencies(text)
+    if !deps.ok() {
+        r.refuse(format!(
+            "REFUSED  {WEB_MANIFEST} could not be read as TOML."
+        ));
+        return r;
+    }
+    let extra: Vec<&str> = deps
+        .lines()
         .into_iter()
-        .filter(|d| *d != "core")
+        .filter(|l| !l.is_empty() && l.rsplit(':').next() != Some("core"))
         .collect();
     if extra.is_empty() {
         r.say("OK.");
@@ -2776,6 +2961,7 @@ fn run(args: &[String]) -> Result<Report, String> {
                 &scan_in(&w, "workflow", a(3)?)?,
                 &scan_in(&w, "aggregator", a(4)?)?,
                 &scan_in(&w, "spawns", a(5)?)?,
+                &scan_in(&w, "fork", a(6)?)?,
             ))
         }
         ("gate-1", "prepare") => {
@@ -2863,7 +3049,21 @@ fn run(args: &[String]) -> Result<Report, String> {
                 &scan_in(&w, "browser", a(3)?)?,
             ))
         }
-        ("gate-1c", _) => Ok(gate_1c(&ls_files(&[])?, &disk)),
+        ("gate-1c", "prepare") => {
+            let rs = gate_1c_sources(&ls_files(&[])?);
+            let mut r = Report::default();
+            if rs.is_empty() {
+                r.refuse("GATE 1C READ NO .rs FILE outside web/.");
+            } else {
+                write_nul(&dir(2)?.join("rs.z"), &rs)?;
+            }
+            Ok(r)
+        }
+        ("gate-1c", "verdict") => Ok(gate_1c(
+            &ls_files(&[])?,
+            &disk,
+            &scan_in(&dir(2)?, "decoded", a(3)?)?,
+        )),
         ("gate-1d", "prepare") => {
             let list = ls_files(&["crates/pull"])?;
             let mut r = Report::default();
@@ -2896,6 +3096,11 @@ fn run(args: &[String]) -> Result<Report, String> {
             let to = w.join("tracked");
             std::fs::write(&to, raw).map_err(|e| format!("{}: {e}", to.display()))?;
             write_nul(&w.join("roots.z"), &ls_files(&["*build.rs"])?)?;
+            let manifests: Vec<String> = ls_files(&["*Cargo.toml"])?
+                .into_iter()
+                .filter(|m| is_manifest(m))
+                .collect();
+            write_nul(&w.join("manifests.z"), &manifests)?;
             Ok(r)
         }
         ("gate-2", "files") => {
@@ -2915,6 +3120,7 @@ fn run(args: &[String]) -> Result<Report, String> {
                 &scan_in(&w, "closure", a(3)?)?,
                 &scan_in(&w, "found", a(4)?)?,
                 &read_all(&manifests)?,
+                &scan_in(&w, "keys", a(5)?)?,
             ))
         }
         ("gate-9", _) => {
@@ -2929,14 +3135,22 @@ fn run(args: &[String]) -> Result<Report, String> {
             Ok(gate_9b(tracked, &Scan::read(a(2)?, a(3)?)?, &sources))
         }
         ("gate-10b", _) => Ok(gate_10b(&read_text(Path::new(INVARIANTS))?)),
-        ("gate-7", _) => {
-            let p = Path::new(WEB_MANIFEST);
-            let text = if p.is_file() {
-                Some(read_text(p)?)
+        ("gate-7", "prepare") => {
+            let present: Vec<String> = Path::new(WEB_MANIFEST)
+                .is_file()
+                .then(|| WEB_MANIFEST.to_owned())
+                .into_iter()
+                .collect();
+            write_nul(&dir(2)?.join("web.z"), &present)?;
+            Ok(Report::default())
+        }
+        ("gate-7", "verdict") => {
+            let w = dir(2)?;
+            if read_nul(&w.join("web.z"))?.is_empty() {
+                Ok(gate_7(None))
             } else {
-                None
-            };
-            Ok(gate_7(text.as_deref()))
+                Ok(gate_7(Some(&scan_in(&w, "deps", a(3)?)?)))
+            }
         }
         (gate, phase) => Err(format!("unknown gate or phase `{gate} {phase}`: {USAGE}")),
     }
@@ -3059,19 +3273,33 @@ mod tests {
 
     #[test]
     fn gate_0_refuses_each_failing_scan_by_name() {
-        assert!(!gate_0_verdict(&ok(), &ok(), &ok()).refused);
+        assert!(!gate_0_verdict(&ok(), &ok(), &ok(), &ok()).refused);
         let cases = [
             (
-                gate_0_verdict(&scan("ci.yml:3: continue-on-error\n", 1), &ok(), &ok()),
+                gate_0_verdict(
+                    &scan("ci.yml:3: continue-on-error\n", 1),
+                    &ok(),
+                    &ok(),
+                    &ok(),
+                ),
                 "the workflow lines above are refused",
             ),
             (
-                gate_0_verdict(&ok(), &scan("x\n", 1), &ok()),
+                gate_0_verdict(&ok(), &scan("x\n", 1), &ok(), &ok()),
                 "ci-ok no longer guards every gate",
             ),
             (
-                gate_0_verdict(&ok(), &ok(), &scan("", 2)),
+                gate_0_verdict(&ok(), &ok(), &scan("", 2), &ok()),
                 "starts a shell or interpreter",
+            ),
+            (
+                gate_0_verdict(
+                    &ok(),
+                    &ok(),
+                    &ok(),
+                    &scan("auto-merge.yml: no isCrossRepository refusal\n", 1),
+                ),
+                "auto-merge can arm a fork's pull request",
             ),
         ];
         for (r, why) in cases {
@@ -3079,7 +3307,12 @@ mod tests {
             assert!(r.text().contains(why), "{}", r.text());
             assert!(!r.text().contains("OK —"));
         }
-        let r = gate_0_verdict(&scan("ci.yml:3: continue-on-error\n", 1), &ok(), &ok());
+        let r = gate_0_verdict(
+            &scan("ci.yml:3: continue-on-error\n", 1),
+            &ok(),
+            &ok(),
+            &ok(),
+        );
         assert!(r.text().contains("ci.yml:3: continue-on-error"));
     }
 
@@ -3162,7 +3395,27 @@ mod tests {
         }
         // A name the old line grep read on any of its lines.
         let t = refused_1("100644", "crates/LICENSE\nfoo.rs");
-        assert!(t.contains("allowed only where it means something"), "{t}");
+        assert!(t.contains("FORBIDDEN NAME"), "{t}");
+    }
+
+    #[test]
+    fn gate_1_matches_a_name_whole_and_refuses_a_control_character() {
+        // P1-07-03 (D-2660, D-1935): a name is a git file or a licence only
+        // when it is that WHOLE name; one that holds the name as a line is
+        // neither, and holds a control character besides.
+        for p in [
+            ".gitignore\nx.y",
+            "x.y\n.gitignore",
+            "LICENSE\nx.rs",
+            "run.y\nmd",
+            "crates/a\tb.rs",
+        ] {
+            let t = refused_1("100644", p);
+            assert!(t.contains("FORBIDDEN NAME"), "{p:?}: {t}");
+            assert!(!t.contains("allowed only"), "{p:?}: {t}");
+        }
+        // Under web/ the name is unrestricted, as every other rule there.
+        passed_1("100644", "web/.gitignore\nx.y");
     }
 
     #[test]
@@ -3197,8 +3450,8 @@ mod tests {
             ("a b.sh", "(extension sh, outside web/)"),
             ("crates/x.RS", "(extension RS, outside web/)"),
             // The old here-string grep accepted an extension on any of its
-            // lines; the whole extension is read now.
-            ("crates/x.rs\nevil", "(extension rs\nevil, outside web/)"),
+            // lines; the whole name is read now, and refused (D-1935).
+            ("crates/x.rs\nevil", "FORBIDDEN NAME  crates/x.rs\\nevil"),
         ] {
             let t = refused_1("100644", p);
             assert!(t.contains(why), "{p}: {t}");
@@ -3526,6 +3779,39 @@ mod tests {
     }
 
     #[test]
+    fn gate_1g_refuses_a_wrapper_name_in_any_position() {
+        // P15-08, D-2322. The finding's three lines, then the forms that set
+        // a listed variable with no `NAME=` and no `GITHUB_ENV` on the line:
+        // a value assembled here and written by a sanctioned line later.
+        for l in [
+            "CARGO_BUILD_RUSTDOC: /tmp/x",
+            "RUSTC_WRAPPER: /tmp/y",
+            "printf '%s=%s\\n' RUSTC_WRAPPER /tmp/z >> \"$GITHUB_ENV\"",
+            "tool=$(printf '%s=%s' RUSTC_WRAPPER /tmp/z)",
+            "tool=$'x\\nRUSTC_WRAPPER=/tmp/z'",
+            "set -- CARGO_BUILD_RUSTDOC /tmp/x",
+            "n=\"CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER\"",
+            "echo RUSTDOC",
+            "k=RUSTUP_TOOLCHAIN",
+        ] {
+            let r = gate_1g_of(&["a"], &format!("x\n{l}\n"));
+            assert!(r.refused, "passed: {l:?}");
+            assert!(names_wrapper(&l.chars().collect::<Vec<_>>()), "{l:?}");
+        }
+        for l in [
+            "RUSTC_WRAPPERS x",
+            "MY_RUSTC_WRAPPER x",
+            "echo $RUSTC_VERSION",
+            "rustc --edition=2024 x.rs",
+            "CARGO_TARGET_DIR x",
+            "CARGO_TARGET__RUNNER x",
+            "CARGO_TARGET_X_RUNNER_2 x",
+        ] {
+            assert!(!names_wrapper(&l.chars().collect::<Vec<_>>()), "{l:?}");
+        }
+    }
+
+    #[test]
     fn gate_1g_passes_what_the_old_patterns_passed() {
         for l in [
             "MY_RUSTC_WRAPPER: x",
@@ -3602,9 +3888,49 @@ mod tests {
             .map(|(a, b)| ((*a).to_owned(), b.as_bytes().to_vec()))
             .collect();
         let list: Vec<String> = map.keys().cloned().collect();
-        gate_1c(&list, &|p: &str| {
-            map.get(p).cloned().ok_or_else(|| format!("{p}: missing"))
-        })
+        gate_1c(
+            &list,
+            &|p: &str| map.get(p).cloned().ok_or_else(|| format!("{p}: missing")),
+            &scan("a.rs:1:a literal\n", 0),
+        )
+    }
+
+    #[test]
+    fn gate_1c_reads_the_decoded_literals_too() {
+        // P1-07-02 (D-2660, D-1935): the source bytes of `\x70rod` hold no
+        // environment word, and the literal the compiler sees does.
+        let src = "const P: &str = \"/acme/\\x70rod/groww/key\";\n";
+        let map: BTreeMap<String, Vec<u8>> =
+            [("crates/a/src/lib.rs".to_owned(), src.as_bytes().to_vec())].into();
+        let list: Vec<String> = map.keys().cloned().collect();
+        let read = |p: &str| map.get(p).cloned().ok_or_else(|| format!("{p}: missing"));
+        let decoded = joined(&["crates/a/src/lib.rs:1:", "acme", "prod", "groww", "key"]);
+        let r = gate_1c(&list, &read, &scan(&format!("{decoded}\n"), 0));
+        assert!(r.refused, "{}", r.text());
+        assert!(
+            r.text().contains(&format!("decoded {decoded}")),
+            "{}",
+            r.text()
+        );
+        // The same tree with the literal still escaped in the scan passes.
+        assert!(!gate_1c(&list, &read, &scan("crates/a/src/lib.rs:1:x\n", 0)).refused);
+        // A scanner that failed, or decoded nothing, is refused.
+        let r = gate_1c(&list, &read, &scan("crates/a/src/lib.rs: lex error\n", 1));
+        assert!(
+            r.text().contains("source_scan strings failed"),
+            "{}",
+            r.text()
+        );
+        let r = gate_1c(&list, &read, &scan("", 0));
+        assert!(
+            r.text().contains("GATE 1C READ NO STRING LITERAL."),
+            "{}",
+            r.text()
+        );
+        assert_eq!(
+            gate_1c_sources(&names(&["a.rs", "web/b.rs", "c.md", "d/e.rs"])),
+            names(&["a.rs", "d/e.rs"])
+        );
     }
 
     #[test]
@@ -3653,7 +3979,7 @@ mod tests {
     #[test]
     fn gate_1c_refuses_a_tracked_credential_config_and_reads_every_file() {
         assert!(
-            gate_1c(&[], &disk)
+            gate_1c(&[], &disk, &ok())
                 .text()
                 .contains("GATE 1C READ NO TRACKED FILE.")
         );
@@ -3672,6 +3998,7 @@ mod tests {
         let r = gate_1c(
             &names(&["gone.md"]),
             &|p: &str| -> Result<Vec<u8>, String> { Err(format!("{p}: missing")) },
+            &scan("a.rs:1:x\n", 0),
         );
         assert!(r.refused);
         assert!(r.text().contains("UNREADABLE gone.md: missing"));
@@ -3736,6 +4063,64 @@ mod tests {
         assert!(!d.contains("acmeorg"));
     }
 
+    #[test]
+    fn gate_1d_declares_the_lists_zero_work_added() {
+        // D-2660, D-1920, D-1931, carried here by D-1935.
+        let d = declared();
+        for w in [
+            "iam",
+            "relative",
+            "one-wrapper",
+            "wp-content",
+            "broad-based-indices",
+            "negative_oi",
+            "masters-not-regular",
+            "kept_unclassified_day",
+            "-5e-1",
+            "18935",
+            "stamp",
+            "reliance",
+        ] {
+            assert!(d.contains(w), "{w}");
+        }
+    }
+
+    #[test]
+    fn gate_1d_splits_a_joined_literal_on_its_slashes() {
+        // P1-07-02 (D-2660, D-1935): a whole path is not segment-shaped in
+        // whole, and every piece of it is now checked.
+        assert_eq!(
+            joined_pieces(&joined(&["", "acmeorg", "prd", "Vendor", "afield"])),
+            vec!["acmeorg", "prd", "afield"]
+        );
+        assert!(joined_pieces("no slash").is_empty());
+        assert!(joined_pieces("a/b c").is_empty());
+        assert!(joined_pieces("a/b\tc").is_empty());
+        let path = joined(&["", "acmeorg", "prd", "groww", "acmefield"]);
+        let r = gate_1d_of(
+            &[("crates/pull/src/a.rs", "")],
+            &format!("crates/pull/src/a.rs:3:{path}\n"),
+        );
+        assert!(r.refused);
+        for w in ["acmeorg", "prd", "acmefield"] {
+            assert!(
+                r.text().contains(&format!(
+                    "UNDECLARED SEGMENT-SHAPED LITERAL IN crates/pull: {w}"
+                )),
+                "{w}: {}",
+                r.text()
+            );
+        }
+        // `groww` is declared; a prose value with a slash is not split.
+        assert!(!r.text().contains("crates/pull: groww"));
+        let prose = joined(&["read the a", "b file"]);
+        let r = gate_1d_of(
+            &[("crates/pull/src/a.rs", "")],
+            &format!("crates/pull/src/a.rs:3:{prose}\n"),
+        );
+        assert!(!r.refused, "{}", r.text());
+    }
+
     fn gate_1d_of(files: &[(&str, &str)], strings: &str) -> Report {
         let map: BTreeMap<String, Vec<u8>> = files
             .iter()
@@ -3794,9 +4179,12 @@ mod tests {
             "f:1:groww\nf:2:2026-01-02\nf:3:Has Upper\nf:4:{\\\"dhan\\\"}\nf:5:a/b\n",
         );
         assert!(!r.refused, "{}", r.text());
+        // `a/b` is joined: its pieces `a` and `b` are read too (D-1935).
         assert!(
             r.text()
-                .contains("read 2 tracked file(s), 2 distinct segment-shaped literal(s)")
+                .contains("read 2 tracked file(s), 4 distinct segment-shaped literal(s)"),
+            "{}",
+            r.text()
         );
     }
 
@@ -3849,7 +4237,7 @@ mod tests {
     #[test]
     fn gate_2_reports_the_closure_and_every_refusal() {
         let roots = names(&["crates/cli/build.rs"]);
-        let r = gate_2_verdict(&[], &ok(), &ok(), &[]);
+        let r = gate_2_verdict(&[], &ok(), &ok(), &[], &ok());
         assert!(!r.refused);
         assert!(r.text().contains("  none — no tracked build.rs"));
         let r = gate_2_verdict(
@@ -3857,6 +4245,7 @@ mod tests {
             &scan("crates/cli/build.rs\ncrates/cli/x.rs\n", 0),
             &ok(),
             &[],
+            &ok(),
         );
         assert!(!r.refused);
         assert!(
@@ -3868,6 +4257,7 @@ mod tests {
             &scan("UNRESOLVED a: b\ncrates/cli/build.rs\n", 1),
             &ok(),
             &[],
+            &ok(),
         );
         assert!(r.refused);
         assert!(
@@ -3879,6 +4269,7 @@ mod tests {
             &scan("crates/cli/build.rs\n", 0),
             &scan("crates/cli/build.rs:3: names Command\n", 1),
             &[],
+            &ok(),
         );
         assert!(r.text().contains(
             "EXTERNAL PROCESS:\n  crates/cli/build.rs:3: names Command\nA build script is Rust"
@@ -3887,13 +4278,39 @@ mod tests {
             "crates/x/Cargo.toml".to_owned(),
             b"links = \"z\"\n".to_vec(),
         )];
-        let r = gate_2_verdict(&[], &ok(), &ok(), &m);
+        let r = gate_2_verdict(&[], &ok(), &ok(), &m, &ok());
         assert!(r.refused);
         assert!(r.text().contains("A MANIFEST NAMES A BUILD SCRIPT OR A NATIVE LIBRARY:\ncrates/x/Cargo.toml:1:links = \"z\""));
         assert_eq!(
             closure_files("UNRESOLVED x\na b.rs\n\nc.rs\n"),
             vec!["a b.rs", "c.rs"]
         );
+    }
+
+    #[test]
+    fn gate_2_refuses_a_build_key_read_as_toml() {
+        // P1-07-01 (D-2660, D-1935): the parsed key, in a spelling the line
+        // reading cannot see, is refused; a scanner that failed is refused.
+        let quoted = vec![(
+            "crates/x/Cargo.toml".to_owned(),
+            b"[package]\n\"build\" = \"gen.rs\"\n".to_vec(),
+        )];
+        assert!(!gate_2_verdict(&[], &ok(), &ok(), &quoted, &ok()).refused);
+        let r = gate_2_verdict(
+            &[],
+            &ok(),
+            &ok(),
+            &quoted,
+            &scan("crates/x/Cargo.toml:2:package.build = gen.rs\n", 0),
+        );
+        assert!(r.refused);
+        assert!(
+            r.text()
+                .contains("NATIVE LIBRARY:\ncrates/x/Cargo.toml:2:package.build = gen.rs")
+        );
+        let r = gate_2_verdict(&[], &ok(), &ok(), &[], &scan("x: bad toml\n", 1));
+        assert!(r.refused);
+        assert!(r.text().contains("COULD NOT BE READ AS TOML"));
     }
 
     // ---- gates 9, 9b ----
@@ -3978,12 +4395,42 @@ mod tests {
         assert!(!r.refused);
         assert!(gate_10b("no table\n").refused);
         for l in [
-            "|  I-1 ", "| i-1 ", "| I-1ab ", "| I1 ", "| I- ", "| I-1", "x| I-1 ", "| I-1| ",
+            "| i-1 |",
+            "| I1 |",
+            "| I- |",
+            "| I-1",
+            "x| I-1 |",
+            "| I-1-|",
+            "| Ab-1 |",
+            "| I--1 |",
+            "| I-1 x |",
         ] {
             assert_eq!(invariant_id(l), None, "{l}");
         }
         assert_eq!(invariant_id("| AFG-42 | x"), Some("AFG-42"));
         assert_eq!(invariant_id("| CIG-13a |"), Some("CIG-13a"));
+    }
+
+    #[test]
+    fn gate_10b_reads_the_widened_id_shape_and_refuses_reading_none() {
+        // D-2667 (P6-04), carried here by D-1936: the ids the old shape could
+        // not see are read, so a duplicate among them is refused.
+        for (l, id) in [
+            ("| FV4-01 | a |", "FV4-01"),
+            ("|  S-30-session | a |", "S-30-session"),
+            ("| `RUST-UC7-a` | a |", "RUST-UC7-a"),
+            ("| CU-SV4-CLOSE-D0961 |", "CU-SV4-CLOSE-D0961"),
+            ("| I-1ab|", "I-1ab"),
+        ] {
+            assert_eq!(invariant_id(l), Some(id), "{l}");
+        }
+        let r = gate_10b("| S-30-session | a |\n| `S-30-session` | b |\n");
+        assert!(r.refused);
+        assert!(r.text().contains("S-30-session"), "{}", r.text());
+        // Header words have no hyphen, and a table of them reads no id.
+        let r = gate_10b("| ID | Invariant |\n|---|---|\n");
+        assert!(r.refused);
+        assert!(r.text().contains("GATE 10B READ NO INVARIANT IDENTIFIER"));
     }
 
     // ---- gate 7 ----
@@ -3994,19 +4441,36 @@ mod tests {
         assert!(!r.refused);
         assert!(r.text().starts_with("skip — crates/web does not exist"));
         assert!(
-            !gate_7(Some(
-                "[package]\nname = \"web\"\n[dependencies]\ncore = { path = \"../core\" }\n"
-            ))
+            !gate_7(Some(&scan(
+                "crates/web/Cargo.toml:4:dependencies:core:core\n",
+                0
+            )))
             .refused
         );
-        let r = gate_7(Some(
-            "[dependencies]\ncore = 1\nserde = \"1\"\n\t tokio\t= 1\n[dev-dependencies]\nx = 1\n",
-        ));
+        assert!(!gate_7(Some(&ok())).refused);
+    }
+
+    #[test]
+    fn gate_7_reads_every_declaration_by_package() {
+        // P1-08-05 (D-2660, D-1936): a table header, a dotted key, a target
+        // table, a dev-dependency and a rename are each refused by package.
+        let deps = "crates/web/Cargo.toml:4:dependencies:core:core\n\
+                    crates/web/Cargo.toml:6:dependencies:store:store\n\
+                    crates/web/Cargo.toml:8:dev-dependencies:x:x\n\
+                    crates/web/Cargo.toml:9:dependencies:core:store\n";
+        let r = gate_7(Some(&scan(deps, 0)));
         assert!(r.refused);
         assert_eq!(
             r.text(),
-            "crates/web MAY ONLY DEPEND ON core. Found:\nserde\ntokio\nIt compiles to wasm32 where the filesystem does not exist."
+            "crates/web MAY ONLY DEPEND ON core. Found:\n\
+             crates/web/Cargo.toml:6:dependencies:store:store\n\
+             crates/web/Cargo.toml:8:dev-dependencies:x:x\n\
+             crates/web/Cargo.toml:9:dependencies:core:store\n\
+             It compiles to wasm32 where the filesystem does not exist."
         );
+        let r = gate_7(Some(&scan("", 1)));
+        assert!(r.refused);
+        assert!(r.text().contains("could not be read as TOML"));
     }
 
     // ---- dispatch ----

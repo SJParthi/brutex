@@ -2723,29 +2723,45 @@ impl PopulationAdmissionV4Ledger {
         let sequence = u64::try_from(self.receipts.len())
             .map_err(|_| "Admission V4 sequence does not fit u64".to_owned())?;
         let records = encoded_block(prepared, sequence)?;
-        let prefix = if let Some(trailing) = &self.trailing {
-            if trailing.source != prepared.source
-                || trailing.first_record + trailing.record_count != self.record_count
-            {
+        let trailing = self.trailing.as_ref().map(|trailing| {
+            (
+                trailing.first_record,
+                trailing.record_count,
+                trailing.source == prepared.source,
+            )
+        });
+        let prefix = if let Some((first_record, record_count, same_source)) = trailing {
+            if first_record + record_count != self.record_count {
                 return Err("Admission V4 trailing prefix is not the exact retry".to_owned());
             }
-            for index in 0..trailing.record_count {
-                let stored = read_record_at(&mut self.data_file, trailing.first_record + index)?;
-                let expected =
-                    records
-                        .get(usize::try_from(index).map_err(|_| {
-                            "Admission V4 prefix index does not fit usize".to_owned()
-                        })?)
-                        .ok_or_else(|| {
-                            "Admission V4 trailing prefix is longer than preparation".to_owned()
-                        })?;
-                if &stored != expected {
-                    return Err(
-                        "Admission V4 trailing prefix bytes differ from exact retry".to_owned()
-                    );
-                }
+            let mut exact = same_source;
+            let mut index = 0;
+            while exact && index < record_count {
+                let stored = read_record_at(&mut self.data_file, first_record + index)?;
+                exact = usize::try_from(index)
+                    .ok()
+                    .and_then(|index| records.get(index))
+                    == Some(&stored);
+                index += 1;
             }
-            trailing.record_count
+            if exact {
+                record_count
+            } else {
+                // A RECEIPT-LESS PREFIX THAT IS NOT THIS EXACT RETRY IS SCRATCH
+                // (D-1905, pop2-4): no Completion acknowledged it, and refusing
+                // every other block because of it wedged the ledger for good.
+                crate::fixed_tail::discard_orphan(
+                    &self.data_file,
+                    &self.data_path,
+                    record_offset(first_record)?,
+                    "an Admission V4 block that is not this exact retry",
+                )?;
+                self.record_count = first_record;
+                self.trailing = None;
+                self.data_generation =
+                    file_generation(&self.data_file, &self.data_path, self.bounds.file_bytes)?;
+                0
+            }
         } else {
             0
         };
@@ -2776,26 +2792,38 @@ impl PopulationAdmissionV4Ledger {
             .ok_or_else(|| "Admission V4 encoded block omitted Completion".to_owned())?;
         let completion_index = u64::try_from(completion_index)
             .map_err(|_| "Admission V4 completion index does not fit u64".to_owned())?;
+        let block = crate::fixed_tail::start(&mut self.data_file, &self.data_path.display())?;
         for index in prefix..completion_index {
             let index = usize::try_from(index)
                 .map_err(|_| "Admission V4 append index does not fit usize".to_owned())?;
             let record = records
                 .get(index)
                 .ok_or_else(|| "Admission V4 append index is absent".to_owned())?;
-            append_raw(&mut self.data_file, record)?;
+            append_raw(&mut self.data_file, &self.data_path, block, record)?;
         }
-        self.data_file
-            .sync_all()
-            .map_err(|why| format!("cannot sync Admission V4 evidence prefix: {why}"))?;
+        crate::fixed_tail::sync_or_roll_back(
+            &self.data_file,
+            &self.data_path,
+            block,
+            File::sync_all,
+        )
+        .map_err(|why| format!("cannot sync Admission V4 evidence prefix: {why}"))?;
+        let block = crate::fixed_tail::start(&mut self.data_file, &self.data_path.display())?;
         append_raw(
             &mut self.data_file,
+            &self.data_path,
+            block,
             records
                 .last()
                 .ok_or_else(|| "Admission V4 encoded block is empty".to_owned())?,
         )?;
-        self.data_file
-            .sync_all()
-            .map_err(|why| format!("cannot sync Admission V4 Completion: {why}"))?;
+        crate::fixed_tail::sync_or_roll_back(
+            &self.data_file,
+            &self.data_path,
+            block,
+            File::sync_all,
+        )
+        .map_err(|why| format!("cannot sync Admission V4 Completion: {why}"))?;
         self.root_file
             .sync_all()
             .map_err(|why| format!("cannot sync Admission V4 directory: {why}"))?;
@@ -3049,36 +3077,17 @@ fn read_record_at(
     Ok(raw)
 }
 
+/// Appends one record of the block that began at `block`. A write error cuts
+/// the file back to `block`, so no ragged tail survives it (D-1900).
 fn append_raw(
     file: &mut File,
+    path: &Path,
+    block: u64,
     raw: &[u8; RECORD_BYTES],
 ) -> Result<(), PopulationAdmissionV4Refusal> {
-    append_with_rollback(file, raw, |file, raw| file.write_all(raw))
-}
-
-/// Appends one record, and on a write error (ENOSPC, EIO) truncates the file
-/// back to the length it had before this record. Without that a partial
-/// `write_all` left a ragged tail, and every later open, read-only included,
-/// refused the file's already committed authorities as ragged.
-fn append_with_rollback(
-    file: &mut File,
-    raw: &[u8; RECORD_BYTES],
-    write: impl FnOnce(&mut File, &[u8; RECORD_BYTES]) -> std::io::Result<()>,
-) -> Result<(), PopulationAdmissionV4Refusal> {
-    let end = file
-        .seek(SeekFrom::End(0))
-        .map_err(|why| format!("cannot append Admission V4 record: {why}"))?;
-    let Err(why) = write(file, raw) else {
-        return Ok(());
-    };
-    match file.set_len(end) {
-        Ok(()) => Err(format!(
-            "cannot append Admission V4 record: {why}; truncated back to {end} bytes"
-        )),
-        Err(rollback) => Err(format!(
-            "cannot append Admission V4 record: {why}; truncation back to {end} bytes also failed: {rollback}"
-        )),
-    }
+    crate::fixed_tail::write_at_end(file, &path.display(), block, raw, |file, raw| {
+        file.write_all(raw)
+    })
 }
 
 fn open_root(
@@ -3265,6 +3274,18 @@ pub(crate) fn population_finalization_v4_test_admission_for(
 )]
 mod tests {
     use super::*;
+
+    /// The rollback append the shipping path used before D-1902 moved it into
+    /// `fixed_tail`; kept as the test's own seam onto the shared helper.
+    fn append_with_rollback(
+        file: &mut File,
+        raw: &[u8],
+        write: impl FnOnce(&mut File, &[u8]) -> std::io::Result<()>,
+    ) -> Result<(), PopulationAdmissionV4Refusal> {
+        let subject = "Admission V4 record";
+        let block = crate::fixed_tail::start(file, &subject)?;
+        crate::fixed_tail::write_at_end(file, &subject, block, raw, write)
+    }
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
@@ -3678,7 +3699,15 @@ mod tests {
             AdmissionV4FamilyTerminal::NaturallyExtinct,
             9,
         );
-        assert!(commit_population_admission_v4(foreign.path(), bounds(), retry).is_err());
+        // pop2-4, D-1905: the foreign receipt-less prefix is scratch; the
+        // next writer discards it and commits its own block.
+        assert!(matches!(
+            commit_population_admission_v4(foreign.path(), bounds(), retry)
+                .expect("a foreign writer discards the orphan and commits"),
+            PopulationAdmissionV4Commit::Written(_)
+        ));
+        PopulationAdmissionV4Ledger::open_read(foreign.path(), bounds())
+            .expect("the ledger reopens whole");
 
         let ragged = TestRoot::new("ragged");
         File::create(ragged.path().join(LOCK_FILE)).expect("create ragged lock");

@@ -654,6 +654,7 @@ impl Attempt {
             let mut file = open_append(&path)?;
             file.lock().map_err(io_error)?;
             let result = (|| {
+                heal_torn::<RANK_BYTES>(&file, &path, RANKS)?;
                 let count = shape::<RANK_BYTES>(&mut file, &path, RANKS, true)?;
                 if count != 0 {
                     return Err(
@@ -661,18 +662,26 @@ impl Attempt {
                             .to_owned(),
                     );
                 }
-                // ONE WRITE FOR THE WHOLE BLOCK, so a failure rolls back to the
-                // header and no prefix of the ranking can survive it.
-                let mut block = Vec::new();
-                block
-                    .try_reserve_exact(rows.len().saturating_mul(RANK_BYTES))
-                    .map_err(io_error)?;
+                // One block: a failure on any row, or on the barrier, cuts
+                // every row this call wrote (D-1900, cli2-1).
+                let block =
+                    crate::fixed_tail::start(&mut file, &path.display()).map_err(io_error)?;
                 for row in rows {
                     let raw = encode_words::<19, RANK_BYTES>(self.evidence, row.words())?;
-                    block.extend_from_slice(&raw);
+                    crate::fixed_tail::write_at_end(
+                        &mut file,
+                        &path.display(),
+                        block,
+                        &raw,
+                        write_rows,
+                    )
+                    .map_err(io_error)?;
                     digest.update(&raw);
                 }
-                append_rolled_back(&mut file, &path, &block).map(|_| ())
+                crate::fixed_tail::sync_or_roll_back(&file, &path, block, |file| {
+                    barrier(file, &path)
+                })
+                .map_err(io_error)
             })();
             let released = file.unlock().map_err(io_error);
             result.and(released)
@@ -1103,9 +1112,18 @@ fn reserve_start(root: &Path, evidence: Evidence) -> Result<(), String> {
     let mut raw = [0_u8; 16 + EVENT_BYTES];
     raw[..16].copy_from_slice(&EVENT_HEADER);
     raw[16..].copy_from_slice(&event_bytes(evidence)?);
-    file.write_all(&raw)
-        .and_then(|()| barrier(&file, &path))
-        .map_err(io_error)
+    // A FAILED RESERVATION LEAVES NO FILE (h-cli-4, D-1854). The file is this
+    // token's own and was created just above, so the state before the attempt
+    // is "no file": a failed or short write is rolled back and the file
+    // removed, rather than left torn for `require_start` to refuse.
+    if let Err(why) = append_rolled_back(&mut file, &path, &raw) {
+        drop(file);
+        return Err(match fs::remove_file(&path) {
+            Ok(()) => format!("{why}; the reservation file was removed"),
+            Err(and) => format!("{why}; removing the reservation file also failed: {and}"),
+        });
+    }
+    Ok(())
 }
 
 fn require_start(root: &Path, evidence: Evidence, max_bytes: u64) -> Result<(), String> {
@@ -1221,9 +1239,10 @@ fn shape<const N: usize>(
 ) -> Result<u64, String> {
     let mut len = file.metadata().map_err(io_error)?.len();
     // AN EMPTY FILE HOLDS NO ROWS, exactly like an absent one (D-1741). It is
-    // what `open_append` leaves before its first write and what a rolled-back
-    // first write leaves; reading it as torn would turn one refused append
-    // into a refusal of every later read of that identity.
+    // what `open_append` leaves before its first write and what a refused
+    // first append leaves once its rollback cut header and rows together
+    // (D-1900, cli2-1); reading it as torn would turn one refused append into
+    // a refusal of every later read of that identity.
     if len == 0 && !create {
         return Ok(0);
     }
@@ -1332,8 +1351,9 @@ fn append_row<const N: usize>(path: &Path, magic: [u8; 8], raw: &[u8; N]) -> Res
     let mut file = open_append(path)?;
     file.lock().map_err(io_error)?;
     let result = (|| {
+        heal_torn::<N>(&file, path, magic)?;
         let at = shape::<N>(&mut file, path, magic, true)?;
-        append_rolled_back(&mut file, path, raw)?;
+        append_durable(&mut file, path, raw)?;
         Ok(at)
     })();
     let released = file.unlock().map_err(io_error);
@@ -1341,6 +1361,39 @@ fn append_row<const N: usize>(path: &Path, magic: [u8; 8], raw: &[u8; N]) -> Res
         (Ok(at), Ok(())) => Ok(at),
         (Err(why), _) | (_, Err(why)) => Err(why),
     }
+}
+/// Appends `bytes` at the end and makes them durable. A write or barrier
+/// failure cuts the file back to where it ended before this call, so one
+/// ENOSPC or EIO no longer leaves a torn row that refuses every later start
+/// (D-1900, cli2-1).
+fn append_durable(file: &mut File, path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let end = crate::fixed_tail::start(file, &path.display()).map_err(io_error)?;
+    crate::fixed_tail::write_at_end(file, &path.display(), end, bytes, write_rows)
+        .map_err(io_error)?;
+    crate::fixed_tail::sync_or_roll_back(file, path, end, |file| barrier(file, path))
+        .map_err(io_error)
+}
+/// WRITER ONLY, under the exclusive lock: cut bytes past the last whole row.
+///
+/// Every row is acknowledged only after its whole stride passed its barrier,
+/// and tokens are counted from whole rows, so a sub-row tail names no token,
+/// no start and no acknowledged row. A kill inside `write(2)` leaves one, and
+/// until D-1901 it refused every later start for every identity, for good
+/// (sweep-2). Readers still refuse it; only a writer cuts it, and says so.
+///
+/// A file shorter than its header is cut to nothing for the same reason: its
+/// header and first rows are one write, and no row is acknowledged until that
+/// write passed its barrier.
+fn heal_torn<const N: usize>(file: &File, path: &Path, magic: [u8; 8]) -> Result<(), String> {
+    let stride = u32::try_from(N).map_err(|why| why.to_string())?;
+    let mut header = [0_u8; 16];
+    header[..8].copy_from_slice(&magic);
+    header[8..12].copy_from_slice(&1_u32.to_le_bytes());
+    header[12..].copy_from_slice(&stride.to_le_bytes());
+    crate::fixed_tail::heal_torn_header(file, path, &header).map_err(io_error)?;
+    crate::fixed_tail::heal_torn_tail(file, path, HEADER, u64::from(stride), &magic)
+        .map(|_| ())
+        .map_err(io_error)
 }
 fn event_bytes(e: Evidence) -> Result<[u8; EVENT_BYTES], String> {
     let mut raw = [0_u8; EVENT_BYTES];
@@ -1414,6 +1467,7 @@ fn append_events(
     let mut file = open_append(path)?;
     file.lock().map_err(io_error)?;
     let result = (|| {
+        heal_torn::<EVENT_BYTES>(&file, path, EVENTS)?;
         let started = file.metadata().map_err(io_error)?.len() == 0;
         let count = if started {
             0
@@ -1426,7 +1480,7 @@ fn append_events(
         } else {
             rows
         };
-        append_rolled_back(&mut file, path, &bytes)?;
+        append_durable(&mut file, path, &bytes)?;
         if started && let Some(parent) = path.parent() {
             flush_directory(parent)?;
         }

@@ -248,15 +248,12 @@ impl Rate {
         // wrong number here, and it prices every option in the run wrongly
         // without erroring anywhere downstream: the model accepts it, the
         // greeks come out finite, and nothing says a word. Refused by name.
-        #[expect(
-            clippy::float_arithmetic,
-            reason = "negating a bound to make the band symmetric. Negative \
-                      rates are real, so the screen must not be a floor at \
-                      zero, and `pull` denies float arithmetic because §7 is \
-                      about PRICES — this is a comparison against a typo \
-                      screen, not a price"
-        )]
-        let band = -MAX_PLAUSIBLE_RATE..=MAX_PLAUSIBLE_RATE;
+        //
+        // The lower bound is its own negative literal, not `-MAX_PLAUSIBLE_RATE`:
+        // a negation is float arithmetic, and this site carried the crate's
+        // second `float_arithmetic` exception while `Tenor::years` claimed to
+        // be the only one. crash-edge-pass20 CE-97, D-1958.
+        let band = MIN_PLAUSIBLE_RATE..=MAX_PLAUSIBLE_RATE;
         if !band.contains(&annual) {
             return Err(PricingError::RateImplausible { annual });
         }
@@ -294,6 +291,14 @@ impl Rate {
 /// greek comes out finite, and nothing downstream says a word. Negative rates
 /// are real and are allowed, which is why the band is symmetric.
 pub const MAX_PLAUSIBLE_RATE: f64 = 1.0;
+
+/// The narrowest rate this build will accept: [`MAX_PLAUSIBLE_RATE`] with its
+/// sign flipped, written as a literal so no float arithmetic produces it.
+pub const MIN_PLAUSIBLE_RATE: f64 = -1.0;
+
+// The band stays symmetric: the two bounds differ in the sign bit and nowhere
+// else. Checked on the bit pattern, which needs no float arithmetic.
+const _: () = assert!(MIN_PLAUSIBLE_RATE.to_bits() == MAX_PLAUSIBLE_RATE.to_bits() ^ (1 << 63));
 
 /// One option, at one bar, in paisa.
 ///
@@ -1262,6 +1267,22 @@ mod tests {
         // AND A NEGATIVE RATE IS REAL, so the band is symmetric rather than a
         // floor at zero.
         assert!(Rate::measured(-0.004, YearBasis::Calendar365, RateSource::Operator).is_ok());
+        // Both ends of the band are inclusive and the lower one is the literal
+        // `MIN_PLAUSIBLE_RATE`, so each edge is admitted and the next float
+        // past it is refused. CE-97, D-1958.
+        for edge in [MIN_PLAUSIBLE_RATE, MAX_PLAUSIBLE_RATE] {
+            assert!(
+                Rate::measured(edge, YearBasis::Calendar365, RateSource::Operator).is_ok(),
+                "{edge} is inside the band"
+            );
+        }
+        for outside in [-1.000_000_1, 1.000_000_1] {
+            assert_eq!(
+                Rate::measured(outside, YearBasis::Calendar365, RateSource::Operator),
+                Err(PricingError::RateImplausible { annual: outside }),
+                "{outside} is outside the band"
+            );
+        }
         // `assert_eq!` CANNOT BE USED HERE and the reason is the bug it would
         // hide: `PartialEq` on this type is derived, so it compares the `f64`,
         // and `NaN != NaN` by IEEE-754. The assertion fails while PRINTING two

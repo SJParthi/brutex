@@ -47,6 +47,15 @@
 //! truncates a damaged record.** `CLAUDE.md` §3 rule 8 and §4 — append-only,
 //! then degrade loudly and name the reason, or refuse.
 //!
+//! **The one truncation is of this call's own failed bytes (D-1854).** A
+//! `write_all` that fails part-way (ENOSPC, EIO) has put down part of a record
+//! that no one committed, and left there it would make every later append
+//! refuse the journal for good. So the writer cuts the file back to the length
+//! it measured under the same exclusive lock, before releasing it, and refuses
+//! naming the write error and the rollback. A record, whole or torn, that was
+//! there before the call is never touched; a process killed inside the write
+//! runs no rollback, and that tail is refused as above.
+//!
 //! # What is deliberately not here
 //!
 //! No rotation, no compaction, and no cap on the file. A pull is an operator
@@ -58,9 +67,9 @@
 //! # What a record does NOT identify, said plainly
 //!
 //! `CLAUDE.md` §3 rule 3: a run is identified by `blake3(mask ‖ direction ‖
-//! instrument ‖ timeframe ‖ params ‖ data_digest ‖ vocab_version ‖ commit)`.
-//! **No record written here carries that identity, and not one of the eight
-//! terms is on disk.** That is written down under §3 rule 6 rather than left
+//! instrument ‖ timeframe ‖ params ‖ data_digest ‖ vocab_version ‖ commit ‖
+//! feed)`. **No record written here carries that identity, and not one of the
+//! nine terms is on disk.** That is written down under §3 rule 6 rather than left
 //! for a reader to discover, because a file called an audit journal invites the
 //! assumption that a run can be reproduced from it, and this one cannot.
 //!
@@ -103,7 +112,7 @@
 //! an empty column that reads as compliance. §4 — never a fallback that hides
 //! a failure.
 
-use std::io::{Read as _, Seek as _, Write as _};
+use std::io::{Read as _, Seek as _};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -136,13 +145,29 @@ const MAGIC: [u8; 4] = *b"BXAU";
 /// is readable by the newer one: an unknown version is refused for that record
 /// alone and every other row still renders. `CLAUDE.md` §3 rule 8 — a format
 /// version is never mutated in place.
-pub const VERSION: u16 = 1;
+///
+/// **Version 2 (D-2673)** is the layout every record is now written in. It is
+/// version 1 byte for byte up to [`OFF_NOTE_V1`]; there it carries two `u32`
+/// counters version 1 had no room for — rows dropped on a day the exchange
+/// calendar records closed, and rows kept on a day it cannot classify — and the
+/// note follows them, eight bytes shorter. Same stride, so the journal stays
+/// one fixed-stride file and a version-1 record beside a version-2 one still
+/// reads ([`VERSION_ONE`]).
+pub const VERSION: u16 = 2;
+
+/// The first layout. Still read, never written. Its records predate the
+/// closed-day filter, so their two newer counters are not zero but UNKNOWN,
+/// and decode as `None`.
+pub const VERSION_ONE: u16 = 1;
 
 /// The longest source this record keeps, in bytes.
 const SOURCE_CAPACITY: usize = 64;
 
-/// The longest note this record keeps, in bytes.
-const NOTE_CAPACITY: usize = 68;
+/// The longest note a version-2 record keeps, in bytes.
+pub const NOTE_CAPACITY: usize = 60;
+
+/// The longest note a version-1 record kept, in bytes.
+pub const NOTE_CAPACITY_V1: usize = 68;
 
 // The field map. Every offset is a constant so the writer and the reader
 // cannot disagree about one, which is the failure a hand-counted literal has.
@@ -177,12 +202,24 @@ const OFF_NOTE_KEPT: usize = 117;
 /// is not one — it is a discriminator in space the format already had.
 const OFF_KIND: usize = 118;
 const OFF_SOURCE: usize = 120;
-const OFF_NOTE: usize = 184;
+/// Where a version-1 record's note began, and where version 2's two new
+/// counters begin.
+const OFF_NOTE_V1: usize = 184;
+/// Version 2: rows dropped on a day the exchange calendar records closed.
+const OFF_CLOSED_DAY: usize = 184;
+/// Version 2: rows kept on a day the exchange calendar cannot classify.
+const OFF_UNCLASSIFIED_KEPT: usize = 188;
+/// Version 2: the note.
+const OFF_NOTE: usize = 192;
 const OFF_CRC: usize = 252;
 
 /// The layout above adds up to exactly one record, checked here rather than in
 /// a comment.
-const _: () = assert!(OFF_SOURCE + SOURCE_CAPACITY == OFF_NOTE);
+const _: () = assert!(OFF_SOURCE + SOURCE_CAPACITY == OFF_NOTE_V1);
+const _: () = assert!(OFF_NOTE_V1 + NOTE_CAPACITY_V1 == OFF_CRC);
+const _: () = assert!(OFF_CLOSED_DAY == OFF_NOTE_V1);
+const _: () = assert!(OFF_CLOSED_DAY + 4 == OFF_UNCLASSIFIED_KEPT);
+const _: () = assert!(OFF_UNCLASSIFIED_KEPT + 4 == OFF_NOTE);
 const _: () = assert!(OFF_NOTE + NOTE_CAPACITY == OFF_CRC);
 const _: () = assert!(OFF_CRC + 4 == RECORD_LEN);
 
@@ -443,7 +480,7 @@ const _: () = assert!(Outcome::of_code(Outcome::COUNT).is_none());
 /// from four totals would mean calling `count` once per drop, which is a walk
 /// over a number that was already known. This is the same four facts as a
 /// value, so a record read off disk becomes a rendered panel without a loop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Drops {
     /// Before 09:15 IST.
     pub before_open: u64,
@@ -453,10 +490,34 @@ pub struct Drops {
     pub before_window: u64,
     /// After the operator's window.
     pub after_window: u64,
+    /// On a day the exchange calendar records closed (P-03, D-2673).
+    ///
+    /// `None` on a version-1 record: that build had no closed-day filter, so
+    /// the count is unknown, and zero would claim no such bar arrived.
+    pub on_closed_day: Option<u64>,
+    /// NOT a drop: rows KEPT on a day the exchange calendar cannot classify,
+    /// counted by name so the keep is not silent. Never part of [`Self::total`].
+    /// `None` on a version-1 record, for the same reason.
+    pub unclassified_kept: Option<u64>,
+}
+
+impl Default for Drops {
+    /// Nothing dropped, under the current layout: every counter is a known
+    /// zero, including the two version 1 could not carry.
+    fn default() -> Self {
+        Self {
+            before_open: 0,
+            after_close: 0,
+            before_window: 0,
+            after_window: 0,
+            on_closed_day: Some(0),
+            unclassified_kept: Some(0),
+        }
+    }
 }
 
 impl Drops {
-    /// The same four counts a filter recorded.
+    /// The same counts a filter recorded.
     #[must_use]
     pub fn of_census(census: DropCensus) -> Self {
         Self {
@@ -464,10 +525,23 @@ impl Drops {
             after_close: u64::from(census.of(DropReason::AtOrAfterSessionClose)),
             before_window: u64::from(census.of(DropReason::BeforeWindow)),
             after_window: u64::from(census.of(DropReason::AfterWindow)),
+            on_closed_day: Some(u64::from(census.of(DropReason::OnClosedDay))),
+            unclassified_kept: Some(u64::from(census.unclassified_kept())),
         }
     }
 
-    /// How many were dropped for one reason.
+    /// How many were dropped for one reason, or `None` when this record's
+    /// version never counted that reason.
+    #[must_use]
+    pub const fn recorded(self, reason: DropReason) -> Option<u64> {
+        match reason {
+            DropReason::OnClosedDay => self.on_closed_day,
+            _ => Some(self.of(reason)),
+        }
+    }
+
+    /// How many were dropped for one reason; zero for a reason this record's
+    /// version never counted (see [`Self::recorded`] for the honest answer).
     #[must_use]
     pub const fn of(self, reason: DropReason) -> u64 {
         match reason {
@@ -475,17 +549,21 @@ impl Drops {
             DropReason::AtOrAfterSessionClose => self.after_close,
             DropReason::BeforeWindow => self.before_window,
             DropReason::AfterWindow => self.after_window,
-            // `DropReason` is `#[non_exhaustive]`, so a fifth reason added in
+            DropReason::OnClosedDay => match self.on_closed_day {
+                Some(n) => n,
+                None => 0,
+            },
+            // `DropReason` is `#[non_exhaustive]`, so a sixth reason added in
             // `pull` compiles here and reports zero rather than failing to
-            // build. It is zero and not a dash because this type carries four
-            // counters and a fifth reason has none — the honest answer is that
+            // build. It is zero and not a dash because this type carries five
+            // counters and a sixth reason has none — the honest answer is that
             // this build never counted it, and `DROP_REASONS` below is what
             // the page iterates, so a reason this build cannot count is also a
             // reason the page never names.
             //
-            // NO TEST DRIVES THIS ARM AND NONE CAN. A fifth variant would have
+            // NO TEST DRIVES THIS ARM AND NONE CAN. A sixth variant would have
             // to be constructed, and `pull::session::DropReason` is a foreign
-            // `#[non_exhaustive]` enum with exactly four constructors. It is
+            // `#[non_exhaustive]` enum with exactly five constructors. It is
             // named here rather than left for a coverage report to find.
             _ => 0,
         }
@@ -498,6 +576,7 @@ impl Drops {
             .saturating_add(self.after_close)
             .saturating_add(self.before_window)
             .saturating_add(self.after_window)
+            .saturating_add(self.of(DropReason::OnClosedDay))
     }
 
     /// The largest single reason, or one, so a share is never divided by zero.
@@ -513,6 +592,9 @@ impl Drops {
         if self.after_window > top {
             top = self.after_window;
         }
+        if self.of(DropReason::OnClosedDay) > top {
+            top = self.of(DropReason::OnClosedDay);
+        }
         if top == 0 { 1 } else { top }
     }
 }
@@ -523,16 +605,20 @@ impl Drops {
 /// four are listed once, here, and every surface reads this rather than writing
 /// its own list — which is what stops a page and a record disagreeing about
 /// which reasons exist.
-pub const DROP_REASONS: [DropReason; 4] = [
+pub const DROP_REASONS: [DropReason; 5] = [
     DropReason::BeforeWindow,
     DropReason::AfterWindow,
     DropReason::BeforeSessionOpen,
     DropReason::AtOrAfterSessionClose,
+    DropReason::OnClosedDay,
 ];
 
 /// One pull, as it is written down.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Record {
+    /// The layout this record was decoded from, or [`VERSION`] for one built
+    /// in memory. Decides only how long [`Self::note`] could have been.
+    pub version: u16,
     /// Whether this is the run or one member that did not land.
     ///
     /// Every constructor but [`Record::member_failure`] makes a [`Kind::Run`],
@@ -599,6 +685,7 @@ impl Record {
         note: &str,
     ) -> Self {
         Self {
+            version: VERSION,
             kind: Kind::Run,
             at_unix_secs: crate::ingest::epoch_secs(at),
             elapsed_micros: 0,
@@ -732,6 +819,7 @@ impl Record {
             Outcome::Stored
         };
         Self {
+            version: VERSION,
             kind: Kind::Run,
             at_unix_secs: crate::ingest::epoch_secs(at),
             elapsed_micros,
@@ -782,6 +870,7 @@ impl Record {
         why: &str,
     ) -> Self {
         Self {
+            version: VERSION,
             kind: Kind::MemberFailure,
             at_unix_secs: crate::ingest::epoch_secs(at),
             elapsed_micros: 0,
@@ -808,6 +897,16 @@ impl Record {
     #[must_use]
     pub fn source_was_cut(&self) -> bool {
         usize::from(self.source_bytes) > self.source.len()
+    }
+
+    /// The longest note this record's version could hold, in bytes.
+    #[must_use]
+    pub const fn note_capacity(&self) -> usize {
+        if self.version == VERSION_ONE {
+            NOTE_CAPACITY_V1
+        } else {
+            NOTE_CAPACITY
+        }
     }
 
     /// Whether the note on the page is shorter than the one that was written.
@@ -852,15 +951,31 @@ impl Record {
             OFF_AFTER_WINDOW,
             self.drops.after_window.to_le_bytes(),
         );
+        // Version 2's two counters, as `u32` because the census that feeds
+        // them is `u32`; a larger figure built by hand saturates rather than
+        // wrapping to a smaller one.
+        write_at(
+            &mut out,
+            OFF_CLOSED_DAY,
+            narrow(self.drops.of(DropReason::OnClosedDay)).to_le_bytes(),
+        );
+        write_at(
+            &mut out,
+            OFF_UNCLASSIFIED_KEPT,
+            narrow(self.drops.unclassified_kept.unwrap_or(0)).to_le_bytes(),
+        );
         write_at(&mut out, OFF_FAILURES, self.failures.to_le_bytes());
         write_at(&mut out, OFF_FROM_DAYS, self.from_days.to_le_bytes());
         write_at(&mut out, OFF_TO_DAYS, self.to_days.to_le_bytes());
         write_at(&mut out, OFF_SOURCE_LEN, self.source_bytes.to_le_bytes());
         write_at(&mut out, OFF_NOTE_LEN, self.note_bytes.to_le_bytes());
         write_at(&mut out, OFF_SOURCE_KEPT, [kept_byte(&self.source)]);
-        write_at(&mut out, OFF_NOTE_KEPT, [kept_byte(&self.note)]);
+        // A version-1 note decoded at 68 bytes is cut to version 2's 60 when it
+        // is written again, so the kept byte never names more than the field.
+        let note = keep(&self.note, NOTE_CAPACITY);
+        write_at(&mut out, OFF_NOTE_KEPT, [kept_byte(&note)]);
         write_text(&mut out, OFF_SOURCE, &self.source, SOURCE_CAPACITY);
-        write_text(&mut out, OFF_NOTE, &self.note, NOTE_CAPACITY);
+        write_text(&mut out, OFF_NOTE, &note, NOTE_CAPACITY);
         let crc = crc32c(&covered(&out));
         write_at(&mut out, OFF_CRC, crc.to_le_bytes());
         out
@@ -884,9 +999,10 @@ impl Record {
             return Err(RecordFault::Checksum { stored, computed });
         }
         let version = u16::from_le_bytes(le2(image, OFF_VERSION));
-        if version != VERSION {
+        if version != VERSION && version != VERSION_ONE {
             return Err(RecordFault::UnknownVersion { version });
         }
+        let current = version == VERSION;
         let scope_code = byte(image, OFF_SCOPE);
         let Some(scope) = Scope::of_code(scope_code) else {
             return Err(RecordFault::UnknownScope { code: scope_code });
@@ -908,8 +1024,20 @@ impl Record {
             byte(image, OFF_SOURCE_KEPT),
             SOURCE_CAPACITY,
         )?;
-        let note = text(image, OFF_NOTE, byte(image, OFF_NOTE_KEPT), NOTE_CAPACITY)?;
+        let note = if current {
+            text(image, OFF_NOTE, byte(image, OFF_NOTE_KEPT), NOTE_CAPACITY)?
+        } else {
+            text(
+                image,
+                OFF_NOTE_V1,
+                byte(image, OFF_NOTE_KEPT),
+                NOTE_CAPACITY_V1,
+            )?
+        };
+        let newer =
+            |offset: usize| current.then(|| u64::from(u32::from_le_bytes(le4(image, offset))));
         Ok(Self {
+            version,
             kind,
             at_unix_secs: i64::from_le_bytes(le8(image, OFF_AT)),
             elapsed_micros: u64::from_le_bytes(le8(image, OFF_ELAPSED)),
@@ -925,6 +1053,8 @@ impl Record {
                 after_close: u64::from_le_bytes(le8(image, OFF_AFTER_CLOSE)),
                 before_window: u64::from_le_bytes(le8(image, OFF_BEFORE_WINDOW)),
                 after_window: u64::from_le_bytes(le8(image, OFF_AFTER_WINDOW)),
+                on_closed_day: newer(OFF_CLOSED_DAY),
+                unclassified_kept: newer(OFF_UNCLASSIFIED_KEPT),
             },
             failures: u64::from_le_bytes(le8(image, OFF_FAILURES)),
             from_days: u32::from_le_bytes(le4(image, OFF_FROM_DAYS)),
@@ -993,7 +1123,11 @@ impl std::fmt::Display for RecordFault {
                 write!(f, "record checksum {stored:#010x} != {computed:#010x}")
             }
             Self::UnknownVersion { version } => {
-                write!(f, "record version {version}; this build writes {VERSION}")
+                write!(
+                    f,
+                    "record version {version}; this build writes {VERSION} and reads \
+                     {VERSION_ONE} and {VERSION}"
+                )
             }
             Self::UnknownScope { code } => {
                 write!(f, "scope byte {code} is not one this build writes")
@@ -1125,15 +1259,12 @@ impl Journal {
     /// on the answer page — silently losing the record of a run that wrote
     /// 9.8 MB of bars is exactly the fallback `CLAUDE.md` §4 forbids.
     ///
-    /// # Two arms here are backstops and no test drives them
+    /// # One arm here is a backstop and no test drives it
     ///
-    /// `write_all` and `sync_all`. Reaching the first needs a full disk and
-    /// the second a failing `fsync`, and neither is a state a developer's disk
-    /// enters on request. The two arms that ARE reachable are covered — a file
-    /// where the directory has to be, and a path with no parent — and
-    /// `crates/store/src/file.rs` solved exactly this shape with a trait so
-    /// the arms can be injected. That is the available fix and it is not built
-    /// here. `CLAUDE.md` §3 rule 6: said, rather than left to be found.
+    /// `sync_all`: reaching it needs a failing `fsync`, which a developer's
+    /// disk does not enter on request. The failed `write_all` is driven, through
+    /// [`write_rolled_back`]'s injected write (D-1854). `CLAUDE.md` §3 rule 6:
+    /// said, rather than left to be found.
     ///
     /// # A refused unlock after the sync is not a failed append
     ///
@@ -1224,8 +1355,13 @@ impl Journal {
                 bytes / RECORD_LEN_U64,
             ));
         }
-        file.write_all(&record.image())
-            .map_err(|e| named("cannot append the record", &e))?;
+        write_rolled_back(
+            &mut file,
+            &self.path,
+            bytes,
+            &record.image(),
+            std::io::Write::write_all,
+        )?;
         file.sync_all()
             .map_err(|e| named("the record was written and not synced", &e))?;
         // THE RECORD IS DURABLE FROM HERE, SO NOTHING BELOW MAY REFUSE THE
@@ -1325,6 +1461,33 @@ impl Journal {
         out.reverse();
         Ok(out)
     }
+}
+
+/// Writes `image` at the end of a journal that held exactly `at` bytes under
+/// the exclusive append lock, and on a failed or short write truncates the
+/// file back to `at` before the lock is released (D-1854). Only bytes this
+/// call wrote are removed; when the truncation also fails both errors are
+/// named and the next append refuses the torn tail.
+fn write_rolled_back(
+    file: &mut std::fs::File,
+    path: &Path,
+    at: u64,
+    image: &[u8],
+    write: impl FnOnce(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
+) -> Result<(), String> {
+    let Err(e) = write(file, image) else {
+        return Ok(());
+    };
+    Err(match file.set_len(at) {
+        Ok(()) => format!(
+            "{}: cannot append the record — {e}; its partial bytes were truncated back to {at} bytes, so every whole record before it stays readable",
+            path.display()
+        ),
+        Err(and) => format!(
+            "{}: cannot append the record — {e}; truncating its partial bytes back to {at} bytes also failed: {and}; the journal may now end torn and the next append refuses it",
+            path.display()
+        ),
+    })
 }
 
 /// A run that is **not on the record at all**, said somewhere that is not the
@@ -1493,6 +1656,11 @@ fn keep(text: &str, capacity: usize) -> String {
     text.get(..end).unwrap_or("").to_owned()
 }
 
+/// A count as the `u32` a version-2 field holds, saturating.
+fn narrow(n: u64) -> u32 {
+    u32::try_from(n).unwrap_or(u32::MAX)
+}
+
 /// A kept text's length as the byte the record stores.
 ///
 /// [`keep`] never returns more than a capacity, and both capacities are under
@@ -1595,6 +1763,7 @@ mod tests {
     use super::*;
     use pull::ingest::Failure;
     use pull::session::Day;
+    use std::io::Write as _;
 
     fn d(y: u16, m: u8, day: u8) -> Day {
         Day::new(y, m, day).expect("a real date")
@@ -1821,6 +1990,10 @@ mod tests {
     /// proves only that it cannot be recorded at this stride, which is the one
     /// thing the header asserts on its own authority.
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one field map restated whole; version 2's two counters took it past 100"
+    )]
     fn the_record_has_exactly_one_free_byte() {
         // HALF ONE — THE DECLARED MAP. Every field constant with its width,
         // marked off against the stride. This catches an offset MOVED (two
@@ -1828,7 +2001,7 @@ mod tests {
         // restates the constants, which is the price of checking them against
         // each other; the existing `const _` blocks only pin the three
         // adjacencies at the tail and say nothing about the counter block.
-        let map: [(usize, usize); 26] = [
+        let map: [(usize, usize); 28] = [
             (OFF_MAGIC, 4),
             (OFF_VERSION, 2),
             (OFF_SCOPE, 1),
@@ -1853,6 +2026,8 @@ mod tests {
             (OFF_NOTE_KEPT, 1),
             (OFF_KIND, 1),
             (OFF_SOURCE, SOURCE_CAPACITY),
+            (OFF_CLOSED_DAY, 4),
+            (OFF_UNCLASSIFIED_KEPT, 4),
             (OFF_NOTE, NOTE_CAPACITY),
             (OFF_CRC, 4),
         ];
@@ -1912,6 +2087,8 @@ mod tests {
             after_close: u64::MAX,
             before_window: u64::MAX,
             after_window: u64::MAX,
+            on_closed_day: Some(u64::MAX),
+            unclassified_kept: Some(u64::MAX),
         };
         record.note = keep(&"N".repeat(NOTE_CAPACITY * 2), NOTE_CAPACITY);
         assert_eq!(record.source.len(), SOURCE_CAPACITY, "the text is full");
@@ -2037,7 +2214,7 @@ mod tests {
         assert!(
             RecordFault::UnknownVersion { version: 9 }
                 .to_string()
-                .contains("this build writes 1")
+                .contains("this build writes 2")
         );
     }
 
@@ -2296,6 +2473,71 @@ mod tests {
         // And a caller asking for more than the ceiling gets the ceiling.
         let all = journal.page(records, 0, u64::MAX).expect("capped");
         assert_eq!(all.len(), 40, "40 records, capped at {MAX_PAGE_RECORDS}");
+    }
+
+    /// AHA-09 (h-cli-4, D-1854). A failed or short record write is truncated
+    /// back to the length measured under the lock, so the journal is never
+    /// left torn by its own writer and the next append lands whole; a failed
+    /// truncation names both errors and changes nothing else.
+    #[test]
+    fn a_failed_record_write_is_truncated_back_and_the_next_append_lands() {
+        let root = scratch("audit-rollback");
+        let journal = Journal::at(&root);
+        let record = Record::refused(Scope::Spot, Outcome::Stored, at(1), "whole", "");
+        journal.append(&record).expect("appends");
+        let before = std::fs::read(&journal.path).expect("reads");
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&journal.path)
+            .expect("opens");
+        let refusal =
+            write_rolled_back(&mut file, &journal.path, 256, &record.image(), |f, raw| {
+                f.write_all(raw.get(..100).expect("partial"))?;
+                Err(std::io::Error::other("injected short write"))
+            })
+            .expect_err("a short write refuses");
+        assert!(
+            refusal.contains("injected short write")
+                && refusal.contains("truncated back to 256 bytes"),
+            "{refusal}"
+        );
+        drop(file);
+        assert_eq!(std::fs::read(&journal.path).expect("reads"), before);
+        assert_eq!(
+            journal.look(),
+            Log::Held {
+                records: 1,
+                bytes: 256,
+                torn: None,
+            }
+        );
+        journal
+            .append(&record)
+            .expect("the next append lands whole");
+        assert_eq!(
+            journal.look(),
+            Log::Held {
+                records: 2,
+                bytes: 512,
+                torn: None,
+            }
+        );
+
+        let grown = std::fs::read(&journal.path).expect("reads");
+        let mut read_only = std::fs::File::open(&journal.path).expect("opens read-only");
+        let refusal = write_rolled_back(
+            &mut read_only,
+            &journal.path,
+            512,
+            &record.image(),
+            std::io::Write::write_all,
+        )
+        .expect_err("a read-only handle refuses");
+        assert!(
+            refusal.contains("truncating its partial bytes back to 512 bytes also failed"),
+            "{refusal}"
+        );
+        assert_eq!(std::fs::read(&journal.path).expect("reads"), grown);
     }
 
     #[test]
@@ -2564,7 +2806,7 @@ mod tests {
         assert_eq!(drops.peak(), 40);
         assert_eq!(Drops::default().peak(), 1, "never a division by zero");
         assert_eq!(Drops::default().total(), 0);
-        assert_eq!(DROP_REASONS.len(), 4);
+        assert_eq!(DROP_REASONS.len(), 5);
 
         // EVERY REASON CAN BE THE PEAK. A `peak` that only ever noticed the
         // first two counters would draw every share bar against the wrong
@@ -2595,6 +2837,111 @@ mod tests {
             9
         );
         assert_eq!(Drops::of_census(census(1, 1, 9, 1)).total(), 12);
+    }
+
+    /// P-03, D-2673: the closed-day drop and the unclassified-day keep are
+    /// carried by a version-2 record, round-trip, and the drop joins the total
+    /// and the peak while the keep never does.
+    #[test]
+    fn a_version_two_record_carries_the_closed_day_drop_and_the_unclassified_keep() {
+        let mut record = Record::refused(Scope::Spot, Outcome::Stored, at(7), "NIFTY", "ok");
+        assert_eq!(record.version, VERSION);
+        record.drops = Drops {
+            before_open: 1,
+            after_close: 2,
+            before_window: 3,
+            after_window: 4,
+            on_closed_day: Some(375),
+            unclassified_kept: Some(12),
+        };
+        let image = record.image();
+        assert_eq!(
+            u16::from_le_bytes(le2(&image, OFF_VERSION)),
+            2,
+            "written as v2"
+        );
+        assert_eq!(u32::from_le_bytes(le4(&image, OFF_CLOSED_DAY)), 375);
+        assert_eq!(u32::from_le_bytes(le4(&image, OFF_UNCLASSIFIED_KEPT)), 12);
+        let back = Record::decode(&image).expect("its own bytes");
+        assert_eq!(back, record);
+        assert_eq!(back.drops.total(), 385, "the closed-day drop is a drop");
+        assert_eq!(back.drops.peak(), 375, "and can be the peak");
+        assert_eq!(back.drops.recorded(DropReason::OnClosedDay), Some(375));
+        assert_eq!(back.drops.unclassified_kept, Some(12));
+        assert_eq!(back.note_capacity(), NOTE_CAPACITY);
+        // A figure past `u32` saturates rather than wrapping smaller.
+        record.drops.on_closed_day = Some(u64::MAX);
+        let wide = Record::decode(&record.image()).expect("bytes");
+        assert_eq!(wide.drops.on_closed_day, Some(u64::from(u32::MAX)));
+        // The census feeds both.
+        let mut census = DropCensus::new();
+        census.count(DropReason::OnClosedDay);
+        census.count_unclassified_kept();
+        let drops = Drops::of_census(census);
+        assert_eq!(drops.on_closed_day, Some(1));
+        assert_eq!(drops.unclassified_kept, Some(1));
+        assert_eq!(drops.total(), 1);
+    }
+
+    /// A version-1 record, built byte by byte in the version-1 map rather than
+    /// through `image()`, which writes only the current version.
+    fn version_one_image(note: &str) -> [u8; RECORD_LEN] {
+        let mut image = [0u8; RECORD_LEN];
+        image[OFF_MAGIC..OFF_MAGIC + 4].copy_from_slice(&MAGIC);
+        image[OFF_VERSION..OFF_VERSION + 2].copy_from_slice(&VERSION_ONE.to_le_bytes());
+        image[OFF_SCOPE] = Scope::Spot.code();
+        image[OFF_OUTCOME] = Outcome::Stored.code();
+        image[OFF_KIND] = Kind::Run.code();
+        image[OFF_AT..OFF_AT + 8].copy_from_slice(&42_i64.to_le_bytes());
+        image[OFF_AFTER_CLOSE..OFF_AFTER_CLOSE + 8].copy_from_slice(&170_u64.to_le_bytes());
+        image[OFF_AFTER_WINDOW..OFF_AFTER_WINDOW + 8].copy_from_slice(&5_u64.to_le_bytes());
+        let source = b"NIFTY";
+        image[OFF_SOURCE..OFF_SOURCE + source.len()].copy_from_slice(source);
+        image[OFF_SOURCE_KEPT] = 5;
+        image[OFF_SOURCE_LEN..OFF_SOURCE_LEN + 2].copy_from_slice(&5_u16.to_le_bytes());
+        image[OFF_NOTE_V1..OFF_NOTE_V1 + NOTE_CAPACITY_V1].copy_from_slice(note.as_bytes());
+        image[OFF_NOTE_KEPT] = 68;
+        image[OFF_NOTE_LEN..OFF_NOTE_LEN + 2].copy_from_slice(&68_u16.to_le_bytes());
+        let crc = crc32c(&covered(&image));
+        image[OFF_CRC..OFF_CRC + 4].copy_from_slice(&crc.to_le_bytes());
+
+        image
+    }
+
+    /// A version-1 record, written before the closed-day filter existed, still
+    /// reads: its four counters and its 68-byte note exactly as written, and
+    /// its two newer counters as UNKNOWN (`None`), never as a claimed zero.
+    /// Rewriting it produces a version-2 image with the note cut to 60 bytes.
+    #[test]
+    fn a_version_one_record_still_reads_and_its_newer_counters_are_unknown() {
+        let note = "V".repeat(NOTE_CAPACITY_V1);
+        let image = version_one_image(&note);
+
+        let old = Record::decode(&image).expect("a version-1 record still reads");
+        assert_eq!(old.version, VERSION_ONE);
+        assert_eq!(old.note, note, "all 68 bytes of the old note");
+        assert_eq!(old.note_capacity(), NOTE_CAPACITY_V1);
+        assert!(!old.note_was_cut());
+        assert_eq!(old.source, "NIFTY");
+        assert_eq!(old.drops.after_close, 170);
+        assert_eq!(old.drops.after_window, 5);
+        assert_eq!(old.drops.on_closed_day, None, "unknown, not zero");
+        assert_eq!(old.drops.unclassified_kept, None);
+        assert_eq!(old.drops.recorded(DropReason::OnClosedDay), None);
+        assert_eq!(old.drops.of(DropReason::OnClosedDay), 0);
+        assert_eq!(old.drops.total(), 175);
+
+        // Written again, it is a version-2 image whose note fits its field.
+        let again = Record::decode(&old.image()).expect("rewritten");
+        assert_eq!(again.version, VERSION);
+        assert_eq!(again.note.len(), NOTE_CAPACITY);
+        assert!(again.note_was_cut());
+        assert_eq!(again.drops.on_closed_day, Some(0));
+        assert!(
+            RecordFault::UnknownVersion { version: 3 }
+                .to_string()
+                .contains("reads 1 and 2")
+        );
     }
 
     /// ITERATED, NOT HAND-LISTED. This test used to name four outcomes and then

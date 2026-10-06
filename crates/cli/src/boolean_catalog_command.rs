@@ -33,10 +33,16 @@ struct Request<'a> {
 }
 
 pub(crate) fn command(args: &[&str], out: &mut String) -> u8 {
-    let result = parse(args).and_then(|request| execute(request, out));
-    match result {
+    // ARGUMENTS FIRST, THEN THE WORK, each with its own code: a word this
+    // build does not understand is `MISUSED` with the usage; a refusal once
+    // they parsed is the work's and is `FAILED` without it (P8-03, D-2722).
+    let request = match parse(args) {
+        Ok(request) => request,
+        Err(why) => return crate::refuse(out, &why),
+    };
+    match execute(request, out) {
         Ok(()) => crate::OK,
-        Err(why) => crate::refuse(out, &why),
+        Err(why) => crate::fail(out, &why),
     }
 }
 
@@ -57,6 +63,7 @@ fn parse<'a>(args: &[&'a str]) -> Result<Request<'a>, String> {
     else {
         return Err("boolean-catalog-stored requires its 11 explicit arguments".into());
     };
+    crate::boolean_catalog_command::words(vendor, symbols)?;
     let month = |year: &str, month: &str| -> Result<(u16, u8), String> {
         let year = year.parse::<u16>().map_err(|_| "invalid year".to_owned())?;
         let month = month
@@ -88,6 +95,16 @@ fn parse<'a>(args: &[&'a str]) -> Result<Request<'a>, String> {
         max_points,
         output: Path::new(*output),
     })
+}
+
+/// The feed and instrument words of a Boolean request, checked while the
+/// arguments are parsed so an unknown one is the operator's to fix (`MISUSED`)
+/// rather than a refusal of the work (P8-03, D-2722). The same two checks
+/// the work applies: [`crate::parse_vendor`] and this module's `scope`.
+pub(crate) fn words(vendor: &str, symbols: &str) -> Result<(), String> {
+    crate::parse_vendor(vendor)?;
+    scope(symbols)?;
+    Ok(())
 }
 
 fn scope(symbols: &str) -> Result<ResearchScopeV1, String> {

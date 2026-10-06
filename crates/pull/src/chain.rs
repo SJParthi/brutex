@@ -102,6 +102,17 @@ pub struct Refusal {
     /// one bool; re-deriving it downstream from prose is guesswork that a
     /// reworded sentence silently breaks. D-0351.
     pub credential_dead: bool,
+    /// The refusal the vendor NAMED in its body, read through its own error
+    /// contract where the whole body was in hand.
+    ///
+    /// The rolling POST and the discovery GET returned a non-2xx refusal as
+    /// its status alone and never read the body, so Dhan's dead-token answer —
+    /// HTTP 400 carrying `DH-906` "Invalid Token" (D-0325) — was a plain
+    /// answered refusal and the token was sent to every remaining cell, while a
+    /// 403 "not entitled" was read as a dead token. The bars path already read
+    /// and classified the body; this carries the same verdict here (CE-29,
+    /// D-1769).
+    pub named: Option<crate::refusal::Disposition>,
 }
 
 impl Refusal {
@@ -116,6 +127,7 @@ impl Refusal {
             // network blip, which is the opposite of the defect it exists to
             // fix.
             credential_dead: false,
+            named: None,
         }
     }
 
@@ -126,6 +138,7 @@ impl Refusal {
             status: Some(status),
             detail,
             credential_dead: false,
+            named: None,
         }
     }
 
@@ -141,7 +154,15 @@ impl Refusal {
             status,
             detail,
             credential_dead: true,
+            named: None,
         }
+    }
+
+    /// This refusal, carrying the disposition the vendor named in its body.
+    #[must_use]
+    pub const fn named_by_vendor(mut self, named: Option<crate::refusal::Disposition>) -> Self {
+        self.named = named;
+        self
     }
 }
 
@@ -330,6 +351,17 @@ pub async fn month<D: Discovery>(feed: Feed, ask: &Ask, from: &D) -> Result<Chai
             month: ask.month,
             expiry,
         };
+        // DECODED BEFORE IT IS SENT. The vendor's expiry string went into the
+        // next request's URL and was validated only after that request had
+        // been made, so the "its contracts were not asked for" below was
+        // false and a malformed value reached the vendor (CE-15, D-1769).
+        let Some(keyed_expiry) = iso_expiry(&keyed.expiry) else {
+            chain.unreadable.push(format!(
+                "expiry {:?} (its contracts were not asked for)",
+                keyed.expiry
+            ));
+            continue;
+        };
         let url = fno::contracts_url(&spec, &keyed).map_err(ChainError::Lookup)?;
         let body = from.get(&url).await.map_err(|why| ChainError::Transport {
             url: url.clone(),
@@ -347,14 +379,7 @@ pub async fn month<D: Discovery>(feed: Feed, ask: &Ask, from: &D) -> Result<Chai
         // An expiry this build cannot decode takes its own contracts down and
         // says so by name, rather than the whole walk failing or the batch
         // vanishing: the vendor answered, and what could not be read is the
-        // thing to report.
-        let Some(keyed_expiry) = iso_expiry(&keyed.expiry) else {
-            chain.unreadable.push(format!(
-                "expiry {:?} (its contracts were not asked for)",
-                keyed.expiry
-            ));
-            continue;
-        };
+        // thing to report. The decode itself is above, before the request.
         let names = fno::names(&body, contracts_field).map_err(ChainError::Lookup)?;
         // ROOM FOR THIS ANSWER BEFORE IT IS FILED (gate 11 rule 3, D-3189):
         // `filed` and `listed` cannot be sized when the walk starts, because the contract

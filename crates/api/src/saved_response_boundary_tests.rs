@@ -257,7 +257,7 @@ fn detail_selectors_are_refused_before_admission_with_the_blocking_paths_bytes()
         (format!("identity={}", "a".repeat(63)), identity_reason),
         (
             format!("identity={ID}&page=banana"),
-            "`page` must be an unsigned decimal integer".to_owned(),
+            "`page` must be a canonical unsigned decimal integer".to_owned(),
         ),
         (
             format!("identity={ID}&page=4096"),

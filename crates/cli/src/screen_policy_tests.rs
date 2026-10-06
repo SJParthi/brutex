@@ -620,6 +620,7 @@ fn the_parallel_band_matches_a_sequential_measurement() {
             admitted: false,
             consistency: None,
             steady: true,
+            calendar_unmeasured: false,
         });
     }
     assert!(rows.len() > 2, "fixture: rows to measure");
@@ -882,6 +883,7 @@ fn screen_reference<'a>(
                 scored,
                 consistency: None,
                 steady: true,
+                calendar_unmeasured: false,
             })
         })
         .collect();

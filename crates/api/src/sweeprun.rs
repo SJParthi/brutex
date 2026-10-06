@@ -748,6 +748,129 @@ fn knobs_in(body: &WireBody) -> Vec<(&'static str, String)> {
     out
 }
 
+/// Every member [`WireBody`] declares except `screen_budget_ms`, which
+/// [`refuse_screen_budget`] refuses on every route before this list is read.
+///
+/// # Why a route refuses a KNOWN field it does not read -- P3-01-02, D-1972
+///
+/// [`WireBody`] is the union of three routes' bodies, so every route decoded
+/// every member and read only its own. `{"rung":"5min"}` on `/backtest/run`,
+/// which reads `rungs`, swept all eight rungs; `"validate":"0"` on a descent,
+/// which applies no knob, was validated and dropped. Each route now names the
+/// members it reads and refuses any other KNOWN member by name, as
+/// [`strict_knobs`] already did for its one word. Unknown members stay ignored
+/// for compatibility (BE-03, D-0685): they are not settings anyone here offers.
+const WIRE_FIELDS: [&str; 26] = [
+    "feed",
+    "underlying",
+    "from_year",
+    "from_month",
+    "to_year",
+    "to_month",
+    "rungs",
+    "command",
+    "rung",
+    "min_hits",
+    "max_points",
+    "support_ppm",
+    "ceiling",
+    "screen_cap",
+    "top",
+    "validate",
+    "horizon_bars",
+    "grid_rungs",
+    "grid_resolution",
+    "sizing_rate_bp",
+    "min_rr_bp",
+    "min_win_rate_bp",
+    "min_trades",
+    "min_ret_over_dd_bp",
+    "min_weakest_bp",
+    "max_mae_ppm",
+];
+
+/// What a span-taking command word reads: its word, feed, instrument, span and
+/// one rung.
+const COMMAND_SPAN_RUNG: [&str; 8] = [
+    "command",
+    "feed",
+    "underlying",
+    "from_year",
+    "from_month",
+    "to_year",
+    "to_month",
+    "rung",
+];
+
+/// [`COMMAND_SPAN_RUNG`] and a `min_hits` count.
+const COMMAND_SPAN_RUNG_HITS: [&str; 9] = [
+    "command",
+    "feed",
+    "underlying",
+    "from_year",
+    "from_month",
+    "to_year",
+    "to_month",
+    "rung",
+    "min_hits",
+];
+
+/// What `screen` reads: [`COMMAND_SPAN_RUNG`] and its three own numbers.
+const COMMAND_SCREEN: [&str; 11] = [
+    "command",
+    "feed",
+    "underlying",
+    "from_year",
+    "from_month",
+    "to_year",
+    "to_month",
+    "rung",
+    "support_ppm",
+    "max_points",
+    "top",
+];
+
+/// What `sweep-all` reads. `cli sweep-all VENDOR RUNG MIN_HITS` takes no
+/// instrument and no span, so a body naming either is refused: a scoped-looking
+/// request must not become a whole-store batch (P3-02-06, D-1972).
+const COMMAND_SWEEP_ALL: [&str; 4] = ["command", "feed", "rung", "min_hits"];
+
+/// Whether a route applies the [`KNOBS`] it is sent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Knobs {
+    /// Every [`KNOBS`] member is read (and validated by the route's own rule).
+    Applied,
+    /// None is read beyond the members the route names itself.
+    NotApplied,
+}
+
+/// Refuses, by name, the first known member `route` does not read.
+///
+/// `reads` lists the members the route consumes; with [`Knobs::Applied`] every
+/// [`KNOBS`] member is read as well. See [`WIRE_FIELDS`] for why. D-1972.
+fn refuse_unread(
+    body: &WireBody,
+    route: &str,
+    reads: &[&str],
+    knobs: Knobs,
+) -> Result<(), Refusal> {
+    for name in WIRE_FIELDS {
+        let present = body.string(name).is_some()
+            || body.scalar(name).is_some()
+            || list_field(body, name).is_some();
+        let read = reads.contains(&name)
+            || (knobs == Knobs::Applied && KNOBS.iter().any(|&(knob, _)| knob == name));
+        if present && !read {
+            return Err(Refusal::Malformed(format!(
+                "`{name}` is not read by {route}, so it is refused rather than \
+                 dropped: a setting that silently did nothing would be the \
+                 fallback CLAUDE.md §4 bans. Omit it. No setting was ignored."
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// What one `POST /backtest/descend` body asked for.
 ///
 /// # Three fields the sweep does not take, and why each is a FACT and not a knob
@@ -899,12 +1022,28 @@ pub fn asked_from(body: &str) -> Result<Asked, Refusal> {
     // line runs. The budget itself decodes as any value, so it is never the
     // field that fails the decode. D-0695.
     refuse_screen_budget(&body)?;
+    // `rung` (singular) is descend's and command's member: read here it was
+    // dropped and the run swept all eight rungs. D-1972.
+    refuse_unread(
+        &body,
+        "`POST /backtest/run`",
+        &[
+            "feed",
+            "underlying",
+            "from_year",
+            "from_month",
+            "to_year",
+            "to_month",
+            "rungs",
+        ],
+        Knobs::Applied,
+    )?;
     asked_from_wire(&body)
 }
 
-/// [`asked_from`] after the strict JSON boundary has been crossed once.
-fn asked_from_wire(body: &WireBody) -> Result<Asked, Refusal> {
-    let feed = field(body, "feed")
+/// The feed every body names, or the refusal that says why it is required.
+fn feed_from(body: &WireBody) -> Result<String, Refusal> {
+    field(body, "feed")
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
             Refusal::Malformed(
@@ -913,7 +1052,12 @@ fn asked_from_wire(body: &WireBody) -> Result<Asked, Refusal> {
              it cannot be defaulted."
                     .to_owned(),
             )
-        })?;
+        })
+}
+
+/// [`asked_from`] after the strict JSON boundary has been crossed once.
+fn asked_from_wire(body: &WireBody) -> Result<Asked, Refusal> {
+    let feed = feed_from(body)?;
     let underlying = field(body, "underlying")
         .filter(|s| !s.is_empty())
         .ok_or_else(|| Refusal::Malformed("no `underlying` in the request.".to_owned()))?;
@@ -928,7 +1072,7 @@ fn asked_from_wire(body: &WireBody) -> Result<Asked, Refusal> {
     let to_year = num("to_year")?;
     let to_month = num("to_month")?;
 
-    let month_ok = |m: u64| (1..=12).contains(&m);
+    let month_ok = |m: u64| matches!(m, 1..=12);
     if !month_ok(from_month) || !month_ok(to_month) {
         return Err(Refusal::Span(format!(
             "months must be 1..=12; this asked for {from_month} and {to_month}."
@@ -1077,6 +1221,25 @@ pub fn descent_from(body: &str) -> Result<AskedDescent, Refusal> {
     // body is refused by name here, as [`asked_from`] refuses it, rather than
     // decoded and dropped. D-0685.
     refuse_screen_budget(&body)?;
+    // A DESCENT APPLIES NO KNOB. `AskedDescent` has no field for one and
+    // `conduct_descent` sets none, so a typed `validate` or `screen_cap` is
+    // refused here rather than validated and dropped. D-1972.
+    refuse_unread(
+        &body,
+        "`POST /backtest/descend`",
+        &[
+            "feed",
+            "underlying",
+            "from_year",
+            "from_month",
+            "to_year",
+            "to_month",
+            "rung",
+            "max_points",
+            "top",
+        ],
+        Knobs::NotApplied,
+    )?;
     descent_from_wire(&body)
 }
 
@@ -1183,7 +1346,10 @@ const ABNORMAL_END: &str = "the engine task stopped abnormally before it recorde
 /// Constructing this guard before the closure is handed to Tokio covers both
 /// failure windows: a panic while the closure runs, and a runtime shutdown that
 /// drops a queued closure before it starts. In either case the captured guard
-/// is dropped and an in-flight slot becomes a visible refusal.
+/// is dropped and an in-flight slot becomes a visible refusal. The panic window
+/// exists only where a panic unwinds (`dev`, `test`); `release` sets
+/// `panic = "abort"`, so there a panic ends the process instead (poison-1,
+/// D-1771).
 ///
 /// # Why normal completion disarms rather than relying on the slot
 ///
@@ -1536,8 +1702,10 @@ pub fn apply_knobs(asked: &Asked) -> Applied {
 /// screen cap, support floor and validation setting. A run steered by settings
 /// nobody chose, with an audit line naming a different request's.
 ///
-/// `Drop` runs during unwinding, so this holds on every exit: normal return,
-/// early return, and panic.
+/// `Drop` runs on normal and early return in every build, and during unwinding
+/// where a panic unwinds (`dev`, `test`). `release` sets `panic = "abort"`, so
+/// there a panic ends the process and no later request exists to inherit the
+/// knobs (poison-1, D-1771).
 #[must_use = "the guard must be held for the run, not dropped immediately"]
 pub struct Applied;
 
@@ -1851,12 +2019,10 @@ fn claim_execution(
         }
     })?;
     if let Some(dir) = crate::logs::cli_log_dir() {
-        let observed = observe_elsewhere(&dir, now_micros() / 1_000);
-        if !observed.launch_clear {
-            return Err(Refusal::Unobservable(
-                "the external command evidence still reports activity or is damaged/unconfirmed; inspect the execution-status note before starting another run".to_owned(),
-            ));
-        }
+        admit_external(
+            &site.store_root,
+            &observe_elsewhere(&dir, now_micros() / 1_000),
+        )?;
     }
     Ok(lease)
 }
@@ -2292,7 +2458,7 @@ fn browser_attempt_unknown(attempt: Option<u64>, why: &str) -> String {
 
 fn external_observation(dir: Option<&std::path::Path>, now: i64) -> ExternalObservation {
     dir.map_or_else(
-        || ExternalObservation { at_millis: None, uncertain: true, in_flight: false, launch_clear: false, body: unknown_status("the CLI telemetry directory is not configured; external execution state is unknown") },
+        || ExternalObservation { at_millis: None, uncertain: true, in_flight: false, launch_clear: false, unterminated: None, body: unknown_status("the CLI telemetry directory is not configured; external execution state is unknown") },
         |dir| observe_elsewhere(dir, now),
     )
 }
@@ -2319,7 +2485,10 @@ fn observed_status_with_admission(
     let external = external_observation(dir, now);
     let (available, why) = match cli::execution_lease::probe(root) {
         Err(why) => (false, why.to_string()),
-        Ok(()) if !external.launch_clear => (false, "External activity or damaged execution evidence remains unresolved. A new sweep has not been admitted.".to_owned()),
+        Ok(()) if !external.launch_clear => match ended_without_terminal(root, &external) {
+            None => (false, "External activity or damaged execution evidence remains unresolved. A new sweep has not been admitted.".to_owned()),
+            Some(ended) => (true, format!("The store execution lease is currently free, and the newest external sweep marker names CLI invocation {ended}, which ended without its terminal marker: it held this lease while it ran, so it is not running now. How it ended is not known. A launch rechecks and claims the lease atomically.")),
+        },
         Ok(()) => (true, "The store execution lease is currently free. A launch rechecks and claims it atomically. Historical status is separate; this does not establish that older binaries or bypassing callers are idle.".to_owned()),
     };
     let mut body = observed_status(local, external);
@@ -2340,6 +2509,11 @@ struct ExternalObservation {
     in_flight: bool,
     /// Healthy history without an unresolved sweep marker does not own a lease.
     launch_clear: bool,
+    /// The newest marker is a named sweep's `command started` under a durable
+    /// invocation id (`cli::operation_audit::ID_BASE` and above), with no
+    /// terminal marker after it: that id and the command word. Only a caller
+    /// HOLDING the store's execution lease may act on it. D-2764.
+    unterminated: Option<(u64, String)>,
     body: String,
 }
 
@@ -2405,7 +2579,24 @@ fn status_tail(
     } else {
         query
     };
-    telemetry::tail(dir, telemetry::DEFAULT_KEEP_FILES, &query)
+    settled_tail(|| telemetry::tail(dir, telemetry::DEFAULT_KEEP_FILES, &query))
+}
+
+/// One read, and one more only when the first ended on a partial line.
+///
+/// A partial last line is what a reader sees while the CLI is inside the
+/// `write` of its newest record. Counted as damage on one read, it refused a
+/// browser launch and turned `/backtest/run.json` to `unknown` for no fault at
+/// all (conc9-2, D-1774). A torn line left by a writer that DIED is still
+/// there on the second read (only the next writer to open terminates it), so
+/// it still refuses: that fragment may be a newer marker, which is why
+/// `partial_tail` is a fault. The second read narrows the window to a write
+/// that spans both reads; it does not close it, and no lock is taken to close
+/// it, because probing `events.lock` would refuse a CLI that opens its sink at
+/// that instant. At most two bounded reads.
+fn settled_tail(read: impl Fn() -> telemetry::Tail) -> telemetry::Tail {
+    let first = read();
+    if first.partial_tail { read() } else { first }
 }
 
 fn tail_fault(tail: &telemetry::Tail) -> Option<String> {
@@ -2449,13 +2640,26 @@ fn tail_fault_unless_answered(tail: &telemetry::Tail, answered: bool) -> Option<
     }
 }
 
-fn observe_elsewhere(dir: &std::path::Path, now: i64) -> ExternalObservation {
-    // Durable run/probe evidence uses this same target. Its completion cannot
-    // replace a whole-command marker, nor can its uncorrelated token refresh
-    // that command's activity. Search a bounded retained window explicitly.
-    let lifecycle = status_tail(dir, "cli.lifecycle", None, 256);
-    let marker = lifecycle.records.iter().find(|record| {
-        matches!(
+/// Damaged or unanswerable evidence: never clears a launch.
+fn uncertain_observation(at_millis: Option<i64>, why: &str) -> ExternalObservation {
+    ExternalObservation {
+        at_millis,
+        uncertain: true,
+        in_flight: false,
+        launch_clear: false,
+        unterminated: None,
+        body: unknown_status(why),
+    }
+}
+
+/// The bounded lifecycle window and the index of its newest sweep-command
+/// marker, the window trimmed to end at that marker when damage behind it is
+/// all that would otherwise refuse (CE-11, D-1914).
+fn newest_sweep_marker(dir: &std::path::Path) -> (telemetry::Tail, Option<usize>) {
+    let mut lifecycle = status_tail(dir, "cli.lifecycle", None, 256);
+    let mut found = None;
+    for (index, record) in lifecycle.records.iter().enumerate() {
+        let is_marker = matches!(
             record.message.as_str(),
             "command started" | "command finished"
         ) && match record.field("command") {
@@ -2464,19 +2668,43 @@ fn observe_elsewhere(dir: &std::path::Path, now: i64) -> ExternalObservation {
             // Retain it so status becomes unknown instead of borrowing an
             // older sweep's successful completion.
             _ => true,
+        };
+        if is_marker {
+            found = Some(index);
+            break;
         }
-    });
+    }
+    // ONLY DAMAGE NEWER THAN THE MARKER CAN HIDE A NEWER MARKER (CE-11,
+    // D-1914). File order is sequence order, so a line torn by a killed CLI
+    // command and stepped over BEHIND the newest marker cannot outrank it, yet
+    // it blocked every browser launch until ~128 further commands pushed it out
+    // of the window. The window is re-walked to stop exactly at the marker, so
+    // only what lies between it and the newest end is judged. A walk that no
+    // longer ends on the same record (a newer one landed in between) keeps the
+    // whole window's verdict.
+    if let Some(index) = found
+        && tail_fault_unless_answered(&lifecycle, true).is_some()
+    {
+        let through = status_tail(dir, "cli.lifecycle", None, index.saturating_add(1));
+        let same = |tail: &telemetry::Tail| tail.records.get(index).map(|record| record.seq);
+        if same(&through).is_some() && same(&through) == same(&lifecycle) {
+            lifecycle = through;
+        }
+    }
+    (lifecycle, found)
+}
+
+fn observe_elsewhere(dir: &std::path::Path, now: i64) -> ExternalObservation {
+    // Durable run/probe evidence uses this same target. Its completion cannot
+    // replace a whole-command marker, nor can its uncorrelated token refresh
+    // that command's activity. Search a bounded retained window explicitly.
+    let (lifecycle, found) = newest_sweep_marker(dir);
+    let marker = found.and_then(|index| lifecycle.records.get(index));
     // A marker found inside the scanned window is the newest one, so the scan
     // cap cannot hide a newer one. With no marker found the cap is still the
     // answer: the latest sweep's marker may lie in the bytes it left unread.
     if let Some(why) = tail_fault_unless_answered(&lifecycle, marker.is_some()) {
-        return ExternalObservation {
-            at_millis: None,
-            uncertain: true,
-            in_flight: false,
-            launch_clear: false,
-            body: unknown_status(&why),
-        };
+        return uncertain_observation(None, &why);
     }
     let Some(marker) = marker else {
         let legacy = status_tail(dir, CLI_SWEEP_TARGET, None, 1);
@@ -2490,6 +2718,7 @@ fn observe_elsewhere(dir: &std::path::Path, now: i64) -> ExternalObservation {
             uncertain: why.is_some(),
             in_flight: false,
             launch_clear,
+            unterminated: None,
             body: why.map_or_else(|| NO_SWEEP.to_owned(), |why| unknown_status(&why)),
         };
     };
@@ -2500,13 +2729,7 @@ fn observe_elsewhere(dir: &std::path::Path, now: i64) -> ExternalObservation {
     // marker is found before the cap. Reaching the cap empty-handed means none
     // is newer, and `last` falls back to the marker, the newest fact there is.
     if let Some(why) = tail_fault_unless_answered(&activity, true) {
-        return ExternalObservation {
-            at_millis: Some(marker.at_unix_millis),
-            uncertain: true,
-            in_flight: false,
-            launch_clear: false,
-            body: unknown_status(&why),
-        };
+        return uncertain_observation(Some(marker.at_unix_millis), &why);
     }
     let last = activity.records.first().unwrap_or(marker);
     let phase = match marker.field("phase") {
@@ -2554,13 +2777,77 @@ fn observe_elsewhere(dir: &std::path::Path, now: i64) -> ExternalObservation {
             "null".to_owned()
         }
     );
+    let unterminated = unterminated_marker(marker, named_sweep);
     ExternalObservation {
         at_millis: Some(last.at_unix_millis),
         uncertain: status == "unknown",
         in_flight: status == "running",
         launch_clear: matches!(status, "completed" | "refused"),
+        unterminated,
         body,
     }
+}
+
+/// A named sweep's newest `command started` under a durable invocation id,
+/// as `(id, command)`; anything else is `None`. D-2764.
+fn unterminated_marker(marker: &telemetry::Record, named_sweep: bool) -> Option<(u64, String)> {
+    match marker.field("command") {
+        Some(telemetry::OwnedValue::Str(command))
+            if marker.message == "command started"
+                && named_sweep
+                && marker.run > cli::operation_audit::ID_BASE =>
+        {
+            Some((marker.run, command.clone()))
+        }
+        _ => None,
+    }
+}
+
+/// The durable invocation a lease holder may prove is not running, if any.
+///
+/// # Why holding the lease is the proof
+///
+/// `cli::run_durable` takes the store's execution lease BEFORE it begins its
+/// durable invocation, writes `command started` inside it, and releases the
+/// lease only after the invocation's terminal is written. The kernel releases
+/// the flock when its holder dies. So a caller that holds THIS store's lease,
+/// and finds the newest marker to be a `command started` whose durable id names
+/// a CLI invocation of the same command in THIS store's audit, has found a
+/// command that cannot be running here: a Ctrl-C, a kill, an OOM or a panic
+/// ended it without its `command finished`. Before D-2764 that marker refused
+/// every browser launch forever, while the lease the refusal guarded was free.
+///
+/// Everything short of that proof keeps refusing: a legacy run id outside the
+/// durable namespace (older binaries, bypassing callers), an id this store's
+/// audit does not hold, a different origin or command word, and any audit read
+/// that fails. It claims nothing about HOW the command ended and rewrites no
+/// history: the status document still reports what the log shows. D-2764.
+fn ended_without_terminal(root: &std::path::Path, observed: &ExternalObservation) -> Option<u64> {
+    let (run, command) = observed.unterminated.as_ref()?;
+    match cli::operation_audit::read(root, *run) {
+        Ok(Some(record))
+            if record.origin == cli::operation_audit::Origin::Cli && record.label == *command =>
+        {
+            Some(*run)
+        }
+        _ => None,
+    }
+}
+
+/// The external-evidence half of admission, for a caller that HOLDS `root`'s
+/// execution lease. D-2764.
+fn admit_external(root: &std::path::Path, observed: &ExternalObservation) -> Result<(), Refusal> {
+    if observed.launch_clear {
+        return Ok(());
+    }
+    // NOT SILENT: the status poll's `admission.why` names the invocation it
+    // found ended, and the log and the invocation audit are left as they are.
+    if ended_without_terminal(root, observed).is_none() {
+        return Err(Refusal::Unobservable(
+            "the external command evidence still reports activity or is damaged/unconfirmed; inspect the execution-status note before starting another run".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 /* ==================================================================
@@ -2885,6 +3172,10 @@ fn command_from_wire(body: &WireBody) -> Result<Command, Refusal> {
         )));
     }
 
+    if let Some((reads, knobs)) = command_reads(&word) {
+        refuse_unread(body, &format!("the `{word}` command"), reads, knobs)?;
+    }
+
     match word.as_str() {
         "audit-range" => Ok(Command::AuditRange {
             span: rung_from(body)?,
@@ -2933,7 +3224,10 @@ fn command_from_wire(body: &WireBody) -> Result<Command, Refusal> {
             min_hits: positive_min_hits(body)?,
         }),
         "sweep-all" => {
-            let asked = asked_from_wire(body)?;
+            // THE FEED ALONE. This called `asked_from_wire`, which REQUIRED an
+            // instrument and a span that `cli sweep-all` does not take, then
+            // kept only the feed. Naming either is refused above. D-1972.
+            let feed = feed_from(body)?;
             let rung = field(body, "rung")
                 .filter(|s| EVERY_RUNG.contains(&s.as_str()))
                 .ok_or_else(|| {
@@ -2943,7 +3237,7 @@ fn command_from_wire(body: &WireBody) -> Result<Command, Refusal> {
                     ))
                 })?;
             Ok(Command::SweepAll {
-                feed: asked.feed,
+                feed,
                 rung,
                 min_hits: positive_min_hits(body)?,
             })
@@ -2952,6 +3246,20 @@ fn command_from_wire(body: &WireBody) -> Result<Command, Refusal> {
             "`{other}` is not a command this route runs. It accepts: {}.",
             EVERY_COMMAND.join(", ")
         ))),
+    }
+}
+
+/// The members an ordinary command word reads, or `None` for a word
+/// [`command_from_wire`] refuses on its own. See [`WIRE_FIELDS`]. D-1972.
+fn command_reads(word: &str) -> Option<(&'static [&'static str], Knobs)> {
+    match word {
+        "audit-range" | "sweep-stored" => Some((&COMMAND_SPAN_RUNG_HITS, Knobs::NotApplied)),
+        // `strict_knobs` validates every knob and refuses its two by name.
+        "audit-audited-range" => Some((&COMMAND_SPAN_RUNG_HITS, Knobs::Applied)),
+        "screen" => Some((&COMMAND_SCREEN, Knobs::NotApplied)),
+        "auto-stored" => Some((&COMMAND_SPAN_RUNG, Knobs::NotApplied)),
+        "sweep-all" => Some((&COMMAND_SWEEP_ALL, Knobs::NotApplied)),
+        _ => None,
     }
 }
 
@@ -3477,6 +3785,49 @@ mod tests {
         Refusal, TaskFinisher, asked_from, attempt_started_event, command_from, completion_audit,
         conduct_command, descent_from, marker_refusal, now_micros, settle, stamp_refusal,
     };
+
+    /// SF-13 (P12-02, D-1791): a derived threshold reaches the wire as
+    /// `null`, never as a magic zero, and a fixed one as its number.
+    #[test]
+    fn a_derived_threshold_is_null_on_the_wire_and_never_a_zero() {
+        let at = |support| {
+            Progress::started("zerodha", "NIFTY", (2024, 1), (2024, 1), support, 0, 1).to_json()
+        };
+        let derived = at(None);
+        assert!(
+            derived.contains(r#","support_ppm":null,"started_micros""#),
+            "{derived}"
+        );
+        let fixed = at(Some(47_000));
+        assert!(
+            fixed.contains(r#","support_ppm":47000,"started_micros""#),
+            "{fixed}"
+        );
+    }
+
+    /// SW-14 (P12-02, D-1791): THE COMMIT GATE RUNS BEFORE THE SLOT IS
+    /// CLAIMED. Two unstamped presses are both refused 503 for the build, the
+    /// second is never answered 409 `Busy`, and the slot is still empty after
+    /// both. Claiming first would make the second press a conflict with a run
+    /// that was only ever going to fail.
+    #[test]
+    fn an_unstamped_press_is_refused_before_the_slot_and_never_reads_as_busy() {
+        let site = finisher_site("sw14-unstamped");
+        let run = format!(r#"{{"feed":"zerodha","underlying":"NIFTY",{SPAN}}}"#);
+        for press in ["first", "second"] {
+            let (status, _headers, body) = super::run_with(&site, &run, None);
+            assert_eq!(
+                status,
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "{press}: {body}"
+            );
+            assert!(body.contains("\"accepted\":false"), "{press}: {body}");
+        }
+        assert!(
+            site.sweep.lock().expect("private slot").is_none(),
+            "an unstamped build claimed the slot"
+        );
+    }
 
     /// audit-20261003 hunt-api-2, D-1582: CTRL-C ENDS THE PROCESS WHILE A
     /// SWEEP RUNS. A blocking task holding an engine-task count sleeps far past
@@ -5987,8 +6338,143 @@ mod tests {
 
     /* ==================== the command dispatcher ==================== */
 
+    /// A good body for `extra`'s word. `sweep-all` takes no instrument and no
+    /// span, and naming either is refused (D-1972), so it gets neither.
     fn command_body(extra: &str) -> String {
+        if extra.contains(r#""command":"sweep-all""#) {
+            return format!(r#"{{"feed":"zerodha",{extra}}}"#);
+        }
         format!(r#"{{"feed":"zerodha","underlying":"NIFTY",{SPAN},{extra}}}"#)
+    }
+
+    /// P3-01-02 and P3-02-06, D-1972. Every route refuses, BY NAME, a known
+    /// member it does not read, instead of decoding it and dropping it.
+    #[test]
+    fn every_route_refuses_a_known_field_it_does_not_read_by_name() {
+        // `/backtest/run` reads `rungs`; a singular `rung` swept all eight.
+        let why = asked_from(&body_with("zerodha", SPAN, r#","rung":"5min""#))
+            .expect_err("rung is descend's member");
+        assert!(
+            why.why()
+                .contains("`rung` is not read by `POST /backtest/run`"),
+            "{}",
+            why.why()
+        );
+        assert!(
+            why.why().contains("No setting was ignored"),
+            "{}",
+            why.why()
+        );
+        let why = asked_from(&body_with("zerodha", SPAN, r#","max_points":50"#))
+            .expect_err("a sweep has no stop ceiling");
+        assert!(why.why().contains("`max_points`"), "{}", why.why());
+        // ...while every knob it applies is still taken.
+        assert!(
+            asked_from(&body_with(
+                "zerodha",
+                SPAN,
+                r#","validate":"0","screen_cap":7"#
+            ))
+            .is_ok()
+        );
+
+        // A descent applies no knob.
+        let descent = |extra: &str| {
+            descent_from(&format!(
+                r#"{{"feed":"dhan","underlying":"NIFTY",{SPAN},"rung":"5min","max_points":50,"top":5{extra}}}"#
+            ))
+        };
+        assert!(descent("").is_ok());
+        for (extra, name) in [
+            (r#","validate":"0""#, "validate"),
+            (r#","screen_cap":7"#, "screen_cap"),
+            (r#","support_ppm":100"#, "support_ppm"),
+            (r#","rungs":["5min"]"#, "rungs"),
+            (r#","min_hits":5"#, "min_hits"),
+        ] {
+            let why = descent(extra).expect_err("a descent applies no knob");
+            assert!(
+                why.why()
+                    .contains(&format!("`{name}` is not read by `POST /backtest/descend`")),
+                "{}",
+                why.why()
+            );
+        }
+
+        // The ordinary command words, each with a member it does not read.
+        for (words, name) in [
+            (
+                r#""command":"audit-range","rung":"15min","min_hits":5,"validate":"0""#,
+                "validate",
+            ),
+            (
+                r#""command":"sweep-stored","rung":"15min","min_hits":5,"screen_cap":7"#,
+                "screen_cap",
+            ),
+            (
+                r#""command":"auto-stored","rung":"1min","min_hits":5"#,
+                "min_hits",
+            ),
+            (
+                r#""command":"screen","rung":"15min","support_ppm":5,"max_points":2,"top":2,"ceiling":3"#,
+                "ceiling",
+            ),
+            (
+                r#""command":"audit-audited-range","rung":"5min","min_hits":5,"rungs":["5min"]"#,
+                "rungs",
+            ),
+            (
+                r#""command":"sweep-all","rung":"15min","min_hits":5,"validate":"0""#,
+                "validate",
+            ),
+        ] {
+            let why = command_from(&command_body(words)).expect_err(words);
+            assert!(
+                why.why()
+                    .contains(&format!("`{name}` is not read by the `")),
+                "{words}: {}",
+                why.why()
+            );
+        }
+        // The strict word still takes its knobs.
+        assert!(
+            command_from(&command_body(
+                r#""command":"audit-audited-range","rung":"5min","min_hits":5,"validate":"0""#
+            ))
+            .is_ok()
+        );
+    }
+
+    /// P3-02-06, D-1972. `sweep-all` takes what `cli sweep-all VENDOR RUNG
+    /// MIN_HITS` takes. A body naming an instrument or a span is refused,
+    /// because it would otherwise become a whole-store batch.
+    #[test]
+    fn sweep_all_takes_no_instrument_and_no_span() {
+        let documented =
+            r#"{"command":"sweep-all","feed":"zerodha","rung":"15min","min_hits":500}"#;
+        let batch = command_from(documented).expect("the documented shape parses");
+        assert_eq!(batch.word(), "sweep-all");
+        assert_eq!(batch.feed(), "zerodha");
+        for extra in [
+            r#","underlying":"BANKNIFTY""#,
+            r#","from_year":2024"#,
+            r#","from_month":1"#,
+            r#","to_year":2024"#,
+            r#","to_month":1"#,
+        ] {
+            let body = format!(
+                r#"{{"command":"sweep-all","feed":"zerodha","rung":"15min","min_hits":500{extra}}}"#
+            );
+            let why = command_from(&body).expect_err("a scoped-looking batch");
+            assert!(
+                why.why().contains("is not read by the `sweep-all` command"),
+                "{}",
+                why.why()
+            );
+        }
+        let why = command_from(r#"{"command":"sweep-all","rung":"15min","min_hits":500}"#)
+            .expect_err("the feed is still required");
+        assert!(why.why().contains("no `feed`"), "{}", why.why());
     }
 
     #[test]
@@ -6089,11 +6575,16 @@ mod tests {
     #[test]
     fn a_command_needing_a_rung_is_refused_without_one() {
         for word in ["audit-range", "auto-stored", "sweep-stored", "sweep-all"] {
-            let why = command_from(&command_body(&format!(
-                r#""command":"{word}","min_hits":500"#
-            )))
-            .expect_err("{word} needs a rung");
-            assert!(why.why().contains("rung"), "{}", why.why());
+            // `auto-stored` reads no `min_hits`, and naming it is refused
+            // (D-1972), so its body omits the field.
+            let hits = if word == "auto-stored" {
+                ""
+            } else {
+                r#","min_hits":500"#
+            };
+            let why = command_from(&command_body(&format!(r#""command":"{word}"{hits}"#)))
+                .expect_err("{word} needs a rung");
+            assert!(why.why().contains("`rung`"), "{}", why.why());
         }
     }
 
@@ -6366,6 +6857,50 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// conc9-2: a partial last line seen once is re-read, and only one still
+    /// there on the second read counts as damage.
+    #[test]
+    fn a_line_being_written_is_reread_and_a_torn_one_still_refuses() {
+        let partial = telemetry::Tail {
+            partial_tail: true,
+            ..telemetry::Tail::default()
+        };
+        let whole = telemetry::Tail::default();
+        let reads = std::cell::Cell::new(0_u8);
+        let settled = super::settled_tail(|| {
+            reads.set(reads.get() + 1);
+            if reads.get() == 1 {
+                partial.clone()
+            } else {
+                whole.clone()
+            }
+        });
+        assert_eq!(reads.get(), 2, "a partial tail is read once more");
+        assert!(
+            super::tail_fault(&settled).is_none(),
+            "the finished write is no fault"
+        );
+
+        reads.set(0);
+        let torn = super::settled_tail(|| {
+            reads.set(reads.get() + 1);
+            partial.clone()
+        });
+        assert_eq!(reads.get(), 2);
+        assert!(
+            super::tail_fault(&torn).is_some(),
+            "a torn tail still refuses"
+        );
+
+        reads.set(0);
+        let clean = super::settled_tail(|| {
+            reads.set(reads.get() + 1);
+            whole.clone()
+        });
+        assert_eq!(reads.get(), 1, "a whole tail is read once");
+        assert!(super::tail_fault(&clean).is_none());
+    }
+
     /// **A sweep marker inside the scanned window is the answer, however large
     /// the log behind it.** W1-api6-4, D-0954.
     ///
@@ -6472,6 +7007,54 @@ mod tests {
             damaged.body
         );
         assert!(!damaged.launch_clear, "{}", damaged.body);
+        drop(sink);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// CE-11, D-1914: a line torn by a killed CLI command, OLDER than the
+    /// newest sweep marker, no longer blocks launch; the same damage NEWER
+    /// than the marker still does.
+    #[test]
+    fn damage_older_than_the_newest_marker_does_not_block_launch() {
+        let dir = crate::scratch::path("sweep-external-old-tear");
+        let _ = std::fs::remove_dir_all(&dir);
+        let sink = telemetry::Sink::open(&telemetry::Config::new(&dir)).expect("sink");
+        let marker = |message, phase| {
+            let event = telemetry::Event::info("cli.lifecycle", message)
+                .with("phase", phase)
+                .with("command", "sweep-stored");
+            assert_eq!(sink.emit_for_run(62, &event), telemetry::Emitted::Written);
+        };
+        let tear = || {
+            std::io::Write::write_all(
+                &mut std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(telemetry::current_path(&dir))
+                    .expect("the current log"),
+                b"{\"torn\n",
+            )
+            .expect("one malformed line");
+        };
+        marker("command started", "running");
+        tear();
+        marker("command started", "running");
+        marker("command finished", "completed");
+        let premise = super::status_tail(&dir, "cli.lifecycle", None, 256);
+        assert_eq!(
+            premise.malformed, 1,
+            "premise: the torn line is in the window"
+        );
+        let clear = super::observe_elsewhere(&dir, i64::MAX);
+        assert!(
+            clear.body.contains(r#""status":"completed""#),
+            "{}",
+            clear.body
+        );
+        assert!(clear.launch_clear && !clear.uncertain, "{}", clear.body);
+        tear();
+        let newer = super::observe_elsewhere(&dir, i64::MAX);
+        assert!(newer.body.contains("1 malformed records"), "{}", newer.body);
+        assert!(!newer.launch_clear, "{}", newer.body);
         drop(sink);
         let _ = std::fs::remove_dir_all(dir);
     }

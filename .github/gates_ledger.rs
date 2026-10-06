@@ -24,12 +24,14 @@
 //! * `invariant-ids`                        gate 27
 //! * `decision-numbers`                     gate 27b
 //! * `tls-provider`                         gate 26
-//! * `failure-events`                       gate 19
+//! * `failure-events PROD STATUS`         gate 19
 //! * `invariant-tests SCANNER PATHS_TOOL`   gate 10
-//! * `banned-constructs`                    gate 11
+//! * `banned-constructs PROD STATUS`      gate 11
 //!
 //! `SCANNER` is the `.github/source_scan.rs` binary gate 0 builds, and
 //! `PATHS_TOOL` is the `.github/invariant_paths.rs` binary gate 10 builds.
+//! `PROD` is the output of `source_scan prod-files` and `STATUS` its exit
+//! status (D-1938).
 
 #![forbid(unsafe_code)]
 
@@ -218,6 +220,9 @@ fn before(s: &str, at: usize) -> Option<char> {
 const ENV_HEAD: &str = concat!("CARGO_PRO", "FILE_");
 const ENV_TAIL: &str = concat!("_OVER", "FLOW_CHECKS");
 const FLAG_KEY: &str = concat!("over", "flow-checks");
+/// The flag's two words, which rustc joins with `-` or `_` (D-2323).
+const FLAG_HEAD: &str = concat!("over", "flow");
+const FLAG_TAIL: &str = "checks";
 
 /// `^FILE:[0-9]*:REST$` with FILE given: the REST of a scanner leaf.
 fn leaf_of<'a>(line: &'a str, file: &str) -> Option<&'a str> {
@@ -263,14 +268,26 @@ fn env_override(line: &str) -> bool {
 }
 
 /// The codegen flag set to `off`, `no`, `n`, `false` or `0`, spaces allowed
-/// around the `=`. As before it is a prefix test: `n` covers `no`.
+/// around the `=` and one quote allowed before the value. As before it is a
+/// prefix test: `n` covers `no`. The two words of the key are joined by a
+/// hyphen OR an underscore (P15-09, D-2323): rustc normalises `-C` option
+/// names, so `-C over..._checks=off` is the same option, comes after cargo's
+/// own `-C ...=on`, and wraps. The key is found anywhere in the line, so the
+/// `-C` written with no space before it is read too.
 fn flag_override(line: &str) -> bool {
-    line.match_indices(FLAG_KEY).any(|(at, _)| {
-        let rest = line[at + FLAG_KEY.len()..].trim_start_matches(is_space);
+    line.match_indices(FLAG_HEAD).any(|(at, _)| {
+        let Some(rest) = line[at + FLAG_HEAD.len()..]
+            .strip_prefix(['-', '_'])
+            .and_then(|r| r.strip_prefix(FLAG_TAIL))
+        else {
+            return false;
+        };
+        let rest = rest.trim_start_matches(is_space);
         let Some(rest) = rest.strip_prefix('=') else {
             return false;
         };
         let rest = rest.trim_start_matches(is_space);
+        let rest = rest.strip_prefix(['"', '\'']).unwrap_or(rest);
         ["off", "n", "false", "0"]
             .iter()
             .any(|v| rest.starts_with(v))
@@ -374,7 +391,9 @@ fn gate25(tree: &dyn Tree, leaves: &str, out: &mut Out) -> bool {
         bad = true;
     }
     let mut envs = Vec::new();
-    for w in listed(tree, &[".github/workflows/*"]) {
+    // Every tracked `.yml` under `.github/` too, composite actions included,
+    // as gate 0 and gate 1g read them (D-2341, D-2323).
+    for w in listed(tree, &[".github/workflows/*", ".github/*.yml"]) {
         let Some(bytes) = tree.read(&w) else {
             say!(out, "  REFUSED  {w} could not be read");
             bad = true;
@@ -429,21 +448,23 @@ fn gate25(tree: &dyn Tree, leaves: &str, out: &mut Out) -> bool {
 const INVARIANTS: &str = "docs/04-invariants.md";
 const DECISIONS: &str = "docs/05-decisions.md";
 
-/// `[A-Z][A-Z0-9-]*-[0-9]{2,3}[a-z]?`, the whole token. D-1608: a digit may
-/// follow the first letter (`FV4-01`).
+/// `[A-Z][A-Z0-9]*(-[A-Za-z0-9]+)+`, the whole token. WIDENED BY D-2667
+/// (P6-04), carried here by D-1936: the old `[A-Z][A-Z0-9-]*-[0-9]{2,3}[a-z]?`
+/// required a two- or three-digit tail, so ids with a letter suffix after a
+/// hyphen or a longer tail (`S-30-session`, `RUST-UC7-a`, `AF-1203-a`,
+/// `CU-SV4-CLOSE-D0961`) were invisible to uniqueness, the blind spot D-1608
+/// closed once for 179 others. Any hyphenated upper-case id counts; header
+/// words (`ID`, `Invariant`, `Point`) have no hyphen.
 fn id_grammar(tok: &str) -> bool {
-    let core = match tok.chars().last() {
-        Some(c) if c.is_ascii_lowercase() => &tok[..tok.len() - 1],
-        _ => tok,
-    };
-    let Some((head, digits)) = core.rsplit_once('-') else {
+    let Some((head, tail)) = tok.split_once('-') else {
         return false;
     };
     let mut h = head.chars();
-    (2..=3).contains(&digits.len())
-        && digits.bytes().all(|b| b.is_ascii_digit())
-        && h.next().is_some_and(|c| c.is_ascii_uppercase())
-        && h.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '-')
+    h.next().is_some_and(|c| c.is_ascii_uppercase())
+        && h.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+        && tail
+            .split('-')
+            .all(|g| !g.is_empty() && g.chars().all(|c| c.is_ascii_alphanumeric()))
 }
 
 /// The id of an invariant row: `^\| *`?ID`? *\|`, one per line at most.
@@ -831,56 +852,49 @@ fn strip(text: &str) -> Option<Stripped> {
     (st == 0).then_some(s)
 }
 
-/// A file the compiler leaves out of every non-test build: its first line
-/// is `#![cfg(test)]`, or the crate root's `#[cfg(test)]` sits IMMEDIATELY
-/// above its `mod STEM;`. A filename or an ordinary comment never exempts a
-/// file. A stem that is not an identifier exempts nothing: the old pattern
-/// read it as a pattern, and reading it literally may only scan more.
-fn whole_file_test_module(tree: &dyn Tree, path: &str) -> bool {
-    if let Some(b) = tree.read(path) {
-        let t = text_of(&b);
-        if t.split('\n').next() == Some("#![cfg(test)]") {
-            return true;
+/// THE FILE LIST IS THE COMPILER'S PRODUCTION CLOSURE (P1-08-04, D-2660,
+/// carried here by D-1938). Gates 11 and 19 read a `/src/` glob with a
+/// "whole-file test module" exempted by its file STEM, so a production
+/// `resume/manifest.rs` sharing a stem with a crate-root
+/// `#[cfg(test)] mod manifest;` was skipped, and `crates/cli/commit_stamp.rs`,
+/// mounted by `#[path]` from outside `src/` and compiled into every `cli`
+/// build, was never read. `source_scan prod-files` follows every `mod`,
+/// `#[path]` and `include!` from each crate's lib/main/bin root, skips what
+/// sits under `#[cfg(test)]` or `#[cfg(all(test, ..))]`, and refuses what it
+/// cannot resolve; the step hands its output and exit status here. A scanner
+/// that failed, or a closure with no file, is a refusal.
+fn prod_list(raw: &str, status: &str, out: &mut Out) -> Option<Vec<String>> {
+    let ok = status.trim() == "0";
+    let lines = records(raw);
+    if !ok {
+        out.say("REFUSED  the production closure could not be resolved:");
+        for l in lines.iter().filter(|l| l.starts_with("UNRESOLVED ")) {
+            say!(out, "  {l}");
         }
-    }
-    let base = path.rsplit('/').next().unwrap_or(path);
-    let stem = base.strip_suffix(".rs").unwrap_or(base);
-    if stem.is_empty() || !stem.chars().all(is_ascii_word) {
-        return false;
-    }
-    let root = match path.rfind("/src/") {
-        Some(at) => format!("{}/src/lib.rs", &path[..at]),
-        None => format!("{path}/src/lib.rs"),
-    };
-    if !tree.is_file(&root) {
-        return false;
-    }
-    let Some(b) = tree.read(&root) else {
-        return false;
-    };
-    let t = text_of(&b);
-    let lines = records(&t);
-    let decl = format!("mod {stem};");
-    lines.windows(2).any(|w| {
-        w[0] == "#[cfg(test)]" && {
-            let l = w[1];
-            let l = if let Some(r) = l.strip_prefix("pub ") {
-                r
-            } else if let Some(r) = l.strip_prefix("pub(") {
-                match r.split_once(") ") {
-                    Some((vis, r))
-                        if !vis.is_empty() && vis.bytes().all(|b| b.is_ascii_lowercase()) =>
-                    {
-                        r
-                    }
-                    _ => l,
-                }
-            } else {
-                l
-            };
-            l == decl
+        if status.trim().parse::<i32>().is_err() {
+            say!(out, "  `{}` is not an exit status", status.trim());
         }
-    })
+        return None;
+    }
+    let files: Vec<String> = lines
+        .into_iter()
+        .filter(|l| !l.is_empty() && !l.starts_with("UNRESOLVED "))
+        .map(str::to_owned)
+        .collect();
+    if files.is_empty() {
+        out.say("READ NO PRODUCTION FILE.");
+        return None;
+    }
+    Some(files)
+}
+
+/// A file whose first line is `#![cfg(test)]` is compiled out of every
+/// non-test build. The production closure already leaves such a file out;
+/// this is the same reading, kept so a list handed in by hand cannot put one
+/// back.
+fn compiled_out(tree: &dyn Tree, path: &str) -> bool {
+    tree.read(path)
+        .is_some_and(|b| text_of(&b).split('\n').next() == Some("#![cfg(test)]"))
 }
 
 /// The walk gates 11 and 19 share: strip each file, refuse the ones that
@@ -902,7 +916,7 @@ fn walk(tree: &dyn Tree, candidates: &[String], out: &mut Out) -> Walk {
         undelimited: 0,
     };
     for f in candidates {
-        if whole_file_test_module(tree, f) {
+        if compiled_out(tree, f) {
             continue;
         }
         w.walked += 1;
@@ -1009,8 +1023,14 @@ fn unlogged(corpus: &[Line]) -> (usize, Vec<usize>) {
 }
 
 /// Gate 19: a failure an operator can see is a failure the log records.
-fn gate19(tree: &dyn Tree, out: &mut Out) -> bool {
-    let candidates = listed(tree, &["crates/pull/src/*.rs", "crates/api/src/*.rs"]);
+/// `prod` is the production closure ([`prod_list`]); gate 19 reads its
+/// `crates/pull/` and `crates/api/` files.
+fn gate19(tree: &dyn Tree, prod: &[String], out: &mut Out) -> bool {
+    let candidates: Vec<String> = prod
+        .iter()
+        .filter(|f| f.starts_with("crates/pull/") || f.starts_with("crates/api/"))
+        .cloned()
+        .collect();
     let w = walk(tree, &candidates, out);
     let mut counted = 0;
     let mut found = Vec::new();
@@ -1023,7 +1043,7 @@ fn gate19(tree: &dyn Tree, out: &mut Out) -> bool {
     // failure mode gate 8 shipped with, and it reported success throughout.
     say!(
         out,
-        "walked {} production source file(s) under crates/{{pull,api}}/src/",
+        "walked {} production source file(s) of crates/{{pull,api}}",
         w.walked
     );
     say!(
@@ -1076,16 +1096,16 @@ fn gate19(tree: &dyn Tree, out: &mut Out) -> bool {
 /// is met, the entry goes and the test is written in the same change. The
 /// allowlist keys on the ROW, so a row naming two tests has both silenced,
 /// and both are printed by name every run.
-const ALLOW_PENDING: &[(&str, &str)] = &[
-    (
-        "P-03",
-        "no trading calendar and no holiday list exist. crates/pull/src/session.rs computes no day of the week and docs/00-charter.md section 3 records special-session shapes and NO holiday list, so a weekend rule would be wrong -- it records 2025-02-01, a Saturday, as a full 375-bar session. CLOSED BY: a sourced holiday list recorded in the charter FIRST (golden rule 1 forbids inventing one), then a filter in session.rs, then pull::unit::calendar_filter driving it.",
-    ),
-    (
-        "X-13",
-        "no cross-vendor bar comparison exists. The reader is there -- BarFile::read_record, walked at every index by S-02, and X-12 already files each vendor under its own path prefix -- but nothing opens two vendors months and matches them bar for bar, so there is no code for a test to drive. This is NOT ruled out by docs/07-plan.md R-6: that forbids SHOWING two feeds side by side and is enforced by a picker and a column, while api::merge already refuses a universe on a cross-vendor ISIN conflict. CLOSED BY: a two-BarFile comparison in crates/store that refuses and names the first divergent timestamp, then store::unit::vendor_disagreement_refuses.",
-    ),
-];
+///
+/// P-03 LEFT THIS LIST (D-2673, carried here by D-1938). Its closing
+/// condition was met: the measured, sourced calendar is pull::calendar
+/// (D-1769; the charter records the trading-holiday authority), the filter is
+/// Window::verdict dropping a bar on a day kind_of records Closed, and
+/// pull::unit::calendar_filter drives it. The row is checked again.
+const ALLOW_PENDING: &[(&str, &str)] = &[(
+    "X-13",
+    "no cross-vendor bar comparison exists. The reader is there -- BarFile::read_record, walked at every index by S-02, and X-12 already files each vendor under its own path prefix -- but nothing opens two vendors months and matches them bar for bar, so there is no code for a test to drive. This is NOT ruled out by docs/07-plan.md R-6: that forbids SHOWING two feeds side by side and is enforced by a picker and a column, while api::merge already refuses a universe on a cross-vendor ISIN conflict. CLOSED BY: a two-BarFile comparison in crates/store that refuses and names the first divergent timestamp, then store::unit::vendor_disagreement_refuses.",
+)];
 
 /// `^(.*):[0-9]+:([A-Za-z_][A-Za-z0-9_]*)$` -> `FILE<TAB>name`; any other
 /// line passes through unchanged, as the substitution left it.
@@ -1326,15 +1346,15 @@ const ALLOW_FLOAT: Allow = &[
     ("crates/greeks/src/error.rs", 17),
     ("crates/greeks/src/solver.rs", 15),
     ("crates/greeks/src/moneyness.rs", 9),
-    ("crates/pull/src/pricing.rs", 22),
+    ("crates/pull/src/pricing.rs", 23),
     ("crates/pull/src/tenor.rs", 5),
     ("crates/runner/src/grid.rs", 4),
-    ("crates/runner/src/significance.rs", 21),
+    ("crates/runner/src/significance.rs", 41),
     ("crates/runner/src/admission.rs", 4),
     ("crates/runner/src/bootstrap.rs", 52),
     ("crates/runner/src/bootstrap_family_pass.rs", 17),
     ("crates/runner/src/outcome.rs", 26),
-    ("crates/runner/src/report.rs", 3),
+    ("crates/runner/src/report.rs", 4),
     ("crates/runner/src/validate.rs", 1),
     ("crates/store/src/format.rs", 14),
     ("crates/lake/src/bar.rs", 9),
@@ -1429,7 +1449,7 @@ const ALLOW_SORT: Allow = &[
     ("crates/runner/src/outcome.rs", 4),
     ("crates/runner/src/pbo.rs", 2),
     ("crates/runner/src/excursion.rs", 1),
-    ("crates/pull/src/folder.rs", 1),
+    ("crates/pull/src/folder.rs", 2),
     ("crates/api/src/bars.rs", 3),
     ("crates/api/src/calendar_of.rs", 3),
     ("crates/api/src/constituents.rs", 3),
@@ -1528,7 +1548,6 @@ const ALLOW_SCAN: Allow = &[
     ("crates/api/src/pullrun.rs", 1),
     ("crates/api/src/server.rs", 9),
     ("crates/api/src/store_wire.rs", 1),
-    ("crates/api/src/sweeprun.rs", 1),
     ("crates/cli/src/boolean_campaign_codec.rs", 2),
     ("crates/cli/src/boolean_qualification_reader.rs", 1),
     ("crates/cli/src/boolean_rung_scope.rs", 1),
@@ -1577,7 +1596,7 @@ const ALLOW_MEMBER: Allow = &[
     ("crates/api/src/coverage.rs", 1),
     ("crates/api/src/credential_law.rs", 1),
     ("crates/api/src/merge.rs", 2),
-    ("crates/api/src/server.rs", 4),
+    ("crates/api/src/server.rs", 2),
     ("crates/api/src/sweeprun.rs", 5),
     ("crates/cli/src/batch.rs", 1),
     ("crates/cli/src/candidate_universe.rs", 1),
@@ -1586,7 +1605,7 @@ const ALLOW_MEMBER: Allow = &[
     ("crates/cli/src/global_replay_v3.rs", 1),
     ("crates/cli/src/institutional_evidence.rs", 2),
     ("crates/cli/src/institutional_statistics.rs", 1),
-    ("crates/cli/src/lib.rs", 5),
+    ("crates/cli/src/lib.rs", 7),
     ("crates/cli/src/population.rs", 3),
     ("crates/cli/src/population_admission_v2.rs", 2),
     ("crates/cli/src/population_admission_v3.rs", 2),
@@ -1654,6 +1673,7 @@ const ALLOW_MEMBER: Allow = &[
     ("crates/api/src/expressionsearchjson.rs", 1),
     ("crates/engine/src/resume.rs", 1),
     ("crates/cli/src/index_stop_store.rs", 1),
+    ("crates/indicators/src/column.rs", 1),
 ];
 
 const ALLOWLISTS: Allowlists = Allowlists {
@@ -2007,12 +2027,9 @@ fn denies(manifest: &str, lint: &str) -> bool {
 }
 
 /// Gate 11: banned constructs on the O(1) paths.
-fn gate11(tree: &dyn Tree, lists: &Allowlists, out: &mut Out) -> bool {
-    let candidates: Vec<String> = listed(tree, &["crates/*.rs"])
-        .into_iter()
-        .filter(|f| f.contains("/src/") && !f.contains("/tests/") && !f.contains("/benches/"))
-        .collect();
-    let w = walk(tree, &candidates, out);
+/// `prod` is the production closure ([`prod_list`], P1-08-04, D-1938).
+fn gate11(tree: &dyn Tree, lists: &Allowlists, prod: &[String], out: &mut Out) -> bool {
+    let w = walk(tree, prod, out);
     let render = |f: &str, l: &Line| format!("{f}:{}:{}", l.no, l.text);
     let corpus: Vec<String> = w
         .files
@@ -2021,7 +2038,7 @@ fn gate11(tree: &dyn Tree, lists: &Allowlists, out: &mut Out) -> bool {
         .collect();
     say!(
         out,
-        "walked {} non-test source file(s) under crates/*/src/",
+        "walked {} production source file(s) of the crates",
         w.walked
     );
     say!(
@@ -2190,8 +2207,9 @@ fn gate11(tree: &dyn Tree, lists: &Allowlists, out: &mut Out) -> bool {
 
 fn usage() -> String {
     "usage: gates_ledger release-profile LEAVES | invariant-ids | decision-numbers | \
-     tls-provider | failure-events | path-declarations < FNS | module-table < MODULES | \
-     invariant-tests PATH_DECLARATIONS MIDDLES | banned-constructs"
+     tls-provider | failure-events PROD STATUS | path-declarations < FNS | \
+     module-table < MODULES | invariant-tests PATH_DECLARATIONS MIDDLES | \
+     banned-constructs PROD STATUS"
         .to_owned()
 }
 
@@ -2237,7 +2255,10 @@ fn run(args: &[String]) -> Result<bool, String> {
         (Some("invariant-ids"), 1) => gate27(&tree, &mut out),
         (Some("decision-numbers"), 1) => gate27b(&tree, DECISION_PINS, &mut out),
         (Some("tls-provider"), 1) => gate26(&tree, &mut out),
-        (Some("failure-events"), 1) => gate19(&tree, &mut out),
+        (Some("failure-events"), 3) => match prod_list(&read_text(&args[1])?, &args[2], &mut out) {
+            Some(prod) => gate19(&tree, &prod, &mut out),
+            None => false,
+        },
         (Some("invariant-tests"), 3) => gate10(
             &tree,
             &read_text(&args[1])?,
@@ -2245,7 +2266,12 @@ fn run(args: &[String]) -> Result<bool, String> {
             ALLOW_PENDING,
             &mut out,
         ),
-        (Some("banned-constructs"), 1) => gate11(&tree, &ALLOWLISTS, &mut out),
+        (Some("banned-constructs"), 3) => {
+            match prod_list(&read_text(&args[1])?, &args[2], &mut out) {
+                Some(prod) => gate11(&tree, &ALLOWLISTS, &prod, &mut out),
+                None => false,
+            }
+        }
         _ => return Err(usage()),
     };
     Ok(passed)
@@ -2457,6 +2483,43 @@ mod tests {
         }
     }
 
+    #[test]
+    fn gate25_refuses_every_spelling_of_the_codegen_flag() {
+        // P15-09, D-2323. rustc reads `_` as `-` in a `-C` option name.
+        let under = FLAG_KEY.replace('-', "_");
+        for body in [
+            format!("      RUSTFLAGS: -D warnings -C {under}=off\n"),
+            format!("      RUSTFLAGS: -C{under}=off\n"),
+            format!("      RUSTFLAGS: -C{FLAG_KEY}=no\n"),
+            format!("      RUSTFLAGS: -C {under} = false\n"),
+            format!("      RUSTFLAGS: \"-C {FLAG_KEY}='off'\"\n"),
+            format!("      RUSTFLAGS: -C {under}=\"n\"\n"),
+        ] {
+            let wf = format!("jobs:\n{body}");
+            let (ok, text) = g25(&[ROOT, (".github/workflows/ci.yml", &wf)], GOOD_LEAVES);
+            assert!(!ok, "{body}");
+            assert!(text.contains("from the environment:\n"), "{text}");
+        }
+        // A composite action is a tracked `.yml` under `.github/` too.
+        let act = format!("runs:\n  steps:\n    - run: RUSTFLAGS='-C {under}=off' x\n");
+        let (ok, text) = g25(
+            &[ROOT, WF, (".github/actions/a/action.yml", &act)],
+            GOOD_LEAVES,
+        );
+        assert!(!ok, "{text}");
+        assert!(text.contains(".github/actions/a/action.yml:3:"), "{text}");
+        for body in [
+            format!("RUSTFLAGS: -C {under}=on\n"),
+            format!("RUSTFLAGS: -C{under}=yes\n"),
+            format!("x: {under}s=off\n"),
+            format!("x: {FLAG_HEAD} {FLAG_TAIL}=off\n"),
+        ] {
+            let wf = format!("jobs:\n{body}");
+            let (ok, text) = g25(&[ROOT, (".github/workflows/ci.yml", &wf)], GOOD_LEAVES);
+            assert!(ok, "{body}: {text}");
+        }
+    }
+
     // ---- gate 27 ----
 
     fn g27(doc: &str) -> (bool, String) {
@@ -2470,7 +2533,42 @@ mod tests {
         let doc = "| C-01 | a |\n| `C-E-02b` | b |\n|FV4-01|c|\n| C-02 | d |\r\n| x | not a row id |\n| c-03 | lower |\n| C-1 | short |\n";
         let (ok, text) = g27(doc);
         assert!(ok, "{text}");
-        assert!(text.starts_with("read 4 invariant row id(s)"), "{text}");
+        // `C-1` counts since D-2667 (D-1936): any hyphenated upper-case id.
+        assert!(text.starts_with("read 5 invariant row id(s)"), "{text}");
+    }
+
+    #[test]
+    fn gate27_reads_the_widened_id_shape() {
+        // D-2667 (P6-04), carried here by D-1936.
+        for id in [
+            "S-30-session",
+            "RUST-UC7-a",
+            "AF-1203-a",
+            "CU-SV4-CLOSE-D0961",
+            "FV4-01",
+            "C-1",
+        ] {
+            assert!(id_grammar(id), "{id}");
+        }
+        for id in [
+            "ID",
+            "Invariant",
+            "c-01",
+            "C-",
+            "C--1",
+            "C-1-",
+            "Ab-1",
+            "-1",
+        ] {
+            assert!(!id_grammar(id), "{id}");
+        }
+        let doc = "| S-30-session | a |\n| `S-30-session` | b |\n";
+        let (ok, text) = g27(doc);
+        assert!(!ok);
+        assert!(
+            text.contains("AN ID NAMES MORE THAN ONE INVARIANT:\n  S-30-session\n"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -2645,34 +2743,84 @@ mod tests {
         assert!(strip("#[cfg(test)]\nmod t {\n    x;\n}\r\nfn y() {}\n").is_none());
     }
 
-    #[test]
-    fn a_whole_file_test_module_needs_the_compiler_to_exclude_it() {
-        let lib = "#[cfg(test)]\nmod emits;\n#[cfg(test)]\n\nmod spaced;\n// #[cfg(test)]\nmod prose;\n#[cfg(test)]\npub(crate) mod vis;\n";
-        let tree = Mem::new(&[
-            ("crates/a/src/lib.rs", lib),
-            ("crates/a/src/emits.rs", "x.unwrap();\n"),
-            ("crates/a/src/spaced.rs", "x\n"),
-            ("crates/a/src/prose.rs", "x\n"),
-            ("crates/a/src/vis.rs", "x\n"),
-            ("crates/a/src/inner.rs", "#![cfg(test)]\nx\n"),
-            ("crates/a/src/crlf.rs", "#![cfg(test)]\r\nx\n"),
-        ]);
-        assert!(whole_file_test_module(&tree, "crates/a/src/emits.rs"));
-        assert!(whole_file_test_module(&tree, "crates/a/src/vis.rs"));
-        assert!(whole_file_test_module(&tree, "crates/a/src/inner.rs"));
-        assert!(!whole_file_test_module(&tree, "crates/a/src/spaced.rs"));
-        assert!(!whole_file_test_module(&tree, "crates/a/src/prose.rs"));
-        assert!(!whole_file_test_module(&tree, "crates/a/src/crlf.rs"));
-        assert!(!whole_file_test_module(&tree, "crates/a/src/lib.rs"));
-        assert!(!whole_file_test_module(&tree, "crates/b/src/emits.rs"));
-    }
-
     // ---- gate 19 ----
 
-    fn g19(files: &[(&str, &str)]) -> (bool, String) {
+    fn names(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    fn g19_of(files: &[(&str, &str)], prod: &[String]) -> (bool, String) {
         let tree = Mem::new(files);
         let mut out = quiet();
-        (gate19(&tree, &mut out), out.text)
+        (gate19(&tree, prod, &mut out), out.text)
+    }
+
+    fn g19(files: &[(&str, &str)]) -> (bool, String) {
+        g19_of(files, &prod_of(files))
+    }
+
+    #[test]
+    fn a_production_closure_is_read_and_a_failed_or_empty_one_refused() {
+        // P1-08-04 (D-2660, D-1938).
+        let mut out = quiet();
+        assert_eq!(
+            prod_list(
+                "crates/a/src/lib.rs\ncrates/cli/commit_stamp.rs\n",
+                "0",
+                &mut out
+            ),
+            Some(names(&[
+                "crates/a/src/lib.rs",
+                "crates/cli/commit_stamp.rs"
+            ]))
+        );
+        let mut out = quiet();
+        assert_eq!(
+            prod_list(
+                "UNRESOLVED crates/a/src/lib.rs: mod gone\ncrates/a/src/lib.rs\n",
+                "1",
+                &mut out
+            ),
+            None
+        );
+        assert!(out.text.contains("REFUSED  the production closure could not be resolved:\n  UNRESOLVED crates/a/src/lib.rs: mod gone\n"), "{}", out.text);
+        let mut out = quiet();
+        assert_eq!(prod_list("", "0", &mut out), None);
+        assert_eq!(out.text, "READ NO PRODUCTION FILE.\n");
+        let mut out = quiet();
+        assert_eq!(prod_list("a.rs\n", "x", &mut out), None);
+        assert!(out.text.contains("`x` is not an exit status"));
+    }
+
+    #[test]
+    fn gates_11_and_19_read_the_production_closure_not_a_stem() {
+        // P1-08-04 (D-2660, D-1938): a production file sharing its stem with
+        // a crate-root `#[cfg(test)] mod manifest;` is read, and so is a
+        // `#[path]` file outside `src/`.
+        let lib = "#[cfg(test)]\nmod manifest;\n";
+        let files = [
+            ("crates/pull/src/lib.rs", lib),
+            ("crates/pull/src/resume/manifest.rs", "failures.push(f);\n"),
+            ("crates/pull/stamp.rs", "x.unwrap();\n"),
+        ];
+        let prod = names(&[
+            "crates/pull/src/lib.rs",
+            "crates/pull/src/resume/manifest.rs",
+            "crates/pull/stamp.rs",
+        ]);
+        let (ok, text) = g19_of(&files, &prod);
+        assert!(!ok);
+        assert!(
+            text.contains("  crates/pull/src/resume/manifest.rs:1\n"),
+            "{text}"
+        );
+        assert!(text.starts_with("walked 3 production"), "{text}");
+        let mut all = vec![("Cargo.toml", LINTS)];
+        all.extend_from_slice(&files);
+        let tree = Mem::new(&all);
+        let mut out = quiet();
+        assert!(!gate11(&tree, &lists(), &prod, &mut out));
+        assert!(out.text.contains("crates/pull/stamp.rs:1"), "{}", out.text);
     }
 
     #[test]
@@ -2728,15 +2876,27 @@ mod tests {
         assert!(!ok);
         assert!(text.contains("  crates/pull/src/a.rs:6\n"), "{text}");
         assert!(text.contains("  3 line(s) in scope, 4 inside a #[cfg(test)] module"));
+        // A file the closure leaves out is not walked; one whose first line
+        // is `#![cfg(test)]` is not walked even when listed.
         let lib = "#[cfg(test)]\nmod emit_sites;\n";
-        let (ok, text) = g19(&[
+        let files = [
             ("crates/pull/src/lib.rs", lib),
             ("crates/pull/src/emit_sites.rs", "failures.push(f);\n"),
+            (
+                "crates/pull/src/inner.rs",
+                "#![cfg(test)]\nfailures.push(f);\n",
+            ),
             (
                 "crates/pull/src/b.rs",
                 "telemetry::emit(x);\nfailures.push(f);\n",
             ),
+        ];
+        let prod = names(&[
+            "crates/pull/src/lib.rs",
+            "crates/pull/src/inner.rs",
+            "crates/pull/src/b.rs",
         ]);
+        let (ok, text) = g19_of(&files, &prod);
         assert!(ok, "{text}");
         assert!(text.starts_with("walked 2 production"));
         // Only a CRLF attribute: the module is not recognised, so it is read.
@@ -2931,12 +3091,28 @@ mod tests {
 
     const LINTS: &str = "unwrap_used = \"deny\"\nexpect_used = \"deny\"\npanic = \"deny\"\ntodo = \"deny\"\nunimplemented = \"deny\"\nindexing_slicing   =   \"deny\"\n";
 
+    /// What `source_scan prod-files` names for a tree with no `mod`
+    /// tables: every file under a crate's `src/` outside a test directory.
+    fn prod_of(files: &[(&str, &str)]) -> Vec<String> {
+        files
+            .iter()
+            .map(|(p, _)| (*p).to_owned())
+            .filter(|f| {
+                f.starts_with("crates/")
+                    && f.ends_with(".rs")
+                    && f.contains("/src/")
+                    && !f.contains("/tests/")
+                    && !f.contains("/benches/")
+            })
+            .collect()
+    }
+
     fn g11(files: &[(&str, &str)], l: &Allowlists) -> (bool, String) {
         let mut all = vec![("Cargo.toml", LINTS)];
         all.extend_from_slice(files);
         let tree = Mem::new(&all);
         let mut out = quiet();
-        (gate11(&tree, l, &mut out), out.text)
+        (gate11(&tree, l, &prod_of(files), &mut out), out.text)
     }
 
     #[test]
@@ -2952,7 +3128,7 @@ mod tests {
             &lists(),
         );
         assert!(ok, "{text}");
-        assert!(text.starts_with("walked 1 non-test source file(s) under crates/*/src/\n  4 line(s) in scope, 4 inside a #[cfg(test)] module\n  3 line(s) after comment stripping\n"), "{text}");
+        assert!(text.starts_with("walked 1 production source file(s) of the crates\n  4 line(s) in scope, 4 inside a #[cfg(test)] module\n  3 line(s) after comment stripping\n"), "{text}");
         assert!(text.contains("\n  none\n"));
     }
 
@@ -3093,7 +3269,10 @@ mod tests {
             let table = LINTS.replace(&format!("{lint} "), &format!("# {lint} "));
             let tree = Mem::new(&[("Cargo.toml", &table), ("crates/a/src/x.rs", "fn a() {}\n")]);
             let mut out = quiet();
-            assert!(!gate11(&tree, &lists(), &mut out), "{lint}");
+            assert!(
+                !gate11(&tree, &lists(), &names(&["crates/a/src/x.rs"]), &mut out),
+                "{lint}"
+            );
             assert!(out.text.contains(&format!(
                 "  REFUSED  Cargo.toml no longer denies clippy::{lint}\n"
             )));
@@ -3102,7 +3281,12 @@ mod tests {
         assert!(!denies("panic_in_result_fn = \"deny\"\n", "panic"));
         let tree = Mem::new(&[("crates/a/src/x.rs", "fn a() {}\n")]);
         let mut out = quiet();
-        assert!(!gate11(&tree, &lists(), &mut out));
+        assert!(!gate11(
+            &tree,
+            &lists(),
+            &names(&["crates/a/src/x.rs"]),
+            &mut out
+        ));
     }
 
     #[test]
@@ -3203,5 +3387,33 @@ mod tests {
                 .iter()
                 .all(|(id, why)| id_grammar(id) && why.contains("CLOSED BY"))
         );
+    }
+
+    #[test]
+    fn p_03_left_the_pending_allowlist() {
+        // D-2673, carried here by D-1938: the calendar exists and
+        // pull::unit::calendar_filter drives it, so the row is checked.
+        assert!(ALLOW_PENDING.iter().all(|(id, _)| *id != "P-03"));
+        assert!(ALLOW_PENDING.iter().any(|(id, _)| *id == "X-13"));
+    }
+
+    #[test]
+    fn gate11_allowlists_carry_the_counts_the_merged_code_needs() {
+        // D-1958, D-1932 and the zero-work counts, carried by D-1938.
+        let count = |l: Allow, f: &str| l.iter().find(|(p, _)| *p == f).map(|(_, n)| *n);
+        assert_eq!(count(ALLOW_FLOAT, "crates/pull/src/pricing.rs"), Some(23));
+        assert_eq!(count(ALLOW_FLOAT, "crates/runner/src/report.rs"), Some(4));
+        assert_eq!(
+            count(ALLOW_FLOAT, "crates/runner/src/significance.rs"),
+            Some(41)
+        );
+        assert_eq!(count(ALLOW_MEMBER, "crates/api/src/server.rs"), Some(2));
+        assert_eq!(count(ALLOW_MEMBER, "crates/cli/src/lib.rs"), Some(7));
+        assert_eq!(
+            count(ALLOW_MEMBER, "crates/indicators/src/column.rs"),
+            Some(1)
+        );
+        assert_eq!(count(ALLOW_SCAN, "crates/api/src/sweeprun.rs"), None);
+        assert_eq!(count(ALLOW_SORT, "crates/pull/src/folder.rs"), Some(2));
     }
 }

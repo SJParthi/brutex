@@ -82,6 +82,9 @@
   import { page as routePage } from '$app/state';
   import { feeds, selectFeed } from '$lib/feeds.svelte.js';
   import { readStoreCensus } from '$lib/store.svelte.js';
+  import { censusFailure } from '$lib/store-census.js';
+  import { refusalFrom } from '$lib/refusal.js';
+  import { sweptSymbolOf } from '$lib/instrument.js';
   /* RENAMED ON IMPORT. This page's Run control owns a state object called
      `ask` — what the operator is asking the sweep for — and the fetch helper
      is a different thing entirely. One name for one value. */
@@ -121,6 +124,7 @@
   import { placeIn } from '$lib/place.js';
   import { monthLabel } from '$lib/dates.js';
   import { rupee, group, exact } from '$lib/money.js';
+  import { holdPeriods as holdPeriodsOf, returnHistogram as returnHistogramOf } from '$lib/hold-series.js';
   import { chargeScope, coverScope, isSweptIndex } from '$lib/charge-scope.js';
   import {
     compareRuns,
@@ -136,7 +140,8 @@
   import { decodeMaskWords } from '$lib/mask.js';
   import { impliedConditions } from '$lib/condition-groups.js';
   import { createRequestGate } from '$lib/request-gate.js';
-  import { liveAttemptKey, reduceLiveProgress } from '$lib/live-progress';
+  import { foldLiveProgress, liveAttemptKey } from '$lib/live-progress';
+  import { liveWinShare } from '$lib/live-win.js';
   import {
     TIME_GRAINS,
     equityMaxDrawdown,
@@ -280,28 +285,41 @@
    * The cast sits INSIDE `$state(...)` for the reason the block above gives.
    */
   let liveTop = $state(
-    /** @type {{ phase: string, rows: any[], trials: number, barMilli: number, idleSecs: number, stale: boolean, why: string }} */ ({
+    /** @type {{ phase: string, rows: any[], trials: number, barMilli: number, idleSecs: number, stale: boolean, why: string, identity: string }} */ ({
       phase: 'idle',
       rows: [],
       trials: 0,
       barMilli: 0,
       idleSecs: 0,
       stale: false,
-      why: ''
+      why: '',
+      identity: ''
     })
   );
+  /** Latest-request-wins generation for `/live.json`. conc18-4. */
+  let liveTopSeq = 0;
 
   /**
    * Read `/live.json` and keep the newest non-stale run's rows.
    *
-   * Latest-request-wins is unnecessary here: the endpoint is a whole-file read
-   * of at most `keep` rows and the poll interval is 2 s, so a late reply can
-   * only carry an older heap of the same run — which is what the next tick
-   * replaces anyway. A refusal is NAMED and never rendered as "no rows".
+   * LATEST REQUEST WINS, AND ONLY FOR THE SWEEP THAT ASKED. This said a
+   * token was unnecessary because a late reply "can only carry an older heap of
+   * the same run". It cannot be relied on: the call is fire-and-forget on a 2 s
+   * poll with a 15 s ceiling, so a slow reply can land after a newer one, and
+   * after the sweep that asked has been replaced. Each call now takes a
+   * sequence number and the status run's key, and publishes only while both
+   * are still current. `invalidateLive(true)` clears the panel when the run
+   * changes, so a new sweep does not open on the previous one's rows. conc18-4.
+   *
+   * A refusal is NAMED and never rendered as "no rows".
    */
   async function fetchLiveTop() {
+    const seq = ++liveTopSeq;
+    const runKey = liveRunKey(sweep.run);
+    const current = () => seq === liveTopSeq && liveRunKey(sweep.run) === runKey;
     try {
       const response = await ask_('/live.json', { cache: 'no-store' });
+      if (!current()) return;
       if (!response.ok) {
         liveTop = {
           ...liveTop,
@@ -311,6 +329,7 @@
         return;
       }
       const body = await response.json();
+      if (!current()) return;
       const runs = Array.isArray(body?.runs) ? body.runs : [];
       // THE FRESHEST RUN BY `idle_secs`, NOT THE FIRST ONE THAT IS NOT STALE.
       //
@@ -360,7 +379,8 @@
           barMilli: 0,
           idleSecs: 0,
           stale: false,
-          why: ''
+          why: '',
+          identity: ''
         };
         return;
       }
@@ -373,9 +393,14 @@
         // that these rows are seconds old rather than trust that they are.
         idleSecs: Number(best.idle_secs) || 0,
         stale: best.stale === true,
-        why: ''
+        why: '',
+        // WHOSE HEAP THIS IS. `/live.json` names each heap by its run identity
+        // and the sweep status names none, so the page cannot prove the heap is
+        // this sweep's; it shows which one it is instead of claiming so.
+        identity: typeof best.identity === 'string' ? best.identity : ''
       };
     } catch (error) {
+      if (!current()) return;
       liveTop = {
         ...liveTop,
         phase: 'failed',
@@ -803,12 +828,19 @@
    *
    * `gross_win` and `gross_loss` are the two sums `/frontier.json` began sending
    * when v3 stored them; before that this criterion was not computable at all.
-   * `null` when nothing was won, because a ratio with no base is undefined —
-   * never `0`, which `norm` would read as "measured, and best".
+   * NOTHING WON AND SOMETHING LOST IS THE WORST RATIO THERE IS, NOT AN
+   * UNKNOWN ONE. This returned `null` whenever `gross_win` was 0, and `norm`
+   * scores `null` as the midpoint, so a row that only ever lost beat every
+   * measured row in the lower half on "less losing ratio". It is `Infinity`
+   * now, which `norm` places at the top of the range and the inverted term
+   * scores 0. `null` remains only when neither side moved: then the ratio
+   * really has no reading. p14num-2, D-2750.
    *
    * @param {any} r
+   * @returns {number|null}
    */
-  const lossRatio = (r) => (r.gross_win > 0 ? -r.gross_loss / r.gross_win : null);
+  const lossRatio = (r) =>
+    r.gross_win > 0 ? -r.gross_loss / r.gross_win : r.gross_loss < 0 ? Infinity : null;
 
   /**
    * Which measurements separate nothing across this set of rows.
@@ -931,8 +963,14 @@
     // An unmeasurable value takes the same 0.5: it is neither evidence for the
     // row nor against it, and any other number would be an opinion the data
     // does not support. `lo === Infinity` means NOTHING was measurable.
+    //
+    // AN UNBOUNDED VALUE IS NOT UNMEASURED. `+Infinity` is past every measured
+    // value, so it sits at the top of the range (1) and `-Infinity` at the
+    // bottom (0); only `null`, `undefined` and `NaN` take the midpoint. D-2750.
     /** @param {number|null|undefined} v @param {{ lo: number, hi: number }} range */
     const norm = (v, { lo, hi }) => {
+      if (v === Infinity) return 1;
+      if (v === -Infinity) return 0;
       if (v === null || v === undefined || !Number.isFinite(v)) return 0.5;
       if (!Number.isFinite(lo) || hi === lo) return 0.5;
       return (v - lo) / (hi - lo);
@@ -966,7 +1004,12 @@
         w.profit * norm(r.pessimistic, ranges.profit) +
         w.winningTrades * norm(r.wins, ranges.winningTrades) +
         w.winRate * norm(r.win_rate_bp, ranges.winRate) +
-        w.rewardRisk * norm(r.reward_to_risk_bp, ranges.rewardRisk) +
+        // A NEVER-LOST ROW IS UNTESTED, NOT MIDDLING. `/frontier.json` sends
+        // `null` here only for `i64::MAX`, the cell with no losing trade, and
+        // `cli::ranked` demotes exactly that sentinel to last in all four
+        // server ranking keys. The midpoint put it above every measured row in
+        // the lower half, against the `rank` this sort breaks ties on. D-2750.
+        w.rewardRisk * (r.reward_to_risk_bp === null ? 0 : norm(r.reward_to_risk_bp, ranges.rewardRisk)) +
         w.avgWin * norm(r.avg_win, ranges.avgWin) +
         w.avgLoss * norm(r.avg_loss, ranges.avgLoss);
       return { ...r, score };
@@ -1908,6 +1951,16 @@
   /** Latest-request-wins generation for the independent live-event stream. */
   let liveSeq = 0;
 
+  /**
+   * The fold carried between polls, for exactly one run key (P1-06-02,
+   * D-2662). `/logs.json?run=` holds the newest 200 events and a validated
+   * sweep emits about 36 a rung, so the start marker leaves the window near
+   * rung six; the fold needs it once, then continues from the last event it
+   * folded, and refuses if a window no longer reaches that event.
+   * @type {{ key: string, carry: import('$lib/live-progress').LiveCarry | null }}
+   */
+  let liveCarry = { key: '', carry: null };
+
   /** @param {any} run */
   function liveRunKey(run) {
     return JSON.stringify([
@@ -1925,7 +1978,12 @@
   /** Revoke every pending live request, optionally clearing the prior attempt. */
   function invalidateLive(clear = false) {
     liveSeq += 1;
-    if (clear) live = { phase: 'idle', attempt: null, rungs: [], why: '' };
+    if (clear) {
+      live = { phase: 'idle', attempt: null, rungs: [], why: '' };
+      // AND THE RANKED HEAP, which belonged to the run being replaced.
+      liveTopSeq += 1;
+      liveTop = { phase: 'idle', rows: [], trials: 0, barMilli: 0, idleSecs: 0, stale: false, why: '', identity: '' };
+    }
   }
 
   /**
@@ -1973,17 +2031,23 @@
       );
       if (seq !== liveSeq || liveRunKey(sweep.run) !== liveRunKey(run)) return;
       if (!response.ok) {
+        // The body's reason is read, not dropped (CE-83, D-1789).
+        const refused = await refusalFrom('/logs.json', response);
+        if (seq !== liveSeq || liveRunKey(sweep.run) !== liveRunKey(run)) return;
         publishLive(seq, run, {
           phase: 'failed',
           attempt,
           rungs: [],
-          why: `/logs.json answered ${response.status} for exact attempt ${attempt}.`
+          why: `${refused} — for exact attempt ${attempt}.`
         });
         return;
       }
       const body = await response.json();
       if (seq !== liveSeq || liveRunKey(sweep.run) !== liveRunKey(run)) return;
-      publishLive(seq, run, reduceLiveProgress(run, body));
+      const key = liveRunKey(run);
+      const step = foldLiveProgress(liveCarry.key === key ? liveCarry.carry : null, run, body);
+      liveCarry = { key, carry: step.carry };
+      publishLive(seq, run, step.progress);
     } catch (why) {
       publishLive(seq, run, {
         phase: 'failed',
@@ -3316,7 +3380,7 @@
         catalog = {
           phase: 'failed',
           why:
-            `/store.json answered ${response.status}, so this form cannot say what the store ` +
+            `${censusFailure(response)} — so this form cannot say what the store ` +
             `holds. The span and the instrument are two of the nine terms in a run's identity, ` +
             `so neither is defaulted — naming a run after a guess is the invention §3 rule 1 forbids.`,
           held: []
@@ -3329,10 +3393,11 @@
       for (const row of rows ?? []) {
         const full = String(row.instrument ?? '');
         // The census names an instrument `NSE-INDEX-NIFTY`; the ledger and
-        // the run route both name it `NIFTY`. Matching on the LAST segment
-        // is what joins them without this page holding an exchange or a
-        // segment literal — the same join `loadRungs` already makes.
-        const leaf = full.split('-').pop() ?? '';
+        // the run route both name it `NIFTY`. The symbol is everything after
+        // the exchange and segment, NOT the last `-` segment: `BAJAJ-AUTO`
+        // and `NAM-INDIA` are sweepable shares and were offered as `AUTO`
+        // and `INDIA`, a name the engine refuses (P3-02-02, D-1769).
+        const leaf = sweptSymbolOf(full) ?? '';
         const month = String(row.month ?? '');
         const rung = String(row.timeframe ?? '');
         if (!leaf || !month || !rung) continue;
@@ -4777,9 +4842,8 @@
       const months = new Map();
       for (const row of rows ?? []) {
         // The census names an instrument `NSE-INDEX-NIFTY`; the ledger names
-        // it `NIFTY`. Matching on the LAST segment is what joins them without
-        // this page holding an exchange or a segment literal.
-        const leaf = String(row.instrument ?? '').split('-').pop();
+        // it `NIFTY`. The symbol may itself hold a `-` (P3-02-02, D-1769).
+        const leaf = sweptSymbolOf(String(row.instrument ?? ''));
         if (leaf !== run.underlying) continue;
         months.set(row.timeframe, (months.get(row.timeframe) ?? 0) + 1);
       }
@@ -4968,40 +5032,15 @@
   });
 
   /**
-   * The bars bucketed by the selected period, each bucket's close-to-close
-   * change in paisa.
-   *
-   * Buckets are keyed by a STRING derived from the bar's IST date, so a
-   * week that straddles a month or a year stays one bucket. Ordered by first
-   * appearance, which is chronological because the bars are.
+   * The bars bucketed by the selected period, each bucket's change from the
+   * PREVIOUS bucket's close (the first bucket's from its first open), in paisa,
+   * keyed by the IST `YYYY-MM-DD` with its year. The arithmetic lives in
+   * `$lib/hold-series.js` so `web/tests/hold-series.test.js` drives it (CE-70,
+   * D-2730): it was each bucket's last close minus its own first close, which
+   * dropped every gap between buckets, and its `d/m` key folded the same day of
+   * different years into one bucket.
    */
-  const holdPeriods = $derived.by(() => {
-    const bars = series.bars;
-    if (bars.length < 2) return [];
-    /** @param {number} t */
-    const key = (t) => {
-      // `t` is epoch seconds on the wire. Shift only for calendar projection;
-      // the stored instant remains unchanged and timezone neutral.
-      const d = new Date(t * 1000 + 19_800_000);
-      const y = d.getUTCFullYear();
-      if (periodScale === 'yearly') return `${y}`;
-      if (periodScale === 'quarterly') return `Q${Math.floor(d.getUTCMonth() / 3) + 1} '${String(y).slice(2)}`;
-      if (periodScale === 'daily') return `${d.getUTCDate()}/${d.getUTCMonth() + 1}`;
-      // Weekly: the Monday that starts the bar's week.
-      const monday = new Date(d);
-      monday.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7));
-      return `${monday.getUTCDate()}/${monday.getUTCMonth() + 1}`;
-    };
-    /** @type {Map<string, {label: string, first: number, last: number}>} */
-    const buckets = new Map();
-    for (const b of bars) {
-      const k = key(b.t);
-      const at = buckets.get(k);
-      if (at) at.last = b.c;
-      else buckets.set(k, { label: k, first: b.c, last: b.c });
-    }
-    return [...buckets.values()].map((x) => ({ label: x.label, v: x.last - x.first }));
-  });
+  const holdPeriods = $derived.by(() => holdPeriodsOf(series.bars, periodScale));
 
   /**
    * The distribution of per-bar returns, in basis points, bucketed.
@@ -5009,55 +5048,13 @@
    * Per BAR, not per trade — the ledger has no trades to distribute. Said on
    * the chart, because a histogram labelled "returns" that is silently a
    * different population is exactly the quiet substitution this page refuses.
+   *
+   * Nothing to distribute is `null`, not a histogram with half its fields. Each
+   * return is `basisPoints` — the engine's half-away-from-zero rule — not
+   * `Math.round` on a float ratio, which put a gain and its mirror-image loss in
+   * asymmetric bins and counted a sub-half-bp loss as flat (CE-73, D-2731).
    */
-  const returnHistogram = $derived.by(() => {
-    const bars = series.bars;
-    /* NOTHING TO DISTRIBUTE IS `null`, NOT A HISTOGRAM WITH HALF ITS FIELDS.
-       These two arms returned `{bins: [], max: 0, avgLoss: null, avgGain:
-       null}` — no `lo`, no `hi`, no `losers`, no `winners` — so the value's
-       type was a union in which the range was sometimes absent, and the panel
-       that reads `h.lo` was only correct because its caller happened to guard
-       on `bins.length`. An empty set of returns HAS no range: `lo: 0` would be
-       a measurement nobody took. One value for "there is no distribution" says
-       that, and the guard at the render site becomes the same question. */
-    if (bars.length < 2) return null;
-    const rets = [];
-    for (const b of bars) {
-      if (b.o > 0) rets.push(Math.round(((b.c - b.o) / b.o) * 10_000));
-    }
-    if (rets.length === 0) return null;
-    const lo = Math.min(...rets);
-    const hi = Math.max(...rets);
-    const width = Math.max(1, Math.ceil((hi - lo) / 18));
-    /** @type {Map<number, number>} */
-    const counts = new Map();
-    for (const r of rets) {
-      const slot = Math.floor((r - lo) / width);
-      counts.set(slot, (counts.get(slot) ?? 0) + 1);
-    }
-    const bins = [];
-    for (let i = 0; i <= Math.floor((hi - lo) / width); i += 1) {
-      const from = lo + i * width;
-      bins.push({ from, mid: from + width / 2, n: counts.get(i) ?? 0 });
-    }
-    const losses = rets.filter((r) => r < 0);
-    const gains = rets.filter((r) => r > 0);
-    /** @param {number[]} xs */
-    const mean = (xs) =>
-      xs.length === 0 ? null : Math.round(xs.reduce((a, b) => a + b, 0) / xs.length);
-    return {
-      bins,
-      max: Math.max(1, ...bins.map((b) => b.n)),
-      lo,
-      hi,
-      avgLoss: mean(losses),
-      avgGain: mean(gains),
-      losers: losses.length,
-      winners: gains.length,
-      flat: rets.length - losses.length - gains.length,
-      total: rets.length
-    };
-  });
+  const returnHistogram = $derived(returnHistogramOf(series.bars));
 
   /**
    * Alternating run-up and drawdown segments of the hold curve.
@@ -6221,6 +6218,9 @@
       <li class="dash"><span class="cf-sw dashed"></span>Average profit<b>{h.avgGain === null ? '—' : pctOf(h.avgGain)}</b></li>
     </ul>
     <p class="cf-note">{note}</p>
+    {#if h.overflowed > 0}
+      <p class="cf-note">{exact(h.overflowed)} {h.overflowed === 1 ? 'bar is' : 'bars are'} left out: the move scaled to basis points exceeds what a browser number holds exactly, the same overflow the engine refuses.</p>
+    {/if}
   </div>
 {/snippet}
 
@@ -7166,12 +7166,12 @@
             {#each live.rungs as r (r.key)}
               <tr>
                 <td><b>{r.rung}</b>{#if r.validating} <span class="dim">validation</span>{/if}</td>
-                <td class="num">{r.bars ? r.bars.toLocaleString() : '—'}</td>
-                <td class="num">{r.minHits ? r.minHits.toLocaleString() : '—'}</td>
+                <td class="num">{r.bars ? group(r.bars) : '—'}</td>
+                <td class="num">{r.minHits ? group(r.minHits) : '—'}</td>
                 <td class="num">
                   {r.bars && r.minHits ? `${((r.minHits / r.bars) * 100).toFixed(2)}%` : '—'}
                 </td>
-                <td class="num">{r.candidates ? r.candidates.toLocaleString() : '—'}</td>
+                <td class="num">{r.candidates ? group(r.candidates) : '—'}</td>
                 <td>
                   <!--
                     FIVE STATES, NOT TWO. This read `recorded / refused /
@@ -7184,7 +7184,7 @@
                   {#if r.done && r.recorded}<span class="ok">recorded</span>
                   {:else if r.done}<span class="warnish">refused — {r.why || 'no reason given'}</span>
                   {:else if r.phase === 'priced'}<span class="dim"
-                      >priced {r.priced.toLocaleString()} — validating…</span
+                      >priced {group(r.priced)} — validating…</span
                     >
                   {:else if r.phase === 'pricing'}<span class="dim">pricing the exit grid…</span>
                   {:else}<span class="dim">sweeping…</span>{/if}
@@ -7251,6 +7251,7 @@
            the markup they describe failed the build outright. -->
       {@const lead = liveTop.rows[0]}
       {@const leadT = Math.abs(lead?.t_milli ?? 0) / 1000}
+      {@const leadWin = liveWinShare(lead)}
       <div class="livetop">
         <!-- THE PLAIN-ENGLISH ANSWER FIRST, THEN THE EVIDENCE.
              This block first rendered a nine-column table of |t|, mean paisa and
@@ -7267,6 +7268,12 @@
               : `${Math.floor(liveTop.idleSecs / 60)}m`} ago
             {#if liveTop.stale || liveTop.idleSecs > 120}
               <span class="pill warn">not moving</span>
+            {/if}
+            {#if liveTop.identity}
+              · heap <code
+                title="The run identity /live.json names this heap by. The sweep status carries no identity, so this is the freshest heap on the server, which is not proved to be this sweep's."
+                >{liveTop.identity.slice(0, 12)}</code
+              >
             {/if}
           </span>
         </p>
@@ -7287,11 +7294,17 @@
           </div>
           <div class="keystat">
             <p class="k">Winning trades</p>
-            <p class="v">
-              {lead?.n > 0 ? ((lead.edge_wins / lead.n) * 100).toFixed(2) : '0.00'}%<span class="u">
-                {exact(lead?.edge_wins ?? 0)}/{exact(lead?.n ?? 0)}</span
-              >
-            </p>
+            <!-- SIDE-AWARE, OR NOT SHOWN. `edge_wins` counts UP moves, which
+                 are a sell's losing trades; see `$lib/live-win.js` (p14num-1). -->
+            {#if leadWin.known}
+              <p class="v">
+                {(leadWin.share * 100).toFixed(2)}%<span class="u">
+                  {exact(leadWin.wins)}/{exact(leadWin.n)}</span
+                >
+              </p>
+            {:else}
+              <p class="v" title={leadWin.why}>—<span class="u"> not served for a sell</span></p>
+            {/if}
           </div>
           <div class="keystat">
             <p class="k">Evidence</p>
@@ -7309,7 +7322,7 @@
         <p class="livetop-verdict {proved > 0 ? 'yes' : 'not-yet'}">
           {#if proved > 0}
             <b>{proved} of {liveTop.rows.length} have proved themselves.</b> They beat the evidence
-            bar of {bar.toFixed(2)} for this run, so they are real patterns rather than luck.
+            bar of {bar.toFixed(2)} for the run this heap belongs to, so they are real patterns rather than luck.
           {:else}
             <b>None have proved themselves yet.</b> Each needs an evidence score above
             <b>{bar.toFixed(2)}</b>, and the best so far is {leadT.toFixed(2)}. That bar rises as
@@ -7333,7 +7346,7 @@
             {@const t = Math.abs(Number(row.t_milli) || 0) / 1000}
             {@const move = Math.abs(Number(row.mean_milli_paisa) || 0) / 1000}
             {@const n = Number(row.n) || 0}
-            {@const wins = Number(row.edge_wins) || 0}
+            {@const win = liveWinShare(row)}
             <!-- Declared here and not beside the markup they describe: Svelte
                  requires `{@const}` to be the immediate child of a block. -->
             {@const decoded = decodeMaskWords(row.mask_words)}
@@ -7377,7 +7390,11 @@
               </div>
               <div class="liverow-facts">
                 <span><b>{exact(n)}</b> trades</span>
-                <span><b>{n > 0 ? Math.round((wins / n) * 100) : 0}%</b> won</span>
+                {#if win.known}
+                  <span><b>{Math.round(win.share * 100)}%</b> won</span>
+                {:else}
+                  <span title={win.why}>won: <b>not served</b></span>
+                {/if}
                 <span>fires on <b>{exact(row.hits)}</b> bars</span>
                 <span>evidence <b>{t.toFixed(2)}</b> of {bar.toFixed(2)}</span>
               </div>

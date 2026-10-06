@@ -454,6 +454,13 @@ fn one_walk_reproduces_all_three_separate_calls_byte_for_byte() {
         for (draws, seed, block) in [(1, 0, 1), (19, 11, 2), (101, 3, 7)] {
             let shared = evaluate_with_family_tests(&returns, draws, seed, block, BOUNDS);
             assert_eq!(shared, separately(&returns, draws, seed, block, BOUNDS));
+            // A block longer than the sample is refused by every entry point
+            // alike (D-1990), and the assertion above already compared those
+            // refusals; there is no verdict to unwrap.
+            if returns.first().is_some_and(|row| block > row.len()) {
+                assert!(shared.is_err(), "a block past the sample is refused");
+                continue;
+            }
             let shared = shared.unwrap();
             assert_eq!(
                 shared.romano_wolf(),

@@ -42,13 +42,25 @@
 
 // The same exception `crates/greeks` and `crate::significance` take, for the
 // reason §7 states in one breath: prices are paisa integers, and statistical
-// values keep full precision. The RETURN in this module is an `i64` of paisa
-// throughout; only the mean and the t-statistic are floating, and both are
-// statistics rather than money.
+// values keep full precision. Each trade's RETURN is an `i64` of paisa, and
+// `edge` accumulates its sums in paisa integers (`i128`).
+//
+// **This module is NOT float-free money.** `Edge` carries money as `f64`:
+// `mean_paisa`, `win_sum`, `loss_sum`, `adverse_sum` and `favourable_sum`, each
+// converted once from an exact paisa integer by `wide` (D-1173, whose bound is
+// one rounding above 2^53 paisa), and the payoff ratio divides two of those
+// `f64` paisa magnitudes. D-1173 sanctions those fields because `cli` persists
+// their IEEE bits, and §3 rule 8 forbids changing that row in place. This
+// comment and the reason below used to say "only the mean and t-statistic are
+// floating", which this file contradicted; crash-edge-pass20 CE-96, D-1958.
+// The allow is still module-wide: a NEW float price computation added here is
+// not linted, so review it as such.
 #![allow(
     clippy::float_arithmetic,
-    reason = "CLAUDE.md §7 keeps statistical values at full precision. Returns \
-              are paisa i64; only the mean and t-statistic are floating."
+    reason = "CLAUDE.md §7 keeps statistical values at full precision. Per-trade \
+              returns and the accumulators are paisa integers; the mean, the \
+              t-statistic and Edge's D-1173 money fields (paisa sums converted \
+              once to floating point) are floating."
 )]
 
 use indicators::Candle;
@@ -4615,10 +4627,38 @@ mod window_tests {
         }
     }
 
-    /// The sparse table is gone from the live path, not merely unused: its
-    /// doubling loop was the Θ(n log n) build and its tables the n·log n memory.
+    /// **A LONG BACKWARD QUERY IS ANSWERED ON EVERY SLICE LENGTH** (FB-01,
+    /// D-2669; found by the Fix Board thread). `BlockExtremes::of` stopped
+    /// doubling when the next span passed the length of the level BELOW, which
+    /// shrinks at every level, rather than the block count, so a backward query
+    /// whose middle run needed the top level answered `None` where a scan has
+    /// extremes. Every slice from 3 to 40 blocks now agrees with the scan.
     #[test]
-    fn forward_builds_no_power_of_two_table() {
+    fn a_backward_query_spanning_most_of_the_slice_is_answered() {
+        for blocks in 3..=40_usize {
+            let n = blocks * super::EXTREME_BLOCK;
+            let bars = wobble(n);
+            let mut window = WindowExtremes::new();
+            assert_eq!(window.over(&bars, 0, n - 1), scan(&bars, 0, n - 1));
+            for (lo, hi) in [(1, n - 2), (0, n - 2), (super::EXTREME_BLOCK - 1, n - 2)] {
+                assert_eq!(
+                    window.over(&bars, lo, hi),
+                    scan(&bars, lo, hi),
+                    "{blocks} blocks, backward [{lo}, {hi}]"
+                );
+            }
+        }
+    }
+
+    /// No PER-BAR power-of-two table is built (D-1170): the per-bar sparse
+    /// table's two `n·log₂ n` tables are gone. The one doubling table left is
+    /// [`super::BlockExtremes`] (D-1572), over 64-bar BLOCKS, and this measures
+    /// what that costs: every level together holds fewer pairs than there are
+    /// bars, where a per-bar table would hold `n·log₂ n`.
+    /// P5-03, D-2665: this used to grep for the old spellings only, so it
+    /// passed while the row it proves said no power-of-two table existed.
+    #[test]
+    fn forward_builds_no_per_bar_power_of_two_table() {
         let source = include_str!("outcome.rs");
         let live = source
             // Up to the first test MODULE: D-1410 put test-only items above it.
@@ -4626,11 +4666,34 @@ mod window_tests {
             .next()
             .expect("a source prefix");
         assert!(!live.contains("RangeExtremes"), "the sparse table is back");
-        assert!(
-            !live.contains("width.saturating_mul(2) <= n"),
-            "the doubling build is back"
-        );
         assert!(live.contains("WindowExtremes::new()"), "forward must slide");
+        for n in [1_usize, 63, 64, 65, 4_096, 65_536, 100_003] {
+            let bars = wobble(n);
+            let mut touched = 0_u64;
+            let blocks = super::BlockExtremes::of(&bars, &mut touched);
+            let base = blocks.levels.first().map_or(0, Vec::len);
+            assert_eq!(
+                base,
+                n.div_ceil(super::EXTREME_BLOCK),
+                "one pair per block at n={n}"
+            );
+            let pairs: usize = blocks.levels.iter().map(Vec::len).sum();
+            assert!(pairs <= n, "{pairs} pairs held for {n} bars");
+            // D-1464 (kept by D-1934): one level per power of two up to the
+            // longest MIDDLE run, `blocks - 2`, the deepest a query reads.
+            assert_eq!(
+                blocks.levels.len(),
+                base.checked_sub(2)
+                    .filter(|&m| m > 0)
+                    .map_or(1, |m| usize::try_from(m.ilog2()).expect("small") + 1),
+                "one level per power of two up to the longest middle run at n={n}"
+            );
+            assert_eq!(
+                touched,
+                u64::try_from(n).expect("small"),
+                "one pass at n={n}"
+            );
+        }
     }
 }
 

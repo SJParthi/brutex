@@ -110,3 +110,30 @@ function refusal(status, html, reason) {
     raw: html
   };
 }
+
+/**
+ * THE RECEIPT FACT THAT COUNTS EVERY FAILURE, SPELLED ONCE.
+ *
+ * `api::server::landed_answer` writes `("Failure diagnostics",
+ * done.failures.len())` and then at most five `Failed` rows
+ * (`done.failures.iter().take(5)`). The page reads this count to see how many
+ * reasons the server truncated. It used to read `Members failed`, a key the
+ * server renamed and no longer emits (its own test asserts the page does not
+ * contain it), so the count was always 0 and a run with six or more failures
+ * was reported as "no failure" for every silent instrument. P17-01.
+ */
+export const FAILURE_COUNT_FACT = 'Failure diagnostics';
+
+/**
+ * How many failure diagnostics the receipt says the run recorded, read from
+ * the first `FAILURE_COUNT_FACT` row. A receipt with no such row (a refusal
+ * carries no facts) counts 0: it named no failure.
+ *
+ * @param {{ k: string, v: string }[]} facts
+ * @returns {number}
+ */
+export function failureCount(facts) {
+  const raw = facts.find((f) => f.k === FAILURE_COUNT_FACT)?.v;
+  const parsed = Number(String(raw ?? '').replace(/[^0-9]/g, ''));
+  return Number.isFinite(parsed) ? parsed : 0;
+}

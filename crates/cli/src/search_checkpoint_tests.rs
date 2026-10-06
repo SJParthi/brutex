@@ -13,6 +13,16 @@ thread_local! {
     /// Armed by a test on its own thread, taken by the next publication on
     /// that thread and by nothing else.
     static PAYLOAD_LOCKED: RefCell<Option<PayloadHook>> = const { RefCell::new(None) };
+    /// Armed by a test, taken by the next publication on this thread once its
+    /// `complete` marker is visible to readers.
+    static MARKER_VISIBLE: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+}
+
+/// Called by `publish_inner` right after its marker becomes discoverable.
+pub(super) fn marker_visible() {
+    if let Some(hook) = MARKER_VISIBLE.with(|slot| slot.borrow_mut().take()) {
+        hook();
+    }
 }
 
 thread_local! {
@@ -269,6 +279,95 @@ fn a_dropped_search_journal_is_released_despite_a_duplicated_descriptor() -> Res
         "no writer is observed once every owner has dropped"
     );
     drop(child);
+    Ok(())
+}
+
+/// CE-34, D-1769: Finder's `.DS_Store` and an `AppleDouble` `._` file are
+/// passed over, and any other stray entry refuses BY NAME.
+#[test]
+fn os_litter_is_passed_over_and_a_stranger_is_named() -> Result<(), String> {
+    let scratch = Scratch::new().map_err(error)?;
+    let dir = scratch.0.join("litter");
+    fs::create_dir_all(dir.join(format!("{:016x}", 1))).map_err(error)?;
+    fs::write(dir.join(".DS_Store"), b"finder").map_err(error)?;
+    fs::write(dir.join("._0000000000000001"), b"appledouble").map_err(error)?;
+    let (next, ..) = discover(&dir)?;
+    assert_eq!(next, 2, "litter does not block the search");
+    // Litter by name but a DIRECTORY is not litter.
+    fs::create_dir(dir.join("._odd")).map_err(error)?;
+    let why = discover(&dir)
+        .err()
+        .ok_or("a directory is not passed over")?;
+    assert!(why.contains("\"._odd\""), "{why}");
+    fs::remove_dir(dir.join("._odd")).map_err(error)?;
+    fs::write(dir.join("notes.txt"), b"x").map_err(error)?;
+    let why = discover(&dir).err().ok_or("a stranger refuses")?;
+    assert!(why.contains("\"notes.txt\""), "{why}");
+    Ok(())
+}
+
+/// CE-3, D-1909: a completion marker cut short by a crash is an interrupted
+/// reservation. The newest whole checkpoint is `latest`, and the resume
+/// publishes the next sequence. A publication leaves no scratch marker.
+#[test]
+fn a_torn_completion_marker_is_an_interrupted_reservation() -> Result<(), String> {
+    // 0 only: a short NON-EMPTY marker is refused, not passed over
+    // (`a_short_nonempty_marker_still_refuses`, D-1934).
+    {
+        let kept = 0_u64;
+        let scratch = Scratch::new().map_err(error)?;
+        let mut journal = Journal::open(&scratch.0, "expression-search-v1", [12; 32])?;
+        journal.publish(b"valid old", 1024)?;
+        journal.publish(b"torn", 1024)?;
+        let newest = journal.directory.join("0000000000000002");
+        assert!(!newest.join("complete.writing").exists());
+        OpenOptions::new()
+            .write(true)
+            .open(newest.join("complete"))
+            .and_then(|marker| marker.set_len(kept))
+            .map_err(error)?;
+        drop(journal);
+        let mut reopened = Journal::open(&scratch.0, "expression-search-v1", [12; 32])?;
+        let latest = reopened
+            .latest(1024)?
+            .ok_or("the whole checkpoint is latest")?;
+        assert_eq!(latest.sequence, 1);
+        assert_eq!(latest.payload, b"valid old");
+        let (sequence, _) = reopened.publish(b"resumed", 1024)?;
+        assert_eq!(sequence, 3);
+        let resumed = reopened.latest(1024)?.ok_or("the resume is latest")?;
+        assert_eq!(resumed.payload, b"resumed");
+    }
+    Ok(())
+}
+
+/// What a reader saw of a checkpoint's payload.
+type Read = Result<Vec<u8>, String>;
+
+/// locks-3, D-1913: once a checkpoint's marker is discoverable, a reader of
+/// that checkpoint is never refused as busy by the publishing writer.
+#[test]
+fn a_discoverable_checkpoint_is_never_refused_as_busy() -> Result<(), String> {
+    let scratch = Scratch::new().map_err(error)?;
+    let mut journal = Journal::open(&scratch.0, "and-checkpoint-v1", [13; 32])?;
+    let seen: Rc<RefCell<Option<Read>>> = Rc::default();
+    let into = Rc::clone(&seen);
+    let base = scratch.0.clone();
+    MARKER_VISIBLE.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move || {
+            let read = Snapshot::open(&base, "and-checkpoint-v1", [13; 32])
+                .and_then(|snapshot| snapshot.ok_or_else(|| "namespace".to_owned()))
+                .and_then(|snapshot| snapshot.read(1, 1024))
+                .map(|saved| saved.payload);
+            *into.borrow_mut() = Some(read);
+        }));
+    });
+    journal.publish(b"visible", 1024)?;
+    let read = seen
+        .borrow_mut()
+        .take()
+        .ok_or("the hook ran once the marker was visible")?;
+    assert_eq!(read?, b"visible");
     Ok(())
 }
 

@@ -330,7 +330,12 @@ fn flat_spaces(b: &[u8], i: usize) -> Option<usize> {
 ///   `[A-Za-z0-9_]::flat` -> ` `, `[Ff]lat[ ]*\(` -> ` (`,
 ///   `[Ww]orst[ -][Cc]ase`, `[Ff]lat +NOUN s?` (the `notclaim` nouns),
 ///   `[Ff]lat +(JSON|json) object`, and
-///   `(exactly|books the trade|came out|row-major and|is charged|A) [Ff]lat`.
+///   `(exactly|books the trade|came out|row-major and|is charged|A|trades?( was| were)?) [Ff]lat`.
+///
+/// `trades? (was |were )?flat` is a trade's OUTCOME, zero profit and zero
+/// loss, not a cost (D-1930, carried here by D-1939): `crates/cli/src/pool.rs`
+/// says "every pooled trade was flat" and "Every pooled trade flat" of a
+/// never-won candidate, and both blocks were refused on the tree as committed.
 fn claim_scrub(text: &str) -> Vec<u8> {
     let b = text.as_bytes();
     let b = substitute(b, b" ", |b, i| {
@@ -373,6 +378,12 @@ fn claim_scrub(text: &str) -> Vec<u8> {
             b"row-major and",
             b"is charged",
             b"A",
+            b"trade",
+            b"trades",
+            b"trade was",
+            b"trade were",
+            b"trades was",
+            b"trades were",
         ]
         .iter()
         .filter(|lead| {
@@ -1004,11 +1015,18 @@ fn exact_line(wf: &str, needle: &str) -> bool {
 const BENCH_LINE: &str = "cargo bench --workspace --locked";
 const EMPTY_LINE: &str = "git ls-files --error-unmatch 'crates/*/benches/*.rs' > /dev/null";
 
+/// `prod` is the compiler's production closure (`source_scan prod-files`),
+/// read beside the `src/` glob: a `#[path]` file outside `src/` is production
+/// too (P1-08-04, D-2660, carried here by D-1939). `bench_keys` is
+/// `source_scan bench-keys` over every crate manifest and whether it passed
+/// (layer 2c, P1-08-02).
 fn gate14(
     repo: &dyn Repo,
     cover: &str,
     lexed: &Lexed,
     runs: [&str; 2],
+    prod: &[String],
+    bench_keys: (&str, bool),
     out: &mut Vec<String>,
 ) -> Result<bool, String> {
     let inv = repo.read(INVARIANTS)?;
@@ -1019,6 +1037,9 @@ fn gate14(
         .ls("crates/*.rs")?
         .into_iter()
         .filter(|f| f.contains("/src/") && !f.contains("/tests/") && !f.contains("/benches/"))
+        .chain(prod.iter().cloned())
+        .collect::<BTreeSet<String>>()
+        .into_iter()
         .collect();
     let mut nb = 0;
     // (crate, file, line), crate being the second `/` field of the path.
@@ -1035,7 +1056,7 @@ fn gate14(
     let ncr = repo.ls("crates/*/Cargo.toml")?.len();
     let nfield = cover.lines().filter(|l| !fields(l).is_empty()).count();
     out.push(format!(
-        "walked {} tracked source file(s) under crates/*/src/",
+        "walked {} tracked source file(s) under crates/*/src/ and in the production closure",
         files.len()
     ));
     out.push(format!(
@@ -1220,6 +1241,30 @@ fn gate14(
         bad = true;
     }
 
+    // layer 2c (P1-08-02, D-2660, carried here by D-1939). `harness = false`
+    // is not the only key that decides whether gate 8 measures a bench:
+    // `bench = false` on a [[bench]] makes `cargo bench --workspace` skip it,
+    // and so does a `required-features` it does not enable -- silently, exit
+    // 0, with this gate still counting the file. Read as TOML, every spelling.
+    out.push(String::new());
+    out.push("layer 2c: no [[bench]] is switched off for cargo bench".into());
+    let (keys, keys_ok) = bench_keys;
+    if keys_ok && lines(keys).iter().all(|l| l.is_empty()) {
+        out.push("  ok       no bench = false, no required-features, no inline bench array".into());
+    } else {
+        for l in lines(keys).into_iter().filter(|l| !l.is_empty()) {
+            out.push(format!("  REFUSED  {l}"));
+        }
+        if keys_ok {
+            out.push("  REFUSED  the bench-key scan printed a finding and passed".into());
+        } else {
+            out.push(
+                "  REFUSED  a [[bench]] is switched off, or a manifest could not be read".into(),
+            );
+        }
+        bad = true;
+    }
+
     // layer 5: gate 8 still runs what this gate counted, unconditionally
     // (`source_scan step-runs`), and as an exact line, so a `|| true` tail
     // cannot satisfy it.
@@ -1293,7 +1338,25 @@ fn run_gate(args: &[String], out: &mut Vec<String>) -> Result<bool, String> {
             out.extend(gate12_tokens(&Git)?);
             Ok(true)
         }
-        [cmd, cover, work] if cmd == "gate14" => {
+        [cmd, cover, work, st_prod, st_keys] if cmd == "gate14" => {
+            let prod_raw = read_work(work, "prod-closure")?;
+            if st_prod.trim() != "0" {
+                out.push("GATE 14: the production closure could not be resolved:".into());
+                for l in lines(&prod_raw).into_iter().filter(|l| l.starts_with("UNRESOLVED ")) {
+                    out.push(format!("  {l}"));
+                }
+                return Ok(false);
+            }
+            let prod: Vec<String> = lines(&prod_raw)
+                .into_iter()
+                .filter(|l| !l.is_empty())
+                .map(str::to_owned)
+                .collect();
+            if prod.is_empty() {
+                out.push("GATE 14: the production closure named no file.".into());
+                return Ok(false);
+            }
+            let keys = read_work(work, "bench-keys")?;
             let listing: Vec<String> = std::fs::read(format!("{work}/benches"))
                 .map_err(|e| format!("{work}/benches: {e}"))?
                 .split(|&c| c == 0)
@@ -1310,10 +1373,18 @@ fn run_gate(args: &[String], out: &mut Vec<String>) -> Result<bool, String> {
                 read_work(work, "runs-bench")?,
                 read_work(work, "runs-empty")?,
             ];
-            gate14(&Git, cover, &lexed, [&runs[0], &runs[1]], out)
+            gate14(
+                &Git,
+                cover,
+                &lexed,
+                [&runs[0], &runs[1]],
+                &prod,
+                (&keys, st_keys.trim() == "0"),
+                out,
+            )
         }
         _ => Err(
-            "usage: gates_bounds gate12-tokens | gate12 ALLOW RESOLVED | gate14 COVER WORKDIR"
+            "usage: gates_bounds gate12-tokens | gate12 ALLOW RESOLVED | gate14 COVER WORKDIR ST_PROD ST_BENCH_KEYS"
                 .into(),
         ),
     }
@@ -1476,6 +1547,14 @@ mod tests {
         );
         assert_eq!(s("a flat JSON object here"), "a  here");
         assert_eq!(s("came out flat; is charged Flat; rA flat"), "; ; r");
+        // A trade's outcome is not a cost (D-1930, D-1939).
+        assert_eq!(
+            s("every pooled trade was flat; Every pooled trade flat; trades were flat"),
+            "every pooled ; Every pooled ; "
+        );
+        assert!(!is_claim("every pooled trade was flat"));
+        assert!(!is_claim("Every pooled trade flat"));
+        assert!(is_claim("a trade costs flat time"));
         // Not rescanned: removing the inner phrase re-forms the outer one.
         assert_eq!(s("worst worst casecase"), "worst case");
         assert!(is_claim("worst worst casecase"));
@@ -1953,11 +2032,104 @@ mod tests {
         strings: &str,
         runs: [&str; 2],
     ) -> (bool, String) {
+        g14_full(tree, cover, code, strings, runs, &[], ("", true))
+    }
+
+    fn g14_full(
+        tree: &Fake,
+        cover: &str,
+        code: &str,
+        strings: &str,
+        runs: [&str; 2],
+        prod: &[String],
+        keys: (&str, bool),
+    ) -> (bool, String) {
         let listing: Vec<String> = tree.ls("crates/*/benches/*.rs").unwrap();
         let lexed = split_lexed(tree, &listing, code, strings).unwrap();
         let mut out = Vec::new();
-        let ok = gate14(tree, cover, &lexed, runs, &mut out).unwrap();
+        let ok = gate14(tree, cover, &lexed, runs, prod, keys, &mut out).unwrap();
         (ok, out.join("\n"))
+    }
+
+    #[test]
+    fn gate14_layer_2c_refuses_a_bench_switched_off_for_cargo_bench() {
+        // P1-08-02 (D-2660, D-1939): `bench = false` or `required-features`
+        // makes `cargo bench --workspace` skip the bench with exit 0.
+        let strings = "crates/core/benches/ratio.rs:5:C-01 measured\n";
+        let tree = fake(G14);
+        let (ok, log) = g14_full(
+            &tree,
+            COVER,
+            BENCH_CODE,
+            strings,
+            [PRESENT, PRESENT],
+            &[],
+            ("", true),
+        );
+        assert!(ok, "{log}");
+        assert!(
+            log.contains("layer 2c: no [[bench]] is switched off for cargo bench\n  ok"),
+            "{log}"
+        );
+        let found = "crates/core/Cargo.toml:6: [[bench]] ratio sets bench = false\n";
+        let (ok, log) = g14_full(
+            &tree,
+            COVER,
+            BENCH_CODE,
+            strings,
+            [PRESENT, PRESENT],
+            &[],
+            (found, false),
+        );
+        assert!(!ok);
+        assert!(
+            log.contains("  REFUSED  crates/core/Cargo.toml:6: [[bench]] ratio sets bench = false"),
+            "{log}"
+        );
+        let (ok, log) = g14_full(
+            &tree,
+            COVER,
+            BENCH_CODE,
+            strings,
+            [PRESENT, PRESENT],
+            &[],
+            ("", false),
+        );
+        assert!(!ok);
+        assert!(log.contains("a manifest could not be read"), "{log}");
+    }
+
+    #[test]
+    fn gate14_reads_a_claim_in_a_production_file_outside_src() {
+        // P1-08-04 (D-2660, D-1939): a `#[path]` file outside `src/` is
+        // production, and its cost claim needs a row.
+        let strings = "crates/core/benches/ratio.rs:5:C-01 measured\n";
+        let tree = fake(&[G14, &[("crates/cli/stamp.rs", "/// O(1)\nfn s() {}\n")]].concat());
+        let (ok, log) = g14_full(
+            &tree,
+            COVER,
+            BENCH_CODE,
+            strings,
+            [PRESENT, PRESENT],
+            &[],
+            ("", true),
+        );
+        assert!(ok, "{log}");
+        let prod = vec!["crates/cli/stamp.rs".to_owned()];
+        let (ok, log) = g14_full(
+            &tree,
+            COVER,
+            BENCH_CODE,
+            strings,
+            [PRESENT, PRESENT],
+            &prod,
+            ("", true),
+        );
+        assert!(!ok);
+        assert!(
+            log.contains("  REFUSED  crates/cli — 1 cost claim(s), no row in the table"),
+            "{log}"
+        );
     }
 
     fn g14(tree: &Fake, cover: &str) -> (bool, String) {
