@@ -78,3 +78,9 @@ At $3.5 per point that estimates 35.9% of this window. Tickvault was $322.43
 (+$9.07 since 07:31). Tickvault spends less than it did at calibration, so that
 estimate leans high; the conservative number stands. Weekly extrapolation: about
 37%. All 13 workers were connected. Next poll at 08:10 (trig_01AhHDB3ZyczWMxNVvnUG8Ss).
+
+How to read the "not allowed" clause in the poll triggers (07:58): every session has
+read seven_day/allowed_warning since at least 07:31. That is the weekly pace warning,
+and the WEEKLY GUARD above handles it, because the owner said to run everything. An
+immediate PAUSE still follows from a five_hour warning, from any status "rejected",
+or from the 5-hour estimate reaching 60%.
