@@ -500,7 +500,15 @@ fn walk_back(
     // read as four bad lines. D-1320.
     let mut overlong = false;
 
-    while pos > 0 {
+    // A BOUNDED NUMBER OF PASSES, NOT A COMPARISON (D-2084). One per block,
+    // plus one so a budget that cuts the LAST block short still comes round to
+    // refuse the rest as `Stopped`. `while pos > 0` let one mutant, `>=`, spin
+    // forever at `pos == 0` reading nothing, so no test could fail on it before
+    // Gate 18's timeout; a range cannot be mutated into an endless one.
+    for _ in 0..len.div_ceil(READ_BLOCK).saturating_add(1) {
+        if pos == 0 {
+            break;
+        }
         // WHAT IS LEFT OF THE BUDGET, and the block is cut to it. Checking the
         // budget and then reading a whole block read up to `READ_BLOCK - 1`
         // bytes past `max_scan_bytes`, which the crate root says a query never
@@ -533,10 +541,10 @@ fn walk_back(
             }
         }
 
+        // Every byte from the last down to the first, once: a range, for the
+        // same reason as the outer loop (D-2084).
         let mut end = work.len();
-        let mut at = end;
-        while at > 0 {
-            at = at.saturating_sub(1);
+        for at in (0..work.len()).rev() {
             if work.get(at) != Some(&b'\n') {
                 continue;
             }
@@ -572,8 +580,10 @@ fn walk_back(
     }
     // The first line of the file has no newline before it.
     //
-    // EXHAUSTED, not merely stopped. This runs only after `while pos > 0` ended,
-    // so every byte of this file has been read. Whether anything OLDER exists is
+    // EXHAUSTED, not merely stopped. This runs only once `pos` reached 0: every
+    // pass reads a block, returns, or ends the loop there, and the pass count
+    // covers every block plus the one a budget cut needs, so every byte of this
+    // file has been read. Whether anything OLDER exists is
     // a question about the NEXT file, and `walked` answers it by looking rather
     // than by assuming the worst.
     if !drop_fragment && !overlong && take_line(&carry, limit, query, out) {
@@ -1826,6 +1836,48 @@ mod tests {
         assert_eq!(out.records.len(), 1, "the record is found: {out:?}");
         assert_eq!(out.malformed, 0, "nothing was overlong: {out:?}");
         assert!(out.reached_oldest);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **THE WALK READS EVERY BYTE OF A FILE OF ANY LENGTH, AND STOPS.**
+    /// G18-rest-30, D-2084.
+    ///
+    /// Lengths 0, 1, one under a block, a block, one over, and three blocks:
+    /// a file of newlines alone is read to its first byte and holds nothing,
+    /// and the same file led by one record finds it as the oldest line. A
+    /// budget that cuts the LAST block short is still refused as a cap, which
+    /// is the pass the block count adds one for.
+    #[test]
+    fn every_length_is_read_to_its_first_byte_and_a_cut_last_block_is_a_cap() {
+        let dir = scratch("every-length");
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let line = sink_lines("every-length-src", 1).remove(0);
+        let block = usize::try_from(READ_BLOCK).expect("a block fits memory");
+        for length in [0, 1, block - 1, block, block + 1, 3 * block] {
+            std::fs::write(current_path(&dir), vec![b'\n'; length]).expect("write");
+            let out = tail(&dir, 1, &Query::last(MAX_LIMIT));
+            assert_eq!(out.bytes_read, length as u64, "{length}: every byte");
+            assert!(out.records.is_empty() && out.malformed == 0, "{length}");
+            assert!(out.reached_oldest, "{length}");
+            if length < line.len() {
+                continue;
+            }
+            let mut file = line.clone();
+            file.resize(length, b'\n');
+            std::fs::write(current_path(&dir), &file).expect("write");
+            let out = tail(&dir, 1, &Query::last(1));
+            assert_eq!(out.records.len(), 1, "{length}: the first line is found");
+            assert_eq!(out.bytes_read, length as u64, "{length}");
+            assert!(out.reached_oldest && !out.hit_scan_cap, "{length}");
+        }
+
+        let length = block + 10;
+        std::fs::write(current_path(&dir), vec![b'\n'; length]).expect("write");
+        let budget = READ_BLOCK + 5;
+        let out = tail(&dir, 1, &Query::last(MAX_LIMIT).scanning_at_most(budget));
+        assert_eq!(out.bytes_read, budget, "the budget, exactly");
+        assert!(out.hit_scan_cap, "the cut last block is a cap: {out:?}");
+        assert!(!out.reached_oldest, "five bytes were never read");
         let _ignored = std::fs::remove_dir_all(&dir);
     }
 

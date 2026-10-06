@@ -63418,3 +63418,30 @@ Two tests hold the result:
 
 **Rejected.** A counter guard on each loop. Every mutation of the guard
 itself leaves behaviour unchanged, so those mutants would be MISSED.
+
+### D-2084 — The telemetry tail walk is bounded by a pass count, not by `pos > 0` — 2026-10-06
+
+**What was observed.** The coordinator's re-run on 3b18a82, with CI's flags,
+reported `TIMEOUT crates/telemetry/src/tail.rs:503:15: replace > with >= in
+walk_back`. This mutant was in run 1283's plan (shard 58), but cargo-mutants
+annotates only MISSED mutants, so it never appeared in the survivor list.
+
+`pos` is a `u64`, so `pos >= 0` is always true. Once `pos` reached 0, each
+pass read nothing and spent no budget, and the walk looped forever. No test
+could fail on it before the timeout. The inner `while at > 0` with
+`at.saturating_sub(1)` has the same shape.
+
+**Decided.** The outer loop is
+`for _ in 0..len.div_ceil(READ_BLOCK).saturating_add(1)`, and it breaks once
+`pos == 0`. That is one pass per block, plus one so that a budget which cuts
+the last block short still comes round to return `Stopped` with the cap set.
+The inner scan is `for at in (0..work.len()).rev()`, which visits the same
+bytes in the same order. A range cannot be mutated into an endless loop.
+
+`tail::tests::every_length_is_read_to_its_first_byte_and_a_cut_last_block_is_a_cap`
+(G18-rest-30) pins two things:
+- Files of 0, 1, `READ_BLOCK − 1`, `READ_BLOCK`, `READ_BLOCK + 1` and
+  `3 × READ_BLOCK` bytes are read to their first byte. Each is tried once as
+  newlines only and once led by one record, which must be found.
+- A budget of `READ_BLOCK + 5` over a file of `READ_BLOCK + 10` bytes stops
+  at the cap, with five bytes unread.
