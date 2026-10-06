@@ -31,3 +31,10 @@ CARGO_BUILD_JOBS=2 cargo mutants --baseline skip --jobs 2 --timeout 300 --cap-li
   --exclude-re '<the 15 already done above>' --test-tool nextest --cargo-test-arg=--lib -- -E 'test(/<new test names>/)'
 ```
 Then: clippy -D warnings; merge origin/final/all-fixes (merge commit); fmt, clippy, cli tests as non-root, static gates; push; write RESULT-cli-b.md.
+
+## Added during pause (coordinator, 04:39 UTC): 10 TIMEOUT cases, see timeouts-cli-b.md
+These are not started yet. Plan on RESUME:
+- **ordered.rs, `Turns::ready`.** Four of these mutants are already covered by the pure-rule test `a_lane_never_waits_on_its_own_slot`, which fails fast. These are false (89), the `||` (95/96), and `-` → `+` or `/` (96:75). Note the own-slot `||` was removed in abda922, so line numbers shift.
+- **ordered.rs, `update` → (), `Finished::drop` → (), delete `!` in `turn` (212).** Each needs a fan-out test with a BOUNDED wait: run it on a thread, take its result with `recv_timeout`, assert the order. A deadline miss is a failure, not a hang.
+- **admission_v4 2745 and finalization_v4 2469, `+=` → `*=`.** Restructure the exact-prefix loop to a bounded `for index in 0..record_count` (or a `zip`), so the progress no single compound-assignment mutation can stall.
+- Prove each with CI's flags plus `--build-timeout 300`: caught or unviable, zero timeouts.
