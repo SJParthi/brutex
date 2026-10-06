@@ -48,7 +48,8 @@ use runner::portfolio::{
 use store::path::YearMonth;
 
 use crate::execution_capability::{
-    ExecutionCapabilityCompletionV1, ExecutionCapabilityLedger, exact_execution_law_digest_v1,
+    ExecutionCapabilityCompletionV1, ExecutionCapabilityLedger, TrainingAttestationsV1,
+    exact_execution_law_digest_v1,
 };
 use crate::population::{InstrumentFamilyV1, PopulationRowV1, TradeDirectionV1};
 use crate::selection::SelectedEntryV1;
@@ -282,6 +283,8 @@ pub fn prepare_global_replay_v1(
     runtime
         .try_reserve_exact(expected_streams)
         .map_err(|why| format!("global replay stream allocation refused: {why}"))?;
+    // One TRAINING attestation per shared slice, not per stream (D-1838).
+    let mut attestations = TrainingAttestationsV1::new();
 
     for (selection_index, selection) in selections.iter().enumerate() {
         for (rank_zero, entry) in selection.top_twenty_five().iter().copied().enumerate() {
@@ -313,6 +316,7 @@ pub fn prepare_global_replay_v1(
                 witness,
                 execution,
                 &manifest,
+                &mut attestations,
             )?;
             runtime.push(built);
         }
@@ -366,15 +370,16 @@ fn require_exact_witness_row(
     clippy::too_many_arguments,
     reason = "each argument is a separately checked selection or execution authority term"
 )]
-fn reconstruct_stream(
+fn reconstruct_stream<'w>(
     selection_index: usize,
     selection: &SelectionReceiptV3,
     rank: u16,
     entry: SelectedEntryV1,
     stream_ordinal: u16,
-    witness: &SelectedReplayWitnessV1<'_>,
+    witness: &SelectedReplayWitnessV1<'w>,
     execution: &mut ExecutionCapabilityLedger,
     manifest: &ReplayManifestV1,
+    attestations: &mut TrainingAttestationsV1<'w>,
 ) -> Result<RuntimeStream, GlobalReplayRefusal> {
     let row = require_exact_witness_row(selection, rank, entry, witness)?;
     let capability = execution
@@ -411,6 +416,7 @@ fn reconstruct_stream(
         witness.training_series,
         witness.training_column,
         witness.training_run,
+        attestations,
     )?;
     let universe = resolved
         .replay_selected_universe(

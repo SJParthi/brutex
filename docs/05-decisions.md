@@ -63544,3 +63544,36 @@ closed mask attests nothing. No stored byte, digest or identity changes.
 counts two attestations for a population of 98 closed masks (196 through the
 per-mask door) and requires a second run to produce identical rows.
 
+### D-1838 — Global Replay V1 and V2 attest each shared TRAINING slice once — 2026-10-04
+
+**What was found (W3-runner2-2; left stated in `docs/06-limits.md` under
+D-0741 as "the remaining per-call callers").** Global Replay V1
+(`ExecutionCapabilityV1::reconstruct_selected`) and V2
+(`reconstruct_stream_v2`) priced each of up to 200 streams through
+`evaluate_training_grid_attested`, which re-hashes every TRAINING bar,
+re-validates the column and rebuilds the slice facts before pricing: O(E) per
+stream even when streams share one population side, and so one resolution and
+one borrowed slice.
+
+**The change.** `execution_capability::TrainingAttestationsV1` holds one
+`AttestedTrainingV1` per key — the resolution digest plus the address and
+length of the borrowed instrument, feed, commit, bars and column, the calendar
+digest and the horizon — and prices every stream with `evaluate_with_attested`.
+Both replays build one cache before their stream loop and pass it to every
+stream; `reconstruct_selected` takes it as a parameter. A key names the very
+same borrowed bytes, so equal content at another address is attested again
+rather than trusted by value. A hit is one hash-map probe, expected O(1). Every
+grid, refusal and stored byte is unchanged: the cache answers exactly as
+`attest_training` followed by `evaluate_with_attested`, which is what the
+per-call door is. Each stream's own grid evaluation and OOS replay remain,
+because each is that stream's own run.
+
+**What it proves.**
+`cli::execution_disposition_v2::v2_tests::a_replay_attests_each_shared_training_slice_once`
+prices 25 long and 25 short streams over one slice with one attestation per
+side (50 through the per-call door), requires every answer and refusal to
+equal the per-call door's, and attests again for an equal column or equal bars
+at another address.
+`cli::execution_disposition_v2::v2_tests::both_global_replays_price_their_streams_through_one_attestation_cache`
+requires both replays to hold one cache across their stream loop and neither
+to call the per-call door.

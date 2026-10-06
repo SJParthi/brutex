@@ -59,7 +59,7 @@ use runner::portfolio::{
 use runner::topn::RankingPolicyV1;
 
 use crate::admission_store::{AdmissionCompletionReceiptV1, AdmissionDecisionRecordV1};
-use crate::execution_capability::exact_execution_law_digest_v1;
+use crate::execution_capability::{TrainingAttestationsV1, exact_execution_law_digest_v1};
 use crate::execution_disposition_v2::{
     ExecutionDispositionLedgerV2, ExecutionDispositionTagV2, ReclassifiedExecutionDispositionV2,
 };
@@ -3095,6 +3095,8 @@ pub fn prepare_global_replay_v2(
     streams
         .try_reserve_exact(MAX_STREAMS)
         .map_err(|why| format!("global replay V2 stream allocation refused: {why}"))?;
+    // One TRAINING attestation per shared slice, not per stream (D-1838).
+    let mut attestations = TrainingAttestationsV1::new();
     for (selection_index, selection_authority) in selection_authorities.iter_mut().enumerate() {
         let selection = selection_authority.receipt().clone();
         for (rank_zero, entry) in selection.top_twenty_five().iter().copied().enumerate() {
@@ -3127,6 +3129,7 @@ pub fn prepare_global_replay_v2(
                 execution,
                 &manifest,
                 selection_authority,
+                &mut attestations,
             )?);
         }
     }
@@ -3143,16 +3146,17 @@ pub fn prepare_global_replay_v2(
     clippy::too_many_lines,
     reason = "every argument is a separately checked Selection V4 or Execution V2 authority term"
 )]
-fn reconstruct_stream_v2(
+fn reconstruct_stream_v2<'w>(
     selection_index: usize,
     selection: &SelectionReceiptV4,
     rank: u16,
     entry: SelectedEntryV1,
     stream_ordinal: u16,
-    witness: &SelectedReplayWitnessV2<'_>,
+    witness: &SelectedReplayWitnessV2<'w>,
     execution: &mut ExecutionDispositionLedgerV2,
     manifest: &GlobalReplayManifestV2,
     selection_authority: &mut ReplaySelectionAuthorityV2,
+    attestations: &mut TrainingAttestationsV1<'w>,
 ) -> Result<VerifiedReplayStreamV2, GlobalReplayRefusalV2> {
     let live_joined = selection_authority.joined_row(entry.family(), entry.row_sequence())?;
     if live_joined != witness.joined_row {
@@ -3242,8 +3246,9 @@ fn reconstruct_stream_v2(
     }
     parameters.require_column(witness.training_column)?;
     let resolved = parameters.reconstruct_grid(witness.training_series)?;
-    let evaluated = resolved
-        .evaluate_training_grid_attested(
+    let evaluated = attestations
+        .evaluate(
+            &resolved,
             witness.training_series,
             witness.training_column,
             parameters.horizon(),
