@@ -499,6 +499,15 @@ pub(crate) fn slow_symbol(symbol: Option<&str>) {
     SLOW_SYMBOL.with(|slow| *slow.borrow_mut() = symbol.map(str::to_owned));
 }
 
+/// Whether the test seam holds `symbol` back: exactly the named symbol, and
+/// nothing when no symbol is named. A function of its own so its choice is
+/// asserted directly (G18-cli-a-02, D-2003): the ordering test passes whichever
+/// month is slow, so it could not see the seam slow the WRONG months.
+#[cfg(test)]
+fn held_back(slow: Option<&str>, symbol: &str) -> bool {
+    slow == Some(symbol)
+}
+
 /// One chunk of at most the rayon pool's width, in four phases, so that
 /// everything durable happens in INPUT order whatever order the threads finish
 /// in (GAP13-13, D-1701).
@@ -560,7 +569,7 @@ fn sweep_chunk(root: &std::path::Path, chunk: &[&Held], min_hits: u64, commit: &
         .map(|staged| {
             let (p, attempt) = staged?;
             #[cfg(test)]
-            if slow.as_deref() == Some(p.held.symbol.as_str()) {
+            if held_back(slow.as_deref(), p.held.symbol.as_str()) {
                 std::thread::sleep(std::time::Duration::from_millis(300));
             }
             sweep_prepared(p, attempt)
