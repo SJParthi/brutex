@@ -63400,3 +63400,29 @@ identical refusals for an absent ordinal and a foreign attestation;
 does the same for the later period; `an_expression_replay_refuses_a_forged_cell`
 refuses a forged cell on the traded and the empty-walk path.
 
+### D-1832 — Delete Search Lineage V2 and V3, which no run ever called — 2026-10-03
+
+**What was found (W2-cli1-2, W2-cli1-3).** D-1631 stated that
+`anchored_search_lineage_v2` and `anchored_search_lineage_v3` rescan their
+whole files on every append, rehash every file on each lookup and do not roll
+a failed write back, and left all three because nothing calls them. The rule
+for this audit is that nothing stays documented only.
+
+**What was checked before deleting.** A module that reads stored data may not
+be deleted while that data can exist. `git log -S "anchored_search_lineage_v2::"`
+and `-S "anchored_search_lineage_v3::"` over `crates/` find no commit, ever,
+in which code outside the two files named either module, and on c97ff00 no
+file outside them names either. Both were compiled outside tests only under
+`allow(dead_code)` / `expect(dead_code)`. No run could therefore have written
+a V2 or V3 lineage file, so no stored file loses its only reader. No test
+outside the two files and no invariant row names them.
+
+**The decision.** Both files are deleted with their `mod` lines and their two
+Gate 11 rule-3 allowlist entries. `runner::validate`'s V2 and V3 projections
+stay: they are public items of another crate. The D-1631 limits section now
+records the removal. V4, the live lineage, is unchanged. This reuses the
+unmerged WIP commit e0ced8a (numbered D-1830 there), re-checked on c97ff00.
+
+**What it changes.** About 5,100 lines of dead code and their tests are gone.
+No output, digest, format or run identity moves.
+

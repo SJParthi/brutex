@@ -96,24 +96,6 @@ mod results_report_tests;
 #[cfg(test)]
 mod screen_policy_tests;
 
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "the bounded Step-3 lineage component remains crate-private until its typed Admission/Finalization consumer exists"
-    )
-)]
-mod anchored_search_lineage_v2;
-
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the version-separated V3 search lineage remains crate-private until Population Admission V3 consumes it"
-    )
-)]
-mod anchored_search_lineage_v3;
-
 mod anchored_search_lineage_v4;
 
 #[cfg_attr(

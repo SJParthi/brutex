@@ -13437,7 +13437,8 @@ the next line; `scan` begins `self.receipts.clear()` (or `.audits`) and
 a `try_reserve` against the record count it has just measured from the
 file length. The map is genuinely sized ZERO at the construction site --
 the file has not been read -- which is `api/trades.rs`'s reason one
-layer down. Traced individually: anchored_search_lineage_v2/v3/v4,
+layer down. Traced individually: anchored_search_lineage_v4 (v2 and v3 were
+deleted by D-1832),
 candidate_universe, execution_v3, execution_v4, population_admission_v2,
 population_admission_v3, population_base_evidence_ledger_v2,
 population_finalization_v2, population_finalization_v3, population_v5,
@@ -14887,23 +14888,13 @@ pass over the bars at a once-per-report boundary, O(bars).
   `indexmap::MAX_CATALOGUE_BYTES`.
 ## Search Lineage V2 and V3 rescan on every append, and are dead — D-1631, 3 October 2026
 
-`anchored_search_lineage_v2` and `anchored_search_lineage_v3` are compiled
-outside tests only under `allow(dead_code)` / `expect(dead_code)`; nothing in
-a production path calls them. Stated so the cost is not recorded only in
-their module docs:
-
-- **Append is O(file bytes + pairs).** `append_completion` rehashes the
-  Completion file and ends in `self.scan()`, which rebuilds the receipt index
-  from every pair. Cumulative cost over N appends is Θ(N²).
-- **Lookup is O(file bytes).** V2's `structural_receipt` hashes all three
-  files through `require_unchanged`; V3's lookup calls it twice.
-- **A failed write is not rolled back.** `append_raw` is `seek(End) +
-  write_all`. A short write leaves a ragged tail every later open refuses.
-  The live V4 ledger rolls back and recovers a lone NIFTY member (D-1620);
-  V2 and V3 do not.
-
-These are not fixed because no run reaches them. A change that gives either
-module a caller must port D-1620 and restate this section.
+**Removed by D-1832.** The two modules this section described were deleted:
+neither ever had a caller outside its own tests (`git log -S` over `crates/`
+finds no commit that names `anchored_search_lineage_v2::` or `_v3::`), so no
+run could have written a V2 or V3 lineage file and no stored file loses its
+reader. Their whole-file rescan per append, whole-file hash per lookup and
+unrolled-back `append_raw` no longer exist in the tree. The live lineage is
+V4, which rolls a failed write back (D-1620).
 
 ## A single-stop search re-verifies its whole acknowledged history on every launch — D-1633, 3 October 2026
 
