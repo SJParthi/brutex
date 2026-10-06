@@ -1196,8 +1196,8 @@ mod tests {
             .open(src.join("old.svelte"))
             .and_then(|file| file.set_modified(long_ago))
             .expect("an old source");
-        let built = shell.join(BUILD_DIR);
-        let build = Build::read_bounded(&shell, Some(built.as_path()), 0);
+        let bundle = shell.join(BUILD_DIR);
+        let build = Build::read_bounded(&shell, Some(bundle.as_path()), 0);
         let Build::Unchecked { ref why } = build else {
             panic!("a walk stopped at once decided nothing: {build:?}");
         };
@@ -1210,7 +1210,7 @@ mod tests {
             build.note()
         );
         assert_eq!(
-            Build::read_bounded(&shell, Some(built.as_path()), 100),
+            Build::read_bounded(&shell, Some(bundle.as_path()), 100),
             Build::Serving,
             "the same tree walked whole is fresh"
         );
@@ -1230,8 +1230,8 @@ mod tests {
                 std::fs::create_dir_all(&locked).expect("mkdir");
                 std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
                     .expect("chmod");
-                let built = shell.join(BUILD_DIR);
-                let build = Build::read_bounded(&shell, Some(built.as_path()), 100);
+                let bundle = shell.join(BUILD_DIR);
+                let build = Build::read_bounded(&shell, Some(bundle.as_path()), 100);
                 let _restored =
                     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755));
                 let Build::Unchecked { ref why } = build else {

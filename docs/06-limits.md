@@ -15722,3 +15722,17 @@ re-verifies and unstamps; the binary already linked keeps the stamp. Not
 closed here: closing it needs a check after linking (a digest of the verified
 blob set beside the stamp, re-verified by CI and the launcher), which is not
 built. conc:cli3-2.
+
+## Slow readers and interim responses — D-3688, D-3689, 6 October 2026
+
+- **A reader that takes nothing for one head timeout is cut.** Since D-3689
+  a connection whose writes return `Pending` for `HEAD_READ_TIMEOUT` with no
+  progress is failed and its slot freed. A reader that takes any bytes inside
+  each timeout is never cut, so a deliberately slow but live reader (one byte
+  per nine seconds) can still hold a slot for as long as its response lasts.
+  That is bounded by the response's length, not by a clock, and is not
+  measured.
+- **`100 Continue` no longer restarts the head clock (D-3688).** Only a 1xx
+  status line is recognised, by its first bytes; a final response written in
+  the same buffer after an interim would not re-arm the clock either. Hyper
+  writes the interim on its own, so that case is not reached. Not measured.

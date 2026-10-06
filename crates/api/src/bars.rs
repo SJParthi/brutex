@@ -684,36 +684,6 @@ enum Behind {
     Bar(Bar),
 }
 
-/// Which stored value a change was measured against.
-#[derive(Clone, Copy)]
-enum Base {
-    Close,
-    OpenInterest,
-}
-
-/// Why a change against a non-positive previous value is withheld: ZERO and
-/// NEGATIVE are different facts. A zero close or open interest is a real zero;
-/// a negative one is a corrupt stored value (a store read does not validate
-/// prices), and both were reported as "is zero" (gap-audit #13, D-3685).
-const fn non_positive_base(base: i64, of: Base) -> &'static str {
-    match (of, base == 0) {
-        (Base::Close, true) => "previous_close_zero",
-        (Base::Close, false) => "previous_close_negative",
-        (Base::OpenInterest, true) => "previous_oi_zero",
-        (Base::OpenInterest, false) => "previous_oi_negative",
-    }
-}
-
-/// Folds the change columns over one file's records, IN THE ORDER WRITTEN.
-///
-/// `behind` is what precedes the first slot. A `None` slot is a record that
-/// would not read: it yields no row, and the row after it says
-/// `previous_unreadable` rather than measuring across the gap against whatever
-/// read before it.
-///
-/// `crate::server::basis_points` is called rather than re-implemented: it rounds
-/// half away from zero and returns a named refusal, and a second spelling of
-/// that arithmetic would drift the first time either was touched.
 fn with_change(behind: Behind, rows: Vec<Option<Bar>>) -> Vec<WindowBar> {
     let mut out = Vec::with_capacity(rows.len());
     let mut previous = behind;
@@ -728,7 +698,11 @@ fn with_change(behind: Behind, rows: Vec<Option<Bar>>) -> Vec<WindowBar> {
             Behind::Bar(before) => match crate::server::basis_points(before.close, bar.close) {
                 Ok(bps) => (Some(bps), ""),
                 Err(crate::server::Unknown::Overflow) => (None, "overflow"),
-                Err(_) => (None, non_positive_base(before.close, Base::Close)),
+                // ZERO AND NEGATIVE ARE DIFFERENT FACTS (gap-audit #13, D-3685):
+                // a zero close is a real zero, a negative one a corrupt stored
+                // value, and both were called "is zero".
+                Err(_) if before.close == 0 => (None, "previous_close_zero"),
+                Err(_) => (None, "previous_close_negative"),
             },
         };
         // OPEN INTEREST HAS A NULL AND A REAL ZERO, and they are not the same
@@ -746,10 +720,8 @@ fn with_change(behind: Behind, rows: Vec<Option<Bar>>) -> Vec<WindowBar> {
                     match crate::server::basis_points(before.open_interest, bar.open_interest) {
                         Ok(bps) => (Some(bps), ""),
                         Err(crate::server::Unknown::Overflow) => (None, "overflow"),
-                        Err(_) => (
-                            None,
-                            non_positive_base(before.open_interest, Base::OpenInterest),
-                        ),
+                        Err(_) if before.open_interest == 0 => (None, "previous_oi_zero"),
+                        Err(_) => (None, "previous_oi_negative"),
                     }
                 }
             }

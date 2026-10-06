@@ -18224,6 +18224,18 @@ fn interim(bytes: &[u8]) -> bool {
     bytes.starts_with(b"HTTP/1.1 1") || bytes.starts_with(b"HTTP/1.0 1")
 }
 
+/// [`interim`] for a vectored write: judged by its first non-empty slice,
+/// which is where the status line begins. One slice looked at in practice;
+/// hyper's vectored writes carry at most a few (D-3688).
+fn interim_vectored(bufs: &[std::io::IoSlice<'_>]) -> bool {
+    for slice in bufs {
+        if !slice.is_empty() {
+            return interim(slice);
+        }
+    }
+    false
+}
+
 impl tokio::io::AsyncWrite for HeadDeadline {
     fn poll_write(
         mut self: std::pin::Pin<&mut Self>,
@@ -18245,12 +18257,7 @@ impl tokio::io::AsyncWrite for HeadDeadline {
     ) -> std::task::Poll<std::io::Result<usize>> {
         let this = &mut *self;
         let written = std::pin::Pin::new(&mut this.io).poll_write_vectored(cx, bufs);
-        if matches!(written, std::task::Poll::Ready(Ok(n)) if n > 0)
-            && !bufs
-                .iter()
-                .find(|slice| !slice.is_empty())
-                .is_some_and(|slice| interim(slice))
-        {
+        if matches!(written, std::task::Poll::Ready(Ok(n)) if n > 0) && !interim_vectored(bufs) {
             this.rearm();
         }
         this.write_progress(cx, written)
@@ -18666,13 +18673,18 @@ mod head_deadline_tests {
                 delivered(&wrapped),
                 "plain write of an interim keeps it delivered"
             );
-            wrapped
+            let wrote = wrapped
                 .write_vectored(&[
                     std::io::IoSlice::new(&[]),
                     std::io::IoSlice::new(interim_line),
                 ])
                 .await
                 .unwrap();
+            assert_eq!(
+                wrote,
+                interim_line.len(),
+                "the whole interim line is written"
+            );
             assert!(
                 delivered(&wrapped),
                 "vectored write of an interim keeps it delivered"
@@ -18685,13 +18697,20 @@ mod head_deadline_tests {
             "a final response re-arms the head clock"
         );
         wrapped.state = super::HeadState::Delivered;
-        wrapped
+        let wrote = wrapped
             .write_vectored(&[std::io::IoSlice::new(b"HTTP/1.1 200 OK\r\n\r\n")])
             .await
             .unwrap();
+        assert_eq!(wrote, 19);
         assert!(!delivered(&wrapped), "on the vectored path too");
         assert!(!super::interim(b"HTTP/1.1 2"));
         assert!(!super::interim(b""));
+        assert!(!super::interim_vectored(&[]));
+        assert!(!super::interim_vectored(&[std::io::IoSlice::new(&[])]));
+        assert!(!super::interim_vectored(&[
+            std::io::IoSlice::new(b"HTTP/1.1 200 OK"),
+            std::io::IoSlice::new(b"HTTP/1.1 100 Continue"),
+        ]));
     }
 
     /// **THE CAP IS EXACT: `cap` SLOTS, NOT `cap + 1`.** A slot is taken only
