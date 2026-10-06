@@ -1268,11 +1268,16 @@ fn irregular_verdict(session: crate::calendar::Session, minute: u32) -> Option<D
     // would saturate to a minute outside every window and after the first
     // open, which is the after-close answer.
     let minute = u16::try_from(minute).unwrap_or(u16::MAX);
-    if session.expects(minute) {
-        return None;
-    }
+    // THE OPEN IS ASKED FIRST. A minute below the first window's open is in
+    // no window, so asking it before `expects` changes no answer -- and it
+    // puts the open minute itself in front of the strict `<`, where `<=` would
+    // drop the session's first bar. Asked after `expects`, that minute had
+    // already returned `None`, and `<` and `<=` were one program (D-2076).
     if session.windows.first().is_some_and(|w| minute < w.from) {
         return Some(DropReason::BeforeSessionOpen);
+    }
+    if session.expects(minute) {
+        return None;
     }
     Some(DropReason::AtOrAfterSessionClose)
 }

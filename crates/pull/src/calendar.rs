@@ -1399,11 +1399,15 @@ impl Calendar {
         // saturated at `i64::MAX` first and then stepped back, so a one-day
         // calendar on `i64::MAX` reported its last day as `i64::MAX - 1` —
         // a day before the only day it holds. D-1390.
+        //
+        // ONE EXPRESSION FOR BOTH SHAPES. `span` is never negative, so
+        // `span - 1` is at least -1 and never overflows, and adding -1 to
+        // `first` IS the empty calendar's `first - 1` (saturating at
+        // `i64::MIN` exactly as a subtraction would). The match this replaced
+        // split off `tail >= 0`, a guard whose `true` gave the same answer on
+        // every input: an equivalent mutant (D-2074).
         let span = i64::try_from(self.kinds.len()).unwrap_or(i64::MAX);
-        match span.checked_sub(1) {
-            Some(tail) if tail >= 0 => self.first.saturating_add(tail),
-            _ => self.first.saturating_sub(1),
-        }
+        self.first.saturating_add(span.saturating_sub(1))
     }
 
     /// How many days it covers.

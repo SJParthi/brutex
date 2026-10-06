@@ -857,6 +857,17 @@ static SITES: &[Site] = &[
         drive: drive_index_skipped,
     },
     Site {
+        at: "crates/pull/src/masters.rs — note_index_skips, elements only",
+        target: "pull.masters",
+        message: "index entries skipped",
+        // AN ELEMENT SKIPPED IN A CATEGORY THAT IS A LIST still emits, and
+        // names that category: the line fires on either count, and its
+        // category falls back to the first that lost an element (G18-rest-16,
+        // D-2076).
+        says: ("category", Says::Holds("Sectoral")),
+        drive: drive_index_element_skipped,
+    },
+    Site {
         at: "crates/pull/src/archive.rs:278",
         target: "pull.archive",
         message: "folder walked",
@@ -1237,6 +1248,15 @@ fn drive_index_skipped(_scratch: &Scratch) {
     let csv = crate::masters::nse_index_csv(r#"{"Broad":["NIFTY 50",42],"Thematic":"NIFTY X"}"#)
         .expect("the good name still converts");
     assert!(csv.contains("NIFTY 50,Broad\n"), "{csv}");
+}
+
+/// An index document whose every category is a list, one of them holding an
+/// element that is not a name: an element skip and no category skip.
+fn drive_index_element_skipped(_scratch: &Scratch) {
+    let csv =
+        crate::masters::nse_index_csv(r#"{"Broad":["NIFTY 50"],"Sectoral":["NIFTY BANK",7]}"#)
+            .expect("the good names still convert");
+    assert!(csv.contains("NIFTY BANK,Sectoral\n"), "{csv}");
 }
 
 /// A CSV row that is two fields where five are required.

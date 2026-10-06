@@ -2505,22 +2505,9 @@ fn check_day(
         return;
     };
     let month = into.month.to_string();
-    let event = match &found {
-        Ok(report) if report.clean() => telemetry::Event::info(
-            "pull.daycheck",
-            "pulled 1day agrees with the days its 1min bars fold to",
-        ),
-        Ok(_) => telemetry::Event::warn(
-            "pull.daycheck",
-            "pulled 1day differs from the days its 1min bars fold to",
-        ),
-        Err(_) => telemetry::Event::warn(
-            "pull.daycheck",
-            "pulled 1day could not be checked against its 1min bars",
-        ),
-    }
-    .with("instrument", telemetry::Value::Str(instrument))
-    .with("month", telemetry::Value::Str(&month));
+    let event = daycheck_headline(&found)
+        .with("instrument", telemetry::Value::Str(instrument))
+        .with("month", telemetry::Value::Str(&month));
     let count = |n: usize| telemetry::Value::Uint(u64::try_from(n).unwrap_or(u64::MAX));
     let event = match &found {
         Ok(report) => event
@@ -2535,6 +2522,29 @@ fn check_day(
         Err(why) => event.with("why", telemetry::Value::Str(why)),
     };
     let _dropped_when_filtered = telemetry::emit(&event);
+}
+
+/// The level and sentence of [`check_day`]'s line: `Info` only when the
+/// comparison ran and every day it covers agreed, `Warn` for a disagreement
+/// and for a day file that could not be read. Its own function so that choice
+/// is asserted rather than left to a log nobody reads back
+/// (`pull::ingest::tests::a_clean_day_check_is_info_and_anything_else_warns`,
+/// G18-rest-15, D-2075).
+fn daycheck_headline(found: &Result<crate::daycheck::Report, String>) -> telemetry::Event<'static> {
+    match found {
+        Ok(report) if report.clean() => telemetry::Event::info(
+            "pull.daycheck",
+            "pulled 1day agrees with the days its 1min bars fold to",
+        ),
+        Ok(_) => telemetry::Event::warn(
+            "pull.daycheck",
+            "pulled 1day differs from the days its 1min bars fold to",
+        ),
+        Err(_) => telemetry::Event::warn(
+            "pull.daycheck",
+            "pulled 1day could not be checked against its 1min bars",
+        ),
+    }
 }
 
 /// [`check_day`]'s finding: `None` for any vendor but Zerodha, otherwise the
@@ -3665,8 +3675,46 @@ mod tests {
 
     use super::{
         CensusLock, DeriveInto, EntryKey, MAX_CENSUS_BYTES, check_day, closes_in_hand,
-        day_check_of, install_locked, lock_refusal, write_and_count,
+        day_check_of, daycheck_headline, install_locked, lock_refusal, write_and_count,
     };
+
+    /// **ONLY A CLEAN COMPARISON IS AN `Info` LINE.** G18-rest-15, D-2075.
+    ///
+    /// A day bar the minutes do not reach yet is not a fault, so a report with
+    /// only `minute_absent` is still clean; one day that differs, or one day
+    /// the day file lacks, is a warning, and so is a file that cannot be read.
+    #[test]
+    fn a_clean_day_check_is_info_and_anything_else_warns() {
+        use crate::daycheck::Report;
+        use telemetry::Level;
+        let clean = Report {
+            agreed: 20,
+            minute_absent: 2,
+            ..Report::default()
+        };
+        let differed = Report {
+            differed: 1,
+            ..clean.clone()
+        };
+        let day_absent = Report {
+            day_absent: 1,
+            ..clean.clone()
+        };
+        for (found, level, says) in [
+            (Ok(clean), Level::Info, "agrees"),
+            (Ok(differed), Level::Warn, "differs"),
+            (Ok(day_absent), Level::Warn, "differs"),
+            (
+                Err("unreadable".to_owned()),
+                Level::Warn,
+                "could not be checked",
+            ),
+        ] {
+            let headline = daycheck_headline(&found);
+            assert_eq!(headline.level(), level, "{found:?}");
+            assert!(headline.message().contains(says), "{found:?}");
+        }
+    }
 
     /// **A MEMBER'S ROWS ARE LANDED BORROWED, NOT CLONED.** o1api-36, D-1203.
     ///
