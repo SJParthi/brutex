@@ -194,6 +194,22 @@ mod tests {
         bar(OPEN - 33_300 + day * 86_400, 100, 120, 90, 98, 60)
     }
 
+    /// **THE IST DAY TURNS AT IST MIDNIGHT, 18:30 UTC.** G18-rest-36, D-2088.
+    /// The offset is ADDED: a UTC stamp of 18:29:59 is still that IST day and
+    /// 18:30:00 is the next, the epoch itself is day 0 at 05:30 IST, and the
+    /// second before IST midnight of 1970-01-01 belongs to day -1.
+    #[test]
+    fn the_ist_day_turns_at_ist_midnight() {
+        let day = |secs: i64| ist_day(&bar(secs, 1, 1, 1, 1, 0));
+        let midnight = 20_000 * 86_400 - 19_800;
+        assert_eq!(day(midnight - 1), 19_999, "23:59:59 IST");
+        assert_eq!(day(midnight), 20_000, "00:00:00 IST");
+        assert_eq!(day(midnight + 86_399), 20_000, "23:59:59 IST, same day");
+        assert_eq!(day(0), 0, "the epoch is 05:30 IST on day 0");
+        assert_eq!(day(-19_800), 0, "IST midnight of day 0");
+        assert_eq!(day(-19_801), -1, "the second before it");
+    }
+
     #[test]
     fn the_anchor_is_a_session_open() {
         assert_eq!((OPEN + 19_800).rem_euclid(86_400), 33_300, "09:15 IST");

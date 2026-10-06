@@ -63525,3 +63525,15 @@ The test
 - a matching day gives `Info`;
 - a moved high gives `Warn`;
 - Dhan gives `None`.
+
+### D-2088 — The day check's IST day is pinned at IST midnight — 2026-10-06
+
+**What was observed.** The coordinator found `daycheck.rs:67` (`+` replaced
+with `-` in `ist_day`) surviving, measured at 969493e1 in a case CI never
+tested. Every existing test compared two stamps from the same session, so
+both moved the same way under the mutant.
+
+**Decided.** `daycheck::tests::the_ist_day_turns_at_ist_midnight`
+(G18-rest-36) pins absolute days on both sides of IST midnight (18:30 UTC),
+across one whole day, at the epoch, and at the second before IST midnight of
+day 0.
