@@ -31,3 +31,9 @@ RESUME (usage guard): the usage window has reset. Read your PAUSE-20261006.md, a
 | 04:06 | $211.36 | ~46% | burn fell to ~$1.7/min while most sessions wait on builds and mutation runs. cost_usd lags inside long turns (running subagents are counted only when they return), so the pause decision takes the HIGHER of this estimate and a time-based one from the last owner reading. |
 | 04:23 | $255.79 (summed by hand; the haiku poller's own total, $274.89, was wrong) | ~56% (time-based also ~56%) | no session warning; below the 70% line; next poll 04:38 UTC (trig_01Xn24XAxZCiXtRN85SiWhyA); weekly ~16% |
 | 04:44 | $312.53 (summed by hand) | ~68% (+ unreported subagent spend, so >= 70%) | PAUSE sent to all 13 sessions, priority now; resume trigger 07:12 UTC (trig_01UoWW9ugvVA2FCgxT1nT1gM) |
+
+## RECALIBRATION 2026-10-06 06:05 UTC (owner screenshot: 5-hour 99%, weekly 27%)
+- The cost_usd sum UNDERCOUNTED the meter by about 30%: $349.26 summed vs 99% shown -> about **$3.5 per 5-hour percent** (not $4.6). The coordinator's own context (713k tokens, re-read every step) is a large share. The 04:45 pause landed far later than intended.
+- New rule for every window: baseline = sum at the window start; estimate = (sum - baseline) / 3.5; **PAUSE at 60% estimated**. Owner readings override the estimate whenever given.
+- Window 07:10-12:10: baseline $349.26 (all sessions idle 04:45-07:13). Only the PR #74 path runs: g18 cli-a, cli-b, api, runner, rest, WS2 (hand-over only, no new attack rounds), WS3 (batch3 only), WS4 (batch3). WS5 and lenses L1-L4 stay PAUSED until the weekly estimate shows room (weekly 27% at 06:05; about 16% weekly per full window).
+- Coordinator keeps its own steps few; no chatty monitor (each wake re-reads its whole context); polls by send_later.
