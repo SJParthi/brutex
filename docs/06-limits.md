@@ -14951,6 +14951,13 @@ O(C·E). The existing preparation statement covers the one-time preparation
 only (W2-cli15-2). Stored post-training OOS repeats cohort-invariant work per
 witness as well; §169 states it.
 
+**Fixed by D-1835 for the per-cell walk.** Institutional evidence now takes a
+`BoundPopulationCompletenessV1`, whose one `bind` per population runs
+`require_population` (and its `StreamFactsV1::of`) once; each cell compares
+its data source with the bound one in O(1). The per-population cost is O(E)
+once, not O(C·E). The stored post-training OOS per-witness work (W2-cli16-1)
+is a separate item and is not changed by D-1835.
+
 ## Global Replay V3/V4 exit quality is checked per row only; evidence cells re-derive the population — D-1638, 3 October 2026
 
 - **No aggregate quality ceiling (GAP15-19) — restored in V4 by D-1643.**
@@ -14965,6 +14972,13 @@ witness as well; §169 states it.
   `derive_population_id_v1` per cell, which hashes the one-minute execution
   series; a `Complete` data source adds `require_population`'s O(E) walk
   (D-1636). O(C·E) per population of C cells.
+  **Fixed by D-1835.** `BoundPopulationCompletenessV1::bind` derives the
+  population identity and reconciles the data source once per population;
+  each cell's projection then compares the bound identity and source in O(1).
+  Counted, not timed: 1,960 cells of the writer fixture derived the population
+  identity 1,961 times before and 2 times after (once by the writer, once by
+  the binding;
+  `evidence_binds_the_complete_population_once_not_per_cell`).
 
 ## Population base evidence and strategy identity costs that are not per-cell constant — D-1639, 3 October 2026
 

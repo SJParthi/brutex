@@ -311,6 +311,8 @@ impl ProducedPopulationAdmissionV1 {
 pub fn derive_population_id_v1(
     authority: &CompletePopulationAuthorityV1<'_>,
 ) -> Result<[u8; 32], PopulationAdmissionWriterRefusal> {
+    #[cfg(test)]
+    tests::POPULATION_ID_DERIVATIONS.with(|count| count.set(count.get() + 1));
     validate_complete_population_authority(authority)?;
     let mut hasher = Hasher::new();
     hasher.update(POPULATION_ID_DOMAIN_V1);
@@ -1665,6 +1667,18 @@ fn require_consistent_i64(
 )]
 mod tests {
 
+    std::thread_local! {
+        /// [`super::derive_population_id_v1`] calls on this thread (test-only
+        /// probe, D-1835).
+        pub(super) static POPULATION_ID_DERIVATIONS: std::cell::Cell<u64> =
+            const { std::cell::Cell::new(0) };
+    }
+
+    /// [`super::derive_population_id_v1`] calls made on this thread so far.
+    fn population_id_derivations_on_this_thread() -> u64 {
+        POPULATION_ID_DERIVATIONS.with(std::cell::Cell::get)
+    }
+
     /// W2-cli10-2, D-1834: no strategy-digest entry validates the whole grid
     /// per cell. The public `derive_strategy_digest_v1` ran
     /// `validate_evaluation` (O(G)) for every cell it was asked about, so a
@@ -2554,6 +2568,166 @@ mod tests {
                 u64::try_from(sequence).expect("sequence fits")
             );
             assert_eq!((row.mask_words, row.direction, row.exit), observed);
+        }
+    }
+
+    /// **The population is verified once, not once per cell (W2-cli7-0,
+    /// W2-cli15-2, D-1835).** Every cell's institutional evidence is built
+    /// with a `Measured` complete-population authority. Counted: the
+    /// population identity (an O(E) authority validation and hash) is derived
+    /// by the writer once and by the evidence binding once, whatever the cell
+    /// count; before D-1835 the evidence builder derived it again for every
+    /// cell.
+    #[test]
+    fn evidence_binds_the_complete_population_once_not_per_cell() {
+        use crate::institutional_evidence::{
+            BoundPopulationCompletenessV1, DataCompletenessSourceV1, EvidenceSourceV1,
+            FullPrecisionStatisticsSourceV1, InstitutionalCompletenessV1,
+            InstitutionalEvidenceSourcesV1, build_institutional_evidence_v1,
+        };
+        let bars = runner::synthetic::sessions(8);
+        let instrument = instrument("NIFTY");
+        let mut evaluator = evaluator();
+        let column = Column::build(&bars, &mut evaluator);
+        let (series, long, short) = resolved_grids(&instrument, &bars);
+        let policy = admission_policy();
+        let authority = authority(&bars, &column, series, &long, &short, &policy);
+        let held = authority;
+        let before = population_id_derivations_on_this_thread();
+        let bound =
+            BoundPopulationCompletenessV1::bind(&held, DataCompletenessSourceV1::Unmeasured)
+                .expect("the fixture population binds");
+        assert_eq!(population_id_derivations_on_this_thread() - before, 1);
+        let signal_column = column.clone();
+        let ladder = Ladder::with_min_hits(600).with_ceiling(50_000);
+        let mut cells = 0_u64;
+        let produced = produce_population_admission_v1(
+            &Sweeper::new(ladder),
+            signal_column,
+            authority,
+            &|_, _, _| {},
+            |words, direction| execution_run(&instrument, &bars, ladder, words, direction),
+            |context| {
+                cells += 1;
+                let admission = build_institutional_evidence_v1(InstitutionalEvidenceSourcesV1 {
+                    context,
+                    ranking_policy_digest: held.identities.ranking_policy_digest,
+                    trade_rows: EvidenceSourceV1::Unmeasured,
+                    independent_sessions: EvidenceSourceV1::Unmeasured,
+                    validation: EvidenceSourceV1::Unmeasured,
+                    family_tests: EvidenceSourceV1::Unmeasured,
+                    completeness: InstitutionalCompletenessV1 {
+                        population_authority: EvidenceSourceV1::Measured(&bound),
+                        data: DataCompletenessSourceV1::Unmeasured,
+                    },
+                    full_precision_statistics: FullPrecisionStatisticsSourceV1::Unmeasured,
+                })?;
+                assert_eq!(
+                    admission.values().population_complete,
+                    CompletenessV1::Complete
+                );
+                assert_eq!(
+                    admission.values().calendar_complete,
+                    CompletenessV1::Complete
+                );
+                assert_eq!(admission.values().data_complete, CompletenessV1::Unmeasured);
+                Ok(PopulationCellEvidenceV1 {
+                    assurance_ppm: cell_evidence(&context).assurance_ppm,
+                    admission,
+                })
+            },
+        )
+        .expect("complete population with measured evidence");
+        let derived = population_id_derivations_on_this_thread() - before;
+        assert!(cells > 1, "the fixture has more than one cell");
+        assert_eq!(
+            u64::try_from(produced.prepared().rows().len()).expect("row count fits"),
+            cells
+        );
+        assert_eq!(bound.population_id(), produced.population_id());
+        assert_eq!(
+            derived, 2,
+            "{cells} cells: evidence binding once, writer once"
+        );
+    }
+
+    /// A bound population still refuses, per cell and in O(1), a foreign
+    /// ranking policy, a data source other than the one it verified, and a
+    /// cell of another population (D-1835).
+    #[test]
+    fn a_bound_population_refuses_a_foreign_cell_policy_or_data_source() {
+        use crate::institutional_evidence::{
+            BoundPopulationCompletenessV1, DataCompletenessSourceV1, EvidenceSourceV1,
+            FullPrecisionStatisticsSourceV1, InstitutionalCompletenessV1,
+            InstitutionalEvidenceSourcesV1, build_institutional_evidence_v1,
+        };
+        let bars = runner::synthetic::sessions(8);
+        let instrument = instrument("NIFTY");
+        let mut evaluator = evaluator();
+        let column = Column::build(&bars, &mut evaluator);
+        let (series, long, short) = resolved_grids(&instrument, &bars);
+        let policy = admission_policy();
+        let authority = authority(&bars, &column, series, &long, &short, &policy);
+        let held = authority;
+        let bound =
+            BoundPopulationCompletenessV1::bind(&held, DataCompletenessSourceV1::Unmeasured)
+                .expect("the fixture population binds");
+        let ladder = Ladder::with_min_hits(600).with_ceiling(50_000);
+        let ranking = held.identities.ranking_policy_digest;
+        let mut foreign_ranking = ranking;
+        foreign_ranking[0] ^= 1;
+        for (ranking_policy_digest, data, foreign_population, refusal) in [
+            (
+                foreign_ranking,
+                DataCompletenessSourceV1::Unmeasured,
+                false,
+                "ranking policy differs from its complete population authority",
+            ),
+            (
+                ranking,
+                DataCompletenessSourceV1::Refused,
+                false,
+                "data source differs from the one its population binding verified",
+            ),
+            (
+                ranking,
+                DataCompletenessSourceV1::Unmeasured,
+                true,
+                "derives another population identity",
+            ),
+        ] {
+            let why = produce_population_admission_v1(
+                &Sweeper::new(ladder),
+                column.clone(),
+                authority,
+                &|_, _, _| {},
+                |words, direction| execution_run(&instrument, &bars, ladder, words, direction),
+                |mut context| {
+                    if foreign_population {
+                        context.population_id[0] ^= 1;
+                    }
+                    let admission =
+                        build_institutional_evidence_v1(InstitutionalEvidenceSourcesV1 {
+                            context,
+                            ranking_policy_digest,
+                            trade_rows: EvidenceSourceV1::Unmeasured,
+                            independent_sessions: EvidenceSourceV1::Unmeasured,
+                            validation: EvidenceSourceV1::Unmeasured,
+                            family_tests: EvidenceSourceV1::Unmeasured,
+                            completeness: InstitutionalCompletenessV1 {
+                                population_authority: EvidenceSourceV1::Measured(&bound),
+                                data,
+                            },
+                            full_precision_statistics: FullPrecisionStatisticsSourceV1::Unmeasured,
+                        })?;
+                    Ok(PopulationCellEvidenceV1 {
+                        assurance_ppm: cell_evidence(&context).assurance_ppm,
+                        admission,
+                    })
+                },
+            )
+            .expect_err("a foreign cell, policy or data source is refused");
+            assert!(why.contains(refusal), "{why}");
         }
     }
 
