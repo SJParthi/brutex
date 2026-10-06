@@ -6942,8 +6942,14 @@ pub(crate) struct BrokerRun {
     /// Distinct from an empty `reached`: nothing was attempted, so nothing can
     /// be concluded about the vendor from it.
     pub blocked: Option<Blocked>,
-    /// Set when the operator stopped the sweep part-way, with the reason.
+    /// Set when the sweep stopped part-way, with the reason: an operator's
+    /// pause, the vendor-down breaker, or a credential stop.
     pub stopped: Option<String>,
+    /// Whether that stop was the OPERATOR's: the autopilot's stop epoch moved
+    /// (Pause, a shutdown). Only this one means "nothing failed, ask again
+    /// at once"; the breaker's stop is a vendor failure and must reach the
+    /// backoff. conc:autopilot-2, D-2800.
+    pub cancelled: bool,
     /// How long it took, in microseconds.
     pub took: u64,
     /// Whether the retry ladder judged the CREDENTIAL dead, structurally.
@@ -8076,6 +8082,7 @@ pub(crate) async fn broker_run(
         // who presses Pause must not wait out the other seven hundred
         // instruments to be obeyed.
         if site.autopilot.stopped(epoch) {
+            out.cancelled = true;
             out.stopped = Some(format!(
                 "{} — stopped after {} of {} instruments. The partial month is \
                  refilled on resume, because the resume point is the store's own.",
@@ -21133,6 +21140,50 @@ mod tests {
             .outcome,
             audit::Outcome::Failed
         );
+    }
+
+    /// **A vendor-down breaker stop backs off; only an operator's stop retries
+    /// at once.** conc:autopilot-2, D-2800. The breaker used to set the same
+    /// `stopped` an operator's Pause sets, and `outcome_of` read every
+    /// non-credential stop as a pause: an immediate retry with no attempt
+    /// counted and no backoff, straight back into a vendor that had just failed
+    /// five instruments in a row.
+    #[test]
+    fn a_breaker_stop_backs_off_and_only_an_operator_stop_retries_at_once() {
+        let feed = || {
+            crate::autopilot::FeedState::new(
+                pull::vendor::Feed::Dhan,
+                brutex_core::vendor::Vendor::Dhan,
+                store::path::YearMonth::new(2026, 8).expect("a month"),
+            )
+        };
+        let mut breaker = BrokerRun {
+            attempted: 9,
+            ..BrokerRun::default()
+        };
+        breaker.stopped = Some(vendor_down_sentence(5, 5, 9));
+        breaker.record_stop();
+        let outcome = crate::autopilot::outcome_of(&breaker, false, None);
+        assert!(!outcome.stopped, "the breaker is not a pause");
+        let mut state = feed();
+        assert!(
+            matches!(state.observe(&outcome), crate::autopilot::Next::Wait { .. }),
+            "a vendor that just failed is backed off from"
+        );
+        assert_eq!(state.attempts, 1, "and the attempt is counted");
+
+        let mut paused = BrokerRun {
+            attempted: 9,
+            cancelled: true,
+            ..BrokerRun::default()
+        };
+        paused.stopped = Some("stopped after 2 of 9 instruments".to_owned());
+        paused.record_stop();
+        let outcome = crate::autopilot::outcome_of(&paused, false, None);
+        assert!(outcome.stopped, "an operator's stop is a stop");
+        let mut state = feed();
+        assert_eq!(state.observe(&outcome), crate::autopilot::Next::Retry);
+        assert_eq!(state.attempts, 0, "and costs no attempt");
     }
 
     #[test]

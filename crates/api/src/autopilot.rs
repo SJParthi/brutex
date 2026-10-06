@@ -3725,11 +3725,15 @@ pub(crate) fn outcome_of(
         stored: run.total.bars_stored,
         reason,
         complete,
-        // A CREDENTIAL STOP IS NOT AN OPERATOR'S PAUSE. `stopped` means "not a
-        // failure, ask again at once"; a run that stopped over its credential
+        // ONLY AN OPERATOR'S STOP IS A STOP HERE. `stopped` means "not a
+        // failure, ask again at once". A run that stopped over its credential
         // carries its own verdict below, and when that verdict is transport it
-        // must reach the backoff rather than an immediate retry.
-        stopped: run.stopped.is_some() && run.credential_stop.is_none(),
+        // must reach the backoff rather than an immediate retry. The
+        // vendor-down breaker's stop is a vendor failure too: read as a pause,
+        // it retried at once with no attempt counted and no backoff, hammering
+        // a vendor that had just failed five instruments in a row
+        // (conc:autopilot-2, D-2800).
+        stopped: run.cancelled && run.credential_stop.is_none(),
         journal_error,
         credential: run.credential_stop,
     }
