@@ -25,3 +25,8 @@ appended here as timeouts-<group>.md. ALWAYS read shard logs, not only annotatio
 Also 04:40: vocab `fnv1a`/`name_index` endless compile-time loops (shards 146, 150 died at the 240m limit) are fixed by
 pr74/g18-rest 3565e479 (D-2083, recursion; session proof 39 mutants: 13 caught, 26 unviable) and CI gets a build bound
 (coordinator commit 46439dee on local integ, D-2090: --build-timeout-multiplier 2).
+
+2026-10-06 04:50 UTC — TIMEOUT lists from every failed shard log (8 parallel readers, get_job_logs tail 100): 23 timeouts,
+none of them in the MISSED lists: timeouts-cli-a.md (4), timeouts-cli-b.md (10), timeouts-rest.md (3), timeouts-runner.md (3),
+timeouts-api.md (3). Shards 8, 111, 116, 119, 120, 138, 167, 168 printed no summary (runner lost): their cases are untested
+(138 added to the coordinator's local pre-run). A timeout costs a shard about 45-76 minutes, which is why 13 shards ran past 3 h.
