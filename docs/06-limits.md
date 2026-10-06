@@ -15701,3 +15701,26 @@ per-candidate primitive from `CLAUDE.md` §3 rule 4.
   a run would need the attempt's origin, which the handler does not receive.
 - **Not timed.** No bench measures a log walk. The 4 MiB per half is the
   configured cap, not a measurement, and the time it takes is UNVERIFIED.
+
+### A torn `.tix` entry no longer costs an append O(`n_valid`) (D-3134)
+
+An append whose resume entry was torn by a failed append on the same handle
+rebuilds that one entry from at most 65 bar reads (`time_index::recover`).
+Measured by the ignored `store` test `tix_repair_latency` on a 4-core cloud
+box, while a mutation run shared the CPU. Before is with the repair disabled.
+
+| Bars | before p50 / p99 | after p50 / p99 / max |
+|---|---|---|
+| 1,000 | 28 / 32 ms | 16 / 20 / 33 ms |
+| 10,000 | 28 / 32 ms | 16 / 20 / 64 ms |
+| 100,000 | 32 / 44 ms | 15 / 20 / 21 ms |
+| 1,000,000 | 124 / 164 ms | 16 / 20 / 20 ms |
+
+The after column is flat: the append's fsyncs are its cost. The two `max`
+spikes at the smaller sizes are single samples on a shared host, not growth.
+**Still O(`n_valid`)**, by construction, and named: the whole rebuild at
+writer open, and on an append whose index the bars do not vouch for
+(`Why::Stale`, a refused header, an entry torn outside the last committed
+bucket). Each is an index damaged by something other than this writer's own
+failed append. Proving every entry would itself be the O(n) audit the index
+exists to avoid.

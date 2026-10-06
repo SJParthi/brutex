@@ -2887,7 +2887,13 @@ impl BarFile {
         match built {
             Ok(entries) => {
                 write_index(&index, tix, &entries)?;
-                note_index_built(&tix.path, why, held.n_valid, len_u64(entries.len()));
+                note_index_built(
+                    &tix.path,
+                    why,
+                    held.n_valid,
+                    len_u64(entries.len()),
+                    "whole index",
+                );
                 Ok(TixState::Ready(index))
             }
             Err(cannot) => {
@@ -2902,9 +2908,12 @@ impl BarFile {
     /// at — `None` when this handle keeps no index.
     ///
     /// One entry read (`time_index::resume`) and one pass over the batch. An
-    /// entry that no longer puts the last committed bar where the header does
-    /// — a torn write from an append that failed on this handle — rebuilds
-    /// the index first, loudly, and is asked again.
+    /// entry torn by an append that failed on this handle is rebuilt alone
+    /// from at most 65 bar reads (`Self::repair_torn_entry`, D-3134), loudly.
+    /// Only an index those bars cannot vouch for, or one that no longer puts
+    /// the last committed bar where the header does, rebuilds the whole index
+    /// first, loudly, and is asked again: O(`n_valid`), the residue
+    /// `docs/06-limits.md` names.
     ///
     /// A bar in the slot of the bar before it — a second daily bar on one IST
     /// day, which the daily rung admits (D-0915) — is not refused: the append
@@ -2935,6 +2944,12 @@ impl BarFile {
         };
         let (bucket, start) = match resumed {
             Ok(found) => found,
+            // ONE TORN ENTRY IS REBUILT ALONE, NOT THE MONTH (D-3134). A
+            // failed append on this handle can tear only the entry of the last
+            // committed bar's bucket; `time_index::recover` rebuilds it from
+            // at most 65 bar reads. Anything it cannot prove falls through to
+            // the whole rebuild below, loudly, as before.
+            Err(why) if let Some(found) = self.repair_torn_entry(&why) => found,
             Err(why) => {
                 self.reindex(&why)?;
                 let Some(tix) = self.tix.as_ref() else {
@@ -2975,6 +2990,30 @@ impl BarFile {
             }),
             Err(other) => Err(index_refused(&tix.path, &other)),
         }
+    }
+
+    /// The entry an append resumes from, rebuilt from the bars of its own
+    /// bucket when `why` says THAT entry is torn — `None` for any other reason,
+    /// or when the bars do not prove it, and the caller rebuilds the whole
+    /// index instead. At most 65 bar reads (`time_index::recover`), and the
+    /// rebuilt entry reaches disk with the append's own entries, before the
+    /// header slot that commits them. Logged as `store.tix` "time index
+    /// rebuilt from the bars" with scope `one torn entry`. D-3134.
+    fn repair_torn_entry(&self, why: &Why) -> Option<(u64, Entry)> {
+        let Why::Entry { bucket } = why else {
+            return None;
+        };
+        let tix = self.tix.as_ref()?;
+        let held = Held::of(&self.header);
+        let (found, entry) = crate::time_index::recover(&tix.geometry, held, |row| {
+            self.read_row::<Bar>(row).map(|bar| bar.ts_micros)
+        })
+        .ok()?;
+        if found != *bucket {
+            return None;
+        }
+        note_index_built(&tix.path, why, held.n_valid, 1, "one torn entry");
+        Some((found, entry))
     }
 
     /// Stops indexing this month, because `why`: the handle bisects from now
@@ -3863,13 +3902,14 @@ fn note_lookup_bisects(path: &Path, why: &Why) {
 
 /// `store.tix`, INFO: a writer rebuilt this month's time index from its bars,
 /// and why it had to.
-fn note_index_built(path: &Path, why: &Why, n_valid: u64, entries: u64) {
+fn note_index_built(path: &Path, why: &Why, n_valid: u64, entries: u64, scope: &str) {
     let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::info("store.tix", "time index rebuilt from the bars")
             .with("file", telemetry::Value::Str(&path.display().to_string()))
             .with("reason", telemetry::Value::Str(&why.to_string()))
             .with("n_valid", telemetry::Value::Uint(n_valid))
-            .with("entries", telemetry::Value::Uint(entries)),
+            .with("entries", telemetry::Value::Uint(entries))
+            .with("scope", telemetry::Value::Str(scope)),
     );
 }
 

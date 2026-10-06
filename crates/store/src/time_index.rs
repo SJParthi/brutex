@@ -570,6 +570,79 @@ pub(crate) fn resume(
     Ok((bucket, found.through(bit)))
 }
 
+/// The entry an append continues from when the stored one is TORN — rebuilt
+/// from the committed bars of its bucket alone, not from the whole month.
+///
+/// # Why this is enough, and constant
+///
+/// An append writes its entries from the bucket of the last committed bar
+/// onward, and syncs them before the header slot that commits its bars. So a
+/// failed append can tear only that bucket's entry (and entries past it, which
+/// [`resume`] never reads and the next append overwrites); every earlier
+/// entry was synced ahead of a header that DID commit. The torn entry holds
+/// the bars in at most 64 slots, and committed stamps rise strictly slot by
+/// slot, so they are the trailing run of rows whose slot is in the bucket: at
+/// most 64 rows, found by reading back from `n_valid - 1` until a bar lies in
+/// an earlier bucket or row 0 is passed. `before` is then `n_valid` less that
+/// run. **At most [`SLOTS_PER_ENTRY`] + 1 stamp reads, whatever the month
+/// holds** — the O(`n_valid`) rebuild this replaces on an append was D-3302's
+/// named limit (D-3134).
+///
+/// It proves only what it reads. Any disagreement among those bars is
+/// refused, never guessed: the caller then rebuilds the whole index, loudly,
+/// exactly as before.
+///
+/// # Errors
+///
+/// [`Why::Stale`] when the last row is not stamped where the header says;
+/// [`Why::Outside`], [`Why::OffGrid`] or [`Why::SharedSlot`] for a bar the
+/// index cannot hold; a refused read as [`Why::Unreadable`].
+pub(crate) fn recover(
+    geometry: &Geometry,
+    held: Held,
+    mut stamp: impl FnMut(u64) -> Result<i64, StoreError>,
+) -> Result<(u64, Entry), Why> {
+    if held.n_valid == 0 {
+        return Ok((0, Entry::EMPTY));
+    }
+    let (bucket, _) = split(geometry.slot_of(held.last_ts).ok_or(Why::Stale)?);
+    let floor = bucket.saturating_mul(SLOTS_PER_ENTRY);
+    let mut occupancy = 0u64;
+    let mut inside = 0u64;
+    // The slot and stamp of the bar read just before (the row above).
+    let mut above: Option<(u64, i64)> = None;
+    let mut row = held.n_valid;
+    while let Some(index) = row.checked_sub(1) {
+        let ts_micros = stamp(index).map_err(Why::Unreadable)?;
+        if above.is_none() && ts_micros != held.last_ts {
+            return Err(Why::Stale);
+        }
+        let slot = geometry
+            .slot_of(ts_micros)
+            .ok_or(Why::Outside { index, ts_micros })?;
+        if slot < floor {
+            break;
+        }
+        if geometry.exact && geometry.slot_start(slot) != ts_micros {
+            return Err(Why::OffGrid { index, ts_micros });
+        }
+        if let Some((later, later_ts)) = above
+            && later <= slot
+        {
+            return Err(Why::SharedSlot {
+                index: index.saturating_add(1),
+                ts_micros: later_ts,
+            });
+        }
+        occupancy |= 1u64 << (slot - floor);
+        inside += 1;
+        above = Some((slot, ts_micros));
+        row = index;
+    }
+    let before = u32::try_from(held.n_valid - inside).map_err(|_| Why::Stale)?;
+    Ok((bucket, Entry { occupancy, before }))
+}
+
 /// The entries from `bucket` on, after the bars stamped `stamps` are added to
 /// `start` — which holds every bar before them and has nothing set above the
 /// last of those.
@@ -1282,5 +1355,143 @@ mod tests {
             Why::Unreadable(inner.clone()).to_string(),
             format!("the .tix time index could not be used: {inner}")
         );
+    }
+
+    /// `recover` over the first `n` of `stamps`, counted: its answer and the
+    /// stamp reads it took.
+    fn recovered(
+        geometry: &Geometry,
+        stamps: &[i64],
+        n: usize,
+    ) -> (Result<(u64, Entry), Why>, u64) {
+        let reads = Cell::new(0u64);
+        let answer = recover(geometry, held(&stamps[..n]), |row| {
+            reads.set(reads.get() + 1);
+            Ok(stamps[usize::try_from(row).expect("a row")])
+        });
+        (answer, reads.get())
+    }
+
+    /// D-3134: a torn entry is rebuilt from its own bucket's bars, equal to
+    /// the entry a whole build gives, in at most 65 reads whatever `n_valid`.
+    #[test]
+    fn recover_rebuilds_the_last_entry_exactly_from_at_most_65_reads() {
+        // EVERY PREFIX of three shapes: dense one-second bars (full buckets),
+        // a session month at one minute (gaps between days), and a daily
+        // month (inexact slots).
+        let second = Geometry::new(month(), 1, 7);
+        let minute = Geometry::new(month(), 60, 7);
+        let daily = Geometry::new(month(), 86_400, 7);
+        let dense: Vec<i64> = (0..700).map(|k| at(0, k)).collect();
+        let sessions = session_month(3, 375, 60);
+        let days: Vec<i64> = (0..31)
+            .map(|d| MONTH_START + d * 86_400 * MICROS + 3_600 * MICROS)
+            .collect();
+        for (geometry, stamps) in [(&second, &dense), (&minute, &sessions), (&daily, &days)] {
+            for n in 0..=stamps.len() {
+                let (answer, reads) = recovered(geometry, stamps, n);
+                let (bucket, entry) = answer.expect("committed bars recover");
+                if n == 0 {
+                    assert_eq!((bucket, entry, reads), (0, Entry::EMPTY, 0));
+                    continue;
+                }
+                let whole = index_of(geometry, &stamps[..n]);
+                let (want, bit) = split(geometry.slot_of(stamps[n - 1]).expect("a slot"));
+                assert_eq!(bucket, want, "n={n}");
+                assert_eq!(
+                    entry,
+                    whole[usize::try_from(want).expect("small")].through(bit),
+                    "n={n}"
+                );
+                assert!(reads <= SLOTS_PER_ENTRY + 1, "n={n}: {reads} reads");
+                // Exactly the bars in the bucket, plus the one that ends the
+                // walk unless the walk ran out of rows.
+                let inside = u64::from(entry.occupancy.count_ones());
+                let expected = inside + u64::from(entry.before > 0);
+                assert_eq!(reads, expected, "n={n}");
+            }
+        }
+        // THE BOUND HOLDS AT 10^6 BARS: a month of full one-second buckets.
+        let million: Vec<i64> = (0..1_000_000).map(|k| MONTH_START + k * MICROS).collect();
+        let (answer, reads) = recovered(&second, &million, million.len());
+        let (bucket, entry) = answer.expect("a million bars recover");
+        assert_eq!(reads, 65, "a full bucket and the bar before it");
+        assert_eq!(
+            u64::from(entry.before) + u64::from(entry.occupancy.count_ones()),
+            1_000_000
+        );
+        assert_eq!(
+            bucket,
+            split(second.slot_of(million[999_999]).expect("a slot")).0
+        );
+    }
+
+    /// D-3134: anything `recover` cannot prove from the bars it reads is a
+    /// named refusal, so the caller rebuilds the whole index instead.
+    #[test]
+    fn recover_refuses_bars_that_do_not_prove_the_entry() {
+        let minute = Geometry::new(month(), 60, 7);
+        let good: Vec<i64> = (0..10).map(|k| at(0, k * 60)).collect();
+        // The header's last stamp is not the last row's.
+        let mut lying = held(&good);
+        lying.last_ts = at(0, 60 * 20);
+        assert_eq!(
+            recover(&minute, lying, |row| Ok(
+                good[usize::try_from(row).expect("a row")]
+            )),
+            Err(Why::Stale)
+        );
+        // Two rows in one slot, and a row off the grid, in the bucket.
+        let mut shared = good.clone();
+        shared[8] = shared[9];
+        assert_eq!(
+            recovered(&minute, &shared, 10).0,
+            Err(Why::SharedSlot {
+                index: 9,
+                ts_micros: good[9]
+            })
+        );
+        let mut late = good.clone();
+        late[8] = good[9] + 60 * MICROS;
+        assert_eq!(
+            recovered(&minute, &late, 10).0,
+            Err(Why::SharedSlot {
+                index: 9,
+                ts_micros: good[9]
+            })
+        );
+        let mut off = good.clone();
+        off[7] += 1;
+        assert_eq!(
+            recovered(&minute, &off, 10).0,
+            Err(Why::OffGrid {
+                index: 7,
+                ts_micros: off[7]
+            })
+        );
+        // A row before the month, and a header stamp outside it.
+        let mut early = good.clone();
+        early[3] = MONTH_START - 86_400 * MICROS;
+        assert_eq!(
+            recovered(&minute, &early, 10).0,
+            Err(Why::Outside {
+                index: 3,
+                ts_micros: early[3]
+            })
+        );
+        let mut outside = held(&good);
+        outside.last_ts = i64::MAX;
+        assert_eq!(recover(&minute, outside, |_| Ok(0)), Err(Why::Stale));
+        // A read the store refuses is carried, not swallowed.
+        let refused = StoreError::ShortRead {
+            path: std::path::PathBuf::from("x.bin"),
+            offset: 0,
+            asked: 56,
+            read: 0,
+        };
+        assert!(matches!(
+            recover(&minute, held(&good), |_| Err(refused.clone())),
+            Err(Why::Unreadable(_))
+        ));
     }
 }

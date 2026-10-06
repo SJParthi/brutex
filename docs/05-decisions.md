@@ -63669,3 +63669,45 @@ already adds `DecodeSkips::total()` to `rows_read` and `decoder_skips`, and
 the receipt already names every reason that fired, so nothing else changes.
 GDFL quote rows (`Tally::quote_rows`, D-2688) are left as they are: D-2688
 rules them "not a degrade", and they are not skips. DPM-04.
+
+### D-3134 — A torn `.tix` entry is rebuilt alone, so the append that finds it stays O(1) — 2026-10-06
+
+**Finding (F-054F53, D-3302 on attack/o1-p99).** `BarFile::index_batch`
+rebuilt the whole time index whenever the entry it resumes from failed. That
+follows a torn index write from an append that failed on the same handle. The
+rebuild reads every committed bar, so that one append was O(`n_valid`).
+Measured on this box with the repair disabled, by the ignored
+`tix_repair_latency`: p50 28 / 28 / 32 / 124 ms and p99 32 / 32 / 44 / 164 ms
+at 10^3 / 10^4 / 10^5 / 10^6 bars.
+
+**Decision.** A failed append can tear only the entry of the last committed
+bar's bucket. Entries are written from that bucket onward and synced before
+the header slot, so every earlier entry was synced ahead of a header that
+committed. Committed stamps rise strictly slot by slot, so the bars in that
+bucket are the trailing run of at most 64 rows. `time_index::recover`
+rebuilds the entry from that run and the row before it, which is at most 65
+bar reads whatever the month holds. It refuses anything it cannot prove: a
+last row not stamped where the header says, a shared slot, an off-grid,
+outside or unreadable bar. `BarFile::repair_torn_entry` uses it only for
+`Why::Entry` at exactly that bucket. Every other reason, and every refusal,
+still takes the whole rebuild, loudly. The repair is logged on the existing
+`store.tix` "time index rebuilt from the bars" line, which now carries
+`scope` (`whole index` or `one torn entry`) and `entries` 1. No new emit site.
+
+The rebuilt entry reaches disk with the append's own entries, before the
+header slot, so the crash ordering of `docs/02-store-format.md` §5 is
+unchanged.
+
+**Measured after**, same test and box: p50 16 / 16 / 15 / 16 ms and p99
+20 / 20 / 20 / 20 ms at 10^3 / 10^4 / 10^5 / 10^6 bars. Flat; the append's
+fsyncs are the cost. The read bound is asserted, not timed, by
+`recover_rebuilds_the_last_entry_exactly_from_at_most_65_reads`: 65 reads at
+10^6 bars.
+
+**What stays O(`n_valid`).** The whole rebuild at writer open, and on an
+append whose index the bars do not vouch for (`Why::Stale`, a header refusal,
+an entry torn outside the last bucket). Those are an index damaged by
+something other than this writer's failed append, and `docs/06-limits.md`
+names them. When attack/o1-p99 merges, this supersedes the "An append can
+pay it too" bullet of its D-3302 section for the torn-write case. DPM-05,
+DPM-06.
