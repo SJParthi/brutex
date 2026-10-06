@@ -45,13 +45,16 @@ const AUTHORITIES: [(&str, &str); 4] = [
 
 /// Spellings of 19,800 seconds, with and without separators, in seconds,
 /// minutes and the two-factor forms the tree used.
-const SPELLINGS: [&str; 6] = [
+const SPELLINGS: [&str; 9] = [
     "19_800",
     "19800",
     "5 * 3600 + 30 * 60",
     "5 * 3_600 + 30 * 60",
     "5 * 60 * 60 + 30 * 60",
     "330 * 60",
+    "5 * 3600 + 1800",
+    "5 * 3_600 + 1_800",
+    "(5 * 60 + 30) * 60",
 ];
 
 /// Every `.rs` under `dir`, sorted.
@@ -70,14 +73,49 @@ fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// The production lines of one file: everything before its first
-/// `#[cfg(test)]`, with `//` comments removed. `(1-based line, code)`.
+/// The production lines of one file, with `//` comments removed:
+/// `(1-based line, code)`. A test module is skipped: from a column-0
+/// `#[cfg(test)]` whose item, past any further attributes, is a `mod`, to the
+/// column-0 `}` that closes it (or the line itself for `mod tests;`). An
+/// indented `#[cfg(test)]` statement inside a production function does not
+/// end the reading (the first version stopped there and missed `api`).
 fn production_lines(text: &str) -> Vec<(usize, &str)> {
-    text.lines()
-        .enumerate()
-        .take_while(|(_, line)| line.trim() != "#[cfg(test)]")
-        .map(|(n, line)| (n + 1, line.split("//").next().unwrap_or(line)))
-        .collect()
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out = Vec::new();
+    let mut n = 0;
+    while n < lines.len() {
+        if lines[n] == "#[cfg(test)]" {
+            // Past every further attribute, however many lines it spans.
+            let mut item = n + 1;
+            while lines.get(item).is_some_and(|l| l.starts_with("#[")) {
+                let mut depth = 0_i64;
+                while let Some(l) = lines.get(item) {
+                    depth += l.matches('[').count() as i64 - l.matches(']').count() as i64;
+                    item += 1;
+                    if depth <= 0 {
+                        break;
+                    }
+                }
+            }
+            let opens_mod = lines
+                .get(item)
+                .is_some_and(|l| l.starts_with("mod ") || l.starts_with("pub mod "));
+            if opens_mod {
+                n = if lines[item].trim_end().ends_with(';') {
+                    item + 1
+                } else {
+                    (item + 1..lines.len())
+                        .find(|&k| lines[k].starts_with('}'))
+                        .map_or(lines.len(), |k| k + 1)
+                };
+                continue;
+            }
+        }
+        let line = lines[n];
+        out.push((n + 1, line.split("//").next().unwrap_or(line)));
+        n += 1;
+    }
+    out
 }
 
 /// Each production line in `text` (from `file`) that spells the offset and is
@@ -136,12 +174,17 @@ fn the_ist_offset_is_spelled_only_by_its_authorities() {
 #[test]
 fn the_reader_skips_tests_comments_and_the_authorities() {
     let text = "const A: i64 = 19_800; // x\n// 19800 in prose\nfn f() { 5 * 3600 + 30 * 60 }\n\
-                #[cfg(test)]\nmod tests { const B: i64 = 19_800; }\n";
+                #[cfg(test)]\nmod tests {\n    const B: i64 = 19_800;\n}\n\
+                fn g() {\n    #[cfg(test)]\n    let x = 1;\n    5 * 3600 + 1800\n}\n\
+                #[cfg(test)]\n#[path = \"t.rs\"]\nmod t;\nconst C: i64 = 19800;\n\
+                #[cfg(test)]\n#[allow(\n    clippy::panic,\n)]\nmod u {\n    const D: i64 = 19_800;\n}\n";
     assert_eq!(
         restatements("crates/x/src/a.rs", text),
         vec![
             "crates/x/src/a.rs:1: const A: i64 = 19_800;".to_owned(),
             "crates/x/src/a.rs:3: fn f() { 5 * 3600 + 30 * 60 }".to_owned(),
+            "crates/x/src/a.rs:11: 5 * 3600 + 1800".to_owned(),
+            "crates/x/src/a.rs:16: const C: i64 = 19800;".to_owned(),
         ]
     );
     let authority = format!("    {}\n", AUTHORITIES[0].1);

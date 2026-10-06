@@ -98,7 +98,7 @@ pub fn ist_clock(ts_micros: i64) -> String {
     // then the two fields. `div_euclid` so a pre-epoch timestamp floors rather
     // than truncating toward zero — the store cannot hold one, and a formatter
     // that is wrong for an input it cannot receive is still wrong.
-    let secs = ts_micros.div_euclid(1_000_000) + 5 * 3600 + 1800;
+    let secs = ts_micros.div_euclid(1_000_000) + pull::session::IST_OFFSET_SECS;
     let day_secs = secs.rem_euclid(86_400);
     let (h, m) = (day_secs / 3600, (day_secs % 3600) / 60);
     format!("{h:02}:{m:02}")
@@ -126,7 +126,7 @@ pub fn ist_clock(ts_micros: i64) -> String {
 /// formatter that lies.
 #[must_use]
 pub fn ist_day(ts_micros: i64) -> String {
-    let secs = ts_micros.div_euclid(1_000_000) + 5 * 3600 + 1800;
+    let secs = ts_micros.div_euclid(1_000_000) + pull::session::IST_OFFSET_SECS;
     let days = secs.div_euclid(86_400);
     u32::try_from(days)
         .ok()

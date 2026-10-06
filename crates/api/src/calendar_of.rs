@@ -673,8 +673,8 @@ fn read_minute_spans(file: &store::file::BarFile, month: YearMonth) -> Result<Da
 
 /// The IST day and minute-of-day of a micros-since-epoch stamp.
 fn ist(ts_micros: i64) -> (i64, u16) {
-    const IST_OFFSET_SECS: i64 = 5 * 3600 + 30 * 60;
-    let secs = ts_micros.div_euclid(1_000_000) + IST_OFFSET_SECS;
+    // `pull::session`'s offset, the one pinned to `store`'s (D-3512).
+    let secs = ts_micros.div_euclid(1_000_000) + pull::session::IST_OFFSET_SECS;
     let day = secs.div_euclid(86_400);
     let minute = u16::try_from(secs.rem_euclid(86_400) / 60).unwrap_or(u16::MAX);
     (day, minute)
@@ -1154,8 +1154,7 @@ pub(crate) mod tests {
     /// The UTC micros stamp of minute-of-day `minute` on IST day `day` — the
     /// inverse of [`ist`], which is the reading `derive` applies.
     pub(crate) fn stamp(day: i64, minute: u16) -> i64 {
-        const IST_OFFSET_SECS: i64 = 5 * 3600 + 30 * 60;
-        (day * 86_400 + i64::from(minute) * 60 - IST_OFFSET_SECS) * 1_000_000
+        (day * 86_400 + i64::from(minute) * 60 - pull::session::IST_OFFSET_SECS) * 1_000_000
     }
 
     /// One stamp per minute of every inclusive run, in order.

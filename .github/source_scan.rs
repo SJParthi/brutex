@@ -1660,7 +1660,11 @@ fn spawn_target_ok(t: &[Token], at: usize, arg: &[Token]) -> bool {
 fn spawn_findings(path: &str, src: &str) -> Result<Vec<String>, String> {
     let lexed = lex(src)?;
     let t = &lexed.tokens;
-    let mut out = Vec::new();
+    let mut out = metavariable_constructors(path, t);
+    let local = (0..t.len()).any(|k| {
+        matches!(t.get(k).and_then(ident), Some("enum" | "struct"))
+            && is_ident(t.get(k + 1), "Command")
+    });
     for (i, tok) in t.iter().enumerate() {
         if ident(tok) != Some("Command") {
             continue;
@@ -1676,7 +1680,7 @@ fn spawn_findings(path: &str, src: &str) -> Result<Vec<String>, String> {
         // alias, the qualified `<Command>::new`, `Command::new` taken as a
         // value, and an impl whose `Self::new` is the constructor -- starts a
         // program whose name this scan never reads, so each is refused.
-        if let Some(how) = hidden_constructor(t, i) {
+        if let Some(how) = hidden_constructor(t, i, local) {
             out.push(format!("{path}:{}: `Command` {how}", tok.line));
             continue;
         }
@@ -1700,15 +1704,17 @@ fn spawn_findings(path: &str, src: &str) -> Result<Vec<String>, String> {
 }
 
 /// How the `Command` token at `i` reaches its constructor without the
-/// `Command::new(` spelling [`spawn_findings`] reads, or `None`.
-fn hidden_constructor(t: &[Token], i: usize) -> Option<&'static str> {
+/// `Command::new(` spelling [`spawn_findings`] reads, or `None`. `local` is
+/// whether the file declares its own `enum` or `struct Command`, whose impls
+/// are not the process type's.
+fn hidden_constructor(t: &[Token], i: usize, local: bool) -> Option<&'static str> {
     if is_path_sep(t, i + 1) && is_ident(t.get(i + 3), "new") && !is_punct(t.get(i + 4), '(') {
         return Some("is constructed through a value, which hides the program it starts");
     }
-    if is_punct(t.get(i + 1), '>') && is_path_sep(t, i + 2) {
-        return Some("is reached through a qualified path, which hides its spawns from this scan");
+    if is_path_sep(t, i + 1) && is_punct(t.get(i + 3), '<') {
+        return Some("is reached through a turbofish, which hides its spawns from this scan");
     }
-    // `impl .. for [path::]Command {` or `.. where`: walk back over the path.
+    // The path the token ends: back over `ident ::` pairs and a leading `::`.
     let mut b = i;
     while b >= 3
         && is_path_sep(t, b - 2)
@@ -1719,18 +1725,45 @@ fn hidden_constructor(t: &[Token], i: usize) -> Option<&'static str> {
     if b >= 2 && is_path_sep(t, b - 2) {
         b -= 2;
     }
-    if (is_punct(t.get(i + 1), '{') || is_ident(t.get(i + 1), "where"))
+    // `<[path::]Command>::new`: a qualified self type, not a generic argument
+    // (`Vec::<Command>` has `::` before its `<`).
+    if is_punct(t.get(i + 1), '>')
+        && is_path_sep(t, i + 2)
+        && is_ident(t.get(i + 4), "new")
         && b > 0
-        && is_ident(t.get(b - 1), "for")
+        && is_punct(t.get(b - 1), '<')
+        && !(b >= 3 && is_path_sep(t, b - 3))
+    {
+        return Some("is reached through a qualified path, which hides its spawns from this scan");
+    }
+    // `impl .. for [(][path::]Command[<>][)] {` or `.. where`.
+    let mut before = b;
+    while before > 0 && is_punct(t.get(before - 1), '(') {
+        before -= 1;
+    }
+    let mut after = i + 1;
+    if is_punct(t.get(after), '<') && is_punct(t.get(after + 1), '>') {
+        after += 2;
+    }
+    while is_punct(t.get(after), ')') {
+        after += 1;
+    }
+    if !local
+        && before > 0
+        && is_ident(t.get(before - 1), "for")
+        && (is_punct(t.get(after), '{') || is_ident(t.get(after), "where"))
     {
         return Some("has an impl whose `Self::new` hides its spawns from this scan");
     }
-    // The statement holding the token, from the last `;`, `{` or `}` before it.
-    let start = (0..i)
+    // The statement holding the token, from the last `;`, `{` or `}` before
+    // it, past any `#[..]` attributes.
+    let mut k = (0..i)
         .rev()
         .find(|&k| is_punct(t.get(k), ';') || is_punct(t.get(k), '{') || is_punct(t.get(k), '}'))
         .map_or(0, |k| k + 1);
-    let mut k = start;
+    while is_punct(t.get(k), '#') && is_punct(t.get(k + 1), '[') {
+        k = skip_group(t, k + 1);
+    }
     if is_ident(t.get(k), "pub") {
         k += 1;
         if is_punct(t.get(k), '(') {
@@ -1739,6 +1772,27 @@ fn hidden_constructor(t: &[Token], i: usize) -> Option<&'static str> {
     }
     is_ident(t.get(k), "type")
         .then_some("is renamed by a type alias, which hides its spawns from this scan")
+}
+
+/// `<$name>::new(`: a macro metavariable used as a qualified self type, whose
+/// path the scan cannot read wherever the macro is invoked (D-3500).
+fn metavariable_constructors(path: &str, t: &[Token]) -> Vec<String> {
+    (0..t.len())
+        .filter(|&k| {
+            is_punct(t.get(k), '<')
+                && is_punct(t.get(k + 1), '$')
+                && t.get(k + 2).and_then(ident).is_some()
+                && is_punct(t.get(k + 3), '>')
+                && is_path_sep(t, k + 4)
+                && is_ident(t.get(k + 6), "new")
+        })
+        .map(|k| {
+            format!(
+                "{path}:{}: `<$..>::new` constructs a type a macro is handed, which this scan cannot read",
+                t[k].line
+            )
+        })
+        .collect()
 }
 
 /// `unsafe`, or a foreign block, anywhere in the file's tokens.
@@ -2673,106 +2727,52 @@ fn unquoted(word: &str) -> &str {
     word.trim_matches(['"', '\''])
 }
 
-/// Does one `sed` script run a program? GNU sed's `e` command and the `e`
-/// flag of `s` hand the pattern space, or the command's text, to a shell. Each
-/// `;`- or newline-separated command is read after its address.
-fn sed_runs(script: &str) -> bool {
-    script.split([';', '\n']).any(|cmd| {
-        let mut c = cmd.trim_start();
-        loop {
-            let before = c.len();
-            c = c.trim_start_matches(|x: char| {
-                x.is_ascii_digit() || matches!(x, '$' | ',' | '~' | '!' | ' ')
-            });
-            if let Some(rest) = c.strip_prefix('/') {
-                c = rest.split_once('/').map_or("", |(_, after)| after);
-            }
-            if c.len() == before {
-                break;
-            }
-        }
-        if c == "e" || c.starts_with("e ") {
-            return true;
-        }
-        let Some(rest) = c.strip_prefix('s') else {
-            return false;
-        };
-        let Some(d) = rest.chars().next() else {
-            return false;
-        };
-        let mut seen = 0;
-        let mut escaped = false;
-        for (k, x) in rest.char_indices().skip(1) {
-            if escaped {
-                escaped = false;
-            } else if x == '\\' {
-                escaped = true;
-            } else if x == d {
-                seen += 1;
-                if seen == 2 {
-                    let flags = &rest[k + x.len_utf8()..];
-                    return flags
-                        .chars()
-                        .take_while(|f| f.is_ascii_alphanumeric() && *f != 'w')
-                        .any(|f| f == 'e');
-                }
-            }
-        }
-        false
-    })
-}
-
-/// D-3511: tools that are not interpreters but run a program the step writes
-/// inline or assembles: `sed`'s `e`, `make --eval`, a git `!` alias, `find
-/// -exec` of a run-time name, and `env -S`.
+/// D-3511: tools that are not interpreters but run a program a step writes
+/// inline or assembles, refused by name where no workflow needs them and by
+/// form where one does. `sed` (its `e` command and `s///e` flag hand text to a
+/// shell, and its scripts are a second language, D-2315), `make` (`--eval`,
+/// `-f -`) and `rustup` (`override`, `default` and `run` outrank the pinned
+/// toolchain) appear in no workflow, so any invocation is refused, as is any
+/// `git -c`, `git --config-env` or `git config` (`alias.*=!…`,
+/// `core.fsmonitor`, `core.pager` and `core.sshCommand` each run a program).
+/// `find -exec` of a run-time name, `env -S` in any flag cluster, and an
+/// `xargs -I R` whose shell `-c` program holds `R` are refused by form.
 fn runner_programs(words: &[&str]) -> Vec<(String, &'static str)> {
     let mut out = Vec::new();
+    // A word that starts inside a quoted string is text, not a command.
+    let mut open: Option<char> = None;
     for (i, w) in words.iter().enumerate() {
+        let inside = open.is_some();
+        for c in w.chars() {
+            match open {
+                Some(q) if c == q => open = None,
+                None if c == '\'' || c == '"' => open = Some(c),
+                _ => {}
+            }
+        }
+        if inside {
+            continue;
+        }
         let rest = &words[i + 1..];
         match bare_word(w) {
-            "sed" | "gsed" => {
-                let mut scripts = Vec::new();
-                let mut k = 0;
-                while let Some(f) = rest.get(k) {
-                    if let Some(v) = f.strip_prefix("--expression=") {
-                        scripts.push(operand(&[v]).0);
-                        k += 1;
-                    } else if matches!(*f, "-e" | "--expression") {
-                        let (text, n) = operand(&rest[k + 1..]);
-                        scripts.push(text);
-                        k += 1 + n;
-                    } else if matches!(*f, "-f" | "--file") {
-                        k += 2;
-                    } else if f.starts_with('-') {
-                        k += 1;
-                    } else {
-                        break;
-                    }
-                }
-                if scripts.is_empty() {
-                    scripts.push(operand(&rest[k.min(rest.len())..]).0);
-                }
-                if let Some(script) = scripts.iter().find(|t| sed_runs(unquoted(t))) {
-                    out.push((format!("{w} {script}"), "sed's `e` hands text to a shell"));
-                }
-            }
-            "make" | "gmake" => {
-                if let Some(f) = rest
-                    .iter()
-                    .find(|f| **f == "-E" || **f == "--eval" || f.starts_with("--eval="))
-                {
-                    out.push((format!("{w} {f}"), "runs a makefile written inline"));
-                }
-            }
+            "sed" | "gsed" => out.push((
+                (*w).to_owned(),
+                "a sed script is a second language and its `e` runs a shell; read text with a .github/*.rs tool",
+            )),
+            "make" | "gmake" => out.push(((*w).to_owned(), "make runs recipes a step can write inline")),
+            "rustup" => out.push((
+                (*w).to_owned(),
+                "rustup can choose a toolchain past rust-toolchain.toml",
+            )),
             "git" => {
-                let alias = rest.windows(2).any(|p| {
-                    (p[0] == "-c" || p[0] == "config") && unquoted(p[1]).starts_with("alias.")
-                }) && rest.iter().any(|x| {
-                    let x = x.replace(['"', '\''], "");
-                    x.starts_with('!') || x.contains("=!")
-                });
-                if alias {
-                    out.push(((*w).to_owned(), "a `!` alias runs a shell program"));
+                if let Some(f) = rest.iter().find(|f| {
+                    let f = unquoted(f);
+                    f == "-c" || f == "config" || f.starts_with("--config-env")
+                }) {
+                    out.push((
+                        format!("{w} {f}"),
+                        "a git configuration value can name a program git runs",
+                    ));
                 }
             }
             "find" => {
@@ -2785,14 +2785,35 @@ fn runner_programs(words: &[&str]) -> Vec<(String, &'static str)> {
                 }
             }
             "env" => {
-                if let Some(f) = rest.iter().find(|f| {
-                    f.starts_with("-S")
-                        || **f == "--split-string"
-                        || f.starts_with("--split-string=")
+                if let Some(f) = rest.iter().map(|f| unquoted(f)).find(|f| {
+                    (f.starts_with('-') && !f.starts_with("--") && f.contains('S'))
+                        || f.starts_with("--split-string")
                 }) {
+                    out.push((format!("{w} {f}"), "splits a run-time string into a command"));
+                }
+            }
+            "xargs" => {
+                let replace = rest.iter().enumerate().find_map(|(k, f)| {
+                    let f = unquoted(f);
+                    if f == "-I" {
+                        rest.get(k + 1).map(|r| unquoted(r).to_owned())
+                    } else if let Some(r) = f.strip_prefix("--replace=") {
+                        Some(r.to_owned())
+                    } else {
+                        f.strip_prefix("-I").filter(|r| !r.is_empty()).map(str::to_owned)
+                    }
+                });
+                let shell_c = (0..rest.len()).any(|k| {
+                    interpreter(rest[k]).is_some_and(|(_, f)| matches!(f, Family::Shell))
+                        && rest.get(k + 1).is_some_and(|f| inline_flag("sh", f))
+                        && replace
+                            .as_deref()
+                            .is_some_and(|r| operand(rest.get(k + 2..).unwrap_or(&[])).0.contains(r))
+                });
+                if shell_c {
                     out.push((
-                        format!("{w} {f}"),
-                        "splits a run-time string into a command",
+                        (*w).to_owned(),
+                        "runs each input line as a shell program",
                     ));
                 }
             }
@@ -5005,7 +5026,6 @@ mod tests {
             "          bash -c 'echo hi'\n",
             "          x=$(command -v node || true)\n",
             "          echo \"use awk here\"\n",
-            "          sed -e 's/a/b/' f\n",
             "          gh pr merge 1 --auto --squash\n",
             "          sha=$(gh api x | \"$j\" field sha)\n",
         ] {
@@ -5016,37 +5036,50 @@ mod tests {
     #[test]
     fn a_program_runner_that_is_not_an_interpreter_is_refused() {
         // D-3511 (ONEAUTH-12). Each starts a program the step assembles or
-        // writes inline, through a tool that is not on the interpreter list.
+        // writes inline, through a tool that is not on the interpreter list;
+        // the second half are the round-3 review's bypasses of a first, form-
+        // reading version.
         for bad in [
             "          sed 's/.*/date/e' f\n",
             "          sed -n 'e uname' f\n",
-            "          sed -n '1e echo x' f\n",
             "          sed \"s/.*/$PROG/e\" f\n",
             "          sed -E -e 's|a|b|ge' f\n",
+            "          sed -e 's/a/b/' f\n",
             "          make --eval='all: ; @echo hi' all\n",
-            "          make -E 'all: ; x' all\n",
             "          git -c alias.x='!echo hi' x\n",
-            "          git -c alias.y=\"!$PROG\" y\n",
             "          git config alias.z '!sh'\n",
             "          find . -exec \"$PROG\" \\;\n",
             "          find . -execdir $P {} +\n",
             "          xargs -I{} sh -c '{}' < f\n",
             "          env -S \"$PROG\"\n",
             "          env --split-string=\"$PROG\"\n",
+            "          sed -e's/.*/echo P/e' f\n",
+            "          sed -n '/./I e echo P' f\n",
+            "          sed -n -e '1{e echo P' -e '}' f\n",
+            "          sed -n '\\%h%e echo P' f\n",
+            "          echo '1e echo P' | sed -n -f - f\n",
+            "          git -c ALIAS.zz='!echo P' zz\n",
+            "          git -c core.fsmonitor='echo P' status\n",
+            "          git --config-env=alias.x=V x\n",
+            "          env -iS'echo P'\n",
+            "          printf 'all:\\n\\t@echo P\\n' | make -f - all\n",
+            "          xargs -I % sh -c '%' < f\n",
+            "          xargs --replace=@ bash -c 'run @' < f\n",
+            "          rustup override set nightly\n",
+            "          rustup run nightly cargo build\n",
         ] {
             assert!(!workflow_findings("w", bad).is_empty(), "passed: {bad}");
         }
         for good in [
-            "          sed -e 's/a/b/' f\n",
-            "          sed -E 's/^(.*):[0-9]+:x/\\1\\t\\2/' f\n",
-            "          sed 's/e/E/g' f\n",
-            "          sed -n '/^end/p' f\n",
-            "          make all\n",
-            "          git -c core.quotepath=off ls-files -z\n",
-            "          git config user.name x\n",
+            "          sed_free=1\n",
+            "          echo \"use sed here\"\n",
+            "          git ls-files -z\n",
+            "          git rev-parse HEAD\n",
             "          find . -name '*.rs' -exec rustfmt --check {} +\n",
             "          xargs -0 -r \"$tool\" workflow < f\n",
+            "          (cd \"$t\" && xargs -I{} env {} $skip < tests.list)\n",
             "          env FOO=1 cargo test\n",
+            "          xargs -I{} cp {} out/ < f\n",
         ] {
             assert!(workflow_findings("w", good).is_empty(), "refused: {good}");
         }
@@ -5232,6 +5265,13 @@ mod tests {
             "impl Go for std::process::Command { fn go() -> Self { Self::new(\"sh\") } }",
             "impl<T> Go<T> for Command where T: X { fn go() -> Self { Self::new(\"sh\") } }",
             "impl Go for ::std::process::Command { fn go() -> Self { Self::new(\"sh\") } }",
+            // Round-3 review bypasses of the first version.
+            "#[allow(dead_code)] type C = std::process::Command; fn t() { C::new(\"sh\"); }",
+            "#[cfg(unix)]\npub type C = Command;",
+            "fn t() { std::process::Command::<>::new(\"sh\").status(); }",
+            "impl Go for (std::process::Command) { fn go() -> Self { Self::new(\"sh\") } }",
+            "impl Go for std::process::Command<> { fn go() -> Self { Self::new(\"sh\") } }",
+            "macro_rules! m { ($c:path) => { <$c>::new(\"sh\").status() } }",
         ] {
             assert!(
                 !spawn_findings("t.rs", src).unwrap().is_empty(),
@@ -5247,6 +5287,9 @@ mod tests {
             "type Out = std::process::Output;",
             "struct S { c: Command, d: u8 }",
             "fn t() -> Command { Command::new(\"git\") }\nenum Command { A }\nimpl Command { fn f() {} }",
+            "use std::process::Command; fn t() { let v = Vec::<Command>::with_capacity(2); }",
+            "pub enum Command { A }\nimpl std::fmt::Display for Command { fn fmt(&self) {} }",
+            "struct S { c: Option<(Command, u8)> }\nfn f(c: Command) {}",
         ] {
             assert_eq!(
                 spawn_findings("t.rs", src).unwrap(),

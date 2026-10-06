@@ -480,7 +480,10 @@ fn row_id(line: &str) -> Option<&str> {
     }
     let after = after.strip_prefix('`').unwrap_or(after);
     // D-3503: `| ID — claim |` shares the cell with its claim and is a row.
-    let after = after.strip_prefix(" — ").map_or(after, |_| "|");
+    let after = [" — ", " – ", ": "]
+        .iter()
+        .find_map(|sep| after.strip_prefix(sep))
+        .map_or(after, |_| "|");
     after
         .trim_start_matches(' ')
         .starts_with('|')
@@ -2601,6 +2604,8 @@ mod tests {
         assert_eq!(row_id("| C-1 x |"), None);
         assert_eq!(row_id("| C-1 -- x |"), None);
         assert_eq!(row_id("| C-1 —x |"), None);
+        assert_eq!(row_id("| C4-RUNNER-01: claim |"), Some("C4-RUNNER-01"));
+        assert_eq!(row_id("| C-1:x |"), None);
     }
 
     #[test]

@@ -612,7 +612,7 @@ fn validate_data(data: &ProjectionData) -> Result<Totals, String> {
 const fn day(stamp: i64) -> i64 {
     const DAY: i64 = 86_400_000_000;
     stamp.div_euclid(DAY)
-        + if stamp.rem_euclid(DAY) >= DAY - 19_800_000_000 {
+        + if stamp.rem_euclid(DAY) >= DAY - indicators::IST_OFFSET_MICROS {
             1
         } else {
             0

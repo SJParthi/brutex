@@ -886,17 +886,6 @@ fn other_door_line(line: &str) -> bool {
         })
     });
     let runtool = holds(&c, "--runtool") || holds(&c, "--test-runtool");
-    // D-3510: `cargo +toolchain` picks a toolchain past rust-toolchain.toml.
-    let plus = (0..c.len()).any(|i| {
-        if (i > 0 && ident_char(c[i - 1])) || !at(&c, i, "cargo") {
-            return false;
-        }
-        let mut p = i + "cargo".len();
-        while c.get(p).is_some_and(|x| ascii_space(*x)) {
-            p += 1;
-        }
-        p > i + "cargo".len() && c.get(p) == Some(&'+')
-    });
     let nextest = reaches(&c, "nextest", &['#', '|', ';'])
         .iter()
         .any(|seg| holds(seg, "--config-file") || holds(seg, "--tool-config-file"));
@@ -914,7 +903,6 @@ fn other_door_line(line: &str) -> bool {
     };
     flags
         || runtool
-        || plus
         || nextest
         || holds(&c, "GITHUB_PATH")
         || either_space(|sp| home(sp) || computed_name(&c, sp) || printf_v(sp))
@@ -974,6 +962,29 @@ fn env_file_line(line: &str) -> bool {
 /// Every workflow line that sets a compiler wrapper, runner or linker, in the
 /// step's order: the first pattern over every file, then the second, then the
 /// third.
+/// D-3510: `cargo +toolchain` picks a toolchain past `rust-toolchain.toml`.
+/// Read with quotes removed and `\` continuations joined, so `"cargo"
+/// '+nightly'` and `cargo \` + newline + `+nightly` are the same words.
+fn cargo_plus(logical: &str) -> bool {
+    let c: Vec<char> = logical
+        .chars()
+        .filter(|x| *x != '"' && *x != '\'')
+        .collect();
+    if c.iter().find(|x| !ascii_space(**x)) == Some(&'#') {
+        return false;
+    }
+    (0..c.len()).any(|i| {
+        if (i > 0 && ident_char(c[i - 1])) || !at(&c, i, "cargo") {
+            return false;
+        }
+        let mut p = i + "cargo".len();
+        while c.get(p).is_some_and(|x| ascii_space(*x) || *x == '\\') {
+            p += 1;
+        }
+        p > i + "cargo".len() && c.get(p) == Some(&'+')
+    })
+}
+
 fn workflow_doors(workflows: &[(String, String)]) -> Vec<String> {
     let mut out = Vec::new();
     let rules: [fn(&str) -> bool; 3] = [wrapper_line, other_door_line, env_file_line];
@@ -982,6 +993,29 @@ fn workflow_doors(workflows: &[(String, String)]) -> Vec<String> {
             for (n, l) in lines_of(text).into_iter().enumerate() {
                 if rule(l) {
                     out.push(format!("{name}:{}:{l}", n + 1));
+                }
+            }
+        }
+    }
+    for (name, text) in workflows {
+        let lines = lines_of(text);
+        let mut first = 0;
+        let mut logical = String::new();
+        for (n, l) in lines.iter().enumerate() {
+            if logical.is_empty() {
+                first = n;
+            }
+            match l.trim_end().strip_suffix('\\') {
+                Some(head) => {
+                    logical.push_str(head);
+                    logical.push(' ');
+                }
+                None => {
+                    logical.push_str(l);
+                    if cargo_plus(&logical) {
+                        out.push(format!("{name}:{}:{}", first + 1, logical.trim()));
+                    }
+                    logical.clear();
                 }
             }
         }
@@ -2838,7 +2872,10 @@ fn invariant_id(line: &str) -> Option<&str> {
     let (tok, after) = rest.split_at(end);
     let after = after.strip_prefix('`').unwrap_or(after);
     // D-3503: `| ID — claim |` shares the cell with its claim and is a row.
-    let after = after.strip_prefix(" — ").map_or(after, |_| "|");
+    let after = [" — ", " – ", ": "]
+        .iter()
+        .find_map(|sep| after.strip_prefix(sep))
+        .map_or(after, |_| "|");
     (id_shape(tok) && after.trim_start_matches(' ').starts_with('|')).then_some(tok)
 }
 
@@ -3774,6 +3811,11 @@ mod tests {
             "  __CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS: nightly",
             "    cargo +nightly build --workspace",
             "    cargo  +1.98.0 test",
+            "    \"cargo\" +nightly build",
+            "    'cargo' +nightly build",
+            "    cargo \"+nightly\" build",
+            "    cargo '+nightly' build",
+            "    cargo \\\n      +nightly build",
         ] {
             assert!(gate_1g_of(&["a"], l).refused, "{l}");
         }
@@ -4509,7 +4551,21 @@ mod tests {
             invariant_id("|  `AU-PROBESTORE-7b` — x"),
             Some("AU-PROBESTORE-7b")
         );
-        for l in ["| I-1 x |", "| I-1 - x |", "| I-1 —x |", "| I-1—x |"] {
+        assert_eq!(
+            invariant_id("| C4-RUNNER-01: claim | t | ✓ |"),
+            Some("C4-RUNNER-01")
+        );
+        assert_eq!(
+            invariant_id("| C4-RUNNER-02 – claim |"),
+            Some("C4-RUNNER-02")
+        );
+        for l in [
+            "| I-1 x |",
+            "| I-1 - x |",
+            "| I-1 —x |",
+            "| I-1—x |",
+            "| I-1:x |",
+        ] {
             assert_eq!(invariant_id(l), None, "{l}");
         }
         let r = gate_10b("| AU-O1CLI-6 — **a** | t | ✓ |\n| AU-O1CLI-6 | b | t | ✓ |\n");
