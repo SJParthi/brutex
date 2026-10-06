@@ -63716,3 +63716,181 @@ landed: there is no `HELD_TRADE_WRITERS`, `TradeFileSeen` or
 `cli::tests::a_cached_handle_refreshes_by_the_delta_and_reopens_when_it_must`.
 D-1849.
 
+### D-2280 — A window past a sealed month's last bar is answered by the bisection — 2026-10-04
+
+**Finding (W1-api5-8).** `/bars.json` with `from=` after the month's last bar
+read the whole month (O(n_valid) reads) to answer `[]`, because a header that
+names zero-filled records lands the bisection at `n_valid` the same way.
+
+**Decision.** In a month born with `FLAG_CHECKSUMS` a landing at `n_valid`
+probed record `n_valid - 1` last, and that probe verified its whole block
+against the sidecar. A zero-filled tail fails that check and the bisection
+refuses, so a landing that survived it stands on a real last bar stamped
+before `from`; the route answers `[]` after `ceil(log2(n_valid + 1))` reads. A
+month born without the flag has nothing that detects zeros and keeps the full
+read. Nothing stored changes; no answer changes except that a sealed month's
+damaged block OUTSIDE the asked window is no longer read by this request,
+exactly as a window inside the month already did not read it.
+
+**Proof.** `api::server::tests::bars_json_past_a_sealed_months_last_bar_reads_no_more_than_the_bisection`. AHD-01.
+
+### D-2281 — The scrub runs on the store-read pool — 2026-10-04
+
+**Finding (W1-api6-0, W1-api5-7).** `/verify.json` walked the census log and
+opened every held month inline in `async fn verify_json`, holding a runtime
+worker for the whole scrub.
+
+**Decision.** The census read, scrub and render move into `verify_reading`,
+run through `detail::run_store_read` (the eight-slot pool `/folder.json` and
+`/indexmap.json` share; 429 past it). The O(log length + E_v) work is
+inherent: the route is the request to open every month the census claims.
+Answers are unchanged except that saturation now answers 429.
+
+**Proof.** `api::server::cost_limits_tests::w1_api5_7_a_scrub_walks_the_append_log_and_opens_a_file_per_entry`. AHD-02.
+
+### D-2282 — The conductor's row count leaves the runtime worker — 2026-10-04
+
+**Finding (W1-api3-1).** `pullrun::rows_now` ran inline in the conductor's
+ticker, pass loop and recovery; a census miss held that worker.
+
+**Decision.** Every async caller goes through `rows_now_off_worker`, which
+runs the same count on `spawn_blocking` and re-raises a panic rather than
+inventing a count. The count is unchanged.
+
+**Proof.** `api::pullrun::tests::the_row_count_runs_off_the_worker_and_a_panic_is_not_a_count`. AHD-03.
+
+### D-2283 — A candidate page holds its catalog summary and closes on the generation — 2026-10-04
+
+**Finding (W1-api2-2).** `candidatejson::render` read and hashed the whole
+sealed catalog twice per page (open and a closing re-read).
+
+**Decision.** One summary slot is held across requests (`summary_for`) and
+re-checked with the new `cli::candidate_trades::require_unchanged` (the warm
+branch of `pinned`: a shared-lock open, a generation comparison and the start
+check), and the closing check is that same generation check. A different
+capture key or a moved generation reads cold. This needed one public function
+in `crates/cli` (owned by F8 otherwise); it adds no behaviour there. Pages are
+unchanged.
+
+**Proof.** `api::candidatejson::tests::a_held_summary_serves_again_warm_and_is_dropped_by_a_key_or_a_rewrite`,
+`api::candidatejson::tests::a_candidate_pages_catalog_reads_are_counted_and_stated`. AHD-04.
+
+### D-2284 — The qualified campaign route does not re-read its history twice — 2026-10-04
+
+**Finding (W1-api1-4).** `render_qualified` ended in `require_current`, H
+record reads that `QualifiedCampaign::open` had just made; a GET was 3H reads.
+
+**Decision.** The closing call is removed; a GET is 2H reads. The rest stays
+and is inherent: the page states `"history_checked":true` for this answer, and
+a cache keyed on metadata cannot see a record that rotted in place, so a held
+reader would state it falsely. Answers are unchanged.
+
+**Proof.** `api::booleancampaignjson::tests::the_qualified_campaign_history_walk_per_request_is_stated`. AHD-05.
+
+### D-2285 — Route answers are kept per census snapshot and universe parse — 2026-10-04
+
+**Finding (W1-api5-3).** `/instruments.json` walked the universe (O(U)) and
+every census entry (O(E)) and sorted the listing on every request.
+
+**Decision.** New `api::answer_memo`: answers kept under the census
+snapshot's allocation (a `Weak`, so the address cannot be reused while held)
+and `Parsed::generation`; a request observing either moved drops every kept
+answer; a build runs outside the lock and is kept only under the inputs it
+was built from. `/instruments.json` keeps its answer per feed. A hit is
+`census_now`'s hit, one probe and a copy of the answer. Answers are unchanged.
+
+**Proof.** `api::answer_memo::tests::an_answer_is_rebuilt_exactly_when_its_snapshot_or_generation_moves`,
+`api::answer_memo::tests::a_dropped_snapshot_is_never_matched_by_one_allocated_after_it`,
+`api::answer_memo::tests::a_build_overtaken_by_a_newer_snapshot_is_not_kept`,
+`api::server::tests::instruments_json_is_built_once_per_snapshot_and_parse`. AHD-06.
+
+### D-2286 — `/calendar.json` keeps its served answer per snapshot, feed, name and stamp — 2026-10-04
+
+**Finding (W1-api5-5).** Both branches collected and sorted the feed's census
+entries per request before their first cached calendar probe.
+
+**Decision.** The answer is kept in `answer_memo` under the snapshot, keyed by
+feed, name and the feed's stamp (the key every calendar inside it is kept
+under by `calendar_of::cached`). Refusals and names the census does not hold
+are never kept, so request text cannot grow it. Answers are unchanged.
+
+**Proof.** `api::server::census_request_tests::calendar_json_is_built_once_per_snapshot`,
+`api::answer_memo::tests::a_refusal_is_never_kept`. AHD-07.
+
+### D-2287 — `/indexmap.json` keeps its answer per catalogue stamp and parse — 2026-10-04
+
+**Finding (W1-api5-9, W1-api2-7).** The NSE catalogue was read, parsed and
+scanned per symbol on every request.
+
+**Decision.** The answer is kept under one `stat` of `nse_indices.csv` taken
+before the read (device, inode, length, both clocks) and the universe
+generation. Any write moves the status-change time. A file that cannot be
+stamped is read uncached; a refusal is never kept. Answers are unchanged.
+
+**Proof.** `api::answer_memo::tests::a_file_stamp_moves_with_any_write_and_stays_without_one`. AHD-08.
+
+### D-2288 — Spot targets are listed once per parse — 2026-10-04
+
+**Finding (W1-api5-11).** `spot_targets` walked every key of the merged
+universe on every pull POST and `recovery_mapping` (`Swept`: ~2,780 keys for
+two).
+
+**Decision.** `Parsed::target_keys` holds each target's tracked keys, built
+by `tracked_target_keys` at load and on every accepted reparse with the same
+two predicates; `spot_targets` walks the asked target's list: O(|target|).
+`resolved_master_rows` stays O(U log U): its answer is U sorted rows.
+
+**Proof.** `api::server::tests::spot_targets_walk_the_targets_own_list`. AHD-09.
+
+### D-2289 — A `/store` filter is walked once per census snapshot — 2026-10-04
+
+**Finding (W1-api5-6).** A filtered `/store` page walked and copied every
+entry per request, so paging one filter repeated the walk.
+
+**Decision.** Filtered lists are kept in `answer_memo` per filter and
+snapshot, at most `STORE_FILTERS_KEPT` = 8; the unfiltered page still borrows.
+The first walk of a filter is inherent: `symbol=` is a substring predicate
+and no index short of one per substring answers it without testing each
+entry. Pages are unchanged.
+
+**Proof.** `api::server::tests::a_store_filter_is_walked_once_per_snapshot`,
+`api::answer_memo::tests::a_capped_memo_never_holds_more_than_its_cap`. AHD-10.
+
+### D-2290 — Every documented API, pull, store and engine cost re-examined; what stays is measured or argued inherent — 2026-10-04
+
+**Finding (F8b re-check).** Thirty-eight audit rows had been closed as
+DOCUMENTED. The user's rule is that none stays documented only: remove it, or
+show it is inherent to what was asked.
+
+**Decision.** Ten are removed (D-2280 to D-2289). The rest are recorded in
+`docs/06-limits.md`'s D-2290 section, each with the guarantee its removal
+would break, and with a measurement where the cost is a read the store makes
+(scratch release harness, not committed, labelled one machine's figures).
+o1api-33's memory remains open: not inherent, not built here. No stored
+format, digest or result changes.
+
+### D-2291 — A JSON decode's peak memory is counted, and `/indexmap.json`'s memo is proved at the route — 2026-10-04
+
+**Finding (o1api-33, F8b re-check of D-2290).** D-2290 left o1api-33 as the
+one cost neither removed nor shown inherent: `pull::http::decode_body`'s peak
+memory was an argued multiple of the body ("~16x, ~32x with digits") that no
+allocator had counted, and the rule is that a cost that stays is measured.
+The same re-check found D-2287's proof was a file-stamp unit test only;
+nothing drove `/indexmap.json` itself through its memo.
+
+**Decision.** `crates/pull/tests/allocation.rs`'s counting allocator (the one
+unsafe exception, D-0724; no new `unsafe` site) also keeps the bytes live on
+the decoding thread and their peak. The decode's high-water mark above the
+body is 12x for a Dhan 34,000-bar chunk, 7x for a Zerodha answer of the same
+size and 17x for one array of a million zeros, the cheapest text per node; the
+test holds a ceiling one step above each, and `decode_body`'s doc and
+`docs/06-limits.md` state the figures. The tree is still built: a typed or
+streaming decode is not in this change, so o1api-33 is measured, not removed.
+`indexmap_reading` takes the catalogue's path through `indexmap_reading_at` so
+a test can name the file without the environment. No answer changes.
+
+**Proof.** `a_json_decodes_peak_memory_is_measured_against_its_body`
+(`crates/pull/tests/allocation.rs`),
+`api::server::tests::indexmap_json_is_built_once_per_catalogue_stamp_and_parse`,
+`api::server::tests::indexmap_json_answers_the_environments_catalogue`.
+AHD-11, AHD-12.

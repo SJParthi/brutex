@@ -387,12 +387,13 @@ fn a_campaign_expecting_a_stock_family_states_the_equity_note_and_an_index_campa
     std::fs::remove_dir_all(root).unwrap();
 }
 
-/// **The qualified campaign route walks its whole history on every GET, and
-/// that is stated.** W1-api1-4, D-1444.
+/// **The qualified campaign route walks its whole history on every GET once,
+/// not twice over, and that is stated.** W1-api1-4, D-1444, D-2284.
 ///
-/// No cache is added: the route serves a mutable latest snapshot. The bullet
-/// must name the walk, its bound and the absence of a cache, and the source
-/// must still be the uncached open the bullet describes.
+/// No cache is added: the route serves a mutable latest snapshot and states
+/// its history checked for this answer. The bullet must name the walk, its
+/// bound and the absence of a cache, and the source must still be the uncached
+/// open the bullet describes, without the closing second re-read.
 #[test]
 fn the_qualified_campaign_history_walk_per_request_is_stated() {
     let bullet = crate::booleanjson::tests::d0951_bullet("W1-api1-4");
@@ -405,6 +406,9 @@ fn the_qualified_campaign_history_walk_per_request_is_stated() {
         "1,000,000",
         "detail::MAX_SCAN_BYTES",
         "no cache",
+        "Since D-2284",
+        "2H reads, not 3H",
+        "`\"history_checked\":true`",
     ] {
         assert!(bullet.contains(word), "the bullet names {word}: {bullet}");
     }
@@ -413,4 +417,13 @@ fn the_qualified_campaign_history_walk_per_request_is_stated() {
     let body = &body[..body.find("\n}\n").unwrap()];
     assert!(body.contains("cli::boolean_evidence::QualifiedCampaign::open(root,asked.identity,crate::detail::MAX_SCAN_BYTES)"));
     assert!(!source.contains("static CACHE"), "the route holds no cache");
+    assert!(
+        !body.contains("require_current()"),
+        "open already ends in the re-verification; the route does not repeat it"
+    );
+    assert!(
+        include_str!("../../cli/src/boolean_qualified_observer.rs")
+            .contains("        reader.require_current()?;\n        Ok(reader)\n"),
+        "and `open` still ends in it, so the page's history is checked once per GET"
+    );
 }
