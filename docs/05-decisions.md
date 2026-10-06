@@ -63477,3 +63477,30 @@ bytes in the same order. A range cannot be mutated into an endless loop.
   (G18-rest-32) walks lists of 0, 1, 14 and 200 empty structs, the shape that
   spends the most passes per byte. It shows each one ends in exactly
   `2n + 4` passes, inside the bound, and is refused one pass short.
+
+### D-2086 — Untested store survivors: an unmeasurable sidecar, and the root's own boundary — 2026-10-06
+
+**What was observed.** Run 1283 never examined these mutants. The coordinator
+measured them at 969493e1 with CI's flags, in place, so the tests that need
+uid 65534 ran, and found four survivors:
+
+- **`remove_index`'s `NotFound` guard replaced with `true` and with `false`.**
+  `file::tests::removing_an_index_already_gone_is_done_and_one_that_will_not_go_refuses`
+  (G18-rest-22, D-2078) already covers both: an absent index must be `Ok`,
+  and a directory must be refused.
+- **`refuse_if_sealed`'s `NotFound` guard replaced with `true`.** No test gave
+  the function a sidecar the host cannot measure.
+- **`missing_below`'s `&&` replaced with `||`.** No test had an absent root,
+  or a directory outside the root.
+
+**Decided.** Two tests, both in `file::tests`:
+
+- `a_sidecar_that_cannot_be_measured_is_refused_and_only_absence_is_tolerated`
+  (G18-rest-33). An absent sidecar is `Ok` and an empty one is `Ok`. One
+  holding four bytes is `CommittedRecordsLost` with `sidecar_len` 4. A path
+  through a regular file, which cannot be measured, is refused, and not as
+  `CommittedRecordsLost`.
+- `only_directories_strictly_below_the_root_are_counted_as_missing`
+  (G18-rest-34). With the root and its parent both absent, `root/a/b` counts
+  `root/a` and `root/a/b` and stops at the root. A directory outside the root
+  counts nothing.

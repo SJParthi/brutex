@@ -7343,6 +7343,61 @@ mod tests {
         assert!(refused.is_err(), "a directory is not unlinked: {refused:?}");
     }
 
+    /// **ONLY AN ABSENT SIDECAR PROVES NOTHING WAS COMMITTED.** G18-rest-33,
+    /// D-2086. Absent and empty are `Ok`, one with entries is
+    /// `CommittedRecordsLost`, and a sidecar the host cannot measure for any
+    /// other reason -- here a path through a regular file -- is refused by
+    /// name, never read as absent.
+    #[test]
+    fn a_sidecar_that_cannot_be_measured_is_refused_and_only_absence_is_tolerated() {
+        let bars = scratch("sealed-bars");
+        let sidecar = scratch("sealed-crc");
+        let _ignored = std::fs::remove_file(&sidecar);
+        assert_eq!(super::refuse_if_sealed(&bars, &sidecar), Ok(()), "absent");
+        std::fs::write(&sidecar, b"").expect("an empty sidecar");
+        assert_eq!(super::refuse_if_sealed(&bars, &sidecar), Ok(()), "empty");
+        std::fs::write(&sidecar, [1, 2, 3, 4]).expect("a sidecar with an entry");
+        assert_eq!(
+            super::refuse_if_sealed(&bars, &sidecar),
+            Err(StoreError::CommittedRecordsLost {
+                path: bars.clone(),
+                sidecar: sidecar.clone(),
+                sidecar_len: 4,
+            })
+        );
+        let unmeasurable = sidecar.join("below-a-file");
+        let refused = super::refuse_if_sealed(&bars, &unmeasurable);
+        let _ignored = std::fs::remove_file(&sidecar);
+        assert!(
+            matches!(refused, Err(ref why) if !matches!(why, StoreError::CommittedRecordsLost { .. })),
+            "a sidecar that cannot be measured is refused: {refused:?}"
+        );
+    }
+
+    /// **THE DIRECTORIES AN OPEN CREATES ARE BELOW THE ROOT, NEVER IT OR
+    /// ABOVE IT.** G18-rest-34, D-2086. With the root itself absent, the walk
+    /// stops at it rather than counting it and its missing parents; and a
+    /// directory outside the root counts nothing.
+    #[test]
+    fn only_directories_strictly_below_the_root_are_counted_as_missing() {
+        let base = scratch("missing-base");
+        let _ignored = std::fs::remove_dir_all(&base);
+        let root = base.join("root");
+        let dir = root.join("a").join("b");
+        assert_eq!(
+            super::missing_below(&root, &dir),
+            vec![root.join("a"), dir.clone()],
+            "the absent root and its absent parent are not counted"
+        );
+        assert_eq!(super::missing_below(&root, &root), Vec::<PathBuf>::new());
+        let outside = base.join("elsewhere").join("c");
+        assert_eq!(
+            super::missing_below(&root, &outside),
+            Vec::<PathBuf>::new(),
+            "a directory outside the root is never counted"
+        );
+    }
+
     /// **A LINK IS REFUSED BY NAME; A FILE AND AN ABSENT PATH ARE NOT LINKS.**
     /// G18-rest-23, D-2078. And the refusal's sentence says what it refused.
     #[test]
