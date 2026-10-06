@@ -104,3 +104,12 @@ resumeFromRunId: "wf_33b651ee-26e", args: {"base": "origin/final/all-fixes",
 "branches", because WS3 started it at 07:51. That changes the args, so the cached
 finder results replay only where the prompt text is unchanged; accept it.
 Weekly extrapolation at 08:07: about 27 + 0.28 x 59 = 44%.
+
+08:16: the owner asked for the work to keep running, so all 12 unfinished sessions got RESUME
+(L2 was done). The pause line was raised to 88% for this window.
+08:26 poll (read directly, Opus only): the 14 brutex sessions sum to $632.46, which is
+$283.20 since 07:10. That estimates 80.9%. WS3's cost_usd has not moved since 07:31
+($16.43) even though it is running, so the real figure is higher. Tickvault was $367.86
+(+$28.67 since 08:06). PAUSE was sent to all 12 at 08:28. RESUME comes at 12:12
+(trig_01VA1zhRBcZL5kLMKpFrS152), together with the audit workflow relaunch.
+Weekly extrapolation: about 27 + 0.28 x 85 = 51%.
