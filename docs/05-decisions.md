@@ -64349,3 +64349,49 @@ value, NaN included: a NaN magnitude is a positive NaN, which `total_cmp` orders
 before. The method calls leave no comparison operator for a mutation to rewrite. The line's two remaining mutants,
 `-` as `+` and as `/`, are caught. The shard-138 `audit.rs:1140:27` `<` as `<=` case is the old `grid` guard. On
 460b702 it is line 1152, and its `<=` mutant was caught in the D-2065 run.
+
+### D-2091 — Gate 18's build bound is four times the baseline build, not two, because the second worker starts cold — 2026-10-06
+
+**What was observed.** D-2090 bounded every mutant build at
+`--build-timeout-multiplier 2`. A read-only gap audit found that cargo-mutants
+26.2.0 takes that bound once, from the baseline build, and applies it to
+every build on every worker. The baseline runs alone in build directory 0.
+The second `--jobs` worker gets a fresh copy of the source, and `copy_target`
+defaults to false, so its first mutant build has no `target/` at all. It runs
+while worker 1 is building or testing, and the two share the
+`--jobserver-tasks 4` tokens. A build that passes the bound is recorded as a
+TIMEOUT, and `mutation_gate verify` refuses the shard. The mutant is correct,
+but the shard is red.
+
+**Measured.**
+
+- CI run 1283 (37251141390), shard 110: `Unmutated baseline in 598s build +
+  2045s test`. Swatinem/rust-cache restores the dependency cache before this
+  step, so that build is warm for the 182 external packages in `Cargo.lock`.
+- On a 4-core container with Gate 18's environment (`CARGO_BUILD_JOBS=2`,
+  `RUSTFLAGS=-D warnings`, `CARGO_INCREMENTAL=0`), `cargo test --workspace
+  --locked --no-run` at the integration head took 1132 s from an empty
+  `target/`. After `cargo clean -p` of all thirteen workspace packages, the
+  same build took 977 s. A cold start therefore costs 1.16 times a warm one.
+
+**Derived, not measured.** Worker 1 can hold half of the four jobserver
+tokens while worker 2 builds. The parallel phases of worker 2's build can
+then run at half the rate the baseline had. That gives a worst case of about
+1.16 × 2 ≈ 2.3 times the baseline build, which is above D-2090's bound of 2.
+No CI run has measured this, because Gate 18 does not record per-mutant
+build times.
+
+**Decided.** `--build-timeout-multiplier 4`. That is 1.7 times the derived
+worst case. A genuinely endless build still stops at four times the baseline,
+about 40 minutes at shard 110's 598 s, well inside the 240-minute job. The
+other worker keeps testing the shard's remaining cases meanwhile. As in
+D-2090, a TIMEOUT is never credited.
+
+**Rejected.**
+
+- `--copy-target true`: it copies `target/` into every build directory. That
+  was 5.5 GB after the measurement above, and nothing in the gate checks the
+  runner's free disk first.
+- A fixed `--build-timeout`: it does not scale with a shard's own baseline.
+- Dropping the bound: it brings back the anonymous 240-minute cancellation
+  D-2090 removed.

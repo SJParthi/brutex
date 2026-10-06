@@ -4316,20 +4316,22 @@ jobs:
           # 5 caught again with --cap-lints true. Lints are enforced by gate 6b;
           # here they only hid mutants from the tests.
           #
-          # --build-timeout-multiplier 2, D-2090. --cap-lints also caps rustc's
+          # --build-timeout-multiplier 4, D-2090 and D-2091. --cap-lints also caps rustc's
           # deny-by-default long_running_const_eval, so a mutant that makes a
           # COMPILE-TIME loop endless (a const fn behind a static) never finishes
           # building, and nothing above bounds a build: run 1283's shards 146 and
           # 150 each held one (vocab name_index) and died at the 240m job limit,
-          # their other 30 cases untested. A build now stops at twice the
+          # their other 30 cases untested. A build now stops at four times the
           # baseline build and is reported as a TIMEOUT, which verify refuses
-          # by name. It bounds the failure; it never credits one.
+          # by name. It bounds the failure; it never credits one. Four, not
+          # two: the second worker's first build starts with no target/ and
+          # shares the jobserver with the first worker (D-2091).
           set +e
           cargo mutants --in-diff /tmp/mutation-plan/changed.diff \
             --shard "$SHARD" --sharding round-robin \
             --jobs 2 --jobserver-tasks 4 \
             --minimum-test-timeout 900 --timeout-multiplier 2 \
-            --build-timeout-multiplier 2 \
+            --build-timeout-multiplier 4 \
             --cap-lints true \
             --cargo-arg=--locked --test-tool nextest --cargo-test-arg=--max-fail=1:immediate \
             --cargo-test-arg=--test-threads=1 --no-shuffle --colors never 2>&1 | tee mutation-run.log
