@@ -594,7 +594,8 @@ pub(crate) fn resume(
 ///
 /// # Errors
 ///
-/// [`Why::Stale`] when the last row is not stamped where the header says;
+/// [`Why::Stale`] when the last row, or row 0 if the walk reaches it, is not
+/// stamped where the header says;
 /// [`Why::Outside`], [`Why::OffGrid`] or [`Why::SharedSlot`] for a bar the
 /// index cannot hold; a refused read as [`Why::Unreadable`].
 pub(crate) fn recover(
@@ -614,7 +615,12 @@ pub(crate) fn recover(
     let mut row = held.n_valid;
     while let Some(index) = row.checked_sub(1) {
         let ts_micros = stamp(index).map_err(Why::Unreadable)?;
-        if above.is_none() && ts_micros != held.last_ts {
+        // The header names the last row's stamp and row 0's: a walk that
+        // reaches either checks it, as the whole rebuild's `confirm` does
+        // (D-3135).
+        if (above.is_none() && ts_micros != held.last_ts)
+            || (index == 0 && ts_micros != held.first_ts)
+        {
             return Err(Why::Stale);
         }
         let slot = geometry
@@ -1437,6 +1443,16 @@ mod tests {
         lying.last_ts = at(0, 60 * 20);
         assert_eq!(
             recover(&minute, lying, |row| Ok(
+                good[usize::try_from(row).expect("a row")]
+            )),
+            Err(Why::Stale)
+        );
+        // The header's FIRST stamp is not row 0's, and the walk reaches row 0
+        // (D-3135): the whole rebuild refused this through `confirm`.
+        let mut first = held(&good);
+        first.first_ts = good[0] + 60 * MICROS;
+        assert_eq!(
+            recover(&minute, first, |row| Ok(
                 good[usize::try_from(row).expect("a row")]
             )),
             Err(Why::Stale)

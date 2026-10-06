@@ -63711,3 +63711,28 @@ something other than this writer's failed append, and `docs/06-limits.md`
 names them. When attack/o1-p99 merges, this supersedes the "An append can
 pay it too" bullet of its D-3302 section for the torn-write case. DPM-05,
 DPM-06.
+
+### D-3135 — A repaired `.tix` entry is logged only once it is on disk, and the repair checks row 0 — 2026-10-06
+
+**Finding (data-path round 5, against D-3134).** Two defects in D-3134's own
+code:
+
+- **Logged too early.** `repair_torn_entry` wrote the `store.tix` "time index
+  rebuilt from the bars" line (scope `one torn entry`) inside `index_batch`,
+  before any byte was written. An append retired after the repair (a second
+  daily bar on one IST day, D-2330) or refused after it logged a repair that
+  never reached disk. Measured: a daily month, its entry torn, then a
+  same-day bar. The append committed, the index was retired, and the log held
+  one "repaired" line. `rebuild_index` logs only after `write_index`, and
+  `append` itself refuses to log ahead of durability.
+- **Row 0 unchecked.** When the walk reached row 0 (a month whose bars all
+  lie in the last bucket), `recover` did not compare row 0 with the header's
+  `first_ts`, which the whole rebuild's `confirm` does. Measured: a header
+  whose `first_ts` is one minute after row 0 was repaired as `Ok`.
+
+**Decision.** `index_batch` returns whether it repaired, and `append` logs the
+repair after `write_entries` has synced it, and only then. `recover` refuses
+`Why::Stale` when the walk reaches row 0 and its stamp is not the header's
+`first_ts`. The caller then rebuilds the whole index, loudly, which refuses
+the same header through `confirm`. DPM-07; DPM-05's refusal test gains the
+case.

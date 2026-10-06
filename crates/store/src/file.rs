@@ -2604,8 +2604,20 @@ impl BarFile {
         // missing from the index; a crash here leaves entries AHEAD of the
         // commit, which `time_index::resume` masks off and the next append
         // overwrites. D-2329.
-        if let Some((bucket, entries)) = &indexed {
+        if let Some((bucket, entries, repaired)) = &indexed {
             self.write_entries(*bucket, entries)?;
+            // A REPAIR IS SAID ONCE IT IS ON DISK, not when it was computed
+            // (D-3135): an append refused or retired between the two would
+            // otherwise log an entry that was never written.
+            if *repaired && let Some(tix) = self.tix.as_ref() {
+                note_index_built(
+                    &tix.path,
+                    &Why::Entry { bucket: *bucket },
+                    self.header.n_valid,
+                    1,
+                    "one torn entry",
+                );
+            }
         }
 
         // Step 4 and step 5: one write of one self-checked 64-byte unit, into
@@ -2929,7 +2941,7 @@ impl BarFile {
     fn index_batch<R: Row>(
         &mut self,
         batch: &[R],
-    ) -> Result<Option<(u64, Vec<Entry>)>, StoreError> {
+    ) -> Result<Option<(u64, Vec<Entry>, bool)>, StoreError> {
         let held = Held::of(&self.header);
         let resumed = match self.tix.as_ref() {
             Some(tix) => match tix.state.get() {
@@ -2942,6 +2954,7 @@ impl BarFile {
             },
             None => return Ok(None),
         };
+        let mut repaired = false;
         let (bucket, start) = match resumed {
             Ok(found) => found,
             // ONE TORN ENTRY IS REBUILT ALONE, NOT THE MONTH (D-3134). A
@@ -2949,7 +2962,10 @@ impl BarFile {
             // committed bar's bucket; `time_index::recover` rebuilds it from
             // at most 65 bar reads. Anything it cannot prove falls through to
             // the whole rebuild below, loudly, as before.
-            Err(why) if let Some(found) = self.repair_torn_entry(&why) => found,
+            Err(why) if let Some(found) = self.repair_torn_entry(&why) => {
+                repaired = true;
+                found
+            }
             Err(why) => {
                 self.reindex(&why)?;
                 let Some(tix) = self.tix.as_ref() else {
@@ -2973,7 +2989,7 @@ impl BarFile {
         let extended =
             crate::time_index::extend(&tix.geometry, bucket, start, held.n_valid, stamps);
         match extended {
-            Ok(entries) => Ok(Some((bucket, entries))),
+            Ok(entries) => Ok(Some((bucket, entries, repaired))),
             Err(why @ Why::SharedSlot { .. }) => {
                 self.retire_index(why)?;
                 Ok(None)
@@ -2998,7 +3014,8 @@ impl BarFile {
     /// index instead. At most 65 bar reads (`time_index::recover`), and the
     /// rebuilt entry reaches disk with the append's own entries, before the
     /// header slot that commits them. Logged as `store.tix` "time index
-    /// rebuilt from the bars" with scope `one torn entry`. D-3134.
+    /// rebuilt from the bars" with scope `one torn entry` by `append`, after
+    /// that write and only if it happened (D-3135). D-3134.
     fn repair_torn_entry(&self, why: &Why) -> Option<(u64, Entry)> {
         let Why::Entry { bucket } = why else {
             return None;
@@ -3009,11 +3026,7 @@ impl BarFile {
             self.read_row::<Bar>(row).map(|bar| bar.ts_micros)
         })
         .ok()?;
-        if found != *bucket {
-            return None;
-        }
-        note_index_built(&tix.path, why, held.n_valid, 1, "one torn entry");
-        Some((found, entry))
+        (found == *bucket).then_some((found, entry))
     }
 
     /// Stops indexing this month, because `why`: the handle bisects from now

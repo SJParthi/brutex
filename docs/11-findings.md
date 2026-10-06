@@ -978,3 +978,12 @@ tests are named in `docs/04-invariants.md` rows DPR.
   diagnostic, and `cli fold_audit` under-counts it. Flushing it would also
   flag a day still in progress as needing a store repair; whether such a day
   can reach the fold is unsettled.
+- **Round 5 (2026-10-06):** two defects in D-3134's own repair: its log line
+  fired before the entry reached disk, and the walk did not check row 0 against
+  the header's first stamp (D-3135, DPM-07). Fixed. One candidate recorded
+  OPEN, low confidence: `gaps::classify_with_subject` passes over stored bars
+  on a `Closed` or `Unmeasured` day, and bars on an open day at a minute the
+  session does not expect, without counting or naming them. Ingest drops both
+  (D-2673), so this needs a calendar that changed after ingest, or a store
+  written by another path. Whether the gap ledger should carry an
+  "unexpected" count is a design decision.
