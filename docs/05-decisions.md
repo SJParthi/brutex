@@ -60695,3 +60695,27 @@ its own.
 was first listed under. A later listing of the same name is refused by name,
 naming both expiries. A dated name under the wrong expiry is still refused by
 `read_contract`. DPR-18.
+
+### D-3127 — The rolling walk keeps one run-failure reason per shape — 2026-10-06
+
+**Finding.** Recorded open after data-path round 3: `Rolled::absorb` and
+`note_run_failure` kept the first five run-failure sentences verbatim, with no
+de-duplication at all. A rolling walk is up to 252 runs, and one cause repeated
+across them (each sentence differing only in the run's strike offset and dates)
+filled every slot, so a later run failing for a different cause was counted in
+`failed` and never named. Measured on 0368dbb: twenty runs refused for one
+cause and a twenty-first for another kept five copies of the first cause and
+dropped the second; the same through the `Ok` arm (runs that partly failed).
+
+**Decision.** Both sites keep a reason through `keep_reason`, the shape rule
+D-3124 gave pricing refusals: a sentence is kept only when no kept sentence has
+its shape (every number erased), the first of each shape verbatim, still capped
+at `pull::pricing::REASONS_KEPT`. Every failure is still counted. The cost is
+bounded by `REASONS_KEPT` shape comparisons per reason offered, never by runs.
+`rolling_reason_limits_do_not_truncate_failures_or_committed_counts` asserted
+five copies of one obstruction on the receipt; it now asserts the two shapes
+(`ATM` and `ATM+n`, which differ by the `+` that survives erasure) and that the
+other five sentences are counted, not repeated. The Groww chain receipt's
+`FnoLanded::record_refusal`/`record_landing` keep five verbatim sentences the
+same way; that is the same class, was not recorded as open, and is left for a
+round that owns it. DPM-01, DPM-02.

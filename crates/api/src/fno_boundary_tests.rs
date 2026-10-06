@@ -1208,9 +1208,20 @@ async fn rolling_reason_limits_do_not_truncate_failures_or_committed_counts() {
     assert_eq!(record.rows_read, 7 * 375);
     assert_eq!(record.bars_stored, 375, "six exact replies append nothing");
     assert_eq!(record.failures, 7);
-    assert_eq!(body.matches("OPTIDX MONTH/1 ").count(), 5, "{body}");
-    assert!(!body.contains("OPTIDX MONTH/1 ATM+5"), "{body}");
-    assert!(!body.contains("OPTIDX MONTH/1 ATM+6"), "{body}");
+    // ONE CAUSE, KEPT ONCE PER SHAPE (D-3127). All seven runs failed on the
+    // same obstruction; the sentences differ only in the offset's number, so
+    // `ATM` and the first `ATM+n` are kept and the other five are counted
+    // above and not repeated. This asserted five copies of one cause until
+    // D-3127, which is the receipt that hid a sixth, different cause.
+    assert_eq!(body.matches("OPTIDX MONTH/1 ").count(), 2, "{body}");
+    assert!(body.contains("OPTIDX MONTH/1 ATM CALL"), "{body}");
+    assert!(body.contains("OPTIDX MONTH/1 ATM+1 CALL"), "{body}");
+    for later in ["ATM+2", "ATM+3", "ATM+4", "ATM+5", "ATM+6"] {
+        assert!(
+            !body.contains(&format!("OPTIDX MONTH/1 {later} ")),
+            "{body}"
+        );
+    }
     assert_eq!(transport.seen.load(std::sync::atomic::Ordering::Relaxed), 7);
     assert_eq!(
         fs::read(obstruction).expect("unchanged obstruction"),

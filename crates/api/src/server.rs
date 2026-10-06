@@ -12861,7 +12861,7 @@ async fn roll_one(
             Err(why) => {
                 // The reply was decoded even when a contract cannot be named.
                 // Keep its read count and any earlier acknowledged groups.
-                note_run_failure(&mut failed, &mut why_not, why);
+                note_run_failure(&mut failed, &mut why_not, &why);
                 break;
             }
         };
@@ -12912,7 +12912,7 @@ async fn roll_one(
         let named = match name_the_contract(expiry_day, strike, option_type, &label) {
             Ok(named) => named,
             Err(why) => {
-                note_run_failure(&mut failed, &mut why_not, why);
+                note_run_failure(&mut failed, &mut why_not, &why);
                 at = end;
                 continue;
             }
@@ -12964,7 +12964,7 @@ async fn roll_one(
         ) {
             Ok(landed) => landed,
             Err(why) => {
-                note_run_failure(&mut failed, &mut why_not, why);
+                note_run_failure(&mut failed, &mut why_not, &why);
                 at = end;
                 continue;
             }
@@ -12976,7 +12976,7 @@ async fn roll_one(
         // travel; the reason travels too rather than being swallowed by the
         // success. `CLAUDE.md` §4 — degrade loudly and name the reason.
         if let Some(why) = trouble {
-            note_run_failure(&mut failed, &mut why_not, why);
+            note_run_failure(&mut failed, &mut why_not, &why);
         }
         // AND NOW THE GREEKS, AFTER THE BARS THEY PRICE.
         //
@@ -12993,7 +12993,7 @@ async fn roll_one(
         if !records.is_empty() {
             match file_the_greeks(&records, contract, asked, site, wire, window) {
                 Some(why) => {
-                    note_run_failure(&mut failed, &mut why_not, format!("{label}: {why}"));
+                    note_run_failure(&mut failed, &mut why_not, &format!("{label}: {why}"));
                 }
                 None => priced.filed = priced.filed.saturating_add(records.len()),
             }
@@ -13006,7 +13006,7 @@ async fn roll_one(
     // ONE CENSUS CYCLE FOR THE WHOLE ANSWER — see `record_held`'s own note.
     if let Some(why) = pull::ingest::record_held(&site.store_root, wire.store_vendor, &census_rows)
     {
-        note_run_failure(&mut failed, &mut why_not, format!("{label}: {why}"));
+        note_run_failure(&mut failed, &mut why_not, &format!("{label}: {why}"));
     }
     Ok(Rolled {
         rows_read: rows.len(),
@@ -13310,11 +13310,18 @@ fn spot_book_for(
 /// both `?` until D-0220, which abandoned every remaining run; two hand-written
 /// copies of the replacement would be two chances for one of them to drift back
 /// toward ending the walk.
-fn note_run_failure(failed: &mut usize, why_not: &mut Vec<String>, why: String) {
+///
+/// # One reason per kind (D-3127)
+///
+/// Every failure is counted; a reason is KEPT only when no kept reason has its
+/// shape — the rule `keep_reason` gives pricing refusals (D-3124). A rolling
+/// walk is up to 252 runs, and one cause repeated across them, each sentence
+/// differing only in the run's strike offset and dates, used to fill every
+/// slot so that a later run failing for a different cause was counted and
+/// never named.
+fn note_run_failure(failed: &mut usize, why_not: &mut Vec<String>, why: &str) {
     *failed = failed.saturating_add(1);
-    if why_not.len() < pull::pricing::REASONS_KEPT {
-        why_not.push(why);
-    }
+    keep_reason(why_not, why);
 }
 
 /// Where the run starting at `at` ends, and the key every row in it shares.
@@ -13688,7 +13695,8 @@ struct Rolled {
     /// 252 runs, so one bad strike discarded 251 good ones. See the two `match`
     /// arms in [`roll_one`] for the measurement and D-0220 for the class.
     failed: usize,
-    /// The first few reasons, verbatim, capped at `pull::pricing::REASONS_KEPT`.
+    /// The first reason of each kind, verbatim, capped at
+    /// `pull::pricing::REASONS_KEPT` (D-3127).
     why: Vec<String>,
     /// What pricing produced, or all zeroes when no rate was supplied.
     priced: PricedCount,
@@ -13716,10 +13724,9 @@ impl Rolled {
                 // trade a run that died loudly for one that succeeds quietly
                 // while having lost groups.
                 self.failed = self.failed.saturating_add(done.failed);
-                for said in done.why {
-                    if self.why.len() < pull::pricing::REASONS_KEPT {
-                        self.why.push(said);
-                    }
+                // BY SHAPE, NOT BY SENTENCE (D-3127). See `note_run_failure`.
+                for said in &done.why {
+                    keep_reason(&mut self.why, said);
                 }
                 false
             }
@@ -13728,7 +13735,7 @@ impl Rolled {
                 note_run_failure(
                     &mut self.failed,
                     &mut self.why,
-                    said.trim_start_matches(CREDENTIAL_DEAD).to_owned(),
+                    said.trim_start_matches(CREDENTIAL_DEAD),
                 );
                 dead
             }
@@ -14438,7 +14445,7 @@ async fn roll_every(
         }
     }
     let credential_stop = watch.stop().map(|(stop, why)| {
-        note_run_failure(&mut out.failed, &mut out.why, why.clone());
+        note_run_failure(&mut out.failed, &mut out.why, why);
         *stop
     });
     say_walk_finished(asked, out.stored, out.failed, out.declined, planned);
@@ -35102,3 +35109,7 @@ mod attack_r2_receipt_tests;
 #[cfg(test)]
 #[path = "attack_r3_tests.rs"]
 mod attack_r3_tests;
+
+#[cfg(test)]
+#[path = "attack_r4_tests.rs"]
+mod attack_r4_tests;

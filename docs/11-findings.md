@@ -951,3 +951,8 @@ tests are named in `docs/04-invariants.md` rows DPR.
   for negative volume was on no line of a balanced receipt (D-3125); a monthly
   vendor name listed under two expiries was filed as two contracts (D-3126).
   Fixed.
+- **Round 3 open item, closed 2026-10-06:** the rolling-option walk kept
+  run-failure reasons with no de-duplication, so one cause repeated across runs
+  filled every slot and a later, different cause was counted and never named
+  (D-3127, DPM-01, DPM-02). Fixed. The Groww chain receipt's verbatim reason
+  list is the same class and stays open, unrecorded until a round owns it.
