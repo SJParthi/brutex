@@ -943,6 +943,19 @@ pub enum EntryFault {
         /// The value that is neither a price nor the sentinel.
         paisa: i64,
     },
+    /// The version-3 contract field states a length past the field, or text
+    /// that is not a contract. Reading it as no contract would file a
+    /// derivative row under its underlying's spot key. D-3680.
+    ContractUnreadable {
+        /// The length byte as stored.
+        len: u8,
+    },
+    /// A byte the format reserves, or a text byte past the contract's stated
+    /// length, is not zero. D-3680.
+    ReservedNotZero {
+        /// Its offset within the closes half.
+        offset: usize,
+    },
 }
 
 impl fmt::Display for EntryFault {
@@ -973,6 +986,14 @@ impl fmt::Display for EntryFault {
                 "close {paisa} paisa is neither a price nor the not-recorded \
                  sentinel {CLOSE_NULL}"
             ),
+            Self::ContractUnreadable { len } => write!(
+                f,
+                "the contract field (length {len}) is not a contract; refused \
+                 rather than read as the spot key"
+            ),
+            Self::ReservedNotZero { offset } => {
+                write!(f, "reserved byte {offset} of the closes half is not zero")
+            }
         }
     }
 }
@@ -1658,6 +1679,23 @@ impl Held {
     /// a second half that fails its own, or [`EntryFault::CloseHalfRecorded`] /
     /// [`EntryFault::CloseNotAPrice`] for a pair that is not a pair.
     pub fn decode(bytes: &[u8]) -> Result<Self, EntryFault> {
+        Self::decode_at(bytes, true)
+    }
+
+    /// Decodes a version-2 entry, whose bytes `16..60` of the closes half were
+    /// reserved and carry no meaning: no contract is read from them, exactly
+    /// as the version-2 decoder read them. Reading version-3 meaning into a
+    /// version-2 row would reinterpret its reserved space, which
+    /// `docs/02-store-format.md` §2 forbids. D-3680.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::decode`], less the contract and reserved-tail refusals.
+    pub fn decode_v2(bytes: &[u8]) -> Result<Self, EntryFault> {
+        Self::decode_at(bytes, false)
+    }
+
+    fn decode_at(bytes: &[u8], with_contract: bool) -> Result<Self, EntryFault> {
         let entry = Entry::decode(bytes)?;
         let half = image_of_at(bytes, IMAGE_LEN).map_err(|len| EntryFault::TooShort { len })?;
         verify(&half).map_err(|(stored, computed)| EntryFault::Checksum { stored, computed })?;
@@ -1674,7 +1712,9 @@ impl Held {
         // answering `None` is the right answer for it, and this is the only
         // place that has both halves in hand.
         let mut entry = entry;
-        entry.key.contract = read_contract(&half);
+        if with_contract {
+            entry.key.contract = read_contract(&half)?;
+        }
         Ok(Self { entry, closes })
     }
 }
@@ -1691,7 +1731,12 @@ impl Layout {
     ///
     /// Whatever [`Entry::decode`] or [`Held::decode`] refuses.
     pub fn decode_entry(self, bytes: &[u8]) -> Result<Held, EntryFault> {
-        if self.carries_closes {
+        // THE VERSION SAYS WHAT THE RESERVED BYTES MEAN (D-3680). Versions 2
+        // and 3 share a geometry, and this chose the decoder by geometry alone,
+        // so a version-2 entry was read with version-3 contract meaning.
+        if self.carries_closes && self.version == 2 {
+            Held::decode_v2(bytes)
+        } else if self.carries_closes {
             Held::decode(bytes)
         } else {
             Entry::decode(bytes).map(Held::unknown)
@@ -3413,20 +3458,40 @@ fn covered(image: &[u8; IMAGE_LEN]) -> [u8; OFF_CRC] {
 }
 
 /// Writes `src` at `offset`.
-/// The contract this half names, or [`None`] where it names none.
+/// The contract a version-3 half names, or [`None`] where it names none.
 ///
-/// A zero length is the spot case and is not an error: every version-2 row and
-/// every spot row leaves these bytes zero, and a census full of them reads back
-/// exactly as it always did. Text that is not valid ASCII, or a length past the
-/// field, answers `None` rather than a partial name — a truncated contract is a
-/// DIFFERENT contract, and reading one would merge two series under one key.
-fn read_contract(half: &[u8; IMAGE_LEN]) -> Option<Contract> {
-    let n = usize::from(*half.get(C_CONTRACT_N)?);
-    if n == 0 || n > C_CONTRACT_LEN {
-        return None;
+/// A zero length is the spot case and is not an error, provided the text field
+/// is zero too: every spot row leaves these bytes zero. A length past the
+/// field, text that is not a contract, a byte past the stated length, or a
+/// nonzero reserved tail (`41..60`) is REFUSED, not read as the spot key. This
+/// answered `None` for all of them, and `None` is the spot key, so a corrupt
+/// derivative row loaded silently as its underlying's spot month and, the
+/// index being newest-wins, replaced that month's count (D-3680;
+/// `docs/02-store-format.md` §11.5a).
+fn read_contract(half: &[u8; IMAGE_LEN]) -> Result<Option<Contract>, EntryFault> {
+    let reserved_from = C_CONTRACT_N + 1;
+    if let Some(offset) = (reserved_from..OFF_CRC).find(|&at| half.get(at).copied() != Some(0)) {
+        return Err(EntryFault::ReservedNotZero { offset });
     }
-    let text = core::str::from_utf8(half.get(C_CONTRACT..C_CONTRACT + n)?).ok()?;
-    Contract::parse(text)
+    let n = half.get(C_CONTRACT_N).copied().unwrap_or(0);
+    let len = usize::from(n);
+    let text_field = half.get(C_CONTRACT..C_CONTRACT_N).unwrap_or_default();
+    if text_field.iter().skip(len).any(|&b| b != 0) {
+        return Err(EntryFault::ReservedNotZero {
+            offset: C_CONTRACT + len,
+        });
+    }
+    if len == 0 {
+        return Ok(None);
+    }
+    let parsed = text_field
+        .get(..len)
+        .and_then(|text| core::str::from_utf8(text).ok())
+        .and_then(Contract::parse);
+    match parsed {
+        Some(contract) => Ok(Some(contract)),
+        None => Err(EntryFault::ContractUnreadable { len: n }),
+    }
 }
 
 fn write_at<const N: usize>(out: &mut [u8; IMAGE_LEN], offset: usize, src: [u8; N]) {

@@ -504,3 +504,29 @@ fn dpd_a_drifted_index_document_refuses_and_keeps_the_catalogue_on_disk() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Gap-audit finding 17/#1, checked on this head (2026-10-06): the HTTP F&O
+/// reader must refuse a zero strike and a leading-zero spelling, as D-1311 and
+/// the lake reader do. Refuted on this branch, where D-3150 and D-3157 already
+/// refuse both; kept as the proof. Trailing-zero fractions stay a vendor-
+/// evidence question (`dpd_spellings_left_to_vendor_evidence_are_pinned`), and
+/// the chain walk files one contract once under any spelling (D-3116).
+#[test]
+fn a_zero_strike_and_a_leading_zero_strike_are_refused_by_the_http_reader() {
+    for name in [
+        "NSE-NIFTY-04Jan24-0-CE",
+        "NSE-NIFTY-04Jan24-0.00-PE",
+        "NSE-NIFTY-04Jan24-00-CE",
+        "NSE-NIFTY-04Jan24-019200-CE",
+        "NSE-NIFTY-04Jan24-019200.5-PE",
+    ] {
+        assert!(
+            read_contract(name, jan4()).is_none(),
+            "{name} must not read"
+        );
+    }
+    assert!(
+        read_contract("NSE-NIFTY-04Jan24-0.05-CE", jan4()).is_some(),
+        "five paise is a strike"
+    );
+}

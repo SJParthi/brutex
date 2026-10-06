@@ -63791,3 +63791,30 @@ history cannot rename. The one shipped spec (`CALL`, `PUT`) is unaffected.
 by name with the run's label, so a new spelling is a deliberate edit here and
 never a silent misfiling. D-0346's sentence stands corrected by this entry.
 DPM-10.
+
+### D-3680 — The census decodes each entry by its own version, and refuses a contract field it cannot read — 2026-10-06
+
+**Finding (gap audit 17, #16; verified with failing tests on e16ded7).**
+`Layout::decode_entry` chose its decoder by geometry alone, and versions 2 and
+3 share one. So a version-2 entry was read with version-3 contract meaning:
+bytes 16..60 of its closes half, reserved at version 2, became a contract.
+Measured: a checksum-valid image carrying contract text, read at `Layout::V2`,
+returned `Some(2025-07-31-2500000-CE)`. At version 3, `read_contract`
+answered `None`, the spot key, for a length past the field or text that is not
+a contract. Such a derivative row loaded as its underlying's spot month and,
+newest-wins, replaced that month's count. Measured: both decoded `Ok`. The
+reserved tail 41..60 was never checked.
+
+**Decision.** Version 2 decodes through `Held::decode_v2` and reads no
+contract. Version 3 refuses `EntryFault::ContractUnreadable { len }` for a
+length past the field or unparseable text. It refuses
+`EntryFault::ReservedNotZero { offset }` for a nonzero byte in 41..60, or a
+text byte past the stated length. A zero length with zero text is still the
+spot key. No writer emits these bytes: every case needs a resealed second
+half, the D-1353/D-1354 class. DPM-11.
+
+Finding #1 of the same audit (fno.rs accepting a zero strike or a
+leading-zero spelling) is refuted on this branch: D-3150 and D-3157 refuse
+both. `a_zero_strike_and_a_leading_zero_strike_are_refused_by_the_http_reader`
+in `crates/pull/tests/attack_decoder.rs` passes unchanged. Trailing-zero
+fractions stay a vendor-evidence question (D-3116 files one contract once).
