@@ -5,3 +5,4 @@ L4-R1b	fixing	d02e10a	D-3503..D-3507 WIP, paused (usage guard)
 L4-R1b	branch	7cf031b	D-3503..D-3507 validated (tests) - mutants pending
 L4-R2	branch	7cf031b	D-3508..D-3514, paused 08:07 (usage guard)
 L4-R3	fixing	50051a5	round-3 self-review fixes, paused 08:28 (usage guard), not validated
+L4	parked	ffff5e5	parked 12:30; api mutants 14/22 (0 missed), cli mutants not run; round 4 open
