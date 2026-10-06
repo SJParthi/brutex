@@ -2,10 +2,10 @@
 //! Completion proves a measured comparison, never admission or portfolio selection.
 use super::{
     BooleanCoordinateV1, Bounds, Chosen, CommittedBooleanFamilyV1, Completion, Direction,
-    ExecutionSeriesV1, Expression, ExpressionExecutionRunV1, Hasher, Horizon, Operation, Params,
-    Path, PathBuf, Remaining, Request, RetainedSource, Run, Sessions, Side, Source, SourceDigest,
-    StrictConfig, catalog_words, cohort_digest, display, grid_context, hash, load_source,
-    persistence, prepare_column, reference, refuse, validate_request,
+    ExecutionDigestsV1, ExecutionSeriesV1, Expression, ExpressionExecutionRunV1, Hasher, Horizon,
+    Operation, Params, Path, PathBuf, Remaining, Request, RetainedSource, Run, Sessions, Side,
+    Source, StrictConfig, catalog_words, cohort_digest, display, grid_context, hash, load_source,
+    persistence, prepare_column, refuse, slice_digests, validate_request,
 };
 use runner::exit_grid_policy::expression_execution::later_period::validation::{
     BoundFixedTrainingFoldsV1, FixedTrainingFoldPlanV1, FixedTrainingFoldProjectionV1,
@@ -433,7 +433,13 @@ fn compute(
     let fold_map = validation
         .map(|asked| LaterFoldMapV1::new(asked.windows, execution, &column, asked.mapping_bytes))
         .transpose()?;
-    let mut digest = SourceDigest::new(source);
+    // ONE SET OF SLICE DIGESTS FOR EVERY PROGRAM AND SIDE (D-1831). Each group
+    // used to mint its run through `new_with_daily_reference`, which hashed
+    // the three streams, searched the minute context for the separately
+    // loaded execution slice and hashed that slice: O(S + M + D + E) per
+    // program x side, none of it depending on the program or the side. Taken
+    // on first use, so a family with no anchor still hashes nothing.
+    let mut hoisted = None;
     for (group, anchor) in training.anchors.iter().enumerate() {
         let program = training
             .programs
@@ -451,9 +457,12 @@ fn compute(
         {
             return Err("Boolean later anchor differs from original directional run".into());
         }
-        let data_digest = digest
-            .get()
-            .map_err(|why| format!("Boolean later daily identity: {why:?}"))?;
+        let digests = slice_digests(
+            &mut hoisted,
+            source,
+            series,
+            "Boolean later daily identity:",
+        )?;
         let run = execution_run(
             request,
             source,
@@ -461,7 +470,7 @@ fn compute(
             commit,
             program,
             resolved.side(),
-            data_digest,
+            &digests,
         )?;
         let attempt = crate::sweep_evidence::begin(
             request.output,
@@ -532,9 +541,9 @@ fn execution_run(
     commit: &str,
     program: &Expression,
     side: Side,
-    data_digest: [u8; 32],
+    digests: &ExecutionDigestsV1,
 ) -> Result<ExpressionExecutionRunV1, String> {
-    ExpressionExecutionRunV1::new_with_daily_reference(
+    ExpressionExecutionRunV1::with_digests(
         &Run {
             mask: program.referenced(),
             direction: if side == Side::Long {
@@ -551,15 +560,12 @@ fn execution_run(
                 policy: 1,
             }
             .with_policy(&catalog_words(identity)),
-            data_digest,
+            data_digest: digests.data_digest(),
             commit,
             feed: request.vendor.as_str(),
         },
         program,
-        &source.data.signal.bars,
-        &source.data.exact_minute.bars,
-        execution(source),
-        reference(source),
+        digests,
     )
 }
 #[expect(

@@ -19,9 +19,7 @@ use runner::exit_grid_policy::{
 };
 use runner::expression::Expression;
 use runner::grid::{Cell, Chosen, TradeRow};
-use runner::identity::{
-    DailyBindingRefusal, DailyReferenceBinding, Direction, Params, ReferenceIntegrity, Run,
-};
+use runner::identity::{DailyReferenceBinding, Direction, Params, ReferenceIntegrity, Run};
 use runner::outcome::Horizon;
 use runner::research_family::ResearchFamilyV1;
 
@@ -815,49 +813,6 @@ struct Remaining {
     bytes: u64,
 }
 
-/// One family's three-stream source digest: hashed the first time a program
-/// asks for it and reused by every later one.
-///
-/// It reads no program: its inputs are the signal, exact-minute and daily
-/// streams and their binding, all fixed for the family. cli used to hash them
-/// afresh for each program × side, in TRAINING and again in the later
-/// comparison. Hashing on first use rather than ahead of the loop leaves a
-/// refusal where it was, at the first program. W2-cli2-3.
-///
-/// The later comparison is its one user now: TRAINING seals each run against
-/// [`slice_digests`] through [`Shared`] (D-1143). There this is cli's digest
-/// only; minting each program × side's later run through
-/// `ExpressionExecutionRunV1::new_with_daily_reference` still hashes the same
-/// streams in the runner (W3-runner2-3, D-0711).
-struct SourceDigest<'a> {
-    source: &'a Source,
-    digest: Option<[u8; 32]>,
-}
-
-impl<'a> SourceDigest<'a> {
-    const fn new(source: &'a Source) -> Self {
-        Self {
-            source,
-            digest: None,
-        }
-    }
-
-    fn get(&mut self) -> Result<[u8; 32], DailyBindingRefusal> {
-        if let Some(digest) = self.digest {
-            return Ok(digest);
-        }
-        #[cfg(test)]
-        tests::count(&tests::DIGESTS);
-        let digest = runner::identity::data_digest_with_daily_reference(
-            &self.source.data.signal.bars,
-            &self.source.data.exact_minute.bars,
-            reference(self.source),
-        )?;
-        self.digest = Some(digest);
-        Ok(digest)
-    }
-}
-
 /// What every program × side of one TRAINING family shares: the source slice
 /// digests and the series, column and horizon each side is attested over.
 ///
@@ -865,7 +820,8 @@ impl<'a> SourceDigest<'a> {
 /// AND the execution digest, so each program × side's run is sealed with
 /// `ExpressionExecutionRunV1::with_digests` and the runner hashes none of the
 /// streams again. That closes, for this TRAINING path, the runner pass
-/// W3-runner2-3 that [`SourceDigest`]'s note records (D-0711).
+/// W3-runner2-3 that D-0711 recorded; the later comparison now seals its runs
+/// the same way (D-1831).
 struct Shared<'a> {
     source: &'a Source,
     digests: Option<ExecutionDigestsV1>,
@@ -892,7 +848,12 @@ impl<'a> Shared<'a> {
 
     /// The slice digests, hashed the first time a program asks for them.
     fn digests(&mut self) -> Result<ExecutionDigestsV1, String> {
-        slice_digests(&mut self.digests, self.source, self.series)
+        slice_digests(
+            &mut self.digests,
+            self.source,
+            self.series,
+            "Boolean daily identity refused:",
+        )
     }
 }
 
@@ -1086,12 +1047,13 @@ fn slice_digests(
     hoisted: &mut Option<ExecutionDigestsV1>,
     source: &Source,
     series: ExecutionSeriesV1<'_>,
+    daily_refusal: &str,
 ) -> Result<ExecutionDigestsV1, String> {
     if let Some(digests) = *hoisted {
         return Ok(digests);
     }
-    // cli's one pass over the family's source, counted where `SourceDigest`
-    // counts the later comparison's (W2-cli2-3).
+    // cli's one pass over the family's source, TRAINING or later comparison
+    // (W2-cli2-3, D-1831).
     #[cfg(test)]
     tests::count(&tests::DIGESTS);
     let digests = ExecutionDigestsV1::of_daily_reference(
@@ -1102,7 +1064,7 @@ fn slice_digests(
     )
     .map_err(|why| match why {
         ExitGridErrorV1::DailyReferenceIdentityRefused(why) => {
-            format!("Boolean daily identity refused: {why:?}")
+            format!("{daily_refusal} {why:?}")
         }
         other => display(other),
     })?;

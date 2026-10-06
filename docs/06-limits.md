@@ -10549,6 +10549,23 @@ is rebuilt in its own copy.
   `evaluate_expression_oos` hashes the later bars (`let execution =
   crate::identity::data_digest(bars);`). None of these is timed here. They are
   ledgered as W3-runner2-3, W3-runner2-5 and W3-runner2-4 for the runner group.
+- **Fixed by D-1831 (3 October 2026): no runner pass is left per program ×
+  side.** TRAINING has sealed against `slice_digests` since D-1143 and the
+  later comparison's bars since D-1188; the later comparison's runs now seal
+  through the same `slice_digests` with
+  `ExpressionExecutionRunV1::with_digests`, which reads no bar. The three-stream
+  hash, the execution-slice hash and the subslice check run once per family
+  (TRAINING) and once per later comparison, not once per program × side.
+  Counted, not timed: 1 digest pass for six groups
+  (`cli_digests_a_later_comparisons_source_once`), and no
+  `new_with_daily_reference` or `data_digest_with_daily_reference` call left in
+  the loop (`the_later_loop_seals_each_run_against_digests_taken_once`).
+  **What is still linear, and why it stays:** that one subslice check walks the
+  minute context, because the Boolean source loads its execution span as its
+  own `Vec` rather than as a view of the context, so the pointer test of
+  D-1196 cannot place it. It runs once per comparison, beside the BLAKE3 pass
+  over the same context that the data digest must take, so it does not change
+  the comparison's order.
 
 ## The AND checkpoint journal, per boundary — D-0712, 27 September 2026
 
