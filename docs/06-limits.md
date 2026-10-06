@@ -16001,3 +16001,63 @@ a neighbour (PROOF.md, scratch state).
   emits each instrument's months in ascending order, so its runs are
   maximal. A caller that interleaved instruments would get more, shorter
   runs. The counts would not change.
+
+## Zerodha minute calendar, day-scoped refusals and the day check — D-3344 to D-3347, 6 October 2026
+
+- **Cost, measured once, not gated.** A throwaway release timing (not
+  committed) on the operator's M4 Pro, 6 Oct 2026. `calendar::Runtime::kind_of`
+  (now `sourced_kind_of`): 1,000 calls of one day per sample over every day of
+  2017-12-25..=2026-10-12, 64,280 samples: p50 1.0 ns per call inside the
+  measured window and 10.0 ns on a sourced-span day (the 2- and 34-entry
+  table walks), p99 12.9 ns, max 41.1 ns per call. Single calls are below the
+  timer's 41.7 ns tick at p50 and p99 (one tick), max 3.0 µs (a preemption).
+  O(1): at most nine compares, or one walk of each compile-time table.
+  `fetch::land_rows` over a 60-day minute window (22,500 rows): 23 ns per row
+  at p50, p99 24, max 25 over 30 windows, with one refused Muhurat day and
+  without one; the refused-day count is a walk of at most five entries per
+  refused row. `daycheck::Report::tally` is a fixed number of compares per
+  day; not timed apart from the fold it follows.
+- **The refused Muhurat minutes are not recoverable by a re-pull.** A
+  length-unmeasured day's rows are refused and the month then holds the days
+  after it, so adding them once the session is measured needs a versioned
+  store repair (D-3344). Five days: 2020-11-14, 2021-11-04, 2022-10-24,
+  2023-11-12, 2024-11-01. The sourced-span Muhurats 2018-11-07 and 2019-10-27
+  hold no minute bar in the store.
+- **Four held months keep a missing prefix.** The five whole-answer losses of
+  D-3344 left, per instrument, 2020-12-01..=15 (11 sessions), 2021-12-01..=10
+  (8), 2022-12-01..=05 (3) and 2024-11-01..=22 (13 sessions and the Muhurat)
+  absent before days a later answer already wrote. A re-pull offers them and
+  the store refuses them as a prefix; since D-3345 that is one named failure
+  per month and the rest of the answer lands, but the 35 sessions per
+  instrument need a versioned store repair. What a re-pull of the same window
+  DOES add, per instrument: the six whole months 2020-11, 2021-11, 2022-11,
+  2023-10, 2023-11 and 2024-10 (121 sessions) and the tails 2020-10-19.., 
+  2021-10-12.., 2022-10-07.. and 2024-09-26.. (41 sessions), with every
+  derived rung of them.
+- **The derive needs the minute month to be re-offered.** Derived rungs are
+  folded when a minute body lands, from the whole committed minute month. The
+  2018-01..=2019-11 and 2026-09-07..=30 rungs that D-3346 now certifies are
+  written by the next pull whose body covers those months (an already-held
+  minute month is re-offered, answers `AlreadyPresent`, and then derives). No
+  separate re-derivation command exists.
+- **The sourced span ends on 2026-10-04.** Every Zerodha day after it is still
+  `Unmeasured` to the ingest calendar: its minutes land, its derived buckets
+  are withheld and named UNVERIFIED, until the span is extended from the next
+  circular check (D-2805's procedure).
+- **The landing verdict still reads `kind_of`.** On the sourced spans a bar is
+  kept and counted as unclassified (D-2673), never dropped as closed, although
+  the derive now treats those days as sourced. Measured: no Zerodha minute or
+  day bar of the seven instruments checked falls on a sourced-closed day.
+- **Exceptional sessions are still withheld per day.** 2021-02-24, 2024-03-02,
+  2024-05-18 and 2025-10-21 land at 1min within their sourced windows
+  (D-2670), every derived bucket of the day is withheld, and the request audit
+  names the day UNVERIFIED. One day each, never its month.
+- **The day check asserts no cause.** Why the vendor's day close, open, range
+  and volume differ from its minutes is not sourced; D-3347 counts the
+  differences and warns only on a contradiction. On a contradiction which
+  series is wrong is UNVERIFIED, and a spike in a stored minute bar still
+  reaches the rungs derived from it.
+- **The evidence window.** The rolling log (8 × 8 MiB) held about seven
+  minutes of the share pull when this was measured, so the index pull's own
+  lines were gone; the classification above is from the store and a replay of
+  the shipped derive over it, and from the share pull's surviving lines.

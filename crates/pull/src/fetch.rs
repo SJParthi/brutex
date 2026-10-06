@@ -635,7 +635,8 @@ impl BarSource for FakeSource {
 pub struct Landed {
     /// Bars inside the window, ready for the store.
     pub bars: Vec<Bar>,
-    /// Every DISCARDED row, by reason. The total equals rows in minus bars out.
+    /// Every DISCARDED row, by reason. The total equals rows in minus bars out
+    /// minus the rows of [`Self::refused_days`], which are refused, not dropped.
     ///
     /// **Session reasons reach it too, and this said they did not.** The doc
     /// here read "only window reasons reach it now. A row outside the published
@@ -661,6 +662,43 @@ pub struct Landed {
     /// prompted the reversal: Dhan sends NSE index bars through 15:38 while
     /// Groww and Zerodha stop at 15:29, against a published close of 15:30.
     pub outside_session: u32,
+    /// The days whose minute bars were REFUSED, each with how many rows it
+    /// carried: a day the exchange calendar records as a traded session of
+    /// unmeasured length (`calendar::DayKind::OpenLengthUnmeasured`, the five
+    /// pre-2025 Muhurats), on which no bar can be judged in or out of session
+    /// (`session::SessionError::SessionLengthUnmeasured`, D-2670).
+    ///
+    /// **The day, never the window (D-3344).** That refusal used to end the
+    /// whole landing with `FetchError::TimestampRefused`, so ONE Muhurat bar in
+    /// a 60-day Zerodha minute answer refused all 60 days: measured on the
+    /// operator's store on 6 Oct 2026, 202 sessions of every instrument in five
+    /// windows, and six whole months (2020-11, 2021-11, 2022-11, 2023-10,
+    /// 2023-11, 2024-10). The refused rows are neither stored nor counted in
+    /// [`Self::census`]: they are not a drop, and the caller names each day as
+    /// a failure. At most one entry per day the calendar lists as
+    /// length-unmeasured, so the list is bounded by that table's compile-time
+    /// length (five), never by the window.
+    pub refused_days: Vec<RefusedDay>,
+}
+
+/// One day [`land_rows`] refused, and how many of the window's rows fell on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RefusedDay {
+    /// The IST day, as days from the epoch.
+    pub day: u32,
+    /// Rows on that day, none of which was stored.
+    pub rows: u32,
+}
+
+/// Count one refused row against its day: a walk of at most as many entries
+/// as the calendar has length-unmeasured days (five), so O(1) per row.
+/// **UNVERIFIED as a gated measurement**: timed once with `land_rows` in a
+/// throwaway release run (`docs/06-limits.md`, D-3344), by no bench.
+fn note_refused(days: &mut Vec<RefusedDay>, day: u32) {
+    match days.iter_mut().find(|held| held.day == day) {
+        Some(held) => held.rows = held.rows.saturating_add(1),
+        None => days.push(RefusedDay { day, rows: 1 }),
+    }
 }
 
 /// Converts a vendor price to paisa.
@@ -762,7 +800,9 @@ pub fn land_with_cash_schedule(
 /// now runs through this one body, so the two entry points cannot drift.
 ///
 /// # Errors
-/// Returns timestamp, price, or unresolved cash-session errors.
+/// Returns timestamp, price, or unresolved cash-session errors. A bar on a
+/// day of unmeasured session length is NOT one: that day alone is refused and
+/// reported in [`Landed::refused_days`] (D-3344).
 pub fn land_rows(
     rows: &[RawRow],
     request: &BarRequest,
@@ -773,6 +813,7 @@ pub fn land_rows(
     let mut bars = Vec::with_capacity(rows.len());
     let mut census = DropCensus::default();
     let mut outside_session = 0u32;
+    let mut refused_days = Vec::new();
 
     for (i, row) in rows.iter().enumerate() {
         // W1 LIVES HERE. The encoding is dispatched, never assumed. A vendor
@@ -820,7 +861,7 @@ pub fn land_rows(
         // not one. A drop is a bar this engine DECLINED; a timestamp it could
         // not read is the vendor or the decoder being wrong, and those are
         // different answers.
-        let mut verdict = request
+        let mut verdict = match request
             .window
             // THE VENUE DECIDES THE HOURS, and the listing decides the venue.
             // NSE's 2026-08-03 CAS change put the index close at 15:15 and left
@@ -830,12 +871,25 @@ pub fn land_rows(
                 epoch_utc,
                 request.granularity.cadence(),
                 request.listing.venue(),
-            )
-            .map_err(|why| FetchError::TimestampRefused {
-                row: i,
-                raw: row.timestamp,
-                why,
-            })?;
+            ) {
+            Ok(verdict) => verdict,
+            // A DAY WHOSE SESSION LENGTH WAS NEVER MEASURED REFUSES ITSELF,
+            // NOT THE WINDOW (D-3344). The bar cannot be judged in or out of
+            // that session (D-2670), and nothing about it says anything about
+            // the other days of the answer. Not stored, not a drop; counted
+            // against its day for the caller to name.
+            Err(crate::session::SessionError::SessionLengthUnmeasured { days }) => {
+                note_refused(&mut refused_days, days);
+                continue;
+            }
+            Err(why) => {
+                return Err(FetchError::TimestampRefused {
+                    row: i,
+                    raw: row.timestamp,
+                    why,
+                });
+            }
+        };
         if verdict.is_none() {
             verdict = cash_close_verdict(epoch_utc, request, cash_schedule)?;
         }
@@ -987,6 +1041,7 @@ pub fn land_rows(
         bars,
         census,
         outside_session,
+        refused_days,
     })
 }
 

@@ -1701,9 +1701,14 @@ fn month_closes(file: &BarFile, header: &Header, batch: &[Bar]) -> Result<Closes
 /// to `Landed` gets carried on one path and forgotten on the other, which is
 /// how `outside_session` would have been lost on the empty-window path while
 /// looking correct on the one anybody tests.
-fn nothing_landed(census: DropCensus, folded: usize, outside_session: u32) -> Landed {
+fn nothing_landed(
+    census: DropCensus,
+    folded: usize,
+    outside_session: u32,
+    failures: Vec<Failure>,
+) -> Landed {
     Landed {
-        failures: Vec::new(),
+        failures,
         committed: 0,
         bars: 0,
         folded,
@@ -1713,6 +1718,87 @@ fn nothing_landed(census: DropCensus, folded: usize, outside_session: u32) -> La
         derived_expected: 0,
         outside_session,
     }
+}
+
+/// One month of a member, appended and counted, or its refusal as a named
+/// failure that is that month's alone (D-3345).
+///
+/// The path is rendered from the values the key is built from, not from the
+/// plan's strings a second time. `exchange.as_str()` is the parsed `Exchange`
+/// speaking, so the directory a bar lands in and the code the census records
+/// cannot disagree — there is only one value.
+///
+/// # Why a refusal is a value and not `?`
+///
+/// It was `?` in [`one`], so a month the store refused ended the member AFTER
+/// the months before it were already appended, and their census rows were
+/// dropped with the `Err`: bars on disk the census does not count, which is the
+/// outcome `from_members_inner` calls the worst there is. It is also the shape
+/// of every re-pull of a window whose last month is already held with its first
+/// days missing (a prefix the append-only store cannot take): the months before
+/// it would land on every attempt and be counted on none. The refused month is
+/// named and left byte-identical, and [`one`] logs it, then lands, derives and
+/// counts the others.
+fn write_month(
+    slice: &[store::format::Bar],
+    month: store::path::YearMonth,
+    timeframe: Timeframe,
+    member: &Member,
+    store_root: &Path,
+    plan: Plan<'_>,
+    identity: &Identity,
+) -> Result<(Held, usize), Failure> {
+    let parts = PathParts {
+        vendor: plan.vendor,
+        exchange: identity.exchange.as_str(),
+        segment: identity.segment.as_str(),
+        symbol: identity.symbol.as_str(),
+        contract: plan.contract,
+        timeframe,
+        month,
+        file: FileKind::Bars,
+    };
+    let key = EntryKey {
+        contract: plan.contract,
+        exchange: identity.exchange,
+        segment: identity.segment,
+        symbol: identity.symbol,
+        timeframe,
+        month,
+    };
+    write_and_count(slice, store_root, identity.symbol_id, parts, key).map_err(|why| Failure {
+        instrument: member.instrument.clone(),
+        why: format!(
+            "{}: {month}: {why}; this month only: the member's other months land and are counted",
+            member.instrument
+        ),
+    })
+}
+
+/// One named failure per day [`fetch::land_rows`] refused, logged and returned
+/// (D-3344).
+///
+/// The sentence says what was refused, why, that it was that day alone, and
+/// what the remedy costs: the month goes on to hold the days after it, so
+/// adding the refused minutes once the session is measured is a versioned store
+/// repair, not a re-pull. One line per refused day, and at most five such days
+/// exist (`calendar::DayKind::OpenLengthUnmeasured`).
+fn refused_day_failures(instrument: &str, days: &[fetch::RefusedDay]) -> Vec<Failure> {
+    days.iter()
+        .map(|refused| {
+            let day = crate::session::Day::from_days(refused.day)
+                .map_or_else(|_| format!("day {}", refused.day), |day| day.to_string());
+            let why = format!(
+                "{day}: {} minute row(s) refused: the exchange calendar records a traded session on this day whose length was never measured (a Muhurat), so no bar on it can be judged in or out of session; this day only, the rest of the window lands; measure the session and record it in the calendar's irregular table, after which adding these minutes to a month that holds later days is a versioned store repair, not a re-pull",
+                refused.rows
+            );
+            note_not_filed(instrument, "unmeasured session day", &why);
+            Failure {
+                instrument: instrument.to_owned(),
+                why,
+            }
+        })
+        .collect()
 }
 
 fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, String> {
@@ -1733,8 +1819,12 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
         .map_err(|why| why.to_string())?;
     // Bound once so the three returns below cannot disagree. See the field.
     let outside_session = landed.outside_session;
+    // EACH REFUSED DAY IS NAMED, AND THAT DAY IS ALL THAT IS LOST (D-3344).
+    // Carried on every return below, so a window holding nothing but the
+    // refused day still says why it stored nothing.
+    let mut failures = refused_day_failures(&member.instrument, &landed.refused_days);
     if landed.bars.is_empty() {
-        return Ok(nothing_landed(landed.census, 0, outside_session));
+        return Ok(nothing_landed(landed.census, 0, outside_session, failures));
     }
 
     // THE FOLD. Without it a real run produced 354,675 rows and ZERO bars:
@@ -1763,7 +1853,12 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
     // and the arm that says "this cannot happen" is a `Landed` with nothing in
     // it rather than a panic.
     if landed.bars.is_empty() {
-        return Ok(nothing_landed(landed.census, folded, outside_session));
+        return Ok(nothing_landed(
+            landed.census,
+            folded,
+            outside_session,
+            failures,
+        ));
     }
     // ONE RUN PER MONTH, RATHER THAN A REFUSAL IF THE BARS CROSS ONE.
     //
@@ -1773,49 +1868,32 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
     // See `months_in` for the measurement.
     let by_month = months_in(&landed.bars)?;
     // THE MEMBER'S IDENTITY, PARSED BEFORE ANY FILE IS OPENED. See `identify`.
+    let identity = identify(&member.instrument, exchange, segment)?;
     let Identity {
         symbol,
         exchange,
         segment,
         symbol_id,
-    } = identify(&member.instrument, exchange, segment)?;
+    } = identity;
 
     // ONE WRITE PER MONTH, in one pass over a batch that may now span many.
-    //
-    // The path is rendered from the values the key is built from, not from the
-    // plan's strings a second time. `exchange.as_str()` is the parsed
-    // `Exchange` speaking, so the directory a bar lands in and the code the
-    // census records cannot disagree — there is only one value.
     let mut entries = Vec::new();
     let mut committed = 0usize;
     let mut months_written = 0usize;
-    let mut failures = Vec::new();
+    // Bars of months whose write was refused: offered, never stored.
+    let mut refused_bars = 0usize;
     for (ym, slice) in &by_month {
-        let parts = PathParts {
-            vendor,
-            exchange: exchange.as_str(),
-            segment: segment.as_str(),
-            symbol: symbol.as_str(),
-            contract: plan.contract,
-            timeframe,
-            month: *ym,
-            file: FileKind::Bars,
+        // ONE MONTH'S REFUSAL IS THAT MONTH'S (D-3345). See `write_month`.
+        let written = write_month(slice, *ym, timeframe, member, store_root, plan, &identity);
+        let (pulled, wrote) = match written {
+            Ok(done) => done,
+            Err(refused) => {
+                note_not_filed(&member.instrument, "bars", &refused.why);
+                failures.push(refused);
+                refused_bars = refused_bars.saturating_add(slice.len());
+                continue;
+            }
         };
-        let (pulled, wrote) = write_and_count(
-            slice,
-            store_root,
-            symbol_id,
-            parts,
-            EntryKey {
-                contract: plan.contract,
-                exchange,
-                segment,
-                symbol,
-                timeframe,
-                month: *ym,
-            },
-        )
-        .map_err(|why| format!("{}: {why}", member.instrument))?;
         entries.push(pulled);
         months_written = months_written.saturating_add(1);
         // SUMMED ACROSS MONTHS, because it is a COUNT of bars written and not
@@ -1871,7 +1949,9 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
         derived_count_for(plan.vendor, plan.contract, timeframe).saturating_mul(months_written);
     Ok(Landed {
         failures,
-        bars: landed.bars.len(),
+        // OFFERED TO A MONTH THAT TOOK THEM: a refused month's bars are named
+        // in `failures` and are not stored bars (D-3345).
+        bars: landed.bars.len().saturating_sub(refused_bars),
         // WRITTEN, AS DISTINCT FROM OFFERED. See `Ingested::bars_stored`.
         committed,
         folded,
@@ -2007,6 +2087,7 @@ fn month_of(
 }
 
 /// A member's identity, parsed once and used by every file it writes.
+#[derive(Clone, Copy)]
 struct Identity {
     symbol: brutex_core::symbol::Symbol,
     exchange: Exchange,
@@ -2509,18 +2590,25 @@ fn derived_from(source: Timeframe) -> impl Iterator<Item = Timeframe> {
 ///
 /// The operator's rule of 4 Oct 2026 is a Zerodha rule: the day pass over the
 /// whole span first, then the minute pass, then everything rebuilt from the
-/// minutes. For Zerodha the two answers for one day are meant to agree, so a
-/// disagreement is news. Groww's day bar opens at the previous session's
-/// close, measured 181 points from Dhan's on one instrument on one day
-/// (D-0077), so checking it would log every day as different and drown a real
-/// gap in convention noise.
+/// minutes. Groww's day bar opens at the previous session's close, measured
+/// 181 points from Dhan's on one instrument on one day (D-0077), so checking it
+/// would log every day as different and drown a real gap in convention noise.
+///
+/// **Zerodha's two answers do NOT agree day for day either**, which this said
+/// they were meant to: measured on the operator's store, the pulled close is
+/// not the last minute's close on almost every day, and a share's pulled volume
+/// is above its minutes' sum on almost every day. So "differs" is not news and
+/// is an `info` line with the count of each kind; only a pulled day that its
+/// own minutes EXCEED (a minute above its high, below its low, or more volume
+/// than it) is a `warn` line. D-3347.
 ///
 /// # Never a failure, never a write
 ///
 /// The minute bars are already committed and the day bars are what the vendor
-/// served, so nothing here can make either more correct. Agreement is an
-/// `info` line, any disagreement or an unreadable day file a `warn` line, both
-/// under `pull.daycheck` on `/logs`. See [`crate::daycheck`].
+/// served, so nothing here can make either more correct. Agreement and a
+/// difference that contradicts nothing are `info` lines; a contradiction, a
+/// minute day with no pulled day, or an unreadable day file is a `warn` line,
+/// all under `pull.daycheck` on `/logs`. See [`crate::daycheck`].
 ///
 /// # Cost
 ///
@@ -2537,36 +2625,71 @@ fn check_day(
         return;
     };
     let month = into.month.to_string();
-    let event = match &found {
-        Ok(report) if report.clean() => telemetry::Event::info(
-            "pull.daycheck",
+    let _dropped_when_filtered = telemetry::emit(&daycheck_event(&found, instrument, &month));
+}
+
+/// The one `pull.daycheck` line for what [`check_day`] found (D-3347).
+///
+/// Four sentences, and the level is the finding's, not the field count's:
+/// identical, or differing without contradiction, is `info`; a pulled day its
+/// minutes exceed, a minute day with no pulled day, or an unreadable day file
+/// is `warn`. Twelve fields at most, which is `telemetry::MAX_FIELDS`, so none
+/// is counted and lost: `why` is the first contradiction when there is one and
+/// the first difference otherwise. The report's `open_differs` is not on the
+/// line for that reason.
+fn daycheck_event<'a>(
+    found: &'a Result<crate::daycheck::Report, String>,
+    instrument: &'a str,
+    month: &'a str,
+) -> telemetry::Event<'a> {
+    let (level, message) = match found {
+        Ok(report) if report.clean() => (
+            telemetry::Level::Info,
             "pulled 1day agrees with the days its 1min bars fold to",
         ),
-        Ok(_) => telemetry::Event::warn(
-            "pull.daycheck",
-            "pulled 1day differs from the days its 1min bars fold to",
+        Ok(report) if report.consistent() => (
+            telemetry::Level::Info,
+            "pulled 1day differs from its 1min fold and is contradicted by none of it",
         ),
-        Err(_) => telemetry::Event::warn(
-            "pull.daycheck",
+        Ok(_) => (
+            telemetry::Level::Warn,
+            "pulled 1day is contradicted by, or missing for, days its 1min bars fold to",
+        ),
+        Err(_) => (
+            telemetry::Level::Warn,
             "pulled 1day could not be checked against its 1min bars",
         ),
-    }
-    .with("instrument", telemetry::Value::Str(instrument))
-    .with("month", telemetry::Value::Str(&month));
+    };
+    let event = telemetry::Event::new(level, "pull.daycheck", message)
+        .with("instrument", telemetry::Value::Str(instrument))
+        .with("month", telemetry::Value::Str(month));
     let count = |n: usize| telemetry::Value::Uint(u64::try_from(n).unwrap_or(u64::MAX));
-    let event = match &found {
+    match found {
         Ok(report) => event
             .with("agreed", count(report.agreed))
             .with("differed", count(report.differed))
+            .with("contradicted", count(report.contradicted))
+            .with("close_differs", count(report.close_differs))
+            .with("range_wider", count(report.range_wider))
+            .with("volume_above", count(report.volume_above))
+            .with(
+                "largest_breach",
+                telemetry::Value::Int(report.largest_breach),
+            )
             .with("day_absent", count(report.day_absent))
             .with("minute_absent", count(report.minute_absent))
             .with(
                 "why",
-                telemetry::Value::Str(report.first.as_deref().unwrap_or("")),
+                telemetry::Value::Str(
+                    report
+                        .first_contradiction
+                        .as_deref()
+                        .or(report.first.as_deref())
+                        .unwrap_or(""),
+                ),
             ),
         Err(why) => event.with("why", telemetry::Value::Str(why)),
-    };
-    let _dropped_when_filtered = telemetry::emit(&event);
+    }
 }
 
 /// [`check_day`]'s finding: `None` for any vendor but Zerodha, otherwise the
@@ -3697,7 +3820,7 @@ mod tests {
 
     use super::{
         CensusLock, DeriveInto, EntryKey, MAX_CENSUS_BYTES, check_day, closes_in_hand,
-        day_check_of, install_locked, lock_refusal, write_and_count,
+        day_check_of, daycheck_event, install_locked, lock_refusal, write_and_count,
     };
 
     /// **A MEMBER'S ROWS ARE LANDED BORROWED, NOT CLONED.** o1api-36, D-1203.
@@ -3976,6 +4099,95 @@ mod tests {
         check_day(&moved, "NIFTY", &root, symbol_id, &dhan);
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **THE DAY CHECK'S LINE IS `info` FOR A DIFFERENCE AND `warn` ONLY FOR
+    /// A CONTRADICTION (D-3347).**
+    ///
+    /// The pulled close differs from the last minute's on almost every day of
+    /// the operator's store, so D-3001's `warn` on any difference warned on
+    /// every month. Identical and differing-without-contradiction are `info`
+    /// with their own sentences; a pulled day its minutes exceed, a minute day
+    /// with no pulled day, and an unreadable file are `warn`. Every count rides
+    /// on the line, at most `telemetry::MAX_FIELDS`, and `why` names the first
+    /// contradiction ahead of the first difference.
+    #[test]
+    fn the_day_check_line_warns_only_on_a_contradiction() {
+        use crate::daycheck::Report;
+        use telemetry::Level;
+        let clean: Result<Report, String> = Ok(Report {
+            agreed: 20,
+            ..Report::default()
+        });
+        let differs = Ok(Report {
+            agreed: 1,
+            differed: 19,
+            close_differs: 19,
+            range_wider: 7,
+            volume_above: 19,
+            first: Some("IST day 1: close pulled 2 folded 3".to_owned()),
+            ..Report::default()
+        });
+        let contradicted = Ok(Report {
+            differed: 2,
+            contradicted: 1,
+            largest_breach: 22_985,
+            first: Some("IST day 1: close pulled 2 folded 3".to_owned()),
+            first_contradiction: Some(
+                "IST day 2: minute high 9 above the pulled high 8".to_owned(),
+            ),
+            ..Report::default()
+        });
+        let absent = Ok(Report {
+            day_absent: 1,
+            ..Report::default()
+        });
+        let unread: Result<Report, String> = Err("no day file".to_owned());
+        for (found, level, says, why) in [
+            (&clean, Level::Info, "agrees with the days", ""),
+            (
+                &differs,
+                Level::Info,
+                "contradicted by none of it",
+                "IST day 1: close pulled 2 folded 3",
+            ),
+            (
+                &contradicted,
+                Level::Warn,
+                "contradicted by, or missing for",
+                "IST day 2: minute high 9 above the pulled high 8",
+            ),
+            (&absent, Level::Warn, "contradicted by, or missing for", ""),
+            (&unread, Level::Warn, "could not be checked", "no day file"),
+        ] {
+            let event = daycheck_event(found, "NIFTY", "2026-01");
+            assert_eq!(event.level(), level, "{says}");
+            assert_eq!(event.target(), "pull.daycheck");
+            assert!(event.message().contains(says), "{}", event.message());
+            assert_eq!(event.dropped_fields(), 0, "{says}: no field lost");
+            let field = |key: &str| {
+                event
+                    .fields()
+                    .iter()
+                    .find(|(name, _)| *name == key)
+                    .map(|(_, value)| format!("{value:?}"))
+            };
+            assert!(
+                field("why").is_some_and(|w| w.contains(why)),
+                "{says}: {:?}",
+                field("why")
+            );
+            if found.is_ok() {
+                assert_eq!(event.fields().len(), telemetry::MAX_FIELDS, "{says}");
+            }
+        }
+        let event = daycheck_event(&contradicted, "NIFTY", "2026-01");
+        let breach = event
+            .fields()
+            .iter()
+            .find(|(name, _)| *name == "largest_breach")
+            .map(|(_, value)| format!("{value:?}"));
+        assert!(breach.is_some_and(|b| b.contains("Int(22985)")));
     }
 
     /// **A LOCK THAT CANNOT BE OPENED IS A REFUSAL, NOT A RUN WITHOUT ONE.**

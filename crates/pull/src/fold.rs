@@ -1198,14 +1198,19 @@ mod guard {
     /// and before its first, with a full session, a single bar, misaligned
     /// seconds and duplicate stamps on the unmeasured days, and with measured
     /// days either side whose own coverage faults must still be named.
+    ///
+    /// The days are past the SOURCED calendar's last day (2026-10-04) and
+    /// before its first (2018-01-01): since D-3346 the ingest calendar answers
+    /// the D-2805 spans, so 2026-09-07..=11 and 2019-11-29, which this used,
+    /// are regular sessions to it now.
     #[test]
     fn an_unmeasured_day_is_one_diagnostic_and_not_one_per_bucket() {
-        let after: Vec<Day> = (7..=11).map(|d| Day::new(2026, 9, d).unwrap()).collect();
+        let after: Vec<Day> = (5..=9).map(|d| Day::new(2026, 10, d).unwrap()).collect();
         for day in &after {
             assert_eq!(
                 Runtime::default().kind_of(i64::from(day.days_from_epoch())),
                 DayKind::Unmeasured,
-                "the premise: {day:?} is past the calendar's last day"
+                "the premise: {day:?} is past the sourced calendar's last day (D-3346)"
             );
         }
         let mut bars = Vec::new();
@@ -1262,7 +1267,7 @@ mod guard {
         assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
 
         // Before the calendar's first day as well as after its last.
-        let early = Day::new(2019, 11, 29).unwrap();
+        let early = Day::new(2017, 12, 29).unwrap();
         assert_eq!(
             Runtime::default().kind_of(i64::from(early.days_from_epoch())),
             DayKind::Unmeasured
@@ -1283,10 +1288,10 @@ mod guard {
     /// o1api-44, D-1201: the skip is for the unmeasured day only. A whole
     /// session on 2026-09-04, the calendar's last day, still completes, and a
     /// hole in it is still named bucket by bucket, ahead of the next day's one
-    /// sentence.
+    /// sentence. The next day is 2026-10-05, past the sourced span (D-3346).
     #[test]
     fn a_measured_day_beside_an_unmeasured_one_keeps_its_own_lines() {
-        let after = [Day::new(2026, 9, 7).unwrap()];
+        let after = [Day::new(2026, 10, 5).unwrap()];
         let last = Day::new(2026, 9, 4).unwrap();
         assert!(matches!(
             Runtime::default().kind_of(i64::from(last.days_from_epoch())),

@@ -65090,3 +65090,202 @@ timed. `docs/06-limits.md`.
 **Proof.** `api::ladder::tests::the_rung_refusal_names_each_owed_run_and_why`
 and `api::server::tests::a_minute_run_is_refused_until_the_day_pass_has_landed`.
 Invariant MR-45.
+
+### D-3344 — A minute bar on a Muhurat of unmeasured length refuses that day, never the answer it came in — 2026-10-06
+
+**What was observed.** After a Zerodha 1min pull of 124 indices over
+2018-01-01..=2026-09-30, and in the F&O share pull running after it, every
+instrument lacked the same 1min months: 2020-11, 2021-11, 2022-11, 2023-10,
+2023-11 and 2024-10. Measured read-only on the operator's store
+(`runtime/store/bars/zerodha`, 6 Oct 2026) for NIFTY, BANKNIFTY, NIFTYIT,
+INDIAVIX, CGPOWER, ABB and ADANIENT, the day files hold a bar on every session
+and the minute files hold none in exactly five runs: 2020-10-19..=2020-12-15
+(41 sessions), 2021-10-12..=2021-12-10 (41), 2022-10-07..=2022-12-05 (40),
+2023-10-03..=2023-11-30 (41) and 2024-09-26..=2024-11-22 (39). Those are the
+five 60-day Zerodha minute requests (`split_window`, cap 60, from
+2018-01-01) that contain the five Muhurat days `pull::calendar` records as
+`OpenLengthUnmeasured`: 2020-11-14, 2021-11-04, 2022-10-24, 2023-11-12 and
+2024-11-01. The server log of the share pull names the cause on every such
+member: `pull.spot` "member did not land", why "day 18935 traded a session
+whose length was never measured … Refused rather than judged against the
+regular hours", and for cash bodies `api.pull` "cash schedule refused" with the
+same sentence. (The index pull's own lines had rolled out of the 64 MiB log
+window before this was measured; the counts the operator quoted from it are
+his, not re-measured here.)
+
+**Why one day cost a whole month of every instrument.** D-2670 made a minute
+bar on such a day a refusal, `SessionError::SessionLengthUnmeasured`, so that
+no bar is kept or dropped against hours the day did not have. That refusal was
+right per bar and wrong in scope: `fetch::land_rows` mapped it to
+`FetchError::TimestampRefused` and returned, which refuses the whole member,
+and a Zerodha minute member is one 60-day answer. So all ~40 sessions of each
+of those five answers were refused for every instrument whose answer carried a
+Muhurat bar, and a month lying wholly inside one answer was never written.
+`api::server::observed_cash_source_days` asked the same verdict with `?` and
+refused the whole body's dated cash schedule, the same loss by a second door.
+Zerodha now serves minute bars on those days; the calendar's note that its
+minute history "does not reach them" was measured on a store pulled before.
+
+**Decision.** The refusal is the day's. `land_rows` counts each row on a
+length-unmeasured day against that day (`fetch::Landed::refused_days`, at most
+one entry per day the calendar lists, five) and lands every other row of the
+answer. Refused rows are neither stored nor counted as drops. `ingest::one`
+turns each refused day into one named failure, on the receipt and on the log
+(`pull.file` "not filed", stage "unmeasured session day"): the date, the row
+count, why, that it is that day only, and the remedy — measure the session and
+record it in the calendar's irregular table — with its cost stated: the month
+then already holds later days, so adding those minutes is a versioned store
+repair, not a re-pull. `observed_cash_source_days` skips such a row (the day
+owes no eligibility because the landing refuses it); every other verdict error
+still refuses. `Window::verdict` itself is unchanged: a bar on that day still
+cannot be judged, and D-2670's per-bar refusal stands.
+
+**Not chosen: keep the day's bars.** D-2673 keeps a bar on a day the calendar
+cannot classify, and the stored reader already drops a bar on an
+`OpenLengthUnmeasured` day and counts it (`cli::stored`). But a kept bar of
+unknown session membership is exactly what D-2670 refused, and the measured
+Dhan case in `cli::stored` (43 bars at 14:47–15:29 on 2021-11-04, where D-0502
+had assumed an evening session) shows a vendor's bars on such a day need not
+sit where anyone expects the session; the session itself is UNVERIFIED here.
+Refusing loses those minutes from an append-only month; keeping would store
+bars no rule can place. The first is named and repairable by a versioned
+repair, the second is not.
+
+**The archive path** (`ingest::keep_in_session`) already declined such a bar
+per row, counted under `BeforeWindow` (D-2670's known limit). Unchanged.
+
+**Proof.** `pull` `tests/derive.rs::a_muhurat_minute_refuses_its_day_and_never_the_window`
+and `api::server::tests::a_muhurat_row_in_a_cash_body_is_skipped_not_a_refusal_of_the_body`.
+Invariants ZMC-01, ZMC-02.
+
+### D-3345 — A month the store refuses is that month's refusal; the member's other months land and are counted — 2026-10-06
+
+**The defect.** `ingest::one` writes a member one month at a time and used
+`?` on each write. A refusal of a later month therefore returned `Err` after
+the earlier months were already appended, and their census rows, held in a
+local vector, were dropped with it: bars on disk the census does not count,
+the outcome `from_members_inner` calls the worst there is.
+
+**Why it matters now.** It is exactly what a re-pull after D-3344 meets. Four
+of the five lost answers end inside a month that a LATER answer already filled
+from its first day on (2020-12 from the 16th, 2021-12 from the 11th, 2022-12
+from the 6th, 2024-11 from the 25th). Offering that month's first days is a
+prefix the append-only store refuses (`BarFile::append`, "a stamp the month
+never held"). Under `?` the re-pull would land 2020-10's tail and all of
+2020-11 on every attempt and count them on none.
+
+**Decision.** `ingest::write_month` returns a month's refusal as a named
+failure — `INSTRUMENT: YYYY-MM: <store's reason>; this month only: the
+member's other months land and are counted` — logged as `pull.file` "not
+filed" (stage "bars"). The refused month's file is left byte-identical, its
+bars are not reported as stored (`Landed::bars` subtracts them), it derives
+nothing, and the member's other months write, derive and are counted. A
+refusal before any file is opened (the identity, the month split) still
+refuses the member.
+
+**Proof.** `pull` `tests/derive.rs::a_refused_month_is_that_months_alone_and_the_others_are_counted`.
+Invariant ZMC-03.
+
+### D-3346 — The ingest calendar answers the D-2805 sourced spans; `kind_of`, run identity and the landing verdict are unchanged — 2026-10-06
+
+**What was observed.** The Zerodha store held 99 NIFTY 1min months
+(2018-01..=2026-09) and 76 months at each derived rung (2019-12..=2026-09),
+and 2026-09's derived files ended on 2026-09-04. Replaying the shipped derive
+over the stored minutes reproduces the held bar count of every derived rung
+exactly (NIFTY 5min: 110,611 bars) and
+names why the rest are absent: 485 sessions (468 in 2018-01-01..=2019-12-01,
+17 in 2026-09-05..=2026-09-30), each "day N: UNVERIFIED … derived buckets
+withheld" at all seven rungs, and the request audit named every day of those
+spans, weekends included, UNVERIFIED. `calendar::Runtime`, the calendar the
+pull hands to the request audit and the derive, answered `kind_of`, which is
+`Unmeasured` outside 2019-12-02..=2026-09-04.
+
+**The decisions in force.** D-2805 sourced 2018-01-01..=2026-10-04 from NSE's
+own holiday circulars as `sourced_kind_of`, and kept it out of `kind_of`
+because `cli::stored::calendar_policy_digest_v2` hashes `kind_of` into every
+stored run's identity — widening it is the operator's decision. It then gave
+the sourced spans to the GDFL readers only and said Zerodha dates before
+2019-12-02 stay `Unmeasured` "on every other path". That restriction follows
+from the run-identity reason, and the ingest calendar is not part of any run
+identity: `Runtime` is read by the request-minute audit, by
+`fold::complete_minutes_with_calendar` (the derive's completeness fold) and by
+`cli::fold_audit`'s reference to that fold, and by nothing that is hashed.
+
+**Corroborated on the operator's store, 6 Oct 2026.** Over the 726 days of the
+two spans, NIFTY's, BANKNIFTY's and NIFTYIT's Zerodha `1day` files hold a bar
+on exactly the 487 days `sourced_kind_of` answers open (485 regular sessions
+and the Muhurats 2018-11-07 and 2019-10-27) and on no other day; INDIAVIX
+agrees except that it has no bar on 2019-07-02, a session the other three
+traded. NIFTY and BANKNIFTY hold the full 09:15–15:29 minute grid on 481 of
+the 485 regular sessions, the other four being minute gaps of 1 to 14 minutes.
+Jan–Aug 2018, which D-2805 recorded as sourced and uncorroborated, is now
+corroborated by three daily series.
+
+**Decision.** `Runtime::kind_of` answers `sourced_kind_of`: `kind_of` inside
+the measured window, the circulars outside it, `Unmeasured` beyond
+2018-01-01..=2026-10-04. Observations still attest nothing. Unchanged:
+`kind_of` and everything that reads it — run identity, the stored readers,
+the expiry rules, `Window::verdict`, `session::on_unclassified_day`. The
+landing therefore still keeps and counts a bar on a day of the sourced spans as
+unclassified (D-2673) rather than dropping it as closed: a drop is permanent
+in an append-only store, and switching the drop authority for spans already
+landed would make a re-pull conflict with what is held. The derive's
+withholding is not permanent — a derived month can be created, or extended at
+its tail, later — so that is where the authority is extended.
+
+**What it changes.** Every regular sourced session whose minutes are complete
+derives at every rung; replayed on the stored NIFTY minutes, 5min goes from
+110,611 to 146,980 complete bars and 60min from 10,314 to 13,705, and the
+remaining diagnostics are genuine minute gaps (11 to 18 buckets per rung) and
+the four exceptional sessions. Weekends and listed holidays of the spans are
+closed, so the request audit no longer names them. Days after 2026-10-04 are
+still withheld and named UNVERIFIED until the sourced span is extended; that is
+a limit (`docs/06-limits.md`), not a change.
+
+**Proof.** `pull::calendar::runtime_tests::the_ingest_calendar_answers_the_sourced_spans_and_kind_of_is_unchanged`,
+`pull` `tests/derive.rs::a_sourced_span_session_derives_every_rung_and_audits_clean`,
+`api::server::tests::production_ingestion_attests_only_the_bounded_calendar_extension`
+(now with a sourced case), and the moved past-the-calendar tests
+(`fold::guard::an_unmeasured_day_is_one_diagnostic_and_not_one_per_bucket`,
+`tests/derive.rs::a_window_past_the_calendar_names_each_day_once_per_rung`).
+Invariant ZMC-04.
+
+### D-3347 — The day check counts a difference by kind and warns only when a pulled day is exceeded by its own minutes — 2026-10-06
+
+**What was observed.** D-3001 logs `warn` "pulled 1day differs from the days
+its 1min bars fold to" for any difference. Replayed on the operator's store
+over the 1,964 days of 2018-01..=2026-09 held at both rungs: NIFTY differs on
+1,920 days (the close on 1,919, the open on 56, a range wider than the
+minutes' on 1,269), BANKNIFTY on 1,922, NIFTYIT on 1,921, INDIAVIX on 1,888,
+and CGPOWER, ABB and ADANIENT on all 1,964 (the pulled volume above the
+minutes' sum on 1,956 to 1,958; median ratio about 1.003). So the line warned
+on 97 of 99 months for every instrument and carried no signal. The charter
+sources no rule for how the vendor forms its day close, open, range or volume,
+so no cause is asserted here.
+
+**Decision.** `daycheck::Report` counts each kind (`close_differs`,
+`open_differs`, `range_wider`, `volume_above`) and separately the days its
+minutes CONTRADICT: a minute high above the pulled high, a minute low below
+the pulled low, or a minute volume sum above the pulled volume — none of which
+any convention of a day bar can produce from the same trades. It keeps the
+largest price breach in paisa and names the first contradiction with both
+values. `check_day` logs `info` "agrees" when identical, `info` "differs from
+its 1min fold and is contradicted by none of it" when only differing, and
+`warn` "is contradicted by, or missing for, days its 1min bars fold to" for a
+contradiction or a minute day with no pulled day; an unreadable day file stays
+`warn`. Every count is on the line (12 fields, `telemetry::MAX_FIELDS`).
+
+**What it found, measured.** Contradicted days: NIFTY 9, among them a minute
+high 229.85 points above the pulled high on 2022-03-07 and a minute low 79.00
+points below the pulled low on 2020-03-13 (and 196.30 above on 2020-03-23);
+BANKNIFTY 4; NIFTYIT 2; INDIAVIX 131, of which 106 in 2018 and each of those
+one or two paisa, the largest 176 paisa; CGPOWER 7, ABB 9, ADANIENT 7, most of
+them minute volume above the pulled volume. Those are real disagreements
+between the vendor's two series and are now the only `warn` lines; which
+series is wrong on each is UNVERIFIED. Nothing is rewritten: both series stay
+as served (D-0077, §3 rule 8), and a spike in a stored minute bar still
+reaches the rungs derived from it.
+
+**Proof.** `pull::daycheck::tests::a_difference_is_counted_by_kind_and_only_an_exceeded_day_contradicts`
+and `pull::ingest::tests::the_day_check_line_warns_only_on_a_contradiction`.
+Invariant ZPO-06.

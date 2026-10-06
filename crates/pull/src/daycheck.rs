@@ -21,6 +21,11 @@
 //! minutes were served, or a volume convention that differs all show up here
 //! rather than nowhere.
 //!
+//! **Differing and contradicting are counted apart (D-3347).** The pulled day
+//! differs from its minutes on almost every day, so a difference alone says
+//! nothing; a pulled day that its own minutes exceed — in high, low or volume —
+//! is the finding. See [`Report`].
+//!
 //! # Cost
 //!
 //! One fold of the month's minute bars, `O(minutes)`, and one merge of two
@@ -34,13 +39,59 @@ use store::format::Bar;
 use crate::fold::{Bucket, FoldError, fold_from_bars};
 
 /// What the comparison found for one instrument-month.
+///
+/// # Differing is not contradicting (D-3347)
+///
+/// Measured on the operator's Zerodha store on 6 Oct 2026, over 1,964 days of
+/// 2018-01..=2026-09 held at both rungs: the pulled day bar differs from the
+/// fold of its own minutes on almost every day. NIFTY: 1,920 days differ, the
+/// close on 1,919 of them and a range wider than the minutes' on 1,269.
+/// CGPOWER, ABB and ADANIENT: all 1,964 days differ, the pulled volume above
+/// the minutes' sum on 1,956 to 1,958 of them. Why the vendor's day bar takes
+/// its close, open, range and volume as it does is not sourced in
+/// `docs/00-charter.md`, and this module does not guess. So "differs" is
+/// counted and is not a warning.
+///
+/// What a pulled day CAN be held to is the one thing no convention excuses:
+/// it cannot hold less than its own minutes. A minute high above the pulled
+/// high, a minute low below the pulled low, or minutes summing to more volume
+/// than the pulled day, is a contradiction between the vendor's two series,
+/// and only that is a warning. Measured on the same store: NIFTY 9 days, among
+/// them a minute high 229.85 points above the pulled high (2022-03-07) and a
+/// minute low 79 points below the pulled low (2020-03-13); BANKNIFTY 4;
+/// NIFTYIT 2; INDIAVIX 131, 106 of them in 2018 and each of those one or two
+/// paisa, the largest 176 paisa; each of the three shares 7 to 9, most of them
+/// minute volume above the pulled volume.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Report {
     /// Days present on both sides whose open, high, low, close and volume all
     /// agree.
     pub agreed: usize,
-    /// Days present on both sides that differ in at least one field.
+    /// Days present on both sides that differ in at least one field, whether
+    /// or not they contradict.
     pub differed: usize,
+    /// Of [`Self::differed`], days the pulled bar CONTRADICTS: a minute high
+    /// above the pulled high, a minute low below the pulled low, or a minute
+    /// volume sum above the pulled volume.
+    pub contradicted: usize,
+    /// Of [`Self::differed`], days whose pulled close is not the last
+    /// minute's close.
+    pub close_differs: usize,
+    /// Of [`Self::differed`], days whose pulled open is not the first
+    /// minute's open.
+    pub open_differs: usize,
+    /// Of [`Self::differed`], days whose pulled high is above the minutes'
+    /// high or whose pulled low is below the minutes' low.
+    pub range_wider: usize,
+    /// Of [`Self::differed`], days whose pulled volume is above the minutes'
+    /// sum.
+    pub volume_above: usize,
+    /// The largest price breach over the contradicted days, in paisa: how far
+    /// a minute high rose above the pulled high, or a minute low fell below
+    /// the pulled low. Zero when nothing contradicted on price.
+    pub largest_breach: i64,
+    /// The first contradiction, in words, or `None`.
+    pub first_contradiction: Option<String>,
     /// Days the minute bars cover and the pulled day file does not.
     pub day_absent: usize,
     /// Days the pulled day file holds and the minute bars do not reach yet.
@@ -60,6 +111,79 @@ impl Report {
     pub const fn clean(&self) -> bool {
         self.differed == 0 && self.day_absent == 0
     }
+
+    /// Whether every day the minute bars cover has a pulled day that holds
+    /// them: it may differ, it does not contradict (D-3347).
+    #[must_use]
+    pub const fn consistent(&self) -> bool {
+        self.contradicted == 0 && self.day_absent == 0
+    }
+
+    /// Count one day present on both sides. O(1): a fixed number of compares.
+    /// **UNVERIFIED as a measurement**: no bench times it (`docs/06-limits.md`,
+    /// D-3347).
+    fn tally(&mut self, day: i64, served: &Bar, made: &Bar) {
+        let why = differing(served, made);
+        if why.is_empty() {
+            self.agreed += 1;
+            return;
+        }
+        if self.first.is_none() {
+            self.first = Some(format!("IST day {day}: {why}"));
+        }
+        self.differed += 1;
+        self.close_differs += usize::from(served.close != made.close);
+        self.open_differs += usize::from(served.open != made.open);
+        self.range_wider += usize::from(served.high > made.high || served.low < made.low);
+        self.volume_above += usize::from(served.volume > made.volume);
+        let against = contradicting(served, made);
+        if !against.is_empty() {
+            self.contradicted += 1;
+            let breach = made
+                .high
+                .saturating_sub(served.high)
+                .max(served.low.saturating_sub(made.low));
+            self.largest_breach = self.largest_breach.max(breach);
+            if self.first_contradiction.is_none() {
+                self.first_contradiction = Some(format!("IST day {day}: {against}"));
+            }
+        }
+    }
+}
+
+/// What the minutes hold that the pulled day cannot, comma separated, or an
+/// empty string. A pulled day may close, open, range and count volume by its
+/// own convention; it cannot be exceeded by its own minutes (D-3347).
+fn contradicting(pulled: &Bar, folded: &Bar) -> String {
+    let checks = [
+        (
+            folded.high > pulled.high,
+            "minute high",
+            folded.high,
+            "above the pulled high",
+            pulled.high,
+        ),
+        (
+            folded.low < pulled.low,
+            "minute low",
+            folded.low,
+            "below the pulled low",
+            pulled.low,
+        ),
+        (
+            folded.volume > pulled.volume,
+            "minute volume",
+            folded.volume,
+            "above the pulled volume",
+            pulled.volume,
+        ),
+    ];
+    checks
+        .iter()
+        .filter(|(hit, ..)| *hit)
+        .map(|(_, name, minutes, relation, served)| format!("{name} {minutes} {relation} {served}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// The IST calendar day a bar's stamp falls on, as days since the epoch.
@@ -134,15 +258,7 @@ pub fn compare(minutes: &[Bar], days: &[Bar]) -> Result<Report, FoldError> {
                         summed.next();
                     }
                     std::cmp::Ordering::Equal => {
-                        let why = differing(served, made);
-                        if why.is_empty() {
-                            report.agreed += 1;
-                        } else {
-                            if report.first.is_none() {
-                                report.first = Some(format!("IST day {a}: {why}"));
-                            }
-                            report.differed += 1;
-                        }
+                        report.tally(a, served, made);
                         pulled.next();
                         summed.next();
                     }
@@ -310,5 +426,88 @@ mod tests {
     #[test]
     fn nothing_on_either_side_is_clean() {
         assert_eq!(compare(&[], &[]).unwrap(), Report::default());
+        assert!(Report::default().consistent());
+    }
+
+    /// **A PULLED DAY MAY DIFFER; IT MAY NOT BE EXCEEDED BY ITS MINUTES
+    /// (D-3347).**
+    ///
+    /// A different close or open, a wider range and more volume are each
+    /// counted by kind and leave the month consistent. A minute above the
+    /// pulled high, below the pulled low, or more minute volume than the pulled
+    /// day is a contradiction: counted, the largest price breach kept in paisa,
+    /// and the first one named with both values. A minute day with no pulled
+    /// day is not consistent either.
+    #[test]
+    fn a_difference_is_counted_by_kind_and_only_an_exceeded_day_contradicts() {
+        // The minutes fold to o100 h120 l90 c98 v60 (see `served`).
+        let mut day = served(0);
+        day.close = 99;
+        day.open = 101;
+        day.high = 125;
+        day.low = 85;
+        day.volume = 70;
+        let report = compare(&session(0), &[day]).unwrap();
+        assert_eq!(
+            report,
+            Report {
+                differed: 1,
+                close_differs: 1,
+                open_differs: 1,
+                range_wider: 1,
+                volume_above: 1,
+                first: report.first.clone(),
+                ..Report::default()
+            }
+        );
+        assert!(report.consistent() && !report.clean());
+        assert!(
+            report
+                .first
+                .as_deref()
+                .is_some_and(|f| f.contains("close pulled 99 folded 98"))
+        );
+
+        for (field, breach) in [("high", 3), ("low", 4), ("volume", 0)] {
+            let mut day = served(0);
+            match field {
+                "high" => day.high = 117,
+                "low" => day.low = 94,
+                _ => day.volume = 59,
+            }
+            let report = compare(&session(0), &[day]).unwrap();
+            assert_eq!(report.contradicted, 1, "{field}");
+            assert_eq!(report.differed, 1, "{field}");
+            assert_eq!(report.largest_breach, breach, "{field}");
+            assert!(!report.consistent(), "{field}");
+            let named = report
+                .first_contradiction
+                .expect("the first contradiction is named");
+            let want = match field {
+                "high" => "minute high 120 above the pulled high 117",
+                "low" => "minute low 90 below the pulled low 94",
+                _ => "minute volume 60 above the pulled volume 59",
+            };
+            assert!(named.ends_with(want), "{field}: {named}");
+        }
+
+        // The largest breach over a month, and the FIRST contradiction named.
+        let mut first = served(0);
+        first.high = 119;
+        let mut second = served(1);
+        second.low = 99;
+        let minutes = [session(0), session(1)].concat();
+        let report = compare(&minutes, &[first, second]).unwrap();
+        assert_eq!((report.contradicted, report.largest_breach), (2, 9));
+        assert!(
+            report
+                .first_contradiction
+                .is_some_and(|f| f.contains("minute high 120 above the pulled high 119"))
+        );
+
+        // A minute day with no pulled day is not consistent.
+        let report = compare(&minutes, &[served(0)]).unwrap();
+        assert_eq!(report.contradicted, 0);
+        assert!(!report.consistent());
     }
 }
