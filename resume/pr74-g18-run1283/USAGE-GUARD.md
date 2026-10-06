@@ -23,3 +23,9 @@ PAUSE (usage guard, from the coordinator): the account's usage limit is nearly r
 
 ## RESUME message
 RESUME (usage guard): the usage window has reset. Read your PAUSE-20261006.md, and continue your task from its next steps under the same rules.
+
+## Poll log
+| UTC | Sum of session cost_usd | Estimate (cost / 4.6) | Note |
+|---|---|---|---|
+| 03:52 | $188.23 | 41% (owner meter 03:53: 41%) | calibration point |
+| 04:06 | $211.36 | ~46% | burn fell to ~$1.7/min while most sessions wait on builds and mutation runs. cost_usd lags inside long turns (running subagents are counted only when they return), so the pause decision takes the HIGHER of this estimate and a time-based one from the last owner reading. |
