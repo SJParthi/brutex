@@ -156,3 +156,16 @@ checked: none uses D-36xx, and none uses FB-110..149.
 - D-3600..D-3649 and FB-110..FB-139: WS3 Fix Board batch4 (fixboard/pr74-batch4).
 - D-3650..D-3659: Gate 18 rest fixer, overflow for the untested-case store survivors.
 - Still free: D-3660..D-3699.
+
+## Integration branch state, 08:20 UTC 2026-10-06 (local branch `integ` in the coordinator's checkout, not pushed)
+- 969493e1 (final/all-fixes) + 46439dee (D-2090 build bound)
+- + c268344f: merge of attack/o1-p99 @3539d87 (L2 done; round 15 was its zero round)
+- + e62e3fe5: merge of pr74/g18-runner @c216c97 (runner survivors all killed; M3 56/56)
+- Both merges hit append-only conflicts in docs/05-decisions.md; each was resolved as
+  ours-then-theirs with /tmp/claude-0/union_merge.py. After both merges, fmt is clean
+  and all 29 static gates PASS. Clippy and the nobody-uid tests run once the next
+  hand-overs are in.
+- Pre-existing defect: docs/05-decisions.md on final/all-fixes has `### D-0370` twice and
+  `### D-0372` twice. Routed to L4 (docs drift).
+- The runner fixer was reassigned at 08:20 to the 121 runner cases CI never tested
+  (D-2065..2069, then D-3660..3669).
