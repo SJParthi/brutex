@@ -63445,3 +63445,35 @@ bytes in the same order. A range cannot be mutated into an endless loop.
   newlines only and once led by one record, which must be found.
 - A budget of `READ_BLOCK + 5` over a file of `READ_BLOCK + 10` bytes stops
   at the cap, with five bytes unread.
+
+### D-2085 — Two run-1283 timeouts made to fail fast: the masters FIFO test and the footer walk — 2026-10-06
+
+**What was observed.** The coordinator read two more timeouts from the run
+1283 shard logs (cargo-mutants annotates only MISSED mutants):
+
+- **Shard 10, `holds_exactly` replaced with `Ok(true)`.** The landing goes to
+  `refresh_mtime`, which opens the FIFO at the target for writing and waits
+  for a reader. On its two-second timeout the test released the worker with
+  another write-only open, which also waited for a reader. The two writers
+  held each other, and the test never ended.
+- **Shard 49, `Cursor::byte` replaced with `Ok(1)`.** The footer walk reads
+  header 1 for ever, because the cursor never reaches the end of the input.
+
+**Decided.**
+
+- **Masters.**
+  `masters::tests::a_master_target_that_is_not_a_regular_file_is_refused_and_never_waits`
+  now releases the FIFO by opening it for read *and* write. On Linux that
+  open never waits, and it unblocks a worker blocked either way, so the
+  mutant fails the test's own two-second bound (G18-rest-31). Production
+  code is unchanged.
+- **Footer.** `walk` runs at most `2n + 2` passes over an `n`-byte footer,
+  through `walk_within`. Each pass either reads a byte or does no-byte work
+  (popping a frame, or opening a struct element) that an earlier byte-reading
+  pass paid for, so a well-formed footer ends within `2n + 1` passes.
+  Exceeding the bound is refused by name. The bound is a method-call
+  expression, so there is no operator to mutate.
+  `footer::tests::the_walk_ends_within_two_passes_per_byte_and_is_refused_past_its_bound`
+  (G18-rest-32) walks lists of 0, 1, 14 and 200 empty structs, the shape that
+  spends the most passes per byte. It shows each one ends in exactly
+  `2n + 4` passes, inside the bound, and is refused one pass short.

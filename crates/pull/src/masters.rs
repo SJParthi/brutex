@@ -3180,10 +3180,21 @@ mod tests {
             })
         };
         let landed = answer.recv_timeout(std::time::Duration::from_secs(2));
-        if landed.is_err() {
-            let _ = std::fs::OpenOptions::new().write(true).open(&target);
-        }
+        // OPENED FOR READ AND WRITE, so it never waits itself and it releases
+        // a worker blocked opening the FIFO EITHER way. A write-only open here
+        // waited for a reader, and a worker that blocked opening the target
+        // for writing (`holds_exactly` answering `true` sends it to
+        // `refresh_mtime`) waited too: the two writers held each other, the
+        // test never ended, and Gate 18 timed the mutant out rather than
+        // catching it (run 1283 shard 10, G18-rest-31, D-2085).
+        let unblock = landed.is_err().then(|| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&target)
+        });
         let _ = worker.join();
+        drop(unblock);
         let landed = landed.expect("a FIFO at the target must not hold the landing");
         let Landed::Refused(ref why) = landed else {
             panic!("a target that is not a regular file is refused: {landed:?}");

@@ -271,3 +271,35 @@ fn a_bool_takes_a_byte_in_a_list_and_none_in_a_field() {
         }
     }
 }
+
+/// G18-rest-32, D-2085: the walk ends within two passes per footer byte, and
+/// the costliest shape uses them. A list of empty structs spends two passes
+/// per one-byte element (open the struct, read its stop), and still ends
+/// inside the bound `walk` sets; one pass fewer than it needs is refused by
+/// name rather than walked for ever.
+#[test]
+fn the_walk_ends_within_two_passes_per_byte_and_is_refused_past_its_bound() {
+    for n in [0_u64, 1, 14, 200] {
+        let mut f = vec![0x19];
+        if n < 15 {
+            f.push(u8::try_from(n << 4).expect("a short count") | STRUCT);
+        } else {
+            f.push(0xF0 | STRUCT);
+            varint(n, &mut f);
+        }
+        f.extend(std::iter::repeat_n(
+            0x00,
+            usize::try_from(n).expect("small"),
+        ));
+        f.push(0x00);
+        ok(walk(&f));
+        // Passes used: the root's field, the list frame's elements opened and
+        // closed (two each), the list popped, the root's stop, and the pass
+        // that finds the stack empty.
+        let needed = 2 * usize::try_from(n).expect("small") + 4;
+        ok(walk_within(&f, needed));
+        let why = reason(walk_within(&f, needed - 1));
+        assert!(why.contains("did not end within"), "{n}: {why}");
+        assert!(needed <= 2 * f.len() + 2, "{n}: inside the bound walk sets");
+    }
+}
