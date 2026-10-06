@@ -36,3 +36,10 @@ Base: origin/final/all-fixes `969493e` (merged at 0edc1a0; re-merge before next 
 
 ## Restart
 git fetch origin attack/one-authority final/all-fixes fix-queue && git checkout attack/one-authority
+
+## Queued during the pause (coordinator, 04:08 UTC) — do after RESUME
+9. New gate-hole finding: a live cargo-mutants marker (`/* ~ changed by cargo-mutants ~ */`, e.g. telemetry tail.rs:503 in
+   pr74/g18-rest 92bcd1a/99d8217, repaired 0d8c386) passes every static gate. Add a language-purity check in an existing
+   .github tool (source_scan `content` is the natural home) refusing that marker in any tracked file, needle built from pieces
+   so the tool does not refuse itself; test with a planted marker that fails first; record decision (D-35xx), ONEAUTH row,
+   docs/11 bullet. Run `git grep -n "changed by cargo-mutants"` before every commit.
