@@ -64079,3 +64079,28 @@ both moved the same way under the mutant.
 (G18-rest-36) pins absolute days on both sides of IST midnight (18:30 UTC),
 across one whole day, at the epoch, and at the second before IST midnight of
 day 0.
+
+### D-2065 — The grid table's selection pivots on index `shown`, so no subtraction is left to mutate — 2026-10-06
+
+**What was observed.** Run 1283 never tested shards 8, 111, 116, 119, 120, 138, 167 and 168. Running their runner cases
+on c216c97 left `shown - 1` as `shown / 1` alive in `runner::audit::grid`:
+`ordered.select_nth_unstable_by_key(shown - 1, key)` under `shown > 0 && shown < ordered.len()`. With either pivot, the
+`shown` smallest rows end up in front, so the two cannot be told apart. The `shown > 0` guard has the same shape: with
+`>=`, it selects at index 0 for an empty head.
+
+**Decided.** The pivot is the index `shown`, which exists whenever a row is cut, under `shown < ordered.len()` alone.
+The printed rows and their order are unchanged, and the existing grid table tests pass unmodified. No subtraction or
+lower guard remains to mutate. `shown < ordered.len()` as `<=` indexes past the end, which the tests with `keep` above
+the cell count catch.
+
+### D-2066 — The later-fold walk advances by `saturating_add`, so no single mutation can stall it — 2026-10-06
+
+**What was observed.** Among run 1283's never-tested runner cases, `fold += 1` in
+`runner::expression_validation::index_folds` as `*= 1` timed out: `fold` stays at 0, and
+`while windows.get(fold).is_some_and(|window| actual > window.last)` never ends for a bar past the first fold. A
+timeout is never credited as a catch.
+
+**Decided.** The step is `fold = fold.saturating_add(1)`. That is a method call, which cargo-mutants does not rewrite,
+so every iteration advances `fold`, and the loop ends no later than `windows.get(fold)` returning `None`. That bounds
+it by the window count, and the walk stays amortised O(1) per bar. The arithmetic is unchanged, because `fold` never
+reaches `usize::MAX`. `fold` is typed `0_usize` so the call resolves.
