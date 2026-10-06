@@ -660,8 +660,11 @@ pub fn rank_checkpointed_streamed(
                 .map_or(last.survivors == 0, |halt| halt.k == last.k)
         },
     );
-    if summary.bars != u64::try_from(column.bits().len()).unwrap_or(u64::MAX)
-        || summary.bars != column.census().swept
+    // The column's own two counts first, then the walk's bars against them,
+    // so each comparison is one term a case can falsify alone.
+    let swept = column.census().swept;
+    if u64::try_from(column.bits().len()).ok() != Some(swept)
+        || summary.bars != swept
         || !accounted
         || !terminal
         || u64::try_from(summary.levels.len()).unwrap_or(u64::MAX) != depth
@@ -1997,6 +2000,10 @@ mod tests {
     /// non-empty level with no halt, a summary that disagrees with what was
     /// handed on, and a walk error.
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "every refusal and its halt boundary beside the control that passes"
+    )]
     fn the_streamed_checkpoint_rank_refuses_each_inconsistency() {
         let bars = synthetic::sessions(8);
         let signal = Column::build(&bars, &mut evaluator());
@@ -2065,6 +2072,54 @@ mod tests {
         assert!(
             rank(original.levels.clone(), original.bars, 1).is_err(),
             "summary length"
+        );
+        // THE HALT BOUNDARY, both ways. A walk that halted ends on its halted
+        // level, which may be non-empty; a halt that names another depth, or a
+        // walk that handed nothing on without halting at k=0, is refused.
+        let halted_at = |k: u32| engine::Halt {
+            k,
+            ..engine::Halt::default()
+        };
+        let mut cut = original.levels.clone();
+        cut.pop();
+        let last = cut.last().expect("a cut ladder").k;
+        let rank_halted = |levels: Vec<engine::Frontier>, halt: Option<engine::Halt>| {
+            super::rank_checkpointed_streamed(
+                signal.clone(),
+                None,
+                &forward,
+                10,
+                crate::rank::Lens::Detectability,
+                |on_retire| {
+                    for (at, level) in levels.iter().enumerate() {
+                        on_retire(level, levels.get(at + 1));
+                    }
+                    Ok(engine::keep::Streamed {
+                        halted: halt,
+                        ..summary_of(&levels, original.bars)
+                    })
+                },
+            )
+        };
+        assert!(
+            rank_halted(cut.clone(), Some(halted_at(last))).is_ok(),
+            "a walk halted on its last level is terminal"
+        );
+        assert!(
+            rank_halted(cut, Some(halted_at(last + 1))).is_err(),
+            "a halt on another depth is not"
+        );
+        assert!(
+            rank_halted(Vec::new(), Some(halted_at(0))).is_ok(),
+            "a walk halted before k=1 hands on nothing and is terminal"
+        );
+        assert!(
+            rank_halted(Vec::new(), Some(halted_at(1))).is_err(),
+            "nothing handed on with a halt at k=1 is not"
+        );
+        assert!(
+            rank_halted(Vec::new(), None).is_err(),
+            "nothing handed on and no halt"
         );
         let failed = super::rank_checkpointed_streamed(
             signal.clone(),
