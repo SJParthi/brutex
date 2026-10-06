@@ -78,7 +78,7 @@
      row that says "2020-03" and nothing else cannot distinguish a month held
      from the 2nd to the 31st from one held on the 2nd alone; the window says
      which, in the `02 Sep 2024` form this product uses everywhere. */
-  import { MON, dayLabel, monthLabel, stampLabel, timeLabel } from '$lib/dates.js';
+  import { MON, barTimeLabel, dayLabel, monthLabel, stampLabel, timeLabel } from '$lib/dates.js';
   import { store, survey, syncStore, refreshStore, surveyStores } from '$lib/store.svelte.js';
   // THE COMPLETENESS ARITHMETIC, OUT OF THE MARKUP AND UNDER A TEST. Two
   // defects lived in these expressions — a denominator taken from whichever
@@ -90,6 +90,7 @@
   import { databasePreparation, instrumentMemo } from '$lib/database-preparation.js';
   import { readDatabasePage } from '$lib/database-pages.js';
   import { SPOT_WHY, chainsFrom, optionCells, readSpots, spotKey } from '$lib/moneyness.js';
+  import { greekCell, greekKey, greekText, greekWhyText, ivText, readGreeks } from '$lib/greeks.js';
   import { pooled as readPool } from '$lib/pooled.js';
   import { basisPoints, bpsText, dirOf } from '$lib/bps.js';
   import { exact } from '$lib/money.js';
@@ -3657,8 +3658,21 @@
     'a pre-market percentage needs a pre-open session price, and the store’s bar record carries none: docs/02-store-format.md fixes the record at timestamp, open, high, low, close, volume and open interest, and /bars.json returns exactly those seven fields. There is nothing on this wire to divide.';
   const NO_SPOT_SORT =
     'spot is read for the rows on this page only (/spot.json, D-2807), so there is no order over the whole selection to sort by.';
-  const NO_GREEK =
-    'no endpoint this page reads carries a Greek, and none is computed here. Black-Scholes needs a measured risk-free rate and a measured time to expiry; neither is sourced in this repository, and CLAUDE.md section 3 rule 1 forbids inventing one. A number printed in this column would be indistinguishable, on screen, from one a vendor sent.';
+  /* SOURCED SINCE D-2830. The greeks were "no source" because no rate and no
+     time to expiry were measured; D-2810 sourced the rate (RBI 91-day T-bill)
+     and D-2831 states the expiry instant, and `/greeks.json` solves each bar
+     in Rust. Like spot, they are read for the page's rows only. */
+  const NO_GREEK_SORT =
+    'greeks are solved for the rows on this page only (/greeks.json, D-2830), so there is no order over the whole selection to sort by.';
+  /** The six greek cells, in column order, each with its reading format. */
+  const GREEK_FIELDS = [
+    { key: 'iv', label: 'IV %', text: (/** @type {any} */ c) => ivText(c.iv) },
+    { key: 'delta', label: 'Delta', text: (/** @type {any} */ c) => greekText(c.delta, 4) },
+    { key: 'gamma', label: 'Gamma', text: (/** @type {any} */ c) => greekText(c.gamma, 6) },
+    { key: 'theta', label: 'Theta', text: (/** @type {any} */ c) => greekText(c.theta, 2) },
+    { key: 'vega', label: 'Vega', text: (/** @type {any} */ c) => greekText(c.vega, 2) },
+    { key: 'rho', label: 'Rho', text: (/** @type {any} */ c) => greekText(c.rho, 2) }
+  ];
 
   /* ---------------------------------------------------------------------
      THE BAR GRID'S COLUMNS - all twenty-four, in the approved order.
@@ -3684,8 +3698,8 @@
     {
       key: 'tod',
       label: 'Time',
-      w: 74,
-      why: 'the bar’s own opening minute, IST - absent on a day rung, where every bar opens at the same one'
+      w: 84,
+      why: 'the bar’s own opening minute, IST - to the SECOND on a 1s rung, where sixty bars share each minute; absent on a day rung, where every bar opens at the same one'
     },
     {
       key: 'tf',
@@ -3776,12 +3790,59 @@
       nosort: NO_SPOT_SORT,
       why: 'this bar’s close less intrinsic, in paisa; not clipped, so a close below intrinsic shows negative'
     },
-    { key: 'iv', label: 'IV %', w: 86, num: true, none: NO_GREEK },
-    { key: 'delta', label: 'Delta', w: 86, num: true, none: NO_GREEK },
-    { key: 'gamma', label: 'Gamma', w: 90, num: true, none: NO_GREEK },
-    { key: 'theta', label: 'Theta', w: 88, num: true, none: NO_GREEK },
-    { key: 'vega', label: 'Vega', w: 86, num: true, none: NO_GREEK },
-    { key: 'rho', label: 'Rho', w: 84, num: true, none: NO_GREEK }
+    /* SOLVED PER BAR, ON THE SERVER (D-2830). Each figure is
+       `pull::pricing::bar_greeks` on this bar's close, the underlying's close
+       at the same instant, the time to the expiry day's session close (D-2831)
+       and the T-bill rate as of the release before this bar's day (D-2810).
+       Zero carry: no dividend yield is sourced. Units are in each `why`. */
+    {
+      key: 'iv',
+      label: 'IV %',
+      w: 86,
+      num: true,
+      nosort: NO_GREEK_SORT,
+      why: 'the Black-Scholes volatility that reproduces this bar’s close, in percent, solved on the server'
+    },
+    {
+      key: 'delta',
+      label: 'Delta',
+      w: 86,
+      num: true,
+      nosort: NO_GREEK_SORT,
+      why: 'change in premium per unit change in the underlying, at the solved volatility'
+    },
+    {
+      key: 'gamma',
+      label: 'Gamma',
+      w: 96,
+      num: true,
+      nosort: NO_GREEK_SORT,
+      why: 'change in delta per rupee of the underlying'
+    },
+    {
+      key: 'theta',
+      label: 'Theta',
+      w: 88,
+      num: true,
+      nosort: NO_GREEK_SORT,
+      why: 'rupees of premium per calendar day (365-day year), negative when time decays it'
+    },
+    {
+      key: 'vega',
+      label: 'Vega',
+      w: 86,
+      num: true,
+      nosort: NO_GREEK_SORT,
+      why: 'rupees of premium per one percentage point of volatility'
+    },
+    {
+      key: 'rho',
+      label: 'Rho',
+      w: 84,
+      num: true,
+      nosort: NO_GREEK_SORT,
+      why: 'rupees of premium per one percentage point of the risk-free rate'
+    }
   ];
   /** By key, so a cell reaches its own column's reason without an index. */
   const BAR_META = (() => {
@@ -3835,7 +3896,19 @@
     return { future, option, contract: future || option };
   });
 
-  const OPTION_COLS = new Set(['side', 'strike', 'mny', 'intr', 'extr']);
+  const OPTION_COLS = new Set([
+    'side',
+    'strike',
+    'mny',
+    'intr',
+    'extr',
+    'iv',
+    'delta',
+    'gamma',
+    'theta',
+    'vega',
+    'rho'
+  ]);
   const FUTURE_COLS = new Set(['exp', 'dte']);
   /**
    * A DAY RUNG HAS NO MINUTE WORTH A COLUMN.
@@ -5432,6 +5505,41 @@
       });
     return () => controller.abort();
   });
+  /* ---------------------------------------------------------------------
+     IV AND GREEKS FOR THE OPTION ROWS ON THIS PAGE — D-2830.
+
+     Solved on the SERVER, per bar, by `/greeks.json`: one request per
+     contract, rung and month on the page. The page formats what comes back
+     and computes no model. A cell with no figure shows the server's reason.
+     --------------------------------------------------------------------- */
+  /** @type {Map<string, import('$lib/greeks.js').GreekCell>} */
+  let greekMap = $state(new Map());
+  $effect(() => {
+    const feed = feeds.active;
+    const rows = barPage.filter((/** @type {any} */ r) => r.side);
+    if (view !== 'bars' || !feed || rows.length === 0) {
+      greekMap = new Map();
+      return;
+    }
+    const controller = new AbortController();
+    readGreeks(feed, rows, controller.signal)
+      .then((answer) => {
+        if (!controller.signal.aborted) greekMap = answer.cells;
+      })
+      .catch(() => {
+        /* Aborted by a newer page: that page's own read files its answers. */
+      });
+    return () => controller.abort();
+  });
+  /**
+   * The title over a solved cell: what it was solved from.
+   * @param {Record<string, any>|null} r
+   */
+  const greekInputs = (r) =>
+    r
+      ? `solved on the server from close ${paisaText(r.premium)}, spot ${paisaText(r.spot)}, ${fmt(r.tenor_s)} s to the expiry session close, rate ${(Number(r.rate) * 100).toFixed(4)}% continuous (RBI 91-day T-bill released ${r.auction}), zero carry${r.below_band ? '; the tenor is below the band the greeks crate validates itself in' : ''}`
+      : '';
+
   /**
    * The cell's reason, and the server's own fault sentence when it sent one.
    * @param {string|null} why
@@ -9609,6 +9717,7 @@
                 {#key stamp}
                   {#each barPage as b, i (b.rk)}
                     {@const oc = optionCells(b, spotMap.get(spotKey(b)), spotChains)}
+                    {@const gc = greekCell(b, greekMap.get(greekKey(b)))}
                     <tr
                       class="brow"
                       class:odd={i % 2 === 1}
@@ -9654,8 +9763,12 @@
                            body must agree cell-for-cell; an `{#if}` here dropped
                            the body's cell while the header kept its own and the
                            two rows slid apart by one. -->
-                      <td class="bt" title="{stampLabel(b.ts)} IST — the bar's opening minute"
-                        >{timeLabel(b.ts)}</td
+                      <!-- TO THE SECOND ON A ONE-SECOND RUNG: sixty 1s bars
+                           share every HH:MM, so a minute label could not tell
+                           them apart. `barTimeLabel` keys on the rung's length
+                           from `TF_SECS`, the one table of rung lengths. -->
+                      <td class="bt" title="{dayLabel(b.ts)}, {barTimeLabel(b.ts, TF_SECS.get(b.tf))} IST — the bar's opening {(TF_SECS.get(b.tf) ?? 60) < 60 ? 'second' : 'minute'}"
+                        >{barTimeLabel(b.ts, TF_SECS.get(b.tf))}</td
                       >
                       <td class="bt">{b.tf}</td>
                       <!-- THE SHARED OPENING IS DIMMED IN PLACE. `.pfx` is a
@@ -9849,37 +9962,24 @@
                           <span title="{fmt(oc.extr)} paisa: close less intrinsic">{paisaText(oc.extr)}</span>
                         {/if}
                       </td>
-                      <!-- The five Greeks plus IV: no source on this wire. -->
-                      <td class="bn na"
-                        ><span class="unk" title={NO_GREEK} aria-label="IV %: no source — {NO_GREEK}"
-                          >no source</span
-                        ></td
-                      >
-                      <td class="bn na"
-                        ><span class="unk" title={NO_GREEK} aria-label="Delta: no source — {NO_GREEK}"
-                          >no source</span
-                        ></td
-                      >
-                      <td class="bn na"
-                        ><span class="unk" title={NO_GREEK} aria-label="Gamma: no source — {NO_GREEK}"
-                          >no source</span
-                        ></td
-                      >
-                      <td class="bn na"
-                        ><span class="unk" title={NO_GREEK} aria-label="Theta: no source — {NO_GREEK}"
-                          >no source</span
-                        ></td
-                      >
-                      <td class="bn na"
-                        ><span class="unk" title={NO_GREEK} aria-label="Vega: no source — {NO_GREEK}"
-                          >no source</span
-                        ></td
-                      >
-                      <td class="bn na"
-                        ><span class="unk" title={NO_GREEK} aria-label="Rho: no source — {NO_GREEK}"
-                          >no source</span
-                        ></td
-                      >
+                      <!-- IV AND THE FIVE GREEKS (D-2830): solved on the
+                           server from this bar's own close, or the server's
+                           named reason there is none — never a blank. -->
+                      {#each GREEK_FIELDS as g (g.key)}
+                        <td class="bn">
+                          {#if gc === null}
+                            <span class="unk" title="not an option — {g.label} belongs to an option.">—</span>
+                          {:else if gc.why !== null}
+                            <span
+                              class="unk"
+                              title={greekWhyText(gc)}
+                              aria-label="{g.label} unknown: {greekWhyText(gc)}">—</span
+                            >
+                          {:else}
+                            <span title="{g.label} {g.text(gc)} — {greekInputs(gc.row)}">{g.text(gc)}</span>
+                          {/if}
+                        </td>
+                      {/each}
                     </tr>
                   {/each}
                 {/key}
@@ -12868,12 +12968,13 @@
      is keep THESE NUMBERS in step with the column list itself, which is two
      thousand lines away and has no link to them. Three separate rules were
      silently pointing one column short until the table was rendered and read. */
+  /* 20 ONWARD — IV AND THE FIVE GREEKS — WERE HIDDEN HERE FOR EVERY
+     SELECTION while they had no source. Since D-2830 they are solved per bar
+     and belong to an OPTION, so `.nooption` below hides them with the other
+     option columns and this rule keeps only pre-market % (9). */
   .bgrid.lean > colgroup > col:nth-child(9),
   .bgrid.lean > thead > tr > th:nth-child(9),
-  .bgrid.lean > tbody > tr > td:nth-child(9),
-  .bgrid.lean > colgroup > col:nth-child(n + 20),
-  .bgrid.lean > thead > tr > th:nth-child(n + 20),
-  .bgrid.lean > tbody > tr > td:nth-child(n + 20) {
+  .bgrid.lean > tbody > tr > td:nth-child(9) {
     display: none;
   }
 
@@ -12942,8 +13043,8 @@
   /* TYPE (15), STRIKE (16) and — since D-2807 sourced them per bar —
      MONEYNESS (17), INTRINSIC (18) and EXTRINSIC (19) belong to an OPTION
      only. A future has an expiry and no strike, so a futures selection keeps
-     13 and 14 and loses 15 onward (20 onward, the greeks, are hidden above
-     for every selection). */
+     13 and 14 and loses 15 onward — IV AND THE GREEKS (20 to 25) included,
+     since D-2830 solved them per bar. */
   .bgrid.lean.nooption > colgroup > col:nth-child(n + 15),
   .bgrid.lean.nooption > thead > tr > th:nth-child(n + 15),
   .bgrid.lean.nooption > tbody > tr > td:nth-child(n + 15) {

@@ -6,7 +6,7 @@ import {
 } from '../src/lib/moneyness.js';
 
 // Generated shapes only; no row here is market data. D-2807.
-const K = (strike, side, expiry = '2026-09-29', u = 'NIFTY') => `NSE-FNO-${u}-${expiry}-${strike}-${side}`;
+const K = (/** @type {number} */ strike, /** @type {string} */ side, expiry = '2026-09-29', u = 'NIFTY') => `NSE-FNO-${u}-${expiry}-${strike}-${side}`;
 const chain = [2400000, 2405000, 2410000, 2415000, 2420000];
 
 test('rungs count listed strikes from the one nearest spot, and the sign is the side', () => {
@@ -37,7 +37,7 @@ test('no rung is named without a ladder, for an unlisted strike, or beyond the c
   assert.deepEqual(moneyness(wide, 2405000, 'CE', 2407501), { rung: null, why: 'spot_outside_chain' });
   for (const why of ['one_strike_listed', 'strike_not_listed', 'spot_outside_chain', 'no_spot_bar',
     'no_spot_file', 'spot_unreadable', 'spot_order_broken', 'spot_request_failed', 'spot_pending']) {
-    assert.equal(typeof SPOT_WHY[why], 'string', why);
+    assert.equal(typeof /** @type {Record<string, string>} */ (SPOT_WHY)[why], 'string', why);
   }
 });
 
@@ -127,8 +127,10 @@ test('the page draws the three columns from the spot read and only for options',
   const page = readFileSync(new URL('../src/routes/db/+page.svelte', import.meta.url), 'utf8');
   assert.match(page, /readSpots\(feed, rows, controller\.signal\)/);
   assert.match(page, /optionCells\(b, spotMap\.get\(spotKey\(b\)\), spotChains\)/);
-  assert.match(page, /const OPTION_COLS = new Set\(\['side', 'strike', 'mny', 'intr', 'extr'\]\)/);
+  assert.match(page, /const OPTION_COLS = new Set\(\[\s*'side',\s*'strike',\s*'mny',\s*'intr',\s*'extr',/);
   assert.match(page, /\.bgrid\.lean\.nooption > tbody > tr > td:nth-child\(n \+ 15\)/);
-  assert.match(page, /\.bgrid\.lean > tbody > tr > td:nth-child\(n \+ 20\)/);
+  // Since D-2830 the greeks (20 onward) are option columns, not hidden for all.
+  assert.doesNotMatch(page, /\.bgrid\.lean > tbody > tr > td:nth-child\(n \+ 20\)/);
+  assert.match(page, /\.bgrid\.lean > tbody > tr > td:nth-child\(9\) \{/);
   assert.doesNotMatch(page, /none: NO_SPOT\b/);
 });

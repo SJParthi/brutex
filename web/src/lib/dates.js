@@ -106,6 +106,7 @@ const IST_PARTS = new Intl.DateTimeFormat('en-GB', {
   day: '2-digit',
   hour: '2-digit',
   minute: '2-digit',
+  second: '2-digit',
   hourCycle: 'h23'
 });
 
@@ -119,7 +120,7 @@ const IST_PARTS = new Intl.DateTimeFormat('en-GB', {
  * 1000 at the call site, where the unit is known.
  *
  * @param {Date | number | string | null | undefined} d
- * @returns {{ y: string, mo: number, day: string, hh: string, mm: string } | null}
+ * @returns {{ y: string, mo: number, day: string, hh: string, mm: string, ss: string } | null}
  */
 function istFields(d) {
   const ms = d instanceof Date ? d.getTime() : typeof d === 'number' ? d : typeof d === 'string' ? Date.parse(d) : NaN;
@@ -129,7 +130,7 @@ function istFields(d) {
   for (const part of IST_PARTS.formatToParts(new Date(ms))) p[part.type] = part.value;
   const mo = Number(p.month);
   if (!Number.isFinite(mo) || mo < 1 || mo > 12) return null;
-  return { y: p.year, mo, day: p.day, hh: p.hour, mm: p.minute };
+  return { y: p.year, mo, day: p.day, hh: p.hour, mm: p.minute, ss: p.second };
 }
 
 /**
@@ -269,4 +270,35 @@ export function timeLabel(d) {
   const f = istFields(d);
   if (f === null) return '—';
   return `${f.hh}:${f.mm}`;
+}
+
+/**
+ * The wall-clock SECOND in IST. `15:29:07`.
+ *
+ * `timeLabel`'s minute plus its second, for the one place a second is the
+ * bar's own resolution: a `1s` bar. Sixty one-second bars share every
+ * `HH:MM`, so a minute label on them prints sixty identical times and the
+ * rows cannot be told apart by their Time column at all. Same inputs and
+ * same em dash as `timeLabel`, whose first five characters it always equals.
+ *
+ * @param {Date | number | string | null | undefined} d
+ * @returns {string}
+ */
+export function secondLabel(d) {
+  const f = istFields(d);
+  if (f === null) return '—';
+  return `${f.hh}:${f.mm}:${f.ss}`;
+}
+
+/**
+ * A bar's Time cell: `HH:MM:SS` for a rung shorter than a minute, `HH:MM`
+ * otherwise. The rung's length in seconds is the caller's (`/db`'s `TF_SECS`),
+ * so no second table of rung lengths lives here.
+ *
+ * @param {Date | number | string | null | undefined} d
+ * @param {number | undefined} rungSeconds
+ * @returns {string}
+ */
+export function barTimeLabel(d, rungSeconds) {
+  return rungSeconds !== undefined && rungSeconds < 60 ? secondLabel(d) : timeLabel(d);
 }
