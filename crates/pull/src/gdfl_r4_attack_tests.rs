@@ -11,7 +11,7 @@
 //! Ported from `claude/attack-gdfl` commit `bda0464f` (D-2827). The
 //! attack's D-3190 to D-3195 are this branch's D-2821 to D-2826, and the
 //! earlier attack numbers its comments cited are D-2812, D-2814 and D-2815.
-//! An adaptation is marked `ADAPTED` with its reason; `r4_11` and `r4_12`
+//! An adaptation is marked `ADAPTED` with its reason; `r4_11` to `r4_14`
 //! are this branch's own (marked `LOCAL`).
 #![expect(
     clippy::unwrap_used,
@@ -812,4 +812,75 @@ fn r4_12_a_done_line_of_no_known_definition_is_rebuilt_and_restated() {
         assert!(journal_text(&root).starts_with(&text), "{stats}");
         std::fs::remove_dir_all(root).unwrap();
     }
+}
+
+// ── 8. LOCAL: the edges mutation testing found unheld ─────────────────────
+
+/// LOCAL (D-2819, D-2827). The row bound of a columnar block is its own
+/// check, not only the rebuild loop's: a block stating more rows than its
+/// size, with a header inside it, is refused `PAST_SIZE` before a column is
+/// decoded, so a malformed numeric column behind it is never reached
+/// (without the bound it refused as the column's own fault). A block of
+/// exactly as many rows as its size, every field empty and no trailing
+/// terminator, rebuilds to exactly its size.
+#[test]
+fn r4_13_a_columnar_block_is_held_to_its_size_by_its_row_count_alone() {
+    let past = CmRefusal::TickStoreMalformed {
+        what: "a columnar block rebuilds past its entry's stated size",
+    };
+    // `\n` rows, no trailing terminator.
+    let block = |header: &str, rows: u64, tag: u8, payload: &[u8], text_len: u64| {
+        let frame = zstd(payload);
+        let mut out = vec![1, 0, 0];
+        out.extend(u32::try_from(header.len()).unwrap().to_le_bytes());
+        out.extend(header.as_bytes());
+        out.extend(1_u32.to_le_bytes());
+        out.extend(rows.to_le_bytes());
+        out.push(tag);
+        out.extend((payload.len() as u64).to_le_bytes());
+        out.extend(text_len.to_le_bytes());
+        out.extend((frame.len() as u64).to_le_bytes());
+        out.extend(frame);
+        out
+    };
+    // 100 rows stated against 50 bytes, a one-byte header, and a numeric
+    // column whose two-byte payload holds no shape for any row.
+    let bad = block("h", 100, 1, &[0, 0], 0);
+    let (day, entry) = day_of(&bad, 50, 100);
+    assert_eq!(
+        crate::gdfl_tickstore::rebuild(&day, &entry),
+        Err(past.clone())
+    );
+    // Inside the size the same column is refused as its own fault.
+    let (day, entry) = day_of(&bad, 1_000, 100);
+    assert_ne!(
+        crate::gdfl_tickstore::rebuild(&day, &entry),
+        Err(past.clone())
+    );
+    assert!(crate::gdfl_tickstore::rebuild(&day, &entry).is_err());
+    // Exactly as many rows as bytes: 64 empty fields, one terminator each.
+    let rows = 64_u64;
+    let newlines = vec![b'\n'; usize::try_from(rows - 1).unwrap()];
+    let exact = block("", rows, 0, &newlines, rows - 1);
+    let (day, entry) = day_of(&exact, rows, rows);
+    let got = crate::gdfl_tickstore::rebuild(&day, &entry).unwrap();
+    assert_eq!(got, vec![b'\n'; usize::try_from(rows).unwrap()]);
+}
+
+/// LOCAL (D-2823, D-2827). A shape needs text before its two digits: a name
+/// that IS the shape names no underlying, and the prefix rule decides it.
+/// No side, no month in its last letters, or no two digits before them is
+/// no shape either.
+#[test]
+fn r4_14_a_shape_with_nothing_before_it_names_no_underlying() {
+    use crate::gdfl_nfo::shaped_underlying;
+    assert_eq!(shaped_underlying("06APR24100CE"), None);
+    assert_eq!(shaped_underlying("24APR100PE"), None);
+    assert_eq!(shaped_underlying("X06APR24100CE"), Some("X"));
+    assert_eq!(shaped_underlying("X24APR100PE"), Some("X"));
+    assert_eq!(shaped_underlying("LTI06APR24100"), None);
+    assert_eq!(shaped_underlying("LTI06XYZ24100CE"), None);
+    assert_eq!(shaped_underlying("LTIA6APR24100CE"), None);
+    assert_eq!(shaped_underlying("APR24CE"), None);
+    assert_eq!(shaped_underlying("CE"), None);
 }

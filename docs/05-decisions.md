@@ -59726,8 +59726,10 @@ earlier attack numbers in their comments mapped to this branch's (D-3167,
 D-3175 to D-2815; D-3168, D-3169, D-3173, D-3174 to D-2814; D-3170 to D-2812).
 Adaptations are marked `ADAPTED` with their reason: `r4_03`'s dropped-field
 case (D-2822) and the local `an_incomplete_day_is_closed_in_the_journal_and_retried`
-(D-2821). `r4_11` and `r4_12` are local additions. Every value is invented;
-no vendor row is read or quoted. **Proven by** GI-16 to GI-26.
+(D-2821). `r4_11` to `r4_14` are local additions; `r4_13` and `r4_14` hold
+the edges a scoped `cargo mutants` run found unheld (the row bound of a
+columnar block, and a shape with nothing before it). Every value is
+invented; no vendor row is read or quoted. **Proven by** GI-16 to GI-26.
 
 ### D-2810 — The risk-free rate is the RBI 91-day T-bill cut-off yield, as a dated series read by path, as of the latest release strictly before the trade day — 2026-10-04
 
