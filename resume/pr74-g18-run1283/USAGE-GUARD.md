@@ -133,3 +133,11 @@ Tickvault $429.58 (+$42 since 08:39). New factor: about $4.9 of brutex spend per
 09:23: PAUSE was sent to all 12 unfinished sessions at about 88-90% by the meter's pace.
 RESUME is at 12:12 (trig_01VA1zhRBcZL5kLMKpFrS152).
 Weekly extrapolation: 46 + 0.28 x 19 = about 51%.
+
+12:12 RESUME (window 12:10-17:10). The 14 brutex sessions summed to $807.93 and Tickvault to
+$579.08; Tickvault spent about $138 between 09:18 and 12:12, while brutex was paused. WS4 and
+the rest fixer recorded a five_hour allowed_warning (resetsAt 12:10), so the old window really
+was near full.
+RESUME went to all 11 paused sessions. L2 got its findings-ledger fix task. L4 had already
+resumed on its own. The audit workflow was relaunched as ww8p80jjb from run wf_33b651ee-26e.
+Next poll: 12:40.
