@@ -545,9 +545,11 @@ fn every_points_rung_is_a_point_or_more_and_within_the_ceiling() {
         (2, 20_000),
         (5, 50_000),
         (10, 100_000),
-        // UNIFORM: every bar spans 400 paisa at a 10,000-rupee close (negative
-        // spread marks the uniform shape in this table).
-        (-200, 1_000_000),
+        // UNIFORM: every bar spans 2,000 paisa at a 10,000-rupee close, so a
+        // bar is 2,000 ppm, the step is 100 ppm, and a point is 100 ppm: every
+        // rung is an EXACT multiple of a point, the case a ceiling division
+        // must not round up. (A negative spread marks this shape.)
+        (-1_000, 1_000_000),
     ] {
         let bars: Vec<indicators::Candle> = (0..400)
             .map(|minute| {
@@ -578,6 +580,12 @@ fn every_points_rung_is_a_point_or_more_and_within_the_ceiling() {
             .filter(|&pt| pt <= ceiling)
             .collect();
         assert_eq!(rungs, want, "{spread}");
+        if spread < 0 {
+            assert_eq!(step, per_point, "premise: one step is one point");
+            let whole: Vec<i64> = (1..).take(rungs.len()).collect();
+            assert_eq!(rungs, whole, "exact multiples stay whole points");
+            assert!(rungs.len() >= 2, "{rungs:?}");
+        }
         assert!(!rungs.is_empty(), "{spread}: a ladder");
         assert!(
             rungs.iter().all(|&pt| (1..=ceiling).contains(&pt)),
