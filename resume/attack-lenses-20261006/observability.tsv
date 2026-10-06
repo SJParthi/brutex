@@ -1,0 +1,8 @@
+id	state	commit	note
+OBSV-01:F-ECBE65	pushed	62d3e3e	logs merged reached_oldest after limit cut; mutants (Gate 18) not yet run
+OBSV-02:F-24EDBD	pushed	62d3e3e	masters status unreadable reported absent; mutants (Gate 18) not yet run
+OBSV-03:F-8AEE77	pushed	62d3e3e	cash-session cache matched reinstall not synced; mutants (Gate 18) not yet run
+OBSV-04:F-08BBA7	pushed	62d3e3e	census append error count; mutants (Gate 18) not yet run
+OBSV-05:F-6EF086	pushed	62d3e3e	live progress refused on older log history; /logs.json since=; mutants (Gate 18) not yet run
+OBSV-06:F-C27563	pushed	62d3e3e	sweep-all refused months not logged; mutants (Gate 18) not yet run
+OBSV-07:F-B26F07	pushed	62d3e3e	sweep-stored refusal reason not logged; mutants (Gate 18) not yet run
