@@ -10,3 +10,7 @@ From the repository owner (Parthiban), relayed by the coordinator session. Apply
 6. **One common, dynamic, incremental path.** No per-instrument special-casing. One authority per fact (calendar, fold, costs, session, vocabulary). Resumable and incremental wherever a run can be interrupted.
 7. **Parallel.** Use subagents for research and reading in parallel. Keep heavy cargo jobs one at a time on your box.
 8. **Honest report.** Report found / fixed / not fixed and why. Label anything unmeasured UNVERIFIED.
+
+Owner rule, 08:10 UTC 2026-10-06: every agent and subagent uses Opus 5.5 (claude-opus-5-5),
+and nothing else. No haiku or sonnet model override anywhere: not in the Agent tool, not in
+workflow agent() calls, not for pollers. The coordinator polls with its own tools.

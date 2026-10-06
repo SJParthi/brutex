@@ -22,7 +22,7 @@
 PAUSE (usage guard, from the coordinator): the account's usage limit is nearly reached. Within your next few tool calls: (1) do not arm monitors, wakeups or send_later; let a build or mutation run finish only if it is nearly done, else stop it; (2) commit everything on YOUR OWN branch (unvalidated work as one commit titled "WIP (paused, not validated)") and push it; (3) write resume/<your folder>/PAUSE-20261006.md on fix-queue: head SHA, done, in progress, exact next steps, commands to restart; (4) end your turn. If a background job wakes you during the pause, write its result into the PAUSE file in one tool call and end the turn. Start nothing new until a message that begins with RESUME arrives.
 
 ## RESUME message
-RESUME (usage guard): the usage window has reset. Read your PAUSE-20261006.md, and continue your task from its next steps under the same rules.
+RESUME (usage guard): the usage window has reset. Read your PAUSE-20261006.md, and continue your task from its next steps under the same rules. Owner rule (08:10 UTC): use ONLY Opus 5.5 (claude-opus-5-5) for every agent and subagent. Never pass a haiku or sonnet model override; omit the model so it inherits Opus 5.5.
 
 ## Poll log
 | UTC | Sum of session cost_usd | Estimate (cost / 4.6) | Note |
