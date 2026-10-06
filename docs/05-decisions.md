@@ -63485,3 +63485,42 @@ population. `cli::stored_data_completeness::tests::institutional_complete_requir
 binds a matching durable data authority and refuses one of another
 population.
 
+### D-1836 — ledger-v6 prices the NIFTY family over the span sizing loaded — 2026-10-03
+
+**What was found (W2-cli16-3; stated, not fixed, by D-1634).**
+`strict::size_sweeper` loads the whole NIFTY signal, daily and exact-minute
+span under the strict checksum receipts to count signal bars, keeps only the
+count and the guard, and the rung's NIFTY family commit then loads the
+identical span again: O(span bytes + months × fsyncs) twice per rung, eight
+rungs per run. D-1634 declined to carry the context forward because it would
+change the strict inputs' guard lifetime; `ledger_v6` already holds that
+guard (`sizing_inputs`) for the whole rung.
+
+**The change.** `size_sweeper` returns the admitted root and loaded context
+as a `strict::SizedContextV1` (through `load_sized`). The rung's NIFTY family
+goes through `commit_strict_candidate_pre_admission_authority_sized_v1`,
+which consumes the held context after `SizedContextV1::into_matching` proves
+the request is the exact load sizing made (underlying, vendor, rung, span,
+load ceilings, strict receipt policy, store root), that its receipts are
+current and that the root is unchanged; any difference is refused by name
+before anything is computed. BANKNIFTY loads as before. The commit after the
+load is the same code (`commit_loaded_stored_v1`), so the family, its
+identities and every stored byte are unchanged.
+
+**What it proves.**
+`cli::step3_orchestrator::tests::strict_v6_fixture_tests::strict_v6_sizing_context_prices_the_nifty_family_without_a_second_load`
+counts two strict loads for size-then-commit through the reloading path and
+one through the sized path, with equal committed identities, and refuses a
+sized context for another underlying, rung, span, load ceiling or receipt
+policy without computing anything.
+
+**Superseded at integration (audit batch 3, 2026-10-06).** Lane 1-b fixed
+the same finding first, as W2-cli7-3 / D-1683, with its own `SizedNifty`
+hand-off; that is what `final/all-fixes` carries. When F8's branch was merged
+onto it, D-1683's code was kept and none of this entry's code landed: there
+is no `SizedContextV1`, `load_sized` or `into_matching` in the tree, and the
+proving tests are D-1683's
+(`strict_v6_the_nifty_commit_consumes_the_sizing_load_once`,
+`strict_v6_a_sized_context_refuses_every_other_request`). The cost stated
+above is removed exactly once, by D-1683. D-1842.
+
