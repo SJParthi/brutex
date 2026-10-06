@@ -90,10 +90,12 @@ impl Turns {
             return true;
         };
         let round = own.performed.saturating_add(1);
+        // A lane's OWN slot needs no exemption: it takes the `else` arm and
+        // `performed >= performed + 1 - 1` holds, so an `other == at` clause
+        // only shadowed the `<`, leaving `<` and `<=` indistinguishable
+        // (G18-cli-b-02, D-2021).
         lanes.iter().enumerate().all(|(other, lane)| {
-            lane.finished
-                || other == at
-                || lane.performed >= if other < at { round } else { round - 1 }
+            lane.finished || lane.performed >= if other < at { round } else { round - 1 }
         })
     }
     fn update(&self, at: usize, change: impl FnOnce(&mut Lane)) {

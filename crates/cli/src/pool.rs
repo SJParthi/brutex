@@ -989,7 +989,11 @@ fn price_all(
     let levels = grid::Levels {
         rungs: crate::grid_rungs(bars),
         step_ppm: Some(crate::grid_step_ppm(bars, hold)),
-        forced: (rules.max_mae_ppm > 0).then_some(rules.max_mae_ppm),
+        // PASSED AS IT IS: the grid's own merge drops a forced level of zero
+        // (`forced.filter(|&l| l > 0)` in `runner::grid::merged`), so a
+        // `> 0` guard here was a second copy of that rule that no test could
+        // tell from `>= 0` (G18-cli-b-03, D-2022).
+        forced: Some(rules.max_mae_ppm),
         ratios: true,
         stops_ppm: &stop_rungs,
     };
@@ -3307,6 +3311,7 @@ mod tests {
             .strip_suffix("  fired on")
             .expect("the trailing label");
         let mut rows = 0;
+        let mut more = Vec::new();
         for row in &lines[at + 1..] {
             if row.trim_start().starts_with("mask ") || row.is_empty() {
                 continue;
@@ -3315,17 +3320,23 @@ mod tests {
                 rows += 1;
                 continue;
             }
-            let Some(row) = row
-                .strip_suffix("  AAA +18446744073709551614 more")
-                .or_else(|| row.strip_suffix("  AAA"))
-            else {
-                break;
+            let (row, named_more) = match row.strip_suffix("  AAA +18446744073709551614 more") {
+                Some(row) => (row, true),
+                None => match row.strip_suffix("  AAA") {
+                    Some(row) => (row, false),
+                    None => break,
+                },
             };
+            more.push(named_more);
             crate::columns::assert_under(header, row, &[R, L, R, R, R, R, R, R, R, R, R])
                 .expect("separated and aligned");
             rows += 1;
         }
         assert_eq!(rows, pooled.len(), "{out}");
+        // FIRED ON MORE INSTRUMENTS THAN NAMED, AND ONLY THEN, says how many
+        // more: one name against `u64::MAX` fired, and none against one.
+        // G18-cli-b-04, D-2020.
+        assert_eq!(more, [true, true, false], "{out}");
         assert!(out.contains(&i64::MIN.to_string()), "{out}");
     }
 

@@ -246,3 +246,45 @@ fn a_turn_outside_a_lane_or_inside_a_held_one_never_waits() {
     .expect("both lanes start");
     assert_eq!(nested, vec![0, 1]);
 }
+
+/// **A lane's own slot never blocks it, and a lower lane must be a round
+/// ahead.** G18-cli-b-02, D-2021.
+///
+/// Fails fast where the fan-out tests would hang: a lane that compared its own
+/// slot as a LOWER one (`other < at` widened to `other <= at`) would wait for
+/// itself forever. Checked on the pure rule, no thread involved.
+#[test]
+fn a_lane_never_waits_on_its_own_slot() {
+    use super::{Lane, Turns};
+    let idle = Lane {
+        performed: 0,
+        finished: false,
+    };
+    assert!(Turns::ready(&[idle], 0), "a lone lane goes");
+    assert!(Turns::ready(&[idle, idle], 0), "lane 0 leads round 1");
+    assert!(
+        !Turns::ready(&[idle, idle], 1),
+        "lane 1 waits for lane 0's round 1"
+    );
+    let ahead = Lane {
+        performed: 1,
+        finished: false,
+    };
+    assert!(Turns::ready(&[ahead, idle], 1), "lane 0 has done round 1");
+    assert!(
+        !Turns::ready(&[ahead, idle], 0),
+        "lane 0's round 2 waits for lane 1's round 1"
+    );
+    let saturated = Lane {
+        performed: u64::MAX,
+        finished: false,
+    };
+    assert!(
+        Turns::ready(&[saturated], 0),
+        "a saturated count still goes"
+    );
+    assert!(
+        Turns::ready(&[idle, idle], 2),
+        "a lane past the end is not held"
+    );
+}
