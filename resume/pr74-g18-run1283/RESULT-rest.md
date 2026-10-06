@@ -90,3 +90,4 @@ Every path stays O(1) per call. Cursor::advance is about 40 ns slower at p50 in 
 IN PROGRESS. CI flags with `--build-timeout 1500`, in place in the world-readable worktrees wt-g18 and wt-g18b. About 14 minutes per mutant: roughly 400 s to build and 420 s to test. The baselines passed in both worktrees: 499 s build + 557 s test, and 559 s build + 523 s test.
 - Done before the container was reclaimed: 16 tested, 15 caught, 1 unviable (`autopilot.rs:3278 round → Default`), 0 missed, 0 timeout.
 - Remaining 110: in 16 chunks of 7 or fewer, each under 2 h, results under /tmp/claude-0/mut/apic/.
+- api chunk c01-b (15:06Z, timeout 1500): 7 tested, 5 caught, 2 unviable, 0 missed, 0 timeout.
