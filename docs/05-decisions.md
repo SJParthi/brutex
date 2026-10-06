@@ -63431,3 +63431,69 @@ barrier failed in this process.
 the commit; each failed on the previous code by construction.
 
 Ported from `wip/zero/conc-data` a937341. The same pattern for Candidate Universe, Base Evidence V2 and Pre-Admission (that branch's D-2557, ledgerall-1's other half and cand-1) has no code on any branch and is not claimed here.
+### D-2537 — The winners' mean adverse excursion is never called a stop level — 2026-10-06
+
+- Z1-slice00-F1. `runner::audit`'s strategy report noted the "mean MAE, winners only" row "the tightest stop that keeps every winner", and the SHARPEST line said the figure "is the tightest stop that would not have killed a winner". The value is `adverse_won / n`, a mean: a stop placed there cuts every winner that went further than the average one. D-0281 corrected the same claim on `cli results` and left this copy owed (`docs/06-limits.md`).
+- The note now reads "a mean, NOT a stop level: winners past it would be cut", the SHARPEST line says both figures are means over the winners, and the `Cell::winner_mae` / `Cell::all_mae` rustdoc and a `validate.rs` comment say the same and point at `worst_mae` as the bound. Wording only; no figure moves.
+- Proved by `runner::audit::tests::the_winner_mae_is_never_called_a_stop_level` (ZX-70).
+
+### D-2538 — `Rates::resolve` is the only public way to hold a `Rates` — 2026-10-06
+
+- Z1-slice10-F1. `costs::trip::Rates::new` was `pub const` and took no day, and `BpsX100::ZERO` and every `pub const` table row can be named outside the crate, so `Rates::new(Groww, ZERO, ZERO, ZERO)` priced a trip for a day the regime tables refuse. The crate header's "no flag, no keyword and no fall-back" and `Rates`' "carries stage one's refusal contract into stage three intact" both had a public door around them. No caller outside `crates/costs` used it.
+- `Rates::new` is now `pub(crate)`; `charge_stack` stays public (the gate-8 bench calls it) and can only be handed a set some dated lookup admitted. The old `Rates::new` doctest moved to a unit test over `Rates::resolve`; a `compile_fail` doctest on `Rates::new` pins the closure. The two doc claims are corrected and the `docs/06-limits.md` entry "The round-trip charge stack can be reached without a date, from outside the crate" is marked closed.
+- Proved by `costs::trip::tests::a_resolved_bse_set_carries_the_flat_brokerage_and_no_ipft` and the `compile_fail` doctest on `costs::trip::Rates::new` (ZX-71).
+
+### D-2539 — The realized slippage is signed, clamped at zero, and never overstates the fills — 2026-10-06
+
+- Z1-slice10-F2. `costs::fill::worst_case_fills` recorded `tick + |sell_anchor − sell_fill|`. When the sell anchor sat below the one-tick floor, the floor pushed the sale UP — favourable to the seller — and `.abs()` counted the push as adverse: an anchor of 0 reported 10, an anchor of −95 reported 105, against the module header's "never overstates what the notionals carry". An anchor of `i64::MIN` made the slip itself overflow, so the bar was refused.
+- The figure is now `max(0, tick + (sell_anchor − sell_fill))`, computed at `i64` with one saturating subtraction; it lies in `[0, 2·TICK]` and needs no narrowing. The fills are unchanged. The `i64::MIN` sell anchor now prices (slip 0) instead of refusing as an overflow; `costs::trip`'s guard test already accepted either answer.
+- Informational line only: no charge, no gross and no run identity reads it.
+- Proved by `costs::fill::tests::the_realized_slippage_is_the_signed_adverse_movement_clamped_at_zero` (ZX-72); `the_sell_floor_binds_at_one_tick_and_the_realized_slippage_follows_it` and the two overflow tests are re-taken with the reason in comments.
+
+### D-2540 — Separating lines take opposite colours from one open — 2026-10-06
+
+- Z1-slice08-F1. `pat_separating_lines_bull` (208) required two bullish bars with equal opens and 209 two bearish ones — the "matching opens" shape. Classical separating lines are a black bar then a white bar from the black bar's open (bull), and the mirror (bear). The named shape never fired and an unnamed one did; the same class as the five predicates D-1543 corrected.
+- 208 is now `bar1.bearish() && bar0.bullish() && bar0.open == bar1.open`, 209 its mirror. The exemplar cases and the old `matching_opens_need_the_same_price_and_the_same_direction` test are rewritten to the new shapes. A convention like every predicate in `pattern.rs`, UNVERIFIED against `docs/00-charter.md`, the same footing as D-1543.
+- Vocabulary: positions 208 and 209 emit different answers on the same bars. No bit is renumbered, retired or widened, so `VOCAB_VERSION` stays 3 for D-1542's reason; the run identity's `commit` term separates runs before and after, and stored results from before are not comparable row for row.
+- Proved by `indicators::pattern::tests::separating_lines_take_opposite_colours_from_one_open` (ZX-73).
+
+### D-2541 — A reprojected census says `offered` is replaced, and `reconciles` says where it holds — 2026-10-06
+
+- Z1-slice08-F2. `Column::reproject_with` overwrites `census.offered` with the execution length (the pairing key `outcome::edge` reads) under a comment that said the census "is left alone", and `Census::reconciles` claimed a false answer is always a module defect. On a reprojected column whose execution series differs in length it is always false.
+- Documentation only: the comment now says `offered` is replaced and why; `reconciles` says it holds for a census from `Column::build` and means nothing on a reprojected one. `runner::complete` already asks it of the signal column only. The pairing key is unchanged.
+- Proved by `indicators::column::reproject_tests::a_reprojected_census_does_not_claim_to_reconcile` (ZX-74).
+
+### D-2542 — The positivity refusal tests all four prices through one predicate — 2026-10-06
+
+- Z1-slice08-F3. `Corrupt::PriceNotPositive`'s doc says all four fields are tested "not `low` alone" so the predicate never depends on another clause; `Candle::check_evaluable` and `Evaluator::stepped` both tested `low <= 0` and leaned on containment.
+- Both now call `Candle::any_price_not_positive` (crate-private, four compares, no loop), which is testable with containment broken. The refusal set of every bar `check` admits is unchanged, because containment makes `low` the minimum there; no output moves.
+- Proved by `indicators::candle::price_not_positive_does_not_depend_on_containment` (ZX-75), which enumerates all 625 assignments of `{i64::MIN, −1, 0, 1, i64::MAX}`.
+
+### D-2543 — The gap reference source is named for the clock-bucket fold — 2026-10-06
+
+- Z1-slice08-F4. `GapReferenceSource::SignalSeriesLastThreeIntradayBars` and the `anchored` module header described `GapFib` as three bars; since D-1441 it folds 3-minute clock buckets (`gap::candle_bucket`).
+- Renamed to `SignalSeriesThreeMinuteBuckets` with a corrected doc. The only reader outside the defining module was its own test; no other crate names it.
+- Proved by `indicators::anchored::tests::the_gap_reference_source_names_the_clock_bucket_fold` (ZX-76).
+
+### D-2544 — The grid prices the leg it uses, and refuses only on that leg — 2026-10-06
+
+- p9num-3. `runner::grid::entry_fills` and `exit_fill` priced a same-bar pair through `fills_at(bar, bar, PrintedExtreme)`, which checks the SELL leg (the low) against one tick whichever leg is read. A long entry or a short's pessimistic exit on a bar with a 1-4 paisa low was refused, and fell back to a `0` entry or a flat exit, while `trade::round_trip` (each leg on its own bar) priced the trade: the two halves disagreed behind a fallback.
+- `one_leg_printed` places the unused leg on a flat bar at this bar's own high, which `Bar::new` has already held to at least a tick, so only the used leg can refuse — exactly `trade::round_trip`'s check. Still through `costs::fill::fills_at`, which `trade.rs`'s source test requires.
+- Proved by `runner::grid::tests::grid_and_trade_agree_on_a_sub_tick_low` (ZX-77).
+
+### D-2545 — `purged_folds` purges and embargoes a trade's window, `h + 1` — 2026-10-06
+
+- p18num-1. `split::purged_folds` purged and embargoed `h` bars, the forward label's reach. A trade from signal `i` fills on `i + 1` and exits on `i + 1 + h`, so the last left-training trade exited ON `test.start` and the last test trade exited on the first resumed training bar. No production caller uses `purged_folds`, so the leak was latent.
+- Both are now `h + 1`. The anchored and rolling shapes keep their arithmetic: their production caller (`validate`'s anchored V4 fold) separates the halves by slicing the training execution bars before the first test signal, and their docs now say so. The module test that checked `i + 15` checks `i + 1 + 15`, and the counted purge/embargo moves 20 → 21.
+- Proved by `runner::split::tests::no_trade_walked_from_a_training_bar_exits_inside_its_test_window` (ZX-78).
+
+### D-2546 — The overnight into the first signal day is measured — 2026-10-06
+
+- p16num-1. `runner::audit::largest_overnight_move` measured `bars.windows(2)` over the signal span only, while the anchored previous-session families read the session before it out of the warm-up month. A split effective on a span's first session lit `gap_down_day` and moved every previous-day level, and the D-1540 line named a different date.
+- `largest_overnight_move_after(prior, bars)` measures one more pair at the front; `cli::stored::overnight_note` takes the door's `DailyContext` and seeds it with `prior_session_record`, the latest eligible daily record strictly before the first signal day. All five kernels that print it (`stored_month_kernel`, `auto_stored_kernel`, `audit_stored_kernel`, and through `span_banner` `audit_range_kernel_cached` and `screen_range_kernel_cached`) pass the context they already hold. Still one pass over the bars plus one over the daily records, once per report.
+- Proved by `runner::audit::overnight_tests::a_split_on_the_first_signal_day_is_the_named_overnight_move` and `cli::stored::tests::the_overnight_note_measures_the_session_before_the_span` (ZX-79).
+
+### D-2547 — Lot sizes, strike steps and expiry weekdays are recorded as UNVERIFIED — 2026-10-06
+
+- P9-02. `crates/costs` `lot.rs`, `strike.rs` and `expiry.rs` cite `TRACK2_OPTIONS_SPEC`, a predecessor document; `docs/00-charter.md` has no row for a lot size or an expiry weekday and its strike-interval row says no source states them. The hunt-costs-5 limit (D-1535) named cost rates only, and `docs/06-limits.md` §26 tabulated the refusal windows without saying the in-window values are unsourced.
+- Documentation only: the hunt-costs-5 limit is widened to the three contract tables and §26 states the in-window values are UNVERIFIED under `CLAUDE.md` §3 rule 1. No value changes. Sourcing them — a charter row per SEBI/NSE circular, retrieved and checked — is the operator's.

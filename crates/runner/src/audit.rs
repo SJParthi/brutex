@@ -225,26 +225,67 @@ pub struct OvernightMove {
 /// bars. One pass, O(bars), at a once-per-report boundary.
 #[must_use]
 pub fn largest_overnight_move(bars: &[indicators::Candle]) -> Option<OvernightMove> {
+    largest_overnight_move_after(None, bars)
+}
+
+/// [`largest_overnight_move`], with the session BEFORE `bars` measured too.
+///
+/// # The overnight into the first signal day (p16num-1, D-2546)
+///
+/// `bars.windows(2)` measures only the overnights INSIDE the slice, so the
+/// move from the last session before the span to the span's first open was
+/// never measured — while the anchored previous-session families read exactly
+/// that session out of the warm-up month. A split effective on a span's first
+/// session lit `gap_down_day` and shifted every previous-day level, and the
+/// D-1540 line named a different, harmless date.
+///
+/// `prior` is that earlier session's LAST record (a daily bar does: its
+/// `close` is the session close); it is measured against `bars`' first open
+/// as one more pair at the front, under the same rules — a different IST day,
+/// a positive close, a tie keeps the earlier session. A `prior` on or after
+/// the first bar's day is ignored rather than trusted. One extra pair, so
+/// still one pass, O(bars), at a once-per-report boundary.
+#[must_use]
+pub fn largest_overnight_move_after(
+    prior: Option<&indicators::Candle>,
+    bars: &[indicators::Candle],
+) -> Option<OvernightMove> {
     let mut best: Option<OvernightMove> = None;
+    if let (Some(before), Some(first)) = (prior, bars.first())
+        && indicators::ist_day(before.ts_micros) < indicators::ist_day(first.ts_micros)
+    {
+        keep_larger(&mut best, before, first);
+    }
     for pair in bars.windows(2) {
         let [before, after] = pair else { continue };
-        let day = indicators::ist_day(after.ts_micros);
-        if day == indicators::ist_day(before.ts_micros) || before.close <= 0 {
-            continue;
-        }
-        let ratio = i128::from(after.open.saturating_sub(before.close)) * 1_000_000
-            / i128::from(before.close);
-        let ppm = i64::try_from(ratio).unwrap_or(if ratio < 0 { i64::MIN } else { i64::MAX });
-        if best.is_none_or(|kept| ppm.unsigned_abs() > kept.ppm.unsigned_abs()) {
-            best = Some(OvernightMove {
-                day,
-                prior_close: before.close,
-                open: after.open,
-                ppm,
-            });
-        }
+        keep_larger(&mut best, before, after);
     }
     best
+}
+
+/// Measures the overnight from `before`'s close to `after`'s open into `best`
+/// when the two are different IST days and the close is positive, keeping the
+/// earlier of two equal magnitudes.
+fn keep_larger(
+    best: &mut Option<OvernightMove>,
+    before: &indicators::Candle,
+    after: &indicators::Candle,
+) {
+    let day = indicators::ist_day(after.ts_micros);
+    if day == indicators::ist_day(before.ts_micros) || before.close <= 0 {
+        return;
+    }
+    let ratio =
+        i128::from(after.open.saturating_sub(before.close)) * 1_000_000 / i128::from(before.close);
+    let ppm = i64::try_from(ratio).unwrap_or(if ratio < 0 { i64::MIN } else { i64::MAX });
+    if best.is_none_or(|kept| ppm.unsigned_abs() > kept.ppm.unsigned_abs()) {
+        *best = Some(OvernightMove {
+            day,
+            prior_close: before.close,
+            open: after.open,
+            ppm,
+        });
+    }
 }
 
 /// What a stock's report says when its bars hold no overnight to measure:
@@ -862,7 +903,12 @@ fn excursion_block(out: &mut String, cell: &Cell) {
         (
             "mean MAE, winners only",
             ppm_pct(cell.winner_mae),
-            "the tightest stop that keeps every winner",
+            // Z1-slice00-F1, D-2537. This note said "the tightest stop that
+            // keeps every winner". The value is `adverse_won / n`, a MEAN, so a
+            // stop placed there cuts every winner that went further than the
+            // average one. D-0281 corrected the same claim on `cli results` and
+            // left this copy owed. The bound is the WORST row above.
+            "a mean, NOT a stop level: winners past it would be cut",
         ),
         (
             "mean MFE, winners only",
@@ -1230,8 +1276,9 @@ pub fn grid(out: &mut String, g: &Grid, keep: usize) {
         let _ = writeln!(
             out,
             "  SHARPEST: variant {}. Winners went {} ppm against before working, \
-             and {} ppm for. Ratio {}. That adverse figure is the tightest stop \
-             that would not have killed a winner.",
+             and {} ppm for. Ratio {}. Both are means over the winners: a stop \
+             at that adverse figure would have cut every winner that went \
+             further.",
             exit_name(sharp),
             sharp.winner_mae,
             sharp.winner_mfe,
@@ -2665,13 +2712,65 @@ mod tests {
         );
         assert!(
             out.contains("41 ppm against"),
-            "the sniper figure is the tightest stop that would not have killed a \
-             winner, and it must appear as a number"
+            "the sniper figure is the winners' MEAN adverse excursion, and it \
+             must appear as a number"
         );
         assert!(
             out.contains("depend on intra-bar ordering"),
             "four ambiguous bars must be reported as uncertainty, not hidden"
         );
+    }
+
+    /// THE WINNERS' MEAN ADVERSE EXCURSION IS NEVER CALLED A STOP LEVEL.
+    ///
+    /// Z1-slice00-F1, D-2537. Two winners that went 0 and 100 ppm against have
+    /// a `winner_mae` of 50; a stop at 50 cuts the second. The strategy report
+    /// noted that row "the tightest stop that keeps every winner" and the
+    /// SHARPEST line said "the tightest stop that would not have killed a
+    /// winner" -- both fail this test on the old strings. Every permutation of
+    /// zero, one and both winners, and a cell with no winners at all, is
+    /// rendered, through both surfaces.
+    #[test]
+    fn the_winner_mae_is_never_called_a_stop_level() {
+        let row = |out: &str, label: &str| -> String {
+            let head = format!("  {label}");
+            for line in out.lines() {
+                if line.starts_with(&head) {
+                    return line.to_owned();
+                }
+            }
+            String::new()
+        };
+        for (wins, winner_mae, worst_mae) in [(0_u64, 0, 0), (1, 0, 0), (1, 100, 100), (2, 50, 100)]
+        {
+            let cell = crate::grid::Cell {
+                trades: 2,
+                wins,
+                pessimistic: 100,
+                optimistic: 100,
+                winner_mae,
+                winner_mfe: 400,
+                worst_mae,
+                ..crate::grid::Cell::default()
+            };
+            let mut out = String::new();
+            strategy_report(&mut out, &cell, "SL·TP", CostScope::IndexSpot);
+            assert!(!out.contains("tightest stop"), "{out}");
+            let mean = row(&out, "mean MAE, winners only");
+            assert!(
+                mean.contains("mean") && mean.contains("NOT a stop"),
+                "{mean}"
+            );
+            assert!(
+                row(&out, "WORST MAE, any single trade").contains("THE BOUND"),
+                "{out}"
+            );
+        }
+        let mut out = String::new();
+        grid(&mut out, &populated_grid(), 10);
+        assert!(out.contains("SHARPEST"), "{out}");
+        assert!(!out.contains("tightest stop"), "{out}");
+        assert!(out.contains("Both are means"), "{out}");
     }
 
     /// The risk-policy winner can differ from the unconstrained money maximum;
@@ -3592,6 +3691,84 @@ mod overnight_tests {
             (-510_000..=-490_000).contains(&found.ppm),
             "a 1:2 split is a move of about -50%: {found:?}"
         );
+    }
+
+    /// A SPLIT ON THE FIRST SIGNAL DAY IS THE NAMED OVERNIGHT MOVE WHEN THE
+    /// SESSION BEFORE THE SPAN IS GIVEN. p16num-1, D-2546.
+    ///
+    /// The span starts ON the split session, so `bars.windows(2)` never sees
+    /// the pre-split close and the old measure named a small in-span overnight
+    /// instead. With the prior session's daily record (close 20,002.00) and a
+    /// first open of 10,001.00 the named day is the first signal day and the
+    /// move is -500,000 ppm. A prior on the first day itself, or after it, is
+    /// ignored; no prior, an empty span and a non-positive prior close each
+    /// fall back to the in-span answer.
+    #[test]
+    fn a_split_on_the_first_signal_day_is_the_named_overnight_move() {
+        let (bars, first) = split_at_twenty();
+        let span = &bars[first..];
+        let first_day = indicators::ist_day(span[0].ts_micros);
+        let in_span = largest_overnight_move(span).expect("ten sessions have overnights");
+        assert_ne!(in_span.day, first_day, "the old measure cannot see it");
+        assert_eq!(
+            super::largest_overnight_move_after(None, span),
+            Some(in_span)
+        );
+
+        let previous = bars[first - 1];
+        let daily = |ts: i64, close: i64| Candle::new(ts, close, close, close, close, 0, i64::MIN);
+        let first_open = Candle::new(
+            span[0].ts_micros,
+            1_000_100,
+            1_000_100,
+            1_000_100,
+            1_000_100,
+            0,
+            i64::MIN,
+        );
+        let mut seeded_span = span.to_vec();
+        seeded_span[0] = first_open;
+        let seeded = super::largest_overnight_move_after(
+            Some(&daily(previous.ts_micros, 2_000_200)),
+            &seeded_span,
+        )
+        .expect("a seeded span has an overnight");
+        assert_eq!(seeded.day, first_day);
+        assert_eq!(seeded.prior_close, 2_000_200);
+        assert_eq!(seeded.open, 1_000_100);
+        assert_eq!(seeded.ppm, -500_000);
+
+        // A prior on the first signal day, or later, is not an overnight.
+        for ts in [span[0].ts_micros - 1, span[0].ts_micros, span[1].ts_micros] {
+            assert!(indicators::ist_day(ts) >= first_day, "fixture: {ts}");
+            let same = super::largest_overnight_move_after(Some(&daily(ts, 2_000_200)), span);
+            assert_eq!(same, Some(in_span), "prior at {ts} is ignored");
+        }
+        // A non-positive prior close is skipped like any other.
+        for close in [0, -1, i64::MIN] {
+            let skipped =
+                super::largest_overnight_move_after(Some(&daily(previous.ts_micros, close)), span);
+            assert_eq!(skipped, Some(in_span), "close {close}");
+        }
+        // An empty span has nothing to measure the prior against.
+        assert_eq!(
+            super::largest_overnight_move_after(Some(&daily(previous.ts_micros, 2_000_200)), &[]),
+            None
+        );
+        // One bar plus a prior is exactly one overnight.
+        let one = super::largest_overnight_move_after(
+            Some(&daily(previous.ts_micros, 2_000_200)),
+            &seeded_span[..1],
+        );
+        assert_eq!(one.map(|m| (m.day, m.ppm)), Some((first_day, -500_000)));
+        // A tie keeps the EARLIER session: the seed, measured first.
+        let tie = [
+            Candle::new(span[0].ts_micros, 100, 100, 100, 100, 0, i64::MIN),
+            Candle::new(span[375].ts_micros, 200, 200, 200, 200, 0, i64::MIN),
+        ];
+        let tied = super::largest_overnight_move_after(Some(&daily(previous.ts_micros, 50)), &tie)
+            .expect("two overnights");
+        assert_eq!(tied.day, first_day, "+100% then +100%: the earlier is kept");
     }
 
     /// ONLY A SESSION BOUNDARY IS AN OVERNIGHT MOVE. A jump inside a session

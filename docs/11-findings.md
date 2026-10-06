@@ -904,3 +904,19 @@ Narrative only. No row is added to the table above.
   integer annotation are refused by name. D-2270, AHC-01.
 - **h-pull-2**: fixed. The TOTP base32 decoder refuses an impossible length
   and non-zero bits past the last whole byte. D-2271, AHC-02.
+
+### Fix group G3 (runner, indicators, costs) — dispositions — 2026-10-06
+
+- **Z1-slice00-F1** (winners' mean MAE called a stop level): fixed. D-2537, ZX-70.
+- **Z1-slice10-F1** (`Rates::new` public, bypassing the dated refusal): fixed. D-2538, ZX-71.
+- **Z1-slice10-F2** (realized slippage counted the sell floor's upward push as adverse): fixed. D-2539, ZX-72.
+- **Z1-slice08-F1** (separating lines fired on same-colour bars): fixed. D-2540, ZX-73.
+- **Z1-slice08-F2** (reprojected census said "left alone" while `offered` is replaced): documented. D-2541, ZX-74.
+- **Z1-slice08-F3** (positivity refusal tested `low` alone): fixed. D-2542, ZX-75.
+- **Z1-slice08-F4** (gap reference source named for three bars): renamed. D-2543, ZX-76.
+- **p9num-3** (same-bar fill refused an unused sub-tick leg): fixed. D-2544, ZX-77.
+- **p18num-1** (`purged_folds` purged `h`, a trade spans `h + 1`): fixed. D-2545, ZX-78.
+- **p16num-1** (overnight into the first signal day never measured): fixed. D-2546, ZX-79.
+- **P9-02** (lot sizes, strike steps, expiry weekdays unsourced): recorded UNVERIFIED. D-2547. Sourcing is the operator's.
+- **p9num-1** (order touched inside the time-exit bar owns the exit): open, owner decision. Fixing it reverses D-1541's optimistic-target allowance.
+- **p4num-2** (flat trades dilute the average-loss cap): open, owner decision. It needs a stored-evidence record version (Population V2 checks `losses == trades − wins`).

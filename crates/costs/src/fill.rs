@@ -278,9 +278,12 @@ impl Fills {
     /// The adverse movement **per unit** truly baked into the two fills.
     ///
     /// Two ticks on the ordinary path. Less when the sell floor bound, because
-    /// a leg that could not move the full tick did not move it — and more when
-    /// the sell anchor sat below the floor, because the floor moved the fill up
-    /// past where the bar printed. It is an informational line: it is not a
+    /// a leg that could not move the full tick did not move it — and less
+    /// again, down to zero, when the sell anchor sat below the floor, because
+    /// the floor moved the fill UP past where the bar printed and a higher
+    /// sale is not adverse. It never exceeds two ticks and is never negative
+    /// (Z1-slice10-F2, D-2539; it used to grow by the distance the floor
+    /// pushed the fill). It is an informational line: it is not a
     /// charge and it is not subtracted from anything, because it is already
     /// inside the fills and therefore inside the gross.
     #[must_use]
@@ -540,14 +543,34 @@ pub fn worst_case_fills(entry: Bar, exit: Bar, direction: Direction) -> Result<F
 
     // The buy leg's contribution is exactly one tick, because it has no floor
     // to shorten it. The sell leg's is whatever the floor left of its tick —
-    // zero when the anchor sat exactly on the floor, more than a tick when the
-    // anchor sat below it and the fill had to be pushed up to reach it.
-    let realized = tick + (i128::from(sell_anchor) - i128::from(sell_fill)).abs();
+    // zero when the anchor sat exactly on the floor, and NEGATIVE when the
+    // anchor sat below it: the floor pushed the sale ABOVE where the bar
+    // printed, which is favourable to the seller, not adverse.
+    //
+    // SIGNED, NOT `.abs()` (Z1-slice10-F2, D-2539). This was
+    // `tick + (anchor - fill).abs()`, so a sell anchor of 0 filled at 5 and
+    // reported 10 of adverse slippage when the notionals carried none, and a
+    // printed low of -95 reported 105 — the opposite of the module header's
+    // "never overstates what the notionals carry". The sum is clamped at zero
+    // because the field is ADVERSE movement and every charge line is
+    // non-negative; a sale pushed up by more than the buy's tick gave up
+    // nothing.
+    //
+    // NO NARROWING, BECAUSE NOTHING CAN LEAVE `i64` ANY MORE. The fill is never
+    // more than one tick below its anchor, so `anchor - fill <= TICK` and the
+    // sum is at most two ticks. Below, the subtraction saturates only for an
+    // anchor within a tick of `i64::MIN`, where the true value is hugely
+    // negative and the clamp answers zero either way. The old `.abs()` was
+    // what made `i64::MIN` overflow; that refusal is gone with it.
+    let realized = TICK
+        .raw()
+        .saturating_add(sell_anchor.saturating_sub(sell_fill))
+        .max(0);
 
     Ok(Fills {
         buy,
         sell: Paisa::from_raw(sell_fill),
-        realized_slip_per_unit: narrow(realized, "the realized slippage per unit")?,
+        realized_slip_per_unit: Paisa::from_raw(realized),
     })
 }
 
@@ -746,14 +769,63 @@ mod tests {
             triple(flat(10_000), bar(10_000, 7), Direction::Long),
             (10_005, 5, 7)
         );
-        // A sell anchor BELOW the floor: the fill is pushed up to one tick and
-        // the recorded movement is the distance it was pushed.
+        // A sell anchor BELOW the floor: the fill is pushed UP to one tick,
+        // which is favourable to the seller, so the sell leg gave up nothing
+        // and the buy leg's tick is offset by the push. This was 105 — the
+        // push counted as adverse (Z1-slice10-F2, D-2539).
         assert_eq!(
             triple(flat(10_000), bar(10_000, -95), Direction::Long),
-            (10_005, 5, 105)
+            (10_005, 5, 0)
         );
         // A short's opening sell floors the same way, off the ENTRY low.
         assert_eq!(triple(flat(5), flat(100), Direction::Short), (105, 5, 5));
+    }
+
+    /// THE REALIZED SLIPPAGE NEVER EXCEEDS WHAT THE TWO FILLS GAVE UP AGAINST
+    /// THEIR ANCHORS, ON EVERY SELL ANCHOR AROUND THE FLOOR.
+    ///
+    /// Z1-slice10-F2, D-2539. The figure must equal
+    /// `max(0, (buy − buy_anchor) + (sell_anchor − sell))` exactly: the adverse
+    /// movement the notionals carry, never more. On the old `.abs()` an anchor
+    /// of 0 reported 10 (fill 5, anchor 0 — the push UP counted as adverse), 3
+    /// reported 7, and -95 reported 105; this test fails on each. Every anchor
+    /// from -40 to 40 is enumerated on both directions, plus the `i64` edges,
+    /// so the floor's boundary (anchor 9, 10, 11), the floor itself (5), the
+    /// zero and the negatives are all covered, and the result is pinned
+    /// within `[0, 2 * TICK]`.
+    #[test]
+    fn the_realized_slippage_is_the_signed_adverse_movement_clamped_at_zero() {
+        let tick = TICK.raw();
+        let mut anchors: Vec<i64> = (-40..=40).collect();
+        anchors.extend([i64::MIN, i64::MIN + 1, -1_000_000, i64::MAX - 1, i64::MAX]);
+        for &anchor in &anchors {
+            for direction in [Direction::Long, Direction::Short] {
+                // The sell anchor is the exit low on a long and the entry low
+                // on a short; the other bar is an ordinary flat one, so the
+                // buy is always exactly one tick above its anchor.
+                let low_bar = bar(anchor.max(tick), anchor);
+                let (entry, exit, buy_anchor) = match direction {
+                    Direction::Long => (flat(10_000), low_bar, 10_000),
+                    Direction::Short => (low_bar, flat(10_000), 10_000),
+                };
+                let (buy, sell, realized) = triple(entry, exit, direction);
+                assert_eq!(buy, buy_anchor + tick);
+                let expected_sell = anchor.checked_sub(tick).map_or(tick, |s| s.max(tick));
+                assert_eq!(sell, expected_sell, "{direction:?} anchor {anchor}");
+                let carried = i128::from(buy - buy_anchor) + i128::from(anchor) - i128::from(sell);
+                assert_eq!(
+                    i128::from(realized),
+                    carried.max(0),
+                    "{direction:?} anchor {anchor}: the slip is what the fills carry"
+                );
+                assert!((0..=2 * tick).contains(&realized), "{direction:?} {anchor}");
+            }
+        }
+        // The named old-code counterexamples, each pinned to its value.
+        for (anchor, slip) in [(0, 0), (3, 3), (5, 5), (7, 7), (9, 9), (10, 10), (11, 10)] {
+            let (_, _, realized) = triple(flat(10_000), bar(10_000, anchor), Direction::Long);
+            assert_eq!(realized, slip, "anchor {anchor}");
+        }
     }
 
     #[test]
@@ -884,15 +956,16 @@ mod tests {
             triple(bar(i64::MAX - TICK.raw(), 10), flat(10), Direction::Long).0,
             i64::MAX
         );
-        // A deeply negative sell anchor: the fill floors fine, but the recorded
-        // movement is the whole distance and that is what leaves i64.
+        // A deeply negative sell anchor: the fill floors fine, and the floor
+        // pushed the sale UP, so nothing adverse was recorded and nothing
+        // leaves i64. This was an `Overflow` refusal while the slip was
+        // `.abs()` of the push (Z1-slice10-F2, D-2539).
         assert_eq!(
-            worst_case_fills(flat(10), bar(10, i64::MIN), Direction::Long),
-            Err(CostError::Overflow {
-                operation: "the realized slippage per unit"
-            })
+            triple(flat(10), bar(10, i64::MIN), Direction::Long),
+            (15, 5, 0)
         );
-        // The short arm reaches the same two refusals off the other two bars.
+        // The short arm reaches the buy refusal off the other bar, and the
+        // same floored sale off the entry low.
         assert_eq!(
             worst_case_fills(flat(10), bar(i64::MAX, 10), Direction::Short),
             Err(CostError::Overflow {
@@ -900,10 +973,8 @@ mod tests {
             })
         );
         assert_eq!(
-            worst_case_fills(bar(10, i64::MIN), flat(10), Direction::Short),
-            Err(CostError::Overflow {
-                operation: "the realized slippage per unit"
-            })
+            triple(bar(10, i64::MIN), flat(10), Direction::Short),
+            (15, 5, 0)
         );
     }
 
@@ -922,21 +993,19 @@ mod tests {
             5
         );
         // `i64::MIN` exactly: the `checked_sub` arm that has no answer, and the
-        // floor stands in for it. The realized slippage is what leaves i64
-        // there, not the fill.
+        // floor stands in for it. The realized slippage no longer leaves i64
+        // there either: the push up is favourable, so it is clamped to zero
+        // (Z1-slice10-F2, D-2539; it was an `Overflow` refusal).
         assert_eq!(
-            worst_case_fills(flat(10), bar(10, i64::MIN), Direction::Long),
-            Err(CostError::Overflow {
-                operation: "the realized slippage per unit"
-            })
+            worst_case_fills(flat(10), bar(10, i64::MIN), Direction::Long)
+                .map(Fills::realized_slip_per_unit),
+            Ok(Paisa::from_raw(0))
         );
         // And with the entry high large enough that i64::MIN is a legal LOW on
         // the same bar the short reads its opening sell from.
         assert_eq!(
-            worst_case_fills(bar(10, i64::MIN), flat(10), Direction::Short),
-            Err(CostError::Overflow {
-                operation: "the realized slippage per unit"
-            })
+            worst_case_fills(bar(10, i64::MIN), flat(10), Direction::Short).map(Fills::sell),
+            Ok(TICK)
         );
     }
 

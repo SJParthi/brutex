@@ -926,9 +926,11 @@ impl Evaluator {
         // guarantee. Keep their refusal aligned with Candle::check_evaluable;
         // an unrepresentable derived pivot ladder remains independently tested
         // with positive extreme prices, without admitting corrupt negative bars.
-        // The earlier containment checks make low the minimum of all four
-        // prices. This one sign check is exactly equivalent to checking each.
-        if bar.low <= 0 {
+        // All four prices, through the one predicate `Candle::check_evaluable`
+        // uses, so the two refusals cannot drift (Z1-slice08-F3, D-2542). This
+        // was `bar.low <= 0` on the strength of the containment checks above,
+        // which the variant's own doc says it must not depend on.
+        if bar.any_price_not_positive() {
             return Err(Corrupt::PriceNotPositive);
         }
         // Ordering, and it was also missing. The rollover below triggers on

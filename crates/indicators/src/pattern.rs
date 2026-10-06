@@ -625,10 +625,17 @@ impl Patterns {
         {
             mask = set(mask, if bar0.bullish() { 206 } else { 207 });
         }
-        if bar1.bullish() && bar0.bullish() && bar0.open == bar1.open {
+        // SEPARATING LINES ARE OPPOSITE COLOURS FROM ONE OPEN (Z1-slice08-F1,
+        // D-2540). Both bits required the two bars to share a colour, which is
+        // the "matching opens" shape, not separating lines: the bull form is a
+        // black bar then a white bar opening at the black bar's open, the bear
+        // form its mirror. The named shape never fired and an unnamed one did.
+        // A convention like every predicate here, UNVERIFIED against the
+        // charter, the same footing as D-1543's five.
+        if bar1.bearish() && bar0.bullish() && bar0.open == bar1.open {
             mask = set(mask, 208);
         }
-        if bar1.bearish() && bar0.bearish() && bar0.open == bar1.open {
+        if bar1.bullish() && bar0.bearish() && bar0.open == bar1.open {
             mask = set(mask, 209);
         }
         if bar1.bearish() && bar0.bullish() && bar0.open < bar1.low && bar0.close == bar1.low {
@@ -1070,74 +1077,70 @@ mod tests {
         );
     }
 
-    /// MATCHING OPENS: THE SHARED PRICE AND BOTH DIRECTIONS ARE ALL REQUIRED.
+    /// SEPARATING LINES: ONE SHARED OPEN AND OPPOSITE COLOURS, AND NOTHING ELSE.
     ///
-    /// Bits 208 and 209 fire when two bars open at the identical price and run
-    /// the same way. Three clauses, and unlike most pairs here **all three are
-    /// isolable** — a doji breaks either direction clause without touching the
-    /// shared open, and moving the open one paisa breaks only that.
+    /// Z1-slice08-F1, D-2540. Bit 208 is a black bar followed by a white bar
+    /// opening at the black bar's open; 209 is a white bar followed by a black
+    /// bar from the white bar's open. Both bits used to require the two bars to
+    /// share a colour ("matching opens"), so the named shape never fired: on the
+    /// old code the first assertion below fails (bear-then-bull lit nothing) and
+    /// the two-bullish case lit 208.
     ///
-    /// The equality is what makes this pattern rare and it is also what makes it
-    /// fragile: one paisa either side and it must not fire, which is the
-    /// assertion below.
+    /// The shared open is exact — one paisa either side and neither bit fires —
+    /// and every colour permutation of the two bars (rising, falling, doji ×
+    /// rising, falling, doji) is enumerated at the shared open, so exactly one
+    /// of the nine pairs sets 208, exactly one sets 209, and never both.
     #[test]
-    fn matching_opens_need_the_same_price_and_the_same_direction() {
-        // Both bars open at 100. Prior runs up to 200.
-        let up = at(10, 100, 210, 90, 200);
-        let same_up = |bar0: &Candle| -> bool {
+    fn separating_lines_take_opposite_colours_from_one_open() {
+        // (open, high, low, close) for a bar opening at 150, by colour.
+        let colours: [(&str, (i64, i64, i64, i64)); 3] = [
+            ("white", (150, 260, 140, 250)),
+            ("black", (150, 160, 40, 50)),
+            ("doji", (150, 170, 130, 150)),
+        ];
+        let fires = |prior: (i64, i64, i64, i64), current: (i64, i64, i64, i64)| {
             let mut p = Patterns::default();
-            let _prev = ok(&mut p, &up);
-            ok(&mut p, bar0).get(208)
+            let _prev = ok(&mut p, &at(10, prior.0, prior.1, prior.2, prior.3));
+            let mask = ok(&mut p, &at(11, current.0, current.1, current.2, current.3));
+            (mask.get(208), mask.get(209))
         };
+        let mut lit_bull = 0_u32;
+        let mut lit_bear = 0_u32;
+        for (prior_name, prior) in colours {
+            for (current_name, current) in colours {
+                let (bull, bear) = fires(prior, current);
+                let want_bull = prior_name == "black" && current_name == "white";
+                let want_bear = prior_name == "white" && current_name == "black";
+                assert_eq!(bull, want_bull, "208 on {prior_name} then {current_name}");
+                assert_eq!(bear, want_bear, "209 on {prior_name} then {current_name}");
+                assert!(!(bull && bear), "both polarities on one bar");
+                lit_bull += u32::from(bull);
+                lit_bear += u32::from(bear);
+            }
+        }
+        assert_eq!((lit_bull, lit_bear), (1, 1), "exactly one pair each");
 
-        assert!(
-            same_up(&at(11, 100, 160, 95, 150)),
-            "two bullish bars opening at the identical price fire this bit"
-        );
-        assert!(
-            !same_up(&at(11, 101, 160, 95, 150)),
-            "one paisa above and the opens no longer MATCH; equality is exact \
-             and nothing rounds it"
-        );
-        assert!(
-            !same_up(&at(11, 99, 160, 95, 150)),
-            "and one paisa below is no match either"
-        );
-        assert!(
-            !same_up(&at(11, 100, 160, 95, 100)),
-            "a second bar that closed where it opened has not risen, so the two \
-             do not run the same way"
-        );
-
-        // The prior bar's own direction, negated with a doji so the shared open
-        // and the current bar are untouched.
-        let mut p = Patterns::default();
-        let _prev = ok(&mut p, &at(10, 100, 210, 90, 100));
-        assert!(
-            !ok(&mut p, &at(11, 100, 160, 95, 150)).get(208),
-            "a prior bar that closed where it opened has no direction to share"
-        );
-
-        // 209 is the mirror: two bearish bars from one open.
-        let down = at(10, 200, 210, 90, 100);
-        let same_down = |bar0: &Candle| -> bool {
-            let mut q = Patterns::default();
-            let _prev = ok(&mut q, &down);
-            ok(&mut q, bar0).get(209)
-        };
-
-        assert!(
-            same_down(&at(11, 200, 205, 140, 150)),
-            "two bearish bars opening at the identical price fire the mirror"
-        );
-        assert!(
-            !same_down(&at(11, 201, 205, 140, 150)),
-            "and one paisa off is not a match on this side either"
-        );
-        assert!(
-            !same_down(&at(11, 200, 205, 140, 200)),
-            "nor is a doji a fall"
-        );
+        // The open is exact: one paisa above or below the prior open, on
+        // either form, lights neither bit.
+        let black = (150, 160, 40, 50);
+        let white = (150, 260, 140, 250);
+        for nudge in [-1_i64, 1] {
+            let off_white = (150 + nudge, 260, 140, 250);
+            assert_eq!(
+                fires(black, off_white),
+                (false, false),
+                "208 nudged {nudge}"
+            );
+            let off_black = (150 + nudge, 160, 40, 50);
+            assert_eq!(
+                fires(white, off_black),
+                (false, false),
+                "209 nudged {nudge}"
+            );
+        }
+        // The named forms, once more by name.
+        assert_eq!(fires(black, white), (true, false), "bear then bull is 208");
+        assert_eq!(fires(white, black), (false, true), "bull then bear is 209");
     }
 
     /// THE PARTIAL-RECOVERY PATTERN: THREE PRICE CLAUSES, EACH AT ITS EDGE.
@@ -2518,13 +2521,16 @@ mod exemplars {
             want: 208,
             name: "pat_separating_lines_bull",
             dark: 209,
-            bars: &[(1000, 1060, 990, 1050), (1000, 1080, 995, 1070)],
+            // A black bar, then a white bar from the black bar's open
+            // (Z1-slice08-F1, D-2540; this was two white bars).
+            bars: &[(1050, 1060, 990, 1000), (1050, 1120, 1040, 1110)],
         },
         Case {
             want: 209,
             name: "pat_separating_lines_bear",
             dark: 208,
-            bars: &[(1050, 1060, 990, 1000), (1050, 1055, 940, 950)],
+            // A white bar, then a black bar from the white bar's open.
+            bars: &[(1000, 1060, 990, 1050), (1000, 1010, 940, 950)],
         },
         Case {
             want: 210,

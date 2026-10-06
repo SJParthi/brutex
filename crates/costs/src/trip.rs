@@ -245,9 +245,13 @@ impl Leg {
 /// (`K-42`) prices a thousand lots against one and asserts this charge alone
 /// does not move while every other one does.
 ///
-/// A [`BpsX100`] cannot be minted outside this crate, so a `Rates` can only be
-/// assembled out of figures that came from a citation-grounded table. That is
-/// what carries stage one's refusal contract into stage three intact.
+/// A [`BpsX100`] cannot be minted outside this crate, and a `Rates` cannot be
+/// assembled outside it either: `Rates::new` is crate-private and
+/// [`Rates::resolve`] is the one public constructor, a dated lookup that
+/// refuses every unverified window. That pair is what carries stage one's
+/// refusal contract into stage three intact. Minting alone was not enough —
+/// [`BpsX100::ZERO`] is public, and while `Rates::new` was public it built a
+/// zero-rate set for a day the tables refuse (Z1-slice10-F1, D-2538).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Rates {
     brokerage_round_trip: Paisa,
@@ -262,23 +266,31 @@ pub struct Rates {
 impl Rates {
     /// A rate set from a broker and the three rates that move.
     ///
-    /// # Examples
+    /// **Crate-private (Z1-slice10-F1, D-2538).** It was `pub`, and a
+    /// [`BpsX100`] that cannot be MINTED outside this crate can still be
+    /// NAMED there: [`BpsX100::ZERO`] and every `pub const` table row are
+    /// public. `Rates::new(Broker::Groww, BpsX100::ZERO, BpsX100::ZERO,
+    /// BpsX100::ZERO)` therefore assembled a rate set for a 2023 day the
+    /// regime tables refuse, and [`charge_stack`] priced it — the refusal
+    /// contract the crate header says the type system enforces had a public
+    /// door around it. [`Rates::resolve`] is now the only public way to hold a
+    /// `Rates`, so every one outside this crate came out of a dated lookup
+    /// that could refuse. The example this carried moved to
+    /// `costs::trip::tests::a_resolved_bse_set_carries_the_flat_brokerage_and_no_ipft`.
     ///
-    /// ```
-    /// use brutex_core::instrument::Exchange;
-    /// use costs::rate::{Broker, ipft};
-    /// use costs::regime::BSE_EXCHANGE_CHARGE;
-    /// use costs::day::TradeDay;
+    /// ```compile_fail
+    /// use costs::rate::{Broker, BpsX100};
     /// use costs::trip::Rates;
     ///
-    /// let stt = costs::regime::stt_options_rate(TradeDay::new(2026, 5, 15)?)?;
-    /// let rates = Rates::new(Broker::Groww, stt, BSE_EXCHANGE_CHARGE, ipft(Exchange::Bse));
-    /// assert_eq!(rates.brokerage_round_trip().raw(), 4_000);
-    /// assert_eq!(rates.ipft().get(), 0);
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// let _free = Rates::new(Broker::Groww, BpsX100::ZERO, BpsX100::ZERO, BpsX100::ZERO);
     /// ```
     #[must_use]
-    pub const fn new(broker: Broker, stt: BpsX100, exchange: BpsX100, ipft: BpsX100) -> Self {
+    pub(crate) const fn new(
+        broker: Broker,
+        stt: BpsX100,
+        exchange: BpsX100,
+        ipft: BpsX100,
+    ) -> Self {
         Self {
             // Per ORDER, and a round trip is two orders. The `* 2` is exact:
             // both shipped figures are asserted at compile time to be at most
@@ -1883,6 +1895,44 @@ mod tests {
         // Zerodha's schedule is its own citation and is priced too.
         let zerodha = Rates::resolve(Broker::Zerodha, Exchange::Nse, example_day()).expect("ok");
         assert_eq!(zerodha.brokerage_round_trip().raw(), 40_00);
+    }
+
+    /// THE ONE PUBLIC CONSTRUCTOR REFUSES WHERE THE TABLES REFUSE, AND CARRIES
+    /// WHAT THE OLD `Rates::new` EXAMPLE SHOWED WHERE THEY DO NOT.
+    ///
+    /// Z1-slice10-F1, D-2538. `Rates::new` went crate-private; the property it
+    /// was public for — "a `Rates` outside this crate came from a dated
+    /// lookup" — is held by the `compile_fail` doctest on `Rates::new` (which
+    /// COMPILES on the old code, so that doctest fails there) and by this test
+    /// over the public path: every broker on both venues refuses 2023-06-15
+    /// and the last day before 2024-10-01, and on the first verified day and
+    /// on the old example's 2026-05-15 every set carries the flat ₹40 round
+    /// trip, with no investor-protection rate on the BSE.
+    #[test]
+    fn a_resolved_bse_set_carries_the_flat_brokerage_and_no_ipft() {
+        for broker in [Broker::Groww, Broker::Zerodha] {
+            for exchange in [Exchange::Nse, Exchange::Bse] {
+                for refused in [day(2023, 6, 15), day(2024, 9, 30), day(2019, 6, 3)] {
+                    assert!(
+                        matches!(
+                            Rates::resolve(broker, exchange, refused),
+                            Err(CostError::Unverified(_))
+                        ),
+                        "{broker:?} {exchange:?} {refused:?} must refuse"
+                    );
+                }
+                for priced in [day(2024, 10, 1), example_day()] {
+                    let rates = Rates::resolve(broker, exchange, priced).expect("verified");
+                    assert_eq!(rates.brokerage_round_trip().raw(), 40_00);
+                    assert_eq!(rates.ipft(), ipft(exchange));
+                    assert_eq!(rates.sebi(), SEBI_TURNOVER_FEE);
+                    assert_eq!(rates.stamp(), stamp_duty(OrderSide::Buy));
+                    assert_eq!(rates.gst(), GST_ON_FEE_BASE);
+                }
+            }
+        }
+        let bse = Rates::resolve(Broker::Groww, Exchange::Bse, example_day()).expect("verified");
+        assert_eq!(bse.ipft().get(), 0);
     }
 
     // -----------------------------------------------------------------------

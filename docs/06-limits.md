@@ -1434,6 +1434,14 @@ configured away, defaulted, or flagged off.
 **Closing them needs data, not code.** One dated row per table, with a citation,
 and the mechanism does not change.
 
+**The values INSIDE the windows are UNVERIFIED too (P9-02, D-2547).** The table
+above counts the days with no value. The days that DO get a value get it from
+`TRACK2_OPTIONS_SPEC`, a predecessor document, and not from a source
+`docs/00-charter.md` records; the charter has no row for a lot size or an
+expiry weekday. A refusal outside the window and an unsourced value inside it
+are different limits, and only the first was stated here. The bullet on
+audit-20261003 hunt-costs-5 below carries the same widening.
+
 ### The lot table follows the source's code, not its documentation
 
 The source's `lot_size_history` module docstring says "for dates before the
@@ -1957,6 +1965,13 @@ from the source for this entry; the out-of-crate probe that produced a number
 (₹61.90 for a 2019 trip) was run by the verification lens and not reproduced
 here.** `charge_stack`'s own doc comment discloses that it "resolves no date and
 cannot refuse for a citation reason"; §27 did not, and now does.
+
+**Closed by D-2538 (Z1-slice10-F1).** `Rates::new` is now `pub(crate)`, so
+`Rates::resolve` — the dated lookup that refuses — is the only public way to
+hold a `Rates`, and `charge_stack` (which stays public for the gate-8 bench)
+can only be handed a set some dated lookup admitted. A `compile_fail` doctest on
+`Rates::new` pins the closure; `BpsX100::ZERO` and the `pub const` table rows
+can still be named outside the crate and no longer reach a charge.
 
 **"Rounding CGST and SGST separately overcharges by exactly ₹1, every trade" is
 false as a generalisation.** The assertion in the test is fine — at Example 1's
@@ -6000,7 +6015,11 @@ An honest gap beats a confident wrong number.
 **What was NOT done.** `runner::audit.rs` still carries *"the tightest stop that
 keeps every winner"* as the note on `mean MAE, winners only` — the same false
 claim, demoted to a note. It was left because another session held that file
-open at the time; it is a one-line change and it is still owed.
+open at the time; it is a one-line change and it is still owed. **Paid by
+D-2537 (Z1-slice00-F1):** the note now says the row is a mean and not a stop
+level, the SHARPEST line says the same, and
+`runner::audit::tests::the_winner_mae_is_never_called_a_stop_level` refuses
+the phrase on both surfaces.
 
 **Also unaddressed and larger:** on 2024-06 the engine's own significance tests
 refused the result — White's Reality Check p = 0.9920, Hansen's SPA p = 1.0000,
@@ -14623,6 +14642,18 @@ bounds are all nonzero.
   UNVERIFIED: `docs/00-charter.md` records no source for any cost rate. Every
   rate traces to the predecessor's citations; none has been checked against a
   primary circular recorded here, and none has been invented.
+  **Widened to the contract facts (P9-02, D-2547).** The same holds for the
+  options lot sizes (`crates/costs/src/lot.rs`), the strike grid steps
+  (`crates/costs/src/strike.rs`) and the weekly and monthly expiry weekdays
+  (`crates/costs/src/expiry.rs`). Each in-window value cites
+  `TRACK2_OPTIONS_SPEC` (§8.3, §5 and §2), a predecessor document, and
+  `docs/00-charter.md` sources none of them: it has no row for a lot size or
+  an expiry weekday, and its one row on the strike intervals says "No source
+  states them" and attributes the 2021-on steps to the predecessor's
+  `STRIKE_STEP`. Under `CLAUDE.md`
+  §3 rule 1 every one of these values is UNVERIFIED. Sourcing them is the
+  operator's: a charter row per SEBI/NSE circular, retrieved and checked.
+  Nothing here is invented, and the pre-window refusals of §26 stand.
 ## crates/api audit fixes — D-1580..D-1591, 3 October 2026
 
 - **A stop is honoured at structural boundaries only (D-1551).** Engine work
@@ -14792,6 +14823,12 @@ window is refused. Every other stock surface (the pool, `range-all`,
 the Boolean research commands) still carries only D-0694's sentence, because
 their banners are written before or without the bars. The measurement is one
 pass over the bars at a once-per-report boundary, O(bars).
+
+Since D-2546 (p16num-1) it also measures the overnight INTO the span: the
+door's daily context is walked once for the latest eligible session before
+the first signal day, O(daily records) — a month-plus of one-day records —
+again once per report, never per bar or per candidate. Not timed: no bench
+covers it.
 ## Audit fixer 2 follow-ups — D-1490 onward, 3 October 2026
 
 - **The request-minute coverage audit's output is not capped (W1-pull3-4,

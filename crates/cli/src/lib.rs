@@ -4327,7 +4327,7 @@ fn stored_month_kernel(
     // gross of every charge, and corporate actions unchecked. An index's is
     // unchanged. D-0694.
     let mut out = stored_provenance_of(&loaded.key);
-    out.push_str(&stored::overnight_note(&loaded.key, &loaded.bars));
+    out.push_str(&stored::overnight_note(&loaded.key, &loaded.bars, daily));
     let _ = writeln!(
         out,
         "feed {} · {} · {} · {year}-{month:02} · {} bars · built at {commit}",
@@ -4785,7 +4785,7 @@ fn auto_stored_kernel(
     ))?;
 
     let mut out = stored_provenance_of(&span.key);
-    out.push_str(&stored::overnight_note(&span.key, &span.bars));
+    out.push_str(&stored::overnight_note(&span.key, &span.bars, &daily));
     // THE BUDGET THE ANSWER WAS FOUND UNDER, because the answer is meaningless
     // without it. This command's usage tells the operator to run it before
     // `range-all`, so its threshold is read as "what this machine can afford" --
@@ -7000,7 +7000,7 @@ fn audit_stored_kernel(request: StoredSweepRequest<'_>) -> Result<String, stored
     );
     // D-1540: the month banner names the largest overnight move of a stock's
     // bars, where `month_banner` itself sees only their count.
-    header.push_str(&stored::overnight_note(&loaded.key, &loaded.bars));
+    header.push_str(&stored::overnight_note(&loaded.key, &loaded.bars, &daily));
     header.push_str(&daily_reference_note(&daily, &exact_minute));
     let bars = u64::try_from(loaded.bars.len()).unwrap_or(u64::MAX);
     // THE FLOORS ARE MEASURED OFF THESE BARS, not frozen into a `const`.
@@ -7211,16 +7211,19 @@ fn execution_rung_line(rung: &str) -> String {
 ///
 /// Split out of [`audit_range_inner`] to keep it under
 /// `clippy::too_many_lines`. It is one idea: what this run was over, said
-/// before any figure computed from it.
+/// before any figure computed from it. `daily` is the context the caller
+/// already loaded, so the overnight into the span's first session is measured
+/// (p16num-1, D-2546).
 fn span_banner(
     span: &stored::Span,
+    daily: &stored::DailyContext,
     underlying: &str,
     from: (u16, u8),
     to: (u16, u8),
     commit: &str,
 ) -> String {
     let mut header = stored_provenance(underlying);
-    header.push_str(&stored::overnight_note(&span.key, &span.bars));
+    header.push_str(&stored::overnight_note(&span.key, &span.bars, daily));
     let _ = writeln!(
         header,
         "feed {} · {underlying} · {} · {}-{:02}..{}-{:02} · {} of {} months · {} bars · built at {commit}",
@@ -7919,7 +7922,7 @@ fn audit_range_kernel_cached(
         feed: span.vendor.as_str(),
     });
 
-    let mut header = span_banner(span, underlying, from, to, commit);
+    let mut header = span_banner(span, daily, underlying, from, to, commit);
     // WITHHELD DAYS ARE NAMED, NOT COUNTED AND DROPPED.
     //
     // A sweep whose sample is smaller than the operator asked for must say so
@@ -18252,7 +18255,7 @@ fn screen_range_kernel_cached(
         commit,
         feed: span.vendor.as_str(),
     });
-    let mut header = span_banner(span, underlying, from, to, commit);
+    let mut header = span_banner(span, daily, underlying, from, to, commit);
     if withheld > 0 {
         let dates = holed_days
             .iter()

@@ -4705,7 +4705,8 @@ fn walk_forward_core(
         // is maximum profit at MINIMAL STOP, and ranking on total profit alone
         // prefers a variant that made more by risking more -- the opposite.
         // `edge_ratio` is favourable-over-adverse excursion on the winners,
-        // which is the tightest stop that would not have killed them.
+        // both MEANS -- not the tightest stop that would not have killed them,
+        // which only a maximum could be (Z1-slice00-F1, D-2537).
         //
         // But it is a proxy chosen by a person, it is computed only over trades
         // that ENDED PROFITABLE so it is structurally silent about how large a

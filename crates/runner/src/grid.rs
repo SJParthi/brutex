@@ -257,8 +257,12 @@ pub struct Cell {
     /// Mean adverse excursion of the trades that ENDED PROFITABLE, in basis
     /// points.
     ///
-    /// **The sniper number.** It says how far a winner went against you before
-    /// it worked, which is the tightest stop that would not have killed it.
+    /// **The sniper number.** It says how far a TYPICAL winner went against
+    /// you before it worked. It is a mean, so it is NOT the tightest stop that
+    /// would not have killed a winner: any winner that went further than the
+    /// average one would have been cut by a stop placed here. The stop every
+    /// trade survived is [`Self::worst_mae`]. (Z1-slice00-F1, D-2537: this doc
+    /// and the audit note both called the mean a stop level.)
     pub winner_mae: Ppm,
     /// Mean favourable excursion of the trades that ended profitable.
     pub winner_mfe: Ppm,
@@ -266,8 +270,8 @@ pub struct Cell {
     ///
     /// # The number [`Cell::edge_ratio`] is divided by, and why it is not `winner_mae`
     ///
-    /// `winner_mae` answers *"how far did a winner go against me before it
-    /// worked"* — the tightest stop that would not have killed it. It is the
+    /// `winner_mae` answers *"how far did a typical winner go against me before
+    /// it worked"* — a mean, not a stop level (Z1-slice00-F1). It is the
     /// right question and it has one fatal property as a **ranking** key: it is
     /// computed only over trades that ended profitable, so it is structurally
     /// blind to how large a loser gets.
@@ -1800,16 +1804,7 @@ fn entry_fills(bars: &[Candle], index: usize, side: Side) -> (i64, i64) {
     // candle whose open sits outside its own high-low is refused HERE rather
     // than priced off extremes that never contained it — the same reasoning
     // `crate::trade::price_one` gives at its own `FillBar::new`.
-    let raw = brutex_core::price::Paisa::from_raw;
-    let Ok(fill_bar) = costs::fill::Bar::new(raw(open), raw(bar.high), raw(bar.low)) else {
-        return (0, open);
-    };
-    let Ok(fills) = costs::fill::fills_at(
-        fill_bar,
-        fill_bar,
-        direction_of(side),
-        costs::fill::Anchor::PrintedExtreme,
-    ) else {
+    let Some(fills) = one_leg_printed(bar, side, true) else {
         return (0, open);
     };
     let worst = match side {
@@ -1817,6 +1812,43 @@ fn entry_fills(bars: &[Candle], index: usize, side: Side) -> (i64, i64) {
         Side::Short => fills.sell().raw(),
     };
     (worst, open)
+}
+
+/// The `PrintedExtreme` fills with THIS bar on one leg only, so only that
+/// leg's sub-tick check can refuse.
+///
+/// # Why not `fills_at(bar, bar, ..)` (p9num-3, D-2544)
+///
+/// `fills_at` checks the SELL leg (a low) against one tick whichever leg the
+/// caller reads. Pricing a same-bar pair therefore refused a long ENTRY whose
+/// low was 1-4 paisa although a long entry reads only the high, and a short's
+/// pessimistic EXIT the same way. The refusal then fell back to a `0` entry or
+/// a flat exit, while `crate::trade::round_trip`, which puts each leg on its
+/// own bar, accepted and priced the same trade — the two halves disagreed
+/// behind a fallback (`CLAUDE.md` §4).
+///
+/// The other leg is placed on a FLAT bar at this bar's own high. `Bar::new`
+/// has already refused a high below one tick, so that partner leg is at least
+/// a tick on either side and can never refuse; the leg read from `bar` is
+/// checked exactly as `trade::round_trip` checks it. `entering` puts `bar` on
+/// the entry side; otherwise it is the exit side. `None` when `bar` is refused
+/// by `costs::fill::Bar::new` or its used leg is below a tick.
+fn one_leg_printed(bar: &Candle, side: Side, entering: bool) -> Option<costs::fill::Fills> {
+    let raw = brutex_core::price::Paisa::from_raw;
+    let fill_bar = costs::fill::Bar::new(raw(bar.open), raw(bar.high), raw(bar.low)).ok()?;
+    let partner = costs::fill::Bar::flat(fill_bar.high()).ok()?;
+    let (entry, exit) = if entering {
+        (fill_bar, partner)
+    } else {
+        (partner, fill_bar)
+    };
+    costs::fill::fills_at(
+        entry,
+        exit,
+        direction_of(side),
+        costs::fill::Anchor::PrintedExtreme,
+    )
+    .ok()
 }
 
 /// The fill for a market EXIT on the bar at `index`, under one reading.
@@ -1840,15 +1872,9 @@ fn exit_fill(bars: &[Candle], index: usize, side: Side, pessimistic: bool) -> Op
         // spread entirely.
         return Some(bar.open);
     }
-    let raw = brutex_core::price::Paisa::from_raw;
-    let fill_bar = costs::fill::Bar::new(raw(bar.open), raw(bar.high), raw(bar.low)).ok()?;
-    let fills = costs::fill::fills_at(
-        fill_bar,
-        fill_bar,
-        direction_of(side),
-        costs::fill::Anchor::PrintedExtreme,
-    )
-    .ok()?;
+    // The exit leg only: a short's pessimistic exit reads the high and no
+    // longer refuses on a 1-4 paisa low it never uses (p9num-3, D-2544).
+    let fills = one_leg_printed(bar, side, false)?;
     Some(match side {
         Side::Long => fills.sell().raw(),
         Side::Short => fills.buy().raw(),
@@ -7425,6 +7451,96 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// THE GRID AND `trade::round_trip` REFUSE THE SAME LEGS ON A SUB-TICK LOW.
+    ///
+    /// p9num-3, D-2544. `entry_fills` and `exit_fill` priced a same-bar pair
+    /// through `fills_at(bar, bar, ..)`, which checks the SELL leg — the low —
+    /// against one tick whichever leg is read. A long entry on O 1000 / H 1000
+    /// / L 3 therefore came back `(0, 1000)`, a ZERO worst entry, and a short's
+    /// pessimistic exit on H 1100 / L 3 came back `None` and was booked flat,
+    /// while `trade::round_trip` (each leg on its own bar) priced both. On the
+    /// old code the first two assertions fail.
+    ///
+    /// The expectation is computed independently, the way `trade::round_trip`
+    /// computes it — `fills_at` with this bar on its own leg and an ordinary
+    /// bar on the other — over every low in a boundary set around the tick
+    /// (`i64::MIN`, negatives, 0, 1, 4, 5, 6, the open, the high) on both sides
+    /// and both legs.
+    #[test]
+    fn grid_and_trade_agree_on_a_sub_tick_low() {
+        let candle = |open: i64, high: i64, low: i64| {
+            indicators::Candle::new(0, open, high, low, open, 10, indicators::OI_NULL)
+        };
+        // The finding's two fixtures, by value.
+        let long_entry = [candle(1_000, 1_000, 3)];
+        assert_eq!(
+            super::entry_fills(&long_entry, 0, Side::Long),
+            (1_000, 1_000)
+        );
+        let short_exit = [candle(1_050, 1_100, 3)];
+        assert_eq!(
+            super::exit_fill(&short_exit, 0, Side::Short, true),
+            Some(1_100)
+        );
+        // The used leg still refuses where trade.rs refuses it.
+        assert_eq!(super::entry_fills(&long_entry, 0, Side::Short), (0, 1_000));
+        assert_eq!(super::exit_fill(&short_exit, 0, Side::Long, true), None);
+
+        let raw = brutex_core::price::Paisa::from_raw;
+        let ordinary = costs::fill::Bar::new(raw(5_000), raw(5_100), raw(4_900)).expect("legal");
+        let high = 2_000_i64;
+        let open = 1_000_i64;
+        let mut priced = 0_u32;
+        let mut refused = 0_u32;
+        for low in [i64::MIN, -1_000, -1, 0, 1, 4, 5, 6, open, high] {
+            let bars = [candle(open.max(low), high, low)];
+            let Ok(this) = costs::fill::Bar::new(raw(open.max(low)), raw(high), raw(low)) else {
+                continue;
+            };
+            for side in [Side::Long, Side::Short] {
+                let direction = super::direction_of(side);
+                let printed = costs::fill::Anchor::PrintedExtreme;
+                // Entry: this bar is the entry, the ordinary bar the exit.
+                let want_entry = costs::fill::fills_at(this, ordinary, direction, printed)
+                    .ok()
+                    .map(|f| match side {
+                        Side::Long => f.buy().raw(),
+                        Side::Short => f.sell().raw(),
+                    });
+                let (got_entry, _) = super::entry_fills(&bars, 0, side);
+                assert_eq!(
+                    got_entry,
+                    want_entry.unwrap_or(0),
+                    "{side:?} entry on low {low}"
+                );
+                // Exit: the ordinary bar is the entry, this bar the exit.
+                let want_exit = costs::fill::fills_at(ordinary, this, direction, printed)
+                    .ok()
+                    .map(|f| match side {
+                        Side::Long => f.sell().raw(),
+                        Side::Short => f.buy().raw(),
+                    });
+                assert_eq!(
+                    super::exit_fill(&bars, 0, side, true),
+                    want_exit,
+                    "{side:?} exit on low {low}"
+                );
+                // The optimistic exit is the open whatever the low is.
+                assert_eq!(super::exit_fill(&bars, 0, side, false), Some(open.max(low)));
+                priced += u32::from(want_entry.is_some()) + u32::from(want_exit.is_some());
+                refused += u32::from(want_entry.is_none()) + u32::from(want_exit.is_none());
+            }
+        }
+        // Both outcomes were reached, so neither half of the comparison is
+        // vacuous: the long entry and the short exit always price, the short
+        // entry and the long exit refuse exactly on the six sub-tick lows.
+        assert_eq!(refused, 6 * 2);
+        assert_eq!(priced, 10 * 4 - 6 * 2);
+        // A missing bar is still the documented refusal on both doors.
+        assert_eq!(super::entry_fills(&[], 0, Side::Long), (0, 0));
+        assert_eq!(super::exit_fill(&[], 0, Side::Short, true), None);
     }
 
     /// THE BAR THAT MADE THE EARLY RETURN A DEFECT AND NOT A SHORTCUT.
