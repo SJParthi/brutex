@@ -174,3 +174,21 @@ Next poll: 12:40.
     - WS3: #2 #3 #4 #12 #13 #14 #17 on fixboard/pr74-batch5 (D-3684..3691)
     - WS4: #7 #8 #9 #15 (D-3692..3695)
     - WS5: #5 #6 look-ahead (D-3696..3699)
+
+## 14:44 UTC — WEEKLY BRAKE (75%) reached; brutex fleet PAUSED; PR 74 pushed
+- Estimate at 14:42: 5h window ~73%, weekly ~75%. Tickvault (the owner's session) spent $45.31 in
+  21 min, against brutex's $6.36.
+- PAUSE sent at 14:44 to WS5, WS3, WS2, WS4, cli-a (finish its hand-over only), api and rest.
+  Each lets running jobs finish, records them, starts nothing new and writes PAUSE-*-1444.md.
+  L1..L4 were already parked; runner and cli-b are done.
+- PUSHED integ 3694ef66 to final/all-fixes (fast-forward from 969493e1, 89 commits, no GDFL or
+  data paths, no live-mutant marker).
+  - Validated: fmt; gates 29/29; clippy -D warnings; tests 122/125 as uid 65534, with the 3
+    remaining failures passing as root (findings 14/14, pull unit 162/162, store cited_commits
+    6/6).
+  - Contains: D-2090 and D-2091 (Gate 18 build bound ×4); the runner (806a463), rest (fea3659) and
+    cli-b (27b77704) fixers; L2 (aafe0d2); L3 (8635409 plus the 8908f88a ledger fix).
+  - Not yet in: cli-a (finishing), api (0be9754b, partial proof), and WS2..WS5 and L1/L4 (not
+    handed over). CI is expected to show their run-1283 survivors again.
+- RESUME = the next 5h window (17:10 UTC) only if weekly allows. The weekly resets Mon Oct 12
+  23:00 UTC. The owner decides.
