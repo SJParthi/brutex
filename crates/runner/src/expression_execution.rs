@@ -448,6 +448,10 @@ impl ResolvedGridViewV1<'_> {
     /// Materialize one authenticated cell, including policy-refused comparison
     /// cells. Its exact rows must reproduce every measured cell field.
     ///
+    /// One-off door: it walks the program once for this one cell. A loop over
+    /// the cells of one grid uses [`Self::expression_coordinate_replay`],
+    /// which walks once for all of them (D-1833).
+    ///
     /// # Errors
     /// Refuses foreign source/column/program or a replay mismatch. This grants
     /// observation evidence only, not admission of a policy-refused coordinate.
@@ -457,30 +461,85 @@ impl ResolvedGridViewV1<'_> {
         validated: &ValidatedExpressionGridV1<'_>,
         ordinal: usize,
     ) -> Result<Vec<TradeRow>, String> {
+        self.expression_coordinate_replay(attested, validated)
+            .materialize(ordinal)
+    }
+
+    /// Every coordinate of `validated`, replayed over ONE program walk.
+    ///
+    /// The source check is taken here, once, and the walk on the first
+    /// [`ExpressionCoordinateReplayV1::materialize`], so each refusal is the
+    /// one [`Self::materialize_expression_coordinate`] reports, in the same
+    /// order: foreign inputs, then an absent ordinal, then the walk.
+    pub(crate) fn expression_coordinate_replay<'r>(
+        &self,
+        attested: &'r AttestedTrainingV1<'r>,
+        validated: &'r ValidatedExpressionGridV1<'r>,
+    ) -> ExpressionCoordinateReplayV1<'r> {
         let evaluation = validated.evaluated;
-        if evaluation.resolution != self.digest
+        let inputs = if evaluation.resolution != self.digest
             || attested.resolution_digest != self.digest
             || attested.column_digest != evaluation.column_digest
             || attested.horizon != evaluation.horizon
             || attested.evaluation_spec != evaluation.evaluation_spec
         {
-            return Err(
-                "expression replay does not match authenticated training inputs".to_owned(),
-            );
+            Err("expression replay does not match authenticated training inputs".to_owned())
+        } else {
+            Ok(())
+        };
+        ExpressionCoordinateReplayV1 {
+            inputs,
+            attested,
+            validated,
+            replay: std::cell::OnceCell::new(),
         }
-        let cell = validated
+    }
+}
+
+/// Every coordinate of one validated program grid, replayed over one program
+/// walk and one crossing table (W3-runner2-1, D-1833).
+///
+/// `materialize_expression_coordinate` re-walked the program and re-measured
+/// every crossing for each ordinal: O(B + signals + C·(span + L)) per cell, so
+/// O(G·(B + signals + C·(span + L))) per program. Through this value the walk
+/// and the crossings are paid on the first [`Self::materialize`] and each cell
+/// then costs O(C) plus its rows. The rows are byte-identical to the per-call
+/// door's, which is now this value with one ordinal.
+pub struct ExpressionCoordinateReplayV1<'r> {
+    inputs: Result<(), String>,
+    attested: &'r AttestedTrainingV1<'r>,
+    validated: &'r ValidatedExpressionGridV1<'r>,
+    replay: std::cell::OnceCell<Result<crate::grid::ExpressionCellReplay<'r>, String>>,
+}
+
+impl ExpressionCoordinateReplayV1<'_> {
+    /// Materialize one authenticated cell, exactly as
+    /// `materialize_expression_coordinate` does.
+    ///
+    /// # Errors
+    /// As `materialize_expression_coordinate`.
+    pub fn materialize(&self, ordinal: usize) -> Result<Vec<TradeRow>, String> {
+        self.inputs.clone()?;
+        let cell = self
+            .validated
             .cell(ordinal)
             .ok_or("expression replay ordinal is absent")?;
-        crate::grid::materialize_expression_cell_over(
-            attested.bars,
-            attested.column,
-            evaluation.program(),
-            evaluation.horizon,
-            evaluation.side,
-            &evaluation.grid,
-            cell,
-            attested.facts(),
-        )
+        let evaluation = self.validated.evaluated;
+        self.replay
+            .get_or_init(|| {
+                crate::grid::ExpressionCellReplay::prepare(
+                    self.attested.bars,
+                    self.attested.column,
+                    evaluation.program(),
+                    evaluation.horizon,
+                    evaluation.side,
+                    &evaluation.grid,
+                    self.attested.facts(),
+                )
+            })
+            .as_ref()
+            .map_err(Clone::clone)?
+            .materialize(cell)
     }
 }
 
@@ -570,6 +629,19 @@ macro_rules! expression_resolution {
             ) -> Result<Vec<TradeRow>, String> {
                 self.view()
                     .materialize_expression_coordinate(attested, validated, ordinal)
+            }
+
+            /// Replay every coordinate of one complete grid over one program
+            /// walk (D-1833). Each cell's rows equal
+            /// [`Self::materialize_expression_coordinate`]'s.
+            #[must_use]
+            pub fn expression_coordinate_replay<'r>(
+                &self,
+                attested: &'r AttestedTrainingV1<'r>,
+                validated: &'r ValidatedExpressionGridV1<'r>,
+            ) -> ExpressionCoordinateReplayV1<'r> {
+                self.view()
+                    .expression_coordinate_replay(attested, validated)
             }
         }
     };

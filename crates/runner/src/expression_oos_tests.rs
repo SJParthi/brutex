@@ -479,3 +479,66 @@ fn one_later_slice_prices_every_program_as_the_per_call_path_does() -> Result<()
     assert!(compared > 0);
     Ok(())
 }
+
+/// **A later grid replays every frozen coordinate over one program walk
+/// (W3-runner2-1, D-1833).** Through `materialize` per ordinal each coordinate
+/// walks the program again; through `coordinate_replay` the walk is taken once
+/// per program. Rows are byte-identical, an absent ordinal refuses with the
+/// same message, and the never-true `30 & !30` exercises the empty walk.
+#[test]
+fn a_later_grid_replays_every_coordinate_over_one_walk() -> Result<(), String> {
+    let (bars, column) = fixture(0)?;
+    let (later, later_column) = fixture(8 * 86_400_000_000)?;
+    let key = InstrumentKey::index(Exchange::Nse, "NIFTY").map_err(super::super::display)?;
+    let side = crate::excursion::Side::Long;
+    let resolved = policy(side)?
+        .resolve_research_attested(series(&key, &bars)?)
+        .map_err(super::super::display)?;
+    let attested = resolved
+        .attest_training(
+            series(&key, &bars)?,
+            &column,
+            Horizon::bars(5).ok_or("horizon")?,
+        )
+        .map_err(super::super::display)?;
+    let (mut per_ordinal, mut replayed, mut coordinates) = (0, 0, 0);
+    for raw in ["30 | !30", "30 & !30", "146 | !146"] {
+        let program = Expression::parse(raw).map_err(|e| format!("{e:?}"))?;
+        let training = resolved.evaluate_expression_with_attested(
+            &attested,
+            &run(&key, &bars, &program, Direction::Long)?,
+        )?;
+        let anchor = resolved
+            .validate_expression_evaluation(&training)?
+            .later_period_anchor();
+        let later_run = run(&key, &later, &program, Direction::Long)?;
+        let evaluated = resolved.evaluate_expression_oos(
+            &anchor,
+            series(&key, &later)?,
+            &later_column,
+            &later_run,
+        )?;
+        let cells = evaluated.grid().cells.len();
+        let before = crate::grid::expression_walks_on_this_thread();
+        let one_off = (0..cells)
+            .map(|ordinal| evaluated.materialize(ordinal))
+            .collect::<Result<Vec<_>, _>>()?;
+        let middle = crate::grid::expression_walks_on_this_thread();
+        let replay = evaluated.coordinate_replay();
+        let shared = (0..cells)
+            .map(|ordinal| replay.materialize(ordinal))
+            .collect::<Result<Vec<_>, _>>()?;
+        let after = crate::grid::expression_walks_on_this_thread();
+        assert_eq!(shared, one_off, "{raw}: rows differ");
+        assert_eq!(
+            replay.materialize(cells).err().as_deref(),
+            Some("later expression coordinate absent")
+        );
+        per_ordinal += middle - before;
+        replayed += after - middle;
+        coordinates += u64::try_from(cells).map_err(super::super::display)?;
+    }
+    assert!(coordinates > 3, "each program has more than one coordinate");
+    assert_eq!((per_ordinal, replayed), (coordinates, 3));
+    Ok(())
+}

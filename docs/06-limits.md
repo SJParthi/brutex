@@ -12680,6 +12680,17 @@ not:
   An expression analogue of `CellReplay` would make that O(C). Its empty-walk
   rule differs from the mask path's (it compares an empty fold to the
   selected cell), so it is not folded into `CellReplay`.
+  **Fixed by D-1833 (W3-runner2-1).** That analogue now exists:
+  `grid::ExpressionCellReplay` keeps the expression empty-walk rule, and
+  `expression_coordinate_replay` (TRAINING), `coordinate_replay` (later
+  period) and every fixed-training fold binding walk the program once per
+  grid. Each further coordinate is O(C) plus its rows. The Boolean TRAINING
+  family and the later comparison loop through them. Counted, not timed: 30
+  coordinates over three programs walk 30 times through the per-ordinal door
+  and 3 times through the replay
+  (`every_coordinate_of_a_program_replays_over_one_walk`,
+  `a_later_grid_replays_every_coordinate_over_one_walk`). The per-ordinal
+  doors remain for one-off callers and are the replay with one ordinal.
 - **`expression_oos`** builds the facts once per anchored call. It is not an
   attested path.
 - Not measured. No bench times any of these; the bounds are read from the
