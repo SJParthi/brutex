@@ -253,12 +253,15 @@ fn index_folds(
     let mut sessions = Vec::new();
     sessions.try_reserve_exact(windows.len()).map_err(display)?;
     sessions.resize(windows.len(), 0_u64);
-    let mut fold = 0;
+    let mut fold = 0_usize;
     let mut last_accepted = None;
     for (index, bar) in bars.iter().enumerate() {
         let actual = day(bar.ts_micros);
         while windows.get(fold).is_some_and(|window| actual > window.last) {
-            fold += 1;
+            // `saturating_add`, not `+= 1` (G18-runner, D-2066): the step is a call
+            // no mutation rewrites, so the walk always advances and ends where
+            // `windows.get` does. `*= 1` held `fold` at 0 and never returned.
+            fold = fold.saturating_add(1);
         }
         let window = windows
             .get(fold)

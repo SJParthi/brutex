@@ -63345,3 +63345,15 @@ on c216c97 left `shown - 1` as `shown / 1` alive in `runner::audit::grid`:
 The printed rows and their order are unchanged, and the existing grid table tests pass unmodified. No subtraction or
 lower guard remains to mutate. `shown < ordered.len()` as `<=` indexes past the end, which the tests with `keep` above
 the cell count catch.
+
+### D-2066 — The later-fold walk advances by `saturating_add`, so no single mutation can stall it — 2026-10-06
+
+**What was observed.** Among run 1283's never-tested runner cases, `fold += 1` in
+`runner::expression_validation::index_folds` as `*= 1` timed out: `fold` stays at 0, and
+`while windows.get(fold).is_some_and(|window| actual > window.last)` never ends for a bar past the first fold. A
+timeout is never credited as a catch.
+
+**Decided.** The step is `fold = fold.saturating_add(1)`. That is a method call, which cargo-mutants does not rewrite,
+so every iteration advances `fold`, and the loop ends no later than `windows.get(fold)` returning `None`. That bounds
+it by the window count, and the walk stays amortised O(1) per bar. The arithmetic is unchanged, because `fold` never
+reaches `usize::MAX`. `fold` is typed `0_usize` so the call resolves.
