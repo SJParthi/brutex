@@ -4368,6 +4368,12 @@ mod route_tests {
         tokio::task::spawn_blocking(move || {
             use std::io::{Read as _, Write as _};
             let mut socket = std::net::TcpStream::connect(addr).expect("connect");
+            // BOUNDED (G18-api-28): a server that accepts nothing, or never
+            // answers, fails this exchange in thirty seconds rather than
+            // hanging the test binary until the job's deadline.
+            let bound = Some(std::time::Duration::from_secs(30));
+            socket.set_read_timeout(bound).expect("read timeout");
+            socket.set_write_timeout(bound).expect("write timeout");
             socket.write_all(request.as_bytes()).expect("write");
             let mut buf = String::new();
             socket.read_to_string(&mut buf).expect("read");

@@ -686,6 +686,65 @@ pub(crate) mod tests {
     use super::*;
     use pull::calendar::{DayKind, Session};
 
+    /// **A DROPPED LANDING RELEASES ITS FLIGHT AND WAKES ITS FOLLOWERS.**
+    /// Unanswered, it lands as `Abandoned`, its key leaves the flight table,
+    /// and a follower waiting on it is woken. Every wait here is bounded, and
+    /// the name sorts this test ahead of every single-flight test in this
+    /// module: under `--test-threads=1` a drop that releases nothing fails
+    /// HERE, before any follower in a later test waits on it forever.
+    /// G18-api-29.
+    #[test]
+    fn a_calendar_landing_releases_its_flight_and_wakes_its_followers_when_dropped() {
+        let cache = Cache::default();
+        let stamp = std::time::SystemTime::UNIX_EPOCH;
+        let key: Key = (
+            Vendor::Zerodha,
+            "NSE".to_owned(),
+            "INDEX".to_owned(),
+            "NIFTY".to_owned(),
+        );
+        let flight = std::sync::Arc::new(Flight::default());
+        cache
+            .flights
+            .lock()
+            .expect("flights")
+            .insert((key.clone(), stamp), std::sync::Arc::clone(&flight));
+        let (woke, waking) = std::sync::mpsc::channel();
+        let follower = {
+            let flight = std::sync::Arc::clone(&flight);
+            std::thread::spawn(move || {
+                let landed = flight.landed.lock().expect("landed");
+                let (landed, _) = flight
+                    .ready
+                    .wait_timeout_while(landed, std::time::Duration::from_secs(10), |l| {
+                        matches!(l, Landed::Deriving)
+                    })
+                    .expect("landed");
+                let _ = woke.send(matches!(*landed, Landed::Abandoned));
+            })
+        };
+        drop(Landing {
+            cache: &cache,
+            key: Some((key, stamp)),
+            flight: std::sync::Arc::clone(&flight),
+            answer: None,
+        });
+        assert!(
+            matches!(*flight.landed.lock().expect("landed"), Landed::Abandoned),
+            "an unanswered landing is abandoned"
+        );
+        assert!(
+            cache.flights.lock().expect("flights").is_empty(),
+            "the flight leaves the table"
+        );
+        assert_eq!(
+            waking.recv_timeout(std::time::Duration::from_secs(10)),
+            Ok(true),
+            "the follower is woken and sees the abandonment"
+        );
+        follower.join().expect("the follower ends");
+    }
+
     /// **THE WARNING FIRES ON EITHER LACK, AND ONLY ON A LACK.** A month
     /// withheld and a month unreadable are each enough on their own; a clean
     /// derivation says nothing. All four corners, so neither half of the `||`

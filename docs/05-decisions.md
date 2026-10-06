@@ -63284,3 +63284,37 @@ exact cases that includes the largest sum that fits. That is the
 three call sites use it, and its full four-row truth table is a test. The
 seek path is unchanged. A test damages February after a clean January and
 requires the one line to name February's file.
+
+### D-2047 — Three `api` mutants that run 1283 timed out now fail fast — 2026-10-06
+
+**What was observed.** Three mutants timed out in CI instead of failing.
+cargo-mutants does not annotate a timeout, so they were missing from the
+survivor list. They are listed in `timeouts-api.md`:
+
+- `calendar_of::Landing::drop` replaced with `()`.
+- `Slots::try_take` with `<` → `>`.
+- `LimitedListener::accept` with its `!` deleted.
+
+Under CI's `--test-threads=1 --max-fail=1` the bounded tests that catch the
+last two were never reached. Reproduced here on mutated binaries, the first
+test to hang under either server mutant was
+`ingest::route_tests::the_three_routes_answer_and_none_of_them_shadows_the_front_end`.
+Its `exchange` helper read the socket with no timeout, and a server that
+admits nothing never answers. Under the `Landing` mutant the first hang was
+`calendar_of::tests::a_derivation_is_kept_only_when_every_file_it_could_not_open_is_unheld`:
+a flight that is never removed makes the next request wait on it as a
+follower, forever.
+
+**Decided.** `exchange` sets 30 s read and write timeouts, so an unanswered
+request fails that test instead of hanging the binary. A new test,
+`a_calendar_landing_releases_its_flight_and_wakes_its_followers_when_dropped`,
+checks `Landing`'s drop directly with no wait: the flight is `Abandoned`, its
+key is gone, and a follower is woken within a 10 s bound. It sorts ahead of
+every single-flight test in its module, so it fails first under the
+single-threaded order.
+
+**Rejected.** Bounding the production follower wait. A follower that gave up
+on a live leader would derive a second time and lose the single-flight
+guarantee D-1443 exists for. **Honest limit:** the `Landing` kill depends on
+test order. A rename that sorted a single-flight test ahead of it would
+restore the timeout, so the ordering is pinned in the test's own doc.
