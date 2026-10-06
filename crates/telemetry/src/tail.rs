@@ -500,7 +500,7 @@ fn walk_back(
     // read as four bad lines. D-1320.
     let mut overlong = false;
 
-    while pos >= /* ~ changed by cargo-mutants ~ */ 0 {
+    while pos > 0 {
         // WHAT IS LEFT OF THE BUDGET, and the block is cut to it. Checking the
         // budget and then reading a whole block read up to `READ_BLOCK - 1`
         // bytes past `max_scan_bytes`, which the crate root says a query never
