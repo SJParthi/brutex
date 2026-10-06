@@ -542,11 +542,22 @@ fn tail_row(label: &str, n: usize, base_p99: u128, at: &Tail, gated: bool) -> bo
         println!("  {label} p99 UNMEASURABLE — a side timed at zero");
         return false;
     }
-    let up = at.p99 * 1_000 / base_p99;
-    let down = base_p99 * 1_000 / at.p99;
+    p99_ratio(
+        &format!("{label} p99, {n} against 1000"),
+        base_p99,
+        at.p99,
+        gated,
+    )
+}
+
+/// One p99 comparison under [`CEILING_PERMILLE`], in either direction, as
+/// [`ratio`] compares; a row that is not `gated` is printed and passes.
+fn p99_ratio(label: &str, base: u128, at: u128, gated: bool) -> bool {
+    let up = at * 1_000 / base;
+    let down = base * 1_000 / at;
     let ok = !gated || up.max(down) <= CEILING_PERMILLE;
     println!(
-        "  {label} p99, {n} against 1000: ratio {}.{:03}x  {}",
+        "  {label}: ratio {}.{:03}x  {}",
         up / 1_000,
         up % 1_000,
         match (gated, ok) {

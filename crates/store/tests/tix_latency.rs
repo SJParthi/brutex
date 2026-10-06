@@ -200,6 +200,8 @@ fn time_and_row_lookup_latency() {
 /// open, which is the one a test can reach without a torn write, by removing
 /// the `.tix` and opening a writer. O(`n_valid`) by construction, and that is
 /// what the numbers show: it is NOT an O(1) path and is never claimed one.
+/// Its cost past 10^6 bars is UNVERIFIED, an extrapolation in
+/// `docs/06-limits.md`.
 #[test]
 #[ignore = "a measurement, run on purpose in release: see the module doc"]
 fn index_rebuild_cost_grows_with_the_month() {

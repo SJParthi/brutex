@@ -15765,7 +15765,7 @@ directory lookup at each read. It does not name the read's own two
 `fsync`s.
 
 The cost is bounded by the page, not by the index. cli's ignored
-`a_full_audit_page_costs_the_same_at_every_index_size` measured one 32-row
+`a_full_audit_page_costs_the_same_at_every_index_size` (`crates/cli/tests/audit_page_latency.rs`) measured one 32-row
 page:
 
 | Invocations indexed | p50 | p99 | max |
