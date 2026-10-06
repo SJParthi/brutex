@@ -63625,3 +63625,29 @@ round that owns it. DPM-01, DPM-02.
   dropped` (50 bytes) and `every row accounted for; N decoder skips` (at most
   59 bytes for `usize::MAX`). The test asserts both, plus the widest count,
   against `NOTE_CAPACITY`. DPR-02 is restated.
+
+### D-3129 — Gate 18 pre-run on the data-path branch: the greeks survivors are killed — 2026-10-06
+
+**Finding.** `cargo mutants --in-diff` over this branch's own diff against
+`origin/final/all-fixes` (`--baseline skip --in-place --timeout 900
+--cap-lints true`, nextest, one crate at a time, in a separate worktree) left
+three greeks survivors:
+
+- `moneyness.rs` `Moneyness::from_ladder`, `>` replaced with `>=` on the
+  `level_to_interval` bound. No test placed a ladder exactly at the bound.
+- `solver.rs` `SUBNORMAL_GAP`, `*` replaced with `+` and with `/`. Nothing
+  observed the constant's exact value.
+
+**Decision.**
+
+- `a_ladder_exactly_at_the_resolution_bound_is_placed_and_one_ulp_past_it_is_not`
+  places a strike at exactly `MAX_LEVEL_TO_INTERVAL`, which is `2^48`
+  (`2^39` over `2^-9`, no rounding), and refuses one ulp finer. On the `>=`
+  mutant it fails with "at the bound" refused.
+- `SUBNORMAL_GAP` is written as `f64::from_bits(1)`, the same double, and
+  `the_subnormal_gap_is_the_old_product` asserts it equals the old product.
+  No arithmetic is left to mutate, and nothing about the solver changes.
+  The assertion is a unit test rather than a `const` item, because gate 11
+  counts an `f64` token on that line in production code.
+
+DPM-03.

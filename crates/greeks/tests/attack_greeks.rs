@@ -580,3 +580,35 @@ fn a_subnormal_scale_reports_the_last_place_its_quote_really_has() {
         Err(e) => assert!(matches!(e, GreeksError::Indeterminate { .. }), "{e}"),
     }
 }
+
+#[test]
+fn a_ladder_exactly_at_the_resolution_bound_is_placed_and_one_ulp_past_it_is_not() {
+    // THE BOUND IS INCLUSIVE, AND IT IS AN EXACT DOUBLE (D-3129). It is
+    // `0.25 / (4 * EPSILON)`, which is 2^48, so a level of 2^39 (inside
+    // `MAX_UNDERLYING`) over an interval of 2^-9 sits on it with no rounding. "Past it" is refused; at
+    // it the slack is exactly a quarter step and the strike is placed.
+    assert_eq!(MAX_LEVEL_TO_INTERVAL, 2.0_f64.powi(48));
+    let atm = 2.0_f64.powi(39);
+    let interval = 2.0_f64.powi(-9);
+    assert_eq!(atm / interval, MAX_LEVEL_TO_INTERVAL);
+    for kind in [OptionKind::Call, OptionKind::Put] {
+        let at = Moneyness::from_ladder(atm, atm, interval, kind).expect("at the bound");
+        assert_eq!(
+            at,
+            Moneyness::from_ladder(1.0, 1.0, 1.0, kind).expect("ordinary")
+        );
+        let finer = f64::from_bits(interval.to_bits() - 1);
+        assert!(atm / finer > MAX_LEVEL_TO_INTERVAL);
+        let error = Moneyness::from_ladder(atm, atm, finer, kind).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                GreeksError::OutOfRange {
+                    field: "level_to_interval",
+                    ..
+                }
+            ),
+            "{error}"
+        );
+    }
+}

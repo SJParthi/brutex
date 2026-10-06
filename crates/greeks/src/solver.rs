@@ -181,7 +181,13 @@ const NEWTON_STEP_TOLERANCE: f64 = 1.0e-12;
 /// The spacing of the subnormal doubles: the smallest positive `f64`, and the
 /// last place of every quote whose scale is below `f64::MIN_POSITIVE`.
 /// D-3101.
-const SUBNORMAL_GAP: f64 = f64::MIN_POSITIVE * f64::EPSILON;
+///
+/// Written as the bit pattern 1, which IS that double (2^-1074), rather than
+/// as `f64::MIN_POSITIVE * f64::EPSILON`: the product is exact, but no test
+/// could tell it from the mutated `+` or `/`, and a constant with nothing to
+/// mutate needs no test to pin it (D-3129). `the_subnormal_gap_is_the_old_product`
+/// checks the two spellings agree.
+const SUBNORMAL_GAP: f64 = f64::from_bits(1);
 
 /// One unit in the last place of the market price may move the answer by this
 /// fraction of itself, and no more. Past it the price does not determine a
@@ -461,11 +467,18 @@ mod tests {
     use super::{
         BISECTION_STEPS, BRACKET_EVALUATIONS, Contract, FINAL_EVALUATION, GreeksError,
         MAX_ITERATIONS, MAX_RELATIVE_UNCERTAINTY, MAX_VOLATILITY, MIN_VOLATILITY, Method,
-        NEWTON_STEPS, OptionKind,
+        NEWTON_STEPS, OptionKind, SUBNORMAL_GAP,
     };
     use crate::bsm::MODEL_EVALUATIONS;
     use crate::bsm::tests::grid;
     use std::collections::HashSet;
+
+    #[test]
+    fn the_subnormal_gap_is_the_old_product() {
+        // D-3129: the bit pattern 1 is the smallest positive double, the
+        // value `f64::MIN_POSITIVE * f64::EPSILON` named before.
+        assert_eq!(SUBNORMAL_GAP, f64::MIN_POSITIVE * f64::EPSILON);
+    }
 
     fn at_the_money() -> Contract {
         Contract {
