@@ -3521,6 +3521,13 @@ pub mod spot;
 #[path = "spot_route_tests.rs"]
 mod spot_route_tests;
 
+#[path = "optiongreeks.rs"]
+pub mod optiongreeks;
+
+#[cfg(test)]
+#[path = "optiongreeks_route_tests.rs"]
+mod optiongreeks_route_tests;
+
 #[cfg(test)]
 #[path = "serve_edge_tests.rs"]
 mod serve_edge_tests;
@@ -16377,6 +16384,13 @@ fn route_table(assets: std::sync::Arc<assets::Assets>) -> axum::Router<Loaded> {
         // moneyness, intrinsic and extrinsic. Exact stamp or a named absence;
         // never a nearest bar. D-2807.
         .route("/spot.json", axum::routing::get(spot::spot_json))
+        // ONE OPTION BAR'S IV AND GREEKS, solved in Rust from its own close, the
+        // underlying's close at the same instant, the dated session close and
+        // the dated T-bill rate. A named refusal per cell, never a guess. D-2830.
+        .route(
+            "/greeks.json",
+            axum::routing::get(optiongreeks::greeks_json),
+        )
         .route("/store.json", axum::routing::get(store_json))
         // THE ONLY ROUTE THAT OPENS A BAR FILE TO CHECK THE COUNTER.
         .route("/verify.json", axum::routing::get(verify_json))

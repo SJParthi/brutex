@@ -14938,3 +14938,38 @@ a neighbour (PROOF.md, scratch state).
   listed and the store does not hold shifts every rung beyond it by one. The
   month-level ladder control on `/db` stays unanchored. Moneyness, intrinsic and extrinsic do not
   sort: spot exists only for the rows on the page.
+
+## `/greeks.json`: per-bar IV and greeks — two bisections and a bounded solve, not O(1) — D-2830, 6 October 2026
+
+- **What one instant costs.** Two `BarFile::first_at_or_after` bisections
+  (the option's month file and the underlying's), each `O(log n_valid)` — the
+  `/spot.json` bound of D-2807, at most 20 probes on a full `1s` month — plus
+  one O(1) dense-table rate lookup (C-RF-01), one O(1) tenor, and one
+  volatility solve bounded by `greeks::solver::MAX_ITERATIONS`, a compile-time
+  constant (the iterations spent are on the wire). **Not O(1)** for the reason
+  D-2807 gives: nothing on disk maps a timestamp to a row. Per request the
+  rate table is read and indexed once, O(rows + days) — 419 auctions and about
+  3,000 day slots on the operator's table — and two month files are opened.
+  At most 400 instants per request; `/db` asks only for the option rows on the
+  visible page.
+- **Measured ad hoc, not gated.** No bench gate row covers it. On this machine,
+  warm page cache, the release build serving the GDFL scratch store: one
+  request of 400 consecutive `1s` instants on one NIFTY weekly contract (244
+  priced, 156 `no_option_bar`) took 18.1–18.4 ms over six runs; `/spot.json`
+  for the same 400 instants took 14.1–14.3 ms, so the two bisections dominate.
+  A throwaway test (not committed) timed `pull::pricing::bar_greeks` alone over
+  20,000 invented bars (10,545 solved, 9,455 refused by the model) in the test
+  profile: p50 292 ns, p99 2.8–3.2 µs, max 15–38 µs over two runs. The maxima
+  are single outliers on a shared machine, not a bound. A cold device is
+  UNVERIFIED.
+- **What it does not do.** No figure is computed in the browser. Carry is
+  zero: for a stock option that is an unsourced zero (D-2830), so a
+  dividend-paying share's IV is biased. Every weekly's tenor is below the
+  0.02-year band `greeks` validates its derivatives in; the flag rides on every
+  row (`below_band`) and the cell title says so, but the greeks there are
+  unvalidated by the crate's own numerical test. Option bars after the index
+  session's close (15:30–15:40 from 2026-08-03) have no spot and answer
+  `no_spot_bar` (D-2831). The tenor runs from the bar's opening stamp, so it
+  overstates `T` by at most one bar. The IV is a Black-Scholes-Merton
+  European-exercise figure; no charter row records the exercise style of the
+  options it is applied to, so that fit is UNVERIFIED here.

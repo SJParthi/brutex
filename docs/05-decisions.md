@@ -59677,3 +59677,117 @@ IV stay "no source" (no sourced rate). No store format, census or write path
 changes; the feed is any feed, not GDFL alone.
 
 **Proof.** DBS-01..DBS-05 in `docs/04-invariants.md`.
+
+### D-2830 — `/db` shows each option bar's implied volatility and greeks, solved in Rust by `/greeks.json` from the bar's own close — 2026-10-06
+
+**Supersedes D-2807 on one point only.** D-2807 left IV and the greeks "no
+source" because no rate was sourced. D-2810 sourced the rate and D-2831 states
+the expiry instant, so the six columns are now filled per bar. Everything else
+D-2807 decided stands.
+
+**Decision.**
+
+1. **One authority, in Rust.** `pull::pricing::bar_greeks(BarQuote, Rate,
+   YearBasis)` solves the volatility from the bar's close and evaluates the
+   greeks at it through the existing `greeks::bsm` arrow (`pull` → `greeks`,
+   D-0217). `BarQuote` is the five model inputs without `Quote`'s ladder slot,
+   so a stock option prices too; both paths build their contract in one
+   function (`contract_from`), so `solve_iv` and `bar_greeks` cannot disagree.
+   `api` gains **no crate arrow**: it calls `pull`. The page computes no model
+   (`web/src/lib/greeks.js` groups requests and formats numbers only), for the
+   reason `/vocab.json` exists — two authorities for one fact (CLAUDE.md §5).
+2. **One read-only route.** `GET /greeks.json?feed&exchange&segment&symbol&
+   contract&timeframe&month&t=<UTC s>,…` (at most 400 instants, the
+   `/spot.json` bound). The server reads the premium itself — the option bar's
+   stored close at `t` — and never takes a price from the page. Spot is the
+   underlying's close at exactly `t` through `spot::close_at` (D-2807's reader
+   and absences). The tenor is `pull::tenor::Tenor::between` (D-2831). The rate
+   is `pull::riskfree::Series::on` for the bar's IST trade day — the latest
+   release **strictly before** that day (D-2810). `contract` must be an option
+   segment, `YYYY-MM-DD-<paisa>-CE|PE`; anything else is a 400.
+3. **The rate table is named by `BRUTEX_TBILL91_SERIES`, with no default.**
+   Unset or empty: every cell is `rate_unset`. Named and refused by
+   `Series::read`: every cell is `rate_unreadable` with the reader's sentence.
+   No rate is guessed and none is carried over a gap (`rate_before_series`,
+   `rate_stale`). The table is read per request (D-2804's no-default pattern;
+   the operator can replace the file without a restart), and the response
+   names the variable, the table's SHA-256, its extent and the charter cite.
+4. **Every unpriced cell names its reason**: `no_option_bar`,
+   `no_option_file`, `option_unreadable`, `option_order_broken`, the four spot
+   words of D-2807, `tenor_refused` (at or past the expiry close, or hours not
+   verified), `rate_*`, and `iv_unsolved` with the model's own sentence (a close
+   at or below the discounted intrinsic is the common case on a deep
+   in-the-money bar). Never a blank and never a substituted figure.
+5. **Carry (dividend yield) is zero, and it is labelled.**
+   `docs/00-charter.md` records no dividend yield for any instrument. For an
+   index option the zero is the existing convention of `pricing::contract_of`
+   ("zero for a spot index with no dividend adjustment"). **For a stock option
+   the zero is UNVERIFIED — "none sourced", not a measurement**: a share that
+   pays a dividend inside the option's life has a lower forward than the model
+   assumes, which biases its call IV down and put IV up. The wire says so in
+   `carry_source`. Sourcing a yield is a charter entry and a new decision.
+6. **Units, converted once in Rust beside the model** (`BarGreeks`): IV as a
+   decimal (the page shows percent); delta unitless; gamma per rupee of spot
+   (model per-paisa × 100); theta in rupees per calendar day (model per-year
+   paisa ÷ 100 ÷ 365 under `Calendar365`); vega and rho in rupees per one
+   percentage point (model per-`1.00` paisa ÷ 100 ÷ 100). The unconverted
+   model output is kept on `BarGreeks::model`.
+7. **The page.** The six columns join `OPTION_COLS`: they show for option
+   selections only, are read for the page's rows only and so do not sort, and
+   each solved cell's title names what it was solved from (close, spot,
+   seconds to the expiry close, the rate and the T-bill release date, zero
+   carry, and whether the tenor is below the band `greeks` validates itself
+   in — every weekly is).
+
+**Not changed.** No store format, census, write path, run identity or sweep
+input changes; greeks are display-only on `/db` and enter no ranking. The rate
+table's digest is shown per response, not recorded in any run identity —
+nothing swept consumes these figures.
+
+**Proof.** GK-01..GK-09 in `docs/04-invariants.md`; limits in
+`docs/06-limits.md` (D-2830).
+
+### D-2831 — Time to expiry runs from the bar's own stamp to the close of the NSE derivatives session on the expiry day, over a 365-day year — 2026-10-06
+
+**Decision.** For `/greeks.json`, `T` is `pull::tenor::Tenor::between(bar
+stamp, expiry)`: seconds from the bar's **opening stamp** to the close minute
+of `Venue::NseDerivatives` on the expiry day, read from the dated session
+table — 15:30 IST, and 15:40 IST from 2026-08-03 (the F&O extension circular
+already in that table). An expiry day whose hours are not verified is refused
+(`tenor_refused`), never guessed. `T` in years is seconds ÷ (365 × 86,400)
+(`YearBasis::Calendar365`), the basis the T-bill rate is converted under
+(D-2810), so the rate and the time discount together.
+
+**Why these, stated rather than implied.**
+
+* **The session close, not midnight and not a settlement time.** It is the
+  instant trading stops, it is already dated per day in this repository, and it
+  is the same table that decided which bars were stored, so the two cannot
+  disagree. `docs/00-charter.md` records no exchange day-count for option
+  pricing; calendar 365 is a declared convention (`YearBasis` says so), not a
+  fact about NSE.
+* **The opening stamp, not the bar's end.** The close of a bar is observed at
+  some moment inside it, so either end is an approximation. The opening stamp
+  is the instant the spot join uses (D-2807), so premium, spot and `T` share one
+  instant; it overstates `T` by at most one bar (one second at `1s`, one minute
+  at `1min`). A bar stamped at or after the expiry close is refused as expired,
+  so the last bar before the close is priced with at least one second left.
+* **A bar after the index session closes has no spot.** From 2026-08-03 the
+  derivatives session runs to 15:40 while the index's ends 15:30, so option bars
+  15:30–15:40 answer `no_spot_bar` (D-2807's rule: no earlier close is borrowed).
+  That is a named gap, not a defect to fill.
+
+**Proof.** GK-04 (tenor equals the seconds to 15:40 on an invented
+post-2026-08-03 expiry) and GK-06 (a bar past the close is `tenor_refused`).
+
+### D-2832 — `/db`'s Time column shows `HH:MM:SS` on a one-second rung — 2026-10-06
+
+**Decision.** A bar whose rung is shorter than a minute (`TF_SECS` < 60, i.e.
+`1s`) shows its opening time as `HH:MM:SS` IST (`dates.js` `secondLabel`, via
+`barTimeLabel(ts, rungSeconds)`); every other rung keeps `HH:MM`. Sixty `1s`
+bars share each `HH:MM`, so a minute label made them indistinguishable. The
+time-of-day filter and the go-to-minute control still work in minutes
+(`timeLabel`), because they select minutes. The rung length comes from the
+page's one `TF_SECS` table; no second table is written.
+
+**Proof.** GK-09 in `docs/04-invariants.md`.
