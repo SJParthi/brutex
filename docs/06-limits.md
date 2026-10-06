@@ -4425,8 +4425,11 @@ same and the evidence for it is now NSE's rather than a vendor's.
   them, which is what is served.
 
 This is a limit on `indices` alone. `NSE-INDIAVIX` is reference-only under
-`CLAUDE.md` §1 and the two swept series are named identically by both masters —
-`swept` is 2 of 2 for both feeds.
+`CLAUDE.md` §1 and the two swept series are named identically by both masters.
+`swept` is no longer two series: since D-0506 it is NIFTY, BANKNIFTY and the 208
+F&O shares, 210 names, and since D-2759 its coverage is counted against that
+compile-time roster, so a swept name no loaded master lists is counted as
+lacking and named rather than dropped from both sides of the count.
 
 ## 65. Reading a folder feed's reach is O(members), and it is a route rather than a page field for exactly that reason
 
@@ -9438,7 +9441,13 @@ it was written.
   damaged record past the commit, leave an entry no extent matches. The
   committed bars are refused until a strictly following append re-seals the
   block. The strict audit door (D-0525) refuses any bytes past the commit and
-  is unchanged. **Widened by D-0910:** a strictly following append now
+  is unchanged. Since D-2791 it refuses them under their own name ("an
+  interrupted append", with the data and sidecar byte counts against the
+  committed extents) rather than under its generic extent sentence. Nothing
+  in the store or the cli clears that extent: such a month stays
+  unauditable through `checksum-audit`, `sweep-audited-stored` and
+  `audit-audited-range` until a covering re-append at least as long as the
+  dead tail rewrites it, while ordinary readers keep serving it. **Widened by D-0910:** a strictly following append now
   verifies the old tail block before re-sealing it, so this state refuses
   every append as well as every read; see the D-0910 section below.
 - **The directory `fsync` after creating a `.crc` is not observable by any

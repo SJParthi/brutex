@@ -122,7 +122,7 @@ fn spot_site(name: &str, script: &Arc<Script>) -> (Site, ingest::SpotRequest) {
     let mut site = Site::serving(&dir, &root);
     site.credentials = Credentials::Scripted(Arc::clone(script));
     let asked = ingest::parse_spot(
-        "target=swept&vendor=dhan&granularity=1day&from=2026-08-03&to=2026-08-05",
+        "target=swept&member=NIFTY&member=BANKNIFTY&vendor=dhan&granularity=1day&from=2026-08-03&to=2026-08-05",
         Day::new(2026, 8, 10).expect("a day"),
     )
     .expect("a finished daily window");

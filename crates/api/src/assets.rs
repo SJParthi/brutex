@@ -807,11 +807,21 @@ impl Assets {
     /// a 404 only for a path that does not look like an asset.
     #[must_use]
     pub fn respond(&self, method: &axum::http::Method, raw_path: &str) -> Response {
+        // NO ROUTE, NOT A WRONG METHOD. Every unrouted path lands here, so a
+        // POST to `/pull/spot/` or `/backtest/runn` is a wrong PATH, and a
+        // `405` told the caller to change a method that can never succeed --
+        // with no `Allow` header, which RFC 9110 §15.5.6 requires of a 405.
+        // `404` names the path as `not_found` does for a GET. D-2752 (CE-99).
         if method != axum::http::Method::GET && method != axum::http::Method::HEAD {
             return answer(
-                StatusCode::METHOD_NOT_ALLOWED,
+                StatusCode::NOT_FOUND,
                 "text/plain; charset=utf-8",
-                format!("{method} is not a method the front end answers\n").into_bytes(),
+                format!(
+                    "no route answers {method} {raw_path}. The front end \
+                     answers only GET and HEAD; every other method needs a \
+                     server route, spelled exactly.\n"
+                )
+                .into_bytes(),
             );
         }
         // NOT BUILT AT STARTUP IS ASKED AGAIN, NOT CACHED. The 503 below tells
@@ -1419,8 +1429,17 @@ mod tests {
         let dir = furnished("method");
         let assets = Assets::new(&dir);
         let (status, _, body) = read(assets.respond(&axum::http::Method::POST, "/db")).await;
-        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
         assert!(body.contains("POST"), "it names the method: {body}");
+        // CE-99 / D-2752: an unrouted POST is a wrong PATH, named as one --
+        // never a 405 without the `Allow` header RFC 9110 requires.
+        let (status, _, body) =
+            read(assets.respond(&axum::http::Method::POST, "/pull/spot/")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert!(
+            body.contains("no route answers POST /pull/spot/"),
+            "it names the method and the path: {body}"
+        );
         let (status, _, _) = read(assets.respond(&axum::http::Method::HEAD, "/")).await;
         assert_eq!(status, StatusCode::OK, "HEAD is a GET without a body");
     }

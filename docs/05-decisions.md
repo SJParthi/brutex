@@ -63354,3 +63354,258 @@ with `emitted::tests` accounting for every site.
 `the_elite_descent_refuses_a_top_the_api_cannot_serve_before_any_read`; PR
 #74's head had meanwhile fixed it as D-2001, so this branch takes D-2001's
 `crates/cli/src/lib.rs` unchanged and adds nothing to it.
+
+### D-2751 — A dropped log line degrades a member failure loudly instead of panicking the dev build — 2026-10-04
+
+**Finding (CE-98).** Three `debug_assert!`s in `api/src/server.rs` asserted
+that a `telemetry::emit` reached the file. `Emitted::Dropped` is an
+environmental outcome (a full or erroring log volume), already counted in the
+sink's health, and the operator runs the dev-profile binary, so a full log
+volume panicked `note_member_failure` before `site.autopilot.fail` recorded
+the failure, and panicked the vendor-refusal and broker-loop paths too.
+
+**Decision.** The three assertions are removed. The member-failure path is
+split into `settle_member_failure`, which records the failure whatever the
+emit answered and, when the append was dropped, appends to its sentence that
+the log line could not be written. The other two sites keep their emit and no
+longer assert on it.
+
+**Proof.** `a_dropped_failure_log_line_still_records_the_failure_and_says_so`
+in `crates/api/src/server.rs`. FB-91.
+
+### D-2752 — A spelling variant of a server route and an unrouted non-GET are 404s that name the path — 2026-10-04
+
+**Finding (CE-99, CE-100).** The router fallback served the front-end shell
+(200 `text/html`) for `/health/`, `//health` and `/Health`, so a monitor
+pointed at a variant read "healthy" whatever `/health` said; and every
+unrouted non-GET answered 405 "not a method the front end answers" with no
+`Allow` header, blaming the method for a wrong path.
+
+**Decision.** `EXTENSIONLESS_ROUTES` lists every extensionless path
+`route_table` registers; the fallback collapses empty segments and compares
+without ASCII case, and a variant of a listed route answers 404 naming the
+route it spells (no redirect, so a POST is never moved to a path the caller
+did not name). `Assets::respond` answers an unrouted non-GET/HEAD with 404
+naming the method and path. A source-reading test pins the list to
+`route_table`.
+
+**Proof.** `a_variant_of_a_server_route_is_refused_rather_than_served_the_shell`
+and `route_variants_cover_every_extensionless_route` in
+`crates/api/src/server.rs`; `only_get_and_head_reach_the_front_end` in
+`crates/api/src/assets.rs`. FB-92.
+
+### D-2753 — An unreadable request body is a 400, not "larger than N bytes" — 2026-10-04
+
+**Finding (CE-101).** `one_value_per_form_field` read the body with
+`axum::body::to_bytes`, whose single error covers the length limit and every
+transport failure, and answered every failure 413 "larger than the 8192
+bytes", including a 10-byte malformed chunked body.
+
+**Decision.** `read_within` reads the frames itself over `http_body::Body`
+(already a dependency): a size hint or data past the bound is `TooLarge`
+(413, as before), and a frame error is `Broken` (400, "could not be read",
+naming the transport's reason). Same bound, same single pass.
+
+**Proof.** `a_malformed_chunked_body_is_refused_as_unreadable_not_too_large`
+in `crates/api/src/server.rs`. FB-93.
+
+### D-2754 — An engine task's duration is monotonic and says so — 2026-10-04
+
+**Finding (CE-86).** The sweep, descent and command completion events
+recorded `elapsed_micros` as two wall-clock reads subtracted and clamped with
+`.max(0)`, so a backward NTP step recorded "took 0 µs", a measurement nobody
+took.
+
+**Decision.** Each spawn site takes a `std::time::Instant` beside its
+wall-clock `started`; `emit_completion` takes that `Instant`, emits
+`began.elapsed()` and labels it `elapsed_basis: monotonic`. `started` remains
+the wall-clock stamp the page shows.
+
+**Proof.** The `api.sweep an engine task finished` case of
+`every_reachable_emit_site_puts_a_record_in_the_file` in
+`crates/api/src/emitted.rs` requires `elapsed_basis: monotonic`. FB-94.
+
+### D-2755 — A CLI event stamped ahead of this clock is unageable, not "running" — 2026-10-04
+
+**Finding (CE-87).** `observe_elsewhere` aged the newest CLI event as
+`now - at` clamped at zero. The CLI sink resumes a floor that can sit ahead of
+this clock after a backward step, so a dead CLI read "running" at age 0 for
+the size of the step plus fifteen minutes.
+
+**Decision.** The age is kept signed and emitted signed. A `command started`
+marker whose newest event is ahead of this clock answers `unknown`, with a
+reason naming how many milliseconds ahead it is stamped.
+
+**Proof.** `a_sweep_running_outside_this_process_is_reported_from_the_log` in
+`crates/api/src/sweeprun.rs`, whose skewed-clock block previously asserted the
+clamp. FB-95.
+
+### D-2756 — A stepped-back clock cannot freeze the store probe or the stall recheck — 2026-10-04
+
+**Finding (CE-84).** The autopilot's store-probe deadline and stall-recheck
+stamp are wall-clock epoch seconds. A backward step postponed both by the size
+of the step, and a host whose clock was once ahead held them until real time
+caught up, while the page said "the next probe is in 60s".
+
+**Decision.** The finding's second remedy, keeping the stamps the page shows:
+`store_due` answers `Now` when the deadline is further away than the wait
+that armed it (`probe_secs(made - 1)`), which only a clock behind the arming
+instant can produce; `reconsider` treats `now < at_unix` as due, still within
+`STALL_RETRIES`, and its sentence says the clock stepped instead of claiming
+`STALL_RECHECK_SECS` of spacing. A clock inside the armed wait still waits.
+
+**Proof.** `a_clock_stepped_back_behind_a_stamp_does_not_freeze_the_probe_or_the_recheck`
+in `crates/api/src/autopilot.rs`. FB-96.
+
+### D-2757 — "Newer than the parse" means changed since the parse — 2026-10-04
+
+**Finding (CE-85).** `/masters/status.json` compared each master's mtime with
+the wall-clock instant of the parse. A clock corrected after the parse hid a
+changed master, and an mtime ahead of the clock demanded a restart that could
+not clear the flag.
+
+**Decision.** `mastersrun::stamps` records each `masters::SOURCES` file's
+(mtime, length) immediately before a parse reads it (`Site::load` and
+`Site::reparse`), held in `Parsed::stamps`; `status_rows` reports
+`newer_than_parse` as inequality with the current (mtime, length). A site
+built without reading a masters directory carries no stamps and answers
+`null`, not an unmeasured `false`. The JSON field names are unchanged.
+
+**Proof.** `a_master_is_newer_only_when_it_changed_since_the_parse_whatever_its_clock`
+in `crates/api/src/mastersrun.rs`. FB-97.
+
+### D-2758 — A native vendor id must be unique within its segment, not across segments — 2026-10-04
+
+**Finding (CE-91).** `NativeIds::build` keyed its reverse map by
+`(vendor, id)`. Dhan's `SECURITY_ID` is unique per exchange segment, so the
+NIFTY index (13) and the ABB share (NSE token 13) cancelled each other and
+Dhan stopped witnessing either in the Zerodha ISIN cross-check.
+
+**Decision.** The reverse map is keyed by `(vendor, key.segment, id)`. Every
+request carries the segment, so this is the scope a reused id can actually
+confuse; a reuse inside one segment still names neither instrument.
+
+**Proof.** `a_vendor_id_shared_across_segments_names_both_instruments` in
+`crates/api/src/merge.rs`. FB-98.
+
+### D-2759 — The swept target is counted and checked against its own roster — 2026-10-04
+
+**Finding (CE-92).** `swept` counted and pulled only what a loaded master
+listed: coverage walked `merged.by_key`, and `spot_mapping_refusal` took its
+expected names from `members()`, which is `None` for `Swept`. A swept name no
+master lists (an NSE rename, a refresh that dropped a row) was in neither
+`matched` nor `lacks`, and a whole-target pull attempted the rest with a
+clean receipt.
+
+**Decision.** `SpotTarget::expected` answers the swept roster, derived from
+`InstrumentKey::SWEPT` and `FNO_UNDERLYINGS` less `FNO_INDEX_UNDERLYINGS`
+(210 names; no list is copied), and `members()` for every other target.
+Coverage counts a roster name no master lists as lacking, with its own
+reason; `spot_mapping_refusal` reads `expected`, so a whole-target swept pull
+refuses such a name by name, as `fno` already did. `members()` is unchanged.
+The stale "`swept` is 2 of 2" sentence in `docs/06-limits.md` is corrected.
+
+**Proof.** `the_swept_surface_is_counted_per_feed_like_everything_else` in
+`crates/api/src/coverage.rs`. FB-99. The receipt tests over two-name fixtures
+(`the_receipt_reports_reach_for_the_feed_and_never_a_number_it_did_not_measure`,
+`each_spot_target_reports_its_own_population_and_not_a_neighbours`,
+`a_valid_window_is_echoed_with_the_wire_date_and_still_starts_nothing`) now
+read "2 of 210", and the run tests that pulled the whole swept target over
+those fixtures name their members (or use `indices`), because a whole swept
+pull over them now refuses the 208 unlisted names before the loop.
+
+### D-2790 — Selection V6 quarantines are named by offset and content — 2026-10-04
+
+**Finding (CE-88).** `set_aside_abandoned_tail` named its quarantine by the
+committed offset alone. Two interrupted writes with no commit between them
+land at one offset, so the second collided with the first's different bytes
+and every later persist refused: the wedge D-1569 removed, back after a
+second crash.
+
+**Decision.** The name is `<file>.abandoned-<offset>-<16 hex of a
+domain-separated BLAKE3 of the tail>`. The "same name, same bytes"
+idempotence check is kept; different bytes get a different name.
+
+**Proof.** `two_interrupted_writes_at_one_offset_each_get_their_own_quarantine`
+in `crates/cli/src/selection_v6_tests.rs`. FB-101.
+
+### D-2791 — The strict checksum audit names the interrupted-append extent — 2026-10-04
+
+**Finding (CE-90).** The strict audit refused a month holding bytes past its
+commit, the state `docs/02-store-format.md` §7 calls interrupted rather than
+damaged, under one sentence shared with four other causes, and nothing clears
+that extent.
+
+**Decision.** The audit still reads exact extents only and still refuses, but
+a sealed month whose data or sidecar is longer than its commit (and neither is
+shorter) is refused as "an interrupted append", with both byte counts against
+the committed extents. `docs/06-limits.md` records that such a month needs a
+covering re-append before the strict doors can audit it. Auditing the
+committed extent through the D-0688 tail proof is not done here.
+
+**Proof.** `bytes_past_the_commit_are_refused_as_an_interrupted_append_by_name`
+in `crates/store/src/checksum_audit_tests.rs`. FB-102.
+
+### D-2792 — Every reader of a recorded run says it is in sample and its validation is unrecorded — 2026-10-04
+
+**Finding (CE-93).** The ledger stores no validation state, and every reader
+but `range-all` (`cli top`, `/engine/top.json`, `/backtest.json`,
+`/frontier.json`, the `/backtest` crown and comparison board) showed recorded
+runs as finished results with no in-sample or multiplicity line.
+
+**Decision.** `cli::LEDGER_IN_SAMPLE` states it once: a recorded run is the
+best of its search on the bars it was chosen on, the ledger records no
+validation verdict, and the best across the ledger is an upper bound.
+`render_top_record` prints it under the banner, `/backtest.json` carries it
+as `in_sample` beside `best_complete`, `/frontier.json` carries it beside the
+equity note, and the page renders it in the crown and above the comparison
+board. **Partial:** the finding's `validated` byte in a new `Record` version
+is not added; the label covers every row, validated or not, which is true
+because no verdict is stored either way.
+
+**Proof.** `the_top_combinations_table_keeps_extreme_figures_apart_and_under_their_headers`
+in `crates/cli/src/columns_tests.rs`, `no_complete_run_is_none_rather_than_a_fabricated_winner`
+in `crates/api/src/backtest.rs` and
+`a_stock_runs_frontier_carries_the_equity_note_and_an_index_runs_is_unchanged`
+in `crates/api/src/frontierjson.rs`. FB-103.
+
+### D-2793 — Every ranked or listed stock total on `/backtest` says it is gross — 2026-10-04
+
+**Finding (CE-94).** The page rendered a run's `equity_note` only in the
+drill-down. The crown ("The answer"), the comparison board, the rung leaders
+and the ledger table printed a cash equity's totals with no gross-of-every-
+charge statement, although `CLAUDE.md` §1 requires one on every ranked equity
+report and `/backtest.json` already sends it.
+
+**Decision.** The crown renders `chargeScope(best)`'s statement (the server's
+note verbatim when sent); the comparison board renders the first gross
+statement among the rows it ranks; each rung-leader group carries the short
+gross label when its instrument is not a swept spot index; and the ledger
+table carries one gross line above it when any listed run is. All four read
+the one `chargeScope` helper the drill-down uses, so no second wording exists.
+Web only; `web/build` regenerated.
+
+**Proof.** `the crown and the comparison board state charges and the in-sample
+limit`, `a stock crowned over an index is labelled gross by the same helper`
+and `the rung leaders and the ledger table state charges for a stock` in
+`web/tests/charge-scope.test.js`. FB-104.
+
+### D-2794 — A writable open of Execution V4 and Anchored Search Lineage V4 cuts nothing it refuses — 2026-10-04
+
+**Finding (CE-89).** Reported at `1f4de71` (`final/all-fixes-zero`): both
+writers called `fixed_tail::heal_torn_tail` with an empty magic before any
+decode, so a renamed or foreign file was cut before it was refused, against
+D-1901.
+
+**Decision.** Not reproducible on this branch's base (`dee61cfd`): neither
+`fixed_tail` nor D-1901 exists here (`1f4de71` is not an ancestor), and both
+writable opens go straight to their scans, which refuse a length that is not a
+whole number of records ("ragged") without writing. Nothing in the writers is
+changed. The existing ragged-file tests are extended to the WRITABLE open and
+assert the bytes are unchanged, so a later merge that brings a pre-decode cut
+onto either path fails them rather than passing silently.
+
+**Proof.** `member_completion_ragged_and_canonical_order_attacks_fail_closed`
+in `crates/cli/src/anchored_search_lineage_v4.rs` and
+`retained_generation_symlink_hardlink_and_ragged_files_fail_closed` in
+`crates/cli/src/execution_v4.rs`. FB-105.

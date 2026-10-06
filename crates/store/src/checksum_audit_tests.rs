@@ -509,3 +509,36 @@ fn a_post_snapshot_crc_truncation_names_the_read_and_preserves_faulted_bytes() {
         assert_eq!(fs::read(path).expect("source preserved on success"), *bytes);
     }
 }
+
+/// CE-90 / D-2791: bytes past the commit, the interrupted-append state the
+/// store format calls benign, are refused under their own name and byte
+/// counts -- not under one sentence covering five causes -- and the bytes are
+/// left as they were. A SHORT extent is still the generic refusal.
+#[test]
+fn bytes_past_the_commit_are_refused_as_an_interrupted_append_by_name() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
+    let fixture = Fixture::new(74);
+    let data = fs::read(fixture.named(FileKind::Bars)).expect("data");
+    let mut longer = data.clone();
+    longer.resize(data.len() + 56, 0);
+    fs::write(fixture.named(FileKind::Bars), &longer).expect("bytes past the commit");
+    let why = fixture.audited().err().expect("still refused");
+    assert!(why.contains("interrupted append"), "{why}");
+    assert!(
+        why.contains(&format!(
+            "data {} bytes against {} committed",
+            longer.len(),
+            data.len()
+        )),
+        "{why}"
+    );
+    assert_eq!(
+        fs::read(fixture.named(FileKind::Bars)).expect("kept"),
+        longer
+    );
+    let mut shorter = data.clone();
+    shorter.truncate(data.len() - 1);
+    fs::write(fixture.named(FileKind::Bars), &shorter).expect("short extent");
+    let why = fixture.audited().err().expect("a short extent is refused");
+    assert!(!why.contains("interrupted append"), "{why}");
+}

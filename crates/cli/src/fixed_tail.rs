@@ -245,9 +245,11 @@ pub(crate) fn refuse_after_failed_barrier(path: &Path) -> Result<(), String> {
 /// Cuts a sub-record tail past `header + k·stride`, makes the cut durable, and
 /// reports it. Call ONLY from a writer holding the ledger's exclusive lock.
 ///
-/// `magic` is the file's leading bytes (empty for a headerless file). A file
-/// that does not begin with them is not this ledger, and nothing is cut: the
-/// caller's own header check then refuses it by name.
+/// `magic` is the file's leading bytes: its header's, or for a headerless
+/// ledger the magic every record begins with. A file that does not begin with
+/// them (or, when shorter, with their prefix) is not this ledger, and nothing
+/// is cut: the caller's own check then refuses it by name. Empty `magic` cuts
+/// any file.
 ///
 /// Returns `None` and changes nothing when the file is no longer than
 /// `header` (not this module's question), does not carry `magic`, or already
@@ -275,13 +277,21 @@ pub(crate) fn heal_torn_tail(
         return Ok(None);
     }
     if !magic.is_empty() {
-        let mut leading = vec![0_u8; magic.len()];
+        // A FILE SHORTER THAN ITS MAGIC IS COMPARED OVER THE BYTES IT HAS. A
+        // headerless ledger whose first record was torn holds only a prefix of
+        // that record's magic; anything else is not this ledger, and a writer
+        // that cut it would destroy a renamed or foreign file before refusing
+        // it (CE-89, D-2795).
+        let present = magic
+            .get(..usize::try_from(found).unwrap_or(usize::MAX))
+            .unwrap_or(magic);
+        let mut leading = vec![0_u8; present.len()];
         let mut reader = file;
         reader
             .seek(SeekFrom::Start(0))
             .and_then(|_| std::io::Read::read_exact(&mut reader, &mut leading))
             .map_err(|why| format!("{} could not be read: {why}", path.display()))?;
-        if leading != magic {
+        if leading != present {
             return Ok(None);
         }
     }
