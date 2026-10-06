@@ -37,3 +37,38 @@ RESUME (usage guard): the usage window has reset. Read your PAUSE-20261006.md, a
 - New rule for every window: baseline = sum at the window start; estimate = (sum - baseline) / 3.5; **PAUSE at 60% estimated**. Owner readings override the estimate whenever given.
 - Window 07:10-12:10: baseline $349.26 (all sessions idle 04:45-07:13). Only the PR #74 path runs: g18 cli-a, cli-b, api, runner, rest, WS2 (hand-over only, no new attack rounds), WS3 (batch3 only), WS4 (batch3). WS5 and lenses L1-L4 stay PAUSED until the weekly estimate shows room (weekly 27% at 06:05; about 16% weekly per full window).
 - Coordinator keeps its own steps few; no chatty monitor (each wake re-reads its whole context); polls by send_later.
+
+## WEEKLY GUARD (added 07:35 UTC 2026-10-06)
+
+Measured, not estimated:
+- Owner screenshots: the weekly meter went from 10% to 27% while the 5-hour
+  meter went from 38% to 99%. One 5-hour point is about 0.28 weekly points,
+  so one full 5-hour window is about 28% of the week (about 3.6 windows per
+  week).
+- Every session's rate_limit_info reads rateLimitType seven_day,
+  status allowed_warning, resetsAt 1791846000. That is 2026-10-12 23:00 UTC,
+  which is Tue 13 Oct 04:30 IST.
+- The owner's own Tickvault session (session_01DysSVGYv7sS3FmL1kmpKwr) spends
+  from the same limits: its cost_usd was 313.36 at 07:31 UTC. It is not ours
+  to pause.
+
+Extrapolation, to be labelled as one:
+weekly ~= 27 + 0.28 x (5-hour % used since 07:10). At 07:31 that is about
+31%. The owner's screenshots override it.
+
+At full speed the remaining ~69% is about 2.5 windows. The week would run out
+between about 20:00 UTC tonight and 03:00 UTC tomorrow. That locks every Claude
+session on the account, Tickvault and GDFL included, until Tue 04:30 IST.
+
+Default until the owner picks another plan:
+- This window (07:10-12:10): all 13 run, with the 5-hour pause at 60% as
+  before.
+- At the 12:12 resume: landing work only. That is the 5 Gate 18 fixers, WS2,
+  WS3, WS4 and the coordinator. L1-L4 and WS5 (discovery) stay paused.
+- Weekly at 85% or more (extrapolated or read): pause every session the
+  coordinator runs until the weekly reset. The rest of the week is left for
+  the owner's own sessions.
+- Each poll also checks connection_status. If an idle session reads
+  "disconnected", its container was reclaimed and its background run died,
+  so send it a restart message. (L2 was disconnected at 07:31 and restarted
+  at 07:33.)
