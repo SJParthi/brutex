@@ -3533,9 +3533,13 @@ fn install_census(
 
 /// The positional writes, kept apart from the sentence they fail with.
 fn append_locked(_lock: &CensusLock, path: &Path, appends: &[Append]) -> Result<(), String> {
-    write_appends(path, appends).map_err(|why| {
+    // THE COUNT IS WHAT LANDED. Each append commits its own slot, so a failure
+    // at append `i` leaves exactly `i` entries durable; the sentence names that
+    // number beside the one asked for, never the asked-for one alone
+    // (OBSV-04, D-3203).
+    write_appends(path, appends).map_err(|(landed, why)| {
         format!(
-            "{} could not be appended to after {} entry write(s): {why}",
+            "{} could not be appended to after {landed} of {} entry write(s): {why}",
             path.display(),
             appends.len()
         )
@@ -3549,7 +3553,7 @@ fn append_locked(_lock: &CensusLock, path: &Path, appends: &[Append]) -> Result<
 /// over entries that may not exist, which is the one way this format can be
 /// made to lie. [`Commit::durable_through`] names the offset, so a writer
 /// cannot claim it did not know which one to flush.
-fn write_appends(path: &Path, appends: &[Append]) -> std::io::Result<()> {
+fn write_appends(path: &Path, appends: &[Append]) -> Result<(), (usize, std::io::Error)> {
     write_appends_observed(path, appends, |_| {})
 }
 
@@ -3573,32 +3577,43 @@ fn write_appends_observed(
     path: &Path,
     appends: &[Append],
     mut landed: impl FnMut(&fs::File),
-) -> std::io::Result<()> {
+) -> Result<(), (usize, std::io::Error)> {
     use std::io::{Seek, SeekFrom};
 
-    let mut file = fs::OpenOptions::new().read(true).write(true).open(path)?;
-    for append in appends {
-        file.seek(SeekFrom::Start(append.offset))?;
-        file.write_all(&append.bytes)?;
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|why| (0, why))?;
+    for (committed, append) in appends.iter().enumerate() {
+        let one = |file: &mut fs::File| -> std::io::Result<()> {
+            file.seek(SeekFrom::Start(append.offset))?;
+            file.write_all(&append.bytes)?;
 
-        // THE BARRIER. Everything through here must be durable before the slot
-        // below is allowed to count it.
-        debug_assert!(append.commit.durable_through <= append.offset + ENTRY_STRIDE);
-        file.sync_data()?;
+            // THE BARRIER. Everything through here must be durable before the
+            // slot below is allowed to count it.
+            debug_assert!(append.commit.durable_through <= append.offset + ENTRY_STRIDE);
+            file.sync_data()?;
 
-        file.seek(SeekFrom::Start(append.commit.offset))?;
-        file.write_all(&append.commit.bytes)?;
-        file.sync_all()?;
+            file.seek(SeekFrom::Start(append.commit.offset))?;
+            file.write_all(&append.commit.bytes)?;
+            file.sync_all()
+        };
+        one(&mut file).map_err(|why| (committed, why))?;
     }
     if appends.is_empty() {
         return Ok(());
     }
     landed(&file);
-    let written = file.metadata()?.modified()?;
-    let past = written
-        .checked_add(std::time::Duration::from_nanos(1))
-        .ok_or_else(|| std::io::Error::other("the census's modification time cannot advance"))?;
-    file.set_modified(std::time::SystemTime::now().max(past))
+    let all = appends.len();
+    let stamp = || -> std::io::Result<()> {
+        let written = file.metadata()?.modified()?;
+        let past = written
+            .checked_add(std::time::Duration::from_nanos(1))
+            .ok_or_else(|| std::io::Error::other("the census's modification time cannot advance"))?;
+        file.set_modified(std::time::SystemTime::now().max(past))
+    };
+    stamp().map_err(|why| (all, why))
 }
 
 /// The install itself, once the census lock is held.
@@ -4088,6 +4103,44 @@ mod tests {
     /// kernel moved the times before copying the bytes, and nothing after the
     /// slot moved them again. Before D-2766 the final stamp WAS that stamp, so
     /// the api's cache kept whatever that reader saw under it indefinitely.
+    /// OBSV-04 (D-3203): the refusal names the entries that LANDED, not the
+    /// ones asked for. A failure at the open lands none and a failure at the
+    /// second append leaves exactly one committed slot, yet the sentence said
+    /// "after 2 entry write(s)" for both -- an operator reconciling the census
+    /// against it was told two entries had been written.
+    #[test]
+    fn a_failed_append_names_how_many_entries_landed() {
+        let root = scratch("census-landed");
+        let census = root.join("manifest").join("dhan.man");
+        std::fs::write(&census, vec![0_u8; 4096]).expect("a census file");
+        let at = |offset: u64, slot: u64| super::Append {
+            ordinal: 0,
+            offset,
+            bytes: [7; crate::manifest::ENTRY_LEN],
+            commit: crate::manifest::Commit {
+                slot: 0,
+                offset: slot,
+                bytes: [9; crate::manifest::IMAGE_LEN],
+                durable_through: offset.saturating_add(128),
+                header: crate::manifest::ManifestHeader::genesis(brutex_core::vendor::Vendor::Dhan),
+            },
+        };
+        let lock = CensusLock::take(&census).unwrap_or_else(|why| panic!("a free lock: {why}"));
+
+        // The second seek is past `i64::MAX`, which no file offset can be.
+        let Err(one) = super::append_locked(&lock, &census, &[at(1024, 64), at(u64::MAX, 64)])
+        else {
+            panic!("an offset no file can have must refuse");
+        };
+        assert!(one.contains("after 1 of 2 entry write(s)"), "{one}");
+
+        let absent = root.join("manifest").join("absent.man");
+        let Err(none) = super::append_locked(&lock, &absent, &[at(1024, 64), at(1152, 64)]) else {
+            panic!("an absent census must refuse");
+        };
+        assert!(none.contains("after 0 of 2 entry write(s)"), "{none}");
+    }
+
     #[test]
     fn an_in_place_append_moves_the_census_stamp_past_its_own_writes() {
         let root = scratch("census-stamp");

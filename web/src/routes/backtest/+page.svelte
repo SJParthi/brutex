@@ -140,7 +140,7 @@
   import { decodeMaskWords } from '$lib/mask.js';
   import { impliedConditions } from '$lib/condition-groups.js';
   import { createRequestGate } from '$lib/request-gate.js';
-  import { foldLiveProgress, liveAttemptKey } from '$lib/live-progress';
+  import { foldLiveProgress, liveAttemptKey, liveLogsPath } from '$lib/live-progress';
   import { liveWinShare } from '$lib/live-win.js';
   import {
     TIME_GRAINS,
@@ -2026,7 +2026,7 @@
     }
     try {
       const response = await ask_(
-        `/logs.json?limit=200&run=${encodeURIComponent(attempt)}`,
+        liveLogsPath(attempt, run),
         { cache: 'no-store' }
       );
       if (seq !== liveSeq || liveRunKey(sweep.run) !== liveRunKey(run)) return;
