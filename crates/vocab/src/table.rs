@@ -1603,10 +1603,10 @@ const MAX_NAME_BYTES: usize = {
     let mut longest = 0;
     let mut row = 0;
     while row < COUNT {
-        let len = TABLE[row].name.len();
-        if len > longest {
-            longest = len;
-        }
+        // Raised by however far this name passes the longest so far, which is
+        // nothing for a shorter or equal one. A `>` guard on the assignment was
+        // an equivalent mutant: on a tie `>=` stored the same length (D-2081).
+        longest += TABLE[row].name.len().saturating_sub(longest);
         row += 1;
     }
     longest

@@ -383,10 +383,12 @@ impl GapFib {
     /// missing.
     fn fold(&mut self, bar: &Candle, bucket: i64) {
         self.candle = match self.candle {
-            Some((high, low)) if bucket == self.bucket => Some((
-                if bar.high > high { bar.high } else { high },
-                if bar.low < low { bar.low } else { low },
-            )),
+            // `max` and `min` rather than two comparisons: on a tie either arm
+            // kept the same value, so `>`/`>=` and `<`/`<=` were one program
+            // and both mutants were equivalent (D-2071).
+            Some((high, low)) if bucket == self.bucket => {
+                Some((bar.high.max(high), bar.low.min(low)))
+            }
             _ => Some((bar.high, bar.low)),
         };
         self.bucket = bucket;

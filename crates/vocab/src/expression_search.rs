@@ -244,13 +244,19 @@ impl Cursor {
         let (start, depth) = match self.code.get(at)? {
             Instruction::Bit(_) => (u16::try_from(at).ok()?, below_depth.checked_add(1)?),
             Instruction::Not if below_depth >= 1 => (below_start, below_depth),
-            Instruction::And | Instruction::Or if below_depth >= 2 => {
+            // NO DEPTH GUARD: the left operand IS the depth check. A stack of
+            // one value is one subtree spanning the whole prefix from 0, so
+            // `right.checked_sub(1)` is `None` exactly when fewer than two
+            // values are stacked. A `below_depth >= 2` guard beside it could
+            // never decide anything, so `true` in its place was an equivalent
+            // mutant (D-2081).
+            Instruction::And | Instruction::Or => {
                 let right = usize::from(below_start);
                 let left = usize::from(*self.starts.get(right.checked_sub(1)?)?);
                 if self.code.get(left..right)? > self.code.get(right..at)? {
                     return None;
                 }
-                (u16::try_from(left).ok()?, below_depth - 1)
+                (u16::try_from(left).ok()?, below_depth.checked_sub(1)?)
             }
             _ => return None,
         };

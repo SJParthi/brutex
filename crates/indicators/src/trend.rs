@@ -1153,6 +1153,26 @@ mod tests {
         );
     }
 
+    /// THE `period`-TH TRUE RANGE IS SEEDED BY THE EXACT MEAN, NOT SMOOTHED.
+    /// G18-rest-04, D-2071.
+    ///
+    /// Folding the `period`-th range by Wilder's step instead of into the seed
+    /// sum differs only by the floor the running mean already took: true ranges
+    /// 4, 0, 0, 0 into ATR(4) are a mean of exactly one paisa, while the step
+    /// from the floored three-bar mean (1.333333) lands on 0.999999 and reads
+    /// as zero. `count > period` against `count >= period` is that difference.
+    #[test]
+    fn the_period_th_range_completes_the_seed_mean_exactly() {
+        let mut atr = Atr::new(4);
+        atr.fold(&candle(0, 4, 0, 0));
+        for ts in 1..4 {
+            atr.fold(&candle(ts, 0, 0, 0));
+        }
+        assert_eq!(atr.scaled, SCALE, "the mean of 4, 0, 0, 0 is one paisa");
+        assert_eq!(atr.value(), Some(1));
+        assert!(atr.warm());
+    }
+
     fn candle(ts: i64, high: i64, low: i64, close: i64) -> Candle {
         Candle {
             ts_micros: ts,
