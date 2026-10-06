@@ -207,3 +207,22 @@ Next poll: 12:40.
   - Mon 12 Oct 23:02 UTC (trig_01SG3BVzJf3qpRKW9i1ArED4): FULL resume of every session from its
     PAUSE/PARK note. New-week lines: weekly 70% by day 3; 5h PAUSE at 90%.
   - CI check 15:31 UTC (trig_01DhayNM7e5WcmsfBpceWQF7) is still armed.
+
+## 17:15 UTC — the 5h window HIT its limit ~15:15; estimate correction; nobody resumes
+- WS5 and WS3 show "You've hit your session limit · resets 5:10pm (UTC)" (five_hour: rejected).
+  The 14:52 estimate (~77%) was low. Correction: the cost-based estimate lags by more than the
+  ~3-4 points assumed. Treat it as a floor and lean ~+15.
+- Weekly is therefore likely ~80-85% (≈ 57 + (100-13) × 0.3). That is past the 80% hard cap of the
+  17:12 minimal-resume plan, so NO session was resumed at 17:12. Hold until the weekly reset
+  (Mon 12 Oct 23:00 UTC = Tue 13 Oct 04:30 IST; trig_01SG3BVzJf3qpRKW9i1ArED4 armed for 23:02).
+- New 5h baseline (17:15): brutex $1032.26, Tickvault $740.20. Tickvault paused itself until
+  00:18 IST.
+- PR 74:
+  - Run 1285 (3694ef66): ALL fast gates GREEN — gates 1+2, W, 3-6 (fmt, clippy, deny, tests),
+    8 (O(1)), and the Gate 18 enumerate step. Coverage was still running, and the shards wait on
+    coverage.
+  - fbdabaec (integ = 3694ef66 + cli-a 7ad5c66e + api 0be9754b) validated (fmt, 29/29 gates,
+    clippy, tests; env-only failures pass as root). Pushed at 17:14 → run 1286 (37502065146);
+    1285 was cancelled by concurrency. Gate 18 (202 shards, max-parallel 20) is expected to take
+    ~30 h.
+  - Cheap CI check armed for 19:50 UTC.
