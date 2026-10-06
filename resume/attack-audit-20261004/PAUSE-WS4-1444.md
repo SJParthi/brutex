@@ -19,7 +19,7 @@ crates/cli/src/lib.rs:14203:5: replace calendar_holds -> bool with true
 crates/cli/src/lib.rs:14203:5: replace calendar_holds -> bool with false
 crates/cli/src/lib.rs:14205:38: replace <= with > in calendar_holds
 ```
-  Survivors so far: none. Chunks B, C, D not started.
+  Survivors so far (4, listed above, not fixed per the pause): least_first `<`→`<=` (14190), calendar_holds →true, →false, `<=`→`>` (14203-14205). Chunks B, C, D not started.
 - Not run here (left to CI Gate 18): the rest of the in-diff set (runner ~46, api 86, cli ~3000 merged F6/F8/F8b mutants).
 
 ## Ready to merge
