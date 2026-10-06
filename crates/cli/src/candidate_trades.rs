@@ -319,7 +319,11 @@ impl<'a> Capture<'a> {
     ) -> Result<Self, String> {
         let model = model_of(expression);
         let directory = directory_for(root, &attempt.identity(), attempt.token(), model);
-        fs::create_dir_all(&directory).map_err(io_error)?;
+        // Up to four NEW levels (`results/<model>/<identity>/<token>`), and
+        // only the leaf was ever synced (by `write_exact`): a power loss could
+        // lose the attempt directory beneath a durable `Completed` row.
+        // Each new level's parent is synced before the next (xcut-3, D-2623).
+        crate::durable_dir::create_all(&directory).map_err(io_error)?;
         let mut start = Encoder::default();
         start.bytes(&attempt.identity());
         start.word(attempt.token());
@@ -740,6 +744,12 @@ pub fn read_model(
     let dir = directory_for(root, &identity, attempt, model);
     let path = dir.join("catalog.bin");
     if !path.try_exists().map_err(io_error)? {
+        return Ok(None);
+    }
+    // cli2-5, D-2624: an empty catalog is a seal that was never written —
+    // the same answer as no catalog, not a damaged one.
+    if fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_file() && meta.len() == 0)
+    {
         return Ok(None);
     }
     #[cfg(test)]
@@ -1310,28 +1320,7 @@ fn write_exact(path: &Path, magic: [u8; 8], payload: &[u8]) -> Result<[u8; 32], 
     hash.update(&header);
     hash.update(payload);
     let digest = hash.finalize();
-    match OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .open(path)
-    {
-        Ok(file) => {
-            // A write or sync failure releases the lock through the guard's
-            // explicit unlock, never by close (D-0693).
-            let mut file = Flock::lock(file, path).map_err(io_error)?;
-            file.write_all(&header)
-                .and_then(|()| file.write_all(payload))
-                .and_then(|()| file.write_all(&digest))
-                .and_then(|()| file.sync_all())
-                .map_err(io_error)?;
-            #[cfg(test)]
-            DURABLE_SYNCS.with(|count| count.set(count.get().saturating_add(1)));
-            file.release().map_err(|u| io_error(u.why))?;
-        }
-        Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(why) => return Err(io_error(why)),
-    }
+    publish_whole(path, &header, payload, &digest)?;
     let budget = (payload.len() as u64)
         .checked_add((HEADER + SEAL) as u64)
         .ok_or("candidate extent overflow")?;
@@ -1345,6 +1334,116 @@ fn write_exact(path: &Path, magic: [u8; 8], payload: &[u8]) -> Result<[u8; 32], 
     #[cfg(test)]
     DURABLE_SYNCS.with(|count| count.set(count.get().saturating_add(1)));
     Ok(digest)
+}
+/// Creates `path` and writes it whole under its exclusive lock, or, when it
+/// already exists, fills it only if it is an EMPTY regular file (cli2-5,
+/// D-2624).
+///
+/// `create_new` makes the name visible at 0 bytes a moment before the lock is
+/// taken. A reader in that gap is answered busy by `read_sealed_generation`
+/// (an empty file is contention, not damage), and a kill in that gap left a
+/// permanent 0-byte file that every retry re-read and refused as truncated.
+/// Such a file was never acknowledged: it is filled here, under the lock,
+/// with the exact bytes this call would have written, and reported. A file
+/// with any byte is left for the caller's comparison, as before. The inode is
+/// never replaced, so a reader that pinned a whole file's generation keeps it.
+fn publish_whole(
+    path: &Path,
+    header: &[u8; HEADER],
+    payload: &[u8],
+    digest: &[u8; 32],
+) -> Result<(), String> {
+    let file = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => {
+            return fill_empty_remnant(path, header, payload, digest);
+        }
+        Err(why) => return Err(io_error(why)),
+    };
+    // A write or sync failure releases the lock through the guard's
+    // explicit unlock, never by close (D-0693).
+    let file = Flock::lock(file, path).map_err(io_error)?;
+    write_whole(file, path, header, payload, digest)
+}
+
+/// Writes the header, payload and seal at offset 0 and syncs, under the
+/// guard's exclusive lock, then releases it by name.
+///
+/// A failed write or barrier cuts the file back to 0 bytes before the lock is
+/// released (`fixed_tail`, D-1900), so what it leaves is the empty remnant the
+/// next writer fills, never a partial file every retry refuses as different
+/// bytes (cli2-5, D-2624).
+fn write_whole(
+    mut file: Flock<File, &Path>,
+    path: &Path,
+    header: &[u8; HEADER],
+    payload: &[u8],
+    digest: &[u8; 32],
+) -> Result<(), String> {
+    if let Err(why) = file
+        .write_all(header)
+        .and_then(|()| file.write_all(payload))
+        .and_then(|()| file.write_all(digest))
+    {
+        return Err(io_error(crate::fixed_tail::roll_back(
+            &file,
+            &path.display(),
+            0,
+            &format!("cannot write {}: {why}", path.display()),
+        )));
+    }
+    crate::fixed_tail::sync_all_or_roll_back(&file, path, 0).map_err(io_error)?;
+    #[cfg(test)]
+    DURABLE_SYNCS.with(|count| count.set(count.get().saturating_add(1)));
+    file.release().map_err(|u| io_error(u.why))
+}
+
+/// The `AlreadyExists` arm of [`publish_whole`]. Only an empty regular file
+/// whose exclusive lock is free, and which is still empty once the lock is
+/// held, is filled; every other case (a whole file, a symbolic link, a live
+/// writer holding the lock) is left for the caller's comparison to judge.
+fn fill_empty_remnant(
+    path: &Path,
+    header: &[u8; HEADER],
+    payload: &[u8],
+    digest: &[u8; 32],
+) -> Result<(), String> {
+    let existing = fs::symlink_metadata(path).map_err(io_error)?;
+    if !existing.is_file() || existing.len() != 0 {
+        return Ok(());
+    }
+    let opened = {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(store::open_flags::O_NOFOLLOW_NONBLOCK)
+            .open(path)
+            .map_err(io_error)?
+    };
+    let file = match Flock::try_lock(opened, path) {
+        Ok(file) => file,
+        Err(std::fs::TryLockError::WouldBlock) => return Ok(()),
+        Err(std::fs::TryLockError::Error(why)) => return Err(io_error(why)),
+    };
+    if file.metadata().map_err(io_error)?.len() != 0 {
+        return file.release().map_err(|u| io_error(u.why));
+    }
+    write_whole(file, path, header, payload, digest)?;
+    crate::note(
+        &telemetry::Event::warn("cli.ledger", "empty candidate detail filled")
+            .with("path", path.display().to_string().as_str())
+            .with(
+                "reason",
+                "a 0-byte detail file is an interrupted create, never acknowledged",
+            ),
+    );
+    Ok(())
 }
 fn read_sealed(path: &Path, magic: [u8; 8], max_bytes: u64) -> Result<(Vec<u8>, [u8; 32]), String> {
     read_sealed_generation(path, magic, max_bytes).map(|(payload, seal, _)| (payload, seal))
@@ -1364,6 +1463,12 @@ fn read_sealed_generation(
     let generation = crate::result_set::file_generation(&file, path)?;
     let metadata = file.metadata().map_err(io_error)?;
     let len = metadata.len();
+    if metadata.is_file() && len == 0 {
+        // cli2-5, D-2624: an empty file is an older writer's interrupted
+        // `create_new` or a write cut back to nothing, which the next writer
+        // of this name fills; it is contention, not damage.
+        return Err(EMPTY_DETAIL.to_owned());
+    }
     if !metadata.is_file() || len < (HEADER + SEAL) as u64 || len > max_bytes {
         return Err(
             "candidate detail file is nonregular, truncated or above its byte admission".to_owned(),
@@ -1390,6 +1495,11 @@ fn read_sealed_generation(
     file.release().map_err(|u| io_error(u.why))?;
     Ok((payload, seal, generation))
 }
+
+/// The refusal for a 0-byte detail file (cli2-5, D-2624). It says "busy",
+/// like [`busy`], because a retry after the next writer is the remedy.
+const EMPTY_DETAIL: &str =
+    "candidate detail is busy: the file is empty, an interrupted write the next writer fills; retry this exact saved page";
 
 fn busy(why: std::fs::TryLockError) -> String {
     match why {

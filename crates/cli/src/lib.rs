@@ -83,11 +83,17 @@ mod columns_tests;
 mod build_provenance;
 #[path = "../commit_stamp.rs"]
 mod commit_stamp;
+/// Directory chains whose every new level is made durable before the next
+/// (D-2623; xcut-3, ledgerv6-3).
+mod durable_dir;
 #[cfg(test)]
 mod equity_statement_tests;
 /// Fixed-stride ledger tails: rollback of a failed append and the writer-side
 /// cut of a torn tail (D-1900, D-1901, D-1902).
 mod fixed_tail;
+/// A bounded wait for a non-blocking lock a short-lived reader or probe
+/// refuses (D-2620; cli1-2, cli1-3, expr-1, expr-2, indexstop-2).
+mod lock_wait;
 #[cfg(test)]
 mod operator_boundary_tests;
 mod readonly_file;
@@ -15282,6 +15288,13 @@ fn one_rung_cached(ask: RungAsk<'_>, store: RungStore, cache: &mut AuditCache) -
     // KEPT FOR THE SAME REASON, and it is `Copy`, so this costs a memcpy of a
     // nine-bool array and a u64 rather than a clone.
     let excluded = span.excluded;
+    // THE BARS THIS DERIVATION READ, pinned so the sweep can be held to them
+    // (rangeall-1, D-2628). `audit_range_cached` loads the span again; pulls
+    // take no lease, so a month landing between the two reads recorded a
+    // `min_hits` and a `missing` list of read #1 beside the bars and data
+    // digest of read #2, which no single store state reproduces. One digest
+    // of the span, once per rung: linear in its bars, like the load itself.
+    let derived_from = runner::identity::data_digest(&span.bars);
     // DERIVED FROM THIS RUNG'S OWN BARS WHEN NOBODY NAMES A SUPPORT.
     //
     // `None` is not a default hiding in an `Option`; it is the ABSENCE of a
@@ -15483,6 +15496,35 @@ fn one_rung_cached(ask: RungAsk<'_>, store: RungStore, cache: &mut AuditCache) -
         }
     };
 
+    // rangeall-1, D-2628: the audit's own load (built once and cached, so
+    // `audit_range_cached` reuses it) must hold the bars the support and the
+    // `missing` list were derived from. A refusal of that load is left for
+    // `audit_range_cached` to name with its own reason.
+    if let Some(commit) = store.commit
+        && let Some(moved) = span_moved_since_derivation(
+            cache,
+            AuditKey {
+                root: root.clone(),
+                vendor,
+                underlying: underlying.to_owned(),
+                rung: rung.to_owned(),
+                span: (from, to),
+                commit: commit.to_owned(),
+            },
+            || load_audit_inputs(&root, vendor, underlying, rung, (from, to), commit),
+            derived_from,
+        )
+    {
+        return RungRow {
+            rung,
+            outcome: Err(moved),
+            missing,
+            excluded,
+            retention: None,
+            validation: None,
+        };
+    }
+
     // ENTERING THE SWEEP IS ALSO AN EVENT, AND THE SILENCE BELOW IT IS THE LONG
     // ONE.
     //
@@ -15623,6 +15665,24 @@ fn one_rung_cached(ask: RungAsk<'_>, store: RungStore, cache: &mut AuditCache) -
         retention,
         validation,
     }
+}
+
+/// The refusal when the audit's span is not the span `one_rung_cached`
+/// derived its support from (rangeall-1, D-2628).
+const SPAN_MOVED: &str = "the stored span changed between the support derivation and the sweep (bars landed between the two reads); nothing was swept or recorded for this rung -- rerun";
+
+/// `Some(refusal)` when the audit inputs `cache` holds (loading them through
+/// `load` if needed) were folded over bars whose digest is not `derived_from`.
+/// `None` when they match, and when the load refused: that refusal belongs to
+/// `audit_range_cached`, which reads the same cached answer.
+fn span_moved_since_derivation(
+    cache: &mut AuditCache,
+    key: AuditKey,
+    load: impl FnOnce() -> Result<AuditInputs, stored::Refusal>,
+    derived_from: [u8; 32],
+) -> Option<String> {
+    let inputs = cache.inputs(key, load).ok()?;
+    (runner::identity::data_digest(&inputs.folded) != derived_from).then(|| SPAN_MOVED.to_owned())
 }
 
 /// Trading weeks a month holds, times one hundred.

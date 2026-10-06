@@ -5527,12 +5527,17 @@ fn header() -> Result<[u8; HEADER_BYTES], PopulationStatisticsV2Refusal> {
 }
 
 fn ensure_header(file: &mut File, path: &Path) -> Result<(), PopulationStatisticsV2Refusal> {
+    let bytes = header()?;
+    // pop2-6, D-2626: a strict prefix of the header never passed its barrier
+    // and names nothing. The writer, under its exclusive lock, cuts it to
+    // nothing and writes the header below, rather than refusing "shorter than
+    // header" on every open. Foreign short bytes are left for `verify_header`.
+    crate::fixed_tail::heal_torn_header(file, path, &bytes)?;
     let len = file
         .metadata()
         .map_err(|why| format!("cannot stat {}: {why}", path.display()))?
         .len();
     if len == 0 {
-        let bytes = header()?;
         file.seek(SeekFrom::Start(0))
             .and_then(|_| file.write_all(&bytes))
             .and_then(|()| file.sync_all())
@@ -5541,7 +5546,18 @@ fn ensure_header(file: &mut File, path: &Path) -> Result<(), PopulationStatistic
         // barrier does not make its directory entry durable.
         return sync_parent(path);
     }
-    verify_header(file, path)
+    verify_header(file, path)?;
+    // pop2-3, D-2625 (extends D-1910): bytes past the last whole record were
+    // never acknowledged; the writer cuts them under the same lock. A reader
+    // keeps refusing them as ragged in `record_count`.
+    crate::fixed_tail::heal_torn_tail(
+        file,
+        path,
+        POPULATION_STATISTICS_V2_HEADER_BYTES,
+        POPULATION_STATISTICS_V2_RECORD_STRIDE,
+        &bytes,
+    )?;
+    Ok(())
 }
 
 /// Makes the directory entries of `path`'s parent durable.
@@ -7558,5 +7574,83 @@ mod tests {
             .expect("matched changed pair remains internally valid");
             assert_ne!(changed.manifest.audit_id, base_id);
         }
+    }
+
+    /// pop2-3, D-2625: a kill part way through an append leaves a sub-record
+    /// tail. A reader still refuses it as ragged; the writer cuts it under its
+    /// exclusive lock, back to the exact committed bytes, at every stray
+    /// length from 1 to one byte short of a stride. On the old code
+    /// `record_count` refused the writer too, so `open_writer` failed and the
+    /// ledger was wedged. A whole trailing stride of foreign bytes is not a
+    /// torn tail and is never cut.
+    #[test]
+    fn a_kill_torn_tail_is_cut_by_the_writer_and_refused_by_a_reader() {
+        let stride = usize::try_from(POPULATION_STATISTICS_V2_RECORD_STRIDE).expect("stride");
+        for stray in [1, 32, stride / 2, stride - 1, stride] {
+            let root = TempRoot::new("torn-tail");
+            let mut ledger =
+                PopulationStatisticsV2Ledger::open_writer(root.path(), bounds()).expect("opens");
+            ledger.append(&fixture(6)).expect("fixture writes");
+            drop(ledger);
+            let path = root.path().join(DATA_FILE);
+            let whole = std::fs::read(&path).expect("whole bytes");
+            write_bytes(&path, &vec![0x5a; stray]);
+            assert!(
+                PopulationStatisticsV2Ledger::open_read(root.path(), bounds()).is_err(),
+                "{stray}: a reader refuses"
+            );
+            let opened = PopulationStatisticsV2Ledger::open_writer(root.path(), bounds());
+            if stray == stride {
+                assert!(opened.is_err(), "a whole foreign stride is refused");
+                assert_eq!(
+                    std::fs::metadata(&path).expect("stat").len(),
+                    whole.len() as u64 + stray as u64,
+                    "a whole record is never cut"
+                );
+            } else {
+                drop(opened.unwrap_or_else(|why| panic!("{stray}: the writer heals: {why}")));
+                assert_eq!(std::fs::read(&path).expect("healed bytes"), whole);
+                PopulationStatisticsV2Ledger::open_read(root.path(), bounds())
+                    .expect("the reader opens the healed ledger");
+            }
+        }
+    }
+
+    /// pop2-6, D-2626: a data file holding a strict prefix of the header (1
+    /// to 63 bytes) is cut and rewritten by the writer, and the reader then
+    /// opens it; the reader alone still refuses it and changes nothing. On
+    /// the old code `ensure_header` initialised only a 0-byte file and
+    /// `verify_header` refused "shorter than population-statistics header",
+    /// so the writer failed. Short bytes that are NOT the header's prefix are
+    /// still refused and kept.
+    #[test]
+    fn a_torn_statistics_v2_header_is_cut_and_rewritten() {
+        let expected = header().expect("header");
+        for kept in [1, 32, HEADER_BYTES - 1] {
+            let root = TempRoot::new("torn-header");
+            drop(
+                PopulationStatisticsV2Ledger::open_writer(root.path(), bounds())
+                    .expect("creates the lock and data files"),
+            );
+            let path = root.path().join(DATA_FILE);
+            std::fs::write(&path, &expected[..kept]).expect("torn header");
+            assert!(PopulationStatisticsV2Ledger::open_read(root.path(), bounds()).is_err());
+            assert_eq!(std::fs::read(&path).expect("unchanged"), &expected[..kept]);
+            drop(
+                PopulationStatisticsV2Ledger::open_writer(root.path(), bounds())
+                    .unwrap_or_else(|why| panic!("{kept}: the writer rewrites: {why}")),
+            );
+            assert_eq!(std::fs::read(&path).expect("rewritten"), expected.to_vec());
+            PopulationStatisticsV2Ledger::open_read(root.path(), bounds())
+                .expect("the reader opens the rewritten header");
+        }
+        let root = TempRoot::new("foreign-short-header");
+        drop(PopulationStatisticsV2Ledger::open_writer(root.path(), bounds()).expect("opens"));
+        let path = root.path().join(DATA_FILE);
+        let mut foreign = expected[..32].to_vec();
+        foreign[0] ^= 1;
+        std::fs::write(&path, &foreign).expect("foreign short bytes");
+        assert!(PopulationStatisticsV2Ledger::open_writer(root.path(), bounds()).is_err());
+        assert_eq!(std::fs::read(&path).expect("kept"), foreign);
     }
 }

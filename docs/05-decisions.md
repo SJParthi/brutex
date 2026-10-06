@@ -64330,3 +64330,208 @@ word-bounded on the left like the other calls; the existing spelling test
 unused `memmap2 = "0.9"` workspace entry, or banning the package in
 `deny.toml`, is left to the owner: it is a manifest change this finding does
 not require.
+### D-2620 — A writer's non-blocking lock waits a bounded second for a reader or a probe — 2026-10-06
+
+**The findings.** cli1-2, cli1-3, expr-1, expr-2, indexstop-2. Four writers took
+their lock with one `try_lock` and refused at the first `WouldBlock`: the
+invocation index (`operation_audit::begin`), the store's execution lease
+(`execution_lease::Lease::acquire`), a search checkpoint's owner
+(`search_checkpoint::Journal::open`) and a Boolean publication's owner
+(`boolean_candidate_persistence::prepare_in_namespace`). Each lock is also
+taken for an instant by a reader or a probe the browser drives: `read`'s
+shared lock on the index, `execution_lease::probe`, `Snapshot::open`'s shared
+probe and a projection's `ReadLease`. A page polling at the wrong instant
+therefore FAILED a sweep, refused a launch, refused a search's start or resume
+after its attempt was appended, or refused a resumed rung's re-publication of
+a content-addressed child after every source was loaded.
+
+**The decision.**
+- New `cli::lock_wait::patiently`: asks again only on `WouldBlock`, every 20 ms
+  for at most 50 times, one second in all, a constant no input raises. A host
+  refusal (`TryLockError::Error`) is never retried.
+- The four writers take their lock through it, each attempt on a `try_clone`
+  of one open description, so a refused attempt holds nothing.
+- A real owner holds each lock for its whole run, so it is still refused, one
+  second later than before. The refusals keep their prefixes (`BUSY`,
+  `Refusal::Busy`, "already owned", `OWNER_REFUSED`, which `lost_owner_race`
+  reads), and the checkpoint and publication refusals now say the lock was
+  held past the wait.
+- Not done: a committed-and-equal shortcut that would let a re-publication
+  skip the exclusive lock entirely (indexstop-2's longer remedy). A reader
+  that holds a lease past one second still refuses the writer, by name.
+- `Lease::acquire`'s doc said "It never waits for another writer"; it now says
+  it waits a bounded second.
+
+**Evidence.** ZQ-20 to ZQ-23.
+
+### D-2621 — A held VIX month lock refuses the capture instead of publishing the month unavailable — 2026-10-06
+
+**The finding.** indexstop-1, left open by D-1760. `index_stop_vix::load_month`
+saved every `VixReferenceMonth::open` refusal as the month's durable
+`unavailable_reason`, including `StoreError::Locked` (a pull landing the month)
+and the new `StoreError::ReaderHolds` (D-2552). The published companion is
+authoritative under its receipt, so one capture at the wrong instant erased
+that VIX month from every later run of that catalog.
+
+**The decision.** `VixReferenceMonth::open_classified` returns
+`OpenRefusal::Busy` for `Locked` and `ReaderHolds` and `OpenRefusal::Unavailable`
+for every other refusal; `open` keeps its `String` contract through it.
+`load_month` returns `Busy` as an error: `capture` refuses before
+`prepare_in_namespace`, nothing is published, the catalog's attempt stays
+pending, and the rerun captures again. A missing, torn or malformed month is
+still saved as explicit unavailability.
+
+**Evidence.** ZQ-24.
+
+### D-2622 — Qualification publication opens its result under the record bound recovery uses — 2026-10-06
+
+**The finding.** Z1-slice19-F1. `index_stop_qualification::publish` opened its
+own result with `Reader::open(root, id, bounds.bytes, bounds.bytes)`: the fourth
+argument is `max_records`, so a byte bound four times the capture's bytes
+stood in for the record bound. Recovery re-verifies the same link with
+`capture.records`, so a qualification between the two bounds was published and
+acknowledged, then refused on every `recover`.
+
+**The decision.** `qualification::Request` gains `records`, set by
+`index_stop_search` to `config.capture.records`, and `publish` passes it as
+`max_records`. It is not a `Bounds` field, so the qualification identity is
+unchanged and no stored byte moves. A qualification recovery would refuse is
+now refused by `produce` (the attempt is finished `Refused`) instead of
+acknowledged.
+
+**Evidence.** ZQ-25.
+
+### D-2623 — Every new level of a ledger or detail directory chain is made durable — 2026-10-06
+
+**The findings.** xcut-3, ledgerv6-3. `candidate_trades::begin_digested` made
+`results/<model>/<identity>/<token>` with `create_dir_all`, up to four new
+levels, and only the leaf was ever synced; `ledger_v6`'s `RungRoots::create`
+and Global Replay root and `ledger_all`'s `LedgerTree::create` did the same
+for `ROOT/<stage>/<rung>`. A power loss could lose a directory beneath a
+durable receipt that names it.
+
+**The decision.** New `cli::durable_dir::create_all`: creates each missing
+level with `create_dir` and syncs its parent before the next level is made.
+Existing levels are left as they are (a symbolic link to a directory is
+followed, as `create_dir_all` followed it); an existing non-directory and a
+`..` below the deepest existing level are refused before anything is created.
+The four call sites use it. Its cost is one `mkdir` and one directory `fsync`
+per NEW level and one `stat` per existing one; nothing scales with data.
+
+**Evidence.** ZQ-26, ZQ-27.
+
+### D-2624 — A candidate detail file is never left at 0 bytes for good — 2026-10-06
+
+**The finding.** cli2-5. `candidate_trades::write_exact` made the final name
+with `create_new` and only then took its lock: a reader in that gap took its
+shared lock unopposed and refused the 0-byte file as "nonregular, truncated or
+above its byte admission", and a kill in the gap left a permanent 0-byte file
+that `write_exact`'s `AlreadyExists` arm re-read and refused on every retry.
+
+**The decision.**
+- A reader answers a 0-byte detail file as BUSY ("the file is empty, an
+  interrupted write the next writer fills; retry"), not as damage, and
+  `read_model` reads an empty `catalog.bin` as no catalog (`Ok(None)`).
+- A writer that finds its final name as an EMPTY regular file whose lock is
+  free fills it in place under the exclusive lock, with the exact bytes it
+  would have written, and emits a `cli.ledger` warn. A file with any byte is
+  left for the existing byte comparison; a live writer's held lock is left to
+  that writer. The inode is never replaced, so a reader that pinned a whole
+  file's generation keeps it.
+- A failed write or barrier now cuts the file back to 0 bytes under its lock
+  (`fixed_tail::roll_back`, `fixed_tail::sync_all_or_roll_back`, D-1900), so
+  what it leaves is the empty remnant the next writer fills, never a partial
+  file every retry refuses as different bytes.
+- A staging name plus `hard_link` was considered and not taken: the unlink of
+  the staging name changes the final inode's ctime, which every pinned
+  generation in this module compares.
+
+**Evidence.** ZQ-28.
+
+### D-2625 — The Population writers cut a kill-torn tail (extends D-1910) — 2026-10-06
+
+**The finding.** pop2-3. Admission V4, Finalization V4 and Statistics V2
+refused a sub-record tail on every open, the writer's included ("data file is
+ragged", "ragged bytes against stride"), so a kill part way through an append
+wedged the ledger. D-1910 had decided the rule and wired it into Pre-Admission,
+Candidate Universe, Execution V4 and lineage V4, not these.
+
+**The decision.** The writable open of Admission V4 and Finalization V4, and
+`ensure_header` of Statistics V2 and V3 (writer only), call
+`fixed_tail::heal_torn_tail` under the exclusive lock, after the header is
+verified and before the length is measured. Readers keep refusing. A whole
+trailing record that fails its seal is not a torn tail and is still refused,
+never cut. Finalization V4's test that asserted the writer refused a ragged
+file is flipped. Admission V3, Finalization V3 and Population V6 are
+unchanged and are named in `docs/06-limits.md`.
+
+**Evidence.** ZQ-29.
+
+### D-2626 — The Statistics writers rewrite a torn header prefix — 2026-10-06
+
+**The finding.** pop2-6. Statistics V2 and V3 `ensure_header` initialised only
+a 0-byte file and refused 1 to 63 bytes as "shorter than ... header" on every
+open. The audit's pass 2 judged the kill mechanism unlikely (the header is one
+64-byte `write_all`), so the finding is low; the shape was nevertheless the one
+D-1902 already closed elsewhere.
+
+**The decision.** Both `ensure_header`s call `fixed_tail::heal_torn_header`
+under the writer's exclusive lock before the empty test: a strict prefix of
+the header is cut to nothing and the header written. Foreign short bytes are
+still refused and kept. Not done: an all-zero 64-byte file (the residue of a
+power loss without data ordering) is still refused as an unknown header.
+
+**Evidence.** ZQ-30.
+
+### D-2627 — The ledger-all report renders a rung with fewer than 25 winners — 2026-10-06
+
+**The finding.** ledgerall-2. Selection V5 commits `min(eligible, 25)` winners,
+but `ledger_all::render_winners` went through `visit_canonical`, whose
+preflight requires exactly 25 per rung. A rung with fewer than 25 eligible
+candidates was durably committed through all three stages and then reported
+refused, on every rerun.
+
+**The decision.** `AllRungSelectionV5SuccessorSetV1::visit_committed` makes
+every check `visit_canonical` makes except the arity, admitting 0..=25 per
+rung (more than 25 is still refused). `render_winners` uses it. Global Replay
+keeps `visit_canonical` and its 8×25 cohort: whether Global Replay should run
+on a short cohort is a contract question this entry does not change.
+
+**Evidence.** ZQ-31.
+
+### D-2628 — range-all refuses a rung whose span moved between derivation and sweep — 2026-10-06
+
+**The finding.** rangeall-1. `one_rung_cached` derived an automatic support and
+the `missing` list from its own raw span load (read #1), while the sweep and
+the recorded data digest came from the audit's load (read #2). Pulls take no
+lease, so a month landing between the two recorded `min_hits = f(N1)` beside
+bars `N2` and digest `D2`, a pairing no single store state reproduces.
+
+**The decision.** `one_rung_cached` pins `data_digest` of read #1's bars and,
+when a commit is stamped, compares it with the digest of the audit inputs'
+folded bars (read #2, loaded through the same `AuditCache` the audit then
+reuses, so no extra load). A mismatch refuses the rung before
+`audit_range_cached` with "the stored span changed between the support
+derivation and the sweep ...; rerun". A refused audit load is left to the
+audit to name. Cost: two digests of the signal span per rung, linear in its
+bars like the load itself. Only the signal span is pinned; a landing that
+moves only the one-minute execution series between the reads is not caught.
+
+**Evidence.** ZQ-32.
+
+### D-2629 — ledger-v6 releases each rung's Selection V6 as the rung ends — 2026-10-06
+
+**The finding.** ledgerv6-1. `ledger_v6::run_route` kept every rung's
+`CommittedStoredSelectionV6` for the whole run, and each holds its Population
+V6 strict inputs: an open, shared-locked descriptor per source month. The
+descriptor count grows with every rung (the finding's ~128 + 200·M at rung 8
+is an EXTRAPOLATION, not a measurement), and every held month refuses ingest
+writes to it (barflow-1) until the run ends.
+
+**The decision.** `run_route` takes a `keep` closure. `ledger-v6` passes `drop`,
+so each rung's selection, and its guards, are released as the rung ends; it
+only ever reported the count. `ledger-v6-replay` passes `identity`, because
+Global Replay V4 needs all eight selections live, and keeps the retention;
+`docs/06-limits.md` says so.
+
+**Evidence.** ZQ-33.

@@ -182,7 +182,8 @@ impl LedgerTree {
             let execution_rung = execution_parent.join(rung);
             let selection_rung = selection_parent.join(rung);
             for path in [&authority_rung, &execution_rung, &selection_rung] {
-                std::fs::create_dir_all(path)
+                // Durable level by level (ledgerv6-3, D-2623).
+                crate::durable_dir::create_all(path)
                     .map_err(|why| format!("cannot create {}: {why}", path.display()))?;
             }
             execution.push(execution_rung);
@@ -944,8 +945,10 @@ fn run_chain(request: &LedgerAllRequest<'_>, out: &mut String) -> Result<usize, 
 /// operator to go and decode a ledger to find out what it decided, which is the
 /// same as not answering.
 ///
-/// Ten and not twenty-five: `visit_canonical` yields all two hundred, and the
-/// full set is on disk for anything that wants it. A terminal report that runs
+/// Ten and not twenty-five: `visit_committed` yields every committed winner
+/// (two hundred when every rung had 25 eligible, fewer when one did not:
+/// ledgerall-2, D-2627), and the full set is on disk for anything that wants
+/// it. A terminal report that runs
 /// to two hundred rows is one nobody reads, and the Top-10 of each rung is the
 /// prefix the selector itself treats as the answer.
 ///
@@ -962,7 +965,11 @@ pub(crate) fn render_winners(
         "\nTOP 10 BY RUNG -- paisa unless a column says ppm; profit is the PESSIMISTIC fill\n",
     );
     let mut current: Option<(u32, Vec<(u32, runner::topn::Metrics)>)> = None;
-    selection.into_successor_set()?.visit_canonical(|winner| {
+    // `visit_committed`, not `visit_canonical`: a rung with fewer than 25
+    // eligible candidates commits fewer winners, legally, and refusing to
+    // RENDER it after all three stages were durably committed reported a
+    // successful run as refused on every rerun (ledgerall-2, D-2627).
+    selection.into_successor_set()?.visit_committed(|winner| {
         let row = winner.row();
         let rank = row.rank();
         // THE SELECTOR'S OWN CONSTANT, not a literal ten. `all_rung_selection_v5`

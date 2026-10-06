@@ -3613,3 +3613,67 @@ fn the_minute_gap_census_asks_the_shares_dated_close() {
     );
     let _ignored = std::fs::remove_dir_all(&store);
 }
+
+/// rangeall-1, D-2628: the audit's own load is held to the bars the support
+/// was derived from. The same store read twice agrees; a derivation over any
+/// other bars (what a pull landing between `one_rung_cached`'s raw read and
+/// the audit's read leaves) is refused by name before a sweep; a load that
+/// refuses is left to `audit_range_cached`, which names its own reason. On
+/// the old code nothing compared the two reads, so a moved span was swept
+/// and recorded under a `min_hits` derived from bars it did not hold.
+#[test]
+fn one_rung_derives_and_sweeps_one_read() {
+    let fixture = Fixture::warmed();
+    let commit = "generated-stored-descend-fixture";
+    let months = ((2025, 5), (2025, 5));
+    let key = || crate::AuditKey {
+        root: fixture.root.clone(),
+        vendor: Vendor::Zerodha,
+        underlying: "NIFTY".to_owned(),
+        rung: "5min".to_owned(),
+        span: months,
+        commit: commit.to_owned(),
+    };
+    let load = || {
+        crate::load_audit_inputs(&fixture.root, Vendor::Zerodha, "NIFTY", "5min", months, commit)
+    };
+    let raw = crate::stored::load_span(
+        &fixture.root,
+        Vendor::Zerodha,
+        "NIFTY",
+        "5min",
+        months.0,
+        months.1,
+    )
+    .expect("raw span");
+    let derived_from = runner::identity::data_digest(&raw.bars);
+    let mut cache = crate::AuditCache::default();
+    assert_eq!(
+        crate::span_moved_since_derivation(&mut cache, key(), load, derived_from),
+        None,
+        "one store state read twice agrees"
+    );
+    let mut fewer = raw.bars.clone();
+    fewer.pop();
+    for other in [
+        runner::identity::data_digest(&fewer),
+        runner::identity::data_digest(&[]),
+        [0_u8; 32],
+    ] {
+        let moved = crate::span_moved_since_derivation(&mut cache, key(), load, other)
+            .expect("a derivation over other bars is refused");
+        assert!(moved.contains("changed between the support derivation and the sweep"));
+        assert!(moved.contains("rerun"), "{moved}");
+    }
+    let mut refused = crate::AuditCache::default();
+    assert_eq!(
+        crate::span_moved_since_derivation(
+            &mut refused,
+            key(),
+            || Err("injected load refusal".to_owned()),
+            derived_from,
+        ),
+        None,
+        "a refused load is the audit's to name"
+    );
+}

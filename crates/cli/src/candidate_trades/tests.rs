@@ -1064,3 +1064,128 @@ fn a_capture_derives_slice_facts_once_and_counts_four_syncs_per_candidate_side()
         );
     }
 }
+
+/// cli2-5, D-2624: an empty `catalog.bin` — what a reader sees between a
+/// writer's `create_new` and its lock, or what a kill there leaves — reads as
+/// no catalog, and an empty detail file is answered busy, not as the
+/// corruption "truncated". On the old code both refused with "nonregular,
+/// truncated or above its byte admission", so the first assertion failed. A
+/// file with ANY byte short of a whole header and seal is still truncated,
+/// at every length from 1 to one byte short.
+#[test]
+fn an_empty_catalog_reads_as_absent_and_an_empty_detail_is_busy_not_truncated() {
+    let root = root();
+    let identity = [61_u8; 32];
+    let directory = directory_for(&root, &identity, 7, Model::And);
+    crate::durable_dir::create_all(&directory).expect("attempt directory");
+    let catalog = directory.join("catalog.bin");
+    fs::write(&catalog, b"").expect("empty catalog");
+    assert!(matches!(
+        read_model(&root, identity, 7, Model::And, DEFAULT_MAX_BYTES),
+        Ok(None)
+    ));
+    let why = read_sealed(&catalog, CATALOG, DEFAULT_MAX_BYTES).expect_err("empty");
+    assert!(why.contains("busy"), "{why}");
+    assert!(!why.contains("truncated"), "{why}");
+    for len in [1, HEADER, HEADER + SEAL - 1] {
+        fs::write(&catalog, vec![0_u8; len]).expect("partial catalog");
+        let why = read_model(&root, identity, 7, Model::And, DEFAULT_MAX_BYTES)
+            .expect_err("a partial catalog is damage");
+        assert!(why.contains("truncated"), "{len}: {why}");
+    }
+}
+
+/// cli2-5, D-2624: a 0-byte file at a detail's final name, left by a kill
+/// between `create_new` and the first byte, is filled by the next writer of
+/// that name, and the retry is idempotent after it. On the old code
+/// `write_exact`'s `AlreadyExists` arm re-read the empty file and refused it
+/// as truncated on every retry, so the first `expect` failed. A file that
+/// holds other whole bytes is still refused, and an empty file whose lock a
+/// live writer holds is left to that writer: the call answers busy and
+/// writes nothing.
+#[test]
+fn a_zero_byte_remnant_is_filled_by_the_next_writer_and_nothing_else_is() {
+    let root = root();
+    fs::create_dir_all(&root).expect("root");
+    let path = root.join("0-0-long-trades.bin");
+    fs::write(&path, b"").expect("kill remnant");
+    let digest = write_exact(&path, TRADES, b"exact payload").expect("the remnant is filled");
+    let (payload, seal) = read_sealed(&path, TRADES, DEFAULT_MAX_BYTES).expect("whole");
+    assert_eq!((payload.as_slice(), seal), (&b"exact payload"[..], digest));
+    assert_eq!(
+        write_exact(&path, TRADES, b"exact payload"),
+        Ok(digest),
+        "an exact retry is idempotent"
+    );
+    let why = write_exact(&path, TRADES, b"other payload").expect_err("other bytes");
+    assert!(why.contains("different bytes"), "{why}");
+
+    let held = root.join("0-0-short-trades.bin");
+    fs::write(&held, b"").expect("live writer's file");
+    let owner = File::open(&held).expect("live writer");
+    owner.lock().expect("the live writer's lock");
+    let why = write_exact(&held, TRADES, b"exact payload").expect_err("held");
+    assert!(why.contains("busy"), "{why}");
+    owner.unlock().expect("release");
+    assert_eq!(fs::metadata(&held).expect("held file").len(), 0);
+    assert!(write_exact(&held, TRADES, b"exact payload").is_ok());
+}
+
+/// cli2-5, D-2624: a failed barrier on a detail write cuts the file back to 0
+/// bytes under its lock (`fixed_tail`, D-1900), so the retry fills it rather
+/// than refusing a partial or unproven file for good. On the old code the
+/// synced-or-not bytes stayed in place.
+#[test]
+fn a_failed_detail_barrier_leaves_an_empty_file_the_retry_fills() {
+    let root = root();
+    fs::create_dir_all(&root).expect("root");
+    let path = root.join("1-0-long-candidate.bin");
+    {
+        let _armed = crate::fixed_tail::fault::Armed::arm(
+            "1-0-long-candidate.bin",
+            crate::fixed_tail::fault::Kind::Sync,
+        );
+        let why = write_exact(&path, CANDIDATE, b"candidate").expect_err("injected");
+        assert!(why.contains("injected sync fault"), "{why}");
+    }
+    assert_eq!(fs::metadata(&path).expect("the name stays").len(), 0);
+    let digest = write_exact(&path, CANDIDATE, b"candidate").expect("the retry fills it");
+    assert_eq!(
+        read_sealed(&path, CANDIDATE, DEFAULT_MAX_BYTES).expect("whole"),
+        (b"candidate".to_vec(), digest)
+    );
+}
+
+/// xcut-3, D-2623: the attempt directory
+/// `results/<model>/<identity>/<token>` is created by the durable walker,
+/// which syncs each new level's parent, and never by `create_dir_all`, which
+/// synced none of up to four new levels. Measured on the source because a
+/// lost directory entry cannot be produced without a power cut; on the old
+/// code `begin_digested` called `create_dir_all`, so the first assertion
+/// failed. The behavioural half: a capture on a store with no candidate
+/// tree lays out every level and its start file.
+#[test]
+fn candidate_trades_creates_each_level_durably() {
+    let source = include_str!("../candidate_trades.rs");
+    let (_, begin) = source
+        .split_once("fn begin_digested(")
+        .expect("begin_digested exists");
+    let begin = begin
+        .split_once("\n    }\n")
+        .map_or(begin, |(body, _)| body);
+    assert!(!begin.contains("create_dir_all("), "{begin}");
+    assert!(
+        begin.contains("crate::durable_dir::create_all(&directory)"),
+        "{begin}"
+    );
+    let root = root();
+    let attempt = attempt(&root);
+    assert!(
+        !root.join("results").join("candidate-trades-v1").exists(),
+        "the premise: no candidate tree yet"
+    );
+    let (bars, column) = fixture();
+    let capture = Capture::begin(&root, &attempt, bars, column).expect("capture");
+    assert!(capture.directory.join("start.bin").is_file());
+    assert!(capture.directory.starts_with(root.join("results")));
+}

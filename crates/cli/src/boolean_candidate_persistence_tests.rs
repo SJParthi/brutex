@@ -167,6 +167,54 @@ fn only_the_owner_lock_refusal_is_a_lost_race() -> Result<(), String> {
     Ok(())
 }
 
+/// expr-2, indexstop-2, D-2620: a reader's shared lease on a committed
+/// child's `owner.lock` — what a dashboard projection holds — no longer
+/// refuses a re-publication of the same bytes, in both namespaces the
+/// findings name. On the old code `prepare_in_namespace` made one `try_lock`
+/// and refused with `OWNER_REFUSED` while the reader held it, so the first
+/// re-publication below failed. A holder past the bound is still refused, by
+/// the prefix `lost_owner_race` reads, and the body is unchanged.
+#[test]
+fn a_reader_lease_does_not_refuse_a_republish_of_a_committed_identity() -> Result<(), String> {
+    for namespace in ["boolean-candidates-v1", "index-stop-vix-reference-v1"] {
+        let root = scratch(&format!("reader-{namespace}"));
+        let identity = [17_u8; 32];
+        let body = b"content-addressed child".to_vec();
+        let digest = brutex_core::blake3::hash(&body);
+        let republish = || {
+            let pending = prepare_in_namespace(&root, namespace, identity, &body)?;
+            pending.verify_body(digest, body.len() as u64)?;
+            pending.finish(identity, digest, body.len() as u64)
+        };
+        republish()?;
+        let directory = root.join(namespace).join(crate::identity_hex(&identity));
+        let reader =
+            fs::File::open(directory.join("owner.lock")).map_err(|why| why.to_string())?;
+        reader.try_lock_shared().map_err(|why| why.to_string())?;
+        let again = std::thread::scope(|scope| {
+            let release = scope.spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                reader.unlock()
+            });
+            let again = republish();
+            let released = release
+                .join()
+                .map_err(|_| "reader thread panicked".to_owned());
+            released.and_then(|unlocked| unlocked.map_err(|why| why.to_string()))?;
+            again
+        });
+        again.map_err(|why| format!("{namespace}: {why}"))?;
+        reader.try_lock_shared().map_err(|why| why.to_string())?;
+        let refusal = republish().err().unwrap_or_default();
+        reader.unlock().map_err(|why| why.to_string())?;
+        assert!(lost_owner_race(&refusal), "{namespace}: {refusal}");
+        assert!(refusal.contains("one-second wait"), "{namespace}: {refusal}");
+        assert!(committed(&directory)?, "{namespace}");
+        assert_eq!(read_exact(&directory.join("body.bin"), 64)?, body);
+    }
+    Ok(())
+}
+
 /// ledgers-2, D-1915: a receipt or body whose barrier failed is withdrawn, so
 /// no later run reuses it as committed history; the rerun then commits.
 #[test]

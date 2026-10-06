@@ -31,7 +31,7 @@ use brutex_core::instrument::{Exchange, InstrumentKey};
 use brutex_core::vendor::Vendor;
 use indicators::Candle;
 use pull::session::IstMoment;
-use store::file::BarFile;
+use store::file::{BarFile, StoreError};
 use store::format::Bar;
 use store::path::{FileKind, StorePath, Timeframe, YearMonth};
 
@@ -43,6 +43,31 @@ pub const CIVIL_MONTH_MINUTE_SLOTS: usize = 31 * 24 * 60;
 
 const MICROS_PER_MINUTE: i64 = 60_000_000;
 const MINUTES_PER_DAY: usize = 24 * 60;
+
+/// Why [`VixReferenceMonth::open_classified`] refused a month.
+///
+/// The split is the whole point (indexstop-1, D-2621): a capture that saved a
+/// lock refusal as the month's permanent "unavailable" reason published a
+/// companion that no later run could correct, because a published companion
+/// is authoritative under its receipt (D-1760).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum OpenRefusal {
+    /// The month's lock was held when asked: a writer is landing it, or
+    /// readers hold it shared. Nothing about the month is known.
+    Busy(String),
+    /// The month is missing, torn, malformed or otherwise unreadable: a fact
+    /// about the store as it stands.
+    Unavailable(String),
+}
+
+impl OpenRefusal {
+    /// The refusal's sentence, whichever kind it is.
+    pub(crate) fn into_reason(self) -> String {
+        match self {
+            Self::Busy(reason) | Self::Unavailable(reason) => reason,
+        }
+    }
+}
 
 /// One exact India VIX observation at a requested trade timestamp.
 ///
@@ -83,23 +108,42 @@ impl VixReferenceMonth {
     /// count, an off-minute timestamp, a timestamp outside `month`, a duplicate
     /// exact timestamp, or timestamps that do not remain strictly increasing.
     pub fn open(root: &Path, vendor: Vendor, month: YearMonth) -> Result<Self, String> {
+        Self::open_classified(root, vendor, month).map_err(OpenRefusal::into_reason)
+    }
+
+    /// [`VixReferenceMonth::open`], with a month whose lock is held right
+    /// now told apart from a month that is missing or malformed
+    /// (indexstop-1, D-2621).
+    ///
+    /// # Errors
+    ///
+    /// [`OpenRefusal::Busy`] when the store refused the month's lock
+    /// (`StoreError::Locked` or `StoreError::ReaderHolds`): a fact about this
+    /// instant, never about the month. [`OpenRefusal::Unavailable`] for every
+    /// refusal [`VixReferenceMonth::open`] documents otherwise.
+    pub(crate) fn open_classified(
+        root: &Path,
+        vendor: Vendor,
+        month: YearMonth,
+    ) -> Result<Self, OpenRefusal> {
+        let unavailable = OpenRefusal::Unavailable;
         let key = InstrumentKey::index(Exchange::Nse, VIX_REFERENCE_SYMBOL).map_err(|why| {
-            format!(
+            unavailable(format!(
                 "the fixed reference key NSE-{VIX_REFERENCE_SYMBOL} is invalid: {why}. Nothing was read"
-            )
+            ))
         })?;
         if key.is_sweepable() {
-            return Err(format!(
+            return Err(unavailable(format!(
                 "the fixed reference key NSE-{VIX_REFERENCE_SYMBOL} entered the swept instrument set; reference loading refused"
-            ));
+            )));
         }
 
         let path = StorePath::for_key(vendor, &key, Timeframe::MINUTE_1, month, FileKind::Bars)
             .map_err(|why| {
-                format!(
+                unavailable(format!(
                     "the {vendor} NSE-{VIX_REFERENCE_SYMBOL} 1min path for {month} is invalid: {why}. Nothing was read",
                     vendor = vendor.as_str()
-                )
+                ))
             })?;
 
         // The store header writes the low 32 bits of this exact FNV-1a value.
@@ -111,13 +155,24 @@ impl VixReferenceMonth {
         )]
         let symbol_id = brutex_core::universe::fnv1a(VIX_REFERENCE_SYMBOL) as u32;
         let file = BarFile::open_existing(root, path, symbol_id).map_err(|why| {
-            format!(
+            let reason = format!(
                 "{vendor} NSE-{VIX_REFERENCE_SYMBOL} 1min {month} could not be opened as reference evidence: {why}. Nothing was stamped",
                 vendor = vendor.as_str()
-            )
+            );
+            // A held lock is this instant, not this month (indexstop-1,
+            // D-2621): a writer landing the month, or readers a writer is
+            // waiting behind. Every other refusal is about the file.
+            if matches!(
+                why,
+                StoreError::Locked { .. } | StoreError::ReaderHolds { .. }
+            ) {
+                OpenRefusal::Busy(reason)
+            } else {
+                unavailable(reason)
+            }
         })?;
 
-        Self::from_file(vendor, month, &file)
+        Self::from_file(vendor, month, &file).map_err(unavailable)
     }
 
     fn from_file(vendor: Vendor, month: YearMonth, file: &BarFile) -> Result<Self, String> {
@@ -322,7 +377,6 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::*;
-    use store::file::StoreError;
     use store::layout::Layout;
 
     const YEAR: u16 = 2026;

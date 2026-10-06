@@ -2586,6 +2586,19 @@ impl PopulationAdmissionV4Ledger {
                     .map_err(|why| format!("cannot sync Admission V4 root: {why}"))?;
             }
             verify_header(&mut data_file)?;
+            // pop2-3, D-2625 (extends D-1910): bytes past the last whole
+            // record were never acknowledged. The WRITER, under the exclusive
+            // lock taken above, cuts them and says so; a reader keeps refusing
+            // them as ragged in `scan`.
+            if writable {
+                crate::fixed_tail::heal_torn_tail(
+                    &data_file,
+                    &data_path,
+                    POPULATION_ADMISSION_V4_HEADER_BYTES,
+                    POPULATION_ADMISSION_V4_RECORD_BYTES,
+                    &header(),
+                )?;
+            }
             let lock_generation = file_generation(&lock_file, &lock_path, 0)?;
             let data_generation = file_generation(&data_file, &data_path, bounds.file_bytes)?;
             let mut ledger = Self {
@@ -3963,6 +3976,67 @@ mod tests {
             metadata.modified().expect("read modified time"),
             stamp,
             "a writer must not rewrite a header that is already whole"
+        );
+    }
+
+    /// pop2-3, D-2625: a kill part way through an append leaves bytes past the
+    /// last whole record. A reader still refuses them as ragged; the writer
+    /// cuts them under its exclusive lock and the ledger reopens whole, at
+    /// every stray length from 1 to one byte short of a record. On the old
+    /// code `scan` refused "ragged" for the writer too, so `open_write`
+    /// failed and the ledger was wedged. A whole trailing record that fails
+    /// its seal is not a torn tail: it is still refused and never cut.
+    #[test]
+    fn a_kill_torn_tail_is_cut_by_the_writer_and_refused_by_a_reader() {
+        let value = prepared(
+            AdmissionV4FamilyTerminal::Evaluated,
+            AdmissionV4FamilyTerminal::NaturallyExtinct,
+            4,
+        );
+        for stray in [1, 64, RECORD_BYTES / 2, RECORD_BYTES - 64, RECORD_BYTES - 1] {
+            let root = TestRoot::new("torn-tail");
+            commit_population_admission_v4(root.path(), bounds(), value.clone())
+                .expect("committed fixture");
+            let path = root.path().join(DATA_FILE);
+            let whole = std::fs::read(&path).expect("whole bytes");
+            let mut file = OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .expect("open for the torn append");
+            file.write_all(&vec![0x5a; stray]).expect("torn bytes");
+            drop(file);
+            let why = PopulationAdmissionV4Ledger::open_read(root.path(), bounds())
+                .err()
+                .unwrap_or_default();
+            assert!(why.contains("ragged"), "{stray}: {why}");
+            assert_eq!(
+                std::fs::metadata(&path).expect("stat").len(),
+                whole.len() as u64 + stray as u64,
+                "a reader must not cut"
+            );
+            drop(
+                PopulationAdmissionV4Ledger::open_write(root.path(), bounds())
+                    .unwrap_or_else(|why| panic!("the writer heals {stray} bytes: {why}")),
+            );
+            assert_eq!(std::fs::read(&path).expect("healed bytes"), whole);
+            PopulationAdmissionV4Ledger::open_read(root.path(), bounds())
+                .expect("the reader opens the healed ledger");
+        }
+        let root = TestRoot::new("whole-bad-record");
+        commit_population_admission_v4(root.path(), bounds(), value).expect("committed fixture");
+        let path = root.path().join(DATA_FILE);
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open for the bad record");
+        file.write_all(&[0x5a; RECORD_BYTES]).expect("bad whole record");
+        drop(file);
+        let before = std::fs::metadata(&path).expect("stat").len();
+        assert!(PopulationAdmissionV4Ledger::open_write(root.path(), bounds()).is_err());
+        assert_eq!(
+            std::fs::metadata(&path).expect("stat").len(),
+            before,
+            "a whole record is never cut"
         );
     }
 }

@@ -15743,3 +15743,37 @@ does not bound the store:
   during a pull can therefore take up to 20 s; a stop with nothing running
   costs one 50 ms-free pass. A recovery request holding a seat is waited on to
   the deadline and then abandoned by name. Not timed.
+## Bounded lock waits, durable directory chains and retained ledger guards — D-2620, D-2623, D-2625, D-2628, D-2629, 6 October 2026
+
+- **A writer's lock waits up to one second.** `cli::lock_wait::patiently` asks a
+  refused `WouldBlock` again every 20 ms for at most 50 times (D-2620). The
+  invocation index, the execution lease, a search checkpoint's owner and a
+  Boolean publication's owner take their lock through it. Each attempt is a
+  syscall pair; the wait is a constant no input raises, and it is wall time,
+  not work. A real owner is refused one second later than before. A reader
+  or probe that holds the lock past one second still refuses the writer: the
+  bound narrows the window, it does not remove it. Not timed by any bench.
+- **A new directory level costs one `mkdir` and one directory `fsync`.**
+  `cli::durable_dir::create_all` (D-2623) syncs each new level's parent; at
+  most the chain's depth (four for a candidate attempt, three for a ledger
+  rung root) per call, and one `stat` per existing level. A level an older
+  `create_dir_all` made and never synced is not repaired. UNVERIFIED as a
+  measured cost.
+- **Interrupted Population writes, update to D-0916/D-0917.** The writers of
+  Admission V4, Finalization V4 and Statistics V2/V3 now cut a sub-record tail
+  under their exclusive lock (D-2625), and the Statistics V2/V3 writers
+  rewrite a strict header prefix (D-2626). Readers still refuse both. Still
+  refused on every open: Admission V3, Finalization V3 and Population V6
+  ragged tails, and an all-zero 64-byte Statistics header.
+- **range-all hashes its signal span twice per rung** to hold the sweep to the
+  bars its support was derived from (D-2628): linear in the span's bars, like
+  the load. Only the signal span is pinned; a landing that moves only the
+  one-minute execution series between the two reads is not detected.
+- **`ledger-v6-replay` keeps eight rungs' source guards for the whole run.**
+  Global Replay V4 needs all eight Selection V6 authorities live, and each
+  holds its Population V6 strict inputs: an open, shared-locked descriptor per
+  source month (D-2629). The descriptor count (~128 + 200·M at the eighth rung,
+  from the finding) is an EXTRAPOLATION, not a measurement, and no `RLIMIT`
+  is raised or checked. While the run lives, those months refuse ingest
+  writes past the ingest's one-second wait (D-2552). `ledger-v6` itself now
+  releases each rung's guards as the rung ends.

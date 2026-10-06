@@ -625,3 +625,44 @@ fn the_read_only_snapshot_admits_the_and_v2_namespace_the_journal_writes() -> Re
     assert_eq!(snapshot.read(sequence, 1024)?.payload, b"v2 boundary");
     Ok(())
 }
+
+/// expr-1, D-2620: a snapshot's shared probe of `owner.lock` — what the api
+/// takes on every poll — is waited for, so it never refuses the writer's
+/// start or resume. On the old code `Journal::open` made one `try_lock` and
+/// refused "already owned" while the probe held the lock, so the first open
+/// below failed. A real owner (an open journal) is still refused, after the
+/// whole bound, and the refusal says the lock was held past the wait.
+#[test]
+fn a_snapshot_probe_does_not_refuse_the_writer() -> Result<(), String> {
+    let scratch = Scratch::new().map_err(error)?;
+    drop(Journal::open(&scratch.0, "expression-search-v1", [14; 32])?);
+    let owner_path = scratch
+        .0
+        .join("expression-search-v1")
+        .join(hex(&[14; 32]))
+        .join("owner.lock");
+    let probe = File::open(&owner_path).map_err(error)?;
+    probe.try_lock_shared().map_err(|why| why.to_string())?;
+    let opened = std::thread::scope(|scope| {
+        let release = scope.spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            probe.unlock()
+        });
+        let opened = Journal::open(&scratch.0, "expression-search-v1", [14; 32]);
+        let released = release
+            .join()
+            .map_err(|_| "probe thread panicked".to_owned());
+        released.and_then(|unlocked| unlocked.map_err(error))?;
+        opened
+    })?;
+    let started = std::time::Instant::now();
+    let refused = Journal::open(&scratch.0, "expression-search-v1", [14; 32])
+        .err()
+        .ok_or("a live owner must still refuse")?;
+    assert!(refused.contains("already owned"), "{refused}");
+    assert!(refused.contains("held past the one-second wait"), "{refused}");
+    assert!(started.elapsed() >= crate::lock_wait::WAIT * crate::lock_wait::WAITS);
+    drop(opened);
+    drop(Journal::open(&scratch.0, "expression-search-v1", [14; 32])?);
+    Ok(())
+}
