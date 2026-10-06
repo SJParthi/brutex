@@ -473,18 +473,19 @@ fn beta_continued_fraction(a: f64, b: f64, x: f64) -> f64 {
     /// Iterations before the fraction is declared not to converge. The tails
     /// this crate asks for converge in tens of terms at any degrees of freedom.
     const MAX_TERMS: u32 = 100_000;
+    let guard = lentz_guard;
     let mut upper = 1.0;
-    let mut lower = 1.0 / lentz_guard(1.0 - (a + b) * x / (a + 1.0));
+    let mut lower = 1.0 / guard(1.0 - (a + b) * x / (a + 1.0));
     let mut fraction = lower;
     for term in 1..=MAX_TERMS {
         let term = f64::from(term);
         let even = term * (b - term) * x / ((a - 1.0 + 2.0 * term) * (a + 2.0 * term));
-        lower = 1.0 / lentz_guard(1.0 + even * lower);
-        upper = lentz_guard(1.0 + even / upper);
+        lower = 1.0 / guard(1.0 + even * lower);
+        upper = guard(1.0 + even / upper);
         fraction *= lower * upper;
         let odd = -(a + term) * (a + b + term) * x / ((a + 2.0 * term) * (a + 1.0 + 2.0 * term));
-        lower = 1.0 / lentz_guard(1.0 + odd * lower);
-        upper = lentz_guard(1.0 + odd / upper);
+        lower = 1.0 / guard(1.0 + odd * lower);
+        upper = guard(1.0 + odd / upper);
         let step = lower * upper;
         fraction *= step;
         if (step - 1.0).abs() < EPSILON {
