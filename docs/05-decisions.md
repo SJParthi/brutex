@@ -64277,3 +64277,46 @@ FNV-1a 64 fingerprint of `index:name` over the first 370 rows. A row
 appended past them does not move it; a renamed, swapped or reused bit does.
 On the same planted swap it fails ("a bit below 370 changed its name").
 Test-only, so it adds no Gate 18 mutant. V-01 names it.
+
+### D-3692 — Gate 1's compiled-root list honours a member's turned-off discovery and target overrides — 2026-10-06
+
+**Finding (gap audit, coordinator's #7; verified here).** `source_scan`'s
+`compiled_roots` counted every conventional target path of a member crate
+(`build.rs`, `src/lib.rs`, `src/main.rs`, `src/bin/*`, `tests/*`,
+`benches/*`, `examples/*`) as compiled even when that crate's manifest turned
+discovery off (`autobins`, `autotests`, `autobenches`, `autoexamples =
+false`), moved the library (`[lib] path`) or the build script (`build =
+false` or a path), so a file nothing compiles could not be reported as an
+orphan. It also read `build = false` as the path `crates/<c>/false`.
+**Planted and confirmed:** the new test run against the previous function
+returned all thirteen paths, `crates/a/false` among them, where five are
+compiled.
+
+**The change.** Each member's `Cargo.toml` leaves record what it turns off;
+a conventional path is a root only while Cargo still discovers it, an
+explicitly named `[[bin]]`/`[[test]]`/`[[bench]]`/`[[example]]` still makes
+`<dir>/<name>.rs` a root, and `build = false`/`true` is a switch, not a path.
+`a_target_cargo_does_not_discover_is_not_a_root`. No tracked manifest uses
+any of these keys today, so no gate result changes on this tree.
+
+### D-3693 — A ✓ invariant row without its trailing pipe is still checked — 2026-10-06
+
+**Finding (coordinator's #8; verified here).** `invariant_paths::row_cells`
+pushed a cell only at a `|`, so `| X | claim | proof | ✓` (no trailing pipe)
+lost its status cell and skipped the "names a proof" check and bare-name
+resolution. **Planted and confirmed:** the previous code returned no refusal
+for `| X-01 | a property | the same test | ✓`. **The change:** a non-empty
+remainder after the last pipe is a cell. The row is refused now, and a
+well-formed proof row without a trailing pipe still passes
+(`a_tick_row_must_name_a_test_a_gate_or_a_front_end_test_file`). Gate 10 is
+green on `docs/04-invariants.md`.
+
+### D-3694 — "gate N" names a CI gate only as a word — 2026-10-06
+
+**Finding (coordinator's #9; verified here).** `names_a_proof` accepted any
+`gate ` followed by a digit, so "the aggregate 7 trials" or "subgate 3"
+counted as naming a CI gate. **Planted and confirmed:** the previous code
+accepted "| X-01 | a property | the aggregate 7 trials | ✓ |". **The change:**
+the match must not follow a letter, digit or underscore; "aggregate 7",
+"subgate 3" and "the_gate 5" are refused, "CI gate 24", "Gate 17" and
+"(gate 17)" are accepted, in the same test.

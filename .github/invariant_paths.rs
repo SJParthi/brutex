@@ -596,6 +596,14 @@ fn row_cells(line: &str) -> Vec<&str> {
             start = at + 1;
         }
     }
+    // A ROW WITHOUT ITS TRAILING PIPE still ends in a cell (D-3693): `| X |
+    // claim | proof | ✓` lost its status cell here and skipped every check.
+    if let Some(last) = line.get(start..)
+        && start > 0
+        && !last.trim().is_empty()
+    {
+        cells.push(last);
+    }
     cells
 }
 
@@ -615,9 +623,11 @@ fn row_cells(line: &str) -> Vec<&str> {
 /// not certify a named one.
 fn names_a_proof(proof: &str, functions: &HashSet<&str>) -> bool {
     let lower = proof.to_ascii_lowercase();
-    let gate = lower
-        .match_indices("gate ")
-        .any(|(at, word)| lower[at + word.len()..].starts_with(|c: char| c.is_ascii_digit()));
+    // "gate" AS A WORD (D-3694): "aggregate 7" or "subgate 3" names no gate.
+    let gate = lower.match_indices("gate ").any(|(at, word)| {
+        !lower[..at].ends_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+            && lower[at + word.len()..].starts_with(|c: char| c.is_ascii_digit())
+    });
     gate || lower.contains(".test.js")
         || proof.split('`').skip(1).step_by(2).any(|value| {
             let value = value.strip_suffix("()").unwrap_or(value);
@@ -947,6 +957,8 @@ mod tests {
             "| X-01 | a property | Gate 17, the swept crates | ✓ |",
             "| X-01 | a property | `web/tests/live.test.js` | ✓ |",
             "| X-01 | a \\| piped property | `the_long_test` | ✓ |",
+            "| X-01 | a property | `the_long_test` | ✓",
+            "| X-01 | a property | (gate 17) | ✓ |",
         ] {
             assert!(unproven_ticks(named, TESTS).is_empty(), "{named}");
         }
@@ -957,6 +969,13 @@ mod tests {
             "| X-01 | a property | the aggregate count | ✓ |",
             "| X-01 | a property | gate keeping | ✓ |",
             "| X-01 | a property | D-0593 | ✓ |",
+            // D-3694: a word that merely ENDS in "gate" names no CI gate.
+            "| X-01 | a property | the aggregate 7 trials | ✓ |",
+            "| X-01 | a property | subgate 3, a helper | ✓ |",
+            "| X-01 | a property | the_gate 5 | ✓ |",
+            // D-3693: a row written without its trailing pipe is still a row.
+            "| X-01 | a property | the same test | ✓",
+            "| X-01 | a property | the same test | ✓   ",
         ] {
             let refused = unproven_ticks(unnamed, TESTS);
             assert_eq!(refused.len(), 1, "{unnamed}");
