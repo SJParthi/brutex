@@ -63301,3 +63301,17 @@ build does not have, so `==` to `!=` survived.
 returns zero without reading it, and anything else is converted and
 refused at zero ppm. A test covers each case without a store
 (G18-cli-a-20).
+
+### D-2017 — `first_accepted_in_order` runs a counted loop — 2026-10-06
+
+**What was observed.** Gate 18 run 1283 timed out two mutants of
+`first_accepted_in_order`'s `while out.len() < top && !rest.is_empty()`
+(shards 13 and 16, 3181 s and 2772 s of tests). With `||`, an empty
+rest never ended the loop. A timeout is refused like a survivor, and
+each one cost its shard most of an hour.
+
+**Decided.** The loop is `for _ in 0..keyed.len()`. Every round consumes
+at least one key, so that many rounds always suffice. The round breaks
+when `top` rows are accepted or no window is left to cut
+(`cut.checked_sub(1)` is `None`). No single mutation can make it spin
+(G18-cli-a-35). Output and cost class are unchanged.

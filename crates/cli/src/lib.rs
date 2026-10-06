@@ -19746,16 +19746,27 @@ fn first_accepted_in_order<'t, T, K: Ord>(
         .map(|(at, item)| (key(item), at))
         .collect();
     let mut out: Vec<&'t T> = Vec::with_capacity(top.min(items.len()));
+    // BOUNDED BY THE KEYS, NOT BY A CONDITION (G18-cli-a-35, D-2017). Every
+    // round below consumes at least one key, so `keyed.len()` rounds always
+    // suffice. The `while` this replaces ran on `out.len() < top &&
+    // !rest.is_empty()`, and a single mutation of that guard (`||`, `<=`)
+    // spun on an empty rest until Gate 18 timed it out; a counted loop cannot.
+    let rounds = keyed.len();
     let mut rest: &mut [(K, usize)] = &mut keyed;
     let mut window = top;
-    while out.len() < top && !rest.is_empty() {
+    for _ in 0..rounds {
+        if out.len() == top {
+            break;
+        }
+        // An empty rest, or a TOP of zero, leaves no window to cut.
         let cut = window.min(rest.len());
+        let Some(last) = cut.checked_sub(1) else {
+            break;
+        };
         // SELECTED EVEN WHEN THE WINDOW IS THE WHOLE REST. Skipping that case
         // saved one O(len) pass before the O(len log len) sort below, and no
         // output could tell the skip from the pass (G18-cli-a-16, D-2012).
-        if let Some(last) = cut.checked_sub(1) {
-            rest.select_nth_unstable(last);
-        }
+        rest.select_nth_unstable(last);
         let (head, tail) = core::mem::take(&mut rest).split_at_mut(cut);
         head.sort_unstable();
         for (_, at) in head.iter() {
