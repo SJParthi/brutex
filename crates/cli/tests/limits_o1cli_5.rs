@@ -46,67 +46,73 @@ fn body(head: &str) -> &'static str {
         .expect("its body")
 }
 
-/// THE EXTRA SPAN LOAD AT EACH OF THE FOUR ENTRY POINTS IS STATED, AND STILL
-/// PAID.
+/// THE SPAN READ FOR ONE NUMBER IS THE SPAN THE HANDED-OFF WORK READS. D-1839.
+///
+/// Each of the four entry points read a whole span for one number, dropped it,
+/// and the work it handed off read the same months again. Each now reads it
+/// through `read_signal_span` once and seeds the `ScreenCache` that work reads,
+/// and nothing drops it to read it again.
 #[test]
-fn the_span_loaded_for_one_number_is_stated_and_still_paid() {
+fn the_span_loaded_for_one_number_seeds_the_work_it_hands_off() {
     let limit =
         limit("## Four commands load a span for one number, then load it again (audit o1cli-5)");
     for sentence in [
-        "`elite_descend_in_points_inner` loads the span for `reference_price`, drops it",
-        "`reference_of_span`, which `screen_arm` calls before `screen_range`",
-        "`screen_range_in_points` loads the span for `reference_price` and the derived rules, then calls `screen_range`",
-        "`descent_bar_count` loads the span for its bar count and the derived floors",
-        "one extra full span load per command, O(span bars)",
+        "Fixed by D-1839",
+        "seeds the `ScreenCache` the handed-off work reads",
         "the record count in a month's header is not the swept bar count",
+        "`a_span_read_for_one_number_seeds_the_screen_that_follows`",
     ] {
         assert!(
             limit.contains(sentence),
             "the limit must say: {sentence}\n{limit}"
         );
     }
+    for head in [
+        "\nfn elite_descend_in_points_inner(",
+        "\nfn reference_of_span(",
+        "\npub fn screen_range_in_points(",
+        "\nfn descent_bar_count(",
+        "\nfn descent_bar_count_at(",
+    ] {
+        let found = body(head);
+        assert!(
+            !found.contains("stored::load_span(") && !found.contains("drop(loaded);"),
+            "{head} reads or drops the span outside the shared read"
+        );
+    }
     let points = body("\nfn elite_descend_in_points_inner(");
-    assert!(points.contains("stored::load_span(") && points.contains("drop(span);"));
-    assert!(points.contains("elite_descend_with_attempt("));
+    assert!(points.contains("read_signal_span(") && points.contains("ScreenCache::seeded("));
+    assert!(!points.contains("drop(span);"));
+    assert!(points.contains("elite_descend_seeded("));
     let reference = body("\nfn reference_of_span(");
-    assert!(reference.contains("stored::load_span(") && reference.contains("drop(loaded);"));
+    assert!(reference.contains("read_signal_span(") && reference.contains("ScreenCache::seeded("));
     let arm = body("\nfn screen_arm(");
     let after = arm
         .split_once("reference_of_span(")
         .expect("the arm asks for a reference")
         .1;
-    assert!(
-        after.contains("screen_range("),
-        "the arm no longer screens after the reference: update the limit"
-    );
+    assert!(after.contains("screen_range_seeded(") && after.contains("seeded,"));
     let screen = body("\npub fn screen_range_in_points(");
     let after = screen
-        .split_once("stored::load_span(")
-        .expect("it loads the span")
+        .split_once("read_signal_span(")
+        .expect("it reads the span")
         .1;
-    assert!(after.contains("drop(span);") && after.contains("screen_range("));
-    let count = body("\nfn descent_bar_count(");
-    assert!(count.contains("stored::load_span(") && count.contains("loaded.bars.len()"));
-    assert!(body("\nfn elite_descend_with_attempt(").contains("descent_bar_count("));
-    assert!(body("\npub fn screen_range(").contains("screen_range_inner("));
-    // Since o1cli-1 (D-0997) the screen reaches its load through a per-command
-    // cache: `screen_range_kernel_cached` loads once per key through
-    // `load_screen_inputs`, so a lone screen still loads its own span.
-    assert!(body("\nfn screen_range_inner(").contains("screen_range_kernel_cached("));
-    // D-2101 routes that load through `ScreenCache::inputs`, which the
-    // descent's swept-row count shares, so the kernel asks the cache and the
-    // cache's one method calls the loader.
+    assert!(!after.contains("drop(span);\n    let policy"));
+    assert!(after.contains("ScreenCache::seeded(") && after.contains("screen_range_seeded("));
+    assert!(body("\nfn descent_bar_count_at(").contains("cache\n        .signal_span(key)"));
+    let descent = body("\nfn elite_descend_seeded(");
+    assert!(descent.contains("&mut cache,") && !descent.contains("ScreenCache::default()"));
+    assert!(body("\nfn load_screen_inputs(").contains("Some(span) => span,"));
+    // D-2101 routes the kernel's load through `ScreenCache::inputs`, and that
+    // one loader takes a seed only for its own key. D-1839 at integration.
     assert!(body("\nfn screen_range_kernel_cached(").contains("cache.inputs("));
-    let cache = LIB
-        .split_once("\nimpl ScreenCache {")
-        .expect("the screen cache has methods")
+    let inputs = LIB
+        .split_once("\n    fn inputs(")
+        .expect("the screen cache loads its inputs")
         .1
-        .split_once("\n}\n")
-        .expect("the impl closes")
+        .split_once("\n    }\n")
+        .expect("the method closes")
         .0;
-    assert!(cache.contains("load_screen_inputs("));
-    assert!(
-        body("\nfn load_screen_inputs(").contains("stored::load_span("),
-        "the screen no longer loads its own span: update the limit"
-    );
+    assert!(inputs.contains("Some((held, seeded)) if held == key => Some(seeded),"));
+    assert!(inputs.contains("load_screen_inputs(root, vendor, underlying, rung, span, seeded)"));
 }

@@ -11634,9 +11634,24 @@ the counts the tests assert: no bench times the fold.
   not a fix: the record count in a month's header is not the swept bar
   count, which excludes withheld days, and the reference price and floors
   need the bars themselves. Sharing one load with the handed-off work is
-  possible and is not done here. Stated from the code's shape; not timed.
-  Held to the code by `the_span_loaded_for_one_number_is_stated_and_still_paid`
-  in `crates/cli/tests/limits_o1cli_5.rs`.
+  possible and was not done then. (Historical: this bullet describes the code
+  before D-1839; its former test was replaced with the fix.)
+
+**Fixed by D-1839 (2026-10-04).** Each of the four entries now reads the span
+once, through `read_signal_span`, takes its number off those bars, and seeds
+the `ScreenCache` the handed-off work reads: `elite_descend_in_points_inner`
+and `reference_of_span` hand the span on instead of dropping it,
+`screen_range_in_points` screens over the span it measured, and
+`descent_bar_count` reads through the descent's own cache, so the first step
+takes the span the count read. The screen kernel takes a seed only for its own
+key; a seed for another question is left alone and the kernel reads its own
+span. Header counts are still not used: the record count in a month's header
+is not the swept bar count, which excludes withheld days. Counted, not timed: a
+descent's bar count and first step read the 5min span twice before and once
+after (`a_span_read_for_one_number_seeds_the_screen_that_follows`). What
+remains per command is the one read the work itself needs. Held to the code by
+`the_span_loaded_for_one_number_seeds_the_work_it_hands_off` in
+`crates/cli/tests/limits_o1cli_5.rs`.
 
 ## The audit kernel reads its daily and minute contexts twice (audit o1cli-4)
 

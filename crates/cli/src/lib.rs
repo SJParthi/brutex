@@ -1507,20 +1507,21 @@ fn screen_arm(
                 return refuse(out, &why);
             }
             // The bars this reads are the WORK's, so a refusal here is too.
-            let reference = match reference_of_span(vendor, underlying, rung, span) {
-                Ok(price) => price,
+            // THE SPAN READ FOR THE REFERENCE IS THE SPAN SCREENED: it seeds the
+            // screen's cache rather than being dropped and read again. D-1839.
+            let (reference, seeded) = match reference_of_span(vendor, underlying, rung, span) {
+                Ok(pair) => pair,
                 Err(why) => return fail(out, why.trim_start_matches("refused: ").trim_end()),
             };
             let ceiling_ppm = match ceiling_in_ppm(pts, reference) {
                 Ok(ppm) => ppm,
                 Err(why) => return refuse(out, why.trim_start_matches("refused: ").trim_end()),
             };
-            let text = screen_range(
+            let text = screen_range_seeded(
                 vendor,
                 underlying,
                 rung,
-                (fy, fm),
-                (ty, tm),
+                ((fy, fm), (ty, tm)),
                 sup,
                 Policy {
                     rules: Rules {
@@ -1566,6 +1567,7 @@ fn screen_arm(
                     // candidates now, marked `UNVALIDATED` on their face.
                     validate: validate_from_env(),
                 },
+                seeded,
             );
             let code = work_exit(&text);
             out.push_str(&text);
@@ -15925,13 +15927,27 @@ fn descent_bar_count(
     underlying: &str,
     rung: &str,
     span: ((u16, u8), (u16, u8)),
-    max_mae_ppm: i64,
-    top: usize,
+    (max_mae_ppm, top): (i64, usize),
+    cache: &mut ScreenCache,
 ) -> Result<(u64, Rules), String> {
-    let (from, to) = span;
     let root = store_root()?;
     let vendor = parse_vendor(vendor_word)?;
-    let loaded = stored::load_span(&root, vendor, underlying, rung, from, to)
+    descent_bar_count_at(
+        screen_key(&root, vendor, underlying, rung, span),
+        (max_mae_ppm, top),
+        cache,
+    )
+}
+
+/// [`descent_bar_count`] over a resolved store, reading the span through
+/// `cache` and leaving it there for the descent's first step. D-1839.
+fn descent_bar_count_at(
+    key: ScreenKey,
+    (max_mae_ppm, top): (i64, usize),
+    cache: &mut ScreenCache,
+) -> Result<(u64, Rules), String> {
+    let loaded = cache
+        .signal_span(key)
         .map_err(|why| format!("before the walk began, so no floor could be derived: {why}"))?;
     let bars = u64::try_from(loaded.bars.len()).unwrap_or(u64::MAX);
     if bars == 0 {
@@ -16076,6 +16092,36 @@ fn elite_descend_with_attempt(
     lens: runner::rank::Lens,
     attempt: Option<u64>,
 ) -> String {
+    elite_descend_seeded(
+        vendor_word,
+        underlying,
+        rung,
+        span,
+        limits,
+        lens,
+        attempt,
+        ScreenCache::default(),
+    )
+}
+
+/// [`elite_descend_with_attempt`] over `cache`, which may already hold the
+/// signal span its caller read. The bar count, the swept-row count, the
+/// measured rules and every step of the walk read that one span; nothing reads
+/// it a second time. D-1839, o1cli-5.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the seven descent inputs plus the input cache its caller may have seeded (D-1839); the cache is state, not part of the question"
+)]
+fn elite_descend_seeded(
+    vendor_word: &str,
+    underlying: &str,
+    rung: &str,
+    span: ((u16, u8), (u16, u8)),
+    limits: (i64, usize),
+    lens: runner::rank::Lens,
+    attempt: Option<u64>,
+    mut cache: ScreenCache,
+) -> String {
     let (max_mae_ppm, top) = limits;
     // D-1727's door bound is the tighter of the two and is the one named, as
     // `elite_descend_in_points_inner` names it (D-1934). The assertion beside
@@ -16102,11 +16148,17 @@ fn elite_descend_with_attempt(
     //
     // A support is a fraction of a bar count, and a bar count comes from opening
     // the span. Nothing about the floor needs a sweep, a trade or a statistic.
-    let (bar_count, rules) =
-        match descent_bar_count(vendor_word, underlying, known, span, max_mae_ppm, top) {
-            Ok(pair) => pair,
-            Err(why) => return format!("refused: {why}\n"),
-        };
+    let (bar_count, rules) = match descent_bar_count(
+        vendor_word,
+        underlying,
+        known,
+        span,
+        (max_mae_ppm, top),
+        &mut cache,
+    ) {
+        Ok(pair) => pair,
+        Err(why) => return format!("refused: {why}\n"),
+    };
     // THE FLOOR IS DERIVED FROM WHAT THE STATISTICS CAN SUPPORT, not from a
     // cadence somebody typed.
     //
@@ -16133,9 +16185,10 @@ fn elite_descend_with_attempt(
     if let Some(why) = unsatisfiable_confidence_pair(&rules) {
         return why;
     }
-    // LOADED ONCE, HERE, AND HELD FOR EVERY STEP: nothing a step loads
-    // depends on its support. D-0997, o1cli-1.
-    let mut cache = ScreenCache::default();
+    // LOADED ONCE AND HELD FOR EVERY STEP: nothing a step loads depends on
+    // its support. D-0997, o1cli-1. The span is the one `descent_bar_count`
+    // already holds in `cache` (or its caller seeded), so the swept-row count
+    // and the first step read no months of their own. D-1839, o1cli-5.
     // THE FLOOR IS A FRACTION OF THE ROWS THAT CAN HIT. Each step scales its
     // support to the column's swept rows (D-2101), so a floor in ppm of the
     // retained count, warm-up included, would ask the step for fewer hits
@@ -16519,7 +16572,7 @@ fn elite_descend_in_points_inner(
     // constant and not from a different rung. A span that refuses here refuses
     // before any threshold is derived, which is the honest order: a floor
     // computed from bars nobody could load is arithmetic on an assumption.
-    let span = match stored::load_span(&root, vendor, underlying, rung, from, to) {
+    let span = match read_signal_span(&root, vendor, underlying, rung, (from, to)) {
         Ok(span) => span,
         Err(why) => {
             return format!(
@@ -16529,10 +16582,15 @@ fn elite_descend_in_points_inner(
         }
     };
     let reference = reference_price(&span.bars);
-    // Dropped before the walk: `elite_descend` loads its own, and holding a
-    // second copy of a multi-year span for the length of a descent is memory
-    // nothing reads. Same reasoning `elite_descend` states for its own seed.
-    drop(span);
+    // HELD, NOT DROPPED AND READ AGAIN (D-1839, o1cli-5). This span was dropped
+    // here and the descent then read the same months twice more: once for its
+    // bar count and once for its first step. It now seeds the descent's cache,
+    // and both read it from there; the first step moves it into its inputs, so
+    // only one copy is ever held.
+    let cache = ScreenCache::seeded(
+        screen_key(&root, vendor, underlying, rung, (from, to)),
+        span,
+    );
     let max_mae_ppm = points_to_ppm_at(max_points, reference);
     if max_mae_ppm <= 0 {
         return format!(
@@ -16542,7 +16600,7 @@ fn elite_descend_in_points_inner(
              swept with.\n"
         );
     }
-    elite_descend_with_attempt(
+    elite_descend_seeded(
         vendor_word,
         underlying,
         rung,
@@ -16550,6 +16608,7 @@ fn elite_descend_in_points_inner(
         (max_mae_ppm, top),
         lens,
         attempt,
+        cache,
     )
 }
 
@@ -16579,30 +16638,31 @@ fn ceiling_in_ppm(points: i64, reference_paisa: i64) -> Result<i64, String> {
     Ok(ppm)
 }
 
-/// The reference price of one stored span, for a caller that has no bars.
+/// The reference price of one stored span, for a caller that has no bars,
+/// and the screen cache that span seeds.
 ///
-/// Loads the span, reads the midpoint of its own extremes, and drops it. The
-/// second load is the cost [`elite_descend_in_points`] already documents and
-/// accepts: converting a points rule needs a price, and the only honest price is
-/// the one these bars actually traded at.
+/// Reads the span and the midpoint of its own extremes: converting a points
+/// rule needs a price, and the only honest price is the one these bars actually
+/// traded at. The span is handed back inside a [`ScreenCache`] keyed to it, so
+/// the screen that follows reads these bars rather than the months again.
+/// D-1839, o1cli-5.
 fn reference_of_span(
     vendor_word: &str,
     underlying: &str,
     rung: &str,
     span: ((u16, u8), (u16, u8)),
-) -> Result<i64, String> {
-    let (from, to) = span;
+) -> Result<(i64, ScreenCache), String> {
     let root = store_root().map_err(|why| format!("refused: {why}\n"))?;
     let vendor = parse_vendor(vendor_word).map_err(|why| format!("refused: {why}\n"))?;
-    let loaded = stored::load_span(&root, vendor, underlying, rung, from, to).map_err(|why| {
+    let loaded = read_signal_span(&root, vendor, underlying, rung, span).map_err(|why| {
         format!(
             "refused before the ceiling could be converted, so nothing was \
              screened: {why}\n"
         )
     })?;
     let reference = reference_price(&loaded.bars);
-    drop(loaded);
-    Ok(reference)
+    let key = screen_key(&root, vendor, underlying, rung, span);
+    Ok((reference, ScreenCache::seeded(key, loaded)))
 }
 
 /// [`screen_range`] with the stop ceiling in POINTS and the policy built here.
@@ -16670,7 +16730,7 @@ pub fn screen_range_in_points(
     // SAME CONVERSION AS THE DESCENT, AND FOR THE SAME REASON. See
     // `elite_descend_in_points`: a points ceiling converted against a constant
     // is doubled on BANKNIFTY and halved on a 2020 low.
-    let span = match stored::load_span(&root, vendor, underlying, rung, from, to) {
+    let span = match read_signal_span(&root, vendor, underlying, rung, (from, to)) {
         Ok(span) => span,
         Err(why) => {
             return format!(
@@ -16699,13 +16759,23 @@ pub fn screen_range_in_points(
     // only reason the bars are still here to measure. It sat between
     // `reference_price` and the conversion purely to release the load early.
     let rules = Rules::elite_on(&span.bars, horizon_for(&span.bars, false), max_mae_ppm, top);
-    drop(span);
     let policy = Policy {
         rules,
         lens: runner::rank::Lens::Payoff,
         validate: validate_from_env(),
     };
-    screen_range(vendor_word, underlying, rung, from, to, support_ppm, policy)
+    // THE MEASURED SPAN IS THE SCREENED SPAN: it seeds the screen's cache
+    // instead of being dropped and read again by the kernel. D-1839, o1cli-5.
+    let key = screen_key(&root, vendor, underlying, rung, (from, to));
+    screen_range_seeded(
+        vendor_word,
+        underlying,
+        rung,
+        (from, to),
+        support_ppm,
+        policy,
+        ScreenCache::seeded(key, span),
+    )
 }
 
 /// The tail of a descent that admitted nothing at any support.
@@ -17815,6 +17885,32 @@ pub fn screen_range(
     }
 }
 
+/// [`screen_range`] over a cache its caller seeded with the signal span it
+/// already read, so the kernel does not read those months again. D-1839.
+fn screen_range_seeded(
+    vendor_word: &str,
+    underlying: &str,
+    rung: &str,
+    span: ((u16, u8), (u16, u8)),
+    support_ppm: u64,
+    policy: Policy,
+    mut cache: ScreenCache,
+) -> String {
+    match screen_range_inner(
+        vendor_word,
+        underlying,
+        rung,
+        span,
+        support_ppm,
+        policy,
+        None,
+        &mut cache,
+    ) {
+        Ok(text) => text,
+        Err(why) => format!("refused: {why}\n"),
+    }
+}
+
 /// [`screen_range`] under one exact browser attempt, reusing `cache`'s
 /// support-independent inputs when it holds this question (D-0997).
 #[expect(
@@ -17992,6 +18088,74 @@ struct ScreenInputs {
 #[derive(Default)]
 struct ScreenCache {
     loaded: Option<(ScreenKey, Result<ScreenInputs, stored::Refusal>)>,
+    /// A signal span already read for this key, by an entry that needed its
+    /// bars before the screen (a reference price, a bar count, measured
+    /// rules). The first load for the same key takes it instead of reading the
+    /// months again. D-1839, o1cli-5.
+    seed: Option<(ScreenKey, stored::Span)>,
+}
+
+impl ScreenCache {
+    /// A cache holding `span`, already read for `key`.
+    fn seeded(key: ScreenKey, span: stored::Span) -> Self {
+        Self {
+            loaded: None,
+            seed: Some((key, span)),
+        }
+    }
+
+    /// The signal span for `key`: the held seed when it is for `key`,
+    /// otherwise read once and held as the seed.
+    fn signal_span(&mut self, key: ScreenKey) -> Result<&stored::Span, stored::Refusal> {
+        if self.seed.as_ref().is_none_or(|(held, _)| *held != key) {
+            let span =
+                read_signal_span(&key.root, key.vendor, &key.underlying, &key.rung, key.span)?;
+            self.seed = Some((key, span));
+        }
+        self.seed
+            .as_ref()
+            .map(|(_, span)| span)
+            .ok_or_else(|| "the screen seed holds nothing after a read".to_owned())
+    }
+}
+
+/// The [`ScreenKey`] of one stored question.
+fn screen_key(
+    root: &std::path::Path,
+    vendor: Vendor,
+    underlying: &str,
+    rung: &str,
+    span: ((u16, u8), (u16, u8)),
+) -> ScreenKey {
+    ScreenKey {
+        root: root.to_path_buf(),
+        vendor,
+        underlying: underlying.to_owned(),
+        rung: rung.to_owned(),
+        span,
+    }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// Test-only: signal-span reads by the screen and descent entries and the
+    /// screen kernel on this thread. D-1839.
+    static SIGNAL_SPAN_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The one read of a stored question's signal span: every screen and descent
+/// entry and the screen kernel read through here, so a test counts them.
+/// D-1839.
+fn read_signal_span(
+    root: &std::path::Path,
+    vendor: Vendor,
+    underlying: &str,
+    rung: &str,
+    (from, to): ((u16, u8), (u16, u8)),
+) -> Result<stored::Span, stored::Refusal> {
+    #[cfg(test)]
+    SIGNAL_SPAN_READS.with(|reads| reads.set(reads.get().saturating_add(1)));
+    stored::load_span(root, vendor, underlying, rung, from, to)
 }
 
 impl ScreenCache {
@@ -18013,9 +18177,18 @@ impl ScreenCache {
             span,
         };
         if self.loaded.as_ref().is_none_or(|(held, _)| *held != key) {
+            // A SEEDED SPAN IS USED ONLY FOR ITS OWN KEY; any other seed is
+            // left where it is and the span is read. D-1839.
+            let seeded = match self.seed.take() {
+                Some((held, seeded)) if held == key => Some(seeded),
+                other => {
+                    self.seed = other;
+                    None
+                }
+            };
             self.loaded = Some((
                 key,
-                load_screen_inputs(root, vendor, underlying, rung, span),
+                load_screen_inputs(root, vendor, underlying, rung, span, seeded),
             ));
         }
         match &self.loaded {
@@ -18078,10 +18251,14 @@ fn load_screen_inputs(
     underlying: &str,
     rung: &str,
     (from, to): ((u16, u8), (u16, u8)),
+    seeded: Option<stored::Span>,
 ) -> Result<ScreenInputs, stored::Refusal> {
     #[cfg(test)]
     SCREEN_SPAN_LOADS.with(|loads| loads.set(loads.get().saturating_add(1)));
-    let mut span = stored::load_span(root, vendor, underlying, rung, from, to)?;
+    let mut span = match seeded {
+        Some(span) => span,
+        None => read_signal_span(root, vendor, underlying, rung, (from, to))?,
+    };
     let signal_length = stored::rung_length_micros(rung)?;
 
     let execution_bars = if rung == EXECUTION_RUNG {
