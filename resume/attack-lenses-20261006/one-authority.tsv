@@ -1,2 +1,4 @@
 id	state	commit	note
 L4-R1	found	-	round 1 started: four read-only lens agents (a rust-only, b one-authority, c runtime, d docs-law)
+L4-R1a	pushed	0edc1a0	D-3500..D-3502 validated
+L4-R1b	fixing	d02e10a	D-3503..D-3507 WIP, paused (usage guard)
