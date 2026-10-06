@@ -766,7 +766,10 @@ fn generated_public_command_flow(root: &std::path::Path) -> Result<(), Box<dyn s
     // THE PREMISE, CHECKED BEFORE THE WORK (G18-cli-a-36, D-2018): this
     // test is fast only because validation is OFF. Were the knob not read
     // as off, the run below would price the full stack for an hour.
-    assert!(!crate::validate_from_env(), "BRUTEX_VALIDATE=0 turns validation off");
+    assert!(
+        !crate::validate_from_env(),
+        "BRUTEX_VALIDATE=0 turns validation off"
+    );
     let commands: &[&[&str]] = &[
         &[
             "auto-stored",
@@ -1662,7 +1665,10 @@ fn bounded_header_knobs() {
     // THE PREMISE, CHECKED BEFORE THE WORK (G18-cli-a-36, D-2018): this
     // test is fast only because validation is OFF. Were the knob not read
     // as off, the run below would price the full stack for an hour.
-    assert!(!crate::validate_from_env(), "BRUTEX_VALIDATE=0 turns validation off");
+    assert!(
+        !crate::validate_from_env(),
+        "BRUTEX_VALIDATE=0 turns validation off"
+    );
     crate::knobs::set("BRUTEX_GRID_RUNGS", "2");
 }
 
@@ -3032,7 +3038,10 @@ fn a_range_descent_prepares_its_stored_inputs_once() {
     // THE PREMISE, CHECKED BEFORE THE WORK (G18-cli-a-36, D-2018): this
     // test is fast only because validation is OFF. Were the knob not read
     // as off, the run below would price the full stack for an hour.
-    assert!(!crate::validate_from_env(), "BRUTEX_VALIDATE=0 turns validation off");
+    assert!(
+        !crate::validate_from_env(),
+        "BRUTEX_VALIDATE=0 turns validation off"
+    );
     let fixture = Fixture::warmed();
     let store = crate::RungStore {
         root: Ok(fixture.root.clone()),
@@ -3407,7 +3416,10 @@ fn a_named_range_support_is_scaled_to_the_swept_rows_not_the_warm_up() {
     // THE PREMISE, CHECKED BEFORE THE WORK (G18-cli-a-36, D-2018): this
     // test is fast only because validation is OFF. Were the knob not read
     // as off, the run below would price the full stack for an hour.
-    assert!(!crate::validate_from_env(), "BRUTEX_VALIDATE=0 turns validation off");
+    assert!(
+        !crate::validate_from_env(),
+        "BRUTEX_VALIDATE=0 turns validation off"
+    );
     for (rung, retained, swept) in [("1min", 3_000_u64, 1_500_u64), ("5min", 600, 300)] {
         for support in [600_000_u64, 999_999, 1] {
             let fixture = Fixture::warmed();

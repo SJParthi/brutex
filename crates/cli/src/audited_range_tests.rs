@@ -700,7 +700,10 @@ fn the_strict_range_kernel_heads_a_share_gross_and_an_index_as_before() {
     // THE PREMISE, CHECKED BEFORE THE WORK (G18-cli-a-36, D-2018): this
     // test is fast only because validation is OFF. Were the knob not read
     // as off, the run below would price the full stack for an hour.
-    assert!(!crate::validate_from_env(), "BRUTEX_VALIDATE=0 turns validation off");
+    assert!(
+        !crate::validate_from_env(),
+        "BRUTEX_VALIDATE=0 turns validation off"
+    );
     crate::knobs::set("BRUTEX_GRID_RUNGS", "2");
     let index = "\nAUDIT\n  INDEX SPOT run. There is no brokerage";
     let equity = "\nAUDIT\n  CASH EQUITY run. EVERY TOTAL BELOW IS GROSS OF EVERY CHARGE.\n";
