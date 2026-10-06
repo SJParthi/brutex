@@ -990,3 +990,8 @@ A final review of the whole branch checked every number across documents,
 every gated or printed claim against the benches, the gate 14 pins and every
 cited identifier. It found three text defects in this lens's own documents.
 They are corrected by D-3313, in the commit after `fd95f23`.
+
+### Attack lens L2, round 7 — dispositions — 2026-10-06
+
+A review for older text that this lens's measurements contradict found four
+such places. They are corrected by D-3314.

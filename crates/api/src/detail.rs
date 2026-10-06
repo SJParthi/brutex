@@ -761,7 +761,8 @@ static PARENTS: Cached<cli::result_set::CommittedParents> = Cached::new();
 
 /// Refreshes both parent indexes once and returns one owned receipt, with
 /// the instrument its ledger parent names, before the caller refreshes any
-/// child. Cold open is O(history); warm refresh is O(new parent rows), with
+/// child. Cold open is O(history); warm refresh is O(new parent rows), or
+/// O(indexed bytes + new rows) when the ledger grew (D-1560, D-3305), with
 /// each file still subject to the HTTP byte ceiling.
 ///
 /// # Errors
@@ -788,7 +789,8 @@ static LEDGER: Cached<cli::results::Results> = Cached::new();
 /// child: `/sweep-evidence.json` and the AND-mask `/candidate-trades.json`.
 /// It reads the ledger alone, so a damaged receipt sidecar cannot refuse a
 /// saved attempt that never had a receipt. Cold open is O(history); warm
-/// refresh is O(new rows), under the same byte ceiling. Nothing is created:
+/// refresh is O(new rows), or O(indexed bytes + new rows) when the ledger grew
+/// (D-1560, D-3305), under the same byte ceiling. Nothing is created:
 /// an absent or empty ledger is answered before any open.
 ///
 /// AN EMPTY LEDGER IS AN ABSENCE, as `cli::results::Results::open_read` says

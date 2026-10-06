@@ -9702,7 +9702,8 @@ by `File::unlock`. What that does not cover, stated rather than implied away:
 - **`/sweep-evidence.json` reads the ledger now**, and so does the AND-mask
   `/candidate-trades.json`. Each looks up the identity's ledger row on every
   saved page, through a cached, byte-bounded ledger handle: O(history) cold,
-  O(new rows) warm. A damaged or over-limit ledger refuses the page, where
+  O(new rows) warm, or O(indexed bytes + new rows) when another writer grew the
+  ledger (D-1560, D-3305). A damaged or over-limit ledger refuses the page, where
   before the ledger was not read at all. An absent or zero-byte `runs.bin` is
   answered as no row from the path's metadata, one call, before any open, so
   either serves the page served before. That includes a ledger truncated to
@@ -12068,8 +12069,10 @@ rule 6); every bound is read from the source.
   file, and the directory again); the terminal is one append and its `fsync`.
   The directory insert at `create_new` and the lookup at each read depend on
   the filesystem and on the directory's entry count, which grows with every
-  audited request ever served. Disk use is O(history). Not timed: no bench
-  covers the journal, and no measurement of a large directory has been taken.
+  audited request ever served. Disk use is O(history). `begin` and the
+  terminal are not timed. The read side, including its directory lookup, is
+  measured to 10^4 invocations by D-3303's section below. No larger directory
+  has been measured.
   `api::operation_audit::tests::each_audited_request_adds_one_file_and_one_index_slot_and_nothing_is_removed`
   pins the byte and file counts, not the latency.
 - **The terminal is owed, so it is not refused by a full detail pool.**
@@ -12532,8 +12535,9 @@ out of the handle's verified block with no syscall. Gate 8 rows: C-TIX-01
 
 **UNVERIFIED:** a cold DEVICE, the page cache dropped; the daily rung's
 bar-read case, which is counted (at most one) but not timed; the writer's
-rebuild of a large month, which is O(`n_valid`) by construction and timed by
-nothing.
+rebuild of a month past 10^6 bars, which is O(`n_valid`) by construction. The
+rebuild is timed to 10^6 bars by `index_rebuild_cost_grows_with_the_month`
+(D-3302, below); past that it is an extrapolation.
 
 **What the confirmation cannot see.** A reader checks the `.tix` header against
 the month's geometry and the two entries holding the first and last committed

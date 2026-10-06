@@ -63345,3 +63345,20 @@ added.
   three-run range. O1P-04's cells are one run's values.
 
 Text only.
+
+### D-3314 — Older sentences this lens's measurements contradicted, corrected — 2026-10-06
+
+A seventh review found sentences that predate this lens and that its
+measurements now contradict:
+
+- D-2329's "timed by nothing" about the rebuild. D-3302 timed it to 10^6 bars.
+- D-1445's "Not timed … no measurement of a large directory". D-3303
+  measured reads to 10^4 invocations.
+- `cli::operation_audit`'s "no named cost test".
+- Three "O(new rows)" warm-refresh statements in `api::detail` and the
+  D-1560-era api section of `docs/06-limits.md`, which D-3305's correction
+  had missed.
+- The two new `docs/07-o1-architecture.md` rows, which needed their host named
+  and their "every other row" scoped to Gate 8 timing rows.
+
+Text only.
