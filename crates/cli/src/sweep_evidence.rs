@@ -1390,7 +1390,9 @@ fn heal_torn<const N: usize>(file: &File, path: &Path, magic: [u8; 8]) -> Result
     header[..8].copy_from_slice(&magic);
     header[8..12].copy_from_slice(&1_u32.to_le_bytes());
     header[12..].copy_from_slice(&stride.to_le_bytes());
-    crate::fixed_tail::heal_torn_header(file, path, &header).map_err(io_error)?;
+    // An all-zero header-length file is an interrupted genesis too (conc5-1,
+    // D-2644), and is cut by the same shared rule as a strict prefix.
+    crate::fixed_tail::heal_interrupted_header(file, path, &header).map_err(io_error)?;
     crate::fixed_tail::heal_torn_tail(file, path, HEADER, u64::from(stride), &magic)
         .map(|_| ())
         .map_err(io_error)

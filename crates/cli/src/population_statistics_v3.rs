@@ -2867,21 +2867,10 @@ fn header() -> Result<[u8; HEADER_BYTES], PopulationStatisticsV3Refusal> {
 }
 
 fn ensure_header(file: &mut File, path: &Path) -> Result<(), PopulationStatisticsV3Refusal> {
-    let bytes = header()?;
-    // pop2-6, D-2626: a strict prefix of the header never passed its barrier
-    // and names nothing. The writer, under its exclusive lock, cuts it to
-    // nothing and writes the header below, rather than refusing "shorter than
-    // header" on every open. Foreign short bytes are left for `verify_header`.
-    crate::fixed_tail::heal_torn_header(file, path, &bytes)?;
-    let len = file
-        .metadata()
-        .map_err(|why| format!("cannot stat {}: {why}", path.display()))?
-        .len();
-    if len == 0 {
-        file.seek(SeekFrom::Start(0))
-            .and_then(|_| file.write_all(&bytes))
-            .and_then(|()| file.sync_all())
-            .map_err(|why| format!("cannot initialize {}: {why}", path.display()))?;
+    // conc5-1 (D-2644): the shared writer header rule.
+    let init = crate::fixed_tail::init_or_heal_header(file, path, &header()?, File::sync_all)
+        .map_err(|why| format!("cannot initialize {}: {why}", path.display()))?;
+    if init == crate::fixed_tail::HeaderInit::Written {
         // The new names are durable too (D-1903, pop2-5).
         return sync_parent(path);
     }

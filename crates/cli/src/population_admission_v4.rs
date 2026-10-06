@@ -2572,14 +2572,22 @@ impl PopulationAdmissionV4Ledger {
             // an empty file or a strict prefix of the constant header. Only
             // the writer, under the exclusive lock, rewrites that; a reader
             // and any other short content still refuse in `verify_header`.
-            let data_created = created || (writable && holds_torn_header(&mut data_file)?);
-            if data_created {
-                data_file
-                    .seek(SeekFrom::Start(0))
-                    .and_then(|_| data_file.write_all(&header()))
-                    .and_then(|()| data_file.sync_all())
-                    .map_err(|why| format!("cannot initialize Admission V4 data: {why}"))?;
-            }
+            //
+            // ONE HEADER RULE (conc5-1, D-2644): the writer initialises or
+            // heals through `fixed_tail::init_or_heal_header`, which also
+            // cuts and remembers a failed header barrier and re-initialises
+            // an all-zero header, which `holds_torn_header` never matched.
+            let torn = created || (writable && holds_torn_header(&mut data_file)?);
+            let data_created = (writable
+                && crate::fixed_tail::init_or_heal_header(
+                    &mut data_file,
+                    &data_path,
+                    &header(),
+                    File::sync_all,
+                )
+                .map_err(|why| format!("cannot initialize Admission V4 data: {why}"))?
+                    == crate::fixed_tail::HeaderInit::Written)
+                || torn;
             if lock_created || data_created {
                 root_file
                     .sync_all()

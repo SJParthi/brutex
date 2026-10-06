@@ -2270,14 +2270,19 @@ impl PopulationFinalizationV4Ledger {
             // an empty file or a strict prefix of the constant header. Only
             // the writer, under the exclusive lock, rewrites that; a reader
             // and any other short content still refuse in `verify_header`.
-            let data_created = created || (writable && holds_torn_header(&mut data_file)?);
-            if data_created {
-                data_file
-                    .seek(SeekFrom::Start(0))
-                    .and_then(|_| data_file.write_all(&header()))
-                    .and_then(|()| data_file.sync_all())
-                    .map_err(|why| format!("cannot initialize Finalization V4 data: {why}"))?;
-            }
+            //
+            // ONE HEADER RULE (conc5-1, D-2644), as Admission V4.
+            let torn = created || (writable && holds_torn_header(&mut data_file)?);
+            let data_created = (writable
+                && crate::fixed_tail::init_or_heal_header(
+                    &mut data_file,
+                    &data_path,
+                    &header(),
+                    File::sync_all,
+                )
+                .map_err(|why| format!("cannot initialize Finalization V4 data: {why}"))?
+                    == crate::fixed_tail::HeaderInit::Written)
+                || torn;
             if lock_created || data_created {
                 root_file
                     .sync_all()

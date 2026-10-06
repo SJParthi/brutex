@@ -1883,7 +1883,15 @@ fn sweep_all_arm(out: &mut String, vendor: &str, rung: &str, min_hits: &str) -> 
                 return refuse(out, &why);
             }
             let text = batch::sweep_all(vendor, rung, h);
-            let code = work_exit(&text);
+            // A WALK WITH A REFUSED MONTH IS NOT A CLEAN RUN (conc13-7,
+            // D-2643). It exited 0 and `run_durable` wrote `completed` while
+            // the tally said `N refused`; each month is still named and the
+            // rest still swept, but the exit says the walk is not whole.
+            let code = if batch::refused_months(&text) > 0 {
+                FAILED
+            } else {
+                work_exit(&text)
+            };
             out.push_str(&text);
             code
         }
@@ -2083,9 +2091,13 @@ fn range_all_arm(
 /// as a function pointer makes the two literally the same code, so a refusal
 /// reworded for one cannot drift from the other -- and it takes forty-six lines
 /// out of a dispatch table `clippy::too_many_lines` had already outgrown.
+///
+/// The exit rule travels with the command (conc13-6, D-2642): `sweep-stored`
+/// takes [`sweep_exit`], so a halted or unmeasured ladder exits [`FAILED`];
+/// `audit-stored` keeps [`work_exit`].
 fn stored_month_arm(
     out: &mut String,
-    command: fn(&str, &str, &str, u16, u8, u64) -> String,
+    (command, exit): (fn(&str, &str, &str, u16, u8, u64) -> String, fn(&str) -> u8),
     what: (&str, &str, &str),
     when: (&str, &str, &str),
 ) -> u8 {
@@ -2103,7 +2115,7 @@ fn stored_month_arm(
                 return refuse(out, &why);
             }
             let text = command(vendor, underlying, rung, y, m, h);
-            let code = work_exit(&text);
+            let code = exit(&text);
             out.push_str(&text);
             code
         }
@@ -2465,12 +2477,9 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
                 // A sweep that walked no ladder measured nothing, and its own
                 // verdict says the answer is not trustworthy. Exiting 0 on it
                 // let `cli sweep 1 10 && <next>` proceed where `cli audit 1 10`
-                // stopped.
-                let code = if carries_refusal(&text) || nothing_measured(&text) {
-                    FAILED
-                } else {
-                    OK
-                };
+                // stopped. A ladder HALTED on a budget is the same verdict
+                // (conc13-6, D-2642): see `sweep_exit`.
+                let code = sweep_exit(&text);
                 out.push_str(&text);
                 code
             }
@@ -2487,12 +2496,18 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
                 (Err(why), _) | (_, Err(why)) => refuse(out, why),
             }
         }
-        ["sweep-stored", feed, under, rung, year, month, hits] => {
-            stored_month_arm(out, sweep_stored, (feed, under, rung), (year, month, hits))
-        }
-        ["audit-stored", feed, under, rung, year, month, hits] => {
-            stored_month_arm(out, audit_stored, (feed, under, rung), (year, month, hits))
-        }
+        ["sweep-stored", feed, under, rung, year, month, hits] => stored_month_arm(
+            out,
+            (sweep_stored, sweep_exit),
+            (feed, under, rung),
+            (year, month, hits),
+        ),
+        ["audit-stored", feed, under, rung, year, month, hits] => stored_month_arm(
+            out,
+            (audit_stored, work_exit),
+            (feed, under, rung),
+            (year, month, hits),
+        ),
         ["checksum-audit-stored", arguments @ ..] if arguments.len() == 7 => {
             command_report(out, checksum_receipts::command(arguments), "CHECKSUM AUDIT")
         }
@@ -2777,6 +2792,22 @@ pub(crate) fn fail(out: &mut String, why: &str) -> u8 {
 /// [`FAILED`] when it carries a refusal, [`OK`] otherwise (P8-03, D-2722).
 fn work_exit(text: &str) -> u8 {
     if carries_refusal(text) { FAILED } else { OK }
+}
+
+/// The exit code of a rendered `sweep` or `sweep-stored` page (conc13-6,
+/// D-2642): [`FAILED`] on a refusal, on a ladder that never walked
+/// ([`nothing_measured`]), and on one its own verdict says may not be
+/// believed ([`untrustworthy`]) -- a ladder halted on a budget prints
+/// `outcome  REFUSED  the walk stopped short`, indented and in neither
+/// spelling [`refusal_reason`] reads, and both arms exited 0 on it while the
+/// run's sweep evidence recorded `Halted`. The same rule [`auto_stored_exit`]
+/// applies (P8-01, D-2720).
+fn sweep_exit(text: &str) -> u8 {
+    if carries_refusal(text) || nothing_measured(text) || untrustworthy(text) {
+        FAILED
+    } else {
+        OK
+    }
 }
 
 /// The words of a stored request, checked before the build, the store or the
@@ -4392,9 +4423,16 @@ fn stored_month_kernel(
     // and before the render, so a run killed while formatting a large report
     // still leaves its result in the log. `halted` is the field that separates
     // "the ladder went extinct" from "a budget stopped it short", which the
-    // count alone cannot say.
+    // count alone cannot say. A HALTED ladder is a Warn (conc13-6, D-2642):
+    // its own verdict says the answer is not trustworthy, and an Info line
+    // read as a healthy run on `/logs`.
+    let walked = if outcome.sweep.halted.is_some() {
+        telemetry::Event::warn("cli.sweep", "ladder walked")
+    } else {
+        telemetry::Event::info("cli.sweep", "ladder walked")
+    };
     note(
-        &telemetry::Event::info("cli.sweep", "ladder walked")
+        &walked
             .with("identity", id.hex().as_str())
             .with("feed", loaded.vendor.as_str())
             .with(
@@ -8779,7 +8817,13 @@ fn refusal_surface(vendor_word: &str, underlying: &str) -> Check {
 /// does not separate concurrent calls within that process or protect leftovers
 /// after pid reuse. No existing path is deleted to make room for this check.
 fn ledger_round_trip() -> Check {
-    let dir = match verification_scratch() {
+    ledger_round_trip_in(verification_scratch())
+}
+
+/// [`ledger_round_trip`] in a scratch directory the caller claimed, or
+/// refused with the claim's own refusal (P16-03, D-2646).
+fn ledger_round_trip_in(scratch: Result<std::path::PathBuf, String>) -> Check {
+    let dir = match scratch {
         Ok(dir) => dir,
         Err(why) => {
             return Check {
@@ -8842,15 +8886,29 @@ fn ledger_round_trip() -> Check {
     }
 }
 
+/// The process-wide serial [`verification_scratch`] claims from.
+static VERIFICATION_SCRATCH_NEXT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 fn verification_scratch() -> Result<std::path::PathBuf, String> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT: AtomicU64 = AtomicU64::new(0);
+    verification_scratch_from(&VERIFICATION_SCRATCH_NEXT, "")
+}
+
+/// [`verification_scratch`] over a caller's own counter and name tag, so a
+/// test that predicts which serials are claimed owns the counter it predicts
+/// and the names it claims (P16-03, D-2646). Production passes the
+/// process-wide counter and no tag, so its names are unchanged.
+fn verification_scratch_from(
+    next: &std::sync::atomic::AtomicU64,
+    tag: &str,
+) -> Result<std::path::PathBuf, String> {
+    use std::sync::atomic::Ordering;
     // Collisions can be old process leftovers. Only atomic create grants
     // ownership; after a fixed number of collisions the check refuses loudly.
     for _ in 0..16 {
-        let serial = NEXT.fetch_add(1, Ordering::Relaxed);
+        let serial = next.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "brutex-verify-ledger-{}-{serial}",
+            "brutex-verify-ledger-{tag}{}-{serial}",
             std::process::id()
         ));
         match std::fs::create_dir(&path) {
@@ -20456,6 +20514,11 @@ fn ranked_with_progress(
 /// completed. `record_all` returns the `NOT_RECORDED` report and a false commit
 /// flag; command classification recognizes that exact report marker. A live
 /// view's final cleanup is separate from permanent result authority.
+///
+/// An uncommitted run's `live` is DROPPED here, and `Live`'s `Drop` removes
+/// its file (conc17-1, D-2641): a refused command is not a search still
+/// going, and its leftover was served by `/live.json` as one. A process
+/// killed between the two steps still keeps its file, as above.
 fn record_and_finish(
     recording: Option<Recording<'_>>,
     id: Option<&runner::identity::RunId>,
@@ -24072,6 +24135,57 @@ mod tests {
         assert!(!untrustworthy(""));
     }
 
+    /// conc13-6 (D-2642): a ladder HALTED on a budget exits `FAILED` from
+    /// `sweep-stored` (and `sweep`), as its own verdict and its sweep evidence
+    /// say; a NOTHING MEASURED page does too; a complete page exits `OK`; and
+    /// `audit-stored` keeps its rule. On the old code `stored_month_arm` read
+    /// `work_exit` alone, and the halted verdict row -- `outcome  REFUSED  the
+    /// walk stopped short`, indented -- is no refusal spelling, so the halted
+    /// fixture exited `OK`.
+    #[test]
+    fn a_halted_sweep_stored_exits_failed() {
+        use super::{stored_month_arm, sweep_exit, work_exit};
+        fn halted(_: &str, _: &str, _: &str, _: u16, _: u8, _: u64) -> String {
+            "STORED SWEEP FIXTURE\nVERDICT\n  outcome                         REFUSED  the walk stopped short\n  trustworthy as a whole answer        NO  \n".to_owned()
+        }
+        fn unmeasured(_: &str, _: &str, _: &str, _: u16, _: u8, _: u64) -> String {
+            "STORED SWEEP FIXTURE\nVERDICT\n  outcome                NOTHING MEASURED  no ladder was walked -- this is not extinction\n  trustworthy as a whole answer        NO  \n".to_owned()
+        }
+        fn complete(_: &str, _: &str, _: &str, _: u16, _: u8, _: u64) -> String {
+            "STORED SWEEP FIXTURE\nVERDICT\n  outcome                        complete  the frontier went extinct, which is the answer\n  trustworthy as a whole answer       yes  \n".to_owned()
+        }
+        let what = ("zerodha", "NIFTY", "1min");
+        let when = ("2025", "5", "1");
+        for (command, want) in [
+            (halted as fn(&str, &str, &str, u16, u8, u64) -> String, FAILED),
+            (unmeasured, FAILED),
+            (complete, OK),
+        ] {
+            let mut out = String::new();
+            assert_eq!(
+                stored_month_arm(&mut out, (command, sweep_exit), what, when),
+                want,
+                "{out}"
+            );
+            assert_eq!(sweep_exit(&out), want, "{out}");
+        }
+        // The halted page carries no refusal spelling: only the verdict says so.
+        let page = halted("", "", "", 0, 0, 0);
+        assert!(!carries_refusal(&page), "{page}");
+        assert!(untrustworthy(&page), "{page}");
+        assert_eq!(work_exit(&page), OK, "audit-stored's own rule is unchanged");
+        // A refusal still fails, whatever the verdict.
+        assert_eq!(sweep_exit("refused: no bars\n"), FAILED);
+        assert_eq!(sweep_exit(""), OK);
+        // Argument refusals keep MISUSED, before any work.
+        let mut out = String::new();
+        assert_eq!(
+            stored_month_arm(&mut out, (complete, sweep_exit), what, ("2025", "x", "1")),
+            MISUSED,
+            "{out}"
+        );
+    }
+
     /// Every refusal NAMES what was wrong and prints the usage.
     ///
     /// All three spellings of a refusal are one, and a report is still a report.
@@ -24142,7 +24256,7 @@ mod tests {
         let mut report = String::new();
         let status = super::stored_month_arm(
             &mut report,
-            failed_recording,
+            (failed_recording, super::work_exit),
             ("zerodha", "NIFTY", "1min"),
             ("2025", "5", "1"),
         );

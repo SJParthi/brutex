@@ -635,11 +635,13 @@ fn index_stop_vix_repeated_minute_scratch_is_admitted_before_cold_validation() -
     Ok(())
 }
 
-/// A corrupt month is published as explicit unavailability. A LOCKED month
-/// no longer is (indexstop-1, D-2621): its case is
-/// `a_locked_vix_month_refuses_publication_and_the_retry_captures_it`.
+/// A torn month is the month's own state and is published as unavailable. A
+/// month a WRITER holds is not: see
+/// `a_vix_month_held_by_a_writer_publishes_nothing` (replay-1, D-2636). This
+/// test covered both and asserted the locked case published unavailability,
+/// which was the defect.
 #[test]
-fn index_stop_vix_corrupt_and_locked_reference_months_publish_explicit_unavailability()
+fn index_stop_vix_corrupt_reference_month_publishes_explicit_unavailability()
 -> Result<(), String> {
     let fixture = Fixture::new()?;
     let loaded = source(&fixture, "NSE-NIFTY", 5, 5)?;
@@ -721,7 +723,7 @@ fn a_locked_vix_month_refuses_publication_and_the_retry_captures_it() -> Result<
     )
     .err()
     .ok_or("a held VIX month must refuse the capture")?;
-    assert!(refused.contains("lock was held"), "{refused}");
+    assert!(refused.contains("busy, not unavailable"), "{refused}");
     assert!(refused.contains("another writer holds"), "{refused}");
     assert!(
         !persistence::committed(&directory)?,
@@ -745,6 +747,68 @@ fn a_locked_vix_month_refuses_publication_and_the_retry_captures_it() -> Result<
         assert!(month.snapshot_digest.is_some());
         Ok(())
     })
+}
+
+/// replay-1 (D-2636): a VIX month a writer holds for longer than the bounded
+/// wait publishes NOTHING; once the writer closes, a retry publishes the
+/// month with its records. On the old code the held month was captured as a
+/// durable `unavailable_reason` month, so the first `produce_catalog` returned
+/// `Ok` and `expect_err` failed.
+#[test]
+fn a_vix_month_held_by_a_writer_publishes_nothing() -> Result<(), String> {
+    let fixture = Fixture::new()?;
+    let loaded = source(&fixture, "NSE-NIFTY", 5, 5)?;
+    seed(&fixture, Vendor::Zerodha, 0, false)?;
+    let month = YearMonth::new(2025, 5).map_err(display)?;
+    let key = InstrumentKey::index(Exchange::Nse, "INDIAVIX").map_err(display)?;
+    let path = StorePath::for_key(
+        Vendor::Zerodha,
+        &key,
+        Timeframe::MINUTE_1,
+        month,
+        FileKind::Bars,
+    )
+    .map_err(display)?;
+    let owner =
+        BarFile::open_or_create(&fixture.root, path, symbol_id("INDIAVIX")).map_err(display)?;
+    let context = loaded.prepare(limits())?;
+    let refused = crate::index_stop::produce_catalog(
+        &fixture.output,
+        &loaded,
+        &context,
+        &programs()?,
+        loaded.days(),
+        limits(),
+    )
+    .err()
+    .ok_or("a writer-held VIX month must refuse, not publish unavailability")?;
+    assert!(refused.contains("another writer holds"), "{refused}");
+    assert!(refused.contains("busy, not unavailable"), "{refused}");
+    let namespace = fixture.output.join(NAMESPACE);
+    assert!(
+        !namespace.exists() || inventory(&namespace)?.is_empty(),
+        "no companion byte was published for a busy month"
+    );
+    drop(owner);
+    let context = loaded.prepare(limits())?;
+    let saved = crate::index_stop::produce_catalog(
+        &fixture.output,
+        &loaded,
+        &context,
+        &programs()?,
+        loaded.days(),
+        limits(),
+    )?;
+    let reader = open(&fixture, &saved)?;
+    reader.with_current(|view| {
+        assert_eq!(view.metadata().unavailable_stamps, 0);
+        let row = view.page(0, 0, 1)?.rows.first().ok_or("native trade")?;
+        let month = view.month(row.month_index)?;
+        assert!(month.records.is_some_and(|records| records > 0));
+        assert!(month.unavailable_reason.is_none());
+        Ok(())
+    })?;
+    Ok(())
 }
 
 #[test]

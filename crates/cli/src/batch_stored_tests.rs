@@ -435,3 +435,57 @@ fn a_whole_store_sweep_emits_one_progress_event_per_instrument_month_not_per_bar
         "events are per month, so far fewer than bars: {mine:?}"
     );
 }
+
+/// conc13-7 (D-2643): a walk with one swept month and one unreadable month
+/// reports a refused count the `sweep-all` arm fails on, and logs the refused
+/// month by name at Warn and its tally at Warn. On the old code no event
+/// named a refused month, and the arm exited `OK` on this page.
+#[test]
+fn a_walk_with_a_refused_month_logs_it_and_exits_failed() {
+    const BAD: &str = "zerodha/NSE/INDEX/BANKNIFTY/1min/2025-05.bin";
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    let from = crate::ledger_all::tests::mark();
+    let report = crate::audited_stored::with_warmed_store(|root| {
+        let full = root.join("bars").join(BAD);
+        fs::create_dir_all(full.parent().expect("has a parent")).expect("creatable");
+        fs::write(&full, b"not a bar file").expect("writable");
+        sweep_under(root, "zerodha", "1min", u64::MAX, "conc13-7-refused-month")
+            .expect("the walk completes")
+    });
+    crate::knobs::clear_all();
+    let refused = crate::batch::refused_months(&report);
+    assert!(refused > 0, "{report}");
+    assert!(!crate::carries_refusal(&report), "the page is still a report");
+    // The exit the arm takes for this page.
+    let code = if refused > 0 {
+        crate::FAILED
+    } else {
+        crate::work_exit(&report)
+    };
+    assert_eq!(code, crate::FAILED, "{report}");
+
+    let sink = crate::ledger_all::tests::sink();
+    let dir = sink
+        .path()
+        .parent()
+        .expect("the sink writes its file inside a directory")
+        .to_path_buf();
+    let query = telemetry::Query::last(telemetry::MAX_LIMIT).from_target("cli.sweep");
+    let records = telemetry::tail(&dir, sink.keep_files(), &query).records;
+    let label = "zerodha BANKNIFTY 1min 2025-05";
+    assert!(
+        records.iter().any(|record| record.seq >= from
+            && record.message == "stored month refused"
+            && record.level == telemetry::Level::Warn
+            && crate::ledger_all::tests::says(record, "label", label)),
+        "the refused month is logged by name at Warn: {records:?}"
+    );
+    assert!(
+        records.iter().any(|record| record.seq >= from
+            && record.message == "stored walk tallied"
+            && record.level == telemetry::Level::Warn
+            && crate::ledger_all::tests::counts(record, "refused", refused)),
+        "the walk's tally is logged at Warn: {records:?}"
+    );
+}

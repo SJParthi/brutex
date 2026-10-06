@@ -44,31 +44,6 @@ pub const CIVIL_MONTH_MINUTE_SLOTS: usize = 31 * 24 * 60;
 const MICROS_PER_MINUTE: i64 = 60_000_000;
 const MINUTES_PER_DAY: usize = 24 * 60;
 
-/// Why [`VixReferenceMonth::open_classified`] refused a month.
-///
-/// The split is the whole point (indexstop-1, D-2621): a capture that saved a
-/// lock refusal as the month's permanent "unavailable" reason published a
-/// companion that no later run could correct, because a published companion
-/// is authoritative under its receipt (D-1760).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum OpenRefusal {
-    /// The month's lock was held when asked: a writer is landing it, or
-    /// readers hold it shared. Nothing about the month is known.
-    Busy(String),
-    /// The month is missing, torn, malformed or otherwise unreadable: a fact
-    /// about the store as it stands.
-    Unavailable(String),
-}
-
-impl OpenRefusal {
-    /// The refusal's sentence, whichever kind it is.
-    pub(crate) fn into_reason(self) -> String {
-        match self {
-            Self::Busy(reason) | Self::Unavailable(reason) => reason,
-        }
-    }
-}
-
 /// One exact India VIX observation at a requested trade timestamp.
 ///
 /// Absence is a variant rather than a sentinel. In particular, an absent VIX
@@ -80,6 +55,43 @@ pub enum VixStamp {
     Absent,
     /// The complete stored India VIX OHLCV/OI bar at that exact timestamp.
     Exact(Candle),
+}
+
+/// Waits [`VixReferenceMonth::open_waiting`] takes for a writer holding a
+/// month, [`VIX_BUSY_WAIT`] apart: one second in all (replay-1, replay-5,
+/// D-2636).
+pub(crate) const VIX_BUSY_WAITS: u32 = 20;
+
+/// The pause between two of [`VIX_BUSY_WAITS`].
+pub(crate) const VIX_BUSY_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Why a VIX month could not be opened, split by whether the month itself is
+/// the answer (replay-1, D-2636; indexstop-1, D-2621): a capture that saved a
+/// lock refusal as the month's permanent "unavailable" reason published a
+/// companion no later run could correct, because a published companion is
+/// authoritative under its receipt (D-1760).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum VixOpenRefusal {
+    /// A writer holds the month's lock. Transient: never recorded as the
+    /// month's state, never turned into absence.
+    Busy(String),
+    /// The month is missing, torn, malformed or otherwise unreadable.
+    Unavailable(String),
+}
+
+impl VixOpenRefusal {
+    /// The refusal's sentence, whichever kind it is.
+    pub(crate) fn into_reason(self) -> String {
+        match self {
+            Self::Busy(reason) | Self::Unavailable(reason) => reason,
+        }
+    }
+}
+
+impl From<String> for VixOpenRefusal {
+    fn from(reason: String) -> Self {
+        Self::Unavailable(reason)
+    }
 }
 
 /// A validated one-minute `NSE-INDIAVIX` civil month.
@@ -108,32 +120,59 @@ impl VixReferenceMonth {
     /// count, an off-minute timestamp, a timestamp outside `month`, a duplicate
     /// exact timestamp, or timestamps that do not remain strictly increasing.
     pub fn open(root: &Path, vendor: Vendor, month: YearMonth) -> Result<Self, String> {
-        Self::open_classified(root, vendor, month).map_err(OpenRefusal::into_reason)
+        Self::open_classified(root, vendor, month).map_err(VixOpenRefusal::into_reason)
     }
 
-    /// [`VixReferenceMonth::open`], with a month whose lock is held right
-    /// now told apart from a month that is missing or malformed
-    /// (indexstop-1, D-2621).
+    /// [`Self::open`], waiting a bounded [`VIX_BUSY_WAITS`] × [`VIX_BUSY_WAIT`]
+    /// (one second) for a WRITER that holds the month, and keeping a busy
+    /// refusal distinct from a month that is missing or malformed.
+    ///
+    /// A writer holding the month is transient: a concurrent VIX pull closes
+    /// it in moments. Captured as the month's answer it became a durable
+    /// "unavailable" month in an index-stop companion (replay-1), and refused
+    /// a multi-hour Global Replay V4 at its very end (replay-5). The wait is a
+    /// constant no input raises, at most [`VIX_BUSY_WAITS`] + 1 opens, as the
+    /// ingest writers' wait for a reader is (D-2552). D-2636.
     ///
     /// # Errors
     ///
-    /// [`OpenRefusal::Busy`] when the store refused the month's lock
-    /// (`StoreError::Locked` or `StoreError::ReaderHolds`): a fact about this
-    /// instant, never about the month. [`OpenRefusal::Unavailable`] for every
-    /// refusal [`VixReferenceMonth::open`] documents otherwise.
-    pub(crate) fn open_classified(
+    /// [`VixOpenRefusal::Busy`] when a writer still holds the month after the
+    /// bound; [`VixOpenRefusal::Unavailable`] for every other refusal.
+    pub(crate) fn open_waiting(
         root: &Path,
         vendor: Vendor,
         month: YearMonth,
-    ) -> Result<Self, OpenRefusal> {
-        let unavailable = OpenRefusal::Unavailable;
+    ) -> Result<Self, VixOpenRefusal> {
+        let mut waited = 0_u32;
+        loop {
+            match Self::open_classified(root, vendor, month) {
+                Err(VixOpenRefusal::Busy(_)) if waited < VIX_BUSY_WAITS => {
+                    waited += 1;
+                    std::thread::sleep(VIX_BUSY_WAIT);
+                }
+                Err(VixOpenRefusal::Busy(why)) => {
+                    return Err(VixOpenRefusal::Busy(format!(
+                        "{why}; a writer still held it after {} ms. It is busy, not unavailable: nothing was published, and a retry after the writer closes will read it",
+                        u128::from(waited) * VIX_BUSY_WAIT.as_millis()
+                    )));
+                }
+                other => return other,
+            }
+        }
+    }
+
+    fn open_classified(
+        root: &Path,
+        vendor: Vendor,
+        month: YearMonth,
+    ) -> Result<Self, VixOpenRefusal> {
         let key = InstrumentKey::index(Exchange::Nse, VIX_REFERENCE_SYMBOL).map_err(|why| {
             unavailable(format!(
                 "the fixed reference key NSE-{VIX_REFERENCE_SYMBOL} is invalid: {why}. Nothing was read"
             ))
         })?;
         if key.is_sweepable() {
-            return Err(unavailable(format!(
+            return Err(VixOpenRefusal::Unavailable(format!(
                 "the fixed reference key NSE-{VIX_REFERENCE_SYMBOL} entered the swept instrument set; reference loading refused"
             )));
         }
@@ -155,24 +194,25 @@ impl VixReferenceMonth {
         )]
         let symbol_id = brutex_core::universe::fnv1a(VIX_REFERENCE_SYMBOL) as u32;
         let file = BarFile::open_existing(root, path, symbol_id).map_err(|why| {
+            // Only a writer's lock is transient. `ReaderHolds` is a writer's
+            // answer and cannot reach this read door; it is matched anyway so
+            // a future reader refusal of that shape is never made durable.
+            let busy = matches!(
+                why,
+                store::file::StoreError::Locked { .. } | store::file::StoreError::ReaderHolds { .. }
+            );
             let reason = format!(
                 "{vendor} NSE-{VIX_REFERENCE_SYMBOL} 1min {month} could not be opened as reference evidence: {why}. Nothing was stamped",
                 vendor = vendor.as_str()
             );
-            // A held lock is this instant, not this month (indexstop-1,
-            // D-2621): a writer landing the month, or readers a writer is
-            // waiting behind. Every other refusal is about the file.
-            if matches!(
-                why,
-                StoreError::Locked { .. } | StoreError::ReaderHolds { .. }
-            ) {
-                OpenRefusal::Busy(reason)
+            if busy {
+                VixOpenRefusal::Busy(reason)
             } else {
-                unavailable(reason)
+                VixOpenRefusal::Unavailable(reason)
             }
         })?;
 
-        Self::from_file(vendor, month, &file).map_err(unavailable)
+        Ok(Self::from_file(vendor, month, &file)?)
     }
 
     fn from_file(vendor: Vendor, month: YearMonth, file: &BarFile) -> Result<Self, String> {
@@ -681,6 +721,78 @@ mod tests {
                 Err(StoreError::Missing { .. })
             ),
             "the fixture exists; lock must not be reclassified as missing"
+        );
+    }
+
+    /// replay-1, replay-5 (D-2636): a writer holding the month is BUSY, never
+    /// the month's unavailability; the waiting door reads it once the writer
+    /// closes inside the bound, refuses by name past it, and answers a missing
+    /// or malformed month at once as `Unavailable`.
+    #[test]
+    fn a_writer_held_month_is_busy_and_waited_for_a_bounded_second() {
+        let first = ist_minute(2026, 8, 3, 9 * 60 + 15);
+        let (root, file_path) = seed("busy", Vendor::Dhan, &[bar(first, 0)]);
+        let key = InstrumentKey::index(Exchange::Nse, VIX_REFERENCE_SYMBOL)
+            .expect("the fixed VIX key is valid");
+        let path = vix_path(Vendor::Dhan, month(), &key);
+        let symbol_id = brutex_core::universe::fnv1a(VIX_REFERENCE_SYMBOL) as u32;
+        let bound = VIX_BUSY_WAIT * VIX_BUSY_WAITS;
+
+        // Held past the bound: Busy, after the whole bounded wait.
+        let writer = BarFile::open_or_create(&root, path, symbol_id).expect("writer owns month");
+        let started = std::time::Instant::now();
+        match VixReferenceMonth::open_waiting(&root, Vendor::Dhan, month()).map(|m| m.records()) {
+            Err(VixOpenRefusal::Busy(why)) => {
+                assert!(why.contains("another writer holds"), "{why}");
+                assert!(why.contains("busy, not unavailable"), "{why}");
+                assert!(why.contains("1000 ms"), "{why}");
+            }
+            other => panic!("a held month must be busy, not {other:?}"),
+        }
+        assert!(started.elapsed() >= bound, "the whole bound was waited");
+
+        // Released inside the bound: the waiting door reads the month.
+        let opener = {
+            let root = root.clone();
+            std::thread::spawn(move || {
+                VixReferenceMonth::open_waiting(&root, Vendor::Dhan, month()).map(|m| m.records())
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        drop(writer);
+        assert_eq!(
+            opener.join().expect("opener thread"),
+            Ok(1),
+            "a writer that closes inside the bound is waited for"
+        );
+
+        // No writer: read at once.
+        let index =
+            VixReferenceMonth::open_waiting(&root, Vendor::Dhan, month()).expect("free month");
+        assert_eq!(index.records(), 1);
+
+        // Missing: Unavailable, without the wait.
+        let started = std::time::Instant::now();
+        match VixReferenceMonth::open_waiting(&root, Vendor::Groww, month()).map(|m| m.records()) {
+            Err(VixOpenRefusal::Unavailable(why)) => assert!(why.contains("does not exist"), "{why}"),
+            other => panic!("a missing month is unavailable, not {other:?}"),
+        }
+        assert!(started.elapsed() < bound, "a missing month is not waited for");
+
+        // Malformed: Unavailable.
+        std::fs::write(&file_path, b"torn reference month").expect("torn fixture");
+        assert!(matches!(
+            VixReferenceMonth::open_waiting(&root, Vendor::Dhan, month()).map(|m| m.records()),
+            Err(VixOpenRefusal::Unavailable(_))
+        ));
+        // The plain door keeps its single sentence for both kinds.
+        assert_eq!(
+            VixOpenRefusal::Busy("b".to_owned()).into_reason(),
+            "b".to_owned()
+        );
+        assert_eq!(
+            VixOpenRefusal::from("u".to_owned()),
+            VixOpenRefusal::Unavailable("u".to_owned())
         );
     }
 }

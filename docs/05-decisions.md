@@ -64768,3 +64768,255 @@ carried from `StoreError` through `pull::ingest` (the M fix), and making a
 then refuses again and re-halts within `STORE_PROBES`).
 
 **Evidence.** ZK-39.
+### D-2635 — A checksum receipt is vouched for only after a barrier, and its namespace root is synced on every creating call — 2026-10-06
+
+**The findings.** replay-3, replay-4. `checksum_receipts::publish` answered
+`Ok` for a full-length receipt that matched, with no barrier, so a publisher
+killed after its last `write_all` and before its `sync_all` left a receipt
+the next caller vouched for from the page cache. `namespace_directory` synced
+the root only when its own `create_dir` succeeded, so a kill between the
+`create_dir` and that barrier was never repaired.
+
+**The decision.**
+- The fast path syncs the receipt (through `fixed_tail::sync_all_hooked`) and
+  its directory before returning `Ok`. A failed barrier is named and
+  remembered (`remember_failed_barrier`); `publish` refuses a path whose
+  barrier already failed in this process, on either path.
+- A creating `namespace_directory` call syncs the root whether the namespace
+  was created now or already existed. A reading call syncs nothing.
+
+**Evidence.** ZQ-40.
+
+### D-2636 — A VIX month a writer holds is busy, waited for a bounded second, and never the month's answer — 2026-10-06
+
+**The findings.** replay-1, replay-5. `index_stop_vix::load_month` turned every
+`VixReferenceMonth::open` refusal, including the transient "another writer
+holds", into a durable `unavailable_reason` month that the sealed companion
+then kept (D-1760 left this out by name). Global Replay V4 opened its VIX
+months after the whole replay, and CE-8's eviction re-opens them, so a VIX
+pull holding a month for a moment refused a multi-hour run at its end.
+
+**The decision.**
+- `VixReferenceMonth::open_waiting` classifies a refusal: `Busy` for
+  `StoreError::Locked` (and `ReaderHolds`, should a reader door ever see it),
+  `Unavailable` for every other. A busy month is asked again every 50 ms for
+  at most 20 times, one second in all, a constant no input raises, as the
+  ingest writers' wait for a reader is (D-2552). Past the bound the refusal
+  names the month as busy, not unavailable.
+- `load_month` returns a busy refusal as an error, so nothing is published and
+  the catalog's own retry reads the month. Only a missing or malformed month
+  is recorded as unavailable.
+- `VixCatalog::stamp` opens through the waiting door and never turns a refusal
+  into an absent stamp. Pre-opening the months before the replay was not done:
+  the months are known only from the trades the replay admits.
+- `open` keeps its single sentence and does not wait.
+
+**Evidence.** ZQ-41, ZQ-42.
+
+### D-2637 — Population absorbs a foreign append whole or refuses it by its file-first duplicate — 2026-10-06
+
+**The finding.** determinism-3. `PopulationLedger::absorb_rows` inserted each
+newly scanned block while checking it, in `HashMap` order, so a refusal named
+whichever duplicate the random order reached first and left every block
+visited before it in the index; a retry on the same handle then named a
+different population.
+
+**The decision.** The whole batch is validated first. The duplicate named is
+the one with the lowest first row (file order), and nothing is inserted until
+none is found. Stored bytes and identities are unchanged.
+
+**Evidence.** ZQ-43.
+
+### D-2638 — `ledger-all` sizes its span before it creates its tree — 2026-10-06
+
+**The finding.** P1-20-01. `run_chain` created the stage roots before
+`build_sweepers` first read the span, so a span it refused left the tree behind
+under a report that nothing was read. The arm half (month 13, a backwards
+range) is already refused by `stored_words` before any work, and is now
+pinned by test.
+
+**The decision.** `build_sweepers` runs before `LedgerTree::create`, as
+`ledger_v6` does.
+
+**Evidence.** ZQ-44.
+
+### D-2639 — CSCV split scores fold per-segment summaries, with the per-period walk's exact refusals — 2026-10-06
+
+**The findings.** pst-2, p2bool-2. Observation V1's split rows and the Boolean
+numeric kernel walked every period of every Candidate for every split,
+O(C·S·P).
+
+**The decision.** Each Candidate's periods are walked once into one summary per
+segment: its exact sum and the highest and lowest running sum inside it, in
+`i128`. A split folds the summaries in segment order and refuses when any
+running sum the per-period walk would have reached leaves `i64`, so the
+outputs, every refusal and every refusal's sentence are the walk's own. The
+old walk is kept as the test oracle and the equality is enumerated over every
+sequence of up to five periods from {MIN, -1, 0, 1, MAX}, widths 0 to 3 and
+every 6-bit mask shape. Cost is O(C·(P + S·segments)); the speed is
+UNVERIFIED. `docs/06-limits.md` §164 says so.
+
+**Evidence.** ZQ-45, ZQ-46.
+
+### D-2640 — Global Replay indexes a minute's offered constituents once — 2026-10-06
+
+**The finding.** rep-1. `find_offered_stream` (V1 and V2) rescanned every
+offered stream and rebuilt its `Constituent` for every scheduled decision, up
+to 200² rebuilds per minute, while the module header promised "at most 200
+stream heads per emitted minute".
+
+**The decision.** `global_replay::OfferedIndex` maps each offered constituent
+to its stream (or to an alias marker) once per minute from the intents the
+minute already built; each decision is one expected-O(1) probe with the scan's
+three answers and its own refusal sentences. The module header and
+`docs/06-limits.md` §143 state the bound, as expected rather than worst-case
+and UNVERIFIED.
+
+**Evidence.** ZQ-47.
+
+### D-2641 — A dropped live view removes its file — 2026-10-06
+
+**The findings.** conc17-1 and the in-process half of CE-20. `Live::finish`
+was the only remover and ran on the success path only, so a rung refused after
+its live view opened (an evaluator error, a refused seal, a failed
+`record_all`) left its file for good; `/live.json` served it as a run in
+flight, and past `LIVE_RUN_LIMIT` (128) leftovers every refresh refused.
+
+**The decision.** `impl Drop for Live` removes the file unless `finish` ran;
+a removal that fails for any reason but absence is logged at Warn
+(`cli.live`, "abandoned live file not removed"). `record_and_finish` drops an
+uncommitted run's view, so it is removed too.
+
+**Not decided.** A process killed without unwinding (SIGKILL, power loss)
+still leaves its file. Reclaiming it needs a writer lease the census can probe
+and a decision on what `/live.json` lists in its place, which changes the
+route's answers; that half of CE-20 is left to its owner.
+
+**Evidence.** ZQ-48.
+
+### D-2642 — A halted or unmeasured sweep exits FAILED — 2026-10-06
+
+**The finding.** conc13-6. `sweep` and `sweep-stored` exited 0 on a ladder
+halted on a budget: the verdict row `outcome REFUSED the walk stopped short`
+is indented and in neither refusal spelling, so `run_durable` wrote
+`completed` while the run's sweep evidence recorded `Halted`. `sweep-stored`
+also exited 0 on NOTHING MEASURED.
+
+**The decision.** `sweep_exit` = refusal, or NOTHING MEASURED, or the verdict's
+`trustworthy as a whole answer NO` (the P8-01 predicate) → `FAILED`.
+`stored_month_arm` now takes the exit rule with the command: `sweep-stored`
+takes `sweep_exit`, `audit-stored` keeps `work_exit`. The `ladder walked`
+event is a Warn when the ladder halted.
+
+**Evidence.** ZQ-49.
+
+### D-2643 — A `sweep-all` walk with a refused month exits FAILED and logs it — 2026-10-06
+
+**The finding.** conc13-7. `sweep-all` with some refused months exited 0,
+wrote `phase=completed`, and logged only the swept months; the refused count
+existed only in the stdout tally.
+
+**The decision.** Policy: a walk with ANY refused month exits `FAILED` (the
+existing code; no new partial code), with every month still named and the rest
+still swept and filed. The arm reads the refused count off the column-zero
+tally line (`batch::refused_months`; month rows are indented and their names
+escaped, so no stored name can forge it). Each refused month emits
+`cli.sweep "stored month refused"` at Warn with its label and reason, and the
+walk emits `"stored walk tallied"` with offered, swept and refused, at Warn
+when any refused. A walk whose every month refused is still the whole-run
+refusal of D-0696.
+
+**Evidence.** ZQ-50.
+
+### D-2644 — One header rule for every cli ledger writer — 2026-10-06
+
+**The finding.** conc5-1. Every fresh-header writer wrote and synced its
+header into a zero-length file with no rollback and no memory of a failed
+barrier, and re-initialised only when the length was 0. After a header barrier
+failed and the page was evicted, or a power cut on a filesystem that extends
+the size before the data, the header read back as zeros at full length, and
+every open, the writer's included, refused the empty ledger for good.
+
+**The decision.** `fixed_tail::init_or_heal_header`, called only by a writer
+holding the ledger's exclusive lock:
+- a file of 1..=header bytes, all zero, is an interrupted genesis and is cut
+  to nothing, with a Warn (`cli.ledger`, "zero-filled ledger header
+  reinitialised"), as the store's `is_interrupted_genesis` does (D-1520,
+  D-1521); a strict prefix of the header is cut as `heal_torn_header` did;
+- an empty file gets the header through `write_at_end` and
+  `sync_or_roll_back`: a failed write or barrier cuts it back to zero bytes,
+  and a failed barrier is remembered.
+
+Readers keep refusing. Used by Candidate Universe, Pre-Admission V1/V2, Base
+Evidence V2, Observation V1 authority and V2, Admission V4, Finalization V4,
+Population (all four files), Population V6, Statistics V2/V3 and Result Set.
+Results and Frontier keep their read-back-before-barrier order and use the
+healing half (`heal_interrupted_header`) plus `roll_back` /
+`sync_all_or_roll_back`; Sweep Evidence, whose header and first rows are one
+block already under `sync_or_roll_back`, uses the healing half. Population V5,
+Selection V5 and Selection V6 were not touched here.
+
+**Evidence.** ZQ-51.
+
+### D-2645 — Candidate Universe and Pre-Admission sync the store root after creating a file — 2026-10-06
+
+**The finding.** conc11-1. D-1903's rule ("files created on first use get a
+directory barrier") was applied to the Step-3 ledgers and Base V2 but not to
+Candidate Universe or Pre-Admission V1/V2, so after a power cut a committed
+universe's file could vanish and every successor bound to it refuse.
+
+**The decision.** When `init_or_heal_header` wrote a header (the file was
+created, or held only an interrupted header), the writer syncs the directory
+holding it (`fixed_tail::sync_parent_directory`, through the barrier fault
+hook) before going on.
+
+**Evidence.** ZQ-52.
+
+### D-2646 — The verification-scratch collision test owns the counter it predicts — 2026-10-06
+
+**The finding.** P16-03.
+`ledger_self_checks_do_not_delete_an_existing_directory_and_can_run_concurrently`
+pre-claimed the next 16 serials of the process-wide `verification_scratch`
+counter, which every other caller in the test binary also draws on, so a
+concurrent caller could take a pre-claimed serial or push the counter past
+the window.
+
+**The decision.** `verification_scratch_from(counter, tag)` and
+`ledger_round_trip_in(scratch)` take the claim from the caller; production
+passes the shared counter and no tag, so its names are unchanged. The test
+claims from a local counter under its own tag while other threads draw on the
+shared one.
+
+**Evidence.** ZQ-53.
+
+### D-2647 — A Candidate Universe appender re-scans files another writer only grew — 2026-10-06
+
+**The finding.** conc10-2. `append_complete` refused "changed since open;
+cached audit is stale" on any generation change, so two `ledger-v6` /
+`ledger-all` runs whose opens interleaved made the second appender refuse
+after its whole preparation, even for an exact reuse.
+
+**The decision.** Under the exclusive lock the append already holds, files
+that are the same files (device and inode) and strictly longer are re-scanned
+whole, exactly as an open does, O(rows + completions) and only when another
+writer moved them. A replaced, shrunk or same-length-rewritten file, or a
+changed lock file, still refuses as stale. Base Evidence V2's same shape was
+not changed here.
+
+**Evidence.** ZQ-54.
+
+### D-2648 — The pooled drawdown column is not a bound — 2026-10-06
+
+**The finding.** p2misc-1. `cli pool` printed the largest single-instrument
+drawdown as `dd>=`, "a lower bound on the pooled drawdown". It bounds the
+merged sequence's drawdown in neither direction (A −100, B +150, A −100 prints
+200 against a pooled 100; two simultaneous losses of 100 print 100 against a
+pooled 200). This supersedes the sentence of the pool decision that named the
+column `dd>=` "because it is a lower bound".
+
+**The decision.** The column is `dd1max`, the legend says it bounds the pooled
+drawdown in neither direction, and the module and field docs,
+`docs/06-limits.md` and SC-08 say the same. The sort key is unchanged and is
+documented as a ranking key, not a bound.
+
+**Evidence.** ZQ-55.

@@ -3752,7 +3752,7 @@ impl CandidateUniverseLedgerV1 {
         &mut self,
         prepared: &PreparedCandidateUniverseV1,
     ) -> Result<CandidateUniverseProductionCommitV1, CandidateUniverseRefusal> {
-        self.require_unchanged()?;
+        self.rescan_if_grown()?;
         let receipt = prepared.receipt;
         receipt.validate()?;
         if receipt.row_count > self.bounds.max_rows {
@@ -3925,6 +3925,34 @@ impl CandidateUniverseLedgerV1 {
         validate_file_block(&mut self.row_file, audit.first_row, &audit.receipt)?;
         self.require_unchanged()?;
         Ok(audit)
+    }
+
+    /// The append's freshness rule (conc10-2, D-2647): unchanged files go on
+    /// as before; files that are the SAME files (device and inode) and only
+    /// GREW -- another writer appended whole universes between this handle's
+    /// open and its append -- are re-scanned whole under the exclusive lock
+    /// this append already holds, exactly as an open would; anything else (a
+    /// replaced, shrunk or same-length-mutated file, or a changed lock file)
+    /// still refuses as stale.
+    ///
+    /// Two `ledger-v6`/`ledger-all` runs whose opens interleaved made the
+    /// second appender refuse "cached audit is stale" after its whole
+    /// preparation, even for an exact reuse of the first one's universe. The
+    /// rescan is the open's own cost, O(rows + completions), paid only when
+    /// another writer moved the files.
+    fn rescan_if_grown(&mut self) -> Result<(), CandidateUniverseRefusal> {
+        if self.require_unchanged().is_ok() {
+            return Ok(());
+        }
+        require_generation(self.lock_generation, &self.writer_lock, &self.lock_path)?;
+        let rows = file_generation(&self.row_file, &self.row_path)?;
+        let receipts = file_generation(&self.receipt_file, &self.receipt_path)?;
+        if !grew_in_place(self.row_generation, rows)
+            || !grew_in_place(self.receipt_generation, receipts)
+        {
+            return self.require_unchanged();
+        }
+        self.scan()
     }
 
     fn require_unchanged(&self) -> Result<(), CandidateUniverseRefusal> {
@@ -6267,15 +6295,20 @@ fn ensure_header(
     stride: u64,
     path: &Path,
 ) -> Result<(), CandidateUniverseRefusal> {
-    let len = file
-        .metadata()
-        .map_err(|why| format!("cannot stat candidate file {}: {why}", path.display()))?
-        .len();
-    if len == 0 {
-        file.seek(SeekFrom::Start(0))
-            .and_then(|_| file.write_all(&header_bytes(magic, kind, stride)))
-            .and_then(|()| file.sync_data())
-            .map_err(|why| format!("cannot initialize candidate file {}: {why}", path.display()))?;
+    // conc5-1 (D-2644): one header rule. A failed header write or barrier is
+    // cut back to nothing and remembered, and an all-zero or torn header the
+    // writer's own failure left is re-initialised instead of refused forever.
+    let init = crate::fixed_tail::init_or_heal_header(
+        file,
+        path,
+        &header_bytes(magic, kind, stride),
+        File::sync_data,
+    )
+    .map_err(|why| format!("cannot initialize candidate file {}: {why}", path.display()))?;
+    // conc11-1 (D-2645): a file this writer just made non-empty keeps its
+    // directory entry across a power cut, as D-1903 gave the Step-3 ledgers.
+    if init == crate::fixed_tail::HeaderInit::Written {
+        crate::fixed_tail::sync_parent_directory(path)?;
     }
     verify_header(file, magic, kind, stride, path)?;
     // ledgers-3, D-1910: the writer cuts a kill-torn tail under its exclusive
@@ -6606,6 +6639,20 @@ fn generation_of(metadata: &std::fs::Metadata) -> FileGenerationV1 {
         len: metadata.len(),
         modified: metadata.modified().ok(),
     }
+}
+
+/// Whether `observed` is `expected` itself, or the same file (device and
+/// inode) strictly longer: appended to, never replaced, cut or rewritten at
+/// the same length (conc10-2, D-2647).
+fn grew_in_place(expected: FileGenerationV1, observed: FileGenerationV1) -> bool {
+    if observed == expected {
+        return true;
+    }
+    #[cfg(unix)]
+    if observed.device != expected.device || observed.inode != expected.inode {
+        return false;
+    }
+    observed.len > expected.len
 }
 
 fn require_generation(
@@ -9182,6 +9229,82 @@ mod tests {
                 .expect("generations hold"),
             Some(appended.audit())
         );
+    }
+
+    /// conc10-2 (D-2647): two writers whose opens interleaved both commit.
+    /// B opened before A appended; B's append re-scans the grown files under
+    /// its lock and writes after A's block, and B's exact retry of A's
+    /// universe is `Reused`. A same-length rewrite or a replaced file still
+    /// refuses as stale. On the old code B's first append refused "changed
+    /// since open; cached audit is stale".
+    #[test]
+    fn interleaved_writers_both_commit_after_a_rescan_of_grown_files() {
+        let bounds = CandidateUniverseBoundsV1::new(32, 4).expect("fixture bounds are nonzero");
+        let root = test_dir();
+        let mut a = CandidateUniverseLedgerV1::open(root.path(), bounds).expect("A opens");
+        let mut b = CandidateUniverseLedgerV1::open(root.path(), bounds).expect("B opens");
+        let first = prepared(70);
+        let second = prepared(71);
+        let written = a.append_complete(&first).expect("A commits");
+        assert!(matches!(written, CandidateUniverseProductionCommitV1::Written(_)));
+        let after = b
+            .append_complete(&second)
+            .expect("B re-scans A's growth and commits");
+        assert!(matches!(after, CandidateUniverseProductionCommitV1::Written(_)));
+        assert_eq!(after.audit().first_row(), first.receipt().row_count());
+        let reused = b.append_complete(&first).expect("B reuses A's universe");
+        assert!(matches!(reused, CandidateUniverseProductionCommitV1::Reused(_)));
+        assert_eq!(reused.audit(), written.audit());
+        // A, now behind B, re-scans too and reuses B's universe.
+        let reused = a.append_complete(&second).expect("A reuses B's universe");
+        assert!(matches!(reused, CandidateUniverseProductionCommitV1::Reused(_)));
+        let fresh = CandidateUniverseLedgerV1::open_read(root.path(), bounds).expect("reader");
+        assert_eq!(
+            fresh
+                .reopen_audit(&second.receipt().universe_id())
+                .expect("generations hold"),
+            Some(after.audit())
+        );
+
+        // A same-length rewrite is not growth: still stale.
+        let mut c = CandidateUniverseLedgerV1::open(root.path(), bounds).expect("C opens");
+        let row_path = root.path().join(ROW_FILE);
+        let raw = std::fs::read(&row_path).expect("rows");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&row_path, &raw).expect("same bytes, same length, rewritten");
+        assert!(
+            c.append_complete(&prepared(72))
+                .expect_err("a same-length rewrite refuses")
+                .contains("changed since open")
+        );
+
+        // A replaced file (new inode, longer) is not growth either.
+        let replaced = test_dir();
+        let mut d = CandidateUniverseLedgerV1::open(replaced.path(), bounds).expect("D opens");
+        let path = replaced.path().join(ROW_FILE);
+        let mut bytes = std::fs::read(&path).expect("rows");
+        let displaced = replaced.path().join("rows.displaced");
+        std::fs::rename(&path, &displaced).expect("displaced");
+        bytes.extend_from_slice(&[0_u8; 3]);
+        std::fs::write(&path, &bytes).expect("a new, longer inode");
+        assert!(d.append_complete(&prepared(73)).is_err());
+
+        // The rule itself, exhaustively over its four shapes.
+        let base = file_generation(
+            &std::fs::File::open(&displaced).expect("displaced opens"),
+            &displaced,
+        )
+        .expect("generation");
+        assert!(grew_in_place(base, base));
+        let mut longer = base;
+        longer.len += 1;
+        assert!(grew_in_place(base, longer));
+        let mut shorter = base;
+        shorter.len = shorter.len.saturating_sub(1);
+        assert!(!grew_in_place(base, shorter) || base.len == 0);
+        let mut moved = longer;
+        moved.inode = moved.inode.wrapping_add(1);
+        assert!(!grew_in_place(base, moved));
     }
 
     #[test]

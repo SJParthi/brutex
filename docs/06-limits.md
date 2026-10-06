@@ -7775,6 +7775,11 @@ and OOS bars and G_i resolved grid cells per selected stream, that work is at
 least O(sum(B_i + G_i)) before scheduling. The fixed 200-stream ceiling bounds
 simultaneous stream heads, not candidate history: scheduling, candidate/
 decision encoding and ordered hashing are O(C) for C reachable candidates.
+Within one minute, Global Replay V1 and V2 index the at most 200 offered
+constituents once and resolve each scheduled decision with one expected-O(1)
+hash probe; each decision used to rescan every offered stream and rebuild its
+constituent, up to 200² rebuilds per minute (rep-1, D-2640). The probe is
+expected rather than worst-case O(1), and no bench times it.
 
 Opening the five V2 files reads, decodes and hashes every record—including
 valid unreferenced orphans—then reconstructs and re-runs every completed
@@ -8519,6 +8524,15 @@ procedures. It retains O(C) Candidate rows plus procedure state. An all-extinct
 pair correctly performs no bootstrap at all; it is not a constant-time
 substitute for an evaluated family.
 
+CSCV split scores walk each Candidate's P periods ONCE into at most 64
+segment summaries (each segment's sum and running-sum extremes, CO-02 caps a
+layout at 16), and each of the S splits then folds those summaries:
+O(C·(P + S·segments)) in place of the O(C·S·P) per-period walk, in both the
+Observation V1 split rows and the Boolean numeric kernel (pst-2, p2bool-2,
+D-2639). The summaries hold at most 48 bytes per segment per Candidate. The
+outputs and every refusal, overflow included, equal the per-period walk's;
+that equality is enumerated by test, the speed is UNVERIFIED (no bench).
+
 For A admitted authorities and bounded ledger bytes B, opening and fresh reopen
 scan and authenticate O(B) bytes and retain O(A + total candidates) indexes.
 Append, exact reuse and receipt-less tail comparison validate an authority-
@@ -8779,11 +8793,15 @@ instruments and are exact. The worst trade and the smallest win are exact
 minima. The drawdown is NOT pooled: a pooled drawdown is a property of the
 merged, time-ordered sequence of every instrument's trades, and
 `runner::grid::Cell` carries per-cell aggregates, not per-trade P&L. The
-column the report prints as `dd>=` is the LARGEST single-instrument drawdown
-among the cells pooled — a lower bound on the pooled figure. It can only be
-made exact by exposing each cell's trade sequence from the grid, which is a
-change inside the pricing loop and is not made. Every report labels the
-column as a bound.
+column the report prints as `dd1max` is the LARGEST single-instrument
+drawdown among the cells pooled, and it bounds the pooled figure in NEITHER
+direction: interleaving can hide one instrument's losses behind another's
+gains (200 printed, 100 pooled), and simultaneous losses can add (100
+printed, 200 pooled). This said "a lower bound on the pooled figure" and the
+column was `dd>=`; both were false (p2misc-1, D-2648). The pooled drawdown can
+only be measured by exposing each cell's trade sequence from the grid, which
+is a change inside the pricing loop and is not made. Every report says the
+column is not the pooled figure and not a bound on it.
 
 Cost: pass 1 is I screens, one at a time in surface order (D-1701), each
 what `range-rung` costs on that instrument, with that screen's sweep and

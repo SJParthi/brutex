@@ -560,17 +560,13 @@ fn load_month(
     feed: Vendor,
     month: YearMonth,
 ) -> Result<(Month, Option<VixReferenceMonth>), String> {
-    match VixReferenceMonth::open_classified(store, feed, month) {
-        // A HELD LOCK IS NOT AN UNAVAILABLE MONTH (indexstop-1, D-2621). It
-        // was saved as this month's permanent `unavailable_reason`, and the
-        // published companion is authoritative under its receipt (D-1760), so
-        // a pull landing the VIX month at the wrong instant erased that month
-        // from every later run of this catalog. The capture now refuses:
-        // nothing is published, the batch stays pending and the rerun
-        // captures again.
-        Err(OpenRefusal::Busy(reason)) => Err(format!(
-            "{reason}. The VIX month's lock was held, which says nothing about the month, so no companion was published; rerun once the store is idle"
-        )),
+    match VixReferenceMonth::open_waiting(store, feed, month) {
+        // replay-1 (D-2636): a writer holding the month is not the month's
+        // answer. It was captured as a durable `unavailable_reason` month, and
+        // the companion it sealed stayed authoritative under `committed()`
+        // (D-1760) long after the writer closed. Now nothing is published and
+        // the catalog's own retry reads the month.
+        Err(crate::vix_reference::VixOpenRefusal::Busy(reason)) => Err(reason),
         Ok(loaded) => Ok((
             Month {
                 year: month.year(),
@@ -581,7 +577,7 @@ fn load_month(
             },
             Some(loaded),
         )),
-        Err(OpenRefusal::Unavailable(reason)) => {
+        Err(crate::vix_reference::VixOpenRefusal::Unavailable(reason)) => {
             if reason.is_empty() || reason.len() > MAX_REASON_BYTES {
                 return Err("complete VIX refusal diagnostic exceeds explicit record admission; no truncated annotation published".into());
             }

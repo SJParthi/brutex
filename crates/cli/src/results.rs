@@ -659,8 +659,16 @@ fn write_fresh_header(file: &mut File, path: &Path) -> Result<(), Refusal> {
         .get_mut(8..12)
         .ok_or_else(|| "the header is shorter than its version".to_owned())?
         .copy_from_slice(&VERSION.to_le_bytes());
-    file.write_all(&header)
-        .map_err(|why| format!("the header could not be written: {why}"))?;
+    // A failed write is cut back to nothing (conc5-1, D-2644), so the next
+    // open writes the header again instead of refusing a torn one.
+    file.write_all(&header).map_err(|why| {
+        crate::fixed_tail::roll_back(
+            file,
+            &path.display(),
+            0,
+            &format!("the header could not be written: {why}"),
+        )
+    })?;
     // THE HEADER IS READ BACK, BECAUSE A SUCCESSFUL WRITE IS NOT PROOF
     // THAT ANYTHING WAS STORED.
     //
@@ -713,7 +721,11 @@ fn write_fresh_header(file: &mut File, path: &Path) -> Result<(), Refusal> {
     // one that names a symptom. A device that cannot fsync must still reach the
     // refusal that tells the operator their store points at a black hole, so the
     // sharper check goes first and the durability barrier goes after it.
-    file.sync_all()
+    //
+    // A FAILED BARRIER IS CUT AND REMEMBERED (conc5-1, D-2644): left in place,
+    // the header's page read back as zeros after eviction and every later
+    // open refused the empty ledger for good.
+    crate::fixed_tail::sync_all_or_roll_back(file, path, 0)
         .map_err(|why| format!("the header could not be flushed: {why}"))?;
     Ok(())
 }
@@ -941,6 +953,13 @@ impl Results {
         // Only a current-version file is cut: an older version is read and
         // never appended to, at a stride this one does not address.
         if writable && lock.is_some() {
+            // An all-zero or torn header the writer's own failure left is cut
+            // to nothing and written again below (conc5-1, D-2644).
+            crate::fixed_tail::heal_interrupted_header(
+                &file,
+                &path,
+                &crate::fixed_tail::sixteen_byte_header(MAGIC, VERSION),
+            )?;
             crate::fixed_tail::heal_torn_tail(
                 &file,
                 &path,

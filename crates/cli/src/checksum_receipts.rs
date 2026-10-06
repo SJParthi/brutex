@@ -304,10 +304,27 @@ impl Receipt {
 }
 
 fn publish(path: &Path, expected: &[u8; BYTES]) -> Result<(), String> {
+    // A barrier that failed on this receipt in this process is never confirmed
+    // by a second one (D-1900 rule 3; replay-3, D-2635).
+    crate::fixed_tail::refuse_after_failed_barrier(path)?;
     if fs::symlink_metadata(path)
         .is_ok_and(|metadata| metadata.is_file() && metadata.len() == BYTES as u64)
     {
-        Receipt::open(path, expected)?;
+        // replay-3 (D-2635): exact bytes on disk are not proof they reached
+        // the device. A publisher killed after its last `write_all` and before
+        // its `sync_all` leaves a complete receipt in the page cache with the
+        // lock released, and this path used to answer `Ok` for it with no
+        // barrier at all. The file and its directory entry are synced here, as
+        // the slow path does, before the receipt is vouched for.
+        let receipt = Receipt::open(path, expected)?;
+        if let Err(why) = crate::fixed_tail::sync_all_hooked(&receipt.file, path) {
+            crate::fixed_tail::remember_failed_barrier(path);
+            return Err(format!(
+                "checksum receipt {} could not be made durable: {why}",
+                path.display()
+            ));
+        }
+        sync_parent(path)?;
         return Ok(());
     }
     let mut file = open(path, true)?;
@@ -352,14 +369,19 @@ fn publish(path: &Path, expected: &[u8; BYTES]) -> Result<(), String> {
             .map_err(error)?;
         }
         file.sync_all().map_err(error)?;
-        File::open(path.parent().ok_or("receipt parent absent")?)
-            .and_then(|dir| dir.sync_all())
-            .map_err(error)?;
+        sync_parent(path)?;
         regular_generation(&file, path)?;
         Ok(())
     })();
     let unlock = file.unlock().map_err(error);
     result.and(unlock)
+}
+
+/// Syncs the directory holding `path`, so its entry is durable.
+fn sync_parent(path: &Path) -> Result<(), String> {
+    File::open(path.parent().ok_or("receipt parent absent")?)
+        .and_then(|dir| dir.sync_all())
+        .map_err(error)
 }
 
 fn receipt_directory(root: &Path, create: bool) -> Result<PathBuf, String> {
@@ -374,12 +396,17 @@ fn namespace_directory(root: &Path, namespace: &str, create: bool) -> Result<Pat
     let base = root.join(namespace);
     if create {
         match fs::create_dir(&base) {
-            Ok(()) => File::open(&root)
-                .and_then(|dir| dir.sync_all())
-                .map_err(error)?,
+            Ok(()) => {}
             Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(why) => return Err(error(why)),
         }
+        // replay-4 (D-2635): the root is synced on EVERY creating call, not
+        // only the one whose `create_dir` succeeded. A process killed between
+        // `create_dir` and this barrier left an entry that every later call
+        // found `AlreadyExists` and never made durable.
+        File::open(&root)
+            .and_then(|dir| crate::fixed_tail::sync_all_hooked(&dir, &root))
+            .map_err(error)?;
     }
     if !fs::symlink_metadata(&base).map_err(error)?.is_dir() {
         return Err("checksum receipt namespace must be a nonsymlink directory".to_owned());
