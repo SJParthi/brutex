@@ -192,3 +192,18 @@ Next poll: 12:40.
     handed over). CI is expected to show their run-1283 survivors again.
 - RESUME = the next 5h window (17:10 UTC) only if weekly allows. The weekly resets Mon Oct 12
   23:00 UTC. The owner decides.
+
+## 14:52 UTC — usage check (owner: "check the usage and pause and resume")
+- Estimate: 5h window ~77%; rate_limit_info has switched to five_hour/allowed_warning, resetting
+  17:10 UTC (1791306600). Weekly ~76%, resetting Mon 12 Oct 23:00 UTC (1791846000).
+- Since 14:42: brutex +$10.79 (sum $1015.00), Tickvault +$9.63 ($735.67). Tickvault set itself to
+  resume at 00:18 IST.
+- Fleet stays PAUSED. WS5 was still finishing its in-flight command at 14:52; cli-a is finishing
+  its hand-over only.
+- RESUME plan (triggers armed):
+  - 17:12 UTC (trig_01U56UBvcyHEdqqVaPjitwHV): MINIMAL resume, PR 74 critical path only. Read CI
+    run 1285, fix non-Gate-18 failures, and resume only the owners of named survivors (likely api,
+    cli-a). Hard cap: re-pause everything at weekly 80%.
+  - Mon 12 Oct 23:02 UTC (trig_01SG3BVzJf3qpRKW9i1ArED4): FULL resume of every session from its
+    PAUSE/PARK note. New-week lines: weekly 70% by day 3; 5h PAUSE at 90%.
+  - CI check 15:31 UTC (trig_01DhayNM7e5WcmsfBpceWQF7) is still armed.
