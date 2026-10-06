@@ -64195,3 +64195,64 @@ and `grid::tests::unmeasured_and_refused_at_answer_each_cause_on_its_own`.
 No code changes and no new decision of substance; this entry records the
 evidence so the row can close. D-1813 was F6's reserved number for a fix,
 used here for the confirmation.
+
+### D-2240 — `derive_all`'s whole-month re-derivation is measured and kept inherent — 2026-10-06
+
+**Findings (ET-bars-candles-store-1, ET-bars-candles-store-8, rederive; stated
+by D-0955, triaged inherent by F8).** `derive_all` re-reads every committed
+minute of the month and re-folds all seven derived rungs on every batch, and
+`reconcile_derived` reads every stored derived record back, so a month filled
+session by session reads quadratically many minute rows.
+
+**Measured, not argued alone.** `crates/pull/benches/ratio.rs` gains
+`a_month_filled_session_by_session_rederives_linearly`: 23 full July-2025
+sessions ingested one `from_members` call at a time into a fresh store, nine
+rounds, p50/p99/max per call. On this 4-core cloud box: session 1
+17.4/21.2/96.7 ms, session 12 10.5/11.0/11.2 ms, session 23 12.9/13.8/15.9 ms.
+The growth the limit states is real and small at month scale (about 2.4 ms
+per call from session 12 to 23). The bench asserts the last call's p50 stays
+within `CEILING_PERMILLE` (3.0×) of sessions × the first call's p50, so a
+change that re-derived more than the month fails Gate 8.
+
+**Kept.** The full reconcile is the only check that finds a derived conflict,
+a rerun is how a derivation blocked by missing schedule evidence is retried,
+and an incremental fold needs a per-rung resume point the store format does
+not record. Removing it is a new derived-file version, not made here.
+`docs/06-limits.md` (D-0955 section) carries the numbers. No output changes.
+
+### D-1849 — Audit batch 3 integration record, and the o1cli rows measured before and after — 2026-10-06
+
+**Integration.** `wip/audit-batch3` is `final/all-fixes` 969493e with, as
+merge commits only: F6 (`wip/audit-fixes-6c` ed6a7bf: D-1810..D-1812), F8
+commit by commit (46bbc6a..7293587: D-1831..D-1841) and F8b
+(`wip/audit-fixes-8g` 3e0ce95: D-2280..D-2291). Conflicts at the tails of
+`docs/04`, `05` and `06` kept both sides, base first; `web/build` was rebuilt
+from the merged `web/src`. Three F8 changes did not land as written:
+- D-1836 (W2-cli16-3) duplicated lane 1-b's D-1683; D-1683's code is kept and
+  D-1836 is marked superseded.
+- D-1841 (W2-cli16-2) duplicated the zero-findings D-1777
+  (`with_cached_handle`); D-1777's code is kept and D-1841 is marked
+  superseded.
+- D-1840 (o1cli-2/3/4) conflicted with D-1781, D-1701, D-1707 and D-1662; the
+  merge kept the base and D-1843 re-applies it.
+F8's deletion of Search Lineage V2/V3 (D-1832) is kept over F10's rollback
+hunks in them, as the RESUME notes required; their Gate 11 allowlist rows were
+removed from `.github/gates_ledger.rs`.
+
+**Measured before and after (owner rule 3).** On this 4-core cloud box, base
+= `final/all-fixes` 969493e built in a separate worktree, after = this branch;
+p50 / p99 / max, ms:
+- o1cli-6, 21 runs on generated rows, `top` 10: n 10k 37.6/51.0/51.2 →
+  4.19/6.32/8.03; n 100k 243.2/261.9/289.1 → 25.1/27.8/30.0; n 1M
+  4,350.5/4,471.1/4,555.6 → 314.3/338.5/340.9.
+- o1cli-5, bar count then one screen step, 15 runs: 16.05/20.12/21.51 →
+  14.70/16.09/16.49.
+- o1cli-2/4, one derived `5min` rung, 15 runs: 255.8/264.5/266.8 →
+  248.7/275.7/321.0 (within noise on a one-month fixture).
+- o1cli-3, `5min` then `1min`, 15 runs: 353.4/359.5/366.4 → 353.1/370.1/377.8
+  (within noise on a one-month fixture).
+The o1cli-2/3/4 gains are read and build counts, proven by the counting tests
+D-1843 names; on the one-month fixture they are not visible in wall time, and
+on a multi-year span they are UNVERIFIED (not measured). The measurements are
+the ignored tests `cli::tests::o1cli_6_selection_measurement` and
+`cli::audited_stored::tests::o1cli_cost_measurement`.

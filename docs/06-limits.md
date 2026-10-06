@@ -11667,6 +11667,14 @@ and every `top` from 1 to 50, both calendar settings, and requires the same
 printed rows in order, the same verdicts and the same subject; it reaches the
 admitted and the fallback subject both. Counted by shape, not timed.
 
+**Measured, D-1849 (2026-10-06).** `tests::o1cli_6_selection_measurement`
+(ignored; run explicitly) times both paths on the same generated rows, 21 runs
+each, `top` 10: n = 10,000: two sorts p50 37.6 / p99 51.0 / max 51.2 ms,
+selections 4.19 / 6.32 / 8.03 ms; n = 100,000: 243.2 / 261.9 / 289.1 ms
+against 25.1 / 27.8 / 30.0 ms; n = 1,000,000: 4,350.5 / 4,471.1 / 4,555.6 ms
+against 314.3 / 338.5 / 340.9 ms. Every run asserts the same printed top and
+subject.
+
 ## Four commands load a span for one number, then load it again (audit o1cli-5)
 
 - **Four entry points load a whole stored span to read one number off it,
@@ -11701,6 +11709,10 @@ after (`a_span_read_for_one_number_seeds_the_screen_that_follows`). What
 remains per command is the one read the work itself needs. Held to the code by
 `the_span_loaded_for_one_number_seeds_the_work_it_hands_off` in
 `crates/cli/tests/limits_o1cli_5.rs`.
+
+**Measured, D-1849 (2026-10-06).** Bar count then one screen step on the
+warmed `5min` fixture, 15 runs: base (two span reads) p50 16.05 / p99 20.12 /
+max 21.51 ms, this tree (one read) 14.70 / 16.09 / 16.49 ms.
 
 ## The audit kernel reads its daily and minute contexts twice (audit o1cli-4)
 
@@ -11739,6 +11751,14 @@ before the fix.
 digest the build records is still `bind_withheld` over the whole series and
 every withheld day, and the build's own "exact-minute days withheld" event is
 the one event for those days (the kernel no longer emits a second).
+
+**Measured, D-1849 (2026-10-06).** `audited_stored::tests::o1cli_cost_measurement`
+(ignored; run explicitly) times one derived `5min` rung (the same run covers o1cli-2 and o1cli-4) on the warmed
+one-month fixture, 15 runs on this 4-core cloud box: base tree
+(`final/all-fixes` 969493e) p50 255.8 / p99 264.5 / max 266.8 ms, this tree
+248.7 / 275.7 / 321.0 ms. The reads and the second build it removes are
+counted above; on one month they are a small share of the rung, so the wall
+time is within run-to-run noise. Not measured on a multi-year span.
 
 ## Parallel rungs each re-read the same one-minute span (audit o1cli-3)
 
@@ -11788,6 +11808,12 @@ share is a `Mutex` over at most `SPAN_SHARE_KEYS` (6) spans, walked by key,
 and the daily context, which D-1781 derives from the whole folded series, is
 derived once per build rather than once per pass.
 
+**Measured, D-1849 (2026-10-06).** Two rungs (`5min`, `1min`) on the warmed
+one-month fixture, 15 runs: base p50 353.4 / p99 359.5 / max 366.4 ms, this
+tree (one share) 353.1 / 370.1 / 377.8 ms: within noise on one month, where
+the shared reads are a small share of two sweeps. The read counts above are
+the guarantee; wall time on a multi-year span is UNVERIFIED.
+
 ## A rung loads its span twice and may build its column twice (audit o1cli-2)
 
 - **`one_rung` loads the rung's span with `stored::load_span`, and the audit
@@ -11830,6 +11856,14 @@ or not), and that read seeds the kernel's load through `AuditCache::inputs`,
 so the span is read once per rung, not twice; the kernel's preparation then
 sizes the probe. A derived support on an unstamped build refuses with the
 same words the derivation always used.
+
+**Measured, D-1849 (2026-10-06).** `audited_stored::tests::o1cli_cost_measurement`
+(ignored; run explicitly) times one derived `5min` rung on the warmed
+one-month fixture, 15 runs on this 4-core cloud box: base tree
+(`final/all-fixes` 969493e) p50 255.8 / p99 264.5 / max 266.8 ms, this tree
+248.7 / 275.7 / 321.0 ms. The reads and the second build it removes are
+counted above; on one month they are a small share of the rung, so the wall
+time is within run-to-run noise. Not measured on a multi-year span.
 
 ## Condition names resolve through a compile-time index (audit o1engine-24)
 
@@ -12063,6 +12097,19 @@ read from the source.
   not `write_and_count` wrote anything, so a window the store already holds
   (`AlreadyPresent`) pays the full O(n_m + Σ h_r) reads and 7 × O(n_m) folds of
   the bullet above. Kept for the retry reason above.
+* **Measured by D-2240 (2026-10-06), and argued inherent.** The pull bench's
+  `a_month_filled_session_by_session_rederives_linearly` fills July 2025 (23
+  full sessions) one `from_members` call per session, nine rounds, on this
+  4-core cloud box (dev box, not a dedicated runner): one call took p50
+  17.4 ms / p99 21.2 ms / max 96.7 ms at session 1 (file creation included),
+  10.5 / 11.0 / 11.2 ms at session 12, and 12.9 / 13.8 / 15.9 ms at session 23.
+  The re-read and re-fold of the growing month add about 2.4 ms per call
+  between sessions 12 and 23, under a fifth of the call; the bench asserts the
+  last call stays within 3 × (sessions × first) and does not assert the growth
+  away. Inherent to the current format for the reasons above: the full
+  `reconcile_derived` pass is the only derived-conflict detector, a rerun is the
+  retry, and an incremental fold needs a per-rung resume point the store does
+  not record (a new derived-file version, not made here).
 * **W1-pull2-0 — `from_members_inner`, once per broker window.** Each call takes
   the census lock and calls `read_census`, which is one `fs::read(path)` of the
   whole manifest and a decode and CRC-32C check of every committed entry:

@@ -572,7 +572,7 @@ fn session_member(day: u8) -> pull::archive::Member {
 fn full_sessions() -> Vec<u8> {
     (1..=31_u8)
         .filter(|&day| {
-            pull::session::Day::new(2025, 7, day).is_some_and(|date| {
+            pull::session::Day::new(2025, 7, day).is_ok_and(|date| {
                 matches!(
                     pull::calendar::kind_of(i64::from(date.days_from_epoch())),
                     pull::calendar::DayKind::Open(session) if session.bars() == 375
@@ -618,7 +618,7 @@ fn a_month_filled_session_by_session_rederives_linearly() -> bool {
             return false;
         }
         for (at, &day) in days.iter().enumerate() {
-            let Some(date) = pull::session::Day::new(2025, 7, day) else {
+            let Ok(date) = pull::session::Day::new(2025, 7, day) else {
                 return false;
             };
             let Ok(window) = pull::session::Window::new(date, date) else {
