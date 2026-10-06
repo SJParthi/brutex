@@ -909,11 +909,13 @@ Narrative only. No row is added to the table above.
 
 Branch `attack/permutations`. These IDs are the first six hex digits of the
 SHA-256 of the title, because the ledger does not record the original scheme.
-Candidates refuted before any fix: the VWAP below-bias (the floor is the
-documented definition, D-3401) and the SuperTrend seed carried past warm (a
-locked choice, with the wording corrected, D-3401).
+Candidates refuted before any fix: the VWAP below-bias and the daily pivot floor
+(each defined as a floor by its document, D-3401) and the SuperTrend seed
+carried past warm (a locked choice, with the wording corrected, D-3401). The gap
+midpoint is ind1-2, already tracked and fixed on its owner's branch.
 
 | ID | Severity | Title | Where | Disposition |
 |---|---|---|---|---|
-| `F-DBC24E` | `wrong` | EMA sides were decided on the paisa floor of the average, so a close on the floor of a fractional EMA was certified not below it | `crates/indicators/src/trend.rs` (`Ema::value`, `TrendState::emit` bits 0–5) | FIXED f9ab789 — D-3400, XPERM-01 |
+| `F-DBC24E` | `wrong` | EMA sides were decided on the paisa floor of the average, so a close on the floor of a fractional EMA was certified not below it | `crates/indicators/src/trend.rs` (`Ema::value`, `TrendState::emit` bits 0–5) | WITHDRAWN — duplicate of ind1-2, fixed on `wip/zero/numeric-edges` de48df5; the lens's EMA change was removed (D-3400) |
 | `F-25A074` | `wrong` | Candlestick midpoints were floored, so the bearish beyond-the-midpoint clauses and the rickshaw man centre each answered one price the wrong way | `crates/indicators/src/pattern.rs` (`Shape::mid`, positions 162, 164, 212, 226) | FIXED f9ab789 — D-3402, XPERM-02 |
+| `F-3B4D5A` | `wrong` | The SuperTrend stop was built from a floored midpoint, a floored ATR and a floored band, so bits 64 and 65 could put a close on the wrong side of it | `crates/indicators/src/trend.rs` (`SuperTrend::fold`, `TrendState::emit` 64–65) | FIXED SHA_F2 — D-3403, XPERM-03 |

@@ -217,8 +217,10 @@ Duplicate rejection | O(1) **expected**, not adversarial worst-case | k=1 uses o
 Nothing in the closure grows with the number of candles fed. That is the property a
 live consumer needs and it is asserted in the build rather than described here:
 `const _: () = assert!(size_of::<Evaluator>() <= 1808)` fails if any module starts
-accumulating. It measures 1776 bytes today, so the assertion has 32 bytes of slack and is
-a live guard rather than a rounded-up number that could never fire. D-1542 grew it from
+accumulating. It measures 1792 bytes today, so the assertion has 16 bytes of slack and is
+a live guard rather than a rounded-up number that could never fire. D-3403 grew it from
+1776 by holding the SuperTrend stop exactly, as an `i128` numerator, so its
+`Option` went from 16 bytes to 32; the ceiling did not move. D-1542 grew it from
 1728 (ceiling 1760) by one `i128` seed sum in each of the two EMAs and the ATR, so the
 first warm value is the simple mean of the first period. D-1441 shrank it from
 1792 (ceiling 1824) when `GapFib`'s three-slot ring became one running 3-minute candle,

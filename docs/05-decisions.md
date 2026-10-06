@@ -63140,33 +63140,19 @@ longer be reached, so it was removed. The frontier writer keeps its own
 **Rejected.** Changing the test to expect the 4,096 text. That would
 leave the two descent doors with different bounds.
 
-### D-3400 — An EMA's side is decided on the held average, not on its paisa floor — 2026-10-06
+### D-3400 — Withdrawn: the EMA side fix duplicated ind1-2 — 2026-10-06
 
-**What was observed.** The permutations attack (lens L3) found that
-`trend::Ema::value` floors the average, which is held scaled by `SCALE =
-1_000_000`, to a whole paisa, and `TrendState::emit` compared the close with
-that floor. That decides "above" exactly for an integer close, but not
-"below". A close equal to the floor of a fractional average sits below it,
-set neither bit 0 nor bit 1, and `known` still certified both as false.
-Nineteen candles at 100 and one at 95 give an EMA20 of 99.75. A close of 99
-was "neither" before this fix. Positions 2/3 (EMA200) and 4/5 (fast against
-slow, both floored) had the same fault. No document defines the EMA on a
-paisa floor: the module doc says the average is held "to six further digits".
-`docs/26-vwap-mapping.md` does define VWAP as a floor, which is why the VWAP
-twin of this candidate was refuted (D-3401).
+**What happened.** The permutations lens (L3) found the following: the EMA was
+compared with the close on its paisa floor, so "below" lost one price that
+"above" kept (bits 0–5). It pushed a fix in `f9ab789` under this number, with
+invariant XPERM-01. The defect was already tracked as **ind1-2**
+(`resume/numeric-audit/pass1/ind1.md`), which is owned by the numeric-edges
+helper and fixed on `wip/zero/numeric-edges` at `de48df5`. The lens's dedupe
+read the board row `ind1-2 fixing` and not the audit file that names it.
 
-**Decided.** `Ema::side_of(price)` compares `price · SCALE` with the held
-`scaled` value exactly, since `i64 · 10^6` fits in `i128`. Bits 4/5 compare
-the two held values. The `value()` checks stay only as the availability gate
-that `known` certifies. The derived cross and ordinal bits (280–283, 314–319)
-read bits 0–3, so they follow. Proof: XPERM-01. Both tests failed before the
-fix, e.g. `period 20, last seed 95, close 99` and `fast above slow:
-ConditionMask([0, 0, 0, 0, 0, 0])`. The all-position evaluator digest in
-`gap::tests::complete_sessions_through_the_evaluator_are_byte_identical` is
-re-taken; the gap count, 4,092, did not move.
-
-**Rejected.** Rounding `value()` to nearest. That moves the error to the
-other side instead of removing it.
+**Decided.** The EMA code, its two tests and XPERM-01 are withdrawn from
+`attack/permutations`. The owner's fix stands. This number stays, so no
+citation silently changes meaning.
 
 ### D-3401 — Two lens-L3 candidates refuted, and the SuperTrend warm wording corrected — 2026-10-06
 
@@ -63176,6 +63162,14 @@ floor of a fractional VWAP. `docs/26-vwap-mapping.md:19-20` defines the VWAP as
 against that value. The code matches the governing document. Changing the
 definition to the exact rational mean is an owner call, recorded as UNVERIFIED
 under "needs the owner" in the lens result.
+
+**Daily pivot, BC and TC floored, refuted.** `daily.rs:30-40` defines the
+levels as floored once per session ("Integer division, once, at the level
+boundary"). `the_ceiling_is_exact_arithmetic_and_rounding_can_pass_it` pins that
+policy. Exact levels would be an owner call, so this is UNVERIFIED.
+
+**Gap midpoint 66/67, already tracked.** It is ind1-2 and is fixed on
+`wip/zero/numeric-edges` (`de48df5`). Not touched here.
 
 **SuperTrend seed carried past warm, refuted as a defect.** At `warm()` the
 ratchet can still hold bar 0's stop. The candidate's example: bar 0 TR 2 gives
@@ -63205,3 +63199,34 @@ XPERM-02. All three tests failed before the fix, e.g. `prior 100->103, bar
 
 **Rejected.** `(a + b + 1) / 2` (round half up). It moves the bias to the
 bullish twins.
+
+### D-3403 — The SuperTrend stop is held exactly, not built from three floors — 2026-10-06
+
+**What was observed.** The permutations lens (L3) found, in round 2, that
+`SuperTrend::fold` built the stop from three floored values. It took
+`i128::midpoint(high, low)`, then `Atr::value()` (the six-digit Wilder ATR
+floored to a whole paisa), then a band floored again by `div_euclid(1000)`.
+Bits 64/65 then compared the close with that integer. The error is not limited
+to a close equal to the level: it reaches `mult / 1000` paisa plus a half, and
+it can put the close on the WRONG side. Take CLASSICAL thresholds:
+- bars 0–9 are H101 L100 C101;
+- bar 10 is H97 L96 C96, which flips the trend down with an exact Wilder ATR of
+  1.4, so the stop is 96.5 + 4.2 = 100.7;
+- floored, the stop was 96 + 3 = 99, and a close of 100 set 64 (above).
+No document defines a floored SuperTrend. The module doc holds the ATR "in the
+same scaled form" as the EMA, and D-1542 locks only the seed.
+
+**Decided.** The stop is held as an `i128` numerator over `STOP_UNIT =
+2 · SCALE · 1000`, so `(h + l) / 2` and `atr · mult / 1000` are exact integers.
+`SuperTrend::side_of` compares `close · STOP_UNIT` with it, and 64/65 use that.
+`stop()` still reports the paisa floor. A held stop whose floor does not fit
+`i64` is absent, the policy C4-INDICATORS-01 pins. `Atr::value()` stays the
+availability gate (F-87AB98 unchanged). `Evaluator` grew from 1,776 to 1,792
+bytes; the 1,808 ceiling did not move (docs/10-shared-core.md). Proof:
+XPERM-03. Both tests failed before the fix: `100 < 100.7:
+ConditionMask([0, 1, 0, 0, 0, 0])` and `minute 10: close 10003 against
+20025000000000/2000000000`. The all-position evaluator digest is re-taken; the
+gap count, 4,092, did not move.
+
+**Rejected.** Rounding the ATR to nearest. That still puts a close on the wrong
+side, multiplied by the band multiple.

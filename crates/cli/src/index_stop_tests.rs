@@ -85,15 +85,10 @@ impl Drop for Group {
 /// conditions and terminals did not move; the identity that names the source
 /// bytes did. At the tree before D-1571 was merged this test passed on the
 /// previous pins.
-///
-/// Re-taken again for D-3400 and D-3402: the EMA rows are now decided on the
-/// average held below a paisa, so the evaluated conditions moved. With
-/// `indicators/src` restored to its previous bytes this test passed on the
-/// previous pins (`d155210e…`, `733a085e…`, `7065fe29…`).
 const PINS: [&str; 3] = [
-    "982d7e874e72165d7f0129c0bd5f7bcbe0ab699de750983dbb63ec2714dfc776",
-    "f51a53dcc67bd8b81ff16e10093a182783cd76dc07504c177e049dff8d5bff62",
-    "28330b7210d51aadc9b92eabae1f3bcbde5d737c96ac620f839d5325b3413f7b",
+    "d155210e870779530659e7ce44fee9f43e4a0b09aafa271c383b23890cadd45a",
+    "733a085e817912c7f85d98d9618b8c115ceb8a955fb4a247e29b88578dacd2e6",
+    "7065fe2916044f03cd4f513e9c6f66cae8be6b968f7d4c4c9fe6bbf446a5be99",
 ];
 
 fn body_hex(fixture: &Fixture, identity: [u8; 32]) -> Result<String, String> {

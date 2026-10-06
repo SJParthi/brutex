@@ -375,7 +375,9 @@ pub enum Trend {
 pub struct SuperTrend {
     atr: Atr,
     multiplier: i128,
-    stop: Option<i64>,
+    /// The stop held EXACTLY, as a numerator over [`STOP_UNIT`]: the midpoint, the
+    /// held ATR and the band are never rounded to a paisa on the way (D-3403).
+    stop: Option<i128>,
     trend: Trend,
 }
 
@@ -392,9 +394,24 @@ impl SuperTrend {
     }
 
     /// The stop's price, or `None` before it is established.
+    /// The stop, floored to a whole paisa for reporting. The bits do not compare
+    /// against this: see [`Self::side_of`].
     #[must_use]
-    pub const fn stop(&self) -> Option<i64> {
+    pub fn stop(&self) -> Option<i64> {
         self.stop
+            .and_then(|held| i64::try_from(held.div_euclid(STOP_UNIT)).ok())
+    }
+
+    /// Which side of the HELD stop `close` sits on, or `None` with no stop.
+    ///
+    /// The stop is `(high + low) / 2 ± atr · mult / 1000`, which is a fraction of a
+    /// paisa in general. It used to be built from a floored midpoint, a floored ATR
+    /// and a floored band, so a close could sit on the wrong side of it by up to
+    /// `mult / 1000` paisa plus a half — not merely on it (D-3403).
+    #[must_use]
+    pub fn side_of(&self, close: i64) -> Option<core::cmp::Ordering> {
+        self.stop
+            .map(|held| i128::from(close).saturating_mul(STOP_UNIT).cmp(&held))
     }
 
     /// Which side of it the market is on.
@@ -420,14 +437,23 @@ impl SuperTrend {
     /// Fold one candle in, moving or flipping the stop.
     pub fn fold(&mut self, candle: &Candle) {
         self.atr.fold(candle);
-        let Some(atr) = self.atr.value() else { return };
-        let mid = i128::from(candle.high).midpoint(i128::from(candle.low));
-        let band = i128::from(atr)
+        // `value` is the availability gate only — an ATR `i64` cannot hold has no
+        // band (F-87AB98). The band itself is built from the held ATR.
+        if self.atr.value().is_none() {
+            return;
+        }
+        // All three over STOP_UNIT = 2 · SCALE · 1000: `(h + l) / 2` and
+        // `(atr / SCALE) · (mult / 1000)` become integers, exactly.
+        let mid = (i128::from(candle.high).saturating_add(i128::from(candle.low)))
+            .saturating_mul(SCALE * 1000);
+        let band = self
+            .atr
+            .scaled
             .saturating_mul(self.multiplier)
-            .div_euclid(1000);
+            .saturating_mul(2);
         let upper = mid.saturating_add(band);
         let lower = mid.saturating_sub(band);
-        let close = i128::from(candle.close);
+        let close = i128::from(candle.close).saturating_mul(STOP_UNIT);
 
         let Some(previous) = self.stop else {
             // Seed on the side the first candle implies, so the first emitted bit is
@@ -438,10 +464,9 @@ impl SuperTrend {
                 (Trend::Down, upper)
             };
             self.trend = trend;
-            self.stop = i64::try_from(stop).ok();
+            self.stop = representable(stop);
             return;
         };
-        let previous = i128::from(previous);
 
         let (trend, stop) = match self.trend {
             Trend::Up => {
@@ -464,8 +489,19 @@ impl SuperTrend {
         // Same policy as the seed: a stop `i64` cannot hold is absent, not the previous
         // leg's level kept under the new trend. The next candle then reseeds, exactly as
         // it does after an unrepresentable seed.
-        self.stop = i64::try_from(stop).ok();
+        self.stop = representable(stop);
     }
+}
+
+/// The denominator the SuperTrend stop is held over: `2 · SCALE · 1000`, so the
+/// midpoint's half, the ATR's six digits and the multiplier's thousandths are all
+/// whole numbers (D-3403).
+const STOP_UNIT: i128 = 2 * SCALE * 1000;
+
+/// A held stop whose paisa floor `i64` cannot hold is absent, the policy the seed
+/// and the flip share (C4-INDICATORS-01).
+fn representable(held: i128) -> Option<i128> {
+    i64::try_from(held.div_euclid(STOP_UNIT)).ok().map(|_| held)
 }
 
 /// A confirmed swing, and the window it was confirmed in.
@@ -976,9 +1012,9 @@ impl TrendState {
         // a band passes it or the trend flips: the gate is on the ATR, not on the level
         // (D-1542 seeds at the first candle by choice; D-3401).
         if self.supertrend.warm()
-            && let Some(stop) = self.supertrend.stop()
+            && let Some(ordering) = self.supertrend.side_of(close)
         {
-            mask = side(mask, close, stop, 64, 65);
+            mask = side_by(mask, ordering, 64, 65);
         }
 
         // 72–73: near a confirmed swing. `Kind::Near`, so `vocab` gates the band.
@@ -1043,10 +1079,20 @@ fn set(mask: ConditionMask, index: u16) -> ConditionMask {
 /// fire on every zero-body bar and handed an undirected tri-star to the bearish bit.
 /// Making it structural means it cannot be forgotten at the fourth call site.
 fn side(mask: ConditionMask, value: i64, level: i64, above: u16, below: u16) -> ConditionMask {
+    side_by(mask, value.cmp(&level), above, below)
+}
+
+/// [`side`] on an ordering already decided, for a level held below a paisa.
+fn side_by(
+    mask: ConditionMask,
+    ordering: core::cmp::Ordering,
+    above: u16,
+    below: u16,
+) -> ConditionMask {
     // A `match` on the ordering rather than an `if` chain: `Ordering` has exactly
     // three variants, so the compiler checks the equality arm exists instead of a
     // reader having to notice it does.
-    match value.cmp(&level) {
+    match ordering {
         core::cmp::Ordering::Greater => set(mask, above),
         core::cmp::Ordering::Less => set(mask, below),
         core::cmp::Ordering::Equal => mask,
@@ -2730,5 +2776,158 @@ mod a_period_is_folded_before_it_is_named {
                  anything later — or never — is a live condition the sweep cannot reach"
             );
         }
+    }
+}
+
+// XPERM-03 (D-3403): the SuperTrend stop is held exactly — midpoint, ATR and band
+// are never rounded to a paisa before the close is compared with it. A sibling
+// module, like `the_stop_on_both_sides`.
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod supertrend_exact {
+    use super::*;
+
+    fn bar(minute: i64, high: i64, low: i64, close: i64) -> Candle {
+        Candle {
+            ts_micros: minute * 60_000_000,
+            open: close,
+            high,
+            low,
+            close,
+            volume: 0,
+            open_interest: i64::MIN,
+        }
+    }
+
+    fn tol() -> Tolerance {
+        vocab::tolerance::pinned_fib().expect("the pinned fib width is valid")
+    }
+
+    /// A naive SuperTrend over exact fractions. The ATR is the documented one —
+    /// a running mean of the true range, then Wilder's `1/n`, held to six digits
+    /// below a paisa — recomputed here independently; everything after it is
+    /// exact: the stop is kept as a numerator over `2 · 10^6 · 1000`.
+    struct Naive {
+        period: i128,
+        multiplier: i128,
+        atr: i128,
+        sum: i128,
+        count: i128,
+        previous_close: Option<i128>,
+        up: bool,
+        stop: Option<i128>,
+    }
+
+    const UNIT: i128 = 2 * 1_000_000 * 1000;
+
+    impl Naive {
+        fn fold(&mut self, high: i128, low: i128, close: i128) {
+            let mut tr = high - low;
+            if let Some(p) = self.previous_close {
+                tr = tr.max((high - p).abs()).max((p - low).abs());
+            }
+            self.count += 1;
+            if self.count <= self.period {
+                self.sum += tr * 1_000_000;
+                self.atr = self.sum.div_euclid(self.count);
+            } else {
+                self.atr += (tr * 1_000_000 - self.atr).div_euclid(self.period);
+            }
+            self.previous_close = Some(close);
+            // (h + l) / 2 and atr / 10^6 · mult / 1000, both over UNIT.
+            let mid = (high + low) * 1_000_000 * 1000;
+            let band = self.atr * self.multiplier * 2;
+            let (upper, lower, close) = (mid + band, mid - band, close * UNIT);
+            self.stop = Some(match (self.stop, self.up) {
+                (None, _) => {
+                    self.up = close >= mid;
+                    if self.up { lower } else { upper }
+                }
+                (Some(s), true) if close < s => {
+                    self.up = false;
+                    upper
+                }
+                (Some(s), true) => lower.max(s),
+                (Some(s), false) if close > s => {
+                    self.up = true;
+                    lower
+                }
+                (Some(s), false) => upper.min(s),
+            });
+        }
+    }
+
+    /// The refutation's own trace. Bars 0–9 hold the ATR at exactly 1 paisa; bar 10
+    /// flips the trend down with a Wilder ATR of exactly 1.4, so the stop is
+    /// 96.5 + 4.2 = 100.7. Floored, it was 96 + 3 = 99, and a close of 100 set 64
+    /// (above) where it sits below the stop.
+    #[test]
+    fn a_close_under_the_exact_stop_is_below_it_whatever_the_floors_said() {
+        let mut t = TrendState::new(TrendThresholds::CLASSICAL);
+        for i in 0..10 {
+            t.step(&bar(i, 101, 100, 101), tol()).expect("sane");
+        }
+        let m = t.step(&bar(10, 97, 96, 96), tol()).expect("sane");
+        assert!(
+            m.get(65) && !m.get(64),
+            "96 is under the seeded stop: {m:?}"
+        );
+        let m = t.bits(100, tol());
+        assert!(m.get(65) && !m.get(64), "100 < 100.7: {m:?}");
+        let m = t.bits(101, tol());
+        assert!(m.get(64) && !m.get(65), "101 > 100.7: {m:?}");
+        assert_eq!(
+            t.supertrend.stop(),
+            Some(100),
+            "the reported level floors 100.7"
+        );
+    }
+
+    /// Differential: 3,000 bars of a deterministic walk (seeded LCG, steps of a few
+    /// paisa so the fractional parts matter), every bar's 64/65 against the naive
+    /// oracle's side, and every warm bar decided one way or the other.
+    #[test]
+    fn bits_64_and_65_agree_with_an_exact_naive_supertrend_on_a_long_walk() {
+        let thresholds = TrendThresholds::CLASSICAL;
+        let mut t = TrendState::new(thresholds);
+        let mut naive = Naive {
+            period: thresholds.atr_period,
+            multiplier: thresholds.supertrend_mult,
+            atr: 0,
+            sum: 0,
+            count: 0,
+            previous_close: None,
+            up: true,
+            stop: None,
+        };
+        let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = |span: i64| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            i64::try_from(seed >> 33).expect("31 bits") % span
+        };
+        let mut price: i64 = 10_000;
+        let mut compared = 0_u32;
+        for minute in 0..3_000_i64 {
+            price += next(7) - 3;
+            let high = price + next(4);
+            let low = price - next(4);
+            let close = low + next(high - low + 1);
+            let candle = bar(minute, high, low, close);
+            let mask = t.step(&candle, tol()).expect("sane");
+            if minute >= thresholds.atr_period as i64 {
+                let stop = naive.stop.expect("seeded on the first bar");
+                let exact = i128::from(close) * UNIT;
+                assert_eq!(
+                    (mask.get(64), mask.get(65)),
+                    (exact > stop, exact < stop),
+                    "minute {minute}: close {close} against {stop}/{UNIT}"
+                );
+                compared += 1;
+            }
+            naive.fold(i128::from(high), i128::from(low), i128::from(close));
+        }
+        assert_eq!(compared, 2_990);
     }
 }

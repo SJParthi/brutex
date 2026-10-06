@@ -789,12 +789,6 @@ fn a_tabled_day_window_seals_exactly_what_the_full_row_walk_did() {
     // measured on the build before that change, over every start day and three
     // end days per start, both sides, so any drift in which rows or periods a
     // window takes changes it.
-    //
-    // RE-TAKEN for D-3400 and D-3402: the fixture's column is built by the
-    // evaluator, whose EMA sides and candlestick midpoints are now decided below a
-    // paisa. With `indicators/src` restored to its previous bytes this test passed
-    // on the previous pin, so nothing in the window walk moved it. Was
-    // [115, 168, 60, 123, ...].
     let mut fixture = Fixture::new(1, 30);
     fixture.signals = fixture.bars.clone();
     fixture.column = column(&fixture.signals);
@@ -820,8 +814,8 @@ fn a_tabled_day_window_seals_exactly_what_the_full_row_walk_did() {
     }
     assert_eq!(windows, 240);
     let pin: [u8; 32] = [
-        114, 56, 246, 5, 214, 32, 167, 184, 82, 153, 157, 67, 177, 235, 92, 243, 254, 246, 28, 214,
-        96, 144, 156, 83, 16, 53, 118, 242, 238, 41, 240, 27,
+        115, 168, 60, 123, 173, 208, 37, 133, 254, 72, 232, 166, 232, 107, 241, 176, 137, 227, 42,
+        200, 185, 248, 182, 169, 204, 8, 90, 7, 172, 20, 223, 148,
     ];
     assert_eq!(fold.finalize(), pin);
 }

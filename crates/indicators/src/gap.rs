@@ -1528,12 +1528,12 @@ mod tests {
         // all 384 positions, so it moved. The gap family's own count, 4,092,
         // did not, and `complete_sessions_emit_exactly_what_the_three_bar_fold_emitted`
         // above still pins the gap family alone. Was 8_217_985_476_958_011_973.
-        // RE-TAKEN again for D-3400 and D-3402: the averages' sides and five
-        // midpoint predicates are now decided below a paisa, so the all-position
+        // RE-TAKEN again for D-3402 and D-3403: five candlestick midpoint predicates
+        // and the SuperTrend stop are now decided below a paisa, so the all-position
         // digest moved and the gap count did not. Was 9_976_369_688_448_099_888.
         assert_eq!(
             (digest, gap_known),
-            (16_517_796_913_939_238_448, 4_092),
+            (1_794_190_917_626_450_722, 4_092),
             "complete sessions no longer emit what the three-bar fold emitted"
         );
     }
