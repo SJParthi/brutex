@@ -30,3 +30,4 @@ Not yet: the cli batch-3 mutation chunks are unfinished and RESULT-20261006.md /
    (each < 2 h; --re for any chunk-A mutants not reached). Kill every MISSED/TIMEOUT with a test.
 2. Write resume/attack-audit-20261004/RESULT-20261006.md (draft table in this session), append a RESUME.md section, run
    /tmp/claude-0/out/tracker.py <head> on the tracker, push fix-queue.
+- Chunk A ended: 9 caught, 5 missed, 0 timeout, 2 unviable of 20 (rc 124); missed: crates/cli/src/lib.rs:14190:14: replace < with <= in least_first;crates/cli/src/lib.rs:14203:5: replace calendar_holds -> bool with true;crates/cli/src/lib.rs:14203:5: replace calendar_holds -> bool with false;crates/cli/src/lib.rs:14205:38: replace <= with > in calendar_holds;crates/cli/src/lib.rs:14218:85: replace > with < in final_selection_split
