@@ -248,3 +248,16 @@ Next poll: 12:40.
   else stays paused.
 - Survivor-round trigger armed for Oct 7 20:30 UTC; it re-arms +2 h while the run is still going.
   The cheap CI check at 19:50 UTC Oct 6 is still armed. Full RESUME at Mon 12 Oct 23:02 UTC.
+
+## 17:46 UTC — handoff prompt for a NEW ACCOUNT written (owner's request)
+- The owner asked for one precise prompt to continue every held, paused or unfinished job from a different
+  Claude account (Claude Code project, beta), delivered at the latest when weekly reaches 95%.
+- Written: `resume/HANDOFF-NEW-ACCOUNT.md`. It holds the prompt and the per-workstream table. It is
+  refreshed at every coordinator wake, and before the 93% stop.
+- Takeover lock: the new account first writes `resume/HANDOFF-CLAIM.md`. Every routine on this account
+  checks that file and stands down if it exists, so two coordinators never push `final/all-fixes`.
+- Costs now: brutex fleet $1048.25 (was $1032.26 at 17:15); Tickvault $751.59 (was $740.20).
+- Estimate (lean high; GDFL is unmeasured, so ×1.5):
+  - the extra $27.4 is about 5.6 points of the 5h window, ×1.5 = 8.4;
+  - weekly ≈ 85 + 0.29 × 8.4 ≈ 87.4%.
+  The owner meter overrides.
