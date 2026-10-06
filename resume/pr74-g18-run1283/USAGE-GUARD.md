@@ -84,3 +84,23 @@ read seven_day/allowed_warning since at least 07:31. That is the weekly pace war
 and the WEEKLY GUARD above handles it, because the owner said to run everything. An
 immediate PAUSE still follows from a five_hour warning, from any status "rejected",
 or from the 5-hour estimate reaching 60%.
+
+08:07 poll: the 14 brutex sessions sum to $557.19, which is $207.93 since 07:10.
+That estimates 59.4% of the window, and cost_usd trails real spend. WS5 alone went
+$76.15 -> $137.97 between 07:51 and 08:06. Tickvault was $339.20.
+PAUSE was sent to all 13 sessions (priority now). Builds and mutation runs already
+going may finish, since they cost no usage.
+The zero-defect audit workflow wf_33b651ee-26e was stopped at 08:08 so the sessions
+keep room to save their work.
+RESUME trigger: 12:12 UTC (trig_01VA1zhRBcZL5kLMKpFrS152), plan B unless the owner
+picks A or C.
+Workflow relaunch: Workflow({scriptPath:
+"/root/.claude/projects/-home-user-brutex/a9c2d522-edad-5d9f-8141-66605ab12cdb/workflows/scripts/zero-defect-gap-audit-wf_33b651ee-26e.js",
+resumeFromRunId: "wf_33b651ee-26e", args: {"base": "origin/final/all-fixes",
+"branches": ["pr74/g18-cli-a", "pr74/g18-cli-b", "pr74/g18-api", "pr74/g18-runner",
+"pr74/g18-rest", "claude/attack-data-pipeline-hgxmw9", "fixboard/pr74-batch3",
+"wip/audit-batch3", "zero/next", "attack/observability", "attack/o1-p99",
+"attack/permutations", "attack/one-authority"]}}). Add "fixboard/pr74-batch4" to
+"branches", because WS3 started it at 07:51. That changes the args, so the cached
+finder results replay only where the prompt text is unchanged; accept it.
+Weekly extrapolation at 08:07: about 27 + 0.28 x 59 = 44%.
