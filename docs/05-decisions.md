@@ -63261,3 +63261,35 @@ changes neither.
 **Rejected.** Making the whole-file refusal tolerate unknown codes. D-0329
 and D-3310 keep that policy. The kept body is what makes the refusal cheap
 to act on.
+
+### D-3312 — GLOBAL is a known Kite exchange code, from a count of one whole dump — 2026-10-06
+
+**What was observed.** The D-3311 build refreshed the Zerodha dump at
+11:07 IST on 6 Oct 2026. It refused at
+``line 25979: unrecognised exchange `GLOBAL` `` and kept the body. The
+operator counted that kept file's `exchange` column: `BFO` 5,016, `BSE`
+12,992, `CDS` 7,902, `GLOBAL` 12, `MCX` 15,330, `NCO` 21,557, `NFO`
+34,928, `NSE` 10,318, `NSEIX` 1. All 12 `GLOBAL` rows are on segment
+`INDICES`. `NSE` rows carry only the segments `NSE` (10,182) and
+`INDICES` (136). The full table is in charter §4z.
+
+**Decided.** `GLOBAL` joins Zerodha's known non-stored exchange codes and
+declines as `ForeignExchange`. Its source is the vendor's own dump, as the
+operator's app observed and counted it. What `GLOBAL` means beyond "12
+INDICES rows in the dump" is UNVERIFIED and not needed: the row is
+declined by its code.
+
+**Why the decline is at the exchange gate.** A `GLOBAL` row has the same
+shape as an NSE index row: segment `INDICES`, type `EQ`. If it got past
+the exchange gate, the index promotion (D-0785) would file it as a spot
+index. The exchange gate runs first, so it is declined before the segment
+is read. A test pins this.
+
+**Result.** All nine codes in that dump are now readable. Every
+non-`NSE` code is a routine decline, and every `NSE` row's segment is one
+`segment_of` already stores. So the counted dump has no row this build
+refuses for an unknown code. Measured: a throwaway local test (not
+committed) passed the kept 11:07 file (8,780,872 bytes) to
+`pull::masters::validated_body` with this change, and it returned `Ok`.
+The whole dump validates. A code that appears later still refuses by name
+and keeps the body.

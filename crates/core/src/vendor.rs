@@ -1419,10 +1419,14 @@ impl Vendor {
             // 2024, "the NSE-Commodity exchange". `NSEIX`: the live dump itself,
             // line 25963 on 6 Oct 2026 (the refusal D-3310 made name it), and
             // Zerodha staff on the forum, March 2025, "`NSEIX` for GIFT NIFTY"
-            // (D-3311). All in charter §4z.
+            // (D-3311). `GLOBAL`: the live dump, 12 rows all on segment
+            // `INDICES`, counted from the kept refused body at 11:07 IST on
+            // 6 Oct 2026 (D-3312). Declined HERE, before the segment gate, so
+            // a `GLOBAL` index is never promoted to an NSE index. All in
+            // charter §4z.
             Self::Zerodha => matches!(
                 code,
-                "NFO" | "CDS" | "BCD" | "BFO" | "MCX" | "NCO" | "NSEIX"
+                "NFO" | "CDS" | "BCD" | "BFO" | "MCX" | "NCO" | "NSEIX" | "GLOBAL"
             ),
             // No master, so no exchange column to read.
             Self::TrueData | Self::Gdfl => false,
@@ -2248,7 +2252,7 @@ mod tests {
             (Vendor::Dhan, &["MCX"]),
             (
                 Vendor::Zerodha,
-                &["NFO", "CDS", "BCD", "BFO", "MCX", "NCO", "NSEIX"],
+                &["NFO", "CDS", "BCD", "BFO", "MCX", "NCO", "NSEIX", "GLOBAL"],
             ),
             (Vendor::TrueData, &[]),
             (Vendor::Gdfl, &[]),
@@ -2262,7 +2266,19 @@ mod tests {
                 );
             }
         }
-        for code in ["NFO", "CDS", "BCD", "BFO", "MCX", "NCO", "NSEIX"] {
+        // D-3312: every `GLOBAL` row in the live dump is on `INDICES` with
+        // type `EQ` -- the exact shape an NSE index row has. It must be
+        // declined at the exchange gate and never promoted to an index.
+        let mut global = row("GLOBAL", "INDICES", "", "EQ", "", "");
+        global.trading_symbol = "INVENTED 30";
+        global.listing_class = "";
+        assert_eq!(
+            decode_master_row(Vendor::Zerodha, global)
+                .expect("a decline")
+                .skip(),
+            Some(Skip::ForeignExchange)
+        );
+        for code in ["NFO", "CDS", "BCD", "BFO", "MCX", "NCO", "NSEIX", "GLOBAL"] {
             let decoded = decode_master_row(
                 Vendor::Zerodha,
                 row(code, "NFO-FUT", "NIFTY", "FUT", "2026-08-05", ""),
@@ -2297,6 +2313,7 @@ mod tests {
             (Vendor::Zerodha, "NSEIX-UNREAD"),
             (Vendor::Zerodha, "nseix"),
             (Vendor::Groww, "NSEIX"),
+            (Vendor::Zerodha, "global"),
         ] {
             let decoded = decode_master_row(
                 vendor,

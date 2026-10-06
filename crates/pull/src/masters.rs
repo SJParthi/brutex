@@ -2361,7 +2361,7 @@ mod tests {
     fn nseix_is_a_known_kite_exchange_and_an_unknown_segment_is_named() {
         // D-3311. `NSEIX` is what the live dump held at line 25963 on 6 Oct
         // 2026, once D-3310 made the refusal name it.
-        let body = kite_body(&[("NSEIX", "NSEIX")]);
+        let body = kite_body(&[("NSEIX", "NSEIX"), ("GLOBAL", "INDICES")]);
         assert_eq!(super::validate_rows(&body, Vendor::Zerodha), Ok(()));
         // An NSE row with a segment `segment_of` cannot read is a malformed
         // row, and the refusal now says which segment.
