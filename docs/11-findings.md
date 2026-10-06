@@ -983,3 +983,10 @@ numbers. It found one misattributed bound. `MAX_CHECKPOINTS` does not cap
 `discover_through`'s walk; `DIRECTORY_LIMIT` does, and `open` checks
 `MAX_CHECKPOINTS` after the walk. Corrected in `docs/06-limits.md`'s D-3312
 section. Text only.
+
+### Attack lens L2, round 6 — dispositions — 2026-10-06
+
+A final review of the whole branch checked every number across documents,
+every gated or printed claim against the benches, the gate 14 pins and every
+cited identifier. It found three text defects in this lens's own documents.
+They are corrected by D-3313, in the commit after `fd95f23`.

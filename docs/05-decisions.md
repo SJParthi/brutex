@@ -63332,3 +63332,16 @@ freshness check. Both opens walk the checkpoint directory. This is stated in
 `docs/06-limits.md` and is UNVERIFIED as a measurement. A cache would need an
 invalidation signal that the checkpoint writer does not publish, so none was
 added.
+
+### D-3313 — Three more text corrections from the final review of the p99 lens — 2026-10-06
+
+- D-2327's section in `docs/06-limits.md` said no bench measures a log walk.
+  D-3311's bench row now reports one, so the sentence is scoped to the route.
+- D-3303 said `/backtest/run.json` reaches the audit `read` on every poll. It
+  does so only on a poll that names a persisted attempt, or whose newest CLI
+  marker has no terminal. `docs/06-limits.md` now says so; D-3303 stands as
+  written and is corrected by this entry.
+- The caption of the O1P table in `docs/06-limits.md` claimed every cell was a
+  three-run range. O1P-04's cells are one run's values.
+
+Text only.

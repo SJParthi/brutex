@@ -15653,8 +15653,10 @@ per-candidate primitive from `CLAUDE.md` §3 rule 4.
   further because a cut changes what a successful answer contains: its
   records, `bytes_read` and `hit_scan_cap`. Skipping the half that cannot hold
   a run would need the attempt's origin, which the handler does not receive.
-- **Not timed.** No bench measures a log walk. The 4 MiB per half is the
-  configured cap, not a measurement, and the time it takes is UNVERIFIED.
+- **Not timed per request.** No bench times this route's walk. D-3311's
+  section below reports one capped, no-match `telemetry::tail` walk: about 20
+  ms at p50 for 4 MiB. The time one `/logs.json` request takes is still
+  UNVERIFIED.
 
 ## Gate 8 at p99, and the per-operation costs the p99 rows found — D-3300 to D-3305, 6 October 2026
 
@@ -15692,8 +15694,10 @@ never gated, because on a shared box the max is the scheduler.
 | O1P-04 | result append into a reservation, per 32 | 3,019 / 2,984 / 2,968 / 3,026 ns | 0.98×–1.04× |
 
 Each cell is the range over three runs of the corrected sampler (D-3309); a
-ratio is each run's 10^6 against that same run's 10^3. The O1P-04 row is from
-the first three runs and its code did not change. The maxima ran from 19 µs to
+ratio is each run's 10^6 against that same run's 10^3. The O1P-04 row is the
+exception: its cells are one run's values, and its ratio column is the range
+over three runs of the round-1 bench, whose O1P-04 code did not change
+(1.008×, 0.977×, 1.041×). The maxima ran from 19 µs to
 497 µs and are not a bound. The plants above were run against the round-1
 sampler, whose cold read could, about once in 196 samples at 10^3, land in the
 block before it; D-3309 removed that.
@@ -15763,8 +15767,10 @@ because reaching it takes a torn write.
 `cli::operation_audit::read` calls `sync_all` on the index and then on the
 invocation's own journal. That is two `fsync`s on a READ path, so that what
 it reports has reached the disk. `page` calls `read` once per row, up to
-`MAX_PAGE` = 32. `/backtest/audit.json` serves a page, and `/backtest/run.json`
-reaches `read` through `persisted_status` on every status poll. D-1445's
+`MAX_PAGE` = 32. `/backtest/audit.json` serves a page. `/backtest/run.json`
+reaches `read` on a poll that names a persisted attempt (`persisted_status`),
+or on one whose newest CLI marker has no terminal (`ended_without_terminal`).
+An idle poll that names neither reads no audit record (D-3313). D-1445's
 section above counts the `fsync`s that `begin` and the terminal pay and a
 directory lookup at each read. It does not name the read's own two
 `fsync`s.
