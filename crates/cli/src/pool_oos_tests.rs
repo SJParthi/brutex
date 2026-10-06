@@ -488,7 +488,7 @@ fn the_verb_refuses_exactly_the_misordered_splits() {
 }
 
 /// **An empty store is reported as a page, not refused, and an existing
-/// CATALOG_OUT is refused before it.** G18-cli-b-06, D-2020.
+/// `CATALOG_OUT` is refused before it.** G18-cli-b-06, D-2020.
 #[test]
 fn an_empty_store_is_a_page_and_an_existing_catalog_out_is_refused_first() {
     let scratch = Scratch::new();

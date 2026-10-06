@@ -628,7 +628,7 @@ fn reuse_sets_nothing_aside_records_bind_and_an_identical_quarantine_is_accepted
     assert_eq!(std::fs::read(&quarantine).expect("kept"), &foreign[..4096]);
 }
 
-/// A quarantine that cannot be created (here ENAMETOOLONG, not AlreadyExists)
+/// A quarantine that cannot be created (here `ENAMETOOLONG`, not `AlreadyExists`)
 /// refuses with the create error and is never compared as an existing copy.
 /// G18-cli-b-19, D-2027.
 #[cfg(target_os = "linux")]
