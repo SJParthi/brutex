@@ -597,24 +597,20 @@ fn mix(seed: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-/// The record index sample `call` reads in an `n`-record file: a uniformly
-/// drawn record in a block OTHER than the one sample `call - 1` read, so the
-/// handle's one-block memory never serves it and every sample pays the cold
-/// verify — the path a random access and a bisection probe pay.
-fn cold_index(n: u64, call: u64) -> u64 {
+/// The record index sample `call` reads in an `n`-record file, and the block
+/// it lands in: a uniformly drawn record in a block OTHER than `previous`,
+/// the block the sample before it ACTUALLY read, so the handle's one-block
+/// memory never serves it and every sample pays the cold verify — the path a
+/// random access and a bisection probe pay. The block is drawn from the
+/// `blocks - 1` others, so it cannot equal `previous` by construction.
+fn cold_index(n: u64, call: u64, previous: u64) -> (u64, u64) {
     let per_block = Layout::V2.records_per_block();
     let blocks = n.div_ceil(per_block).max(2);
-    let previous = if call == 0 {
-        blocks - 1
-    } else {
-        mix(call - 1) % blocks
-    };
-    let mut block = mix(call) % blocks;
-    if block == previous {
-        block = (block + 1) % blocks;
-    }
-    let index = block * per_block + mix(call ^ 0x5555) % per_block;
-    index.min(n - 1)
+    let block = (previous + 1 + mix(call) % (blocks - 1)) % blocks;
+    let index = (block * per_block + mix(call ^ 0x5555) % per_block).min(n - 1);
+    // The last block may be short: clamping to `n - 1` keeps the index in
+    // `block` because `n - 1` is in the last block.
+    (index, Layout::V2.block_of(index))
 }
 
 /// The stamp sample `call` looks up in an `n`-bar bench file: uniform in
@@ -669,7 +665,15 @@ fn lookups_are_flat_at_p99() -> bool {
         if file.time_lookup() != store::file::TimeLookup::Indexed {
             refuse("a p99 bench month has no ready time index");
         }
-        let read = tail(|call| file.read_record(black_box(cold_index(n, call))));
+        let mut previous = Layout::V2.block_of(n - 1);
+        let read = tail(|call| {
+            let (index, block) = cold_index(n, call, previous);
+            if block == previous {
+                refuse("O1P-01: a sample landed in the block the one before it read");
+            }
+            previous = block;
+            file.read_record(black_box(index))
+        });
         let time = tail(|call| file.first_at_or_after(black_box(tail_stamp(n, call))));
         if step == 0 {
             base_read = read.p99;

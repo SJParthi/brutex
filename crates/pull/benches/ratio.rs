@@ -410,7 +410,7 @@ fn entry_lookup_is_flat() -> bool {
 }
 
 /// O1P-05 — one manifest entry lookup is flat AT p99, over RANDOM present
-/// keys, from 10^3 to 10^5 months in the census (D-3306).
+/// keys, from 10^3 to 10^5 months in the census (D-3306, D-3309).
 ///
 /// C-12 looks up `key(7)` twenty thousand times: one bucket, already in the
 /// cache, measured as a minimum of means. A table whose probe sequences grew
@@ -420,29 +420,31 @@ fn entry_lookup_is_flat() -> bool {
 /// smallest round p99 against the 10^3 one under [`CEILING_PERMILLE`] at 10^4
 /// and prints it at 10^5, where the map leaves the cache (D-3307).
 ///
-/// 10^5 is the largest size: this harness can name 289,080 distinct keys,
-/// and a census of every F&O underlying's every month since 1990 is under
-/// 10^5. Keys are built before the timer, so the timed work is the lookup.
+/// 10^5 is the largest size because this harness can name only 289,080
+/// distinct keys; a real census's size is UNVERIFIED (`docs/06-limits.md`).
+/// Every key of the census is built before the timer and read in a spread
+/// order, so the timed work is the lookup over the whole map.
 fn entry_lookup_is_flat_at_p99() -> bool {
+    /// A fixed-seed spread of the lookup number. `SplitMix64`'s finaliser.
+    fn spread(at: usize) -> usize {
+        let mut z = (at as u64).wrapping_add(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        usize::try_from(z ^ (z >> 31)).unwrap_or(0)
+    }
     /// Samples per round, rounds, and lookups per sample.
     const SAMPLES: usize = 10_000;
     const ROUNDS: usize = 5;
     const BATCH: usize = 32;
-    /// Distinct keys drawn per size, cycled through by the samples.
-    const DRAWN: usize = 4_096;
     let mut ok = true;
     let mut base = 0u128;
     for (step, count) in [1_000_u32, 10_000, 100_000].into_iter().enumerate() {
         let (m, _keep) = census(count);
-        let mut seed = 0x9E37_79B9_7F4A_7C15_u64;
-        let keys: Vec<EntryKey> = (0..DRAWN)
-            .map(|_| {
-                seed ^= seed << 13;
-                seed ^= seed >> 7;
-                seed ^= seed << 17;
-                key(u32::try_from(seed % u64::from(count)).unwrap_or(0))
-            })
-            .collect();
+        // EVERY key of the census, built before the timer and read in a
+        // pseudo-random order, so the lookups touch the whole map rather
+        // than a cached subset of it.
+        let keys: Vec<EntryKey> = (0..count).map(key).collect();
+        let width = keys.len().max(1);
         let mut ns: Vec<u128> = Vec::with_capacity(SAMPLES);
         let (mut p50, mut p99, mut max) = (u128::MAX, u128::MAX, 0u128);
         let mut next = 0usize;
@@ -451,7 +453,7 @@ fn entry_lookup_is_flat_at_p99() -> bool {
             for _ in 0..SAMPLES {
                 let start = Instant::now();
                 for _ in 0..BATCH {
-                    let k = keys.get(next % DRAWN);
+                    let k = keys.get(spread(next) % width);
                     next = next.wrapping_add(1);
                     if let Some(k) = k {
                         black_box(black_box(&m).entry(black_box(k)));
@@ -466,7 +468,7 @@ fn entry_lookup_is_flat_at_p99() -> bool {
             max = max.max(ns.last().copied().unwrap_or(0));
         }
         if keys.iter().any(|k| m.entry(k).is_none()) {
-            refuse("O1P-05: a drawn key is absent from the census it was drawn from");
+            refuse("O1P-05: a key is absent from the census it was built from");
         }
         println!(
             "  {:<44} n={count:>9}  p50 {p50:>6} ns  p99 {p99:>6} ns  max {max:>8} ns  per {BATCH}",

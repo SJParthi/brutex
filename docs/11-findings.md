@@ -938,3 +938,16 @@ the code they describe. No separate refuter was run in this round.
 |---|---|---|---|---|
 | `F-DE1694` | `wrong` | A random manifest lookup is flat in probes, not in time, and the fixed-key row hid it: p99 2.0×–4.1× at 10^5 months while C-12 and `docs/07-o1-architecture.md` read 1.0× | `crates/pull/src/manifest.rs` `Manifest::entry`; `crates/pull/benches/ratio.rs` C-12 | FIXED e2715c9b — O1P-05 gates 10^4 and prints 10^5; named in `docs/06-limits.md` and `docs/07-o1-architecture.md` (D-3306, D-3307) |
 | `F-3D3988` | `wrong` | fno_land and price_group cost comments contradicted the code: "one census read for the whole run", and an O(rows) "nothing scans" block on the O(bars) `read_month_bars` | `crates/api/src/server.rs` | FIXED e2715c9b (D-3308) |
+
+### Attack lens L2, round 3 — dispositions — 2026-10-06
+
+Two read-only audits ran. A call-graph pass over runner, indicators, lake,
+costs, greeks and vocab, following 15 hot-loop functions two calls deep,
+found nothing new. An adversarial review of this lens's own diff found the
+defects below. One more correction to the round 1 table: F-8D5719's "planted
+one-in-fifty O(n) tails" was two plants, a one-in-fifty tail in
+`read_record` and a one-key-in-64 scan in `offer`.
+
+| ID | Severity | Finding | Where | Disposition |
+|---|---|---|---|---|
+| `F-61001B` | `wrong` | The lens's own p99 rows misdescribed what they measured: O1P-01 could re-read the previous block, O1P-05 cycled 4,096 keys while claiming uniform draws, and three sets of quoted numbers disagreed | `crates/store/benches/ratio.rs` `cold_index`; `crates/pull/benches/ratio.rs` O1P-05; `docs/04`, `06`, `07` | FIXED (D-3309), commit named in round 4 below |

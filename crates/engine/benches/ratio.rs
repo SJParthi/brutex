@@ -624,6 +624,9 @@ fn rule_four_primitives_are_flat_at_p99() -> bool {
             }
             out.len()
         });
+        if push.p50 == 0 {
+            refuse("O1P-04: a batch of pushes timed at zero");
+        }
         if step == 0 {
             base_dup = dup.p99;
             base_push = push.p99;

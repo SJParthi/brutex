@@ -63269,3 +63269,34 @@ landed body reads the vendor's manifest (W1-api5-1). `price_group`'s
 O(rows) block sat on `read_month_bars`, which is O(bars). The first comment
 is rewritten and the second is moved to the function it describes. Comments
 only; no behaviour changed.
+
+### D-3309 — The p99 rows' own defects, found by attacking them, and corrected — 2026-10-06
+
+**What was observed.** A review of this lens's own diff found five defects:
+
+- O1P-01's sampler compared against the block the previous sample drew, not
+  the one it read after a bump. About 1 sample in 196 at 10^3 could be served
+  warm.
+- O1P-05 cycled 4,096 keys, so at 10^5 it touched a subset of the map while
+  the documents said "uniformly drawn".
+- Three sets of numbers disagreed with each other: the 10^4 manifest ratios,
+  the dedup 10^6 ratio against its stated baseline, and the plant wording in
+  F-8D5719.
+- `telemetry::sink`'s corrected comment listed four of the bench's rows and
+  missed C-T-04 and O1P-06.
+- The census-size reasoning contradicted itself across the bench, D-3306 and
+  `docs/06-limits.md`.
+
+**Decided.**
+- O1P-01 draws each block from the `blocks - 1` others and refuses a repeat.
+- O1P-05 looks up every key of the census in a spread order.
+- O1P-04 refuses a zero p50, as O1P-03 does.
+- The sink comment names the bench and the invariants document rather than a
+  list that drifts.
+- Every row was re-measured three times, and `docs/04-invariants.md`,
+  `docs/06-limits.md` and `docs/07-o1-architecture.md` now quote those runs.
+  At 10^5 the manifest's p99 is 4.62× to 5.91×, worse than the 2.0× to 4.1×
+  that D-3307 recorded. The size of a real census is UNVERIFIED.
+
+D-3301, D-3306 and D-3307 stand as written; this entry supersedes their
+numbers.

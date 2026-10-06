@@ -15686,12 +15686,17 @@ never gated, because on a shared box the max is the scheduler.
 
 | Row | Operation | p99 at 10^3 / 10^4 / 10^5 / 10^6 | 10^6 / 10^3 |
 |---|---|---|---|
-| O1P-01 | cold `BarFile::read_record` | 3,265 / 3,461 / 3,751 / 4,112 ns | 1.26× |
-| O1P-02 | `BarFile::first_at_or_after` via `.tix` | 276 / 284 / 309 / 303 ns | 1.10× |
-| O1P-03 | k=1 duplicate rejection, per 32 | 463 / 475 / 607 / 1,164 ns | 2.1×–2.9×, **not gated** |
+| O1P-01 | cold `BarFile::read_record` | 3,543–4,609 / 3,454–4,671 / 3,492–3,562 / 4,323–4,418 ns | 0.95×–1.24× |
+| O1P-02 | `BarFile::first_at_or_after` via `.tix` | 278–446 / 313–330 / 311–314 / 301–306 ns | 0.67×–1.10× |
+| O1P-03 | k=1 duplicate rejection, per 32 | 436–453 / 467–614 / 561–612 / 1,147–1,503 ns | 2.63×–3.42×, **not gated** |
 | O1P-04 | result append into a reservation, per 32 | 3,019 / 2,984 / 2,968 / 3,026 ns | 0.98×–1.04× |
 
-The maxima ran from 22 µs to 340 µs and are not a bound.
+Each cell is the range over three runs of the corrected sampler (D-3309); a
+ratio is each run's 10^6 against that same run's 10^3. The O1P-04 row is from
+the first three runs and its code did not change. The maxima ran from 19 µs to
+497 µs and are not a bound. The plants above were run against the round-1
+sampler, whose cold read could, about once in 196 samples at 10^3, land in the
+block before it; D-3309 removed that.
 
 **Still at the minimum of a mean:** mask evaluation (`C-E-*`, `C-V-*`),
 condition lookup, and every other row in the thirteen benches. The `hits`
@@ -15704,8 +15709,8 @@ bar lookup and the k=1 table, are now covered.
 `engine::primitives::offer` is one `HashSet<u32>::insert`, an expected-O(1)
 probe. At 10^6 entries the table is several MiB and outgrows the cache, so a
 probe of a random present key pays a memory miss. Its p99 per 32 rejections
-measured **1,123 – 1,280 ns at 10^6** against 463 ns at 10^3, which is
-**2.1× – 2.9×** over three runs. That is the operation count staying the same
+measured **1,147 – 1,503 ns at 10^6** against 436 – 453 ns at 10^3 in the same
+runs, which is **2.63× – 3.42×** over three runs (D-3309). That is the operation count staying the same
 while each probe gets slower in time: it is the memory hierarchy, not the
 algorithm. **No production table reaches that size.** k=1 offers one position
 per live condition, so the table never holds more than `ConditionMask::BITS`,
@@ -15823,27 +15828,32 @@ every lookup:
 
 | Months in the census | p99 per 32 lookups | against 10^3 |
 |---|---|---|
-| 1,000 | 1,975 – 3,044 ns | 1.00× |
-| 10,000 | 2,484 – 3,809 ns | 0.82× – 1.73× |
-| 100,000 | 6,135 – 9,048 ns | **2.0× – 4.1×** |
+| 1,000 | 2,055 – 2,701 ns | 1.00× |
+| 10,000 | 3,591 – 4,137 ns | 1.53× – 1.88× |
+| 100,000 | 11,293 – 12,486 ns | **4.62× – 5.91×** |
 
-On the same tables in the same runs, C-12 read 0.97× – 1.09×. The p50 roughly
-doubles too, from about 1,950 ns to about 4,000 ns per 32. A held entry carries
+Ratios are each run against its own 10^3. Every key of the census is looked
+up in a spread order (D-3309). The first version cycled 4,096 keys and
+measured 2.0× – 4.1×, which understated it. On the same tables in the same
+runs, C-12 read 0.90× – 1.04×. The p50 rises too, from about 2,000 ns to
+about 3,050 and then about 5,600 ns per 32. A held entry carries
 its key twice: once as the map key, and again inside `Entry` beside the
 counters and closes. At a reservation factor of 2, 10^5 months is tens of MiB,
 so a random key's slot costs a cache miss.
 
 **This is memory, not a scan.** A scan would be about 100× at 100× the census.
-The p99 row gates 10^4 and prints 10^5, because gating a ratio measured
-between 2.0× and 4.1× under a 3.0× ceiling would make the build's colour a
-matter of luck.
+The p99 row gates 10^4 and prints 10^5. 10^5 is over the 3.0× ceiling in
+every run, so gating it would make the build red, and raising the ceiling for
+one row would hide the effect behind a looser number.
 
 **10^5 months is a real size, not an artificial one.** That is what separates
 this from the k=1 dedup table (D-3301), which can never exceed 384 entries.
 208 shares and 2 indices at roughly 130 months each is about 27,000 keys per
 rung. Across several rungs, plus stored option and futures contracts, which
-the key separates, one vendor's census can reach 10^5. That is an estimate,
-not a count of a real census. Shrinking the entry would mean holding `log` positions in the
+the key separates, one vendor's census can reach 10^5, and with enough
+contracts more. That is an estimate, not a count of a real census. **What a
+real census holds is UNVERIFIED**, and so is the lookup past 10^5: the harness
+can name only 289,080 distinct keys. Shrinking the entry would mean holding `log` positions in the
 map instead of `Held` copies. That trades one cache miss for two dependent
 loads, and nothing measured here says it would win, so it was not done.
 
