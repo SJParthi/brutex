@@ -1115,3 +1115,22 @@ fn a_detail_write_stopped_part_way_leaves_no_torn_file_and_the_retry_lands() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Only a lost race to the same name is not a link failure (D-3603).
+#[test]
+fn only_a_lost_link_race_is_not_a_failure() {
+    assert!(linked_or_lost_race(Ok(())).is_ok());
+    assert!(
+        linked_or_lost_race(Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists))).is_ok()
+    );
+    for kind in [
+        std::io::ErrorKind::NotFound,
+        std::io::ErrorKind::PermissionDenied,
+        std::io::ErrorKind::StorageFull,
+    ] {
+        assert_eq!(
+            linked_or_lost_race(Err(std::io::Error::from(kind))).map_err(|why| why.kind()),
+            Err(kind)
+        );
+    }
+}

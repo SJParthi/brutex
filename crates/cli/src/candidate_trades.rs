@@ -1354,10 +1354,7 @@ fn write_exact_via(
                 .and_then(|()| write(&mut file, &digest))
                 .and_then(|()| file.sync_all());
             drop(file);
-            let linked = written.and_then(|()| match fs::hard_link(&aside, path) {
-                Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
-                other => other,
-            });
+            let linked = written.and_then(|()| linked_or_lost_race(fs::hard_link(&aside, path)));
             let removed = fs::remove_file(&aside);
             linked.map_err(io_error)?;
             removed.map_err(io_error)?;
@@ -1379,6 +1376,15 @@ fn write_exact_via(
     #[cfg(test)]
     DURABLE_SYNCS.with(|count| count.set(count.get().saturating_add(1)));
     Ok(digest)
+}
+/// A link into the final name, where losing the race to another writer of
+/// the same name is not a failure: the winner's bytes are verified next, as
+/// they always were. Any other link error is (D-3603).
+fn linked_or_lost_race(linked: std::io::Result<()>) -> std::io::Result<()> {
+    match linked {
+        Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        other => other,
+    }
 }
 fn read_sealed(path: &Path, magic: [u8; 8], max_bytes: u64) -> Result<(Vec<u8>, [u8; 32]), String> {
     read_sealed_generation(path, magic, max_bytes).map(|(payload, seal, _)| (payload, seal))
