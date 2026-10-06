@@ -6795,6 +6795,7 @@ async fn broker_answer(
             ),
         ));
     }
+    facts.extend(run.before_first_bar_facts());
     // STOPPING IS NOT FAILING, and it is not silent either. A sweep the
     // operator interrupted says so on its own receipt, with the count it got
     // to, so a short run is never mistaken for a complete one.
@@ -6949,9 +6950,58 @@ pub(crate) struct BrokerRun {
     /// the only thing `autopilot::FeedState::observe` may halt a feed on as a
     /// dead credential. `CLAUDE.md` §8, GAP2-36 and GAP2-37, D-0948.
     pub credential_stop: Option<crate::credential_law::CredentialStop>,
+    /// One line per instrument whose leading empty chunks were shown to
+    /// precede its first bar. Not failures, and on the receipt. D-3313.
+    pub before_first_bar: Vec<String>,
+}
+
+/// The receipt line for one instrument's span before its first bar, written to
+/// `/logs` at `Warn` as it is made, or nothing when there is none.
+///
+/// `Warn` rather than `Info`: nothing failed, but an operator who expected bars
+/// from the window's start is told where they begin and why. D-3313.
+fn before_first_bar_line(instrument: &str, note: Option<&str>) -> Option<String> {
+    let note = note?;
+    let _noted = telemetry::emit(
+        &telemetry::Event::new(
+            telemetry::Level::Warn,
+            "pull.spot",
+            "empty chunks before the series' first bar",
+        )
+        .with("instrument", telemetry::Value::Str(instrument))
+        .with("why", telemetry::Value::Str(note)),
+    );
+    Some(format!("{instrument} — {note}"))
 }
 
 impl BrokerRun {
+    /// One reached member's landing, summed, and its before-first-bar note
+    /// kept for the receipt. D-3313.
+    fn absorb_member(&mut self, landed: &BrokerWindow, landed_one: pull::ingest::Ingested) {
+        self.total.absorb(landed_one);
+        self.before_first_bar.extend(before_first_bar_line(
+            &landed.instrument,
+            landed.before_first_bar.as_deref(),
+        ));
+    }
+
+    /// The receipt's `Before first bar` rows: a count, then one line per
+    /// instrument. Not a failure, and not silent. Empty when there are none.
+    /// D-3313.
+    fn before_first_bar_facts(&self) -> Vec<(&'static str, String)> {
+        let mut out = Vec::new();
+        if !self.before_first_bar.is_empty() {
+            out.push((
+                "Before first bar",
+                format!("{} instrument(s)", self.before_first_bar.len()),
+            ));
+        }
+        for line in &self.before_first_bar {
+            out.push(("Before first bar", line.clone()));
+        }
+        out
+    }
+
     /// A transport refusal must also reach the receipt's failure accounting.
     /// Otherwise a different member's successful write makes the whole basket green.
     fn record_refusal(&mut self, instrument: &str, why: String) {
@@ -8116,7 +8166,7 @@ pub(crate) async fn broker_run(
                 out.origin.clone_from(&landed.origin);
                 let landed_one =
                     land_broker_member(&landed, instrument, site, &mut dated, &month, asked).await;
-                out.total.absorb(landed_one);
+                out.absorb_member(&landed, landed_one);
                 rejected
             }
         };
@@ -8368,6 +8418,10 @@ struct BrokerWindow {
     /// Always `None` on the expired-F&O path, which keeps its own
     /// all-or-nothing contract until it is separately revisited. See [`Chunks`].
     unfetched: Option<String>,
+    /// The empty chunks shown to precede this series' first bar, named, or
+    /// `None`. Not a failure and never silent: `broker_run` puts it on the
+    /// receipt and `/logs`. `None` on the expired-F&O path. D-3313.
+    before_first_bar: Option<String>,
     /// Which instrument they are.
     instrument: String,
     /// The URL they came from, for the receipt.
@@ -9299,7 +9353,26 @@ async fn fetch_chunks(
         .filter(|(_, body)| body.rows.is_empty())
         .map(|(window, _)| *window)
         .collect();
-    let unfetched = hollow.first().map(|first| {
+    let unfetched = hollow_sentence(&hollow, chunks.len());
+    // THE HOLLOW CHUNKS THAT COME BEFORE THE VENDOR'S FIRST ROW, counted here
+    // and judged by the caller, which holds the store. D-3313.
+    let leading = leading_hollow(&bodies);
+    Ok(Chunks {
+        bodies,
+        unfetched,
+        hollow,
+        leading,
+        total: chunks.len(),
+    })
+}
+
+/// The sentence for chunks that answered with no rows, or `None` for none.
+///
+/// One function, because two callers write it: [`fetch_chunks`] over every
+/// hollow chunk, and [`before_first_bar`] over the ones after the vendor's
+/// first row once the leading run is shown to precede the series.
+fn hollow_sentence(hollow: &[pull::session::Window], total: usize) -> Option<String> {
+    hollow.first().map(|first| {
         format!(
             "{} of {} chunk(s) answered with NO ROWS AT ALL, the first covering \
              {}..={}. The vendor was reached and did not refuse — it returned an \
@@ -9310,12 +9383,172 @@ async fn fetch_chunks(
              missing permanently, because the store is append-only and cannot go \
              back for them.",
             hollow.len(),
-            chunks.len(),
+            total,
             first.from(),
             first.to(),
         )
-    });
-    Ok(Chunks { bodies, unfetched })
+    })
+}
+
+/// How many chunks answered with no rows BEFORE the first chunk that carried
+/// one, or `0` when no chunk carried a row at all.
+///
+/// Zero when nothing landed, on purpose: with no row anywhere there is no first
+/// bar, so nothing says the series exists, and every hollow chunk stays the
+/// failure [`hollow_sentence`] names. One pass over one window's chunks, which
+/// [`fetch_chunks`] has already walked. D-3313.
+fn leading_hollow(bodies: &[(pull::session::Window, pull::fetch::RawWindow)]) -> usize {
+    bodies
+        .iter()
+        .position(|(_, body)| !body.rows.is_empty())
+        .unwrap_or(0)
+}
+
+/// Whether the store holds no month of this series in `months`, read off one
+/// vendor census: `Ok(())` when that is shown, `Err` naming why not.
+///
+/// The store's half of the evidence for "before the first bar" (D-3313). The
+/// vendor's half is no row in any chunk before the first one that carried
+/// rows. This half is needed because a vendor that answers empty for days
+/// BEFORE bars this store already holds is a hole, not a series' start.
+///
+/// **Only a loaded, undamaged census is evidence.** An absent census, an
+/// unreadable one, or one recovered from damage cannot show that nothing is
+/// held, so each answers `Err` and the hollow chunks stay a failure —
+/// `CLAUDE.md` §4: refuse rather than guess. One hash probe per month in
+/// `months`; the caller bounds `months` by the feed's history floor.
+fn store_holds_nothing_in(
+    census: &census::VendorCensus,
+    months: &[store::path::YearMonth],
+    key: impl Fn(store::path::YearMonth) -> pull::manifest::EntryKey,
+) -> Result<(), String> {
+    let census::Census::Held { ref manifest } = census.state else {
+        return Err(format!(
+            "the store's census is {}, so nothing shows the store holds no \
+             earlier bar",
+            census.state.name()
+        ));
+    };
+    if let Some(why) = manifest.degraded_reason() {
+        return Err(format!(
+            "the store's census was recovered from damage ({why}), so a month \
+             it lost could hold an earlier bar"
+        ));
+    }
+    match months
+        .iter()
+        .find(|month| manifest.entry(&key(**month)).is_some())
+    {
+        Some(month) => Err(format!("the store already holds {month} of this series")),
+        None => Ok(()),
+    }
+}
+
+/// The store's half of the evidence for one instrument: no month of its spot
+/// series held from the feed's history floor for this rung to the end of the
+/// last leading empty chunk.
+///
+/// A feed whose floor names no day (`Unbounded`, `Unstated`) bounds no probe,
+/// so it is `Err` and the empty chunks stay a failure. Otherwise one census
+/// read and one hash probe per month — at most ~141 for Zerodha's 2015 floor —
+/// and only for an instrument whose first chunk came back empty. Not O(1) and
+/// not on any per-bar path; `docs/06-limits.md` states it. D-3313.
+fn nothing_held_before_first_bar(
+    asked: &ingest::SpotRequest,
+    site: &Site,
+    spec: &pull::vendor::HttpSpec,
+    instrument: &brutex_core::instrument::InstrumentKey,
+    store_vendor: brutex_core::vendor::Vendor,
+    chunks: &Chunks,
+) -> Result<(), String> {
+    let last = chunks
+        .leading
+        .checked_sub(1)
+        .and_then(|at| chunks.hollow.get(at))
+        .ok_or_else(|| "no empty chunk precedes the first row".to_owned())?;
+    let today = ingest::ist_day(std::time::SystemTime::now())
+        .map_err(|why| format!("the clock is unusable: {why}"))?;
+    let floor = floor_oldest(rung_floor(asked, spec), today).ok_or_else(|| {
+        "the feed states no dated history floor for this rung, so no bound \
+         limits how far back an earlier bar could be held"
+            .to_owned()
+    })?;
+    let timeframe = asked
+        .granularity
+        .store_timeframe()
+        .ok_or_else(|| "this rung has no store timeframe".to_owned())?;
+    let span = pull::session::Window::new(floor, last.to())
+        .map_err(|why| format!("the floor-to-first-bar span is not a window: {why}"))?;
+    let months = crate::ladder::months_of(span);
+    let census = census::read_vendor(&site.store_root, store_vendor);
+    store_holds_nothing_in(&census, &months, |month| pull::manifest::EntryKey {
+        contract: None,
+        exchange: instrument.exchange,
+        segment: instrument.segment,
+        symbol: instrument.underlying,
+        timeframe,
+        month,
+    })
+}
+
+/// Splits the hollow chunks at the vendor's first row, given the store's
+/// answer: the failure sentence for what still counts, and the
+/// before-first-bar note for what does not.
+///
+/// # Why the leading run is not a failure, and only with both halves of the evidence
+///
+/// An index NSE launched in 2023, asked for from 2018, is answered empty for
+/// every chunk before it existed. Counting that as a hole marked the member
+/// failed although every bar it has was written — the chunks after an empty
+/// one land either way. With no vendor row before the first chunk that carried
+/// rows AND no month of the series held from the feed's history floor to the
+/// end of the last empty chunk (`held`), nothing exists to be missing there: it
+/// is the span before the series' first bar. It is NAMED, never dropped — the
+/// caller writes the note to the receipt and to `/logs`.
+///
+/// Every other empty chunk keeps the failure: one after the first row, every
+/// one when no chunk carried a row, and every one when the store cannot show
+/// that it holds nothing earlier. D-3313.
+fn before_first_bar(chunks: &Chunks, held: Result<(), String>) -> (Option<String>, Option<String>) {
+    let (Some(first), Some(last)) = (
+        chunks.hollow.first(),
+        chunks
+            .leading
+            .checked_sub(1)
+            .and_then(|at| chunks.hollow.get(at)),
+    ) else {
+        return (chunks.unfetched.clone(), None);
+    };
+    if let Err(why) = held {
+        return (
+            chunks.unfetched.as_ref().map(|said| {
+                format!(
+                    "{said} The leading empty chunks precede the vendor's first \
+                     row, but are not taken as the span before the first bar: {why}."
+                )
+            }),
+            None,
+        );
+    }
+    let note = format!(
+        "BEFORE FIRST BAR · {} chunk(s) covering {}..={} answered with no rows, \
+         every one before the vendor's first returned row, and the store holds \
+         no bar of this series from the feed's history floor to {}. Recorded as \
+         the span before this series' first bar, not as a hole. The vendor's \
+         first row is evidence of what it serves, not of a listing date, which \
+         is UNVERIFIED.",
+        chunks.leading,
+        first.from(),
+        last.to(),
+        last.to(),
+    );
+    (
+        hollow_sentence(
+            chunks.hollow.get(chunks.leading..).unwrap_or(&[]),
+            chunks.total,
+        ),
+        Some(note),
+    )
 }
 
 /// Records a window that landed SHORT as a failure of its own member.
@@ -9414,6 +9647,14 @@ struct Chunks {
     /// say both. `None` with an EMPTY `bodies` cannot happen: an empty prefix is
     /// the `Err` arm — see [`prefix_or_refusal`].
     unfetched: Option<String>,
+    /// Every chunk that answered with no rows, oldest first. Empty after a
+    /// refusal, which stops before emptiness is judged.
+    hollow: Vec<pull::session::Window>,
+    /// How many of [`Self::hollow`] precede the first chunk that carried a
+    /// row; `0` when none carried one. See [`leading_hollow`]. D-3313.
+    leading: usize,
+    /// How many chunks the window was split into.
+    total: usize,
 }
 
 /// The prefix if there is one, or the refusal if there is not.
@@ -9433,6 +9674,9 @@ fn prefix_or_refusal(
         Ok(Chunks {
             bodies,
             unfetched: Some(why),
+            hollow: Vec::new(),
+            leading: 0,
+            total: 0,
         })
     }
 }
@@ -10784,6 +11028,15 @@ async fn broker_window(
             vendor.as_str()
         ));
     };
+    // EMPTY CHUNKS BEFORE THE VENDOR'S FIRST ROW are judged against the store
+    // here, where the instrument and the store are both in hand. D-3313.
+    let (unfetched, before_first) = if bodies.leading == 0 {
+        (bodies.unfetched.clone(), None)
+    } else {
+        let held =
+            nothing_held_before_first_bar(asked, site, &spec, instrument, store_vendor, &bodies);
+        before_first_bar(&bodies, held)
+    };
 
     // Even `Swept` is two series and this fetches one. Saying which, rather
     // than letting the receipt imply both.
@@ -10802,7 +11055,10 @@ async fn broker_window(
         // because the vendor refused and one that is short because the month
         // had fewer trading days are the same number of bars and opposite
         // facts. See `Chunks`.
-        unfetched: bodies.unfetched,
+        unfetched,
+        // THE SPAN BEFORE THIS SERIES' FIRST BAR, when both halves of the
+        // evidence showed one. Named on the receipt, never counted. D-3313.
+        before_first_bar: before_first,
         exchange: instrument.exchange.as_str(),
         segment: instrument.segment.as_str(),
         window: asked.window,
@@ -12070,6 +12326,7 @@ async fn fno_land(
             // here is that boundary stated rather than inherited: this path
             // never returns a short window, so it never reports one.
             unfetched: None,
+            before_first_bar: None,
             instrument: found.underlying.clone(),
             origin: origin.clone(),
             spec: wire.spec,
@@ -21321,6 +21578,7 @@ mod tests {
             listing: Listing::Equity,
             contract: None,
             unfetched: None,
+            before_first_bar: None,
             instrument: "RELIANCE".to_owned(),
             origin: "test only".to_owned(),
             spec,
@@ -21395,6 +21653,7 @@ mod tests {
                 listing: Listing::Index,
                 contract: None,
                 unfetched: None,
+                before_first_bar: None,
                 instrument: "NIFTY".to_owned(),
                 origin: "test only".to_owned(),
                 spec,
@@ -21489,6 +21748,7 @@ mod tests {
             listing: Listing::Index,
             contract: None,
             unfetched: None,
+            before_first_bar: None,
             instrument: "NIFTY".to_owned(),
             origin: "test only".to_owned(),
             spec,
@@ -21577,6 +21837,7 @@ mod tests {
             listing: Listing::Index,
             contract: None,
             unfetched: None,
+            before_first_bar: None,
             instrument: "NIFTY".to_owned(),
             origin: "test only".to_owned(),
             spec,
@@ -21691,6 +21952,7 @@ mod tests {
             listing: Listing::Equity,
             contract: None,
             unfetched: None,
+            before_first_bar: None,
             instrument: "RELIANCE".to_owned(),
             origin: "test only".to_owned(),
             spec,
@@ -32314,6 +32576,259 @@ mod tests {
         // `a_refused_chunk_keeps_the_contiguous_prefix_and_names_what_is_missing`.
         // Reaching that channel is therefore the whole of what this rule needs;
         // asserting the conversion again here would test that test.
+    }
+
+    /// A chunk window for the before-first-bar fixtures.
+    fn span(from: (u16, u8, u8), to: (u16, u8, u8)) -> pull::session::Window {
+        pull::session::Window::new(day(from.0, from.1, from.2), day(to.0, to.1, to.2))
+            .expect("a fixture window")
+    }
+
+    /// One answered chunk with `rows` rows.
+    fn answered(
+        window: pull::session::Window,
+        rows: usize,
+    ) -> (pull::session::Window, pull::fetch::RawWindow) {
+        let row = pull::fetch::RawRow {
+            timestamp: 1,
+            open: 1,
+            high: 1,
+            low: 1,
+            close: 1,
+            volume: 0,
+            open_interest: None,
+        };
+        (
+            window,
+            pull::fetch::RawWindow {
+                rows: vec![row; rows],
+            },
+        )
+    }
+
+    /// The chunks of a window as `fetch_chunks` would return them.
+    fn chunked(bodies: Vec<(pull::session::Window, pull::fetch::RawWindow)>) -> Chunks {
+        let hollow: Vec<_> = bodies
+            .iter()
+            .filter(|(_, b)| b.rows.is_empty())
+            .map(|(w, _)| *w)
+            .collect();
+        let total = bodies.len();
+        Chunks {
+            unfetched: hollow_sentence(&hollow, total),
+            leading: leading_hollow(&bodies),
+            hollow,
+            total,
+            bodies,
+        }
+    }
+
+    /// **EMPTY CHUNKS BEFORE THE VENDOR'S FIRST ROW, WITH NOTHING HELD EARLIER,
+    /// ARE THE SPAN BEFORE THE FIRST BAR — NAMED, NOT A FAILURE. EVERY OTHER
+    /// EMPTY CHUNK STAYS ONE.** D-3313.
+    ///
+    /// The real case: Zerodha's 1day `NIFTYCHEMICALS`, asked from 2018-01-01,
+    /// answered its first chunk (2018-01-01..=2023-06-23) empty because the
+    /// series did not exist yet, and the member was marked failed although its
+    /// whole history was written.
+    #[test]
+    fn empty_chunks_before_the_first_row_are_named_and_only_those_are_forgiven() {
+        let early = span((2018, 1, 1), (2023, 6, 23));
+        let late = span((2023, 6, 24), (2026, 9, 30));
+
+        // Leading empty chunk, data after, store shown to hold nothing.
+        let fresh = chunked(vec![answered(early, 0), answered(late, 3)]);
+        assert_eq!(fresh.leading, 1);
+        let (failure, note) = before_first_bar(&fresh, Ok(()));
+        assert_eq!(failure, None, "nothing after the first row was empty");
+        let note = note.expect("the span is NAMED, never dropped");
+        assert!(
+            note.contains("BEFORE FIRST BAR") && note.contains("2018-01-01..=2023-06-23"),
+            "{note}"
+        );
+        assert!(
+            note.contains("UNVERIFIED"),
+            "no listing date is claimed: {note}"
+        );
+
+        // The same chunks when the store cannot show it holds nothing earlier.
+        let (failure, note) =
+            before_first_bar(&fresh, Err("the store already holds 2016-03".to_owned()));
+        assert_eq!(note, None);
+        let failure = failure.expect("a store holding earlier bars keeps the failure");
+        assert!(
+            failure.contains("NO ROWS AT ALL") && failure.contains("2016-03"),
+            "{failure}"
+        );
+
+        // An empty chunk AFTER the first row is a hole, whatever the store says.
+        let middle = span((2020, 1, 1), (2021, 12, 31));
+        let holed = chunked(vec![
+            answered(early, 0),
+            answered(middle, 2),
+            answered(late, 0),
+        ]);
+        let (failure, note) = before_first_bar(&holed, Ok(()));
+        assert!(
+            note.is_some(),
+            "the leading one is still before the first bar"
+        );
+        let failure = failure.expect("the trailing empty chunk is a hole");
+        assert!(
+            failure.contains("1 of 3") && failure.contains(&late.from().to_string()),
+            "only the chunk after the first row is counted: {failure}"
+        );
+
+        // No row anywhere: no first bar, so nothing is forgiven.
+        let barren = chunked(vec![answered(early, 0), answered(late, 0)]);
+        assert_eq!(barren.leading, 0, "with no row there is no first bar");
+        let (failure, note) = before_first_bar(&barren, Ok(()));
+        assert_eq!(note, None);
+        assert!(failure.expect("a failure").contains("2 of 2"));
+
+        // A first chunk that carried rows leaves nothing to judge.
+        let whole = chunked(vec![answered(early, 1), answered(late, 0)]);
+        assert_eq!(whole.leading, 0);
+        assert_eq!(
+            before_first_bar(&whole, Ok(())),
+            (whole.unfetched.clone(), None)
+        );
+    }
+
+    /// **ONLY A LOADED, UNDAMAGED CENSUS WITH NO MONTH OF THE SERIES IS
+    /// EVIDENCE THAT NOTHING EARLIER IS HELD.** D-3313.
+    #[test]
+    fn only_an_undamaged_census_without_the_series_shows_nothing_is_held() {
+        use pull::manifest::{Entry, EntryKey, Manifest};
+        let key = |symbol: &str, month: store::path::YearMonth| EntryKey {
+            contract: None,
+            exchange: brutex_core::instrument::Exchange::Nse,
+            segment: brutex_core::instrument::Segment::Index,
+            symbol: brutex_core::symbol::Symbol::new(symbol).expect("a symbol"),
+            timeframe: store::path::Timeframe::DAY_1,
+            month,
+        };
+        let held = store::path::YearMonth::new(2019, 4).expect("a month");
+        let mut manifest = Manifest::open(Vendor::Zerodha, &[], &[]).expect("a genesis census");
+        manifest
+            .record(Entry {
+                key: key("NIFTYOLD", held),
+                rows: 20,
+                first_ts_micros: 1_554_000_000_000_000,
+                last_ts_micros: 1_556_000_000_000_000,
+            })
+            .expect("records");
+        let census = |state| census::VendorCensus {
+            vendor: Vendor::Zerodha,
+            path: PathBuf::from("/nowhere"),
+            state,
+        };
+        let loaded = census(census::Census::Held {
+            manifest: Box::new(manifest),
+        });
+        let months = crate::ladder::months_of(span((2015, 1, 1), (2023, 6, 23)));
+
+        assert_eq!(
+            store_holds_nothing_in(&loaded, &months, |m| key("NIFTYCHEMICALS", m)),
+            Ok(()),
+            "a series the census has no month of is shown not held"
+        );
+        let why = store_holds_nothing_in(&loaded, &months, |m| key("NIFTYOLD", m))
+            .expect_err("a held month before the first row is a hole, not a start");
+        assert!(why.contains("2019-04"), "{why}");
+        let later = crate::ladder::months_of(span((2015, 1, 1), (2019, 3, 31)));
+        assert_eq!(
+            store_holds_nothing_in(&loaded, &later, |m| key("NIFTYOLD", m)),
+            Ok(()),
+            "only the months asked about are probed"
+        );
+        let why = store_holds_nothing_in(&census(census::Census::Absent), &months, |m| {
+            key("NIFTYCHEMICALS", m)
+        })
+        .expect_err("an absent census shows nothing");
+        assert!(why.contains("absent"), "{why}");
+    }
+
+    /// **THE STORE HALF IS ASKED OF THE REAL STORE, FROM THE FEED'S FLOOR.**
+    /// An absent census refuses, a held month of the same series before the
+    /// last empty chunk refuses, and another series' month does not. D-3313.
+    #[test]
+    fn the_first_bar_evidence_reads_this_series_in_the_real_store() {
+        let root = store_root("before-first-bar");
+        let site = Site::serving(&masters("before-first-bar", None, None), &root);
+        let asked = ingest::parse_spot(
+            "target=swept&vendor=dhan&granularity=1min&from=2026-01-05&to=2026-06-30",
+            day(2026, 8, 10),
+        )
+        .expect("a real target and a window in the past");
+        let spec = match pull::vendor::Feed::Dhan.descriptor().transport {
+            pull::vendor::Transport::Http(spec) => spec,
+            pull::vendor::Transport::LocalArchive(_) => panic!("this feed is HTTP"),
+        };
+        let nifty = brutex_core::instrument::InstrumentKey::index(
+            brutex_core::instrument::Exchange::Nse,
+            "NIFTY",
+        )
+        .expect("a key");
+        let chunks = chunked(vec![
+            answered(span((2026, 1, 5), (2026, 3, 31)), 0),
+            answered(span((2026, 4, 1), (2026, 6, 30)), 2),
+        ]);
+        let ask =
+            || nothing_held_before_first_bar(&asked, &site, &spec, &nifty, Vendor::Dhan, &chunks);
+
+        let why = ask().expect_err("no census, no evidence");
+        assert!(why.contains("absent"), "{why}");
+
+        let other = store::path::YearMonth::new(2026, 2).expect("a month");
+        publish_index_months(&root, &["BANKNIFTY"], other);
+        assert_eq!(ask(), Ok(()), "another series' month is not this one's");
+
+        publish_index_months(&root, &["NIFTY"], other);
+        let why = ask().expect_err("a held month before the first row is a hole");
+        assert!(why.contains("2026-02"), "{why}");
+
+        let none = chunked(vec![answered(span((2026, 1, 5), (2026, 6, 30)), 1)]);
+        let why = nothing_held_before_first_bar(&asked, &site, &spec, &nifty, Vendor::Dhan, &none)
+            .expect_err("nothing to judge without a leading empty chunk");
+        assert!(why.contains("no empty chunk"), "{why}");
+    }
+
+    /// The note reaches `/logs` and the receipt line names the instrument.
+    #[test]
+    fn a_before_first_bar_note_is_a_named_receipt_line() {
+        let _shared = crate::emitted::sink();
+        let from = crate::emitted::mark();
+        assert_eq!(before_first_bar_line("NIFTYWAVES", None), None);
+        assert_eq!(
+            before_first_bar_line("NIFTYWAVES", Some("BEFORE FIRST BAR · x")),
+            Some("NIFTYWAVES — BEFORE FIRST BAR · x".to_owned())
+        );
+        let said = crate::emitted::landed(
+            from,
+            "pull.spot",
+            "empty chunks before the series' first bar",
+        );
+        assert!(
+            said.iter().any(|record| {
+                record.level == telemetry::Level::Warn
+                    && crate::emitted::says(record, "instrument", "NIFTYWAVES")
+                    && crate::emitted::says(record, "why", "BEFORE FIRST BAR")
+            }),
+            "the note is in the file under its own name: {said:?}"
+        );
+
+        let mut run = BrokerRun::default();
+        assert!(run.before_first_bar_facts().is_empty());
+        run.before_first_bar.push("NIFTYWAVES — x".to_owned());
+        assert_eq!(
+            run.before_first_bar_facts(),
+            vec![
+                ("Before first bar", "1 instrument(s)".to_owned()),
+                ("Before first bar", "NIFTYWAVES — x".to_owned()),
+            ],
+            "the receipt counts them and names each one"
+        );
     }
 
     /// An EMPTY prefix is still an `Err`, and that boundary carries a status.

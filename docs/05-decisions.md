@@ -63293,3 +63293,56 @@ committed) passed the kept 11:07 file (8,780,872 bytes) to
 `pull::masters::validated_body` with this change, and it returned `Ok`.
 The whole dump validates. A code that appears later still refuses by name
 and keeps the body.
+
+### D-3313 — Empty chunks before a series' first bar are named, not failed, when the vendor and the store both show it — 2026-10-06
+
+**What was observed.** The operator ran a real Zerodha 1day pull of
+Reference indices for 2018-01-01..=2026-09-30. It finished with 10 failures.
+Each was an index the vendor serves only from recent years, such as
+`NIFTYCHEMICALS`, `NIFTYWAVES`, `NIFTYINTERNET`, `NIFTYRAILWAYSPSU`,
+`NIFTYTMMQ50` and `NIFTYSMEEMERGE`. The log said: "1 of 2 chunk(s) answered
+with NO ROWS AT ALL, the first covering 2018-01-01..=2023-06-23". The later
+chunk was NOT discarded. The store holds those series from their first
+served month, written in that run (`NIFTYCHEMICALS` 2025-11..2026-09,
+`NIFTYINTERNET` 2021-10..2026-09). The failure was the verdict only.
+
+**The rule that produced it.** P-68 and the comment in `fetch_chunks`: an
+empty chunk "is reported rather than taken as a quiet success", because if
+a later chunk of the same month lands, the empty chunk's days can never be
+fetched again. That purpose is kept. For an index that did not exist yet,
+there are no days to lose, so the failure told the operator something false.
+A retry cannot change it either.
+
+**Decided.** Leading empty chunks are recorded as `BEFORE FIRST BAR`, not as
+a failure, only when both halves of the evidence hold:
+
+1. **The vendor's.** Every such chunk comes before the first chunk that
+   carried a row. That row is the vendor's first returned row.
+2. **The store's.** A loaded, undamaged census holds no month of this spot
+   series from the feed's dated history floor for this rung to the end of
+   the last empty leading chunk.
+
+Every other empty chunk stays the P-68 failure, with the same sentence:
+
+- an empty chunk after the first row;
+- every empty chunk when no chunk carried a row (no first bar exists);
+- every empty chunk when the census is absent, unreadable, or recovered
+  from damage, when it holds such a month, or when the floor names no day.
+
+In those cases the sentence also says why the forgiveness was refused.
+
+**Never silent.** The note names the span and the chunk count. It goes on
+the receipt as `Before first bar` and to `/logs` as a `Warn`
+(`pull.spot`, "empty chunks before the series' first bar"). It says the
+listing date is UNVERIFIED: the first row proves what the vendor served,
+not when NSE launched the index.
+
+**What did not change.** Which bars land is unchanged. The empty chunk was
+never a discard, and the refused-chunk prefix rule (D-0327) is untouched.
+The audit journal gets no new record kind for this note. The note lives on
+the receipt and in the rolling log. The expired-F&O path keeps its
+all-or-nothing contract.
+
+**Cost.** One census read and one hash probe per month from the floor, only
+for an instrument whose first chunk was empty. This is O(months), not O(1),
+and not timed. `docs/06-limits.md` states the bound. Invariant P-75.
