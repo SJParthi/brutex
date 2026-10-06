@@ -41,7 +41,7 @@ final merge is a no-op). No PR opened. Decisions D-2055..D-2064, invariants G18-
 | outcome.rs:1598 largest_gain_paisa `<`->`<=` | yes | 9ac4962 | M2 caught, `a_flat_mean_reads_the_largest_up_move_as_its_gain` |
 | outcome.rs:1833 `<`->`<=` (min_win) | yes, folded with `min` (cannot exist) | 9ac4962 | absent from list; `==`->`!=` M2 caught |
 | outcome.rs:1841 x5 (min_loss) | yes, folded with `min` + test | 9ac4962 | remaining `==`->`!=` M2 caught; others absent; `the_smallest_win_and_loss_...in_any_order` |
-| significance.rs:444 x5 regularized_incomplete_beta | yes (bit-exact side test) | fbfcbbd | M2 caught all 15 mutants on the line |
+| significance.rs:444 x5 regularized_incomplete_beta | yes (bit-exact side test) | fbfcbbd | M2 caught all 11 mutants on the line |
 | significance.rs:460 `<`->`<=`/`==` Lentz guard | yes, named `lentz_guard` + boundary test | fbfcbbd, fe5c87a | M2 caught (462:20 x3) |
 | significance.rs:493 `<`->`<=` ln_gamma | yes | fbfcbbd, c216c97 | M3 caught (bounded loop `>=`->`<`), bit-exact `ln_gamma(10)` |
 | significance.rs:499 `-`->`+` ln_gamma (shard 178) | yes | fbfcbbd | M3 caught (all series mutants) |
