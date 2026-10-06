@@ -49,3 +49,10 @@ All on branches from final/all-fixes-zero 1f4de71a; hashes sent to zero-findings
 1. On resume (22:03 UTC): fetch, check fixboard/pr74-conc-api and 605c5299 status on head; update fixboard.tsv.
 2. Hourly refresh (routine at :19): inputs checks/pr/streams, run.sh, render check, republish, commit to fix-queue.
 3. Take more unclaimed found rows (tell zero-findings first). Free D-numbers: D-2751..2759, D-2770..2799.
+
+## 2026-10-06 (WS3 batch3 + batch4)
+- `fixboard/pr74-batch3` 289ea4ab: merges api2 (D-2779 serve-lock, one registry, FB-80 matrix) and ce2 (D-2795 magic-gated heal). Gate fixes D-2796/D-2797.
+- `fixboard/pr74-batch4` a08d2ec4 (contains batch3): 11 conc rows fixed (D-2798, D-2799, D-3600..D-3603; FB-107..112).
+- Full table and evidence: `resume/fix-board/RESULT-20261006.md`. Pause history: `PAUSE-20261006.md`.
+- Gate 18 pre-run is detached in /tmp/claude-0/wt-mut; script /tmp/claude-0/mutall.sh, which resumes with --iterate. Results in /tmp/claude-0/m3-<crate>.
+- Next: batch5 = coordinator's gap-audit findings #2 #3 #4 #13 #14 #17 (#12 = recovery-3, done). Branch fixboard/pr74-batch5 from batch4, D-3684..D-3691.
