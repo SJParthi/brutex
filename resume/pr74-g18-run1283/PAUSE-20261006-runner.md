@@ -49,3 +49,23 @@ explicit `--timeout 900` was added. The command:
 3. Re-run cargo-mutants on just those mutants and require 0 missed and 0 timeout.
 4. Run fmt, clippy, runner tests as non-root and the static gates, then push and update RESULT-runner.md.
 If M4 is lost with the container, rebuild the list: map the 116 lines as above and run the command above.
+
+## PAUSE 09:23 UTC: untested-mutant task, partly done
+Branch head: **a8d09ad**, pushed and clean.
+- Done: D-2065 (a8d09ad). `audit.rs` `grid` now pivots `select_nth_unstable_by_key` on index `shown` under
+  `shown < len` alone. This removes the M4 survivor `audit.rs:1148:50 - -> / in grid`. fmt, runner clippy and the audit
+  tests pass as non-root. NOT yet proven by cargo-mutants on a8d09ad.
+- In progress: M4 (113 mapped untested mutants, on c216c97, full suite) is still running and may continue.
+  At pause it had caught 82, unviable 6, missed:
+  - crates/runner/src/audit.rs:1148:50: replace - with / in grid
+  timeout:
+
+- Count note: the coordinator says 121, but untested-mutants-run1283.md has 116 runner lines (113 still exist and 3 were
+  removed by D-2056). I found no separate list of the "5 from shard 138".
+
+## Next on RESUME
+1. Read the final M4 counts. Kill every remaining MISSED or TIMEOUT, using D-2066..D-2069, then D-3660 onward, and
+   invariants G18-runner-19 onward.
+2. Re-run cargo-mutants on a8d09ad plus later fixes, for the new `audit.rs` pivot line and every fixed mutant,
+   with the same flags as M4. Require 0 missed and 0 timeout.
+3. Run fmt, workspace clippy, runner tests as non-root and the static gates, then push and update RESULT-runner.md.
