@@ -1,13 +1,13 @@
 id	state	commit	note
-Z1-slice00-F1	found	-	ws5 2026-10-06: NOT_FIXED
+Z1-slice00-F1	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G3); test added, fails-without-fix not re-run unless RESULT says so
 Z1-slice00-F2	branch	final D-2712	ws5 2026-10-06: FIXED: - `crates/runner/src/audit.rs:990` now renders `ratio_or_no_dd(cell.return_over_drawdown())`.
 Z1-slice00-F3	branch	final D-1771	ws5 2026-10-06: already fixed on final/all-fixes
 Z1-slice03-F1	branch	final D-1771	ws5 2026-10-06: already fixed on final/all-fixes
 Z1-slice03-F2	branch	D-1547; crates/runner/src/validate.rs:1680-1697 fold_rungs r	triage 2026-10-04
 Z1-slice09-F1	pushed	dda2a3d	ws5 2026-10-06: fixed on zero/next (D-2603..D-2619)
 Z1-slice09-F2	branch	final D-1771	ws5 2026-10-06: already fixed on final/all-fixes
-Z1-slice10-F1	found	-	ws5 2026-10-06: NOT_FIXED
-Z1-slice10-F2	found	-	ws5 2026-10-06: NOT_FIXED
+Z1-slice10-F1	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G3); test added, fails-without-fix not re-run unless RESULT says so
+Z1-slice10-F2	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G3); test added, fails-without-fix not re-run unless RESULT says so
 Z1-slice11-F1	branch	3f22aed8	
 Z1-slice11-F2	branch	3f22aed8	
 Z1-slice11-F3	branch	3f22aed8	
@@ -15,8 +15,8 @@ Z1-slice11-F4	branch	3f22aed8
 Z1-slice11-F5	branch	3f22aed8	
 Z1-slice11-F6	branch	3f22aed8	
 Z1-slice11-F7	branch	3f22aed8	
-Z1-slice12-F1	found	-	ws5 2026-10-06: NOT_FIXED
-Z1-slice12-F2	found	-	ws5 2026-10-06: NOT_FIXED
+Z1-slice12-F1	found	-	ws5 2026-10-06: still open
+Z1-slice12-F2	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G5) (doc only); test added, fails-without-fix not re-run unless RESULT says so
 Z1-slice13-F1	branch	3f22aed8	
 Z1-slice13-F2	branch	3f22aed8	
 Z1-slice13-F3	branch	3f22aed8	
@@ -31,7 +31,7 @@ Z1-slice17-F2	branch	final D-1771	ws5 2026-10-06: already fixed on final/all-fix
 Z1-slice18-F1	branch	D-1763 (P1-16-02); docs/02-store-format.md:782 '## 13 ... ve	triage 2026-10-04
 Z1-slice18-F2	branch	final D-1771	ws5 2026-10-06: already fixed on final/all-fixes
 Z1-slice18-F3	branch	D-1940 (P1-16-04); docs/02-store-format.md:1782 '## 31. Exec	triage 2026-10-04
-Z1-slice19-F1	found	-	ws5 2026-10-06: NOT_FIXED
+Z1-slice19-F1	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G7); test added, fails-without-fix not re-run unless RESULT says so
 Z1-slice20-F1	branch	3f22aed8	
 Z1-slice23-F1	branch	9c6284c2	
 Z1-slice23-F2	branch	3f22aed8	
@@ -51,7 +51,7 @@ runs-4	found	-	ws5 2026-10-06: owner-held (Fix Board), not touched
 autopilot-1	pushed	89af06d	ws5 2026-10-06: fixed on zero/next (D-2500..D-2510, D-2691..D-2698)
 autopilot-2	pushed	89af06d	ws5 2026-10-06: fixed on zero/next (D-2500..D-2510, D-2691..D-2698)
 autopilot-3	pushed	89af06d	ws5 2026-10-06: fixed on zero/next (D-2500..D-2510, D-2691..D-2698)
-autopilot-4	found	-	ws5 2026-10-06: NOT_FIXED
+autopilot-4	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G5); test added, fails-without-fix not re-run unless RESULT says so
 recovery-1	branch	final D-2761	ws5 2026-10-06: already fixed on final/all-fixes
 recovery-2	branch	final D-2762	ws5 2026-10-06: already fixed on final/all-fixes
 recovery-3	pushed	89af06d	ws5 2026-10-06: fixed on zero/next (D-2500..D-2510, D-2691..D-2698)
@@ -61,27 +61,27 @@ recovery-6	pushed	89af06d	ws5 2026-10-06: fixed on zero/next (D-2500..D-2510, D-
 apicache-1	branch	final D-2763	ws5 2026-10-06: already fixed on final/all-fixes
 apicache-2	found	-	ws5 2026-10-06: owner-held (Fix Board), not touched
 telemetry-1	branch	D-1537 (hunt-costs-3); crates/telemetry/src/sink.rs:1499-152	triage 2026-10-04
-store1-1	found	-	ws5 2026-10-06: NOT_FIXED
+store1-1	pushed	386b900	ws5 2026-10-06: fixed on zero/next; test added and fails-without-fix recorded
 store1-2	branch	ledger-tails (merged bde50c0c)	
-store2-1	found	-	ws5 2026-10-06: NOT_FIXED
+store2-1	pushed	386b900	ws5 2026-10-06: fixed on zero/next; test added
 pull1-1	branch	D-1769 (CE-30, docs/05-decisions.md:56857); crates/api/src/s	triage 2026-10-04
-pull1-2	found	-	ws5 2026-10-06: NOT_FIXED
-pull1-3	found	-	ws5 2026-10-06: NOT_FIXED
+pull1-2	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G2); test added, fails-without-fix not re-run unless RESULT says so
+pull1-3	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G2); test added, fails-without-fix not re-run unless RESULT says so
 pull2-1	branch	final D-2765	ws5 2026-10-06: already fixed on final/all-fixes
-pull2-2	found	-	ws5 2026-10-06: NOT_FIXED
-pull2-3	found	-	ws5 2026-10-06: NOT_FIXED
-pull2-4	found	-	ws5 2026-10-06: NOT_FIXED
-pull2-5	found	-	ws5 2026-10-06: NOT_FIXED
+pull2-2	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G2); test added, fails-without-fix not re-run unless RESULT says so
+pull2-3	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G2); test added, fails-without-fix not re-run unless RESULT says so
+pull2-4	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G2) (one fix); test added, fails-without-fix not re-run unless RESULT says so
+pull2-5	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G2); test added, fails-without-fix not re-run unless RESULT says so
 cli1-1	branch	final D-1742	ws5 2026-10-06: FIXED: - D-1742 (docs/05-decisions.md:57626, finding W2-cli9-5): `crates/cli/src/operation_audit.rs:641-647` returns `Ok(Some(started))` for a 0-byte per-inv
-cli1-2	found	-	ws5 2026-10-06: NOT_FIXED
-cli1-3	found	-	ws5 2026-10-06: NOT_FIXED
+cli1-2	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G7); test added, fails-without-fix not re-run unless RESULT says so
+cli1-3	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G7); test added, fails-without-fix not re-run unless RESULT says so
 cli1-4	branch	final D-1701	ws5 2026-10-06: FIXED: - D-1701 (docs/05-decisions.md:57758): `sweep_rungs` (`crates/cli/src/lib.rs:17233-17253`) now runs `one_rung` through `in_input_order` (`:17259`), wh
 cli1-5	branch	final D-1771	ws5 2026-10-06: already fixed on final/all-fixes
 cli2-1	branch	ledger-tails (merged bde50c0c)	
 cli2-2	branch	final D-1700,D-2667	ws5 2026-10-06: FIXED: - D-1700 (W2-cli8-9): the key-scan `latest_for` is gone. `one_rung_cached` (`crates/cli/src/lib.rs:15573`) now calls `recorded_row` (`lib.rs:17642`). 
 cli2-3	branch	final D-1901	ws5 2026-10-06: already fixed on final/all-fixes
 cli2-4	branch	final D-1745	ws5 2026-10-06: FIXED: - D-1745 (docs/05-decisions.md:57702, GAP11-3): `record_unadmitted` (`crates/cli/src/lib.rs:21719-21728`) takes `ResultSetLock`, then `record_frontier
-cli2-5	found	-	ws5 2026-10-06: NOT_FIXED
+cli2-5	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G7); test added, fails-without-fix not re-run unless RESULT says so
 cli3-1	branch	3f22aed8	
 cli3-2	operator	-	ws5 2026-10-06: owner decision: USER
 cli3-3	branch	ledger-tails (merged bde50c0c)	
@@ -91,68 +91,68 @@ pop1-3	branch	D-1903; crates/cli/src/population_observations_v1.rs:2185 an	triag
 pop1-4	branch	ledger-tails (merged bde50c0c)	
 pop2-1	branch	ledger-tails (merged bde50c0c)	
 pop2-2	branch	D-1900/D-1902; append_raw now goes through crate::fixed_tail	triage 2026-10-04
-pop2-3	found	-	ws5 2026-10-06: NOT_FIXED
+pop2-3	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G7); test added, fails-without-fix not re-run unless RESULT says so
 pop2-4	branch	ledger-tails (merged bde50c0c)	
 pop2-5	branch	ledger-tails (merged bde50c0c)	
-pop2-6	found	-	ws5 2026-10-06: NOT_FIXED
+pop2-6	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G7); test added, fails-without-fix not re-run unless RESULT says so
 pop2-7	branch	final code read	ws5 2026-10-06: STALE: - **The finding does not apply to the shipped binary.** Its repro is two concurrent `cli ledger-v6` processes on one ROOT. Both are sweep commands und
 sel-1	branch	ledger-tails (merged bde50c0c)	
 search-1	branch	3f22aed8	
 search-2	branch	ledger-tails (merged bde50c0c)	
 xcut-1	branch	1f4de71a	zero/numeric merged; api tests green on staging non-root run
-xcut-2	found	-	ws5 2026-10-06: NOT_FIXED
-xcut-3	found	-	ws5 2026-10-06: NOT_FIXED
-barflow-1	found	-	ws5 2026-10-06: NOT_FIXED
-press-1	found	-	ws5 2026-10-06: NOT_FIXED
+xcut-2	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G2); test added, fails-without-fix not re-run unless RESULT says so
+xcut-3	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G7); test added, fails-without-fix not re-run unless RESULT says so
+barflow-1	pushed	386b900	ws5 2026-10-06: fixed on zero/next; test added and fails-without-fix recorded
+press-1	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G5); test added, fails-without-fix not re-run unless RESULT says so
 press-2	pushed	89af06d	ws5 2026-10-06: fixed on zero/next (D-2500..D-2510, D-2691..D-2698)
 recauto-1	branch	final D-2761	ws5 2026-10-06: budget loss fixed by D-2761; the run still ends BLOCKED on a busy seat, by D-2761 design
 recauto-2	pushed	89af06d	ws5 2026-10-06: fixed on zero/next (D-2500..D-2510, D-2691..D-2698)
 sweep-1	branch	final D-2764	ws5 2026-10-06: already fixed on final/all-fixes
 sweep-2	branch	ledger-tails (merged bde50c0c)	
-sweep-3	found	-	ws5 2026-10-06: NOT_FIXED
-rangeall-1	found	-	ws5 2026-10-06: NOT_FIXED
-rangeall-2	found	-	ws5 2026-10-06: NOT_FIXED
-ledgerv6-1	found	-	ws5 2026-10-06: NOT_FIXED
+sweep-3	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G5); test added, fails-without-fix not re-run unless RESULT says so
+rangeall-1	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G7); test added, fails-without-fix not re-run unless RESULT says so
+rangeall-2	found	-	ws5 2026-10-06: still open
+ledgerv6-1	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G7) (ledger-v6); replay retention documented); test added, fails-without-fix not re-run unless RESULT says so
 ledgerv6-2	branch	final family_v6::reopen_pair	ws5 2026-10-06: STALE: - **The repro cannot run.** It needs process A (`ledger-v6`) and process B (`ledger-all` or another `ledger-v6`) on one store at the same time. The ex
-ledgerv6-3	found	-	ws5 2026-10-06: NOT_FIXED
-ledgerall-1	found	-	ws5 2026-10-06: NOT_FIXED
-ledgerall-2	found	-	ws5 2026-10-06: NOT_FIXED
-ledgerall-3	found	-	ws5 2026-10-06: NOT_FIXED
-indexstop-1	found	-	ws5 2026-10-06: still open
-indexstop-2	found	-	ws5 2026-10-06: NOT_FIXED
-expr-1	found	-	ws5 2026-10-06: NOT_FIXED
-expr-2	found	-	ws5 2026-10-06: NOT_FIXED
-expr-3	found	-	ws5 2026-10-06: NOT_FIXED
-replay-1	found	-	ws5 2026-10-06: NOT_FIXED
+ledgerv6-3	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G7); test added, fails-without-fix not re-run unless RESULT says so
+ledgerall-1	found	-	ws5 2026-10-06: still open
+ledgerall-2	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G7); test added, fails-without-fix not re-run unless RESULT says so
+ledgerall-3	found	-	ws5 2026-10-06: still open
+indexstop-1	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G7); test added, fails-without-fix not re-run unless RESULT says so
+indexstop-2	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G7) (cases a and b); test added, fails-without-fix not re-run unless RESULT says so
+expr-1	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G7); test added, fails-without-fix not re-run unless RESULT says so
+expr-2	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G7); test added, fails-without-fix not re-run unless RESULT says so
+expr-3	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G5); test added, fails-without-fix not re-run unless RESULT says so
+replay-1	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G8); test added, fails-without-fix not re-run unless RESULT says so
 replay-2	branch	3f22aed8	
-replay-3	found	-	ws5 2026-10-06: NOT_FIXED
-replay-4	found	-	ws5 2026-10-06: NOT_FIXED
-replay-5	found	-	ws5 2026-10-06: NOT_FIXED
-cand-1	found	-	ws5 2026-10-06: NOT_FIXED
-cand-2	found	-	ws5 2026-10-06: NOT_FIXED
-log-1	found	-	ws5 2026-10-06: NOT_FIXED
-log-2	found	-	ws5 2026-10-06: NOT_FIXED
+replay-3	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G8); test added, fails-without-fix not re-run unless RESULT says so
+replay-4	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G8); test added, fails-without-fix not re-run unless RESULT says so
+replay-5	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G8); test added, fails-without-fix not re-run unless RESULT says so
+cand-1	found	-	ws5 2026-10-06: still open
+cand-2	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G5); test added, fails-without-fix not re-run unless RESULT says so
+log-1	found	-	ws5 2026-10-06: still open
+log-2	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G5); test added, fails-without-fix not re-run unless RESULT says so
 log-3	pushed	58da61c	/logs walks run off the async workers behind a 4-slot admission pool; per-request O(file) read remains, stated in 06-limits (D-2327) [on PR #74 via c863e92]
 census-1	branch	final D-2766	ws5 2026-10-06: already fixed on final/all-fixes
-equity-1	found	-	ws5 2026-10-06: NOT_FIXED
-equity-2	found	-	ws5 2026-10-06: NOT_FIXED
-lifecycle-1	found	-	ws5 2026-10-06: NOT_FIXED
-lifecycle-2	found	-	ws5 2026-10-06: NOT_FIXED
+equity-1	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G5); test added, fails-without-fix not re-run unless RESULT says so
+equity-2	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G2) (one fix); test added, fails-without-fix not re-run unless RESULT says so
+lifecycle-1	partial	ca93445	ws5 2026-10-06: fixed on zero/next (G5) (partial: press half; recovery deliberately not stopped); test added, fails-without-fix not re-run unless RESULT says so
+lifecycle-2	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G5); test added, fails-without-fix not re-run unless RESULT says so
 lifecycle-3	branch	final D-1537	ws5 2026-10-06: FIXED: - **Fixed by D-1537** (docs/05-decisions.md:53745, "One telemetry sink per directory, across processes"). This is the corrupting half: two api servers
 poison-1	branch	4817f9b9	zero/edges-3 (doc: release is panic=abort)
-atomics-1	found	-	ws5 2026-10-06: NOT_FIXED
-determinism-1	found	-	ws5 2026-10-06: NOT_FIXED
-determinism-2	found	-	ws5 2026-10-06: NOT_FIXED
-determinism-3	found	-	ws5 2026-10-06: NOT_FIXED
-clock-1	found	-	ws5 2026-10-06: NOT_FIXED
-clock-2	found	-	ws5 2026-10-06: NOT_FIXED
-clock-3	found	-	ws5 2026-10-06: NOT_FIXED
+atomics-1	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G5); test added, fails-without-fix not re-run unless RESULT says so
+determinism-1	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G5); test added, fails-without-fix not re-run unless RESULT says so
+determinism-2	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G2); test added, fails-without-fix not re-run unless RESULT says so
+determinism-3	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G8); test added, fails-without-fix not re-run unless RESULT says so
+clock-1	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G5); test added, fails-without-fix not re-run unless RESULT says so
+clock-2	partial	ca93445	ws5 2026-10-06: fixed on zero/next (G5) (partial: data-side half) + OWNER (settle margin); test added, fails-without-fix not re-run unless RESULT says so
+clock-3	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G5); test added, fails-without-fix not re-run unless RESULT says so
 clock-4	branch	final D-1538	ws5 2026-10-06: FIXED: - **Evidence:**
-clock-5	found	-	ws5 2026-10-06: NOT_FIXED
+clock-5	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G5); test added, fails-without-fix not re-run unless RESULT says so
 resources-1	branch	ledger-tails (merged bde50c0c)	
-resources-2	found	-	ws5 2026-10-06: NOT_FIXED
-resources-3	found	-	ws5 2026-10-06: NOT_FIXED
-resources-4	found	-	ws5 2026-10-06: NOT_FIXED
+resources-2	found	-	ws5 2026-10-06: still open
+resources-3	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G6); test added, fails-without-fix not re-run unless RESULT says so
+resources-4	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G6); test added, fails-without-fix not re-run unless RESULT says so
 P1-01-01	branch	5140aca3	
 P1-01-02	branch	5140aca3	
 P1-01-03	branch	5140aca3	
@@ -163,10 +163,10 @@ P1-02-03	branch	5140aca3
 P1-02-04	branch	5140aca3	
 P1-02-05	branch	5140aca3	
 P1-02-06	branch	5140aca3	
-P1-04-01	found	-	ws5 2026-10-06: NOT_FIXED
+P1-04-01	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G6); test added, fails-without-fix not re-run unless RESULT says so
 P1-04-02	pushed	58da61c	/logs walks run off the async workers behind a 4-slot admission pool; per-request O(file) read remains, stated in 06-limits (D-2327) [on PR #74 via c863e92]
-P1-04-03	found	-	ws5 2026-10-06: NOT_FIXED
-P1-04-04	found	-	ws5 2026-10-06: NOT_FIXED
+P1-04-03	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G6); test added, fails-without-fix not re-run unless RESULT says so
+P1-04-04	partial	ca93445	ws5 2026-10-06: fixed on zero/next (G6) in part; pool admission remainder is an owner decision
 P1-06-01	branch	zero/ci-web abad3b2	ci-web agent, D-2660..2664, ZB-01..10; not yet merged
 P1-06-02	branch	zero/ci-web abad3b2	ci-web agent, D-2660..2664, ZB-01..10; not yet merged
 P1-06-03	branch	zero/ci-web abad3b2	ci-web agent, D-2660..2664, ZB-01..10; not yet merged
@@ -229,10 +229,10 @@ P1-18-04	branch	dcdf7a6b
 P1-18-05	branch	dcdf7a6b	
 P1-18-06	branch	dcdf7a6b	
 P1-18-07	branch	dcdf7a6b	
-P1-19-01	found	-	ws5 2026-10-06: NOT_FIXED
+P1-19-01	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G2); test added, fails-without-fix not re-run unless RESULT says so
 P1-19-02	branch	D-1769 / ZR-49 (docs/04-invariants.md:6429); crates/pull/src	triage 2026-10-04
 P1-19-03	pushed	58da61c	AWS credentials file and SSM answer read through bounded readers (D-2326) [on PR #74 via c863e92]
-P1-20-01	found	-	ws5 2026-10-06: NOT_FIXED
+P1-20-01	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G8) (partial: arm half ALREADY-FIXED); test added, fails-without-fix not re-run unless RESULT says so
 pst-1	branch	final D-1682	ws5 2026-10-06: FIXED: - **Evidence:**
 grk-1	pushed	dda2a3d	ws5 2026-10-06: fixed on zero/next (D-2603..D-2619)
 run1-1	operator	-	needs the owner: Should a flat (zero P&L) trade count as a loss in Cell::guaranteed_floor and avg_loss? Changing it alters variant select
@@ -241,19 +241,19 @@ run1-3	branch	already fixed by CE-7 (9c6284c2)
 run2-1	pushed	dda2a3d	ws5 2026-10-06: fixed on zero/next (D-2603..D-2619)
 run2-2	pushed	dda2a3d	ws5 2026-10-06: fixed on zero/next (D-2603..D-2619)
 run3-1	branch	1f4de71a	zero/numeric merged into staging
-pst-2	found	-	ws5 2026-10-06: NOT_FIXED
+pst-2	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G8); test added, fails-without-fix not re-run unless RESULT says so
 pst-3	operator	-	needs the owner: Is a CSCV winner landing exactly on the OOS median (logit 0) overfit or not? Need a charter source for the Bailey et al.
 grk-2	pushed	dda2a3d	ws5 2026-10-06: fixed on zero/next (D-2603..D-2619)
 STO-1	pushed	dda2a3d	ws5 2026-10-06: fixed on zero/next (D-2603..D-2619)
 STO-2	pushed	dda2a3d	ws5 2026-10-06: fixed on zero/next (D-2603..D-2619)
 pul-1	pushed	dda2a3d	ws5 2026-10-06: fixed on zero/next (D-2603..D-2619)
 core-1	pushed	dda2a3d	ws5 2026-10-06: fixed on zero/next (D-2603..D-2619)
-apir-1	found	-	ws5 2026-10-06: NOT_FIXED
-apir-2	found	-	ws5 2026-10-06: NOT_FIXED
-rep-1	found	-	ws5 2026-10-06: NOT_FIXED
+apir-1	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G6); test added, fails-without-fix not re-run unless RESULT says so
+apir-2	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G6); test added, fails-without-fix not re-run unless RESULT says so
+rep-1	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G8); test added, fails-without-fix not re-run unless RESULT says so
 pst-4	operator	-	ws5 2026-10-06: owner decision: USER
-apir-3	found	-	ws5 2026-10-06: NOT_FIXED
-apis-2	found	-	ws5 2026-10-06: NOT_FIXED
+apir-3	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G6); test added, fails-without-fix not re-run unless RESULT says so
+apis-2	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G6); test added, fails-without-fix not re-run unless RESULT says so
 clib-1	operator	-	needs the owner: Accept a run-identity change to round the statistical floor up (div_ceil) so min_hits == needed? Every auto-floored iden
 clib-2	operator	-	needs the owner: Accept the identity change of multiplying before the /100 divide for PerWeek (10/wk over 1 month: 43 not 40)? Docs contr
 ind1-1	pushed	dda2a3d	ws5 2026-10-06: fixed on zero/next (D-2603..D-2619)
@@ -319,7 +319,7 @@ P3-02-06	branch	1f4de71a	zero/api-routes merged into staging final/all-fixes-zer
 P3-02-07	branch	1f4de71a	zero/api-routes merged into staging final/all-fixes-zero
 CE-19	partial	1f4de71a	TOP capped (D-1981); chosen-trade /trades hold cap still open, queued
 CE-21	branch	9c6284c2	
-CE-20	found	-	ws5 2026-10-06: NOT_FIXED
+CE-20	partial	ca93445	ws5 2026-10-06: fixed on zero/next (G8) (partial: in-process half) / OWNER (SIGKILL half); test added, fails-without-fix not re-run unless RESULT says so
 CE-22	branch	3f22aed8	
 CE-36	branch	9c6284c2	
 CE-37	branch	9c6284c2	
@@ -347,19 +347,19 @@ CE-51	pushed	89af06d	ws5 2026-10-06: fixed on zero/next (D-2500..D-2510, D-2691.
 CE-47	branch	zero/ci-web 69f74e8	ci-web agent
 CE-48	branch	zero/ci-web 69f74e8	ci-web agent
 p2run-1	pushed	dda2a3d	ws5 2026-10-06: fixed on zero/next (D-2603..D-2619)
-p2misc-1	found	-	ws5 2026-10-06: NOT_FIXED
+p2misc-1	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G8); test added, fails-without-fix not re-run unless RESULT says so
 p2misc-2	branch	final D-1662	ws5 2026-10-06: FIXED: - The headline defect is fixed by **D-1662** (docs/05-decisions.md:58029): a missing 15:29 or an early stop was never withheld, and `MissingClosingMin
-p2bool-2	found	-	ws5 2026-10-06: NOT_FIXED
+p2bool-2	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G8); test added, fails-without-fix not re-run unless RESULT says so
 p4num-1	pushed	dda2a3d	ws5 2026-10-06: fixed on zero/next (D-2603..D-2619)
-p4num-2	found	-	ws5 2026-10-06: NOT_FIXED
-conc4-1	found	-	ws5 2026-10-06: NOT_FIXED
-conc4-2	found	-	ws5 2026-10-06: NOT_FIXED
-P1-03-1	found	-	ws5 2026-10-06: NOT_FIXED
-P1-03-2	found	-	ws5 2026-10-06: NOT_FIXED
-Z1-slice08-F1	found	-	ws5 2026-10-06: NOT_FIXED
-Z1-slice08-F2	found	-	ws5 2026-10-06: NOT_FIXED
-Z1-slice08-F3	found	-	ws5 2026-10-06: NOT_FIXED
-Z1-slice08-F4	found	-	ws5 2026-10-06: NOT_FIXED
+p4num-2	operator	-	ws5 2026-10-06: owner decision needed (G3); see RESULT-20261006
+conc4-1	pushed	966c714	ws5 2026-10-06: fixed on zero/next; test added
+conc4-2	pushed	966c714	ws5 2026-10-06: fixed on zero/next; test added
+P1-03-1	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G6); test added, fails-without-fix not re-run unless RESULT says so
+P1-03-2	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G6); test added, fails-without-fix not re-run unless RESULT says so
+Z1-slice08-F1	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G3) (vocabulary output change; follows the D-1543 precedent); test added, fails-without-fix not re-run unless RESULT says so
+Z1-slice08-F2	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G3) (docs/contract); test added, fails-without-fix not re-run unless RESULT says so
+Z1-slice08-F3	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G3); test added, fails-without-fix not re-run unless RESULT says so
+Z1-slice08-F4	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G3); test added, fails-without-fix not re-run unless RESULT says so
 CE-54	branch	6a5cc72	D-2659 rolling pre-flight on first day, ZX-08
 P5-01	branch	26c66f1	D-2657
 P5-02	branch	26c66f1	D-2657
@@ -403,9 +403,9 @@ conc6-1	pushed	89af06d	ws5 2026-10-06: fixed on zero/next (D-2500..D-2510, D-269
 conc6-2	pushed	89af06d	ws5 2026-10-06: fixed on zero/next (D-2500..D-2510, D-2691..D-2698)
 conc6-3	pushed	89af06d	ws5 2026-10-06: fixed on zero/next (D-2500..D-2510, D-2691..D-2698)
 conc6-4	pushed	89af06d	ws5 2026-10-06: fixed on zero/next (D-2500..D-2510, D-2691..D-2698)
-p9num-1	found	-	ws5 2026-10-06: NOT_FIXED
+p9num-1	operator	-	ws5 2026-10-06: owner decision needed (G3); see RESULT-20261006
 p9num-2	operator	-	needs the owner: Which price is the 15:10 square-off executed at: the 15:09 bar's close (signal_candle_stop/outcome) or its open (trade/g
-p9num-3	found	-	ws5 2026-10-06: NOT_FIXED
+p9num-3	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G3); test added, fails-without-fix not re-run unless RESULT says so
 P8-01	branch	c26d8db5	offered to Fix Board thread (D-2700 range)
 P8-02	branch	c26d8db5	offered to Fix Board thread (D-2700 range)
 P8-03	branch	c26d8db5	offered to Fix Board thread (D-2700 range)
@@ -416,9 +416,9 @@ p5num-1	branch	final D-2714	ws5 2026-10-06: already fixed on final/all-fixes
 p5num-2	branch	final D-2712	ws5 2026-10-06: already fixed on final/all-fixes
 p5num-3	branch	final D-1930,D-2713	ws5 2026-10-06: already fixed on final/all-fixes
 p5num-4	branch	final D-2712	ws5 2026-10-06: already fixed on final/all-fixes
-p5num-5	found	-	ws5 2026-10-06: NOT_FIXED
+p5num-5	partial	ca93445	ws5 2026-10-06: fixed on zero/next (G4) (partial: wire half) + OWNER (the no-gains refusal); test added, fails-without-fix not re-run unless RESULT says so
 P9-01	operator	-	needs the owner: Store t and payoff as f64 bits (new frontier version), or carve out display-scaled ranking columns in CLAUDE.md §7 plus 
-P9-02	found	-	ws5 2026-10-06: NOT_FIXED
+P9-02	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G3) (docs only); test added, fails-without-fix not re-run unless RESULT says so
 P9-03	branch	final D-1963	ws5 2026-10-06: FIXED: - **Evidence:** **D-1963** (docs/05-decisions.md:59939, P17-05).
 P9-04	branch	final D-1771	ws5 2026-10-06: already fixed on final/all-fixes
 CE-67	branch	final D-1772,D-1935,D-1938	ws5 2026-10-06: already fixed on final/all-fixes
@@ -433,8 +433,8 @@ conc9-2	branch	final D-1774	ws5 2026-10-06: already fixed on final/all-fixes
 conc9-3	branch	final D-1774	ws5 2026-10-06: already fixed on final/all-fixes
 p10num-1	branch	zero-work 6b26815b	data-edges agent
 p10num-2	branch	zero-work 6b26815b	data-edges agent
-conc10-1	found	-	ws5 2026-10-06: NOT_FIXED
-conc10-2	found	-	ws5 2026-10-06: NOT_FIXED
+conc10-1	operator	-	ws5 2026-10-06: owner decision needed; see RESULT-20261006
+conc10-2	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G8); test added, fails-without-fix not re-run unless RESULT says so
 P10-01	branch	-	Fix Board (fixboard/zero-p8)
 P10-02	branch	-	Fix Board (fixboard/zero-p8)
 P10-03	branch	-	Fix Board (fixboard/zero-p8)
@@ -446,19 +446,19 @@ p11num-1	branch	0aa8daa4	helpers round 8
 p11num-2	branch	-	helpers round 8
 p11num-3	branch	final D-1775	ws5 2026-10-06: already fixed on final/all-fixes
 p11num-4	branch	final D-1775	ws5 2026-10-06: already fixed on final/all-fixes
-P11-01	found	-	ws5 2026-10-06: NOT_FIXED
+P11-01	branch	final	ws5 2026-10-06: already fixed on final/all-fixes (G6 evidence)
 P11-02	branch	final D-1776	ws5 2026-10-06: already fixed on final/all-fixes
-P11-03	found	-	ws5 2026-10-06: NOT_FIXED
+P11-03	partial	ca93445	ws5 2026-10-06: fixed on zero/next (G2) (partial: header half) / OWNER (zeroize half); test added, fails-without-fix not re-run unless RESULT says so
 P11-04	operator	-	history rewrite is owner call; docs paths to scrub
 CE-74	branch	final D-1776	ws5 2026-10-06: already fixed on final/all-fixes
-conc11-1	found	-	ws5 2026-10-06: NOT_FIXED
-conc11-2	found	-	ws5 2026-10-06: NOT_FIXED
-conc11-3	found	-	ws5 2026-10-06: NOT_FIXED
-conc5-1	found	-	ws5 2026-10-06: NOT_FIXED
-conc5-2	found	-	ws5 2026-10-06: NOT_FIXED
+conc11-1	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G8); test added, fails-without-fix not re-run unless RESULT says so
+conc11-2	partial	ca93445	ws5 2026-10-06: fixed on zero/next (G6) (S variant only); test added, fails-without-fix not re-run unless RESULT says so
+conc11-3	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G6); test added, fails-without-fix not re-run unless RESULT says so
+conc5-1	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G8); test added, fails-without-fix not re-run unless RESULT says so
+conc5-2	pushed	966c714	ws5 2026-10-06: fixed on zero/next; test added
 p12num-1	branch	final D-1777	ws5 2026-10-06: already fixed on final/all-fixes
 P-03	branch	zero-work 6b26815b	calendar agent; from coordinator (Lane 1)
-conc12-1	found	-	ws5 2026-10-06: NOT_FIXED
+conc12-1	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G2); test added, fails-without-fix not re-run unless RESULT says so
 P12-01	branch	7d6fa64e	helpers round 9 (docs/04)
 P12-02	branch	7d6fa64e	helpers round 9 (docs/04)
 P12-03	branch	7d6fa64e	helpers round 9 (docs/04)
@@ -483,18 +483,18 @@ CE-81	branch	zero-work 6b26815b	helpers round 10 crash pass 15 (api-web contract
 CE-82	branch	zero-work 6b26815b	helpers round 10 crash pass 15 (api-web contract)
 CE-83	branch	zero-work 6b26815b	helpers round 10 crash pass 15 (api-web contract)
 P13-01	branch	0aa8daa4	web/build rebuild in staging (main thread)
-P13-02	found	-	ws5 2026-10-06: NOT_FIXED
-P13-03	found	-	ws5 2026-10-06: NOT_FIXED
+P13-02	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G1); test added, fails-without-fix not re-run unless RESULT says so
+P13-03	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G1); test added, fails-without-fix not re-run unless RESULT says so
 P13-04	pushed	4bb242b	§96 re-measured (13 native spawners), plan cites §96; §2 reach over deps is an owner question (D-2328) [on PR #74 via c863e92]
 P13-05	pushed	a194586	fixed (D-2325); merged on sweep branch, waiting for PR 74 CI thread [on PR #74 via c863e92]
-conc13-1	found	-	ws5 2026-10-06: NOT_FIXED
-conc13-2	found	-	ws5 2026-10-06: NOT_FIXED
-conc13-3	found	-	ws5 2026-10-06: NOT_FIXED
-conc13-4	found	-	ws5 2026-10-06: NOT_FIXED
-conc13-5	found	-	ws5 2026-10-06: NOT_FIXED
-conc13-6	found	-	ws5 2026-10-06: NOT_FIXED
-conc13-7	found	-	ws5 2026-10-06: NOT_FIXED
-conc13-8	found	-	ws5 2026-10-06: NOT_FIXED
+conc13-1	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G6); test added, fails-without-fix not re-run unless RESULT says so
+conc13-2	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G2); test added, fails-without-fix not re-run unless RESULT says so
+conc13-3	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G6); test added, fails-without-fix not re-run unless RESULT says so
+conc13-4	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G6); test added, fails-without-fix not re-run unless RESULT says so
+conc13-5	found	-	ws5 2026-10-06: still open
+conc13-6	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G8); test added, fails-without-fix not re-run unless RESULT says so
+conc13-7	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G8); test added, fails-without-fix not re-run unless RESULT says so
+conc13-8	found	-	ws5 2026-10-06: still open
 CE-84	found	-	ws5 2026-10-06: owner-held (Fix Board), not touched
 CE-85	found	-	ws5 2026-10-06: owner-held (Fix Board), not touched
 CE-86	found	-	ws5 2026-10-06: owner-held (Fix Board), not touched
@@ -502,8 +502,8 @@ CE-87	found	-	ws5 2026-10-06: owner-held (Fix Board), not touched
 p14num-1	branch	891d8f8d	Fix Board fixboard/pr74-web18
 p14num-2	branch	final D-2750	ws5 2026-10-06: already fixed on final/all-fixes
 p14num-3	operator	-	same root as run1-1/run1-2 (owner: which definition of a losing trade)
-conc14-1	found	-	ws5 2026-10-06: NOT_FIXED
-conc14-2	found	-	ws5 2026-10-06: NOT_FIXED
+conc14-1	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G2); test added, fails-without-fix not re-run unless RESULT says so
+conc14-2	found	-	ws5 2026-10-06: still open
 P14-01	branch	final D-1959	ws5 2026-10-06: already fixed on final/all-fixes
 P14-02	branch	final D-1959	ws5 2026-10-06: already fixed on final/all-fixes
 P14-03	branch	final D-1959	ws5 2026-10-06: already fixed on final/all-fixes
@@ -512,49 +512,49 @@ P14-05	branch	final D-1959	ws5 2026-10-06: already fixed on final/all-fixes
 P14-06	branch	final D-1959	ws5 2026-10-06: already fixed on final/all-fixes
 P14-07-graph	branch	final D-1959	ws5 2026-10-06: FIXED: 
 p15num-1	operator	-	ws5 2026-10-06: owner decision: USER
-p15num-2	found	-	ws5 2026-10-06: NOT_FIXED
-conc15-1	found	-	ws5 2026-10-06: NOT_FIXED
-conc15-2	found	-	ws5 2026-10-06: NOT_FIXED
-conc15-3	found	-	ws5 2026-10-06: NOT_FIXED
-conc15-4	found	-	ws5 2026-10-06: NOT_FIXED
-conc15-5	found	-	ws5 2026-10-06: NOT_FIXED
-conc15-6	found	-	ws5 2026-10-06: NOT_FIXED
+p15num-2	operator	-	ws5 2026-10-06: owner decision needed (G6); see RESULT-20261006
+conc15-1	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G6); test added, fails-without-fix not re-run unless RESULT says so
+conc15-2	found	-	ws5 2026-10-06: still open
+conc15-3	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G6); test added, fails-without-fix not re-run unless RESULT says so
+conc15-4	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G6); test added, fails-without-fix not re-run unless RESULT says so
+conc15-5	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G6); test added, fails-without-fix not re-run unless RESULT says so
+conc15-6	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G6); test added, fails-without-fix not re-run unless RESULT says so
 CE-88	found	-	ws5 2026-10-06: owner-held (Fix Board), not touched
 CE-89	found	-	ws5 2026-10-06: owner-held (Fix Board), not touched
 CE-90	found	-	ws5 2026-10-06: owner-held (Fix Board), not touched
-P15-01	found	-	ws5 2026-10-06: NOT_FIXED
-P15-02	found	-	ws5 2026-10-06: NOT_FIXED
-P15-03	found	-	ws5 2026-10-06: NOT_FIXED
-P15-04	found	-	ws5 2026-10-06: NOT_FIXED
-P15-05	found	-	ws5 2026-10-06: NOT_FIXED
-P15-06	found	-	ws5 2026-10-06: NOT_FIXED
+P15-01	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G1); test added, fails-without-fix not re-run unless RESULT says so
+P15-02	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G1); test added, fails-without-fix not re-run unless RESULT says so
+P15-03	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G1) (with P15-06); test added, fails-without-fix not re-run unless RESULT says so
+P15-04	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G1); test added, fails-without-fix not re-run unless RESULT says so
+P15-05	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G1); test added, fails-without-fix not re-run unless RESULT says so
+P15-06	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G1); test added, fails-without-fix not re-run unless RESULT says so
 P15-07	pushed	a194586	fixed (D-2321); merged on sweep branch, waiting for PR 74 CI thread [on PR #74 via c863e92]
 P15-08	pushed	a194586	fixed (D-2322); merged on sweep branch, waiting for PR 74 CI thread [on PR #74 via c863e92]
 P15-09	pushed	a194586	fixed (D-2323); merged on sweep branch, waiting for PR 74 CI thread [on PR #74 via c863e92]
-P15-10	found	-	ws5 2026-10-06: NOT_FIXED
-P15-11	found	-	ws5 2026-10-06: NOT_FIXED
-P15-12	found	-	ws5 2026-10-06: NOT_FIXED
+P15-10	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G1); test added, fails-without-fix not re-run unless RESULT says so
+P15-11	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G1); test added, fails-without-fix not re-run unless RESULT says so
+P15-12	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G1); test added, fails-without-fix not re-run unless RESULT says so
 P15-13	branch	final D-2345	ws5 2026-10-06: FIXED: - D-2345 (docs/05-decisions.md:60411), "Gate 1e builds and tests a worktree of the commit with `web/` deleted".
-P15-14	found	-	ws5 2026-10-06: NOT_FIXED
-P15-15	found	-	ws5 2026-10-06: NOT_FIXED
-P15-16	found	-	ws5 2026-10-06: NOT_FIXED
+P15-14	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G1); test added, fails-without-fix not re-run unless RESULT says so
+P15-15	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G1); test added, fails-without-fix not re-run unless RESULT says so
+P15-16	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G1); test added, fails-without-fix not re-run unless RESULT says so
 P15-17	pushed	a194586	fixed (D-2324); merged on sweep branch, waiting for PR 74 CI thread [on PR #74 via c863e92]
-conc16-1	found	-	ws5 2026-10-06: NOT_FIXED
-conc16-2	found	-	ws5 2026-10-06: NOT_FIXED
-p16num-1	found	-	ws5 2026-10-06: NOT_FIXED
+conc16-1	found	-	ws5 2026-10-06: still open
+conc16-2	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G6); test added, fails-without-fix not re-run unless RESULT says so
+p16num-1	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G3); test added, fails-without-fix not re-run unless RESULT says so
 p16num-2	branch	final D-1969	ws5 2026-10-06: already fixed on final/all-fixes
 p16num-3	branch	final D-1969	ws5 2026-10-06: already fixed on final/all-fixes
 CE-91	found	-	ws5 2026-10-06: owner-held (Fix Board), not touched
 CE-92	found	-	ws5 2026-10-06: owner-held (Fix Board), not touched
-P16-01	found	-	ws5 2026-10-06: NOT_FIXED
-P16-02	found	-	ws5 2026-10-06: NOT_FIXED
-P16-03	found	-	ws5 2026-10-06: NOT_FIXED
-P16-04	found	-	ws5 2026-10-06: NOT_FIXED
+P16-01	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G2); test added, fails-without-fix not re-run unless RESULT says so
+P16-02	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G6); test added, fails-without-fix not re-run unless RESULT says so
+P16-03	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G8); test added, fails-without-fix not re-run unless RESULT says so
+P16-04	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G6); test added, fails-without-fix not re-run unless RESULT says so
 CE-93	found	-	ws5 2026-10-06: owner-held (Fix Board), not touched
 CE-94	found	-	ws5 2026-10-06: owner-held (Fix Board), not touched
-conc17-1	found	-	ws5 2026-10-06: NOT_FIXED
-conc17-2	found	-	ws5 2026-10-06: NOT_FIXED
-p17num-1	found	-	ws5 2026-10-06: NOT_FIXED (needs an owner decision on search identity)
+conc17-1	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G8); test added, fails-without-fix not re-run unless RESULT says so
+conc17-2	partial	ca93445	ws5 2026-10-06: fixed on zero/next (G4) (partial: web half) + OWNER (bounding the journal); test added, fails-without-fix not re-run unless RESULT says so
+p17num-1	operator	-	ws5 2026-10-06: owner decision needed; see RESULT-20261006
 P17-01	branch	891d8f8d	Fix Board fixboard/pr74-web18
 P17-02	branch	final D-1967	ws5 2026-10-06: already fixed on final/all-fixes
 P17-03	branch	final D-1967	ws5 2026-10-06: already fixed on final/all-fixes
@@ -582,7 +582,7 @@ P18-03	branch	final D-1962	ws5 2026-10-06: already fixed on final/all-fixes
 P18-04	branch	final D-1964	ws5 2026-10-06: already fixed on final/all-fixes
 P18-05	branch	final D-1965	ws5 2026-10-06: already fixed on final/all-fixes
 P18-col	branch	final D-1966,D-0401,D-0293	ws5 2026-10-06: FIXED: - D-1966 (docs/05-decisions.md:59954), "The indicators column comments cite D-0401's exact aligner". At :59956: "Four comments in `indicators::column`
-p18num-1	found	-	ws5 2026-10-06: NOT_FIXED (latent; no production caller)
+p18num-1	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G3); test added, fails-without-fix not re-run unless RESULT says so
 conc18-1	branch	891d8f8d	Fix Board fixboard/pr74-web18
 conc18-2	branch	891d8f8d	Fix Board fixboard/pr74-web18
 conc18-3	fixing	-	ws5 2026-10-06: owner-held (Fix Board), not touched
@@ -598,13 +598,13 @@ api-strict-top	branch	27362003	already fixed in staging by CE-19 (D-1981)
 CE-99	found	-	ws5 2026-10-06: owner-held (Fix Board), not touched
 CE-100	found	-	ws5 2026-10-06: owner-held (Fix Board), not touched
 CE-101	found	-	ws5 2026-10-06: owner-held (Fix Board), not touched
-conc19-1	found	-	ws5 2026-10-06: NOT_FIXED
-conc19-2	found	-	ws5 2026-10-06: NOT_FIXED
-conc19-3	found	-	ws5 2026-10-06: NOT_FIXED
-P19-01	found	-	ws5 2026-10-06: NOT_FIXED (partly mitigated)
-P19-02	found	-	ws5 2026-10-06: NOT_FIXED
-P19-03	found	-	ws5 2026-10-06: NOT_FIXED
-P19-04	found	-	ws5 2026-10-06: NOT_FIXED
-P19-05	found	-	ws5 2026-10-06: NOT_FIXED
-P19-06	found	-	ws5 2026-10-06: NOT_FIXED (half fixed)
-P19-07	found	-	ws5 2026-10-06: NOT_FIXED
+conc19-1	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G6); test added, fails-without-fix not re-run unless RESULT says so
+conc19-2	found	-	ws5 2026-10-06: still open
+conc19-3	found	-	ws5 2026-10-06: still open
+P19-01	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G4) (complements D-2750); test added, fails-without-fix not re-run unless RESULT says so
+P19-02	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G4); test added, fails-without-fix not re-run unless RESULT says so
+P19-03	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G4); test added, fails-without-fix not re-run unless RESULT says so
+P19-04	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G4); test added, fails-without-fix not re-run unless RESULT says so
+P19-05	partial	ca93445	ws5 2026-10-06: fixed on zero/next (G4) (partial: the two named tests and the helper; about 18 other tests of the same shape were not touched); test added, fails-without-fix not re-run unless RESULT s
+P19-06	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G4) (partial: the page half was already done by D-2732); test added, fails-without-fix not re-run unless RESULT says so
+P19-07	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G4); test added, fails-without-fix not re-run unless RESULT says so
