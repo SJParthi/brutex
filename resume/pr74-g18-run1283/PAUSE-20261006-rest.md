@@ -15,3 +15,11 @@ Head: **445ad02** (pushed, clean, no cargo-mutants marker). origin/final/all-fix
 1. Read the r-mine2 result: `grep 'mutants tested' /tmp/claude-0/mut/r-mine2.log; cat /tmp/claude-0/mut/r-mine2/mutants.out/{missed,timeout}.txt`. Kill anything listed.
 2. Re-fetch origin/final/all-fixes; if it moved, merge, re-validate (fmt, clippy, non-root tests, gates) and push.
 3. Fill HEADSHA and MINE2 in /tmp/claude-0/RESULT-rest.draft.md, publish it as resume/pr74-g18-run1283/RESULT-rest.md on fix-queue (merge commit, never force), and send the final table.
+
+## r-mine2 result (finished during pause)
+```
+exit 0
+66 mutants tested in 16m: 37 caught, 29 unviable
+
+[exited with code 0]
+```
