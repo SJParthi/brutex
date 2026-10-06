@@ -241,3 +241,90 @@ fn the_citation_readers_read_whole_tokens_only() {
         set(&["I-01", "I-02", "I-03"])
     );
 }
+
+/// `CLAUDE.md`, whose §10 says which documents carry authority.
+const LAW: &str = include_str!("../../../CLAUDE.md");
+
+/// §10's table rows (`docs/…` paths with authority) and the inclusive range of
+/// report numbers its "hold no authority" sentence names, read from the text.
+fn authority_table(law: &str) -> (BTreeSet<String>, Option<(u32, u32)>) {
+    let section = law.split_once("\n## 10.").map_or("", |(_, rest)| rest);
+    let rows = section
+        .lines()
+        .filter_map(|line| line.strip_prefix("| `docs/"))
+        .filter_map(|rest| rest.split_once('`'))
+        .map(|(name, _)| format!("docs/{name}"))
+        .collect();
+    let range = section.split_once("**`docs/").and_then(|(_, rest)| {
+        let (low, rest) = rest.split_once("-` to `docs/")?;
+        let (high, _) = rest.split_once("-`")?;
+        Some((low.parse().ok()?, high.parse().ok()?))
+    });
+    (rows, range)
+}
+
+/// How §10 classifies one `docs/` path: in the table, a numbered report in the
+/// stated range, or under `docs/research-policy/`; `false` for none of them.
+fn classified(path: &str, rows: &BTreeSet<String>, range: (u32, u32)) -> bool {
+    if rows.contains(path) || path.starts_with("docs/research-policy/") {
+        return true;
+    }
+    path.strip_prefix("docs/")
+        .and_then(|name| name.split_once('-'))
+        .and_then(|(number, _)| number.parse::<u32>().ok())
+        .is_some_and(|n| (range.0..=range.1).contains(&n))
+}
+
+/// D-3509 (ONEAUTH-10). `CLAUDE.md` §10 is the one statement of which
+/// documents bind. It listed eight of fourteen (D-0212) and then fourteen of
+/// thirty-nine (D-1764) before anyone noticed, because nothing compared it with
+/// the directory. Every table row names a file that exists, and every file
+/// under `docs/` is a row, a numbered report inside the stated range, or under
+/// `docs/research-policy/`.
+#[test]
+fn every_document_is_classified_by_the_law() {
+    let (rows, range) = authority_table(LAW);
+    assert_eq!(rows.len(), 14, "§10's table: {rows:?}");
+    let range = range.expect("§10 names the report range");
+    let root = root();
+    for row in &rows {
+        assert!(
+            root.join(row).is_file(),
+            "§10 names {row}, which does not exist"
+        );
+    }
+    let mut files = Vec::new();
+    walk(&root.join("docs"), &["md"], &mut files);
+    let unclassified: Vec<String> = files
+        .iter()
+        .filter_map(|path| path.strip_prefix(&root).ok())
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .filter(|path| !classified(path, &rows, range))
+        .collect();
+    assert_eq!(
+        unclassified,
+        Vec::<String>::new(),
+        "§10 says nothing about these"
+    );
+}
+
+/// The §10 reader and classifier on their edges.
+#[test]
+fn the_authority_reader_reads_the_table_and_the_range() {
+    let law = "## 9. x\n| `docs/99-no.md` | x |\n## 10. Documents\n| File | A |\n\
+               | `docs/00-a.md` | a |\n| `docs/01-b.md` | b |\n\
+               **`docs/12-` to `docs/35-` and more** text\n## 11. y\n";
+    let (rows, range) = authority_table(law);
+    let set = |xs: &[&str]| xs.iter().map(|x| (*x).to_owned()).collect::<BTreeSet<_>>();
+    assert_eq!(rows, set(&["docs/00-a.md", "docs/01-b.md"]));
+    assert_eq!(range, Some((12, 35)));
+    assert_eq!(authority_table("no section"), (BTreeSet::new(), None));
+    let range = (12, 35);
+    assert!(classified("docs/00-a.md", &rows, range));
+    assert!(classified("docs/12-x.md", &rows, range));
+    assert!(classified("docs/35-x.md", &rows, range));
+    assert!(classified("docs/research-policy/r.md", &rows, range));
+    assert!(!classified("docs/36-x.md", &rows, range));
+    assert!(!classified("docs/11-x.md", &rows, range));
+    assert!(!classified("docs/notes.md", &rows, range));
+}

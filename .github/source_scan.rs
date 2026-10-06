@@ -3301,6 +3301,10 @@ fn mutants_skip_findings(path: &str, src: &str) -> Result<Vec<String>, String> {
 /// into two lines for every line-oriented check, and git C-quotes the other
 /// three in any listing read without `-z`, so a quoted name's real ending
 /// was invisible to every gate that greps a listing.
+/// The text cargo-mutants writes into a mutated line, in two pieces so this
+/// file does not hold it whole and refuse itself (D-3508).
+const MUTANT_MARKER: [&str; 2] = ["changed by cargo-", "mutants"];
+
 fn content_findings(path: &str, bytes: &[u8]) -> Vec<String> {
     if path.starts_with("web/") {
         return Vec::new();
@@ -3330,6 +3334,16 @@ fn content_findings(path: &str, bytes: &[u8]) -> Vec<String> {
     match std::str::from_utf8(bytes) {
         Err(_) => out.push(format!("{path}: is not UTF-8")),
         Ok(text) => {
+            // D-3508: a mutated line committed from an `--in-place` run.
+            let marker = MUTANT_MARKER.concat();
+            for (n, line) in text.lines().enumerate() {
+                if line.contains(&marker) {
+                    out.push(format!(
+                        "{path}:{}: a cargo-mutants marker -- a live mutation was committed",
+                        n + 1
+                    ));
+                }
+            }
             if path.ends_with(".rs") {
                 match lex(text) {
                     Ok(l) if l.shebang => out.push(format!(
@@ -4412,6 +4426,40 @@ mod tests {
             content_findings("web/x.rs", b"#[mutants::skip]\nfn f() {}\n").is_empty(),
             "web/ is unrestricted"
         );
+    }
+
+    #[test]
+    fn a_live_mutation_marker_is_refused_in_any_tracked_file() {
+        // D-3508 (ONEAUTH-09): pr74/g18-rest committed `while pos >= <marker> 0`
+        // in crates/telemetry/src/tail.rs, an endless loop that every static
+        // gate passed. The marker is assembled here as the gate assembles it.
+        let marker = format!("/* ~ {} ~ */", MUTANT_MARKER.concat());
+        for (path, src) in [
+            (
+                "crates/telemetry/src/tail.rs",
+                format!("fn f() {{ while pos >= {marker} 0 {{}} }}\n"),
+            ),
+            ("crates/a/tests/t.rs", format!("// {marker}\n")),
+            (".github/x.rs", format!("const S: &str = \"{marker}\";\n")),
+            ("docs/x.md", format!("{marker}\n")),
+            ("Cargo.toml", format!("# {}\n", MUTANT_MARKER.concat())),
+        ] {
+            assert!(
+                content_findings(path, src.as_bytes())
+                    .iter()
+                    .any(|f| f.contains("cargo-mutants marker")),
+                "passed: {path}: {src}"
+            );
+        }
+        for src in [
+            "// changed by cargo\n",
+            "// cargo-mutants changed nothing\n",
+        ] {
+            assert!(
+                content_findings("crates/a/src/lib.rs", src.as_bytes()).is_empty(),
+                "refused: {src}"
+            );
+        }
     }
 
     #[test]

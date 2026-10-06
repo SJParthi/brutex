@@ -63329,3 +63329,38 @@ page) and `A-18` restated. The comments are corrected.
 (`web/src/routes/terminal/+page.svelte`, `web/src/lib/terminal.svelte.js`) are
 left: a comment edit rebuilds hashed `web/build` chunks Gate W1 compares, and
 that churn belongs with the next `web/` change.
+
+### D-3508 — Gate 1 refuses a committed cargo-mutants marker in any tracked file — 2026-10-06
+
+**What was observed.** Commits 92bcd1a and 99d8217 on `pr74/g18-rest`
+carried a live mutation out of an `--in-place` cargo-mutants run:
+`crates/telemetry/src/tail.rs:503` read `while pos >= /* ~ <marker> ~ */ 0`,
+an endless loop (repaired in 0d8c386). The marker is the text cargo-mutants
+writes into every line it mutates, "changed by cargo-" followed by
+"mutants". No language-purity gate read for it, so only the slow test and
+mutation jobs could have stopped it, and an endless loop stops them by timing
+out. The coordinator raised it to lens L4.
+
+**Decided.** `source_scan content` (gate 1) refuses any tracked file outside
+`web/` that holds the marker, naming the line. The needle is the constant
+`MUTANT_MARKER`, held in two pieces so the tool's own source does not hold it
+whole, and no tracked file may spell it whole either (this entry splits it).
+`a_live_mutation_marker_is_refused_in_any_tracked_file` failed first on the
+`tail.rs` shape; planting the marker on that line and running the gate 1 step
+exited 1 naming `crates/telemetry/src/tail.rs:503`.
+
+### D-3509 — `CLAUDE.md` §10 is compared with the files under `docs/` — 2026-10-06
+
+**What was observed.** §10 is the one statement of which documents bind. It
+listed eight documents while fourteen existed (D-0212 item 5) and then said
+"all fourteen are listed now" while 25 more existed (D-1764), each found by a
+reader rather than a check; `CLAUDE.md` itself records that "nothing checks
+this file". A new `docs/36-…` today would sit outside both the table and the
+"`docs/12-` to `docs/35-`" sentence with every gate green.
+
+**Decided.** `crates/core/tests/citations.rs` reads §10's table rows and the
+range its "hold no authority" sentence names, requires every row to name an
+existing file, and requires every `.md` under `docs/` to be a row, a numbered
+report inside that range, or under `docs/research-policy/`
+(`every_document_is_classified_by_the_law`). Planting `docs/36-probe.md` turns
+it red. No law text changes: the table, the range and the files agree today.

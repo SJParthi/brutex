@@ -1491,13 +1491,17 @@ mod tests {
             "a positive tie still rounds up"
         );
         let authority = |text: &str| -> Option<i64> {
-            let (sign, rest) = text
-                .strip_prefix('-')
-                .map_or(("", text), |rest| ("-", rest));
+            let negative = text.starts_with('-');
+            let rest = text.trim_start_matches('-');
             let (whole, fraction) = rest.split_once('.').unwrap_or((rest, ""));
             let padded = format!("{fraction:0<4}");
             let (moved, tail) = padded.split_at(4);
-            let shifted = format!("{sign}{whole}{moved}.{tail}");
+            let unsigned = format!("{whole}{moved}.{tail}");
+            let shifted = if negative {
+                ['-'].into_iter().chain(unsigned.chars()).collect()
+            } else {
+                unsigned
+            };
             brutex_core::price::Paisa::from_rupee_text_half_up(&shifted)
                 .ok()
                 .map(brutex_core::price::Paisa::raw)
@@ -1506,7 +1510,7 @@ mod tests {
         // digits whose sixth to ninth places come from {0, 4, 5, 6, 9}.
         let digits = [0_u8, 4, 5, 6, 9].map(|d| b'0' + d);
         let mut compared = 0_u32;
-        for sign in ["", "-"] {
+        for sign in [None, Some('-')] {
             for whole in [0_u8, 7] {
                 for len in 7..=9 {
                     let tails = digits.len().pow(u32::try_from(len - 5).expect("small"));
@@ -1518,6 +1522,7 @@ mod tests {
                             rest /= digits.len();
                         }
                         let fraction = String::from_utf8(fraction).expect("decimal digits");
+                        let sign = sign.map(String::from).unwrap_or_default();
                         let text = format!("{sign}{whole}.{fraction}");
                         assert_eq!(shift_six(&text), authority(&text), "{text}");
                         compared += 1;

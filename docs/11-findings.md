@@ -918,7 +918,7 @@ Narrative only. No row is added to the table above.
 - **`F-9082AA`** `unguarded` — Invariant ids sharing their cell with the claim
   are invisible to gates 10b and 27: fixed. D-3503, ONEAUTH-04.
 - **`F-F0AAB3`** `unguarded` — Cited decision numbers and invariant ids that
-  resolve to nothing (D-2710, D-1619, I-41): fixed. D-3504, ONEAUTH-05.
+  resolve to nothing (an invariants heading citing 2710, a range ending at 1619, invariant I-41): fixed. D-3504, ONEAUTH-05.
 - **`F-B082CC`** `wrong` — shift_six rounds a negative tie away from zero
   while claiming core's rule: fixed. D-3505, ONEAUTH-06.
 - **`F-624E08`** `unguarded` — The population write lock path is built in six
@@ -930,3 +930,5 @@ Narrative only. No row is added to the table above.
   `api::recovery`'s index list and `runner::research_family`'s Total Market gate
   (D-0682 keeps both as independent checks, identical answers today);
   `CLAUDE.md` §10's count of 25 (correct).
+- **`F-67659A`** `unguarded` — A committed cargo-mutants marker passes every static gate: fixed. D-3508, ONEAUTH-09.
+- **`F-E739E5`** `unguarded` — CLAUDE.md section 10 is compared with the docs directory by nothing: fixed. D-3509, ONEAUTH-10.
