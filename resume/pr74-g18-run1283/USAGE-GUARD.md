@@ -124,3 +124,12 @@ Lines: stop the audit workflow at 80%; PAUSE every session at 90%. Weekly brake 
 weekly moved 27 -> 41 while the window went 99 (prev) + 53 (this one).
 All 12 unfinished sessions got RESUME at 08:56. The audit workflow was relaunched as task
 wrp8x51vb, resumed from run wf_33b651ee-26e with fixboard/pr74-batch4 added.
+
+09:10: owner meter screenshot read session 71% (resets in 3h00m) and weekly 46%. The window
+rose 18 points in 15 min, about 1.2 points/min. At 09:11 the brutex sum was $745.25 and
+Tickvault $429.58 (+$42 since 08:39). New factor: about $4.9 of brutex spend per point.
+09:18: the audit workflow wrp8x51vb was stopped at the 80% line. Its cached agents replay at
+12:12 (run wf_33b651ee-26e).
+09:23: PAUSE was sent to all 12 unfinished sessions at about 88-90% by the meter's pace.
+RESUME is at 12:12 (trig_01VA1zhRBcZL5kLMKpFrS152).
+Weekly extrapolation: 46 + 0.28 x 19 = about 51%.
