@@ -63315,3 +63315,20 @@ the code or D-3309's numbers:
   gate stricter.
 
 Text only.
+
+### D-3311 — An idle run-status poll's log walks are named and one is measured — 2026-10-06
+
+`/backtest/run.json`'s external observation can make up to six capped
+`telemetry::tail` walks of up to 4 MiB each, outside the D-2327 pool. They
+are stated in `docs/06-limits.md`. The `telemetry` bench now reports one
+capped, no-match walk: 4,194,304 bytes and a p50 of about 20 ms. The walks are
+not cut, because they decide whether another process is sweeping. A poll that
+answered without them would report a status it had not observed.
+
+### D-3312 — `/boolean-campaign.json`'s double open is named, not cached — 2026-10-06
+
+The route opens the campaign, then reopens it in `require_current` as a
+freshness check. Both opens walk the checkpoint directory. This is stated in
+`docs/06-limits.md` and is UNVERIFIED as a measurement. A cache would need an
+invalidation signal that the checkpoint writer does not publish, so none was
+added.

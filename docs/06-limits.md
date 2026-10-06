@@ -15899,3 +15899,45 @@ not per evaluation.
   C-L-01 measures.
 - The api routes are measured by D-1446's and D-0954's sections, not by a
   bench. That remains UNVERIFIED as a measurement.
+
+## Two api GETs whose cost no section stated — D-3311 and D-3312, 6 October 2026
+
+Found by a router-first pass over all 58 GET routes (round 4 of the p99 lens).
+Every other route was either bounded or already named.
+
+### An idle `/backtest/run.json` poll walks the CLI log up to six times (D-3311)
+
+`sweeprun::observed_status_with_admission` → `observe_elsewhere` →
+`newest_sweep_marker`. That runs `status_tail("cli.lifecycle", 256)`, then a
+second walk to the marker's position, then a third walk for the run's activity
+or the legacy target. Each `status_tail` is a filtered `telemetry::tail`
+capped at `logs::SCAN_BYTES`, 4 MiB. `settled_tail` repeats any walk that came
+back on a partial tail. **So one poll can read up to six times 4 MiB**, and how
+much it reads grows with how much other CLI log follows the newest sweep
+marker, up to that cap.
+
+These walks run inside `detail::run`, not in `run_log_read`'s pool of four, so
+D-2327's "at most 32 MiB of log being read at once" does not cover them. D-0954
+named the lifecycle walk's cap only for what it means when no marker is found.
+
+**Measured** on a 4-core cloud box by `telemetry`'s bench, which reports this
+and does not gate it. One filtered `tail` that matches nothing over 100,000
+events reads exactly 4,194,304 bytes. Over three runs of 50 calls it took a
+p50 of 20.2 – 21.0 ms and a p99 of 22.7 – 32.1 ms. Six such walks would be
+about 120 ms per poll. **That figure is an extrapolation; the poll itself was
+not timed.**
+
+### `/boolean-campaign.json` opens the campaign twice per request (D-3312)
+
+`booleancampaignjson::render` calls `cli::boolean_campaign::Reader::open`.
+That is a `read_dir` over the campaign's checkpoint directory (`discover_through`,
+capped at `DIRECTORY_LIMIT` entries and `MAX_CHECKPOINTS` = 1,024 in
+sequence), a read of the latest snapshot, and one flock and 112-byte read per
+recorded child receipt. Then `Reader::require_current` runs the whole `open`
+again to prove nothing changed while the body was built.
+
+Nothing caches it. So the route is O(checkpoint entries + receipts), twice,
+on every request. D-0904 names the same directory walk for three other
+routes; this one was named only in D-1445's list of audited routes. The second
+open is the freshness check, and it is kept. **No timing was taken. The cost
+is UNVERIFIED as a measurement.**

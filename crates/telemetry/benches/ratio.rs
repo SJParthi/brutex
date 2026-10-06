@@ -578,6 +578,28 @@ fn the_tail_is_flat_at_p99() -> bool {
     ok
 }
 
+/// A filtered `tail` that matches nothing walks to its scan cap — what one
+/// `cli.lifecycle` lookup on an idle `/backtest/run.json` poll costs when no
+/// marker is near the end (D-3311). REPORTED, never gated: the cost is the cap,
+/// by design, and the cap is the api's `logs::SCAN_BYTES`, 4 MiB, which this
+/// crate cannot name, so the number is restated here.
+fn a_filtered_tail_that_matches_nothing_reads_its_cap() {
+    /// `api::logs::SCAN_BYTES`.
+    const CAP: u64 = 4 * 1024 * 1024;
+    let (sink, dir) = loaded("tail-capped", LARGE);
+    drop(sink);
+    let query = Query::last(256)
+        .from_target("absent.target")
+        .scanning_at_most(CAP);
+    let d = Dist::of(50, || tail(black_box(&dir), 8, black_box(&query)));
+    let read = tail(&dir, 8, &query).bytes_read;
+    d.report("capped filtered tail, 100,000 events, no match");
+    println!(
+        "  {:<52} {read} bytes read per call",
+        "capped filtered tail"
+    );
+}
+
 fn main() {
     println!("gate 8 — crates/telemetry, ceiling {CEILING_PERMILLE} permille");
     let mut ok = true;
@@ -589,6 +611,7 @@ fn main() {
     ok &= the_tail_is_flat_at_p99();
     println!();
     the_worst_case_is_named_rather_than_averaged_away();
+    a_filtered_tail_that_matches_nothing_reads_its_cap();
     println!();
     if ok {
         println!("all ratios within the ceiling");

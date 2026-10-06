@@ -966,3 +966,11 @@ code or the D-3309 numbers:
 All four were corrected in the commit after `7ebc0a9e` (D-3310). None
 changes what a row gates or measures. A separate router-first pass over the
 api GET handlers is recorded with the next round.
+
+The router-first pass over all 58 GET routes found two per-request costs no
+section stated:
+
+| ID | Severity | Finding | Where | Disposition |
+|---|---|---|---|---|
+| `F-A86CB4` | `gap` | An idle run-status poll can walk the CLI log six times at 4 MiB each, outside the D-2327 pool | `crates/api/src/sweeprun.rs` `newest_sweep_marker`, `observe_elsewhere`, `status_tail` | FIXED in the commit carrying D-3311 (named; one walk measured) |
+| `F-BE221F` | `gap` | `/boolean-campaign.json` opens the campaign twice per request, each open walking the checkpoint directory | `crates/api/src/booleancampaignjson.rs` `render`; `crates/cli/src/boolean_campaign_reader.rs` `require_current` | FIXED in the commit carrying D-3312 (named) |
