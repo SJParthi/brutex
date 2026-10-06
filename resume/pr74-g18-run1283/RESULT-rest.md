@@ -76,3 +76,17 @@ Every path stays O(1) per call. Cursor::advance is about 40 ns slower at p50 in 
 - Coverage (line and branch, 100%) was not measured: **UNVERIFIED**.
 - `cargo deny check` was not run in this session: **UNVERIFIED**.
 - The Cursor::advance timing gap is unexplained (see Timing).
+
+## Coordinator's untested pull survivors (run on 969493e1), on head fea3659
+
+| item | status | evidence |
+|---|---|---|
+| daycheck.rs:67 `+`→`-` ist_day | killed (D-2088) | fea3659: 2 tested, 2 caught, killed by `daycheck::tests::the_ist_day_turns_at_ist_midnight` |
+| ingest.rs:2504 check_day→() | killed (D-2087) | 445ad02: caught in the r-mine2 in-diff run |
+| ingest.rs:2509 report.clean() guard | killed (D-2075); the guard now lives in `daycheck_headline` | guard true and false both caught, killed by `ingest::tests::a_clean_day_check_is_info_and_anything_else_warns` |
+
+## api cases run 1283 never tested (126 `crates/api` lines in untested-mutants-run1283.md, shard 138 included), on fea3659
+
+IN PROGRESS. CI flags with `--build-timeout 1500`, in place in the world-readable worktrees wt-g18 and wt-g18b. About 14 minutes per mutant: roughly 400 s to build and 420 s to test. The baselines passed in both worktrees: 499 s build + 557 s test, and 559 s build + 523 s test.
+- Done before the container was reclaimed: 16 tested, 15 caught, 1 unviable (`autopilot.rs:3278 round → Default`), 0 missed, 0 timeout.
+- Remaining 110: in 16 chunks of 7 or fewer, each under 2 h, results under /tmp/claude-0/mut/apic/.
