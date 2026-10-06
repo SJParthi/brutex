@@ -926,3 +926,15 @@ outputs are in `docs/06-limits.md`. The other four are documentation
 corrections. Their evidence is a measurement or the code they now describe,
 not a unit test that fails before the change. A test that greps a comment
 proves nothing about the code it describes.
+
+### Attack lens L2, round 2 — dispositions — 2026-10-06
+
+Fresh-eyes pass: three read-only audits (hidden per-operation growth; doc
+cost claims against code) plus new p99 rows. The manifest finding is a
+measurement, repeated three times. The two comments were each read against
+the code they describe. No separate refuter was run in this round.
+
+| ID | Severity | Finding | Where | Disposition |
+|---|---|---|---|---|
+| `F-DE1694` | `wrong` | A random manifest lookup is flat in probes, not in time, and the fixed-key row hid it: p99 2.0×–4.1× at 10^5 months while C-12 and `docs/07-o1-architecture.md` read 1.0× | `crates/pull/src/manifest.rs` `Manifest::entry`; `crates/pull/benches/ratio.rs` C-12 | FIXED e2715c9b — O1P-05 gates 10^4 and prints 10^5; named in `docs/06-limits.md` and `docs/07-o1-architecture.md` (D-3306, D-3307) |
+| `F-3D3988` | `wrong` | fno_land and price_group cost comments contradicted the code: "one census read for the whole run", and an O(rows) "nothing scans" block on the O(bars) `read_month_bars` | `crates/api/src/server.rs` | FIXED e2715c9b (D-3308) |
