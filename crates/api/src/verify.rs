@@ -119,9 +119,11 @@ impl Report {
         let busy = if t.busy == 0 {
             String::new()
         } else {
+            // `busy` also counts a file grown past the counter over a matching
+            // prefix (conc14-1, D-2532): a live pull either way.
             format!(
-                " {} more were held by a writer and not checked; scrub again once \
-                 the pull finishes.",
+                " {} more were held by a writer, or had grown past the counter, \
+                 and were not checked; scrub again once the pull finishes.",
                 t.busy
             )
         };

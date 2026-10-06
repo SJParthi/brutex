@@ -302,7 +302,46 @@ impl VendorCensus {
 #[must_use]
 pub fn read_vendor(root: &Path, vendor: Vendor) -> VendorCensus {
     let path = manifest_path(root, vendor);
-    let state = match sized(&path) {
+    let state = state_read_twice_if_degraded(&path, vendor, sized);
+    note_read(vendor, &path, &state);
+    VendorCensus {
+        vendor,
+        path,
+        state,
+    }
+}
+
+/// One read of the manifest, and ONE more when the first loaded degraded
+/// (pull2-5, D-2536).
+///
+/// This read takes no lock, so it can overlap a writer's slot commit: the
+/// newest slot then fails its checksum, the manifest loads from the older one
+/// and reports `degraded_reason`, and since D-1786 the browser refuses any
+/// non-empty `x-brutex-census-degraded` — so one overlapping read blanked the
+/// selected-feed page for a census that was whole a moment later. A degraded
+/// first read is read once more and the second kept when it is NOT degraded;
+/// a census still degraded on the second read is genuinely damaged and is
+/// reported exactly as before. At most two reads, so the extra cost is one
+/// bounded manifest read, and only on a degraded census
+/// (`docs/06-limits.md`, D-2536).
+fn state_read_twice_if_degraded(
+    path: &Path,
+    vendor: Vendor,
+    mut read: impl FnMut(&Path) -> std::io::Result<Result<Vec<u8>, String>>,
+) -> Census {
+    let degraded = |state: &Census| matches!(state, Census::Held { manifest } if manifest.degraded_reason().is_some());
+    let first = state_of(read(path), vendor);
+    if !degraded(&first) {
+        return first;
+    }
+    let second = state_of(read(path), vendor);
+    let whole = matches!(second, Census::Held { .. }) && !degraded(&second);
+    if whole { second } else { first }
+}
+
+/// What one read of the manifest's bytes says the census is.
+fn state_of(read: std::io::Result<Result<Vec<u8>, String>>, vendor: Vendor) -> Census {
+    match read {
         Err(e) => Census::of_io_error(&e),
         Ok(Err(reason)) => Census::Unreadable {
             reason,
@@ -327,7 +366,11 @@ pub fn read_vendor(root: &Path, vendor: Vendor) -> VendorCensus {
                 },
             }
         }
-    };
+    }
+}
+
+/// The `api.census read` line for one vendor's census.
+fn note_read(vendor: Vendor, path: &Path, state: &Census) {
     // THE COUNTER'S OWN STATE, NAMED — held, absent, or unreadable.
     //
     // These three are not interchangeable and the difference decides what the
@@ -381,11 +424,6 @@ pub fn read_vendor(root: &Path, vendor: Vendor) -> VendorCensus {
         "state" => telemetry::Value::Str(said),
         "path" => telemetry::Value::Str(&path.display().to_string()),
     );
-    VendorCensus {
-        vendor,
-        path,
-        state,
-    }
 }
 
 /// The bytes at `path`, if this reader may hold them.
@@ -1439,6 +1477,79 @@ mod tests {
         assert!(note.contains("DEGRADED CENSUS"), "{note}");
         assert!(note.contains("recovered generation 1"), "{note}");
         assert!(note.contains(&why), "the refusal itself is carried: {note}");
+    }
+
+    /// **ONE READ THAT OVERLAPPED A SLOT COMMIT IS READ AGAIN, NOT SERVED AS
+    /// DEGRADED (pull2-5, D-2536).**
+    ///
+    /// The reader is injected: its first answer is a census whose newest slot
+    /// fails its checksum (the torn moment of a commit), its second the same
+    /// census whole. On the old code `read_vendor` read once, so the census
+    /// came back degraded and the first assertion failed. Walked: torn then
+    /// whole (whole kept), torn both times (degraded kept, two reads), whole
+    /// first (one read), torn then unreadable and torn then absent (the
+    /// degraded first read kept, never a worse second).
+    #[test]
+    fn a_census_torn_on_one_read_is_read_again_and_whole_is_kept() {
+        type Answer = std::io::Result<Result<Vec<u8>, String>>;
+        let good = ManifestHeader {
+            generation: 1,
+            ..ManifestHeader::genesis(Vendor::Groww)
+        }
+        .image();
+        let image = |slot0: &[u8; 64]| {
+            let mut bytes = vec![0u8; HEADER_LEN_USIZE];
+            bytes.get_mut(..64).expect("room").copy_from_slice(slot0);
+            bytes
+                .get_mut(16_384..16_448)
+                .expect("room")
+                .copy_from_slice(&good);
+            bytes
+        };
+        let mut damaged = ManifestHeader::genesis(Vendor::Groww).image();
+        damaged[16] ^= 0xFF;
+        let torn = image(&damaged);
+        let whole = image(&ManifestHeader::genesis(Vendor::Groww).image());
+        let path = Path::new("UNUSED.man");
+        let run = |answers: Vec<Answer>| {
+            let mut answers = answers.into_iter();
+            let mut reads = 0_usize;
+            let state = state_read_twice_if_degraded(path, Vendor::Groww, |_| {
+                reads += 1;
+                answers.next().expect("asked at most as often as scripted")
+            });
+            (state, reads)
+        };
+        let degraded_of = |state: &Census| match state {
+            Census::Held { manifest } => manifest.degraded_reason().map(|why| why.to_string()),
+            Census::Absent | Census::Unreadable { .. } => None,
+        };
+
+        let (state, reads) = run(vec![Ok(Ok(torn.clone())), Ok(Ok(whole.clone()))]);
+        assert_eq!(reads, 2);
+        assert!(matches!(state, Census::Held { .. }), "{}", state.name());
+        assert_eq!(degraded_of(&state), None, "the whole second read is kept");
+
+        let (state, reads) = run(vec![Ok(Ok(torn.clone())), Ok(Ok(torn.clone()))]);
+        assert_eq!(reads, 2);
+        assert!(degraded_of(&state).is_some(), "damaged twice is damaged");
+
+        let (state, reads) = run(vec![Ok(Ok(whole.clone()))]);
+        assert_eq!(reads, 1, "a whole census is read once");
+        assert_eq!(degraded_of(&state), None);
+
+        for worse in [
+            Ok(Err("REFUSED".to_owned())),
+            Err(std::io::ErrorKind::NotFound.into()),
+        ] {
+            let (state, reads) = run(vec![Ok(Ok(torn.clone())), worse]);
+            assert_eq!(reads, 2);
+            assert!(
+                degraded_of(&state).is_some(),
+                "the degraded first read stands: {}",
+                state.name()
+            );
+        }
     }
 
     #[test]

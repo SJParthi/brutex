@@ -5334,6 +5334,12 @@ type SharedGovernor = std::sync::Arc<std::sync::Mutex<pull::rate::Governor>>;
 /// a ceiling nobody wrote down, which §3 rule 1 forbids, and
 /// `HttpSource::sharing` refuses it on its own side too.
 ///
+/// Also `None` for a POISONED budget list. That `None` no longer ungoverns the
+/// source: `sharing(None)` keeps the private governor `HttpSource::new` built
+/// (pull1-2, D-2524), so the source still charges its own instance, and every
+/// path that spends from this list refuses the poison by name in
+/// `await_budget`.
+///
 /// # Cost
 ///
 /// One lock, one index, one `Arc` clone. O(1), and the lock is released before
@@ -9839,6 +9845,23 @@ const fn step(
     }
 }
 
+/// One retried transport failure, on the log (conc13-2, D-2526).
+///
+/// `Warn`, because a run that recovered still spent a backoff on a fault the
+/// operator may need to see recurring, and `/logs?level=warn` is where a
+/// recurring network fault is looked for. `why` is the transport's own words,
+/// which never carry a header this build set (the token travels only in the
+/// sensitive auth header), and the sink clips it at its string ceiling.
+fn note_transport_retry(feed: pull::vendor::Feed, attempt: u32, wait_ms: u64, why: &str) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::warn("pull.http", "transport failed, retrying")
+            .with("feed", telemetry::Value::Str(feed.wire()))
+            .with("attempt", telemetry::Value::Uint(u64::from(attempt)))
+            .with("wait_ms", telemetry::Value::Uint(wait_ms))
+            .with("why", telemetry::Value::Str(why)),
+    );
+}
+
 /// One window, re-asked while the reason to re-ask still stands.
 ///
 /// The refusal decides, and it decides from the status the vendor actually
@@ -10072,6 +10095,17 @@ async fn with_retry(
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                                 .record_throttled();
+                        }
+                        // AN UNANSWERED FAILURE THAT IS RETRIED IS STILL SAID
+                        // (conc13-2, D-2526). A timeout, a reset or a DNS fault
+                        // that recovered within `THROTTLE_ATTEMPTS` used to leave
+                        // no line and no count anywhere: only the final verdict
+                        // was ever logged, and a recovered blip has none. One
+                        // `Warn` per retried attempt -- at most
+                        // `THROTTLE_ATTEMPTS - 1` per chunk, so the cost is
+                        // bounded by the retry ladder itself, not by the run.
+                        if status.is_none() {
+                            note_transport_retry(feed, attempt, wait_ms, &text);
                         }
                         tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
                     }
@@ -32234,6 +32268,97 @@ mod tests {
             }
         });
         (format!("http://{addr}"), rx)
+    }
+
+    /// **A RETRIED TRANSPORT FAILURE LEAVES A `Warn` LINE (conc13-2, D-2526).**
+    ///
+    /// The loopback vendor reads the first request and closes the socket with
+    /// no answer -- a transport fault with no status -- then answers 200. On
+    /// the old code `with_retry`'s `Step::Again` arm slept and re-asked with no
+    /// event, so the run recovered and `landed` below found nothing.
+    #[tokio::test]
+    async fn a_retried_transport_failure_is_logged_at_warn() {
+        const BODY: &str = concat!(
+            r#"{"open":[24500.75],"high":[24501.50],"low":[24499.25],"#,
+            r#""close":[24500.50],"volume":[250],"timestamp":[1751337900]}"#
+        );
+        let _sink = crate::emitted::sink();
+        let dir = masters("transport-retry", None, None);
+        let site = Site::serving(&dir, &store_root("transport-retry"));
+        let asked = ingest::parse_spot(
+            "target=swept&from=2026-08-03&to=2026-08-05",
+            day(2026, 8, 10),
+        )
+        .expect("a real target and a window in the past");
+        let ok: &'static str = Box::leak(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{BODY}",
+                BODY.len()
+            )
+            .into_boxed_str(),
+        );
+        // AN EMPTY ANSWER IS A CLOSED SOCKET: nothing is written and the
+        // stream is dropped, so the client sees no status at all.
+        let (url, reached) = loopback_script(Box::leak(Box::new(["", ok])));
+        let shipped = match pull::vendor::Feed::Dhan.descriptor().transport {
+            pull::vendor::Transport::Http(spec) => spec,
+            pull::vendor::Transport::LocalArchive(_) => panic!("this feed is HTTP"),
+        };
+        let spec = pull::vendor::HttpSpec {
+            base_url: Box::leak(url.into_boxed_str()),
+            ..shipped
+        };
+        let source =
+            pull::http::HttpSource::new(spec, pull::http::Credential::token("shhh".to_owned()))
+                .expect("a client");
+
+        let from = crate::emitted::mark();
+        let got = fetch_chunks(
+            &asked,
+            &site,
+            &source,
+            "13",
+            pull::vendor::Listing::Index,
+            &spec,
+        )
+        .await
+        .expect("the retry was answered");
+        assert!(
+            reached
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .is_ok(),
+            "the loopback vendor was contacted"
+        );
+        assert!(
+            got.unfetched.is_none(),
+            "the blip recovered, so nothing is missing: {:?}",
+            got.unfetched
+        );
+        assert!(!got.bodies.is_empty(), "the second attempt answered");
+
+        let lines = crate::emitted::landed(from, "pull.http", "transport failed, retrying");
+        let mine: Vec<&telemetry::Record> = lines
+            .iter()
+            .filter(|record| {
+                crate::emitted::says(record, "feed", pull::vendor::Feed::Dhan.wire())
+                    && crate::emitted::counts(record, "attempt", 1)
+                    && crate::emitted::counts(record, "wait_ms", 250)
+            })
+            .collect();
+        assert!(
+            !mine.is_empty(),
+            "a retried transport failure is on the log: {lines:?}"
+        );
+        for record in mine {
+            assert_eq!(record.level, telemetry::Level::Warn, "{record:?}");
+            assert!(
+                record
+                    .field("why")
+                    .and_then(telemetry::OwnedValue::as_str)
+                    .is_some_and(|why| !why.is_empty() && !why.contains("shhh")),
+                "the reason is said and the token is not: {record:?}"
+            );
+        }
     }
 
     /// **THE CONTIGUOUS PREFIX IS KEPT AND THE SUFFIX IS NOT**, driven over a

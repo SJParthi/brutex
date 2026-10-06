@@ -700,14 +700,35 @@ pub fn day_of(ts_micros: i64) -> Option<Day> {
 /// clamps cross, which is a month entirely below the floor or entirely in the
 /// future.
 ///
-/// Integer comparison on three-field dates. No calendar is walked.
+/// # The span ends on its last day that is not CLOSED (conc12-1, D-2535)
+///
+/// It ended on the calendar day, so a month whose last day is a weekend or a
+/// holiday never read as held — no bar can exist there — and every restart
+/// re-asked it, since the dry-round retirement lives only in memory. `to` is
+/// now walked back to the last day `pull::calendar::kind_of` does not report
+/// `Closed`; a day the calendar has not measured is still asked, as before.
+/// `None` also when every day of the clamped span is closed.
+///
+/// # Cost
+///
+/// Integer comparison on three-field dates, then `pull::calendar::last_not_closed`
+/// over at most the month's own days: linear in the trailing closed run,
+/// named in `docs/06-limits.md` (D-2535).
 #[must_use]
 pub fn month_span(month: YearMonth, floor: Day, yesterday: Day) -> Option<(Day, Day)> {
     let first = Day::new(month.year(), month.month(), 1).ok()?;
     let last = first.end_of_month();
     let from = if first < floor { floor } else { first };
     let to = if last < yesterday { last } else { yesterday };
-    if to < from { None } else { Some((from, to)) }
+    if to < from {
+        return None;
+    }
+    let open = pull::calendar::last_not_closed(
+        i64::from(from.days_from_epoch()),
+        i64::from(to.days_from_epoch()),
+    )?;
+    let to = Day::from_days(u32::try_from(open).ok()?).ok()?;
+    Some((from, to))
 }
 
 /// What one month-tick will ask for, derived from the store alone.

@@ -1631,7 +1631,10 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // 20 -> 21 at D-1920 (P1-17-02): `api.serve the serve lock is held but
     // could not be stamped`, driven through `note_unstamped_lock` and read back
     // by `server::tests::a_serve_lock_stamp_that_fails_is_cleared_or_refused_never_left_stale`.
-    const REACHED_IN_SERVER_TESTS: usize = 21;
+    // 21 -> 22 at D-2526 (conc13-2): `pull.http transport failed, retrying`,
+    // driven over a loopback vendor that closes its first socket unanswered and
+    // read back by `server::tests::a_retried_transport_failure_is_logged_at_warn`.
+    const REACHED_IN_SERVER_TESTS: usize = 22;
     // Both production recovery boundaries are emitted and read back through
     // this installed sink by recovery::tests::
     // recovery_boundary_events_are_read_back_from_the_installed_sink.
@@ -1755,9 +1758,12 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     //
     // 63 -> 65 at D-1582 and D-1583, merged in: the two unreachable sites
     // named above.
+    //
+    // 65 -> 66 at D-2526 (conc13-2): `pull.http transport failed, retrying` in
+    // `server::note_transport_retry`, counted in `REACHED_IN_SERVER_TESTS`.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 65,
+        lib_sites, 66,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"

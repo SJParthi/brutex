@@ -63669,3 +63669,216 @@ side). Telling them apart needs the refusal persisted beside the value, a
 frontier file-format change under `CLAUDE.md` §3 rule 8, and is not made here.
 The stored bytes, the ranking and run identity are unchanged. Invariants ZX-88
 (api) and ZX-82 (browser).
+
+### D-2524 — `HttpSource::sharing(None)` keeps the private governor — 2026-10-06
+
+**The finding.** pull1-2. `sharing` assigned its argument whenever the source
+was governed, so `sharing(None)` dropped the governor `HttpSource::new` built
+and left `charged_by_caller` false: `wait_for_permit` charged nobody. The api's
+`shared_governor` answers `None` for a poisoned `site.budgets`, so one panic
+elsewhere switched the vendor's ceiling off for every later source.
+
+**The decision.** `None` is a no-op. Only a governor actually handed over
+replaces the private one and moves the charge to the caller; an ungoverned
+source stays ungoverned whatever it is handed. A poisoned budget list therefore
+degrades to the source's own private governor (still governed), and every api
+path that spends from the list still refuses the poison by name in
+`await_budget`. The api's `shared_governor` signature is unchanged.
+
+**Evidence.** ZX-60.
+
+### D-2525 — A credential that is not a header value refuses at construction; the auth header is sensitive — 2026-10-06
+
+**The findings.** P1-19-01: a token with a stored newline or other control byte
+passed `HttpSource::new` and failed inside `send`, reported as
+`TransportFailed` ("was not reached") and retried as a network blip, never
+reaching the credential law; `ssm::get_parameter` checked only `is_empty`.
+P11-03 (the header half): the assembled auth header was a plain `String` handed
+to the builder, never marked sensitive.
+
+**The decision.** `HttpSource` holds the auth header as one
+`reqwest::header::HeaderValue`, parsed once in `new` (after the scheme check, so
+a mismatch is still named first) and marked `set_sensitive(true)`; a value that
+is not a header value refuses as the new
+`FetchError::CredentialNotAHeaderValue { header }`, naming the header and never
+the value, before any client or permit exists. The api maps it to
+`Unreadable::configuration`, as it does `CredentialMismatch`.
+`ssm::get_parameter` refuses a value with leading or trailing whitespace as the
+new `SecretError::Padded` (configuration class), never trimming it.
+
+**Not done, and an owner call.** P11-03's second half — holding token, key,
+header and AWS secret in `zeroize::Zeroizing` — needs `zeroize` promoted from a
+transitive to a direct dependency, and D-0074 records `zeroize`'s aarch64
+`asm!` inside the open §2 native-code question. Left for the owner.
+
+**Evidence.** ZX-61.
+
+### D-2526 — A retried transport failure is logged at `Warn` — 2026-10-06
+
+**The finding.** conc13-2. `with_retry`'s `Step::Again` arm slept and re-asked
+on an unanswered transport failure with no event; a blip that recovered within
+`THROTTLE_ATTEMPTS` left no trace anywhere.
+
+**The decision.** When the failure carried no status, `server::note_transport_retry`
+emits `pull.http` "transport failed, retrying" at `Warn` with the feed, the
+attempt, the wait and the transport's words. At most `THROTTLE_ATTEMPTS - 1`
+lines per chunk. The run-level counter the finding also proposed
+(`BrokerRun::retried_transport`) is not added: `with_retry` holds no run, and
+the event is countable on `/logs`. The api's emit-site accounting moves 65 → 66
+and `REACHED_IN_SERVER_TESTS` 21 → 22.
+
+**Evidence.** ZX-62.
+
+### D-2527 — A vendor capture is staged, linked into place and its directory synced — 2026-10-06
+
+**The finding.** pull1-3. `capture::write_new_capture_with_stamp` created the
+capture at its final name and wrote it in place, so a crash or full disk left a
+final-named file shorter than its own `bytes:` line.
+
+**The decision.** The body is written and synced under `.<name>.partial`,
+`hard_link`ed to the final name (no-clobber: `AlreadyExists` moves to the next
+bounded name), the staging name removed, and the directory synced. A staging
+name left by a crashed writer is skipped, never reused or removed. A failure
+after the link is named as published-but-unsettled.
+
+**Evidence.** ZX-63.
+
+### D-2528 — One refused census row in `record_held` does not discard the rest — 2026-10-06
+
+**The finding.** pull2-2. `ingest::record_all` returned on the first `count`
+refusal, so one stale `RowCountWentBackwards` dropped every other contract's
+census append while their bars were on disk.
+
+**The decision.** Each refusal is logged (`pull.census bars not counted`),
+named with its key, and collected; the remaining appends are installed; the
+joined reasons are returned. `Manifest::record_held` refuses before it records,
+so the rows after a refusal are counted against the same census.
+
+**Evidence.** ZX-64.
+
+### D-2529 — A census fault after the publish is "published, durability UNVERIFIED", not "not published" — 2026-10-06
+
+**The finding.** xcut-2. `ingest::publish` mapped a failed directory sync AFTER
+`fs::rename` to "could not be published", and a part-way append failure called
+every append of the batch unpublished.
+
+**The decision.** `install_census` returns `CensusFault::{NotPublished {
+committed, why }, Uncertain(why)}`. A fault before the rename, or an append
+fault, is `NotPublished` with how many appends committed; a failed directory
+sync after the rename, or a failed modification-time advance after every slot
+is durable, is `Uncertain`, logged `pull.census` "published, durability
+UNVERIFIED" at `Warn` and not pushed as a run failure, because every reader
+already counts the slices. `write_appends` answers `(committed, error)`.
+
+**Evidence.** ZX-64.
+
+### D-2530 — The census-lock socket test binds through a short link — 2026-10-06
+
+**The finding.** P16-01. `a_socket_at_the_lock_path_is_refused_rather_than_run_unlocked`
+bound a Unix socket at `TMPDIR` + ~74 bytes, past `SUN_LEN` under the macOS
+`TMPDIR` or a mutation run's long one.
+
+**The decision.** The socket is bound through a link under `/tmp` to the
+manifest directory, as `api`'s `SocketAt` does (D-0695), so it is still made at
+the lock path itself; the bound address's length is asserted under 104.
+
+**Evidence.** The test itself; no new invariant.
+
+### D-2531 — An archive walk visits each directory in path order and lists its rejects by path — 2026-10-06
+
+**The finding.** determinism-2. `archive::walk` sorted only the decoded
+members; `rejected` (served as `/folder.json`'s `rejected`) and the walk's
+visit order were filesystem order, so which malformed member a strict walk
+refused, which member tripped `MAX_MEMBERS`, and the census's list order all
+depended on the directory listing.
+
+**The decision.** `descend` collects each directory's entries and sorts them
+before the loop; `walk` sorts `rejected` by path after `sort_members`. One
+`Vec<PathBuf>` and an O(e log e) sort per directory of `e` entries, named in
+`docs/06-limits.md`.
+
+**Evidence.** ZX-65.
+
+### D-2532 — A month grown past its census over a matching prefix scrubs as `Ahead`, not `Rows` — 2026-10-06
+
+**The finding.** conc14-1. `/verify.json` scrubs every month against one census
+snapshot; a month a live pull appended to during the walk read `held >
+counted` and was reported as `Rows` — "the disk says otherwise".
+
+**The decision.** When the file holds more rows than counted and its record 0
+and record `counted - 1` carry the counted first and last instants (two more
+O(1) record reads, only on this arm), the finding is the new
+`scrub::Finding::Ahead`, tallied with `busy` (not a disagreement, not clean).
+Any other growth, and any shortfall, is still `Rows`. `api::verify`'s busy
+sentence names grown files too.
+
+**Evidence.** ZX-66.
+
+### D-2533 — The cash-session cache publishes whole files and heals an unreceipted payload only on identical bytes — 2026-10-06
+
+**The finding.** pull2-3. `install_and_read` created the payload and the
+receipt at their final names; a crash between them left a payload with no
+receipt that `read_entry` refused for ever, read first by `prepare`, so no
+later run could recover the day.
+
+**The decision.** Both files are published through `publish_new`: written and
+synced under `.<name>.partial` and `hard_link`ed into place (never over an
+existing file; a stale staging file under the exclusive lock is a crashed
+installer's and is removed first). Under the exclusive lock, an unreceipted
+payload earns its receipt only when the bytes just validated are byte-identical
+to it; different bytes are a conflict naming the retained file and the manual
+remedy. The fetching `prepare` paths treat an unreceipted payload as missing,
+fetch it once and go through that heal; the local-only path still never
+downloads and names the retained file. An unreceipted payload still never
+READS as an entry, and `read_entry`'s refusal now names the file present and
+the way out. The former test asserting "no implicit receipt upgrade" for
+identical bytes is replaced by one asserting the byte-equality heal.
+
+**Evidence.** ZX-67.
+
+### D-2534 — Cash-session validation takes the day lock shared — 2026-10-06
+
+**The findings.** pull2-4, equity-2. Both validation loops (`prepare_with`,
+`prepare_observed_with`, reached by `/gaps.json`'s audit and the recovery
+auditor through `prepare_local_observed`) took the exclusive `Flock::try_lock`
+only to read and decode, so two equity ingests on one day, or a gap-page read
+beside an ingest, refused each other.
+
+**The decision.** The validation loops take the new `lock_day_shared`
+(`Flock::try_lock_shared`); `install_and_read` alone keeps the exclusive lock.
+Still non-blocking: a reader refuses while a day is installed and an installer
+refuses while one is read, promptly, as the module has always done. A blocking
+wait was considered (equity-2's proposal) and not taken: no async task here
+waits on a filesystem lock.
+
+**Evidence.** ZX-67.
+
+### D-2535 — A month's span ends on its last day the calendar does not report closed — 2026-10-06
+
+**The finding.** conc12-1. `api::autopilot::month_span` and
+`pull::fnowork::span_of` ended a month's span at its calendar end, so a month
+ending on a weekend or holiday never read as held; the autopilot re-asked it
+after every restart and the F&O press on every press.
+
+**The decision.** `pull::calendar::last_not_closed(first, last)` walks back
+from `last` to the latest day `kind_of` does not report `Closed`; both spans
+end there, and are `None` when every day is closed. `Open`,
+`OpenLengthUnmeasured` and `Unmeasured` all stop the walk, so an unmeasured day
+is still asked. The walk is linear in the trailing closed run (at most one
+month's days), named in `docs/06-limits.md`.
+
+**Evidence.** ZX-68.
+
+### D-2536 — A census that loads degraded is read once more — 2026-10-06
+
+**The finding.** pull2-5. `api::census::read_vendor` reads the manifest without
+a lock; a read overlapping a slot commit loaded degraded, and since D-1786 the
+browser refuses any degraded census, blanking the selected-feed page for a
+census whole a moment later.
+
+**The decision.** `state_read_twice_if_degraded`: a first read that loads
+degraded is read once more, and the second is kept only when it is held and
+not degraded; otherwise the first stands. At most two reads, the second only on
+a degraded census, named in `docs/06-limits.md`.
+
+**Evidence.** ZX-69.

@@ -15707,3 +15707,19 @@ does not bound the store:
   `audited_route` also changes the cross-site admission that reads the same list
   (D-0687); a bounded ring for reads changes what the audit records. Neither is
   made here.
+## G2 pull costs that are not constant — D-2531, D-2535, D-2536, 6 October 2026
+
+- **An archive walk sorts each directory's listing** (D-2531, determinism-2).
+  `archive::descend` collects one `Vec<PathBuf>` per directory and sorts it,
+  O(e log e) in that directory's `e` entries, so visit order — and with it the
+  first strict refusal and the `MAX_MEMBERS` cut-off — is by path. The walk was
+  already O(members) and holds every row (D-0720 above). Unmeasured.
+- **A month's span walks back over its trailing closed days** (D-2535,
+  conc12-1). `pull::calendar::last_not_closed` calls the O(1) `kind_of` once per
+  closed day at the span's end: linear in that run, at most the month's own
+  days, reached from `api::autopilot::month_span` and `pull::fnowork::span_of`.
+  Unmeasured.
+- **A degraded census is read twice** (D-2536, pull2-5).
+  `api::census::read_vendor` reads a manifest that loads degraded once more,
+  one more bounded `MAX_MANIFEST_BYTES` read, so a genuinely damaged census
+  costs two reads on every request that misses the census cache. Unmeasured.

@@ -307,7 +307,19 @@ pub struct HttpSource {
     /// Holding the assembled value is not a wider exposure than holding the
     /// token was — it is the same secret, in the same struct, behind the same
     /// hand-written `Debug`.
-    header_value: String,
+    ///
+    /// # A validated, SENSITIVE `HeaderValue` (P1-19-01, P11-03, D-2525)
+    ///
+    /// This was a `String` handed to the request builder on every send. A token
+    /// holding a byte a header cannot carry — a stored newline — passed
+    /// construction and failed inside `send`, where it was reported as
+    /// `TransportFailed` ("was not reached") and retried like a network blip.
+    /// It is now parsed ONCE here, and a value that is not a header value
+    /// refuses construction as [`FetchError::CredentialNotAHeaderValue`]
+    /// before a client or a permit exists. It is marked sensitive, so the
+    /// HTTP stack's own `Debug` of a header map prints `Sensitive` rather than
+    /// the token.
+    header_value: reqwest::header::HeaderValue,
     client: reqwest::Client,
     /// THE BUDGET, ENFORCED RATHER THAN MERELY DECLARED.
     ///
@@ -506,6 +518,24 @@ impl HttpSource {
         }
     }
 
+    /// The assembled auth value as a header the HTTP client will send, marked
+    /// sensitive (P1-19-01, P11-03, D-2525).
+    ///
+    /// # Errors
+    ///
+    /// [`FetchError::CredentialNotAHeaderValue`] naming the header and never
+    /// the value, for a credential holding a byte no header can carry. The
+    /// assembled `String` is dropped either way; nothing else holds it.
+    fn sensitive_header(
+        header: &'static str,
+        assembled: String,
+    ) -> Result<reqwest::header::HeaderValue, FetchError> {
+        let mut value = reqwest::header::HeaderValue::from_str(&assembled)
+            .map_err(|_| FetchError::CredentialNotAHeaderValue { header })?;
+        value.set_sensitive(true);
+        Ok(value)
+    }
+
     /// Builds a source for one vendor.
     ///
     /// # Errors
@@ -515,6 +545,8 @@ impl HttpSource {
     /// deployment fault rather than a vendor one.
     /// [`FetchError::CredentialMismatch`] if the credential does not match the
     /// scheme — see [`Self::header_value`].
+    /// [`FetchError::CredentialNotAHeaderValue`] if the assembled credential
+    /// cannot be sent as a header — see [`Self::sensitive_header`].
     pub fn new(spec: HttpSpec, credential: Credential) -> Result<Self, FetchError> {
         // BEFORE THE CLIENT, deliberately. A mismatch is a wiring fault and
         // costs nothing to find; building a TLS client first would spend that
@@ -523,7 +555,8 @@ impl HttpSource {
         // print is what `CLAUDE.md` §8's comparison is made on; see
         // `Credential::print`.
         let print = credential.print();
-        let header_value = Self::header_value(spec.auth.scheme, credential)?;
+        let assembled = Self::header_value(spec.auth.scheme, credential)?;
+        let header_value = Self::sensitive_header(spec.auth.header, assembled)?;
         let client = pooled_client().map_err(|why| FetchError::TransportFailed {
             detail: format!("the HTTPS client could not be built: {why}"),
         })?;
@@ -598,18 +631,28 @@ impl HttpSource {
     /// A source whose feed declares no budget is left ungoverned: handing one a
     /// governor would enforce a ceiling nobody wrote down, which is the
     /// invention §3 rule 1 forbids.
+    ///
+    /// # `None` keeps the private governor (pull1-2, D-2524)
+    ///
+    /// Handing over NOTHING is not handing over "no budget". This used to
+    /// assign the argument unconditionally, so a governed source given `None`
+    /// dropped the private governor `new` built and `wait_for_permit` became a
+    /// no-op: the api's `shared_governor` answers `None` for a poisoned budget
+    /// list, and that one panic elsewhere switched the vendor's ceiling off for
+    /// every later source. A `None` is now a no-op: the source stays governed
+    /// by its own instance and charges it itself.
     #[must_use]
     pub fn sharing(
         mut self,
         governor: Option<std::sync::Arc<std::sync::Mutex<crate::rate::Governor>>>,
     ) -> Self {
-        if self.governor.is_some() {
-            // THE CALLER NOW CHARGES, and only if it actually handed one over.
+        if let (Some(shared), true) = (governor, self.governor.is_some()) {
+            // THE CALLER NOW CHARGES, because it actually handed one over.
             // Sharing a governor and spending from it are one act; both sides
             // calling `admit` is two permits for one request. See
             // `charged_by_caller`.
-            self.charged_by_caller = governor.is_some();
-            self.governor = governor;
+            self.charged_by_caller = true;
+            self.governor = Some(shared);
         }
         self
     }
@@ -832,8 +875,12 @@ impl HttpSource {
     ///
     /// Returned as a pair rather than applied inside, so a test can assert the
     /// NAME without ever seeing the value.
-    fn header(&self) -> (&'static str, &str) {
-        (self.spec.auth.header, &self.header_value)
+    ///
+    /// The value is a refcounted clone of the one validated, sensitive
+    /// `HeaderValue` built in [`Self::new`] (P11-03, D-2525): the flag travels
+    /// with it into the request.
+    fn header(&self) -> (&'static str, reqwest::header::HeaderValue) {
+        (self.spec.auth.header, self.header_value.clone())
     }
 }
 
@@ -4060,6 +4107,90 @@ mod tests {
         assert_eq!(credit(&held), before, "nothing was charged");
     }
 
+    /// **`sharing(None)` KEEPS THE PRIVATE GOVERNOR (pull1-2, D-2524).**
+    ///
+    /// On the old code `sharing` assigned its argument whenever the source was
+    /// governed, so `sharing(None)` left `governor == None` and
+    /// `charged_by_caller == false` -- nobody charged anything, and the first
+    /// assertion below failed. Every ordering of the two calls a server makes
+    /// is walked, plus the ungoverned source that must stay ungoverned.
+    #[tokio::test]
+    async fn sharing_none_keeps_the_private_governor() {
+        type Shared = std::sync::Arc<std::sync::Mutex<crate::rate::Governor>>;
+        let crate::vendor::Transport::Http(spec) = crate::vendor::Feed::Dhan.descriptor().transport
+        else {
+            panic!("Dhan is an HTTP feed");
+        };
+        let build =
+            || HttpSource::new(spec, Credential::token("t".to_owned())).expect("Dhan builds");
+        let same = |a: Option<&Shared>, b: &Shared| a.is_some_and(|a| std::sync::Arc::ptr_eq(a, b));
+        let cursor_of = |held: &Shared| {
+            held.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .cursor_micros()
+        };
+
+        // NONE ALONE: the private instance survives and is still charged here.
+        let source = build();
+        let private = std::sync::Arc::clone(source.governor.as_ref().expect("Dhan is budgeted"));
+        let source = source.sharing(None);
+        assert!(
+            same(source.governor.as_ref(), &private),
+            "sharing(None) must keep the governor `new` built, not drop it"
+        );
+        assert!(
+            !source.charged_by_caller,
+            "nobody handed a governor over, so this source still charges its own"
+        );
+        // AND IT REALLY IS CHARGED: the cursor moves on a permit. The clock is
+        // read first for the reason the shared-governor test gives.
+        let _origin = crate::rate::monotonic_micros();
+        tokio::time::sleep(core::time::Duration::from_millis(2)).await;
+        let before = cursor_of(&private);
+        source
+            .wait_for_permit()
+            .await
+            .expect("a fresh governor admits");
+        assert!(
+            cursor_of(&private) > before,
+            "the kept private governor is the one spent"
+        );
+
+        // NONE TWICE: idempotent.
+        let source = build();
+        let private = std::sync::Arc::clone(source.governor.as_ref().expect("budgeted"));
+        let source = source.sharing(None).sharing(None);
+        assert!(same(source.governor.as_ref(), &private));
+        assert!(!source.charged_by_caller);
+
+        // SOME THEN NONE: a later `None` does not undo a real hand-over.
+        let held = std::sync::Arc::clone(build().governor.as_ref().expect("budgeted"));
+        let source = build()
+            .sharing(Some(std::sync::Arc::clone(&held)))
+            .sharing(None);
+        assert!(same(source.governor.as_ref(), &held));
+        assert!(
+            source.charged_by_caller,
+            "the caller that handed it over still charges"
+        );
+
+        // NONE THEN SOME: the hand-over still lands after a no-op.
+        let source = build()
+            .sharing(None)
+            .sharing(Some(std::sync::Arc::clone(&held)));
+        assert!(same(source.governor.as_ref(), &held));
+        assert!(source.charged_by_caller);
+
+        // AN UNGOVERNED SOURCE stays ungoverned whatever it is handed.
+        for offered in [None, Some(std::sync::Arc::clone(&held))] {
+            let mut source = build();
+            source.governor = None;
+            let source = source.sharing(offered);
+            assert!(source.governor.is_none(), "no ceiling nobody wrote down");
+            assert!(!source.charged_by_caller);
+        }
+    }
+
     /// A throttle lowers the allowance; clean answers raise it again.
     ///
     /// The incremental/decremental behaviour, asserted as a NUMBER rather than
@@ -6116,9 +6247,11 @@ mod tests {
         let (name, value) = source.header();
         assert_eq!(name, "Authorization");
         assert_eq!(
-            value, "token APIKEY:TOKEN",
+            value.to_str().expect("an ASCII header"),
+            "token APIKEY:TOKEN",
             "key first, one colon, one trailing space in the prefix"
         );
+        assert!(value.is_sensitive(), "P11-03, D-2525");
         assert!(
             zerodha
                 .extra_headers
@@ -6159,6 +6292,91 @@ mod tests {
                 given_two: true
             }
         );
+    }
+
+    /// **A CREDENTIAL THAT IS NOT A HEADER VALUE REFUSES AT CONSTRUCTION, AND A
+    /// GOOD ONE IS HELD SENSITIVE (P1-19-01, P11-03, D-2525).**
+    ///
+    /// On the old code `header_value` was a `String` and `new` never parsed it,
+    /// so every "bad" case below BUILT a source (the first `expect_err` failed)
+    /// and the newline surfaced only at send time as `TransportFailed`; and
+    /// there was no `HeaderValue` to ask `is_sensitive` of. Walked for every
+    /// HTTP feed in `Feed::ALL`, with each refused byte at the start, the
+    /// middle and the end of the token, and in the key of a two-secret scheme.
+    /// A scheme mismatch still refuses FIRST, as `CredentialMismatch`.
+    #[test]
+    fn a_credential_that_is_not_a_header_value_is_refused_at_construction() {
+        const TOKEN: &str = "TOKENBYTES";
+        let refused_bytes = ['\n', '\r', '\0', '\u{01}', '\u{1f}', '\u{7f}'];
+        let mut walked = 0_usize;
+        for feed in crate::vendor::Feed::ALL {
+            let crate::vendor::Transport::Http(spec) = feed.descriptor().transport else {
+                continue;
+            };
+            let two = spec.auth.scheme.names_two_secrets();
+            let credential = |token: String, key: String| {
+                if two {
+                    Credential::pair(key, token)
+                } else {
+                    Credential::token(token)
+                }
+            };
+            for bad in refused_bytes {
+                let mut cases = vec![
+                    (format!("{bad}{TOKEN}"), "KEY".to_owned()),
+                    (format!("TOKEN{bad}BYTES"), "KEY".to_owned()),
+                    (format!("{TOKEN}{bad}"), "KEY".to_owned()),
+                ];
+                if two {
+                    cases.push((TOKEN.to_owned(), format!("KEY{bad}")));
+                }
+                for (token, key) in cases {
+                    let why = HttpSource::new(spec, credential(token, key))
+                        .expect_err("a credential no header can carry refuses");
+                    assert_eq!(
+                        why,
+                        FetchError::CredentialNotAHeaderValue {
+                            header: spec.auth.header
+                        },
+                        "{feed} {bad:?}"
+                    );
+                    let said = why.to_string();
+                    assert!(!said.contains("TOKEN"), "the value is never shown: {said}");
+                    assert!(said.contains(spec.auth.header), "{said}");
+                    walked += 1;
+                }
+            }
+            // THE ORDER: a mismatch is named before the bytes are looked at.
+            let mismatched = if two {
+                Credential::token(format!("{TOKEN}\n"))
+            } else {
+                Credential::pair("KEY".to_owned(), format!("{TOKEN}\n"))
+            };
+            assert!(
+                matches!(
+                    HttpSource::new(spec, mismatched),
+                    Err(FetchError::CredentialMismatch { .. })
+                ),
+                "{feed}: a scheme mismatch refuses first"
+            );
+            // A GOOD CREDENTIAL, including a tab and a space a header CAN
+            // carry, builds, and its header is sensitive everywhere it goes.
+            for good in [TOKEN, "TOKEN\tBYTES", "TOKEN BYTES"] {
+                let source = HttpSource::new(spec, credential(good.to_owned(), "KEY".to_owned()))
+                    .expect("a header-safe credential builds");
+                let (name, value) = source.header();
+                assert!(value.is_sensitive(), "{feed}: the auth header is sensitive");
+                let mut map = reqwest::header::HeaderMap::new();
+                map.insert(
+                    reqwest::header::HeaderName::from_bytes(name.as_bytes())
+                        .expect("a header name"),
+                    value,
+                );
+                let printed = format!("{map:?} {source:?}");
+                assert!(!printed.contains("BYTES"), "{feed}: {printed}");
+            }
+        }
+        assert!(walked >= 18, "at least one HTTP feed was walked: {walked}");
     }
 
     /// The blocking seam refuses by name rather than silently blocking, and

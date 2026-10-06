@@ -936,6 +936,47 @@ fn wire_headers(identity: &AwsIdentity) -> Vec<(&'static str, &str)> {
     }
 }
 
+/// Refuses a parameter value this build will not send as a credential.
+///
+/// # Empty, and whitespace-padded (P1-19-01, D-2525)
+///
+/// Empty was always refused. A value with leading or trailing whitespace —
+/// most often a newline pasted into the console with the token — was returned
+/// as it was: a newline then failed inside the HTTP client at send time and
+/// was reported as a transport fault ("was not reached") and retried like a
+/// network blip, never reaching the credential law. A padded value is now
+/// refused HERE, at the one place it arrives, as configuration. The value is
+/// never quoted and never trimmed: trimming would send a credential the
+/// operator did not store, which is a guess about what they meant.
+///
+/// # Errors
+///
+/// [`SecretError::Empty`] for an empty value and [`SecretError::Padded`] for a
+/// value with leading or trailing whitespace. Neither detail carries a byte of
+/// the value.
+fn refuse_unusable_value(value: &str) -> Result<(), SsmError> {
+    if value.is_empty() {
+        return Err(SsmError {
+            detail: "the parameter exists and holds nothing. An empty \
+                     credential is not a credential, and this build will not \
+                     send one to a broker."
+                .to_owned(),
+            kind: SecretError::Empty,
+        });
+    }
+    if value.trim() != value {
+        return Err(SsmError {
+            detail: "the parameter's value begins or ends with whitespace, \
+                     most often a newline stored with the token. This build \
+                     will not send it and will not trim it: re-store the \
+                     credential without the padding."
+                .to_owned(),
+            kind: SecretError::Padded,
+        });
+    }
+    Ok(())
+}
+
 /// One live `GetParameter` call, signed and sent.
 ///
 /// # This is the function that makes it real
@@ -1063,15 +1104,7 @@ pub async fn get_parameter(
     }
 
     let value = value_of(&text)?;
-    if value.is_empty() {
-        return Err(SsmError {
-            detail: "the parameter exists and holds nothing. An empty \
-                     credential is not a credential, and this build will not \
-                     send one to a broker."
-                .to_owned(),
-            kind: SecretError::Empty,
-        });
-    }
+    refuse_unusable_value(&value)?;
     // THE CREDENTIAL READ HAPPENED — AND NOT ONE BYTE OF THE CREDENTIAL.
     //
     // `CLAUDE.md` §8 keeps the parameter PATH out of every tracked file because
@@ -1239,6 +1272,56 @@ mod tests {
         assert_eq!(refusal_kind(404, "{}"), SecretError::NotFound);
         assert_eq!(refusal_kind(400, "{}"), SecretError::Unreachable);
         assert_eq!(refusal_kind(503, "<html>"), SecretError::Unreachable);
+    }
+
+    /// **A WHITESPACE-PADDED VALUE IS REFUSED WHERE IT ARRIVES (P1-19-01,
+    /// D-2525).**
+    ///
+    /// On the old code only `is_empty` was checked, so every padded case below
+    /// was returned as a credential: there was no `refuse_unusable_value` and no
+    /// `SecretError::Padded`, and a newline then failed inside the HTTP client as
+    /// a transport fault. Every leading and trailing ASCII whitespace byte is
+    /// walked on both ends, the whitespace-only values, the empty value, and
+    /// interior whitespace, which is not padding and is left to the header
+    /// check in `HttpSource::new`.
+    #[test]
+    fn a_whitespace_padded_parameter_value_is_refused_and_never_quoted() {
+        use crate::secret::SecretError;
+        let empty = refuse_unusable_value("").expect_err("empty refuses");
+        assert_eq!(empty.kind, SecretError::Empty);
+        for pad in [' ', '\t', '\n', '\r', '\u{0b}', '\u{0c}', '\u{a0}'] {
+            for value in [
+                format!("{pad}SECRETVALUE"),
+                format!("SECRETVALUE{pad}"),
+                format!("{pad}SECRETVALUE{pad}"),
+                format!("{pad}"),
+                format!("{pad}{pad}"),
+            ] {
+                let refused = refuse_unusable_value(&value).expect_err("padding refuses");
+                assert_eq!(refused.kind, SecretError::Padded, "{:?}", pad);
+                assert!(
+                    !refused.detail.contains("SECRETVALUE"),
+                    "the value is never quoted: {}",
+                    refused.detail
+                );
+            }
+        }
+        for usable in ["SECRETVALUE", "S", "SECRET VALUE", "KEY:TOKEN"] {
+            assert!(
+                refuse_unusable_value(usable).is_ok(),
+                "{usable:?} has no padding"
+            );
+        }
+        // THE CALL SITE USES IT: `get_parameter` reads no value past it.
+        let source = include_str!("ssm.rs");
+        let body = source
+            .split("pub async fn get_parameter(")
+            .nth(1)
+            .expect("get_parameter exists");
+        assert!(
+            body.contains("refuse_unusable_value(&value)?;"),
+            "get_parameter refuses an unusable value before returning it"
+        );
     }
 
     /// §8 — the parameter path never reaches the output, whatever AWS says.

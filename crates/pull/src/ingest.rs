@@ -933,19 +933,46 @@ fn from_members_inner(members: &[Member], store_root: &Path, plan: Plan<'_>) -> 
 
     // ONE INSTALL, AFTER THE LOOP — and none at all when nothing changed, so
     // a re-run of the same folder leaves the census byte for byte as it was.
-    if let Err(why) = install_census(&census_lock, &census_path, &census, &appends, publish) {
-        note_census_unpublished(&census_path, appends.len(), &why);
-        done.failures.push(Failure {
-            instrument: census_path.display().to_string(),
-            why: format!(
-                "{} slice(s) are on disk and the census that counts them was \
-                 not published: {why}",
-                done.counted
-            ),
-        });
+    match install_census(&census_lock, &census_path, &census, &appends, publish) {
+        Ok(()) => {}
+        // PUBLISHED, AND ONLY A BARRIER AFTER IT FAILED (xcut-2, D-2529). The
+        // census counts the slices and every reader sees it, so this is not
+        // the "not published" failure below; it is said at `Warn` with the
+        // durability doubt named.
+        Err(CensusFault::Uncertain(why)) => {
+            note_census_uncertain(&census_path, appends.len(), &why);
+        }
+        Err(CensusFault::NotPublished { committed, why }) => {
+            note_census_unpublished(&census_path, appends.len().saturating_sub(committed), &why);
+            done.failures.push(Failure {
+                instrument: census_path.display().to_string(),
+                why: format!(
+                    "{} slice(s) are on disk and the census that counts them was \
+                     not published: {why}",
+                    done.counted
+                ),
+            });
+        }
     }
 
     done
+}
+
+/// The census was published and a barrier after it failed (xcut-2, D-2529).
+///
+/// `Warn`, once per install: every reader already counts the slices, so the
+/// run is not short; what is UNVERIFIED is the publish's survival of a power
+/// cut, or a lock-free reader's cache key.
+fn note_census_uncertain(census: &Path, slices: usize, why: &str) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::warn("pull.census", "published, durability UNVERIFIED")
+            .with(
+                "census",
+                telemetry::Value::Str(&census.display().to_string()),
+            )
+            .with("slices", telemetry::Value::Uint(slices as u64))
+            .with("why", telemetry::Value::Str(why)),
+    );
 }
 
 /// A run refused before a single bar was written, named against the file the
@@ -1214,18 +1241,42 @@ fn record_all(store_root: &Path, vendor: Vendor, held: &[Held]) -> Option<String
     };
     // RESERVED FROM THE BOUND IN HAND — at most one append per entry offered.
     let mut appends: Vec<Append> = Vec::with_capacity(held.len());
+    // ONE REFUSED ROW DOES NOT DISCARD THE REST (pull2-2, D-2528). This
+    // returned on the first `count` refusal, so one stale
+    // `RowCountWentBackwards` dropped every OTHER contract's census row too --
+    // bars that are on disk, left uncounted, and refetched by the next run.
+    // `from_members_inner` has always counted the rest and named the one; this
+    // now does the same. A refused row leaves the census unchanged
+    // (`Manifest::record_held` refuses before it records), so the rows after it
+    // are counted against the same census they would have been.
+    let mut refused: Vec<String> = Vec::new();
     for one in held {
         match count(&mut census, *one) {
             Ok(Some(append)) => appends.push(append),
             Ok(None) => {}
-            Err(why) => return Some(why),
+            Err(why) => {
+                let named = format!("{:?}", one.entry.key);
+                note_bars_not_counted(&named, one.entry.rows, &why);
+                refused.push(format!("{named}: {why}"));
+            }
         }
     }
-    if let Err(why) = install_census(&lock, &census_path, &census, &appends, false) {
-        note_census_unpublished(&census_path, appends.len(), &why);
-        return Some(why);
+    match install_census(&lock, &census_path, &census, &appends, false) {
+        Ok(()) => {}
+        // Published; only a barrier after it failed (xcut-2, D-2529).
+        Err(CensusFault::Uncertain(why)) => {
+            note_census_uncertain(&census_path, appends.len(), &why);
+        }
+        Err(CensusFault::NotPublished { committed, why }) => {
+            note_census_unpublished(&census_path, appends.len().saturating_sub(committed), &why);
+            refused.push(why);
+        }
     }
-    None
+    if refused.is_empty() {
+        None
+    } else {
+        Some(refused.join("; "))
+    }
 }
 
 /// Writes a batch of census rows in ONE cycle — one lock, one read, one install.
@@ -3549,7 +3600,7 @@ fn install_census(
     census: &Manifest,
     appends: &[Append],
     repairing: bool,
-) -> Result<(), String> {
+) -> Result<(), CensusFault> {
     // Nothing moved. A re-run of the same folder leaves the census byte for
     // byte as it was, which is `CLAUDE.md` §3 rule 5 about the bytes.
     if appends.is_empty() && !repairing {
@@ -3566,14 +3617,64 @@ fn install_census(
     append_locked(lock, path, appends)
 }
 
+/// Why a census install did not settle, split by whether a reader can already
+/// see the new census (xcut-2, D-2529).
+///
+/// # Why two arms and not one sentence
+///
+/// Every fault used to read "the census that counts them was not published".
+/// After `fs::rename` succeeds, or after an append's slot is synced, that is
+/// false: every reader already sees the new census, and what failed is only a
+/// barrier after it — the directory sync of a rename, or the stamp an in-place
+/// append moves. Reporting that as "not published" tells an operator the bars
+/// are uncounted when `/store` is counting them. `pull::masters` models the
+/// same state as `Landed::Uncertain`; this is the census's copy of it.
+#[derive(Debug)]
+enum CensusFault {
+    /// Nothing of this batch past its first `committed` appends reached a
+    /// reader. `committed` is 0 for a whole-image install, which publishes all
+    /// or nothing.
+    NotPublished {
+        /// Appends of this batch whose slot was synced before the fault.
+        committed: usize,
+        /// The fault, naming the path.
+        why: String,
+    },
+    /// Every reader sees the new census; a barrier after the publish failed,
+    /// so its survival of a power cut, or a reader's cache key, is UNVERIFIED.
+    Uncertain(String),
+}
+
+impl core::fmt::Display for CensusFault {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NotPublished { why, .. } | Self::Uncertain(why) => f.write_str(why),
+        }
+    }
+}
+
 /// The positional writes, kept apart from the sentence they fail with.
-fn append_locked(_lock: &CensusLock, path: &Path, appends: &[Append]) -> Result<(), String> {
-    write_appends(path, appends).map_err(|why| {
-        format!(
-            "{} could not be appended to after {} entry write(s): {why}",
-            path.display(),
-            appends.len()
-        )
+fn append_locked(_lock: &CensusLock, path: &Path, appends: &[Append]) -> Result<(), CensusFault> {
+    write_appends(path, appends).map_err(|(committed, why)| {
+        if committed == appends.len() {
+            // EVERY SLOT IS DURABLE; only the stamp past the writes failed.
+            CensusFault::Uncertain(format!(
+                "{} was appended to and all {committed} slot(s) are durable, but \
+                 its modification time could not be moved past the writes, so a \
+                 reader that stamped it mid-write may keep its copy — {why}",
+                path.display()
+            ))
+        } else {
+            CensusFault::NotPublished {
+                committed,
+                why: format!(
+                    "{} could not be appended to after {committed} of {} entry \
+                     write(s) committed: {why}",
+                    path.display(),
+                    appends.len()
+                ),
+            }
+        }
     })
 }
 
@@ -3584,8 +3685,31 @@ fn append_locked(_lock: &CensusLock, path: &Path, appends: &[Append]) -> Result<
 /// over entries that may not exist, which is the one way this format can be
 /// made to lie. [`Commit::durable_through`] names the offset, so a writer
 /// cannot claim it did not know which one to flush.
-fn write_appends(path: &Path, appends: &[Append]) -> std::io::Result<()> {
+///
+/// # Errors
+///
+/// The fault, beside how many appends of the batch had their slot synced
+/// before it (xcut-2, D-2529): those are published, and a caller that called
+/// all of them unpublished would be wrong about exactly that many.
+fn write_appends(path: &Path, appends: &[Append]) -> Result<(), (usize, std::io::Error)> {
     write_appends_observed(path, appends, |_| {})
+}
+
+/// One append's entry, barrier and slot.
+fn commit_one(file: &mut fs::File, append: &Append) -> std::io::Result<()> {
+    use std::io::{Seek, SeekFrom};
+
+    file.seek(SeekFrom::Start(append.offset))?;
+    file.write_all(&append.bytes)?;
+
+    // THE BARRIER. Everything through here must be durable before the slot
+    // below is allowed to count it.
+    debug_assert!(append.commit.durable_through <= append.offset + ENTRY_STRIDE);
+    file.sync_data()?;
+
+    file.seek(SeekFrom::Start(append.commit.offset))?;
+    file.write_all(&append.commit.bytes)?;
+    file.sync_all()
 }
 
 /// [`write_appends`], with a look at the file after its last slot is durable
@@ -3608,32 +3732,34 @@ fn write_appends_observed(
     path: &Path,
     appends: &[Append],
     mut landed: impl FnMut(&fs::File),
-) -> std::io::Result<()> {
-    use std::io::{Seek, SeekFrom};
-
-    let mut file = fs::OpenOptions::new().read(true).write(true).open(path)?;
-    for append in appends {
-        file.seek(SeekFrom::Start(append.offset))?;
-        file.write_all(&append.bytes)?;
-
-        // THE BARRIER. Everything through here must be durable before the slot
-        // below is allowed to count it.
-        debug_assert!(append.commit.durable_through <= append.offset + ENTRY_STRIDE);
-        file.sync_data()?;
-
-        file.seek(SeekFrom::Start(append.commit.offset))?;
-        file.write_all(&append.commit.bytes)?;
-        file.sync_all()?;
+) -> Result<(), (usize, std::io::Error)> {
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|why| (0, why))?;
+    for (committed, append) in appends.iter().enumerate() {
+        commit_one(&mut file, append).map_err(|why| (committed, why))?;
     }
     if appends.is_empty() {
         return Ok(());
     }
     landed(&file);
-    let written = file.metadata()?.modified()?;
+    let all = appends.len();
+    let written = file
+        .metadata()
+        .and_then(|meta| meta.modified())
+        .map_err(|why| (all, why))?;
     let past = written
         .checked_add(std::time::Duration::from_nanos(1))
-        .ok_or_else(|| std::io::Error::other("the census's modification time cannot advance"))?;
+        .ok_or_else(|| {
+            (
+                all,
+                std::io::Error::other("the census's modification time cannot advance"),
+            )
+        })?;
     file.set_modified(std::time::SystemTime::now().max(past))
+        .map_err(|why| (all, why))
 }
 
 /// The install itself, once the census lock is held.
@@ -3642,33 +3768,78 @@ fn write_appends_observed(
 /// "the lock is held" a thing the compiler checks rather than a thing a comment
 /// asserts, so no future caller can reach the publish without having gone
 /// through [`CensusLock::take`] first.
-fn install_locked(_lock: &CensusLock, path: &Path, image: &[u8]) -> Result<(), String> {
+fn install_locked(lock: &CensusLock, path: &Path, image: &[u8]) -> Result<(), CensusFault> {
+    install_locked_with(lock, path, image, sync_directory)
+}
+
+/// The directory barrier a rename needs before its new entry survives a power
+/// cut.
+fn sync_directory(dir: &Path) -> std::io::Result<()> {
+    fs::File::open(dir)?.sync_all()
+}
+
+/// [`install_locked`], with the directory barrier injectable so a test can
+/// fail it AFTER the rename (xcut-2, D-2529).
+fn install_locked_with(
+    _lock: &CensusLock,
+    path: &Path,
+    image: &[u8],
+    sync_dir: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<(), CensusFault> {
     // A rendered census path is `<root>/manifest/<vendor>.man`, so the parent
     // is always there; the fallback is the path itself, which cannot be
     // created as a directory and therefore fails loudly on the next line
     // rather than writing somewhere unexpected.
     let dir: &Path = path.parent().unwrap_or(path);
     let tmp: PathBuf = path.with_extension("man.writing");
-    publish(dir, &tmp, path, image).map_err(|why| {
-        format!(
-            "{} could not be published through {}: {why}",
+    publish(dir, &tmp, path, image, sync_dir).map_err(|fault| match fault {
+        Published::Before(why) => CensusFault::NotPublished {
+            committed: 0,
+            why: format!(
+                "{} could not be published through {}: {why}",
+                path.display(),
+                tmp.display()
+            ),
+        },
+        Published::After(why) => CensusFault::Uncertain(format!(
+            "{} was published (renamed into place), but {} could not be synced, \
+             so the new entry's survival of a power cut is UNVERIFIED: {why}",
             path.display(),
-            tmp.display()
-        )
+            dir.display()
+        )),
     })
 }
 
-/// The five calls [`install`] is, kept apart from the sentence it fails with.
-fn publish(dir: &Path, tmp: &Path, path: &Path, image: &[u8]) -> std::io::Result<()> {
-    fs::create_dir_all(dir)?;
-    let mut file = fs::File::create(tmp)?;
-    file.write_all(image)?;
-    // The bytes before the rename, always. A rename that beats its own
-    // contents to the disk publishes a name over nothing.
-    file.sync_all()?;
-    drop(file);
-    fs::rename(tmp, path)?;
-    fs::File::open(dir)?.sync_all()
+/// Which side of the rename a whole-image publish failed on (xcut-2, D-2529).
+enum Published {
+    /// Before the rename: the live path still names the census it named.
+    Before(std::io::Error),
+    /// After it: every reader sees the new census; only its directory entry's
+    /// durability is unknown.
+    After(std::io::Error),
+}
+
+/// The five calls [`install_locked`] is, kept apart from the sentence it fails
+/// with, and split at the rename.
+fn publish(
+    dir: &Path,
+    tmp: &Path,
+    path: &Path,
+    image: &[u8],
+    sync_dir: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<(), Published> {
+    let staged = || -> std::io::Result<()> {
+        fs::create_dir_all(dir)?;
+        let mut file = fs::File::create(tmp)?;
+        file.write_all(image)?;
+        // The bytes before the rename, always. A rename that beats its own
+        // contents to the disk publishes a name over nothing.
+        file.sync_all()?;
+        drop(file);
+        fs::rename(tmp, path)
+    };
+    staged().map_err(Published::Before)?;
+    sync_dir(dir).map_err(Published::After)
 }
 
 /// The facts about this module no external test can reach.
@@ -3778,6 +3949,99 @@ mod tests {
         ));
         std::fs::create_dir_all(root.join("manifest")).expect("the manifest directory");
         root
+    }
+
+    /// **ONE REFUSED HELD ROW DOES NOT DISCARD THE REST (pull2-2, D-2528).**
+    ///
+    /// Three months are seeded at 10 rows each, then re-offered with ONE of
+    /// them gone backwards to 3 rows and the other two grown to 20. On the old
+    /// code `record_all` returned on the refusal before `install_census`, so
+    /// the grown months were left at 10 -- the `20` assertions below failed
+    /// whenever the refused row was not last. Every position of the refused
+    /// row is walked, plus all three refused, none refused, a duplicate row,
+    /// and the empty slice.
+    #[test]
+    fn one_refused_held_row_does_not_discard_the_rest() {
+        use crate::manifest::{Entry, Held, manifest_path};
+        let vendor = Vendor::Dhan;
+        let key = |month: u8| EntryKey {
+            contract: None,
+            exchange: brutex_core::instrument::Exchange::Nse,
+            segment: brutex_core::instrument::Segment::Index,
+            symbol: brutex_core::symbol::Symbol::new("NIFTY").expect("a symbol"),
+            timeframe: store::path::Timeframe::MINUTE_1,
+            month: store::path::YearMonth::new(2026, month).expect("a legal month"),
+        };
+        let held = |month: u8, rows: u64| {
+            Held::unknown(Entry {
+                key: key(month),
+                rows,
+                first_ts_micros: 1_000,
+                last_ts_micros: 2_000,
+            })
+        };
+        let rows_of = |root: &std::path::Path, month: u8| {
+            super::read_census(&manifest_path(root, vendor), vendor)
+                .expect("the census reads")
+                .held(&key(month))
+                .map(|h| h.entry.rows)
+        };
+        for refused_at in [None, Some(1_u8), Some(2), Some(3)] {
+            let root = scratch("HELD-REFUSAL");
+            assert_eq!(
+                super::record_held(&root, vendor, &[held(1, 10), held(2, 10), held(3, 10)]),
+                None,
+                "the seed lands"
+            );
+            let offered: Vec<Held> = (1..=3_u8)
+                .map(|m| held(m, if Some(m) == refused_at { 3 } else { 20 }))
+                .collect();
+            let said = super::record_held(&root, vendor, &offered);
+            for month in 1..=3_u8 {
+                let want = if Some(month) == refused_at { 10 } else { 20 };
+                assert_eq!(
+                    rows_of(&root, month),
+                    Some(want),
+                    "refused at {refused_at:?}: month {month} must read {want}"
+                );
+            }
+            match refused_at {
+                None => assert_eq!(said, None, "nothing refused, nothing said"),
+                Some(month) => {
+                    let why = said.expect("the refused row is named");
+                    assert!(
+                        why.contains(&format!("{:?}", key(month))),
+                        "the refusal names the row: {why}"
+                    );
+                    assert_eq!(why.matches("EntryKey").count(), 1, "only that row: {why}");
+                }
+            }
+            let _ = std::fs::remove_dir_all(&root);
+        }
+
+        // ALL REFUSED: every one is named, nothing is published, nothing moves.
+        let root = scratch("HELD-ALL-REFUSED");
+        assert_eq!(
+            super::record_held(&root, vendor, &[held(1, 10), held(2, 10)]),
+            None
+        );
+        let why =
+            super::record_held(&root, vendor, &[held(1, 3), held(2, 4)]).expect("both are refused");
+        assert_eq!(why.matches("EntryKey").count(), 2, "{why}");
+        assert_eq!(rows_of(&root, 1), Some(10));
+        assert_eq!(rows_of(&root, 2), Some(10));
+
+        // A DUPLICATE beside a refusal: counted once, the refusal still named.
+        let why = super::record_held(&root, vendor, &[held(1, 12), held(1, 12), held(2, 1)])
+            .expect("the backwards row is refused");
+        assert_eq!(why.matches("EntryKey").count(), 1, "{why}");
+        assert_eq!(rows_of(&root, 1), Some(12));
+        assert_eq!(rows_of(&root, 2), Some(10));
+
+        // THE EMPTY SLICE writes nothing and says nothing.
+        assert_eq!(super::record_held(&root, vendor, &[]), None);
+        assert_eq!(rows_of(&root, 1), Some(12));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// **A PARTIAL-OVERLAP RESUME REPORTS WHAT IT WROTE, NOT WHAT IT OFFERED.**
@@ -4120,7 +4384,8 @@ mod tests {
         let deferred = CensusLock::take(&census)
             .expect("a path failure is the install's to report, in better words");
         let why = install_locked(&deferred, &census, b"an image")
-            .expect_err("the install must fail on the same cause the lock did");
+            .expect_err("the install must fail on the same cause the lock did")
+            .to_string();
         assert!(
             why.contains("could not be published"),
             "and that is the sentence the outside test expects: {why}"
@@ -4232,6 +4497,122 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// **A FAILED DIRECTORY SYNC AFTER THE RENAME IS PUBLISHED-UNCERTAIN, NOT
+    /// "NOT PUBLISHED" (xcut-2, D-2529).**
+    ///
+    /// The directory barrier is injected to fail AFTER the rename. On the old
+    /// code `publish` mapped every fault, before or after the rename, to "could
+    /// not be published", so the `Uncertain` match below failed although the
+    /// new image was already at the live path. The other two orderings are
+    /// walked: a fault before the rename (a directory in the temporary's
+    /// place) publishes nothing and says so, and a clean install is `Ok`.
+    #[test]
+    fn a_failed_directory_sync_after_rename_is_published_uncertain() {
+        let root = scratch("SYNC-AFTER-RENAME");
+        let census = root.join("manifest").join("dhan.man");
+        let lock = CensusLock::take(&census).unwrap_or_else(|why| panic!("a free lock: {why}"));
+
+        // AFTER THE RENAME: published, durability UNVERIFIED.
+        let fault = super::install_locked_with(&lock, &census, b"IMAGE ONE", |_| {
+            Err(std::io::Error::other("injected directory sync failure"))
+        })
+        .expect_err("the barrier failed");
+        let why = match fault {
+            super::CensusFault::Uncertain(why) => why,
+            other @ super::CensusFault::NotPublished { .. } => {
+                panic!("a fault after the rename is uncertain, not unpublished: {other}")
+            }
+        };
+        assert!(
+            why.contains("was published") && why.contains("UNVERIFIED"),
+            "{why}"
+        );
+        assert!(!why.contains("could not be published"), "{why}");
+        assert_eq!(
+            std::fs::read(&census).expect("the image is live"),
+            b"IMAGE ONE".to_vec(),
+            "every reader already sees the new census"
+        );
+
+        // A CLEAN INSTALL replaces it and answers Ok.
+        super::install_locked_with(&lock, &census, b"IMAGE TWO", |_| Ok(()))
+            .expect("a clean install");
+        assert_eq!(std::fs::read(&census).expect("live"), b"IMAGE TWO".to_vec());
+
+        // BEFORE THE RENAME: nothing published, and the barrier is never asked.
+        std::fs::create_dir_all(census.with_extension("man.writing"))
+            .expect("a directory in the temporary's place");
+        let asked = std::cell::Cell::new(false);
+        let fault = super::install_locked_with(&lock, &census, b"IMAGE THREE", |_| {
+            asked.set(true);
+            Ok(())
+        })
+        .expect_err("the temporary cannot be created");
+        let (committed, why) = match fault {
+            super::CensusFault::NotPublished { committed, why } => (committed, why),
+            other @ super::CensusFault::Uncertain(_) => {
+                panic!("a fault before the rename publishes nothing: {other}")
+            }
+        };
+        assert_eq!(committed, 0);
+        assert!(why.contains("could not be published"), "{why}");
+        assert!(
+            !asked.get(),
+            "no barrier is taken for a publish that did not happen"
+        );
+        assert_eq!(
+            std::fs::read(&census).expect("live"),
+            b"IMAGE TWO".to_vec(),
+            "the live census is the one before the refused install"
+        );
+        drop(lock);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// **AN APPEND THAT FAILS PART-WAY NAMES HOW MANY OF ITS APPENDS COMMITTED
+    /// (xcut-2, D-2529).**
+    ///
+    /// Two appends, the second aimed past what a file can hold so its seek or
+    /// write fails. On the old code `write_appends` returned a bare
+    /// `io::Error` and the caller called all appends unpublished; it now
+    /// answers `(1, _)`, and the first append's slot is on disk. Also walked:
+    /// the empty batch (nothing opened, `Ok`), and a census path that does not
+    /// exist (`(0, _)`).
+    #[test]
+    fn a_part_way_append_failure_names_what_committed() {
+        let root = scratch("PART-WAY-APPEND");
+        let census = root.join("manifest").join("dhan.man");
+        std::fs::write(&census, vec![0_u8; 4096]).expect("a census file");
+        let append = |offset: u64, slot_offset: u64, fill: u8| super::Append {
+            ordinal: 0,
+            offset,
+            bytes: [fill; crate::manifest::ENTRY_LEN],
+            commit: crate::manifest::Commit {
+                slot: 0,
+                offset: slot_offset,
+                bytes: [fill; crate::manifest::IMAGE_LEN],
+                durable_through: offset + 128,
+                header: crate::manifest::ManifestHeader::genesis(Vendor::Dhan),
+            },
+        };
+        let good = append(1024, 64, 7);
+        // `i64::MAX as u64` + 1 is past every file offset a seek accepts.
+        let bad = append(1 << 63, 64, 8);
+        let (committed, _why) =
+            super::write_appends(&census, &[good, bad]).expect_err("the second append cannot land");
+        assert_eq!(committed, 1, "the first append's slot was synced");
+        let bytes = std::fs::read(&census).expect("the census");
+        assert_eq!(bytes.get(1024..1152), Some(&[7_u8; 128][..]));
+        assert_eq!(bytes.get(64..128), Some(&[7_u8; 64][..]));
+
+        assert!(super::write_appends(&census, &[]).is_ok(), "an empty batch");
+        let (committed, _why) =
+            super::write_appends(&root.join("manifest").join("ABSENT.man"), &[good])
+                .expect_err("no file to open");
+        assert_eq!(committed, 0);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// **A DROPPED CENSUS LOCK IS RELEASED WHILE A DUPLICATE OF ITS DESCRIPTOR
     /// IS STILL OPEN.** D-0693.
     ///
@@ -4333,8 +4714,31 @@ mod tests {
         let root = scratch("LOCK-SOCKET");
         let census = root.join("manifest").join("dhan.man");
         let lock_path = census.with_extension("man.lock");
-        let listener = std::os::unix::net::UnixListener::bind(&lock_path)
+        // BOUND THROUGH A SHORT LINK, NOT AT THE LONG PATH (P16-01, D-2530).
+        // `scratch` is `TMPDIR` plus ~74 bytes, and a socket address holds
+        // fewer than 104: under the macOS `TMPDIR` or a mutation run's long one
+        // the direct bind failed with `InvalidInput` and this test panicked on
+        // its premise. The link under `/tmp` names the manifest directory, so
+        // the socket is made AT `lock_path` itself, exactly as before -- the
+        // pattern `api`'s `SocketAt` uses (D-0695).
+        let link = std::path::Path::new("/tmp").join(format!("BIS-{}-LOCK", std::process::id()));
+        let _stale = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(root.join("manifest"), &link)
+            .expect("a link under /tmp to the manifest directory");
+        let address = link.join(lock_path.file_name().expect("the lock names a file"));
+        assert!(
+            address.as_os_str().len() < 104,
+            "the bound address fits a socket address on every host: {}",
+            address.display()
+        );
+        let listener = std::os::unix::net::UnixListener::bind(&address)
             .expect("the socket this test is about can be bound");
+        let _link_gone = std::fs::remove_file(&link);
+        assert!(
+            std::fs::symlink_metadata(&lock_path)
+                .is_ok_and(|meta| std::os::unix::fs::FileTypeExt::is_socket(&meta.file_type())),
+            "the socket is at the lock path itself, not a link to one"
+        );
         let opened = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)

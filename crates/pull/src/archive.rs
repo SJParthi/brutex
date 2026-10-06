@@ -670,6 +670,11 @@ fn walk(
     // `tests::a_malformed_member_below_the_root_still_refuses_the_whole_walk`,
     // because "unobservable" is a claim.
     sort_members(out);
+    // THE REJECTS ARE ORDERED TOO (determinism-2, D-2531). Only `out` was, so
+    // a census's `rejected` list, which reaches the wire as `/folder.json`'s
+    // `rejected`, came out in whatever order the filesystem listed the folder.
+    // Stable, and by the same key `sort_members` uses.
+    rejected.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(())
 }
 
@@ -707,18 +712,29 @@ fn descend(
             path: dir.to_path_buf(),
         });
     }
-    let entries = fs::read_dir(dir).map_err(|e| ArchiveError::Unreadable {
+    // EACH DIRECTORY'S ENTRIES ARE VISITED IN PATH ORDER (determinism-2,
+    // D-2531). `fs::read_dir` yields in filesystem order, and three outcomes
+    // of this walk depend on VISIT order rather than on the final sort: which
+    // malformed member an ingest walk refuses first, which member trips
+    // `MAX_MEMBERS`, and which non-text or oversized member is named. So the
+    // listing is collected and ordered before the loop. One `Vec<PathBuf>` per
+    // directory and an O(e log e) sort of its own `e` entries; the walk was
+    // already O(members) and holds every row (`docs/06-limits.md`, D-0720).
+    let listing = fs::read_dir(dir).map_err(|e| ArchiveError::Unreadable {
         path: dir.to_path_buf(),
         detail: e.to_string(),
     })?;
-
-    for entry in entries {
+    let mut entries = Vec::new();
+    for entry in listing {
         let entry = entry.map_err(|e| ArchiveError::Unreadable {
             path: dir.to_path_buf(),
             detail: e.to_string(),
         })?;
-        let path = entry.path();
+        entries.push(entry.path());
+    }
+    entries.sort();
 
+    for path in entries {
         // THE GHOST FILTER, before anything is opened. Counted in a plain
         // integer rather than logged: `GDFL.zip` holds 12,145 of these, and one
         // line each would bury the walk's own result in its own noise.
@@ -752,9 +768,9 @@ fn descend(
         // and this walker never read it — which is why the fix is a descent and
         // not a question for anybody.
         //
-        // DEPTH-FIRST, IN DIRECTORY ORDER, and the ordering does not matter
-        // because `sort_members` orders the accumulator by path once the whole
-        // recursion has returned — in `walk`, for exactly this reason.
+        // DEPTH-FIRST, IN PATH ORDER (D-2531). The members' final order is
+        // still `sort_members`'s, once the whole recursion has returned — in
+        // `walk`; the visit order is what decides which refusal comes first.
         if path.is_dir() {
             descend(
                 &path,
@@ -1118,6 +1134,72 @@ mod tests {
             matches!(why, ArchiveError::MemberMalformed { ref path, .. } if *path == odd),
             "the refusal must name the member a level down, not the folder: {why}"
         );
+    }
+
+    /// **A CENSUS LISTS ITS REJECTS BY PATH, AND A STRICT WALK REFUSES THE
+    /// FIRST MALFORMED MEMBER BY PATH (determinism-2, D-2531).**
+    ///
+    /// Three malformed members are created in each of the six orders, beside
+    /// one good member and a malformed one a level down. On the old code
+    /// `rejected` was never ordered and `descend` visited in `fs::read_dir`
+    /// order, so on a filesystem that lists by creation (tmpfs lists newest
+    /// first) or by hash, at least one of the six orders put the rejects, and
+    /// the strict refusal, somewhere other than first-by-path.
+    #[test]
+    fn a_census_lists_rejected_members_by_path_and_a_strict_walk_refuses_the_first_by_path() {
+        const BAD: &str = "20221003,09:15:01,38445.65\n";
+        let orders: [[&str; 3]; 6] = [
+            ["AA", "MM", "ZZ"],
+            ["AA", "ZZ", "MM"],
+            ["MM", "AA", "ZZ"],
+            ["MM", "ZZ", "AA"],
+            ["ZZ", "AA", "MM"],
+            ["ZZ", "MM", "AA"],
+        ];
+        for order in orders {
+            let scratch = Scratch::new();
+            let root = scratch.root.join("feed");
+            let nested = root.join("Options");
+            fs::create_dir_all(&nested).expect("Options");
+            fs::write(root.join("GOOD.csv"), ONE_ROW).expect("a good member");
+            fs::write(nested.join("BB.csv"), BAD).expect("a nested malformed member");
+            for name in order {
+                fs::write(root.join(format!("{name}.csv")), BAD).expect("a malformed member");
+            }
+
+            let (members, rejected) =
+                read_dir_reporting(&root, Columns::TrueDataIndex).expect("the census walk");
+            assert_eq!(members.len(), 1, "{order:?}");
+            let paths: Vec<PathBuf> = rejected.iter().map(|r| r.path.clone()).collect();
+            assert_eq!(
+                paths,
+                vec![
+                    root.join("AA.csv"),
+                    root.join("MM.csv"),
+                    root.join("Options").join("BB.csv"),
+                    root.join("ZZ.csv"),
+                ],
+                "created in {order:?}: the rejects are listed by path"
+            );
+
+            let why = read_dir(&root, Columns::TrueDataIndex).expect_err("a malformed member");
+            assert!(
+                matches!(why, ArchiveError::MemberMalformed { ref path, .. } if *path == root.join("AA.csv")),
+                "created in {order:?}: the strict walk refuses the first by path: {why}"
+            );
+        }
+
+        // THE EMPTY AND THE SINGLE CASE: nothing to order, and one to name.
+        let scratch = Scratch::new();
+        let root = scratch.root.join("feed");
+        fs::create_dir_all(&root).expect("feed");
+        let (members, rejected) =
+            read_dir_reporting(&root, Columns::TrueDataIndex).expect("an empty folder walks");
+        assert!(members.is_empty() && rejected.is_empty());
+        fs::write(root.join("ONLY.csv"), BAD).expect("one malformed member");
+        let (_, rejected) =
+            read_dir_reporting(&root, Columns::TrueDataIndex).expect("the census walk");
+        assert_eq!(rejected.len(), 1);
     }
 
     /// **THE WALK HOLDS EVERY MEMBER IT DECODED, ROWS AND ALL, UNTIL IT
