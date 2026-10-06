@@ -63139,3 +63139,69 @@ longer be reached, so it was removed. The frontier writer keeps its own
 
 **Rejected.** Changing the test to expect the 4,096 text. That would
 leave the two descent doors with different bounds.
+
+### D-3310 — Kite's derivative, currency and commodity exchange codes are a routine decline, and an unread code is named in the refusal — 2026-10-06
+
+**What was observed.** On 6 Oct 2026, "Refresh all four" on `/masters`
+refused all three vendor masters. Zerodha's refusal read `line 2:
+unrecognised exchange`. `decode_master_row` read the exchange column
+with `Exchange::parse`, which knows `NSE` and `BSE` only. Any other
+code became `Skip::UnrecognisedExchange`. That reason is not routine
+(D-0329), and `pull::masters::validate_rows` refuses the whole file on
+the first non-routine decline. Kite's dump files NSE's own index
+derivatives under `NFO` and commodities under `MCX` (its instruments
+page sample rows, charter §4z). So the Kite master was refused at its
+first non-cash row. The segment decline list
+(`NFO-FUT NFO-OPT MCX BSE`) was never reached for those rows. The
+refusal also did not say which code it had read, and the dump cannot
+be re-read without spending the session token.
+
+**Decided.**
+
+1. `Vendor::is_known_foreign_exchange` names the exchange codes each
+   vendor is known to write for rows this engine does not store.
+   Zerodha: `NFO CDS BCD BFO MCX NCO`. Groww and Dhan: `MCX`. The
+   archives (TrueData, GDFL): none. Each code's source is in charter
+   §4z: the Kite orders page for six, the vendor's SDK for `BFO`, Kite
+   forum staff for `NCO`, and the operator's 6 Oct measurement for
+   `MCX` at Groww and Dhan. A row carrying one of these codes is the
+   routine `Skip::ForeignExchange`. The match is exact and per vendor.
+   A padded, lower-cased or renamed code, or a code another vendor
+   writes, stays `UnrecognisedExchange`.
+2. Every one of these codes is `ForeignExchange`, `NFO` included. The
+   reason judges the code in the vendor's exchange column. Most codes
+   are not expanded by any page read, so filing one under a segment or
+   a venue would invent a meaning.
+3. `Skip::unread_code` returns the vendor's code for the two
+   non-routine reasons. `validate_rows` now names it, escaped:
+   ``line 2: unrecognised exchange `XYZ` ``.
+4. The whole-file refusal is kept. D-0329 made non-routine declines
+   reach a status and an exit code, and MR-01 keeps the previous
+   master when a body is refused. No decision relaxes either rule. A
+   code outside the list still refuses the Kite master, and now the
+   message names the code.
+5. Mutation testing `validate_rows` for this change found five survivors
+   on lines this change did not write. Four were on the two 4,096-byte
+   bounds, which no test reached at the limit. The fifth was the row
+   counter: `rows += 1` could become `-= 1` and no test could tell,
+   because only `rows == 0` was ever asked. A boundary test now pins
+   both bounds on each side. The counter is now a flag. After both
+   changes, 11 mutants are caught, 1 is unviable and 1 times out
+   (`offset + 2` to `offset - 2`).
+
+**Not decided here.** `MCX`, `NFO` and the rest do not become `Exchange`
+variants. An `Exchange` variant is a stored venue. That would widen
+CLAUDE.md §1, which D-0017 closes. A segment code `segment_of` cannot
+read is still a row error, and that message still does not name the
+code. That is the next place to look if Kite's master refuses again.
+
+**Not measured.** No real Kite dump was decoded for this change. The
+operator's copy is token-gated and none is held locally. Whether line 2
+held one of these eight codes is UNVERIFIED. The named refusal is how the
+next refresh will show it.
+
+**Rejected.** Making `UnrecognisedExchange` routine would bring back the
+D-0329 defect: `NSE` drifting to `NSE_EQ` would decline every row and
+report `ok`. Adding the codes to `Exchange::parse` would make every
+caller of that function, including the store layout, accept a venue the
+engine does not store.

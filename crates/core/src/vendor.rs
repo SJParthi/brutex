@@ -675,7 +675,9 @@ pub enum Skip {
     /// Not an exchange this engine stores. `docs/05-decisions.md` D-0017.
     ///
     /// Raised only for an exchange code this engine **recognises and does not
-    /// store** -- today that is `BSE`. A code it cannot parse at all gets
+    /// store** -- `BSE`, plus the per-vendor codes
+    /// [`Vendor::is_known_foreign_exchange`] names (`MCX`, and Kite's `NFO` and
+    /// kin; D-3310). Any other code it cannot parse gets
     /// [`Skip::UnrecognisedExchange`], for the same reason a bond and an
     /// unknown series code are different reasons.
     ForeignExchange,
@@ -818,6 +820,29 @@ impl Skip {
             self,
             Self::UnrecognisedListingClass | Self::UnrecognisedExchange
         )
+    }
+
+    /// The vendor's own code this decline could not read, taken from `row`, or
+    /// `None` for a decline that names no unread code.
+    ///
+    /// Exactly the non-routine reasons carry one, because those are the ones
+    /// an operator must act on and "unrecognised exchange" alone does not say
+    /// what arrived. Here rather than at a reporter for the reason
+    /// [`Skip::reason`] is: the match is exhaustive inside this crate, so a new
+    /// variant must decide whether it names a code. D-3310.
+    #[must_use]
+    pub const fn unread_code<'a>(self, row: &MasterRow<'a>) -> Option<&'a str> {
+        match self {
+            Self::UnrecognisedExchange => Some(row.exchange),
+            Self::UnrecognisedListingClass => Some(row.listing_class),
+            Self::NoVendorId
+            | Self::ForeignExchange
+            | Self::TestInstrument
+            | Self::ForeignSegment
+            | Self::LiveContract
+            | Self::NotEquityListing
+            | Self::SmeBoard => None,
+        }
     }
 
     /// Whether this decline judges the **paper** rather than the venue.
@@ -1348,6 +1373,56 @@ impl Vendor {
         }
     }
 
+    /// Whether `code` is an exchange code this vendor's master writes that this
+    /// engine **recognises and does not store**, beyond the `BSE` that
+    /// [`Exchange::parse`] already reads. A row carrying one is the routine
+    /// [`Skip::ForeignExchange`]; any other code [`Exchange::parse`] refuses
+    /// stays [`Skip::UnrecognisedExchange`], which is not routine. D-3310.
+    ///
+    /// # Why this exists, and what its absence cost
+    ///
+    /// On 6 Oct 2026 "Refresh all four" on `/masters` refused all three vendor
+    /// masters, Zerodha's at `line 2: unrecognised exchange`. Kite's `exchange`
+    /// column is not a venue alone: its own instruments sample files a NIFTY
+    /// future under `NFO` and a silver future under `MCX`
+    /// (`docs/00-charter.md` §4z), so every derivative, currency and commodity
+    /// row of the dump reached the exchange gate with a code `Exchange::parse`
+    /// cannot read, and `pull::masters::validate_rows` refuses a whole file on
+    /// the first non-routine decline. The segment decline list
+    /// (`NFO-FUT NFO-OPT MCX`) was never reached for those rows.
+    ///
+    /// # Why every code here is `ForeignExchange`, `NFO` included
+    ///
+    /// The reason judges the **code in the vendor's exchange column**, not the
+    /// legal entity behind it. The pages read name these codes and do not
+    /// expand most of them, so filing one under a venue or a segment would be
+    /// an invented meaning. Every one of them is declined either way; nothing
+    /// the engine stores is reachable through any of them.
+    ///
+    /// Not `Exchange` variants on purpose: that would widen the stored surface,
+    /// which `CLAUDE.md` §1 and D-0017 close.
+    ///
+    /// Matched exactly, like [`Vendor::segment_of`]: a padded, lower-cased or
+    /// renamed code is drift, not a known venue.
+    ///
+    /// **Constant time**: a `match` over string literals, not a scan.
+    #[must_use]
+    pub fn is_known_foreign_exchange(self, code: &str) -> bool {
+        match self {
+            // `MCX` is a venue CLAUDE.md §1 names as not stored (D-0017). At
+            // Groww and Dhan it is operator-measured in the `exchange` and
+            // `EXCH_ID` columns on 6 Oct 2026 (charter §4z, D-3310).
+            Self::Groww | Self::Dhan => code == "MCX",
+            // `NFO CDS BCD MCX`: Kite's orders page, "Name of the exchange (NSE,
+            // BSE, NFO, CDS, BCD, MCX)". `BFO`: the vendor's own SDK constant
+            // `EXCHANGE_BFO`. `NCO`: Zerodha staff on the Kite forum, April
+            // 2024, "the NSE-Commodity exchange". All in charter §4z.
+            Self::Zerodha => matches!(code, "NFO" | "CDS" | "BCD" | "BFO" | "MCX" | "NCO"),
+            // No master, so no exchange column to read.
+            Self::TrueData | Self::Gdfl => false,
+        }
+    }
+
     /// The exchange's canonical ticker for an index this vendor spells by NAME.
     ///
     /// # Why an alias is needed at all, and why it is not an invention
@@ -1464,9 +1539,17 @@ pub fn decode_master_row(vendor: Vendor, row: MasterRow<'_>) -> Result<Decoded, 
     // exchange" decline. A master legitimately lists venues we do not store --
     // that is `Ok(Bse)` and it is routine. A code that does not parse is the
     // vendor having changed something under us, and it is not.
+    //
+    // A code `Exchange::parse` cannot read is still routine when this vendor is
+    // KNOWN to write it for rows we do not store -- Kite's `NFO` and `MCX`, for
+    // two. Matched exactly, like `segment_of`: a padded or renamed code is not
+    // a known one. D-3310.
     match Exchange::parse(row.exchange) {
         Ok(Exchange::Nse) => {}
         Ok(_) => return declined(Skip::ForeignExchange),
+        Err(_) if vendor.is_known_foreign_exchange(row.exchange) => {
+            return declined(Skip::ForeignExchange);
+        }
         Err(_) => return declined(Skip::UnrecognisedExchange),
     }
     let exchange = Exchange::Nse;
@@ -2026,16 +2109,125 @@ mod tests {
         );
         assert!(Skip::ForeignExchange.is_routine());
 
-        // `MCX` is a code `Exchange::parse` cannot read at all. This test used
-        // to assert it was ALSO `ForeignExchange` -- it encoded the defect
-        // rather than catching it, which is why the defect survived a suite at
-        // 100% coverage. The two are now different reasons, and only one of
-        // them is routine.
+        // A code this vendor is not known to write is unreadable, not foreign.
+        // This test used to make that point with `MCX` and before that asserted
+        // `MCX` was ALSO `ForeignExchange` -- it encoded the conflation D-0329
+        // removed. `MCX` is now a code the masters are KNOWN to carry (D-3310,
+        // below), so the unreadable case is an invented code instead.
+        assert_eq!(
+            groww(row("XYZ", "COMMODITY", "GOLD", "FUT", "2026-08-05", ""))
+                .expect("ok")
+                .skip(),
+            Some(Skip::UnrecognisedExchange)
+        );
+    }
+
+    #[test]
+    fn exactly_the_non_routine_declines_name_the_code_they_could_not_read() {
+        // D-3310: the refusal says WHAT arrived, from the column it judged.
+        let mut r = row("XYZ", "NSE", "RELIANCE", "EQ", "", "");
+        r.listing_class = "EQX";
+        assert_eq!(Skip::UnrecognisedExchange.unread_code(&r), Some("XYZ"));
+        assert_eq!(Skip::UnrecognisedListingClass.unread_code(&r), Some("EQX"));
+        for routine in [
+            Skip::NoVendorId,
+            Skip::ForeignExchange,
+            Skip::TestInstrument,
+            Skip::ForeignSegment,
+            Skip::LiveContract,
+            Skip::NotEquityListing,
+            Skip::SmeBoard,
+        ] {
+            assert!(routine.is_routine());
+            assert_eq!(routine.unread_code(&r), None, "{routine:?}");
+        }
+    }
+
+    #[test]
+    fn every_known_non_nse_exchange_code_is_the_routine_foreign_decline() {
+        // D-3310. Kite's dump files derivatives under `NFO`, commodities under
+        // `MCX`, and so on; each of those rows refused the whole master as an
+        // UNRECOGNISED exchange at line 2. The type column is a valid `FUT` so
+        // the row would decode if the exchange gate let it through: only that
+        // gate can be the reason.
+        // The whole table, both ways: every listed code is known, and every
+        // code listed for ANY vendor is unknown at a vendor that does not
+        // list it -- so no arm can quietly grow or shrink.
+        let all = [
+            "NFO", "CDS", "BCD", "BFO", "MCX", "NCO", "NSE", "BSE", "XYZ",
+        ];
+        let expected: [(Vendor, &[&str]); 5] = [
+            (Vendor::Groww, &["MCX"]),
+            (Vendor::Dhan, &["MCX"]),
+            (Vendor::Zerodha, &["NFO", "CDS", "BCD", "BFO", "MCX", "NCO"]),
+            (Vendor::TrueData, &[]),
+            (Vendor::Gdfl, &[]),
+        ];
+        for (vendor, codes) in expected {
+            for code in all {
+                assert_eq!(
+                    vendor.is_known_foreign_exchange(code),
+                    codes.contains(&code),
+                    "{vendor:?} {code}"
+                );
+            }
+        }
+        for code in ["NFO", "CDS", "BCD", "BFO", "MCX", "NCO"] {
+            let decoded = decode_master_row(
+                Vendor::Zerodha,
+                row(code, "NFO-FUT", "NIFTY", "FUT", "2026-08-05", ""),
+            )
+            .expect("a decline, not an error");
+            assert_eq!(decoded.skip(), Some(Skip::ForeignExchange), "{code}");
+        }
         assert_eq!(
             groww(row("MCX", "COMMODITY", "GOLD", "FUT", "2026-08-05", ""))
                 .expect("ok")
                 .skip(),
-            Some(Skip::UnrecognisedExchange)
+            Some(Skip::ForeignExchange)
+        );
+        assert_eq!(
+            decode_master_row(
+                Vendor::Dhan,
+                row("MCX", "M", "GOLD", "FUTCOM", "2026-08-05", "")
+            )
+            .expect("ok")
+            .skip(),
+            Some(Skip::ForeignExchange)
+        );
+
+        // Recognition is per vendor and exact. `NFO` is a Kite word, not a
+        // Groww one; a padded or lower-cased known code is drift, not a venue.
+        for (vendor, code) in [
+            (Vendor::Groww, "NFO"),
+            (Vendor::Dhan, "BFO"),
+            (Vendor::Zerodha, "nfo"),
+            (Vendor::Zerodha, " MCX"),
+            (Vendor::Zerodha, "MCX "),
+            (Vendor::Zerodha, "NSEIX-UNREAD"),
+        ] {
+            let decoded = decode_master_row(
+                vendor,
+                row(code, "NFO-FUT", "NIFTY", "FUT", "2026-08-05", ""),
+            )
+            .expect("a decline, not an error");
+            assert_eq!(
+                decoded.skip(),
+                Some(Skip::UnrecognisedExchange),
+                "{vendor:?} {code:?}"
+            );
+        }
+
+        // And NSE still passes the gate at Kite: the row reaches the segment
+        // gate, which is what stores or declines it.
+        let mut cash = row("NSE", "NSE", "", "EQ", "", "");
+        cash.trading_symbol = "RELIANCE";
+        cash.listing_class = "";
+        assert!(
+            decode_master_row(Vendor::Zerodha, cash)
+                .expect("decodes")
+                .skip()
+                .is_none()
         );
     }
 

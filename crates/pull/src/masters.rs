@@ -1150,7 +1150,9 @@ fn validate_rows(body: &str, vendor: Vendor) -> Result<(), String> {
         .max()
         .unwrap_or(0);
     let mut fields = Vec::with_capacity(widest + 1);
-    let mut rows = 0;
+    // A flag, not a count: only "was there one" is ever asked, and a counter
+    // here let `+= 1` become `-= 1` with no test able to tell (D-3310).
+    let mut any_row = false;
     for (offset, line) in lines.enumerate() {
         if line.is_empty() {
             continue;
@@ -1175,31 +1177,42 @@ fn validate_rows(body: &str, vendor: Vendor) -> Result<(), String> {
                 .copied()
                 .unwrap_or("")
         };
-        let decoded = brutex_core::vendor::decode_master_row(
-            vendor,
-            brutex_core::vendor::MasterRow {
-                vendor_id: get(names.vendor_id),
-                exchange: get(names.exchange),
-                segment: get(names.segment),
-                underlying: get(names.underlying),
-                trading_symbol: get(names.trading_symbol),
-                instrument_type: get(names.instrument_type),
-                listing_class: get(names.listing_class),
-                isin: get(names.isin),
-                expiry: get(names.expiry),
-                strike_rupees: get(names.strike),
-                option_side: names.option_side.map_or("", get),
-            },
-        )
-        .map_err(|why| format!("line {line_number}: {why}"))?;
+        let row = brutex_core::vendor::MasterRow {
+            vendor_id: get(names.vendor_id),
+            exchange: get(names.exchange),
+            segment: get(names.segment),
+            underlying: get(names.underlying),
+            trading_symbol: get(names.trading_symbol),
+            instrument_type: get(names.instrument_type),
+            listing_class: get(names.listing_class),
+            isin: get(names.isin),
+            expiry: get(names.expiry),
+            strike_rupees: get(names.strike),
+            option_side: names.option_side.map_or("", get),
+        };
+        let decoded = brutex_core::vendor::decode_master_row(vendor, row)
+            .map_err(|why| format!("line {line_number}: {why}"))?;
         if let brutex_core::vendor::Decoded::Skipped(declined) = decoded
             && !declined.reason.is_routine()
         {
-            return Err(format!("line {line_number}: {}", declined.reason.reason()));
+            // THE REFUSAL NAMES THE CODE IT COULD NOT READ (D-3310). It said
+            // only `line 2: unrecognised exchange`, so the operator learned
+            // that Kite had sent something and not what -- and the Kite dump
+            // cannot be re-fetched to look without spending the session token.
+            // Escaped, because it is vendor text inside an operator message;
+            // already bounded by `decode_master_row`'s width gate.
+            let unread = declined
+                .reason
+                .unread_code(&row)
+                .map_or_else(String::new, |code| format!(" `{}`", code.escape_debug()));
+            return Err(format!(
+                "line {line_number}: {}{unread}",
+                declined.reason.reason()
+            ));
         }
-        rows += 1;
+        any_row = true;
     }
-    if rows == 0 {
+    if !any_row {
         return Err("master has no data rows".to_owned());
     }
     Ok(())
@@ -2181,6 +2194,97 @@ mod tests {
             assert!(super::validate_rows(&body, vendor).is_ok());
             assert!(super::validate_rows(&format!("{}\n", columns.join(",")), vendor).is_err());
         }
+    }
+
+    /// A Kite-shaped body whose every data row carries `exchange` (and a
+    /// matching `segment`) as given. Invented rows; no vendor byte.
+    fn kite_body(rows: &[(&str, &str)]) -> String {
+        use std::fmt::Write as _;
+        let mut body = "instrument_token,exchange_token,tradingsymbol,name,last_price,expiry,\
+                        strike,tick_size,lot_size,instrument_type,segment,exchange\n"
+            .to_owned();
+        for (i, (exchange, segment)) in rows.iter().enumerate() {
+            writeln!(
+                body,
+                "{},{},INVENTED{i},,0,2026-11-26,0,0.05,1,FUT,{segment},{exchange}",
+                900_000 + i,
+                9_000 + i
+            )
+            .expect("writing to a String cannot fail");
+        }
+        body
+    }
+
+    #[test]
+    fn a_kite_master_full_of_derivative_and_commodity_codes_is_valid() {
+        // D-3310. "Refresh all four" refused Kite's dump at `line 2:
+        // unrecognised exchange`: its exchange column files derivatives,
+        // currency and commodity rows under codes `Exchange::parse` cannot
+        // read. Each is a known, routine decline now.
+        let body = kite_body(&[
+            ("NFO", "NFO-FUT"),
+            ("CDS", "CDS-FUT"),
+            ("BCD", "BCD-FUT"),
+            ("BFO", "BFO-FUT"),
+            ("MCX", "MCX"),
+            ("NCO", "NCO-FUT"),
+            ("BSE", "BSE"),
+        ]);
+        assert_eq!(super::validate_rows(&body, Vendor::Zerodha), Ok(()));
+    }
+
+    #[test]
+    fn the_row_byte_limit_admits_exactly_4096_bytes_on_the_header_and_on_a_row() {
+        // Both bounds are `> 4096`, so 4,096 is the last admitted length. Each
+        // side is pinned: at the limit lands, one byte over refuses by name.
+        let header = "instrument_token,exchange_token,tradingsymbol,name,last_price,expiry,\
+                      strike,tick_size,lot_size,instrument_type,segment,exchange";
+        let row = |name: &str| format!("1,2,INVENTED,{name},0,,0,0.05,1,EQ,BSE,BSE");
+        let pad = |base: usize, to: usize| "x".repeat(to - base);
+
+        // The header, padded with one unread trailing column.
+        let base = header.len() + ",".len();
+        for (len, ok) in [(4096, true), (4097, false)] {
+            let wide = format!("{header},{}", pad(base, len));
+            assert_eq!(wide.len(), len);
+            let got = super::validate_rows(&format!("{wide}\n{}\n", row("N")), Vendor::Zerodha);
+            if ok {
+                assert_eq!(got, Ok(()), "{len}");
+            } else {
+                assert_eq!(got, Err("header exceeds 4096 bytes".to_owned()), "{len}");
+            }
+        }
+
+        // A row, padded in `name`, a column this vendor's decode never reads.
+        let base = row("").len();
+        for (len, ok) in [(4096, true), (4097, false)] {
+            let wide = row(&pad(base, len));
+            assert_eq!(wide.len(), len);
+            let got = super::validate_rows(&format!("{header}\n{wide}\n"), Vendor::Zerodha);
+            if ok {
+                assert_eq!(got, Ok(()), "{len}");
+            } else {
+                assert_eq!(got, Err("line 2 exceeds 4096 bytes".to_owned()), "{len}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_unknown_exchange_refuses_the_master_and_names_the_code_it_sent() {
+        // The policy is unchanged -- one non-routine decline refuses the
+        // file (D-0329) -- but the message now carries the code, so the next
+        // drift is diagnosable without re-fetching a token-gated dump.
+        let body = kite_body(&[("NFO", "NFO-FUT"), ("XYZ", "XYZ")]);
+        assert_eq!(
+            super::validate_rows(&body, Vendor::Zerodha),
+            Err("line 3: unrecognised exchange `XYZ`".to_owned())
+        );
+        // Vendor text is escaped, never written raw into an operator message.
+        let body = kite_body(&[("X\u{1b}Y", "NFO-FUT")]);
+        assert_eq!(
+            super::validate_rows(&body, Vendor::Zerodha),
+            Err("line 2: unrecognised exchange `X\\u{1b}Y`".to_owned())
+        );
     }
 
     #[test]
