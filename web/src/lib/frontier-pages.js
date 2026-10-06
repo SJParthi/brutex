@@ -22,6 +22,20 @@ function sameRules(left, right) {
 }
 
 /**
+ * The served `admission` lists (which rules `meets.all` conjoins) must be the
+ * same on every page: they come from `cli::frontier::VERDICT_CHECKED` and
+ * `VERDICT_UNCHECKED`, so a change between pages is two server builds. D-1810.
+ *
+ * @param {any} left @param {any} right
+ */
+function sameAdmission(left, right) {
+  const names = (/** @type {any} */ value, /** @type {string} */ key) =>
+    value && typeof value === 'object' && Array.isArray(value[key]) ? value[key].join('\u0000') : null;
+  return names(left, 'checked') === names(right, 'checked') &&
+    names(left, 'unchecked') === names(right, 'unchecked');
+}
+
+/**
  * @param {string} identity
  * @param {(url: string) => Promise<{ok: boolean, status: number, json: () => Promise<any>}>} request
  * @returns {Promise<any>}
@@ -61,8 +75,9 @@ export async function fetchCompleteFrontier(identity, request) {
       refuse('total_admitted is not a valid result count.');
     }
     if (first && (body.total_count !== first.total_count ||
-        body.total_admitted !== first.total_admitted || !sameRules(first.rules, body.rules))) {
-      refuse('result counts or recorded rules changed between pages.');
+        body.total_admitted !== first.total_admitted || !sameRules(first.rules, body.rules) ||
+        !sameAdmission(first.admission, body.admission))) {
+      refuse('result counts, recorded rules or admission lists changed between pages.');
     }
     const offset = page * FRONTIER_PAGE_ROWS;
     const expectedCount = Math.min(FRONTIER_PAGE_ROWS, body.total_count - offset);

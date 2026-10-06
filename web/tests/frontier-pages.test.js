@@ -7,7 +7,12 @@ const identity = 'ab'.repeat(32);
 /** @param {number} total */
 const rules = (total) => ({
   min_win_rate_bp: 5_000, min_rr_bp: 125, min_ret_over_dd_bp: 400,
-  min_trades: 4, min_assurance_bp: 3_000, max_mae_ppm: 0, top: Math.max(1, total)
+  min_trades: 4, min_assurance_bp: 3_000, max_mae_ppm: 0, min_avg_rr_bp: 200,
+  min_fill_headroom_bp: 150, top: Math.max(1, total)
+});
+const admission = () => ({
+  checked: ['win_rate', 'reward_to_risk', 'return_over_drawdown', 'trades', 'assurance', 'avg_payoff'],
+  unchecked: ['stop', 'protective_exits', 'fill_headroom']
 });
 /** @param {number} rank */
 const row = (rank) => ({
@@ -19,8 +24,8 @@ const row = (rank) => ({
   gross_win: 300, gross_loss: -100,
   meets: {
     win_rate: true, reward_to_risk: true, return_over_drawdown: true,
-    trades: true, assurance: true, all: true, stop_unchecked: true,
-    protective_exits_unchecked: true
+    trades: true, assurance: true, avg_payoff: true, all: true, stop_unchecked: true,
+    protective_exits_unchecked: true, fill_headroom_unchecked: true
   }
 });
 
@@ -35,7 +40,7 @@ function responseFor(total, page) {
     body: {
       identity, rows: Array.from({ length: end - offset }, (_, i) => row(offset + i + 1)),
       count: end - offset, total_count: total, admitted: end - offset, total_admitted: total,
-      rules: total ? rules(total) : null, page, limit: FRONTIER_PAGE_ROWS,
+      rules: total ? rules(total) : null, admission: admission(), page, limit: FRONTIER_PAGE_ROWS,
       page_complete: true, complete, next_page: end < total ? page + 1 : null,
       refusal: complete ? null : `partial page only: page ${page} returns rows ${offset}..${end} of ${total}. Fetch every page and reconcile \`total_count\`; this response is not a complete frontier`
     }
@@ -140,6 +145,7 @@ test('later pages cannot change identity, counts, rules, coordinates, completene
     (body) => { body.total_admitted = 256; },
     (body) => { body.rules.top = 258; },
     (body) => { body.rules = null; },
+    (body) => { body.admission.checked.pop(); },
     (body) => { body.page = 0; },
     (body) => { body.limit = 128; },
     (body) => { body.page_complete = false; },

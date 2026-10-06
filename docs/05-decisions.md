@@ -63139,3 +63139,198 @@ longer be reached, so it was removed. The frontier writer keeps its own
 
 **Rejected.** Changing the test to expect the 4,096 text. That would
 leave the two descent doors with different bounds.
+### D-1810 — `/frontier.json`'s verdict is `Rules::admits` on every term a row can answer, and the browser reads the rule list from the server — 2026-10-04
+
+**What was wrong (W2-cli5-4, left open by D-1632).** One admission rule was
+written three times. `cli::Rules::admits` conjoins nine terms.
+`cli::frontier::Row::verdict` restated five of them inline and set
+`admitted` from those five, so a row that `admits` refuses for average payoff
+(`min_avg_rr_bp`) was served `"all":true`. Fill headroom was neither checked
+nor flagged. `web/src/lib/frontier-analytics.js` then restated the same five
+thresholds, the assurance formula and the conjunction, and refused any answer
+whose `meets` differed from its own copy. A fix in `cli` alone would have made
+the page refuse every valid response. An unpriced row's verdict also carried
+`protective_exits_unchecked: false`, which the browser refused.
+
+**The change.** One definition per rule, served rather than copied, as D-0288
+did for the vocabulary.
+
+* `cli::Rules` gains one method per term (`win_rate_holds`,
+  `reward_to_risk_holds`, `return_over_drawdown_holds`, `trades_hold`,
+  `assurance_holds`, `avg_payoff_holds_for`, plus the private `mae_holds`).
+  `admits` is their conjunction, in the same short-circuit order as before.
+  `Row::verdict` calls the same methods on the row's own cell.
+* `Verdict` gains `avg_payoff` and `fill_headroom_unchecked` (always `true`:
+  a row stores no optimistic total). `admitted` conjoins the six answered
+  rules. Every unchecked flag is `true` on every row, priced or not.
+* `cli::frontier::VERDICT_CHECKED` and `VERDICT_UNCHECKED` name the answered
+  and unanswered terms. `Verdict::checked()` and `unchecked()` return them
+  with their values.
+* `api`'s `/frontier.json` writes `meets` from those two methods. Its envelope
+  echoes `min_avg_rr_bp` and `min_fill_headroom_bp` in `rules` and adds
+  `"admission":{"checked":[..],"unchecked":[..]}` from the two constants.
+* The browser no longer compares any threshold or recomputes assurance. It
+  checks that `meets` carries exactly the served members, all booleans, that
+  `all` is the conjunction of the served checked list, that every served
+  unchecked rule is flagged `true`, and that an unpriced row is not admitted.
+  `frontier-pages.js` refuses an `admission` list that changes between pages.
+  The verdict pill counts and names the rules from `meets` itself.
+
+**What changes on the wire and in results.** No stored byte changes: the
+frontier format and its rules are as they were. A row that clears the five old
+rules but fails `min_avg_rr_bp` now reads `"all":false`, and `admitted` and
+`total_admitted` fall by one for each such row. A rule set with
+`min_avg_rr_bp <= 0` gives the same `all` as before. `meets` gains two
+members. The envelope gains two thresholds and `admission`. A browser older
+than this change refuses the new answer, loudly, because its member list no
+longer matches. Cost per row stays O(1): six comparisons, one square root,
+three flags.
+
+**Tests.** `cli::frontier::tests::the_verdict_is_rules_admits_on_every_term_a_row_can_answer`
+compares `verdict(..).admitted` with `Rules::admits` across nine cell shapes
+(including `u64::MAX` trades and `i64::MIN`/`i64::MAX` money), nine payoff
+floors from `i64::MIN` to `i64::MAX` and two rule bases, with the three
+unanswerable terms switched off. With `avg_payoff` dropped from `admitted` it
+fails at the first row a payoff floor refuses.
+`the_served_rule_names_are_the_verdicts_fields_once_each` pins both lists and
+their order. `an_unpriced_row_fails_every_rule_and_is_marked_unpriced` now
+requires every unchecked flag. `api::frontierjson::tests::a_row_failing_only_average_payoff_is_not_served_as_admitted`
+requires the exact `meets` object, counts, thresholds and `admission` for
+floors 300 (refused), 200 (the boundary, admitted) and 100. Web:
+`tests/frontier-analytics.test.js` (an unknown served rule is enforced, an
+unknown unchecked rule must be flagged, no threshold is compared, an unpriced
+admitted row is refused, fifteen malformed admission shapes refuse);
+`tests/frontier-pages.test.js` (a changed admission list between pages
+refuses). Seven tests in `frontier-analytics.test.js` fail against the
+previous verifier.
+AGB-01, AGB-02.
+
+**Not changed.** `min_weakest_bp` is not a term of `Rules::admits` (it sets the
+screen's `steady` flag), so it is not part of this verdict either. The derived
+figures the browser still cross-checks (`win_rate_bp`, the two ratios, the two
+averages) are integrity checks on the row's own arithmetic, not admission
+rules.
+
+### D-1811 — The V4 OOS replay attests its fold slice once and replays the pending candidates in parallel — 2026-10-04
+
+**What was left (W3-runner5-0, the remainder D-1143 recorded).** Each pending
+OOS candidate in the V4 anchored-search fold went through `replay_selected`,
+which re-attested the fold's series for every candidate: one BLAKE3 over
+`trade_test` (the run-identity check and `oos_data_digest`), one over the
+projected column, every bar re-validated, the acceptance verdicts recounted,
+every source rechecked and the price extremes rescanned. That is O(E + R) per
+candidate for facts that depend on no candidate, and pending holds up to two
+candidates per closed mask. The loop was serial. D-1143 held off because a
+token built before the loop would change which refusal an input with several
+faults reports.
+
+**The change.** New crate-visible `exit_grid_policy::OosReplaySliceV1`, built
+from the OOS series, the column and optionally the hoisted `SliceFacts`. It
+takes the series digest, the feed and commit digests, the bar verdict, the
+acceptance verdict, the source verdict, the price extremes and the column
+digest once, and holds each verdict as it was found, the way
+`LaterExpressionSliceV1` does for the Boolean later period (D-1188).
+`replay_selected_on` reads each verdict at the exact position the per-call
+door checked it, so the refusal order is unchanged; computing a check early
+is not reporting it early. The public `replay_selected` and
+`replay_selected_universe` now build a slice and call the same body, so there
+is one replay path. `require_matches_digested` and the
+`validate_arithmetic_envelope` wrapper had no other callers and are removed.
+`validate.rs` builds one slice per fold, replays the pending candidates with
+`par_iter`, and reads the results back in pending order, so the first refusal
+is the lowest ordinal's, as before, and `final_candidates` keeps its order.
+
+**No output changes.** Every replay value, digest and refusal is identical.
+The walk half of W3-runner5-0 was already closed by D-1186.
+
+**Tests.** `exit_grid_policy::tests::the_oos_replay_refusal_order_is_pinned_for_multi_fault_inputs`
+pins five multi-fault refusals (a torn selection, a foreign side and a foreign
+mask each over a corrupt bar; a corrupt bar; an off-minute bar before a
+corrupt one) through the public door only. It passes on the tree before this
+change and after it, and moving the bar check ahead of the mask check fails
+it. `replays_on_one_oos_slice_equal_the_per_call_replay_for_every_fault`
+crosses six series (clean, a later OOS boundary, a corrupt bar, off-minute
+plus corrupt, a price at `i64::MAX`, a series overlapping training) with four
+runs and two selections, requires the slice door to equal the per-call door
+for every pair, requires one series hash per slice however many replays run
+on it, and requires foreign hoisted facts to be refused unless an earlier
+refusal wins. `validate::tests::the_oos_replay_loop_attests_once_per_fold_and_replays_in_parallel`
+is a source-shape test that fails on the previous tree. AGB-03, AGB-04.
+
+### D-1812 — Column digest V2 binds `known()`; V1 stays, byte for byte, as the named verifier of older records — 2026-10-04
+
+**What was wrong (W3-runner2-8, left open by D-1498).** `column_digest_v1`
+hashes a column's truth bits, sources, sourcing, census, first swept bar,
+collision count, evaluator fingerprint, acceptance verdicts and acceptance
+census, and not `Column::known()`, the per-row masks of conditions with a
+certified answer. Two columns with the same truths and different availability
+shared one digest, although an unknown condition must never be read as false.
+Adding `known()` to V1 would have changed the meaning of every V1 digest
+already recorded, which `CLAUDE.md` §3 rule 8 forbids.
+
+**The change.**
+
+* New `runner::exit_grid_policy::column_digest_v2`: the same field sequence
+  under the domain tag `brutex.indicators.execution-column.v2`, then the
+  length of `known()` and every `known()` mask. The tag alone keeps every V2
+  digest distinct from every V1 digest.
+* `column_digest_v1` is unchanged byte for byte; the shared field sequence is
+  one private helper both codecs call, so V2 cannot drift from V1's part of
+  it. A test pins V1's value on a fixed column, captured from the codec
+  before this change.
+* New `column_digest_codec(column, stored)` answers `Some(V2)`, `Some(V1)` or
+  `None`, so a reader holding an older record and its column verifies the
+  record's column digest by name instead of seeing a changed column.
+* Every digest this build computes uses V2: the private `digest_column`
+  (grid evaluation, `AttestedTrainingV1`, OOS replay and its slice,
+  `resolved_grid_view`, the Boolean later-period slice), the walk-forward V4
+  source identity (`AnchoredSearchPolicyFactsV4::signal_column_digest`), and
+  `cli::candidate_universe`'s signal and execution descriptor digests, its
+  self-check and its universe hash.
+* **One exception, kept on V1 on purpose:** the signal-candle-stop source
+  identity (`brutex.signal-candle-stop.source.v1`, the source id of every
+  index-stop catalog). That namespace already hashes the signal column's
+  `known()` rows directly, and its execution column is `reproject_checked` of
+  that column over bars the same hash binds, so V2 would add no coverage and
+  would re-key every stored index-stop catalog. Measured:
+  `cli::index_stop::tests::grouped_catalogs_keep_the_ungrouped_bytes_and_terminals`
+  fails with V2 there and passes with V1.
+
+**Which stored digests change.** Every value below written by this build
+differs from the value an earlier build wrote for the same inputs, on every
+column, because the codec tag differs:
+
+* the column-digest fields themselves: `signal_column_digest` and
+  `execution_column_digest` in Candidate Universe V1 descriptors and in the
+  records that copy them (Population Admission V3/V4, Population Finalization
+  V3/V4, Population V5/V6, Anchored Search Lineage V4, Step 3 receipts), and
+  `column_digest` in Execution V3/V4, Execution Disposition V2 and Selection V5
+  records;
+* every digest hashed over a column digest: the evaluated-grid, cell,
+  selection, replay and candidate-universe digests, the Global Replay V1–V3
+  witness digests, the walk-forward V4 policy-facts and family digests and
+  the candidate universe digest. Index-stop catalogs and their source ids do
+  not change.
+
+Run identities (§3 rule 3), data digests, policy and resolution digests, cell
+money and every ranking are unchanged: the column digest is a term of
+attestation, not of what was computed.
+
+**How older records are read.** Their bytes are unchanged and every decoder
+reads them: a column digest is 32 opaque bytes in each format, and no format
+version changes. Nothing that serves stored records (`api`) recomputes a
+column digest. Re-verifying an older record against this build's live
+recomputation refuses it, as it did before this change, because each of those
+records also binds the writing build's source commit through its run
+identity or policy facts; the column term is a second, independent mismatch.
+A reader that holds the record's column and wants the column digest itself
+checked calls `column_digest_codec`, which names V1. No stored record is
+rewritten.
+
+**Tests.** `runner::exit_grid_policy::tests::column_digest_v1_never_moves_and_v2_binds_known`
+pins V1 on a fixed column to its pre-change value, checks V1 and V2 against an
+independent composition of their layouts (V2 including every `known()` row,
+and differing when `known()` is left out), requires `digest_column` to be V2,
+and drives `column_digest_codec` through V2, V1, a different column, a zero
+digest and the empty column. It does not compile on the previous tree.
+AGB-05.

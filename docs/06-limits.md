@@ -12678,15 +12678,16 @@ not:
   `new_with_daily_reference`, which is O(S + E) per member-side. It also
   re-attests per member-side (D-1141's limits), so the order there is
   unchanged.
-- **V4 OOS replay (W3-runner5-0, open).** Each pending candidate's
-  `replay_selected` still costs O(E_prefix) attestation work: BLAKE3 over
-  `trade_test` twice, one over the column, bar/acceptance/source/envelope
-  validation, and a `SliceFacts` build. Its walk is O(prefix rows), not
-  O(test rows). The loop is serial, and pending is up to 2 × closed masks.
-  Closing the attestation term needs an attested-OOS token. That token would
-  change which refusal is reported when an input has more than one fault, and
-  that needs its own decision. Closing the walk term needs `trade::walk_over`
-  to start at a row offset (see the W3-runner5-3 entry below).
+- **V4 OOS replay (W3-runner5-0, closed by D-1811).** The fold builds one
+  `OosReplaySliceV1` before its candidates: one BLAKE3 over `trade_test`, one
+  over the column, and the bar, acceptance, source and price-extreme checks,
+  O(E + R) once per fold. Each pending candidate's `replay_selected_on` then
+  pays O(1) for those checks, reading each verdict where the per-call door
+  checked it, plus its own walk over the OOS-only projected column (D-1186)
+  and its crossing table. The candidates replay on rayon's pool and are read
+  back in pending order. Counted, not timed: `DATA_DIGESTS` reads one series
+  hash per slice however many candidates replay on it. No wall-clock figure
+  is claimed for the parallel loop.
 - **`walk_forward_core` OOS pass (W3-runner5-3, open).** Every scored candidate
   is re-priced with `with_levels_over` on a column that runs from bar 0 to
   `fold.test.end`, with rows before `fold.test.start` blanked by `restricted`.
@@ -15648,3 +15649,13 @@ per-candidate primitive from `CLAUDE.md` §3 rule 4.
   a run would need the attempt's origin, which the handler does not receive.
 - **Not timed.** No bench measures a log walk. The 4 MiB per half is the
   configured cap, not a measurement, and the time it takes is UNVERIFIED.
+
+## The frontier verdict's per-row cost is counted, not timed — D-1810, 4 October 2026
+
+- `cli::frontier::Row::verdict` answers six rules (six comparisons and one
+  square root inside `assurance_bp`) and sets three unchecked flags; `api`'s
+  `write_meets` then writes nine short names and one conjunction per row, and
+  `admission_json` writes the two fixed lists once per response. That is a
+  fixed count per row, read from the source. No bench times it, so it is
+  UNVERIFIED as a measured bound. The browser's check of `meets` is one pass
+  over the served lists per row, also untimed.

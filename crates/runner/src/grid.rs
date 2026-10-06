@@ -2454,7 +2454,7 @@ fn evaluate_timed_with_exact_ladders(
 ///
 /// # The bound, and why it is sufficient
 ///
-/// It is the money term `exit_grid_policy`'s `validate_arithmetic_envelope`
+/// It is the money term `exit_grid_policy`'s `validate_envelope_extremes`
 /// already applies to the V1 grid, over the bars the paths actually touch:
 /// with `A` the largest absolute price on any path and `P` the number of
 /// paths, each trade's fill legs lie inside `[-A, A]`, so one trade moves a
@@ -6251,11 +6251,12 @@ mod exit_family_tests {
             })
             .unwrap_or_default();
         assert!(
-            oos_loop.contains("replay_selected_over("),
-            "the loop replays over hoisted facts"
+            oos_loop.contains("OosReplaySliceV1::new(oos, &projected_oos, Some(&oos_facts))")
+                && oos_loop.contains("replay_selected_on("),
+            "the loop replays over hoisted facts, held by the fold's one slice (D-1811)"
         );
         let in_loop = oos_loop
-            .split_once("for (ordinal, candidate) in pending.iter().enumerate() {")
+            .split_once(".par_iter()")
             .map(|(_, body)| body)
             .unwrap_or_default();
         assert!(
