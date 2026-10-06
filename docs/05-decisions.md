@@ -63609,3 +63609,48 @@ onto either path fails them rather than passing silently.
 in `crates/cli/src/anchored_search_lineage_v4.rs` and
 `retained_generation_symlink_hardlink_and_ragged_files_fail_closed` in
 `crates/cli/src/execution_v4.rs`. FB-105.
+
+### D-2795 — A headerless ledger's writer cuts a torn tail only from a file that begins with its records' magic — 2026-10-06
+
+**Context.** Merging `fixboard/pr74-ce2` into PR #74's head met two
+decisions about one line. D-1910 (ledgers-3) made the writable open of
+Execution V4 and Anchored Search Lineage V4 call
+`fixed_tail::heal_torn_tail`, so a kill-torn sub-record tail no longer
+wedges the ledger. D-2794 (CE-89) asked that a renamed or foreign file
+never be cut before it is refused, and extended the ragged-file tests to
+the writable open; it could not reproduce the defect on its own base,
+where `fixed_tail` did not exist. Here both exist. Both ledgers are
+headerless, so the heal was called with an empty magic, and an empty magic
+cuts any file: CE-89 reproduced on this merge (its tests failed against
+D-1910's code, which is what D-2794 wrote them to do).
+
+**Decision.** Each of the six files is healed with the 16-byte magic its
+own records begin with (`PARAMETER_MAGIC`, `PERCENTILE_MAGIC`,
+`DISPOSITION_MAGIC`, `COMPLETION_MAGIC`; `MEMBER_MAGIC`,
+`COMPLETION_MAGIC`). `heal_torn_tail` compares a file shorter than its
+magic over the bytes it has, so a torn FIRST record (a prefix of the
+magic) is still cut to nothing, while a file whose leading bytes are not
+that magic, or not a prefix of it, is left untouched and refused by the
+scan as "ragged". Headered callers are unchanged: their files are longer
+than the header before the comparison is reached. Both sides' tests are
+kept: CE-89's foreign byte (`0x5a`, `0x01`) is refused with its bytes
+unchanged, and D-1910's heal is exercised by a torn prefix of the
+records' own magic.
+
+**Limit.** The check names the file, not the tail: bytes past the last
+whole record of a file that begins with the right magic are cut whatever
+they are, as D-1910 decided, because no record past the last whole one was
+ever acknowledged.
+
+**Proof.** `a_file_shorter_than_its_magic_is_cut_only_when_it_is_a_prefix_of_it`
+in `crates/cli/src/fixed_tail.rs`;
+`retained_generation_symlink_hardlink_and_ragged_files_fail_closed` in
+`crates/cli/src/execution_v4.rs`;
+`member_completion_ragged_and_canonical_order_attacks_fail_closed` in
+`crates/cli/src/anchored_search_lineage_v4.rs`. FB-106.
+
+**Also in this merge.** CE-65's bounded quarantine read (a FIFO at the
+quarantine name never holds the repair) met D-2790's offset-and-digest
+quarantine name. The name is now built by one function, `quarantine_path`
+in `crates/cli/src/selection_v6.rs`, which the CE-65 test calls so its FIFO
+sits at the name the repair reaches for.

@@ -653,6 +653,29 @@ mod tests {
     }
 
     #[test]
+    fn a_file_shorter_than_its_magic_is_cut_only_when_it_is_a_prefix_of_it() {
+        let path = scratch("short-magic");
+        let mut file = open(&path);
+        file.write_all(b"BTX").expect("torn first record");
+        assert_eq!(
+            heal_torn_tail(&file, &path, 0, 10, b"BTX-MAGIC"),
+            Ok(Some(TornTail { kept: 0, found: 3 })),
+            "a torn first record holds a prefix of its magic"
+        );
+        assert_eq!(contents(&path).len(), 0);
+        file.rewind().expect("rewind");
+        file.write_all(b"BTY").expect("foreign short file");
+        assert_eq!(heal_torn_tail(&file, &path, 0, 10, b"BTX-MAGIC"), Ok(None));
+        assert_eq!(contents(&path), b"BTY".to_vec(), "a foreign file is never cut");
+        file.write_all(b"-MAGIC!!!!!!").expect("past the magic");
+        assert_eq!(
+            heal_torn_tail(&file, &path, 0, 10, b"BTY-MAGIC"),
+            Ok(Some(TornTail { kept: 10, found: 15 })),
+            "a file longer than its magic is compared over the whole magic"
+        );
+    }
+
+    #[test]
     fn a_strict_prefix_of_the_header_is_cut_to_nothing_and_anything_else_is_left() {
         let header = b"HEADER01";
         let path = scratch("torn-header");
