@@ -12365,7 +12365,14 @@ fn chain_quotes(
             );
             continue;
         };
-        let Ok(tenor) = pull::tenor::Tenor::between(bar.ts_micros, month_of.inputs.expiry) else {
+        // AT THE CLOSE THE BAR PRICES, NOT ITS OPEN STAMP (grk-2, D-2604). The
+        // premium is the bar's close, so the tenor is measured to the moment
+        // that close printed: one bar width later, capped at the session close.
+        let Ok(tenor) = pull::tenor::Tenor::at_close_of(
+            bar.ts_micros,
+            month_of.timeframe.secs(),
+            month_of.inputs.expiry,
+        ) else {
             out.refused = out.refused.saturating_add(1);
             note_price_refusal(
                 out,
@@ -13456,7 +13463,7 @@ struct PriceInputs {
 ///
 /// # Cost
 ///
-/// **O(rows)**: one `Tenor::between` and one `pull::pricing::price` each, both
+/// **O(rows)**: one `Tenor::at_close_of` and one `pull::pricing::price` each, both
 /// O(1). The volatility lookup is one hash probe. Nothing here scans the store
 /// and nothing reaches the network.
 /// Reads back one instrument-month of bars, contract segment included.
@@ -13755,6 +13762,16 @@ fn file_the_greeks(
     .err()
 }
 
+/// How long one rolling bar of `cadence` lives, for measuring its tenor at
+/// its close. A daily bar lives to the session close, which
+/// [`pull::tenor::Tenor::at_close_of`] caps any longer width at.
+const fn bar_width_secs(cadence: pull::session::Cadence) -> u32 {
+    match cadence {
+        pull::session::Cadence::Minute => 60,
+        pull::session::Cadence::Daily => 86_400,
+    }
+}
+
 fn price_group(
     group: &[pull::rolling::Row],
     inputs: PriceInputs,
@@ -13794,14 +13811,16 @@ fn price_group(
             );
             continue;
         };
-        let tenor = match pull::tenor::Tenor::between(ts, inputs.expiry) {
-            Ok(tenor) => tenor,
-            Err(why) => {
-                out.refused = out.refused.saturating_add(1);
-                note_price_refusal(&mut out, &why.to_string());
-                continue;
-            }
-        };
+        // Measured at the bar's close (grk-2, D-2604); see `chain_quotes`.
+        let tenor =
+            match pull::tenor::Tenor::at_close_of(ts, bar_width_secs(cadence), inputs.expiry) {
+                Ok(tenor) => tenor,
+                Err(why) => {
+                    out.refused = out.refused.saturating_add(1);
+                    note_price_refusal(&mut out, &why.to_string());
+                    continue;
+                }
+            };
         let Ok(at) = pull::session::IstMoment::from_epoch_secs(ts.div_euclid(1_000_000)) else {
             out.refused = out.refused.saturating_add(1);
             note_price_refusal(
@@ -20272,6 +20291,23 @@ mod tests {
     /// filter read that refusal as "no weekly contracts" and dropped WEEK for
     /// the whole window, and every chunk opening in a holiday week, uncounted.
     /// Both the window-level and the per-chunk question must now say "asked".
+    /// grk-2, D-2604: a rolling bar's tenor is measured at its close, one
+    /// bar width after its stamp; a minute bar lives 60 s and a daily bar
+    /// lives to the session close, which `Tenor::at_close_of` caps it at.
+    #[test]
+    fn a_rolling_bar_is_priced_one_width_after_its_stamp() {
+        assert_eq!(bar_width_secs(pull::session::Cadence::Minute), 60);
+        assert_eq!(bar_width_secs(pull::session::Cadence::Daily), 86_400);
+        let source = include_str!("server.rs");
+        let calls = source.matches(concat!("Tenor::", "at_close_of(")).count();
+        let stamps = source.matches(concat!("Tenor::", "between(")).count();
+        assert_eq!(
+            (calls, stamps),
+            (2, 0),
+            "both pricing loops measure at the close"
+        );
+    }
+
     #[test]
     fn a_holiday_week_contract_does_not_remove_its_cadence_from_the_walk() {
         let today = pull::session::Day::new(2026, 8, 20).expect("a real date");

@@ -404,7 +404,7 @@ pub fn render(
     exits: Option<&Grid>,
     folds: Option<&Validated>,
     overfit: Option<&Pbo>,
-    boot: Option<(Option<&Verdict>, Option<&Verdict>, usize)>,
+    boot: Option<(Option<&Verdict>, Option<&Verdict>, Option<usize>)>,
     rows: usize,
 ) -> String {
     render_selected(scope, taken, exits, None, folds, overfit, boot, rows)
@@ -434,7 +434,7 @@ pub fn render_selected(
     selected: Option<&Cell>,
     folds: Option<&Validated>,
     overfit: Option<&Pbo>,
-    boot: Option<(Option<&Verdict>, Option<&Verdict>, usize)>,
+    boot: Option<(Option<&Verdict>, Option<&Verdict>, Option<usize>)>,
     rows: usize,
 ) -> String {
     let mut out = String::with_capacity(4_096);
@@ -1426,7 +1426,12 @@ pub fn overfitting(out: &mut String, p: &Pbo) {
 }
 
 /// The three bootstrap tests, side by side.
-pub fn bootstrap(out: &mut String, rc: Option<&Verdict>, spa: Option<&Verdict>, named: usize) {
+pub fn bootstrap(
+    out: &mut String,
+    rc: Option<&Verdict>,
+    spa: Option<&Verdict>,
+    named: Option<usize>,
+) {
     let _ = writeln!(out, "BOOTSTRAP");
     let _ = writeln!(
         out,
@@ -1450,17 +1455,35 @@ pub fn bootstrap(out: &mut String, rc: Option<&Verdict>, spa: Option<&Verdict>, 
             }
         }
     }
+    // A REFUSED STEPDOWN IS NOT A STEPDOWN THAT NAMED NOTHING (p4num-1,
+    // D-2617). A family too short for the block (D-1990) has no Romano-Wolf
+    // answer; printing it as "names 0" told the reader a stepdown had run and
+    // rejected nothing.
+    let shown = named.map_or_else(|| "REFUSED".to_owned(), |n| n.to_string());
     let _ = writeln!(
         out,
         "  {:<28}{:>12}{:>12}{:>10}",
-        "Romano-Wolf (named)", "-", "-", named
+        "Romano-Wolf (named)", "-", "-", shown
     );
     let _ = writeln!(out);
-    let _ = writeln!(
-        out,
-        "  The first two ask whether ANYTHING here is real. Only Romano-Wolf \
-         says WHICH, and it names {named}."
-    );
+    match named {
+        Some(named) => {
+            let _ = writeln!(
+                out,
+                "  The first two ask whether ANYTHING here is real. Only Romano-Wolf \
+                 says WHICH, and it names {named}."
+            );
+        }
+        None => {
+            let _ = writeln!(
+                out,
+                "  The first two ask whether ANYTHING here is real. Only Romano-Wolf \
+                 says WHICH, and it was REFUSED: the family's aligned periods are too \
+                 few for the resampling block, so it named nothing because it ran on \
+                 nothing."
+            );
+        }
+    }
 
     // WHAT THE SAMPLE SIZE WAS WORTH, BESIDE THE P-VALUE IT PRODUCED.
     //
@@ -1519,7 +1542,7 @@ mod tests {
             periods: 3,
         };
         let mut out = String::new();
-        bootstrap(&mut out, Some(&short), None, 1);
+        bootstrap(&mut out, Some(&short), None, Some(1));
         assert!(out.contains("37.1%"), "the measured rate is shown:\n{out}");
         assert!(
             out.contains("  sample: 3 period(s);"),
@@ -1532,7 +1555,7 @@ mod tests {
             ..short
         };
         let mut said = String::new();
-        bootstrap(&mut said, Some(&between), None, 1);
+        bootstrap(&mut said, Some(&between), None, Some(1));
         assert!(said.contains("  sample: 57 period(s);"), "{said}");
         assert!(said.contains("30 periods: measured 13.3%"), "{said}");
         assert!(
@@ -1545,7 +1568,7 @@ mod tests {
             ..short
         };
         let mut out = String::new();
-        bootstrap(&mut out, Some(&long), None, 1);
+        bootstrap(&mut out, Some(&long), None, Some(1));
         assert!(out.contains("nominal"), "a long sample says so:\n{out}");
         assert!(
             !out.contains("READ THE TWO ROWS ABOVE"),
@@ -1886,7 +1909,7 @@ mod tests {
             Some(selected),
             Some(&Validated::default()),
             Some(&probability_of_overfitting(&[])),
-            Some((None, None, 0)),
+            Some((None, None, Some(0))),
             10,
         )
     }
@@ -2850,7 +2873,7 @@ mod tests {
             strategies: 20,
         };
         let mut out = String::new();
-        bootstrap(&mut out, Some(&clears), Some(&fails), 2);
+        bootstrap(&mut out, Some(&clears), Some(&fails), Some(2));
 
         assert!(out.contains("White's Reality Check"));
         assert!(out.contains("Hansen's SPA"));
@@ -2896,7 +2919,7 @@ mod tests {
             Some(&grid_in),
             Some(&folds),
             Some(&over),
-            Some((None, None, 0)),
+            Some((None, None, Some(0))),
             10,
         );
 
@@ -2918,12 +2941,86 @@ mod tests {
     #[test]
     fn a_refused_bootstrap_is_shown_as_refused_and_never_as_a_pass() {
         let mut out = String::new();
-        bootstrap(&mut out, None, None, 0);
+        bootstrap(&mut out, None, None, None);
         assert!(out.contains("REFUSED"));
         assert!(
             !out.contains("yes"),
             "a test that was refused must never render as clearing"
         );
+    }
+
+    /// p4num-1 / D-2617: a refused stepdown is printed as REFUSED on its own
+    /// row and in its sentence, never as "names 0"; a stepdown that ran and
+    /// rejected nothing still prints 0.
+    #[test]
+    fn a_refused_romano_wolf_is_never_printed_as_naming_zero() {
+        let mut refused = String::new();
+        bootstrap(&mut refused, None, None, None);
+        let row = refused
+            .lines()
+            .find(|line| line.contains("Romano-Wolf (named)"))
+            .expect("the stepdown row");
+        assert!(row.trim_end().ends_with("REFUSED"), "{row}");
+        assert!(!refused.contains("names 0"), "{refused}");
+        assert!(refused.contains("it was REFUSED"), "{refused}");
+
+        let mut ran = String::new();
+        bootstrap(&mut ran, None, None, Some(0));
+        let row = ran
+            .lines()
+            .find(|line| line.contains("Romano-Wolf (named)"))
+            .expect("the stepdown row");
+        assert!(row.trim_end().ends_with('0'), "{row}");
+        assert!(ran.contains("it names 0."), "{ran}");
+    }
+
+    /// p5num-4 / D-2712: an all-winner variant with no drawdown prints `no DD`,
+    /// not the `i64::MAX` sentinel as a ratio, and no average of nothing.
+    #[test]
+    fn the_strategy_report_never_prints_a_sentinel_or_an_empty_mean_as_measured() {
+        let all_won = crate::grid::Cell {
+            trades: 3,
+            wins: 3,
+            pessimistic: 900,
+            optimistic: 900,
+            gross_win: 900,
+            best_trade: 300,
+            min_win: 300,
+            max_drawdown: 0,
+            ..crate::grid::Cell::default()
+        };
+        assert_eq!(all_won.return_over_drawdown(), i64::MAX);
+        let mut out = String::new();
+        super::strategy_report(&mut out, &all_won, "x", CostScope::IndexSpot);
+        assert!(!out.contains("92233720368547758"), "{out}");
+        let row = |label: &str| {
+            out.lines()
+                .find(|l| l.contains(label))
+                .unwrap_or_default()
+                .to_owned()
+        };
+        assert!(row("return over drawdown").contains("no DD"), "{out}");
+        assert!(row("avg losing trade").contains("no losing trade"), "{out}");
+        assert!(!row("avg winning trade").contains('-'), "{out}");
+
+        let none_won = crate::grid::Cell {
+            trades: 2,
+            wins: 0,
+            pessimistic: -200,
+            optimistic: -200,
+            gross_loss: -200,
+            worst_trade: -100,
+            max_drawdown: 200,
+            ..crate::grid::Cell::default()
+        };
+        let mut out = String::new();
+        super::strategy_report(&mut out, &none_won, "y", CostScope::IndexSpot);
+        let line = out
+            .lines()
+            .find(|l| l.contains("avg winning trade"))
+            .unwrap_or_default();
+        assert!(line.contains("no winning trade"), "{out}");
+        assert!(!line.contains("0.00"), "{out}");
     }
 
     /// o1runner-11 / D-1195: the cut table sorts only its shown rows, and

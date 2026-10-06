@@ -163,8 +163,9 @@ fn expected(prefix: &[Candle], current: &Candle, tolerance: Tolerance) -> [Truth
                                 .expect("previous low"),
                 ),
                 _ if day_open == pc => Truth::Unknown,
-                66 => answer(close > (day_open + pc) / 2),
-                67 => answer(close < (day_open + pc) / 2),
+                // Exact since D-2613 (ind1-2): `2·close` against the sum.
+                66 => answer(close * 2 > day_open + pc),
+                67 => answer(close * 2 < day_open + pc),
                 68 if tolerance.base() == Some(Base::SessionRange) => answer(
                     (close - (day_open + pc) / 2).abs() * 1000
                         <= (day_open - pc).abs() * i128::from(tolerance.milli()),

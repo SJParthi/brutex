@@ -63139,3 +63139,78 @@ longer be reached, so it was removed. The frontier writer keeps its own
 
 **Rejected.** Changing the test to expect the 4,096 text. That would
 leave the two descent doors with different bounds.
+
+### D-2603 — A vendor volatility whose unit cannot be told from its value is refused by name — 2026-10-06
+
+- grk-1 (zero-findings numeric pass). `pull::pricing::price` took the vendor's `iv` "unchanged", bounded only by `greeks::MAX_VOLATILITY = 10.0`. The one real Dhan IV the charter records (`docs/00-charter.md` §4b) is in PERCENT (`11.939…`, `9.789…`), and no source records the unit of the rolling overlay's `iv`. A percent figure below 10 was therefore accepted as a decimal: `9.79` was priced as 979 % volatility and filed as vendor greeks.
+- The unit is **UNVERIFIED**, so it is not guessed. A figure at or above `MAX_UNAMBIGUOUS_VENDOR_VOLATILITY = 1.0`, zero, negative or not finite is refused with `PricingError::VendorVolatilityUnitAmbiguous`, which names the figure and the reason. A decimal below one (an index option under 100 % volatility) passes unchanged.
+- Consequence, stated plainly: until a recorded source settles the unit, a vendor IV in percent (every value in the charter's sample) produces a counted, named refusal rather than greeks. Settling the unit is an operator task (`docs/00-charter.md`), not a code change.
+- Proved by `pull::pricing::tests::a_vendor_volatility_of_ambiguous_unit_is_refused_by_name` (ZQ-01).
+- Gate 11 rule 2's float allowlist for `crates/pull/src/pricing.rs` goes from 23 to 25 for the constant and the refusal's field, both statistics (CLAUDE.md §7), and GPORT-11 says so.
+
+### D-2604 — A bar's tenor is measured where its close printed — 2026-10-06
+
+- grk-2 and apis-1. Both api pricing loops (`chain_quotes` for the chain path, `price_group` for the rolling path) priced a bar's CLOSE with `Tenor::between(bar.ts_micros, ..)`, measured from the bar's OPEN stamp. Every row had one bar width too much life, and the expiry day's last minute bar, whose close printed at the expiry instant, was priced with 60 s left instead of being refused as expired. That biases the solved IV low near expiry.
+- New `pull::tenor::Tenor::at_close_of(open, width, expiry)` measures from `open + width`, capped at that day's derivatives close, so a daily bar or a session's short last bucket ends at the close. `chain_quotes` passes the stored rung's width and `price_group` passes `bar_width_secs(cadence)` (60 for a minute bar, a day for a daily bar, which the cap brings to the close).
+- Proved by `pull::tenor::tests::a_bars_tenor_is_measured_at_the_moment_its_close_printed` and `api::server::tests::a_rolling_bar_is_priced_one_width_after_its_stamp` (ZQ-02).
+
+### D-2605 — A stop rests at the price that triggers it — 2026-10-06
+
+- run2-1. The crossing test fires a stop when `move × 1e6 ≥ ppm × anchor`, which is the CEILING paisa distance, but `level_price` and the trail give-back placed the stop at the FLOOR distance (`paisa_of`). A bar printing the stop price exactly therefore did not stop out, and the reported fill sat one paisa inside the trigger (87 ppm of 2,502,006 is 217.67: the trigger needs 218, the stop rested at 217).
+- `runner::grid::paisa_ceil_of` gives the smallest whole-paisa move that reaches the ppm; stops and trail give-backs use it. A target is a limit order and keeps the floor, the conservative reading of a touch that may not fill. The grid digest test is re-taken (each level moves out by at most one paisa; counts unchanged).
+- Proved by `runner::grid::tests::a_stop_rests_at_the_price_that_triggers_it` (ZQ-03).
+
+### D-2606 — The operator rule never selects a winless cell — 2026-10-06
+
+- run2-2. `ExitGridSelectorV1::OperatorRule` took `max_by_key(reward_to_risk_bp)`, and `reward_to_risk_bp` is `i64::MAX` for any cell that never lost, including a cell with no winner at all (every trade exactly flat). Such a cell beat every measured ratio and was selected. `Grid::by_reward_to_risk` already excluded it.
+- The rule now filters `wins > 0` first, and ties at the ceiling break on trade count before money.
+- Proved by `runner::exit_grid_policy::tests::operator_rule_never_selects_a_winless_cell_at_the_ratio_ceiling` (ZQ-04).
+
+### D-2607 — A negative spot or IV is refused at the write boundary — 2026-10-06
+
+- STO-1 and STO-2. `store::format::Overlay::is_sane` returned `true` unconditionally, so a negative underlying spot or a negative implied volatility committed to the store. CE-16 already refused an unreadable IV cell in `pull::rolling`; a negative one still passed.
+- `Overlay::is_sane` now requires each of `spot` and `iv_micros` to be the absent marker or non-negative (zero is a legal reading), so `survey` refuses the batch before a byte is written. `pull::rolling` refuses a negative IV cell by name before it reaches the store.
+- Proved by `store::file::tests::an_overlay_with_a_negative_spot_or_iv_is_refused_before_a_byte_is_written` and `pull::rolling::tests::a_negative_volatility_cell_is_refused_by_name` (ZQ-05).
+
+### D-2608 — A fold width that does not divide one day is refused — 2026-10-06
+
+- pul-1. `pull::fold::Bucket::of_secs` accepted any width up to a day. The grid is anchored at 09:15 IST on 1970-01-01, and its edge repeats at 09:15 every day only when the width divides 86,400; a 7-second, 7-minute or 7-hour width drifts by `(day × 86,400) mod width` and opens most sessions with a short bar stamped before 09:15, which `complete_minutes` then certified as whole.
+- Such a width is now refused (`None`). Every rung in `store::path::Timeframe::KNOWN` divides a day, so no stored rung changes.
+- Proved by `pull` test `a_width_that_does_not_divide_a_day_is_refused_and_every_divisor_opens_at_0915` in `crates/pull/tests/anchor.rs` (ZQ-06).
+
+### D-2609 — Contracts order by strike numerically — 2026-10-06
+
+- core-1. `InstrumentKey`'s `Display` doc claimed that sorting the names sorts by strike; the strike is unpadded paisa, so `500000` sorted after `1500000`, and `Contract` derived `Ord` over those bytes.
+- `Contract` now implements `Ord` by comparing its `-`-separated parts in turn, an all-digit part by value and any other by bytes, with a final tie-break on the whole text so the order agrees with `Eq`. The doc says text order is NOT strike order. The path format is unchanged and nothing persists an order derived from `Contract::cmp` (no non-test `BTreeMap`/`BTreeSet`/sorted `Vec<Contract>`).
+- Proved by `core::instrument::tests::contracts_order_by_strike_numerically_and_agree_with_equality` (ZQ-07).
+
+### D-2612 — VWAP side and band bits are decided on the exact rationals — 2026-10-06
+
+- ind1-1 and Z1-slice09-F1. `vwap::value()` is a floor of `pv / 3V`, and the side bits compared `close > vwap` / `close < vwap` against it, so a close equal to `floor(VWAP) < VWAP` set neither side while both were marked evaluable; band bits built from the floored VWAP and sigma could fire up to `1 + k` paisa inside the true band.
+- The side is now decided on `3V·close − pv` in `i128`, and band membership on `x² > m²·D` with `D = V·p2v − pv²` held in 256 bits (`dispersion`, `wide_times`, `band_outside`). Near bands still use the floored levels.
+- Proved by `indicators::vwap::tests::side_and_band_bits_are_decided_on_the_exact_rationals` (ZQ-08).
+
+### D-2613 — EMA steps truncate toward zero and the gap midpoint is exact — 2026-10-06
+
+- ind1-2. The trend EMA stepped with `div_euclid`, which floors: an up step fell short and a down step overshot, so after a fall the EMA reached a flat price exactly and `close_below_ema` went silent for good, while after the mirror rise it stalled below. The gap-midpoint side compared `close` with a ROUNDED midpoint, so a close half a paisa below an odd-sum midpoint read as "on" it.
+- EMA steps now truncate toward zero, so a rise and a fall are mirror images, and the gap-mid sides compare `2·close` against `prev_close + today_open` in `i128`. The gap digest test is re-taken; the family count (4,092) is unchanged.
+- Proved by `indicators::trend::tests::a_flat_price_after_a_rise_and_after_a_fall_report_mirror_sides` and `indicators::session::tests::a_close_on_a_rounded_gap_midpoint_is_judged_against_the_exact_one` (ZQ-09).
+
+### D-2614 — A host halt is never checkpointed or replayed — 2026-10-06
+
+- engine-1 and CE-9. `Ladder::continue_walk` checkpointed every halt, including `Breach::Memory` (a `try_reserve` refusal) and `Breach::Workers` (a spawn failure). Those are facts about the machine, not the run: `resume_checkpointed` returned the saved halt, so a transient OS refusal became the run's answer for that identity for good.
+- `is_durable` lets only an unhalted level or a budget halt (Candidates, Pairs) be checkpointed; after a host halt the last durable boundary is the complete level below, which a rerun rebuilds from.
+- A journal written before this change can already hold such a halt. It still decodes, but `resume_checkpointed` refuses it by name ("checkpoint holds a host Memory or Workers halt, which is never replayed; remove it to rerun the level"). It cannot be rewound, because the pair count at the level below was never saved.
+- Proved by `engine::tests::only_a_host_independent_halt_is_checkpointed` and `serialized_resource_tags_preserve_terminal_refusal_and_reject_contradictions` in `crates/engine/tests/resume_readiness.rs` (ZQ-10).
+
+### D-2617 — A refused Romano-Wolf stepdown is printed as REFUSED, not "names 0" — 2026-10-06
+
+- p4num-1. `cli::bootstrap_family` used `romano_wolf(..).len()`, and `romano_wolf` answers a family too short for the block (D-1990) with an empty list, so the audit printed "Romano-Wolf (named) 0" and "it names 0": a stepdown that ran and rejected nothing, when none had run.
+- `cli` now uses `romano_wolf_receipt(..).map(|r| r.rejected().len())`, and `runner::audit::bootstrap` takes `Option<usize>`: `None` renders `REFUSED` in the row and a sentence saying the family's aligned periods are too few for the block.
+- Proved by `runner::audit::tests::a_refused_romano_wolf_is_never_printed_as_naming_zero` (ZQ-11).
+
+### D-2619 — One distinct test prints the bar FINDINGS judges it against — 2026-10-06
+
+- p2run-1. Below two distinct tests the SIGNIFICANCE block said there was no threshold, while FINDINGS judged the one test against `bonferroni_t(1)` = 1.96. The report contradicted itself.
+- `few_hypotheses` prints `-` for the luck floor and the 1.96 bar at one test; zero tests still print `-`.
+- Proved by `runner::report::tests::one_distinct_test_prints_the_bar_findings_judges_it_against` (ZQ-12).

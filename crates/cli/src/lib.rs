@@ -20612,7 +20612,7 @@ fn bootstrap_family(
 ) -> Option<(
     Option<runner::bootstrap::Verdict>,
     Option<runner::bootstrap::Verdict>,
-    usize,
+    Option<usize>,
 )> {
     // THE BOOTSTRAP, WHICH NEEDED A DIFFERENT SHAPE OF DATA FROM PBO.
     //
@@ -20714,14 +20714,18 @@ fn bootstrap_family(
     );
     // THE STEPDOWN, at the same 5% the two rows above are judged at, so one
     // report carries one alpha rather than two.
-    let named = runner::bootstrap::romano_wolf(
+    // A REFUSED STEPDOWN IS `None`, NOT ZERO (p4num-1, D-2617). `romano_wolf`
+    // answers a family too short for the block with an empty list, which the
+    // report used to print as "names 0", a stepdown that ran and rejected
+    // nothing. The receipt tells the two apart.
+    let named = runner::bootstrap::romano_wolf_receipt(
         &family,
         draws,
         BOOTSTRAP_SEED,
         runner::bootstrap::DEFAULT_BLOCK,
         BOOTSTRAP_ALPHA_PPM,
     )
-    .len();
+    .map(|receipt| receipt.rejected().len());
     let boot = (!family.is_empty()).then_some((rc.as_ref(), spa.as_ref(), named));
     let _ = boot;
     if family.is_empty() {

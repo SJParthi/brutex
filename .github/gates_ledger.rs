@@ -1346,7 +1346,9 @@ const ALLOW_FLOAT: Allow = &[
     ("crates/greeks/src/error.rs", 17),
     ("crates/greeks/src/solver.rs", 14),
     ("crates/greeks/src/moneyness.rs", 6),
-    ("crates/pull/src/pricing.rs", 23),
+    // 25: D-2603 adds the vendor-volatility unit screen, a statistic
+    // (MAX_UNAMBIGUOUS_VENDOR_VOLATILITY and the refusal that names it).
+    ("crates/pull/src/pricing.rs", 25),
     ("crates/pull/src/tenor.rs", 5),
     ("crates/runner/src/grid.rs", 4),
     ("crates/runner/src/significance.rs", 41),
@@ -3400,7 +3402,7 @@ mod tests {
     fn gate11_allowlists_carry_the_counts_the_merged_code_needs() {
         // D-1958, D-1932 and the zero-work counts, carried by D-1938.
         let count = |l: Allow, f: &str| l.iter().find(|(p, _)| *p == f).map(|(_, n)| *n);
-        assert_eq!(count(ALLOW_FLOAT, "crates/pull/src/pricing.rs"), Some(23));
+        assert_eq!(count(ALLOW_FLOAT, "crates/pull/src/pricing.rs"), Some(25));
         assert_eq!(count(ALLOW_FLOAT, "crates/runner/src/report.rs"), Some(4));
         assert_eq!(
             count(ALLOW_FLOAT, "crates/runner/src/significance.rs"),
