@@ -415,18 +415,25 @@ async fn obtain<D: Discovery, P: masters::Pause>(
     struct Validating<'a, D> {
         from: &'a D,
         source: &'a Source,
+        dir: &'a Path,
     }
     impl<D: Discovery> Discovery for Validating<'_, D> {
         async fn get(&self, url: &str) -> Result<String, pull::chain::Refusal> {
             let body = self.from.get(url).await?;
             if self.source.every_url().any(|candidate| candidate == url) {
-                masters::validated_body(self.source, &body)
-                    .map_err(|why| pull::chain::Refusal::answered(200, why))?;
+                // A REFUSED BODY IS KEPT FOR DIAGNOSIS (D-3311), and the path
+                // is named in the refusal the operator reads.
+                masters::validated_body(self.source, &body).map_err(|why| {
+                    pull::chain::Refusal::answered(
+                        200,
+                        masters::keep_rejected(self.dir, self.source, &body, &why),
+                    )
+                })?;
             }
             Ok(body)
         }
     }
-    let tried = masters::fetch(&Validating { from, source }, clock, source).await;
+    let tried = masters::fetch(&Validating { from, source, dir }, clock, source).await;
     let landed = match tried.body {
         Some(ref body) => masters::land(dir, source, body),
         // THE LAST WORD THE HOST SAID, not a summary of the ladder. The full
@@ -1047,6 +1054,22 @@ mod tests {
             tried.attempts.get(1).expect("mirror attempt").got,
             masters::Got::Body { .. }
         ));
+        // D-3311: the refused primary body is kept for diagnosis, and the
+        // master that landed is the mirror's, not the refused bytes.
+        let kept = masters::rejected_path_of(&dir, &source);
+        assert_eq!(
+            std::fs::read_to_string(&kept).expect("the refused body is kept"),
+            format!("{}short\n", a_master())
+        );
+        assert_eq!(
+            std::fs::read_to_string(masters::path_of(&dir, &source)).expect("landed"),
+            a_master()
+        );
+        let named = match tried.attempts.first().expect("primary attempt").got {
+            masters::Got::Refused { ref detail, .. } => detail.clone(),
+            ref other => format!("not a refusal: {other:?}"),
+        };
+        assert!(named.contains(&kept.display().to_string()), "{named}");
     }
 
     /// A clock that does not wait.

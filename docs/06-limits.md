@@ -15905,3 +15905,26 @@ a neighbour (PROOF.md, scratch state).
   overstates `T` by at most one bar. The IV is a Black-Scholes-Merton
   European-exercise figure; no charter row records the exercise style of the
   options it is applied to, so that fit is UNVERIFIED here.
+
+## The before-first-bar check reads a census and probes month by month — D-3313, 6 October 2026
+
+- **When it runs.** Only for a spot instrument whose first chunk came back
+  with no rows while a later chunk carried rows. It runs once per such
+  instrument per run, never per bar or per row.
+- **Cost: O(months), not O(1).** One `census::read_vendor` (a whole-manifest
+  read), then one `Manifest::entry` hash probe per month from the rung's
+  dated history floor to the end of the last empty leading chunk. For
+  Zerodha's fixed 2015-01-01 floor that is at most about 141 probes in
+  October 2026, and the count grows by one each month.
+- **Not timed.** No bench measures it. The time is UNVERIFIED. The bound
+  above is a count of probes, not a measurement.
+- **What it cannot see.** It reads the census, not the bar files. A bar file
+  the census does not list counts as not held. A census recovered from
+  damage is refused as evidence for this reason. Absent and unreadable
+  censuses are refused too, so a store's first-ever pull of a new series
+  still reports its leading empty chunks as a failure. The next run, with a
+  census, does not.
+- **What the vendor's first row proves.** Only what the vendor served. It
+  is not the listing date, which stays UNVERIFIED. A vendor that wrongly
+  answers empty before real history, for a series this store holds nothing
+  of, is read as "before first bar". The bars land the same either way.

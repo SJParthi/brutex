@@ -1018,9 +1018,88 @@ fn replace_locked(dir: &Path, source: &Source, body: &str) -> Result<Result<(), 
 pub fn land(dir: &Path, source: &Source, body: &str) -> Landed {
     let converted = match validated_body(source, body) {
         Ok(body) => body,
-        Err(why) => return Landed::Refused(why),
+        Err(why) => return Landed::Refused(keep_rejected(dir, source, body, &why)),
     };
     land_validated(dir, source, &converted)
+}
+
+/// Where a REFUSED body for one source is kept for diagnosis. D-3311.
+///
+/// `<master>.rejected` beside the master: one file per source, overwritten by
+/// each refusal. It is never a master. Every reader opens a master by
+/// [`path_of`], the exact file name, and no reader lists the directory, so
+/// this name is never read as one. The name does not end in `.csv`, so a
+/// person does not mistake it for one either.
+#[must_use]
+pub fn rejected_path_of(dir: &Path, source: &Source) -> PathBuf {
+    dir.join(format!("{}.rejected", source.file))
+}
+
+/// Keeps a refused body at [`rejected_path_of`] and returns `why` with the
+/// path named, or with the reason it could not be kept.
+///
+/// # Why
+///
+/// D-3310's refusal named one unknown code per refresh. For Zerodha each
+/// refresh spends a fetch with the session token, and the dump is the only
+/// copy of what it held. Keeping the refused bytes lets every unknown code be
+/// found from one refusal. D-3311.
+///
+/// # What it never does
+///
+/// It never writes the master and never makes a refusal look like a
+/// success. The live master is untouched, as MR-01 requires. A body over
+/// [`MAX_BODY_BYTES`] is not kept, because that bound is why it was refused.
+/// A copy that cannot be written is reported in the refusal, never hidden.
+/// The write takes the source's lock and goes through a `.partial` and a
+/// rename, so a concurrent refresh never reads a half-written copy.
+#[must_use]
+pub fn keep_rejected(dir: &Path, source: &Source, body: &str, why: &str) -> String {
+    let path = rejected_path_of(dir, source);
+    let kept = if body.len() > MAX_BODY_BYTES {
+        Err(format!("it exceeds the {MAX_BODY_BYTES}-byte ceiling"))
+    } else {
+        write_rejected(dir, source, &path, body)
+    };
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::warn("pull.masters", "a refused master body")
+            .with("file", telemetry::Value::Str(source.file))
+            .with(
+                "bytes",
+                telemetry::Value::Uint(u64::try_from(body.len()).unwrap_or(u64::MAX)),
+            )
+            .with(
+                "kept_at",
+                telemetry::Value::Str(if kept.is_ok() {
+                    path.to_str().unwrap_or("(not UTF-8)")
+                } else {
+                    "(not kept)"
+                }),
+            ),
+    );
+    match kept {
+        Ok(()) => format!(
+            "{why}. The refused body ({} bytes) is kept at {} for diagnosis; it is \
+             never read as a master, and the previous master is untouched",
+            body.len(),
+            path.display()
+        ),
+        Err(failure) => format!("{why}. The refused body was NOT kept — {failure}"),
+    }
+}
+
+fn write_rejected(dir: &Path, source: &Source, path: &Path, body: &str) -> Result<(), String> {
+    std::fs::create_dir_all(dir)
+        .map_err(|e| format!("{} cannot be created — {e}", dir.display()))?;
+    let _lock = lock_source(dir, source)?;
+    let temporary = dir.join(format!(".{}.rejected.partial", source.file));
+    let written = std::fs::write(&temporary, body.as_bytes())
+        .map_err(|e| format!("{} could not be written — {e}", temporary.display()));
+    let renamed = written.and_then(|()| {
+        std::fs::rename(&temporary, path)
+            .map_err(|e| format!("{} could not be renamed — {e}", temporary.display()))
+    });
+    renamed.map_err(|failure| remove_partial_after(&temporary, failure))
 }
 
 /// Checks the complete payload before it can replace a stored master.
@@ -1150,7 +1229,9 @@ fn validate_rows(body: &str, vendor: Vendor) -> Result<(), String> {
         .max()
         .unwrap_or(0);
     let mut fields = Vec::with_capacity(widest + 1);
-    let mut rows = 0;
+    // A flag, not a count: only "was there one" is ever asked, and a counter
+    // here let `+= 1` become `-= 1` with no test able to tell (D-3310).
+    let mut any_row = false;
     for (offset, line) in lines.enumerate() {
         if line.is_empty() {
             continue;
@@ -1175,31 +1256,51 @@ fn validate_rows(body: &str, vendor: Vendor) -> Result<(), String> {
                 .copied()
                 .unwrap_or("")
         };
-        let decoded = brutex_core::vendor::decode_master_row(
-            vendor,
-            brutex_core::vendor::MasterRow {
-                vendor_id: get(names.vendor_id),
-                exchange: get(names.exchange),
-                segment: get(names.segment),
-                underlying: get(names.underlying),
-                trading_symbol: get(names.trading_symbol),
-                instrument_type: get(names.instrument_type),
-                listing_class: get(names.listing_class),
-                isin: get(names.isin),
-                expiry: get(names.expiry),
-                strike_rupees: get(names.strike),
-                option_side: names.option_side.map_or("", get),
-            },
-        )
-        .map_err(|why| format!("line {line_number}: {why}"))?;
+        let row = brutex_core::vendor::MasterRow {
+            vendor_id: get(names.vendor_id),
+            exchange: get(names.exchange),
+            segment: get(names.segment),
+            underlying: get(names.underlying),
+            trading_symbol: get(names.trading_symbol),
+            instrument_type: get(names.instrument_type),
+            listing_class: get(names.listing_class),
+            isin: get(names.isin),
+            expiry: get(names.expiry),
+            strike_rupees: get(names.strike),
+            option_side: names.option_side.map_or("", get),
+        };
+        // A MALFORMED ROW NAMES THE CODE THE DECODER COULD NOT READ (D-3311),
+        // when a segment or type code is the reason; the error itself is
+        // `Copy` and cannot carry it. Escaped, and bounded by the width gate.
+        let decoded = brutex_core::vendor::decode_master_row(vendor, row).map_err(|why| {
+            let unread = brutex_core::vendor::unread_master_code(vendor, &row)
+                .filter(|_| why == brutex_core::error::InstrumentError::Malformed)
+                .map_or_else(String::new, |(field, code)| {
+                    format!(" — unrecognised {field} `{}`", code.escape_debug())
+                });
+            format!("line {line_number}: {why}{unread}")
+        })?;
         if let brutex_core::vendor::Decoded::Skipped(declined) = decoded
             && !declined.reason.is_routine()
         {
-            return Err(format!("line {line_number}: {}", declined.reason.reason()));
+            // THE REFUSAL NAMES THE CODE IT COULD NOT READ (D-3310). It said
+            // only `line 2: unrecognised exchange`, so the operator learned
+            // that Kite had sent something and not what -- and the Kite dump
+            // cannot be re-fetched to look without spending the session token.
+            // Escaped, because it is vendor text inside an operator message;
+            // already bounded by `decode_master_row`'s width gate.
+            let unread = declined
+                .reason
+                .unread_code(&row)
+                .map_or_else(String::new, |code| format!(" `{}`", code.escape_debug()));
+            return Err(format!(
+                "line {line_number}: {}{unread}",
+                declined.reason.reason()
+            ));
         }
-        rows += 1;
+        any_row = true;
     }
-    if rows == 0 {
+    if !any_row {
         return Err("master has no data rows".to_owned());
     }
     Ok(())
@@ -1700,8 +1801,8 @@ async fn prime_now<D: crate::chain::Discovery>(
 )]
 mod tests {
     use super::{
-        Landed, MIN_BODY_BYTES, NSE_INDICES_FILE, SOURCES, Transport, free_sources, land,
-        lock_path_of, lock_source, may_fetch, path_of, token_sources,
+        Landed, MIN_BODY_BYTES, NSE_INDICES_FILE, SOURCES, Transport, free_sources, keep_rejected,
+        land, lock_path_of, lock_source, may_fetch, path_of, rejected_path_of, token_sources,
     };
     use brutex_core::vendor::Vendor;
 
@@ -2181,6 +2282,198 @@ mod tests {
             assert!(super::validate_rows(&body, vendor).is_ok());
             assert!(super::validate_rows(&format!("{}\n", columns.join(",")), vendor).is_err());
         }
+    }
+
+    /// A Kite-shaped body whose every data row carries `exchange` (and a
+    /// matching `segment`) as given. Invented rows; no vendor byte.
+    fn kite_body(rows: &[(&str, &str)]) -> String {
+        use std::fmt::Write as _;
+        let mut body = "instrument_token,exchange_token,tradingsymbol,name,last_price,expiry,\
+                        strike,tick_size,lot_size,instrument_type,segment,exchange\n"
+            .to_owned();
+        for (i, (exchange, segment)) in rows.iter().enumerate() {
+            writeln!(
+                body,
+                "{},{},INVENTED{i},,0,2026-11-26,0,0.05,1,FUT,{segment},{exchange}",
+                900_000 + i,
+                9_000 + i
+            )
+            .expect("writing to a String cannot fail");
+        }
+        body
+    }
+
+    #[test]
+    fn a_kite_master_full_of_derivative_and_commodity_codes_is_valid() {
+        // D-3310. "Refresh all four" refused Kite's dump at `line 2:
+        // unrecognised exchange`: its exchange column files derivatives,
+        // currency and commodity rows under codes `Exchange::parse` cannot
+        // read. Each is a known, routine decline now.
+        let body = kite_body(&[
+            ("NFO", "NFO-FUT"),
+            ("CDS", "CDS-FUT"),
+            ("BCD", "BCD-FUT"),
+            ("BFO", "BFO-FUT"),
+            ("MCX", "MCX"),
+            ("NCO", "NCO-FUT"),
+            ("BSE", "BSE"),
+        ]);
+        assert_eq!(super::validate_rows(&body, Vendor::Zerodha), Ok(()));
+    }
+
+    #[test]
+    fn the_row_byte_limit_admits_exactly_4096_bytes_on_the_header_and_on_a_row() {
+        // Both bounds are `> 4096`, so 4,096 is the last admitted length. Each
+        // side is pinned: at the limit lands, one byte over refuses by name.
+        let header = "instrument_token,exchange_token,tradingsymbol,name,last_price,expiry,\
+                      strike,tick_size,lot_size,instrument_type,segment,exchange";
+        let row = |name: &str| format!("1,2,INVENTED,{name},0,,0,0.05,1,EQ,BSE,BSE");
+        let pad = |base: usize, to: usize| "x".repeat(to - base);
+
+        // The header, padded with one unread trailing column.
+        let base = header.len() + ",".len();
+        for (len, ok) in [(4096, true), (4097, false)] {
+            let wide = format!("{header},{}", pad(base, len));
+            assert_eq!(wide.len(), len);
+            let got = super::validate_rows(&format!("{wide}\n{}\n", row("N")), Vendor::Zerodha);
+            if ok {
+                assert_eq!(got, Ok(()), "{len}");
+            } else {
+                assert_eq!(got, Err("header exceeds 4096 bytes".to_owned()), "{len}");
+            }
+        }
+
+        // A row, padded in `name`, a column this vendor's decode never reads.
+        let base = row("").len();
+        for (len, ok) in [(4096, true), (4097, false)] {
+            let wide = row(&pad(base, len));
+            assert_eq!(wide.len(), len);
+            let got = super::validate_rows(&format!("{header}\n{wide}\n"), Vendor::Zerodha);
+            if ok {
+                assert_eq!(got, Ok(()), "{len}");
+            } else {
+                assert_eq!(got, Err("line 2 exceeds 4096 bytes".to_owned()), "{len}");
+            }
+        }
+    }
+
+    #[test]
+    fn nseix_is_a_known_kite_exchange_and_an_unknown_segment_is_named() {
+        // D-3311. `NSEIX` is what the live dump held at line 25963 on 6 Oct
+        // 2026, once D-3310 made the refusal name it.
+        let body = kite_body(&[("NSEIX", "NSEIX"), ("GLOBAL", "INDICES")]);
+        assert_eq!(super::validate_rows(&body, Vendor::Zerodha), Ok(()));
+        // An NSE row with a segment `segment_of` cannot read is a malformed
+        // row, and the refusal now says which segment.
+        let body = kite_body(&[("NFO", "NFO-FUT"), ("NSE", "NSE-NEW")]);
+        assert_eq!(
+            super::validate_rows(&body, Vendor::Zerodha),
+            Err(
+                "line 3: malformed instrument identifier — unrecognised segment `NSE-NEW`"
+                    .to_owned()
+            )
+        );
+        // A malformed row that is NOT a code (a bad expiry) names nothing.
+        let body = kite_body(&[("NSE", "NSE")]).replace("2026-11-26", "not-a-date");
+        assert_eq!(
+            super::validate_rows(&body, Vendor::Zerodha),
+            Err("line 2: malformed instrument identifier".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_refused_body_is_kept_beside_the_master_and_never_replaces_it() {
+        // D-3311: one refusal must be enough to see every code the vendor
+        // sent. The copy lands at `<master>.rejected`, the live master keeps
+        // its bytes, and the refusal names the copy's path.
+        let dir = scratch("rejected-kept");
+        let source = &SOURCES[0];
+        let good = a_master();
+        assert!(land(&dir, source, &good).is_written());
+        let bad = format!("{good}short\n");
+        let Landed::Refused(why) = land(&dir, source, &bad) else {
+            panic!("a malformed row refuses");
+        };
+        let kept = rejected_path_of(&dir, source);
+        assert_eq!(
+            kept.file_name().and_then(|n| n.to_str()),
+            Some("dhan_scrip.csv.rejected")
+        );
+        assert_ne!(kept, path_of(&dir, source));
+        assert!(why.contains("line "), "{why}");
+        assert!(why.contains(&kept.display().to_string()), "{why}");
+        assert!(why.contains(&format!("({} bytes)", bad.len())), "{why}");
+        assert_eq!(std::fs::read_to_string(&kept).expect("kept"), bad);
+        assert_eq!(
+            std::fs::read_to_string(path_of(&dir, source)).expect("live"),
+            good
+        );
+
+        // Overwritten by the next refusal, never appended, and no partial is
+        // left behind.
+        let worse = format!("{good}also short\n");
+        assert!(!land(&dir, source, &worse).is_written());
+        assert_eq!(std::fs::read_to_string(&kept).expect("kept"), worse);
+        let partials = std::fs::read_dir(&dir)
+            .expect("readable")
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains("partial"))
+            .count();
+        assert_eq!(partials, 0);
+    }
+
+    #[test]
+    fn a_refused_body_that_cannot_be_kept_says_so_rather_than_hiding_it() {
+        let dir = scratch("rejected-unkept");
+        let source = &SOURCES[0];
+        // A directory where the copy's name would go: the rename fails.
+        std::fs::create_dir_all(rejected_path_of(&dir, source).join("x")).expect("blocker");
+        let why = keep_rejected(&dir, source, "body", "refused");
+        assert!(
+            why.starts_with("refused. The refused body was NOT kept — "),
+            "{why}"
+        );
+        assert!(why.contains("could not be renamed"), "{why}");
+        // A body over the ceiling is not written at all.
+        let over = "x".repeat(MAX_BODY_BYTES + 1);
+        let why = keep_rejected(&dir, source, &over, "refused");
+        assert_eq!(
+            why,
+            format!(
+                "refused. The refused body was NOT kept — it exceeds the \
+                 {MAX_BODY_BYTES}-byte ceiling"
+            )
+        );
+        // At the ceiling it is kept.
+        let dir = scratch("rejected-ceiling");
+        let at = "x".repeat(MAX_BODY_BYTES);
+        let why = keep_rejected(&dir, source, &at, "refused");
+        assert!(why.contains("is kept at"), "{why}");
+        assert_eq!(
+            std::fs::metadata(rejected_path_of(&dir, source))
+                .expect("kept")
+                .len(),
+            u64::try_from(MAX_BODY_BYTES).expect("fits")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unknown_exchange_refuses_the_master_and_names_the_code_it_sent() {
+        // The policy is unchanged -- one non-routine decline refuses the
+        // file (D-0329) -- but the message now carries the code, so the next
+        // drift is diagnosable without re-fetching a token-gated dump.
+        let body = kite_body(&[("NFO", "NFO-FUT"), ("XYZ", "XYZ")]);
+        assert_eq!(
+            super::validate_rows(&body, Vendor::Zerodha),
+            Err("line 3: unrecognised exchange `XYZ`".to_owned())
+        );
+        // Vendor text is escaped, never written raw into an operator message.
+        let body = kite_body(&[("X\u{1b}Y", "NFO-FUT")]);
+        assert_eq!(
+            super::validate_rows(&body, Vendor::Zerodha),
+            Err("line 2: unrecognised exchange `X\\u{1b}Y`".to_owned())
+        );
     }
 
     #[test]

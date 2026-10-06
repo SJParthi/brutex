@@ -3254,6 +3254,7 @@ fn landed_nifty() -> BrokerWindow {
         listing: pull::vendor::Listing::Index,
         contract: None,
         unfetched: None,
+        before_first_bar: None,
         instrument: "NIFTY".to_owned(),
         origin: "test only".to_owned(),
         spec,

@@ -64679,3 +64679,210 @@ time-of-day filter and the go-to-minute control still work in minutes
 page's one `TF_SECS` table; no second table is written.
 
 **Proof.** GK-09 in `docs/04-invariants.md`.
+
+### D-3310 — Kite's derivative, currency and commodity exchange codes are a routine decline, and an unread code is named in the refusal — 2026-10-06
+
+**What was observed.** On 6 Oct 2026, "Refresh all four" on `/masters`
+refused all three vendor masters. Zerodha's refusal read `line 2:
+unrecognised exchange`. `decode_master_row` read the exchange column
+with `Exchange::parse`, which knows `NSE` and `BSE` only. Any other
+code became `Skip::UnrecognisedExchange`. That reason is not routine
+(D-0329), and `pull::masters::validate_rows` refuses the whole file on
+the first non-routine decline. Kite's dump files NSE's own index
+derivatives under `NFO` and commodities under `MCX` (its instruments
+page sample rows, charter §4z). So the Kite master was refused at its
+first non-cash row. The segment decline list
+(`NFO-FUT NFO-OPT MCX BSE`) was never reached for those rows. The
+refusal also did not say which code it had read, and the dump cannot
+be re-read without spending the session token.
+
+**Decided.**
+
+1. `Vendor::is_known_foreign_exchange` names the exchange codes each
+   vendor is known to write for rows this engine does not store.
+   Zerodha: `NFO CDS BCD BFO MCX NCO`. Groww and Dhan: `MCX`. The
+   archives (TrueData, GDFL): none. Each code's source is in charter
+   §4z: the Kite orders page for six, the vendor's SDK for `BFO`, Kite
+   forum staff for `NCO`, and the operator's 6 Oct measurement for
+   `MCX` at Groww and Dhan. A row carrying one of these codes is the
+   routine `Skip::ForeignExchange`. The match is exact and per vendor.
+   A padded, lower-cased or renamed code, or a code another vendor
+   writes, stays `UnrecognisedExchange`.
+2. Every one of these codes is `ForeignExchange`, `NFO` included. The
+   reason judges the code in the vendor's exchange column. Most codes
+   are not expanded by any page read, so filing one under a segment or
+   a venue would invent a meaning.
+3. `Skip::unread_code` returns the vendor's code for the two
+   non-routine reasons. `validate_rows` now names it, escaped:
+   ``line 2: unrecognised exchange `XYZ` ``.
+4. The whole-file refusal is kept. D-0329 made non-routine declines
+   reach a status and an exit code, and MR-01 keeps the previous
+   master when a body is refused. No decision relaxes either rule. A
+   code outside the list still refuses the Kite master, and now the
+   message names the code.
+5. Mutation testing `validate_rows` for this change found five survivors
+   on lines this change did not write. Four were on the two 4,096-byte
+   bounds, which no test reached at the limit. The fifth was the row
+   counter: `rows += 1` could become `-= 1` and no test could tell,
+   because only `rows == 0` was ever asked. A boundary test now pins
+   both bounds on each side. The counter is now a flag. After both
+   changes, 11 mutants are caught, 1 is unviable and 1 times out
+   (`offset + 2` to `offset - 2`).
+
+**Not decided here.** `MCX`, `NFO` and the rest do not become `Exchange`
+variants. An `Exchange` variant is a stored venue. That would widen
+CLAUDE.md §1, which D-0017 closes. A segment code `segment_of` cannot
+read is still a row error, and that message still does not name the
+code. That is the next place to look if Kite's master refuses again.
+
+**Not measured.** No real Kite dump was decoded for this change. The
+operator's copy is token-gated and none is held locally. Whether line 2
+held one of these eight codes is UNVERIFIED. The named refusal is how the
+next refresh will show it.
+
+**Rejected.** Making `UnrecognisedExchange` routine would bring back the
+D-0329 defect: `NSE` drifting to `NSE_EQ` would decline every row and
+report `ok`. Adding the codes to `Exchange::parse` would make every
+caller of that function, including the store layout, accept a venue the
+engine does not store.
+
+### D-3311 — NSEIX is a known Kite exchange; a refused master body is kept beside the master; an unread segment or type code is named — 2026-10-06
+
+**What was observed.** The D-3310 build was deployed on `:8080` and
+refreshed. Zerodha's dump (`api.kite.trade/instruments`, HTTP 200,
+6 Oct 2026 about 10:36 IST) got past line 2 and then refused at
+``line 25963: unrecognised exchange `NSEIX` ``. Each unknown code
+cost one Kite fetch, which is made with the session token. Only the
+first unknown code in the file was ever named. Two other gaps had the
+same shape:
+- A segment or instrument-type code that `segment_of` or `type_of` cannot
+  read still refused as `line N: malformed instrument identifier`, with
+  no code.
+- A refused body was thrown away, so nothing was left to read for
+  diagnosis.
+
+**Decided.**
+
+1. `NSEIX` joins Zerodha's known non-stored exchange codes and declines as
+   `ForeignExchange`. Its sources are the live dump, as the operator's
+   app observed it (charter §4z), and Zerodha staff on the forum in
+   March 2025: "`NSEIX` for GIFT NIFTY". `GLOBAL` is not added. No
+   source read shows it as a dump `exchange` value, so it is UNVERIFIED.
+2. When a master body is refused, the received body is kept at
+   `<master>.rejected` beside the masters, for example
+   `zerodha_instruments.csv.rejected`. It is kept in two places: in the
+   refresh ladder's validation (`api::mastersrun::obtain`) and in
+   `pull::masters::land`. The refusal names the path and the byte count,
+   and a `pull.masters` warning event is logged.
+   - There is one copy per source, overwritten by each refusal. It is
+     written under the source's lock through a `.partial` and a rename.
+   - It is never read as a master. Every reader opens a master by the
+     exact file name (`path_of`), and no reader lists the directory. The
+     name does not end in `.csv`.
+   - The live master is untouched, as MR-01 requires.
+   - A body over `MAX_BODY_BYTES` is not kept. If the copy cannot be
+     written, the refusal says "NOT kept" and why.
+   - The masters directory is outside the repository, so the copy is
+     never tracked.
+   - The copy is not deleted when a later refresh succeeds. A stale
+     `.rejected` file means only that some earlier refresh refused; its
+     modification time says when.
+3. `core::vendor::unread_master_code` names the segment or
+   instrument-type code that `decode_master_row` could not read. It
+   checks the decoder's gates in the decoder's order, and answers only
+   for an NSE row within the width bound. `validate_rows` appends it to a
+   `Malformed` refusal, for example
+   ``line 3: malformed instrument identifier — unrecognised segment `NSE-NEW` ``.
+
+**Checked first.** No decision forbids keeping a refused body. D-2684 and
+OD-5 (D-2374) govern how the live master is read and replaced; this copy
+changes neither.
+
+**Rejected.** Making the whole-file refusal tolerate unknown codes. D-0329
+and D-3310 keep that policy. The kept body is what makes the refusal cheap
+to act on.
+
+### D-3312 — GLOBAL is a known Kite exchange code, from a count of one whole dump — 2026-10-06
+
+**What was observed.** The D-3311 build refreshed the Zerodha dump at
+11:07 IST on 6 Oct 2026. It refused at
+``line 25979: unrecognised exchange `GLOBAL` `` and kept the body. The
+operator counted that kept file's `exchange` column: `BFO` 5,016, `BSE`
+12,992, `CDS` 7,902, `GLOBAL` 12, `MCX` 15,330, `NCO` 21,557, `NFO`
+34,928, `NSE` 10,318, `NSEIX` 1. All 12 `GLOBAL` rows are on segment
+`INDICES`. `NSE` rows carry only the segments `NSE` (10,182) and
+`INDICES` (136). The full table is in charter §4z.
+
+**Decided.** `GLOBAL` joins Zerodha's known non-stored exchange codes and
+declines as `ForeignExchange`. Its source is the vendor's own dump, as the
+operator's app observed and counted it. What `GLOBAL` means beyond "12
+INDICES rows in the dump" is UNVERIFIED and not needed: the row is
+declined by its code.
+
+**Why the decline is at the exchange gate.** A `GLOBAL` row has the same
+shape as an NSE index row: segment `INDICES`, type `EQ`. If it got past
+the exchange gate, the index promotion (D-0785) would file it as a spot
+index. The exchange gate runs first, so it is declined before the segment
+is read. A test pins this.
+
+**Result.** All nine codes in that dump are now readable. Every
+non-`NSE` code is a routine decline, and every `NSE` row's segment is one
+`segment_of` already stores. So the counted dump has no row this build
+refuses for an unknown code. Measured: a throwaway local test (not
+committed) passed the kept 11:07 file (8,780,872 bytes) to
+`pull::masters::validated_body` with this change, and it returned `Ok`.
+The whole dump validates. A code that appears later still refuses by name
+and keeps the body.
+
+### D-3313 — Empty chunks before a series' first bar are named, not failed, when the vendor and the store both show it — 2026-10-06
+
+**What was observed.** The operator ran a real Zerodha 1day pull of
+Reference indices for 2018-01-01..=2026-09-30. It finished with 10 failures.
+Each was an index the vendor serves only from recent years, such as
+`NIFTYCHEMICALS`, `NIFTYWAVES`, `NIFTYINTERNET`, `NIFTYRAILWAYSPSU`,
+`NIFTYTMMQ50` and `NIFTYSMEEMERGE`. The log said: "1 of 2 chunk(s) answered
+with NO ROWS AT ALL, the first covering 2018-01-01..=2023-06-23". The later
+chunk was NOT discarded. The store holds those series from their first
+served month, written in that run (`NIFTYCHEMICALS` 2025-11..2026-09,
+`NIFTYINTERNET` 2021-10..2026-09). The failure was the verdict only.
+
+**The rule that produced it.** P-68 and the comment in `fetch_chunks`: an
+empty chunk "is reported rather than taken as a quiet success", because if
+a later chunk of the same month lands, the empty chunk's days can never be
+fetched again. That purpose is kept. For an index that did not exist yet,
+there are no days to lose, so the failure told the operator something false.
+A retry cannot change it either.
+
+**Decided.** Leading empty chunks are recorded as `BEFORE FIRST BAR`, not as
+a failure, only when both halves of the evidence hold:
+
+1. **The vendor's.** Every such chunk comes before the first chunk that
+   carried a row. That row is the vendor's first returned row.
+2. **The store's.** A loaded, undamaged census holds no month of this spot
+   series from the feed's dated history floor for this rung to the end of
+   the last empty leading chunk.
+
+Every other empty chunk stays the P-68 failure, with the same sentence:
+
+- an empty chunk after the first row;
+- every empty chunk when no chunk carried a row (no first bar exists);
+- every empty chunk when the census is absent, unreadable, or recovered
+  from damage, when it holds such a month, or when the floor names no day.
+
+In those cases the sentence also says why the forgiveness was refused.
+
+**Never silent.** The note names the span and the chunk count. It goes on
+the receipt as `Before first bar` and to `/logs` as a `Warn`
+(`pull.spot`, "empty chunks before the series' first bar"). It says the
+listing date is UNVERIFIED: the first row proves what the vendor served,
+not when NSE launched the index.
+
+**What did not change.** Which bars land is unchanged. The empty chunk was
+never a discard, and the refused-chunk prefix rule (D-0327) is untouched.
+The audit journal gets no new record kind for this note. The note lives on
+the receipt and in the rolling log. The expired-F&O path keeps its
+all-or-nothing contract.
+
+**Cost.** One census read and one hash probe per month from the floor, only
+for an instrument whose first chunk was empty. This is O(months), not O(1),
+and not timed. `docs/06-limits.md` states the bound. Invariant P-75.

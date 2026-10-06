@@ -699,22 +699,21 @@ mod zerodha_master_tests {
             got.declined.len(),
             got.errors
         );
-        // THE TWO `NFO` ROWS, AND THIS ASSERTION USED TO SAY "foreign exchange".
+        // THE TWO `NFO` ROWS, AND THIS ASSERTION HAS SAID BOTH THINGS.
         //
-        // `Exchange::parse` knows `NSE` and `BSE` and nothing else, so `NFO`
-        // returns `Err` rather than a venue this build declines to store. Those
-        // are two different facts and they were one outcome: a code the engine
-        // CANNOT PARSE and a venue it CHOOSES NOT TO STORE both read as routine,
-        // so `NSE` drifting to `NSE_EQ` would decline every row of both masters
-        // while the report printed `ok` and exited zero. D-0329 separated them,
-        // and this assertion is the one that had pinned the conflation.
-        //
-        // A real `BSE` row still reads as `foreign exchange`, which is what
-        // makes the distinction worth having rather than a rename.
+        // It said "foreign exchange" while an unparseable code and a venue we
+        // choose not to store were one outcome; D-0329 separated them and it
+        // said "unrecognised exchange". That was right about the separation
+        // and wrong about `NFO`: Kite's own instruments page files NIFTY
+        // derivatives under `NFO` (charter §4z), so it is a code this vendor is
+        // KNOWN to write, and treating it as unreadable refused the whole live
+        // Kite master at line 2 on 6 Oct 2026. D-3310 names it as a known,
+        // routine decline for this vendor only. `NSE_EQ` drift is still
+        // unrecognised -- `core::vendor` pins that.
         assert_eq!(
             got.skipped_by_reason(),
-            vec![("unrecognised exchange", 2)],
-            "the two NFO rows: a code no decoder parses is not a venue"
+            vec![("foreign exchange", 2)],
+            "the two NFO rows: a code Kite is known to write, declined by code"
         );
         assert!(
             got.errors.is_empty(),
