@@ -32,3 +32,11 @@
 - Do Mac journals hold `done` lines with no `definition=`? (they will re-import once).
 - pull::calendar::FIRST_DAY is 2019-12-02 on pushed branches; Mac D-2805 fixes it.
 - Store lookup by time is bisection O(log n) (owned by the Rust/O(1) sweep thread).
+
+## 2026-10-06 (ws2 data-path session)
+
+Head **66eb9eb** on `claude/attack-data-pipeline-hgxmw9`, merged with
+final/all-fixes 969493e1. Rounds 4-7 are done, D-3127..D-3139, D-3680 and
+D-3700. The full table is in RESULT-20261006.md. The Gate 18 pre-run is
+running as nobody in /home/user/brutex-nb (shards, each under 2 h).
+Next: finish the api and pull shards, kill any survivors, run round 8.
