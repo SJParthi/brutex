@@ -169,3 +169,17 @@ checked: none uses D-36xx, and none uses FB-110..149.
   `### D-0372` twice. Routed to L4 (docs drift).
 - The runner fixer was reassigned at 08:20 to the 121 runner cases CI never tested
   (D-2065..2069, then D-3660..3669).
+
+## Integration validation at cab2f2ae (09:40 UTC)
+- fmt clean; 29/29 static gates PASS; workspace clippy -D warnings PASS.
+- Tests (each binary as uid 65534): 122 binaries pass, 3 fail.
+  - pull `unit` (2 tests at crates/pull/tests/unit.rs:112) and store `cited_commits` (2 tests):
+    both pass as root, so the failures are environmental. In pull, the shared /tmp/brutex-pull
+    dir was created earlier by root. In store, git refuses a repo owned by another uid.
+  - core `findings` FAILS as root too, so it is REAL. L2 (attack/o1-p99) appended 10 rows to
+    docs/11-findings.md without updating the disposition tally (stated 111, has 121), the
+    "N stood" prose, or the row digest. It also marked rows FIXED with branch commits:
+    F-8D5719 names f80e4d11, which is not on main (the test requires IN PROGRESS until the
+    squash merge), and F-A86CB4 says FIXED with no sha. L2 never ran core's tests (its RESULT
+    lists touched-crate tests only).
+  - Owner of the fix: L2, at the 12:12 RESUME. Nothing is pushed until it passes.
