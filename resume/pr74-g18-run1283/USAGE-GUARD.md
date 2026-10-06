@@ -72,3 +72,9 @@ Default until the owner picks another plan:
   "disconnected", its container was reclaimed and its background run died,
   so send it a restart message. (L2 was disconnected at 07:31 and restarted
   at 07:33.)
+
+07:51 poll: the 14 brutex sessions sum to $474.76, which is $125.50 since 07:10.
+At $3.5 per point that estimates 35.9% of this window. Tickvault was $322.43
+(+$9.07 since 07:31). Tickvault spends less than it did at calibration, so that
+estimate leans high; the conservative number stands. Weekly extrapolation: about
+37%. All 13 workers were connected. Next poll at 08:10 (trig_01AhHDB3ZyczWMxNVvnUG8Ss).

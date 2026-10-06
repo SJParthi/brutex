@@ -150,3 +150,9 @@ Read CLAUDE.md, then the fix-queue branch file resume/pr74-ci-thread.md (last se
 - Found this window: (1) 23 Gate 18 TIMEOUTS missing from the annotation lists (cargo-mutants annotates only MISSED); lists resume/pr74-g18-run1283/timeouts-*.md, sent to fixers. Total to fix 332. (2) vocab compile-time loop hang (shards 146, 150 at 240m): fixed by g18-rest 3565e479 (D-2083), coordinator re-run 41/41 caught or unviable, 0 timeout; CI bound committed on local integ 46439dee (D-2090, --build-timeout-multiplier 2; proven TIMEOUT in 60s build). (3) g18-rest's walk_back TIMEOUT (u64 pos >= 0): fixed bb736104 (D-2084), verification running. (4) g18-rest 99d8217 had committed a live mutation (repaired 0d8c386); all sessions now grep for the cargo-mutants marker before committing; L4 asked to add a gate for it.
 - Verified so far: g18-rest kills costs 1/1, lake 6/6, indicators 12/12; g18-rest and g18-runner production rewrites reviewed as behaviour-preserving. Untested-shard mutants: greeks 2/2, engine 18/18, indicators 22/22, lake 14+7 unviable, vocab 8+2 unviable; 0 survivors so far.
 - On resume: re-arm the monitor (marker scan), read PAUSE-*.md files, check local job summaries, update the board, continue integration (local integ = 969493e1 + 46439dee).
+
+Number ranges assigned 07:51 UTC 2026-10-06. Before assigning, every live branch head was
+checked: none uses D-36xx, and none uses FB-110..149.
+- D-3600..D-3649 and FB-110..FB-139: WS3 Fix Board batch4 (fixboard/pr74-batch4).
+- D-3650..D-3659: Gate 18 rest fixer, overflow for the untested-case store survivors.
+- Still free: D-3660..D-3699.
