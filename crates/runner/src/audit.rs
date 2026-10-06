@@ -234,7 +234,14 @@ pub fn largest_overnight_move(bars: &[indicators::Candle]) -> Option<OvernightMo
         }
         let ratio = i128::from(after.open.saturating_sub(before.close)) * 1_000_000
             / i128::from(before.close);
-        let ppm = i64::try_from(ratio).unwrap_or(if ratio < 0 { i64::MIN } else { i64::MAX });
+        // `is_negative`, not `ratio < 0`: zero always fits an `i64`, so the
+        // comparison's boundary was never read and `<=` was an equivalent
+        // mutant (G18-runner, D-2055).
+        let ppm = i64::try_from(ratio).unwrap_or(if ratio.is_negative() {
+            i64::MIN
+        } else {
+            i64::MAX
+        });
         if best.is_none_or(|kept| ppm.unsigned_abs() > kept.ppm.unsigned_abs()) {
             best = Some(OvernightMove {
                 day,
@@ -1181,13 +1188,15 @@ pub fn grid(out: &mut String, g: &Grid, keep: usize) {
         // The tail is unsorted now, and at most two of its cells carry a mark
         // (one per selector), so those are put in key order by one comparison
         // instead of by sorting the tail.
+        //
+        // A two-slot sort, not a guarded swap: the key is total over distinct
+        // cells, so a `key(b) < key(a)` guard's `<=` boundary could never be
+        // reached and was an equivalent mutant (G18-runner, D-2056). `None`
+        // sorts first and prints nothing, so one or zero marks still work.
         let mut marked = tail.iter().filter(|&&(_, c)| !mark_for(c).is_empty());
-        let (first, second) = (marked.next(), marked.next());
-        let (first, second) = match (first, second) {
-            (Some(a), Some(b)) if key(b) < key(a) => (Some(b), Some(a)),
-            pair => pair,
-        };
-        for &(_, c) in first.into_iter().chain(second) {
+        let mut pair = [marked.next(), marked.next()];
+        pair.sort_unstable_by_key(|slot| slot.map(key));
+        for &(_, c) in pair.into_iter().flatten() {
             grid_row(out, c, mark_for(c));
         }
     }
@@ -3309,6 +3318,34 @@ mod tests {
         );
     }
 
+    /// Two rescued rows print in the table's own key order, whatever order
+    /// the selection left them in the tail (G18-runner-01, D-2056).
+    #[test]
+    fn two_chosen_rows_below_the_cut_print_in_key_order() {
+        // `best()` takes the 900 total, `SHARPEST` the 900 mfe, so both marks
+        // fall below a cut of one and the 900 total sorts first. Both cell
+        // orders are fed, so neither tail arrangement can pass by accident.
+        for flip in [false, true] {
+            let mut cells = vec![winner(Some(0), 500, 900), winner(Some(1), 900, 400)];
+            if flip {
+                cells.reverse();
+            }
+            cells.insert(0, crate::grid::Cell::default());
+            let g = crate::grid::Grid {
+                cells,
+                ..crate::grid::Grid::default()
+            };
+            let mut out = String::new();
+            grid(&mut out, &g, 1);
+            let best = out.find("<- best()").expect("best() is rescued");
+            let sharp = out.find("<- SHARPEST").expect("SHARPEST is rescued");
+            assert!(
+                best < sharp,
+                "flip={flip}: key order puts 900 first:\n{out}"
+            );
+        }
+    }
+
     /// The sniper line identifies the variant it describes.
     #[test]
     fn the_sharpest_line_names_the_variant_and_not_only_its_numbers() {
@@ -3567,5 +3604,85 @@ mod overnight_tests {
             small.contains("-0.00%"),
             "a sub-basis-point fall keeps its sign:\n{small}"
         );
+        let flat = overnight_line(
+            &OvernightMove {
+                day: 0,
+                prior_close: 100_000,
+                open: 100_000,
+                ppm: 0,
+            },
+            "2024-06-14",
+        );
+        assert!(
+            flat.contains("+0.00%"),
+            "no move is not a fall (G18-runner-02):\n{flat}"
+        );
+    }
+
+    /// One bar per session, each at its own 09:15: `closes[i]` closes
+    /// session `i` and `opens[i]` opens session `i + 1`.
+    fn overnights(closes: &[i64], opens: &[i64]) -> Vec<Candle> {
+        let mut bars = Vec::new();
+        let mut open = closes.first().copied().unwrap_or(1);
+        for (day, &close) in closes.iter().enumerate() {
+            let ts = crate::synthetic::bar(i64::try_from(day).expect("small"), 0).ts_micros;
+            bars.push(Candle::new(
+                ts,
+                open,
+                open.max(close),
+                open.min(close),
+                close,
+                1,
+                indicators::OI_NULL,
+            ));
+            open = opens.get(day).copied().unwrap_or(close);
+        }
+        let ts = crate::synthetic::bar(i64::try_from(closes.len()).expect("small"), 0).ts_micros;
+        bars.push(Candle::new(
+            ts,
+            open,
+            open,
+            open,
+            open,
+            1,
+            indicators::OI_NULL,
+        ));
+        bars
+    }
+
+    /// A TIE KEEPS THE EARLIER SESSION, sign or no sign (G18-runner-03,
+    /// D-2055): +10% into session one and -10% into session two are the same
+    /// magnitude, and the answer must not depend on which came last.
+    #[test]
+    fn a_tie_in_magnitude_keeps_the_earlier_session() {
+        let bars = overnights(&[100_000, 100_000], &[110_000, 90_000]);
+        let found = largest_overnight_move(&bars).expect("three sessions");
+        assert_eq!(found.ppm, 100_000, "{found:?}");
+        assert_eq!(found.day, indicators::ist_day(bars[1].ts_micros));
+        let later = overnights(&[100_000, 100_000], &[90_000, 110_000]);
+        let found = largest_overnight_move(&later).expect("three sessions");
+        assert_eq!(found.ppm, -100_000, "{found:?}");
+        assert_eq!(found.day, indicators::ist_day(later[1].ts_micros));
+    }
+
+    /// A move no `i64` of ppm can hold saturates toward its own sign
+    /// (G18-runner-04, D-2055).
+    #[test]
+    fn an_unrepresentable_move_saturates_toward_its_sign() {
+        let up = largest_overnight_move(&overnights(&[1], &[i64::MAX])).expect("two sessions");
+        assert_eq!(up.ppm, i64::MAX);
+        let down = largest_overnight_move(&overnights(&[1], &[i64::MIN])).expect("two sessions");
+        assert_eq!(down.ppm, i64::MIN);
+    }
+
+    /// Paisa render as signed rupees: zero carries no sign and a fall under
+    /// one rupee keeps its minus (G18-runner-05, D-2055).
+    #[test]
+    fn rupees_signs_only_a_negative_amount() {
+        assert_eq!(super::rupees(0), "0.00");
+        assert_eq!(super::rupees(5), "0.05");
+        assert_eq!(super::rupees(-5), "-0.05");
+        assert_eq!(super::rupees(-12_345), "-123.45");
+        assert_eq!(super::rupees(i64::MIN), "-92233720368547758.08");
     }
 }
