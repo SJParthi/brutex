@@ -15936,3 +15936,40 @@ a neighbour (PROOF.md, scratch state).
   floor-to-first-bar months), never by the bars, and run once per such
   instrument per run. Allowlisted when `fix/masters-mcx` was merged into
   `feat/app-all`.
+
+## `zerodha_nse_checked` reads NSE's file once per parse and probes per member — D-3314, 6 October 2026
+
+- **Cost.** `nse_identity::Reference::read` decodes `nse_total_market.csv`
+  once per masters parse: one pass over at most
+  `pull::nse::MAX_CONSTITUENTS` rows into a pre-sized `HashMap`. A request
+  then pays, per member, one expected-O(1) hash probe into Zerodha's native
+  index and one into that map. Hash probes are expected O(1), not a
+  worst-case bound.
+- **Measured once, not gated.** A throwaway local test (not committed) timed
+  `Reference::confirm` on copies of the 6 Oct 2026 masters: release build,
+  M4 Pro, 50 rounds of the 208 F&O shares, 10,400 calls. p50 84 ns (no NSE
+  file) and 125 ns (with one), p99 250 ns, max 1.5 µs and 10.9 µs. One
+  machine, one run, on the committed one-probe lookup. No bench measures it, so a regression would not fail a
+  gate.
+- **What "same day" checks.** The two files' modification times, converted
+  to IST days, read in the same parse. A file copied with its time preserved
+  keeps it; a file touched without being refetched looks fresh. The check is
+  read at parse time, so a masters refresh that lands both files re-reads
+  both.
+- **What the NSE file cannot say.** It carries no date of its own. Landed
+  today means fetched today, not that NSE changed it today. Whether NSE
+  updates it between rebalances when a constituent's symbol or ISIN changes
+  is UNVERIFIED. A share that leaves the Total Market drops out of the file
+  and refuses as "no row", not as a different identity.
+- **Not yet observed live.** No live copy of the file has been landed by
+  this build. The only real-data run used a file rebuilt from the
+  2026-08-11 transcription in `core::universe`, with series written as `EQ`
+  because the transcription does not carry it. The first live refresh is
+  the first real test of the series column and of the host's answer.
+- **The fifth master.** A masters refresh now fetches five files. If the
+  archive host refuses, the refresh reports `complete: false` and the other
+  masters still land; only `zerodha_nse_checked` refuses for want of it.
+- **A refusal is bounded, and it repeats.** A file refusal can quote the
+  file's first line, so it is cut to its first 120 and last 240 characters.
+  The same reason is then repeated once per refused member on the receipt:
+  with no file, that is 208 lines.

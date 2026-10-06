@@ -101,12 +101,15 @@ pub mod master;
 /// are stale.
 ///
 /// Separate from `/pull/*` on purpose: that moves BARS and spends the vendor's
-/// quota per instrument-month; this moves four files, three of them free public
-/// CDN downloads. A refresh re-parses the masters in place through
+/// quota per instrument-month; this moves five files, four of them free public
+/// downloads. A refresh re-parses the masters in place through
 /// `Site::reparse`; this also answers whether a restart is still required.
 /// D-0308, D-1762.
 pub mod mastersrun;
 pub mod merge;
+/// `cash_identity=zerodha_nse_checked`: a Zerodha NSE EQ row confirmed
+/// against NSE's own ISIN-bearing Total Market file. D-3314.
+pub mod nse_identity;
 pub mod operation_audit;
 pub mod pullrun;
 pub(crate) mod recovery;

@@ -785,6 +785,18 @@ independent master listing. That cross-check is current-snapshot evidence;
 it does not claim that Zerodha supplied the ISIN or prove historical symbol
 changes or historical F&O membership. No ISIN is synthesized in its crawl.
 
+D-3314 adds a third Zerodha-only assurance level that reads no other
+vendor's master. Its one source is the exchange's own file, already recorded
+in §4c:
+
+| Assurance level | Evidence it requires | Source | What it does not claim |
+|---|---|---|---|
+| `zerodha_nse_checked` | Exactly one Zerodha NSE cash EQ row for the symbol, with a token no other row shares; NSE's `ind_niftytotalmarket_list.csv` landed on the same IST day as the Zerodha dump; that file lists the symbol in series `EQ`; the ISIN it prints beside the symbol equals the member's ISIN in `core::universe` | `https://nsearchives.nseindia.com/content/indices/ind_niftytotalmarket_list.csv` (§4c, fetched 2026-08-11 with header `Company Name,Industry,Symbol,Series,ISIN Code`) and the Kite instruments specification above | That Zerodha supplied an ISIN (none is written into Zerodha's row, D-0517); historical renames, corporate actions or membership; when NSE last changed the file, which carries no date of its own |
+
+Whether NSE updates this constituent file when a constituent's symbol or
+ISIN changes between rebalances is **UNVERIFIED**. The landing day says when
+the file was fetched, not how current its rows are.
+
 ## 9. Dated cash closing-auction eligibility — verified 2026-09-06
 
 [NSE/CMTR/73845](https://nsearchives.nseindia.com/content/circulars/CMTR73845.zip)

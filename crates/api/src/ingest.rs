@@ -997,7 +997,7 @@ impl std::error::Error for Refusal {}
 
 fn cash_identity_refusal(got: &str) -> String {
     format!(
-        "REFUSED · cash_identity {got:?}: use isin, or explicitly use zerodha_cross_checked or zerodha_symbol with Zerodha. Native-only symbol mapping is not ISIN verification"
+        "REFUSED · cash_identity {got:?}: use isin, or explicitly use zerodha_nse_checked, zerodha_cross_checked or zerodha_symbol with Zerodha. Native-only symbol mapping is not ISIN verification"
     )
 }
 
@@ -1018,6 +1018,11 @@ pub enum CashIdentity {
     /// Exact native token plus exchange ISIN corroborated by an independent master.
     /// The ISIN is never attributed to Zerodha's ISIN-less file.
     ZerodhaCrossChecked,
+    /// Exact native Zerodha NSE EQ token whose symbol NSE's own Total Market
+    /// file, landed the same IST day, maps to the member's ISIN. No other
+    /// vendor's master is read, and no ISIN is written into Zerodha's row.
+    /// A labelled assurance level of its own, not `isin`. D-3314.
+    ZerodhaNseChecked,
 }
 
 impl CashIdentity {
@@ -1032,6 +1037,9 @@ impl CashIdentity {
             Self::ZerodhaCrossChecked => {
                 "Zerodha exact native token + NSE ISIN cross-check with independent master; current snapshot, not historical identity proof"
             }
+            Self::ZerodhaNseChecked => {
+                "Zerodha exact native NSE EQ token + symbol confirmed against NSE's own ISIN file (ind_niftytotalmarket_list.csv) landed the same day — NOT a vendor ISIN; no other vendor master; current snapshot, not historical identity proof"
+            }
         }
     }
 }
@@ -1043,6 +1051,7 @@ fn parse_cash_identity(body: &str) -> Result<CashIdentity, Refusal> {
         [choice] if choice == "isin" => CashIdentity::Isin,
         [choice] if choice == "zerodha_symbol" => CashIdentity::ZerodhaSymbol,
         [choice] if choice == "zerodha_cross_checked" => CashIdentity::ZerodhaCrossChecked,
+        [choice] if choice == "zerodha_nse_checked" => CashIdentity::ZerodhaNseChecked,
         _ => {
             return Err(Refusal::InvalidCashIdentity {
                 got: choices.join(","),
@@ -2340,6 +2349,10 @@ mod tests {
             parse_cash_identity("vendor=zerodha&cash_identity=zerodha_cross_checked").unwrap(),
             CashIdentity::ZerodhaCrossChecked
         );
+        assert_eq!(
+            parse_cash_identity("vendor=zerodha&cash_identity=zerodha_nse_checked").unwrap(),
+            CashIdentity::ZerodhaNseChecked
+        );
         for body in [
             "vendor=zerodha&cash_identity=",
             "vendor=zerodha&cash_identity=auto",
@@ -2349,6 +2362,11 @@ mod tests {
             "vendor=dhan&cash_identity=zerodha_cross_checked",
             "cash_identity=zerodha_cross_checked",
             "vendor=zerodha&cash_identity=zerodha_cross_checked&cash_identity=isin",
+            "vendor=dhan&cash_identity=zerodha_nse_checked",
+            "vendor=groww&cash_identity=zerodha_nse_checked",
+            "cash_identity=zerodha_nse_checked",
+            "vendor=zerodha&cash_identity=zerodha_nse_checked&cash_identity=zerodha_nse_checked",
+            "vendor=zerodha&cash_identity=ZERODHA_NSE_CHECKED",
         ] {
             assert!(
                 matches!(
@@ -2367,6 +2385,44 @@ mod tests {
             CashIdentity::ZerodhaCrossChecked
                 .label()
                 .contains("independent master")
+        );
+        let nse = CashIdentity::ZerodhaNseChecked.label();
+        assert!(nse.contains("NSE's own ISIN file"), "{nse}");
+        assert!(nse.contains("NOT a vendor ISIN"), "{nse}");
+        assert!(nse.contains("no other vendor master"), "{nse}");
+        assert!(nse.contains("same day"), "{nse}");
+        assert!(
+            cash_identity_refusal("auto").contains("zerodha_nse_checked"),
+            "the refusal names every accepted value"
+        );
+        // EVERY CHOICE THE /pull FORM OFFERS IS ONE THIS PARSER ACCEPTS, and
+        // the default it renders is `isin`. D-3314.
+        let offered: Vec<&str> = crate::render::CASH_IDENTITY_SELECT
+            .split("value=\"")
+            .skip(1)
+            .filter_map(|rest| rest.split('"').next())
+            .collect();
+        assert_eq!(
+            offered,
+            [
+                "isin",
+                "zerodha_nse_checked",
+                "zerodha_cross_checked",
+                "zerodha_symbol"
+            ]
+        );
+        for value in offered {
+            assert!(
+                parse_cash_identity(&format!("vendor=zerodha&cash_identity={value}")).is_ok(),
+                "{value}"
+            );
+        }
+        assert!(crate::render::CASH_IDENTITY_SELECT.contains("value=\"isin\" selected"));
+        assert_eq!(
+            crate::render::CASH_IDENTITY_SELECT
+                .matches(" selected")
+                .count(),
+            1
         );
     }
     use super::*;

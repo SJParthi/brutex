@@ -8366,10 +8366,11 @@
                     <span class="lab">Stock identity verification</span>
                     <select class="din" aria-label="Zerodha cash identity" bind:value={zerodhaCashIdentity}>
                       <option value="isin">Vendor-supplied ISIN — unavailable in Zerodha master</option>
+                      <option value="zerodha_nse_checked">Token + symbol checked against NSE's own ISIN file — Zerodha only, no other vendor</option>
                       <option value="zerodha_cross_checked">Token + independent ISIN cross-check (recommended)</option>
                       <option value="zerodha_symbol">Exact token only — NOT ISIN-verified</option>
                     </select>
-                    <span class="note quiet wrap full">Zerodha does not supply ISINs. The cross-check requires an exact NSE cash listing and a separate, unambiguous ISIN-bearing master matching the exchange table. Missing or conflicting evidence is refused. This is current-snapshot evidence, not proof of historical renames or membership.</span>
+                    <span class="note quiet wrap full">Zerodha does not supply ISINs. The NSE check requires exactly one Zerodha NSE EQ row for the symbol, and NSE's own Total Market file (landed the same day as the Zerodha dump by Refresh masters) mapping that symbol to the member's ISIN; no other vendor is read. The cross-check instead requires a separate, unambiguous ISIN-bearing Groww or Dhan master matching the exchange table. Missing or conflicting evidence is refused. This is current-snapshot evidence, not proof of historical renames or membership.</span>
                   </div>
                 {/if}
                 {#if isFolderFeed}

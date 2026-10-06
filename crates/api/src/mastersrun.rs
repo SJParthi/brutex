@@ -801,6 +801,9 @@ fn page_html() -> String {
         let shape = match source.shape {
             masters::Shape::Csv => "CSV, landed as received",
             masters::Shape::NseIndexJson => "JSON, converted to index_name,category",
+            masters::Shape::NseConstituentCsv => {
+                "CSV, landed as received once every constituent row decodes"
+            }
         };
         let owner = source.vendor.map_or(
             "NSE — the reference the feeds are checked against",
@@ -1165,6 +1168,9 @@ mod tests {
             // between a malformed answer and a wrong catalogue.
             Ok(match masters::SOURCES.iter().find(|s| s.url == url) {
                 Some(source) if source.shape == masters::Shape::NseIndexJson => an_index_document(),
+                Some(source) if source.shape == masters::Shape::NseConstituentCsv => {
+                    a_constituent_file()
+                }
                 // The prime is a homepage; anything non-empty will do, and the
                 // ladder never looks at its body.
                 None => "<html></html>".to_owned(),
@@ -1178,6 +1184,18 @@ mod tests {
                     .map_or_else(|| self.body.clone(), a_master_for),
             })
         }
+    }
+
+    /// NSE's constituent file, large enough to clear the byte floor. D-3314.
+    fn a_constituent_file() -> String {
+        let mut body = String::from("Company Name,Industry,Symbol,Series,ISIN Code\n");
+        for n in 0..40 {
+            let _infallible = std::fmt::Write::write_fmt(
+                &mut body,
+                format_args!("Company {n},Industry,SYM{n},EQ,INE{n:06}A01018\n"),
+            );
+        }
+        body
     }
 
     /// An NSE index document large enough to clear the byte floor once it is
@@ -1538,6 +1556,21 @@ mod tests {
             masters::SOURCES.len(),
             "one row per source, no more and no fewer"
         );
+        // EACH ROW NAMES ITS OWNER AND ITS SHAPE. The NSE constituent file is
+        // the fifth master (D-3314) and says it is landed only once it decodes.
+        for owner in ["Dhan", "Groww", "Zerodha"] {
+            assert!(
+                html.contains(&format!("<div class=\"sub\">{owner}</div>")),
+                "{owner} is not named as a row's owner"
+            );
+        }
+        assert!(!html.contains("another feed"));
+        assert_eq!(
+            html.matches("NSE — the reference the feeds are checked against")
+                .count(),
+            2
+        );
+        assert!(html.contains("CSV, landed as received once every constituent row decodes"));
     }
 
     #[test]
