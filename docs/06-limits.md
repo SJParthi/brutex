@@ -6896,7 +6896,10 @@ not a deterministic collision-proof bound.
 Before an append or durability confirmation, a stale handle scans the bytes
 added since its last validated offset. The work is O(new rows), zero on the
 ordinary serialized path and linear in concurrent append history in the worst
-case. A frontier or chosen-trade block of N rows still requires O(N) validation,
+case. The receipt handle also re-hashes every byte it had already indexed when
+another writer grew the file, so its append and refresh are O(indexed bytes +
+new rows) on that branch (D-1560, D-3318); frontier and chosen-trade handles
+have no prefix recheck (D-3320). A frontier or chosen-trade block of N rows still requires O(N) validation,
 encoding and write work and O(N) buffering; only the receipt row, file-length
 arithmetic and fixed-stride seek are constant-size. Repeating `sync_all` for a
 byte-equal reuse is a fixed number of calls, not constant storage latency.

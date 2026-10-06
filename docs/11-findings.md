@@ -1028,3 +1028,9 @@ receipt refresh.
 own cost doc, found by a wider sweep of wordings. Both corrected by D-3319.
 The round 11 note's "no other copies" held only for the phrasings it
 searched.
+
+### Attack lens L2, round 13 — dispositions — 2026-10-06
+
+§116 and `api::frontierjson`, plus the borderline `api::topjson` header.
+Corrected by D-3320, which also records a search by call site rather than by
+phrase.

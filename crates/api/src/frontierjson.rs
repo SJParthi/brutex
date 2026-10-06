@@ -60,7 +60,9 @@
 //!
 //! After indexes exist, one hash probe finds the run's block and reading it is
 //! linear in the selected rows. Cold opens index historical frontier, ledger
-//! and receipt rows. Warm requests refresh only appended rows, retaining
+//! and receipt rows. Warm requests refresh only appended rows, or first
+//! re-hash every indexed ledger or receipt byte when either file grew
+//! (O(indexed bytes + new rows), D-1560, D-3305, D-3318, D-3320), retaining
 //! generation checks and a parent snapshot before touching children. These
 //! refreshes and selected-row reads are not O(1) overall. The HTTP door caps
 //! every indexed file at 64 MiB, one

@@ -1,5 +1,6 @@
 //! Bounded top report reader. Cold selection indexes O(history); refresh folds
-//! only appended ledger records. Selected frontier verification remains O(rows).
+//! only appended ledger records, after the ledger handle re-hashes its indexed
+//! prefix when another writer grew it (D-1560, D-3320). Selected frontier verification remains O(rows).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

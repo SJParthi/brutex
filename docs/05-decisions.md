@@ -63424,3 +63424,20 @@ the growth branch. The sweep searched for "O(new records)", "O(appended",
 remaining hits are correct: `PrefixDigest`'s own "O(appended bytes)", scoped
 to the non-growth path, and the D-0523 sentence already qualified by D-3317.
 Text only.
+
+### D-3320 — The last copies of the ledger and receipt refresh cost, found by call site — 2026-10-06
+
+A thirteenth review found that §116 in `docs/06-limits.md`, which covers the
+receipt handle, said a stale handle's work is O(new rows). It also found that
+`api::frontierjson`'s `# Cost` section said warm requests "refresh only
+appended rows"; `api::topjson`'s header was borderline. All three now name the
+growth re-hash.
+
+Phrase greps had missed copies three rounds running, so this round searched
+by call site instead. The search listed every `crates/api/src` file that
+names `committed_receipt`, `CommittedParents`, `Receipts` or the results
+ledger: `backtest`, `detail`, `frontierjson`, `lib`, `mastersrun`,
+`sweepevidence`, `sweeprun`, `topjson`, `trades`. It then read each one's
+cost statements, and searched `crates/cli/src` for cost comments beside
+`with_shared_writer`, `ensure_detail_receipt` and `Receipts::`. No other
+statement claims a refresh cost without the re-hash. Text only.
