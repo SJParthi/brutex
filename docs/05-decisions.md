@@ -63265,3 +63265,22 @@ change:
 - `sweeprun::unterminated_marker`'s three-part guard.
 - `topjson::parse`'s `seen.is_empty()` guard (`feed=&underlying=` is
   refused).
+
+### D-2046 — Four later `api` survivors of run 1283 — 2026-10-06
+
+**What was observed.** Shards 183 and 184 finished after the first
+collection and added four survivors:
+
+- `booleanqualification_projection::project`, `asked.offset + n` → `*` and
+  `-`. No api test renders a real qualification page.
+- `server::credential_halts`, `touched_wire || reached_wire()` → `&&`.
+- `bars::seek_page`, the `!` deleted from `!bad.is_empty()`. That made the
+  first CLEAN file the one the `records unreadable` line names.
+
+**Decided.** The page index is `row_index(offset, n)`, pinned by a table of
+exact cases that includes the largest sum that fits. That is the
+`same_coordinate` precedent (D-0731). `touched_wire` gets one authority,
+`BrokerRun::note_wire(reached)`, which uses `|=` and stays true once set. All
+three call sites use it, and its full four-row truth table is a test. The
+seek path is unchanged. A test damages February after a clean January and
+requires the one line to name February's file.

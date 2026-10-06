@@ -23,7 +23,7 @@ pub(super) fn project(reader: &Qualification, asked: &Asked) -> Result<Value, St
     }
     let mut rendered = Vec::new();
     for (n, (row, original)) in rows.iter().zip(&observations).enumerate() {
-        let index = asked.offset + n;
+        let index = row_index(asked.offset, n);
         same_coordinate(row.original, row.family, row.coordinate, original)?;
         let mut value = admission_projection::row(
             index,
@@ -93,6 +93,16 @@ pub(super) fn project(reader: &Qualification, asked: &Asked) -> Result<Value, St
     )?;
     reader.require_current()?;
     Ok(body)
+}
+
+/// The page-wide index of the `n`th row of a page that starts at `offset`.
+///
+/// Its own function for `same_coordinate`'s reason: no api test renders a
+/// real qualification page, and `offset + n` inline survived `*` and `-`
+/// (G18-api-26). The page is bounded by `reader.rows`, which refuses an
+/// extent past the saved count, so the sum cannot overflow.
+const fn row_index(offset: usize, n: usize) -> usize {
+    offset + n
 }
 
 /// Refuses a qualification row that does not name the saved original row

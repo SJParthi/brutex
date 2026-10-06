@@ -2555,6 +2555,60 @@ mod window_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// **THE `records unreadable` LINE NAMES THE FIRST FILE THAT REFUSED A
+    /// RECORD, NOT THE FIRST FILE READ.** January reads clean and February is
+    /// damaged: on the seek path the line names February's file. G18-api-27.
+    #[test]
+    fn the_unreadable_line_names_the_first_damaged_file_not_the_first_file() {
+        let root = scratch("first-faulted");
+        let jan = YearMonth::new(2026, 1).expect("m");
+        let feb = YearMonth::new(2026, 2).expect("m");
+        write_month(&root, jan, 10, 1_000);
+        write_month(&root, feb, 10, 2_000);
+        damage_record(&root, feb, 5);
+        let path_of = |month| {
+            open_classified(
+                &root,
+                PathParts {
+                    vendor: Vendor::Dhan,
+                    exchange: "NSE",
+                    segment: "INDEX",
+                    symbol: SYMBOL,
+                    contract: None,
+                    timeframe: Timeframe::MINUTE_1,
+                    month,
+                    file: FileKind::Bars,
+                },
+            )
+            .map_err(|why| why.message)
+            .expect("the month opens")
+            .path()
+            .display()
+            .to_string()
+        };
+        let (jan_path, feb_path) = (path_of(jan), path_of(feb));
+        let from = crate::emitted::mark();
+        let page = window_over(&root, feb, SortKey::Ts, false, 0, 20, false);
+        assert!(
+            !page.faults.is_empty(),
+            "February's damage is named on the page"
+        );
+        let mine: Vec<telemetry::Record> =
+            crate::emitted::landed(from, "api.bars", "records unreadable")
+                .into_iter()
+                .filter(|record| {
+                    crate::emitted::says(record, "file", &feb_path)
+                        || crate::emitted::says(record, "file", &jan_path)
+                })
+                .collect();
+        assert_eq!(mine.len(), 1, "one line for the request: {mine:?}");
+        assert!(
+            crate::emitted::says(&mine[0], "file", &feb_path),
+            "{mine:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// An unreadable LAST record of the month before is a named gap for the
     /// next month's first row, not "first in file" and not a number measured
     /// across the gap (Z1-slice11-F4).

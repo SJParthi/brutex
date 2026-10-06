@@ -6952,6 +6952,15 @@ pub(crate) struct BrokerRun {
 }
 
 impl BrokerRun {
+    /// Records that a request of this run reached the vendor. Once true it
+    /// stays true: a later instrument refused before the wire cannot unsay
+    /// that an earlier one reached it. The one authority for
+    /// [`BrokerRun::touched_wire`]; three call sites used to spell
+    /// `touched_wire = touched_wire || reached` each. G18-api-25.
+    const fn note_wire(&mut self, reached: bool) {
+        self.touched_wire |= reached;
+    }
+
     /// A transport refusal must also reach the receipt's failure accounting.
     /// Otherwise a different member's successful write makes the whole basket green.
     fn record_refusal(&mut self, instrument: &str, why: String) {
@@ -8069,7 +8078,7 @@ pub(crate) async fn broker_run(
                 // the question the status answers is whether the VENDOR was
                 // ever asked, and once it has been, it has been.
                 let marked = read_markers(&why);
-                out.touched_wire = out.touched_wire || marked.reached_wire;
+                out.note_wire(marked.reached_wire);
                 vendor_down_streak = breaker_next(vendor_down_streak, marked.vendor_down);
                 // THE VERDICT IS RECORDED, NOT RE-DERIVED LATER FROM PROSE.
                 // `autopilot::credential_fault_in_page` lowercases the rendered
@@ -8141,7 +8150,7 @@ pub(crate) async fn broker_run(
     // A STOP CAN LEAVE FETCHED LANES UNLANDED. They are asked again on the
     // next run, because the resume point is the store's own; whether they
     // reached the vendor is still part of what this run did.
-    out.touched_wire = out.touched_wire || lanes.reached_wire();
+    out.note_wire(lanes.reached_wire());
     // NOTHING IS ON THE WIRE ANY MORE. Left set, a finished run would keep
     // claiming to be fetching the last instrument it touched for as long as the
     // process lived.
@@ -8178,7 +8187,7 @@ async fn credential_halts(
     index: usize,
 ) -> bool {
     if rejected {
-        out.touched_wire = out.touched_wire || lanes.reached_wire();
+        out.note_wire(lanes.reached_wire());
         lanes.ahead.clear();
         lanes.wide = false;
     }
@@ -30027,6 +30036,26 @@ mod tests {
             super::land_broker_member(&landed, &key, &site, &mut dated, "2026-09", &asked).await;
         assert_eq!(done.members, 1, "{done:?}");
         assert_eq!(done.bars_committed, 1, "{:?}", done.failures);
+    }
+
+    /// **A RUN THAT TOUCHED THE WIRE STAYS TOUCHED.** The whole truth table
+    /// of `note_wire`: reaching sets it, not reaching leaves it as it was,
+    /// and nothing clears it. G18-api-25.
+    #[test]
+    fn touching_the_wire_is_sticky_and_only_a_reach_sets_it() {
+        for (before, reached, after) in [
+            (false, false, false),
+            (false, true, true),
+            (true, false, true),
+            (true, true, true),
+        ] {
+            let mut run = BrokerRun {
+                touched_wire: before,
+                ..BrokerRun::default()
+            };
+            run.note_wire(reached);
+            assert_eq!(run.touched_wire, after, "{before} then {reached}");
+        }
     }
 
     /// **A LANE REACHED THE WIRE WHEN AN ANSWER LANDED OR A REFUSAL SAYS SO.**

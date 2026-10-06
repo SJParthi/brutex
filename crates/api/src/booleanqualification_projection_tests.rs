@@ -99,3 +99,21 @@ fn project_cross_checks_each_row_before_rendering_it() {
     let render = row_loop.find("admission_projection::row(").unwrap();
     assert!(check < render, "the check runs before the row is rendered");
 }
+
+/// **A ROW'S INDEX IS ITS PAGE'S OFFSET PLUS ITS PLACE ON THE PAGE.** Zero,
+/// one, an offset with the first row, a later row, and the extremes that
+/// still fit. G18-api-26.
+#[test]
+fn a_rows_index_is_the_offset_plus_its_place_on_the_page() {
+    for (offset, n, index) in [
+        (0, 0, 0),
+        (0, 1, 1),
+        (1, 1, 2),
+        (2, 2, 4),
+        (7, 0, 7),
+        (7, 3, 10),
+        (usize::MAX - 3, 3, usize::MAX),
+    ] {
+        assert_eq!(super::row_index(offset, n), index, "{offset} + {n}");
+    }
+}

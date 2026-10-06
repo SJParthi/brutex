@@ -6905,3 +6905,6 @@ old line regex the same input and watched it pass.
 | G18-api-22 | The external-observation clock is the system clock in whole milliseconds (D-2044) | `api::sweeprun::tests::the_observation_clock_is_unix_milliseconds` | ✓ |
 | G18-api-23 | An unterminated marker needs all three: the `command started` message, a named sweep, and a durable run id above `ID_BASE` (D-2045) | `api::sweeprun::tests::an_unterminated_marker_needs_all_three_conditions` | ✓ |
 | G18-api-24 | `/engine/top.json` refuses a `feed` or `underlying` key given with an empty value rather than reading it as unfiltered (D-2045) | `api::topjson::tests::top_queries_and_unreadable_files_refuse_without_creating_a_store` | ✓ |
+| G18-api-25 | `BrokerRun::touched_wire` is set by a reach and never cleared by a later refusal (D-2046) | `api::server::tests::touching_the_wire_is_sticky_and_only_a_reach_sets_it` | ✓ |
+| G18-api-26 | A qualification row's page-wide index is the page offset plus its place on the page (D-2046) | `api::booleanqualification_projection::tests::a_rows_index_is_the_offset_plus_its_place_on_the_page` | ✓ |
+| G18-api-27 | The seek path's `records unreadable` line names the first file that refused a record, not the first file read (D-2046) | `api::bars::window_tests::the_unreadable_line_names_the_first_damaged_file_not_the_first_file` | ✓ |
