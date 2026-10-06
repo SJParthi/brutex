@@ -2931,6 +2931,12 @@ mod tests {
             0,
             "one short move"
         );
+        // Two moves ARE a sample: the guard stops at one, not at two.
+        assert_eq!(
+            edge_of_moves(&[5, 10]).worst_reward_risk_bp(),
+            i64::MAX,
+            "two moves that never lost"
+        );
     }
 
     #[test]
