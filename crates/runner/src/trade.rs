@@ -2579,6 +2579,13 @@ mod tests {
                     scan_missing(from, to)
                 };
                 assert_eq!(r, expected_r, "first refused on {from}..={to}");
+                // The yes/no read agrees with the scan on every range, the
+                // one-bar `from == to` included (G18-runner-15, D-2062).
+                assert_eq!(
+                    facts.refused_within(from, to),
+                    expected_r.is_some(),
+                    "refused within {from}..={to}"
+                );
                 assert_eq!(m, expected_m, "first missing on {from}..={to}");
                 if to <= last && from <= to {
                     assert_eq!(

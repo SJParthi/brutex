@@ -503,7 +503,16 @@ pub fn reality_check(
         // for 1 paisa as readily as for 1,000,000. A family with at least one
         // varying row is untouched: its null has spread, and a riskless mean
         // beating that spread is the answer this test is meant to give.
-        p_value: if draws == 0 || periods < 2 || white_null_is_a_point_mass(returns) {
+        //
+        // ONE CLAUSE STANDS FOR ALL THREE (G18-runner, D-2057). `aligned` gives
+        // every row exactly `periods` entries, so `periods < 2` leaves each row
+        // constant and is a point mass by construction; and `draws == 0` leaves
+        // `beaten` at zero, so the formula below is `1 / 1`, the same 1.0. The
+        // two clauses were spelled out here and decided nothing, which made
+        // each `||` -> `&&` mutant unkillable; their cases stay pinned by
+        // `zero_draws_reports_no_evidence_rather_than_certainty` and
+        // `a_single_period_carries_no_evidence_rather_than_certainty`.
+        p_value: if white_null_is_a_point_mass(returns) {
             1.0
         } else {
             beaten.saturating_add(1) as f64 / draws.saturating_add(1) as f64
@@ -3549,6 +3558,60 @@ mod block_ceiling_tests {
         assert!(romano_wolf_receipt(&set, 999, 3, periods, 50_000).is_some());
         assert!(romano_wolf_adjusted_p_values_v1(&set, 999, 3, periods).is_some());
         assert!(family_tests_v1(&set, &[0], 999, 3, periods).is_ok());
+    }
+
+    /// The ceiling ITSELF, on a series long enough that the length check
+    /// cannot answer for it (G18-runner-06, D-2057). Over 200 periods a block
+    /// of 1,000,001 is refused by `aligned_for` before `MAX_BLOCK` is read, so
+    /// the test above never told `>` from `>=` or `==`. Over 1,000,001 periods
+    /// one million is accepted and one more is refused by the ceiling alone.
+    #[test]
+    fn the_ceiling_is_read_on_a_series_longer_than_it() {
+        let ceiling = super::MAX_BLOCK;
+        let periods = ceiling + 1;
+        let set = vec![edged(periods, 21, 60), edged(periods, 22, 0)];
+        let draws = 19;
+        let alpha = 100_000;
+        assert!(reality_check(&set, draws, 3, ceiling).is_some());
+        assert!(reality_check(&set, draws, 3, periods).is_none());
+        assert!(!romano_wolf(&set, draws, 3, ceiling, alpha).is_empty());
+        assert!(romano_wolf(&set, draws, 3, periods, alpha).is_empty());
+        assert!(romano_wolf_receipt(&set, draws, 3, ceiling, alpha).is_some());
+        assert!(romano_wolf_receipt(&set, draws, 3, periods, alpha).is_none());
+        assert!(romano_wolf_adjusted_p_values_v1(&set, draws, 3, ceiling).is_some());
+        assert!(romano_wolf_adjusted_p_values_v1(&set, draws, 3, periods).is_none());
+        assert!(spa(&set, draws, 3, ceiling).is_some());
+        assert!(spa(&set, draws, 3, periods).is_none());
+        assert!(white_reality_check_receipt_v1(&set, draws, 3, ceiling).is_some());
+        assert!(white_reality_check_receipt_v1(&set, draws, 3, periods).is_none());
+        assert!(spa_receipt_v1(&set, draws, 3, ceiling).is_some());
+        assert!(spa_receipt_v1(&set, draws, 3, periods).is_none());
+        assert!(family_tests_v1(&set, &[0], draws, 3, ceiling).is_ok());
+        assert!(family_tests_v1(&set, &[0], draws, 3, periods).is_err());
+    }
+
+    /// An alpha of exactly one million ppm is a probability, so the receipt
+    /// is complete; one more is not (G18-runner-07, D-2057).
+    #[test]
+    fn an_alpha_of_one_is_inside_the_ppm_domain() {
+        let set = vec![edged(200, 11, 3), edged(200, 12, 0)];
+        assert!(romano_wolf_receipt(&set, 99, 3, 10, 1_000_000).is_some());
+        assert!(romano_wolf_receipt(&set, 99, 3, 10, 1_000_001).is_none());
+    }
+
+    /// No draws clears nothing, even beside a p-value under the threshold;
+    /// one draw at exactly 5% clears (G18-runner-08, D-2057).
+    #[test]
+    fn a_verdict_clears_only_with_draws_and_at_most_five_percent() {
+        let at = |draws, p_value| super::Verdict {
+            p_value,
+            draws,
+            ..super::Verdict::default()
+        };
+        assert!(!at(0, 0.0).clears());
+        assert!(!at(0, 0.05).clears());
+        assert!(at(1, 0.05).clears());
+        assert!(!at(1, 0.050_000_1).clears());
     }
 
     /// D-0742's open half, D-1990: a block longer than the series is refused

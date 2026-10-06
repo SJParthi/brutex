@@ -4555,19 +4555,16 @@ fn one_variant(
         // that path rather than leave the durable row implying the figure was
         // unavailable.
         //
-        // THE GUARD IS KEPT THOUGH IT NO LONGER SAVES A SCAN. It used to read
-        // "the ordinary fold still avoids the scan for a loser", and there is no
-        // scan left to avoid — this is the same indexed read as the adverse line
-        // above. What it still buys is a division, and what it buys that matters
-        // more is that `went_for` stays exactly zero for a loser nobody asked a
-        // row for, which is the value every banked result was folded with.
-        let went_for = if pess > 0 || trades.is_some() {
-            c.cross.favourable_ppm_at(pess_off, c.entry_opt, side)
-        } else {
-            0
-        };
+        // A READ ON DEMAND, NOT A GUARDED VALUE (G18-runner, D-2060). This was
+        // `if pess > 0 || trades.is_some() { read } else { 0 }`, and the zero
+        // reached nothing: only the detail row and the winner sum below read
+        // `went_for`, and each sits behind its own gate. So `pess >= 0` on that
+        // guard changed no output and could not be killed. Each consumer now
+        // takes the same indexed read itself; a winner with a requested row
+        // reads it twice, two loads and a division, on the reporting path only.
+        let went_for = || c.cross.favourable_ppm_at(pess_off, c.entry_opt, side);
         if let Some(rows) = trades.as_deref_mut() {
-            rows.push(row_of(bars, c, exit, pess, opt, went_against, went_for));
+            rows.push(row_of(bars, c, exit, pess, opt, went_against, went_for()));
         }
         // `worst_mae` is gated by a maximum, so it takes the reading rounded UP
         // (p3floor-2, D-1769); `went_against` stays the floored figure the
@@ -4587,7 +4584,7 @@ fn one_variant(
             // the optimistic quantity, so it is measured from the optimistic
             // entry. Pairing it with `entry_pess` would flatter the ratio at
             // both ends at once.
-            gain_on_winners = gain_on_winners.saturating_add(went_for);
+            gain_on_winners = gain_on_winners.saturating_add(went_for());
         }
         open_until = Some(c.entry.saturating_add(pess_off));
     }
@@ -5842,6 +5839,7 @@ mod exit_family_tests {
             },
         );
         assert_eq!(sound.refused_levels, None, "premise: a sound ladder prices");
+        assert!(sound.signals > 0, "premise: the empty mask fires");
         assert!(sound.cells.iter().any(|cell| cell.stop.is_some()));
         for (stops, step) in [
             (&[80_i64, 40, 20][..], None),
@@ -5873,6 +5871,12 @@ mod exit_family_tests {
             assert!(
                 grid.best().is_none(),
                 "{stops:?} {step:?}: nothing is chosen"
+            );
+            // The refusal still counts the signals the walk saw (G18-runner-14,
+            // D-2060): a refused ladder is not a combination that never fired.
+            assert_eq!(
+                grid.signals, sound.signals,
+                "{stops:?} {step:?}: the signal count survives the refusal"
             );
         }
     }

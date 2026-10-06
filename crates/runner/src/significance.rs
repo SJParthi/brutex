@@ -448,16 +448,32 @@ fn regularized_incomplete_beta(a: f64, b: f64, x: f64) -> f64 {
     }
 }
 
+/// Below this magnitude a Lentz denominator is replaced, so a zero cannot
+/// divide.
+const LENTZ_TINY: f64 = 1e-300;
+
+/// A Lentz denominator, replaced by [`LENTZ_TINY`] when its magnitude is
+/// strictly below it; at the floor itself it is kept, sign and all.
+///
+/// A named function rather than a closure so the boundary is testable: no
+/// fraction this crate evaluates lands on it, so a closure's `<` against `<=`
+/// could not be told apart (G18-runner, D-2058).
+fn lentz_guard(value: f64) -> f64 {
+    if value.abs() < LENTZ_TINY {
+        LENTZ_TINY
+    } else {
+        value
+    }
+}
+
 /// The continued fraction of A&S 26.5.8 by the modified Lentz method.
 fn beta_continued_fraction(a: f64, b: f64, x: f64) -> f64 {
-    /// Below this a Lentz denominator is replaced, so a zero cannot divide.
-    const TINY: f64 = 1e-300;
     /// Convergence: the last factor is within this of one.
     const EPSILON: f64 = 1e-15;
     /// Iterations before the fraction is declared not to converge. The tails
     /// this crate asks for converge in tens of terms at any degrees of freedom.
     const MAX_TERMS: u32 = 100_000;
-    let guard = |value: f64| if value.abs() < TINY { TINY } else { value };
+    let guard = lentz_guard;
     let mut upper = 1.0;
     let mut lower = 1.0 / guard(1.0 - (a + b) * x / (a + 1.0));
     let mut fraction = lower;
@@ -490,7 +506,16 @@ fn ln_beta(a: f64, b: f64) -> f64 {
 fn ln_gamma(x: f64) -> f64 {
     let mut z = x;
     let mut shift = 0.0;
-    while z < 10.0 {
+    // AT MOST TEN SHIFTS, BY A FIXED RANGE, NOT BY THE DATA (G18-runner,
+    // D-2064). Every `x > 0` reaches 10 within ten unit steps, so this takes
+    // exactly the shifts the old `while z < 10.0` took, in the same order and
+    // to the same bits. What it removes is the unbounded loop: under that
+    // `while`, flipping the comparison or the `+= 1.0` step (both mutated by
+    // Gate 18, run 1283) never reached the bound and ran past an hour.
+    for _ in 0..10 {
+        if z >= 10.0 {
+            break;
+        }
         shift += z.ln();
         z += 1.0;
     }
@@ -766,6 +791,119 @@ mod tests {
     };
     use engine::{Frontier, Itemset, Sweep};
     use vocab::ConditionMask;
+
+    /// A Lentz denominator strictly under the floor is replaced by the
+    /// positive floor; the floor itself and everything above keep their own
+    /// value and sign (G18-runner-09, D-2058).
+    #[test]
+    fn the_lentz_guard_replaces_only_magnitudes_strictly_below_the_floor() {
+        use super::{LENTZ_TINY, lentz_guard};
+        for (value, expected) in [
+            (0.0, LENTZ_TINY),
+            (-0.0, LENTZ_TINY),
+            (LENTZ_TINY / 2.0, LENTZ_TINY),
+            (-LENTZ_TINY / 2.0, LENTZ_TINY),
+            (LENTZ_TINY, LENTZ_TINY),
+            (-LENTZ_TINY, -LENTZ_TINY),
+            (0.5, 0.5),
+            (-2.0, -2.0),
+        ] {
+            assert_eq!(
+                lentz_guard(value).to_bits(),
+                expected.to_bits(),
+                "{value:e}"
+            );
+        }
+    }
+
+    /// A value already at 10 takes no shift: `ln_gamma(10.0)` is Stirling's
+    /// series at 10 to the bit, and within its stated error of `ln 9!`
+    /// (G18-runner-10, D-2058).
+    #[test]
+    fn ln_gamma_at_ten_is_the_unshifted_series() {
+        use super::ln_gamma;
+        // A&S 6.1.41 at z = 10, written out as `ln_gamma` evaluates it.
+        let z = 10.0_f64;
+        let inv = 1.0 / z;
+        let inv2 = inv * inv;
+        let series =
+            inv * (1.0 / 12.0 - inv2 * (1.0 / 360.0 - inv2 * (1.0 / 1260.0 - inv2 / 1680.0)));
+        let unshifted = (z - 0.5) * z.ln() - z + 0.5 * core::f64::consts::TAU.ln() + series;
+        assert_eq!(ln_gamma(10.0).to_bits(), unshifted.to_bits());
+        let ln_9_factorial = (2..=9).map(f64::from).map(f64::ln).sum::<f64>();
+        assert!((ln_gamma(10.0) - ln_9_factorial).abs() < 1e-12);
+        assert!((ln_gamma(9.0) - (ln_9_factorial - 9.0_f64.ln())).abs() < 1e-12);
+    }
+
+    /// The bounded shift is the old unbounded `while z < 10.0` loop to the bit
+    /// on every `x > 0` (G18-runner-18, D-2064): the smallest positive values,
+    /// each side of every integer up to 11, every tenth to 20, and large and
+    /// extreme values. The reference is the loop as it stood.
+    #[test]
+    fn the_bounded_gamma_shift_is_the_unbounded_loop_to_the_bit() {
+        use super::ln_gamma;
+        let reference = |x: f64| {
+            let mut z = x;
+            let mut shift = 0.0;
+            while z < 10.0 {
+                shift += z.ln();
+                z += 1.0;
+            }
+            let inv = 1.0 / z;
+            let inv2 = inv * inv;
+            let series =
+                inv * (1.0 / 12.0 - inv2 * (1.0 / 360.0 - inv2 * (1.0 / 1260.0 - inv2 / 1680.0)));
+            (z - 0.5) * z.ln() - z + 0.5 * core::f64::consts::TAU.ln() + series - shift
+        };
+        let mut xs = vec![
+            f64::MIN_POSITIVE,
+            5e-324,
+            1e-300,
+            1e-17,
+            0.5,
+            1e6,
+            1e300,
+            f64::MAX,
+        ];
+        for whole in 1..=11_u32 {
+            let at = f64::from(whole);
+            xs.extend([at.next_down(), at, at.next_up()]);
+        }
+        xs.extend((1..=200_u32).map(|tenth| f64::from(tenth) / 10.0));
+        for x in xs {
+            assert_eq!(ln_gamma(x).to_bits(), reference(x).to_bits(), "x = {x:e}");
+        }
+    }
+
+    /// The fraction is evaluated on the documented side of
+    /// `x < (a + 1) / (a + b + 2)`, strictly: at the boundary it takes the
+    /// symmetric side. Both sides agree to about 1e-13, so the side is pinned
+    /// to the bit against the explicit formula, and the value against the
+    /// closed form `I_x(1/2, 1/2) = (2/pi) asin(sqrt x)` (G18-runner-11, D-2058).
+    #[test]
+    fn the_incomplete_beta_takes_the_documented_side_of_its_split() {
+        use super::{beta_continued_fraction, ln_beta, regularized_incomplete_beta};
+        let (a, b) = (0.5_f64, 0.5_f64);
+        let front = |x: f64| (a * x.ln() + b * (-x).ln_1p() - ln_beta(a, b)).exp();
+        let closed = |x: f64| core::f64::consts::FRAC_2_PI * x.sqrt().asin();
+        // Below the split (0.5 here): the direct side.
+        let below = 0.2;
+        let direct = front(below) * beta_continued_fraction(a, b, below) / a;
+        assert_eq!(
+            regularized_incomplete_beta(a, b, below).to_bits(),
+            direct.to_bits()
+        );
+        assert!((direct - closed(below)).abs() < 1e-11);
+        // On the split exactly: the symmetric side.
+        let on = 0.5_f64;
+        assert_eq!(on.to_bits(), ((a + 1.0) / (a + b + 2.0)).to_bits());
+        let mirrored = 1.0 - front(on) * beta_continued_fraction(b, a, 1.0 - on) / b;
+        assert_eq!(
+            regularized_incomplete_beta(a, b, on).to_bits(),
+            mirrored.to_bits()
+        );
+        assert!((mirrored - closed(on)).abs() < 1e-11);
+    }
 
     fn level(k: u32, frequent: usize, infrequent: u64) -> Frontier {
         Frontier {

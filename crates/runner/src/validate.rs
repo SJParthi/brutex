@@ -2023,10 +2023,15 @@ pub fn walk_forward_shaped(
     // their own knob store and use `walk_forward_shaped_with_rungs` instead.
     let rungs = match fold_rungs() {
         Ok(rungs) => rungs,
+        // EVERY FIELD NAMED, NO `..Validated::default()` (G18-runner, D-2061).
+        // The refusal is reachable only through the process environment, which
+        // a test cannot set under `forbid(unsafe_code)`, so a defaulted literal
+        // left "delete field `refused`" alive. A complete literal has no field
+        // to delete; `fold_rungs_from` pins the refusal text itself.
         Err(why) => {
             return Validated {
+                folds: Vec::new(),
                 refused: Some(why),
-                ..Validated::default()
             };
         }
     };
