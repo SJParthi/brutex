@@ -63171,3 +63171,322 @@ D-2083).
 **Rejected.** Dropping `--cap-lints true` to restore the const-eval lint: it
 would bring back D-0680's false unviables on every parameterised function.
 Skipping the cases: never (D-0192).
+### D-3300 — Gate 8 gates p99 at 10^3 to 10^6 for bar lookup, time lookup, k=1 dedup and append — 2026-10-06
+
+**What was observed.** `docs/06-limits.md` §1 says each operation `CLAUDE.md`
+§3 rule 4 names "is measured by gate 8". Every row except telemetry's C-T-01b
+took the minimum over trials of a mean, a statistic a tail cannot move. A
+planted O(n) scan on one cold `read_record` in fifty left C-BC-01 at 1.20×. A
+planted scan in `offer` for one key in 64 left C-E-10 at 1.08×, because that
+row only ever probes key 0. The rows also stopped at 10^5.
+
+**Decided.** Add O1P-01 (cold `read_record`) and O1P-02
+(`first_at_or_after`) to `crates/store/benches/ratio.rs`, and O1P-03 (k=1
+duplicate rejection on random present keys) and O1P-04 (append into a
+reservation) to `crates/engine/benches/ratio.rs`. Each times every call, or
+every batch of 32, at 10^3, 10^4, 10^5 and 10^6. It takes 5 rounds and gates
+the smallest round p99 against the 10^3 one under the existing 3.0× ceiling.
+No new threshold is invented. The two plants above breach these rows at 9.4×
+to 158.8×. Max is printed, never gated.
+
+**Rejected.** Gating the maximum: on a shared runner it is the scheduler.
+Gating a single round's p99: one disturbed round would fail the build.
+Replacing the minimum-of-mean rows: they bound something different, the
+per-call floor, and other rows divide by them.
+
+### D-3301 — Two p99 facts are named, not gated: the dedup table past the cache, and the reserved append's page fault — 2026-10-06
+
+**What was observed.** At 10^6 offered positions, O1P-03's p99 measured 2.1×
+to 2.9× the 10^3 one, because the table outgrows the cache. O1P-04's p99 is
+about 14× its p50 at every size. Touching the reservation first took it from
+3,019 ns to 780 ns per 32 pushes, so the tail is the first-touch page fault.
+
+**Decided.** O1P-03 gates 10^4 and 10^5 and prints 10^6. k=1 never offers
+more than `ConditionMask::BITS` (384) positions, so 10^5 is already 260× past
+the domain. O1P-04 stays gated: the fault is per page, so it is flat. Both
+are stated in `docs/06-limits.md` with their numbers.
+
+**Rejected.** Gating O1P-03 at 10^6 with a ratio that measured up to 2.9×
+against a 3.0× ceiling, which would turn the build red by luck. Pre-touching
+`drain`'s reservation, which would move the fault cost onto levels that never
+fill it.
+
+### D-3302 — The `.tix` rebuild is O(n_valid) inside an append too, and it is now measured — 2026-10-06
+
+**What was observed.** `store::file::index_batch` calls `reindex` when the
+entry it resumes from no longer agrees with the header, which follows a torn
+index write from a failed append on the same handle. That rebuild reads every
+committed record. `docs/06-limits.md` ("What an append pays") and
+`docs/02-store-format.md` placed the rebuild only at writer open, "once per
+month", and the cost was "timed by nothing".
+
+**Decided.** Name the append-time rebuild in both documents and in the
+function's doc comment. Add the ignored measurement
+`index_rebuild_cost_grows_with_the_month` to `crates/store/tests/tix_latency.rs`:
+0.49 / 1.2 / 7.9 / 80 ms at 10^3 / 10^4 / 10^5 / 10^6 bars, about 80 ns per
+bar.
+
+**Rejected.** Repairing only the torn tail entries instead of rebuilding.
+Locating the last good entry's row without the entry itself is a bisection,
+the recovery path is rare, and changing it is a store-format behaviour change
+outside this lens.
+
+### D-3303 — An audit read's two `fsync`s are named and measured, and kept — 2026-10-06
+
+**What was observed.** `cli::operation_audit::read` syncs the index and the
+invocation's file on every read. `page` reads up to 32 rows, which is up to 64
+`fsync`s per `/backtest/audit.json` GET, and `/backtest/run.json` reaches
+`read` on every poll. D-1445 named the write side's syncs only.
+
+**Decided.** State the read-side syncs in `docs/06-limits.md`, measured by the
+ignored `a_full_audit_page_costs_the_same_at_every_index_size`: a p50 of
+2.42–2.46 ms per 32-row page at 10^2, 10^3 and 10^4 invocations, so the cost
+is flat in the index. The 105 ms maximum is a writeback wait, so the route has
+no latency bound.
+
+**Rejected.** Removing the syncs. That would let the page report a record a
+crash could still take back. It is a change to what the route promises, which
+is the owner's call, not a cost fix.
+
+### D-3304 — Four stale cost and shape claims in `api` and `telemetry` comments, corrected — 2026-10-06
+
+`api::bars`'s module header said "Nothing here scans", although its `window`
+route scans (D-0733). `api::render` called its walk "the only `read_dir`" and
+`api::autopilot` said there were two; `server.rs`'s `archive_ready` is a
+third. `telemetry::sink` said the crate carried no bench after
+`benches/ratio.rs` had landed. Each comment now says what the code does.
+Comments only; no behaviour changed.
+
+### D-3305 — The results ledger's append and refresh are O(indexed bytes + delta) on growth, as D-1560 already said — 2026-10-06
+
+`cli::results`'s module table, `append`'s doc and `refresh`'s doc, and
+`docs/06-limits.md` §100, said O(delta + 1) and O(new rows). D-1560 made the
+growth branch re-hash every byte the handle had indexed, and its own section
+in `docs/06-limits.md` said so, so the documents contradicted each other.
+Every one of them now states the growth-branch cost. The code is unchanged.
+
+### D-3306 — p99 rows for the manifest lookup and the telemetry tail — 2026-10-06
+
+**Decided.** O1P-05 (`pull`) times `Manifest::entry` over uniformly drawn
+present keys, at 10^3, 10^4 and 10^5 months in the census. O1P-06
+(`telemetry`) times `tail(20)` at 10^3 to 10^6 events. Both use the same
+method as D-3300: every call (or every batch of 32) is timed, 5 rounds are
+run, the smallest round p99 is taken, and it is held to the existing 3.0×
+ceiling. The point pins in gate 14 go to pull 7 and telemetry 9.
+
+**Rejected.** A 10^6-month census: the harness can name 289,080 distinct
+keys, and no real store approaches 10^6 months.
+
+### D-3307 — A random manifest lookup at 10^5 months is named, not gated — 2026-10-06
+
+**What was observed.** O1P-05's p99 at 10^5 months measured 2.0× to 4.1× the
+10^3 value over three runs, and its p50 about 2×. C-12 re-reads one cached
+key, so it read 1.0× on the same tables. The probe count does not grow: the
+map is reserved from the census, so its load factor is the same at every
+size. What grows is the memory a probe touches.
+
+**Decided.** Gate 10^4, print 10^5, and state it in `docs/06-limits.md` and
+`docs/07-o1-architecture.md`, whose fixed-key row described the lookup as
+flat.
+
+**Rejected.** Raising the ceiling for this row, which would hide the effect
+behind a looser number. Reworking the map to hold log positions: it trades one
+miss for two dependent loads, and nothing measured says it wins.
+
+### D-3308 — Two api cost comments the code contradicted, corrected — 2026-10-06
+
+`fno_land` claimed one census read per run and O(1) per contract. Each
+landed body reads the vendor's manifest (W1-api5-1). `price_group`'s
+O(rows) block sat on `read_month_bars`, which is O(bars). The first comment
+is rewritten and the second is moved to the function it describes. Comments
+only; no behaviour changed.
+
+### D-3309 — The p99 rows' own defects, found by attacking them, and corrected — 2026-10-06
+
+**What was observed.** A review of this lens's own diff found five defects:
+
+- O1P-01's sampler compared against the block the previous sample drew, not
+  the one it read after a bump. About 1 sample in 196 at 10^3 could be served
+  warm.
+- O1P-05 cycled 4,096 keys, so at 10^5 it touched a subset of the map while
+  the documents said "uniformly drawn".
+- Three sets of numbers disagreed with each other: the 10^4 manifest ratios,
+  the dedup 10^6 ratio against its stated baseline, and the plant wording in
+  F-8D5719.
+- `telemetry::sink`'s corrected comment listed four of the bench's rows and
+  missed C-T-04 and O1P-06.
+- The census-size reasoning contradicted itself across the bench, D-3306 and
+  `docs/06-limits.md`.
+
+**Decided.**
+- O1P-01 draws each block from the `blocks - 1` others and refuses a repeat.
+- O1P-05 looks up every key of the census in a spread order.
+- O1P-04 refuses a zero p50, as O1P-03 does.
+- The sink comment names the bench and the invariants document rather than a
+  list that drifts.
+- Every row was re-measured three times, and `docs/04-invariants.md`,
+  `docs/06-limits.md` and `docs/07-o1-architecture.md` now quote those runs.
+  At 10^5 the manifest's p99 is 4.62× to 5.91×, worse than the 2.0× to 4.1×
+  that D-3307 recorded. The size of a real census is UNVERIFIED.
+
+D-3301, D-3306 and D-3307 stand as written; this entry supersedes their
+numbers.
+
+### D-3310 — Four leftover statements in the p99 rows' text, corrected — 2026-10-06
+
+A second review of this lens's diff found four statements that did not match
+the code or D-3309's numbers:
+
+- O1P-03's 10^5 ratio in `docs/04-invariants.md`. It now says 1.03× to
+  1.41× at 10^4 and 1.29× to 1.39× at 10^5, each run against its own 10^3.
+- The pull bench's comment, which quoted the 4,096-key numbers.
+- F-61001B's disposition, which pointed at a missing section.
+- `tail_stamp`'s claim that no sample repeats the previous index entry.
+  Independent draws repeat about 1 in 16 at 10^3, and that only makes the
+  gate stricter.
+
+Text only.
+
+### D-3311 — An idle run-status poll's log walks are named and one is measured — 2026-10-06
+
+`/backtest/run.json`'s external observation can make up to six capped
+`telemetry::tail` walks of up to 4 MiB each, outside the D-2327 pool. They
+are stated in `docs/06-limits.md`. The `telemetry` bench now reports one
+capped, no-match walk: 4,194,304 bytes and a p50 of about 20 ms. The walks are
+not cut, because they decide whether another process is sweeping. A poll that
+answered without them would report a status it had not observed.
+
+### D-3312 — `/boolean-campaign.json`'s double open is named, not cached — 2026-10-06
+
+The route opens the campaign, then reopens it in `require_current` as a
+freshness check. Both opens walk the checkpoint directory. This is stated in
+`docs/06-limits.md` and is UNVERIFIED as a measurement. A cache would need an
+invalidation signal that the checkpoint writer does not publish, so none was
+added.
+
+### D-3313 — Three more text corrections from the final review of the p99 lens — 2026-10-06
+
+- D-2327's section in `docs/06-limits.md` said no bench measures a log walk.
+  D-3311's bench row now reports one, so the sentence is scoped to the route.
+- D-3303 said `/backtest/run.json` reaches the audit `read` on every poll. It
+  does so only on a poll that names a persisted attempt, or whose newest CLI
+  marker has no terminal. `docs/06-limits.md` now says so; D-3303 stands as
+  written and is corrected by this entry.
+- The caption of the O1P table in `docs/06-limits.md` claimed every cell was a
+  three-run range. O1P-04's cells are one run's values.
+
+Text only.
+
+### D-3314 — Older sentences this lens's measurements contradicted, corrected — 2026-10-06
+
+A seventh review found sentences that predate this lens and that its
+measurements now contradict:
+
+- D-2329's "timed by nothing" about the rebuild. D-3302 timed it to 10^6 bars.
+- D-1445's "Not timed … no measurement of a large directory". D-3303
+  measured reads to 10^4 invocations.
+- `cli::operation_audit`'s "no named cost test".
+- Three "O(new rows)" warm-refresh statements in `api::detail` and the
+  D-1560-era api section of `docs/06-limits.md`, which D-3305's correction
+  had missed.
+- The two new `docs/07-o1-architecture.md` rows, which needed their host named
+  and their "every other row" scoped to Gate 8 timing rows.
+
+Text only.
+
+### D-3315 — Three more stale copies of corrected claims — 2026-10-06
+
+An eighth review found three copies that D-3302, D-3304 and D-3305 had
+missed:
+
+- `store::file::rebuild_index` said the rebuild is "paid once per month".
+- `api::census` said its walk is "the only" `read_dir` in shipping code.
+- An inline comment in `cli::results` said the append catch-up is "O(delta)".
+
+Each now states what the corrected copies state. A grep for the old wording
+across `crates/*/src` and `docs/02-store-format.md` finds no further copies.
+Text only.
+
+### D-3316 — Older "flat" and "no bench" claims the manifest and greeks measurements contradict — 2026-10-06
+
+A ninth review found older text that the round-2 measurement contradicts:
+§17 of `docs/06-limits.md`, the C-12 invariant row, the C-12 bench comment and
+a `Manifest` doc comment each called the census lookup flat at 100× with no
+qualifier. Each is now scoped to the one cached key C-12 probes and points to
+O1P-05. The D-3300 section's "every other row" now names C-T-01b and the O1P
+rows. A sweep for "carries no bench" found the greeks paragraph, written
+before `crates/greeks/benches/ratio.rs` existed. It now names C-G-01 and
+C-G-02 and keeps the per-argument claim an extrapolation. Text only.
+
+### D-3317 — The last O(delta) copies for the results ledger, and the pull bench header — 2026-10-06
+
+A tenth review found that the pull bench's module header still said its rows
+measure the probe count and not the memory hierarchy, beside O1P-05, which
+measures exactly that. It also found that `docs/06-limits.md` still called
+the results ledger's shared-handle refresh O(delta) in two sections. A grep for
+"O(delta)" across `docs/0*.md`, `CLAUDE.md`, and `crates/cli` and `crates/api`
+sources then found two more: the D-0523 Results/Receipts sentence, and
+`cli`'s `with_cached_handle` doc comparing itself to `with_shared_writer`.
+Each now states the growth-branch re-hash.
+
+The trades and frontier `O(delta)` statements are correct as written. Those
+ledgers have no prefix recheck, so they were left. Text only.
+
+### D-3318 — The receipt handle re-hashes its prefix too — 2026-10-06
+
+An eleventh review found that `cli`'s `with_cached_handle` caches three
+handles, not two. The third is `result_set::Receipts`, whose `refresh` and
+`append_exact` go through `absorb_new`, which re-hashes the indexed prefix on
+growth (D-1560). D-3317's `with_cached_handle` doc, D-1777's bullet in
+`docs/06-limits.md` and `api::detail`'s `CommittedParents` doc each left the
+receipt file out. Each now names it. D-3317 stands; this entry adds the
+handle it missed. Text only.
+
+### D-3319 — Two more warm-refresh cost claims that omitted the growth re-hash — 2026-10-06
+
+A twelfth review found `api::trades`'s module `# Cost` section calling the
+ledger and receipt refresh "O(new records)". A sweep for every other wording
+then found a second copy: `Results::absorb_new_records`'s own doc, "O(records
+appended by others)", on the very function that calls
+`PrefixDigest::require_unchanged`. Both now state O(indexed bytes + delta) on
+the growth branch. The sweep searched for "O(new records)", "O(appended",
+"O(new entries)", "warm refresh is" and "O(records appended" across
+`crates/*/src`, `docs/0*.md`, `docs/10-shared-core.md` and `CLAUDE.md`. Its
+remaining hits are correct: `PrefixDigest`'s own "O(appended bytes)", scoped
+to the non-growth path, and the D-0523 sentence already qualified by D-3317.
+Text only.
+
+### D-3320 — The last copies of the ledger and receipt refresh cost, found by call site — 2026-10-06
+
+A thirteenth review found that §116 in `docs/06-limits.md`, which covers the
+receipt handle, said a stale handle's work is O(new rows). It also found that
+`api::frontierjson`'s `# Cost` section said warm requests "refresh only
+appended rows"; `api::topjson`'s header was borderline. All three now name the
+growth re-hash.
+
+Phrase greps had missed copies three rounds running, so this round searched
+by call site instead. The search listed every `crates/api/src` file that
+names `committed_receipt`, `CommittedParents`, `Receipts` or the results
+ledger: `backtest`, `detail`, `frontierjson`, `lib`, `mastersrun`,
+`sweepevidence`, `sweeprun`, `topjson`, `trades`. It then read each one's
+cost statements, and searched `crates/cli/src` for cost comments beside
+`with_shared_writer`, `ensure_detail_receipt` and `Receipts::`. No other
+statement claims a refresh cost without the re-hash. Text only.
+
+### D-3321 — `recorded_row`'s ledger-refresh cost, and two of this lens's own captions — 2026-10-06
+
+A fourteenth review found three things:
+
+- `cli`'s `recorded_row` doc still called the shared ledger handle's refresh
+  O(rows appended). Its `docs/06-limits.md` twin was corrected by D-3317.
+- §116's heading said "bounded by new history" over a body that now names the
+  receipts' growth re-hash.
+- A `docs/07-o1-architecture.md` row said "every other Gate 8 timing row" was
+  a minimum of means, directly under O1P-05's p99 row.
+
+All three are corrected. Every `with_shared_writer(` and `.refresh()` call in
+`crates/cli/src` outside tests was then listed. Each caller's surrounding doc
+was read for a cost claim about the results or receipt handle, and none
+remains unqualified; the other `.refresh()` calls belong to execution,
+selection, frontier and trades files, which have no prefix recheck. Text
+only.

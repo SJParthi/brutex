@@ -189,3 +189,55 @@ fn time_and_row_lookup_latency() {
     measure("1min", Timeframe::MINUTE_1, &month(31, 375, 60, false));
     measure("1s", Timeframe::SECOND_1, &month(23, 22_500, 1, true));
 }
+
+/// The `.tix` REBUILD, timed at 10^3 to 10^6 one-second bars — D-3302.
+///
+/// `BarFile::rebuild_index` reads every committed record. A writer pays it at
+/// open for a month with records and no index it can confirm, and an
+/// `append` pays it when the index entry it resumes from no longer agrees
+/// with the header — after an append that failed on the same handle
+/// (`index_batch` → `reindex`). Both run the same function; this times the
+/// open, which is the one a test can reach without a torn write, by removing
+/// the `.tix` and opening a writer. O(`n_valid`) by construction, and that is
+/// what the numbers show: it is NOT an O(1) path and is never claimed one.
+/// Its cost past 10^6 bars is UNVERIFIED, an extrapolation in
+/// `docs/06-limits.md`.
+#[test]
+#[ignore = "a measurement, run on purpose in release: see the module doc"]
+fn index_rebuild_cost_grows_with_the_month() {
+    for n in [1_000_i64, 10_000, 100_000, 1_000_000] {
+        let root: PathBuf =
+            std::env::temp_dir().join(format!("brutex-tix-rebuild-{n}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let bars: Vec<Bar> = (0..n)
+            .map(|i| Bar {
+                ts_micros: JULY_START + i * MICROS,
+                open: 2_000_000,
+                high: 2_000_100,
+                low: 1_999_900,
+                close: 2_000_050,
+                volume: 1,
+                open_interest: OI_NULL,
+            })
+            .collect();
+        BarFile::open_or_create(&root, path(Timeframe::SECOND_1), 7)
+            .unwrap()
+            .append(&bars)
+            .unwrap();
+        let tix = path(Timeframe::SECOND_1)
+            .to_path_buf(&root)
+            .with_extension("tix");
+        let mut ns = Vec::new();
+        for _ in 0..7 {
+            fs::remove_file(&tix).unwrap();
+            let start = Instant::now();
+            let writer = BarFile::open_or_create(&root, path(Timeframe::SECOND_1), 7).unwrap();
+            ns.push(start.elapsed().as_nanos() as u64);
+            assert!(tix.exists(), "the writer open rebuilt no index");
+            drop(writer);
+        }
+        report(&format!("rebuild on writer open, {n} bars"), ns);
+        let _ = fs::remove_dir_all(&root);
+    }
+}

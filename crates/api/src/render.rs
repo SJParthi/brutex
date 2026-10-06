@@ -3127,9 +3127,11 @@ const MAX_FOLDER_SUGGESTIONS: usize = 60;
 ///
 /// # Call this at startup and nowhere else
 ///
-/// This is the only `read_dir` in shipping code under `crates/api` — `bars.rs`
-/// has one behind `#[cfg(test)]`, which ships nowhere — and it is O(entries
-/// under `$HOME/Downloads`), unbounded by anything this repository controls.
+/// It is not the only `read_dir` in shipping code under `crates/api` (D-3304):
+/// `assets.rs` walks the front-end bundle at startup, and `server.rs`'s
+/// `archive_ready` lists one feed's archive directory per `/feeds.json`
+/// request, reading at most one entry of it. This one is O(entries under
+/// `$HOME/Downloads`), unbounded by anything this repository controls.
 /// `server::Site::new` calls it once and holds the result for the process's
 /// lifetime, which is the same bargain D-0039 struck for the instrument master
 /// and `census::held_series` strikes for the coverage axis. Calling it from a

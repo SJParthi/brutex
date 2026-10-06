@@ -33,7 +33,9 @@
 //! refreshes cached ledger and receipt indexes to obtain one canonical commit
 //! snapshot, then refreshes its cached child index before reconciling
 //! that exact receipt's count and direction. Cold setup is O(history); warm
-//! refresh is O(new records), plus O(selected rows). Only each in-memory
+//! refresh is O(new records), or O(indexed bytes + new records) when the
+//! ledger or the receipt file grew (D-1560, D-3305, D-3318), plus O(selected
+//! rows). Only each in-memory
 //! identity probe is O(1). D-0404 and limits §98 name the cold bound rather than
 //! turning local lookup shape into a latency claim. The HTTP boundary makes
 //! those linear terms finite: each indexed file is at most 64 MiB, one verified

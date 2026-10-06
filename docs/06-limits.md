@@ -754,8 +754,10 @@ vendor hold" is a field read of the manifest header —
 **402,568×** on two runs of the same tree, against re-deriving the same number
 from 10,000 entries in the same process on an Apple M4 Pro. "What do I hold for
 this month" is one hash probe into a map reserved from the committed entry
-count, flat to within 1.05× at 100× the census
-(`pull::bench::entry_lookup_is_flat`).
+count, flat to within 1.05× at 100× the census for one repeatedly probed,
+cached key (`pull::bench::entry_lookup_is_flat`). Over random present keys it
+is flat in probes and not in time: p99 1.53× – 1.88× at 10^4 and 4.62× –
+5.91× at 10^5 (O1P-05, D-3307, D-3309).
 
 **The cause of the C-11 spread is NOT established, and D-0035 said it was.**
 That entry, and this section, and `docs/07-o1-architecture.md` all read "a field
@@ -2121,9 +2123,11 @@ converges in three or four steps and never reaches the bisection.
 The closed form has no loop and no input-dependent branch other than the one
 choosing a call from a put. That is a statement about the **code**, not about
 the **cost**: whether the platform's `exp`, `ln` and `sqrt` take the same time
-for every argument is not measured here, and this crate carries no bench that
-would measure it. Any claim that one greek evaluation is constant-time is
-therefore an **EXTRAPOLATION** from the shape of the source.
+for every argument is not measured here. The crate now carries a bench:
+C-G-01 and C-G-02 time a price and the greek set across contracts far apart
+in moneyness and tenor, which samples arguments rather than proving every one
+(D-3316). A claim that one greek evaluation is constant-time for EVERY
+argument is still an **EXTRAPOLATION** from the shape of the source.
 
 What *is* asserted as a number is the solver's iteration count, which is an
 integer and does not move with a scheduler —
@@ -6472,9 +6476,10 @@ contention even though independent sweeps may compute in parallel.
 The fixed-width ledger append is not unconditionally O(1) either. Once it holds
 the exclusive file lock, `Results::append` absorbs `delta` complete rows written
 by other processes since that handle last scanned, then performs the one-stride
-write and expected-O(1) identity-map update. Its local work is therefore
-O(delta + 1); only the common `delta == 0` single-writer path has fixed local
-work. Lock waiting, seek/write and `sync_all` latency remain filesystem- and
+write and expected-O(1) identity-map update. Since D-1560 a nonzero `delta`
+also re-hashes every byte the handle had already indexed, so its local work is
+O(indexed bytes + delta), not the O(delta + 1) this paragraph said until D-3305;
+only the common `delta == 0` single-writer path has fixed local work. Lock waiting, seek/write and `sync_all` latency remain filesystem- and
 contention-dependent rather than worst-case O(1).
 
 ### §101 — exact browser drill-down arithmetic is a refusal boundary, not an `i64` proof
@@ -6880,7 +6885,7 @@ check. Moving every numeric field to canonical strings and `BigInt` would be a
 new versioned wire contract; D-0425 deliberately refuses unsafe rows rather
 than inventing that migration inside the browser.
 
-### §116 — refreshed detail recovery is bounded by new history, not O(1) end to end
+### §116 — refreshed detail recovery is bounded by new history (receipts: indexed bytes on growth), not O(1) end to end
 
 A frontier or chosen-trade handle opens by indexing every existing row, and a
 receipt handle opens by indexing every receipt. Those cold paths are O(F), O(T)
@@ -6891,7 +6896,10 @@ not a deterministic collision-proof bound.
 Before an append or durability confirmation, a stale handle scans the bytes
 added since its last validated offset. The work is O(new rows), zero on the
 ordinary serialized path and linear in concurrent append history in the worst
-case. A frontier or chosen-trade block of N rows still requires O(N) validation,
+case. The receipt handle also re-hashes every byte it had already indexed when
+another writer grew the file, so its append and refresh are O(indexed bytes +
+new rows) on that branch (D-1560, D-3318); frontier and chosen-trade handles
+have no prefix recheck (D-3320). A frontier or chosen-trade block of N rows still requires O(N) validation,
 encoding and write work and O(N) buffering; only the receipt row, file-length
 arithmetic and fixed-stride seek are constant-size. Repeating `sync_all` for a
 byte-equal reuse is a fixed number of calls, not constant storage latency.
@@ -8885,7 +8893,8 @@ and subsequent automatic probes, and returns when the current walk returns.
 It is not an immediate cancellation guarantee.
 
 Cold Results/Receipts opens remain O(history); warm refresh is O(delta) with
-expected hash cost. Top selection uses an ordered map. Live census still
+expected hash cost when nothing else wrote, and O(indexed bytes + delta) when
+another writer grew the file (D-1560, D-3305; this sentence predates both). Top selection uses an ordered map. Live census still
 measures a bounded directory; decoded unchanged files are reused. Four admitted
 blocking tasks, 64 MiB file ceilings, 256-row pages and 4,096-row selected-result
 caps bound specified dashboard work; they are not constant I/O deadlines or
@@ -9701,7 +9710,8 @@ by `File::unlock`. What that does not cover, stated rather than implied away:
 - **`/sweep-evidence.json` reads the ledger now**, and so does the AND-mask
   `/candidate-trades.json`. Each looks up the identity's ledger row on every
   saved page, through a cached, byte-bounded ledger handle: O(history) cold,
-  O(new rows) warm. A damaged or over-limit ledger refuses the page, where
+  O(new rows) warm, or O(indexed bytes + new rows) when another writer grew the
+  ledger (D-1560, D-3305). A damaged or over-limit ledger refuses the page, where
   before the ledger was not read at all. An absent or zero-byte `runs.bin` is
   answered as no row from the path's metadata, one call, before any open, so
   either serves the page served before. That includes a ledger truncated to
@@ -12067,8 +12077,10 @@ rule 6); every bound is read from the source.
   file, and the directory again); the terminal is one append and its `fsync`.
   The directory insert at `create_new` and the lookup at each read depend on
   the filesystem and on the directory's entry count, which grows with every
-  audited request ever served. Disk use is O(history). Not timed: no bench
-  covers the journal, and no measurement of a large directory has been taken.
+  audited request ever served. Disk use is O(history). `begin` and the
+  terminal are not timed. The read side, including its directory lookup, is
+  measured to 10^4 invocations by D-3303's section below. No larger directory
+  has been measured.
   `api::operation_audit::tests::each_audited_request_adds_one_file_and_one_index_slot_and_nothing_is_removed`
   pins the byte and file counts, not the latency.
 - **The terminal is owed, so it is not refused by a full detail pool.**
@@ -12492,7 +12504,13 @@ buckets the batch reaches: a gap of `g` empty slots costs `g / 64` sixteen-byte
 entries. An overnight gap on the one-second rung is about 64,000 slots, so
 about 1,000 entries, 16 KB, once per session. Then one `fsync` of the `.tix`,
 before the header slot (`docs/02-store-format.md` §5 step 3b). The extra
-`fsync` per append is measured by nothing.
+`fsync` per append is measured by nothing. **One append pays O(`n_valid`)**
+(D-3302): when the entry it resumes from no longer agrees with the header —
+a torn index write from an append that failed on the same handle —
+`index_batch` rebuilds the whole index before it writes, the same rebuild a
+writer open pays. This paragraph and `docs/02-store-format.md` placed the
+rebuild only at open, "once per month", until D-3302; see "The `.tix`
+rebuild, measured" below.
 
 **Measured — `x86_64` shared host, 4 cores, load average 5 to 7 from other
 builds, release profile, 2026-10-04.** `crates/store/tests/tix_latency.rs`
@@ -12525,8 +12543,9 @@ out of the handle's verified block with no syscall. Gate 8 rows: C-TIX-01
 
 **UNVERIFIED:** a cold DEVICE, the page cache dropped; the daily rung's
 bar-read case, which is counted (at most one) but not timed; the writer's
-rebuild of a large month, which is O(`n_valid`) by construction and timed by
-nothing.
+rebuild of a month past 10^6 bars, which is O(`n_valid`) by construction. The
+rebuild is timed to 10^6 bars by `index_rebuild_cost_grows_with_the_month`
+(D-3302, below); past that it is an extrapolation.
 
 **What the confirmation cannot see.** A reader checks the `.tix` header against
 the month's geometry and the two entries holding the first and last committed
@@ -12983,7 +13002,9 @@ not:
   opened the results ledger, which builds the identity index and hashes the
   file, before its backward scan, once per rung of `range-all`, `pool` pass 1
   and every `descend` step. D-1700 replaced it with `recorded_row`, one
-  expected-O(1) probe of the shared ledger handle after an O(delta) refresh;
+  expected-O(1) probe of the shared ledger handle after an O(delta) refresh,
+  or O(indexed bytes + delta) when another writer grew the ledger (D-1560,
+  D-3305);
   "A range rung's row is read back by identity" below states it.
 
 - **Ordered lanes (D-1556; replaces the completion-order statement D-1564
@@ -14906,7 +14927,9 @@ new durable authority, and none exists.
   `ensure_trade_rows` and `ensure_detail_receipt` now keep one writer handle
   per process (`cli::with_cached_handle`) and bring it up to date with the
   type's `refresh`, which reads only rows appended since: O(T + delta) per
-  recorded run instead of O(H + T). The full walk remains once per process,
+  recorded run instead of O(H + T). The receipt sidecar's refresh and append
+  are O(indexed bytes + delta) when another writer grew it, because
+  `Receipts::absorb_new` re-hashes the indexed prefix first (D-1560, D-3318). The full walk remains once per process,
   and again whenever the root changes, the path names a different file (by
   device and inode), a refresh is refused or an operation is refused; each of
   those opens fresh. UNVERIFIED as a measurement: no bench times it.
@@ -15415,11 +15438,12 @@ The rollback on a failed append is one `seek`, one `set_len` and one
 ## A range rung's row is read back by identity through the shared ledger handle (D-1700)
 
 - **`one_rung` reads its own ledger row back with one expected-O(1) probe,
-  not O(1) worst case, after an O(delta) refresh.** `recorded_row` lifts the
+  not O(1) worst case, after a catch-up refresh.** `recorded_row` lifts the
   identity from the rung's page and calls `of_identity` on the process's
   shared ledger handle (`results::with_shared_writer`). The handle's `refresh`
   absorbs the rows appended since its last use -- O(delta), zero in the common
-  case because the same handle just committed the row -- and the probe is one
+  case because the same handle just committed the row, and O(indexed bytes +
+  delta) when another writer grew the ledger (D-1560, D-3305) -- and the probe is one
   `HashMap` lookup, expected O(1), then one fixed-width read. The handle's
   FIRST open in a process (and on a change of store root) is the O(runs) index
   build `Results::open` states; it is paid once per process and root, not
@@ -15646,5 +15670,300 @@ per-candidate primitive from `CLAUDE.md` §3 rule 4.
   further because a cut changes what a successful answer contains: its
   records, `bytes_read` and `hit_scan_cap`. Skipping the half that cannot hold
   a run would need the attempt's origin, which the handler does not receive.
-- **Not timed.** No bench measures a log walk. The 4 MiB per half is the
-  configured cap, not a measurement, and the time it takes is UNVERIFIED.
+- **Not timed per request.** No bench times this route's walk. D-3311's
+  section below reports one capped, no-match `telemetry::tail` walk: about 20
+  ms at p50 for 4 MiB. The time one `/logs.json` request takes is still
+  UNVERIFIED.
+
+## Gate 8 at p99, and the per-operation costs the p99 rows found — D-3300 to D-3305, 6 October 2026
+
+All numbers on this page were measured on a 4-core cloud box (Intel Xeon,
+`nproc` 4, shared), in the release bench profile, on 6 October 2026. They
+are repeated runs, not single ones, and the spread is given wherever it
+matters.
+
+### What §1's "measured by gate 8" meant, and what it means now (D-3300)
+
+§1 says each operation `CLAUDE.md` §3 rule 4 names "is O(1) and each is
+measured by gate 8". Until D-3300 every Gate 8 row except telemetry's C-T-01b
+took the **minimum over trials of a mean**. That statistic cannot fail on a
+tail. The minimum throws away any trial that paid a slow call, and the mean
+spreads a slow call across the reps. Two plants proved it on this box:
+
+- A cold `read_record` that scans O(n) on one call in fifty: C-BC-01 read
+  **1.20×** and stayed green. The new O1P-01 row read **9.4×** at 10^5 and
+  **87×** at 10^6 and breached.
+- An `offer` that scans the whole table for one key in 64: C-E-10 read
+  **1.08×** and stayed green, because it only ever probes key 0. O1P-03 read
+  **11.5×** at 10^4 and **158.8×** at 10^5 and breached.
+
+The new rows time every call (or every batch of 32, for the nanosecond
+primitives) on its own, at **10^3, 10^4, 10^5 and 10^6**. Each size runs 5
+rounds, and the row gates the smallest round p99 against the 10^3 one under
+the same 3.0× ceiling. The other rows stopped at 10^5. Max is printed and
+never gated, because on a shared box the max is the scheduler.
+
+| Row | Operation | p99 at 10^3 / 10^4 / 10^5 / 10^6 | 10^6 / 10^3 |
+|---|---|---|---|
+| O1P-01 | cold `BarFile::read_record` | 3,543–4,609 / 3,454–4,671 / 3,492–3,562 / 4,323–4,418 ns | 0.95×–1.24× |
+| O1P-02 | `BarFile::first_at_or_after` via `.tix` | 278–446 / 313–330 / 311–314 / 301–306 ns | 0.67×–1.10× |
+| O1P-03 | k=1 duplicate rejection, per 32 | 436–453 / 467–614 / 561–612 / 1,147–1,503 ns | 2.63×–3.42×, **not gated** |
+| O1P-04 | result append into a reservation, per 32 | 3,019 / 2,984 / 2,968 / 3,026 ns | 0.98×–1.04× |
+
+Each cell is the range over three runs of the corrected sampler (D-3309); a
+ratio is each run's 10^6 against that same run's 10^3. The O1P-04 row is the
+exception: its cells are one run's values, and its ratio column is the range
+over three runs of the round-1 bench, whose O1P-04 code did not change
+(1.008×, 0.977×, 1.041×). The maxima ran from 19 µs to
+497 µs and are not a bound. The plants above were run against the round-1
+sampler, whose cold read could, about once in 196 samples at 10^3, land in the
+block before it; D-3309 removed that.
+
+**Still at the minimum of a mean:** mask evaluation (`C-E-*`, `C-V-*`),
+condition lookup, and every other row in the thirteen benches apart from
+C-T-01b and the O1P rows. The `hits` test and the compile-time name table have
+no size that grows, so there is nothing for a 10^3 → 10^6 sweep to vary. The
+two rule-4 operations that do grow, bar lookup and the k=1 table, are now
+covered. Round 2 below adds O1P-05 for the manifest lookup and O1P-06 for
+`tail`.
+
+### k=1 duplicate rejection leaves the cache past 10^5 offered positions (D-3301)
+
+`engine::primitives::offer` is one `HashSet<u32>::insert`, an expected-O(1)
+probe. At 10^6 entries the table is several MiB and outgrows the cache, so a
+probe of a random present key pays a memory miss. Its p99 per 32 rejections
+measured **1,147 – 1,503 ns at 10^6** against 436 – 453 ns at 10^3 in the same
+runs, which is **2.63× – 3.42×** over three runs (D-3309). That is the operation count staying the same
+while each probe gets slower in time: it is the memory hierarchy, not the
+algorithm. **No production table reaches that size.** k=1 offers one position
+per live condition, so the table never holds more than `ConditionMask::BITS`,
+384 entries. O1P-03 gates 10^4 and 10^5 and only prints 10^6. Gating 10^6 at
+a ratio this close to 3.0 would make a red build a matter of luck.
+
+### A reserved append's p99 is a page fault, about 14× its p50 (D-3301)
+
+`Vec::with_capacity` reserves address space, not memory. The first push into
+each page that has not been touched yet takes a minor page fault. O1P-04's p50
+is about 216 ns per 32 pushes and its p99 about 3,000 ns at **every** size,
+because the faults recur at a fixed rate per page. Touching the whole
+reservation before timing took the p99 to **780 ns** (and the p50 to 389 ns).
+So the tail is the fault, not the push. It is flat in the number of results
+held, and the row gates that flatness. The constant itself, a few
+microseconds per fresh page, is real and is paid by `engine::drain`'s
+reserved `out` as well. Touching every reserved page ahead of time would move
+that cost to the reservation and make a level that never fills it pay for
+pages it never uses, so it was not done.
+
+### The `.tix` rebuild, measured — and that an append can pay it (D-3302)
+
+`BarFile::rebuild_index` reads every committed record through the verified
+path. Before D-3302 it was described only as a writer-open cost "once per
+month", and as "timed by nothing". Two corrections:
+
+- **An append can pay it too.** `index_batch` rebuilds the index when the
+  entry it resumes from no longer agrees with the header. That happens after a
+  torn index write from an append that failed on the same handle. That one
+  append is O(`n_valid`). The healthy path is still one entry read.
+- **Measured** by `store`'s ignored `index_rebuild_cost_grows_with_the_month`
+  in `tests/tix_latency.rs`. The test times a writer open with the `.tix`
+  removed, 7 samples per size, over two runs:
+
+| Bars | p50 | max |
+|---|---|---|
+| 1,000 | 0.49 ms | 0.60 ms |
+| 10,000 | 1.21 – 1.28 ms | 1.45 ms |
+| 100,000 | 7.9 – 8.0 ms | 9.5 ms |
+| 1,000,000 | 79 – 82 ms | 87 ms |
+
+That is linear, about 80 ns per bar above roughly 0.4 ms of fixed open cost.
+At the one-second ceiling of 2,678,400 bars it would be about **215 ms**.
+**That figure is an extrapolation, not a measurement.** The append-time
+rebuild runs the same function, but no test times it inside an append,
+because reaching it takes a torn write.
+
+### An audit page `fsync`s up to 64 times on a GET (D-3303)
+
+`cli::operation_audit::read` calls `sync_all` on the index and then on the
+invocation's own journal. That is two `fsync`s on a READ path, so that what
+it reports has reached the disk. `page` calls `read` once per row, up to
+`MAX_PAGE` = 32. `/backtest/audit.json` serves a page. `/backtest/run.json`
+reaches `read` on a poll that names a persisted attempt (`persisted_status`),
+or on one whose newest CLI marker has no terminal (`ended_without_terminal`).
+An idle poll that names neither reads no audit record (D-3313). D-1445's
+section above counts the `fsync`s that `begin` and the terminal pay and a
+directory lookup at each read. It does not name the read's own two
+`fsync`s.
+
+The cost is bounded by the page, not by the index. cli's ignored
+`a_full_audit_page_costs_the_same_at_every_index_size` (`crates/cli/tests/audit_page_latency.rs`) measured one 32-row
+page:
+
+| Invocations indexed | p50 | p99 | max |
+|---|---|---|---|
+| 100 | 2.46 ms | 3.23 ms | 3.97 ms |
+| 1,000 | 2.42 ms | 4.16 ms | 105 ms |
+| 10,000 | 2.42 ms | 3.04 ms | 4.49 ms |
+
+That is flat. But an `fsync` waits for whatever writeback the file has
+pending, and the 105 ms maximum is one such wait. **The latency of this GET
+therefore depends on other writers' dirty pages, and it has no bound.** The
+syncs were kept. Dropping them would let the page report a record that a
+crash could still take back, and that is a change to what the route
+promises, not to what it costs. 10^5 and 10^6 invocations were not run,
+because each invocation is its own synced journal. **The size of the index
+does not enter the cost by construction, but that is UNVERIFIED as a
+measurement past 10^4.**
+
+### Five claims that the code contradicted, corrected (D-3302, D-3304, D-3305)
+
+- `cli::results` said its append and `refresh` cost "O(delta + 1)" and
+  "O(new rows)", and so did §100 above. Since D-1560, a handle that finds the
+  file grown re-hashes every byte it had already indexed first, so the cost is
+  O(indexed bytes + delta). The section above on ledger prefix rechecks,
+  D-1560 to D-1567, already said so; the module header did not (D-3305).
+- `api::bars`'s module header said "Nothing here scans". Its own `window`
+  route reads every bar of up to 240 months when sorted by a price column
+  (D-0733). The header now scopes the claim to the page route (D-3304).
+- `api::render` called its startup walk "the only `read_dir` in shipping code
+  under `crates/api`", and `api::autopilot` said there were two. There are
+  three, and the third, `server.rs`'s `archive_ready`, runs on every
+  `/feeds.json` request. It reads at most one entry, so it costs O(1) per
+  feed (D-3304).
+- `telemetry::sink` said "this crate carries no bench" after
+  `benches/ratio.rs` had landed (D-3304).
+- `store::file::index_batch` and `docs/02-store-format.md`, about the
+  append-time rebuild (D-3302, above).
+
+`docs/14-sweep-readiness-20260906.md` still quotes "O(delta + 1)" for the
+cached result append. It is a dated snapshot of 6 September, so it was left
+as written. This section is the correction.
+
+## Round 2 of the p99 lens: the manifest lookup past the cache, and `tail` at p99 — D-3306 to D-3308, 6 October 2026
+
+All numbers are from a 4-core cloud box (shared, `nproc` 4), in the release
+bench profile, over three runs.
+
+### A random manifest lookup is flat in probes, not in time, at 10^5 months (D-3307)
+
+`Manifest::entry` is one `HashMap<EntryKey, Held>::get` on a map reserved
+from the census size, so the load factor is the same at every size. C-12, and
+the "0.994–1.049×" row in `docs/07-o1-architecture.md`, re-read ONE key,
+`key(7)`, whose slot stays in cache. O1P-05 reads a different present key on
+every lookup:
+
+| Months in the census | p99 per 32 lookups | against 10^3 |
+|---|---|---|
+| 1,000 | 2,055 – 2,701 ns | 1.00× |
+| 10,000 | 3,591 – 4,137 ns | 1.53× – 1.88× |
+| 100,000 | 11,293 – 12,486 ns | **4.62× – 5.91×** |
+
+Ratios are each run against its own 10^3. Every key of the census is looked
+up in a spread order (D-3309). The first version cycled 4,096 keys and
+measured 2.0× – 4.1×, which understated it. On the same tables in the same
+runs, C-12 read 0.90× – 1.04×. The p50 rises too, from about 2,000 ns to
+about 3,050 and then about 5,600 ns per 32. A held entry carries
+its key twice: once as the map key, and again inside `Entry` beside the
+counters and closes. At a reservation factor of 2, 10^5 months is tens of MiB,
+so a random key's slot costs a cache miss.
+
+**This is memory, not a scan.** A scan would be about 100× at 100× the census.
+The p99 row gates 10^4 and prints 10^5. 10^5 is over the 3.0× ceiling in
+every run, so gating it would make the build red, and raising the ceiling for
+one row would hide the effect behind a looser number.
+
+**10^5 months is a real size, not an artificial one.** That is what separates
+this from the k=1 dedup table (D-3301), which can never exceed 384 entries.
+208 shares and 2 indices at roughly 130 months each is about 27,000 keys per
+rung. Across several rungs, plus stored option and futures contracts, which
+the key separates, one vendor's census can reach 10^5, and with enough
+contracts more. That is an estimate, not a count of a real census. **What a
+real census holds is UNVERIFIED**, and so is the lookup past 10^5: the harness
+can name only 289,080 distinct keys. Shrinking the entry would mean holding `log` positions in the
+map instead of `Held` copies. That trades one cache miss for two dependent
+loads, and nothing measured here says it would win, so it was not done.
+
+### `tail(20)` is flat at p99 to 10^6 events (D-3306)
+
+O1P-06 times every `telemetry::tail` call. C-T-03 measured a minimum of means
+and a byte count, neither of which can see a tail that one call in fifty pays.
+p99: 33,943 / 30,531 / 30,805 / 31,770 ns at 10^3 / 10^4 / 10^5 / 10^6 events
+in the file, which is 0.94× at 10^6. That is C-T-03's flatness, now shown on
+the statistic that could fail.
+
+### Two api doc comments that the code contradicted (D-3308)
+
+- `server.rs`'s `fno_land` said "One census read for the whole run … O(1)
+  per contract; nothing here scans the store". Landing each body goes
+  through `pull::ingest::from_window`, which reads and checks the vendor's
+  whole manifest per body. That cost was already stated above (W1-api5-1,
+  W1-pull2-0); the comment now says it too.
+- The doc block "Prices one rolling-option group … **O(rows)** … Nothing here
+  scans the store" was attached to `read_month_bars`, which reads every
+  record of a month. It belongs to `price_group`, one loop over the group's
+  rows, and has been moved there.
+
+### What a fresh pass checked and found holding
+
+Two read-only audits looked for hidden per-operation growth in eight crates:
+unsized maps on per-operation paths, caches that never evict, per-request
+clones of growing structures, and linear `contains`/`any`. A third audit read
+354 doc-comment cost claims in pull, lake, indicators, runner and api, and
+checked about 45 of them against the code. Every collection that grows on a
+per-operation path is reserved, capped by a named constant, or already
+stated in this file. Beyond the two comments above, no cost claim was
+contradicted. One note sits below the finding threshold:
+`runner::signal_candle_stop::period_geometry` grows a `Vec` once per IST day
+without reserving it. That is amortised O(1) and runs once per preparation,
+not per evaluation.
+
+**Not covered by a p99 row, and why.**
+- Core universe membership and vocab name lookup use compile-time tables
+  whose size does not change with data, so there is no n to sweep. Their
+  probe counts are asserted by tests (`docs/07-o1-architecture.md` layer 4).
+- The lake row read `Batch::row` is an index into a decoded batch, which
+  C-L-01 measures.
+- The api routes are measured by D-1446's and D-0954's sections, not by a
+  bench. That remains UNVERIFIED as a measurement.
+
+## Two api GETs whose cost no section stated — D-3311 and D-3312, 6 October 2026
+
+Found by a router-first pass over all 58 GET routes (round 4 of the p99 lens).
+Every other route was either bounded or already named.
+
+### An idle `/backtest/run.json` poll walks the CLI log up to six times (D-3311)
+
+`sweeprun::observed_status_with_admission` → `observe_elsewhere` →
+`newest_sweep_marker`. That runs `status_tail("cli.lifecycle", 256)`, then a
+second walk to the marker's position, then a third walk for the run's activity
+or the legacy target. Each `status_tail` is a filtered `telemetry::tail`
+capped at `logs::SCAN_BYTES`, 4 MiB. `settled_tail` repeats any walk that came
+back on a partial tail. **So one poll can read up to six times 4 MiB**, and how
+much it reads grows with how much other CLI log follows the newest sweep
+marker, up to that cap.
+
+These walks run inside `detail::run`, not in `run_log_read`'s pool of four, so
+D-2327's "at most 32 MiB of log being read at once" does not cover them. D-0954
+named the lifecycle walk's cap only for what it means when no marker is found.
+
+**Measured** on a 4-core cloud box by `telemetry`'s bench, which reports this
+and does not gate it. One filtered `tail` that matches nothing over 100,000
+events reads exactly 4,194,304 bytes. Over three runs of 50 calls it took a
+p50 of 20.2 – 21.0 ms and a p99 of 22.7 – 32.1 ms. Six such walks would be
+about 120 ms per poll. **That figure is an extrapolation; the poll itself was
+not timed.**
+
+### `/boolean-campaign.json` opens the campaign twice per request (D-3312)
+
+`booleancampaignjson::render` calls `cli::boolean_campaign::Reader::open`.
+That is a `read_dir` over the campaign's checkpoint directory
+(`discover_through`, which refuses past `DIRECTORY_LIMIT` = 1,000,000 entries;
+`open` then refuses a latest or interrupted sequence at or past
+`MAX_CHECKPOINTS` = 1,024, after the walk), a read of the latest snapshot, and one flock and 112-byte read per
+recorded child receipt. Then `Reader::require_current` runs the whole `open`
+again to prove nothing changed while the body was built.
+
+Nothing caches it. So the route is O(checkpoint entries + receipts), twice,
+on every request. D-0904 names the same directory walk for three other
+routes; this one was named only in D-1445's list of audited routes. The second
+open is the freshness check, and it is kept. **No timing was taken. The cost
+is UNVERIFIED as a measurement.**

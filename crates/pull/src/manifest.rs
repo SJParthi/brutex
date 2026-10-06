@@ -2783,8 +2783,9 @@ impl Manifest {
     /// probe at 1×, 10× and 100× the census, on a hit and on a miss. The bench
     /// calls [`Manifest::entry`] rather than this method because the two are
     /// one `HashMap::get` on the same key type and differ only in which field
-    /// of the `Copy` value they hand back, so a cost that had started to grow
-    /// with the census would show on either one.
+    /// of the `Copy` value they hand back. C-12 probes one cached key, so it
+    /// cannot see the cache-miss growth O1P-05 measures for random keys past
+    /// 10^4 months (D-3307).
     ///
     /// **UNVERIFIED as a measurement.** The bound is argued from the
     /// shape of the code and no bench in this workspace times it.

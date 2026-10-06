@@ -2770,9 +2770,11 @@ impl BarFile {
 
     /// Rebuilds `index` from every committed bar, because `why`.
     ///
-    /// O(`n_valid`) record reads, through the verified read path, and paid
-    /// once per month: the writer that rebuilt it keeps it in step from then
-    /// on. Logged as a `store.tix` info line naming the reason.
+    /// O(`n_valid`) record reads, through the verified read path. Paid at
+    /// writer open for a month with no index it can confirm, and again by
+    /// `reindex` inside an append whose resume entry is torn (D-3302);
+    /// otherwise the writer keeps the index in step. Logged as a `store.tix`
+    /// info line naming the reason.
     ///
     /// When the bars cannot be indexed — one shares a slot with the bar before
     /// it, lies off its rung's grid or outside the month, or does not read —
@@ -2818,7 +2820,10 @@ impl BarFile {
     /// One entry read (`time_index::resume`) and one pass over the batch. An
     /// entry that no longer puts the last committed bar where the header does
     /// — a torn write from an append that failed on this handle — rebuilds
-    /// the index first, loudly, and is asked again.
+    /// the index first, loudly, and is asked again. **That rebuild is
+    /// O(`n_valid`) inside this append**: every committed record is read
+    /// through the verified path, about 80 ms at 10^6 one-second bars
+    /// measured on a 4-core cloud box (D-3302, `docs/06-limits.md`).
     ///
     /// A bar in the slot of the bar before it — a second daily bar on one IST
     /// day, which the daily rung admits (D-0915) — is not refused: the append

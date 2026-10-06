@@ -20,16 +20,18 @@
 //!
 //! | Operation | Cost | How |
 //! |---|---|---|
-//! | append | **O(delta + 1) local work** | absorb `delta` records appended by other writers, then seek/write one stride and update one expected-O(1) hash entry |
+//! | append | **O(1) local work when no other writer grew the file; O(indexed bytes + delta) when one did** | on growth, re-hash every byte already indexed (D-1560), absorb `delta` records appended by other writers, then seek/write one stride and update one expected-O(1) hash entry |
 //! | read record *i* | **O(1)** | seek to `HEADER + i·STRIDE`, one read |
 //! | count | **O(1)** | `(file_len - HEADER) / STRIDE`, no walk |
 //! | duplicate check | **expected O(1)** | a `HashMap` of identities, built once at open and caught up under the append lock |
 //!
 //! Building the identity map is one O(runs) pass over the file at open. An
 //! append then takes the exclusive file lock and catches that map up with every
-//! complete record another writer added since this handle last scanned; that
-//! delta can be nonzero and makes the call O(delta + 1), not unconditionally
-//! O(1). The common single-writer path has delta zero. None of this is per bar
+//! complete record another writer added since this handle last scanned. When
+//! that delta is nonzero the handle first re-hashes every byte it had already
+//! indexed (D-1560), so the call is O(indexed bytes + delta), not O(delta + 1)
+//! as this table said until D-3305. The common single-writer path has delta
+//! zero and pays neither. None of this is per bar
 //! or per candidate, so it is not on the path §3 rule 4 governs. Lock waiting,
 //! seek/write and `sync_all` latency are filesystem costs and have no worst-case
 //! O(1) latency claim.
@@ -1059,8 +1061,8 @@ impl Results {
         let stride = stride_of(version);
 
         // ONE PASS AT OPEN. Stated rather than hidden: this is O(runs). Append
-        // may later perform O(delta) catch-up for records written by another
-        // process; direct reads, counts and already-built index probes do not
+        // may later perform O(indexed bytes + delta) catch-up for records
+        // written by another process (D-1560, D-3305); direct reads, counts and already-built index probes do not
         // scan the ledger. None is on the per-bar or per-candidate path §3 rule
         // 4 governs.
         //
@@ -1260,12 +1262,14 @@ impl Results {
         self.read(index).map(Some)
     }
 
-    /// Appends one run with O(delta + 1) local work.
+    /// Appends one run: O(1) local work when no other writer grew the file,
+    /// O(indexed bytes + delta) when one did (D-1560, D-3305).
     ///
     /// `delta` is the number of complete records another cooperating writer
-    /// appended since this handle last scanned. Under the exclusive lock those
-    /// records are read into the identity map before the duplicate check; the
-    /// common single-writer path has `delta == 0`. The final record has fixed
+    /// appended since this handle last scanned. Under the exclusive lock the
+    /// already-indexed prefix is re-hashed and those records are read into the
+    /// identity map before the duplicate check; the common single-writer path
+    /// has `delta == 0` and pays neither. The final record has fixed
     /// width, but lock waiting, seek/write and `sync_all` latency are not given
     /// a worst-case O(1) bound.
     ///
@@ -1276,7 +1280,7 @@ impl Results {
     /// run has nothing to add, and overwriting would destroy the first one's
     /// timestamp for no gain.
     ///
-    /// **UNVERIFIED as a measurement.** The O(delta + 1) shape is argued from
+    /// **UNVERIFIED as a measurement.** The cost shape above is argued from
     /// the code and no bench in this workspace times either the catch-up or the
     /// filesystem latency. `CLAUDE.md` §3 rule 6: a structural argument is not
     /// a measurement, however sound it is.
@@ -1452,9 +1456,12 @@ impl Results {
     ///
     /// # Cost
     ///
-    /// **O(records appended by others)**, which is zero on the overwhelmingly
-    /// common path of one writer — the `while` does not execute and this is a
-    /// length check. It is never per bar and never per candidate.
+    /// **O(records appended by others)** plus, when there are any, a re-hash
+    /// of every byte already indexed (`PrefixDigest::require_unchanged`,
+    /// D-1560, D-3319): O(indexed bytes + delta) on the growth branch. Zero on
+    /// the overwhelmingly common path of one writer — the `while` does not
+    /// execute and this is a length check. It is never per bar and never per
+    /// candidate.
     ///
     /// Revalidate the tail while holding the append lock: another writer can
     /// die after this handle opens. A partial tail is preserved and refused
@@ -1514,7 +1521,9 @@ impl Results {
 
     /// Refresh the validated index from appended rows under a shared file lock.
     ///
-    /// O(new rows), with constant metadata checks when unchanged. Replacement,
+    /// Constant metadata checks when unchanged; when the file grew, the
+    /// already-indexed prefix is re-hashed first (D-1560), so O(indexed bytes +
+    /// new rows), not O(new rows) as this said until D-3305. Replacement,
     /// shrinkage, same-length mutation and over-limit growth are refusals.
     ///
     /// # Errors

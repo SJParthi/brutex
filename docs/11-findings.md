@@ -904,3 +904,154 @@ Narrative only. No row is added to the table above.
   integer annotation are refused by name. D-2270, AHC-01.
 - **h-pull-2**: fixed. The TOTP base32 decoder refuses an impossible length
   and non-zero bits past the last whole byte. D-2271, AHC-02.
+
+### Attack lens L2, O(1) at measured p99 — dispositions — 2026-10-06
+
+Found by five read-only per-crate audits of every per-operation path. Each
+candidate went to a separate refuter told to default to refuting. One was
+refuted: the frontier read's per-read sort, which is linear on rows already
+written best-first and capped at 4,096. The survivors:
+
+| ID | Severity | Finding | Where | Disposition |
+|---|---|---|---|---|
+| `F-8D5719` | `unguarded` | Gate 8 measured every rule-4 operation at the minimum of a mean, which a tail cannot move: planted one-in-fifty O(n) tails passed C-BC-01 at 1.20× and C-E-10 at 1.08× | `crates/store/benches/ratio.rs`, `crates/engine/benches/ratio.rs`; `docs/06-limits.md` §1 | FIXED f80e4d11 — O1P-01..04 gate p99 at 10^3..10^6 and breach the same plants at 9.4×–158.8× (D-3300, D-3301) |
+| `F-054F53` | `gap` | An append rebuilds the .tix in O(n_valid) and no document said so; the rebuild was "once per month" and "timed by nothing" | `crates/store/src/file.rs` `index_batch`; `docs/06-limits.md`; `docs/02-store-format.md` | FIXED f80e4d11 — named in all three; measured 0.49 → 80 ms at 10^3 → 10^6 bars (D-3302) |
+| `F-4EB825` | `gap` | An audit read fsyncs twice per row on a GET and no limit named it: up to 64 per `/backtest/audit.json` page | `crates/cli/src/operation_audit.rs` `read`, `page` | FIXED f80e4d11 — named and measured, 2.4 ms per page flat at 10^2..10^4 invocations; the syncs are kept (D-3303) |
+| `F-D27B5E` | `wrong` | cli results append and refresh claimed O(delta + 1) against D-1560, whose growth branch re-hashes the indexed prefix | `crates/cli/src/results.rs` header, `append`, `refresh`; `docs/06-limits.md` §100 | FIXED f80e4d11 — documents state O(indexed bytes + delta) (D-3305) |
+| `F-C33088` | `wrong` | Four stale cost and shape comments in api and telemetry: "nothing here scans", "the only `read_dir`", "two `read_dir` sites", "carries no bench" | `crates/api/src/bars.rs`, `render.rs`, `autopilot.rs`; `crates/telemetry/src/sink.rs` | FIXED f80e4d11 (D-3304) |
+
+**What these fixes are proven by.** For `F-8D5719` the evidence is the plants:
+each was run against these rows and breached them, and was then reverted. The
+outputs are in `docs/06-limits.md`. The other four are documentation
+corrections. Their evidence is a measurement or the code they now describe,
+not a unit test that fails before the change. A test that greps a comment
+proves nothing about the code it describes.
+
+### Attack lens L2, round 2 — dispositions — 2026-10-06
+
+Fresh-eyes pass: three read-only audits (hidden per-operation growth; doc
+cost claims against code) plus new p99 rows. The manifest finding is a
+measurement, repeated three times. The two comments were each read against
+the code they describe. No separate refuter was run in this round.
+
+| ID | Severity | Finding | Where | Disposition |
+|---|---|---|---|---|
+| `F-DE1694` | `wrong` | A random manifest lookup is flat in probes, not in time, and the fixed-key row hid it: p99 2.0×–4.1× at 10^5 months while C-12 and `docs/07-o1-architecture.md` read 1.0× | `crates/pull/src/manifest.rs` `Manifest::entry`; `crates/pull/benches/ratio.rs` C-12 | FIXED e2715c9b — O1P-05 gates 10^4 and prints 10^5; named in `docs/06-limits.md` and `docs/07-o1-architecture.md` (D-3306, D-3307) |
+| `F-3D3988` | `wrong` | fno_land and price_group cost comments contradicted the code: "one census read for the whole run", and an O(rows) "nothing scans" block on the O(bars) `read_month_bars` | `crates/api/src/server.rs` | FIXED e2715c9b (D-3308) |
+
+### Attack lens L2, round 3 — dispositions — 2026-10-06
+
+Two read-only audits ran. A call-graph pass over runner, indicators, lake,
+costs, greeks and vocab, following 15 hot-loop functions two calls deep,
+found nothing new. An adversarial review of this lens's own diff found the
+defects below. One more correction to the round 1 table: F-8D5719's "planted
+one-in-fifty O(n) tails" was two plants, a one-in-fifty tail in
+`read_record` and a one-key-in-64 scan in `offer`.
+
+| ID | Severity | Finding | Where | Disposition |
+|---|---|---|---|---|
+| `F-61001B` | `wrong` | The lens's own p99 rows misdescribed what they measured: O1P-01 could re-read the previous block, O1P-05 cycled 4,096 keys while claiming uniform draws, and three sets of quoted numbers disagreed | `crates/store/benches/ratio.rs` `cold_index`; `crates/pull/benches/ratio.rs` O1P-05; `docs/04`, `06`, `07` | FIXED 7ebc0a9e (D-3309) |
+
+### Attack lens L2, round 4 — dispositions — 2026-10-06
+
+A second adversarial review of the whole branch diff confirmed D-3309's two
+sampler fixes. It found four leftover statements that did not match the
+code or the D-3309 numbers:
+
+- O1P-03's 10^5 ratio in `docs/04-invariants.md`.
+- The pull bench's in-code comment on O1P-05.
+- F-61001B pointing at a section that did not exist.
+- `tail_stamp`'s "none repeats the entry" claim.
+
+All four were corrected in the commit after `7ebc0a9e` (D-3310). None
+changes what a row gates or measures. A separate router-first pass over the
+api GET handlers is recorded with the next round.
+
+The router-first pass over all 58 GET routes found two per-request costs no
+section stated:
+
+| ID | Severity | Finding | Where | Disposition |
+|---|---|---|---|---|
+| `F-A86CB4` | `gap` | An idle run-status poll can walk the CLI log six times at 4 MiB each, outside the D-2327 pool | `crates/api/src/sweeprun.rs` `newest_sweep_marker`, `observe_elsewhere`, `status_tail` | FIXED in the commit carrying D-3311 (named; one walk measured) |
+| `F-BE221F` | `gap` | `/boolean-campaign.json` opens the campaign twice per request, each open walking the checkpoint directory | `crates/api/src/booleancampaignjson.rs` `render`; `crates/cli/src/boolean_campaign_reader.rs` `require_current` | FIXED in the commit carrying D-3312 (named) |
+
+### Attack lens L2, round 5 — dispositions — 2026-10-06
+
+A review of round 4's diff checked every statement against the code: the
+six-walk bound, the pool, the double open, the bench row and the O1P-03
+numbers. It found one misattributed bound. `MAX_CHECKPOINTS` does not cap
+`discover_through`'s walk; `DIRECTORY_LIMIT` does, and `open` checks
+`MAX_CHECKPOINTS` after the walk. Corrected in `docs/06-limits.md`'s D-3312
+section. Text only.
+
+### Attack lens L2, round 6 — dispositions — 2026-10-06
+
+A final review of the whole branch checked every number across documents,
+every gated or printed claim against the benches, the gate 14 pins and every
+cited identifier. It found three text defects in this lens's own documents.
+They are corrected by D-3313, in the commit after `fd95f23`.
+
+### Attack lens L2, round 7 — dispositions — 2026-10-06
+
+A review for older text that this lens's measurements contradict found four
+such places. They are corrected by D-3314.
+
+### Attack lens L2, round 8 — dispositions — 2026-10-06
+
+Three stale copies of claims corrected in rounds 1 and 2: `rebuild_index`,
+`api::census` and an inline comment in `cli::results`. Corrected by D-3315,
+with a grep for each old wording showing no further copies.
+
+### Attack lens L2, round 9 — dispositions — 2026-10-06
+
+Four older statements called the census lookup flat with no qualifier, and
+one paragraph said greeks carried no bench. Corrected by D-3316. A grep for
+"flat to within", "lookup is flat", "100× the census" and "carries no bench"
+was run afterwards across docs, CLAUDE.md, crates/*/src and the benches.
+
+### Attack lens L2, round 10 — dispositions — 2026-10-06
+
+The pull bench header and two results-ledger "O(delta)" sections. A grep
+afterwards found two more of the latter, and all are corrected by D-3317.
+
+### Attack lens L2, round 11 — dispositions — 2026-10-06
+
+The receipt handle's growth re-hash was left out of three statements.
+Corrected by D-3318. A grep for receipt refresh "O(delta)" or "O(new rows)"
+across `docs/0*.md` and `crates/*/src` found no other copies;
+`candidate_universe`'s "O(new rows)" is the write of its own block, not a
+receipt refresh.
+
+### Attack lens L2, round 12 — dispositions — 2026-10-06
+
+`api::trades`'s "O(new records)" warm refresh, plus `absorb_new_records`'s
+own cost doc, found by a wider sweep of wordings. Both corrected by D-3319.
+The round 11 note's "no other copies" held only for the phrasings it
+searched.
+
+### Attack lens L2, round 13 — dispositions — 2026-10-06
+
+§116 and `api::frontierjson`, plus the borderline `api::topjson` header.
+Corrected by D-3320, which also records a search by call site rather than by
+phrase.
+
+### Attack lens L2, round 14 — dispositions — 2026-10-06
+
+`recorded_row`'s doc, §116's heading, and one `docs/07-o1-architecture.md`
+row. Corrected by D-3321, with every non-test `with_shared_writer(` and
+`.refresh()` caller in `crates/cli/src` read afterwards.
+
+### Attack lens L2, round 15 — the zero round — 2026-10-06
+
+A full review of the branch at `c0b7c8b` found ZERO defects. It covered:
+
+- every statement added or changed across 20 commits and 28 files, checked
+  against the code;
+- older authoritative text, found by call site, for each corrected fact:
+  every caller of `with_shared_writer`, `.refresh()`, `CommittedParents` and
+  `Receipts` in `crates/cli` and `crates/api`; `BarFile::append` callers;
+  `Manifest::entry` callers; audit-read callers; the run-status poll; the
+  campaign route; `AGENTS.md`, `CLAUDE.md`, `docs/01` and `docs/10`;
+- the O1P-01..06 bench code, the capped tail and the gate 14 pins.
+
+This is the lens's exit round.

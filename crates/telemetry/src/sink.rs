@@ -36,10 +36,9 @@
 //!
 //! **No timing was taken and none is claimed**, which the first line of this
 //! section already said and this one keeps saying: every entry in the table is
-//! a count of operations. This crate carries no bench. Turning the counts into
-//! a measurement needs a `crates/telemetry/benches/ratio.rs` of the shape
-//! `crates/store` and `crates/pull` already have — which CI gate 14 wants
-//! anyway — and nothing here should be read as a figure until it exists.
+//! a count of operations. The timings live in `crates/telemetry/benches/ratio.rs`
+//! and `docs/04-invariants.md` names its rows; `docs/06-limits.md` reports
+//! them. This table is not where a figure is read (D-3304).
 //!
 //! Once per [`Config::max_file_bytes`] a rotation happens instead, inside the
 //! same lock: at most `2 * keep_files` renames and one `open`. That is a

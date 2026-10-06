@@ -1,4 +1,5 @@
-//! UNVERIFIED performance: no named cost test or measured latency bound is established here.
+//! UNVERIFIED performance: no latency bound is established. A read page is
+//! measured, not gated, by `crates/cli/tests/audit_page_latency.rs` (D-3303).
 //! Durable invocation history, separate from computation identity and admission.
 //!
 //! `audit/invocations-v1/index.bin` reserves monotonically increasing IDs under

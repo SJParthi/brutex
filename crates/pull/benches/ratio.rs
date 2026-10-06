@@ -5,7 +5,8 @@
 //! `docs/07-o1-architecture.md`: *"A layer is not built because the code looks
 //! right. It is built when a test asserts the bound as a number."* Layer 13 is
 //! "counters, never scans", and the two numbers that make it real are here:
-//! reading the census costs the same whatever the census holds, and it beats
+//! reading the census for one cached key costs the same whatever the census
+//! holds (random keys are O1P-05, which is not flat in time at 10^5), and it beats
 //! re-deriving the same answer from the entries by a wide margin, measured in
 //! the same process.
 //!
@@ -40,9 +41,10 @@
 //!
 //! Not measured either: residency. A probe into a 100,000-entry map that has
 //! fallen out of cache costs more than one into a map that has not, and that is
-//! layer 7's subject rather than layer 3's. These measurements probe one key
+//! layer 7's subject rather than layer 3's. C-11, C-12 and C-26 probe one key
 //! repeatedly, so what they report is the **probe count** — which is what "no
-//! rehash, one probe" claims — and not the machine's memory hierarchy.
+//! rehash, one probe" claims — and not the machine's memory hierarchy. O1P-05,
+//! below, does measure it: random keys past the cache (D-3307).
 
 use std::hint::black_box;
 use std::time::Instant;
@@ -313,7 +315,8 @@ fn census_beats_the_scan_it_replaces() -> bool {
     ok
 }
 
-/// C-12 — one entry lookup costs the same at 1×, 10× and 100× the census.
+/// C-12 — one REPEATED entry lookup costs the same at 1×, 10× and 100× the
+/// census. It probes one cached key; random keys are O1P-05 (D-3307).
 ///
 /// The map is reserved from the entry count known before the load walk begins,
 /// so it never rehashes: `docs/07-o1-architecture.md` layer 3, O(1) **worst
@@ -407,6 +410,101 @@ fn entry_lookup_is_flat() -> bool {
     let d = ratio("C-12 absent lookup, 100x census", base, miss(&hundred));
 
     a && b && c && d
+}
+
+/// O1P-05 — one manifest entry lookup is flat AT p99, over RANDOM present
+/// keys, from 10^3 to 10^5 months in the census (D-3306, D-3309).
+///
+/// C-12 looks up `key(7)` twenty thousand times: one bucket, already in the
+/// cache, measured as a minimum of means. A table whose probe sequences grew
+/// with its load, or a key whose hash collided with the census, would stay
+/// green there. This looks up a different, uniformly drawn, present key on
+/// every operation, 32 per sample, 5 rounds of 10,000 samples, and gates the
+/// smallest round p99 against the 10^3 one under [`CEILING_PERMILLE`] at 10^4
+/// and prints it at 10^5, where the map leaves the cache (D-3307).
+///
+/// 10^5 is the largest size because this harness can name only 289,080
+/// distinct keys; a real census's size is UNVERIFIED (`docs/06-limits.md`).
+/// Every key of the census is built before the timer and read in a spread
+/// order, so the timed work is the lookup over the whole map.
+fn entry_lookup_is_flat_at_p99() -> bool {
+    /// A fixed-seed spread of the lookup number. `SplitMix64`'s finaliser.
+    fn spread(at: usize) -> usize {
+        let mut z = (at as u64).wrapping_add(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        usize::try_from(z ^ (z >> 31)).unwrap_or(0)
+    }
+    /// Samples per round, rounds, and lookups per sample.
+    const SAMPLES: usize = 10_000;
+    const ROUNDS: usize = 5;
+    const BATCH: usize = 32;
+    let mut ok = true;
+    let mut base = 0u128;
+    for (step, count) in [1_000_u32, 10_000, 100_000].into_iter().enumerate() {
+        let (m, _keep) = census(count);
+        // EVERY key of the census, built before the timer and read in a
+        // pseudo-random order, so the lookups touch the whole map rather
+        // than a cached subset of it.
+        let keys: Vec<EntryKey> = (0..count).map(key).collect();
+        let width = keys.len().max(1);
+        let mut ns: Vec<u128> = Vec::with_capacity(SAMPLES);
+        let (mut p50, mut p99, mut max) = (u128::MAX, u128::MAX, 0u128);
+        let mut next = 0usize;
+        for _ in 0..ROUNDS {
+            ns.clear();
+            for _ in 0..SAMPLES {
+                let start = Instant::now();
+                for _ in 0..BATCH {
+                    let k = keys.get(spread(next) % width);
+                    next = next.wrapping_add(1);
+                    if let Some(k) = k {
+                        black_box(black_box(&m).entry(black_box(k)));
+                    }
+                }
+                ns.push(start.elapsed().as_nanos());
+            }
+            ns.sort_unstable();
+            let at = |q: usize| ns.get((ns.len() * q / 1_000).min(ns.len() - 1)).copied();
+            p50 = p50.min(at(500).unwrap_or(0));
+            p99 = p99.min(at(990).unwrap_or(0));
+            max = max.max(ns.last().copied().unwrap_or(0));
+        }
+        if keys.iter().any(|k| m.entry(k).is_none()) {
+            refuse("O1P-05: a key is absent from the census it was built from");
+        }
+        println!(
+            "  {:<44} n={count:>9}  p50 {p50:>6} ns  p99 {p99:>6} ns  max {max:>8} ns  per {BATCH}",
+            "O1P-05 manifest entry lookup"
+        );
+        if step == 0 {
+            base = p99;
+            continue;
+        }
+        // GATED AT 10^4, PRINTED AT 10^5 (D-3307, D-3309). At 10^5 months
+        // the map is tens of MiB, a random key's slot is a cache miss, and
+        // p99 measured 4.62x to 5.91x the 10^3 one over three runs while
+        // C-12's one cached key read 0.90x to 1.04x on the same tables. The probe count
+        // does not grow — the reservation keeps the load factor the same at
+        // every size — the memory a probe touches does. `docs/06-limits.md`
+        // names it rather than this row hiding it behind a looser ceiling.
+        if count > 10_000 {
+            let permille = p99.saturating_mul(1_000) / base.max(1);
+            println!(
+                "  O1P-05 entry lookup p99, {count} against 1000: ratio {}.{:03}x  REPORTED, not gated",
+                permille / 1_000,
+                permille % 1_000
+            );
+            continue;
+        }
+        // `ratio` prints picoseconds; the samples are nanoseconds.
+        ok &= ratio(
+            &format!("O1P-05 entry lookup p99, {count} against 1000"),
+            base.saturating_mul(1_000),
+            p99.saturating_mul(1_000),
+        );
+    }
+    ok
 }
 
 /// New keys appended inside one timed region.
@@ -547,6 +645,7 @@ fn main() {
     ok &= census_beats_the_scan_it_replaces();
     ok &= entry_lookup_is_flat();
     ok &= entry_lookup_stays_within_its_budget();
+    ok &= entry_lookup_is_flat_at_p99();
     ok &= append_after_load_is_flat();
     if ok {
         println!("all ratios within the ceiling");
