@@ -63646,7 +63646,8 @@ ever acknowledged.
 in `crates/cli/src/fixed_tail.rs`;
 `retained_generation_symlink_hardlink_and_ragged_files_fail_closed` in
 `crates/cli/src/execution_v4.rs`;
-`member_completion_ragged_and_canonical_order_attacks_fail_closed` in
+`member_completion_ragged_and_canonical_order_attacks_fail_closed` and
+`a_torn_record_of_its_own_is_cut_by_the_next_writer` in
 `crates/cli/src/anchored_search_lineage_v4.rs`. FB-106.
 
 **Also in this merge.** CE-65's bounded quarantine read (a FIFO at the

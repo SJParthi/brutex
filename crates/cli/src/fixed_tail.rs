@@ -666,11 +666,18 @@ mod tests {
         file.rewind().expect("rewind");
         file.write_all(b"BTY").expect("foreign short file");
         assert_eq!(heal_torn_tail(&file, &path, 0, 10, b"BTX-MAGIC"), Ok(None));
-        assert_eq!(contents(&path), b"BTY".to_vec(), "a foreign file is never cut");
+        assert_eq!(
+            contents(&path),
+            b"BTY".to_vec(),
+            "a foreign file is never cut"
+        );
         file.write_all(b"-MAGIC!!!!!!").expect("past the magic");
         assert_eq!(
             heal_torn_tail(&file, &path, 0, 10, b"BTY-MAGIC"),
-            Ok(Some(TornTail { kept: 10, found: 15 })),
+            Ok(Some(TornTail {
+                kept: 10,
+                found: 15
+            })),
             "a file longer than its magic is compared over the whole magic"
         );
     }

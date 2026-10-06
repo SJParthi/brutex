@@ -2671,6 +2671,45 @@ mod tests {
     }
 
     #[test]
+    fn a_torn_record_of_its_own_is_cut_by_the_next_writer() {
+        for (label, file_name, magic) in [
+            ("torn-member", MEMBER_FILE, MEMBER_MAGIC),
+            ("torn-completion", COMPLETION_FILE, COMPLETION_MAGIC),
+        ] {
+            let root = TestRoot::new(label);
+            initialize(root.path());
+            let mut file = OpenOptions::new()
+                .append(true)
+                .open(root.path().join(file_name))
+                .expect("open V4 file for torn append");
+            file.write_all(&magic[..5]).expect("append torn V4 record");
+            file.sync_all().expect("sync torn V4 record");
+            drop(file);
+            assert_refuses(
+                AnchoredSearchLineageV4Ledger::open_read(root.path(), bounds()),
+                "ragged",
+            );
+            // ledgers-3, D-1910: the next writer cuts the never-acknowledged
+            // tail of its own record, and a reader then opens.
+            drop(
+                AnchoredSearchLineageV4Ledger::open_write(root.path(), bounds())
+                    .expect("the writer cuts the ragged tail"),
+            );
+            assert_eq!(
+                std::fs::metadata(root.path().join(file_name))
+                    .expect("measure healed V4 file")
+                    .len(),
+                0,
+                "the torn {label} record is cut"
+            );
+            drop(
+                AnchoredSearchLineageV4Ledger::open_read(root.path(), bounds())
+                    .expect("a reader opens the healed ledger"),
+            );
+        }
+    }
+
+    #[test]
     fn member_completion_ragged_and_canonical_order_attacks_fail_closed() {
         let (nifty, banknifty) = projections();
 
@@ -2728,42 +2767,6 @@ mod tests {
                 std::fs::read(root.path().join(file_name)).expect("ragged bytes kept"),
                 held,
                 "the writable open cut nothing"
-            );
-        }
-
-        for (label, file_name, magic) in [
-            ("torn-member", MEMBER_FILE, MEMBER_MAGIC),
-            ("torn-completion", COMPLETION_FILE, COMPLETION_MAGIC),
-        ] {
-            let root = TestRoot::new(label);
-            initialize(root.path());
-            let mut file = OpenOptions::new()
-                .append(true)
-                .open(root.path().join(file_name))
-                .expect("open V4 file for torn append");
-            file.write_all(&magic[..5]).expect("append torn V4 record");
-            file.sync_all().expect("sync torn V4 record");
-            drop(file);
-            assert_refuses(
-                AnchoredSearchLineageV4Ledger::open_read(root.path(), bounds()),
-                "ragged",
-            );
-            // ledgers-3, D-1910: the next writer cuts the never-acknowledged
-            // tail of its own record, and a reader then opens.
-            drop(
-                AnchoredSearchLineageV4Ledger::open_write(root.path(), bounds())
-                    .expect("the writer cuts the ragged tail"),
-            );
-            assert_eq!(
-                std::fs::metadata(root.path().join(file_name))
-                    .expect("measure healed V4 file")
-                    .len(),
-                0,
-                "the torn {label} record is cut"
-            );
-            drop(
-                AnchoredSearchLineageV4Ledger::open_read(root.path(), bounds())
-                    .expect("a reader opens the healed ledger"),
             );
         }
 
