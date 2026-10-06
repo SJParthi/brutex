@@ -1,0 +1,12 @@
+id	state	commit	note
+F-25A074	pushed	f9ab789	pattern midpoints exact (D-3402, XPERM-02)
+F-3B4D5A	pushed	30a8cde	SuperTrend stop held exactly (D-3403, XPERM-03)
+F-DBC24E	doc	cee4ccb	WITHDRAWN: duplicate of ind1-2 (wip/zero/numeric-edges de48df5), D-3400
+R1-VWAP	doc	-	REFUTED: docs/26-vwap-mapping.md defines the floor (D-3401)
+R1-ST-SEED	doc	-	REFUTED: D-1542 locked seed; wording fixed (D-3401)
+R2-PIVOT	doc	-	REFUTED: daily.rs:30-40 defines the floor (D-3401)
+R2-GAPMID	operator	-	already tracked ind1-2 (owner branch)
+R2-ROLLING-IV	operator	-	already tracked STO-2
+R1-FOLDGRID	operator	-	already tracked D-3130/D-3131
+GATE18	fixing	09a9793	mutation pre-run on indicators diff in progress
+ROUND3	found	-	four read-only agents running
