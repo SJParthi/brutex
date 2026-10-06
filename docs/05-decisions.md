@@ -63233,3 +63233,39 @@ Comments only; no behaviour changed.
 growth branch re-hash every byte the handle had indexed, and its own section
 in `docs/06-limits.md` said so, so the documents contradicted each other.
 Every one of them now states the growth-branch cost. The code is unchanged.
+
+### D-3306 — p99 rows for the manifest lookup and the telemetry tail — 2026-10-06
+
+**Decided.** O1P-05 (`pull`) times `Manifest::entry` over uniformly drawn
+present keys, at 10^3, 10^4 and 10^5 months in the census. O1P-06
+(`telemetry`) times `tail(20)` at 10^3 to 10^6 events. Both use the same
+method as D-3300: every call (or every batch of 32) is timed, 5 rounds are
+run, the smallest round p99 is taken, and it is held to the existing 3.0×
+ceiling. The point pins in gate 14 go to pull 7 and telemetry 9.
+
+**Rejected.** A 10^6-month census: the harness can name 289,080 distinct
+keys, and no real store approaches 10^6 months.
+
+### D-3307 — A random manifest lookup at 10^5 months is named, not gated — 2026-10-06
+
+**What was observed.** O1P-05's p99 at 10^5 months measured 2.0× to 4.1× the
+10^3 value over three runs, and its p50 about 2×. C-12 re-reads one cached
+key, so it read 1.0× on the same tables. The probe count does not grow: the
+map is reserved from the census, so its load factor is the same at every
+size. What grows is the memory a probe touches.
+
+**Decided.** Gate 10^4, print 10^5, and state it in `docs/06-limits.md` and
+`docs/07-o1-architecture.md`, whose fixed-key row described the lookup as
+flat.
+
+**Rejected.** Raising the ceiling for this row, which would hide the effect
+behind a looser number. Reworking the map to hold log positions: it trades one
+miss for two dependent loads, and nothing measured says it wins.
+
+### D-3308 — Two api cost comments the code contradicted, corrected — 2026-10-06
+
+`fno_land` claimed one census read per run and O(1) per contract. Each
+landed body reads the vendor's manifest (W1-api5-1). `price_group`'s
+O(rows) block sat on `read_month_bars`, which is O(bars). The first comment
+is rewritten and the second is moved to the function it describes. Comments
+only; no behaviour changed.

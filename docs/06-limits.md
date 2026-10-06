@@ -15807,3 +15807,85 @@ measurement past 10^4.**
 `docs/14-sweep-readiness-20260906.md` still quotes "O(delta + 1)" for the
 cached result append. It is a dated snapshot of 6 September, so it was left
 as written. This section is the correction.
+
+## Round 2 of the p99 lens: the manifest lookup past the cache, and `tail` at p99 — D-3306 to D-3308, 6 October 2026
+
+All numbers are from a 4-core cloud box (shared, `nproc` 4), in the release
+bench profile, over three runs.
+
+### A random manifest lookup is flat in probes, not in time, at 10^5 months (D-3307)
+
+`Manifest::entry` is one `HashMap<EntryKey, Held>::get` on a map reserved
+from the census size, so the load factor is the same at every size. C-12, and
+the "0.994–1.049×" row in `docs/07-o1-architecture.md`, re-read ONE key,
+`key(7)`, whose slot stays in cache. O1P-05 reads a different present key on
+every lookup:
+
+| Months in the census | p99 per 32 lookups | against 10^3 |
+|---|---|---|
+| 1,000 | 1,975 – 3,044 ns | 1.00× |
+| 10,000 | 2,484 – 3,809 ns | 0.82× – 1.73× |
+| 100,000 | 6,135 – 9,048 ns | **2.0× – 4.1×** |
+
+On the same tables in the same runs, C-12 read 0.97× – 1.09×. The p50 roughly
+doubles too, from about 1,950 ns to about 4,000 ns per 32. A held entry carries
+its key twice: once as the map key, and again inside `Entry` beside the
+counters and closes. At a reservation factor of 2, 10^5 months is tens of MiB,
+so a random key's slot costs a cache miss.
+
+**This is memory, not a scan.** A scan would be about 100× at 100× the census.
+The p99 row gates 10^4 and prints 10^5, because gating a ratio measured
+between 2.0× and 4.1× under a 3.0× ceiling would make the build's colour a
+matter of luck.
+
+**10^5 months is a real size, not an artificial one.** That is what separates
+this from the k=1 dedup table (D-3301), which can never exceed 384 entries.
+208 shares and 2 indices at roughly 130 months each is about 27,000 keys per
+rung. Across several rungs, plus stored option and futures contracts, which
+the key separates, one vendor's census can reach 10^5. That is an estimate,
+not a count of a real census. Shrinking the entry would mean holding `log` positions in the
+map instead of `Held` copies. That trades one cache miss for two dependent
+loads, and nothing measured here says it would win, so it was not done.
+
+### `tail(20)` is flat at p99 to 10^6 events (D-3306)
+
+O1P-06 times every `telemetry::tail` call. C-T-03 measured a minimum of means
+and a byte count, neither of which can see a tail that one call in fifty pays.
+p99: 33,943 / 30,531 / 30,805 / 31,770 ns at 10^3 / 10^4 / 10^5 / 10^6 events
+in the file, which is 0.94× at 10^6. That is C-T-03's flatness, now shown on
+the statistic that could fail.
+
+### Two api doc comments that the code contradicted (D-3308)
+
+- `server.rs`'s `fno_land` said "One census read for the whole run … O(1)
+  per contract; nothing here scans the store". Landing each body goes
+  through `pull::ingest::from_window`, which reads and checks the vendor's
+  whole manifest per body. That cost was already stated above (W1-api5-1,
+  W1-pull2-0); the comment now says it too.
+- The doc block "Prices one rolling-option group … **O(rows)** … Nothing here
+  scans the store" was attached to `read_month_bars`, which reads every
+  record of a month. It belongs to `price_group`, one loop over the group's
+  rows, and has been moved there.
+
+### What a fresh pass checked and found holding
+
+Two read-only audits looked for hidden per-operation growth in eight crates:
+unsized maps on per-operation paths, caches that never evict, per-request
+clones of growing structures, and linear `contains`/`any`. A third audit read
+354 doc-comment cost claims in pull, lake, indicators, runner and api, and
+checked about 45 of them against the code. Every collection that grows on a
+per-operation path is reserved, capped by a named constant, or already
+stated in this file. Beyond the two comments above, no cost claim was
+contradicted. One note sits below the finding threshold:
+`runner::signal_candle_stop::period_geometry` grows a `Vec` once per IST day
+without reserving it. That is amortised O(1) and runs once per preparation,
+not per evaluation.
+
+**Not covered by a p99 row, and why.**
+- Core universe membership and vocab name lookup use compile-time tables
+  whose size does not change with data, so there is no n to sweep. Their
+  probe counts are asserted by tests (`docs/07-o1-architecture.md` layer 4).
+- The lake row read `Batch::row` is an index into a decoded batch, which
+  C-L-01 measures.
+- The api routes are measured by D-1446's and D-0954's sections, not by a
+  bench. That remains UNVERIFIED as a measurement.

@@ -409,6 +409,99 @@ fn entry_lookup_is_flat() -> bool {
     a && b && c && d
 }
 
+/// O1P-05 — one manifest entry lookup is flat AT p99, over RANDOM present
+/// keys, from 10^3 to 10^5 months in the census (D-3306).
+///
+/// C-12 looks up `key(7)` twenty thousand times: one bucket, already in the
+/// cache, measured as a minimum of means. A table whose probe sequences grew
+/// with its load, or a key whose hash collided with the census, would stay
+/// green there. This looks up a different, uniformly drawn, present key on
+/// every operation, 32 per sample, 5 rounds of 10,000 samples, and gates the
+/// smallest round p99 against the 10^3 one under [`CEILING_PERMILLE`] at 10^4
+/// and prints it at 10^5, where the map leaves the cache (D-3307).
+///
+/// 10^5 is the largest size: this harness can name 289,080 distinct keys,
+/// and a census of every F&O underlying's every month since 1990 is under
+/// 10^5. Keys are built before the timer, so the timed work is the lookup.
+fn entry_lookup_is_flat_at_p99() -> bool {
+    /// Samples per round, rounds, and lookups per sample.
+    const SAMPLES: usize = 10_000;
+    const ROUNDS: usize = 5;
+    const BATCH: usize = 32;
+    /// Distinct keys drawn per size, cycled through by the samples.
+    const DRAWN: usize = 4_096;
+    let mut ok = true;
+    let mut base = 0u128;
+    for (step, count) in [1_000_u32, 10_000, 100_000].into_iter().enumerate() {
+        let (m, _keep) = census(count);
+        let mut seed = 0x9E37_79B9_7F4A_7C15_u64;
+        let keys: Vec<EntryKey> = (0..DRAWN)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                key(u32::try_from(seed % u64::from(count)).unwrap_or(0))
+            })
+            .collect();
+        let mut ns: Vec<u128> = Vec::with_capacity(SAMPLES);
+        let (mut p50, mut p99, mut max) = (u128::MAX, u128::MAX, 0u128);
+        let mut next = 0usize;
+        for _ in 0..ROUNDS {
+            ns.clear();
+            for _ in 0..SAMPLES {
+                let start = Instant::now();
+                for _ in 0..BATCH {
+                    let k = keys.get(next % DRAWN);
+                    next = next.wrapping_add(1);
+                    if let Some(k) = k {
+                        black_box(black_box(&m).entry(black_box(k)));
+                    }
+                }
+                ns.push(start.elapsed().as_nanos());
+            }
+            ns.sort_unstable();
+            let at = |q: usize| ns.get((ns.len() * q / 1_000).min(ns.len() - 1)).copied();
+            p50 = p50.min(at(500).unwrap_or(0));
+            p99 = p99.min(at(990).unwrap_or(0));
+            max = max.max(ns.last().copied().unwrap_or(0));
+        }
+        if keys.iter().any(|k| m.entry(k).is_none()) {
+            refuse("O1P-05: a drawn key is absent from the census it was drawn from");
+        }
+        println!(
+            "  {:<44} n={count:>9}  p50 {p50:>6} ns  p99 {p99:>6} ns  max {max:>8} ns  per {BATCH}",
+            "O1P-05 manifest entry lookup"
+        );
+        if step == 0 {
+            base = p99;
+            continue;
+        }
+        // GATED AT 10^4, PRINTED AT 10^5 (D-3307). At 10^5 months the map
+        // is tens of MiB, a random key's slot is a cache miss, and p99
+        // measured 2.0x to 4.1x the 10^3 one over three runs while C-12's
+        // one cached key stayed at 1.0x on the same tables. The probe count
+        // does not grow — the reservation keeps the load factor the same at
+        // every size — the memory a probe touches does. `docs/06-limits.md`
+        // names it rather than this row hiding it behind a looser ceiling.
+        if count > 10_000 {
+            let permille = p99.saturating_mul(1_000) / base.max(1);
+            println!(
+                "  O1P-05 entry lookup p99, {count} against 1000: ratio {}.{:03}x  REPORTED, not gated",
+                permille / 1_000,
+                permille % 1_000
+            );
+            continue;
+        }
+        // `ratio` prints picoseconds; the samples are nanoseconds.
+        ok &= ratio(
+            &format!("O1P-05 entry lookup p99, {count} against 1000"),
+            base.saturating_mul(1_000),
+            p99.saturating_mul(1_000),
+        );
+    }
+    ok
+}
+
 /// New keys appended inside one timed region.
 ///
 /// A single `record` is a few tens of nanoseconds, which is inside the clock
@@ -547,6 +640,7 @@ fn main() {
     ok &= census_beats_the_scan_it_replaces();
     ok &= entry_lookup_is_flat();
     ok &= entry_lookup_stays_within_its_budget();
+    ok &= entry_lookup_is_flat_at_p99();
     ok &= append_after_load_is_flat();
     if ok {
         println!("all ratios within the ceiling");

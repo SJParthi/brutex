@@ -11894,9 +11894,12 @@ where
 ///
 /// # Cost
 ///
-/// One request per contract-month still owed, each rate-governed. One census
-/// read for the whole run and one hash probe per contract-month. O(1) per
-/// contract; nothing here scans the store.
+/// One request per contract-month still owed, each rate-governed, and one
+/// hash probe per contract-month against the census read at the start of the
+/// run. Landing each fetched body is NOT O(1): `pull::ingest::from_window`
+/// reads and checks the vendor's whole manifest per body, O(manifest bytes),
+/// as `docs/06-limits.md` states (W1-api5-1, W1-pull2-0). This said "one
+/// census read for the whole run" and "O(1) per contract" until D-3308.
 ///
 /// **UNVERIFIED as a measurement.** The bound is argued from the
 /// shape of the code and no bench in this workspace times it.
@@ -13437,28 +13440,6 @@ struct PriceInputs {
     vendor: brutex_core::vendor::Vendor,
 }
 
-/// Prices one rolling-option group from bars this run already holds.
-///
-/// # Nothing extra is fetched
-///
-/// Dhan's rolling answer carries `iv` and `spot` beside every bar — see
-/// `pull::rolling::Overlay` — so the spot needs no join here and the volatility
-/// is the vendor's wherever it sent one. Where it sent none, it is solved from
-/// the premium, and `pull::pricing::VolSource` records which per row so a
-/// receipt can never present the two as one number.
-///
-/// # A row that cannot become a quote is REFUSED, not skipped
-///
-/// A bar with no overlay spot, or one stamped at or past the expiry, cannot be
-/// priced. Both are counted with their reason rather than dropped: a row that
-/// vanishes between "bars stored" and "rows priced" makes those two numbers
-/// disagree on a receipt with nothing explaining the gap.
-///
-/// # Cost
-///
-/// **O(rows)**: one `Tenor::between` and one `pull::pricing::price` each, both
-/// O(1). The volatility lookup is one hash probe. Nothing here scans the store
-/// and nothing reaches the network.
 /// Reads back one instrument-month of bars, contract segment included.
 ///
 /// # Why not [`crate::bars::open`]
@@ -13755,6 +13736,32 @@ fn file_the_greeks(
     .err()
 }
 
+/// Prices one rolling-option group from bars this run already holds.
+///
+/// # Nothing extra is fetched
+///
+/// Dhan's rolling answer carries `iv` and `spot` beside every bar — see
+/// `pull::rolling::Overlay` — so the spot needs no join here and the volatility
+/// is the vendor's wherever it sent one. Where it sent none, it is solved from
+/// the premium, and `pull::pricing::VolSource` records which per row so a
+/// receipt can never present the two as one number.
+///
+/// # A row that cannot become a quote is REFUSED, not skipped
+///
+/// A bar with no overlay spot, or one stamped at or past the expiry, cannot be
+/// priced. Both are counted with their reason rather than dropped: a row that
+/// vanishes between "bars stored" and "rows priced" makes those two numbers
+/// disagree on a receipt with nothing explaining the gap.
+///
+/// # Cost
+///
+/// **O(rows)**: one `Tenor::between` and one `pull::pricing::price` each, both
+/// O(1). The volatility lookup is one hash probe. Nothing here scans the store
+/// and nothing reaches the network. (This block sat above `read_month_bars`,
+/// which is O(bars), until D-3308 moved it to the function it describes.)
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the shape of the
+/// code and no bench in this workspace times it.
 fn price_group(
     group: &[pull::rolling::Row],
     inputs: PriceInputs,

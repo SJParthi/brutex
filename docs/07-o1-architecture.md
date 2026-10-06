@@ -83,6 +83,7 @@ Measured on an Apple M4 Pro, 48 GB, macOS 26.5.2, rustc 1.97.1.
 | Bar read past RAM | ~100 ns → **61,566 ns** | 616×. Physics. Layer 7 exists because of it |
 | Manifest census vs deriving it | **193,449×** and **402,568×** on two runs | Layer 13. The counter against decoding 10,000 entries, same process. The counter side has been seen at 378–789 ps across runs while the scan holds at ~152 µs; **the cause of that spread is not established** — see below. D-0035, D-0036 |
 | Manifest entry lookup, 1→100× census | **0.994–1.049×** | Layer 3 in the layer-13 file: reserved from a known bound, so no rehash — measured on the map a **loaded** manifest holds, which is the only one that reservation applies to (D-0036) |
+| Manifest entry lookup, **random keys, p99**, 10^3 → 10^5 | **1.10–1.73× at 10^4; 2.0–4.1× at 10^5, not gated** | O1P-05, D-3307. The row above re-reads one cached key, so it cannot see that a random key's slot in a 10^5-month map is a cache miss. Flat in probes, not in time past the cache |
 | Bar lookup, time lookup, k=1 dedup, append — **p99**, 10^3 → 10^6 | **1.26× / 1.10× / 2.1–2.9× (not gated past 10^5) / ≤1.04×** | O1P-01…04, D-3300. Measured on a 4-core cloud box, 6 October 2026. Every other row here is a minimum of means, which a planted one-in-fifty O(n) tail passed at 1.20× while the p99 row breached at 87×. The dedup row leaves the cache at 10^6, past the 384 positions k=1 can ever offer (D-3301) |
 
 **Not O(1), and never claimed to be:** the sweep. Apriori over the vocabulary is
