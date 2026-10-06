@@ -15,7 +15,7 @@ Z1-slice11-F4	branch	3f22aed8
 Z1-slice11-F5	branch	3f22aed8	
 Z1-slice11-F6	branch	3f22aed8	
 Z1-slice11-F7	branch	3f22aed8	
-Z1-slice12-F1	found	-	ws5 2026-10-06: still open
+Z1-slice12-F1	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G5, D-2581): counter path only when every proved day holds 375 in-window minutes and they sum to the file; test a_counter_match_padded_by_stray_minutes
 Z1-slice12-F2	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G5) (doc only); test added, fails-without-fix not re-run unless RESULT says so
 Z1-slice13-F1	branch	3f22aed8	
 Z1-slice13-F2	branch	3f22aed8	
@@ -130,7 +130,7 @@ replay-4	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G8); test added, fai
 replay-5	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G8); test added, fails-without-fix not re-run unless RESULT says so
 cand-1	found	-	ws5 2026-10-06: still open
 cand-2	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G5); test added, fails-without-fix not re-run unless RESULT says so
-log-1	found	-	ws5 2026-10-06: still open
+log-1	partial	8db2fa83	ws5 2026-10-06: web half fixed (D-2501, fails-without-fix recorded); begin already waits (D-2620); read sync_all left
 log-2	pushed	ca93445	ws5 2026-10-06: fixed on zero/next (G5); test added, fails-without-fix not re-run unless RESULT says so
 log-3	pushed	58da61c	/logs walks run off the async workers behind a 4-slot admission pool; per-request O(file) read remains, stated in 06-limits (D-2327) [on PR #74 via c863e92]
 census-1	branch	final D-2766	ws5 2026-10-06: already fixed on final/all-fixes
