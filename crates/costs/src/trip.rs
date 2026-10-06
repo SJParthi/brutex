@@ -1082,11 +1082,10 @@ fn charge_stack_legs(
     // Stamp duty: the BUY notional, at the buy day's rate. The sell side's rate
     // is zero by construction, so there is nothing to charge there and no call.
     let stamp = statutory_levy(position.buy_notional, buy.stamp())?;
-    let gst_rate = if sell.gst().get() > buy.gst().get() {
-        sell.gst()
-    } else {
-        buy.gst()
-    };
+    // The higher of the two days' GST rates. `max` rather than a comparison:
+    // on equal rates either branch picked the same value, so `>` and `>=`
+    // were one program and that mutant was equivalent (D-2070).
+    let gst_rate = buy.gst().max(sell.gst());
 
     // GST: 18% on the services base, which is the sum of the ALREADY-ROUNDED
     // service components. The transaction tax and the stamp duty are taxes, not

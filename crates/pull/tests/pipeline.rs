@@ -837,6 +837,14 @@ fn fetching_and_landing_is_one_call_over_the_same_seam() {
          would have stayed a zero"
     );
     assert!(landed.census.is_empty(), "nothing was dropped");
+    // KEPT ON A DAY THE CALENDAR CLASSIFIES, so not counted as kept on an
+    // unclassified one: that count needs BOTH a kept bar and an unclassified
+    // day, and either alone is not it (G18-rest-12, D-2074).
+    assert!(
+        !pull::session::on_unclassified_day(at),
+        "2022-10-03 is classified"
+    );
+    assert_eq!(landed.census.unclassified_kept(), 0);
 
     let refused = fetch::fetch_and_land(
         &FakeSource::refusing(FetchError::TransportFailed {

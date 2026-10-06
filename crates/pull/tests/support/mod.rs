@@ -25,6 +25,9 @@
 //! The environment is inherited, so a coverage run's `LLVM_PROFILE_FILE`
 //! reaches the child and the body's lines are counted.
 
+/// The marker that makes a process the child, which runs the body itself.
+const CHILD: &str = "BRUTEX_PERMISSION_BINDS_CHILD";
+
 /// Runs `body` in a process whose permission bits are enforced.
 ///
 /// `test` is the name the harness knows the caller by: the bare function name
@@ -40,7 +43,6 @@
 )]
 pub(crate) fn where_permission_binds(test: &str, body: impl FnOnce()) {
     use std::os::unix::process::CommandExt as _;
-    const CHILD: &str = "BRUTEX_PERMISSION_BINDS_CHILD";
     const NOBODY: u32 = 65_534;
     if std::env::var_os(CHILD).is_some() {
         body();
@@ -85,4 +87,67 @@ fn effective_uid() -> u32 {
     drop(file);
     let _removed = std::fs::remove_file(&probe);
     uid
+}
+
+/// The fixture's own two promises, proved where it is compiled (G18-rest-10,
+/// D-2073): the body runs, in the child, where the mode bits bind; and a
+/// child that ran no test fails the parent. Without them the fixture could be
+/// replaced by `()` and every test that leans on it would pass having run
+/// nothing.
+#[cfg(test)]
+mod tests {
+    use super::{CHILD, where_permission_binds};
+    use std::os::unix::fs::MetadataExt as _;
+
+    /// The file a child's body leaves for its parent, named by the PARENT's
+    /// process id: the parent's own, or the child's parent's.
+    fn marker(in_child: bool) -> std::path::PathBuf {
+        let dir = std::env::temp_dir();
+        let own = std::process::id();
+        let parent = if in_child {
+            std::os::unix::process::parent_id()
+        } else {
+            own
+        };
+        dir.join(format!("brutex-uid-probe-{parent}-child"))
+    }
+
+    /// `test`'s name as the harness knows it, in whichever binary this is.
+    fn named(test: &str) -> String {
+        let here = module_path!();
+        let module = here.split_once("::").map_or(here, |(_, below)| below);
+        format!("{module}::{test}")
+    }
+
+    #[test]
+    fn the_body_runs_in_a_child_where_the_bits_bind() {
+        let own = marker(false);
+        let _stale = std::fs::remove_file(&own);
+        where_permission_binds(
+            &named("the_body_runs_in_a_child_where_the_bits_bind"),
+            || {
+                let parent = marker(true);
+                assert!(
+                    std::fs::File::create_new(parent).is_ok(),
+                    "the body leaves its marker"
+                );
+            },
+        );
+        if std::env::var_os(CHILD).is_some() {
+            // The child: its body ran above, and the parent reads what it left.
+            return;
+        }
+        let owner = std::fs::symlink_metadata(&own).map(|left| left.uid());
+        let _removed = std::fs::remove_file(&own);
+        assert!(
+            matches!(owner, Ok(uid) if uid != 0),
+            "the body ran, in a child, where the mode bits bind: {owner:?}"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "ran no test")]
+    fn a_child_that_ran_no_test_fails_the_parent() {
+        where_permission_binds(&named("no test carries this name"), || {});
+    }
 }

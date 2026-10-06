@@ -2264,7 +2264,7 @@ fn derive_all(
         None
     };
     if let Some(minutes) = history.as_deref() {
-        check_day(minutes, instrument, store_root, symbol_id, &into);
+        let _level = check_day(minutes, instrument, store_root, symbol_id, &into);
     }
     let source_bars = history.as_deref().unwrap_or(source_bars);
     for rung in derived_from(source) {
@@ -2494,33 +2494,22 @@ fn derived_from(source: Timeframe) -> impl Iterator<Item = Timeframe> {
 ///
 /// One read of the month's day file, `O(days)`, then [`crate::daycheck::compare`],
 /// `O(minutes + days)`. Once per instrument-month after its minute bars land.
+///
+/// Answers the level of the line it emitted, or `None` for a vendor it does
+/// not check, so a test can tell a check that ran from one that did nothing
+/// without reading the log back (G18-rest-35, D-2087).
 fn check_day(
     minutes: &[Bar],
     instrument: &str,
     store_root: &Path,
     symbol_id: u32,
     into: &DeriveInto<'_>,
-) {
-    let Some(found) = day_check_of(minutes, store_root, symbol_id, into) else {
-        return;
-    };
+) -> Option<telemetry::Level> {
+    let found = day_check_of(minutes, store_root, symbol_id, into)?;
     let month = into.month.to_string();
-    let event = match &found {
-        Ok(report) if report.clean() => telemetry::Event::info(
-            "pull.daycheck",
-            "pulled 1day agrees with the days its 1min bars fold to",
-        ),
-        Ok(_) => telemetry::Event::warn(
-            "pull.daycheck",
-            "pulled 1day differs from the days its 1min bars fold to",
-        ),
-        Err(_) => telemetry::Event::warn(
-            "pull.daycheck",
-            "pulled 1day could not be checked against its 1min bars",
-        ),
-    }
-    .with("instrument", telemetry::Value::Str(instrument))
-    .with("month", telemetry::Value::Str(&month));
+    let event = daycheck_headline(&found)
+        .with("instrument", telemetry::Value::Str(instrument))
+        .with("month", telemetry::Value::Str(&month));
     let count = |n: usize| telemetry::Value::Uint(u64::try_from(n).unwrap_or(u64::MAX));
     let event = match &found {
         Ok(report) => event
@@ -2535,6 +2524,30 @@ fn check_day(
         Err(why) => event.with("why", telemetry::Value::Str(why)),
     };
     let _dropped_when_filtered = telemetry::emit(&event);
+    Some(event.level())
+}
+
+/// The level and sentence of [`check_day`]'s line: `Info` only when the
+/// comparison ran and every day it covers agreed, `Warn` for a disagreement
+/// and for a day file that could not be read. Its own function so that choice
+/// is asserted rather than left to a log nobody reads back
+/// (`pull::ingest::tests::a_clean_day_check_is_info_and_anything_else_warns`,
+/// G18-rest-15, D-2075).
+fn daycheck_headline(found: &Result<crate::daycheck::Report, String>) -> telemetry::Event<'static> {
+    match found {
+        Ok(report) if report.clean() => telemetry::Event::info(
+            "pull.daycheck",
+            "pulled 1day agrees with the days its 1min bars fold to",
+        ),
+        Ok(_) => telemetry::Event::warn(
+            "pull.daycheck",
+            "pulled 1day differs from the days its 1min bars fold to",
+        ),
+        Err(_) => telemetry::Event::warn(
+            "pull.daycheck",
+            "pulled 1day could not be checked against its 1min bars",
+        ),
+    }
 }
 
 /// [`check_day`]'s finding: `None` for any vendor but Zerodha, otherwise the
@@ -3665,8 +3678,46 @@ mod tests {
 
     use super::{
         CensusLock, DeriveInto, EntryKey, MAX_CENSUS_BYTES, check_day, closes_in_hand,
-        day_check_of, install_locked, lock_refusal, write_and_count,
+        day_check_of, daycheck_headline, install_locked, lock_refusal, write_and_count,
     };
+
+    /// **ONLY A CLEAN COMPARISON IS AN `Info` LINE.** G18-rest-15, D-2075.
+    ///
+    /// A day bar the minutes do not reach yet is not a fault, so a report with
+    /// only `minute_absent` is still clean; one day that differs, or one day
+    /// the day file lacks, is a warning, and so is a file that cannot be read.
+    #[test]
+    fn a_clean_day_check_is_info_and_anything_else_warns() {
+        use crate::daycheck::Report;
+        use telemetry::Level;
+        let clean = Report {
+            agreed: 20,
+            minute_absent: 2,
+            ..Report::default()
+        };
+        let differed = Report {
+            differed: 1,
+            ..clean.clone()
+        };
+        let day_absent = Report {
+            day_absent: 1,
+            ..clean.clone()
+        };
+        for (found, level, says) in [
+            (Ok(clean), Level::Info, "1day agrees with"),
+            (Ok(differed), Level::Warn, "1day differs from"),
+            (Ok(day_absent), Level::Warn, "1day differs from"),
+            (
+                Err("unreadable".to_owned()),
+                Level::Warn,
+                "could not be checked",
+            ),
+        ] {
+            let headline = daycheck_headline(&found);
+            assert_eq!(headline.level(), level, "{found:?}");
+            assert!(headline.message().contains(says), "{found:?}");
+        }
+    }
 
     /// **A MEMBER'S ROWS ARE LANDED BORROWED, NOT CLONED.** o1api-36, D-1203.
     ///
@@ -3899,11 +3950,14 @@ mod tests {
         )]
         let symbol_id = brutex_core::universe::fnv1a("NIFTY") as u32;
         let zerodha = into(Vendor::Zerodha);
+        let level = |bars: &[Bar], vendor: &DeriveInto<'_>| {
+            check_day(bars, "NIFTY", &root, symbol_id, vendor)
+        };
 
         // NO PULLED DAY FILE: a reason, never a silent pass.
         let found = day_check_of(&minutes, &root, symbol_id, &zerodha).expect("zerodha is checked");
         assert!(found.is_err(), "{found:?}");
-        check_day(&minutes, "NIFTY", &root, symbol_id, &zerodha);
+        assert_eq!(level(&minutes, &zerodha), Some(telemetry::Level::Warn));
 
         // THE PULLED DAY MATCHES THE FOLD.
         let _ = write_and_count(
@@ -3919,7 +3973,7 @@ mod tests {
             .expect("the day file reads");
         assert_eq!((report.agreed, report.differed), (1, 0));
         assert!(report.clean());
-        check_day(&minutes, "NIFTY", &root, symbol_id, &zerodha);
+        assert_eq!(level(&minutes, &zerodha), Some(telemetry::Level::Info));
 
         // A MINUTE THAT MOVED THE HIGH is named with both values.
         let mut moved = minutes;
@@ -3935,13 +3989,13 @@ mod tests {
             .clone()
             .expect("the first disagreement is named");
         assert!(first.contains("high pulled 120 folded 125"), "{first}");
-        check_day(&moved, "NIFTY", &root, symbol_id, &zerodha);
+        assert_eq!(level(&moved, &zerodha), Some(telemetry::Level::Warn));
 
         // ANY OTHER VENDOR IS NOT CHECKED: its day bar follows its own
         // convention (D-0077).
         let dhan = into(Vendor::Dhan);
         assert!(day_check_of(&moved, &root, symbol_id, &dhan).is_none());
-        check_day(&moved, "NIFTY", &root, symbol_id, &dhan);
+        assert_eq!(level(&moved, &dhan), None);
 
         let _ = std::fs::remove_dir_all(&root);
     }

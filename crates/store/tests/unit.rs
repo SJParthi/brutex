@@ -3030,3 +3030,48 @@ fn a_flag_bit_version_two_does_not_define_is_refused_on_read_and_on_write() {
             .contains("0xffffffff")
     );
 }
+
+/// **AN OVERLAY IS "ALREADY STORED" ONLY WHEN EVERY ONE OF ITS BYTES IS.**
+/// G18-rest-27, D-2082.
+///
+/// `same_bytes` is the writer's duplicate check: an overlap answered `true`
+/// for a record that differs is a restated spot or volatility filed as a
+/// re-run. Every field, moved by one in either direction and to the null
+/// sentinel, and the extremes, must differ; only the identical record matches.
+#[test]
+fn an_overlay_matches_only_its_own_bytes() {
+    use store::format::{Overlay, Row as _};
+    let base = Overlay {
+        ts_micros: 1_717_386_300_000_000,
+        spot: 2_345_600,
+        iv_micros: 125_000,
+    };
+    assert!(base.same_bytes(&base), "a record is its own bytes");
+    assert!(base.same_bytes(&{ base }), "and so is a copy");
+    let mut others = Vec::new();
+    for value in [-1, 1, i64::MIN, i64::MAX, OI_NULL] {
+        let moved = |v: i64| {
+            if value == -1 || value == 1 {
+                v + value
+            } else {
+                value
+            }
+        };
+        others.push(Overlay {
+            ts_micros: moved(base.ts_micros),
+            ..base
+        });
+        others.push(Overlay {
+            spot: moved(base.spot),
+            ..base
+        });
+        others.push(Overlay {
+            iv_micros: moved(base.iv_micros),
+            ..base
+        });
+    }
+    for other in others {
+        assert!(!base.same_bytes(&other), "{other:?} differs from {base:?}");
+        assert!(!other.same_bytes(&base), "and the other way round");
+    }
+}

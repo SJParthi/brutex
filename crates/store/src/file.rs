@@ -7211,6 +7211,220 @@ mod tests {
         assert_eq!(sealed_sum(&path, 0), live_sum(&path, 0, 11));
         scrub_month(&path);
     }
+
+    /// The month every store-rooted test below writes, under `root`.
+    fn indexed_month() -> crate::path::StorePath<'static> {
+        crate::path::StorePath::new(crate::path::PathParts {
+            vendor: brutex_core::vendor::Vendor::Groww,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: crate::path::Timeframe::MINUTE_1,
+            month: crate::path::YearMonth::new(2024, 6).expect("the month T0 is in"),
+            file: crate::path::FileKind::Bars,
+        })
+        .expect("a store path")
+    }
+
+    /// **A LOOKUP ASKS THE INDEX ONLY WHEN THE MONTH HOLDS BARS.**
+    /// G18-rest-19, D-2077.
+    ///
+    /// An empty month answers 0 and reads nothing, its index included, so a
+    /// reader of one stays silent; a month with bars decides its index on the
+    /// first lookup and is served by it. Either half alone is the other turned
+    /// around.
+    #[test]
+    fn a_lookup_asks_the_index_only_when_the_month_holds_bars() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+        let root = scratch("tix-decide");
+        let _ignored = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a store root");
+        let path = indexed_month();
+        let decided = |file: &BarFile| {
+            file.tix
+                .as_ref()
+                .map(|tix| matches!(tix.state.get(), Some(super::TixState::Ready(_))))
+        };
+
+        drop(BarFile::open_or_create(&root, path, SYMBOL).expect("a fresh month"));
+        let empty = BarFile::open_existing(&root, path, SYMBOL).expect("the month reads");
+        assert_eq!(empty.first_at_or_after(T0), Ok(0));
+        assert!(
+            empty
+                .tix
+                .as_ref()
+                .is_some_and(|tix| tix.state.get().is_none()),
+            "an empty month asked nothing of its index"
+        );
+        drop(empty);
+
+        let mut writer = BarFile::open_or_create(&root, path, SYMBOL).expect("the writer");
+        let held: Vec<Bar> = (0..3).map(bar).collect();
+        assert!(matches!(
+            writer.append(&held),
+            Ok(Appended::Committed { .. })
+        ));
+        drop(writer);
+        let reader = BarFile::open_existing(&root, path, SYMBOL).expect("the month reads");
+        assert_eq!(reader.first_at_or_after(bar(1).ts_micros), Ok(1));
+        assert_eq!(decided(&reader), Some(true), "the lookup used the index");
+        drop(reader);
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
+
+    /// **AN OVERLAP THAT SKIPS HELD BARS NAMES THE FIRST ONE IT SKIPPED.**
+    /// G18-rest-20, D-2078.
+    ///
+    /// Held: bars 0, 1, 2. `[0, 3]` matches bar 0 and then jumps past the
+    /// held range, so bar 1 is the one it skipped. `[0, 1, 2, 3]` and `[0]`
+    /// skip nothing: the first runs out of held bars exactly as it leaves the
+    /// range, and the second runs out of batch inside it.
+    #[test]
+    fn an_overlap_that_skips_held_bars_names_the_first_it_skipped() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+        let (path, mut file) = month("overlap-skip");
+        let held: Vec<Bar> = (0..3).map(bar).collect();
+        assert!(matches!(file.append(&held), Ok(Appended::Committed { .. })));
+        assert_eq!(
+            file.diagnose_overlap(&[bar(0), bar(3)]),
+            Some(StoreError::OverlapDisagrees {
+                path: path.clone(),
+                at: 1,
+                ts_micros: bar(1).ts_micros,
+                conflict: super::Conflict::Skipped,
+            })
+        );
+        let through: Vec<Bar> = (0..4).map(bar).collect();
+        assert_eq!(file.diagnose_overlap(&through), None);
+        assert_eq!(file.diagnose_overlap(&[bar(0)]), None);
+        drop(file);
+        scrub_month(&path);
+    }
+
+    /// **A HEADER MAY BEGIN ON ITS MONTH'S FIRST INSTANT AND END BEFORE ITS
+    /// LAST.** G18-rest-21, D-2078. The range check is half-open, exactly as
+    /// the batch admission's is.
+    #[test]
+    fn a_header_may_begin_on_the_first_instant_of_its_month() {
+        let month = crate::path::YearMonth::new(2024, 6).expect("a month");
+        let (from, until) = month.ist_bounds_micros();
+        let admission = super::Admission::new(month, 60);
+        let header = |first_ts_micros, last_ts_micros| crate::header::Header {
+            format_version: 1,
+            record_stride: 64,
+            flags: 0,
+            generation: 1,
+            n_valid: 2,
+            first_ts_micros,
+            last_ts_micros,
+            symbol_id: SYMBOL,
+            timeframe_secs: 60,
+        };
+        assert_eq!(admission.admit_header(&header(from, until - 1)), Ok(()));
+        for (first, last) in [(from - 1, until - 1), (from, until)] {
+            assert_eq!(
+                admission.admit_header(&header(first, last)),
+                Err(FormatError::RangeOutsideMonth {
+                    first_ts_micros: first,
+                    last_ts_micros: last,
+                })
+            );
+        }
+    }
+
+    /// **AN INDEX ALREADY GONE IS REMOVED; ONE THE HOST WILL NOT REMOVE IS
+    /// REFUSED.** G18-rest-22, D-2078. Only `NotFound` is "already done".
+    #[test]
+    fn removing_an_index_already_gone_is_done_and_one_that_will_not_go_refuses() {
+        let gone = scratch("tix-gone");
+        let _ignored = std::fs::remove_file(&gone);
+        assert_eq!(super::remove_index(&gone), Ok(()));
+        let directory = scratch("tix-directory");
+        let _ignored = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a directory");
+        let refused = super::remove_index(&directory);
+        let _ignored = std::fs::remove_dir_all(&directory);
+        assert!(refused.is_err(), "a directory is not unlinked: {refused:?}");
+    }
+
+    /// **ONLY AN ABSENT SIDECAR PROVES NOTHING WAS COMMITTED.** G18-rest-33,
+    /// D-2086. Absent and empty are `Ok`, one with entries is
+    /// `CommittedRecordsLost`, and a sidecar the host cannot measure for any
+    /// other reason -- here a path through a regular file -- is refused by
+    /// name, never read as absent.
+    #[test]
+    fn a_sidecar_that_cannot_be_measured_is_refused_and_only_absence_is_tolerated() {
+        let bars = scratch("sealed-bars");
+        let sidecar = scratch("sealed-crc");
+        let _ignored = std::fs::remove_file(&sidecar);
+        assert_eq!(super::refuse_if_sealed(&bars, &sidecar), Ok(()), "absent");
+        std::fs::write(&sidecar, b"").expect("an empty sidecar");
+        assert_eq!(super::refuse_if_sealed(&bars, &sidecar), Ok(()), "empty");
+        std::fs::write(&sidecar, [1, 2, 3, 4]).expect("a sidecar with an entry");
+        assert_eq!(
+            super::refuse_if_sealed(&bars, &sidecar),
+            Err(StoreError::CommittedRecordsLost {
+                path: bars.clone(),
+                sidecar: sidecar.clone(),
+                sidecar_len: 4,
+            })
+        );
+        let unmeasurable = sidecar.join("below-a-file");
+        let refused = super::refuse_if_sealed(&bars, &unmeasurable);
+        let _ignored = std::fs::remove_file(&sidecar);
+        assert!(
+            matches!(refused, Err(ref why) if !matches!(why, StoreError::CommittedRecordsLost { .. })),
+            "a sidecar that cannot be measured is refused: {refused:?}"
+        );
+    }
+
+    /// **THE DIRECTORIES AN OPEN CREATES ARE BELOW THE ROOT, NEVER IT OR
+    /// ABOVE IT.** G18-rest-34, D-2086. With the root itself absent, the walk
+    /// stops at it rather than counting it and its missing parents; and a
+    /// directory outside the root counts nothing.
+    #[test]
+    fn only_directories_strictly_below_the_root_are_counted_as_missing() {
+        let base = scratch("missing-base");
+        let _ignored = std::fs::remove_dir_all(&base);
+        let root = base.join("root");
+        let dir = root.join("a").join("b");
+        assert_eq!(
+            super::missing_below(&root, &dir),
+            vec![root.join("a"), dir.clone()],
+            "the absent root and its absent parent are not counted"
+        );
+        assert_eq!(super::missing_below(&root, &root), Vec::<PathBuf>::new());
+        let outside = base.join("elsewhere").join("c");
+        assert_eq!(
+            super::missing_below(&root, &outside),
+            Vec::<PathBuf>::new(),
+            "a directory outside the root is never counted"
+        );
+    }
+
+    /// **A LINK IS REFUSED BY NAME; A FILE AND AN ABSENT PATH ARE NOT LINKS.**
+    /// G18-rest-23, D-2078. And the refusal's sentence says what it refused.
+    #[test]
+    fn a_link_is_refused_by_name_and_a_file_or_nothing_is_not() {
+        let target = scratch("link-target");
+        let link = scratch("link-itself");
+        let _ignored = std::fs::remove_file(&link);
+        std::fs::write(&target, b"bars").expect("a file");
+        std::os::unix::fs::symlink(&target, &link).expect("a link");
+        let refused = super::refuse_link(&link);
+        let file = super::refuse_link(&target);
+        let _ignored = std::fs::remove_file(&link);
+        let _ignored = std::fs::remove_file(&target);
+        assert_eq!(refused, Err(StoreError::Symlinked { path: link.clone() }));
+        assert_eq!(file, Ok(()));
+        assert_eq!(super::refuse_link(&link), Ok(()), "an absent path");
+        let said = StoreError::Symlinked { path: link.clone() }.to_string();
+        assert!(
+            said.contains(&link.display().to_string()) && said.contains("is a symbolic link"),
+            "{said}"
+        );
+    }
 }
 
 /// Open an existing file for reading, creating nothing.

@@ -498,3 +498,94 @@ fn only_a_bar_file_carries_a_time_index() {
         })
     ));
 }
+
+/// **AN INDEX THAT IS THERE AND CANNOT BE OPENED IS UNREADABLE, NOT ABSENT.**
+/// G18-rest-24, D-2077.
+///
+/// `Why::Absent` tells an operator to open a writer, which builds an index; a
+/// directory where the `.tix` belongs is not fixed by that and must be named
+/// as what it is. Only a host `NotFound` is absence.
+#[test]
+fn an_index_that_cannot_be_opened_is_named_unreadable_not_absent() {
+    let tf = Timeframe::MINUTE_1;
+    let root = Root::new();
+    let bars = month_of(1, 10, 60);
+    write(&root, tf, &bars, 10);
+    fs::remove_file(root.tix(tf)).unwrap();
+    fs::create_dir(root.tix(tf)).unwrap();
+    let reader = root.reader(tf);
+    let lookup = reader.time_lookup();
+    assert!(
+        matches!(
+            lookup,
+            TimeLookup::Bisection(Why::Unreadable(StoreError::IsADirectory { .. }))
+        ),
+        "{lookup:?}"
+    );
+    assert_eq!(reader.first_at_or_after(bars[4].ts_micros), Ok(4));
+}
+
+/// **A WRITER OPEN OF AN EMPTY MONTH KEEPS ONLY THE FRESH INDEX.**
+/// G18-rest-25, D-2077.
+///
+/// The fresh index is exactly its header, and that header confirms. An index
+/// that confirms with bytes past its header, and one of the header's length
+/// whose header does not confirm, are each rewritten to the fresh bytes: the
+/// length test and the confirmation are BOTH required, and neither alone.
+#[test]
+fn a_writer_open_of_an_empty_month_rewrites_every_index_but_the_fresh_one() {
+    let tf = Timeframe::MINUTE_1;
+    let root = Root::new();
+    drop(root.writer(tf));
+    let fresh = fs::read(root.tix(tf)).unwrap();
+    assert_eq!(fresh.len() as u64, store::time_index::HEADER_LEN);
+
+    let mut long = fresh.clone();
+    long.extend_from_slice(&[0u8; 16]);
+    let mut damaged = fresh.clone();
+    damaged[20] ^= 1;
+    for (bytes, what) in [
+        (long, "bytes past the header"),
+        (damaged, "a damaged header"),
+    ] {
+        fs::write(root.tix(tf), &bytes).unwrap();
+        drop(root.writer(tf));
+        assert_eq!(fs::read(root.tix(tf)).unwrap(), fresh, "{what}");
+    }
+}
+
+/// **AN INDEX DAMAGED UNDER A LIVE WRITER IS REBUILT BEFORE ITS NEXT APPEND.**
+/// G18-rest-26, D-2077.
+///
+/// The writer confirmed its index at open; the index is then cut back to its
+/// header under it. The next append cannot resume from the cut entry, so the
+/// writer rebuilds the index from its bars and the append commits. Without the
+/// rebuild the second resume fails the same way and the append is refused.
+#[test]
+fn an_index_damaged_under_a_live_writer_is_rebuilt_before_its_append() {
+    let tf = Timeframe::MINUTE_1;
+    let root = Root::new();
+    let bars = month_of(2, 30, 60);
+    let half = bars.len() / 2;
+    let mut writer = root.writer(tf);
+    assert!(matches!(
+        writer.append(&bars[..half]),
+        Ok(Appended::Committed { .. })
+    ));
+    fs::OpenOptions::new()
+        .write(true)
+        .open(root.tix(tf))
+        .unwrap()
+        .set_len(store::time_index::HEADER_LEN)
+        .unwrap();
+    assert!(matches!(
+        writer.append(&bars[half..]),
+        Ok(Appended::Committed { .. })
+    ));
+    drop(writer);
+    let reader = root.reader(tf);
+    assert_eq!(reader.time_lookup(), TimeLookup::Indexed);
+    for (row, bar) in bars.iter().enumerate() {
+        assert_eq!(reader.first_at_or_after(bar.ts_micros), Ok(row as u64));
+    }
+}

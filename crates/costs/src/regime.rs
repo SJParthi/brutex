@@ -653,6 +653,41 @@ mod tests {
         );
     }
 
+    /// G18-rest-01, D-2070: the refusal names the FIRST later row that
+    /// answers, not the last. With two verified rows ahead of an unverified
+    /// one, `||` in place of `&&` let the second overwrite the first, sending
+    /// a caller five years past the first day that prices.
+    #[test]
+    fn a_refusal_names_the_nearest_verified_row_not_a_later_one() {
+        let subject = RegimeTable {
+            charge: "a test charge",
+            exchange: None,
+            anchor: RegimeRow::unverified(TradeDay::MIN, "the gap"),
+            later: [
+                Some(RegimeRow::verified(
+                    day(2010, 1, 1),
+                    9,
+                    "the first citation",
+                )),
+                Some(RegimeRow::verified(
+                    day(2015, 1, 1),
+                    12,
+                    "the second citation",
+                )),
+            ],
+        };
+        for asked in [TradeDay::MIN, day(2009, 12, 31)] {
+            let refusal = subject.rate_on(asked).expect_err("the anchor refuses");
+            assert_eq!(
+                refusal.verified_from(),
+                Some(day(2010, 1, 1)),
+                "asked {asked}"
+            );
+        }
+        assert_eq!(rate_of(subject.rate_on(day(2010, 1, 1))), 9);
+        assert_eq!(rate_of(subject.rate_on(day(2015, 1, 1))), 12);
+    }
+
     #[test]
     fn stt_on_options_premium_holds_on_both_sides_of_both_boundaries() {
         assert_eq!(rate_of(stt_options_rate(TradeDay::MIN)), 6_250);

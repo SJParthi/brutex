@@ -1900,4 +1900,14 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
         assert_eq!(parsed["securityId"], "13\u{1}\n\t\r\"\\x");
     }
+
+    /// The escape ends BELOW 0x20: U+001F, the last control character, is
+    /// escaped, and the space at 0x20 goes out as itself. `<=` would send
+    /// `\u0020` for every space in a value (G18-rest-17, D-2076).
+    #[test]
+    fn the_control_escape_stops_below_the_space() {
+        let mut out = String::new();
+        push_pair(&mut out, "securityId", "a\u{1f} b", true);
+        assert_eq!(out, r#""securityId":"a\u001f b""#);
+    }
 }

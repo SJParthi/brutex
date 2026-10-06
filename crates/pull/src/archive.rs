@@ -1388,6 +1388,10 @@ mod tests {
     /// as a field-count refusal instead. D-1362.
     #[test]
     fn a_member_past_the_byte_cap_is_refused_before_it_is_read() {
+        // The cap is the 256 MiB D-1362 chose, by value: every use below names
+        // the constant, so a cap miswritten as `256 + 1024 * 1024` would pass
+        // them all (G18-rest-11, D-2074).
+        assert_eq!(MAX_MEMBER_BYTES, 268_435_456, "256 MiB");
         let scratch = Scratch::new();
         let root = scratch.root.join("feed");
         fs::create_dir_all(&root).expect("a feed folder");

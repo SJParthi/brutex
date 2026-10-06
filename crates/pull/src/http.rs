@@ -4014,6 +4014,57 @@ mod tests {
         );
     }
 
+    /// **A RESERVATION IN THE FUTURE IS SLEPT TO.** G18-rest-14, D-2074.
+    ///
+    /// The second's permits are spent at an instant 300 ms ahead, so the next
+    /// one exists only after it. The wait is slept and counted as absorbed; a
+    /// `wait == 0` test turned around would return at once on exactly this
+    /// path and charge the request to a second that has no permit left.
+    #[tokio::test]
+    async fn a_reservation_in_the_future_is_slept_to_and_counted() {
+        let crate::vendor::Transport::Http(spec) = crate::vendor::Feed::Dhan.descriptor().transport
+        else {
+            panic!("Dhan is an HTTP feed");
+        };
+        let owned = HttpSource::new(spec, Credential::token("t".to_owned())).expect("Dhan builds");
+        let held = std::sync::Arc::clone(owned.governor.as_ref().expect("Dhan is budgeted"));
+        let ahead = crate::rate::monotonic_micros().saturating_add(300_000);
+        let pin = || {
+            held.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .admit(ahead)
+        };
+        while pin() == crate::rate::Verdict::Admit {}
+        let absorbed = crate::rate::absorbed_micros();
+        let started = std::time::Instant::now();
+        owned
+            .wait_for_permit()
+            .await
+            .expect("a permit exists, later");
+        let waited = started.elapsed();
+        assert!(
+            waited >= core::time::Duration::from_millis(250),
+            "the reservation 300 ms ahead was slept to: {waited:?}"
+        );
+        assert!(
+            crate::rate::absorbed_micros().saturating_sub(absorbed) >= 250_000,
+            "and the wait was counted as absorbed"
+        );
+    }
+
+    /// **AN ESCAPED QUOTE INSIDE A KEY DOES NOT END IT.** G18-rest-13, D-2074.
+    ///
+    /// Read as the end of the string, the `\"` in `"a\"b"` leaves `b"` to
+    /// open a string of its own, and the repeat is never seen.
+    #[test]
+    fn an_escaped_quote_inside_a_key_does_not_end_the_key() {
+        assert_eq!(
+            repeated_key(r#"{"a\"b":1,"a\"b":2}"#),
+            Some("a\"b".to_owned())
+        );
+        assert_eq!(repeated_key(r#"{"a\"b":1,"b":2}"#), None);
+    }
+
     /// **A SATURATED RESERVATION IS REFUSED BY NAME, NOT SLEPT TOWARD.** The
     /// fix to D-1203.
     ///

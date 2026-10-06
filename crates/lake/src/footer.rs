@@ -164,17 +164,32 @@ pub(crate) fn check(file: &[u8]) -> Result<(), LakeError> {
 }
 
 /// The walk itself, over the footer bytes alone.
+///
+/// AT MOST TWO PASSES PER FOOTER BYTE, PLUS THE ROOT (D-2085). A pass that
+/// reads no byte either pops a frame or opens a struct element of a list, and
+/// each of those is paid for by a pass that did read one: a pushed frame was
+/// opened by a byte or is a struct whose stop byte closes it. So a footer of
+/// `n` bytes ends within `2n + 1` passes, and the bound is enforced rather than
+/// assumed: a cursor that stopped advancing (run 1283 shard 49 timed out on
+/// `Cursor::byte` answering `Ok(1)` for ever) is refused instead of walking for
+/// ever.
 fn walk(footer: &[u8]) -> Result<(), LakeError> {
+    walk_within(footer, footer.len().saturating_mul(2).saturating_add(2))
+}
+
+/// [`walk`] allowed `passes` passes, so a test can reach the refusal a correct
+/// cursor never does.
+fn walk_within(footer: &[u8], passes: usize) -> Result<(), LakeError> {
     let mut cur = Cursor {
         buf: footer,
         pos: 0,
     };
     let mut stack: Vec<Frame> = Vec::with_capacity(MAX_DEPTH);
     stack.push(Frame::Struct { last: 0 });
-    loop {
+    for _ in 0..passes {
         let at_top = stack.len() == 1;
         let Some(top) = stack.last_mut() else {
-            break;
+            return Ok(());
         };
         let pushed = match top {
             Frame::Struct { last } => {
@@ -217,7 +232,10 @@ fn walk(footer: &[u8]) -> Result<(), LakeError> {
             stack.push(frame);
         }
     }
-    Ok(())
+    Err(refuse(&format!(
+        "the walk did not end within {passes} passes over {} footer bytes",
+        footer.len()
+    )))
 }
 
 /// Refuses a schema list longer than any shape the lake holds.

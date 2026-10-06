@@ -2885,6 +2885,13 @@ mod exemplars {
             (false, false),
             "a close on the prior lower shadow is neither"
         );
+
+        // `bar0.open < bar1.low` is strict. An open one paisa under the prior
+        // low gapped below it and is in-neck; an open EXACTLY at that low did
+        // not gap, and `<=` would light 211 for it (G18-rest-03, D-2071).
+        let opened = |open: i64| fold(&[prior, (open, 1015, 985, 1012)]).get(211);
+        assert!(opened(999), "an open under the prior low gapped");
+        assert!(!opened(1000), "an open at the prior low never gapped");
     }
 
     /// FOUR PATTERNS FOLLOW THEIR CLASSICAL SHAPES, AND THE SHAPES THEY USED TO
