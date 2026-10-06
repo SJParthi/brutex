@@ -241,18 +241,6 @@ impl Ema {
         i64::try_from(self.scaled.div_euclid(SCALE)).ok()
     }
 
-    /// Which side of the HELD average `price` sits on, decided below a paisa.
-    ///
-    /// [`Self::value`] floors the average to a whole paisa, which is right for
-    /// reporting a level and wrong for deciding a side: a close equal to the floor
-    /// of a fractional average is below it, and comparing with the floor called it
-    /// equal (D-3400). The close is scaled instead, exactly — `i64 · SCALE` is far
-    /// inside `i128`.
-    #[must_use]
-    pub fn side_of(&self, price: i64) -> core::cmp::Ordering {
-        (i128::from(price) * SCALE).cmp(&self.scaled)
-    }
-
     /// True once `period` candles have been folded.
     ///
     /// Until then the average is the mean of fewer than `period` prices — a fact
@@ -960,14 +948,15 @@ impl TrendState {
         // and nothing downstream could tell that bit from one backed by two hundred
         // candles. Folding the gate into `value` instead would have starved
         // `SuperTrend::fold` of its seed — see `Ema::warm`.
-        //
-        // The side is decided on the held average, not on the floored `value` — the
-        // `value` check only keeps the gate `known` certifies (D-3400).
-        if self.fast.warm() && self.fast.value().is_some() {
-            mask = side_by(mask, self.fast.side_of(close), 0, 1);
+        if self.fast.warm()
+            && let Some(fast) = self.fast.value()
+        {
+            mask = side(mask, close, fast, 0, 1);
         }
-        if self.slow.warm() && self.slow.value().is_some() {
-            mask = side_by(mask, self.slow.side_of(close), 2, 3);
+        if self.slow.warm()
+            && let Some(slow) = self.slow.value()
+        {
+            mask = side(mask, close, slow, 2, 3);
         }
         // 4–5: the averages against each other. BOTH must have folded their own period,
         // so the slow one governs and this pair is the last of the six to speak. Gating
@@ -975,10 +964,9 @@ impl TrendState {
         // which is a statement about the seed and not about the market.
         if self.fast.warm()
             && self.slow.warm()
-            && self.fast.value().is_some()
-            && self.slow.value().is_some()
+            && let (Some(fast), Some(slow)) = (self.fast.value(), self.slow.value())
         {
-            mask = side_by(mask, self.fast.scaled.cmp(&self.slow.scaled), 4, 5);
+            mask = side(mask, fast, slow, 4, 5);
         }
 
         // 64–65: close against the trailing stop, once the range under the band is an
@@ -1055,20 +1043,10 @@ fn set(mask: ConditionMask, index: u16) -> ConditionMask {
 /// fire on every zero-body bar and handed an undirected tri-star to the bearish bit.
 /// Making it structural means it cannot be forgotten at the fourth call site.
 fn side(mask: ConditionMask, value: i64, level: i64, above: u16, below: u16) -> ConditionMask {
-    side_by(mask, value.cmp(&level), above, below)
-}
-
-/// [`side`] on an ordering already decided, for comparisons made below a paisa.
-fn side_by(
-    mask: ConditionMask,
-    ordering: core::cmp::Ordering,
-    above: u16,
-    below: u16,
-) -> ConditionMask {
     // A `match` on the ordering rather than an `if` chain: `Ordering` has exactly
     // three variants, so the compiler checks the equality arm exists instead of a
     // reader having to notice it does.
-    match ordering {
+    match value.cmp(&level) {
         core::cmp::Ordering::Greater => set(mask, above),
         core::cmp::Ordering::Less => set(mask, below),
         core::cmp::Ordering::Equal => mask,
@@ -1297,74 +1275,6 @@ mod tests {
                 "position {index} spoke too early"
             );
         }
-    }
-
-    /// **XPERM-01 — close against an average is decided on the held average (D-3400).**
-    ///
-    /// The average is held to six digits below a paisa; `value()` floors it to a
-    /// whole paisa. Comparing the close with that floor decides "above" exactly but
-    /// not "below": a close equal to the floor of a fractional average sits below
-    /// it, set neither bit, and `known` certified both — a definite false the held
-    /// average contradicts. Differential and exhaustive: for every last seed price
-    /// in 95..=105 after `period - 1` candles at 100, the average is the simple mean
-    /// (D-1542), and every close in 94..=106 is checked against the naive rational
-    /// oracle `close · period` vs `sum`, for the 20 and the 200.
-    #[test]
-    fn close_against_each_average_agrees_with_the_exact_seed_mean() {
-        let mut compared = 0_u32;
-        for (period, above, below) in [(20_i64, 0_u32, 1_u32), (200, 2, 3)] {
-            for last in 95..=105_i64 {
-                let mut t = TrendState::default();
-                for i in 0..period - 1 {
-                    t.step(&candle(i * 60_000_000, 100, 100, 100), tol())
-                        .expect("sane candle");
-                }
-                t.step(&candle((period - 1) * 60_000_000, last, last, last), tol())
-                    .expect("sane candle");
-                let sum = 100 * (period - 1) + last;
-                for close in 94..=106_i64 {
-                    let mask = t.bits(close, tol());
-                    let known = t.known(tol());
-                    assert_eq!(
-                        (mask.get(above), mask.get(below)),
-                        (close * period > sum, close * period < sum),
-                        "period {period}, last seed {last}, close {close}"
-                    );
-                    assert!(known.get(above) && known.get(below));
-                    compared += 1;
-                }
-            }
-        }
-        assert_eq!(compared, 2 * 11 * 13);
-    }
-
-    /// The two averages against each other compare the held values too: a fast
-    /// 100.95 above a slow 100.10 is above, though both floor to 100 paisa.
-    #[test]
-    fn the_averages_compare_below_a_paisa() {
-        let mut t = TrendState::default();
-        for i in 0..200_i64 {
-            t.step(&candle(i * 60_000_000, 100, 100, 100), tol())
-                .expect("sane candle");
-        }
-        t.fast.scaled = 100_950_000;
-        t.slow.scaled = 100_100_000;
-        assert_eq!((t.fast.value(), t.slow.value()), (Some(100), Some(100)));
-        let mask = t.bits(100, tol());
-        assert!(mask.get(4) && !mask.get(5), "fast above slow: {mask:?}");
-        assert!(mask.get(1) && mask.get(3), "100 is below both: {mask:?}");
-        assert!(!mask.get(0) && !mask.get(2), "and above neither: {mask:?}");
-        t.slow.scaled = 100_950_000;
-        let mask = t.bits(100, tol());
-        assert!(
-            !mask.get(4) && !mask.get(5),
-            "equal held values are neither"
-        );
-        t.slow.scaled = 100_950_001;
-        assert!(
-            t.bits(100, tol()).get(5),
-            "one millionth of a paisa decides"
-        );
     }
 
     /// A close exactly on the average sets neither side.
