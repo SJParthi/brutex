@@ -63935,3 +63935,263 @@ holds the code and the limit to that shape. Counted by shape, not timed. The
 F8 stash `c249ffc` carried only these tests' first draft; the code is new
 here. AU-O1CLI-6.
 
+### D-1843 — D-1840 re-applied onto the folded series and the in-order rungs; a build pass reads nothing — 2026-10-06
+
+**Why a re-application.** F8's D-1840 (o1cli-2, o1cli-3, o1cli-4) was written
+on a base where the rungs ran as parallel lanes and the build re-read whole
+contexts. By the time it was merged, `final/all-fixes` folded the whole
+signal series and withheld only rows (D-1781), ran the rungs one at a time
+(D-1701), let the pool build read-only (D-1707) and counted build passes
+(D-1662). D-1840's code conflicted with all four in `lib.rs`, so the merge
+kept the base's code and this entry re-applies the change onto it. D-1840's
+text states the intent; where this entry differs, this entry is what the tree
+does. It also closes W2-cli8-6's re-reads.
+
+**The change.**
+- `SpanShare` holds, per command, the spans that do not depend on the rung:
+  the `1min` execution series over the signal months (also the `1min` rung's
+  signal) and the `1day` and `1min` warm context spans. The first ask reads a
+  span under the share's lock; every later ask is handed the same bytes,
+  refusal included. It holds at most `SPAN_SHARE_KEYS` (6) keys and walks
+  them with a loop (Gate 11's membership rules); a key past the bound is read
+  and not held. `sweep_rungs` gives every rung's `AuditCache` the one share
+  (`AuditCache::sharing`); every other cache owns its own.
+- `column_withholding_at_build` takes the share, derives the daily context
+  once (D-1781 derives it from the whole folded series, which no pass
+  changes) and the exact-minute context per pass from the held minute span,
+  and returns a `PreparedColumn`: the column, its digest, both contexts and
+  the days the build itself withheld. A retry pass reads nothing from disk
+  (W2-cli8-6). The pool's read-only build passes a fresh share.
+- `load_audit_inputs` sweeps the build's contexts. The second
+  `exact_minute_withholding_unsourceable_days` read, the second
+  `load_daily_context`, the second digest and its compare are gone, and
+  `exact_minute_withholding_unsourceable_days` and
+  `column_withholding_unsourceable_days`, left without callers, are deleted.
+  The compare could only notice the store changing between two reads, and
+  the second read was what the sweep used; the identity now binds the bytes
+  swept by construction (`bind_withheld` over the whole series and every
+  withheld day, unchanged). The days the build withheld fill the page's
+  `EXACT-MINUTE HOLES` line; the build's "exact-minute days withheld" event
+  is the one event for them.
+- `one_rung_cached` still reads the raw signal span once for every row's
+  bar count, missing months and exclusion, and that read now seeds the
+  kernel's load (`AuditCache::inputs` hands the held raw span to
+  `load_audit_inputs`), so the span is read once per rung. A derived support
+  sizes its probe on the kernel's own column, span and preparation digest
+  (`AuditInputs::preparation_digest`), read through the cache the audit
+  consults next; the second column build and its two context reads are gone.
+  An unstamped build refuses a derived support with the words the derivation
+  always used.
+
+**Which outputs change.** A derived support's probe now measures the column
+the sweep runs over, which withholds the census's holed days first; it
+measured an unwithheld copy before, so on a span with holed days its
+AutoSearch identity and possibly its threshold differ. On a clean span the
+column, digest and identity are those of before. A day the build withholds
+beyond the census is now named on the page. Every other row, digest and
+identity is unchanged.
+
+**What it proves.** `cli::audited_stored_tests::rungs_share_their_reads_and_build_their_column_once`
+counts: one derived `5min` rung, three shared reads, one build pass, one
+input load; `5min` and `1min` unshared, six reads, through one share three,
+with equal recorded rows but for the wall-clock stamp.
+`cli::audited_stored_tests::a_build_that_withholds_a_day_reads_nothing_more`
+drives a second build pass and counts no further read.
+`a_seeded_descent_refuses_an_unknown_rung_before_reading` (D-1839) is
+carried over. `crates/cli/tests/limits_o1cli_2.rs`, `_3.rs` and `_4.rs` hold
+the code and the limits to this shape. Counted, not timed.
+
+**What remains, and why.** Each coarse rung reads its own signal span once;
+the `from..to` minute months are read twice per command, as the execution
+series and inside the warm context span, which begins a month earlier and
+must exist whole where the execution series may name a hole. A retry pass
+still clones the held minute span, derives its context, records its own
+preparation attempt and rebuilds the column: the withheld bars changed, so
+the column and its identity are new, and a pass after the first happens only
+when the census and the overlay disagree (D-1662), which is refused at 64.
+
+
+### D-1845 — The ledger row reads are test-only, and a written append validates its own block instead of rescanning — 2026-10-06
+
+**Findings (cli-14: W2-cli11-1, W2-cli11-0, W2-cli12-3, W2-cli12-4; stated,
+not changed, by D-0934).**
+
+- **W2-cli11-1 and W2-cli12-3.** Finalization V3's `row_projection` and
+  `CommittedStoredPopulationV5::authenticated_row` each pay whole-file work
+  (four hashes of two files; two whole Population preparations) to read one
+  row. Neither has a production caller: both carried
+  `#[cfg_attr(not(test), expect(dead_code))]` (CE-95, D-1956). They are now
+  `#[cfg(test)]`, so the cost cannot be paid outside a test, and
+  `ledger_scan_costs.rs` requires the attribute.
+- **W2-cli11-0.** Finalization V4's `append_locked`, after the synced
+  Completion, hashed the data file and called `scan`, which re-decoded and
+  re-validated every earlier block. It now reads back the block it wrote,
+  checks its sequence and source, validates it with the same
+  `validate_complete_block` a scan runs, and inserts that receipt. Earlier
+  blocks were validated when the writer opened, `require_unchanged` proves
+  the file still holds them, and `commit_population_finalization_v4` still
+  reopens the ledger and compares receipts. What remains per append is the
+  two whole-file generation hashes, O(F); that is inherent, because a
+  generation that did not hash the bytes could not see a same-size rewrite
+  (D-0036).
+- **W2-cli12-4.** Population V5's `finish_written` scanned the whole ledger
+  after every written append. It now reads back the last Completion and its
+  rows, requires them contiguous and canonical, validates the block and
+  checks it names the Population just written. A written commit scans twice,
+  as a reused one does: the writer's open scan, which is the index the append
+  and its duplicate check run on, and the fresh `open_read`, which is the
+  independent proof the authority is returned from. Both are inherent to what
+  the commit proves.
+
+**No output changes.** Every receipt is the one a scan derives;
+`commit_population_finalization_v4` and `commit_population_v5` compare them
+with a fresh reopen as before.
+
+**Proof.** `cli::population_finalization_v4::tests::an_append_validates_its_own_block_and_does_not_rescan_the_ledger`
+and `cli::population_v5::tests::a_written_append_validates_its_own_block_and_does_not_rescan`
+count no scan during two appends and require each receipt to equal the one a
+fresh scan finds. `crates/cli/tests/ledger_scan_costs.rs` holds the code, the
+rustdocs and `docs/06-limits.md` to the new shape. Counted, not timed.
+C4-CLI-14-01..04.
+
+### D-1846 — A single-stop launch keeps verifying every acknowledged child: argued inherent — 2026-10-06
+
+**Finding (W2-cli6-0; stated, not removed, by D-1633).**
+`index_stop_search_checkpoint::recover` replays, on every launch, every
+acknowledged child slot of every completed frame:
+O(B × R × replay) per launch.
+
+**Decision: inherent, and pinned.** A child is a separate durable journal
+that the parent pins by seal. The parent's chain proves the pins; only the
+replay reads the children, so it is the only check that refuses a child
+damaged or replaced since its acknowledgement before the search builds on it.
+Verifying only the newest frame's children would accept a damaged older child
+silently; a cached verdict would be a new durable authority, and a generation
+check cannot see a same-size rewrite (D-0036). The cost is bounded by the
+search's own cold admission. `docs/06-limits.md` states the argument;
+`a_single_stop_launch_verifies_every_acknowledged_child`
+(`crates/cli/tests/limits_inherent_rechecks.rs`) holds the code and the limit
+to it. No output changes. Not timed. AGD-13.
+
+### D-1847 — A Boolean search page keeps both journal rechecks: argued inherent; D-1638's heading corrected — 2026-10-06
+
+**Finding (W2-cli2-5; stated, not reduced, by D-1641).**
+`RungReader::rows` rechecks every retained journal record of the search and
+the qualified campaign before and after reading one page: 2 × O(H + H').
+
+**Decision: inherent, and pinned.** The opening recheck proves the page
+starts from records that still hold; the closing one proves they held while
+the page was read, so a record rewritten during the read is refused rather
+than served. A generation check in place of either cannot see a same-size
+rewrite (D-0036). The page is bounded at 256 rows and H, H' by the search's
+record admission. `a_boolean_search_page_rechecks_its_journals_on_both_sides`
+holds the code and the limit to it. No output changes. Not timed. AGD-14.
+
+**Also.** The `docs/06-limits.md` heading of D-1638 still said "evidence
+cells re-derive the population" although D-1835 fixed W2-cli7-0 and its
+bullet says so; it now reads "re-derived the population until D-1835".
+Documentation only.
+
+### D-1848 — A Selection V6 snapshot is one authenticated read; the remaining replays are argued inherent — 2026-10-06
+
+**Findings (W2-cli14-1, -2, -3; stated, not reduced, by D-1642).**
+Selection V5 and V6 reads derive their selection from the committed
+Execution before and after reading; a V6 `snapshot` called `top_twenty_five`
+(two preparations, one scan) and then prepared a third time and scanned the
+committed file again only to cut the 960-byte envelope from the block it had
+just proven; the V6 commit scans in `persist` and again in
+`require_committed`.
+
+**The change.** `CommittedStoredSelectionV6::authenticated` is the one
+before/after read and returns the winners with the block it proved
+committed; `top_twenty_five` returns its winners and `snapshot` cuts its
+envelope from its block. A snapshot is two preparations and one scan, down
+from three and two; `stored_oos_witnesses`, which takes two, saves two of
+each. Output unchanged: the envelope is cut from the same block, which the
+same read proved committed between two equal preparations.
+
+**Argued inherent, the rest.** Each remaining replay is a before/after pair
+around one read or write, and the pair is the read's proof: Selection holds
+no copy of its upstream, so the winners can only be shown to follow from the
+Population and Execution by deriving them on both sides and comparing.
+`persist`'s scan is the duplicate check under the lock and
+`require_committed`'s is the read-back that proves the block landed whole.
+
+**Proof.** `cli::selection_v6_source::tests::a_selection_v6_read_counts_its_population_replays_and_the_limits_say_so`
+now counts zero preparations and no `require_committed` in `snapshot` and one
+authenticated read, and two preparations in the authenticated read;
+`a_selection_v5_read_derives_its_selection_on_both_sides`
+(`crates/cli/tests/limits_inherent_rechecks.rs`) pins V5. Counted, not timed.
+AGD-15.
+
+### D-1844 — The stored sweep doors rank each level as it retires instead of retaining the whole sweep — 2026-10-06
+
+**Finding (AC-whp-o1-1; stated by D-1448, triaged "keep" by F8).**
+`sweep-stored` and `sweep-audited-stored` reach `cli::and_checkpoint::run`,
+which walked with the retaining checkpoint sink (every level kept in
+`Sweep::levels`) and ranked the complete `Sweep` after the walk with
+`runner::rank_checkpointed_sweep`: retention O(total frequent combinations),
+the 6.35 GB of 8.91 GB D-1448 measured. The triage held that streaming would
+change the ranked result. It does not: `rank_checkpointed_sweep` feeds the
+same `Accumulator::offer_retired(level, next, ..)` the streamed path feeds
+from the engine's retire callback, with the same rule for a partial
+successor, and the journal already saves each level as it is reached and
+writes only the prefix and the current level at a boundary.
+
+**The change.**
+- `engine`: `CheckpointView` carries `retired_count`; `write_prefix_to`
+  writes it, and `write_to` refuses on a view whose earlier levels were
+  handed on. New `Ladder::walk_checkpointed_streamed` and
+  `resume_checkpointed_streamed` run the same walk with a sink that hands each
+  retired level and its lent successor to a callback, keeps its `Tally` and
+  drops it, returning `keep::Streamed`. A resume first hands on the restored
+  levels in depth order, each with its restored successor (none for the
+  partial level a halt left), dropping each as it goes.
+- `runner::rank_checkpointed_streamed` ranks through that callback with the
+  accumulator `rank_checkpointed_sweep` uses, and refuses what it refuses: a
+  column count mismatch, a level that does not reconcile, a depth sequence
+  that is not 1, 2, 3, … with only the last level empty or halted.
+- `cli::and_checkpoint::run` uses both; the journal logic is one `walk_core`
+  that both the retaining test door (`walk_within`) and the streamed
+  production door drive.
+
+**No output changes.** The levels handed on, every boundary's bytes, the
+tallies and the ranking are those of the retaining door, fresh and resumed.
+A resumed attempt still decodes the journal's earlier levels into one
+`Checkpoint` before handing them on, so its peak includes the restored
+history once; a fresh attempt holds what the streamed uncheckpointed walk
+holds.
+
+**Proof.** `engine` test
+`a_streamed_checkpointed_walk_hands_on_what_the_retaining_walk_retains`
+compares the hand-off, the boundaries, the tallies and every resume over 50
+fixture cases; `cli::and_checkpoint::tests::the_streamed_door_ranks_what_the_retained_sweep_ranked`
+compares the ranked run with ranking the retained sweep, fresh and resumed at
+every depth; `vocab` test `limits_section_5_names_the_retaining_stored_door`
+holds `docs/06-limits.md` §5 and the door to the new shape. Counted, not
+timed. AGD-16.
+
+### D-1813 — W3-runner2-7 is closed by D-1514, confirmed on the batch-3 tree — 2026-10-06
+
+**Finding.** W3-runner2-7: a refused record or missing minute AFTER a stop,
+target or trail had closed a position un-priced that variant and blocked the
+next signal to the time exit (look-ahead in the refusal). D-1179 located the
+first refused bar, D-1183 made the grid compare it with the variant's exit,
+D-1191 made each `Occupancy` record its holes, and D-1514 made the walk mark
+such a path `priceable_before_hole` and the grid price every variant whose
+pessimistic exit precedes the hole, under grid cost model V2.
+
+**Confirmed, not re-fixed.** F6 (wip/audit-fixes-6c) left this row as
+"confirm closed by D-1514". On the merged batch-3 tree the code D-1514
+describes is present: `trade::Occupancy::priceable_before_hole` and
+`hole_offset`, `grid::Candidate::refused_at` and `grid::pessimistic_offset`,
+read by `one_variant` and the V1 replay alike. D-1514's proving tests run
+green on this tree: `runner` integration tests
+`hole_after_exit::a_refused_record_after_a_stop_leaves_the_stop_priced`,
+`a_missing_minute_after_a_stop_leaves_the_stop_priced` and
+`a_refused_stop_bar_is_never_priced`, and the unit tests
+`grid::tests::a_walk_built_stop_before_a_hole_is_priced_by_the_cell_and_the_replay_alike`
+and `grid::tests::unmeasured_and_refused_at_answer_each_cause_on_its_own`.
+No code changes and no new decision of substance; this entry records the
+evidence so the row can close. D-1813 was F6's reserved number for a fix,
+used here for the confirmation.

@@ -879,6 +879,81 @@ fn actual_ranked_helper_replays_durable_history_and_refuses_unwarmed_data() -> R
     Ok(())
 }
 
+/// AC-whp-o1-1, D-1844: the door ranks each level as it retires and returns
+/// exactly what ranking the retained sweep afterwards returned, fresh and
+/// resumed from every depth a journal recorded.
+#[test]
+fn the_streamed_door_ranks_what_the_retained_sweep_ranked() -> Result<(), String> {
+    let bars = runner::synthetic::sessions(8);
+    let column = Column::build(&bars, &mut crate::evaluator().map_err(error)?);
+    let forward = runner::outcome::forward(&bars, &column, crate::Horizon::DEFAULT);
+    let ladder = Ladder::with_min_hits(600)
+        .with_ceiling(50_000)
+        .with_support_lanes(1);
+    let bits = engine::column::Column::try_from_rows(column.bits()).map_err(error)?;
+    let retained_root = Scratch::new().map_err(error)?;
+    let retained_attempt = sweep_evidence::begin(&retained_root.0, ID, Operation::Sweep)?;
+    let sweep = walk(
+        &retained_root.0,
+        &retained_attempt,
+        ladder,
+        &bits,
+        &runner::live_positions(),
+        &mut |_| Ok(()),
+    )?;
+    let depth = sweep.levels.len();
+    assert!(depth >= 2, "a ladder, not one level");
+    let expected = runner::rank_checkpointed_sweep(
+        column.clone(),
+        Some(&column),
+        &forward,
+        sweep,
+        crate::STORED_KEEP,
+        runner::rank::Lens::Detectability,
+    )?;
+    let fresh_root = Scratch::new().map_err(error)?;
+    let fresh = sweep_evidence::begin(&fresh_root.0, ID, Operation::Sweep)?;
+    let streamed = run(
+        &fresh_root.0,
+        &fresh,
+        ladder,
+        column.clone(),
+        &column,
+        &forward,
+    )?;
+    assert_eq!(streamed.ranked.top, expected.ranked.top);
+    assert_eq!(streamed.ranked.closed_top, expected.ranked.closed_top);
+    assert_eq!(streamed.ranked.considered, expected.ranked.considered);
+    assert_eq!(streamed.outcome.sweep.levels, expected.outcome.sweep.levels);
+    assert_eq!(streamed.outcome.trials, expected.outcome.trials);
+    for stop in 1..=u32::try_from(depth).map_err(error)? {
+        let root = Scratch::new().map_err(error)?;
+        let paused = sweep_evidence::begin(&root.0, ID, Operation::Sweep)?;
+        let refused = walk(
+            &root.0,
+            &paused,
+            ladder,
+            &bits,
+            &runner::live_positions(),
+            &mut |view| {
+                if view.current().k == stop {
+                    Err("paused".into())
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert!(refused.is_err(), "paused at depth {stop}");
+        drop(paused);
+        let again = sweep_evidence::begin(&root.0, ID, Operation::Sweep)?;
+        let resumed = run(&root.0, &again, ladder, column.clone(), &column, &forward)?;
+        assert_eq!(resumed.ranked.top, expected.ranked.top, "resumed at {stop}");
+        assert_eq!(resumed.ranked.closed_top, expected.ranked.closed_top);
+        assert_eq!(resumed.outcome.sweep.levels, expected.outcome.sweep.levels);
+    }
+    Ok(())
+}
+
 /// The final boundary and every chunk it names are reopened before a
 /// rankable run is returned: changing either after the terminal callback
 /// refuses the attempt.

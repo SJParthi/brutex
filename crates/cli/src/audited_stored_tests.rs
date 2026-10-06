@@ -3032,6 +3032,214 @@ fn sessions_missing_their_closing_minutes_are_withheld_up_front() {
     );
 }
 
+/// **A seeded descent refuses a rung it does not sweep before it reads
+/// anything, and leaves its seed alone.** o1cli-5, D-1839.
+#[test]
+fn a_seeded_descent_refuses_an_unknown_rung_before_reading() {
+    let before = crate::SIGNAL_SPAN_READS.with(std::cell::Cell::get);
+    let page = crate::elite_descend_seeded(
+        "zerodha",
+        "NIFTY",
+        "7min",
+        ((2025, 5), (2025, 5)),
+        (1_000, 5),
+        runner::rank::Lens::Payoff,
+        None,
+        crate::ScreenCache::default(),
+    );
+    assert_eq!(
+        page,
+        format!(
+            "refused: `7min` is not a rung this engine sweeps. The eight are: {}.\n",
+            crate::EVERY_RUNG.join(", ")
+        )
+    );
+    assert_eq!(crate::SIGNAL_SPAN_READS.with(std::cell::Cell::get), before);
+}
+
+/// **A rung reads its span and builds its column once, the rungs of one
+/// command read the minute and daily spans once between them, and a build
+/// pass reads nothing.** o1cli-2, o1cli-3, o1cli-4, D-1840, re-applied by D-1843.
+///
+/// Counted before the fix: a derived-support `5min` rung built its column
+/// twice (the probe's build, then the kernel's), and every rung read the
+/// execution series once, the minute and daily context spans once per build
+/// pass, and both again after the build: seven reads of rung-independent
+/// spans for one derived `5min` rung on a clean month. Now the probe reads the
+/// kernel's column, two rungs through one share read the three spans three
+/// times in all, and every row equals a fresh, unshared run's.
+#[test]
+fn rungs_share_their_reads_and_build_their_column_once() {
+    use std::cell::Cell;
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    crate::knobs::set("BRUTEX_VALIDATE", "0");
+    let reads = || crate::SHARED_SPAN_READS.with(Cell::get);
+    let builds = || u64::try_from(crate::COLUMN_BUILD_ATTEMPTS.with(Cell::get)).unwrap_or(u64::MAX);
+    let loads = || crate::AUDIT_INPUT_LOADS.with(Cell::get);
+    let store = |fixture: &Fixture| crate::RungStore {
+        root: Ok(fixture.root.clone()),
+        commit: Some("generated-stored-rungs-fixture"),
+    };
+    let ask = |rung, support_ppm| crate::RungAsk {
+        vendor_word: "zerodha",
+        underlying: "NIFTY",
+        rung,
+        from: (2025, 5),
+        to: (2025, 5),
+        support_ppm,
+        attempt: None,
+    };
+
+    // A DERIVED SUPPORT BUILDS ONE COLUMN: the probe sizes the kernel's.
+    let derived = Fixture::warmed();
+    let (r, b, l) = (reads(), builds(), loads());
+    let _ = crate::one_rung_cached(
+        ask("5min", None),
+        store(&derived),
+        &mut crate::AuditCache::default(),
+    );
+    assert_eq!(
+        (reads() - r, builds() - b, loads() - l),
+        (3, 1, 1),
+        "one preparation for the probe and the sweep (two builds and seven reads before)"
+    );
+
+    let fresh = Fixture::warmed();
+    let shared = Fixture::warmed();
+    let (r, b, l) = (reads(), builds(), loads());
+    let alone: Vec<_> = ["5min", "1min"]
+        .map(|rung| {
+            crate::one_rung_cached(
+                ask(rung, Some(600_000)),
+                store(&fresh),
+                &mut crate::AuditCache::default(),
+            )
+            .outcome
+        })
+        .into();
+    assert_eq!(
+        (reads() - r, builds() - b, loads() - l),
+        (6, 2, 2),
+        "unshared, each rung reads its three spans and builds once"
+    );
+
+    let (r, b, l) = (reads(), builds(), loads());
+    let share = std::sync::Arc::new(crate::SpanShare::default());
+    let together: Vec<_> = ["5min", "1min"]
+        .map(|rung| {
+            crate::one_rung_cached(
+                ask(rung, Some(600_000)),
+                store(&shared),
+                &mut crate::AuditCache::sharing(std::sync::Arc::clone(&share)),
+            )
+            .outcome
+        })
+        .into();
+    assert_eq!(
+        (reads() - r, builds() - b, loads() - l),
+        (3, 2, 2),
+        "two rungs share three span reads and each builds once"
+    );
+    assert!(together.iter().all(Result::is_ok), "{together:?}");
+    // Every field but the wall-clock stamp of when each row landed.
+    let unstamped = |rows: Vec<Result<crate::results::Record, String>>| {
+        rows.into_iter()
+            .map(|row| {
+                row.map(|record| crate::results::Record {
+                    finished_micros: 0,
+                    ..record
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(unstamped(together), unstamped(alone));
+    crate::knobs::clear_all();
+}
+
+/// **A build pass that withholds a day reads nothing more.** o1cli-3,
+/// o1cli-4, W2-cli8-6, D-1840, re-applied by D-1843.
+///
+/// Each pass read the daily and minute context spans again. 2025-05-06 loses
+/// its last minute, and the build is handed the whole month with nothing
+/// withheld up front (the census, D-1662, would withhold that day itself; the
+/// loop is the defence behind it): the first pass refuses the 15:25 bar's
+/// close, the day is withheld, and the second pass builds. Both passes derive
+/// from one read of each context span, the build hands back the day, and a
+/// second build through the same share reads nothing at all.
+#[test]
+fn a_build_that_withholds_a_day_reads_nothing_more() {
+    use std::cell::Cell;
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    let reads = || crate::SHARED_SPAN_READS.with(Cell::get);
+    let passes = || crate::COLUMN_BUILD_ATTEMPTS.with(Cell::get);
+    let edged = Fixture::warmed();
+    edged.rewrite_owned_minutes(|day, rows| {
+        if day == 6 {
+            rows.pop();
+        }
+    });
+    let whole = stored::load_span(
+        &edged.root,
+        Vendor::Zerodha,
+        "NIFTY",
+        "5min",
+        (2025, 5),
+        (2025, 5),
+    )
+    .expect("the month loads")
+    .bars;
+    let withheld = i64::from(
+        pull::session::Day::new(2025, 5, 6)
+            .expect("date")
+            .days_from_epoch(),
+    );
+    let share = crate::SpanShare::default();
+    let build = |share: &crate::SpanShare| {
+        let mut days = Vec::new();
+        let mut bars = whole.clone();
+        let prepared = crate::column_withholding_at_build(
+            &edged.root,
+            Vendor::Zerodha,
+            "NIFTY",
+            ((2025, 5), (2025, 5)),
+            crate::FoldedSeries {
+                folded: &whole,
+                days: &mut days,
+                bars: &mut bars,
+            },
+            stored::rung_length_micros("5min").expect("a rung"),
+            crate::StoredPreparationBuild {
+                rung: "5min",
+                commit: None,
+            },
+            share,
+        )
+        .expect("the edged month builds");
+        (prepared, days, bars.len())
+    };
+    let (r, p) = (reads(), passes());
+    let (prepared, days, kept) = build(&share);
+    assert_eq!(
+        (reads() - r, passes() - p),
+        (2, 2),
+        "a refused pass and a built one over one read of each context span"
+    );
+    assert_eq!(prepared.build_withheld, [withheld]);
+    assert_eq!(days, [withheld], "the build appends the day it withheld");
+    assert!(kept < whole.len(), "the day's bars left the sweep");
+    let (r, p) = (reads(), passes());
+    let (again, _, _) = build(&share);
+    assert_eq!(
+        (reads() - r, passes() - p),
+        (0, 2),
+        "a second build through the same share reads nothing"
+    );
+    assert_eq!(again.digest, prepared.digest, "and prepares the same bytes");
+    crate::knobs::clear_all();
+}
+
 /// A RELIANCE (or index) May whose every price halves from 2025-05-09 on:
 /// an unadjusted 1:2 split, written at all three rungs `warmed_for` writes.
 fn split_on_the_ninth(symbol: &'static str) -> Fixture {

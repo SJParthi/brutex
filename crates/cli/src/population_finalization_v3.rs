@@ -1183,14 +1183,10 @@ impl PopulationFinalizationV3Authority {
     ///
     /// Refuses an out-of-range ordinal or any stale, replaced, corrupt,
     /// reordered or crosswired retained source.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "reached only from tests; narrowed from a module-wide expect so a
-                      NEW dead item in this module warns (CE-95, D-1956)"
-        )
-    )]
+    // TEST-ONLY SINCE D-1845 (W2-cli11-1, W2-cli12-3): no production path
+    // reads one row this way, so the per-row whole-file cost the limit states
+    // cannot be paid outside a test.
+    #[cfg(test)]
     pub(crate) fn row_projection(
         &mut self,
         global_sequence: u64,

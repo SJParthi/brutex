@@ -107,7 +107,7 @@ fn the_span_loaded_for_one_number_seeds_the_work_it_hands_off() {
     // one loader takes a seed only for its own key. D-1839 at integration.
     assert!(body("\nfn screen_range_kernel_cached(").contains("cache.inputs("));
     let inputs = LIB
-        .split_once("\n    fn inputs(")
+        .split_once("\n    fn inputs(\n        &mut self,\n        root: &std::path::Path,")
         .expect("the screen cache loads its inputs")
         .1
         .split_once("\n    }\n")

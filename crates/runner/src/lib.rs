@@ -615,6 +615,63 @@ pub fn rank_checkpointed_sweep(
     Ok(ranked_run(column, summary, ranked))
 }
 
+/// Rank a checkpointed walk AS IT RETIRES, with the accumulator
+/// [`rank_checkpointed_sweep`] uses, holding no level once it is ranked.
+/// AC-whp-o1-1, D-1844.
+///
+/// `walk` runs the checkpointed walk, fresh or resumed, and hands every level
+/// it retires, in depth order, to the callback it is given, with the adjacent
+/// successor the engine lends (`engine::Ladder::walk_checkpointed_streamed`).
+/// Every level is scored when it retires, so no survivor is retained for a
+/// ranking pass at the end: the stored doors held the whole frequent set
+/// (6.35 GB of 8.91 GB measured, D-1448) only to rank it afterwards.
+///
+/// # Errors
+///
+/// Refuses what [`rank_checkpointed_sweep`] refuses: a signal-column count
+/// mismatch, a level that does not reconcile, a depth sequence that is not
+/// 1, 2, 3, ... with only the last level empty or halted, or a walk error.
+pub fn rank_checkpointed_streamed(
+    column: Column,
+    scoring_column: Option<&Column>,
+    forward: &crate::outcome::Forward,
+    keep: usize,
+    lens: crate::rank::Lens,
+    walk: impl FnOnce(
+        &mut dyn FnMut(&engine::Frontier, Option<&engine::Frontier>),
+    ) -> Result<engine::keep::Streamed, String>,
+) -> Result<RankedRun, String> {
+    let mut accumulator = crate::rank::Accumulator::new(keep, lens);
+    let scored_on = scoring_column.unwrap_or(&column);
+    let mut depth = 0_u64;
+    let mut emptied = false;
+    let mut accounted = true;
+    let summary = walk(&mut |level, next| {
+        depth = depth.saturating_add(1);
+        accounted &= level.reconciles() && u64::from(level.k) == depth && !emptied;
+        emptied = level.frequent.is_empty();
+        accumulator.offer_retired(level, next, scored_on, forward);
+    })?;
+    let terminal = summary.levels.last().map_or_else(
+        || summary.halted.is_some_and(|halt| halt.k == 0),
+        |last| {
+            summary
+                .halted
+                .map_or(last.survivors == 0, |halt| halt.k == last.k)
+        },
+    );
+    if summary.bars != u64::try_from(column.bits().len()).unwrap_or(u64::MAX)
+        || summary.bars != column.census().swept
+        || !accounted
+        || !terminal
+        || u64::try_from(summary.levels.len()).unwrap_or(u64::MAX) != depth
+    {
+        return Err("restored sweep and signal column/accounting disagree".into());
+    }
+    let ranked = accumulator.finish();
+    Ok(ranked_run(column, summary, ranked))
+}
+
 fn restored_terminal(sweep: &Sweep) -> bool {
     let Some(last) = sweep.levels.last() else {
         return sweep.halted.is_some_and(|halt| halt.k == 0);

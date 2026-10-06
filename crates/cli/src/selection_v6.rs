@@ -88,14 +88,15 @@ pub(crate) struct CommittedStoredSelectionV6 {
 }
 
 impl CommittedStoredSelectionV6 {
+    /// The authenticated Top-25 and the block it was proven against.
+    ///
+    /// `snapshot` read the Top-25, then prepared the source a third time and
+    /// scanned the committed file a second time to take the envelope from a
+    /// block it had just proven (W2-cli14-2, D-1848). The envelope is now cut
+    /// from the block the Top-25 read already proved committed, between its
+    /// two equal preparations: two preparations and one scan per snapshot.
     pub(crate) fn snapshot(&mut self) -> Result<SelectionV6Snapshot, String> {
-        let winners = self.top_twenty_five()?;
-        let prepared = Prepared::from_execution(&mut self.source, self.policy)?;
-        let block = prepared.block()?;
-        if prepared.identity()? != self.identity {
-            return Err("Selection V6 snapshot changed identity".to_owned());
-        }
-        require_committed(&self.root, self.bounds, &block)?;
+        let (winners, block) = self.authenticated()?;
         let envelope = block
             .get(..960)
             .ok_or("Selection V6 envelope bounds")?
@@ -145,6 +146,12 @@ impl CommittedStoredSelectionV6 {
 
     /// Reproduces source and ranking before and after a freshly opened record.
     pub(crate) fn top_twenty_five(&mut self) -> Result<Vec<SelectionV6Winner>, String> {
+        Ok(self.authenticated()?.0)
+    }
+
+    /// [`Self::top_twenty_five`] and the committed block it proved, so a
+    /// snapshot needs no third preparation and no second scan. D-1848.
+    fn authenticated(&mut self) -> Result<(Vec<SelectionV6Winner>, Block), String> {
         let before = Prepared::from_execution(&mut self.source, self.policy)?;
         if before.identity()? != self.identity {
             return Err("Selection V6 retained source now identifies another selection".to_owned());
@@ -154,12 +161,13 @@ impl CommittedStoredSelectionV6 {
         if after != before {
             return Err("Selection V6 source changed during authoritative winner read".to_owned());
         }
-        before
+        let winners = before
             .winners
             .iter()
             .enumerate()
             .map(|(rank, winner)| public_winner(rank, winner))
-            .collect()
+            .collect::<Result<_, _>>()?;
+        Ok((winners, before.block()?))
     }
 
     /// Exact actual prefix of the same authenticated Top-25.

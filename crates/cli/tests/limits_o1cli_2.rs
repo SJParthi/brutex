@@ -49,47 +49,49 @@ fn body(head: &str) -> &'static str {
         .expect("its body")
 }
 
-/// THE SECOND LOAD AND BUILD PER RUNG ARE STATED, AND STILL TRUE.
+/// A RUNG READS ITS SPAN ONCE AND BUILDS ITS COLUMN ONCE. D-1840, re-applied
+/// onto D-1781 and D-1701 by D-1843.
 #[test]
-fn a_rungs_second_load_and_build_are_stated_and_still_paid() {
+fn a_rung_reads_its_span_and_builds_its_column_once() {
     let limit =
         limit("## A rung loads its span twice and may build its column twice (audit o1cli-2)");
     for sentence in [
-        "`one_rung` loads the rung's span with `stored::load_span`",
-        "the audit kernel `audit_range_kernel` then loads the same span again",
-        "When no support is named, the column is also built twice",
-        "`column_withholding_unsourceable_days` for `affordable_min_hits`, then `column_withholding_at_build`",
-        "two span loads per rung always, and two column builds",
-        "O(rung bars) each",
+        "Fixed by D-1840",
+        "Re-applied by D-1843",
+        "seeds the kernel's load",
+        "`rungs_share_their_reads_and_build_their_column_once`",
     ] {
         assert!(
             limit.contains(sentence),
             "the limit must say: {sentence}\n{limit}"
         );
     }
-    // D-1557: `one_rung` is `one_rung_cached` with a fresh cache.
     let rung = body("\nfn one_rung_cached(");
-    for call in [
-        "stored::load_span(",
-        "column_withholding_unsourceable_days(",
-        "affordable_min_hits(",
-        "audit_range_cached(",
-    ] {
-        assert!(
-            rung.contains(call),
-            "`one_rung` no longer calls {call}: update the limit"
-        );
-    }
     assert!(
-        rung.find("stored::load_span(") < rung.find("named_ppm.is_some()"),
-        "the span is loaded before the named-support branch, so even a named support pays the first load"
+        !rung.contains("column_withholding"),
+        "the rung builds its own column again"
     );
-    // D-1557: the kernel's loads moved into its cached loader.
-    let kernel = body("\nfn load_audit_inputs(");
-    for call in ["stored::load_span(", "column_withholding_at_build("] {
-        assert!(
-            kernel.contains(call),
-            "the kernel no longer calls {call}: update the limit"
-        );
-    }
+    assert!(rung.contains("cache.inputs(") && rung.contains("load_audit_inputs("));
+    let probe = rung
+        .split_once("affordable_min_hits(")
+        .expect("the derived support is still probed")
+        .1;
+    assert!(
+        probe
+            .trim_start()
+            .starts_with("column, &root, &inputs.span, inputs.preparation_digest")
+    );
+    assert!(!LIB.contains("\nfn column_withholding_unsourceable_days("));
+    let cache = LIB
+        .split_once("\n    fn inputs(\n        &mut self,\n        key: AuditKey,")
+        .expect("the audit cache loads its inputs")
+        .1
+        .split_once("\n    }\n")
+        .expect("the method closes")
+        .0;
+    assert!(
+        cache.contains("Some((held, Ok(span))) if *held == key => Some(span.clone()),"),
+        "the raw span seeds the kernel's load"
+    );
+    assert!(body("\nfn load_audit_inputs(").contains("Some(span) => span,"));
 }

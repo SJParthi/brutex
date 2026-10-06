@@ -179,8 +179,17 @@ fn limits_section_5_names_the_retaining_stored_door() {
     let limits = read("docs/06-limits.md");
     let five = flat(section(&limits, "## 5.", "## 6."));
     assert!(five.contains("`cli::and_checkpoint::run`"));
-    assert!(five.contains("`runner::rank_checkpointed_sweep`"));
+    assert!(five.contains("`runner::rank_checkpointed_streamed`"));
+    assert!(five.contains("**Since D-1844 (AC-whp-o1-1) the two stored doors stream too.**"));
     assert!(!five.contains("only ranked entry points take the streamed result"));
+    let door = read("crates/cli/src/and_checkpoint.rs");
+    let run = section(&door, "pub(crate) fn run(", "fn ");
+    assert!(
+        run.contains("runner::rank_checkpointed_streamed(")
+            && run.contains("walk_checkpointed_streamed(")
+            && !run.contains("rank_checkpointed_sweep("),
+        "the stored door retains its sweep again; revisit docs/06-limits.md §5"
+    );
     let resume = flat(&read("docs/20-sweep-resume.md"));
     assert!(!resume.contains("Encoding uses fixed scratch space"));
     assert!(resume.contains("`BoundedBytes`"));

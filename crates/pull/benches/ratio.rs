@@ -541,6 +541,156 @@ fn append_after_load_is_flat() -> bool {
     ok
 }
 
+/// One July-2025 session of one-minute rows, as `crates/pull/tests/derive.rs`
+/// builds them: `day` is the day of the month.
+fn session_member(day: u8) -> pull::archive::Member {
+    // 2025-07-01 09:15:00 IST as a UTC epoch second.
+    const OPEN_UTC: i64 = 1_751_341_500;
+    let open = OPEN_UTC + (i64::from(day) - 1) * 86_400;
+    let rows = (0..375_i64)
+        .map(|m| {
+            let base = 2_550_000 + ((m * 37) % 211 - 105) * 25;
+            pull::fetch::RawRow {
+                timestamp: open + m * 60,
+                open: base,
+                high: base + 40,
+                low: base - 35,
+                close: base + 10,
+                volume: 400 + m,
+                open_interest: Some(500_000 + m * 3),
+            }
+        })
+        .collect();
+    pull::archive::Member {
+        path: std::path::PathBuf::from("/bought/NIFTY.csv"),
+        instrument: "NIFTY".to_owned(),
+        rows,
+    }
+}
+
+/// The July-2025 days the canonical calendar holds as full sessions.
+fn full_sessions() -> Vec<u8> {
+    (1..=31_u8)
+        .filter(|&day| {
+            pull::session::Day::new(2025, 7, day).is_some_and(|date| {
+                matches!(
+                    pull::calendar::kind_of(i64::from(date.days_from_epoch())),
+                    pull::calendar::DayKind::Open(session) if session.bars() == 375
+                )
+            })
+        })
+        .collect()
+}
+
+/// The `s`-th order statistic of `samples` at `permille` (p50 = 500).
+fn quantile(samples: &mut [u128], permille: usize) -> u128 {
+    samples.sort_unstable();
+    let at = (samples.len().saturating_sub(1) * permille) / 1_000;
+    samples.get(at).copied().unwrap_or(0)
+}
+
+/// ET-bars-candles-store-1, -8 and rederive, D-2240: **MEASURED**.
+///
+/// `derive_all` re-reads and re-folds the whole month on every batch, so the
+/// cost of ingesting the s-th session of a month grows with s. This fills a
+/// fresh store's July 2025 one session per `from_members` call, as an
+/// operator filling a month day by day does, `ROUNDS` times, and prints
+/// p50, p99 and max of one call's wall time at the first, middle and last
+/// session. The bound it asserts is the one `docs/06-limits.md` states: the
+/// per-call cost grows at most linearly in s, so the last call costs no more
+/// than `CEILING_PERMILLE` thousandths of s times the first (a call that
+/// re-derived more than the month would breach it). It does not assert that
+/// the growth is absent: that would be the incremental fold the store format
+/// cannot resume (D-0955).
+fn a_month_filled_session_by_session_rederives_linearly() -> bool {
+    const ROUNDS: usize = 9;
+    let days = full_sessions();
+    let sessions = days.len();
+    let mut per_session: Vec<Vec<u128>> = vec![Vec::with_capacity(ROUNDS); sessions];
+    for round in 0..ROUNDS {
+        let root = std::env::temp_dir().join(format!(
+            "brutex-pull-bench-rederive-{}-{round}",
+            std::process::id()
+        ));
+        let _fresh = std::fs::remove_dir_all(&root);
+        if std::fs::create_dir_all(&root).is_err() {
+            println!("BREACH rederive: no scratch root");
+            return false;
+        }
+        for (at, &day) in days.iter().enumerate() {
+            let Some(date) = pull::session::Day::new(2025, 7, day) else {
+                return false;
+            };
+            let Ok(window) = pull::session::Window::new(date, date) else {
+                return false;
+            };
+            let request = pull::fetch::BarRequest {
+                instrument_id: String::new(),
+                listing: pull::vendor::Listing::Index,
+                window,
+                granularity: pull::vendor::Granularity::Minute1,
+            };
+            let plan = pull::ingest::Plan {
+                calendar: pull::calendar::Runtime::default(),
+                cash_schedule: None,
+                columns: pull::csv::Columns::TrueDataIndex,
+                request: &request,
+                encoding: pull::vendor::TimestampEncoding::EpochSecondsUtc,
+                scale: pull::vendor::PriceScale::Paisa,
+                vendor: Vendor::TrueData,
+                exchange: "NSE",
+                segment: "INDEX",
+                contract: None,
+            };
+            let member = session_member(day);
+            let start = Instant::now();
+            let done = black_box(pull::ingest::from_members(
+                std::slice::from_ref(&member),
+                &root,
+                plan,
+            ));
+            let took = start.elapsed().as_nanos();
+            if !done.failures.is_empty() {
+                println!("BREACH rederive: session {day} refused: {:?}", done.failures);
+                return false;
+            }
+            if let Some(samples) = per_session.get_mut(at) {
+                samples.push(took);
+            }
+        }
+        let _cleanup = std::fs::remove_dir_all(&root);
+    }
+    let mut report = |at: usize| {
+        let samples = per_session.get_mut(at).map_or(&mut [][..], Vec::as_mut_slice);
+        let (p50, p99, max) = (
+            quantile(samples, 500),
+            quantile(samples, 990),
+            quantile(samples, 1_000),
+        );
+        println!(
+            "rederive: session {:>2} of {sessions}: p50 {:>9} ns, p99 {:>9} ns, max {:>9} ns",
+            at + 1,
+            p50,
+            p99,
+            max
+        );
+        p50
+    };
+    let first = report(0);
+    let _middle = report(sessions / 2);
+    let last = report(sessions.saturating_sub(1));
+    let envelope = first
+        .saturating_mul(u128::try_from(sessions).unwrap_or(u128::MAX))
+        .saturating_mul(CEILING_PERMILLE)
+        / 1_000;
+    let ok = sessions > 1 && last <= envelope;
+    println!(
+        "rederive: last p50 {last} ns against a linear envelope of {envelope} ns ({})",
+        if ok { "within" } else { "BREACH" }
+    );
+    ok
+}
+
 fn main() {
     println!("gate 8 — crates/pull, ceiling {CEILING_PERMILLE} permille");
     let mut ok = true;
@@ -548,6 +698,7 @@ fn main() {
     ok &= entry_lookup_is_flat();
     ok &= entry_lookup_stays_within_its_budget();
     ok &= append_after_load_is_flat();
+    ok &= a_month_filled_session_by_session_rederives_linearly();
     if ok {
         println!("all ratios within the ceiling");
     } else {

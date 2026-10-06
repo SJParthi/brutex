@@ -2402,6 +2402,8 @@ impl PopulationV5Ledger {
     }
 
     fn scan(&mut self) -> Result<(), PopulationV5Refusal> {
+        #[cfg(test)]
+        SCANS.with(|scans| scans.set(scans.get().saturating_add(1)));
         let row_records = checked_record_count(
             self.row_generation.len,
             POPULATION_V5_ROW_BYTES,
@@ -2635,13 +2637,55 @@ impl PopulationV5Ledger {
         &mut self,
         population_id: [u8; 32],
     ) -> Result<PopulationV5StructuralCommit, PopulationV5Refusal> {
-        self.scan()?;
-        let receipt = self.receipts.get(&population_id).copied().ok_or_else(|| {
-            format!(
+        // THE NEW BLOCK IS READ BACK AND VALIDATED, NOT THE WHOLE LEDGER
+        // (W2-cli12-4, D-1845). This called `scan`, which re-decoded and
+        // re-validated every row of every Population already stored. Those
+        // blocks were scanned when this writer opened, and `require_unchanged`
+        // has held their bytes since; the block just written is decoded from
+        // disk and validated by the same `validate_complete_block` a scan runs,
+        // with the same contiguity and identity checks, so the receipt is the
+        // one a scan derives. `commit_population_v5` still reopens the ledger
+        // read-only, scans it whole and compares receipts.
+        let index = self
+            .completion_records
+            .checked_sub(1)
+            .ok_or_else(|| "Population V5 appended no Completion".to_owned())?;
+        let completion = PopulationV5CompletionRecord::decode(&read_fixed_at(
+            &mut self.completion_file,
+            index,
+            POPULATION_V5_COMPLETION_BYTES,
+            "Completion",
+        )?)?;
+        let end = completion
+            .first_row_record
+            .checked_add(completion.row_count)
+            .ok_or_else(|| "Population V5 completed row range overflowed".to_owned())?;
+        if completion.block_sequence != index || end != self.row_records {
+            return Err(format!(
+                "Population V5 Completion {index} is not contiguous/canonical"
+            ));
+        }
+        require_block_bound(self.bounds, completion.row_count)?;
+        let rows = self.read_rows(completion.first_row_record, completion.row_count)?;
+        let receipt = validate_complete_block(&rows, &completion)?;
+        if receipt.population_id != population_id {
+            return Err(format!(
                 "Population V5 appended identity {} was not indexed",
                 hex32(population_id)
-            )
-        })?;
+            ));
+        }
+        if self
+            .receipts
+            .insert(receipt.population_id, receipt)
+            .is_some()
+        {
+            return Err(format!(
+                "Population V5 identity {} appears more than once",
+                hex32(receipt.population_id)
+            ));
+        }
+        self.trailing = None;
+        self.require_unchanged()?;
         Ok(PopulationV5StructuralCommit::Written(receipt))
     }
 
@@ -2928,14 +2972,10 @@ impl PopulationV5Authority {
     }
 
     /// Reads one fixed-offset row after validating every retained generation.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "reached only from tests; narrowed from a module-wide expect so a
-                      NEW dead item in this module warns (CE-95, D-1956)"
-        )
-    )]
+    // TEST-ONLY SINCE D-1845 (W2-cli11-1, W2-cli12-3): no production path
+    // reads one row this way, so the per-row whole-file cost the limit states
+    // cannot be paid outside a test.
+    #[cfg(test)]
     pub(crate) fn authenticated_row(
         &mut self,
         global_sequence: u64,
@@ -3009,14 +3049,9 @@ impl CommittedStoredPopulationV5 {
     /// files per call".
     /// `crates/cli/tests/ledger_scan_costs.rs` counts the calls that make this
     /// cost.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "reached only from tests; narrowed from a module-wide expect so a
-                      NEW dead item in this module warns (CE-95, D-1956)"
-        )
-    )]
+    // TEST-ONLY SINCE D-1845 (W2-cli12-3): no production path reads one row
+    // this way, so the two whole preparations cannot be paid outside a test.
+    #[cfg(test)]
     pub(crate) fn authenticated_row(
         &mut self,
         global_sequence: u64,
@@ -3114,6 +3149,12 @@ impl CommittedStoredPopulationV5 {
     }
 }
 
+#[cfg(test)]
+std::thread_local! {
+    /// Test-only: whole-ledger scans on this thread. D-1845.
+    static SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// Commits the exact retained three-ledger successor join as Population V5.
 ///
 /// This is the sole production preparation door. It takes the nonconstructible
@@ -3130,10 +3171,13 @@ impl CommittedStoredPopulationV5 {
 /// intentionally not described as O(1).
 ///
 /// The file bytes above include the whole V5 ledger, and not once. The ledger
-/// is scanned, every row decoded, three times per written commit: `open_write`
-/// scans it, `finish_written` scans it again after the Completion, and the
-/// fresh `open_read` scans it a third time; a reused Population is scanned
-/// twice, because `reuse_existing` neither scans nor calls `finish_written`.
+/// is scanned, every row decoded, twice per commit, written or reused:
+/// `open_write` scans it and the fresh `open_read` scans it again.
+/// `finish_written` reads back and validates only the block just written; it
+/// rescanned the whole ledger until D-1845 (W2-cli12-4). The two scans are
+/// inherent to what the commit proves: the writer's scan is the index the
+/// append and its duplicate check run on, and the reader's is the independent
+/// reopen the authority is returned from.
 /// Each scan decodes every row of every Population already in the ledger,
 /// and decoding a row validates it, re-encodes it (which validates it again),
 /// and `validate_complete_block` validates it once more, so the V5 ledger
@@ -4701,6 +4745,52 @@ mod tests {
         assert_ne!(populations[0].population_id, populations[2].population_id);
         assert_row_record_bound(&populations);
         assert_completion_record_bound(&populations);
+    }
+
+    /// W2-cli12-4, D-1845: a written append reads back and validates its own
+    /// block and does not rescan the ledger; its receipts are the ones a
+    /// fresh scan derives.
+    #[test]
+    fn a_written_append_validates_its_own_block_and_does_not_rescan() {
+        let populations = [
+            prepared_with_statuses(
+                &[AdmissionV3Status::Admitted],
+                &[AdmissionV3Status::Refused],
+            )
+            .0,
+            prepared_with_statuses(
+                &[AdmissionV3Status::Refused],
+                &[AdmissionV3Status::Admitted],
+            )
+            .0,
+        ];
+        let root = TestRoot::new("append-no-rescan");
+        let scans = || SCANS.with(std::cell::Cell::get);
+        let mut writer =
+            PopulationV5Ledger::open_write(root.path(), bounds()).expect("writer opens");
+        let before = scans();
+        let receipts = populations.each_ref().map(|prepared| {
+            writer
+                .append(prepared)
+                .expect("the Population writes")
+                .receipt()
+        });
+        assert_eq!(scans(), before, "an append rescanned the ledger");
+        drop(writer);
+        let reopened = PopulationV5Ledger::open_read(root.path(), bounds()).expect("reader opens");
+        for (prepared, receipt) in populations.iter().zip(receipts) {
+            assert_eq!(
+                reopened
+                    .structural_receipt(&prepared.population_id)
+                    .expect("indexed"),
+                Some(receipt),
+                "the append's receipt is the one a scan derives"
+            );
+        }
+        assert_eq!(
+            (receipts[1].block_sequence(), receipts[1].first_row_record()),
+            (1, 2)
+        );
     }
 
     fn assert_row_record_bound(populations: &[PreparedPopulationV5; 3]) {

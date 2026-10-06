@@ -56,6 +56,14 @@ and shared result assembly as the streamed ranked path. It performs no new
 indicator fold or ladder search. Its caller must bind the signal column,
 optional separate scoring column and forward series to the verified identity.
 
+`runner::rank_checkpointed_streamed` is the same conversion done as each level
+retires: `Ladder::walk_checkpointed_streamed` and
+`Ladder::resume_checkpointed_streamed` hand every level to it with its
+adjacent successor (restored levels first, in depth order) and keep only its
+tally, and their boundary view holds no earlier level, so `CheckpointView::write_to`
+refuses on it and a journal writes `write_prefix_to` and `write_current_to`.
+Since D-1844 `cli::and_checkpoint::run` ranks this way (AC-whp-o1-1).
+
 The actual `sweep-stored` operator now calls
 `cli::and_checkpoint::run` after recording the exact stored `RunId`, building the
 causal signal column and preparing the existing execution/forward series. The

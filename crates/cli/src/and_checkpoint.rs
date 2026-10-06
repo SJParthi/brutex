@@ -26,8 +26,10 @@ use std::io::{self, Read, Write};
 use std::num::NonZeroUsize;
 use std::path::Path;
 
+use engine::Ladder;
+#[cfg(test)]
+use engine::Sweep;
 use engine::resume::{Checkpoint, CheckpointView};
-use engine::{Ladder, Sweep};
 use indicators::column::Column;
 
 use crate::search_checkpoint::Journal;
@@ -102,27 +104,51 @@ pub(crate) fn run(
         return Err("AND checkpoint sweep requires a measured, reconciled signal column".into());
     }
     let bits = engine::column::Column::try_from_rows(column.bits()).map_err(error)?;
-    let sweep = walk(
-        root,
-        attempt,
-        ladder,
-        &bits,
-        &runner::live_positions(),
-        &mut |view| {
-            crate::emit_ladder_level(view.current(), view.admitted(), view.pairs());
-            Ok(())
-        },
-    )?;
-    runner::rank_checkpointed_sweep(
+    // RANKED AS EACH LEVEL RETIRES, NOT AFTER THE WALK (AC-whp-o1-1, D-1844).
+    // Every level is already durable in the journal when it retires, and the
+    // ranker scores it then, so no survivor is held for a ranking pass at the
+    // end; the walk holds what a streamed walk holds.
+    runner::rank_checkpointed_streamed(
         column,
         Some(scoring_column),
         forward,
-        sweep,
         crate::STORED_KEEP,
         runner::rank::Lens::Detectability,
+        |on_retire| {
+            walk_core(
+                root,
+                attempt,
+                ladder,
+                &bits,
+                &runner::live_positions(),
+                PRODUCTION,
+                &mut |view| {
+                    crate::emit_ladder_level(view.current(), view.admitted(), view.pairs());
+                    Ok(())
+                },
+                |checkpoint, reporter| match checkpoint {
+                    Some(checkpoint) => ladder.resume_checkpointed_streamed(
+                        &bits,
+                        &runner::live_positions(),
+                        attempt.identity(),
+                        checkpoint,
+                        reporter,
+                        on_retire,
+                    ),
+                    None => ladder.walk_checkpointed_streamed(
+                        &bits,
+                        &runner::live_positions(),
+                        attempt.identity(),
+                        reporter,
+                        on_retire,
+                    ),
+                },
+            )
+        },
     )
 }
 
+#[cfg(test)]
 fn walk(
     root: &Path,
     attempt: &Attempt,
@@ -134,6 +160,10 @@ fn walk(
     walk_within(root, attempt, ladder, column, live, PRODUCTION, after_saved)
 }
 
+/// The journal walk with the retaining engine door: the whole frequent set
+/// comes back. Tests compare it with an unjournalled walk; production ranks
+/// through [`walk_core`]'s streamed door instead (D-1844).
+#[cfg(test)]
 fn walk_within(
     root: &Path,
     attempt: &Attempt,
@@ -143,6 +173,43 @@ fn walk_within(
     limits: Limits,
     after_saved: &mut dyn FnMut(&CheckpointView<'_>) -> Result<(), String>,
 ) -> Result<Sweep, String> {
+    walk_core(
+        root,
+        attempt,
+        ladder,
+        column,
+        live,
+        limits,
+        after_saved,
+        |checkpoint, reporter| match checkpoint {
+            Some(checkpoint) => {
+                ladder.resume_checkpointed(column, live, attempt.identity(), checkpoint, reporter)
+            }
+            None => ladder.walk_checkpointed(column, live, attempt.identity(), reporter),
+        },
+    )
+}
+
+/// Recover, journal every level as the walk reaches it, and verify the final
+/// boundary; `drive` runs the engine door (retaining or streamed) from the
+/// recovered checkpoint, if any, with the journaling reporter. D-1844.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the six journal inputs plus the reporter and the engine door; splitting them would separate recovery from the door it feeds"
+)]
+fn walk_core<R>(
+    root: &Path,
+    attempt: &Attempt,
+    ladder: Ladder,
+    column: &engine::column::Column,
+    live: &[u32],
+    limits: Limits,
+    after_saved: &mut dyn FnMut(&CheckpointView<'_>) -> Result<(), String>,
+    drive: impl FnOnce(
+        Option<engine::resume::Checkpoint>,
+        &mut dyn FnMut(&CheckpointView<'_>) -> Result<(), String>,
+    ) -> Result<R, engine::resume::Error>,
+) -> Result<R, String> {
     attempt.check()?;
     let mut journal = Journal::open(root, NAMESPACE, attempt.identity())?;
     let recovered = recover(&journal, limits)?;
@@ -203,17 +270,7 @@ fn walk_within(
         attempt.level(row)?;
         after_saved(view)
     };
-    let sweep = match checkpoint {
-        Some(checkpoint) => ladder.resume_checkpointed(
-            column,
-            live,
-            attempt.identity(),
-            checkpoint,
-            &mut checkpointed,
-        ),
-        None => ladder.walk_checkpointed(column, live, attempt.identity(), &mut checkpointed),
-    }
-    .map_err(error)?;
+    let sweep = drive(checkpoint, &mut checkpointed).map_err(error)?;
     // Reopen the final boundary and every chunk it names before returning a
     // rankable run. Checking the exact acknowledged seals also rejects a newly
     // resealed replacement, not only accidental byte corruption.

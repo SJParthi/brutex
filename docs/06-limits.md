@@ -179,6 +179,22 @@ walk ends. On those two doors retention is O(total frequent combinations), as
 it was before streaming, and everything below about the streamed result is
 about the other path. D-1448.
 
+**Since D-1844 (AC-whp-o1-1) the two stored doors stream too.**
+`cli::and_checkpoint::run` now walks with `Ladder::walk_checkpointed_streamed`
+(or `resume_checkpointed_streamed`), whose sink hands each level to
+`runner::rank_checkpointed_streamed` as it retires and keeps only its
+`Tally`; every level is already durable in the journal when it retires. The
+retained `Sweep` and the after-the-walk `runner::rank_checkpointed_sweep` are
+no longer on these doors, so their retention is that of the streamed path
+below. A resume still decodes the journal's earlier levels into one
+`Checkpoint` before handing them on in depth order, so a resumed attempt's
+peak includes the restored history once; a fresh attempt's does not.
+`a_streamed_checkpointed_walk_hands_on_what_the_retaining_walk_retains`
+(engine) and `the_streamed_door_ranks_what_the_retained_sweep_ranked` (cli)
+require the same levels, boundaries and ranking, fresh and resumed. Counted,
+not timed; the memory saved is the retained survivors the measurement above
+names, not re-measured here.
+
 Both retained and streamed entry points execute the same `Ladder::walk_into`; the streamed sink
 reduces every retired frontier to one fixed-size `Tally`. Its engine result is
 therefore **O(depth)**, plus the vocabulary-bounded exclusion list. Ranking
@@ -206,8 +222,8 @@ every survivor walk exactly the same levels to exactly the same extinction or
 halt. The cap decides only what the caller retains; the join, support test,
 subset prune and both budgets never read it. `Sweep` remains available to a
 plain caller that explicitly wants every survivor and accepts that retention
-cost. Not every ranked entry point takes the streamed result: the two stored
-sweep doors take a retained, checkpointed `Sweep` (above).
+cost. Since D-1844 the two stored sweep doors take the streamed result as
+well, through the checkpointed streamed walk (above).
 
 Whether the whole-vocabulary worst case is REACHABLE is **UNMEASURED**. It
 depends on how fast the frequent frontier collapses on real bars at a real
@@ -10809,9 +10825,11 @@ counts in the source:
 * `top_twenty_five` calls
   `Prepared::from_execution(&mut self.source, self.policy)?` twice, once
   before and once after `require_committed` checks the committed block.
-  `top_ten` calls `top_twenty_five` once. `snapshot` calls `top_twenty_five` once and
-  `Prepared::from_execution` once more, so three. `commit_stored_selection_v6`
-  calls it twice.
+  `top_ten` calls `top_twenty_five` once. `snapshot` called `top_twenty_five` once and
+  `Prepared::from_execution` once more, so three, and scanned the committed
+  file twice; since D-1848 it calls the same authenticated read once and cuts
+  its envelope from the block that read proved, so two and one scan.
+  `commit_stored_selection_v6` calls it twice.
 * `Prepared::from_execution` is
   `Self::from_source(&source.selection_v6_source()?, policy)`: one Execution V4
   `selection_v6_source` per call.
@@ -10830,9 +10848,9 @@ counts in the source:
 So one `top_twenty_five` or `top_ten` read is 2 × 2 = four Population V6
 `execution_v4_source` calls: four Execution V3 exit-grid replays for each
 retained Candidate family, and eight upstream authentications, each reading
-every retained Candidate authority's population rows twice. A `snapshot` is
-six `execution_v4_source` calls, and `stored_oos_witnesses` takes two
-snapshots around its own replay.
+every retained Candidate authority's population rows twice. A `snapshot` was
+six `execution_v4_source` calls and is four since D-1848, and
+`stored_oos_witnesses` takes two snapshots around its own replay.
 
 The Population replays are not the whole cost. Each layer also repeats full
 reads of its own durable file, and the same test counts each call:
@@ -10974,7 +10992,9 @@ in this workspace measures any of the four.
   check before and after its one fixed-offset read, and each check hashes the
   lock, row and Completion files whole, twice each. One row read therefore hashes the row file and the Completion file four
   times each: O(row-file bytes + Completion-file bytes) per row, not O(1), and
-  O(R × those bytes) for R rows read one at a time. The bulk path,
+  O(R × those bytes) for R rows read one at a time. **Test-only since
+  D-1845:** `row_projection` is `#[cfg(test)]`, so no production path pays
+  this per-row cost. The bulk path,
   `ordered_row_projections`, performs "one bounded bulk read between one
   before/after generation-validation pair" in its own rustdoc's words.
 * **Finalization V4, one append** (`append_locked`, W2-cli11-0). After the
@@ -10984,7 +11004,12 @@ in this workspace measures any of the four.
   and the appends into one ledger cost quadratically in its length over its
   life. This supersedes, for append, §168's "Encoding, ordered hashing,
   exact-prefix comparison and append are O(D)." The rescan that follows the
-  synced Completion walks every earlier block as well as the new one. The
+  synced Completion walks every earlier block as well as the new one.
+  **Rescan removed by D-1845:** the append now reads back and validates only
+  the block it wrote, and `an_append_validates_its_own_block_and_does_not_rescan_the_ledger`
+  counts no scan during an append. One append stays O(F) through its two
+  whole-file generation hashes, which is inherent: a generation that did not
+  hash the bytes could not see a same-size rewrite (D-0036). The
   append opens with a generation check that hashes the whole data file, and an
   exact reuse runs another before it returns, so a reused append that writes
   nothing is O(F) as well.
@@ -10993,7 +11018,8 @@ in this workspace measures any of the four.
   calls `PreparedPopulationV5::from_authority` twice, and each of those joins
   every upstream input and derives all C rows, to compare one row. One row read
   is therefore Θ(C) row derivation twice, plus the upstream joins and the V5
-  generation hashing, not O(1). The one row read goes through
+  generation hashing, not O(1). **Test-only since D-1845:** it is
+  `#[cfg(test)]`, so no production path pays it. The one row read goes through
   `PopulationV5Authority::authenticated_row` to the ledger's fixed-offset
   `authenticated_row`, not through the whole-block `authenticated_rows`.
 * **Population V5, one commit** (`commit_population_v5`, W2-cli12-4). Each
@@ -11001,7 +11027,13 @@ in this workspace measures any of the four.
   decoding a row validates it, re-encodes it (which validates it again), and
   `validate_complete_block` validates it once more, so the V5 ledger work of
   one commit is O(R) in the ledger's total rows R, not O(C). A written commit
-  scans the ledger three times and a reused one twice. On top of the ledger
+  scans the ledger three times and a reused one twice. **Since D-1845 a
+  written commit scans it twice as well:** `finish_written` reads back and
+  validates only its own block
+  (`a_written_append_validates_its_own_block_and_does_not_rescan`); the
+  writer's open scan and the fresh reopen's are inherent, being the index
+  the append runs on and the independent proof the authority is returned
+  from. On top of the ledger
   work, `PreparedPopulationV5::from_authority` runs twice, before the write
   and after the reopen, and each run joins every upstream input. One commit is
   therefore O(R) plus two whole upstream joins, not O(R) alone. The module
@@ -11703,6 +11735,11 @@ never fill once the build had succeeded. Counted, not timed:
 `crates/cli/tests/limits_o1cli_4.rs`; the bullet above describes the code
 before the fix.
 
+**Re-applied by D-1843 (2026-10-06)** onto D-1781's folded series: the
+digest the build records is still `bind_withheld` over the whole series and
+every withheld day, and the build's own "exact-minute days withheld" event is
+the one event for those days (the kernel no longer emits a second).
+
 ## Parallel rungs each re-read the same one-minute span (audit o1cli-3)
 
 - **`sweep_rungs` runs every rung through `one_rung`, one rung at a time in
@@ -11746,6 +11783,11 @@ the code by `the_rungs_of_one_command_read_the_shared_spans_once` in
 `crates/cli/tests/limits_o1cli_3.rs`; the bullet above describes the code
 before the fix.
 
+**Re-applied by D-1843 (2026-10-06)** onto the in-order rungs of D-1701: the
+share is a `Mutex` over at most `SPAN_SHARE_KEYS` (6) spans, walked by key,
+and the daily context, which D-1781 derives from the whole folded series, is
+derived once per build rather than once per pass.
+
 ## A rung loads its span twice and may build its column twice (audit o1cli-2)
 
 - **`one_rung` loads the rung's span with `stored::load_span`, and the audit
@@ -11779,6 +11821,15 @@ Counted, not timed: `rungs_share_their_reads_and_build_their_column_once`.
 Held to the code by `a_rung_reads_its_span_and_builds_its_column_once` in
 `crates/cli/tests/limits_o1cli_2.rs`; the bullet above describes the code
 before the fix.
+
+**Re-applied by D-1843 (2026-10-06)** onto `final/all-fixes`, where D-1781
+folds the whole series and D-1701 runs the rungs in order. One difference
+from the paragraph above: `one_rung_cached` still reads the raw signal span
+once, for the bar count, missing months and exclusion of every row (stamped
+or not), and that read seeds the kernel's load through `AuditCache::inputs`,
+so the span is read once per rung, not twice; the kernel's preparation then
+sizes the probe. A derived support on an unstamped build refuses with the
+same words the derivation always used.
 
 ## Condition names resolve through a compile-time index (audit o1engine-24)
 
@@ -15089,6 +15140,19 @@ It is not removed: the replay is how a resume proves an acknowledged child
 still says what its pin says. A trusted cache of verified frames would be a
 new durable authority, and none exists.
 
+**Argued inherent by D-1846 (2026-10-06).** An acknowledged child is a
+separate durable journal that the parent pins by seal, and the parent's
+journal chain proves only the pins, not that each child still holds what was
+pinned. The replay on launch is the only check that reads the child, so a
+child damaged or replaced since its acknowledgement is refused before the
+search continues on top of it. Verifying only the newest frame's children
+would accept a damaged older child silently; caching a verdict would be the
+new durable authority the paragraph above refuses, and a generation check
+cannot see a same-size rewrite (D-0036). The cost is bounded by the search's
+own cold admission (`records`, `bytes`, `nodes`). Held to the code by
+`a_single_stop_launch_verifies_every_acknowledged_child`
+(`crates/cli/tests/limits_inherent_rechecks.rs`). Not timed.
+
 ## Recording a run reopens the chosen-trades file; ledger-v6 sizing reloads the NIFTY span per rung — D-1634, 3 October 2026
 
 - **`Trades::open` per recorded run (W2-cli16-2).** `ensure_trade_rows`
@@ -15133,7 +15197,7 @@ its data source with the bound one in O(1). The per-population cost is O(E)
 once, not O(C·E). The stored post-training OOS per-witness work (W2-cli16-1)
 is a separate item and is not changed by D-1835.
 
-## Global Replay V3/V4 exit quality is checked per row only; evidence cells re-derive the population — D-1638, 3 October 2026
+## Global Replay V3/V4 exit quality is checked per row only; evidence cells re-derived the population until D-1835 — D-1638, 3 October 2026
 
 - **No aggregate quality ceiling (GAP15-19) — restored in V4 by D-1643.**
   Global Replay V1 refused when a stream's admitted ambiguous bars or gap
@@ -15192,6 +15256,16 @@ record" (W2-cli2-5). Not reduced here: the recheck is what lets a page refuse
 a journal that changed under it, and a cheaper generation check would be a
 change to that reader's authority.
 
+**Argued inherent by D-1847 (2026-10-06).** The opening recheck proves the
+page starts from records that still hold; the closing recheck is what proves
+the page was read from records that held throughout, so a record rewritten
+while the page was read is refused instead of served. Dropping either side
+serves rows nothing proved; a generation check in their place cannot see a
+same-size rewrite (D-0036). The page itself is bounded at 256 rows; H and H'
+are bounded by the search's own record admission. Held to the code by
+`a_boolean_search_page_rechecks_its_journals_on_both_sides`
+(`crates/cli/tests/limits_inherent_rechecks.rs`). Not timed.
+
 ## Selection V5 and V6 reads and commits replay their sources — D-1642, 3 October 2026
 
 Let C be the rung's candidates (Population rows / Execution dispositions)
@@ -15209,8 +15283,9 @@ and H the committed blocks in `global-selection-v6.bin` (at most
 - **Selection V6 reads (W2-cli14-2).** `top_twenty_five` and `top_ten` call
   `Prepared::from_execution` twice (each two Population V6 replays) with
   `require_committed`, an O(H) scan hashing every 16 KiB block twice, in
-  between. `snapshot` is three `from_execution` and two scans;
-  `stored_oos_witnesses` takes two snapshots.
+  between. `snapshot` was three `from_execution` and two scans, and is two and
+  one since D-1848: it takes its envelope from the block its authenticated
+  read proved. `stored_oos_witnesses` takes two snapshots.
 - **Selection V6 commit (W2-cli14-3).** `persist` scans the whole file before
   appending one block, and `commit_stored_selection_v6` scans it again in
   `require_committed` and runs a second `from_execution`: two O(H) scans per
@@ -15219,6 +15294,18 @@ and H the committed blocks in `global-selection-v6.bin` (at most
 
 None of these is O(1), and none grows with the request alone. They are not
 reduced here (D-1642).
+
+**D-1848 (2026-10-06), argued inherent beyond the snapshot.** Each remaining
+replay is a before/after pair around one read or write, and the pair IS the
+read's proof: Selection holds no copy of its upstream, so the only way to say
+the winners still follow from the Population and Execution they were ranked
+from is to derive them again on both sides of the read and compare. A cached
+verdict would be a new durable authority (D-0036's class: a generation check
+cannot see a same-size rewrite). The commit's second O(H) scan
+(`require_committed` after `persist`) is the read-back that proves the block
+landed whole; `persist`'s scan is the duplicate check under the lock.
+`a_selection_v6_read_counts_its_population_replays_and_the_limits_say_so`
+counts every pair. Counted, not timed.
 
 ## Gate 12 cost claims left UNVERIFIED by the audit-20261003 fixes — D-1459, 3 October 2026
 
