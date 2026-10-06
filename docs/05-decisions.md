@@ -64336,3 +64336,16 @@ matching, so a sentence that wraps across `///` lines is still caught.
 combination passes however good it is" for records below the floor. That holds
 only for a record at exactly the sizing rate; a better record can clear sooner.
 Whether that floor should change is UNVERIFIED and is not touched here.
+
+### D-2067 — The Lentz convergence test is `total_cmp(..).is_lt()`, because its boundary is unreachable — 2026-10-06
+
+**What was observed.** Shard 138 of run 1283 never tested its cases. Re-run on 460b702, `(step - 1.0).abs() < EPSILON`
+in `runner::significance::beta_continued_fraction` as `<=` was MISSED, and no test can kill it. Near one, `step - 1.0`
+is exact and a multiple of 2^-52, and `EPSILON = 1e-15` is not. Away from one, the magnitude is far above `1e-15`. So
+the magnitude never equals `EPSILON`, and `<` and `<=` agree on every input.
+
+**Decided.** The test is `(step - 1.0).abs().total_cmp(&EPSILON).is_lt()`. It gives the same answer as `<` for every
+value, NaN included: a NaN magnitude is a positive NaN, which `total_cmp` orders above `EPSILON`, so it is not less, as
+before. The method calls leave no comparison operator for a mutation to rewrite. The line's two remaining mutants,
+`-` as `+` and as `/`, are caught. The shard-138 `audit.rs:1140:27` `<` as `<=` case is the old `grid` guard. On
+460b702 it is line 1152, and its `<=` mutant was caught in the D-2065 run.
