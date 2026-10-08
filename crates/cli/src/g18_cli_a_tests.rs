@@ -130,10 +130,9 @@ fn a_stored_preparation_over_a_missing_root_refuses() {
         },
         &share,
     );
-    let Err(why) = refused else {
-        panic!("no store, no column");
-    };
-    assert!(why.contains("/nonexistent/brutex-g18-store"), "{why}");
+    assert!(refused.is_err(), "no store, no column");
+    let why = refused.err().unwrap_or_default();
+    assert!(why.contains("absent from the store"), "{why}");
     assert!(days.is_empty(), "a refusal withholds no day: {days:?}");
 }
 

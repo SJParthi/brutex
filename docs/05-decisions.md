@@ -66238,3 +66238,33 @@ both sides required.
 `column_withholding_at_build` (the caller now takes the stamp and passes a
 span share, D-1843). The test now asks that build directly, stamped, over a
 missing root, and asserts it refuses and withholds no day.
+
+### D-4401 — The screen's subject is the least traded row; five live mutants were changes no test could see — 2026-10-08
+
+**Finding (batch-3 mutation, chunk A: 20 mutants, 9 caught, 5 missed, 2
+unviable).** The five survivors were `least_first`'s `k < rows.len()` →
+`<=`, `calendar_holds` → `true`, → `false`, its `<=` → `>`, and
+`final_selection_split`'s first `trades > 0` → `< 0`. Each was checked by
+reasoning, not left as "probably equivalent":
+
+- `least_first`: with `k == rows.len()`, selecting index `len - 1` and then
+  sorting the head gives exactly the sorted rows the skipped selection gave.
+  The guard saved one O(n) pass and nothing observable.
+- `final_selection_split`: `screen_order_key` leads with `admitted`, then the
+  weakest grain share. A share is never negative
+  (`stability::Measured::positive_share_bp` is a count over a positive count
+  times 10,000), and an unmeasured row takes `i64::MIN`. With
+  `min_weakest_bp > 0` every admitted row the gate keeps sorts ahead of every
+  admitted row it drops; with `min_weakest_bp <= 0` it drops none. So the
+  least traded row is kept whenever any traded row is, and the first filter —
+  admitted, kept by the calendar, traded — never chose a different row from
+  the fallback's. Every mutant that weakened or emptied that filter therefore
+  gave the same answer.
+
+**The change.** The dead parts are removed, not tested around: `least_first`
+selects whenever `k >= 1`, `final_selection_split` is one minimum over traded
+rows, and `calendar_holds` (read only there) is gone. The O(n) selection
+cost is unchanged. `the_screens_selections_give_exactly_what_its_two_full_sorts_gave`
+still compares the result against both full sorts and the gate, and now runs
+four calendar floors (0, 3,000, -1 and 10,000) instead of two, so a key
+change that broke the ordering argument fails it.

@@ -14218,11 +14218,14 @@ fn screen_order_key(r: &Screened<'_>) -> ScreenOrder {
 ///
 /// `key` must be total over distinct rows (the screen's keys end in `rank`),
 /// so the unstable selection and sort give the one order a stable sort would.
+///
+/// The selection runs even when `k` is every row: it is one more O(n) pass
+/// whose result the sort then fixes, and the `k < len` guard that skipped it
+/// changed nothing a caller could observe, so no test could tell it from
+/// `k <= len` (batch-3 mutation, D-4401).
 fn least_first<T, K: Ord>(rows: &mut [T], k: usize, key: impl Fn(&T) -> K + Copy) {
     let k = k.min(rows.len());
-    if let Some(last) = k.checked_sub(1)
-        && k < rows.len()
-    {
+    if let Some(last) = k.checked_sub(1) {
         rows.select_nth_unstable_by_key(last, key);
     }
     if let Some(head) = rows.get_mut(..k) {
@@ -14230,32 +14233,34 @@ fn least_first<T, K: Ord>(rows: &mut [T], k: usize, key: impl Fn(&T) -> K + Copy
     }
 }
 
-/// Whether [`calendar_gate`] leaves an admitted row admitted: a measured row
-/// whose weakest grain clears the floor, or an unmeasured one while the rule
-/// is off. D-1842.
-fn calendar_holds(row: &Screened<'_>, rules: Rules) -> bool {
-    match row.consistency {
-        Some(ref c) => c.weakest_bp() >= rules.min_weakest_bp,
-        None => rules.min_weakest_bp <= 0,
-    }
-}
-
 /// [`final_selection`] over rows in ANY order, read before [`calendar_gate`]
-/// runs: the least row under [`screen_order_key`] that stays admitted and
-/// traded, else the least that traded. One pass each, O(n). o1cli-6, D-1842.
+/// runs: the least TRADED row under [`screen_order_key`]. One pass, O(n).
+/// o1cli-6, D-1842.
 ///
-/// [`final_selection`] reads the first such row in the fully sorted order,
-/// after the gate; that row is this minimum, because the order is
-/// `screen_order_key`'s and the gate's verdict is [`calendar_holds`].
+/// [`final_selection`] reads, after the gate, the first row in the sorted
+/// order that is still admitted and traded, else the first traded row. Those
+/// are the same row, because of how the key is built:
+///
+/// - it LEADS with `admitted`, so among traded rows every admitted row sorts
+///   ahead of every row that is not;
+/// - it then reads the weakest grain share, which is never negative
+///   (`stability::Measured::positive_share_bp`), and an unmeasured row takes
+///   `i64::MIN` there. With the calendar rule ON (`min_weakest_bp > 0`) every
+///   admitted row the gate keeps has a share at or above the floor, and every
+///   one it drops is below it or unmeasured, so every kept row sorts ahead of
+///   every dropped one. With it OFF the gate drops no row at all.
+///
+/// So the least traded row is one the gate keeps whenever the gate keeps any
+/// traded row, and the least traded row is the fallback when it keeps none.
+/// The first form filtered on the gate's verdict before falling back; for the
+/// reason above that filter never changed the answer, and the five mutants
+/// batch-3's mutation run left alive on it and on `least_first` were changes
+/// no test could observe (D-4401). The equivalence test beside the screen
+/// still compares this against both full sorts and the gate.
 fn final_selection_split<'a>(rows: &[Screened<'a>], rules: Rules) -> Option<ScreenSelection<'a>> {
     rows.iter()
-        .filter(|row| row.admitted && calendar_holds(row, rules) && row.cell.trades > 0)
+        .filter(|row| row.cell.trades > 0)
         .min_by_key(|row| screen_order_key(row))
-        .or_else(|| {
-            rows.iter()
-                .filter(|row| row.cell.trades > 0)
-                .min_by_key(|row| screen_order_key(row))
-        })
         .map(|row| ScreenSelection {
             scored: row.scored,
             direction: row.side,
@@ -25481,7 +25486,15 @@ mod tests {
             for top in 1..=50 {
                 let mut rules = crate::Rules::operator();
                 rules.top = top;
-                rules.min_weakest_bp = if round.is_multiple_of(2) { 0 } else { 3_000 };
+                // Off, on, off below zero, and on at the ceiling: the
+                // selection's single filter leans on the key ordering every
+                // kept row ahead of every dropped one at each (D-4401).
+                rules.min_weakest_bp = match round % 4 {
+                    0 => 0,
+                    1 => 3_000,
+                    2 => -1,
+                    _ => 10_000,
+                };
 
                 let mut old = build();
                 old.sort_by_key(|r| super::money_key(&r.cell));

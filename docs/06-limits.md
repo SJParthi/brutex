@@ -11667,13 +11667,17 @@ a minimum under that key, not a walk down a sorted list. `finish_screen` now
 selects the measured band with `least_first` (`select_nth_unstable_by_key`,
 then a sort of the band alone) on `(money_key, rank)`, measures it, selects
 and sorts the printed top the same way on `screen_order_key`, and finds the
-subject with `final_selection_split`: two O(n) minimum scans, taken before
-`calendar_gate` flips `admitted`, with the gate's verdict read through
-`calendar_holds`. Cost O(n + band log band + top log top) per screen, band =
-`measured_band(top)`, instead of two O(n log n) sorts.
+subject with `final_selection_split`: one O(n) minimum scan over the traded
+rows, taken before `calendar_gate` flips `admitted` (it was two scans, the
+first filtered on the gate's verdict; the key orders every row the gate keeps
+ahead of every row it drops, so that filter never changed the answer and was
+removed with the mutants it left alive, D-4401). Cost O(n + band log band +
+top log top) per screen, band = `measured_band(top)`, instead of two
+O(n log n) sorts.
 `the_screens_selections_give_exactly_what_its_two_full_sorts_gave` runs the
 old double sort and the new selections over 60 rounds of 48 heavily tied rows
-and every `top` from 1 to 50, both calendar settings, and requires the same
+and every `top` from 1 to 50, four calendar settings (off, on, a negative
+floor, the 10,000 ceiling; two before D-4401), and requires the same
 printed rows in order, the same verdicts and the same subject; it reaches the
 admitted and the fallback subject both. Counted by shape, not timed.
 
