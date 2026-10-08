@@ -105,13 +105,15 @@ fn the_ledger_arms_exit_misused_on_words_they_do_not_understand() {
 }
 
 /// G18-cli-a-24: the stamped preparation never answers without a store.
-/// Unstamped, it refuses for the stamp; stamped, the missing root refuses.
+/// The stamp is now taken by the caller and handed in (o1cli-3/-4, D-1843),
+/// so the build is asked directly, stamped, over a root that does not exist.
 #[test]
 fn a_stored_preparation_over_a_missing_root_refuses() {
     let folded = vec![candle(0, 2_500_000)];
     let mut days = Vec::new();
     let mut bars = folded.clone();
-    let refused = column_withholding_unsourceable_days(
+    let share = SpanShare::default();
+    let refused = column_withholding_at_build(
         std::path::Path::new("/nonexistent/brutex-g18-store"),
         parse_vendor("zerodha").expect("feed"),
         "NIFTY",
@@ -122,13 +124,17 @@ fn a_stored_preparation_over_a_missing_root_refuses() {
             bars: &mut bars,
         },
         60_000_000,
-        "1min",
+        StoredPreparationBuild {
+            rung: "1min",
+            commit: Some("generated-g18-stamp"),
+        },
+        &share,
     );
-    assert!(refused.is_err(), "no store, no column");
-    let why = refused.err().unwrap_or_default();
-    if commit_stamp().is_none() {
-        assert!(why.contains("no verified commit stamp"), "{why}");
-    }
+    let Err(why) = refused else {
+        panic!("no store, no column");
+    };
+    assert!(why.contains("/nonexistent/brutex-g18-store"), "{why}");
+    assert!(days.is_empty(), "a refusal withholds no day: {days:?}");
 }
 
 /// G18-cli-a-25: the anchored digest is a function of the signal: equal

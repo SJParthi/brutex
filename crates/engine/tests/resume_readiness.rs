@@ -1051,3 +1051,130 @@ fn a_boundary_prefix_and_every_level_saved_so_far_are_write_to_byte_for_byte() {
         "levels past the first hold survivors: {survivors}"
     );
 }
+
+/// One handed-on level: its depth, every survivor with its hits, and the depth
+/// of the successor lent with it.
+type Handed = (u32, Vec<([u64; 6], u64)>, Option<u32>);
+
+fn handed(level: &engine::Frontier, next: Option<&engine::Frontier>) -> Handed {
+    (
+        level.k,
+        level
+            .frequent
+            .iter()
+            .map(|item| (item.mask.words(), item.hits))
+            .collect(),
+        next.map(|next| next.k),
+    )
+}
+
+/// The prefix and current level a streamed boundary writes, which is what a
+/// journal that saves each level as it is reached publishes.
+fn boundary(view: &CheckpointView<'_>) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    view.write_prefix_to(&mut bytes).expect("prefix");
+    view.write_current_to(&mut bytes).expect("current");
+    bytes
+}
+
+/// AC-whp-o1-1, D-1844: the streamed checkpointed walk hands on exactly the
+/// levels, in order and with the successors, that the retaining walk retains,
+/// reports byte-identical boundaries, keeps the same tallies, holds no earlier
+/// level in its boundary view, and resumes from every safe depth to the same
+/// hand-off.
+#[test]
+fn a_streamed_checkpointed_walk_hands_on_what_the_retaining_walk_retains() {
+    let mut cases = 0;
+    let mut resumed_cases = 0;
+    for count in [0, 1, 2, 9, 65] {
+        for mixed in [false, true] {
+            let rows = masks(count, mixed);
+            let column = Column::try_from_rows(&rows).expect("column");
+            for threshold in [0, 1, 2, count as u64, u64::MAX] {
+                let live = POSITIONS.to_vec();
+                let ladder = Ladder::with_min_hits(threshold).with_support_lanes(1);
+                let mut retained_boundaries = Vec::new();
+                let retained = ladder
+                    .walk_checkpointed(&column, &live, IDENTITY, &mut |view| {
+                        retained_boundaries.push(boundary(view));
+                        Ok(())
+                    })
+                    .expect("retaining walk");
+                let expected: Vec<Handed> = retained
+                    .levels
+                    .iter()
+                    .enumerate()
+                    .map(|(at, level)| {
+                        let next = retained
+                            .levels
+                            .get(at + 1)
+                            .filter(|next| retained.halted.is_none_or(|halt| halt.k != next.k));
+                        handed(level, next)
+                    })
+                    .collect();
+                let mut seen = Vec::new();
+                let mut streamed_boundaries = Vec::new();
+                let streamed = ladder
+                    .walk_checkpointed_streamed(
+                        &column,
+                        &live,
+                        IDENTITY,
+                        &mut |view| {
+                            assert!(view.retired().is_empty(), "a streamed view holds no level");
+                            let mut whole = Vec::new();
+                            assert!(view.write_to(&mut whole).is_err() || view.current().k == 1);
+                            streamed_boundaries.push(boundary(view));
+                            Ok(())
+                        },
+                        &mut |level, next| seen.push(handed(level, next)),
+                    )
+                    .expect("streamed walk");
+                assert_eq!(seen, expected);
+                assert_eq!(streamed_boundaries, retained_boundaries);
+                let tallies: Vec<_> = retained
+                    .levels
+                    .iter()
+                    .map(engine::keep::Tally::of)
+                    .collect();
+                assert_eq!(streamed.levels, tallies);
+                assert_eq!(streamed.halted, retained.halted);
+                assert_eq!(streamed.bars, retained.bars);
+                assert_eq!(
+                    streamed.streamed,
+                    retained
+                        .levels
+                        .iter()
+                        .map(|level| level.frequent.len() as u64)
+                        .sum::<u64>()
+                );
+                for stop in retained.levels.iter().map(|level| level.k) {
+                    let mut saved = Vec::new();
+                    let _ = ladder.walk_checkpointed(&column, &live, IDENTITY, &mut |view| {
+                        if view.current().k == stop {
+                            saved = encode(view);
+                            return Err("pause".into());
+                        }
+                        Ok(())
+                    });
+                    let mut resumed_seen = Vec::new();
+                    let resumed = ladder
+                        .resume_checkpointed_streamed(
+                            &column,
+                            &live,
+                            IDENTITY,
+                            decode(&saved),
+                            &mut |_| Ok(()),
+                            &mut |level, next| resumed_seen.push(handed(level, next)),
+                        )
+                        .expect("streamed resume");
+                    assert_eq!(resumed_seen, expected, "resumed at depth {stop}");
+                    assert_eq!(resumed.levels, tallies);
+                    resumed_cases += 1;
+                }
+                cases += 1;
+            }
+        }
+    }
+    assert_eq!(cases, 50);
+    assert!(resumed_cases > cases);
+}

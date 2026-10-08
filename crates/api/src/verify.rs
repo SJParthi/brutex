@@ -34,10 +34,10 @@
 //! offsets, none of which grows with the size of the file. Before that,
 //! `Manifest::newest` walks the census's whole append log once to find the
 //! newest write of each key: O(log length). So one scrub is O(log length +
-//! E_v) with E_v file opens, and it runs on the request's own task, blocking
-//! that runtime worker for the whole walk (`docs/06-limits.md`, W1-api5-7 and
-//! D-1501). This said "O(1) per entry" and named no log walk until D-1501
-//! (W1-api6-0).
+//! E_v) with E_v file opens. `verify_json` runs it on the store-read pool
+//! (`detail::run_store_read`), so no runtime worker waits on the walk
+//! (D-2281; it ran on the request's own task until then). This said "O(1)
+//! per entry" and named no log walk until D-1501 (W1-api6-0).
 //!
 //! **UNVERIFIED as a measurement.** The bound is argued from the
 //! shape of the code and no bench in this workspace times it.

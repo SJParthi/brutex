@@ -1089,7 +1089,7 @@ pub(crate) fn prepare_span(
     // be sourced is withheld and the column rebuilt from what survives, exactly
     // as `one_rung` and `audit_range_kernel` do; `commit: None` records no
     // preparation attempt, because this pass prepares nothing new. D-1707.
-    let (column, _digest) = crate::column_withholding_at_build(
+    let crate::PreparedColumn { column, .. } = crate::column_withholding_at_build(
         root,
         vendor,
         underlying,
@@ -1101,6 +1101,7 @@ pub(crate) fn prepare_span(
         },
         signal_length,
         crate::StoredPreparationBuild { rung, commit: None },
+        &crate::SpanShare::default(),
     )?;
     let execution = execution_bars.as_ref().map(|exec| crate::Execution {
         bars: &exec.bars,

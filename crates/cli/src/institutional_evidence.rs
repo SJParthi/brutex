@@ -38,14 +38,11 @@
 //! # Cost
 //!
 //! One complete exit grid is validated once in O(G), then each cell's ordinal
-//! check is O(1) through the retained opaque capability. **The cell projection
-//! is not O(1) when the population authority is `Measured`:**
-//! `complete_population_values` re-derives the population identity per call
-//! (`derive_population_id_v1`, which hashes the whole one-minute execution
-//! series, O(E)), and a `Complete` data source adds
-//! `StoredDataCompletenessAuthorityV1::require_population`, another O(E).
-//! Over a population of C cells that is O(C·E). This said "each cell projection
-//! is O(1)" until D-1638; `docs/06-limits.md` states it. Trade
+//! check is O(1) through the retained opaque capability. A `Measured`
+//! population authority is a [`BoundPopulationCompletenessV1`], which derives
+//! the population identity and reconciles stored-data completeness once per
+//! population (O(E)); each cell then compares against it in O(1). Until D-1835
+//! each cell re-derived both, O(C·E) per population (W2-cli7-0, W2-cli15-2). Trade
 //! reconciliation, session concentration and stability are O(trades);
 //! support-session measurement is O(signal bars), and validation reconciliation
 //! is O(all fold candidate rows + F log F) for F folds. This is a once-per-result
@@ -117,10 +114,76 @@ pub enum DataCompletenessSourceV1<'a> {
 /// this builder.
 #[derive(Clone, Copy, Debug)]
 pub struct InstitutionalCompletenessV1<'a> {
-    /// Pre-run authority containing both opaque complete calendar receipts.
-    pub population_authority: EvidenceSourceV1<&'a CompletePopulationAuthorityV1<'a>>,
-    /// Stored input-data reconciliation state.
+    /// Pre-run authority containing both opaque complete calendar receipts,
+    /// verified once for the population by [`BoundPopulationCompletenessV1::bind`].
+    pub population_authority: EvidenceSourceV1<&'a BoundPopulationCompletenessV1<'a>>,
+    /// Stored input-data reconciliation state. With a `Measured` population
+    /// authority it must be the source that binding verified.
     pub data: DataCompletenessSourceV1<'a>,
+}
+
+/// One complete population authority and its stored-data completeness,
+/// verified ONCE for every cell of the population (W2-cli7-0, W2-cli15-2,
+/// D-1835).
+///
+/// Deriving the population identity validates the whole authority and a
+/// `Complete` data source walks and hashes every execution bar. Both are facts
+/// about the population, not about a cell, and the per-cell builder used to
+/// redo them for every cell: O(E) per cell, O(C·E) per population. [`Self::bind`]
+/// pays them once; each cell then checks its context against the bound
+/// identity and its data source against the bound source, both O(1).
+/// Proof:
+/// `cli::population_admission_writer::evidence_binds_the_complete_population_once_not_per_cell`.
+///
+/// The fields are private and the one constructor derives them from the
+/// authority it is given, so a bound identity or data verdict cannot be
+/// supplied from elsewhere.
+#[derive(Clone, Copy, Debug)]
+pub struct BoundPopulationCompletenessV1<'a> {
+    authority: &'a CompletePopulationAuthorityV1<'a>,
+    population_id: [u8; 32],
+    data_source: DataCompletenessSourceV1<'a>,
+    data: CompletenessV1,
+}
+
+impl<'a> BoundPopulationCompletenessV1<'a> {
+    /// Derives the population identity and reconciles `data_source` with the
+    /// population, once.
+    ///
+    /// # Cost
+    ///
+    /// O(E) once for E one-minute execution bars, plus the authority's own
+    /// validation; every cell built against the result is O(1) in E.
+    /// Counted by
+    /// `cli::population_admission_writer::tests::evidence_binds_the_complete_population_once_not_per_cell`;
+    /// not timed (UNVERIFIED as a measurement, `CLAUDE.md` §3 rule 6).
+    ///
+    /// # Errors
+    ///
+    /// The refusals the per-cell builder gave: an authority whose identity
+    /// cannot be derived, and a `Complete` data authority that does not
+    /// reconcile with this population.
+    pub fn bind(
+        authority: &'a CompletePopulationAuthorityV1<'a>,
+        data_source: DataCompletenessSourceV1<'a>,
+    ) -> Result<Self, String> {
+        let population_id = derive_population_id_v1(authority).map_err(|why| {
+            format!("complete population authority refused during evidence binding: {why}")
+        })?;
+        let data = data_completeness_value(population_id, authority, data_source)?;
+        Ok(Self {
+            authority,
+            population_id,
+            data_source,
+            data,
+        })
+    }
+
+    /// Population identity this binding derived.
+    #[must_use]
+    pub const fn population_id(&self) -> [u8; 32] {
+        self.population_id
+    }
 }
 
 /// Current full-precision source capability.
@@ -1074,20 +1137,24 @@ fn completeness_values(
 fn complete_population_values(
     context: &PopulationCellContextV1<'_>,
     ranking_policy_digest: [u8; 32],
-    authority: &CompletePopulationAuthorityV1<'_>,
+    bound: &BoundPopulationCompletenessV1<'_>,
     data_source: DataCompletenessSourceV1<'_>,
 ) -> Result<CompletenessValuesV1, String> {
+    let authority = bound.authority;
     if authority.identities.ranking_policy_digest != ranking_policy_digest {
         return Err(
             "institutional evidence ranking policy differs from its complete population authority"
                 .to_owned(),
         );
     }
-    let derived = derive_population_id_v1(authority).map_err(|why| {
-        format!("complete population authority refused during evidence binding: {why}")
-    })?;
-    if derived != context.population_id {
+    if bound.population_id != context.population_id {
         return Err("complete population authority derives another population identity".to_owned());
+    }
+    if data_source != bound.data_source {
+        return Err(
+            "institutional evidence data source differs from the one its population binding verified"
+                .to_owned(),
+        );
     }
     reconcile_completed_population_context(context, authority)?;
     let strategy_digest = derive_strategy_digest_from_validated_v1(
@@ -1108,10 +1175,9 @@ fn complete_population_values(
                 .to_owned(),
         );
     }
-    let data = data_completeness_value(context.population_id, authority, data_source)?;
     Ok(CompletenessValuesV1 {
         execution: CompletenessV1::Complete,
-        data,
+        data: bound.data,
         calendar: CompletenessV1::Complete,
         population: CompletenessV1::Complete,
     })

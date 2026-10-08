@@ -615,6 +615,66 @@ pub fn rank_checkpointed_sweep(
     Ok(ranked_run(column, summary, ranked))
 }
 
+/// Rank a checkpointed walk AS IT RETIRES, with the accumulator
+/// [`rank_checkpointed_sweep`] uses, holding no level once it is ranked.
+/// AC-whp-o1-1, D-1844.
+///
+/// `walk` runs the checkpointed walk, fresh or resumed, and hands every level
+/// it retires, in depth order, to the callback it is given, with the adjacent
+/// successor the engine lends (`engine::Ladder::walk_checkpointed_streamed`).
+/// Every level is scored when it retires, so no survivor is retained for a
+/// ranking pass at the end: the stored doors held the whole frequent set
+/// (6.35 GB of 8.91 GB measured, D-1448) only to rank it afterwards.
+///
+/// # Errors
+///
+/// Refuses what [`rank_checkpointed_sweep`] refuses: a signal-column count
+/// mismatch, a level that does not reconcile, a depth sequence that is not
+/// 1, 2, 3, ... with only the last level empty or halted, or a walk error.
+pub fn rank_checkpointed_streamed(
+    column: Column,
+    scoring_column: Option<&Column>,
+    forward: &crate::outcome::Forward,
+    keep: usize,
+    lens: crate::rank::Lens,
+    walk: impl FnOnce(
+        &mut dyn FnMut(&engine::Frontier, Option<&engine::Frontier>),
+    ) -> Result<engine::keep::Streamed, String>,
+) -> Result<RankedRun, String> {
+    let mut accumulator = crate::rank::Accumulator::new(keep, lens);
+    let scored_on = scoring_column.unwrap_or(&column);
+    let mut depth = 0_u64;
+    let mut emptied = false;
+    let mut accounted = true;
+    let summary = walk(&mut |level, next| {
+        depth = depth.saturating_add(1);
+        accounted &= level.reconciles() && u64::from(level.k) == depth && !emptied;
+        emptied = level.frequent.is_empty();
+        accumulator.offer_retired(level, next, scored_on, forward);
+    })?;
+    let terminal = summary.levels.last().map_or_else(
+        || summary.halted.is_some_and(|halt| halt.k == 0),
+        |last| {
+            summary
+                .halted
+                .map_or(last.survivors == 0, |halt| halt.k == last.k)
+        },
+    );
+    // The column's own two counts first, then the walk's bars against them,
+    // so each comparison is one term a case can falsify alone.
+    let swept = column.census().swept;
+    if u64::try_from(column.bits().len()).ok() != Some(swept)
+        || summary.bars != swept
+        || !accounted
+        || !terminal
+        || u64::try_from(summary.levels.len()).unwrap_or(u64::MAX) != depth
+    {
+        return Err("restored sweep and signal column/accounting disagree".into());
+    }
+    let ranked = accumulator.finish();
+    Ok(ranked_run(column, summary, ranked))
+}
+
 fn restored_terminal(sweep: &Sweep) -> bool {
     let Some(last) = sweep.levels.last() else {
         return sweep.halted.is_some_and(|halt| halt.k == 0);
@@ -1832,6 +1892,244 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    /// AC-whp-o1-1, D-1844: ranking each level as it retires equals ranking
+    /// the retained sweep, through the engine's streamed walk fresh and
+    /// resumed from every boundary, at both caps and both lenses.
+    #[test]
+    fn the_streamed_checkpoint_rank_equals_the_retained_one() {
+        let bars = synthetic::sessions(8);
+        let signal = Column::build(&bars, &mut evaluator());
+        let bit_column = engine::column::Column::try_from_rows(signal.bits()).expect("rows");
+        let forward = crate::outcome::forward(&bars, &signal, crate::outcome::Horizon::DEFAULT);
+        let ladder = bounded();
+        let retained = ladder
+            .walk_checkpointed(&bit_column, &live_positions(), [7; 32], &mut |_| Ok(()))
+            .expect("retained walk");
+        let mut boundaries = Vec::new();
+        let _ = ladder.walk_checkpointed(&bit_column, &live_positions(), [7; 32], &mut |view| {
+            let mut bytes = Vec::new();
+            view.write_to(&mut bytes)
+                .map_err(|error| error.to_string())?;
+            boundaries.push(bytes);
+            Ok(())
+        });
+        for lens in [crate::rank::Lens::Detectability, crate::rank::Lens::Payoff] {
+            for keep in [0, 10] {
+                let expected = super::rank_checkpointed_sweep(
+                    signal.clone(),
+                    Some(&signal),
+                    &forward,
+                    retained.clone(),
+                    keep,
+                    lens,
+                )
+                .expect("rank retained");
+                let fresh = super::rank_checkpointed_streamed(
+                    signal.clone(),
+                    Some(&signal),
+                    &forward,
+                    keep,
+                    lens,
+                    |on_retire| {
+                        ladder
+                            .walk_checkpointed_streamed(
+                                &bit_column,
+                                &live_positions(),
+                                [7; 32],
+                                &mut |_| Ok(()),
+                                on_retire,
+                            )
+                            .map_err(|error| error.to_string())
+                    },
+                )
+                .expect("rank streamed");
+                for got in std::iter::once(fresh).chain(boundaries.iter().map(|saved| {
+                    let checkpoint = engine::resume::Checkpoint::read_from(
+                        &mut saved.as_slice(),
+                        saved.len() as u64,
+                        [7; 32],
+                    )
+                    .expect("decode");
+                    super::rank_checkpointed_streamed(
+                        signal.clone(),
+                        Some(&signal),
+                        &forward,
+                        keep,
+                        lens,
+                        |on_retire| {
+                            ladder
+                                .resume_checkpointed_streamed(
+                                    &bit_column,
+                                    &live_positions(),
+                                    [7; 32],
+                                    checkpoint,
+                                    &mut |_| Ok(()),
+                                    on_retire,
+                                )
+                                .map_err(|error| error.to_string())
+                        },
+                    )
+                    .expect("rank resumed")
+                })) {
+                    assert_eq!(got.ranked.top, expected.ranked.top);
+                    assert_eq!(got.ranked.closed_top, expected.ranked.closed_top);
+                    assert_eq!(got.ranked.considered, expected.ranked.considered);
+                    assert_eq!(got.ranked.redundant, expected.ranked.redundant);
+                    assert_eq!(got.outcome.trials, expected.outcome.trials);
+                    assert_eq!(
+                        got.outcome.effective_trials,
+                        expected.outcome.effective_trials
+                    );
+                    assert_eq!(
+                        got.outcome.closure_complete,
+                        expected.outcome.closure_complete
+                    );
+                    assert_eq!(got.outcome.sweep.levels, expected.outcome.sweep.levels);
+                    assert_eq!(got.outcome.sweep.streamed, expected.outcome.sweep.streamed);
+                }
+            }
+        }
+        assert!(boundaries.len() >= 2, "a ladder, not one level");
+    }
+
+    /// D-1844: the streamed adapter refuses what the retained one refuses,
+    /// each case alone: a wrong bar count, a level that does not reconcile,
+    /// a skipped depth, an empty level before the last, a walk that ends on a
+    /// non-empty level with no halt, a summary that disagrees with what was
+    /// handed on, and a walk error.
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "every refusal and its halt boundary beside the control that passes"
+    )]
+    fn the_streamed_checkpoint_rank_refuses_each_inconsistency() {
+        let bars = synthetic::sessions(8);
+        let signal = Column::build(&bars, &mut evaluator());
+        let forward = crate::outcome::forward(&bars, &signal, crate::outcome::Horizon::DEFAULT);
+        let original = Sweeper::new(bounded()).run_prepared(&signal).sweep;
+        assert!(original.levels.len() >= 3, "a ladder deep enough to cut");
+        let summary_of = |levels: &[engine::Frontier], bars: u64| engine::keep::Streamed {
+            levels: levels.iter().map(engine::keep::Tally::of).collect(),
+            excluded: original.excluded.clone(),
+            bars,
+            min_hits: original.min_hits,
+            halted: original.halted,
+            streamed: levels.iter().map(|level| level.frequent.len() as u64).sum(),
+        };
+        let rank = |levels: Vec<engine::Frontier>, bars: u64, extra: usize| {
+            super::rank_checkpointed_streamed(
+                signal.clone(),
+                None,
+                &forward,
+                10,
+                crate::rank::Lens::Detectability,
+                |on_retire| {
+                    for (at, level) in levels.iter().enumerate() {
+                        on_retire(level, levels.get(at + 1));
+                    }
+                    let mut summary = summary_of(&levels, bars);
+                    for _ in 0..extra {
+                        summary.levels.push(engine::keep::Tally::default());
+                    }
+                    Ok(summary)
+                },
+            )
+        };
+        assert!(
+            rank(original.levels.clone(), original.bars, 0).is_ok(),
+            "the control passes"
+        );
+        assert!(
+            rank(original.levels.clone(), original.bars + 1, 0).is_err(),
+            "bar count"
+        );
+        let mut unreconciled = original.levels.clone();
+        unreconciled.first_mut().expect("first").generated += 1;
+        assert!(rank(unreconciled, original.bars, 0).is_err(), "reconcile");
+        assert!(
+            rank(
+                original.levels.get(1..).expect("deeper").to_vec(),
+                original.bars,
+                0
+            )
+            .is_err(),
+            "a walk that does not start at depth one"
+        );
+        let mut empty_early = original.levels.clone();
+        empty_early.swap(0, original.levels.len() - 1);
+        assert!(
+            rank(empty_early, original.bars, 0).is_err(),
+            "an empty level first"
+        );
+        let mut unterminated = original.levels.clone();
+        unterminated.pop();
+        assert!(
+            rank(unterminated, original.bars, 0).is_err(),
+            "no terminal level"
+        );
+        assert!(
+            rank(original.levels.clone(), original.bars, 1).is_err(),
+            "summary length"
+        );
+        // THE HALT BOUNDARY, both ways. A walk that halted ends on its halted
+        // level, which may be non-empty; a halt that names another depth, or a
+        // walk that handed nothing on without halting at k=0, is refused.
+        let halted_at = |k: u32| engine::Halt {
+            k,
+            ..engine::Halt::default()
+        };
+        let mut cut = original.levels.clone();
+        cut.pop();
+        let last = cut.last().expect("a cut ladder").k;
+        let rank_halted = |levels: Vec<engine::Frontier>, halt: Option<engine::Halt>| {
+            super::rank_checkpointed_streamed(
+                signal.clone(),
+                None,
+                &forward,
+                10,
+                crate::rank::Lens::Detectability,
+                |on_retire| {
+                    for (at, level) in levels.iter().enumerate() {
+                        on_retire(level, levels.get(at + 1));
+                    }
+                    Ok(engine::keep::Streamed {
+                        halted: halt,
+                        ..summary_of(&levels, original.bars)
+                    })
+                },
+            )
+        };
+        assert!(
+            rank_halted(cut.clone(), Some(halted_at(last))).is_ok(),
+            "a walk halted on its last level is terminal"
+        );
+        assert!(
+            rank_halted(cut, Some(halted_at(last + 1))).is_err(),
+            "a halt on another depth is not"
+        );
+        assert!(
+            rank_halted(Vec::new(), Some(halted_at(0))).is_ok(),
+            "a walk halted before k=1 hands on nothing and is terminal"
+        );
+        assert!(
+            rank_halted(Vec::new(), Some(halted_at(1))).is_err(),
+            "nothing handed on with a halt at k=1 is not"
+        );
+        assert!(
+            rank_halted(Vec::new(), None).is_err(),
+            "nothing handed on and no halt"
+        );
+        let failed = super::rank_checkpointed_streamed(
+            signal.clone(),
+            None,
+            &forward,
+            10,
+            crate::rank::Lens::Detectability,
+            |_| Err("the walk refused".to_owned()),
+        );
+        assert_eq!(failed.err().as_deref(), Some("the walk refused"));
     }
 
     /// The exact call that OOM-killed this process, now a loud refusal.

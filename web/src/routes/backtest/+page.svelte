@@ -6062,19 +6062,22 @@
     <span class="vp vp-unpriced" title="Never met an exit grid — screen_cap cut it before pricing."
       >unpriced</span
     >
-  {:else if meets.all}
-    <span class="vp vp-pass" title="Five historical rules met. This verdict does not prove worst adverse excursion, protective exits, fill headroom, average payoff, period consistency or institutional admission.">5 rules pass</span>
   {:else}
-    {@const failed = [
-      !meets.win_rate && 'win rate',
-      !meets.reward_to_risk && 'reward:risk',
-      !meets.return_over_drawdown && 'return/drawdown',
-      !meets.trades && 'trade count',
-      !meets.assurance && 'assurance'
-    ].filter(Boolean)}
-    <span class="vp vp-fail" title="Fails: {failed.join(', ')}. This is only the five-rule historical verdict."
-      >FAIL <i>{failed.length}</i></span
-    >
+    {@const answered = Object.keys(meets).filter((k) => k !== 'all' && k !== 'priced' && !k.endsWith('_unchecked'))}
+    {@const unanswered = Object.keys(meets).filter((k) => k.endsWith('_unchecked')).map((k) => k.slice(0, -'_unchecked'.length).replaceAll('_', ' '))}
+    {@const failed = answered.filter((k) => meets[k] === false).map((k) => k.replaceAll('_', ' '))}
+    <!-- THE RULE NAMES ARE THE SERVER'S (D-1810). Every `meets` member other
+         than `all` and the `*_unchecked` flags is a rule `cli` answered, and
+         `validateFrontierPayload` has already required that set to equal the
+         served `admission.checked` list. Nothing here lists the rules, so a
+         rule added in `cli` is counted and named without an edit. -->
+    {#if meets.all}
+      <span class="vp vp-pass" title="{answered.length} historical rules met. This verdict does not answer: {unanswered.join(', ')}; nor period consistency or institutional admission.">{answered.length} rules pass</span>
+    {:else}
+      <span class="vp vp-fail" title="Fails: {failed.join(', ')}. This is only the {answered.length}-rule historical verdict; it does not answer: {unanswered.join(', ')}."
+        >FAIL <i>{failed.length}</i></span
+      >
+    {/if}
   {/if}
 {/snippet}
 
@@ -8451,10 +8454,11 @@
                 drawdown outranks every real one.
                 <b>This ordering is complete only within those {exact(g.priced)} priced rows.</b>
                 {#if g.rules}
-                  <b>{exact(g.admittedShown)} of {exact(g.top.length)} shown meet the five displayed rules</b>
+                  <b>{exact(g.admittedShown)} of {exact(g.top.length)} shown meet every rule the server checked</b>
                   — win rate ≥ {(g.rules.min_win_rate_bp / 100).toFixed(0)}%, reward:risk ≥
                   {(g.rules.min_rr_bp / 100).toFixed(2)}×, return over drawdown ≥
-                  {(g.rules.min_ret_over_dd_bp / 100).toFixed(2)}×.
+                  {(g.rules.min_ret_over_dd_bp / 100).toFixed(2)}×, average win over average loss ≥
+                  {(g.rules.min_avg_rr_bp / 100).toFixed(2)}× (0 or less: not required).
                 {/if}
               </p>
             {:else}
@@ -10403,9 +10407,11 @@
                       — win rate ≥ {(combos.rules.min_win_rate_bp / 100).toFixed(0)}%, reward:risk ≥
                       {(combos.rules.min_rr_bp / 100).toFixed(2)}×, return over drawdown ≥
                       {(combos.rules.min_ret_over_dd_bp / 100).toFixed(2)}×, at least
-                      {exact(combos.rules.min_trades)} trades.
-                      <b>The stop rule is not checked here</b> — it is judged on the worst adverse
-                      excursion across every trade, and a ranked row does not store that.
+                      {exact(combos.rules.min_trades)} trades, average win over average loss ≥
+                      {(combos.rules.min_avg_rr_bp / 100).toFixed(2)}× (0 or less: not required).
+                      <b>The stop, protective-exit and fill-headroom rules are not checked here</b> — a
+                      ranked row stores none of the worst adverse excursion, the exit shape or the
+                      best-fill total they are judged on.
                     {/if}
                     {#if combos.rows.filter((r) => !r.priced).length > 0}
                       <b>{combos.rows.filter((r) => !r.priced).length} excluded as never priced</b> —

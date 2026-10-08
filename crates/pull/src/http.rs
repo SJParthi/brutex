@@ -934,20 +934,24 @@ fn note_answer(
 /// **the seven arrays disagreeing in length**, the trap that would otherwise
 /// yield a short window filed as complete.
 ///
-/// # Memory — a whole tree, and UNMEASURED
+/// # Memory — a whole tree, MEASURED
 ///
 /// The body is parsed into one `serde_json::Value` tree before any field is
 /// read, so the tree, the body and the decoded columns are alive at once. A
 /// `Value` is 32 bytes on this build (pinned by
 /// `the_json_tree_is_thirty_two_bytes_a_node`) against as few as two bytes of
-/// text for one array element (`0,`), so the tree alone can reach ~16× the
-/// body, and more while an array's backing vector doubles. Since D-1570
+/// text for one array element (`0,`), and since D-1570
 /// (`arbitrary_precision`) a number node also owns its digits in one heap
-/// allocation, so a body of one-digit numbers can reach about twice that
-/// (~32×, allocator overhead included, also UNMEASURED). A body is capped at
-/// [`MAX_RESPONSE_BYTES`]. That is an ARGUED bound: no peak has been measured,
-/// and the typed or streaming decode that would remove the tree is not built.
-/// o1api-33, D-1203; `docs/06-limits.md` states it.
+/// allocation. The peak above the body is COUNTED by
+/// `a_json_decodes_peak_memory_is_measured_against_its_body` in
+/// `crates/pull/tests/allocation.rs` (D-2291): 12x the body for a Dhan
+/// 34,000-bar chunk as the vendor quotes it, 7x for a Zerodha answer of the
+/// same size, and 17x for the cheapest hostile text per node, one array of a
+/// million zeros, under the [`MAX_RESPONSE_BYTES`] cap (so at most about
+/// 1.1 GiB for a 64 MiB hostile body). Bytes asked of the allocator: its own
+/// per-block overhead is not counted. The typed or streaming decode that would
+/// remove the tree is not built. o1api-33, D-1203, D-2291; `docs/06-limits.md`
+/// states it.
 pub fn decode_body(
     body: &str,
     spec: &HttpSpec,
@@ -4380,8 +4384,9 @@ mod tests {
 
     /// **THE TREE NODE THE MEMORY NOTE ON `decode_body` IS ARGUED FROM.**
     ///
-    /// o1api-33, D-1203: the peak memory of a decode is unmeasured, and the
-    /// stated bound rests on this size. A `serde_json` feature that widens the
+    /// o1api-33, D-1203, D-2291: the peak memory of a decode is counted by
+    /// `crates/pull/tests/allocation.rs`, and the per-node part of it rests on
+    /// this size. A `serde_json` feature that widens the
     /// node (`arbitrary_precision`, for one) changes the bound, and this fails
     /// so the note and `docs/06-limits.md` are revisited rather than left wrong.
     #[test]
@@ -4391,8 +4396,9 @@ mod tests {
         let doc = &source[..source
             .find(&format!("{}{}", "pub fn decode_", "body("))
             .expect("decode_body exists")];
-        assert!(doc.contains("# Memory — a whole tree, and UNMEASURED"));
-        assert!(doc.contains("~16× the\n/// body"));
+        assert!(doc.contains("# Memory — a whole tree, MEASURED"));
+        assert!(doc.contains("12x the body for a Dhan"));
+        assert!(doc.contains("17x for the cheapest hostile text per node"));
     }
 
     /// Every price the paisa grid can hold, held exactly.

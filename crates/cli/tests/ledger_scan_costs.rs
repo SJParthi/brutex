@@ -182,6 +182,10 @@ fn a_finalization_v3_row_read_hashes_both_files_four_times_and_its_docs_say_so()
         "`row_projection` must read through the fixed-offset lookup: {delegate}"
     );
     assert!(!delegate.contains("ordered_row_projections"), "{delegate}");
+    assert!(
+        FINALIZATION_V3.contains("    #[cfg(test)]\n    pub(crate) fn row_projection("),
+        "the one-row read is test-only since D-1845"
+    );
 
     let sentence = "One row read therefore hashes the row file and the Completion file four \
                     times each: O(row-file bytes + Completion-file bytes) per row, not O(1), \
@@ -216,16 +220,29 @@ fn a_finalization_v3_row_read_hashes_both_files_four_times_and_its_docs_say_so()
     );
 }
 
-/// W2-cli11-0. `append_locked` ends by hashing the data file and rescanning
-/// every record, and the rescan ends in a second whole-file hash.
+/// W2-cli11-0. `append_locked` ends by hashing the data file and, since
+/// D-1845, validating only the block it wrote: it no longer rescans.
 #[test]
-fn a_finalization_v4_append_rescans_the_whole_ledger_and_its_docs_say_so() {
+#[expect(
+    clippy::too_many_lines,
+    reason = "the code shape, the rustdoc and the limits for one call are read together"
+)]
+fn a_finalization_v4_append_validates_only_its_block_and_its_docs_say_so() {
     let append = body(FINALIZATION_V4, "", "fn append_locked(");
     let tail = append
         .rfind("file_generation(&self.data_file")
         .expect("the append hashes the data file");
-    let rescan = append.rfind("self.scan()?").expect("the append rescans");
-    assert!(tail < rescan, "the hash comes before the rescan: {append}");
+    assert!(
+        !append.contains("self.scan()"),
+        "the append rescans: {append}"
+    );
+    let rescan = append
+        .rfind("validate_complete_block(&mut self.data_file, block_first, &data)?")
+        .expect("the append validates its own block");
+    assert!(
+        tail < rescan,
+        "the hash comes before the validation: {append}"
+    );
     assert!(
         append
             .rfind("sync Finalization V4 Completion")
@@ -283,11 +300,11 @@ fn a_finalization_v4_append_rescans_the_whole_ledger_and_its_docs_say_so() {
     says(
         &doc,
         "`append_locked`'s rustdoc",
-        "After the Completion is synced, the append hashes the whole data file and then \
-         rescans the whole ledger: `scan` decodes every record, validates every complete \
-         block, and ends with a generation check that hashes the data file whole again.",
+        "and then reads back and validates only the block it wrote: O(D) in its own \
+         decisions. It no longer rescans the ledger (W2-cli11-0, D-1845). The two \
+         whole-file hashes keep one append O(F) in the ledger's file bytes F, and that \
+         is inherent to the check",
     );
-    says(&doc, "`append_locked`'s rustdoc", sentence);
     says(&doc, "`append_locked`'s rustdoc", HELD);
     says(
         &doc,
@@ -306,6 +323,12 @@ fn a_finalization_v4_append_rescans_the_whole_ledger_and_its_docs_say_so() {
     );
     let limits = limits();
     says(&limits, "the limits section", sentence);
+    says(
+        &limits,
+        "the limits section",
+        "**Rescan removed by D-1845:** the append now reads back and validates only the \
+         block it wrote",
+    );
     says(&limits, "the limits section", reused);
     says(
         &limits,
@@ -329,6 +352,12 @@ fn a_population_v5_row_read_derives_the_whole_population_twice_and_its_docs_say_
         "{lookup}"
     );
     assert_eq!(count(lookup, "prepared_before.rows.get("), 1, "{lookup}");
+    assert!(
+        POPULATION_V5.contains(
+            "    #[cfg(test)]\n    pub(crate) fn authenticated_row(\n        &mut self,\n        global_sequence: u64,"
+        ),
+        "the one-row read is test-only since D-1845"
+    );
     let v5_read = body(
         POPULATION_V5,
         "impl PopulationV5Ledger",
@@ -416,7 +445,11 @@ fn a_population_v5_commit_opens_appends_and_reopens_and_hashes_whole_files() {
     let open = body(POPULATION_V5, "impl PopulationV5Ledger", "    fn open(\n");
     assert_eq!(count(open, "ledger.scan()?"), 1, "{open}");
     let finish = body(POPULATION_V5, "", "fn finish_written(");
-    assert!(finish.contains("self.scan()?"), "{finish}");
+    assert!(!finish.contains("self.scan()"), "{finish}");
+    assert!(
+        finish.contains("validate_complete_block(&rows, &completion)?"),
+        "{finish}"
+    );
     for (head, caller) in [
         ("fn append_locked(", "the fresh append"),
         ("fn complete_trailing(", "the trailing completion"),
@@ -425,7 +458,7 @@ fn a_population_v5_commit_opens_appends_and_reopens_and_hashes_whole_files() {
         assert_eq!(
             count(written, "self.finish_written(prepared.population_id)"),
             1,
-            "{caller} must finish with one rescan: {written}"
+            "{caller} must finish by validating its own block: {written}"
         );
     }
     assert_eq!(
@@ -519,7 +552,7 @@ fn population_v5_rows_are_validated_on_every_scan() -> (&'static str, &'static s
 /// W2-cli12-4. `commit_population_v5` opens a writer, appends and reopens,
 /// and each of the three scans the whole ledger.
 #[test]
-fn a_population_v5_commit_scans_the_whole_ledger_three_times_and_its_docs_say_so() {
+fn a_population_v5_commit_scans_the_whole_ledger_twice_and_its_docs_say_so() {
     a_population_v5_commit_opens_appends_and_reopens_and_hashes_whole_files();
     let (decode, encode, block) = population_v5_rows_are_validated_on_every_scan();
 
@@ -561,10 +594,10 @@ fn a_population_v5_commit_scans_the_whole_ledger_three_times_and_its_docs_say_so
         "Sequential work is O(C + bounded source/file bytes) and space is O(C) for C \
          Candidates.",
         "The file bytes above include the whole V5 ledger, and not once. The ledger is \
-         scanned, every row decoded, three times per written commit: `open_write` scans it, \
-         `finish_written` scans it again after the Completion, and the fresh `open_read` \
-         scans it a third time; a reused Population is scanned twice, because \
-         `reuse_existing` neither scans nor calls `finish_written`.",
+         scanned, every row decoded, twice per commit, written or reused: `open_write` \
+         scans it and the fresh `open_read` scans it again. `finish_written` reads back \
+         and validates only the block just written; it rescanned the whole ledger until \
+         D-1845 (W2-cli12-4).",
         sentence,
         "Separately, every generation check hashes the lock, row and Completion files \
          whole, each of them twice; this counts scans, not those hashes.",
@@ -583,7 +616,8 @@ fn a_population_v5_commit_scans_the_whole_ledger_three_times_and_its_docs_say_so
     let limits = limits();
     for stated in [
         sentence,
-        "A written commit scans the ledger three times and a reused one twice.",
+        "A written commit scans the ledger three times and a reused one twice. **Since \
+         D-1845 a written commit scans it twice as well:**",
         upstream,
         total,
     ] {

@@ -1204,7 +1204,41 @@ async fn instruments_json(
     // deadlock this shape invites."*
     //
     // The fix is to acquire once and reuse, which the borrow already required.
+    // THE ANSWER IS KEPT FOR THE CENSUS SNAPSHOT AND THE PARSE IT WAS BUILT
+    // FROM. Everything below is a function of the two and of `feed`: the list
+    // filter walks the merged universe (O(U)), `bars_by_symbol` walks every
+    // census entry (O(E)) and the listing is sorted (O(T log T)), on a route
+    // every page of the console loads. While neither input has moved the
+    // request is `census_now`'s hit, one memo probe and a copy of the answer.
+    // A pull that moves a manifest replaces the snapshot and a reparse moves
+    // the generation, and either drops every kept answer. W1-api5-3, D-2285;
+    // see `crate::answer_memo`.
+    //
+    // ONE GUARD FOR THE WHOLE STATEMENT, taken once and handed to the build,
+    // for the deadlock reason the comment above gives.
+    let (censuses, entries) = census_now(&site);
     let universe = site.universe();
+    site.instruments_memo
+        .of_census(&censuses, universe.generation, feed, || {
+            (
+                instruments_answer(&universe, feed, &censuses, &entries),
+                true,
+            )
+        })
+}
+
+/// What `/instruments.json` answers: the status, the headers and the body.
+type InstrumentsAnswer = (axum::http::StatusCode, axum::http::HeaderMap, String);
+
+/// [`instruments_json`]'s answer for `feed`, built from one parse and one
+/// census snapshot. Pure in its four arguments, which is what lets the route
+/// keep it under them (D-2285).
+fn instruments_answer(
+    universe: &Parsed,
+    feed: Vendor,
+    censuses: &[census::VendorCensus],
+    entries: &[(census::Series, store::path::YearMonth)],
+) -> InstrumentsAnswer {
     let mut listing: Vec<_> = universe
         .read
         .merged
@@ -1219,8 +1253,8 @@ async fn instruments_json(
     // the screen: it told an operator a boolean when the question they actually
     // have is "how much of this do I have". A count answers both — zero IS the
     // boolean, and 1,125 is what the boolean threw away.
-    // FRESH, so a row's bar count moves as a backfill lands. See `census_now`.
-    let (censuses, entries) = census_now(&site);
+    // FRESH, so a row's bar count moves as a backfill lands: `censuses` and
+    // `entries` are this request's `census_now` snapshot.
     // ONE PASS OVER THE CENSUS, NOT ONE PER INSTRUMENT. See `bars_by_symbol`.
     let held = bars_by_symbol(censuses.iter().find(|c| c.vendor == feed), entries.iter());
     let bars_of = |key: &brutex_core::instrument::InstrumentKey| -> u64 {
@@ -2502,11 +2536,26 @@ async fn bars_json(
     // `bars_array` filter, which is exactly the previous behaviour. A window
     // genuinely past the last bar costs one wasted pass and still answers `[]`
     // -- the same answer, arrived at by reading rather than by assuming.
-    let begins = from_micros
+    //
+    // EXCEPT IN A SEALED FILE, WHERE THE LANDING IS PROOF (W1-api5-8, D-2280).
+    // A bisection that returns `n_valid` probed record `n_valid - 1` last, and
+    // in a file born with `FLAG_CHECKSUMS` that probe verified its whole block
+    // against the sidecar. A zero-filled extent is the tail of an interrupted
+    // append, so record `n_valid - 1` lies in it and fails that check: the
+    // bisection refuses, `.ok()` drops it, and the month is read as before. A
+    // landing that survived the check therefore stands on a real last bar
+    // stamped before `from`, and the writer kept every sealed bar strictly
+    // increasing, so no bar of this month is in the window. The answer is `[]`
+    // after the bisection's `ceil(log2(n_valid + 1))` reads instead of
+    // `n_valid`. A file born without the flag has nothing that could detect the
+    // zeros, so it keeps the full read.
+    let landed = from_micros
         .and_then(|at| file.first_at_or_after(at).ok())
-        .and_then(|index| usize::try_from(index).ok())
-        .filter(|&index| index < held)
-        .unwrap_or(0);
+        .and_then(|index| usize::try_from(index).ok());
+    if landed == Some(held) && file.header().checksums_present() {
+        return (axum::http::StatusCode::OK, json(), "[]".to_owned());
+    }
+    let begins = landed.filter(|&index| index < held).unwrap_or(0);
     // THE END IS BISECTED TOO, and the first version said it did not need to be.
     //
     // That commit argued "those rows have to be read to be returned, so a second
@@ -4897,14 +4946,31 @@ async fn verify_json(
             no_such_feed_json(&asked),
         );
     };
+    // OFF THE ASYNC WORKERS, AND ADMITTED: a scrub opens one bar file per held
+    // entry, and running it inline held a runtime worker for the whole walk.
+    // W1-api6-0, D-2281.
+    match crate::detail::run_store_read(move || verify_reading(&site, feed, &asked)).await {
+        Ok((code, body)) => (code, headers, body),
+        Err(why) => {
+            let (code, body) = crate::detail::admission_refused(
+                "scrub",
+                crate::detail::MAX_STORE_READ_CONCURRENT,
+                &why,
+            );
+            (code, headers, body)
+        }
+    }
+}
+
+/// [`verify_json`]'s census read, scrub and render, run on the store-read pool.
+fn verify_reading(site: &Site, feed: Vendor, asked: &str) -> (axum::http::StatusCode, String) {
     // FRESH, NEVER THE STARTUP SNAPSHOT. A scrub answering from a census read
     // at boot would verify a store that has since been written to.
-    let (censuses, _entries) = census_now(&site);
+    let (censuses, _entries) = census_now(site);
     let Some(census) = censuses.iter().find(|c| c.vendor == feed) else {
         return (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            headers,
-            no_such_feed_json(&asked),
+            no_such_feed_json(asked),
         );
     };
 
@@ -4944,7 +5010,7 @@ async fn verify_json(
             .as_ref()
             .map_or_else(|| "null".to_owned(), |why| render::json_string(why)),
     );
-    (code, headers, body)
+    (code, body)
 }
 
 /// One census body's validator, for conditional requests.
@@ -5426,6 +5492,28 @@ pub struct Site {
     pub census: CensusCache,
     /// Encoded responses for one exact immutable census snapshot.
     census_wire: store_wire::Cache,
+    /// `/instruments.json`'s answer per feed, for one census snapshot and one
+    /// universe parse. See [`crate::answer_memo`]. W1-api5-3, D-2285.
+    instruments_memo: crate::answer_memo::CensusMemo<Vendor, InstrumentsAnswer>,
+    /// `/calendar.json`'s served answers per feed and symbol, for one census
+    /// snapshot. See [`crate::answer_memo`]. W1-api5-5, D-2286.
+    calendar_memo: crate::answer_memo::CensusMemo<
+        (Vendor, String, Option<std::time::SystemTime>),
+        CalendarAnswer,
+    >,
+    /// `/store`'s filtered entry lists, per filter, for one census snapshot.
+    /// At most [`STORE_FILTERS_KEPT`] are held. W1-api5-6, D-2289.
+    store_filter_memo: crate::answer_memo::CensusMemo<
+        census::StoreFilter,
+        std::sync::Arc<Vec<(census::Series, store::path::YearMonth)>>,
+    >,
+    /// `/indexmap.json`'s answer per feed, for one stamp of `nse_indices.csv`
+    /// and one universe parse. W1-api5-9, W1-api2-7, D-2287.
+    indexmap_memo: crate::answer_memo::Memo<
+        crate::answer_memo::FileStamp,
+        Vendor,
+        (axum::http::StatusCode, String),
+    >,
     /// `/audit.json`'s per-feed month rollups for one exact census snapshot.
     /// See [`crate::audit_json::RollupCache`]. D-0732.
     pub(crate) audit_rollup: crate::audit_json::RollupCache,
@@ -5651,6 +5739,7 @@ impl Site {
             }
         }
         let targets = count_targets(&read);
+        let target_keys = tracked_target_keys(&read);
         let summary = read.notes.join(" · ");
         let mut held = self
             .parsed
@@ -5661,6 +5750,7 @@ impl Site {
             read,
             at: parsed_at,
             targets,
+            target_keys,
             generation,
         };
         Ok(summary)
@@ -5675,6 +5765,7 @@ impl Site {
     #[must_use]
     pub fn new(read: Read, censuses: Vec<census::VendorCensus>, store_root: PathBuf) -> Self {
         let targets = count_targets(&read);
+        let target_keys = tracked_target_keys(&read);
         // THE GRID'S AXIS IS READ OFF THE CENSUSES, NOT OUT OF THE MASTER.
         //
         // It used to be `grid_instruments(read.merged.by_key.keys())` — the
@@ -5706,6 +5797,10 @@ impl Site {
             calendars: crate::calendar_of::Cache::default(),
             census: std::sync::Mutex::new(None),
             census_wire: store_wire::Cache::default(),
+            instruments_memo: crate::answer_memo::Memo::default(),
+            calendar_memo: crate::answer_memo::Memo::default(),
+            indexmap_memo: crate::answer_memo::Memo::default(),
+            store_filter_memo: crate::answer_memo::Memo::with_cap(STORE_FILTERS_KEPT),
             audit_rollup: crate::audit_json::RollupCache::default(),
             budgets: std::sync::Mutex::new(feed_budgets()),
             // NO RUN UNTIL SOMEBODY PRESSES PULL. A site that started life
@@ -5724,6 +5819,7 @@ impl Site {
                 // stamp would answer a different one.
                 at: std::time::SystemTime::now(),
                 targets,
+                target_keys,
                 generation: 0,
             }),
             censuses,
@@ -5894,6 +5990,16 @@ pub struct Parsed {
     pub at: std::time::SystemTime,
     /// How many instruments each spot target names, counted from [`Self::read`].
     pub targets: [usize; ingest::SpotTarget::ALL.len()],
+    /// The tracked keys each spot target names, from [`Self::read`], indexed by
+    /// the target's discriminant (`target as usize`).
+    ///
+    /// Built once per parse by [`tracked_target_keys`], beside [`Self::targets`]
+    /// and replaced with it by [`Site::reparse`], so [`spot_targets`] walks the
+    /// asked target's own list and not the whole merged universe (W1-api5-11,
+    /// D-2288). A key appears in a list exactly when `catalog::tracked` and
+    /// `SpotTarget::names` both hold for it, the two predicates the per-request
+    /// walk applied.
+    pub target_keys: [Vec<brutex_core::instrument::InstrumentKey>; ingest::SpotTarget::ALL.len()],
     /// Zero at load, and moved by every [`Site::reparse`] that swaps a universe
     /// in. A refused reparse leaves it alone, as it leaves the universe.
     ///
@@ -5910,6 +6016,36 @@ pub struct Parsed {
 /// arithmetic: a reload that recomputed this differently would put a form's
 /// count out of step with the run it launches, which is the defect
 /// `SpotTarget::names` exists to prevent.
+/// The tracked keys each spot target names, indexed by `target as usize`.
+///
+/// One walk of the merged universe per PARSE, at startup and on each accepted
+/// [`Site::reparse`], instead of one per pull POST in [`spot_targets`]. Each list
+/// keeps the universe map's own iteration order, which is the order the
+/// per-request walk produced for the same parse. W1-api5-11, D-2288.
+fn tracked_target_keys(
+    read: &Read,
+) -> [Vec<brutex_core::instrument::InstrumentKey>; ingest::SpotTarget::ALL.len()] {
+    // INDEXED BY THE TARGET'S OWN DISCRIMINANT, the way `ids` is indexed by
+    // the vendor's, so `spot_targets` finds its list with one array index and
+    // no search. `ALL` names every variant once, so every slot is filled.
+    let mut lists: [Vec<brutex_core::instrument::InstrumentKey>; ingest::SpotTarget::ALL.len()] =
+        Default::default();
+    for target in ingest::SpotTarget::ALL {
+        if let Some(list) = lists.get_mut(target as usize) {
+            *list = read
+                .merged
+                .by_key
+                .iter()
+                .filter(|(key, entry)| {
+                    crate::catalog::tracked(entry.universe) && target.names(key, entry.universe)
+                })
+                .map(|(key, _)| *key)
+                .collect();
+        }
+    }
+    lists
+}
+
 fn count_targets(read: &Read) -> [usize; ingest::SpotTarget::ALL.len()] {
     let mut targets = [0usize; ingest::SpotTarget::ALL.len()];
     for (key, entry) in &read.merged.by_key {
@@ -7482,12 +7618,20 @@ fn spot_targets(
     asked: &ingest::SpotRequest,
     site: &Site,
 ) -> Vec<brutex_core::instrument::InstrumentKey> {
-    let targets: Vec<brutex_core::instrument::InstrumentKey> = site
-        .universe()
-        .read
-        .merged
-        .by_key
+    // THE ASKED TARGET'S OWN LIST, BUILT AT THE PARSE, NOT A WALK OF THE
+    // UNIVERSE. This filtered every key of the merged universe (about 2,780)
+    // on every pull POST and every `recovery_mapping`, so `Swept` walked them
+    // all to return two. The two predicates below the list now run once per
+    // parse in `tracked_target_keys`; what is left per request is a walk of the
+    // target's own keys and one `by_key` probe each, O(|target|), the size of
+    // the set the request names. W1-api5-11, D-2288.
+    let universe = site.universe();
+    let targets: Vec<brutex_core::instrument::InstrumentKey> = universe
+        .target_keys
+        .get(asked.target as usize)
+        .map_or(&[][..], Vec::as_slice)
         .iter()
+        .filter_map(|key| universe.read.merged.by_key.get_key_value(key))
         // TRACKED **AND** NAMED BY THE TARGET THE OPERATOR CHOSE.
         //
         // `tracked` alone is the whole 765-name surface, so every run swept
@@ -7495,9 +7639,7 @@ fn spot_targets(
         // the label on the receipt. `Swept indices` said 2, and 360ONE was
         // request 1 of 785. Both predicates now bind: `tracked` is what the
         // engine may hold, `names` is what this request asked for.
-        .filter(|(key, entry)| {
-            crate::catalog::tracked(entry.universe) && asked.target.names(key, entry.universe)
-        })
+        // (Both are applied in `tracked_target_keys`, once per parse.)
         // AND THE INSTRUMENTS ACTUALLY TICKED, WHICH THIS DID NOT ASK.
         //
         // The page draws a per-instrument picker, says `1 of 213 ticked` and
@@ -15662,6 +15804,12 @@ fn store_feed_refusal(asked: &str) -> (axum::http::StatusCode, String) {
     )
 }
 
+/// How many filtered entry lists `/store` keeps for one census snapshot.
+///
+/// Each is at most the snapshot's entry list, so the memo holds at most this
+/// many copies of it; past the cap every kept list is dropped (D-2289).
+const STORE_FILTERS_KEPT: usize = 8;
+
 /// The store page, from a site already loaded, and the status it answers under.
 ///
 /// An absent manifest renders; it never fails. Before the first ingest there is
@@ -15732,12 +15880,34 @@ pub fn store_html(
     let (censuses, entries) = census_now(site);
 
     let (rows, total, last_page) = if held_only {
-        let kept = census::filtered(&entries, &filter);
+        // A FILTERED LIST IS BUILT ONCE PER FILTER AND CENSUS SNAPSHOT, and a
+        // page of it after that is O(page). `census::filtered` walks and copies
+        // every entry, O(E), and paging through one filter's result, or a
+        // console polling it, paid that on every request. The list is a
+        // function of the snapshot and the filter, so it is kept under both:
+        // a pull replaces the snapshot and drops every list. The unfiltered
+        // list borrows the snapshot and is never copied. At most
+        // `STORE_FILTERS_KEPT` lists are held, so filters typed into the query
+        // cannot grow the memo. W1-api5-6, D-2289.
+        let memo;
+        let kept: &[(census::Series, store::path::YearMonth)] = if filter.is_empty() {
+            &entries
+        } else {
+            memo = site
+                .store_filter_memo
+                .of_census(&censuses, 0, filter.clone(), || {
+                    (
+                        std::sync::Arc::new(census::filtered(&entries, &filter).into_owned()),
+                        true,
+                    )
+                });
+            &memo
+        };
         let total = kept.len();
         let last = total.saturating_sub(1) / PAGE_ROWS;
         let page = page.min(last);
         (
-            census::held_page(&kept, &censuses, page.saturating_mul(PAGE_ROWS), PAGE_ROWS),
+            census::held_page(kept, &censuses, page.saturating_mul(PAGE_ROWS), PAGE_ROWS),
             total,
             last,
         )
@@ -20078,6 +20248,209 @@ async fn run_in_over(
 )]
 mod tests {
     use super::*;
+
+    /// **`/instruments.json` is built once per feed, census snapshot and
+    /// universe parse.** W1-api5-3, D-2285.
+    ///
+    /// A repeat is the same answer without a build; a new snapshot (as a pull
+    /// leaves) and an accepted reparse each build again, and another feed is
+    /// its own answer.
+    #[tokio::test]
+    async fn instruments_json_is_built_once_per_snapshot_and_parse() {
+        let dir = agreeing("instmemo");
+        let loaded = std::sync::Arc::new(site("instmemo", &dir));
+        let ask = |query: &'static str| {
+            let loaded = std::sync::Arc::clone(&loaded);
+            async move {
+                let (code, _, body) =
+                    instruments_json(axum::extract::State(loaded), query.parse().expect("a uri"))
+                        .await;
+                (code, body)
+            }
+        };
+        let memo = &loaded.instruments_memo;
+        let first = ask("/instruments.json?feed=dhan").await;
+        assert!(first.1.contains("RELIANCE"), "{first:?}");
+        assert_eq!(ask("/instruments.json?feed=dhan").await, first);
+        assert_eq!(memo.builds(), 1, "the repeat built nothing");
+        let groww = ask("/instruments.json?feed=groww").await;
+        assert_eq!(memo.builds(), 2, "another feed is its own answer");
+        assert_eq!(ask("/instruments.json?feed=groww").await, groww);
+        assert_eq!(memo.builds(), 2);
+        *loaded
+            .census
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        assert_eq!(ask("/instruments.json?feed=dhan").await, first);
+        assert_eq!(memo.builds(), 3, "a new census snapshot builds again");
+        assert!(loaded.reparse(&dir).is_ok(), "the same masters reparse");
+        assert_eq!(ask("/instruments.json?feed=dhan").await, first);
+        assert_eq!(memo.builds(), 4, "a new parse builds again");
+        assert_eq!(memo.len(), 1, "and the older answers are gone");
+    }
+
+    /// **`/indexmap.json` answers what [`indexmap_reading_at`] answers for
+    /// the environment's catalogue, as JSON, and refuses an unknown feed by
+    /// name.** The route and its environment wrapper add nothing but the path
+    /// and the pool. W1-api5-9, D-2287, D-2291.
+    #[tokio::test]
+    async fn indexmap_json_answers_the_environments_catalogue() {
+        let dir = agreeing("indexmaproute");
+        let loaded = std::sync::Arc::new(site("indexmaproute", &dir));
+        let expected = indexmap_reading_at(
+            &loaded,
+            Vendor::Dhan,
+            masters_dir().map(|dir| dir.join("nse_indices.csv")),
+        );
+        assert!(expected.1.starts_with('{'), "{expected:?}");
+        assert_eq!(indexmap_reading(&loaded, Vendor::Dhan), expected);
+        let (code, [(name, kind)], body) = indexmap_json(
+            axum::extract::State(std::sync::Arc::clone(&loaded)),
+            "/indexmap.json?feed=dhan".parse().expect("a uri"),
+        )
+        .await;
+        assert_eq!((code, body), expected);
+        assert_eq!(name, axum::http::header::CONTENT_TYPE);
+        assert_eq!(kind, "application/json; charset=utf-8");
+        let (code, _, body) = indexmap_json(
+            axum::extract::State(loaded),
+            "/indexmap.json?feed=nope".parse().expect("a uri"),
+        )
+        .await;
+        assert_eq!(code, axum::http::StatusCode::BAD_REQUEST);
+        assert!(body.contains("nope"), "{body}");
+    }
+
+    /// **`/indexmap.json` reads the catalogue once per stamp and parse.** A
+    /// repeat on an untouched file builds nothing; a rewrite of the same
+    /// length, a reparse and another feed each build again; a missing file is
+    /// answered 500 every time and never kept. W1-api5-9, W1-api2-7, D-2287.
+    #[test]
+    fn indexmap_json_is_built_once_per_catalogue_stamp_and_parse() {
+        let dir = agreeing("indexmapmemo");
+        let built = site("indexmapmemo", &dir);
+        let memo = &built.indexmap_memo;
+        let file = dir.join("nse_indices.csv");
+        std::fs::write(&file, "index_name,category\nNIFTY 50,broad\n").expect("write");
+        let ask = |feed| indexmap_reading_at(&built, feed, Ok(file.clone()));
+        let first = ask(Vendor::Dhan);
+        assert_eq!(first.0, axum::http::StatusCode::OK, "{first:?}");
+        assert_eq!(ask(Vendor::Dhan), first);
+        assert_eq!(memo.builds(), 1, "the repeat read nothing");
+        let groww = ask(Vendor::Groww);
+        assert_eq!(groww.0, axum::http::StatusCode::OK);
+        assert_eq!(memo.builds(), 2, "another feed is its own answer");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let same_length = "index_name,category\nA,b\nC,d\nEFGH,i\n";
+        assert_eq!(
+            same_length.len(),
+            "index_name,category\nNIFTY 50,broad\n".len()
+        );
+        std::fs::write(&file, same_length).expect("rewrite");
+        let rewritten = ask(Vendor::Dhan);
+        assert_eq!(memo.builds(), 3, "a same-length rewrite reads again");
+        assert_ne!(rewritten, first, "the new bytes are the new answer");
+        assert!(built.reparse(&dir).is_ok(), "the same masters reparse");
+        assert_eq!(ask(Vendor::Dhan), rewritten);
+        assert_eq!(memo.builds(), 4, "a new parse reads again");
+        assert_eq!(memo.len(), 1, "and the older answers are gone");
+        let absent = dir.join("absent.csv");
+        let missing = indexmap_reading_at(&built, Vendor::Dhan, Ok(absent.clone()));
+        assert_eq!(missing.0, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            indexmap_reading_at(&built, Vendor::Dhan, Ok(absent)),
+            missing
+        );
+        assert_eq!(memo.builds(), 4, "an unstamped file is read uncached");
+        assert_eq!(
+            indexmap_reading_at(&built, Vendor::Dhan, Err("no home".to_owned())).0,
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    /// **A `/store` filter is walked once per census snapshot, and the
+    /// unfiltered page never builds a list.** W1-api5-6, D-2289.
+    #[test]
+    fn a_store_filter_is_walked_once_per_snapshot() {
+        let dir = agreeing("storefiltermemo");
+        let built = site("storefiltermemo", &dir);
+        let memo = &built.store_filter_memo;
+        let today = day(2026, 8, 7);
+        let plain = store_ok(&built, today, 0, "");
+        assert_eq!(store_ok(&built, today, 0, ""), plain);
+        assert_eq!(memo.builds(), 0, "the unfiltered list is borrowed");
+        let first = store_ok(&built, today, 0, "symbol=nifty");
+        assert_eq!(store_ok(&built, today, 0, "symbol=nifty"), first);
+        let _second = store_ok(&built, today, 1, "symbol=nifty");
+        assert_eq!(memo.builds(), 1, "paging one filter walks once");
+        let _other = store_ok(&built, today, 0, "symbol=reli");
+        assert_eq!(memo.builds(), 2, "another filter is its own walk");
+        for n in 0..u8::try_from(STORE_FILTERS_KEPT).expect("a small cap") {
+            let _page = store_ok(&built, today, 0, &format!("symbol=x{n}"));
+            assert!(memo.len() <= STORE_FILTERS_KEPT, "{}", memo.len());
+        }
+        *built
+            .census
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        let before = memo.builds();
+        assert_eq!(store_ok(&built, today, 0, "symbol=nifty"), first);
+        assert_eq!(memo.builds(), before + 1, "a new snapshot walks again");
+        assert_eq!(memo.len(), 1);
+    }
+
+    /// **`spot_targets` walks the asked target's own list, built once per
+    /// parse, and answers exactly what the per-request walk of the universe
+    /// answered.** W1-api5-11, D-2288.
+    #[test]
+    fn spot_targets_walk_the_targets_own_list() {
+        let dir = agreeing("spottargetlists");
+        let built = site("spottargetlists", &dir);
+        // EVERY TARGET HAS ITS OWN SLOT, so no target can fall to an empty
+        // list or read another's: the discriminants are exactly 0..ALL.len().
+        let mut slots: Vec<usize> = ingest::SpotTarget::ALL
+            .into_iter()
+            .map(|target| target as usize)
+            .collect();
+        slots.sort_unstable();
+        assert_eq!(
+            slots,
+            (0..ingest::SpotTarget::ALL.len()).collect::<Vec<_>>()
+        );
+        let universe = built.universe();
+        for target in ingest::SpotTarget::ALL {
+            let slot = target as usize;
+            let mut walked: Vec<_> = universe
+                .read
+                .merged
+                .by_key
+                .iter()
+                .filter(|(key, entry)| {
+                    crate::catalog::tracked(entry.universe) && target.names(key, entry.universe)
+                })
+                .map(|(key, _)| *key)
+                .collect();
+            let mut kept = universe.target_keys[slot].clone();
+            walked.sort_unstable();
+            kept.sort_unstable();
+            assert_eq!(kept, walked, "{target:?}");
+        }
+        assert!(
+            universe.target_keys.iter().any(|keys| !keys.is_empty()),
+            "the fixture names something, so the comparison is not of empties"
+        );
+        drop(universe);
+        let source = include_str!("server.rs");
+        let body = source
+            .split_once("\nfn spot_targets(")
+            .expect("spot_targets")
+            .1
+            .split_once("\n}\n")
+            .expect("its end")
+            .0;
+        assert!(body.contains(".get(asked.target as usize)"), "{body}");
+        assert!(!body.contains(".by_key\n        .iter()"), "{body}");
+    }
     use std::io::Write as _;
 
     /// locks-1, D-1911: a host refusal of `flock` names the host, never another
@@ -27259,6 +27632,180 @@ mod tests {
         assert_eq!(junk.matches("\"t\":").count(), 0, "no bar response: {junk}");
     }
 
+    /// **A WINDOW PAST A SEALED MONTH'S LAST BAR IS ANSWERED BY THE BISECTION,
+    /// AND AN UNSEALED MONTH STILL READS ITSELF** (W1-api5-8, D-2280).
+    ///
+    /// Three months, one route. A sealed month of 200 bars has a byte in block 0
+    /// flipped: the bisection for a later day probes only blocks 1 and 2, so the
+    /// answer is a clean `200 []`. Reading the whole month, as the route did,
+    /// would have met the flipped block and answered `206` with a fault — so the
+    /// clean answer is the observation that the month was NOT read. The same
+    /// damage under a window that covers the bars still answers `206`, which
+    /// proves the damage is real. A sealed month whose header names a
+    /// zero-filled tail refuses its tail probe and falls back to reading. An
+    /// UNSEALED month with that tail lands past the end through the zeros and
+    /// must still read the month and return its two real bars.
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "three stores, each a different landing; one route over all three \
+                  is the test, and splitting it would repeat the fixture thrice"
+    )]
+    async fn bars_json_past_a_sealed_months_last_bar_reads_no_more_than_the_bisection() {
+        use std::os::unix::fs::FileExt as _;
+        let month = store::path::YearMonth::new(2024, 1).expect("a legal month");
+        // 2024-01-01 12:00 IST plus `m` minutes; every bar is on the first day.
+        let stamp = |m: i64| ((19_723 * 86_400 - 19_800 + 6 * 3_600) + m * 60) * 1_000_000;
+        let bar = |m: i64| store::format::Bar {
+            ts_micros: stamp(m),
+            open: 100,
+            high: 110,
+            low: 90,
+            close: 105,
+            volume: 1,
+            open_interest: i64::MIN,
+        };
+        let path = store::path::StorePath::new(store::path::PathParts {
+            vendor: Vendor::Dhan,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: store::path::Timeframe::MINUTE_1,
+            month,
+            file: store::path::FileKind::Bars,
+        })
+        .expect("a legal path");
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the id is the cross-check `open` folds; any 32 bits serve"
+        )]
+        let symbol_id = brutex_core::universe::fnv1a("NIFTY") as u32;
+        let layout = store::layout::Layout::CURRENT;
+        let write = |root: &std::path::Path, count: i64| {
+            let mut file =
+                store::file::BarFile::open_or_create(root, path, symbol_id).expect("a bar file");
+            let rows: Vec<store::format::Bar> = (0..count).map(bar).collect();
+            file.append(&rows).expect("legal bars");
+            let header = file.header();
+            drop(file);
+            (path.to_path_buf(root), header)
+        };
+        // Names `n_valid` records in the header and zero-fills the extent past
+        // the written ones, as an append whose records never reached the disk
+        // leaves it; `flags` decides whether the month claims a sidecar.
+        let zero_tail = |bin: &std::path::Path, header: store::header::Header, n: u64, flags| {
+            let raw = std::fs::OpenOptions::new()
+                .write(true)
+                .open(bin)
+                .expect("the month opens for the fault");
+            let from = layout.offset_of(header.n_valid).expect("an offset");
+            let to = layout.offset_of(n).expect("an offset");
+            let zeros = vec![0u8; usize::try_from(to - from).expect("small")];
+            raw.write_all_at(&zeros, from).expect("the zero extent");
+            let mut grown = header;
+            grown.n_valid = n;
+            grown.flags = flags;
+            grown.generation = header.generation + 1;
+            let commit = grown.commit().expect("a header image");
+            raw.write_all_at(&commit.bytes, commit.offset)
+                .expect("the header names the zeros");
+        };
+        let ask = |root: &std::path::Path, tag: &str, window: &str| {
+            let site = std::sync::Arc::new(Site::serving(&masters(tag, None, None), root));
+            let uri: axum::http::Uri = format!(
+                "/bars.json?feed=dhan&exchange=NSE&segment=INDEX&symbol=NIFTY\
+                 &timeframe=1min&month=2024-01{window}"
+            )
+            .parse()
+            .expect("a uri");
+            async move { bars_json(axum::extract::State(site), uri).await }
+        };
+
+        // SEALED, 200 BARS, BLOCK 0 DAMAGED.
+        let root = store_root("barspastsealed");
+        let (bin, header) = write(&root, 200);
+        assert!(header.checksums_present(), "the premise: a sealed month");
+        let raw = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&bin)
+            .expect("the month opens for the fault");
+        let in_block_zero = layout.offset_of(10).expect("an offset") + 40;
+        raw.write_all_at(&[0x5a], in_block_zero)
+            .expect("one flipped byte");
+        drop(raw);
+        let (code, _, body) = ask(&root, "barspastsealed", "&from=2024-01-05").await;
+        assert_eq!(
+            (code, body.as_str()),
+            (axum::http::StatusCode::OK, "[]"),
+            "past the last bar of a sealed month: the bisection is the answer"
+        );
+        let (code, _, body) = ask(&root, "barspastsealed", "&from=2024-01-01").await;
+        assert_eq!(
+            code,
+            axum::http::StatusCode::PARTIAL_CONTENT,
+            "the damage is real, and a window over it reads and names it: {body}"
+        );
+
+        // SEALED, A ZERO TAIL: the tail probe refuses and the month is read.
+        let root = store_root("barspastsealedzero");
+        let (bin, header) = write(&root, 3);
+        zero_tail(&bin, header, 10, header.flags);
+        let (code, _, body) = ask(&root, "barspastsealedzero", "&from=2024-01-01").await;
+        assert_ne!(
+            (code, body.as_str()),
+            (axum::http::StatusCode::OK, "[]"),
+            "a sealed zero tail never reads as an empty window"
+        );
+
+        // UNSEALED, A ZERO TAIL: nothing can detect the zeros, so it reads.
+        // Forged as a version-2 file, the only version that may be unsealed
+        // (D-1571): a header naming ten records over three real ones and seven
+        // records of zeros, as an append whose records never reached the disk.
+        let root = store_root("barspastunsealed");
+        let genesis =
+            store::header::Header::genesis_at(store::layout::Layout::V2, symbol_id, 60, 0);
+        let named = genesis.advance(10, stamp(0), stamp(2)).expect("a commit");
+        let mut image = vec![0u8; usize::try_from(store::format::HEADER_LEN).expect("small")];
+        for commit in [
+            genesis.commit().expect("genesis"),
+            named.commit().expect("commit"),
+        ] {
+            let at = usize::try_from(commit.offset).expect("small");
+            image
+                .iter_mut()
+                .skip(at)
+                .zip(commit.bytes)
+                .for_each(|(dst, src)| *dst = src);
+        }
+        for m in 0..3 {
+            image.extend_from_slice(&bar(m).image());
+        }
+        image.resize(
+            usize::try_from(store::layout::Layout::V2.offset_of(10).expect("an offset"))
+                .expect("small"),
+            0,
+        );
+        let bin = path.to_path_buf(&root);
+        std::fs::create_dir_all(bin.parent().expect("a parent")).expect("the month's directory");
+        std::fs::write(&bin, &image).expect("the forged month");
+        assert!(
+            !store::file::BarFile::open_existing(&root, path, symbol_id)
+                .expect("the forged month opens")
+                .header()
+                .checksums_present(),
+            "the premise: an unsealed month"
+        );
+        let (code, _, body) = ask(&root, "barspastunsealed", "&from=2024-01-01").await;
+        assert_eq!(code, axum::http::StatusCode::OK, "{body}");
+        assert_eq!(
+            body.matches("\"t\":").count(),
+            3,
+            "the bisection walked up through the zeros to n_valid; an unsealed \
+             month must still be read, and its three real bars returned: {body}"
+        );
+    }
+
     /// **A COMPLETE SESSION SCORES ZERO LOSSES, AND ONE MISSING MINUTE IS
     /// FOUND — while the weekend around it stays NOT a loss.**
     ///
@@ -33725,9 +34272,16 @@ mod broker_target_tests {
         };
         let select = body_of("fn spot_targets(");
         let run = body_of("pub(crate) async fn broker_run");
+        // The target's own list is built once per parse (D-2288); the
+        // selection walks the chosen target's list, and the list is built by
+        // the target's own predicate.
         assert!(
-            select.contains("asked.target.names(key, entry.universe)"),
+            select.contains(".get(asked.target as usize)"),
             "the selection is built from the chosen target"
+        );
+        assert!(
+            body_of("fn tracked_target_keys(").contains("target.names(key, entry.universe)"),
+            "and each target's list from that target's predicate"
         );
         assert!(
             select.contains("feed_can_name(asked.feed, entry)"),
@@ -35455,8 +36009,9 @@ async fn indexmap_json(
             no_such_feed_json(&asked),
         );
     };
-    // OFF THE ASYNC WORKERS, AND ADMITTED: the catalogue is read from disk on
-    // every request. W1-api2-11, D-1508.
+    // OFF THE ASYNC WORKERS, AND ADMITTED: a request stamps the catalogue
+    // with one `stat` and reads it from disk only when that stamp or the parse
+    // moved (D-2287). W1-api2-11, D-1508.
     match crate::detail::run_store_read(move || indexmap_reading(&site, feed)).await {
         Ok((status, body)) => (status, [(axum::http::header::CONTENT_TYPE, json)], body),
         Err(why) => {
@@ -35473,9 +36028,56 @@ async fn indexmap_json(
 /// Everything [`indexmap_json`] does once the feed is parsed, on the blocking
 /// pool. D-1508.
 fn indexmap_reading(site: &Site, feed: Vendor) -> (axum::http::StatusCode, String) {
-    let read = masters_dir()
-        .map(|dir| dir.join("nse_indices.csv"))
-        .and_then(|path| crate::indexmap::Published::read(&path));
+    indexmap_reading_at(
+        site,
+        feed,
+        masters_dir().map(|dir| dir.join("nse_indices.csv")),
+    )
+}
+
+/// [`indexmap_reading`] over the catalogue at `path`, so a test can name the
+/// file without setting `BRUTEX_MASTERS` in a process running tests in
+/// parallel.
+fn indexmap_reading_at(
+    site: &Site,
+    feed: Vendor,
+    path: Result<std::path::PathBuf, String>,
+) -> (axum::http::StatusCode, String) {
+    // THE ANSWER IS KEPT FOR ONE STAMP OF THE CATALOGUE AND ONE PARSE. The read
+    // below parses `nse_indices.csv` whole (up to `MAX_CATALOGUE_BYTES`), walks
+    // the merged universe (O(U)) and resolves every index symbol against the
+    // catalogue, a scan of it for each name not published verbatim. All of it
+    // is a function of the file's bytes, the parse and the feed, so it is kept
+    // under the file's stamp, taken by one `stat` BEFORE the read, and the
+    // universe generation: a request on an unchanged catalogue and parse costs
+    // that `stat`, one memo probe and a copy of the answer. Any write to the
+    // file moves its stamp; a write between the `stat` and the read keeps the
+    // newer answer under the older stamp, which the next request's `stat` no
+    // longer matches, so it is stale for no request. A file that cannot be
+    // stamped is read uncached, and a refusal is never kept. W1-api5-9,
+    // W1-api2-7, D-2287.
+    let stamp = path
+        .as_ref()
+        .ok()
+        .and_then(|path| crate::answer_memo::FileStamp::of(path).ok());
+    let Some(stamp) = stamp else {
+        return indexmap_answer(site, feed, path);
+    };
+    let generation = site.universe().generation;
+    site.indexmap_memo.get(&stamp, generation, feed, || {
+        let answer = indexmap_answer(site, feed, path);
+        let keep = answer.0 == axum::http::StatusCode::OK;
+        (answer, keep)
+    })
+}
+
+/// [`indexmap_reading`]'s read, join and render, uncached.
+fn indexmap_answer(
+    site: &Site,
+    feed: Vendor,
+    path: Result<std::path::PathBuf, String>,
+) -> (axum::http::StatusCode, String) {
+    let read = path.and_then(|path| crate::indexmap::Published::read(&path));
     let nse = match read {
         Ok(nse) => nse,
         Err(why) => {
@@ -35898,11 +36500,6 @@ fn calendar_admission_refused(why: &crate::detail::RunError) -> CalendarAnswer {
 /// read and before its calendar is kept -- the interleaving that decides
 /// whether the calendar is kept under its census's stamp or a later one -- on
 /// every run, as [`census_now_reading`]'s parameter does for the census. D-0695.
-#[expect(
-    clippy::too_many_lines,
-    reason = "one stamped census shared by both branches, refused once before either when \
-              it cannot be read; splitting the branches apart would re-take it per branch"
-)]
 fn calendar_json_reading(
     site: &Site,
     uri: &axum::http::Uri,
@@ -35951,6 +36548,39 @@ fn calendar_json_reading(
     // own evidence beside it — who it was derived from, and every day they read
     // differently. See `calendar_of::agree` for why that is a union.
     let symbol = stored_case(param(query, "symbol"));
+    // THE SERVED ANSWER IS KEPT FOR THE CENSUS SNAPSHOT IT WAS BUILT FROM.
+    // Both branches below collect and sort this feed's census entries
+    // (`held_entries`, O(E_v log E_v)) before their first calendar probe, and
+    // the exchange branch clones and agrees every spot series' calendar. Every
+    // calendar they read is itself kept under this snapshot's stamp by
+    // `calendar_of::cached`, so the answer is a function of the snapshot, the
+    // feed and the name: while the snapshot is the one this request observed
+    // it is served again, one memo probe and a copy. The feed's own stamp is in
+    // the key as well, because it is the key every calendar below is kept
+    // under. A pull replaces the snapshot and drops every kept answer; a
+    // refusal is never kept. W1-api5-5, D-2286; see `crate::answer_memo`.
+    site.calendar_memo
+        .of_census(&fresh, 0, (feed, symbol.clone(), stamp), || {
+            calendar_answer(site, feed, own, stamp, &symbol, &fresh, json)
+        })
+}
+
+/// [`calendar_json_reading`]'s answer for one feed and name, and whether it may
+/// be kept under the census snapshot `fresh` (D-2286).
+#[expect(
+    clippy::too_many_lines,
+    reason = "both branches of one answer over one stamped census, refused once before \
+              either when it cannot be read; splitting them would re-take it per branch"
+)]
+fn calendar_answer(
+    site: &Site,
+    feed: Vendor,
+    own: Option<&census::VendorCensus>,
+    stamp: Option<std::time::SystemTime>,
+    symbol: &str,
+    fresh: &[census::VendorCensus],
+    json: &'static str,
+) -> (CalendarAnswer, bool) {
     if symbol.is_empty() {
         // A FRESH CENSUS, NOT `site.entries`.
         //
@@ -36071,7 +36701,10 @@ fn calendar_json_reading(
             // session wherever it was the one witness, and that agreement would
             // be answered as the exchange's. See `unopened_calendar`.
             if !derived.unopened.is_empty() {
-                return unopened_calendar(feed, symbol.as_str(), &derived.unopened);
+                return (
+                    unopened_calendar(feed, symbol.as_str(), &derived.unopened),
+                    false,
+                );
             }
             let calendar = derived.calendar;
             // A SYMBOL THIS FEED HOLDS NOTHING FOR IS NOT A VOTE FOR ANYTHING.
@@ -36087,10 +36720,15 @@ fn calendar_json_reading(
         }
         let (exchange, clashes) = crate::calendar_of::agree(&readings);
         let from: Vec<String> = readings.into_iter().map(|(name, _)| name).collect();
+        // KEPT ONLY WHEN EVERY CALENDAR IN IT WAS KEPT UNDER A STAMP: without
+        // one `calendar_of::cached` keeps nothing either.
         return (
-            axum::http::StatusCode::OK,
-            [(axum::http::header::CONTENT_TYPE, json)],
-            crate::calendar_of::exchange_json(&exchange, &from, &clashes),
+            (
+                axum::http::StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, json)],
+                crate::calendar_of::exchange_json(&exchange, &from, &clashes),
+            ),
+            stamp.is_some(),
         );
     }
 
@@ -36146,9 +36784,12 @@ fn calendar_json_reading(
             Some(seen) if seen == identity => months.push(month),
             Some(seen) => {
                 return (
-                    axum::http::StatusCode::CONFLICT,
-                    [(axum::http::header::CONTENT_TYPE, json)],
-                    calendar_conflict_json(feed, &symbol, seen, identity),
+                    (
+                        axum::http::StatusCode::CONFLICT,
+                        [(axum::http::header::CONTENT_TYPE, json)],
+                        calendar_conflict_json(feed, symbol, seen, identity),
+                    ),
+                    false,
                 );
             }
         }
@@ -36187,7 +36828,7 @@ fn calendar_json_reading(
         feed,
         exchange.as_str(),
         segment.as_str(),
-        &symbol,
+        symbol,
         held.and(stamp),
         &months,
         census_holds(own.zip(series)),
@@ -36195,13 +36836,19 @@ fn calendar_json_reading(
     // A HELD MONTH THAT DID NOT OPEN IS NOT A MONTH WITHOUT SESSIONS. See
     // `unopened_calendar`.
     if !derived.unopened.is_empty() {
-        return unopened_calendar(feed, &symbol, &derived.unopened);
+        return (unopened_calendar(feed, symbol, &derived.unopened), false);
     }
     let calendar = derived.calendar;
+    // KEPT ONLY FOR A NAME THIS FEED'S CENSUS HOLDS, under a stamp: the same
+    // rule `calendar_of::cached` keeps by, so request text alone never grows
+    // the memo. D-2286.
     (
-        axum::http::StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, json)],
-        crate::calendar_of::json(&calendar),
+        (
+            axum::http::StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, json)],
+            crate::calendar_of::json(&calendar),
+        ),
+        held.and(stamp).is_some(),
     )
 }
 

@@ -752,9 +752,18 @@ mod tests {
         let prepare = "Prepared::from_execution(";
         let top = body(
             selection,
-            "pub(crate) fn top_twenty_five(&mut self) -> Result<Vec<SelectionV6Winner>, String>",
+            "fn authenticated(&mut self) -> Result<(Vec<SelectionV6Winner>, Block), String>",
         );
         assert_eq!(top.matches(prepare).count(), 2, "{top}");
+        let public = body(
+            selection,
+            "pub(crate) fn top_twenty_five(&mut self) -> Result<Vec<SelectionV6Winner>, String>",
+        );
+        assert_eq!(
+            public.matches("self.authenticated()?").count(),
+            1,
+            "{public}"
+        );
         let ten = body(
             selection,
             "pub(crate) fn top_ten(&mut self) -> Result<Vec<SelectionV6Winner>, String>",
@@ -764,8 +773,11 @@ mod tests {
             selection,
             "pub(crate) fn snapshot(&mut self) -> Result<SelectionV6Snapshot, String>",
         );
-        assert_eq!(snapshot.matches(prepare).count(), 1, "{snapshot}");
-        assert_eq!(snapshot.matches("self.top_twenty_five()?").count(), 1);
+        // D-1848 (W2-cli14-2): the snapshot takes its envelope from the block
+        // the authenticated read proved, with no third preparation or scan.
+        assert_eq!(snapshot.matches(prepare).count(), 0, "{snapshot}");
+        assert!(!snapshot.contains("require_committed("), "{snapshot}");
+        assert_eq!(snapshot.matches("self.authenticated()?").count(), 1);
         let witnesses = body(selection, "pub(crate) fn stored_oos_witnesses(");
         assert_eq!(
             witnesses.matches("self.snapshot()?").count(),
