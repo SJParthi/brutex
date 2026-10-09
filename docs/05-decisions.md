@@ -65203,3 +65203,91 @@ right. Each one is proven against a temporary mutant, measured with
 - **A begin refusal refusing every month.** The partway test failed at
   month 0's completion check, with "sweep evidence I/O refused: Is a
   directory (os error 21)".
+
+### D-4703 — `one_rung_cached` is driven A, then B with the same key, then A again, end to end — 2026-10-09
+
+**What was wrong.** W2-cli8-9 test gap. D-1700 made the success arm of
+`one_rung_cached` read a rung's row back through `recorded_row`, by the
+identity its page names, rather than taking the newest row that matches its
+key. Both of its tests call `recorded_row` directly. If the arm were
+rewired back to a key lookup, every test would still pass.
+
+**Decided.**
+`audited_stored::tests::a_range_rung_rerun_through_one_rung_cached_returns_its_own_row`
+calls `one_rung_cached` three times on one warmed store, at 5min with a
+fixed support, under three explicit commits:
+1. "generated-one-rung-readback-a"
+2. "-b"
+3. "-a" again
+
+The first two runs share feed, instrument, rung, span and `min_hits`, and
+have different identities. The second run is the ledger's newest row. The
+third run's row must have the first run's identity, must equal ledger row 0,
+and must equal the first run's row field for field. The premises are
+asserted first: two distinct identities, one key, and two ledger rows.
+
+**Proof.** The test passed on the unfixed tree, because the arm is right.
+Against a temporary mutant whose arm reads the newest ledger row, it failed
+at `audited_stored_tests.rs:2960`: the rerun's identity was B's. Under the
+same mutant, `a_reused_range_rung_reads_its_own_row_and_not_the_newest_with_its_key`,
+which calls `recorded_row` directly, still passed.
+
+### D-4704 — Pool pass 2 is held to the cell pass 1 recorded, at 5min and 60min, for every recorded row — 2026-10-09
+
+**What was wrong.** GAP13-15 test gap.
+`pool::tests::the_pool_prices_a_span_exactly_where_the_audit_path_does`
+holds `price_all` to `audit_path_cell`, a cell that the test module
+re-assembles from the audit path's functions. Three things followed:
+- A divergence in what pass 1 actually records, in `price_grids` or the tier
+  cascade, would move neither side of that test.
+- Only the empty mask was priced.
+- 60min, the rung the finding measured, was never exercised. The warmed
+  store's constant prices halt a 60min ladder, because every condition holds
+  on every bar.
+
+**Decided.**
+`pool::tests::pass_two_prices_each_frontier_row_as_pass_one_recorded_it`
+runs at 5min over May 2025 and at 60min over March to May:
+1. `screen_pass_one` screens NIFTY.
+2. The test reads that run's frontier rows by its recorded identity.
+3. `union_of` and `price_all` price the union.
+4. Each frontier row's `(mask, side)` must get from `price_all` the cell the
+   row carries: trades, wins, pessimistic net, worst trade, drawdown,
+   smallest win, gross win and gross loss. A row with no trade must get no
+   cell.
+
+Its premise is that at least one recorded row with a non-empty mask traded.
+On this store every recorded row has a non-empty mask, and
+`the_pool_prices_a_span_exactly_where_the_audit_path_does` keeps the empty
+mask. The ceiling is named (`BRUTEX_CEILING=4096`), so the ladder's reach
+does not follow the machine.
+
+The store is `audited_stored::with_varied_store`:
+- a reproducible random walk through 2025-02-28 and every session of March
+  to May;
+- its 1day bars span each session's minutes;
+- its 5min and 60min months are folded by `pull::fold`, so every signal bar
+  closes on its last minute's close, as the exact-minute overlay requires.
+
+Two simpler stores failed, both measured:
+- The warmed store's 5min bars are sampled minutes. Varied prices fail that
+  overlay ("SignalCloseMismatch").
+- One month of 60min bars halted the ladder at every support from 60% to
+  99%, on either walk. March to May, 213 swept bars, completed at each.
+
+**Proof.** Measured against temporary mutants of the levels `price_grids`
+builds for what pass 1 records:
+- One more rung. The test failed at 60min: "60min rank 1 Long: pass 2's cell
+  is pass 1's recorded cell", pessimistic -4595 against -4525. Under the
+  same mutant `the_pool_prices_a_span_exactly_where_the_audit_path_does`
+  still passed, which is the gap. The 5min half did not differ, which is
+  why the 60min half is needed.
+- A doubled step. Pass 1 then refused to record ("could not reproduce its
+  selected exit cell on an exact grid rebuild"), so the test failed at its
+  premise.
+- No forced stop, and no ratio targets. These recorded the same cells on
+  this store, and the test passed. They are equivalent here, not caught.
+
+**Honest limit.** The fixture's prices are generated and say nothing about a
+market. The test pins that the two passes agree, not what a cell is worth.
+A drift that moves no recorded cell on this store is not seen.

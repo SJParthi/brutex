@@ -3754,6 +3754,110 @@ mod tests {
         });
     }
 
+    /// **Pass 2 prices each frontier row exactly as pass 1 RECORDED it, at
+    /// 5min and at 60min.** GAP13-15 test gap, D-1702, D-4704.
+    ///
+    /// The test above holds `price_all` to a cell re-assembled here from the
+    /// audit path's functions, so a drift in what pass 1 records (its tier
+    /// cascade, `price_grids`) would move neither side and pass, and it
+    /// prices the empty mask only. This reads the cells pass 1 actually
+    /// wrote: `screen_pass_one` screens the instrument, and every frontier row
+    /// of its recorded identity is a `(mask, side)` with the money its cell
+    /// carried. `price_all` must return that money for that candidate, and no
+    /// cell for a row that did not trade. Every recorded row is checked, and
+    /// a non-empty mask among them must have traded (a premise). 60min is the
+    /// rung the finding measured; it runs over March to May, because one
+    /// month of 60min bars halts the ladder (see `with_varied_store`). The
+    /// ceiling is named, so the ladder's reach does not follow the machine.
+    #[test]
+    fn pass_two_prices_each_frontier_row_as_pass_one_recorded_it() {
+        let _knobs = crate::knobs::serially();
+        crate::knobs::clear_all();
+        crate::knobs::set("BRUTEX_VALIDATE", "0");
+        crate::knobs::set("BRUTEX_CEILING", "4096");
+        crate::audited_stored::with_varied_store(|root| {
+            let vendor = brutex_core::vendor::Vendor::Zerodha;
+            let surface = ["NIFTY".to_owned()];
+            for (rung, span) in [
+                ("5min", ((2025, 5), (2025, 5))),
+                ("60min", ((2025, 3), (2025, 5))),
+            ] {
+                let screened = super::screen_pass_one(
+                    root,
+                    Some("generated-pass-two-reference"),
+                    "zerodha",
+                    &surface,
+                    rung,
+                    span,
+                    Some(600_000),
+                );
+                let record = screened
+                    .first()
+                    .expect("one screen")
+                    .outcome
+                    .as_ref()
+                    .map_err(|why| format!("{rung}: {why}"))
+                    .expect("premise: pass 1 records");
+                let (rows, damage) = crate::frontier::Frontier::open_read(root)
+                    .expect("frontier")
+                    .of_run(&record.identity)
+                    .expect("its rows");
+                assert!(damage.is_none(), "{damage:?}");
+                let (union, unread) = super::union_of(root, &screened);
+                assert!(unread.is_empty(), "{unread:?}");
+                let priced = super::price_all(root, vendor, "NIFTY", rung, span.0, span.1, &union)
+                    .expect("pass 2 prices the span");
+                let (mut fired, mut fired_non_empty) = (0, 0);
+                for row in &rows {
+                    let at = union
+                        .iter()
+                        .position(|c| c.words == row.mask_words && c.direction == row.direction)
+                        .expect("every frontier row is in the union");
+                    let figures = priced.get(at).copied().flatten().map(|c| {
+                        (
+                            c.trades,
+                            c.wins,
+                            c.pessimistic,
+                            c.worst_trade,
+                            c.max_drawdown,
+                            c.min_win,
+                            c.gross_win,
+                            c.gross_loss,
+                        )
+                    });
+                    let recorded = (row.trades > 0).then_some((
+                        row.trades,
+                        row.cell_wins,
+                        row.pessimistic,
+                        row.worst_trade,
+                        row.max_drawdown,
+                        row.min_win,
+                        row.gross_win,
+                        row.gross_loss,
+                    ));
+                    assert_eq!(
+                        figures, recorded,
+                        "{rung} rank {} {:?}: pass 2's cell is pass 1's recorded cell",
+                        row.rank, row.direction
+                    );
+                    if row.trades > 0 {
+                        fired += 1;
+                        if row.mask_words != [0; 6] {
+                            fired_non_empty += 1;
+                        }
+                    }
+                }
+                assert!(fired > 0, "premise: a recorded {rung} row fired");
+                assert!(
+                    fired_non_empty > 0,
+                    "premise: a non-empty {rung} mask fired: {} row(s)",
+                    rows.len()
+                );
+            }
+        });
+        crate::knobs::clear_all();
+    }
+
     /// **Pass 2 withholds the day pass 1 withholds when that day's closing
     /// minute cannot be sourced, and prices the rest exactly where the audit
     /// path does.** D-1707, closing the difference D-1702 stated.

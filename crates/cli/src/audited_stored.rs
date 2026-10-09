@@ -249,5 +249,6 @@ mod tests;
 
 #[cfg(test)]
 pub(crate) use tests::{
-    with_unsourceable_close, with_unsourceable_close_of, with_warmed_store, with_warmed_store_of,
+    with_unsourceable_close, with_unsourceable_close_of, with_varied_store, with_warmed_store,
+    with_warmed_store_of,
 };
