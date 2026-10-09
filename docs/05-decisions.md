@@ -68901,3 +68901,29 @@ and the test is re-taken; none of these changes production code.
   store mid-run: measured as `.../bars/zerodha does not exist` under the
   default thread count, green with `--test-threads=1`. It now has its own
   root, `month-refused`, a tag gate 1d already declares.
+
+### D-4613 — The newest event file that cannot be measured is proved, not declared — 2026-10-09
+
+**What CI found.** Run 1287 on the merged tree (`061c7004`) measured
+`crates/telemetry/src/sink.rs` at 28 uncovered lines against gate 20's
+declared 20, and gate 20 failed; the Gate 18 shards need the coverage job,
+so all of them were skipped. A crate-scoped profile on this box reproduced
+both numbers exactly (20 on `fbdabaec`, 28 on the merge), and the eight new
+lines are one block: the `Err(e)` arm of `resume_point` that CE-51 (D-2510,
+zero/next) added for a newest file whose `metadata` fails for a reason other
+than absence. zero/next's own test proves the undecodable half; nothing
+reached this one.
+
+**Decision.** Cover it rather than raise the count. The arm is a production
+path an operator can meet (a link that loops, an I/O error from the file
+system), so declaring it unreachable would be false. The test makes `.1` a
+link to itself, so `metadata` fails with a loop, keeps a readable stream in
+`.2`, and requires that the open resumes from neither, numbers from 1, and
+names `.1` in `last_error`. Its asserts are single-line, so the test adds no
+uncovered line of its own. Gate 20's declaration stays at `sink.rs 20` and
+`docs/06-limits.md` §54 is unchanged.
+
+**Proof.** MRG-05:
+`an_unmeasurable_newest_file_is_named_and_not_replaced_by_an_older_one` in
+`crates/telemetry/src/sink.rs`. Re-measured crate-scoped after the test: 20
+uncovered lines, the same 20 as on `fbdabaec`.

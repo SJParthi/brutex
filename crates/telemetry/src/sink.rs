@@ -4230,6 +4230,40 @@ mod tests {
         let _ignored = std::fs::remove_dir_all(&dir);
     }
 
+    /// A NEWEST FILE WHOSE SIZE CANNOT BE MEASURED STOPS THE WALK THERE, AND
+    /// SAYS SO. CE-51, D-2510, D-4613.
+    ///
+    /// The other half of the test above. A measuring error used to read as
+    /// length zero, so the walk stepped past it to an older file. Here the
+    /// current file is empty, `.1` is a link to itself (so `metadata` fails
+    /// with a loop, not with absence) and `.2` holds a readable stream: the
+    /// open must not resume from `.2`, and it must name `.1`.
+    #[test]
+    fn an_unmeasurable_newest_file_is_named_and_not_replaced_by_an_older_one() {
+        // A sink is dropped and reopened here: see `FORK_GATE` (D-1462).
+        let _gate = crate::tests::no_fork_in_flight();
+        let dir = scratch("resume-unmeasurable");
+        let config = Config::new(&dir).with_keep_files(4);
+        {
+            let sink = Sink::open(&config).expect("opens");
+            for _ in 0..5 {
+                assert!(sink.emit(&Event::info("t", "m")).is_written());
+            }
+        }
+        std::fs::rename(current_path(&dir), rotated_path(&dir, 2)).expect("roll");
+        let newest = rotated_path(&dir, 1);
+        std::os::unix::fs::symlink(&newest, &newest).expect("a self-referential link");
+        let sink = Sink::open(&config).expect("reopens");
+        let health = sink.health();
+        assert_eq!(health.next_seq, 1, "the older file did not stand in");
+        let why = health.last_error.unwrap_or_default();
+        assert!(why.contains("cannot measure the newest"), "{why}");
+        assert!(why.contains("restart at zero"), "{why}");
+        assert!(why.contains("events.1.ndjson"), "the file is named: {why}");
+        drop(sink);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
     /// **THE TWO FLOORS ARE ONE WORD, SO NOTHING CAN OBSERVE THEM CROSSED.**
     ///
     /// `set_min_level` used to store the global floor into one atomic and then
