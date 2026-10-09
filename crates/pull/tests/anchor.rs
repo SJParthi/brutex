@@ -161,32 +161,49 @@ fn an_open_tail_is_not_a_scheduled_closing_stub() {
     assert!(diagnostics.is_empty());
 }
 
+/// **A SPECIAL SESSION FOLDS INSIDE ITS WINDOWS, ON THE STORED GRID (D-3321
+/// item 1, WP-13b).** Every bucket of these days was withheld ("fixed stored
+/// grid cannot attest session alignment"), so BANKNIFTY 2024-03-02 held 105
+/// one-minute bars and none at any derived rung (DB-013). On the regular
+/// 09:15 grid a bucket owes exactly the window minutes it overlaps, so each
+/// day folds to one hour bar per hour bucket its windows touch — counted here
+/// from the windows, not from the fold — every bar starts on the grid, and a
+/// missing first minute withholds the first bucket alone.
 #[test]
-fn exceptional_sessions_are_withheld_without_changing_the_stored_grid() {
+fn exceptional_sessions_fold_inside_their_windows_on_the_stored_grid() {
     for day in [pull::calendar::SYSTEMS_OUTAGE_DAY, 19_784, 19_861, 20_382] {
         let pull::calendar::DayKind::Open(session) = pull::calendar::kind_of(day) else {
             panic!("known session")
         };
         let midnight = day * 86_400 - pull::session::IST_OFFSET_SECS;
-        let bars: Vec<_> = (0..1440_u16)
-            .filter(|m| session.expects(*m))
-            .map(|m| minute(midnight + i64::from(m) * 60))
+        let owed: Vec<u16> = (0..1440_u16).filter(|m| session.expects(*m)).collect();
+        let bars: Vec<_> = owed
+            .iter()
+            .map(|m| minute(midnight + i64::from(*m) * 60))
             .collect();
+        let mut hours: Vec<i64> = owed
+            .iter()
+            .map(|m| (i64::from(*m) - 555).div_euclid(60))
+            .collect();
+        hours.dedup();
         let (complete, diagnostics) =
             pull::fold::complete_minutes(&bars, Bucket::of_secs(3600).unwrap()).unwrap();
-        assert!(
-            complete.is_empty(),
-            "{day}: exceptional session must not be certified"
-        );
-        assert!(
-            diagnostics
-                .iter()
-                .any(|why| why.contains("exceptional session"))
+        assert!(diagnostics.is_empty(), "{day}: {diagnostics:?}");
+        assert_eq!(complete.len(), hours.len(), "{day}");
+        for bar in &complete {
+            let from_open = bar.ts_micros / 1_000_000 - (midnight + 555 * 60);
+            assert_eq!(from_open.rem_euclid(3_600), 0, "{day}: on the 09:15 grid");
+        }
+        assert_eq!(
+            complete.iter().map(|bar| bar.volume).sum::<i64>(),
+            i64::try_from(owed.len()).unwrap(),
+            "{day}: every owed minute is in exactly one bar"
         );
         let (short, diagnostics) =
             pull::fold::complete_minutes(&bars[1..], Bucket::of_secs(3600).unwrap()).unwrap();
-        assert!(short.is_empty());
-        assert!(!diagnostics.is_empty());
+        assert_eq!(short.len(), complete.len() - 1, "{day}");
+        assert_eq!(diagnostics.len(), 1, "{day}: {diagnostics:?}");
+        assert!(diagnostics[0].contains("incomplete or invalid minute coverage"));
     }
 }
 
@@ -412,14 +429,14 @@ fn derivative_extension_changes_the_missing_observed_day_tail() {
     assert!(diagnostics[0].contains("observed-day tail"));
 }
 
-/// audit-20261003 hunt-pull-3 (D-1533). An exceptional session is named ONCE
-/// per day, not once per bucket. o1api-44 / D-1201 collapsed the per-bucket
-/// lines for unmeasured days; an outage day, a DR Saturday or a Muhurat still
-/// pushed one identical "exceptional session ... withheld" line per bucket,
-/// each a `pull.derive` warning and a clause of the rung's refusal: 54 lines
-/// for 2024-03-02 at two minutes.
+/// audit-20261003 hunt-pull-3 (D-1533) named an exceptional session once per
+/// day instead of once per bucket, while it was withheld (54 lines for
+/// 2024-03-02 at two minutes). Since D-3321 (WP-13b) the day folds: 54
+/// two-minute bars, the first window's 23 and the second's 31, each owing the
+/// window minutes it overlaps (11:29's bucket owes 11:30 alone), and nothing
+/// to name.
 #[test]
-fn an_exceptional_session_is_named_once_per_day_not_once_per_bucket() {
+fn a_disaster_recovery_saturday_folds_at_two_minutes_with_nothing_to_name() {
     let day = 19_784; // 2024-03-02, a disaster-recovery Saturday in two windows
     let pull::calendar::DayKind::Open(session) = pull::calendar::kind_of(day) else {
         panic!("known session")
@@ -431,18 +448,19 @@ fn an_exceptional_session_is_named_once_per_day_not_once_per_bucket() {
         .collect();
     let (complete, diagnostics) =
         pull::fold::complete_minutes(&bars, Bucket::of_secs(120).unwrap()).unwrap();
-    assert!(complete.is_empty(), "the session is still withheld");
-    let named: Vec<_> = diagnostics
-        .iter()
-        .filter(|why| why.contains("exceptional session"))
-        .collect();
-    assert_eq!(named.len(), 1, "one line for the day: {diagnostics:?}");
-    assert!(
-        named.iter().all(|why| why.contains(&day.to_string())),
-        "the line names the day: {named:?}"
-    );
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(complete.len(), 23 + 31);
+    let at = |bar: &Bar| (bar.ts_micros / 1_000_000 - midnight) / 60;
+    assert_eq!(at(&complete[22]), 599, "the first window's one-minute stub");
+    assert_eq!(at(&complete[23]), 689, "the second window's first bucket");
+    assert_eq!((complete[22].volume, complete[23].volume), (1, 1));
 }
 
+/// THE CALENDAR'S SESSION, NOT THE VENUE'S HOURS, ON EVERY VENUE (CE-52,
+/// D-2670). 385 minutes from 09:15 on the 2021-02-24 outage day: only the two
+/// hour buckets the first window owes in full (09:15 and 10:15) fold, on every
+/// venue; every bucket holding a minute after 11:39 holds one the session does
+/// not owe and is withheld by name, a share's included.
 #[test]
 fn venue_hours_do_not_override_an_exceptional_calendar_session() {
     for venue in pull::vendor::Venue::ALL {
@@ -454,13 +472,18 @@ fn venue_hours_do_not_override_an_exceptional_calendar_session() {
         let (complete, diagnostics) =
             pull::fold::complete_minutes_for_venue(&bars, Bucket::of_secs(3600).unwrap(), venue)
                 .unwrap();
-        assert!(complete.is_empty());
+        let starts: Vec<i64> = complete
+            .iter()
+            .map(|bar| (bar.ts_micros / 1_000_000 - midnight) / 60)
+            .collect();
+        assert_eq!(starts, [555, 615], "{venue}");
+        assert_eq!(diagnostics.len(), 5, "{venue}: {diagnostics:?}");
         assert!(
             diagnostics
                 .iter()
-                .all(|why| why.contains("exceptional session"))
+                .all(|why| why.contains("incomplete or invalid minute coverage")),
+            "{venue}: {diagnostics:?}"
         );
-        assert!(!diagnostics.is_empty());
     }
 }
 
@@ -469,63 +492,44 @@ fn midnight_of(day: pull::session::Day) -> i64 {
     i64::from(day.days_from_epoch()) * 86_400 - pull::session::IST_OFFSET_SECS
 }
 
-/// **A DAY WHOSE SESSION LENGTH IS UNMEASURED IS WITHHELD ONCE, FOR ITS OWN
-/// REASON.** GAP12-12, D-0955.
-///
-/// A pre-2025 Muhurat is `OpenLengthUnmeasured`: the exchange traded and the
-/// calendar does not state for how long, so no minute count can complete a
-/// bucket. Each bucket used to be reported as "incomplete or invalid minute
-/// coverage ... historical gap refill requires a versioned store repair", which
-/// `ingest::derive` rewrites into "restore complete minute source" — a repair
-/// that does not exist, once per bucket. Checked at every width from one minute
-/// to an hour, with a regular day after it whose buckets must still complete.
+/// **A MUHURAT THE CALENDAR LEAVES UNSIZED FOLDS INSIDE ITS RECORDED WINDOW
+/// (D-3319, D-3321, WP-13b).** GAP12-12 and D-0955 withheld such a day once,
+/// for its own reason, because no minute count could complete a bucket of a
+/// session whose length nobody had stated. The window is recorded now
+/// (`calendar::SPECIAL_SESSIONS`), so the evening folds at every width beside
+/// the regular day after it, and nothing is named. The once-per-day sentence
+/// for a day with no recorded window is held by `pull::fold`'s own tests.
 #[test]
-fn an_unmeasured_length_day_is_withheld_once_with_its_own_reason() {
+fn an_unsized_muhurat_folds_inside_its_recorded_window() {
     use pull::calendar::DayKind;
     use pull::session::Day;
     let muhurat = Day::new(2020, 11, 14).unwrap();
     assert_eq!(
         pull::calendar::kind_of(i64::from(muhurat.days_from_epoch())),
         DayKind::OpenLengthUnmeasured,
-        "the premise: the calendar withholds this day's length"
+        "the premise: run identity's calendar still leaves this day unsized"
     );
-    // Sixty minutes from 18:15 IST, which is the shape the 2025 Muhurat had.
+    // Sixty minutes from 18:15 IST, the recorded window.
     let evening = midnight_of(muhurat) + (18 * 60 + 15) * 60;
     let mut bars: Vec<_> = (0..60).map(|m| minute(evening + m * 60)).collect();
     // A regular session after it: 2020-11-17, a Tuesday.
     let regular = midnight_of(Day::new(2020, 11, 17).unwrap()) + 555 * 60;
     bars.extend((0..SESSION_MINUTES).map(|m| minute(regular + m * 60)));
-    for secs in [60_u32, 300, 900, 3600] {
+    for (secs, evening_bars) in [(60_u32, 60), (300, 12), (900, 4), (3600, 1)] {
         let (complete, diagnostics) =
             pull::fold::complete_minutes(&bars, Bucket::of_secs(secs).unwrap()).unwrap();
-        assert_eq!(
-            diagnostics.len(),
-            1,
-            "{secs}s: one sentence for the day, not one per bucket: {diagnostics:?}"
-        );
-        let why = &diagnostics[0];
-        assert!(why.contains("unmeasured"), "{secs}s: {why}");
-        assert!(
-            !why.contains("incomplete") && !why.contains("historical gap refill"),
-            "{secs}s: not a coverage fault, so nothing for derive to rewrite into a repair: {why}"
-        );
-        assert!(
-            complete
-                .iter()
-                .all(|bar| bar.ts_micros >= regular * 1_000_000),
-            "{secs}s: nothing from the unmeasured day is certified"
-        );
+        assert!(diagnostics.is_empty(), "{secs}s: {diagnostics:?}");
+        let on_evening = complete
+            .iter()
+            .filter(|bar| bar.ts_micros < regular * 1_000_000)
+            .count();
+        assert_eq!(on_evening, evening_bars, "{secs}s");
         assert_eq!(
             complete.iter().map(|bar| bar.volume).sum::<i64>(),
-            SESSION_MINUTES,
-            "{secs}s: and the regular day after it still completes whole"
+            SESSION_MINUTES + 60,
+            "{secs}s: both days fold whole"
         );
     }
-    // A single bar on that day is still one sentence; no bars is none.
-    let (_, one) = pull::fold::complete_minutes(&bars[..1], Bucket::of_secs(300).unwrap()).unwrap();
-    assert_eq!(one.len(), 1, "{one:?}");
-    let (none, nothing) = pull::fold::complete_minutes(&[], Bucket::of_secs(300).unwrap()).unwrap();
-    assert!(none.is_empty() && nothing.is_empty());
 }
 
 /// **BARS ON A MEASURED CLOSED DAY ARE A STORE DEFECT, NAMED ONCE.** GAP12-12.

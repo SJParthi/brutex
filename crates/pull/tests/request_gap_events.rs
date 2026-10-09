@@ -1,10 +1,14 @@
-//! ONE REQUEST-MINUTE GAP IS ONE LOG LINE. OD-2, D-2371, invariant AFG-71.
+//! ONE (MONTH, REASON) OF REQUEST-MINUTE GAPS IS ONE LOG LINE. OD-2, D-2371,
+//! invariant AFG-71; D-3341 item 2 (WP-13b).
 //!
-//! `ingest::from_window` turns each line of `request_minutes::audit` into a
-//! receipt `Failure` and emits one `pull.request_minutes` event for it. Until
-//! D-2371 the audit ALSO emitted a `pull.file` "not filed" event for the same
-//! line, under the placeholder instrument "requested window", so each gap was
-//! two events while `docs/06-limits.md` said one.
+//! `ingest::from_window` hands the request audit's findings to
+//! `request_minutes::report`, which emits one `pull.request_minutes` event and
+//! one receipt `Failure` per (instrument, month, reason), with `count`,
+//! `first_day` and `last_day`. Until D-2371 the audit ALSO emitted a
+//! `pull.file` "not filed" event for each gap, under the placeholder
+//! instrument "requested window", so each gap was two events while
+//! `docs/06-limits.md` said one; until D-3341 every gap was its own event, and
+//! one log window held 4,847 of them (DB-G88).
 //!
 //! Its own test binary because `telemetry::install` is a process singleton:
 //! no sibling test can write a gap line into this log and inflate the count.
@@ -75,13 +79,14 @@ fn coverage_lines(log: &str) -> Vec<&str> {
 }
 
 #[test]
-fn each_request_minute_gap_is_exactly_one_error_event() {
+fn each_month_and_reason_of_request_minute_gaps_is_exactly_one_error_event() {
     let logs = scratch("gap-receipt");
     let config = telemetry::Config::new(&logs).with_min_level(telemetry::Level::Trace);
     let sink = telemetry::install(&config).expect("the only install in this binary");
     let req = request();
 
-    // Minutes 0..5 and 60..75 absent: two gaps, two receipt failures.
+    // Minutes 0..5 and 60..75 absent: two gaps of one month and one reason,
+    // so one counted receipt failure.
     let rows = (0..375)
         .filter(|m| *m >= 5 && !(60..75).contains(m))
         .map(row)
@@ -99,7 +104,11 @@ fn each_request_minute_gap_is_exactly_one_error_event() {
         .iter()
         .filter(|f| f.why.starts_with("request minute coverage gap"))
         .count();
-    assert_eq!(gaps, 2, "the premise: two gaps on the receipt");
+    assert_eq!(
+        gaps, 1,
+        "two gaps, one counted failure: {:?}",
+        done.failures
+    );
 
     // An empty response is the whole session missing: one more gap.
     let empty = scratch("empty");
@@ -121,9 +130,20 @@ fn each_request_minute_gap_is_exactly_one_error_event() {
     let lines = coverage_lines(&log);
     assert_eq!(
         lines.len(),
-        3,
-        "one event per gap, not two (pull.file + pull.request_minutes): {lines:#?}"
+        2,
+        "one event per (month, reason), not one per gap: {lines:#?}"
     );
+    assert!(
+        lines[0].contains("\"count\":2")
+            && lines[0].contains("\"first_day\":\"2025-07-01\"")
+            && lines[0].contains("\"last_day\":\"2025-07-01\"")
+            && lines[0].contains("\"month\":\"2025-07\"")
+            && lines[0].contains("\"code\":\"vendor_empty\"")
+            && lines[0].contains("\"feed\":\"truedata\""),
+        "{}",
+        lines[0]
+    );
+    assert!(lines[1].contains("\"count\":1"), "{}", lines[1]);
     for line in &lines {
         assert!(line.contains("\"pull.request_minutes\""), "{line}");
         assert!(
