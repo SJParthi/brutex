@@ -49,11 +49,15 @@
 //! `api::indexmap::join`, which calls [`Catalogue::resolve`] directly --
 //! `nse.matcher.resolve(&symbol)` -- for each feed index symbol on every
 //! `GET /indexmap.json`, after re-reading the catalogue from disk, and once
-//! more before that for a symbol the feed renames (`index_alias_source`).
+//! more before that for a store key the alias table names (`brutex_core::alias`,
+//! D-3332: the table's NSE name, which resolves verbatim by one hash lookup).
+//! An ambiguous answer then walks the catalogue once more, through
+//! [`accepts`], to name its candidates (DB-G27).
 //! [`Catalogue::index`] is called only by this module's tests. So on the live
 //! route each resolve of a symbol not published verbatim costs one scan of the
 //! catalogue, O(catalogue rows x collapsed name length), at most two resolves
-//! per feed symbol, and a request costs that times the number of feed symbols. The route claims no §3 rule 4
+//! and one candidate walk per feed symbol, and a request costs that times the
+//! number of feed symbols. The route claims no §3 rule 4
 //! bound (its own `# Cost` section says so), and this one is not claimed
 //! either. D-0961.
 //!
@@ -158,8 +162,14 @@ pub fn is_ordered_subsequence(short: &str, long: &str) -> bool {
     next.is_none()
 }
 
-/// Whether `published` accepts `symbol` as an abbreviation of itself.
-fn accepts(symbol: &str, published: &str) -> bool {
+/// Whether `published` accepts `symbol` as an abbreviation of itself. Both
+/// are collapsed names ([`collapse`]).
+///
+/// Public so a caller naming an ambiguous symbol's candidates
+/// (`api::indexmap`, DB-G27) applies the rule [`Catalogue::resolve`] applies
+/// rather than a second copy of it.
+#[must_use]
+pub fn accepts(symbol: &str, published: &str) -> bool {
     is_ordered_subsequence(symbol, published) && digits_agree(symbol, published)
 }
 

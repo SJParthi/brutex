@@ -1658,7 +1658,7 @@ use census_cache::{
     manifest_stamps, read_as_stamped, refuse_contradicted_absences, stamp_could_read,
 };
 pub use census_cache::{CensusCache, CensusNow, CensusStamps};
-pub(crate) use census_cache::{census_now, census_now_stamped};
+pub(crate) use census_cache::{census_now, census_now_stamped, vendor_census};
 use feeds_route::feeds_json;
 use gaps_route::gaps_json;
 #[cfg(test)]
@@ -30729,11 +30729,8 @@ fn indexmap_reading(site: &Site, feed: Vendor) -> (axum::http::StatusCode, Strin
         })
         .map(|(key, _)| key.underlying.as_str())
         .collect();
-    let rows = crate::indexmap::join(&nse, feed, symbols);
-    (
-        axum::http::StatusCode::OK,
-        crate::indexmap::json(&nse, &rows),
-    )
+    // A feed with no master lists what its census holds instead (DB-G26).
+    crate::indexmap::answer(site, &nse, feed, symbols)
 }
 
 /// `GET /calendar.json` — which days the exchange traded, and what each owes.
