@@ -1349,7 +1349,9 @@ const ALLOW_FLOAT: Allow = &[
     ("crates/pull/src/pricing.rs", 23),
     ("crates/pull/src/tenor.rs", 5),
     ("crates/runner/src/grid.rs", 4),
-    ("crates/runner/src/significance.rs", 41),
+    // 44, not 41: D-4150 bounds the Student-t bracket in `turning_point`, which
+    // takes, steps and refuses (NaN) in f64. Statistics keep full precision (D-4181).
+    ("crates/runner/src/significance.rs", 44),
     ("crates/runner/src/admission.rs", 4),
     ("crates/runner/src/bootstrap.rs", 52),
     ("crates/runner/src/bootstrap_family_pass.rs", 17),
@@ -3404,7 +3406,7 @@ mod tests {
         assert_eq!(count(ALLOW_FLOAT, "crates/runner/src/report.rs"), Some(4));
         assert_eq!(
             count(ALLOW_FLOAT, "crates/runner/src/significance.rs"),
-            Some(41)
+            Some(44)
         );
         assert_eq!(count(ALLOW_MEMBER, "crates/api/src/server.rs"), Some(2));
         assert_eq!(count(ALLOW_MEMBER, "crates/cli/src/lib.rs"), Some(7));

@@ -65362,3 +65362,85 @@ empty grid prices as `None`. This is D-2008's precedent for `best_shown`.
 **Rejected.** A store fixture with a refused path inside a candidate's
 occupancy. It would test the grid's replay, which `runner` already owns,
 rather than this filter.
+
+### D-4180 — The turn tests and run 1286's kill tests run first — 2026-10-09
+
+**What was observed.** CI run 1286 (head `fbdabaec`) timed out on nine
+`crates/cli/src/ordered.rs` mutants: `Turns::ready` replaced with `false`; on
+line 98 `||` → `&&`, `>=` → `<`, `<` → `<=`, `-` → `+` and `-` → `/`;
+`Turns::update` and `<impl Drop for Finished>::drop` replaced with `()`; and
+the `!` deleted in `turn`. Each one leaves some lane's turn ungranted. Two tests
+already catch that quickly: the pure rule test
+`a_lane_never_waits_on_its_own_slot` (D-2021) fails in milliseconds, and
+`turns_are_granted_in_round_then_input_order_within_a_deadline` (D-2033) fails
+at its own 30 s `recv_timeout`. Under Gate 18's `--test-threads=1` and
+fail-fast they were never reached: in name order an earlier test waited on the
+same ungranted turn with no bound, and the shard spent its whole test timeout
+there.
+
+Separately, the tests written for run 1286's cli and api survivors (D-4100,
+D-4101, D-4130..D-4135) fail as soon as they run under their mutant, but most
+sort late in lib suites that take tens of minutes. A mutant is reported caught
+only at its first failure, so each one would have cost its shard most of a
+suite.
+
+**Decided.** `.config/nextest.toml` gives the two turn tests and the sixteen kill
+tests `priority = 100`, matched by exact name. This changes order only: every
+test still runs, and none is filtered, skipped, retried or ignored. Measured on
+`fbdabaec` with the turn-test entry alone and each mutation applied by hand, then
+`cargo nextest run -p cli --locked --max-fail=1:immediate --test-threads=1`:
+
+| Mutant | First failing test | Position | Suite time |
+|---|---|---|---|
+| `Turns::update` → `()` | deadline test, 30.4 s | 48 of 2,060 | 122 s |
+| `!` deleted in `turn` | deadline test, 30.4 s | 48 of 2,060 | 130 s |
+| `Turns::ready` → `false` | pure rule test, 0.37 s | 47 of 2,060 | 88 s |
+| line 98 `\|\|` → `&&` | pure rule test, 0.30 s | 47 of 2,060 | 94 s |
+| line 98 `>=` → `<` | pure rule test, 0.41 s | 47 of 2,060 | 89 s |
+
+In run 1286 the same mutants ran to the test timeout. The other four were not
+measured by hand before the box restarted. Gate 18 tests all nine on the pushed
+head, and that run is their proof.
+
+**Rejected.** A deadline on every test that drives `ordered::map`. That would
+bound a hang, but it puts a wall clock into tests that check answers, and a
+clock bound that load alone can trip is the failure D-0911 removed from the
+generated search test. A wait bound inside `ordered::turn` is rejected as well:
+a lane that gave up on its turn would emit out of order, and in-order emission
+is the property the module exists for.
+
+**Honest limit.** The two turn kills depend on order. nextest does not complain
+when a filter matches nothing, so a rename would silently put the hang back.
+`the_d_4180_priority_names_both_turn_tests` holds both names: it stops compiling
+if either function is renamed, and it fails if the config stops naming either
+one. The sixteen kill-test entries are not pinned this way, because a rename
+there only costs time and never turns a caught mutant into a survivor.
+
+### D-4181 — Two static gates the run 1286 fixes tripped, fixed at the source — 2026-10-09
+
+**What was observed.** A local replay of `ci.yml`'s language-purity job on the
+merged fixes failed two gates. Gate 1d refused five segment-shaped string
+literals in `crates/pull/src/ingest.rs`. All five came from D-4153's new census
+lock test: the scratch tag `lock-unmeasured`, the link names `loop-a` and
+`loop-b`, the file `a-file`, and `"n".repeat(300)`. Gate 11 rule 2 counted 44
+float occurrences in `crates/runner/src/significance.rs` against an allowance
+of 41. The three new ones are D-4150's bounded bracket, `turning_point`, which
+starts, steps and refuses (`NaN`) in `f64`.
+
+**Decided.** The test's literals are upper case (`LOCK-UNMEASURED`, `LOOP-A`,
+`LOOP-B`, `A-FILE`, `"N".repeat(300)`), following the module's own
+`LOCK-FIFO` and `LOCK-SOCKET`. Upper case is outside the `[a-z0-9_-]`
+alphabet that `pull::config::check_segment` accepts, so none of them can be a
+parameter-path segment, and gate 1d's declared list stays as it was. What the
+test asserts is unchanged: the link loop still fails `metadata` with a kind
+outside the deferring three, and a 300-byte component still fails with
+`InvalidFilename`. The float allowance is 44, with the reason beside the
+entry, and
+`gate11_allowlists_carry_the_counts_the_merged_code_needs` pins it. CLAUDE.md
+§7 keeps statistics at full precision, and a Student-t bar is a statistic.
+
+**Rejected.** Declaring the five literals in `.github/gates_tree.rs`. That is a
+claim, made by hand, that each one is not a segment, and here the claim can be
+avoided entirely. Rewriting `turning_point` in fixed point was rejected too:
+the tail it bisects is an `f64` function, and an integer bracket around it
+would only move the floats somewhere else.

@@ -4148,7 +4148,7 @@ mod tests {
     #[test]
     fn a_census_directory_that_cannot_be_measured_refuses_unless_it_is_absent() {
         use std::io::ErrorKind::{InvalidFilename, NotADirectory, NotFound};
-        let root = scratch("lock-unmeasured");
+        let root = scratch("LOCK-UNMEASURED");
         let starved = std::io::Error::from(std::io::ErrorKind::OutOfMemory);
         let kind_above = |lock: &std::path::Path| {
             std::fs::metadata(lock.parent().expect("a parent"))
@@ -4157,9 +4157,9 @@ mod tests {
         };
 
         // A LOOP ABOVE THE LOCK, which no kind in the deferring three names.
-        std::os::unix::fs::symlink(root.join("loop-b"), root.join("loop-a")).expect("a link");
-        std::os::unix::fs::symlink(root.join("loop-a"), root.join("loop-b")).expect("its pair");
-        let looped = root.join("loop-a").join("dhan.man.lock");
+        std::os::unix::fs::symlink(root.join("LOOP-B"), root.join("LOOP-A")).expect("a link");
+        std::os::unix::fs::symlink(root.join("LOOP-A"), root.join("LOOP-B")).expect("its pair");
+        let looped = root.join("LOOP-A").join("dhan.man.lock");
         let kind = kind_above(&looped);
         assert!(
             !matches!(kind, NotFound | NotADirectory | InvalidFilename),
@@ -4176,15 +4176,15 @@ mod tests {
         );
 
         // THE THREE THAT DEFER, each built and its kind confirmed.
-        std::fs::write(root.join("a-file"), b"NOT A DIRECTORY").expect("a file");
+        std::fs::write(root.join("A-FILE"), b"NOT A DIRECTORY").expect("a file");
         for (lock, expected) in [
             (root.join("absent").join("dhan.man.lock"), NotFound),
             (
-                root.join("a-file").join("manifest").join("dhan.man.lock"),
+                root.join("A-FILE").join("manifest").join("dhan.man.lock"),
                 NotADirectory,
             ),
             (
-                root.join("n".repeat(300)).join("dhan.man.lock"),
+                root.join("N".repeat(300)).join("dhan.man.lock"),
                 InvalidFilename,
             ),
         ] {
