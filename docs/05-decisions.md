@@ -65232,3 +65232,29 @@ Test: `the_audit_prices_each_walk_forward_fold_with_its_own_training_rung_count`
 (L1FD-05). It passes on the current code. Proof by mutation: with the call
 reverted to `Fixed(grid_rungs(&bars))` it fails, and the recorded failure is
 in the commit body.
+
+### D-4754 — A CAS prior session that runs past its dated close is named so, not "truncated" — 2026-10-09
+
+**Finding.** G3-7 (low, wording). Suppose an eligible share's CAS-day prior
+session ends at 15:29. Its last bars lie past the dated 15:14 close, which
+contradicts its own master. `exact_minute_context_from_span` refused it as
+"Early or truncated bars cannot seed GapFib", and DCC-01 pinned that word.
+GAP12-6's original complaint was this same misnamed cause.
+
+**Decision.** The terminal-geometry refusal keeps its one message and names
+the fault from the observed last minute (`prior_session_terminal_fault`):
+
+- **Past the session's last minute:** "Its final bar runs past its dated
+  session close, so the store holds bars that close says cannot exist, and
+  they cannot seed GapFib".
+- **At or short of it:** "Early or truncated bars cannot seed GapFib",
+  byte-identical to before.
+
+Both still state the canonical terminal geometry and the observed final three
+minutes. Only the named cause changes. Every input that refused still
+refuses, and every input that passed still passes.
+
+Test: DCC-01, `a_cas_prior_session_is_judged_against_the_shares_dated_close`
+(L1FD-06). It is re-pinned: the eligible share ending at 15:29 names
+"runs past its dated session close" and not "truncated", and the ineligible
+share ending at 15:14 names "Early or truncated" and not "runs past".

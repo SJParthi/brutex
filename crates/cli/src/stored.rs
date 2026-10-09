@@ -3642,6 +3642,22 @@ pub fn load_daily_context_bounded(
     daily_context_from_span(daily, signal)
 }
 
+/// Why a prior session whose terminal geometry is wrong cannot seed `GapFib`,
+/// by which side of its close the final bar fell (G3-7, D-4754).
+///
+/// PAST THE CLOSE IS NOT SHORT OF IT. An eligible share's CAS day ending 15:29
+/// holds bars after its dated 15:14 close: the store contradicts the close it
+/// was judged against, a different fault from a session that stopped early,
+/// and it was refused as "truncated". A final bar at or before the close keeps
+/// the old words, byte for byte.
+fn prior_session_terminal_fault(last: Option<u16>, close: u16) -> &'static str {
+    if last > Some(close) {
+        "Its final bar runs past its dated session close, so the store holds bars that close says cannot exist, and they"
+    } else {
+        "Early or truncated bars"
+    }
+}
+
 /// The minute the accepted prior session's final bar must open at (GAP12-6,
 /// D-1663, D-2102). `kind_of` is the index's venue-blind calendar, and from
 /// 2026-08-03 an NSE cash share's continuous session ends at 15:15 when that
@@ -3767,7 +3783,8 @@ pub(crate) fn exact_minute_context_from_span(
         || last != Some(last_minute)
     {
         return Err(format!(
-            "the accepted prior exact 1min session on IST day {prior_session_day} does not end with canonical terminal-minute geometry {expected_third}, {expected_second}, {last_minute}; observed final three were {third_last:?}, {second_last:?}, {last:?}. Early or truncated bars cannot seed GapFib"
+            "the accepted prior exact 1min session on IST day {prior_session_day} does not end with canonical terminal-minute geometry {expected_third}, {expected_second}, {last_minute}; observed final three were {third_last:?}, {second_last:?}, {last:?}. {} cannot seed GapFib",
+            prior_session_terminal_fault(last, last_minute)
         ));
     }
     let prior_session_bars = u32::try_from(prior_session_bars).map_err(|_| {
@@ -5555,12 +5572,23 @@ mod tests {
 
     /// GAP12-6 closed (D-2102): a share's CAS-day prior session is judged
     /// against ITS dated close. Eligible ends at 15:14 and seeds; the same day
-    /// ending 15:29 is truncated against that close. Ineligible is the mirror.
-    /// The flag is read from the receipted master; nothing is downloaded.
+    /// ending 15:29 runs PAST that close, which contradicts the master and is
+    /// named so, never "truncated" (G3-7, D-4754). Ineligible ending 15:14 is
+    /// short of its 15:29 close: that is the truncated case. The flag is read
+    /// from the receipted master; nothing is downloaded.
     #[test]
     fn a_cas_prior_session_is_judged_against_the_shares_dated_close() {
         let signal = [minute_on_ist_day(OPEN_TUESDAY_2026_08_04, 555, 2_600_000)];
-        for (flag, seeds, truncated) in [(1_u8, 914_i64, 929_i64), (0, 929, 914)] {
+        for (flag, seeds, other, cause, not_cause) in [
+            (
+                1_u8,
+                914_i64,
+                929_i64,
+                "runs past its dated session close",
+                "truncated",
+            ),
+            (0, 929, 914, "Early or truncated", "runs past"),
+        ] {
             let store = root(&format!("cas-dated-{flag}"));
             install_master(&store, OPEN_MONDAY_2026_08_03, flag);
             let context =
@@ -5583,9 +5611,10 @@ mod tests {
             assert_eq!(context.session_close_minute(OPEN_TUESDAY_2026_08_04), None);
             assert_eq!(context.cash_digest(), Some(cash.digest()));
             let why =
-                exact_minute_context_from_span(reliance_prior_session(truncated), &signal, &store)
+                exact_minute_context_from_span(reliance_prior_session(other), &signal, &store)
                     .expect_err("the other close is not this share's");
-            assert!(why.contains("truncated"), "{why}");
+            assert!(why.contains(cause), "{why}");
+            assert!(!why.contains(not_cause), "{why}");
             assert!(
                 why.contains(&format!("{}, {}, {seeds}", seeds - 2, seeds - 1)),
                 "{why}"
