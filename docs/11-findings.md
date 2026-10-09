@@ -1173,3 +1173,28 @@ Narrative only. No row is added to the table above.
   web forced-exit copies (pinned by `FORCED_EXIT_MINUTE == 910`); the
   auto-merge CODEOWNERS parse (latent, recorded in `docs/06-limits.md`).
 - **`F-616724`** `unguarded` — The lens's own gates leak: spawn spellings, sed and git forms, quoted cargo +, unread id cells, a blind IST reader: fixed. D-3515, ONEAUTH-01/04/11/12/13/15.
+
+### One-authority lens L4, round 4 (fixer `fxl4`) — dispositions — 2026-10-09
+
+Narrative only. No row is added to the table above, and no `F-` id was
+filed: these were found while finishing the lens, not through the ledger.
+
+- `wrong` — The markets page derived 2-, 10-, 30- and 60-minute candles from
+  IST midnight while `pull::fold` files every intraday rung from 09:15; the
+  offset was typed twelve times in ten web files and the session length in
+  three: fixed. D-3516, ONEAUTH-16, ONEAUTH-17.
+- `unguarded` — The IST-offset reader missed the offset as 330 minutes
+  (`runner::synthetic`) and read test-only module files, a `pub(super)` test
+  module and a commented test-module header as production: fixed.
+  D-3517, ONEAUTH-18, ONEAUTH-21.
+- `unguarded` — Four private copies of the 09:15 open (`indicators::orb`,
+  `runner::resample`, `runner::synthetic`, test-only `runner::exit_grid_policy`)
+  tied to nothing: fixed. D-3518, ONEAUTH-19, ONEAUTH-20.
+- `unguarded` — The web campaign rung list and fallback charge list held to
+  no Rust source: fixed. D-3519, ONEAUTH-22.
+- `unguarded` — Decision citations in `web/`, the handovers and the tool
+  configurations resolved by nothing: fixed. D-3520, ONEAUTH-24.
+- `unguarded` — Five civil-date copies compared by nothing: fixed. D-3521,
+  ONEAUTH-23.
+- **Round 4 REFUTED or not measured:** recorded in D-3522. D-3510 (auto-merge
+  sensitive paths) is left to the owner.

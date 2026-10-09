@@ -66845,3 +66845,213 @@ writing commit, kept because the ledger is append-only and citations name
 them, and pinned by gate 27b to exactly two headings each while every other
 number must head one. No change is needed; gate 27b is the gate that refuses
 duplicate decision ids.
+
+### D-3516 — The browser holds the IST offset and the session once, and derives a candle on `pull::fold`'s grid — 2026-10-09
+
+**What was observed (lens L4, round 4).** `web/src/routes/markets/+page.svelte`
+derived a coarser candle from stored bars with its own fold,
+`Math.floor((t + 19800) / w) * w - 19800`: every width counted from IST
+midnight. `pull::fold`, the store's one fold authority, counts every intraday
+rung from the 09:15 open, and D-1430 corrected `runner::resample` for exactly
+this. The two grids agree only when the width divides 555 minutes, so at 2, 10,
+30 and 60 minutes the page's first candle of a session began at 09:14, 09:10,
+09:00 and 09:00 and held part of a width, while the stored rung of the same
+name began at 09:15. Which one the page drew depended on which rung the feed
+held (`asStored` draws the stored bars as they are). Separately, twelve sites
+in ten files under `web/src` typed the IST offset (as seconds, milliseconds,
+microseconds and a BigInt: the markets, db, ingest and autopilot pages,
+`hold-series.js`, `trade-analytics.js`, `boolean-oos.js`,
+`index-stop-results.js`, `index-stop-vix.js`, `index-stop-launch.js`) and
+three typed the 375-bar
+session (`presets.js`, the db page, the ingest page's rung table), none tied to
+the Rust definitions.
+
+**Decided.** `web/src/lib/ist.js` restates `pull::session::IST_OFFSET_SECS`,
+`SESSION_OPEN_MINUTE` and `BARS_PER_REGULAR_SESSION` once, with the unit
+variants derived from the seconds, and every file above imports them;
+`presets.js` re-exports its `SESSION_MINUTES` from it. `ist.js` also holds
+`bucketStart(t, width)`: under a day, `t − ((t + IST − 09:15) mod day) mod
+width`, the rule `runner::resample` restates (D-1430), which for every width
+that divides a day is `pull::fold`'s grid edge for edge; a day or wider keeps
+IST midnight. The markets page's `aggregate` calls it. `web/tests/ist.test.js`
+reads the three `pub const` lines of `crates/pull/src/session.rs` and holds the
+web copy to them, holds `bucketStart` to the open-anchored grid at all eight
+stored intraday rungs over a whole session, on the next session and 20,000
+days earlier, to a 09:15 start for widths that do not divide a day (7, 45 and
+75 minutes), and to IST midnight at a day; it extracts the markets page's own
+`aggregate` with the Svelte parser and drives 375 one-minute bars through it
+(13 thirty-minute candles from 09:15, the last of 15 minutes; 7 hourly); and it
+refuses any other spelling of 19,800 seconds (any unit, any separators) or of
+375 or 555 in the code of any `.js`, `.ts` or `.svelte` file under `web/src`,
+comments removed, with a reader test of its own. Run against the sources as
+they were, the aggregate test and the spelling test failed (the spelling test
+listing `boolean-oos.js`'s two BigInt sites first) and the other five passed.
+D-3514's "Not closed" — the browser's 375 was a copy of a fact the api does
+not serve — is closed by the same test: the copy is now held to the Rust
+definition rather than served. `web/tests/autopilot-coverage.test.js` and
+`web/tests/database-page-fixture.js` run page functions lifted out by the
+Svelte parser and pass in what the page imports; each now passes the
+`ist.js` constant its page imports. `web/build` is rebuilt (Gate W1).
+
+**Rejected.** Serving the three numbers from the api. They are fixed by law
+and the exchange, not by configuration, and the page would then refuse to draw
+a chart while the server is down for a number it can read from source at test
+time.
+
+### D-3517 — The IST-offset reader sees the offset in minutes and skips every test-only module file — 2026-10-09
+
+**What was observed (lens L4, round 4).** `runner::synthetic::IST_OPEN_UTC_MICROS`
+was `(555 - 330) * 60 * 1_000_000`: the IST offset as 330 minutes, in
+production code, a spelling `crates/core/tests/one_ist_offset.rs` (D-3512,
+ONEAUTH-13) did not hold, so the test passed with a copy of the offset tied
+to nothing. The same reader skipped `*_tests.rs` and inline test modules but
+read as production every file a `#[cfg(test)] mod name;` declares under any
+other name: `pull/src/emit_sites.rs`, `store/src/emits.rs`,
+`engine/src/manifest.rs` and `api/src/{scratch,isolated,emitted}.rs`.
+
+**Decided.** `IST_OPEN_UTC_MICROS` is `SESSION_OPEN_MINUTE * MINUTE_MICROS -
+IST_OFFSET_MICROS` on `indicators`' constants (D-3518), and
+`runner::synthetic::tests::a_session_opens_at_0345_utc_and_closes_after_0959_utc`
+pins it to the clock time it names. The reader adds `- 330` and `+ 330` to its
+spellings, treats `pub mod` at any `pub(…)` visibility as a module, passes
+over `//` lines among a test module's attributes, and resolves every column-0
+`#[cfg(test)]` `mod name;` to the file Rust would compile (beside a `lib.rs`,
+`main.rs` or `mod.rs`, under the stem's directory otherwise, or the
+`#[path]` given, relative to the declaring file) and skips it. The middle two
+were found by the widened spellings themselves: their first run listed the
+test-only `(555 - 330)` in `indicators::column`'s `pub(super) mod tests` and a
+test fixture's `555..930` in `api::pullrun`, whose test module carries a
+comment between `#[cfg(test)]` and `#[allow(…)]`. A column-0 `#[cfg(test)]`
+item that is not a module is still read, strictly. Its reader test now lists
+the `(555 - 330)` line and that strict read, and a new test pins the
+module-file resolution on `lib.rs` and non-`lib.rs` declarations, `#[path]`,
+`pub(in …)` behind a comment, an inline module, `pubx mod` and a
+`#[cfg(all(test, unix))]` declaration that is not read.
+
+### D-3518 — The 09:15 open has named authorities, each tied to `pull::session`'s — 2026-10-09
+
+**What was observed (lens L4, round 4).** Six production definitions of the
+open: `pull::session::SESSION_OPEN_MINUTE` (const-asserted to 555),
+`pull::calendar::OPEN_MINUTE`, `store::path::Timeframe::OPEN_MINUTES_PAST_IST_MIDNIGHT`,
+a private `OPEN_MINUTE` in `indicators::orb`, a private
+`OPEN_MINUTES_PAST_IST_MIDNIGHT` in `runner::resample`, and the `555` inside
+`runner::synthetic::IST_OPEN_UTC_MICROS`, and a seventh, test-only, in
+`runner::exit_grid_policy` (`REGULAR_OPEN_IST_MINUTE`, under `#[cfg(test)]`).
+Round 2 refuted "the three 09:15 constants" as pinned; the last four were tied
+to no other copy (the resampler only through its byte-equality with
+`pull::fold`), and the session
+length was restated in `runner::synthetic::BARS_PER_SESSION` and
+`pull::calendar::FULL_BARS` beside `BARS_PER_REGULAR_SESSION`.
+
+**Decided.** `indicators::SESSION_OPEN_MINUTE` is the sweep side's one copy
+(`indicators` may not name `pull` or `store`, gate 22): `orb` uses it,
+`runner::resample`'s constant and `runner::exit_grid_policy`'s test-only one
+are defined as it, and `runner::synthetic` builds its open from it.
+`pull::calendar` const-asserts its `u16` copy to 555 (a
+`u16`/`u32` comparison needs a cast this crate refuses) and `pull::session`
+const-asserts its own to `store`'s. `crates/cli/tests/one_session_open.rs`,
+in the one crate that names all four, holds every open, both offsets and every
+session length to `pull::session`'s, and holds every bar of three
+`runner::synthetic::sessions` to a minute of a regular session as
+`pull::session::IstMoment` reads the clock, its minute of day the open plus
+its index and its IST day its session. `crates/core/tests/one_ist_offset.rs`
+refuses any production spelling of the open (`9 * 60 + 15`, 33,300 seconds or
+the whole number 555) outside nine named lines: the four definitions, the two
+pins, `cli::stored`'s frozen `NSE_OPEN_MINUTE_V2` (its digest is stored
+evidence and may not follow a moved open) and the dated irregular sessions of
+`pull::calendar` (each is what happened on its day). Run against the code as
+it was, it listed `indicators/src/orb.rs`, `runner/src/exit_grid_policy.rs`,
+`runner/src/resample.rs` and `runner/src/synthetic.rs`, and the offset test
+listed `runner/src/synthetic.rs`.
+
+### D-3519 — The browser's rung list and charge list are held to their Rust sources — 2026-10-09
+
+**What was observed (lens L4, round 4).** Round 2 recorded (`docs/06-limits.md`)
+that the web's `CAMPAIGN_RUNGS` is not tied to the Rust rung list and that its
+index-to-label lookups do not fail loudly: `BooleanQualifiedSearch.svelte` and
+`ResearchTester.svelte` print `CAMPAIGN_RUNGS[Number(rung)]` for a rung index
+the server sends, so a list that drifted from `cli::EVERY_RUNG` would label a
+result with another rung and nothing would refuse it. `charge-scope.js` prints
+its own list of the charges a share trade pays (brokerage, STT, stamp duty and
+five more, "an UNVERIFIED list") when the server sends no `equity_note`, a copy
+of `runner::audit`'s equity header held to nothing.
+
+**Decided.** `web/tests/boolean-campaign.test.js` reads `pub const EVERY_RUNG`
+from `crates/cli/src/lib.rs` and holds `CAMPAIGN_RUNGS` to it, order and all;
+`web/tests/charge-scope.test.js` reads `equity_header` from
+`crates/runner/src/audit.rs`, joins its continued lines, and holds the page's
+note to the header's list verbatim and its trades sentence to each of the
+eight charges. Each failed when the web copy was edited (two rungs swapped; DP
+charges dropped). The versioned rung arrays in `cli` (`CANONICAL_RUNGS` of the
+selection and replay versions, `CALENDAR_POLICY_RUNGS_V2`) are left as they
+are: each is a frozen part of one evidence version and must not follow a later
+list (`CLAUDE.md` §3 rule 8).
+
+### D-3520 — Decision citations are resolved in the front end, the handovers and the tool configurations too — 2026-10-09
+
+**What was observed (lens L4, round 4).** `crates/core/tests/citations.rs`
+(D-3504, ONEAUTH-05) read the root law files, `docs/`, `.github/` and
+`crates/`, and left `web/` out on the ground that it "cites no decision as
+authority". Its sources cited 83 distinct decisions before this round, the two root handovers
+and `.config/nextest.toml` three more, and nothing resolved any of them.
+All of them resolve today.
+
+**Decided.** The test reads every `.md` and `.toml` at the root, `.config/`,
+`config/`, `.claude/`, and `web/`'s `.js`, `.mjs`, `.ts`, `.svelte`, `.css`,
+`.html`, `.md` and `.rs` files, skipping `target`, `node_modules`, `build` and
+`.svelte-kit` directories (generated or installed text), and asserts that a
+web source and a handover are read and nothing under a skipped directory is.
+
+### D-3521 — The five civil-date copies are compared on every day — 2026-10-09
+
+**What was observed.** Round 2 recorded in `docs/06-limits.md` that Hinnant's
+civil-date algorithm is written in `telemetry::clock`, `costs::day`,
+`store::path`, `pull::session` and `cli::stability` (the `cli::stored`,
+`cli::vix_reference` and `api`/`indicators` copies it also named are test
+fixtures), each tested where it lives and "no test compares them with one
+another". No one crate can hold it for all five: `telemetry` depends on nothing
+(gate 21) and `costs` and `store` name neither `telemetry` nor `pull`.
+
+**Decided.** `crates/cli/tests/one_civil_calendar.rs` walks every day
+`pull::session::Day` admits (2,932,897, 1970-01-01 to 9999-12-31) and holds
+`telemetry::civil_from_days`, `cli::stability::Grain::Month`, `costs::day`
+both ways on its 40,542-day window, and `store::path::YearMonth::ist_bounds_micros`
+on all 96,360 months (each starting at its first day's IST midnight and
+ending where the next starts) to `pull`'s answer. The copies stay; the
+"compares nothing" half of the limit is closed.
+
+### D-3522 — Lens L4 round 4: what else was checked, and the question left open — 2026-10-09
+
+**Checked and not a defect, with the reason.**
+- The candidate-persistence layout (`owner.lock`, `body.bin`,
+  `complete.bin` under `<namespace>/<identity>/`) is spelled in
+  `boolean_candidate_persistence`, `boolean_observation_file` and
+  `boolean_campaign_reader`. A reader that drifted from the writer opens a
+  file that does not exist and refuses through `readonly_file::open`; unlike
+  the lock of D-3506, no drift degrades silently.
+- `attempts.bin` is joined three times in `cli::sweep_evidence`, each onto
+  the same `base(root)` (`results/sweep-evidence-v1`), and in `api::recovery`
+  onto its own `root(site)` (`audit/recovery-v1`): two different files, each
+  built in one module from one base function.
+- `web/src/lib/boolean-work-model.js` bounds `live_conditions` by 384, the
+  mask width; a wider mask makes the page refuse the descriptor loudly.
+- `charge-scope.js`'s `SWEPT_INDICES` decides only whether the zero-levy
+  sentence may print when the server sent no `equity_note`; every other case,
+  an unknown symbol included, is labelled gross.
+- `pull::calendar`'s irregular-session windows that begin at 555 are dated
+  facts about those days, not the regular open, and `cli::stored`'s
+  `NSE_OPEN_MINUTE_V2` is frozen with its digest (D-3518 names both).
+- Every decision a web, handover or tool file cites resolves (D-3520). The
+  browser takes condition names and `vocab_version` from `/vocab.json`
+  (D-0288): `web/src` names a table row only in comments, and
+  `condition-groups.js` splits a served name by its shape, holding no list.
+  A search outside `crates/costs` for a `const`, `static` or `let` named for
+  STT, stamp, brokerage, SEBI, GST, txn, transaction, levy, charge, fee or cost
+  and bound to a number found no cost rate (its five hits are three test
+  timestamps and two feed constants).
+- Not measured: a census of every place `api` and `cli` re-bucket bars. This
+  round checked the browser's fold (D-3516) and the sweep side's open
+  (D-3518) only.
+
+**Left open, for the owner.** Whether `rust-toolchain.toml` and `Cargo.toml`
+join the auto-merge workflow's sensitive paths (D-3510) is not decided here.

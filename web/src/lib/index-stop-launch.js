@@ -3,6 +3,7 @@ import {createPageRequests} from './page-requests.js';
 import {validateNativeResearchPolicy} from './boolean-launch.js';
 import {validateIndexConsistencyPolicy} from './index-consistency.js';
 import {CAMPAIGN_RUNGS} from './boolean-campaign.js';
+import {IST_OFFSET_MS} from './ist.js';
 import {sweepOutcome} from './sweep.js';
 // @ts-expect-error Node strips erasable TypeScript; the browser resolves this source too.
 import {liveAttemptKey} from './live-progress.ts';
@@ -68,7 +69,7 @@ export function validateIndexStopMetadata(v){
 function month(value,label){if(typeof value!=='string'||!/^[0-9]{4}-(0[1-9]|1[0-2])$/.test(value)||value.startsWith('0000'))throw new Error(`${label} needs an explicit month.`);return {year:Number(value.slice(0,4)),month:Number(value.slice(5)),key:value};}
 /** Server response time only; the browser clock never certifies a full month.
  * @param {any} header */
-export function indexStopServerMonth(header){if(typeof header!=='string')return null;const parsed=Date.parse(header);if(!Number.isFinite(parsed)||new Date(parsed).toUTCString()!==header)return null;const ist=new Date(parsed+19800000),year=ist.getUTCFullYear();return year>=1&&year<=9999?`${String(year).padStart(4,'0')}-${String(ist.getUTCMonth()+1).padStart(2,'0')}`:null;}
+export function indexStopServerMonth(header){if(typeof header!=='string')return null;const parsed=Date.parse(header);if(!Number.isFinite(parsed)||new Date(parsed).toUTCString()!==header)return null;const ist=new Date(parsed+IST_OFFSET_MS),year=ist.getUTCFullYear();return year>=1&&year<=9999?`${String(year).padStart(4,'0')}-${String(ist.getUTCMonth()+1).padStart(2,'0')}`:null;}
 /** Display the preceding minute/daily context month required by the strict
  * native loader. This does not certify that its files or candles exist.
  * @param {string} first */

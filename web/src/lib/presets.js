@@ -5,8 +5,11 @@
 // 555 here, which is the minute of the open past IST midnight, so every preset
 // spanned about 1.48 times what its label said.
 
-/** Minutes in one regular session. */
-export const SESSION_MINUTES = 375;
+// The session length is `ist.js`'s, the one web copy of it (D-3516).
+import { SESSION_MINUTES } from './ist.js';
+
+/** Minutes in one regular session, re-exported for the presets' callers. */
+export { SESSION_MINUTES };
 
 /** Sessions in a preset month. */
 export const SESSIONS_PER_MONTH = 21;

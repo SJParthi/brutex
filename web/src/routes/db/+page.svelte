@@ -79,6 +79,7 @@
      from the 2nd to the 31st from one held on the 2nd alone; the window says
      which, in the `02 Sep 2024` form this product uses everywhere. */
   import { MON, dayLabel, monthLabel, stampLabel, timeLabel } from '$lib/dates.js';
+  import { IST_OFFSET_MS, SESSION_MINUTES } from '$lib/ist.js';
   import { store, survey, syncStore, refreshStore, surveyStores } from '$lib/store.svelte.js';
   // THE COMPLETENESS ARITHMETIC, OUT OF THE MARKUP AND UNDER A TEST. Two
   // defects lived in these expressions — a denominator taken from whichever
@@ -395,7 +396,7 @@
    * continuous session ends at 15:29. Stated because a completeness figure with
    * an unstated denominator is a number nobody can check.
    */
-  const BARS_PER_SESSION = 375;
+  const BARS_PER_SESSION = SESSION_MINUTES; /* `$lib/ist.js`, D-3516 */
 
   /**
    * Bars one session holds **at the rung the row is stored at**.
@@ -4755,8 +4756,6 @@
      keystroke: the comparator below runs O(n log n) times and must compare
      plain fields, exactly as the census comparator does.
      --------------------------------------------------------------------- */
-  const IST_OFFSET_MS = 19800000; /* +05:30, and India keeps no DST */
-
   /**
    * The IST calendar day an epoch-millisecond instant falls on, as the
    * `YYYY-MM-DD` KEY form and never a label. It is subtracted from an

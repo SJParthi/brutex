@@ -16423,3 +16423,23 @@ system's URL handler, kept by D-1202 and off with `BRUTEX_NO_OPEN`.
 - **`cargo +toolchain`, `RUSTC_BOOTSTRAP` and the nightly manifest keys are
   refused by name (D-3510).** A spelling built at run time from pieces is the
   limit gate 1g's environment-name rule already records.
+
+## One-authority lens L4, round 4 — what changed in the round-2 record — 2026-10-09
+
+- **Civil-date conversions: the copies stay, the comparison exists
+  (D-3521).** Five production copies remain (`telemetry::clock`,
+  `costs::day`, `store::path`, `pull::session`, `cli::stability`; the
+  `cli::stored`, `cli::vix_reference`, `api` and `indicators` copies named
+  above are test fixtures). `crates/cli/tests/one_civil_calendar.rs` compares
+  all five on every day `pull::session::Day` admits. Still not one authority:
+  `telemetry` depends on nothing (gate 21), so a home in `core` would leave
+  it a copy.
+- **The web's rung list and its charge list are tied to Rust (D-3519).** The
+  index-to-label lookups still do not fail loudly at run time; the list they
+  index is now the `cli::EVERY_RUNG` order by test. The frozen versioned rung
+  arrays in `cli` remain separate by design.
+- **The browser's 375 and IST offset are copies held by test, not served
+  (D-3516).** `web/src/lib/ist.js` reads nothing at run time; a change to
+  `pull::session` fails `web/tests/ist.test.js` (W2), not the page.
+- **Bar re-bucketing in `api` and `cli` has no census.** Round 4 checked the
+  browser's fold and the sweep side's open only (D-3522).

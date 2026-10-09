@@ -1,0 +1,1 @@
+var e=19800,t=e*1e3,n=e*1e6,r=BigInt(e)*1000000n,i=86400,a=(e,t)=>(e%t+t)%t;function o(t,n){return n>=i?t-a(t+e,n):t-a(a(t+e-33300,i),n)}export{o as a,e as i,r as n,t as r,n as t};

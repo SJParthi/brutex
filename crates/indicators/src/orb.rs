@@ -34,11 +34,10 @@
 //! [`Orb::window_closed`] so the caller can abstain per run rather than per bar.
 
 // The crate's one IST offset (D-3512); this file kept a private copy.
-use crate::{Candle, IST_OFFSET_MICROS};
+// And its one open (D-3518); this file kept a private copy of that too.
+use crate::{Candle, IST_OFFSET_MICROS, SESSION_OPEN_MINUTE};
 use vocab::{ConditionMask, Tolerance};
 
-/// Minutes from IST midnight to the NSE open, 09:15.
-const OPEN_MINUTE: i64 = 9 * 60 + 15;
 const MICROS_PER_MINUTE: i64 = 60 * 1_000_000;
 const MINUTES_PER_DAY: i64 = 24 * 60;
 
@@ -85,7 +84,9 @@ pub fn minutes_since_open(ts_micros: i64) -> Option<i64> {
     let minute_of_day = ist
         .div_euclid(MICROS_PER_MINUTE)
         .rem_euclid(MINUTES_PER_DAY);
-    minute_of_day.checked_sub(OPEN_MINUTE).filter(|m| *m >= 0)
+    minute_of_day
+        .checked_sub(SESSION_OPEN_MINUTE)
+        .filter(|m| *m >= 0)
 }
 
 /// One window's running extremes.
@@ -394,8 +395,8 @@ mod tests {
 
     /// A bar `m` minutes after the open on IST day 20,000.
     fn at(m: i64, h: i64, l: i64, c: i64) -> Candle {
-        let ts =
-            (20_000 * MINUTES_PER_DAY + OPEN_MINUTE + m) * MICROS_PER_MINUTE - IST_OFFSET_MICROS;
+        let ts = (20_000 * MINUTES_PER_DAY + SESSION_OPEN_MINUTE + m) * MICROS_PER_MINUTE
+            - IST_OFFSET_MICROS;
         Candle {
             ts_micros: ts,
             open: c,

@@ -122,6 +122,10 @@ const _: () = assert!(IST_OFFSET_SECS == 19_800);
 // boundary (`store::path::YearMonth::ist_bounds_micros`, D-0915) because it
 // cannot depend on this crate. This is what keeps the copy honest.
 const _: () = assert!(IST_OFFSET_SECS == store::path::IST_OFFSET_SECS);
+// The store's copy of the open, which `pull::fold` anchors every intraday rung
+// on, is this one (D-3518).
+const _: () =
+    assert!(SESSION_OPEN_MINUTE == store::path::Timeframe::OPEN_MINUTES_PAST_IST_MIDNIGHT);
 const _: () = assert!(SECS_PER_DAY == 86_400);
 // `IstMoment::from_epoch_secs` narrows this one to `u32`. The cast is exact
 // only while it is 60, and this is what says so at compile time.

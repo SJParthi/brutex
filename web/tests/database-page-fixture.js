@@ -3,6 +3,7 @@ import { parse } from 'svelte/compiler';
 import { parseKey, segmentOf, strikeExact } from '../src/lib/instrument.js';
 import { exact } from '../src/lib/money.js';
 import { isSole, denomKey } from '../src/lib/completeness.js';
+import { SESSION_MINUTES } from '../src/lib/ist.js';
 
 /** Exercise the actual page's pure decoration; no substitute implementation.
  * @param {string} [source] */
@@ -17,8 +18,8 @@ export function databasePage(source = readFileSync(new URL('../src/routes/db/+pa
   ) ?? [];
   if (declarations.length !== names.size) throw new Error('Actual database decoration seam changed.');
   const code = declarations.map((/** @type {any} */ node) => source.slice(node.start, node.end)).join('\n');
-  const functions = new Function('parseKey', 'segmentOf', 'strikeExact', 'exact', 'isSole', 'denomKey',
-    code + '\nreturn {decorateRow,instrumentDescription};')(parseKey, segmentOf, strikeExact, exact, isSole, denomKey);
+  const functions = new Function('parseKey', 'segmentOf', 'strikeExact', 'exact', 'isSole', 'denomKey', 'SESSION_MINUTES',
+    code + '\nreturn {decorateRow,instrumentDescription};')(parseKey, segmentOf, strikeExact, exact, isSole, denomKey, SESSION_MINUTES);
   const matched = ast.instance?.content.body.find((/** @type {any} */ node) => node.type === 'VariableDeclaration' &&
     node.declarations.some((/** @type {any} */ row) => row.id.type === 'Identifier' && row.id.name === 'textMatched'));
   if (matched?.type !== 'VariableDeclaration') throw new Error('Database text selection seam changed.');

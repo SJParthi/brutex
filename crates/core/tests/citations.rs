@@ -15,11 +15,20 @@
 //!
 //! # What it reads
 //!
-//! The root documents and manifests, `docs/` except the ledger itself,
-//! `.github/`, and every `.rs`, `.toml` and `.md` under `crates/`. `web/` is not
-//! read: it is the unrestricted front end (D-0053) and cites no decision as
-//! authority. Three numbers are named in [`UNWRITTEN`] with the reason each
-//! heads nothing; any other unresolved citation fails.
+//! Every `.md` and `.toml` at the root (the law files, the handovers, the
+//! manifests and the toolchain file), `.config/`, `config/` and `.claude/`,
+//! `docs/` except the ledger itself, `.github/`, every `.rs`, `.toml` and `.md`
+//! under `crates/`, and the front end's sources under `web/` (not its
+//! generated `build/` output or its installed `node_modules/`). Three numbers
+//! are named in [`UNWRITTEN`] with the reason each heads nothing; any other
+//! unresolved citation fails.
+//!
+//! `web/` was left out on the ground that it "cites no decision as
+//! authority". Its sources cited 83 distinct decisions, pages and modules naming
+//! the decision that shaped them, and the two root handovers and
+//! `.config/nextest.toml` cite three more; nothing resolved any of them. Round
+//! 4 of lens L4 found every one resolving and widened the reading so a
+//! dangling one fails here (D-3520).
 
 #![allow(
     clippy::expect_used,
@@ -125,8 +134,12 @@ fn invariant_rows(document: &str) -> BTreeSet<String> {
         .collect()
 }
 
+/// Directories never read: build output and installed packages, whose text
+/// is generated from (or foreign to) the sources that are read.
+const SKIPPED: [&str; 4] = ["target", "node_modules", "build", ".svelte-kit"];
+
 /// Every file under `dir` with one of `extensions`, depth first, sorted, never
-/// following into `target`.
+/// following into a [`SKIPPED`] directory.
 fn walk(dir: &Path, extensions: &[&str], out: &mut Vec<PathBuf>) {
     let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
         .unwrap_or_else(|e| panic!("{} cannot be listed: {e}", dir.display()))
@@ -135,7 +148,11 @@ fn walk(dir: &Path, extensions: &[&str], out: &mut Vec<PathBuf>) {
     entries.sort();
     for path in entries {
         if path.is_dir() {
-            if path.file_name().is_some_and(|n| n != "target") {
+            if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| !SKIPPED.contains(&n))
+            {
                 walk(&path, extensions, out);
             }
         } else if path
@@ -151,19 +168,29 @@ fn walk(dir: &Path, extensions: &[&str], out: &mut Vec<PathBuf>) {
 /// The files whose citations are checked, as described in the module header.
 fn cited_files() -> Vec<PathBuf> {
     let root = root();
-    let mut files: Vec<PathBuf> = [
-        "CLAUDE.md",
-        "AGENTS.md",
-        "README.md",
-        "Cargo.toml",
-        "deny.toml",
-    ]
-    .iter()
-    .map(|name| root.join(name))
-    .collect();
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&root)
+        .expect("the root can be listed")
+        .map(|entry| entry.expect("a directory entry").path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e == "md" || e == "toml")
+        })
+        .collect();
+    files.sort();
+    walk(&root.join(".config"), &["toml"], &mut files);
+    walk(&root.join("config"), &["toml"], &mut files);
+    walk(&root.join(".claude"), &["json"], &mut files);
     walk(&root.join("docs"), &["md"], &mut files);
     walk(&root.join(".github"), &["rs", "yml"], &mut files);
     walk(&root.join("crates"), &["rs", "toml", "md"], &mut files);
+    walk(
+        &root.join("web"),
+        &["js", "mjs", "ts", "svelte", "css", "html", "md", "rs"],
+        &mut files,
+    );
     // This file names the dangling numbers it found, as text a reader needs.
     files.retain(|path| {
         !path.ends_with("docs/05-decisions.md") && !path.ends_with("core/tests/citations.rs")
@@ -186,6 +213,23 @@ fn every_cited_decision_heads_an_entry() {
     }
     let files = cited_files();
     assert!(files.len() > 500, "read only {} files", files.len());
+    // D-3520 (ONEAUTH-24): the front end and the root handovers are read, and nothing
+    // generated or installed is.
+    for read in ["web/src/lib/presets.js", "HANDOVER-web-backtest.md"] {
+        assert!(
+            files.iter().any(|p| p.ends_with(read)),
+            "{read} is not read"
+        );
+    }
+    let root = root();
+    assert!(
+        !files.iter().any(|p| p
+            .strip_prefix(&root)
+            .expect("under the root")
+            .components()
+            .any(|c| c.as_os_str().to_str().is_some_and(|c| SKIPPED.contains(&c)))),
+        "a generated or installed file is read"
+    );
     let mut dangling = Vec::new();
     for path in files {
         let text = std::fs::read_to_string(&path)

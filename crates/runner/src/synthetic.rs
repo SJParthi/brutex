@@ -29,14 +29,17 @@
 //! it makes well-formed records whose only guaranteed property is that
 //! `Candle::check` accepts them.
 
-use indicators::{Candle, OI_NULL};
+use indicators::{Candle, IST_OFFSET_MICROS, OI_NULL, SESSION_OPEN_MINUTE};
 
-/// 09:15 IST expressed as microseconds past midnight UTC.
+/// 09:15 IST expressed as microseconds past midnight UTC: 03:45 UTC.
 ///
-/// 555 minutes into the IST day, less the 330-minute offset. Written as the
-/// arithmetic rather than as a constant so the two halves are visible: a reader
-/// checking it does not have to trust a magic number.
-pub const IST_OPEN_UTC_MICROS: i64 = (555 - 330) * 60 * 1_000_000;
+/// The open's minute of the IST day, less the offset. Written as the
+/// arithmetic rather than as a constant so the two halves are visible, and on
+/// `indicators`' two constants: this was `(555 - 330) * 60 * 1_000_000`, a
+/// second copy of the open and of the offset (in minutes, a spelling
+/// `core/tests/one_ist_offset.rs` did not read), tied to neither. D-3517,
+/// D-3518.
+pub const IST_OPEN_UTC_MICROS: i64 = SESSION_OPEN_MINUTE * MINUTE_MICROS - IST_OFFSET_MICROS;
 
 /// One day, in microseconds.
 pub const DAY_MICROS: i64 = 24 * 60 * 60 * 1_000_000;
@@ -45,6 +48,12 @@ pub const DAY_MICROS: i64 = 24 * 60 * 60 * 1_000_000;
 pub const MINUTE_MICROS: i64 = 60 * 1_000_000;
 
 /// Bars in a regular NSE session: 09:15 to 15:29 inclusive, at one minute.
+///
+/// `runner` may not name `pull`, so this restates
+/// `pull::session::BARS_PER_REGULAR_SESSION`;
+/// `crates/cli/tests/one_session_open.rs` holds the two equal and holds every
+/// bar [`sessions`] makes to a minute of a regular session as `pull` reads the
+/// clock (D-3518).
 pub const BARS_PER_SESSION: usize = 375;
 
 /// A price to build around, in paisa. 25,000.00 index points.
@@ -155,6 +164,20 @@ mod tests {
         let first = bars.first().map_or(0, |c| c.ts_micros);
         let second = bars.get(BARS_PER_SESSION).map_or(0, |c| c.ts_micros);
         assert_eq!(second - first, DAY_MICROS, "one calendar day apart");
+    }
+
+    /// D-3517 (ONEAUTH-21): the arithmetic on `indicators`' constants is pinned to the
+    /// clock time it names, 09:15 IST being 03:45 UTC, and the last bar of a
+    /// session to 15:29 IST, 09:59 UTC.
+    #[test]
+    fn a_session_opens_at_0345_utc_and_closes_after_0959_utc() {
+        const UTC_0345: i64 = (3 * 60 + 45) * 60 * 1_000_000;
+        assert_eq!(super::IST_OPEN_UTC_MICROS, UTC_0345);
+        assert_eq!(bar(0, 0).ts_micros, UTC_0345);
+        assert_eq!(
+            bar(2, BARS_PER_SESSION - 1).ts_micros,
+            2 * DAY_MICROS + (9 * 60 + 59) * 60 * 1_000_000
+        );
     }
 
     #[test]
