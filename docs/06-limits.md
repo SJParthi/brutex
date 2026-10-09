@@ -15161,7 +15161,9 @@ Let I be the surface's instruments, U the discovered union, B a span's bars,
 N the later IST sessions and D the bootstrap draws (`bootstrap_draws(N)`, at
 most 100,000).
 
-- **`pool-oos` judging.** Each span costs I × U walks of O(B) each, plus one
+- **`pool-oos` judging.** Each span costs I × U walks of O(B) each, over one
+  `SliceFacts` build of O(B) per span (D-4705; until then each candidate's
+  `trade::walk` rebuilt it, U builds per span, G2-4), plus one
   Romano-Wolf stepdown and one Reality Check of O(D × U × N) each. Neither
   is a §3 rule-4 primitive. Nothing here is measured: UNVERIFIED. Fills are
   on the signal rung's bars, as the audit stack's bootstrap family's are, so

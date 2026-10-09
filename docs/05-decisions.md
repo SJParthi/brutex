@@ -65291,3 +65291,40 @@ builds for what pass 1 records:
 **Honest limit.** The fixture's prices are generated and say nothing about a
 market. The test pins that the two passes agree, not what a cell is worth.
 A drift that moves no recorded cell on this store is not seen.
+
+### D-4705 — `pool_oos::walk_span` builds its slice facts once per span — 2026-10-09
+
+**What was wrong.** G2-4 is the sixth site of AC-whp-o1-2's defect, which
+D-1730 fixed at its first five. `walk_span` called `runner::trade::walk`
+once per union candidate, and `walk` rebuilds `SliceFacts::of(bars, column)`
+on every call. A span therefore paid U builds where one suffices.
+
+**Decided.** `walk_span` builds `SliceFacts::of(bars, &span.column)` once,
+before the parallel map over the union. Each candidate then calls
+`runner::trade::walk_over(.., &facts)`.
+
+Two tests:
+- `pool_oos::tests::the_hoisted_walk_equals_the_per_candidate_walk` holds
+  the output byte for byte against the old per-candidate shape, which the
+  test keeps as its reference. It covers:
+  - two generated spans and two horizons;
+  - booking on and off;
+  - the masks MONDAY, TUESDAY, empty and MONDAY|TUESDAY;
+  - each mask Long and Short.
+
+  Days, tallies and bookings must all be equal, with the premise that some
+  candidate fired.
+- `pool_oos::tests::walk_span_builds_its_slice_facts_once` reads
+  `walk_span`'s body. It must hold no `trade::walk(`, exactly one
+  `SliceFacts::of(`, and `trade::walk_over(`, and the facts must be built
+  before `.par_iter()`.
+
+**Measured before the fix.** The source test failed at
+`pool_oos_tests.rs:816` on `!body.contains("trade::walk(")`.
+
+**What changes in results.** Nothing. `walk` is `walk_over` over facts it
+builds itself (`runner/src/trade.rs`), and the equality test drives that.
+
+**Cost.** One O(B) facts build per span instead of U. Each candidate's walk
+is unchanged: it still visits every row of the column, which is Θ(B) per
+candidate. `docs/06-limits.md` states it.

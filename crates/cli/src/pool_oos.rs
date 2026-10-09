@@ -154,6 +154,14 @@ pub(crate) struct Walked {
 /// `book` false only the tallies are kept: the training span needs no series
 /// (sweep audit OS-2, D-2300).
 ///
+/// The span's [`runner::trade::SliceFacts`] -- its timestamp index, prefix
+/// sums and forced-exit table, each O(B) -- are built ONCE here and shared by
+/// every candidate's [`runner::trade::walk_over`]. Each candidate called
+/// [`runner::trade::walk`], which rebuilds them, so a span paid U facts builds
+/// where one suffices (G2-4, the sixth site of AC-whp-o1-2, D-4705). Each walk
+/// still visits every row of the column, Θ(B) per candidate:
+/// `docs/06-limits.md` states it.
+///
 /// # Errors
 ///
 /// A trade naming a bar outside its span, a non-positive entry open, or a
@@ -165,13 +173,20 @@ pub(crate) fn walk_span(
     book: bool,
 ) -> Result<Walked, String> {
     let bars = span.bars.as_slice();
+    let facts = runner::trade::SliceFacts::of(bars, &span.column);
     let per_candidate: Vec<Result<(Tally, Vec<Booking>), String>> = union
         .par_iter()
         .enumerate()
         .map(|(at, candidate)| {
             let mask = vocab::ConditionMask::from_words(candidate.words);
-            let walked =
-                runner::trade::walk(bars, &span.column, &mask, horizon, candidate.direction);
+            let walked = runner::trade::walk_over(
+                bars,
+                &span.column,
+                &mask,
+                horizon,
+                candidate.direction,
+                &facts,
+            );
             let mut tally = Tally::default();
             let mut bookings = Vec::new();
             if book {
