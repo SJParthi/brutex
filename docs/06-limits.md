@@ -6806,10 +6806,13 @@ the forward vector and the session table remain linear in B and cannot be O(1)
 total while retaining one answer per input bar.
 
 The larger operations keep their real bounds. A trade walk is linear in the
-rows of the column it walks: `walk_core` visits every row from the first one
-that can fire (D-1186; rows before it are all-zero and cannot) and asks `fires`
-of each, so a row that never fires still costs one test, and the signal count bounds only the work after a row
-fires. (This sentence used to say the walk was linear in the signals it decides,
+rows of the column it walks: `walk_core` visits the rows its caller hands it
+and asks `fires` of each, so a row that never fires still costs one test, and the signal count bounds only the work after a row
+fires. Every entry point but one hands it every row from the first one that
+can fire (`rows_from`, D-1186; rows before it are all-zero and cannot).
+`walk_over_rows` hands it exactly the strictly ascending rows its caller
+lists, which must hold every row the mask fires on (`rows_listed`, D-4707), so
+that walk is linear in the list, plus O(|list|) to check its order. (This sentence used to say the walk was linear in the signals it decides,
 which understated it; D-1204 corrects it.) Excursion/crossing construction reads the relevant
 paths. An exit grid evaluates its bounded configured cells over ordered
 candidates, and chosen-row replay plus persistence is output-sensitive. The
@@ -8786,15 +8789,29 @@ execution series (D-1702): per instrument the loads, column, projection and
 one `SliceFacts`, O(B_sig + B_exec) -- times W + 1 for the column, where W is
 the number of exact-minute-unsourceable days withheld, because pass 1's own
 build reloads both contexts and rebuilds after each one (D-1707, at most 64) --
-and per union candidate one
-`grid::evaluate_over`, which walks every row of the projected column before it
-prices, Θ(B_exec + cells × T). So pass 2 is
-Θ(I × (B_sig + B_exec) + I × U × (B_exec + cells × T)). U is the union of
-every instrument's kept frontier (at most `top` rows a run), so U grows with
-I, up to I × `top`, and pass 2 is up to Θ(I² × top × B_exec) when T is small
-and B_exec large -- the rare-setup case the pool exists for. This said "I × U
-grid evaluations, each O(cells × T)", which left the B_exec walk out
-(R9-cli-o1-1). The fold is one pass over I × U cells. None of this is a rule-4
+then one posting pass over the projected column (D-4707): per row one
+six-word intersection with the bits the union names and one push per bit left
+set, Θ(B_exec + P) time and Θ(P) memory for the P rows posted. Per union
+candidate pass 2 then picks the shortest posting list among the bits the mask
+names, O(BITS) with no row read, and runs one `grid::evaluate_over_rows` over
+it, Θ(R + cells × T) for the list's R rows. So pass 2 is
+Θ(I × (B_sig + B_exec + P) + I × U × (R + cells × T)), with P at most B_exec
+times the named bits and R at most B_exec. R counts the rows the RAREST BIT
+is set on, not the rows the mask fires on: a rare conjunction of common bits
+still walks every row of its rarest bit, and the empty mask, which names no
+bit, keeps `grid::evaluate_over`'s walk of every row. U is the union of every
+instrument's kept frontier (at most `top` rows a run), so U grows with I, up
+to I × `top`, and where R = B_exec pass 2 is still Θ(I² × top × B_exec): the
+lists shorten the walk, they do not change the worst case. The cells are the
+every-row walk's cells exactly, because the walk changes state only on a row
+the mask fires on and each such row is on every one of its bits' lists
+(`pass_two_over_posting_lists_prices_what_every_row_prices`). Until D-4707
+every candidate walked every row of the projected column, Θ(B_exec + cells ×
+T), and pass 2 was Θ(I × (B_sig + B_exec) + I × U × (B_exec + cells × T)), up
+to Θ(I² × top × B_exec) when T is small and B_exec large -- the rare-setup
+case the pool exists for. Before that this said "I × U grid evaluations, each
+O(cells × T)", which left the B_exec walk out (R9-cli-o1-1). The fold is one
+pass over I × U cells. None of this is a rule-4
 primitive, and none of it is constant in I or U. Stated from the code's shape;
 not timed.
 

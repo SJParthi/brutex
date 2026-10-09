@@ -1995,6 +1995,42 @@ pub fn evaluate_over(
     )
 }
 
+/// [`evaluate_over`], walking only the column rows `rows` names (D-4707).
+///
+/// What `rows` must hold is [`crate::trade::walk_over_rows`]'s contract:
+/// strictly ascending, and every row the mask fires on. On such a list the
+/// grid equals [`evaluate_over`]'s exactly, because the walk is the only part
+/// that reads the column and the rest prices its trades.
+///
+/// # Errors
+///
+/// [`crate::trade::walk_over_rows`]'s refusal of the list; nothing is priced.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "evaluate_over's seven inputs and the rows the walk visits"
+)]
+pub fn evaluate_over_rows(
+    bars: &[Candle],
+    column: &Column,
+    mask: &ConditionMask,
+    horizon: Horizon,
+    side: Side,
+    levels: Levels<'_>,
+    facts: &crate::trade::SliceFacts,
+    rows: &[usize],
+) -> Result<Grid, String> {
+    let timed =
+        crate::trade::walk_over_rows(bars, column, mask, horizon, direction_of(side), facts, rows)?;
+    Ok(evaluate_timed(
+        bars,
+        side,
+        levels,
+        &timed,
+        facts,
+        ExitFamilies::All,
+    ))
+}
+
 /// [`evaluate`] with an explicit exit-family population.
 ///
 /// Derives the same ladders as legacy evaluation, including its target
@@ -6405,7 +6441,9 @@ mod exit_family_tests {
     reason = "the exception every test module in this workspace takes."
 )]
 mod tests {
-    use super::{Cell, Grid, Levels, Streaks, evaluate, evaluate_over, tally_trade};
+    use super::{
+        Cell, Grid, Levels, Streaks, evaluate, evaluate_over, evaluate_over_rows, tally_trade,
+    };
 
     /// p3floor-1, D-1769: the gated mean-loss magnitude rounds UP.
     #[test]
@@ -7142,6 +7180,80 @@ mod tests {
             "moving per-slice derivation outside a candidate loop must not move \
              one signal, ladder or priced cell"
         );
+    }
+
+    /// D-4707: a grid over the rows a bit is set on is the grid over every
+    /// row, for every bit and both sides, and so is the empty mask's over
+    /// every row. A refused row list prices nothing.
+    #[test]
+    fn a_grid_over_a_superset_of_the_firing_rows_is_the_same_grid() {
+        let (bars, column) = swept();
+        let facts = crate::trade::SliceFacts::of(&bars, &column);
+        let every: Vec<usize> = (0..column.len()).collect();
+        let width = u32::try_from(vocab::table::TABLE.len()).expect("a small table");
+        let mut priced = 0;
+        for bit in 0..width {
+            let mask = ConditionMask::default().with_bit(bit);
+            let set: Vec<usize> = column
+                .bits()
+                .iter()
+                .enumerate()
+                .filter(|(_, bits)| bits.get(bit))
+                .map(|(row, _)| row)
+                .collect();
+            for side in [Side::Long, Side::Short] {
+                let full = evaluate_over(
+                    &bars,
+                    &column,
+                    &mask,
+                    h(15),
+                    side,
+                    Levels::derived(2),
+                    &facts,
+                );
+                let listed = evaluate_over_rows(
+                    &bars,
+                    &column,
+                    &mask,
+                    h(15),
+                    side,
+                    Levels::derived(2),
+                    &facts,
+                    &set,
+                )
+                .expect("an ascending list inside the column");
+                assert_eq!(full, listed, "bit {bit} {side:?}");
+                priced += usize::from(!full.cells.is_empty());
+            }
+        }
+        assert!(priced > 0, "some bit must price a cell");
+        let empty = ConditionMask::default();
+        let over = |rows: &[usize]| {
+            evaluate_over_rows(
+                &bars,
+                &column,
+                &empty,
+                h(15),
+                Side::Long,
+                Levels::derived(2),
+                &facts,
+                rows,
+            )
+        };
+        assert_eq!(
+            over(&every).expect("every row"),
+            evaluate_over(
+                &bars,
+                &column,
+                &empty,
+                h(15),
+                Side::Long,
+                Levels::derived(2),
+                &facts
+            )
+        );
+        let refused = over(&[2, 1]).expect_err("an unordered list is refused");
+        assert!(refused.contains("does not follow"), "{refused}");
     }
 
     /// The same slice with one bar in fifty given a very wide range.

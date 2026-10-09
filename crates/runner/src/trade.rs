@@ -790,8 +790,95 @@ pub fn walk_over_from(
         direction,
         facts.exits(),
         facts,
-        first_row,
+        rows_from(column, first_row),
     )
+}
+
+/// [`walk_over`], visiting only the column rows `rows` names (D-4707).
+///
+/// `rows` must be strictly ascending column rows and must hold every row the
+/// mask fires on. Each listed row is still asked [`ConditionMask::hits`], so a
+/// listed row that does not fire is passed over exactly as the full walk
+/// passes it over. The walk's state changes only on a row that fires, and
+/// every bar it records is a slice index read from `sources`, never a
+/// position in the list, so on such a list the answer equals [`walk_over`]'s
+/// exactly. A list that leaves out a firing row answers a different question
+/// and nothing here can see it: the list must hold every firing row by
+/// construction. `crates/cli`'s pool pricing passes the rows of one of the
+/// mask's own bits, which every firing row sets.
+///
+/// # Errors
+///
+/// A row at or past the column's end, or one not strictly after the row
+/// before it. Nothing is walked then.
+///
+/// # Cost
+///
+/// O(|rows|) to check the list, then the walk over it: one mask test per
+/// listed row, and per firing row what [`walk`] states. No row outside the
+/// list is read.
+pub fn walk_over_rows(
+    bars: &[Candle],
+    column: &Column,
+    mask: &ConditionMask,
+    horizon: Horizon,
+    direction: Direction,
+    facts: &SliceFacts,
+    rows: &[usize],
+) -> Result<Trades, String> {
+    let len = column.bits().len().min(column.sources().len());
+    let mut previous: Option<usize> = None;
+    for &row in rows {
+        if row >= len {
+            return Err(format!(
+                "row {row} is past the column's {len} rows; nothing was walked"
+            ));
+        }
+        if let Some(before) = previous.filter(|&before| row <= before) {
+            return Err(format!(
+                "row {row} does not follow row {before}; the rows must ascend strictly, \
+                 and nothing was walked"
+            ));
+        }
+        previous = Some(row);
+    }
+    Ok(walk_core(
+        bars,
+        column,
+        |bits, _| bits.hits(mask),
+        horizon,
+        direction,
+        facts.exits(),
+        facts,
+        rows_listed(column, rows),
+    ))
+}
+
+/// Every column row from `first_row` on, as `(row, bits, source)`, read as
+/// slices (D-1186). A `first_row` past the column yields nothing.
+fn rows_from(
+    column: &Column,
+    first_row: usize,
+) -> impl Iterator<Item = (usize, &ConditionMask, usize)> {
+    column
+        .bits()
+        .get(first_row..)
+        .unwrap_or_default()
+        .iter()
+        .zip(column.sources().get(first_row..).unwrap_or_default())
+        .enumerate()
+        .map(move |(offset, (bits, &signal))| (first_row.saturating_add(offset), bits, signal))
+}
+
+/// Exactly the column rows `rows` names, in its order, as `(row, bits,
+/// source)` (D-4707). [`walk_over_rows`] has checked every row is inside the
+/// column, so none is passed over here.
+fn rows_listed<'c>(
+    column: &'c Column,
+    rows: &'c [usize],
+) -> impl Iterator<Item = (usize, &'c ConditionMask, usize)> {
+    rows.iter()
+        .filter_map(move |&row| Some((row, column.bits().get(row)?, *column.sources().get(row)?)))
 }
 
 /// Price definite expression signals through the same entry, occupancy and
@@ -823,7 +910,7 @@ pub fn walk_expression_over(
         direction,
         facts.exits(),
         facts,
-        0,
+        rows_from(column, 0),
     ))
 }
 
@@ -897,7 +984,7 @@ pub fn walk_with(
         direction,
         exits,
         &SliceFacts::of(bars, column),
-        0,
+        rows_from(column, 0),
     )
 }
 
@@ -956,10 +1043,10 @@ fn held_before_hole(
 )]
 #[expect(
     clippy::too_many_arguments,
-    reason = "eight, and the eighth is the D-1186 starting row; the seven before \
-              it are the walk's own inputs and per-slice facts"
+    reason = "eight, and the eighth is the rows it visits (D-1186, D-4707); the \
+              seven before it are the walk's own inputs and per-slice facts"
 )]
-fn walk_core(
+fn walk_core<'r>(
     bars: &[Candle],
     column: &Column,
     mut fires: impl FnMut(&ConditionMask, usize) -> bool,
@@ -967,7 +1054,7 @@ fn walk_core(
     direction: Direction,
     exits: &[Option<SquareOff>],
     facts: &SliceFacts,
-    first_row: usize,
+    rows: impl Iterator<Item = (usize, &'r ConditionMask, usize)>,
 ) -> Trades {
     let h = horizon.as_bars() as usize;
     let mut out = Trades::default();
@@ -975,17 +1062,11 @@ fn walk_core(
     // and a new fill is eligible only strictly after it.
     let mut open_until: Option<usize> = None;
 
-    // FROM `first_row`, AS SLICES (D-1186). Rows before it are not visited;
-    // `index` stays the column row, so `fires` and every recorded bar are
-    // unchanged for the rows that are.
-    let rows = column
-        .bits()
-        .get(first_row..)
-        .unwrap_or_default()
-        .iter()
-        .zip(column.sources().get(first_row..).unwrap_or_default());
-    for (offset, (bits, &signal)) in rows.enumerate() {
-        let index = first_row.saturating_add(offset);
+    // THE ROWS THE CALLER NAMES, IN COLUMN ORDER: every row from a first row
+    // on (`rows_from`, D-1186), or exactly a listed few (`rows_listed`,
+    // D-4707). `index` is the column row either way, so `fires` and every
+    // recorded bar are the same for each row visited.
+    for (index, bits, signal) in rows {
         if !fires(bits, index) {
             continue;
         }
@@ -2014,6 +2095,86 @@ mod tests {
             Trades::default(),
             "a start past the column walks nothing"
         );
+    }
+
+    /// D-4707: a walk over the rows a mask's own bit is set on, or over every
+    /// row, equals the full walk, for every bit alone and paired with its
+    /// neighbour, both sides, and for the empty mask over every row. A list
+    /// out of order, repeating a row or naming a row past the column is
+    /// refused; the column's last row is admitted; an empty list walks
+    /// nothing.
+    #[test]
+    fn a_walk_over_a_superset_of_the_firing_rows_equals_the_full_walk() {
+        let (bars, column) = swept();
+        let facts = super::SliceFacts::of(&bars, &column);
+        let every: Vec<usize> = (0..column.len()).collect();
+        let width = u32::try_from(vocab::table::TABLE.len()).expect("a small table");
+        let (mut compared, mut narrower) = (0, 0);
+        for bit in 0..width {
+            let set: Vec<usize> = column
+                .bits()
+                .iter()
+                .enumerate()
+                .filter(|(_, bits)| bits.get(bit))
+                .map(|(row, _)| row)
+                .collect();
+            for other in [bit, (bit + 1) % width] {
+                let mask = ConditionMask::ZERO.with_bit(bit).with_bit(other);
+                for direction in [Direction::Long, Direction::Short] {
+                    let full = super::walk_over(&bars, &column, &mask, h(5), direction, &facts);
+                    for rows in [&set, &every] {
+                        let listed = super::walk_over_rows(
+                            &bars,
+                            &column,
+                            &mask,
+                            h(5),
+                            direction,
+                            &facts,
+                            rows,
+                        )
+                        .expect("an ascending list inside the column");
+                        assert_eq!(full, listed, "bits {bit}+{other} {direction:?}");
+                    }
+                    compared += usize::from(full.signals > 0);
+                    narrower += usize::from(full.signals > 0 && set.len() < every.len());
+                }
+            }
+        }
+        assert!(compared > 0, "some mask must actually fire");
+        assert!(narrower > 0, "some firing bit must skip rows");
+        let empty = ConditionMask::ZERO;
+        let all = super::walk_over_rows(
+            &bars,
+            &column,
+            &empty,
+            h(5),
+            Direction::Long,
+            &facts,
+            &every,
+        )
+        .expect("every row");
+        assert_eq!(
+            all,
+            super::walk_over(&bars, &column, &empty, h(5), Direction::Long, &facts)
+        );
+        let last = column.len().checked_sub(1).expect("a non-empty column");
+        let walk = |rows: &[usize]| {
+            super::walk_over_rows(&bars, &column, &empty, h(5), Direction::Long, &facts, rows)
+        };
+        for (rows, why) in [
+            (vec![1, 0], "row 0 does not follow row 1"),
+            (vec![3, 3], "row 3 does not follow row 3"),
+            (vec![0, column.len()], "is past the column's"),
+        ] {
+            let refused = walk(&rows).expect_err("a bad list is refused");
+            assert!(refused.contains(why), "{refused}");
+        }
+        assert_eq!(
+            walk(&[last]).expect("the last row is inside").signals,
+            1,
+            "the empty mask fires on the one row listed"
+        );
+        assert_eq!(walk(&[]).expect("no rows"), Trades::default());
     }
 
     /// THE LOOK-AHEAD D-1182 PINNED, NOW INVERTED — D-1410.
@@ -3123,7 +3284,7 @@ mod tests {
     fn the_per_candidate_walk_derives_nothing_and_sorts_nothing() {
         let source = include_str!("trade.rs");
         let start = source
-            .find("fn walk_core(")
+            .find("fn walk_core<'r>(")
             .expect("the hot path must still be called walk_core");
         let rest = source.get(start..).unwrap_or_default();
         let end = rest

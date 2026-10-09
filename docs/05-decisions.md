@@ -65356,3 +65356,97 @@ true.
 with the code under D-4700.
 
 **What changes in results.** Nothing. These are text changes only.
+
+### D-4707 — Pool pass 2 walks each candidate over its rarest bit's posting list — 2026-10-09
+
+**What was wrong.** R9-cli-o1-1. Pass 2 priced each union candidate with one
+`grid::evaluate_over`, and that walk visits every row of the projected
+one-minute column before it prices. Each candidate cost Θ(B_exec + cells × T)
+however seldom its mask fired. The union grows with the surface, so pass 2 was
+up to Θ(I² × top × B_exec), and the rare setups the pool exists to find
+(T small, B_exec large) are exactly where that walk dominates.
+
+**Decided.**
+- `runner::trade::walk_core` takes the rows it visits as an iterator of
+  `(row, bits, source)`, in place of a first row.
+  - `rows_from` yields every row from a first row on. It is what every
+    earlier entry point passes, so their walks are the same loop as before
+    (D-1186).
+  - `rows_listed` yields exactly a caller's list.
+- `runner::trade::walk_over_rows` checks the list before it walks: the rows
+  must ascend strictly and lie inside the column. A row out of order,
+  repeated or past the end refuses the whole walk with a reason, and nothing
+  is walked. `runner::grid::evaluate_over_rows` is `evaluate_over` over that
+  walk.
+- `cli::pool::price_all` builds one `Postings` per instrument. It is one
+  pass over the projected column that posts each row under every bit it sets
+  among the bits the union names. Each non-empty mask is then priced over the
+  shortest list among its own bits.
+  - The empty mask names no bit and fires on every row, so it keeps
+    `evaluate_over`.
+  - A refused list refuses the instrument's pass 2 with that reason. It does
+    not fall back to the every-row walk.
+
+**Why the figures cannot move.** The walk changes state only on a row the
+mask fires on, and it records bars by the row's source index, never by the
+row's place in the list. A row the mask fires on sets every bit the mask
+names, so it is on each of those bits' lists. Any one bit's list therefore
+holds every firing row, and each listed row is still asked the full mask
+test. So the rarest bit's list and every row give the same trades, which
+makes the grid and the cell the same too. Choosing a list other than the
+rarest changes only the cost.
+
+**Proof.**
+- `runner::trade::tests::a_walk_over_a_superset_of_the_firing_rows_equals_the_full_walk`
+  compares the listed walk with `walk_over` for every table bit, alone and
+  with its neighbour. It checks both directions, over the bit's own rows
+  and over every row. Premises: some mask fired, and some firing bit's list
+  was shorter than the column. It also checks the refusals, the last row
+  and the empty list.
+- `runner::grid::tests::a_grid_over_a_superset_of_the_firing_rows_is_the_same_grid`
+  compares whole grids, bit by bit and side by side, and checks a refused
+  list.
+- `cli::pool::tests::pass_two_over_posting_lists_prices_what_every_row_prices`
+  runs on the generated random-walk store, at 5min (May 2025) and 60min
+  (March to May). The union is drawn from the prepared column: the empty
+  mask, ten bits that split the rows, five pairs, a triple and a table bit
+  no row sets, each both ways. `price_all` must equal a test-local copy of
+  the every-row pass 2, and each listed grid must equal the every-row grid.
+  Premises: a mask traded over a list shorter than the column, the never-set
+  bit priced nothing over an empty list both ways, and the empty mask
+  traded.
+- `cli::pool::tests::postings_list_each_named_bits_rows_and_rarest_is_the_shortest`
+  checks four things:
+  - each named bit's list is exactly the rows that set it;
+  - an unnamed bit posts nothing;
+  - the empty mask has no list;
+  - `rarest` returns the shorter list, the rarer bit's own list, over pairs
+    of uneven count.
+  The byte-identity test cannot see a choice of list, because every bit's
+  list gives the same figures. This test is what holds the choice.
+- `cli::pool::tests::the_pool_prepares_projects_and_prices_in_order_inside_price_all`
+  now requires, in this order: the facts, then `Postings::of(&column,
+  &named)`, then `postings.rarest(&mask)`, then `evaluate_over_rows(`.
+- `limits_doc_drift::section_113_prices_a_trade_walk_by_the_column_rows_it_visits`
+  reads the new loop, `rows_from`, `rows_listed` and §113's statement of the
+  listed walk.
+
+**Measured before the fix.** With `price_all` put back to one `evaluate_over` per candidate and every
+new test kept, the source order test failed at `pool.rs:3262`:
+"`Postings::of(&column, &named)` must appear in `fn price_all(`'s body after
+the previous step". The two posting tests passed on that build. That is
+expected: they hold an equivalence and the `Postings` type itself, which the
+before-fix body leaves unused.
+
+**What changes in results.** Nothing. Every cell pass 2 prints is the cell
+the every-row walk priced. `pass_two_prices_each_frontier_row_as_pass_one_recorded_it`
+(D-4704) still holds every recorded frontier row to pass 1's cell.
+
+**Cost.** Per instrument, the posting pass is Θ(B_exec + P) time and Θ(P)
+memory for P postings. Per candidate, choosing the list is O(BITS), and the
+walk is Θ(R + cells × T) for the rarest list's R rows. R counts the rows one
+bit is set on, not the rows the mask fires on. A rare conjunction of common
+bits therefore still walks its rarest bit's rows. Where R = B_exec the worst
+case is unchanged at Θ(I² × top × B_exec). `docs/06-limits.md` §171 and §113
+state it, and the `pool.rs` header and `price_all`'s doc state it too. This
+is stated from the code's shape and was not timed.
