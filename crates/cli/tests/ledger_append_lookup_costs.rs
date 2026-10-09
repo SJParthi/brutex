@@ -19,6 +19,8 @@
 //! * W2-cli12-1 (D-4764): the two-open Statistics V2 append and the step's
 //!   third open are one open per step; the tests named in LBE-09 keep their
 //!   names and now pin the one open.
+//! * G4-1 (D-4765): every cached Statistics V2 read hashed the whole data file
+//!   four times while §154 said a lookup is average O(1) and a page O(rows).
 //!
 //! Every file a constant below names is read at compile time, so a rename
 //! fails the build rather than skipping the check. A separate test crate, as
@@ -238,6 +240,17 @@ fn section_154_states_index_reads_the_bounded_reserve_and_the_two_open_append() 
         !text.contains("runs two full opens"),
         "§154 still prices two opens"
     );
+
+    // A cached read checks metadata only since D-4765 (G4-1).
+    let lock = method(STATISTICS, "    fn with_shared_lock<T>(");
+    assert_eq!(
+        lock.matches("self.require_metadata_unchanged()?").count(),
+        2
+    );
+    assert!(!lock.contains("self.require_unchanged()"));
+    let metadata = function(STATISTICS, "fn require_metadata_generation(");
+    assert!(!metadata.contains("hash_file") && !metadata.contains("file_generation("));
+    assert!(text.contains("Since D-4765 that is true of the whole call, not only of the probe"));
 }
 
 #[test]

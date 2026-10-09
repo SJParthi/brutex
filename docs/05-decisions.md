@@ -65086,3 +65086,54 @@ left (2, 2), right (1, 2)),
 `cli::population_statistics_v2::tests::a_post_write_remeasure_adopts_only_a_reproduced_prefix`,
 `cli::population_statistics_v2::tests::reverify_rereads_only_what_this_handle_committed`,
 `cli::ledger_append_lookup_costs::section_154_states_index_reads_the_bounded_reserve_and_the_two_open_append`.
+
+### D-4765 — A cached Statistics V2 read checks metadata and re-verifies what it returns — 2026-10-09
+
+**What was wrong.** G4-1: §154 says a hash-index lookup is average O(1) and a
+bounded page O(page rows). Every cached read (`reopen_audit`, `candidate`,
+`page_candidates`, `projection_candidate`, the Admission V3 reads and
+`trailing_prefix_audit`) ran `with_shared_lock`, whose content checks before
+and after the read hashed the data file four times and the lock file four
+times. That is O(file bytes) per call. The counting test measured 648 hashes
+for 81 calls.
+
+**Decided.** The fix the finding named as (b), the D-1681 shape:
+
+- `with_shared_lock` compares the open's lock and data generations by metadata
+  only, before and after the read: length, device/inode, and nanosecond
+  modification and change times, with no content read.
+- Each read re-verifies what it returns. A lookup re-reads the audit's Data and
+  Completion records, which must decode to the indexed manifest and Completion
+  digest.
+- A candidate read and a page already re-seal and re-validate every row they
+  return.
+- The family-wide reads fold their C rows into the block's ordered candidate
+  digest, through the same function the writer uses, so every returned row is
+  the content the open validated.
+- A trailing-prefix read re-reads the orphan's Data record.
+
+An open still content-hashes, and so do appends. No byte, format or identity
+changes.
+
+**What is no longer seen per read.** A same-length rewrite that leaves every
+metadata field equal: a rewrite inside one timestamp tick, a raw device write
+or a clock change. It goes unseen when it touches a record the read does not
+return, or a returned candidate row that is resealed and still validates. The
+family-wide reads refuse the second by the ordered digest, and the next open
+refuses both by recomputation. This is the residual D-1681 accepted for the
+Pre-Admission page, and §154 states it.
+
+**Rejected.** Option (a), keeping the hashes and correcting §154 to O(file
+bytes) per call: the finding showed (b) is reachable without a format change.
+Dropping only the second `repeated_digest` pass: it halves the cost and leaves
+it O(file bytes).
+
+Tests: `cli::population_statistics_v2::tests::cached_reads_hash_no_file_and_reread_only_what_they_return`
+(failed first on the unfixed reads: "81 cached reads hash no file", left 648,
+right 0),
+`cli::population_statistics_v2::tests::cached_reads_reverify_what_they_return_and_the_limit_is_what_they_do_not`,
+`cli::population_statistics_v2::tests::a_trailing_prefix_read_reverifies_the_orphan_data_record`,
+`cli::population_statistics_v2::tests::explicit_bounds_and_post_open_same_length_mutation_refuse`
+(its rewrites now pin the modification time, so the metadata refusal does not
+depend on the timestamp tick),
+`cli::ledger_append_lookup_costs::section_154_states_index_reads_the_bounded_reserve_and_the_two_open_append`.

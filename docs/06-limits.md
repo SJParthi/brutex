@@ -8138,9 +8138,22 @@ it is not made O(1) by storing its receipt.
 
 The 1,024-byte fixed stride makes one already-validated candidate seek
 worst-case O(1) in record count. A hash-index lookup is average O(1), a bounded
-page is O(page rows), and one record has constant encoded width. File open,
-whole-file validation, hashing, allocation, locks, `sync_all`, CSCV family work
-and bootstrap resampling are not constant-time or constant-space operations.
+page is O(page rows), and one record has constant encoded width. Since D-4765
+that is true of the whole call, not only of the probe: a cached read compares
+the open's lock and data generations by metadata only (length, device/inode,
+nanosecond modification and change times), a constant number of `stat` calls,
+and re-verifies the records it returns. A lookup re-reads the audit's Data and
+Completion records, a candidate read or a page re-seals each row it returns,
+and a family-wide read folds its C rows into the block's ordered candidate
+digest. Before D-4765 every such call content-hashed the data file four times
+and the lock file four times, O(file bytes) per call (G4-1). What a cached read
+does not see is a same-length rewrite that leaves every metadata field equal (a
+rewrite inside one timestamp tick, a raw device write or a clock change) of a
+record it does not return, or of a returned candidate row that is resealed and
+still validates. The family-wide reads refuse the second by the ordered digest,
+and the next open refuses both by recomputation. File open, whole-file
+validation, hashing, allocation, locks, `sync_all`, CSCV family work and
+bootstrap resampling are not constant-time or constant-space operations.
 Explicit audit/candidate/period/split/file ceilings are refusal bounds; they do
 not sample rows, cap Apriori depth or turn an admitted input into a smaller one.
 

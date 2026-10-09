@@ -24,10 +24,14 @@
 //! trailing prefix is recoverable only by a byte-identical retry; corruption,
 //! a ragged/torn record, foreign retry, stale handle or bound breach refuses.
 //!
-//! Opening and generation checking scan bounded file bytes.  Recomputing the
+//! Opening scans and content-hashes bounded file bytes.  Recomputing the
 //! statistics is input-dependent and includes the bootstrap costs recorded in
-//! `docs/06-limits.md` §147.  Only fixed-record offset arithmetic is worst-case
-//! O(1) in record count.  Hash-map lookup is average O(1), and file hashing,
+//! `docs/06-limits.md` §147.  A cached read after the open hashes no file: it
+//! compares the open's lock and data generations by metadata only and
+//! re-verifies the records it returns, so a lookup is average O(1) and a page
+//! is O(page rows) plus a constant number of `stat` calls (G4-1, D-4765).
+//! Only fixed-record offset arithmetic is worst-case O(1) in record count.
+//! Hash-map lookup is average O(1), and file hashing at open and append,
 //! locks, allocation, bootstrap work and `sync_all` are not constant-time.
 //!
 //! **UNVERIFIED as a measured bound.** No bench in this workspace
@@ -1515,9 +1519,10 @@ pub struct PopulationStatisticsV2CandidateProjection {
 /// Preparing this authority is O(C) record reads and O(C) rank-bit space after
 /// the ledger's bounded generation validation, where C is the complete
 /// candidate count.  Reading one candidate from a prepared authority uses one
-/// fixed-stride record read; file locking, generation validation and I/O are
-/// not O(1).  Production callers that need the complete family use the bounded
-/// batch projection so generation hashing is not repeated once per candidate.
+/// fixed-stride record read after metadata-only generation checks (D-4765);
+/// file locking and I/O have no constant bound.  Production callers that need
+/// the complete family use the bounded batch projection, which also folds the
+/// family into its ordered candidate digest.
 ///
 /// **UNVERIFIED as a measured bound.** No bench in this workspace
 /// times this, so the shape above is read from the source rather
@@ -2363,28 +2368,60 @@ impl PopulationStatisticsV2Ledger {
     ) -> Result<Option<PopulationStatisticsV2TrailingPrefixAudit>, PopulationStatisticsV2Refusal>
     {
         self.with_shared_lock(|ledger| {
-            Ok(ledger
-                .orphan
-                .map(|orphan| PopulationStatisticsV2TrailingPrefixAudit {
-                    audit_id: orphan.manifest.audit_id,
-                    logical_sequence: orphan.manifest.sequence,
-                    first_record: orphan.first_record,
-                    present_records: orphan.present_records,
-                    planned_records: orphan.planned_records,
-                }))
+            let Some(orphan) = ledger.orphan else {
+                return Ok(None);
+            };
+            // The one record this read describes is re-read (D-4765).
+            let same = read_record(&mut ledger.data_file, orphan.first_record).and_then(|data| {
+                Ok(data.kind == RecordKindV2::Data
+                    && decode_manifest(&data.payload, data.kind)? == orphan.manifest)
+            });
+            if !matches!(same, Ok(true)) {
+                return Err(format!(
+                    "population-statistics trailing prefix at record {} differs from the one seen at open{}",
+                    orphan.first_record,
+                    same.err().map(|why| format!(": {why}")).unwrap_or_default()
+                ));
+            }
+            Ok(Some(PopulationStatisticsV2TrailingPrefixAudit {
+                audit_id: orphan.manifest.audit_id,
+                logical_sequence: orphan.manifest.sequence,
+                first_record: orphan.first_record,
+                present_records: orphan.present_records,
+                planned_records: orphan.planned_records,
+            }))
         })
     }
 
     /// Looks up one completed audit after stale-generation validation.
     ///
+    /// # Complexity
+    ///
+    /// Average O(1): the lock and data generations are compared by metadata
+    /// only, the index is probed once, and a found audit's Data and Completion
+    /// records, the two records it describes, are re-read and must decode to
+    /// the indexed manifest and Completion digest. No file is hashed (G4-1,
+    /// D-4765). Not seen per lookup: a same-length rewrite, under unchanged
+    /// metadata, of a record inside the block other than those two; the full
+    /// recomputation at the next open refuses it. Invariant L1FE-05, proven by
+    /// `cli::population_statistics_v2::tests::cached_reads_hash_no_file_and_reread_only_what_they_return`;
+    /// stated from the source, not timed.
+    ///
     /// # Errors
     ///
-    /// Refuses a stale/replaced data or lock path and I/O/lock errors.
+    /// Refuses a stale/replaced data or lock path, a Data or Completion record
+    /// that no longer matches the index, and I/O/lock errors.
     pub fn reopen_audit(
         &mut self,
         audit_id: &[u8; 32],
     ) -> Result<Option<PopulationStatisticsV2ReopenAudit>, PopulationStatisticsV2Refusal> {
-        self.with_shared_lock(|ledger| Ok(ledger.audits.get(audit_id).copied()))
+        self.with_shared_lock(|ledger| {
+            let Some(audit) = ledger.audits.get(audit_id).copied() else {
+                return Ok(None);
+            };
+            reverify_block_bounds(&mut ledger.data_file, &audit)?;
+            Ok(Some(audit))
+        })
     }
 
     /// Reads one candidate by validated fixed-record sequence.
@@ -2493,6 +2530,7 @@ impl PopulationStatisticsV2Ledger {
                 })?;
             seen_ranks.resize(usize_of(count, "Admission V3 rank count")?, false);
             let mut familywise = None;
+            let mut ordered = OrderedCandidateCheck::new(count);
             for sequence in 0..count {
                 let candidate = read_candidate_at(
                     &mut ledger.data_file,
@@ -2500,6 +2538,7 @@ impl PopulationStatisticsV2Ledger {
                     &reopened.manifest,
                     sequence,
                 )?;
+                ordered.push(&candidate);
                 let rank = usize_of(candidate.romano_wolf_rank, "Admission V3 Romano-Wolf rank")?;
                 let rank_slot = seen_ranks.get_mut(rank).ok_or_else(|| {
                     "population-statistics Admission V3 Romano-Wolf rank is outside family"
@@ -2525,6 +2564,7 @@ impl PopulationStatisticsV2Ledger {
                         .to_owned(),
                 );
             }
+            ordered.require(&reopened.manifest)?;
             let familywise_romano_wolf_probability = familywise.ok_or_else(|| {
                 "population-statistics Admission V3 rank-zero probability is absent".to_owned()
             })?;
@@ -2571,8 +2611,10 @@ impl PopulationStatisticsV2Ledger {
     /// This is the production path for Admission V3.  It is O(C) fixed-record
     /// reads and O(C) returned output space, not O(1) for the whole family; the
     /// Runner arithmetic performed on each returned candidate remains
-    /// fixed-width.  Unlike repeated single-candidate calls, generation hashing
-    /// is not multiplied by C.
+    /// fixed-width.  No file is hashed: the generations are compared by
+    /// metadata, and the C candidates read are folded into the block's ordered
+    /// candidate digest, which must equal the indexed manifest's, so every
+    /// returned row is the byte content the open validated (D-4765).
     ///
     /// **UNVERIFIED as a measured bound.** No bench in this workspace
     /// times this, so the shape above is read from the source rather
@@ -2595,6 +2637,7 @@ impl PopulationStatisticsV2Ledger {
                 .map_err(|why| {
                     format!("cannot reserve Admission V3 candidate projections: {why}")
                 })?;
+            let mut ordered = OrderedCandidateCheck::new(count);
             for sequence in 0..count {
                 let candidate = read_candidate_at(
                     &mut ledger.data_file,
@@ -2602,8 +2645,10 @@ impl PopulationStatisticsV2Ledger {
                     &reopened.manifest,
                     sequence,
                 )?;
+                ordered.push(&candidate);
                 candidates.push(admission_candidate_projection_v3(authority, &candidate)?);
             }
+            ordered.require(&reopened.manifest)?;
             Ok(candidates)
         })
     }
@@ -2664,10 +2709,14 @@ impl PopulationStatisticsV2Ledger {
         self.lock_file
             .lock_shared()
             .map_err(|why| format!("cannot take population-statistics audit lock: {why}"))?;
+        // Metadata only, before and after (G4-1, D-4765): a content hash here
+        // made every lookup, candidate read and page four whole-file hashes of
+        // the data file and four of the lock file. Each read re-verifies the
+        // records it returns instead.
         let result = (|| {
-            self.require_unchanged()?;
+            self.require_metadata_unchanged()?;
             let value = action(self)?;
-            self.require_unchanged()?;
+            self.require_metadata_unchanged()?;
             Ok(value)
         })();
         let released = self
@@ -2683,6 +2732,13 @@ impl PopulationStatisticsV2Ledger {
     fn require_unchanged(&self) -> Result<(), PopulationStatisticsV2Refusal> {
         require_generation(self.lock_generation, &self.lock_file, &self.lock_path)?;
         require_generation(self.data_generation, &self.data_file, &self.data_path)
+    }
+
+    /// The metadata halves of [`Self::require_unchanged`]: a constant number
+    /// of `stat` calls and no content read.
+    fn require_metadata_unchanged(&self) -> Result<(), PopulationStatisticsV2Refusal> {
+        require_metadata_generation(self.lock_generation, &self.lock_file, &self.lock_path)?;
+        require_metadata_generation(self.data_generation, &self.data_file, &self.data_path)
     }
 
     /// [`Self::require_unchanged`] that also returns the generation-domain
@@ -3288,6 +3344,91 @@ fn validate_orphan_prefix(
     Ok(())
 }
 
+/// Re-reads the Data and Completion records an indexed audit describes and
+/// requires them to decode to its manifest and its Completion digest: two
+/// fixed-record reads, O(1) in file size (D-4765), proven by
+/// `cli::population_statistics_v2::tests::cached_reads_hash_no_file_and_reread_only_what_they_return`.
+fn reverify_block_bounds(
+    file: &mut File,
+    audit: &PopulationStatisticsV2ReopenAudit,
+) -> Result<(), PopulationStatisticsV2Refusal> {
+    let completion_index = audit
+        .manifest
+        .block_record_count()?
+        .checked_sub(1)
+        .and_then(|ordinal| audit.first_record.checked_add(ordinal))
+        .ok_or_else(|| "population-statistics completion index overflowed".to_owned())?;
+    let data = read_record(file, audit.first_record).and_then(|data| {
+        Ok(data.kind == RecordKindV2::Data
+            && decode_manifest(&data.payload, data.kind)? == audit.manifest)
+    });
+    require_reread("Data", audit, data)?;
+    let completion = read_record(file, completion_index).and_then(|completion| {
+        Ok(completion.kind == RecordKindV2::Completion
+            && decode_manifest(&completion.payload, completion.kind)? == audit.manifest
+            && digest_completion_record(&completion.payload) == audit.completion_record_digest)
+    });
+    require_reread("Completion", audit, completion)
+}
+
+/// Names a re-read record of `audit` that no longer matches, with the decode or
+/// read refusal when there was one.
+fn require_reread(
+    kind: &str,
+    audit: &PopulationStatisticsV2ReopenAudit,
+    same: Result<bool, PopulationStatisticsV2Refusal>,
+) -> Result<(), PopulationStatisticsV2Refusal> {
+    match same {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(format!(
+            "population-statistics {kind} record of audit {} differs from the one indexed at open",
+            hex32(audit.audit_id())
+        )),
+        Err(why) => Err(format!(
+            "population-statistics {kind} record of audit {} differs from the one indexed at open: {why}",
+            hex32(audit.audit_id())
+        )),
+    }
+}
+
+/// The block's ordered candidate digest, folded from candidates in sequence
+/// order: the one authority [`ordered_candidate_digest`] and the family-wide
+/// reads share, so a read of all C candidates re-verifies their content
+/// against the manifest at no extra I/O (D-4765).
+struct OrderedCandidateCheck {
+    hasher: Hasher,
+}
+
+impl OrderedCandidateCheck {
+    fn new(count: u64) -> Self {
+        let mut hasher = Hasher::new();
+        hasher.update(CANDIDATE_ORDER_DOMAIN);
+        hasher.update(&count.to_le_bytes());
+        Self { hasher }
+    }
+
+    fn push(&mut self, candidate: &PopulationStatisticsCandidateV2) {
+        hash_candidate(&mut self.hasher, candidate);
+    }
+
+    fn finish(self) -> [u8; 32] {
+        self.hasher.finalize()
+    }
+
+    fn require(
+        self,
+        manifest: &PopulationStatisticsManifestV2,
+    ) -> Result<(), PopulationStatisticsV2Refusal> {
+        if self.finish() != manifest.ordered_candidate_digest {
+            return Err(
+                "population-statistics candidate records no longer reproduce the block's ordered candidate digest"
+                    .to_owned(),
+            );
+        }
+        Ok(())
+    }
+}
+
 fn read_candidate_at(
     file: &mut File,
     first: u64,
@@ -3725,6 +3866,12 @@ fn build_raw_splits(
 thread_local! {
     /// Test-only count of full-ledger scans (one per open) on this thread.
     static STATISTICS_SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only count of whole-file generation hash passes on this thread.
+    static STATISTICS_FILE_HASHES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -5451,13 +5598,12 @@ fn candidate_source_hasher(domain: &[u8], sequence: u64) -> Hasher {
 fn ordered_candidate_digest(
     candidates: &[PopulationStatisticsCandidateV2],
 ) -> Result<[u8; 32], PopulationStatisticsV2Refusal> {
-    let mut hasher = Hasher::new();
-    hasher.update(CANDIDATE_ORDER_DOMAIN);
-    hasher.update(&u64_of(candidates.len(), "ordered candidate count")?.to_le_bytes());
+    let mut ordered =
+        OrderedCandidateCheck::new(u64_of(candidates.len(), "ordered candidate count")?);
     for candidate in candidates {
-        hash_candidate(&mut hasher, candidate);
+        ordered.push(candidate);
     }
-    Ok(hasher.finalize())
+    Ok(ordered.finish())
 }
 
 fn ordered_period_digest(
@@ -6032,6 +6178,8 @@ fn hash_file_split(
     exact_bytes: u64,
     cut: u64,
 ) -> Result<([u8; 32], [u8; 32]), PopulationStatisticsV2Refusal> {
+    #[cfg(test)]
+    STATISTICS_FILE_HASHES.with(|count| count.set(count.get().saturating_add(1)));
     file.seek(SeekFrom::Start(0))
         .map_err(|why| format!("cannot seek {} for generation hash: {why}", path.display()))?;
     let rest = exact_bytes
@@ -6094,7 +6242,8 @@ fn hash_exact(
 /// The metadata half of [`require_generation`]: the held file and the file the
 /// path names (not followed through a link) must be one inode whose length and
 /// nanosecond modification/change times are the cached ones. It reads no
-/// content.
+/// content, so it is O(1) in file bytes, proven by
+/// `cli::population_statistics_v2::tests::cached_reads_hash_no_file_and_reread_only_what_they_return`.
 fn require_metadata_generation(
     expected: FileGenerationV2,
     file: &File,
@@ -6887,6 +7036,83 @@ mod tests {
     }
 
     #[test]
+    fn cached_reads_hash_no_file_and_reread_only_what_they_return() {
+        // G4-1: every cached read ran `with_shared_lock`, whose two content
+        // checks hashed the data file four times and the lock file four times
+        // per call. An open still hashes; a read after it hashes nothing.
+        let root = TempRoot::new("no-hash-reads");
+        let prepared = fixture(31);
+        let procedure =
+            PopulationStatisticsProcedureV2::new(16, 77, 2).expect("fixture procedure is explicit");
+        let link =
+            observation_statistics_link(observation_facts(131), &prepared.manifest, procedure)
+                .expect("detached Observation link prepares");
+        let statistics = append_population_statistics_v2(root.path(), bounds(), &prepared)
+            .expect("Statistics bytes commit");
+        let audit = statistics.audit();
+        let source = PopulationStatisticsObservationCommitV2 { statistics, link }
+            .projection_source()
+            .expect("exact linked commit produces a source");
+        let hashes = || STATISTICS_FILE_HASHES.with(std::cell::Cell::get);
+        STATISTICS_FILE_HASHES.with(|count| count.set(0));
+        let mut reader =
+            PopulationStatisticsV2Ledger::open_read(root.path(), bounds()).expect("reader opens");
+        assert_eq!(
+            hashes(),
+            4,
+            "an open hashes the lock file and the data file twice each"
+        );
+        STATISTICS_FILE_HASHES.with(|count| count.set(0));
+        let authority = reader
+            .prepare_admission_projection_v3(&source)
+            .expect("complete family projects");
+        for _ in 0..10 {
+            assert_eq!(
+                reader
+                    .reopen_audit(&audit.audit_id())
+                    .expect("lookup reads"),
+                Some(audit)
+            );
+            assert_eq!(
+                reader
+                    .reopen_audit(&[0xAB; 32])
+                    .expect("absent lookup reads"),
+                None
+            );
+            assert_eq!(
+                reader
+                    .candidate(&audit.audit_id(), 1)
+                    .expect("candidate reads")
+                    .sequence(),
+                1
+            );
+            assert_eq!(
+                reader
+                    .page_candidates(&audit.audit_id(), 0, 2)
+                    .expect("page reads")
+                    .rows()
+                    .len(),
+                2
+            );
+            reader
+                .projection_candidate(source, 0)
+                .expect("projection candidate reads");
+            reader
+                .admission_candidate_v3(&authority, 1)
+                .expect("Admission V3 candidate reads");
+            assert_eq!(
+                reader
+                    .admission_candidates_v3(&authority)
+                    .expect("Admission V3 family reads")
+                    .len(),
+                2
+            );
+            assert!(reader.trailing_prefix_audit().expect("no orphan").is_none());
+        }
+        assert_eq!(hashes(), 0, "81 cached reads hash no file");
+    }
+
+    #[test]
     fn one_append_runs_one_full_scan_and_rereads_only_its_block() {
         // W2-cli12-1: the door opened the ledger twice (the writer's open and
         // a fresh read-only reopen), so every append re-validated every stored
@@ -7071,6 +7297,174 @@ mod tests {
             why.contains("changed after population-statistics open"),
             "{why}"
         );
+    }
+
+    /// Pins the file's modification time far from now, so a change is visible
+    /// to a metadata generation whatever the filesystem's timestamp tick.
+    fn pin_mtime(path: &Path) {
+        OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("fixture file opens")
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1))
+            .expect("fixture mtime sets");
+    }
+
+    /// Re-measures the cached data generation's metadata, keeping its content
+    /// digest: a rewrite made inside one timestamp tick, which a metadata
+    /// generation cannot see.
+    fn same_tick(ledger: &mut PopulationStatisticsV2Ledger) {
+        let metadata = std::fs::metadata(&ledger.data_path).expect("ledger measures");
+        ledger.data_generation = generation_of(&metadata, ledger.data_generation.content_digest);
+    }
+
+    #[test]
+    fn cached_reads_reverify_what_they_return_and_the_limit_is_what_they_do_not() {
+        // G4-1, D-4765: a cached read compares generations by metadata and
+        // re-verifies the records it returns. One audit of fixture(31): Data at
+        // record 0, candidates at 1 and 2, periods 3..=10, splits 11 and 12,
+        // Completion at 13.
+        let root = TempRoot::new("reverified-reads");
+        let prepared = fixture(31);
+        let procedure =
+            PopulationStatisticsProcedureV2::new(16, 77, 2).expect("fixture procedure is explicit");
+        let link =
+            observation_statistics_link(observation_facts(131), &prepared.manifest, procedure)
+                .expect("detached Observation link prepares");
+        let statistics = append_population_statistics_v2(root.path(), bounds(), &prepared)
+            .expect("Statistics bytes commit");
+        let audit = statistics.audit();
+        let id = audit.audit_id();
+        let source = PopulationStatisticsObservationCommitV2 { statistics, link }
+            .projection_source()
+            .expect("exact linked commit produces a source");
+        let path = root.path().join(DATA_FILE);
+        let offset = |record: u64, byte: u64| record_offset(record).expect("offset") + byte;
+
+        // A metadata-visible change refuses every read, even an absent id.
+        let mut reader =
+            PopulationStatisticsV2Ledger::open_read(root.path(), bounds()).expect("reader opens");
+        pin_mtime(&path);
+        for why in [
+            reader.reopen_audit(&[0xAB; 32]).err(),
+            reader.candidate(&id, 0).err(),
+            reader.page_candidates(&id, 0, 1).err(),
+            reader.trailing_prefix_audit().err(),
+        ] {
+            let why = why.unwrap_or_default();
+            assert!(
+                why.contains("changed after population-statistics open"),
+                "{why}"
+            );
+        }
+
+        // Inside one tick, a lookup re-reads its Data and Completion.
+        for (record, needed) in [
+            (0, "Data record of audit"),
+            (13, "Completion record of audit"),
+        ] {
+            let mut reader = PopulationStatisticsV2Ledger::open_read(root.path(), bounds())
+                .expect("reader opens");
+            rewrite_resealed_record(&path, record, |payload| payload[600] ^= 0x01);
+            same_tick(&mut reader);
+            let why = reader
+                .reopen_audit(&id)
+                .expect_err("its own records refuse");
+            assert!(why.contains(needed), "{why}");
+            assert_eq!(
+                reader.reopen_audit(&[0xAB; 32]).expect("an absent id"),
+                None
+            );
+            rewrite_resealed_record(&path, record, |payload| payload[600] ^= 0x01);
+        }
+
+        // An unsealed returned candidate refuses by its seal.
+        let mut reader =
+            PopulationStatisticsV2Ledger::open_read(root.path(), bounds()).expect("reader opens");
+        flip_byte(&path, offset(1, 72));
+        same_tick(&mut reader);
+        assert!(
+            reader.candidate(&id, 0).is_err(),
+            "a single read re-seals its row"
+        );
+        assert!(
+            reader.page_candidates(&id, 0, 2).is_err(),
+            "a page re-seals its rows"
+        );
+        assert!(
+            reader.candidate(&id, 1).is_ok(),
+            "the other row is not read"
+        );
+        flip_byte(&path, offset(1, 72));
+
+        // A RESEALED candidate that still validates: the limit. A single read
+        // returns it as written; the family-wide reads refuse it by the
+        // block's ordered candidate digest, and the next open by recomputation.
+        let mut reader =
+            PopulationStatisticsV2Ledger::open_read(root.path(), bounds()).expect("reader opens");
+        let authority = reader
+            .prepare_admission_projection_v3(&source)
+            .expect("complete family projects");
+        rewrite_resealed_record(&path, 1, |payload| payload[72] ^= 0x01);
+        same_tick(&mut reader);
+        let returned = reader.candidate(&id, 0).expect("not seen by a single read");
+        assert_ne!(
+            returned.candidate_semantic_digest,
+            audit_candidate_digest(&prepared)
+        );
+        for why in [
+            reader.admission_candidates_v3(&authority).err(),
+            reader.prepare_admission_projection_v3(&source).err(),
+        ] {
+            let why = why.unwrap_or_default();
+            assert!(
+                why.contains("no longer reproduce the block's ordered candidate digest"),
+                "{why}"
+            );
+        }
+        assert!(
+            reader
+                .reopen_audit(&id)
+                .expect("a lookup does not read rows")
+                .is_some()
+        );
+        drop(reader);
+        assert!(
+            PopulationStatisticsV2Ledger::open_read(root.path(), bounds()).is_err(),
+            "the next open recomputes the block and refuses it"
+        );
+    }
+
+    /// The first candidate's semantic digest as prepared.
+    fn audit_candidate_digest(prepared: &PreparedPopulationStatisticsV2) -> [u8; 32] {
+        let planned = prepared.records(0, 0).expect("planned bytes build");
+        let raw = planned.get(1).expect("a candidate record");
+        let mut payload = [0_u8; PAYLOAD_BYTES];
+        payload.copy_from_slice(&raw[..PAYLOAD_BYTES]);
+        decode_candidate(&payload)
+            .expect("planned candidate decodes")
+            .candidate_semantic_digest
+    }
+
+    #[test]
+    fn a_trailing_prefix_read_reverifies_the_orphan_data_record() {
+        let root = TempRoot::new("orphan-reverify");
+        orphan_fixture(root.path(), &fixture(2));
+        let path = root.path().join(DATA_FILE);
+        let mut reader = PopulationStatisticsV2Ledger::open_read(root.path(), bounds())
+            .expect("the orphan is recoverable");
+        assert!(
+            reader
+                .trailing_prefix_audit()
+                .expect("orphan reads")
+                .is_some()
+        );
+        rewrite_resealed_record(&path, 0, |payload| payload[600] ^= 0x01);
+        same_tick(&mut reader);
+        let why = reader
+            .trailing_prefix_audit()
+            .expect_err("a changed orphan Data refuses");
+        assert!(why.contains("differs from the one seen at open"), "{why}");
     }
 
     #[test]
@@ -7981,6 +8375,10 @@ mod tests {
             let value = get_u64(payload, 136).expect("trade count reads");
             put_u64(payload, 136, value.saturating_add(1)).expect("fixed candidate field exists");
         });
+        // A cached read compares metadata (D-4765): the pin makes the rewrite
+        // visible to it whatever the timestamp tick. A same-tick rewrite is
+        // `cached_reads_reverify_what_they_return_and_the_limit_is_what_they_do_not`.
+        pin_mtime(&path);
         let why = reader
             .candidate(&audit.audit_id(), 0)
             .expect_err("same-length mutation invalidates cached handle");
@@ -8001,6 +8399,7 @@ mod tests {
                     put_u64(payload, 136, value.saturating_add(1))
                         .expect("fixed candidate field exists");
                 });
+                pin_mtime(&during_path);
                 Ok(())
             })
             .expect_err("post-action generation check catches non-cooperating mutation");
