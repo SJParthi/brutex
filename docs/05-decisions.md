@@ -65224,3 +65224,14 @@ same moment".
 **Decision.** Each block moved onto its own item; `TOP_CEILING` keeps only
 its own. `each_screen_band_doc_sits_on_its_own_item` reads the doc directly
 above each of the three items; it failed on `measure_top`'s empty doc.
+
+### D-4724 — Two `latest_for` limits no longer state a removed function as current — 2026-10-09
+
+**Finding.** G2-2. Two `docs/06-limits.md` bullets stated `latest_for`'s
+O(runs) per call as a current cost, while D-1700 removed the function and
+other bullets already said so.
+
+**Decision.** Both bullets now name D-1700 and `recorded_row`.
+`no_limit_states_the_removed_latest_for_as_current` requires every limit
+bullet headed by `latest_for` to name D-1700; it failed on the first stale
+bullet.

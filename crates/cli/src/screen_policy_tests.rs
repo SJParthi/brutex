@@ -2043,3 +2043,34 @@ fn each_screen_band_doc_sits_on_its_own_item() {
         "{ceiling}"
     );
 }
+
+/// G2-2, D-4724. `latest_for` was removed by D-1700. Two bullets of
+/// `docs/06-limits.md` still stated its O(runs) cost as current beside the
+/// corrected copies; every bullet naming it must say it is gone.
+#[test]
+fn no_limit_states_the_removed_latest_for_as_current() {
+    let limits = include_str!("../../../docs/06-limits.md");
+    let bullets: Vec<&str> = limits
+        .split("\n- ")
+        .skip(1)
+        .map(|bullet| {
+            let paragraph = bullet.split_once("\n\n").map_or(bullet, |(head, _)| head);
+            paragraph
+                .split_once("\n#")
+                .map_or(paragraph, |(head, _)| head)
+        })
+        .filter(|bullet| {
+            bullet
+                .lines()
+                .next()
+                .is_some_and(|head| head.contains("latest_for`"))
+        })
+        .collect();
+    assert!(bullets.len() >= 2, "the corrected bullets remain");
+    for bullet in bullets {
+        assert!(
+            bullet.contains("D-1700"),
+            "a bullet still states `latest_for` as current:\n{bullet}"
+        );
+    }
+}

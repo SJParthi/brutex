@@ -13034,10 +13034,12 @@ not:
   audit, which consumes them), the O(bars) scans that derive its horizon,
   grid rungs, floors and policy from the held bars, and its own sweep. NOT
   MEASURED.
-- **`latest_for` (D-1567).** O(runs) per call: it opens the results ledger,
-  which builds the identity index and hashes the file, before its backward
-  scan. Called once per rung of `range-all`, `pool` pass 1 and every `descend`
-  step.
+- **`latest_for` (D-1567, removed by D-1700).** No longer a cost: the
+  function is gone. Its O(runs) per call, a ledger open before a backward
+  scan once per rung of `range-all`, `pool` pass 1 and every `descend` step,
+  is history; `recorded_row` replaced it, and the first `latest_for` bullet
+  of this section states what that costs. Restated by D-4724, which found
+  this bullet still describing the removed function as current.
 ## Audit fixes — D-1480 onward, 3 October 2026
 
 **A credential watch's dead-value check is O(d), not O(1) (v3a-1, D-1482).**
@@ -15045,10 +15047,12 @@ UNVERIFIED for the rest:
 - **`api::server::form_read_bound` (D-1592).** "O(1)": four comparisons since D-1770 (two before)
   against literal paths. `api::server::form_read_bound_is_wide_only_on_the_member_routes`
   proves which route gets which bound; nothing times the call.
-- **`cli::latest_for` (D-1567).** The stated O(runs) per call (the bullet
-  above) rests on the audit's measurement (14.13x open cost for 10x rows,
-  o1surface2-4). `crates/cli/benches/ratio.rs` deliberately does not time
-  `Results::open`, so no tracked bench repeats it.
+- **`cli::latest_for` (D-1567, removed by D-1700).** The O(runs) per call
+  this bullet once rested on the audit's measurement (14.13x open cost for
+  10x rows, o1surface2-4) belongs to a removed function. Its replacement
+  `recorded_row` is stated from the code's shape and not timed:
+  `crates/cli/benches/ratio.rs` deliberately does not time `Results::open` or
+  the shared handle's refresh. Restated by D-4724.
 ## A rate span published slower than one permit a second keeps the old floor — D-1769, 3 October 2026
 
 `pull::rate::Window::floor_of` floors every span at one permit a second in its
