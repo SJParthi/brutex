@@ -2664,8 +2664,16 @@ impl ManifestHeader {
             let [code] = le_bytes(&image, H_SEGMENT);
             let segment =
                 segment_of(code).map_err(|_| ManifestError::UnknownSegmentCode { code })?;
-            let reserved: [u8; 3] = le_bytes(&image, H_V4_RESERVED);
-            if let Some(at) = reserved.iter().position(|byte| *byte != 0) {
+            // THREE BYTES, NAMED ONE BY ONE: the first that is not zero is the
+            // offset the refusal names. A pattern over a fixed-size array, so
+            // the check is bounded by the slot's layout and not by any data.
+            let first_set = match le_bytes::<3>(&image, H_V4_RESERVED) {
+                [0, 0, 0] => None,
+                [0, 0, _] => Some(2),
+                [0, _, _] => Some(1),
+                _ => Some(0),
+            };
+            if let Some(at) = first_set {
                 return Err(ManifestError::ReservedNotZero {
                     offset: H_V4_RESERVED + at,
                 });
@@ -2958,12 +2966,20 @@ impl Manifest {
     /// guarantee is about the loaded index, which is the one a query touches.
     /// See `docs/06-limits.md` §17.
     fn genesis(vendor: Vendor) -> Self {
+        Self::empty(ManifestHeader::genesis(vendor), FORMAT_VERSION)
+    }
+
+    /// A census of no entries under `header`, as `loaded_version` — the one
+    /// constructor every genesis goes through, single file or partition, so
+    /// the index that reserves nothing (see [`Manifest::genesis`]) is built in
+    /// one place.
+    fn empty(header: ManifestHeader, loaded_version: u16) -> Self {
         Self {
-            header: ManifestHeader::genesis(vendor),
+            header,
             log: Vec::new(),
             index: HashMap::new(),
             degraded: None,
-            loaded_version: FORMAT_VERSION,
+            loaded_version,
         }
     }
 
@@ -3083,13 +3099,10 @@ impl Manifest {
         segment: Segment,
         capacity: u64,
     ) -> Result<Self, ManifestError> {
-        Ok(Self {
-            header: ManifestHeader::genesis_partition(vendor, segment, capacity)?,
-            log: Vec::new(),
-            index: HashMap::new(),
-            degraded: None,
-            loaded_version: PARTITION_FORMAT_VERSION,
-        })
+        Ok(Self::empty(
+            ManifestHeader::genesis_partition(vendor, segment, capacity)?,
+            PARTITION_FORMAT_VERSION,
+        ))
     }
 
     /// The census of a `(vendor, segment)` whose directory holds no epoch: a
@@ -3103,8 +3116,8 @@ impl Manifest {
     #[must_use]
     pub fn partition_absent(vendor: Vendor, segment: Segment) -> Self {
         note_census_absent(vendor, Some(segment));
-        Self {
-            header: ManifestHeader {
+        Self::empty(
+            ManifestHeader {
                 format_version: PARTITION_FORMAT_VERSION,
                 entry_stride: ENTRY_STRIDE_U16,
                 vendor,
@@ -3115,11 +3128,8 @@ impl Manifest {
                 capacity: capacity_floor(segment),
                 segment: Some(segment),
             },
-            log: Vec::new(),
-            index: HashMap::new(),
-            degraded: None,
-            loaded_version: PARTITION_FORMAT_VERSION,
-        }
+            PARTITION_FORMAT_VERSION,
+        )
     }
 
     /// Loads a manifest from its header region and its entry region.

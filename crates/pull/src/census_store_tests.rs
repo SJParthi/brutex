@@ -4,6 +4,16 @@
 //!
 //! Every fixture is invented: keys, counts, stamps and journal lines.
 
+#![cfg(test)]
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "the same exception every test module in this workspace takes: a \
+              test that cannot panic cannot fail."
+)]
+
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 

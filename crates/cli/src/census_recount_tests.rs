@@ -1,6 +1,16 @@
 //! `cli census-recount` and `cli census-migrate`, driven against scratch
 //! stores built from invented bars (D-3316, D-3317 item 5). No vendor row.
 
+#![cfg(test)]
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "the same exception every test module in this workspace takes: a \
+              test that cannot panic cannot fail."
+)]
+
 use std::path::{Path, PathBuf};
 
 use brutex_core::instrument::{Contract, Exchange, Segment};

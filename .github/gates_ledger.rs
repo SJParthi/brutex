@@ -1491,7 +1491,15 @@ const ALLOW_SORT: Allow = &[
     ("crates/api/src/merge.rs", 4),
     ("crates/api/src/render.rs", 1),
     ("crates/pull/src/archive.rs", 1),
-    ("crates/pull/src/manifest.rs", 1),
+    // 2 since D-3316 (WP-10): beside the header slots' generation order, a
+    // compaction writes the newest row of every key IN KEY ORDER, so two
+    // processes compacting one census write the same bytes. One sort of the
+    // keys, O(keys log keys), once per fill of an epoch (bench C-14).
+    ("crates/pull/src/manifest.rs", 2),
+    // D-3316 (WP-10): `cli census-recount` sorts each directory it walks by
+    // name, O(d log d) per directory, so two recounts of one store record rows
+    // in one order and publish identical bytes. Never on a request path.
+    ("crates/pull/src/census_store.rs", 1),
     ("crates/store/src/catalog.rs", 1),
     ("crates/cli/src/boolean_statistics_v1.rs", 1),
     ("crates/pull/src/ingest.rs", 1),

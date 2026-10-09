@@ -50,7 +50,7 @@
 //! the closes — so a census refused while its bars landed is caught up without
 //! re-reading a single vendor zip (DB-G09, DB-G49).
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{ErrorKind, Read as _, Write as _};
@@ -967,13 +967,14 @@ fn install_epoch(
     image: &[u8],
 ) -> Result<PathBuf, String> {
     let dir = segment_dir(root, vendor, segment);
-    if !(FIRST_EPOCH..=LAST_EPOCH).contains(&epoch) {
+    // A range pattern: the epochs six digits can name, a compile-time bound.
+    let (FIRST_EPOCH..=LAST_EPOCH) = epoch else {
         return Err(format!(
             "{}: epoch {epoch} is outside {FIRST_EPOCH}..={LAST_EPOCH}, the epochs six \
              digits can name; nothing was written",
             dir.display()
         ));
-    }
+    };
     let path = epoch_path(root, vendor, segment, epoch);
     if fs::symlink_metadata(&path).is_ok() {
         return Err(format!(
@@ -1661,7 +1662,9 @@ pub fn recount(
     let mut found = Recount::default();
     let mut held: Vec<Held> = Vec::new();
     let base = root.join(store::path::STORE_ROOT).join(vendor.as_str());
-    let mut unreadable_months: HashSet<YearMonth> = HashSet::new();
+    // Ordered as it is filled, so the receipt lists the months in order with
+    // no sort after the walk.
+    let mut unreadable_months: BTreeSet<YearMonth> = BTreeSet::new();
     for (exchange_path, exchange_name) in sorted_dir(&base)? {
         let Ok(exchange) = Exchange::parse(&exchange_name) else {
             stray(&mut found, exchange_path);
@@ -1698,9 +1701,7 @@ pub fn recount(
         }
     }
     found.offered = u64::try_from(held.len()).unwrap_or(u64::MAX);
-    let mut months_unreadable: Vec<YearMonth> = unreadable_months.into_iter().collect();
-    months_unreadable.sort_unstable();
-    found.months_unreadable = months_unreadable;
+    found.months_unreadable = unreadable_months.into_iter().collect();
     for (target, rows) in &grouped(root, vendor, &held)? {
         if rows.is_empty() {
             continue;
@@ -1752,7 +1753,7 @@ struct Walk<'a> {
     span: Span,
     found: &'a mut Recount,
     held: &'a mut Vec<Held>,
-    unreadable_months: &'a mut HashSet<YearMonth>,
+    unreadable_months: &'a mut BTreeSet<YearMonth>,
 }
 
 /// Everything below one symbol directory: rungs directly, or contracts then
@@ -2123,6 +2124,16 @@ pub fn close_journal(
             .or_default()
             .push((one.entry.first_ts_micros, one.entry.last_ts_micros));
     }
+    // The months no day of may close, and why: an unreadable file outranks a
+    // refused row, because a month the recount could not read is one it
+    // cannot say anything about.
+    let mut blocked: BTreeMap<YearMonth, Blocked> = BTreeMap::new();
+    for month in refused {
+        let _ = blocked.insert(*month, Blocked::Refused);
+    }
+    for month in unreadable {
+        let _ = blocked.insert(*month, Blocked::Unreadable);
+    }
     let mut done = JournalClose {
         path: path.clone(),
         ..JournalClose::default()
@@ -2144,12 +2155,7 @@ pub fn close_journal(
             done.other_stage.push(key.clone());
             continue;
         }
-        match day_verdict(
-            (kind, day),
-            fields,
-            &by_month,
-            (unreadable, refused, strays),
-        ) {
+        match day_verdict((kind, day), fields, &by_month, (&blocked, strays)) {
             Ok(closed) => done.closed.push(Closed {
                 key: key.clone(),
                 ..closed
@@ -2163,8 +2169,14 @@ pub fn close_journal(
     let started = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs());
+    // `started`, raised by one while an earlier `run` line holds it (D-3317
+    // item 4): one ordered walk of the ids at or past it, stopping at the
+    // first gap.
     let mut id = started;
-    while runs.contains(&id) {
+    for held in runs.range(started..) {
+        if *held != id {
+            break;
+        }
         id += 1;
     }
     let to = span
@@ -2198,6 +2210,15 @@ pub fn close_journal(
 /// and month of its key.
 type Spans = BTreeMap<(Segment, YearMonth), Vec<(i64, i64)>>;
 
+/// Why no day of a month may close.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Blocked {
+    /// A bar file of the month could not be read.
+    Unreadable,
+    /// The census refused a row of the month.
+    Refused,
+}
+
 /// Whether `day`'s months are all in the census, and the `recounted` fields if
 /// they are. `kind` is the journal key's first word, which names the segment
 /// the day's files were filed under (`pull::gdfl_import::ImportKind`).
@@ -2225,7 +2246,7 @@ fn day_verdict(
     (kind, day): (&str, Day),
     fields: &[String],
     by_month: &Spans,
-    (unreadable, refused, strays): (&[YearMonth], &HashSet<YearMonth>, u64),
+    (blocked, strays): (&BTreeMap<YearMonth, Blocked>, u64),
 ) -> Result<Closed, String> {
     let month = day
         .year_month()
@@ -2243,17 +2264,20 @@ fn day_verdict(
              the census may not hold every month the day touched"
         ));
     }
-    if unreadable.contains(&month) {
-        return Err(format!(
-            "a bar file of {month} could not be read, so the census may not hold \
-             every month the day touched"
-        ));
-    }
-    if refused.contains(&month) {
-        return Err(format!(
-            "the census refused a row of {month}, so it does not hold every month \
-             the day touched"
-        ));
+    match blocked.get(&month) {
+        Some(Blocked::Unreadable) => {
+            return Err(format!(
+                "a bar file of {month} could not be read, so the census may not hold \
+                 every month the day touched"
+            ));
+        }
+        Some(Blocked::Refused) => {
+            return Err(format!(
+                "the census refused a row of {month}, so it does not hold every month \
+                 the day touched"
+            ));
+        }
+        None => {}
     }
     let (start, end) = ist_day_micros(day);
     let months = by_month.get(&(segment, month)).map_or(0, |spans| {
@@ -2305,9 +2329,9 @@ fn parse_day(text: &str) -> Option<Day> {
 fn journal_states(
     path: &Path,
     text: &str,
-) -> Result<(BTreeMap<String, KeyState>, HashSet<u64>), String> {
+) -> Result<(BTreeMap<String, KeyState>, BTreeSet<u64>), String> {
     let mut states: BTreeMap<String, KeyState> = BTreeMap::new();
-    let mut runs: HashSet<u64> = HashSet::new();
+    let mut runs: BTreeSet<u64> = BTreeSet::new();
     let whole = text.rsplit_once('\n').map_or("", |(whole, _)| whole);
     for line in whole.split('\n').filter(|line| !line.is_empty()) {
         if line.ends_with(TORN) {
@@ -2371,13 +2395,5 @@ fn append_journal(path: &Path, lines: &str) -> Result<(), String> {
 /// The arms only this module can reach: the run-level compaction, the epoch
 /// install's refusals, the drift check and the migration's refusals.
 #[cfg(test)]
-#[allow(
-    clippy::expect_used,
-    clippy::unwrap_used,
-    clippy::panic,
-    clippy::indexing_slicing,
-    reason = "the same exception every test module in this workspace takes: a \
-              test that cannot panic cannot fail."
-)]
 #[path = "census_store_tests.rs"]
 mod tests;

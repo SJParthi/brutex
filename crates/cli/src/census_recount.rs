@@ -382,13 +382,5 @@ fn render_migration(out: &mut String, vendor: Vendor, done: &Migration) {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::expect_used,
-    clippy::unwrap_used,
-    clippy::panic,
-    clippy::indexing_slicing,
-    reason = "the same exception every test module in this workspace takes: a \
-              test that cannot panic cannot fail."
-)]
 #[path = "census_recount_tests.rs"]
 mod tests;
