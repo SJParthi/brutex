@@ -346,27 +346,59 @@ fn turns_are_granted_in_round_then_input_order_within_a_deadline() {
     );
 }
 
-/// **The two turn tests above are first in the test order, by name.** D-4180.
+/// **The two turn tests above are in the test order's front band, by name.**
+/// D-4180.
 ///
 /// Under one test thread and fail-fast, a mutant that leaves a turn ungranted
 /// is caught only if one of these runs before any test that waits on a turn
 /// with no deadline. `.config/nextest.toml` gives both `priority = 100` by
-/// exact name, and nextest does not complain when a filter matches nothing,
-/// so a rename would silently put the hang back. The two function pointers
-/// below stop compiling on a rename, and the config is checked for both names.
+/// exact name, beside run 1286's other kill tests, so both run ahead of every
+/// priority-0 test that drives `ordered::map` (measured at positions 47 and 48
+/// of the cli binary, D-4180). No test in that band may itself drive
+/// `ordered::map` without a deadline. nextest does not complain when a filter matches
+/// nothing, so a rename or a move would silently put the hang back. The two
+/// function pointers below stop compiling on a rename; the filter is built
+/// from this module's own path, so a move changes the name the config must
+/// carry; and the name must sit in an active override's `filter` whose
+/// `priority` is 100, not merely somewhere in the file.
 #[test]
 fn the_d_4180_priority_names_both_turn_tests() {
     let _: fn() = a_lane_never_waits_on_its_own_slot;
     let _: fn() = turns_are_granted_in_round_then_input_order_within_a_deadline;
     let config = include_str!("../../../.config/nextest.toml");
+    // `cli::ordered::tests` is `ordered::tests` to nextest, which names a test
+    // by its path inside the crate.
+    let here = module_path!()
+        .split_once("::")
+        .map_or(module_path!(), |(_, inside)| inside);
+    assert_eq!(here, "ordered::tests", "premise: the path nextest prints");
+    // Each override, cut at the next table header, without its comment lines.
+    let overrides: Vec<Vec<&str>> = config
+        .split("[[profile.default.overrides]]")
+        .skip(1)
+        .map(|block| {
+            block
+                .lines()
+                .map(str::trim)
+                .take_while(|line| !line.starts_with('['))
+                .filter(|line| !line.starts_with('#'))
+                .collect()
+        })
+        .collect();
     for name in [
         "a_lane_never_waits_on_its_own_slot",
         "turns_are_granted_in_round_then_input_order_within_a_deadline",
     ] {
-        let filter = format!("test(=ordered::tests::{name})");
+        let filter = format!("test(={here}::{name})");
+        let banded = overrides.iter().any(|lines| {
+            lines
+                .iter()
+                .any(|line| line.starts_with("filter") && line.contains(&filter))
+                && lines.contains(&"priority = 100")
+        });
         assert!(
-            config.contains(&filter),
-            "`.config/nextest.toml` must run {filter} first (D-4180)"
+            banded,
+            "`.config/nextest.toml` must give {filter} priority 100 in an active override (D-4180)"
         );
     }
 }

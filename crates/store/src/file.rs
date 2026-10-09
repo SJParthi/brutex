@@ -7429,7 +7429,11 @@ mod tests {
     /// **A TIME-INDEX REFUSAL NAMES THE `.tix` AND QUOTES ITS REASON, WORD FOR
     /// WORD.** R1286-rest-03, D-4151.
     ///
-    /// `index_refused` is the one door an append's index failure leaves by. A
+    /// `index_refused` is where `index_batch` sends an index failure it has no
+    /// more specific answer for: a second failed resume, or an `extend` error
+    /// it does not map. (`OffGrid` and `Outside` leave as `StoreError::OffGrid`
+    /// and `StoreError::OutsideMonth`, `SharedSlot` retires the index, and a
+    /// failed rebuild passes its own error up.) Through `index_refused`, a
     /// cause that is already a store error (`Why::Unreadable`) goes back as
     /// that error; every other cause becomes `StoreError::TimeIndex`, whose
     /// sentence leads with the file and then quotes `Why`'s own words. Gate 18

@@ -398,7 +398,10 @@ pub fn bonferroni_t_student(trials: u64, df: u64) -> f64 {
 /// The float where `short` stops holding, for a `short` that holds at zero and
 /// fails from its turning point up: a bracket found by doubling from `start`,
 /// then 200 bisection steps, which leave `high` one ulp above a `t` where
-/// `short` holds.
+/// `short` holds, for a turning point no smaller than about `start * 2^-147`.
+/// The steps narrow the bracket to `2^-200` of its width, and an ulp is about
+/// `2^-52` of the point, so a turning point far below `start` is only within
+/// `start * 2^-200` of `high`, not one ulp.
 ///
 /// # The bracket is bounded, and a bracket that never closes refuses (D-4150)
 ///
@@ -1296,7 +1299,8 @@ mod tests {
     /// finite `t` closes only at `+inf`, the 1,025th point, and turns there,
     /// and one that turns at `2^1022` is found to the bit after 1,022
     /// doublings. (`2^1023` is not: the midpoint `0.5 * (low + high)` overflows
-    /// above it, which is 2^950 times the widest bar any input has.)
+    /// above it. That is about 2^955 times the widest bar any input has, which
+    /// D-4150 measures at about 2^67.7.)
     #[test]
     fn a_bracket_that_never_closes_is_nan_after_a_bounded_number_of_calls() {
         let calls = Cell::new(0_u32);

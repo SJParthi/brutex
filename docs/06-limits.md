@@ -13171,11 +13171,13 @@ row at all accumulated.
   store/format.rs 14 -- the greeks record. Volatility, delta, gamma,
     theta, vega, rho are statistical values, and the file's own doc
     says so before declaring them.
-  runner/significance.rs 18 -> 21 -> 41 -- three more in the same
+  runner/significance.rs 18 -> 21 -> 41 -> 44 -- three more in the same
     multiple-comparison arithmetic the eighteen already cover, then
     twenty for the Student-t tail a row's t is judged on (D-2725):
     the regularized incomplete beta, its continued fraction, ln Gamma,
-    and the Bonferroni bar found by bisection on that tail. Every
+    and the Bonferroni bar found by bisection on that tail, then three
+    for that bisection's bounded bracket in `turning_point`, which
+    starts, steps and refuses (NaN) in f64 (D-4150, D-4181). Every
     input is a COUNT (observations, trials) or a t-statistic; no price
     reaches any of them.
   runner/outcome.rs 5 -> 8 -> 15 -- the three Newey-West

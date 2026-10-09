@@ -65139,8 +65139,8 @@ inside one unit of any `i128` root, and the floor needs at most two more.
 the count. It takes the same steps, stops at the same exit, and reports the
 same count, with no comparison left to mutate. The existing tests pin the
 exact counts (2 at 1, 5 at `i64::MAX` and at 10^30, 6 at `i128::MAX`), the
-exact root of every input to 10^6 and of `k^2 - 1` up to `i128::MAX.isqrt()`,
-and the ceiling. R1286-rest-04 names the shape.
+exact root of every input to 10^6 and of `k^2 - 1` at six `k` from 2 to
+`i128::MAX.isqrt()`, and the ceiling. R1286-rest-04 names the shape.
 
 **Rejected.** Lowering `NEWTON_STEPS` to 8 so the bound would bite. That spends
 the documented margin of twice the measured worst case to make a mutant
@@ -65156,8 +65156,11 @@ was rebuilt from the bars. The other is an `extend` failure that the append
 does not map, and none of today's stamps can yield one. A filesystem test
 cannot provoke either on demand.
 
-**Decided.** A unit test drives `index_refused`, the one door an append's index
-failure leaves by, with four `Why` kinds. It asserts the exact variant and the
+**Decided.** A unit test drives `index_refused`, where `index_batch` sends both
+of those failures, with four `Why` kinds. (It is not the only way out:
+`index_batch` maps `OffGrid` and `Outside` to their own store errors, retires
+the index on `SharedSlot`, and passes a failed rebuild's error up. This said
+"the one door an append's index failure leaves by" until review.) It asserts the exact variant and the
 whole sentence: the `.tix` path, `: time index refused: `, then `Why`'s own
 words. It also asserts that `Why::Unreadable` hands back the store error it
 holds, unwrapped. R1286-rest-03.
@@ -65215,11 +65218,14 @@ pins the seek path; nothing pinned the reading path, which a window takes when
 ordered by anything but time.
 
 **Decided.** A test orders a two-month window by close, once with February
-damaged after a clean January and once with January damaged before a clean
-February, and requires exactly one line, naming the damaged file. One flipped
-byte fails its record's whole checksum block, which in a ten-row month is all
-ten rows, so the test also requires ten named faults and the clean month's ten
-rows, whole (R1286-api-02).
+damaged after a clean January, once with January damaged before a clean
+February, and once with both damaged, and requires exactly one line, naming
+the first damaged file in time order. One flipped byte fails its record's whole
+checksum block, which in a ten-row month is all ten rows, so the test also
+requires ten named faults per damaged month and a clean month's ten rows, whole
+(R1286-api-02). The both-damaged case was added after review: with one damaged
+month, "the first damaged file" and "the last damaged file" are the same file,
+so only that case tells the rule from its opposite.
 
 **Rejected.** Nothing else was needed: the code was right.
 
@@ -65292,8 +65298,12 @@ error's text, the directory untouched and no `active.bin` written
 `<path>: File exists`.
 
 **Rejected.** A permission-denied staging file: the box runs tests as root and
-as uid 65534, and `create_new` would refuse with the same `EACCES` text, so it
-cannot tell the two apart.
+as uid 65534, and root removes a file from a read-only directory anyway, so the
+fixture would not make `remove_file` fail under root and the test would kill
+the mutant under one uid only. (This said `create_new` would refuse with the
+same `EACCES` text. It would not: `create_new` puts the path in front of every
+error, and a staging file that survived its removal makes it fail with
+`File exists`.)
 
 ### D-4100 — The `cli` survivors of run 1286 are killed by tests alone — 2026-10-08
 
@@ -65412,9 +65422,21 @@ is the property the module exists for.
 **Honest limit.** The two turn kills depend on order. nextest does not complain
 when a filter matches nothing, so a rename would silently put the hang back.
 `the_d_4180_priority_names_both_turn_tests` holds both names: it stops compiling
-if either function is renamed, and it fails if the config stops naming either
-one. The sixteen kill-test entries are not pinned this way, because a rename
-there only costs time and never turns a caught mutant into a survivor.
+if either function is renamed, it builds each filter from the test module's own
+path so a move changes the name it looks for, and it fails unless an active
+override (comment lines skipped) both names the filter and carries
+`priority = 100`. The sixteen kill-test entries are not pinned this way,
+because a rename there only costs time and never turns a caught mutant into a
+survivor. "First" means the priority-100 band, not position 1: the two turn
+tests share it with those sixteen and ran at positions 47 and 48 of the cli
+binary, ahead of every priority-0 test that drives `ordered::map`. The three of
+the sixteen that sort ahead of them in the cli binary
+(`anchored_search_lineage_v4`, `candidate_universe`, `expression_search`) reach
+neither of `ordered::map`'s two production callers, `boolean_oos_command` and
+`boolean_catalog_prepared`, and outside a fan-out `ordered::turn` returns at
+once. (Review found the first version of
+the pin test only searched the file's text for the filter and hardcoded the
+module path; both were tightened before the push.)
 
 ### D-4181 — Two static gates the run 1286 fixes tripped, fixed at the source — 2026-10-09
 

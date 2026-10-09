@@ -18842,7 +18842,9 @@ fn sole_server(store_root: &Path, addr: std::net::SocketAddr) -> Result<ServeLoc
 /// [`log_announcement`]'s reason: printed, no test could read them, and a
 /// mutant answering `true` for a degraded read survived (R1286-api-05,
 /// D-4133). One line per note, joined by `\n`, so the one [`say!`] that prints
-/// them writes the same bytes the per-line calls did.
+/// them writes the same bytes to stdout the per-line calls did. On a closed
+/// stdout the block is one write, so it costs one fallback notice on stderr
+/// where the per-line calls cost one per line.
 fn announce_universe(read: &Read) -> (String, bool) {
     let mut said = format!("  universe: {}", read.status());
     let clean = read.is_clean();

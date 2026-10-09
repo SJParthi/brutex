@@ -757,8 +757,9 @@ fn an_uninspectable_rung_path_is_refused_not_reported_absent() {
     assert_eq!(refused, 1);
 }
 
-/// **A page that starts at or past the last block is an empty page for every
-/// `from`, including one whose byte offset cannot be represented.**
+/// **A page that starts past the file's last block (`from >= total`) is an
+/// empty page for every such `from`, including one whose byte offset cannot
+/// be represented.**
 /// R1286-cli-01, D-4100.
 ///
 /// The seek to block `from` is made only when the page shows a block. A page

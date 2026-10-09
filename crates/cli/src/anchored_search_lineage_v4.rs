@@ -2905,9 +2905,11 @@ mod tests {
     ///
     /// A one-pair ledger takes its first pair. A second, different pair would
     /// make two: it is refused with the bound's own sentence, naming both
-    /// counts, and both files keep their exact lengths -- the fresh reopen's
-    /// physical bound would only have refused AFTER the bytes were down. The
-    /// first pair's exact retry is reused at the bound, not refused by it.
+    /// counts, and both files keep their exact lengths. Without the capacity
+    /// check the writer's own post-append length check against the
+    /// member-byte bound (`file_generation`) refuses only AFTER the member
+    /// bytes are down. The first pair's exact retry is reused at the bound,
+    /// not refused by it.
     #[test]
     fn an_append_past_the_pair_bound_is_refused_before_any_byte_is_written() {
         let root = TestRoot::new("pair-bound");
