@@ -65539,3 +65539,233 @@ Tests (L1FD-08):
 - `two_daily_bars_on_one_ist_day_are_refused_by_name`.
 - `only_the_daily_rung_is_restamped_and_the_limit_bounds_the_fold`: an
   intraday span is never restamped.
+
+### D-4764 — A Statistics V2 append re-reads its block through the writer's handle, and the step reads through it: one full scan per append and per step — 2026-10-09
+
+**What was wrong.** W2-cli12-1: `append_population_statistics_v2` ran two full
+opens, the writer's and a fresh read-only reopen after the writer was dropped.
+Each re-validated every stored block and reran every stored bootstrap. The
+step-3 orchestrator then opened the root a third time for its Admission V3
+projection. One step paid three full scans, and A appends cost O(A²) block
+validations with constant 2. D-1682 stated the cost and kept the reopen.
+
+**Decided.** One open. After the receipt-last write, `reverify_committed`
+re-reads exactly the committed block through the writer's own handle, under the
+shared lock:
+
+- the generation must be current by metadata;
+- a written block must end the file, and a reused one must lie inside it;
+- the index must hold exactly this audit;
+- `validate_complete_block`, the function an open runs per block, must
+  recompute it to the identical audit;
+- the whole file must still match its content generation.
+
+The door hands that handle back with the commit (`append_and_retain_reader`),
+and the orchestrator's Admission V3 projection reads through it instead of
+opening the root again. "Freshly reopened" in this module now means re-read and
+re-validated from disk under a generation measured after the write, with every
+byte before the block proven unchanged since the open's scan validated it. No
+byte, format, identity or projection type changes.
+
+That last clause closes a hole the removed second open used to cover. A blind
+re-measure after an owned write would adopt a non-cooperating edit made to an
+older block during the append. The pre-write check now returns, from the same
+hash pass, the digest of the bytes the block lands after: the whole file, or
+the bytes before a trailing orphan. Every re-measure after a write must
+reproduce that digest or refuses, and the block is planned at that verified
+length, never after bytes nothing verified.
+
+Cost: one full open, O(sum over the A stored audits of (C·(P+S) +
+bootstrap)), plus two validations of the new block and a constant number of
+whole-file generation hash passes with no recomputation. A appends cost O(A²)
+block validations with constant 1, and a step scans its root once where it
+scanned three times. `docs/06-limits.md` §154 states it.
+
+**Supersedes** D-1682's rejection of the writer-handle re-read and the claim in
+LBE-09 that an append runs two full scans. The two tests LBE-09 names keep their
+names, because invariant rows are append-only, and now pin one scan; L1FE-01 to
+L1FE-04 state what holds.
+
+**Rejected.** Re-measuring the generation after the write without the prefix
+digest: it adopts edits made during the append. A sealed verified-prefix
+sidecar letting an open skip recomputing unchanged blocks: a new authority,
+behind an unkeyed seal an adversary with write access could re-forge.
+
+Tests: `cli::population_statistics_v2::tests::one_append_runs_one_full_scan_and_rereads_only_its_block`
+(failed first on the unfixed door: "A = 0: one open, the new block twice",
+left (2, 2), right (1, 2)),
+`cli::step3_orchestrator::tests::stored_pair_commits_observation_and_statistics_then_reuses_exact_bytes`
+(failed first: "one Statistics V2 scan per written step", left 3, right 1),
+`cli::population_statistics_v2::tests::one_append_runs_two_full_scans_as_section_154_states`,
+`cli::population_statistics_v2::tests::a_post_write_remeasure_adopts_only_a_reproduced_prefix`,
+`cli::population_statistics_v2::tests::reverify_rereads_only_what_this_handle_committed`,
+`cli::ledger_append_lookup_costs::section_154_states_index_reads_the_bounded_reserve_and_the_two_open_append`.
+
+### D-4765 — A cached Statistics V2 read checks metadata and re-verifies what it returns — 2026-10-09
+
+**What was wrong.** G4-1: §154 says a hash-index lookup is average O(1) and a
+bounded page O(page rows). Every cached read (`reopen_audit`, `candidate`,
+`page_candidates`, `projection_candidate`, the Admission V3 reads and
+`trailing_prefix_audit`) ran `with_shared_lock`, whose content checks before
+and after the read hashed the data file four times and the lock file four
+times. That is O(file bytes) per call. The counting test measured 648 hashes
+for 81 calls.
+
+**Decided.** The fix the finding named as (b), the D-1681 shape:
+
+- `with_shared_lock` compares the open's lock and data generations by metadata
+  only, before and after the read: length, device/inode, and nanosecond
+  modification and change times, with no content read.
+- Each read re-verifies what it returns. A lookup re-reads the audit's Data and
+  Completion records, which must decode to the indexed manifest and Completion
+  digest.
+- A candidate read and a page already re-seal and re-validate every row they
+  return.
+- The family-wide reads fold their C rows into the block's ordered candidate
+  digest, through the same function the writer uses, so every returned row is
+  the content the open validated.
+- A trailing-prefix read re-reads the orphan's Data record.
+
+An open still content-hashes, and so do appends. No byte, format or identity
+changes.
+
+**What is no longer seen per read.** A same-length rewrite that leaves every
+metadata field equal: a rewrite inside one timestamp tick, a raw device write
+or a clock change. It goes unseen when it touches a record the read does not
+return, or a returned candidate row that is resealed and still validates. The
+family-wide reads refuse the second by the ordered digest, and the next open
+refuses both by recomputation. This is the residual D-1681 accepted for the
+Pre-Admission page, and §154 states it.
+
+**Rejected.** Option (a), keeping the hashes and correcting §154 to O(file
+bytes) per call: the finding showed (b) is reachable without a format change.
+Dropping only the second `repeated_digest` pass: it halves the cost and leaves
+it O(file bytes).
+
+Tests: `cli::population_statistics_v2::tests::cached_reads_hash_no_file_and_reread_only_what_they_return`
+(failed first on the unfixed reads: "81 cached reads hash no file", left 648,
+right 0),
+`cli::population_statistics_v2::tests::cached_reads_reverify_what_they_return_and_the_limit_is_what_they_do_not`,
+`cli::population_statistics_v2::tests::a_trailing_prefix_read_reverifies_the_orphan_data_record`,
+`cli::population_statistics_v2::tests::explicit_bounds_and_post_open_same_length_mutation_refuse`
+(its rewrites now pin the modification time, so the metadata refusal does not
+depend on the timestamp tick),
+`cli::ledger_append_lookup_costs::section_154_states_index_reads_the_bounded_reserve_and_the_two_open_append`.
+
+### D-4766 — An Observation lookup reads its own pair, and an append door opens once — 2026-10-09
+
+**What was wrong.** W2-cli11-3: each Observation V1 and V2 `reopen_audit` read
+the whole bounded authority file into memory and hashed it, O(B) time and O(B)
+memory per lookup. The only production lookup is the append door's own fresh
+reopen. Each door made five whole-file reads and two scans: the writer's open,
+the pre-append check, the post-write refresh, a second open, and the lookup.
+D-1681 stated the cost and kept the hash.
+
+**Decided.** The plan G4 §C named, checked against the layout: an authority is
+a contiguous Data/Completion pair at physical records `2·seq` and `2·seq+1`,
+stride 512 bytes in V1 and 1,024 in V2.
+
+- `require_unchanged` is metadata only, the existing pair of
+  `require_observation_generation` calls on the lock and the file. An open now
+  measures those generations before it reads and re-checks them after, so the
+  bytes its scan validated are the bytes later checks compare against.
+- A lookup re-reads the found pair at its fixed offset. Both seals are checked,
+  the Completion must name the sequence and validate against the Data, and the
+  pair must decode to exactly the cached audit and indexed Data. V2 also
+  requires the raw seals to equal the cached digests.
+- The append door re-reads only the committed pair through the writer's handle
+  (`reverify_committed`, the D-1680 shape). It checks the generation, that a
+  written pair ends the file, and the index entry, then re-reads the pair.
+- The post-write refresh is one streaming hash pass with O(1) memory. It must
+  first reproduce the verified digest of the bytes the handle had already
+  validated, so a non-cooperating edit below the new pair is refused rather
+  than adopted. The removed second open used to catch that edit.
+
+A door is now one open (one read, one scan) plus one hash pass on a write, and
+none on a reuse. No byte, format or identity changes.
+
+**What is no longer seen per lookup.** An equal-metadata, same-length rewrite
+of another authority's pair. That pair's own lookup and the next open refuse
+it, the residual D-1681 accepted for the Pre-Admission page.
+
+**Rejected.** Re-verifying only the previous tail pair before an append, as G4
+§C sketched. The streaming prefix check after the write covers every byte
+below the new pair, so it subsumes that.
+
+Tests: `cli::population_observations_v1::tests::lookups_read_no_whole_file_and_one_append_door_scans_once`
+(failed first on the unfixed door: "V1 written: one open, one post-write pass",
+left (5, 2, 0), right (1, 1, 1)),
+`cli::population_observations_v1::tests::a_v1_lookup_rereads_its_own_pair_and_not_another`,
+`cli::population_observations_v1::tests::a_v1_reverify_and_refresh_adopt_only_what_the_handle_verified`,
+`cli::population_observations_v1::tests::a_v2_lookup_reverify_and_refresh_reread_only_their_own_pair`,
+`cli::ledger_append_lookup_costs::observation_lookups_still_hash_the_whole_file_and_say_so`,
+`cli::ledger_append_lookup_costs::a_pre_admission_page_checks_metadata_and_its_lookups_are_priced_by_file_bytes`.
+
+### D-4767 — A Finalization V2 lookup re-digests the two records it names — 2026-10-09
+
+**What was wrong.** W2-cli11-2: `reopen_structural_receipt` ran
+`require_unchanged` on every lookup. That checks the root directory generation
+and content-hashes the lock file and the whole data file, O(file bytes) per
+lookup, before an average-O(1) probe. The counting test measured 40 hashes for
+20 lookups. D-1681 stated the cost and kept the hash.
+
+**Decided.** The plan G4 §B named, checked against the code. The ledger has no
+caller outside its module, and its receipt carries `first_physical_record`,
+`rekey_count` and the raw-record digests of its Data and Completion.
+
+- `require_platform_unchanged` checks the root's directory generation. It then
+  compares the length and platform generation (device/inode and nanosecond
+  modification/change times) of the held and the named lock and data files
+  against the cached ones, without reading content.
+- A found receipt's Data record, at `first_physical_record`, and its
+  Completion, at `first_physical_record + rekey_count + 1`, are re-read with
+  two fixed-offset reads. Their raw digests must equal the receipt's: the same
+  `raw_record_digest` the scan used.
+- An absent id is `Ok(None)` after the metadata check.
+- The open keeps its content hashes, and the dormant append is unchanged.
+
+No byte, format or identity changes.
+
+**What is no longer seen per lookup.** An equal-metadata, same-length rewrite
+of another block, or of this block's Rekey rows. `authenticate_structural_receipt`
+and the next open refuse it, the residual D-1681 accepted for the
+Pre-Admission page.
+
+**Rejected.** Re-reading the whole block per lookup: that is O(Rekey rows),
+and the receipt does not return those rows.
+
+Tests: `cli::population_finalization_v2::tests::lookups_hash_no_file_and_redigest_only_the_two_records_they_name`
+(failed first on the unfixed lookup: "twenty lookups hash no file", left 40,
+right 0),
+`cli::population_finalization_v2::tests::a_lookup_redigests_its_data_and_completion_and_not_the_rekey_rows`,
+`cli::population_finalization_v2::tests::stale_same_length_mutation_and_path_replacement_invalidate_lookup`,
+`cli::ledger_append_lookup_costs::the_finalization_lookup_reads_two_records_and_says_so`.
+
+### D-4768 — The Statistics V2 index grows with the audits it admits — 2026-10-09
+
+**What was wrong.** W2-cli12-2: after D-1682 an open reserved one index slot per
+stored record, `min(max_audits, records)`, and D-2026 pinned that. One audit
+spans 2 + C·(1 + P + S) records, so the reservation exceeded the audits by that
+factor: 14 slots for 2 audits in the counting test.
+
+**Decided.** The open starts with an empty map. `scan` makes room for exactly
+one audit before each insert with `try_reserve(1)`, so a failed allocation is
+a named refusal, never an abort. The map grows geometrically. A audits cost
+amortised O(1) each and O(A) in total, and the capacity stays below twice A
+plus a constant. Nothing on disk changes.
+
+**Supersedes** D-1682's rejection of growing on demand ("repeated rehashing
+during the scan"). Geometric growth rehashes O(A) entries in total, the same
+class as the scan itself. It also supersedes D-2026's "the open must reserve at
+least the stored record count". The test D-2026 tightened,
+`an_open_reserves_for_stored_records_not_the_audit_ceiling`, keeps its name for
+LBE-08 and now pins a capacity below the stored record count.
+
+**Rejected.** Reserving by a count of audits read ahead of the scan: that would
+read every block's Data record twice to save an amortised constant.
+
+Tests: `cli::population_statistics_v2::tests::an_open_sizes_its_index_by_audits_not_records`
+(failed first on the record-sized reservation: "the index holds 14 slots for 2
+audits; it is sized by audits, not by the 28 records"),
+`cli::population_statistics_v2::tests::an_open_reserves_for_stored_records_not_the_audit_ceiling`,
+`cli::ledger_append_lookup_costs::section_154_states_index_reads_the_bounded_reserve_and_the_two_open_append`.

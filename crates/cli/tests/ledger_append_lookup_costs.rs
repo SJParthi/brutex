@@ -16,6 +16,17 @@
 //!   per rung, and its replay's full-route cost was stated nowhere.
 //! * W2-cli3-3 (D-1684): the stored OOS source was rebuilt for every witness
 //!   while §169 priced minting by the replay alone.
+//! * W2-cli12-1 (D-4764): the two-open Statistics V2 append and the step's
+//!   third open are one open per step; the tests named in LBE-09 keep their
+//!   names and now pin the one open.
+//! * G4-1 (D-4765): every cached Statistics V2 read hashed the whole data file
+//!   four times while §154 said a lookup is average O(1) and a page O(rows).
+//! * W2-cli11-3 (D-4766): the Observation lookups no longer hash the whole
+//!   file; the test LBE-06 names for that keeps its name and pins the new shape.
+//! * W2-cli11-2 (D-4767): the Finalization V2 lookup no longer hashes the
+//!   data file.
+//! * W2-cli12-2 (D-4768): the Statistics V2 index was reserved for every
+//!   stored record; it now grows with the audits the scan admits.
 //!
 //! Every file a constant below names is read at compile time, so a rename
 //! fails the build rather than skipping the check. A separate test crate, as
@@ -35,6 +46,8 @@ const CANDIDATE: &str = include_str!("../src/candidate_universe.rs");
 const PRE_ADMISSION: &str = include_str!("../src/pre_admission_data.rs");
 const OBSERVATIONS: &str = include_str!("../src/population_observations_v1.rs");
 const STATISTICS: &str = include_str!("../src/population_statistics_v2.rs");
+const FINALIZATION: &str = include_str!("../src/population_finalization_v2.rs");
+const STEP3: &str = include_str!("../src/step3_orchestrator.rs");
 const LEDGER_V6: &str = include_str!("../src/ledger_v6.rs");
 const STRICT_INPUTS: &str = include_str!("../src/strict_v6_inputs.rs");
 const POPULATION_V6: &str = include_str!("../src/population_v6.rs");
@@ -144,18 +157,26 @@ fn a_pre_admission_page_checks_metadata_and_its_lookups_are_priced_by_file_bytes
     let section_153 = flat(section(153));
     assert!(section_153.contains("A page costs O(P) for P returned rows: since D-1681"));
     assert!(section_153.contains("A cached `reopen_audit` lookup still content-hashes both files"));
+    // §157 and §161 price the Observation lookups at average O(1) since
+    // D-4766, which `observation_lookups_still_hash_the_whole_file_and_say_so`
+    // pins against the source.
     let section_157 = flat(section(157));
     assert!(!section_157.contains("hashes its bounded bytes; hash-index lookup is average O(1)"));
-    assert!(section_157.contains("so one lookup is O(file bytes)"));
+    assert!(!section_157.contains("so one lookup is O(file bytes)"));
+    assert!(section_157.contains("A cached `reopen_audit` lookup is average O(1) since D-4766"));
     let section_161 = flat(section(161));
     assert!(!section_161.contains("identity-map lookup is average O(1); allocation"));
-    assert!(section_161.contains("reads and hashes the whole bounded file, O(B)"));
+    assert!(!section_161.contains("lookup reads and hashes the whole bounded file, O(B), before"));
+    assert!(section_161.contains("One cached `reopen_audit` lookup is average O(1)"));
 
     let module = flat(PRE_ADMISSION.get(..3_000).expect("the module header"));
     assert!(!module.contains("A page is proportional to the returned records after that scan"));
     assert!(module.contains("A page checks file generations by metadata only"));
 }
 
+/// LBE-06 names this test, and invariant rows are append-only, so the name
+/// stays. What it pinned, a whole-file read per Observation lookup, D-4766
+/// removed: it now pins the metadata check and the pair re-read (L1FE-06).
 #[test]
 fn observation_lookups_still_hash_the_whole_file_and_say_so() {
     let mut lookups = 0;
@@ -163,31 +184,71 @@ fn observation_lookups_still_hash_the_whole_file_and_say_so() {
     while let Some(at) = rest.find("    pub fn reopen_audit(") {
         let body = method(rest, "    pub fn reopen_audit(");
         assert!(body.contains("self.require_unchanged()?"));
+        assert!(body.contains("self.reverify_pair(&audit)?"));
         let doc_start = rest
             .get(..at)
             .expect("a prefix")
             .rfind("\n\n")
             .expect("a gap");
         let doc = flat(rest.get(doc_start..at).expect("the rustdoc"));
-        assert!(doc.contains("so it is O(B) time and O(B) transient memory"));
+        assert!(!doc.contains("so it is O(B) time and O(B) transient memory"));
+        assert!(doc.contains("Average O(1) time and O(1) memory in file bytes"));
         lookups += 1;
         rest = rest.get(at + 1..).expect("a suffix");
     }
     assert_eq!(lookups, 2, "Observation V1 and V2 each have one lookup");
-    let unchanged = method(OBSERVATIONS, "    fn require_unchanged(&mut self)");
-    assert!(unchanged.contains("read_bounded_authority_file"));
+    let mut checks = 0;
+    let mut rest = OBSERVATIONS;
+    while let Some(at) = rest.find("    fn require_unchanged(&self)") {
+        let unchanged = method(rest, "    fn require_unchanged(&self)");
+        assert!(
+            !unchanged.contains("read_bounded_") && !unchanged.contains("digest_"),
+            "an Observation lookup reads the whole file again; re-measure §157 and §161"
+        );
+        checks += 1;
+        rest = rest.get(at + 1..).expect("a suffix");
+    }
+    assert_eq!(checks, 2, "V1 and V2 each have one metadata check");
+    assert!(!OBSERVATIONS.contains("fn require_unchanged(&mut self)"));
 
     let chapter = chapter(CHAPTER);
     for needed in [
         "Pre-Admission Data V1 `page`** (§153) is now O(P)",
-        "Observation V1 and V2 `reopen_audit`** (§157, §161) read the whole bounded authority file",
-        "Finalization V2 `reopen_structural_receipt`** re-hashes the bounded data file",
+        "Observation V1 and V2 `reopen_audit`** (§157, §161) are average O(1) since D-4766",
+        "Finalization V2 `reopen_structural_receipt`** is average O(1) since D-4767",
     ] {
         assert!(
             chapter.contains(needed),
             "the chapter no longer says `{needed}`"
         );
     }
+}
+
+#[test]
+fn the_finalization_lookup_reads_two_records_and_says_so() {
+    let lookup = method(FINALIZATION, "    pub fn reopen_structural_receipt(");
+    assert!(lookup.contains("self.require_platform_unchanged()"));
+    assert!(lookup.contains("self.redigest_receipt_records(receipt)?"));
+    assert!(
+        !lookup.contains("self.require_unchanged()"),
+        "the lookup content-hashes the ledger again; re-measure the chapter"
+    );
+    let platform = method(FINALIZATION, "    fn require_platform_unchanged(&self)");
+    assert!(!platform.contains("require_file_generation(") && !platform.contains("hash_file"));
+    let metadata = function(FINALIZATION, "fn require_file_metadata(");
+    assert!(!metadata.contains("hash_file") && !metadata.contains("file_generation("));
+    let redigest = method(FINALIZATION, "    fn redigest_receipt_records(");
+    assert_eq!(redigest.matches("read_record_shared(").count(), 2);
+    let start = FINALIZATION
+        .find("    pub fn reopen_structural_receipt(")
+        .expect("the lookup");
+    let doc_start = FINALIZATION
+        .get(..start)
+        .expect("a prefix")
+        .rfind("\n\n")
+        .expect("a gap");
+    let doc = flat(FINALIZATION.get(doc_start..start).expect("the rustdoc"));
+    assert!(doc.contains("Average O(1) in file bytes and in the block's Rekey count"));
 }
 
 #[test]
@@ -201,21 +262,56 @@ fn section_154_states_index_reads_the_bounded_reserve_and_the_two_open_append() 
     let column = function(STATISTICS, "fn candidate_column<");
     assert!(column.contains(".skip(sequence).step_by(width)"));
     let open = method(STATISTICS, "    fn open_inner(");
-    assert!(open.contains("bounds.audits.min(stored_records)"));
-    assert!(!open.contains("try_reserve(usize_of(bounds.audits,"));
-    let append = function(STATISTICS, "pub fn append_population_statistics_v2(");
-    assert!(append.contains("PopulationStatisticsV2Ledger::open_writer(root, bounds)?"));
-    assert!(append.contains("PopulationStatisticsV2Ledger::open_read(root, bounds)?"));
+    assert!(
+        !open.contains("stored_records") && !open.contains("try_reserve("),
+        "the open pre-reserves its index again; re-measure §154"
+    );
+    assert!(open.contains("audits: HashMap::new(),"));
+    let scan = method(STATISTICS, "    fn scan(&mut self)");
+    assert_eq!(scan.matches(".try_reserve(1)").count(), 1);
+    // One open per append and per step since D-4764: the door re-reads its
+    // block through the writer's handle and hands that handle to the step.
+    let door = function(STATISTICS, "pub fn append_population_statistics_v2(");
+    assert!(door.contains("append_and_retain_ledger(") && !door.contains("open_read("));
+    let append = function(STATISTICS, "fn append_and_retain_ledger(");
+    assert_eq!(append.matches("open_writer(").count(), 1);
+    assert!(
+        !append.contains("open_read("),
+        "the append reopens its root again; re-measure §154"
+    );
+    assert!(append.contains("ledger.reverify_committed(&committed)?"));
+    let projection = function(STEP3, "fn prepare_admission_statistics_projection_v3(");
+    assert!(
+        !projection.contains("open_read("),
+        "the step opens its Statistics root a third time; re-measure §154"
+    );
 
     let text = flat(section(154));
     for needed in [
         "so the per-candidate summaries cost O(C·(P+S)) in total",
-        "never the configured `max_audits` ceiling",
-        "One append through `append_population_statistics_v2` runs two full opens",
-        "A appends to one root cost O(A²) block validations in total",
+        "never by the stored records and never the configured `max_audits` ceiling",
+        "so A audits cost amortised O(1) each and O(A) in total",
+        "One append through `append_population_statistics_v2` runs one full open",
+        "A appends to one root cost O(A²) block validations in total, with constant 1",
+        "a step scans its Statistics root once where it scanned three times",
     ] {
         assert!(text.contains(needed), "§154 no longer says `{needed}`");
     }
+    assert!(
+        !text.contains("runs two full opens"),
+        "§154 still prices two opens"
+    );
+
+    // A cached read checks metadata only since D-4765 (G4-1).
+    let lock = method(STATISTICS, "    fn with_shared_lock<T>(");
+    assert_eq!(
+        lock.matches("self.require_metadata_unchanged()?").count(),
+        2
+    );
+    assert!(!lock.contains("self.require_unchanged()"));
+    let metadata = function(STATISTICS, "fn require_metadata_generation(");
+    assert!(!metadata.contains("hash_file") && !metadata.contains("file_generation("));
+    assert!(text.contains("Since D-4765 that is true of the whole call, not only of the probe"));
 }
 
 #[test]
