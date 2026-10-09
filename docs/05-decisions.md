@@ -65025,3 +65025,28 @@ on a live leader would derive a second time and lose the single-flight
 guarantee D-1443 exists for. **Honest limit:** the `Landing` kill depends on
 test order. A rename that sorted a single-flight test ahead of it would
 restore the timeout, so the ordering is pinned in the test's own doc.
+
+### D-4130 — The trimmed marker walk is tested against a record landing between its reads — 2026-10-08
+
+**What was observed.** Gate 18 run 1286 (head fbdabaec) reported
+`sweeprun::newest_sweep_marker` with the `&&` in
+`same(&through).is_some() && same(&through) == same(&lifecycle)` changed to
+`||` as MISSED. The two operands differ only when the re-read has a record
+at `found` whose sequence is not the marker's. That happens only when a CLI
+appends a lifecycle record BETWEEN the window read and the trimmed re-read.
+The function read the log itself, so no single-threaded test could land a
+record there, and under the mutant any trimmed walk was taken: a clean window
+whose `found` index named the newcomer instead of the marker.
+
+**Decided.** The body moved into `marker_window(read)`, which takes the
+bounded read as a closure; `newest_sweep_marker` passes the same
+`status_tail(dir, "cli.lifecycle", None, limit)` call it used to make, so
+what is read and how often are unchanged (at most two bounded reads). A test
+writes a torn line behind a finished sweep's marker, proves the quiet walk is
+trimmed to the marker, and then lands a newer `command started` from inside
+the second read. It requires reads of exactly 256 then 1, the whole first
+window kept with its malformed line, `found` still naming the finished
+marker's sequence, and the fault still raised (R1286-api-01).
+
+**Rejected.** Racing a writer thread against the reader. It would pass or
+fail by scheduling, which is no test.
