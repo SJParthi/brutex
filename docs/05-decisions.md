@@ -66521,3 +66521,32 @@ browser decodes before it acts. Refusing every `data:` substring: 14 string
 literals under `crates/` (`source_scan strings`, test code included) carry it
 in prose, such as "refused before opening market data:" in
 `crates/cli/src/step3_orchestrator.rs` and "cannot stat Population V6 data:".
+
+### D-4493 — Gate 12's last text program is Rust, and gate 0 refuses the stream editor in every workflow — 2026-10-09
+
+**What was observed (srust-4).** D-2314 moved gate 12's 16 `sed` calls into
+`.github/gates_bounds.rs` because CI is a corner the standing rule covers.
+Commit 46511d59 (D-2105) then added one back, at `ci.yml` line 3347 of
+21443a2a: `xargs -0 -r "$scan" fns < "$work/sources.z" | sed -E
+'s/^(.*):[0-9]+:([A-Za-z_][A-Za-z0-9_]*)$/\1\t\2/'`. Gate 0 refused `awk` and
+`jq` programs but its own test listed `sed -e 's/a/b/'` as acceptable, so a
+`sed` program of any shape passed; the audit's P13, a branching program
+(`sed -n -e ':a' -e 'N' -e '$!ba' -e 's/\n/ /g'`), passed gate 0 when rerun here
+on a scratch copy of 21443a2a.
+
+**The decision.** Gate 12 pipes the scanner's `fns` output through
+`gates-ledger path-declarations`, the Rust filter gate 10 already uses for the
+same `FILE:LINE:name` to `FILE<TAB>name` rewrite (`path_fn_line` in
+`.github/gates_ledger.rs`); gate 25 builds that binary earlier in the same job.
+Measured on 21443a2a's tree: both filters read the same 24,436 `fns` lines and
+wrote byte-identical output (`cmp` silent; sha256 `d9fd388e…f900f` for both).
+Gate 0's `source_scan workflow` refuses the words `sed` and `gsed` on every
+workflow line that is not a comment, as a program name however it is reached
+(`xargs sed`, `find -exec sed`, `"$(command -v sed)"`, `/usr/bin/sed`). It is a
+refusal, not a ratchet: the count is zero after this edit, and the awk ratchet
+(D-2342) shows a ratchet is only for a count above zero. Invariant FXE-02.
+
+**The cost, stated.** The rule reads a word, not a command shape, so a step
+name or an `echo` may not say the word either. That is the shape gate 15 already
+takes for its own word, and no line of the three workflows says it today
+outside comments.

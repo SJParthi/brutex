@@ -3034,6 +3034,30 @@ fn inline_programs(l: &str) -> Vec<(String, &'static str, Family)> {
 const AWK_RATCHET: &[(&str, usize)] = &[(".github/workflows/ci.yml", AWK_IN_CI)];
 const AWK_IN_CI: usize = 0;
 
+/// The stream editor's names. Its first operand, or every `-e` and `-f`, IS a
+/// program, branches and loops included, so every invocation runs one: a
+/// workflow's text edits are a `.github/*.rs` tool (D-2314). Refused as a
+/// WORD, not as a command shape, on every line that is not a comment, so
+/// `xargs sed`, `find -exec sed`, `"$(command -v sed)"` and `/usr/bin/sed` are
+/// all one finding; the cost is that a step name or an `echo` may not say the
+/// word either (srust-4, D-4493).
+const SED: [&str; 2] = ["sed", "gsed"];
+
+/// The program names on one workflow line: every run of characters a path or
+/// a command name is made of, the directory dropped and a version suffix
+/// trimmed (`/usr/bin/node22` is `node`). Quoting, `$(`, `;`, `|`, `=` and
+/// `@` all split, so `X=$(npm bin)` names `npm` and `setup-node@sha` does not
+/// name `node` (D-4493, D-4494).
+fn program_words(l: &str) -> impl Iterator<Item = &str> {
+    l.split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/')))
+        .filter_map(|w| w.rsplit('/').next())
+        .map(|w| {
+            let bare = w.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+            if bare.is_empty() { w } else { bare }
+        })
+        .filter(|w| !w.is_empty())
+}
+
 /// The value of every `shell` key on one logical workflow line (P15-07,
 /// D-2321): the key at the start of the line, after a `- ` list marker, or
 /// after a flow mapping's `{` or `,`, bare or quoted, then `:` and a space or
@@ -3186,6 +3210,11 @@ fn workflow_findings(path: &str, src: &str) -> Vec<String> {
             } else {
                 out.push(line);
             }
+        }
+        if let Some(w) = program_words(l).find(|w| SED.contains(w)) {
+            out.push(format!(
+                "{path}:{n}: `{w}` runs a sed program; a workflow's text edits are a .github/*.rs tool (D-2314, D-4493)"
+            ));
         }
     }
     let allowed = AWK_RATCHET
@@ -5259,7 +5288,6 @@ mod tests {
             "          bash -c 'echo hi'\n",
             "          x=$(command -v node || true)\n",
             "          echo \"use awk here\"\n",
-            "          sed -e 's/a/b/' f\n",
             "          gh pr merge 1 --auto --squash\n",
             "          sha=$(gh api x | \"$j\" field sha)\n",
         ] {
@@ -5394,6 +5422,49 @@ mod tests {
         }
         let any = format!("x\n{one}");
         assert!(!workflow_findings(".github/workflows/ci.yml", &any).is_empty() || AWK_IN_CI == 1);
+    }
+
+    #[test]
+    fn a_sed_program_in_any_spelling_is_refused() {
+        // srust-4, D-4493. The first is Gate 12's line at 21443a2a; the
+        // second is the audit's P13, a branching program. Both passed gate 0.
+        for bad in [
+            "          xargs -0 -r \"$scan\" fns < \"$work/sources.z\" \\\n            | sed -E 's/^(.*):[0-9]+:([A-Za-z_][A-Za-z0-9_]*)$/\\1\\t\\2/' > \"$work/path-fns\"\n",
+            "          git ls-files 'crates/*/Cargo.toml' | sed -n -e ':a' -e 'N' -e '$!ba' -e 's/\\n/ /g' -e 'p'\n",
+            "          sed -e 's/a/b/' f\n",
+            "          sed 1d f\n",
+            "          xargs -0 sed -i 's/a/b/'\n",
+            "          find . -name x -exec sed -i 's/a/b/' {} +\n",
+            "          \"$(command -v sed)\" -n p f\n",
+            "          /usr/bin/sed -n p f\n",
+            "          gsed -E 's/x/y/' f\n",
+            "          x=$(sed -n 1p f)\n",
+            "      - run: sed -f prog.sed f\n",
+            "          echo x | sed4 p\n",
+        ] {
+            let found = workflow_findings(".github/workflows/ci.yml", bad);
+            assert!(
+                found
+                    .iter()
+                    .any(|f| f.contains("runs a sed program") && f.contains("D-4493")),
+                "passed: {bad}: {found:?}"
+            );
+        }
+        for good in [
+            "          # sed in a comment is prose\n",
+            "          used=1; based=2; echo sedan\n",
+            "          git ls-files -- 'docs/sed.md' 'a.sed'\n",
+            "          --sed-like x\n",
+        ] {
+            assert!(
+                workflow_findings(".github/workflows/ci.yml", good).is_empty(),
+                "refused: {good}"
+            );
+        }
+        assert_eq!(
+            program_words("X=$(/usr/bin/node22 x) uses: a/setup-node@1 'npm';").collect::<Vec<_>>(),
+            ["X", "node", "x", "uses", "setup-node", "1", "npm"]
+        );
     }
 
     #[test]
