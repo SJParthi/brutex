@@ -1385,7 +1385,7 @@ const ALLOW_UNSIZED: Allow = &[
     ("crates/cli/src/anchored_search_lineage_v2.rs", 1),
     ("crates/cli/src/anchored_search_lineage_v3.rs", 1),
     ("crates/cli/src/anchored_search_lineage_v4.rs", 1),
-    ("crates/cli/src/candidate_universe.rs", 2),
+    ("crates/cli/src/candidate_universe.rs", 3),
     ("crates/cli/src/execution_capability.rs", 2),
     ("crates/cli/src/execution_disposition_v2.rs", 4),
     ("crates/cli/src/execution_v3.rs", 8),

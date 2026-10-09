@@ -8018,15 +8018,27 @@ and worst-case O(1) in record count; a hash lookup is average O(1), not a
 worst-case collision guarantee, and a page costs O(P) for P returned rows.
 On an already-open handle, append, hashing, canonical-order validation and
 durability are proportional to the new block plus filesystem costs. The one
-production door, `append_produced_candidate_universe_v1`, opens the ledger on
-every call, so one production append is O(R+C) for that open plus O(new rows)
-to write the block and re-read it through the same handle. Before D-1680 it
-then dropped the handle and ran a second full `open_read`, so it cost two
-O(R+C) passes. `ledger-v6` makes one such append per rung per family, 16 per
-run against one root, so a run's Candidate appends cost O(16 x (R+C)) plus the
-rows written: they grow with the ledger's history, not only the new block.
-Universe construction would additionally walk the naturally extinct frontier
-and both dynamic grids. It is not O(1).
+production door, `append_produced_candidate_universe_v1`, appends through a
+`CandidateLedgerWriterV1` that one run carries across all its appends
+(W2-cli3-4, D-4780). The run's first append opens the ledger, so it is
+O(R+C) for that open plus O(new rows) to write the block and re-read it
+through the same handle. Every later append catches the held handle up under
+the exclusive writer lock instead of opening again: unchanged generations cost
+three stats, and a ledger another writer appended to is caught up by
+validating only the completions past the indexed count and the blocks they
+name, so a later append is O(new rows + foreign new rows). `ledger-v6` and
+`ledger-all` each make one append per rung per family, 16 per run against one
+root, so a run's Candidate appends now cost one O(R+C) open plus the rows
+written and caught up on. Before D-4780 every append opened the ledger, so
+the 16 cost O(16 x (R+C)) and grew with the ledger's history; before D-1680
+each also dropped the handle and ran a second full `open_read`. The catch-up
+has an honest limit: a metadata generation cannot tell an append from an
+append made together with an in-place rewrite of an older block, so a carried
+writer does not see such a rewrite. It re-reads the last completion it indexed
+as a witness, refuses a change that added no completion, and the next full
+open re-validates every block and refuses the rewrite. Universe construction
+would additionally walk the naturally extinct frontier and both dynamic grids.
+It is not O(1).
 
 On Unix, cached-generation refusal binds the held lock, row and receipt paths by
 device/inode, length and nanosecond modification/change times. It is metadata
@@ -13519,6 +13531,20 @@ per vendor answer, after `serde_json` has already parsed the same body,
 over a body capped at `MAX_RESPONSE_BYTES`; every set together holds at
 most every key of that body once, so growth is amortised O(1) per key
 and bounded by the response cap, never by the store.
+
+`cli/candidate_universe.rs` 3 (was 2), D-4780 -- SHAPE 1. The third
+site is `absorb_foreign_completions`'s `fresh`, the map that holds the
+completions another writer appended since a carried Candidate writer
+last measured the files. It is bound `HashMap::new()` and its very next
+statement is `fresh.try_reserve(receipt_count - indexed)`, the
+new-completion count measured from the receipt file under the exclusive
+writer lock and bounded by `max_universes`; no insert precedes it. It
+is kept apart from the handle's index so that nothing is indexed until
+every new completion has verified, and it refuses a universe completed
+twice within the batch, as `api/recovery_journal.rs`'s `fresh` does. The
+index itself is reserved by `try_reserve` before the batch moves in.
+`with_capacity` would abort on allocation failure where this path
+returns a named refusal.
 ~~~~
 
 ### Gate 11 — rule 4. docs/07 layer 12: bounded page, never O(universe).
@@ -15661,10 +15687,15 @@ per-candidate primitive from `CLAUDE.md` §3 rule 4.
 - **`ledger-all` sizing now builds NIFTY's Candidate column for each rung.**
   It used to read one signal span per rung for its length. It now loads the
   signal, one-minute and daily context exactly as the Candidate commit does,
-  and builds that column once to read its swept count. Per command, that is
-  eight extra context loads and column builds. The commit then loads its own
-  copy again. `ledger-v6` already held that context, so it only adds the
-  column build. Not measured; read off the source.
+  and builds that column once to read its swept count. Until D-4784 that was
+  eight extra context loads and column builds per command, because the commit
+  then loaded its own copy again, and until D-4783 `ledger-v6`, which already
+  held that context, built the column twice. Since D-4783 and D-4784 both
+  verbs hand the sizing context and column to the same rung's NIFTY commit,
+  which consumes them, so sizing adds no load and no column build;
+  `ledger-all` sizes each rung at that rung's Candidate phase and holds one
+  sized context at a time. Not measured; read off the source and counted by
+  the tests D-4783 and D-4784 name.
 
 - **The Zerodha day check (D-3001).** `pull::daycheck::compare` folds one
   instrument-month of minute bars to days, O(minutes), and merges two

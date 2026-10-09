@@ -13,10 +13,12 @@
 //! audit lookup and one row seek are O(1) in record count (plus bounded,
 //! metadata-only file generation checks); a page is O(page length), and an
 //! append on an already-open handle is O(new rows). The production append door
-//! opens the ledger once per call, so one production append costs
-//! O(rows + receipts) for that open plus O(new rows) to write the block and
-//! re-read it from disk (D-1680). No whole-ledger operation is described as
-//! O(1).
+//! appends through one writer a run carries across all its appends: its first
+//! append opens the ledger, so it costs O(rows + receipts) for that open plus
+//! O(new rows) to write the block and re-read it from disk (D-1680), and every
+//! later append of the run catches the held handle up on what other writers
+//! appended since, O(new rows + foreign new rows), instead of opening again
+//! (W2-cli3-4, D-4780). No whole-ledger operation is described as O(1).
 //!
 //! Crate-internal production preparation is available only through
 //! [`CandidateUniverseProductionSourceV1`]. That opaque source bundle rebuilds
@@ -852,6 +854,7 @@ impl<'a> CandidateUniverseProductionSourceV1<'a> {
         signal_load_bound: StoredSpanLoadBoundV1,
         minute_load_bound: StoredSpanLoadBoundV1,
         daily_load_bound: StoredSpanLoadBoundV1,
+        prebuilt_signal: Option<PrebuiltSignalColumnV1>,
     ) -> Result<Self, CandidateUniverseRefusal> {
         require_rung(rung_seconds)?;
         require_canonical_daily_reference(daily_references, daily_reference)?;
@@ -908,14 +911,31 @@ impl<'a> CandidateUniverseProductionSourceV1<'a> {
             availability,
             thresholds,
         };
-        let (signal_column, execution_column) = build_candidate_columns(
-            signal_bars,
-            daily_references,
-            reference_minute_context,
-            execution_series.bars(),
-            rung_seconds,
-            &evaluation,
-        )?;
+        let (signal_column, execution_column) = match prebuilt_signal {
+            // CONSUMED, NOT REBUILT (G4-3, D-4783): the sizing census built
+            // this exact column from these exact slices; only the execution
+            // projection is derived here.
+            Some(prebuilt) => project_candidate_execution_column(
+                signal_bars,
+                prebuilt.into_column_for(
+                    signal_bars,
+                    daily_references,
+                    reference_minute_context,
+                    rung_seconds,
+                    &evaluation,
+                )?,
+                execution_series.bars(),
+                rung_seconds,
+            )?,
+            None => build_candidate_columns(
+                signal_bars,
+                daily_references,
+                reference_minute_context,
+                execution_series.bars(),
+                rung_seconds,
+                &evaluation,
+            )?,
+        };
 
         let data_digest = runner::identity::data_digest_with_daily_reference(
             signal_bars,
@@ -1498,7 +1518,7 @@ fn derive_global_replay_oos_source_id(source: &CandidateGlobalReplayOosSourceV1<
     hasher.finalize()
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CandidateEvaluationInputsV1 {
     pub(crate) widths: Widths,
     pub(crate) availability: Availability,
@@ -1626,13 +1646,24 @@ pub(crate) fn build_candidate_columns(
     rung_seconds: u32,
     evaluation: &CandidateEvaluationInputsV1,
 ) -> Result<(Column, Column), CandidateUniverseRefusal> {
-    let signal_column = build_candidate_signal_column(
+    let signal_column = build_full_candidate_signal_column(
         signal_bars,
         daily_references,
         reference_minute_context,
         rung_seconds,
         evaluation,
     )?;
+    project_candidate_execution_column(signal_bars, signal_column, execution_bars, rung_seconds)
+}
+
+/// The checked one-minute execution projection of one complete signal
+/// column, returned beside it. O(signal + execution).
+fn project_candidate_execution_column(
+    signal_bars: &[Candle],
+    signal_column: Column,
+    execution_bars: &[Candle],
+    rung_seconds: u32,
+) -> Result<(Column, Column), CandidateUniverseRefusal> {
     let signal_length_micros = signal_length_micros(rung_seconds)?;
     let alignment = runner::align::onto_execution(
         signal_bars,
@@ -1656,24 +1687,27 @@ pub(crate) fn build_candidate_columns(
     Ok((signal_column, execution_column))
 }
 
-/// The rows Candidate production's signal column sweeps over these inputs,
-/// read from that column's own census, warm-up excluded (D-2103).
-///
-/// This runs the one builder below, so a ledger sizing its support on it asks
-/// exactly the fold its Candidate commit will sweep; there is no second count.
-/// O(signal + daily + minute), one column build. **UNVERIFIED as a measured
-/// bound**; read off the source.
-///
-/// # Errors
-///
-/// Every refusal of that build.
-pub(crate) fn candidate_signal_swept_v1(
+#[cfg(test)]
+thread_local! {
+    /// Test-only count of complete Candidate signal-column builds on this
+    /// thread: sizing censuses and source constructions, not Search V4's
+    /// causal prefixes (D-4783).
+    pub(crate) static FULL_SIGNAL_COLUMN_BUILDS: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// [`build_candidate_signal_column`] over a complete span: the one build a
+/// sizing census and a source construction share. O(signal + daily +
+/// minute). **UNVERIFIED as a measured bound**; read off the source.
+fn build_full_candidate_signal_column(
     signal_bars: &[Candle],
     daily_references: &[DailyReference],
     reference_minute_context: &[Candle],
     rung_seconds: u32,
     evaluation: &CandidateEvaluationInputsV1,
-) -> Result<u64, CandidateUniverseRefusal> {
+) -> Result<Column, CandidateUniverseRefusal> {
+    #[cfg(test)]
+    FULL_SIGNAL_COLUMN_BUILDS.with(|count| count.set(count.get().saturating_add(1)));
     build_candidate_signal_column(
         signal_bars,
         daily_references,
@@ -1681,7 +1715,121 @@ pub(crate) fn candidate_signal_swept_v1(
         rung_seconds,
         evaluation,
     )
-    .map(|column| column.census().swept)
+}
+
+/// A complete Candidate signal column a ledger's sizing census built, carried
+/// to the same rung's NIFTY commit so that commit does not build it again
+/// (G4-3, D-4783).
+///
+/// It remembers the evaluation inputs and rung it was built under and the
+/// address and length of the three slices it was built from. A source
+/// construction accepts it only for exactly those: the context that owns the
+/// slices is moved, never copied, between the census and the commit, so its
+/// buffers keep their addresses, and nothing can mutate them in between. Any
+/// difference refuses by name; nothing falls back to a rebuild.
+#[derive(Debug)]
+pub(crate) struct PrebuiltSignalColumnV1 {
+    column: Column,
+    evaluation: CandidateEvaluationInputsV1,
+    rung_seconds: u32,
+    inputs: [(usize, usize); 3],
+}
+
+impl PrebuiltSignalColumnV1 {
+    /// Builds the column once. O(signal + daily + minute), the same build a
+    /// source construction runs.
+    ///
+    /// # Errors
+    ///
+    /// Every refusal of that build.
+    pub(crate) fn build(
+        signal_bars: &[Candle],
+        daily_references: &[DailyReference],
+        reference_minute_context: &[Candle],
+        rung_seconds: u32,
+        evaluation: CandidateEvaluationInputsV1,
+    ) -> Result<Self, CandidateUniverseRefusal> {
+        let column = build_full_candidate_signal_column(
+            signal_bars,
+            daily_references,
+            reference_minute_context,
+            rung_seconds,
+            &evaluation,
+        )?;
+        Ok(Self {
+            column,
+            evaluation,
+            rung_seconds,
+            inputs: slice_identities(signal_bars, daily_references, reference_minute_context),
+        })
+    }
+
+    /// The rows the column sweeps, warm-up excluded (D-2103), read from the
+    /// column's own census.
+    pub(crate) fn swept(&self) -> u64 {
+        self.column.census().swept
+    }
+
+    /// The evaluation inputs the column was built under.
+    pub(crate) const fn evaluation(&self) -> CandidateEvaluationInputsV1 {
+        self.evaluation
+    }
+
+    /// The column, for exactly the inputs it was built from. O(1): three
+    /// separate comparisons, each refusing by name, and no bar is read; see
+    /// `cli::candidate_universe::tests::a_prebuilt_signal_column_serves_exactly_the_inputs_it_was_built_from`.
+    ///
+    /// # Errors
+    ///
+    /// Other evaluation inputs, another rung, or slices at another address or
+    /// of another length than the ones the column was built from.
+    fn into_column_for(
+        self,
+        signal_bars: &[Candle],
+        daily_references: &[DailyReference],
+        reference_minute_context: &[Candle],
+        rung_seconds: u32,
+        evaluation: &CandidateEvaluationInputsV1,
+    ) -> Result<Column, CandidateUniverseRefusal> {
+        if self.evaluation != *evaluation {
+            return Err(
+                "the sizing-built Candidate signal column was built under other evaluation inputs"
+                    .to_owned(),
+            );
+        }
+        if self.rung_seconds != rung_seconds {
+            return Err(format!(
+                "the sizing-built Candidate signal column was built for rung {}s, not {rung_seconds}s",
+                self.rung_seconds
+            ));
+        }
+        if self.inputs != slice_identities(signal_bars, daily_references, reference_minute_context)
+        {
+            return Err(
+                "the sizing-built Candidate signal column was built from other bars than this source's"
+                    .to_owned(),
+            );
+        }
+        Ok(self.column)
+    }
+}
+
+/// The address and length of each slice, compared in O(1) without reading a
+/// bar; see
+/// `cli::candidate_universe::tests::a_prebuilt_signal_column_serves_exactly_the_inputs_it_was_built_from`.
+fn slice_identities(
+    signal_bars: &[Candle],
+    daily_references: &[DailyReference],
+    reference_minute_context: &[Candle],
+) -> [(usize, usize); 3] {
+    [
+        (signal_bars.as_ptr().addr(), signal_bars.len()),
+        (daily_references.as_ptr().addr(), daily_references.len()),
+        (
+            reference_minute_context.as_ptr().addr(),
+            reference_minute_context.len(),
+        ),
+    ]
 }
 
 /// Builds one exact anchored signal column from the typed daily reference and
@@ -2708,15 +2856,36 @@ impl<'a> ProducedCandidateUniverseV1<'a> {
     ///
     /// Returns any receipt-last append, exact-retry, corruption, stale-path,
     /// bounds, I/O or reopen mismatch refusal. No partial audit is returned.
+    #[cfg(test)]
     pub(crate) fn append_and_reopen(
         &self,
         root: impl AsRef<Path>,
         bounds: CandidateUniverseBoundsV1,
     ) -> Result<CandidateUniverseProductionCommitV1, CandidateUniverseRefusal> {
+        self.append_and_reopen_with(&mut CandidateLedgerWriterV1::new(), root.as_ref(), bounds)
+    }
+
+    /// Commits the complete block through a writer the caller carries across
+    /// a run, then re-reads and re-seals that block and its receipt from disk
+    /// through the same handle, before returning success. The ledger is
+    /// opened once per run rather than once per append (W2-cli3-4, D-4780).
+    ///
+    /// # Errors
+    ///
+    /// Returns any receipt-last append, exact-retry, catch-up, corruption,
+    /// stale-path, bounds, I/O or reopen mismatch refusal, and a carried
+    /// writer that was opened for another root or other bounds. No partial
+    /// audit is returned.
+    pub(crate) fn append_and_reopen_with(
+        &self,
+        writer: &mut CandidateLedgerWriterV1,
+        root: &Path,
+        bounds: CandidateUniverseBoundsV1,
+    ) -> Result<CandidateUniverseProductionCommitV1, CandidateUniverseRefusal> {
         self.base_evidence
             .validate_candidate_receipt(&self.prepared.receipt)
             .map_err(|why| why.to_string())?;
-        append_produced_candidate_universe_v1(root, bounds, self)
+        append_produced_candidate_universe_v1(writer, root, bounds, self)
     }
 
     /// Persists the same-pass Base records only after the exact Candidate
@@ -3202,6 +3371,8 @@ pub(crate) fn verify_population_v5_canonical_record(
 }
 
 #[cfg(test)]
+pub(crate) use tests::append_foreign_fixture_universe;
+#[cfg(test)]
 pub(crate) use tests::population_v5_test_canonical_candidate_record_for_identity;
 
 /// Crate-internal result of a typed append followed by an exact re-read of the
@@ -3263,6 +3434,9 @@ pub struct CandidateUniverseLedgerV1 {
     audits: HashMap<[u8; 32], CandidateUniverseReopenAuditV1>,
     orphan: Option<OrphanBlockV1>,
     total_rows: u64,
+    /// The last completion this handle indexed, re-read before a catch-up
+    /// trusts the history below it (W2-cli3-4, D-4780).
+    last_receipt: Option<CandidateUniverseReceiptV1>,
     lock_generation: FileGenerationV1,
     row_generation: FileGenerationV1,
     receipt_generation: FileGenerationV1,
@@ -3304,6 +3478,10 @@ impl CandidateUniverseLedgerV1 {
         writable: bool,
     ) -> Result<Self, CandidateUniverseRefusal> {
         let (row_path, receipt_path, lock_path) = candidate_ledger_paths(root)?;
+        #[cfg(test)]
+        if writable {
+            LEDGER_WRITER_OPENS.with(|count| count.set(count.get().saturating_add(1)));
+        }
         let writer_lock = open_file(&lock_path, writable, writable)?;
         // The open lock is released by name on success and by the guard's
         // explicit unlock on every refusal, never by closing a descriptor: the
@@ -3378,6 +3556,7 @@ impl CandidateUniverseLedgerV1 {
                 audits: HashMap::new(),
                 orphan: None,
                 total_rows: 0,
+                last_receipt: None,
                 lock_generation,
                 row_generation,
                 receipt_generation,
@@ -3433,6 +3612,7 @@ impl CandidateUniverseLedgerV1 {
             .try_reserve(capacity)
             .map_err(|why| format!("cannot reserve candidate completion audit index: {why}"))?;
         let mut committed = 0_u64;
+        let mut last = None;
         for index in 0..receipt_count {
             let receipt = read_receipt(&mut self.receipt_file, index)?;
             let end = committed
@@ -3455,10 +3635,12 @@ impl CandidateUniverseLedgerV1 {
                     hex32(receipt.universe_id())
                 ));
             }
+            last = Some(receipt);
             committed = end;
         }
         self.orphan = scan_orphan(&mut self.row_file, committed, total_rows)?;
         self.total_rows = total_rows;
+        self.last_receipt = last;
         self.row_generation = file_generation(&self.row_file, &self.row_path)?;
         self.receipt_generation = file_generation(&self.receipt_file, &self.receipt_path)?;
         Ok(())
@@ -3762,7 +3944,10 @@ impl CandidateUniverseLedgerV1 {
         &mut self,
         prepared: &PreparedCandidateUniverseV1,
     ) -> Result<CandidateUniverseProductionCommitV1, CandidateUniverseRefusal> {
-        self.require_unchanged()?;
+        // CAUGHT UP, NOT REOPENED (W2-cli3-4, D-4780): completions another
+        // writer appended since this handle last measured the files are
+        // verified here, block by block; nothing older is read again.
+        self.catch_up_locked()?;
         let receipt = prepared.receipt;
         receipt.validate()?;
         if receipt.row_count > self.bounds.max_rows {
@@ -3847,6 +4032,7 @@ impl CandidateUniverseLedgerV1 {
         )?;
         let audit = CandidateUniverseReopenAuditV1 { first_row, receipt };
         self.audits.insert(receipt.universe_id(), audit);
+        self.last_receipt = Some(receipt);
         self.orphan = None;
         self.receipt_generation = file_generation(&self.receipt_file, &self.receipt_path)?;
         Ok(CandidateUniverseProductionCommitV1::Written(audit))
@@ -3937,6 +4123,159 @@ impl CandidateUniverseLedgerV1 {
         Ok(audit)
     }
 
+    /// Brings this handle up to the files as they stand, under the exclusive
+    /// writer lock, before an append (W2-cli3-4, D-4780; D-1700 is the
+    /// precedent).
+    ///
+    /// Unchanged generations cost three stats. A ledger another writer has
+    /// appended to since this handle last measured it is caught up by
+    /// [`Self::absorb_foreign_completions`], which reads only the completions
+    /// past the indexed count and the blocks they name. Every other change
+    /// refuses: a replaced path, a change that added no completion, or a last
+    /// indexed completion that is no longer the one this handle indexed.
+    fn catch_up_locked(&mut self) -> Result<(), CandidateUniverseRefusal> {
+        require_generation(self.lock_generation, &self.writer_lock, &self.lock_path)?;
+        let rows_now = file_generation(&self.row_file, &self.row_path)?;
+        let receipts_now = file_generation(&self.receipt_file, &self.receipt_path)?;
+        if rows_now == self.row_generation && receipts_now == self.receipt_generation {
+            return Ok(());
+        }
+        self.absorb_foreign_completions(rows_now, receipts_now)
+    }
+
+    /// Indexes the completions another writer appended since this handle
+    /// last measured the files, verifying each one's block against its seal,
+    /// then re-scans the orphan tail after them. O(new completions + new
+    /// rows); the history below the indexed count is not read again.
+    ///
+    /// That is the honest limit (D-4780): a metadata generation cannot tell
+    /// an append from an append made together with an in-place rewrite of an
+    /// older block, so such a rewrite is not seen here. The last indexed
+    /// completion is re-read as a witness, and the next full open of the
+    /// ledger re-validates every block and refuses the rewrite.
+    ///
+    /// Nothing is indexed until every new completion has verified, so a
+    /// refusal leaves the handle as it was; the carried writer then discards
+    /// it all the same.
+    fn absorb_foreign_completions(
+        &mut self,
+        rows_now: FileGenerationV1,
+        receipts_now: FileGenerationV1,
+    ) -> Result<(), CandidateUniverseRefusal> {
+        let total_rows = record_count(
+            &self.row_file,
+            CANDIDATE_ROW_STRIDE_V1,
+            self.bounds.max_rows,
+            "candidate rows",
+        )?;
+        let receipt_count = record_count(
+            &self.receipt_file,
+            CANDIDATE_RECEIPT_STRIDE_V1,
+            self.bounds.max_universes,
+            "candidate completions",
+        )?;
+        let indexed = u64::try_from(self.audits.len())
+            .map_err(|_| "candidate index size does not fit u64".to_owned())?;
+        if receipt_count <= indexed {
+            return Err(format!(
+                "candidate ledger changed since the carried Candidate writer indexed it, but holds {receipt_count} completions against the {indexed} indexed: only appended completions are caught up, so this refuses"
+            ));
+        }
+        if let Some(last) = indexed.checked_sub(1)
+            && Some(read_receipt(&mut self.receipt_file, last)?) != self.last_receipt
+        {
+            return Err(format!(
+                "candidate completion {last} is no longer the one the carried Candidate writer indexed; the history below a catch-up changed, so this refuses"
+            ));
+        }
+        let mut committed = self
+            .orphan
+            .map_or(self.total_rows, |orphan| orphan.first_row);
+        let mut fresh = HashMap::new();
+        fresh
+            .try_reserve(
+                usize::try_from(receipt_count - indexed)
+                    .map_err(|_| "candidate catch-up count does not fit usize".to_owned())?,
+            )
+            .map_err(|why| format!("cannot reserve candidate catch-up index: {why}"))?;
+        let mut last = None;
+        for index in indexed..receipt_count {
+            let receipt = read_receipt(&mut self.receipt_file, index)?;
+            let end = committed
+                .checked_add(receipt.row_count)
+                .ok_or_else(|| "candidate catch-up row cursor overflowed u64".to_owned())?;
+            if end > total_rows {
+                return Err(format!(
+                    "candidate receipt {} commits rows {committed}..{end}, beyond physical total {total_rows}",
+                    hex32(receipt.universe_id())
+                ));
+            }
+            validate_file_block(&mut self.row_file, committed, &receipt)?;
+            if self.audits.contains_key(&receipt.universe_id()) {
+                return Err(format!(
+                    "candidate universe {} has more than one completion receipt",
+                    hex32(receipt.universe_id())
+                ));
+            }
+            let audit = CandidateUniverseReopenAuditV1 {
+                first_row: committed,
+                receipt,
+            };
+            if fresh.insert(receipt.universe_id(), audit).is_some() {
+                return Err(format!(
+                    "candidate universe {} has more than one completion receipt",
+                    hex32(receipt.universe_id())
+                ));
+            }
+            last = Some(receipt);
+            committed = end;
+        }
+        let orphan = scan_orphan(&mut self.row_file, committed, total_rows)?;
+        #[cfg(test)]
+        LEDGER_CATCH_UP_RECEIPTS.with(|count| {
+            count.set(
+                count
+                    .get()
+                    .saturating_add(u64::try_from(fresh.len()).unwrap_or(u64::MAX)),
+            );
+        });
+        self.audits
+            .try_reserve(fresh.len())
+            .map_err(|why| format!("cannot reserve candidate index for the catch-up: {why}"))?;
+        self.audits.extend(fresh);
+        self.last_receipt = last;
+        self.orphan = orphan;
+        self.total_rows = total_rows;
+        self.row_generation = rows_now;
+        self.receipt_generation = receipts_now;
+        Ok(())
+    }
+
+    /// Refuses an append for any root or bounds other than the ones this
+    /// handle opened, so a carried writer cannot write one run's universe
+    /// into another ledger (W2-cli3-4, D-4780).
+    fn require_serves(
+        &self,
+        root: &Path,
+        bounds: CandidateUniverseBoundsV1,
+    ) -> Result<(), CandidateUniverseRefusal> {
+        let (row_path, _, _) = candidate_ledger_paths(root)?;
+        if row_path != self.row_path {
+            return Err(format!(
+                "the carried Candidate writer holds {}, not {}",
+                self.row_path.display(),
+                row_path.display()
+            ));
+        }
+        if bounds != self.bounds {
+            return Err(format!(
+                "the carried Candidate writer was opened with bounds {:?}, not this append's {bounds:?}",
+                self.bounds
+            ));
+        }
+        Ok(())
+    }
+
     fn require_unchanged(&self) -> Result<(), CandidateUniverseRefusal> {
         require_generation(self.lock_generation, &self.writer_lock, &self.lock_path)?;
         require_generation(self.row_generation, &self.row_file, &self.row_path)?;
@@ -3977,27 +4316,89 @@ fn candidate_ledger_paths(
 }
 
 fn append_produced_candidate_universe_v1(
-    root: impl AsRef<Path>,
+    writer: &mut CandidateLedgerWriterV1,
+    root: &Path,
     bounds: CandidateUniverseBoundsV1,
     produced: &ProducedCandidateUniverseV1<'_>,
 ) -> Result<CandidateUniverseProductionCommitV1, CandidateUniverseRefusal> {
-    append_prepared_and_reverify(root.as_ref(), bounds, &produced.prepared)
+    writer.append_and_reverify(root, bounds, &produced.prepared)
 }
 
-/// One production append: one full open, the append, then a re-read of only
-/// the committed block through the same handle. O(R + C) for the open plus
-/// O(new rows); before D-1680 a second full `open_read` made it
-/// 2 x O(R + C) + O(new rows).
+/// One Candidate ledger writer carried across every append of one run
+/// (W2-cli3-4, D-4780).
+///
+/// The first append opens the ledger, which validates every stored block
+/// once: O(R + C). Every later append catches the held handle up instead,
+/// under the exclusive lock, verifying only the completions another writer
+/// appended since (`CandidateUniverseLedgerV1::absorb_foreign_completions`),
+/// then appends and re-reads its own block. One run therefore pays one
+/// O(R + C) open plus O(new rows) per append, where it paid one open per
+/// append. Any refusal discards the held handle, so the next append opens
+/// the ledger again rather than trusting a handle that refused.
+#[derive(Debug, Default)]
+pub(crate) struct CandidateLedgerWriterV1 {
+    ledger: Option<CandidateUniverseLedgerV1>,
+}
+
+impl CandidateLedgerWriterV1 {
+    /// A writer that has not opened its ledger yet.
+    #[must_use]
+    pub(crate) const fn new() -> Self {
+        Self { ledger: None }
+    }
+
+    fn append_and_reverify(
+        &mut self,
+        root: &Path,
+        bounds: CandidateUniverseBoundsV1,
+        prepared: &PreparedCandidateUniverseV1,
+    ) -> Result<CandidateUniverseProductionCommitV1, CandidateUniverseRefusal> {
+        let result = self.append_with_held_or_opened(root, bounds, prepared);
+        if result.is_err() {
+            self.ledger = None;
+        }
+        result
+    }
+
+    fn append_with_held_or_opened(
+        &mut self,
+        root: &Path,
+        bounds: CandidateUniverseBoundsV1,
+        prepared: &PreparedCandidateUniverseV1,
+    ) -> Result<CandidateUniverseProductionCommitV1, CandidateUniverseRefusal> {
+        if let Some(ledger) = self.ledger.as_mut() {
+            ledger.require_serves(root, bounds)?;
+            return commit_and_reverify(ledger, prepared);
+        }
+        let ledger = self
+            .ledger
+            .insert(CandidateUniverseLedgerV1::open(root, bounds)?);
+        commit_and_reverify(ledger, prepared)
+    }
+}
+
+/// One stand-alone production append: one full open, then
+/// [`commit_and_reverify`]. O(R + C) for the open plus O(new rows); before
+/// D-1680 a second full `open_read` made it 2 x O(R + C) + O(new rows).
+#[cfg(test)]
 fn append_prepared_and_reverify(
     root: &Path,
     bounds: CandidateUniverseBoundsV1,
     prepared: &PreparedCandidateUniverseV1,
 ) -> Result<CandidateUniverseProductionCommitV1, CandidateUniverseRefusal> {
     let mut ledger = CandidateUniverseLedgerV1::open(root, bounds)?;
+    commit_and_reverify(&mut ledger, prepared)
+}
+
+/// The append, then a re-read of only the committed block through the same
+/// handle (D-1680), then the exact comparison with the prepared receipt.
+fn commit_and_reverify(
+    ledger: &mut CandidateUniverseLedgerV1,
+    prepared: &PreparedCandidateUniverseV1,
+) -> Result<CandidateUniverseProductionCommitV1, CandidateUniverseRefusal> {
     let committed = ledger.append_complete(prepared)?;
     let expected = committed.audit();
     let reopened = ledger.reverify_committed(&committed)?;
-    drop(ledger);
     // TWO CHECKS, NOT ONE `||` (G18-cli-a-05, D-2004). Either inequality alone
     // refuses; a joined guard let a mutant require both, and no honest fixture
     // can make the committed block reopen differently from its own audit. Each
@@ -4972,7 +5373,24 @@ pub(crate) fn note_oos_stream_hash() {
 thread_local! {
     /// Test-only count of `CandidateUniverseLedgerV1::scan` calls (one per
     /// full open) on this thread.
-    static LEDGER_SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    pub(crate) static LEDGER_SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only count of writable Candidate ledger opens on this thread: the
+    /// opens a production append pays, not the read-only reopens successor
+    /// authentication makes (D-4780).
+    pub(crate) static LEDGER_WRITER_OPENS: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only count of foreign completions a carried Candidate writer
+    /// verified while catching up before an append, on this thread (D-4780).
+    pub(crate) static LEDGER_CATCH_UP_RECEIPTS: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -6902,6 +7320,15 @@ mod tests {
         );
     }
 
+    /// Appends one fixture universe through its own full open, as another
+    /// process's writer would (D-4780).
+    pub(crate) fn append_foreign_fixture_universe(
+        root: &Path,
+        bounds: CandidateUniverseBoundsV1,
+    ) -> Result<CandidateUniverseProductionCommitV1, CandidateUniverseRefusal> {
+        append_prepared_and_reverify(root, bounds, &prepared(97))
+    }
+
     pub(crate) fn population_v5_test_canonical_candidate_record() -> [u8; ROW_STRIDE_BYTES] {
         let raw = prepared(32).rows[0]
             .record()
@@ -7627,6 +8054,14 @@ mod tests {
         }
 
         fn source(&self) -> CandidateUniverseProductionSourceV1<'_> {
+            self.source_with(None)
+                .expect("all production fixture sources agree")
+        }
+
+        fn source_with(
+            &self,
+            prebuilt: Option<PrebuiltSignalColumnV1>,
+        ) -> Result<CandidateUniverseProductionSourceV1<'_>, CandidateUniverseRefusal> {
             CandidateUniverseProductionSourceV1::new(
                 InstrumentFamilyV1::Nifty,
                 60,
@@ -7656,9 +8091,98 @@ mod tests {
                     u64::try_from(self.daily_bars.len()).expect("daily length fits u64"),
                 )
                 .expect("daily load ceiling is nonzero"),
+                prebuilt,
             )
-            .expect("all production fixture sources agree")
         }
+
+        fn evaluation() -> CandidateEvaluationInputsV1 {
+            CandidateEvaluationInputsV1 {
+                widths: Widths::pinned().expect("fixture uses measured widths"),
+                availability: Availability::Absent,
+                thresholds: Thresholds::CLASSICAL,
+            }
+        }
+
+        fn prebuilt(&self) -> PrebuiltSignalColumnV1 {
+            PrebuiltSignalColumnV1::build(
+                self.execution(),
+                &self.daily_references,
+                &self.context,
+                60,
+                Self::evaluation(),
+            )
+            .expect("the fixture column builds")
+        }
+    }
+
+    #[test]
+    fn a_prebuilt_signal_column_serves_exactly_the_inputs_it_was_built_from() {
+        // G4-3 / D-4783: the NIFTY commit built the whole Candidate signal
+        // column the sizing census had just built and dropped.
+        let fixture = ProductionFixture::new();
+        let reference = fixture.source();
+        let prebuilt = fixture.prebuilt();
+        FULL_SIGNAL_COLUMN_BUILDS.with(|count| count.set(0));
+        let sourced = fixture
+            .source_with(Some(prebuilt))
+            .expect("a column serves the exact inputs it was built from");
+        assert_eq!(
+            FULL_SIGNAL_COLUMN_BUILDS.with(std::cell::Cell::get),
+            0,
+            "the source consumed the prebuilt column and built none"
+        );
+        assert_eq!(sourced.source_id, reference.source_id);
+        assert_eq!(sourced.signal_column_digest, reference.signal_column_digest);
+        assert_eq!(
+            sourced.execution_column_digest,
+            reference.execution_column_digest
+        );
+
+        let evaluation = ProductionFixture::evaluation();
+        let other = CandidateEvaluationInputsV1 {
+            availability: Availability::Present,
+            ..evaluation
+        };
+        assert!(
+            fixture
+                .prebuilt()
+                .into_column_for(
+                    fixture.execution(),
+                    &fixture.daily_references,
+                    &fixture.context,
+                    60,
+                    &other,
+                )
+                .expect_err("other evaluation inputs must refuse")
+                .contains("other evaluation inputs")
+        );
+        assert!(
+            fixture
+                .prebuilt()
+                .into_column_for(
+                    fixture.execution(),
+                    &fixture.daily_references,
+                    &fixture.context,
+                    120,
+                    &evaluation,
+                )
+                .expect_err("another rung must refuse")
+                .contains("not 120s")
+        );
+        let copied = fixture.execution().to_vec();
+        assert!(
+            fixture
+                .prebuilt()
+                .into_column_for(
+                    &copied,
+                    &fixture.daily_references,
+                    &fixture.context,
+                    60,
+                    &evaluation,
+                )
+                .expect_err("equal bars at another address must refuse")
+                .contains("other bars")
+        );
     }
 
     fn minute_bars(first_day: i64, last_day: i64) -> Vec<Candle> {
@@ -9351,6 +9875,392 @@ mod tests {
                 .reverify_committed(&CandidateUniverseProductionCommitV1::Reused(older.audit()))
                 .expect("a Reused older block re-reads cleanly"),
             older.audit()
+        );
+    }
+
+    /// Flips one fact byte of physical row `row` and syncs it.
+    fn flip_candidate_row_fact(root: &Path, row: u64) {
+        let path = root.join(ROW_FILE);
+        let mut file = open_file(&path, true, false).expect("row file reopens");
+        let offset = HEADER_BYTES_V1 + row * CANDIDATE_ROW_STRIDE_V1 + 248;
+        let mut byte = [0_u8; 1];
+        file.seek(SeekFrom::Start(offset))
+            .and_then(|_| file.read_exact(&mut byte))
+            .expect("fact byte reads");
+        byte[0] ^= 1;
+        file.seek(SeekFrom::Start(offset))
+            .and_then(|_| file.write_all(&byte))
+            .and_then(|()| file.sync_data())
+            .expect("fact mutation persists");
+    }
+
+    #[test]
+    fn a_carried_writer_opens_once_and_verifies_what_others_appended_since() {
+        // W2-cli3-4 / D-4780: before, every production append opened the whole
+        // store-root ledger again, so one run paid 16 x O(R_total + C).
+        let bounds = CandidateUniverseBoundsV1::new(256, 16).expect("fixture bounds are nonzero");
+        let root = test_dir();
+        let (first, foreign, third) = (prepared(80), prepared(81), prepared(82));
+        let mut writer = CandidateLedgerWriterV1::new();
+        LEDGER_SCANS.with(|count| count.set(0));
+        LEDGER_CATCH_UP_RECEIPTS.with(|count| count.set(0));
+        let written = writer
+            .append_and_reverify(root.path(), bounds, &first)
+            .expect("the first append opens and writes");
+        assert!(matches!(
+            written,
+            CandidateUniverseProductionCommitV1::Written(_)
+        ));
+        assert_eq!(LEDGER_SCANS.with(std::cell::Cell::get), 1);
+
+        // Another writer appends between two of this run's appends.
+        let other = append_prepared_and_reverify(root.path(), bounds, &foreign)
+            .expect("a foreign writer appends");
+        LEDGER_SCANS.with(|count| count.set(0));
+        let appended = writer
+            .append_and_reverify(root.path(), bounds, &third)
+            .expect("the carried writer catches up and appends");
+        assert_eq!(
+            LEDGER_SCANS.with(std::cell::Cell::get),
+            0,
+            "the carried writer caught up instead of opening the ledger again"
+        );
+        assert_eq!(
+            LEDGER_CATCH_UP_RECEIPTS.with(std::cell::Cell::get),
+            1,
+            "the foreign completion was verified, not missed"
+        );
+        assert_eq!(
+            appended.audit().first_row(),
+            first.receipt().row_count() + foreign.receipt().row_count(),
+            "the new block starts after the foreign one"
+        );
+
+        // The foreign universe is in the carried index, so its exact retry is
+        // reused, and an unchanged ledger is not read again.
+        let reused = writer
+            .append_and_reverify(root.path(), bounds, &foreign)
+            .expect("the foreign universe's exact retry is reused");
+        assert!(matches!(
+            reused,
+            CandidateUniverseProductionCommitV1::Reused(_)
+        ));
+        assert_eq!(reused.audit(), other.audit());
+        let again = writer
+            .append_and_reverify(root.path(), bounds, &first)
+            .expect("this run's own first universe is reused");
+        assert_eq!(again.audit(), written.audit());
+        assert_eq!(LEDGER_SCANS.with(std::cell::Cell::get), 0);
+        assert_eq!(LEDGER_CATCH_UP_RECEIPTS.with(std::cell::Cell::get), 1);
+
+        let fresh = CandidateUniverseLedgerV1::open_read(root.path(), bounds)
+            .expect("a fresh reader opens");
+        for (offered, commit) in [(&first, written), (&foreign, other), (&third, appended)] {
+            assert_eq!(
+                fresh
+                    .reopen_audit(&offered.receipt().universe_id())
+                    .expect("generations hold"),
+                Some(commit.audit()),
+                "a fresh reader agrees with every audit the carried writer returned"
+            );
+        }
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one adversarial sequence keeps each catch-up refusal beside the reopen that follows it"
+    )]
+    fn a_carried_writer_refuses_what_it_cannot_catch_up_on() {
+        let bounds = CandidateUniverseBoundsV1::new(256, 16).expect("fixture bounds are nonzero");
+
+        // A foreign block broken after it was written is refused by its seal
+        // while the carried writer catches up, and a refused writer reopens.
+        let root = test_dir();
+        let mut writer = CandidateLedgerWriterV1::new();
+        writer
+            .append_and_reverify(root.path(), bounds, &prepared(83))
+            .expect("the first append writes");
+        append_prepared_and_reverify(root.path(), bounds, &prepared(84))
+            .expect("a foreign writer appends");
+        flip_candidate_row_fact(root.path(), 4);
+        assert!(
+            writer
+                .append_and_reverify(root.path(), bounds, &prepared(85))
+                .expect_err("a corrupt foreign block must refuse")
+                .contains("seal")
+        );
+        flip_candidate_row_fact(root.path(), 4);
+        LEDGER_SCANS.with(|count| count.set(0));
+        writer
+            .append_and_reverify(root.path(), bounds, &prepared(85))
+            .expect("the restored ledger accepts the append");
+        assert_eq!(
+            LEDGER_SCANS.with(std::cell::Cell::get),
+            1,
+            "a writer that refused once is never trusted again: it reopens"
+        );
+
+        // A rewrite of committed bytes that added no completion is not an
+        // append, so it is refused rather than caught up.
+        flip_candidate_row_fact(root.path(), 0);
+        LEDGER_SCANS.with(|count| count.set(0));
+        assert!(
+            writer
+                .append_and_reverify(root.path(), bounds, &prepared(86))
+                .expect_err("an in-place rewrite must refuse")
+                .contains("only appended completions are caught up")
+        );
+        assert_eq!(LEDGER_SCANS.with(std::cell::Cell::get), 0);
+        flip_candidate_row_fact(root.path(), 0);
+
+        // The honest limit (D-4780): an in-place rewrite of an older block
+        // that arrives together with a foreign append is not re-read by the
+        // catch-up, which verifies only the new block; the next open refuses it.
+        let limit_root = test_dir();
+        let mut limited = CandidateLedgerWriterV1::new();
+        limited
+            .append_and_reverify(limit_root.path(), bounds, &prepared(87))
+            .expect("the first append writes");
+        append_prepared_and_reverify(limit_root.path(), bounds, &prepared(88))
+            .expect("a foreign writer appends");
+        flip_candidate_row_fact(limit_root.path(), 0);
+        limited
+            .append_and_reverify(limit_root.path(), bounds, &prepared(89))
+            .expect("the catch-up verifies the foreign block only");
+        assert!(
+            CandidateUniverseLedgerV1::open_read(limit_root.path(), bounds)
+                .expect_err("the next open re-validates every block")
+                .contains("seal")
+        );
+
+        // A replaced row file refuses by name.
+        let replaced_root = test_dir();
+        let mut replaced = CandidateLedgerWriterV1::new();
+        replaced
+            .append_and_reverify(replaced_root.path(), bounds, &prepared(90))
+            .expect("the first append writes");
+        let path = replaced_root.path().join(ROW_FILE);
+        let displaced = replaced_root.path().join("candidate-rows.displaced");
+        std::fs::rename(&path, &displaced).expect("the held row file is displaced");
+        std::fs::copy(&displaced, &path).expect("the same bytes appear at a new inode");
+        assert!(
+            replaced
+                .append_and_reverify(replaced_root.path(), bounds, &prepared(91))
+                .expect_err("a replaced row file must refuse")
+                .contains("no longer names")
+        );
+
+        // A replaced lock file refuses by name before anything is caught up.
+        let lock_root = test_dir();
+        let mut locked = CandidateLedgerWriterV1::new();
+        locked
+            .append_and_reverify(lock_root.path(), bounds, &prepared(98))
+            .expect("the first append writes");
+        let lock_path = lock_root.path().join(LOCK_FILE);
+        std::fs::rename(
+            &lock_path,
+            lock_root.path().join("candidate.lock.displaced"),
+        )
+        .expect("the held lock is displaced");
+        File::create(&lock_path).expect("a new lock inode appears");
+        assert!(
+            locked
+                .append_and_reverify(lock_root.path(), bounds, &prepared(99))
+                .expect_err("a replaced lock must refuse")
+                .contains("no longer names")
+        );
+
+        // A carried writer serves exactly the root and bounds it opened.
+        let other_root = test_dir();
+        let mut carried = CandidateLedgerWriterV1::new();
+        carried
+            .append_and_reverify(root.path(), bounds, &prepared(92))
+            .expect("the first append writes");
+        assert!(
+            carried
+                .append_and_reverify(other_root.path(), bounds, &prepared(93))
+                .expect_err("another root must refuse")
+                .contains("carried Candidate writer")
+        );
+        let mut carried = CandidateLedgerWriterV1::new();
+        carried
+            .append_and_reverify(root.path(), bounds, &prepared(92))
+            .expect("the exact retry is reused");
+        let wider = CandidateUniverseBoundsV1::new(512, 16).expect("fixture bounds are nonzero");
+        assert!(
+            carried
+                .append_and_reverify(root.path(), wider, &prepared(93))
+                .expect_err("other bounds must refuse")
+                .contains("carried Candidate writer")
+        );
+    }
+
+    /// Appends a raw copy of the four-row block at `first_row` and of
+    /// completion `receipt_index`, as a writer that ignored every rule would.
+    fn append_raw_copy_of_block(root: &Path, first_row: u64, receipt_index: u64) {
+        let rows_path = root.join(ROW_FILE);
+        let receipts_path = root.join(RECEIPT_FILE);
+        let rows = std::fs::read(&rows_path).expect("rows read");
+        let receipts = std::fs::read(&receipts_path).expect("receipts read");
+        let row_stride = usize::try_from(CANDIDATE_ROW_STRIDE_V1).expect("stride fits");
+        let receipt_stride = usize::try_from(CANDIDATE_RECEIPT_STRIDE_V1).expect("stride fits");
+        let header = usize::try_from(HEADER_BYTES_V1).expect("header fits");
+        let row_start = header + usize::try_from(first_row).expect("row fits") * row_stride;
+        let receipt_start =
+            header + usize::try_from(receipt_index).expect("index fits") * receipt_stride;
+        let block = rows[row_start..row_start + 4 * row_stride].to_vec();
+        let receipt = receipts[receipt_start..receipt_start + receipt_stride].to_vec();
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(&rows_path)
+            .expect("rows open");
+        file.write_all(&block)
+            .and_then(|()| file.sync_data())
+            .expect("rows copy");
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(&receipts_path)
+            .expect("receipts open");
+        file.write_all(&receipt)
+            .and_then(|()| file.sync_data())
+            .expect("receipt copy");
+    }
+
+    /// Removes the last stored completion, leaving its rows as an orphan.
+    fn drop_last_candidate_receipt(root: &Path) {
+        let path = root.join(RECEIPT_FILE);
+        let len = std::fs::metadata(&path).expect("receipts measure").len();
+        let file = open_file(&path, true, false).expect("receipts reopen");
+        file.set_len(len - CANDIDATE_RECEIPT_STRIDE_V1)
+            .and_then(|()| file.sync_all())
+            .expect("the last completion is cut");
+    }
+
+    #[test]
+    fn a_carried_writer_catches_up_from_its_own_committed_cursor() {
+        // The carried handle holds an orphan (its append was an exact retry,
+        // reused), another writer then completes that orphan: the catch-up
+        // verifies the orphan's block where it lies, below the physical end.
+        let bounds = CandidateUniverseBoundsV1::new(256, 16).expect("fixture bounds are nonzero");
+        let root = test_dir();
+        let (first, orphaned, later) = (prepared(70), prepared(71), prepared(72));
+        append_prepared_and_reverify(root.path(), bounds, &first).expect("the first writes");
+        append_prepared_and_reverify(root.path(), bounds, &orphaned).expect("the second writes");
+        drop_last_candidate_receipt(root.path());
+        let mut writer = CandidateLedgerWriterV1::new();
+        let reused = writer
+            .append_and_reverify(root.path(), bounds, &first)
+            .expect("an exact retry under an orphan is reused");
+        assert!(matches!(
+            reused,
+            CandidateUniverseProductionCommitV1::Reused(_)
+        ));
+        let completed = append_prepared_and_reverify(root.path(), bounds, &orphaned)
+            .expect("another writer completes the orphan");
+        LEDGER_SCANS.with(|count| count.set(0));
+        LEDGER_CATCH_UP_RECEIPTS.with(|count| count.set(0));
+        let appended = writer
+            .append_and_reverify(root.path(), bounds, &later)
+            .expect("the carried writer catches up on the completed orphan");
+        assert_eq!(appended.audit().first_row(), 8);
+        assert_eq!(LEDGER_SCANS.with(std::cell::Cell::get), 0);
+        assert_eq!(LEDGER_CATCH_UP_RECEIPTS.with(std::cell::Cell::get), 1);
+        assert_eq!(
+            writer
+                .append_and_reverify(root.path(), bounds, &orphaned)
+                .expect("the caught-up universe is reused")
+                .audit(),
+            completed.audit()
+        );
+
+        // A reuse right after a catch-up rechecks the generations the
+        // catch-up measured, and they hold.
+        append_prepared_and_reverify(root.path(), bounds, &prepared(73))
+            .expect("another writer appends");
+        assert_eq!(
+            writer
+                .append_and_reverify(root.path(), bounds, &first)
+                .expect("a reuse after a catch-up reverifies")
+                .audit(),
+            reused.audit()
+        );
+
+        // An orphan another writer left past its completions is seen by the
+        // catch-up, so a different universe is refused rather than written
+        // after it.
+        append_prepared_and_reverify(root.path(), bounds, &prepared(74))
+            .expect("another writer appends");
+        append_prepared_and_reverify(root.path(), bounds, &prepared(75))
+            .expect("another writer appends");
+        drop_last_candidate_receipt(root.path());
+        assert!(
+            writer
+                .append_and_reverify(root.path(), bounds, &prepared(76))
+                .expect_err("a foreign orphan must refuse another universe")
+                .contains("no fallback may hide it")
+        );
+    }
+
+    #[test]
+    fn a_carried_writer_refuses_history_that_moved_and_duplicate_completions() {
+        let bounds = CandidateUniverseBoundsV1::new(256, 16).expect("fixture bounds are nonzero");
+
+        // The ledger is wiped and regrown longer than the handle measured it:
+        // the last indexed completion is not where it was, so the catch-up
+        // refuses rather than trusting the rows below it.
+        let root = test_dir();
+        let mut writer = CandidateLedgerWriterV1::new();
+        let first = prepared(77);
+        writer
+            .append_and_reverify(root.path(), bounds, &first)
+            .expect("the first append writes");
+        for name in [ROW_FILE, RECEIPT_FILE] {
+            let file = open_file(&root.path().join(name), true, false).expect("file reopens");
+            file.set_len(HEADER_BYTES_V1)
+                .and_then(|()| file.sync_all())
+                .expect("the file is wiped to its header");
+        }
+        append_prepared_and_reverify(root.path(), bounds, &prepared(78))
+            .expect("another writer appends to the wiped ledger");
+        append_prepared_and_reverify(root.path(), bounds, &prepared(79))
+            .expect("another writer appends again");
+        assert!(
+            writer
+                .append_and_reverify(root.path(), bounds, &first)
+                .expect_err("moved history must refuse")
+                .contains("is no longer the one the carried Candidate writer indexed")
+        );
+
+        // A raw copy of an indexed block and its completion seals, and is
+        // still refused as a second completion of one universe.
+        let duplicate_root = test_dir();
+        let mut duplicated = CandidateLedgerWriterV1::new();
+        duplicated
+            .append_and_reverify(duplicate_root.path(), bounds, &prepared(100))
+            .expect("the first append writes");
+        append_raw_copy_of_block(duplicate_root.path(), 0, 0);
+        assert!(
+            duplicated
+                .append_and_reverify(duplicate_root.path(), bounds, &prepared(101))
+                .expect_err("a duplicate of an indexed universe must refuse")
+                .contains("more than one completion receipt")
+        );
+
+        // Two copies among the new completions refuse the same way.
+        let twice_root = test_dir();
+        let mut twice = CandidateLedgerWriterV1::new();
+        twice
+            .append_and_reverify(twice_root.path(), bounds, &prepared(102))
+            .expect("the first append writes");
+        append_prepared_and_reverify(twice_root.path(), bounds, &prepared(103))
+            .expect("another writer appends");
+        append_raw_copy_of_block(twice_root.path(), 4, 1);
+        assert!(
+            twice
+                .append_and_reverify(twice_root.path(), bounds, &prepared(104))
+                .expect_err("a duplicate among new completions must refuse")
+                .contains("more than one completion receipt")
         );
     }
 

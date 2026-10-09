@@ -52,11 +52,15 @@ impl Inputs {
 /// The family whose signal bar count sizes every rung's support threshold.
 pub(crate) const SIZING_UNDERLYING: &str = "NIFTY";
 
-/// The strict NIFTY context the sizing census loaded, held for the NIFTY
+/// The NIFTY context a sizing census loaded, and the Candidate signal column
+/// it built from that context to count the swept rows, held for the NIFTY
 /// family commit of the same rung so that span is loaded once, not twice
-/// (W2-cli7-3, D-1683). It can be consumed only by a request whose root,
-/// vendor, family, rung, span, load bounds and strict configuration are the
-/// ones it was loaded under; anything else refuses by name.
+/// (W2-cli7-3, D-1683), and its column is built once, not twice (G4-3,
+/// D-4783). `ledger-v6` holds a strict context; `ledger-all` holds an
+/// ordinary one (G4-2, D-4784). It can be consumed only by a request whose
+/// root, vendor, family, rung, span, load bounds, evaluation inputs and
+/// strict configuration are the ones it was built under; anything else
+/// refuses by name.
 pub(crate) struct SizedNifty {
     root: std::path::PathBuf,
     vendor: brutex_core::vendor::Vendor,
@@ -64,13 +68,20 @@ pub(crate) struct SizedNifty {
     from: (u16, u8),
     to: (u16, u8),
     bounds: [crate::stored::StoredSpanLoadBoundV1; 3],
-    config: StrictConfig,
+    config: Option<StrictConfig>,
     context: BoundedStoredContextV1,
+    column: crate::candidate_universe::PrebuiltSignalColumnV1,
 }
 
 impl SizedNifty {
-    /// The held context, when `request` and `config` name exactly what it
-    /// was loaded under and its sources are still current.
+    /// The rows the held Candidate signal column sweeps, warm-up excluded
+    /// (D-2103): the support denominator.
+    pub(crate) fn swept(&self) -> u64 {
+        self.column.swept()
+    }
+
+    /// The held context and column, when `request` and `config` name exactly
+    /// what they were built under and the sources are still current.
     ///
     /// # Errors
     ///
@@ -80,7 +91,13 @@ impl SizedNifty {
         request: &super::StoredCandidatePreAdmissionRequestV1<'_>,
         root: &AdmittedRootV1,
         config: Option<&StrictConfig>,
-    ) -> Result<BoundedStoredContextV1, String> {
+    ) -> Result<
+        (
+            BoundedStoredContextV1,
+            crate::candidate_universe::PrebuiltSignalColumnV1,
+        ),
+        String,
+    > {
         if let Some(term) = self.differing_term(request, root.path(), config) {
             return Err(format!(
                 "the sized {SIZING_UNDERLYING} context cannot serve a request with another {term}"
@@ -88,7 +105,7 @@ impl SizedNifty {
         }
         self.context.require_current()?;
         root.require_same("before reusing the sized strict context")?;
-        Ok(self.context)
+        Ok((self.context, self.column))
     }
 
     /// The first request term that differs from what this context was loaded
@@ -116,12 +133,60 @@ impl SizedNifty {
         ] != self.bounds
         {
             Some("load bounds")
-        } else if config != Some(&self.config) {
+        } else if (crate::candidate_universe::CandidateEvaluationInputsV1 {
+            widths: request.widths,
+            availability: request.availability,
+            thresholds: request.thresholds,
+        }) != self.column.evaluation()
+        {
+            Some("evaluation")
+        } else if config != self.config.as_ref() {
             Some("strict configuration")
         } else {
             None
         }
     }
+}
+
+/// Loads one sizing context for [`SIZING_UNDERLYING`] and builds its Candidate
+/// signal column once, for the swept count and for the same rung's NIFTY
+/// commit to consume (D-2103, D-4783, D-4784). `config` is `Some` for the
+/// strict `ledger-v6` route and `None` for `ledger-all`.
+///
+/// # Errors
+///
+/// Another underlying, and every load and column-build refusal.
+pub(super) fn census(
+    root: &AdmittedRootV1,
+    spec: StoredContextLoadSpecV1<'_>,
+    config: Option<&StrictConfig>,
+    evaluation: &crate::candidate_universe::CandidateEvaluationInputsV1,
+) -> Result<SizedNifty, String> {
+    if spec.underlying != SIZING_UNDERLYING {
+        return Err(format!(
+            "a sizing census is taken on {SIZING_UNDERLYING}, not {}",
+            spec.underlying
+        ));
+    }
+    let context = super::load_bounded_stored_context_from_spec_v1(spec, root, config)?;
+    let column = crate::candidate_universe::PrebuiltSignalColumnV1::build(
+        &context.signal.bars,
+        &context.daily.references,
+        &context.minute.bars,
+        context.rung_seconds,
+        *evaluation,
+    )?;
+    Ok(SizedNifty {
+        root: root.path().to_path_buf(),
+        vendor: spec.vendor,
+        rung: spec.rung_name.to_owned(),
+        from: spec.from,
+        to: spec.to,
+        bounds: [spec.signal_bound, spec.minute_bound, spec.daily_bound],
+        config: config.cloned(),
+        context,
+        column,
+    })
 }
 
 #[cfg(test)]
@@ -147,7 +212,8 @@ pub(crate) fn size_sweeper(
     evaluation: &crate::candidate_universe::CandidateEvaluationInputsV1,
 ) -> Result<(runner::Sweeper, Arc<Inputs>, SizedNifty), String> {
     let root = AdmittedRootV1::admit(root)?;
-    let context = load(
+    let sized = census(
+        &root,
         StoredContextLoadSpecV1 {
             vendor,
             underlying: SIZING_UNDERLYING,
@@ -158,13 +224,15 @@ pub(crate) fn size_sweeper(
             minute_bound: bounds.minute_records,
             daily_bound: bounds.daily_records,
         },
-        &root,
-        config,
+        Some(config),
+        evaluation,
     )?;
-    // The rows the Candidate column sweeps, warm-up excluded (D-2103).
-    let count = context.candidate_swept_v1(evaluation)?;
+    // The rows the Candidate column sweeps, warm-up excluded (D-2103). The
+    // column itself is kept for the NIFTY commit (G4-3, D-4783).
+    let count = sized.swept();
     let inputs = Arc::clone(
-        context
+        sized
+            .context
             .strict
             .as_ref()
             .ok_or("strict institutional sizing lost its input authority")?,
@@ -179,20 +247,6 @@ pub(crate) fn size_sweeper(
         min_hits,
         request.support_ppm,
     ));
-    let sized = SizedNifty {
-        root: root.path().to_path_buf(),
-        vendor,
-        rung: rung.to_owned(),
-        from: request.from,
-        to: request.to,
-        bounds: [
-            bounds.signal_records,
-            bounds.minute_records,
-            bounds.daily_records,
-        ],
-        config: config.clone(),
-        context,
-    };
     Ok((sweeper, inputs, sized))
 }
 

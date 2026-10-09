@@ -74,15 +74,22 @@ fn function<'a>(source: &'a str, signature: &str) -> &'a str {
 
 #[test]
 fn section_150_states_one_open_per_production_append_and_no_data_hash() {
-    // The source first: what the section must describe.
-    let door = function(CANDIDATE, "fn append_prepared_and_reverify(");
+    // The source first: what the section must describe. The carried writer
+    // opens the ledger once (D-4780), and the per-append commit opens nothing
+    // and re-reads only its block (D-1680).
+    let writer = method(CANDIDATE, "    fn append_with_held_or_opened(");
     assert_eq!(
-        door.matches("CandidateUniverseLedgerV1::open").count(),
+        writer.matches("CandidateUniverseLedgerV1::open").count(),
         1,
-        "the production append door opens the ledger more than once again; \
+        "the carried Candidate writer opens the ledger more than once again; \
          re-measure §150 before changing this test"
     );
-    assert!(door.contains("reverify_committed"));
+    let commit = function(CANDIDATE, "fn commit_and_reverify(");
+    assert!(!commit.contains("CandidateUniverseLedgerV1::open"));
+    assert!(commit.contains("reverify_committed"));
+    let append = method(CANDIDATE, "    fn append_complete_locked(");
+    assert!(append.contains("self.catch_up_locked()?"));
+    assert!(!append.contains("self.require_unchanged()?"));
     let generation = function(CANDIDATE, "fn file_generation(");
     assert!(
         !generation.contains("hash") && !generation.contains("blake3"),
@@ -93,19 +100,24 @@ fn section_150_states_one_open_per_production_append_and_no_data_hash() {
     for stale in [
         "and also hashes the data files",
         "Append, hashing, canonical-order validation and durability are proportional to the new block",
+        "opens the ledger on every call",
     ] {
         assert!(!text.contains(stale), "§150 still says `{stale}`");
     }
     for needed in [
-        "one production append is O(R+C) for that open plus O(new rows)",
+        "The run's first append opens the ledger, so it is O(R+C) for that open plus O(new rows)",
+        "so a later append is O(new rows + foreign new rows)",
+        "16 per run against one root, so a run's Candidate appends now cost one O(R+C) open",
+        "a carried writer does not see such a rewrite",
         "It is metadata only and hashes no data file",
-        "16 per run",
     ] {
         assert!(text.contains(needed), "§150 no longer says `{needed}`");
     }
-    let header = flat(CANDIDATE.get(..2_000).expect("the module header"));
+    let header = flat(CANDIDATE.get(..2_400).expect("the module header"));
     assert!(!header.contains("the sealed internal append is O(new rows)"));
-    assert!(header.contains("one production append costs O(rows + receipts)"));
+    assert!(!header.contains("The production append door opens the ledger once per call"));
+    assert!(header.contains("its first append opens the ledger, so it costs O(rows + receipts)"));
+    assert!(header.contains("instead of opening again (W2-cli3-4, D-4780)"));
 }
 
 #[test]
@@ -263,8 +275,17 @@ fn the_ledger_v6_route_and_replay_costs_are_stated() {
         "the route calls the door that always reloads NIFTY"
     );
     let sizing = function(STRICT_INPUTS, "pub(crate) fn size_sweeper(");
-    assert_eq!(sizing.matches("load(").count(), 1);
+    assert_eq!(sizing.matches("census(").count(), 1);
+    assert!(!sizing.contains("load("));
     assert!(sizing.contains("Ok((sweeper, inputs, sized))"));
+    let census = function(STRICT_INPUTS, "pub(super) fn census(");
+    assert_eq!(
+        census
+            .matches("load_bounded_stored_context_from_spec_v1(")
+            .count(),
+        1
+    );
+    assert_eq!(census.matches("PrebuiltSignalColumnV1::build(").count(), 1);
     let replay = function(LEDGER_V6, "fn replay_route(");
     assert!(replay.contains("run_route(request, out)?"));
     let start = LEDGER_V6.find("fn replay_route(").expect("replay_route");

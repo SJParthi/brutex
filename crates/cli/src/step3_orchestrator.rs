@@ -44,8 +44,8 @@ use crate::anchored_search_lineage_v4::{
 };
 use crate::candidate_universe::{
     AuthenticatedCandidatePopulationRowV1, BaseEvidenceLedgerBoundsV2, BaseEvidenceLedgerReaderV2,
-    BaseEvidenceReopenAuditV2, CandidateExecutionReplayAuthorityV1, CandidateUniverseBoundsV1,
-    CandidateUniverseLedgerV1, CandidateUniverseProductionCommitV1,
+    BaseEvidenceReopenAuditV2, CandidateExecutionReplayAuthorityV1, CandidateLedgerWriterV1,
+    CandidateUniverseBoundsV1, CandidateUniverseLedgerV1, CandidateUniverseProductionCommitV1,
     CandidateUniverseProductionSourceV1, CandidateUniverseReceiptV1,
     CandidateUniverseReopenAuditV1, PairedBaseEvidenceAuthorityV2, PairedBaseEvidenceReaderV2,
     PairedBaseEvidenceRecordProjectionV2, ProducedCandidateUniverseV1,
@@ -497,30 +497,10 @@ pub(crate) struct BoundedStoredContextV1 {
     pub(crate) strict: Option<Arc<strict::Inputs>>,
 }
 
-impl BoundedStoredContextV1 {
-    /// Rows this context's Candidate signal column sweeps: the support
-    /// denominator a ledger sizes its threshold on (D-2103).
-    ///
-    /// # Errors
-    ///
-    /// Every refusal of the Candidate column build.
-    pub(crate) fn candidate_swept_v1(
-        &self,
-        evaluation: &crate::candidate_universe::CandidateEvaluationInputsV1,
-    ) -> Result<u64, Step3OrchestratorRefusal> {
-        crate::candidate_universe::candidate_signal_swept_v1(
-            &self.signal.bars,
-            &self.daily.references,
-            &self.minute.bars,
-            self.rung_seconds,
-            evaluation,
-        )
-    }
-}
-
-/// Load one stored context exactly as a Candidate commit does and count the
-/// rows its signal column sweeps (D-2103). `ledger-all` sizes each rung's
-/// threshold on this for its sizing underlying.
+/// Load one stored context exactly as a Candidate commit does and build its
+/// signal column once (D-2103). `ledger-all` sizes each rung's threshold on
+/// [`strict::SizedNifty::swept`] and hands the returned context and column to
+/// that rung's NIFTY commit, so neither is built twice (G4-2, D-4784).
 ///
 /// # Errors
 ///
@@ -532,9 +512,10 @@ pub(crate) fn stored_candidate_swept_v1(
     (from, to): ((u16, u8), (u16, u8)),
     bounds: StoredCandidatePreAdmissionBoundsV1,
     evaluation: &crate::candidate_universe::CandidateEvaluationInputsV1,
-) -> Result<u64, Step3OrchestratorRefusal> {
+) -> Result<strict::SizedNifty, Step3OrchestratorRefusal> {
     let root = AdmittedRootV1::admit(root)?;
-    load_bounded_stored_context_from_spec_v1(
+    strict::census(
+        &root,
         StoredContextLoadSpecV1 {
             vendor,
             underlying,
@@ -545,10 +526,9 @@ pub(crate) fn stored_candidate_swept_v1(
             minute_bound: bounds.minute_records,
             daily_bound: bounds.daily_records,
         },
-        &root,
         None,
-    )?
-    .candidate_swept_v1(evaluation)
+        evaluation,
+    )
 }
 
 #[path = "stored_family_v6.rs"]
@@ -2944,6 +2924,7 @@ impl RetainedStoredExecutionContextV1 {
             signal_bound,
             minute_bound,
             daily_bound,
+            None,
         )
         .map_err(|why| format!("Step 3 Execution V3 Candidate source refused: {why}"))?;
         if source.search_splits() != self.search_splits {
@@ -3073,12 +3054,46 @@ pub fn commit_stored_candidate_pre_admission_v1(
 /// minted only from the clean process-free stamp. An all-rung transaction can
 /// retain one proof across its families. It owns a no-op progress observer;
 /// no caller-authored commit, bars, digest, calendar or result is admitted.
+/// Production now reaches it only through the carried door below (D-4780).
+#[cfg(test)]
 pub(crate) fn commit_stored_candidate_pre_admission_authority_v1(
     request: StoredCandidatePreAdmissionRequestV1<'_>,
     verified_commit: VerifiedBuildCommitV1<'_>,
 ) -> Result<CommittedStoredCandidatePreAdmissionV1, Step3OrchestratorRefusal> {
     let no_progress_observer = |_: &engine::Frontier, _: usize, _: u64| {};
     commit_stored_with_verified_build_v1(request, verified_commit, &no_progress_observer)
+}
+
+/// Commit the same public stored request while retaining its opaque
+/// sources, for a transaction that carries one Candidate writer across all
+/// its appends (W2-cli3-4, D-4780) and may hand the NIFTY commit the context
+/// and column its sizing census already built (G4-2, D-4784). It owns a
+/// no-op progress observer, and no caller-authored commit, bars, digest,
+/// calendar or result is admitted.
+///
+/// # Errors
+///
+/// Every stored-request, build-proof, Candidate and Pre-Admission refusal,
+/// an extinct family, a carried writer opened for another root or bounds,
+/// or a sized context that names another request or whose sources changed.
+pub(crate) fn commit_stored_candidate_pre_admission_authority_carried_v1(
+    request: StoredCandidatePreAdmissionRequestV1<'_>,
+    verified_commit: VerifiedBuildCommitV1<'_>,
+    candidate_writer: &mut CandidateLedgerWriterV1,
+    sized: Option<strict::SizedNifty>,
+) -> Result<CommittedStoredCandidatePreAdmissionV1, Step3OrchestratorRefusal> {
+    commit_family_from_v6(
+        request,
+        verified_commit,
+        &|_, _, _| {},
+        None,
+        false,
+        sized,
+        candidate_writer,
+    )?
+    .into_parts()
+    .0
+    .ok_or_else(|| "ordinary Pre-Admission V1 cannot represent an extinct family".to_owned())
 }
 
 /// Strict institutional door; ordinary callers retain the historical contract.
@@ -3097,9 +3112,18 @@ pub(crate) fn commit_strict_candidate_pre_admission_authority_sized_v1(
     request: StoredCandidatePreAdmissionRequestV1<'_>,
     config: &crate::audited_range_command::StrictConfig,
     sized: Option<strict::SizedNifty>,
+    candidate_writer: &mut CandidateLedgerWriterV1,
 ) -> Result<family_v6::StoredFamilyV6, String> {
     let commit = VerifiedBuildCommitV1::current()?;
-    commit_family_from_v6(request, commit, &|_, _, _| {}, Some(config), true, sized)
+    commit_family_from_v6(
+        request,
+        commit,
+        &|_, _, _| {},
+        Some(config),
+        true,
+        sized,
+        candidate_writer,
+    )
 }
 
 fn commit_stored_with_verified_build_v1(
@@ -3137,6 +3161,7 @@ fn commit_family_with_inputs_v6(
         config,
         allow_extinct,
         None,
+        &mut CandidateLedgerWriterV1::new(),
     )
 }
 
@@ -3147,11 +3172,18 @@ fn commit_family_from_v6(
     config: Option<&crate::audited_range_command::StrictConfig>,
     allow_extinct: bool,
     sized: Option<strict::SizedNifty>,
+    candidate_writer: &mut CandidateLedgerWriterV1,
 ) -> Result<family_v6::StoredFamilyV6, String> {
     let mut root = AdmittedRootV1::admit(request.root)?;
-    let context = match sized {
-        Some(sized) => sized.into_context_for(&request, &root, config)?,
-        None => load_bounded_stored_context_v1(&request, &root, config)?,
+    let (context, prebuilt_signal) = match sized {
+        Some(sized) => {
+            let (context, column) = sized.into_context_for(&request, &root, config)?;
+            (context, Some(column))
+        }
+        None => (
+            load_bounded_stored_context_v1(&request, &root, config)?,
+            None,
+        ),
     };
     root.strict.clone_from(&context.strict);
     let attempt = strict::begin(&context, &request, verified_commit.0)?;
@@ -3160,8 +3192,9 @@ fn commit_family_from_v6(
         verified_commit,
         on_level,
         root,
-        context,
+        (context, prebuilt_signal),
         allow_extinct,
+        candidate_writer,
     );
     strict::finish(attempt, result)
 }
@@ -3171,8 +3204,12 @@ fn commit_loaded_stored_v1(
     verified_commit: VerifiedBuildCommitV1<'_>,
     on_level: &dyn Fn(&engine::Frontier, usize, u64),
     root: AdmittedRootV1,
-    context: BoundedStoredContextV1,
+    (context, prebuilt_signal): (
+        BoundedStoredContextV1,
+        Option<crate::candidate_universe::PrebuiltSignalColumnV1>,
+    ),
     allow_extinct: bool,
+    candidate_writer: &mut CandidateLedgerWriterV1,
 ) -> Result<family_v6::StoredFamilyV6, String> {
     let resolved = resolve_stored_execution_v1(
         &context,
@@ -3211,6 +3248,7 @@ fn commit_loaded_stored_v1(
         request.bounds.signal_records,
         request.bounds.minute_records,
         request.bounds.daily_records,
+        prebuilt_signal,
     )
     .map_err(|why| format!("Step 3 stored Candidate source refused: {why}"))?;
 
@@ -3228,6 +3266,7 @@ fn commit_loaded_stored_v1(
         request.bounds.pre_admission,
         on_level,
         allow_extinct,
+        candidate_writer,
     )?;
     let search =
         StoredSearchMemberV4::bind_candidate(&committed.candidate_audit(), search_validation)?;
@@ -3294,11 +3333,21 @@ struct StoredContextLoadSpecV1<'a> {
     daily_bound: StoredSpanLoadBoundV1,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only count of stored Candidate context loads, strict or not, on
+    /// this thread (D-4784).
+    pub(crate) static STORED_CONTEXT_LOADS: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
+
 fn load_bounded_stored_context_from_spec_v1(
     spec: StoredContextLoadSpecV1<'_>,
     root: &AdmittedRootV1,
     config: Option<&crate::audited_range_command::StrictConfig>,
 ) -> Result<BoundedStoredContextV1, Step3OrchestratorRefusal> {
+    #[cfg(test)]
+    STORED_CONTEXT_LOADS.with(|count| count.set(count.get().saturating_add(1)));
     if let Some(config) = config {
         return strict::load(spec, root, config);
     }
@@ -4095,6 +4144,7 @@ fn commit_candidate_pre_admission_authority_guarded_v1<'a>(
         pre_admission_bounds,
         on_level,
         false,
+        &mut CandidateLedgerWriterV1::new(),
     )? {
         family_v6::CandidateCommitV6::Evaluated(committed) => Ok(*committed),
         family_v6::CandidateCommitV6::Extinct(_) => {
@@ -4105,7 +4155,7 @@ fn commit_candidate_pre_admission_authority_guarded_v1<'a>(
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "one typed source and its existing independent publication bounds plus explicit V2 extinction permission"
+    reason = "one typed source and its existing independent publication bounds plus explicit V2 extinction permission and the run's carried Candidate writer"
 )]
 fn commit_candidate_family_guarded_v6<'a>(
     root: &Path,
@@ -4116,6 +4166,7 @@ fn commit_candidate_family_guarded_v6<'a>(
     pre_admission_bounds: PreAdmissionDataBoundsV1,
     on_level: &dyn Fn(&engine::Frontier, usize, u64),
     allow_extinct: bool,
+    candidate_writer: &mut CandidateLedgerWriterV1,
 ) -> Result<family_v6::CandidateCommitV6, String> {
     let candidate = produce_candidate_universe_v1(sweeper, source, candidate_bounds, on_level)
         .map_err(|why| format!("Step 3 Candidate production refused: {why}"))?;
@@ -4130,8 +4181,12 @@ fn commit_candidate_family_guarded_v6<'a>(
     let prepared_receipt = candidate.receipt();
     let observations = candidate.observations().clone();
     require_admitted_root_v1(admitted_root, "before Candidate receipt-last append/reopen")?;
+    // ONE WRITER PER RUN (W2-cli3-4, D-4780): the ledger sits at the store
+    // root every run shares, and opening it here cost O(R_total + C) per
+    // append, 16 times a run. The carried writer opens it once and catches up
+    // on what other writers appended since, verifying only those records.
     let candidate_commit = candidate
-        .append_and_reopen(root, candidate_bounds)
+        .append_and_reopen_with(candidate_writer, root, candidate_bounds)
         .map_err(|why| format!("Step 3 Candidate receipt-last commit refused: {why}"))?;
     require_admitted_root_v1(admitted_root, "after Candidate receipt-last append/reopen")?;
     let candidate_audit = candidate_commit.audit();

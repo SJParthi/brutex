@@ -65026,6 +65026,69 @@ guarantee D-1443 exists for. **Honest limit:** the `Landing` kill depends on
 test order. A rename that sorted a single-flight test ahead of it would
 restore the timeout, so the ordering is pinned in the test's own doc.
 
+### D-4780 — One Candidate ledger writer per run, caught up before each append — 2026-10-09
+
+**What was observed.** W2-cli3-4 was PARTIAL after D-1680. One production
+append no longer opened the Candidate ledger twice, but it still opened it once,
+and an open walks and re-seals every stored block: O(R + C). That ledger sits at
+the store root, and every run, rung and family shares it. `ledger-v6` and
+`ledger-all` each make 16 appends per run, so one run paid 16 x O(R_total + C),
+which grows with the ledger's history and not with the run's own work. D-1680
+rejected carrying the writer only because it changed three callers' ownership.
+
+**Decided.** A run carries one `CandidateLedgerWriterV1` through the whole
+commit chain. `ledger_v6::run_route` and the all-rung coordinator's phase one
+each create one before their rung loop. It passes through
+`commit_strict_candidate_pre_admission_authority_sized_v1` or
+`commit_stored_candidate_pre_admission_authority_carried_v1`, then
+`commit_family_from_v6`, `commit_loaded_stored_v1` and
+`commit_candidate_family_guarded_v6`, and reaches
+`ProducedCandidateUniverseV1::append_and_reopen_with`. The writer's first append
+opens the ledger. Every later append runs `append_complete` on the held handle.
+Under the exclusive writer lock, `catch_up_locked` then rechecks the three
+generations:
+
+- Unchanged generations cost three stats.
+- Otherwise `absorb_foreign_completions` catches up. The ledger must hold more
+  completions than the handle indexed. The last completion it indexed must
+  still be the one stored there. Each new completion's block is validated
+  against its seal from the handle's own committed cursor: the orphan's first
+  row when it holds one, the row total when not. A universe completed twice
+  refuses, and the orphan tail after the new blocks is re-scanned. Nothing is
+  indexed until every new completion has verified.
+- Any other change refuses: a replaced path, a change that added no completion,
+  or a moved last completion.
+
+The writer serves only the root and bounds it opened, as two separate checks,
+and any refusal discards the held handle, so the next append opens again rather
+than trusting a handle that refused. D-1700's ledger catch-up is the precedent.
+The single-family doors keep a fresh writer per call, so they still pay one open
+per call, as before. The read-only reopens that successor authentication makes
+are unchanged.
+
+A run now pays one O(R + C) open plus O(new rows + foreign new rows) per append.
+
+**Honest limit.** A metadata generation cannot tell an append from an append
+made together with an in-place rewrite of an older block. A carried writer
+therefore does not see such a rewrite: it verifies only the new blocks, and its
+witness is the last completion it indexed. The next full open re-validates every
+block and refuses the rewrite.
+`cli::candidate_universe::tests::a_carried_writer_refuses_what_it_cannot_catch_up_on`
+drives that case to the refusal. A rewrite that grows nothing is refused at once.
+
+**Rejected.** Re-scanning the whole ledger on any change that is not a pure
+append. A carried handle would then silently adopt a history rewritten under it.
+Refusing is the loud answer, and a rerun opens afresh.
+
+Tests:
+- `cli::candidate_universe::tests::a_carried_writer_opens_once_and_verifies_what_others_appended_since`
+  (fails at 1 against 0 scans on the per-append-open code).
+- `cli::candidate_universe::tests::a_carried_writer_refuses_what_it_cannot_catch_up_on`.
+- `cli::candidate_universe::tests::a_carried_writer_catches_up_from_its_own_committed_cursor`.
+- `cli::candidate_universe::tests::a_carried_writer_refuses_history_that_moved_and_duplicate_completions`.
+- `cli::step3_orchestrator::tests::strict_v6_fixture_tests::strict_v6_one_candidate_writer_serves_every_family_and_catches_up_on_others`.
+- `cli::step3_orchestrator::all_rung_tests::all_rung_sizing_hands_each_nifty_context_to_its_commit_and_one_writer_serves_every_append`.
+
 ### D-4781 — The Pre-Admission V1 and V2 append doors re-read only their pair — 2026-10-09
 
 **What was observed.** G4-4 found a sibling of W2-cli3-4 that no document
@@ -65111,3 +65174,77 @@ Tests:
   (fails at 15 against 3 passes on the re-hashing code; it also refuses a
   tampered cohort identity at the fold).
 - `cli::step3_orchestrator::tests::strict_v6_fixture_tests::strict_v6_one_oos_fold_serves_every_witness_of_its_cohort`.
+
+### D-4783 — The NIFTY commit consumes the signal column its sizing census built — 2026-10-09
+
+**What was observed.** G4-3 found that D-2103 had re-created W2-cli7-3's shape.
+`size_sweeper` built NIFTY's whole anchored Candidate signal column, which is
+Θ(S·W + Q + D) with the evaluator fold and the exact-minute overlay, only to
+read `census().swept`, and then dropped it. The NIFTY commit consumed the same
+`SizedNifty` context and built the identical column again, eight times per
+`ledger-v6` run.
+
+**Decided.** `SizedNifty` now holds a `PrebuiltSignalColumnV1`: the column, the
+evaluation inputs and rung it was built under, and the address and length of the
+three slices it was built from. `differing_term` adds `evaluation`, so a request
+with other widths, availability or thresholds is refused by name.
+`CandidateUniverseProductionSourceV1::new` takes an
+`Option<PrebuiltSignalColumnV1>`. When one is given, `into_column_for` makes
+three separate checks and refuses other evaluation inputs, another rung, or
+slices at another address or of another length. It then derives only the
+execution projection (`project_candidate_execution_column`). The column digest,
+source id and universe id are unchanged: the unit test compares them with the
+unsized build.
+
+The address check is sound because the context that owns the slices is moved,
+never copied, between the census and the commit, so its buffers keep their
+addresses. Equal bytes at another address refuse, and nothing falls back to a
+rebuild.
+
+**Rejected.** Hashing the slices to prove they are the same. That costs
+Θ(S + Q + D), which defeats the purpose. Relying on `SizedNifty`'s term checks
+alone was also rejected: they do not bind the slices.
+
+Tests:
+- `cli::step3_orchestrator::tests::strict_v6_fixture_tests::strict_v6_the_nifty_commit_consumes_the_sizing_column_once`
+  (fails at 2 against 1 builds on the rebuilding code).
+- `cli::candidate_universe::tests::a_prebuilt_signal_column_serves_exactly_the_inputs_it_was_built_from`.
+
+### D-4784 — `ledger-all` sizes each rung at its Candidate phase and hands that rung's NIFTY commit the context and column — 2026-10-09
+
+**What was observed.** G4-2 found the same problem in `ledger-all`, and worse.
+After D-2103, `build_sweepers` loaded NIFTY's full signal, one-minute and daily
+context and built its column for all eight rungs before the first commit, only
+to read the swept count. Each NIFTY commit then loaded and built them again: 24
+context loads per run where 16 suffice.
+
+**Decided.** The all-rung request now carries `AllRungSweepersV1`:
+
+- `Named` holds the eight caller-built sweepers, as before.
+- `SizedPerRung` is a sizing closure.
+
+`ledger-all` passes `SizedPerRung(size_rung ...)`. The coordinator calls it at
+the start of each rung's Candidate phase and uses the returned sweeper for both
+families. It hands the `SizedNifty` to that rung's NIFTY commit through
+`commit_stored_candidate_pre_admission_authority_carried_v1`. `size_rung` builds
+an ordinary (non-strict) census through the same
+`strict_v6_inputs::census` as `ledger-v6`, so the count and the commit use the
+same bytes. A run now makes 16 context loads (the test measured 24 before), with
+as many column builds as the named path. Peak memory holds one sized context at
+a time.
+
+**Consequences.**
+- A rung whose span cannot be sized now refuses when its own rung is reached.
+  That is after the earlier rungs' receipt-last appends, which an exact retry
+  reuses; it is the coordinator's documented recoverable-prefix contract.
+- The eight `rung sized` events now come after the population stage's start
+  event and interleave with its work, where before all eight came first.
+- A sizing refusal now also emits the stage's refusal event.
+- The report text is unchanged, and no stored byte or run identity changes.
+
+**Rejected.** Building all eight sizings first and holding them for the commits.
+That would raise peak memory eightfold.
+
+Tests:
+- `cli::step3_orchestrator::all_rung_tests::all_rung_sizing_hands_each_nifty_context_to_its_commit_and_one_writer_serves_every_append`
+  (fails at 24 against 16 loads on the up-front sizing code).

@@ -491,6 +491,159 @@ mod strict_v6_fixture_tests {
     }
 
     #[test]
+    fn strict_v6_one_candidate_writer_serves_every_family_and_catches_up_on_others()
+    -> Result<(), String> {
+        // W2-cli3-4 / D-4780: every family commit opened the whole store-root
+        // Candidate ledger, O(R_total + C), sixteen times a `ledger-v6` run.
+        let fixture = StoredSuccessFixture::new()?;
+        let config = strict_fixture_config(&fixture)?;
+        let long = exit_policy(Side::Long)?;
+        let short = exit_policy(Side::Short)?;
+        let sweeper = Sweeper::new(engine::Ladder::with_min_hits(1_000_000));
+        let mut writer = crate::candidate_universe::CandidateLedgerWriterV1::new();
+        crate::candidate_universe::LEDGER_WRITER_OPENS.with(|count| count.set(0));
+        crate::candidate_universe::LEDGER_CATCH_UP_RECEIPTS.with(|count| count.set(0));
+        let mut commit = |family: &str| {
+            commit_family_from_v6(
+                fixture_request(&fixture.source, family, &sweeper, &long, &short)?,
+                VerifiedBuildCommitV1(FIXTURE_COMMIT),
+                &|_, _, _| {},
+                Some(&config),
+                true,
+                None,
+                &mut writer,
+            )
+        };
+        let nifty = commit("NIFTY")?;
+        // Another writer appends to the same ledger between two families.
+        crate::candidate_universe::append_foreign_fixture_universe(
+            &fixture.source,
+            fixture_bounds()?.candidate,
+        )?;
+        let banknifty = commit("BANKNIFTY")?;
+        let rerun = commit("NIFTY")?;
+        assert_eq!(rerun.candidate_audit(), nifty.candidate_audit());
+        assert_eq!(
+            crate::candidate_universe::LEDGER_WRITER_OPENS.with(std::cell::Cell::get),
+            2,
+            "one writer open serves every family's append; the other is the foreign writer's"
+        );
+        assert_eq!(
+            crate::candidate_universe::LEDGER_CATCH_UP_RECEIPTS.with(std::cell::Cell::get),
+            1,
+            "the foreign completion was verified before the next append, not missed"
+        );
+        let fresh = crate::candidate_universe::CandidateUniverseLedgerV1::open_read(
+            &fixture.source,
+            fixture_bounds()?.candidate,
+        )?;
+        for family in [&nifty, &banknifty] {
+            assert_eq!(
+                fresh.reopen_audit(&family.candidate_audit().universe_id())?,
+                Some(family.candidate_audit())
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn strict_v6_the_nifty_commit_consumes_the_sizing_column_once() -> Result<(), String> {
+        // G4-3 / D-4783: sizing built NIFTY's whole Candidate signal column to
+        // read its swept count and dropped it; the NIFTY commit built it again.
+        let fixture = StoredSuccessFixture::new()?;
+        let config = strict_fixture_config(&fixture)?;
+        let long = exit_policy(Side::Long)?;
+        let short = exit_policy(Side::Short)?;
+        let ledger_request = crate::ledger_all::LedgerAllRequest {
+            vendor: "zerodha",
+            from: FIXTURE_FROM,
+            to: FIXTURE_TO,
+            support_ppm: 1_000_000,
+            max_points: 1,
+            root: &fixture.base,
+        };
+        crate::candidate_universe::FULL_SIGNAL_COLUMN_BUILDS.with(|count| count.set(0));
+        let (sweeper, _, sized) = strict::size_sweeper(
+            &fixture.source,
+            Vendor::Zerodha,
+            &ledger_request,
+            "1min",
+            fixture_bounds()?,
+            &config,
+            &sizing_evaluation()?,
+        )?;
+        assert_eq!(
+            crate::candidate_universe::FULL_SIGNAL_COLUMN_BUILDS.with(std::cell::Cell::get),
+            1
+        );
+        let mut writer = crate::candidate_universe::CandidateLedgerWriterV1::new();
+        let nifty = commit_family_from_v6(
+            fixture_request(&fixture.source, "NIFTY", &sweeper, &long, &short)?,
+            VerifiedBuildCommitV1(FIXTURE_COMMIT),
+            &|_, _, _| {},
+            Some(&config),
+            true,
+            Some(sized),
+            &mut writer,
+        )?;
+        assert_eq!(
+            crate::candidate_universe::FULL_SIGNAL_COLUMN_BUILDS.with(std::cell::Cell::get),
+            1,
+            "the NIFTY commit consumed the sizing column and built none"
+        );
+        // The receipt is the unsized path's, byte for byte: an unsized commit
+        // of the same request reuses it.
+        let unsized_commit = commit_family_from_v6(
+            fixture_request(&fixture.source, "NIFTY", &sweeper, &long, &short)?,
+            VerifiedBuildCommitV1(FIXTURE_COMMIT),
+            &|_, _, _| {},
+            Some(&config),
+            true,
+            None,
+            &mut writer,
+        )?;
+        assert_eq!(unsized_commit.candidate_audit(), nifty.candidate_audit());
+        assert_eq!(
+            crate::candidate_universe::FULL_SIGNAL_COLUMN_BUILDS.with(std::cell::Cell::get),
+            2,
+            "an unsized commit builds its own column"
+        );
+
+        // A column built under other evaluation inputs serves no request.
+        let (_, _, sized) = strict::size_sweeper(
+            &fixture.source,
+            Vendor::Zerodha,
+            &ledger_request,
+            "1min",
+            fixture_bounds()?,
+            &config,
+            &sizing_evaluation()?,
+        )?;
+        let mut other = fixture_request(&fixture.source, "NIFTY", &sweeper, &long, &short)?;
+        other.availability = Availability::Present;
+        let source = AdmittedRootV1::admit(&fixture.source)?;
+        assert_eq!(
+            sized.differing_term(&other, source.path(), Some(&config)),
+            Some("evaluation")
+        );
+        let refused = commit_family_from_v6(
+            other,
+            VerifiedBuildCommitV1(FIXTURE_COMMIT),
+            &|_, _, _| {},
+            Some(&config),
+            true,
+            Some(sized),
+            &mut writer,
+        );
+        assert!(
+            matches!(&refused, Err(why) if why.contains("cannot serve a request with another evaluation")),
+            "{refused:?}",
+            refused = refused.as_ref().err()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn strict_v6_extinct_selection_keeps_both_family_sources_through_final_reauthentication()
     -> Result<(), String> {
         let fixture = StoredSuccessFixture::new()?;
@@ -586,6 +739,7 @@ mod strict_v6_fixture_tests {
             Some(&config),
             true,
             Some(sized),
+            &mut crate::candidate_universe::CandidateLedgerWriterV1::new(),
         )?;
         nifty.require_current()?;
         assert_eq!(
@@ -600,6 +754,7 @@ mod strict_v6_fixture_tests {
             Some(&config),
             true,
             None,
+            &mut crate::candidate_universe::CandidateLedgerWriterV1::new(),
         )?;
         banknifty.require_current()?;
         assert_eq!(
@@ -626,7 +781,26 @@ mod strict_v6_fixture_tests {
             (FIXTURE_FROM, FIXTURE_TO),
             fixture_bounds()?,
             &sizing_evaluation()?,
-        )?;
+        )?
+        .swept();
+        // D-4783: the census is NIFTY's alone, so another underlying is
+        // refused by name before any load rather than sized as if it were.
+        let other = crate::step3_orchestrator::stored_candidate_swept_v1(
+            &fixture.source,
+            Vendor::Zerodha,
+            ("BANKNIFTY", "1min"),
+            (FIXTURE_FROM, FIXTURE_TO),
+            fixture_bounds()?,
+            &sizing_evaluation()?,
+        );
+        assert!(
+            other
+                .as_ref()
+                .err()
+                .is_some_and(|why| why == "a sizing census is taken on NIFTY, not BANKNIFTY"),
+            "{:?}",
+            other.map(|sized| sized.swept())
+        );
         let retained = crate::stored::load_span(
             &fixture.source,
             Vendor::Zerodha,
@@ -747,6 +921,7 @@ mod strict_v6_fixture_tests {
             Some(&config),
             true,
             Some(sized),
+            &mut crate::candidate_universe::CandidateLedgerWriterV1::new(),
         );
         assert!(
             matches!(&refused, Err(why) if why.contains("cannot serve a request with another family")),
@@ -801,6 +976,7 @@ mod strict_v6_fixture_tests {
                 Some(&config),
                 true,
                 Some(sized),
+                &mut crate::candidate_universe::CandidateLedgerWriterV1::new(),
             )
             .is_err(),
             "a sized context whose source changed cannot be consumed"
