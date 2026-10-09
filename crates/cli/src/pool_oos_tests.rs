@@ -730,3 +730,128 @@ fn a_catalog_at_the_byte_bound_is_written_and_one_byte_over_is_refused() {
     );
     assert!(!over.exists(), "nothing was written");
 }
+
+/// **The judge over walked spans refuses an empty family by its own name,
+/// whichever half is empty.** R1286-cli-05, D-4100.
+///
+/// `judge` refuses an empty family before it walks, so its test never reached
+/// the same check inside [`judge_walked`], the one the verb calls. No walked
+/// instrument with two candidates, and one walked instrument (each span
+/// holding a session) with no candidate, are each refused with the empty
+/// family's sentence -- not with the later-span or receipt refusals the judge
+/// would reach if it went on.
+#[test]
+fn the_walked_judge_refuses_an_empty_family_by_name_whichever_half_is_empty() {
+    const EMPTY: &str = "no instrument or no candidate to judge out of sample";
+    let one_session = || super::Walked {
+        days: vec![FIRST_MONDAY],
+        tallies: Vec::new(),
+        bookings: Vec::new(),
+    };
+    assert_eq!(
+        judge_walked(&[], &union()).err().as_deref(),
+        Some(EMPTY),
+        "no instrument"
+    );
+    assert_eq!(
+        judge_walked(&[(one_session(), one_session())], &[])
+            .err()
+            .as_deref(),
+        Some(EMPTY),
+        "no candidate"
+    );
+}
+
+/// **A per-session figure is the tally's mean in ppm, truncated toward zero,
+/// and zero over no session.** R1286-cli-06, D-4100.
+///
+/// Both signs truncate toward zero (`-7 / 2` is `-3`, never `-4`), the
+/// extremes divide without overflow, and a span of no session answers zero
+/// rather than dividing by it.
+#[test]
+fn a_per_session_figure_is_the_truncated_mean_and_zero_over_no_session() {
+    use super::{Tally, per_session};
+    let tally = |sum_ppm| Tally { trades: 9, sum_ppm };
+    for (sum, sessions, mean) in [
+        (7, 2, 3),
+        (-7, 2, -3),
+        (-7_001, 2, -3_500),
+        (9, 3, 3),
+        (2, 3, 0),
+        (i128::MAX, 1, i128::MAX),
+        (i128::MIN, 1, i128::MIN),
+        (
+            i128::MAX,
+            usize::MAX,
+            i128::MAX / i128::try_from(usize::MAX).expect("a usize fits an i128"),
+        ),
+        (7, 0, 0),
+        (-7, 0, 0),
+        (0, 0, 0),
+    ] {
+        assert_eq!(
+            per_session(tally(sum), sessions),
+            mean,
+            "{sum} / {sessions}"
+        );
+    }
+}
+
+/// **The table prints each row's per-session means in its two ppm columns.**
+/// R1286-cli-06, D-4100.
+///
+/// One held row, its training sum -7,001 ppm over two sessions and its later
+/// sum 7 ppm over three: the row reads rank, verdict, side, the two trade
+/// counts and the truncated means -3,500 and 2. With no training session the
+/// training mean prints 0.
+#[test]
+fn the_table_prints_each_rows_per_session_means() {
+    let union = union();
+    let row = super::Judgement {
+        candidate: 1,
+        training: super::Tally {
+            trades: 4,
+            sum_ppm: -7_001,
+        },
+        later: super::Tally {
+            trades: 3,
+            sum_ppm: 7,
+        },
+        held: true,
+    };
+    let tuesday = crate::pool::mask_hex(mask(TUESDAY));
+    for (training_sessions, training_mean) in [(2, "-3500"), (0, "0")] {
+        let judged = super::Judged {
+            rows: vec![row],
+            training_sessions,
+            later_sessions: 3,
+            draws: 7,
+            reality: None,
+        };
+        let mut out = String::new();
+        super::render(&mut out, &union, &judged, 1);
+        let mut lines = out.lines();
+        lines
+            .find(|line| line.trim_start().starts_with("rank verdict"))
+            .expect("the table header is printed");
+        let printed: Vec<&str> = lines
+            .next()
+            .expect("the one row follows the header")
+            .split_whitespace()
+            .collect();
+        assert_eq!(
+            printed,
+            [
+                "1",
+                "HELD",
+                "long",
+                "4",
+                training_mean,
+                "3",
+                "2",
+                tuesday.as_str()
+            ],
+            "{out}"
+        );
+    }
+}
