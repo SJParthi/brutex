@@ -218,7 +218,11 @@ fn row_lookup_is_constant_in_batch_size() -> bool {
 /// [`Batch::row`] of a cash batch of `n` rows must touch, with nothing of the
 /// crate's around it.
 fn plain_columns(n: usize) -> [Vec<i64>; 7] {
-    let column = || (0..n).map(|i| i64::try_from(i).unwrap_or(0)).collect::<Vec<i64>>();
+    let column = || {
+        (0..n)
+            .map(|i| i64::try_from(i).unwrap_or(0))
+            .collect::<Vec<i64>>()
+    };
     [
         column(),
         column(),
@@ -291,7 +295,10 @@ fn rows_are_flat_at_p99() -> bool {
     /// One round's percentiles, folded into the kept ones.
     fn fold(ns: &mut [u128], kept: &mut (u128, u128, u128)) {
         ns.sort_unstable();
-        let at = |q: usize| ns.get((ns.len() * q / 1_000).min(ns.len().saturating_sub(1))).copied();
+        let at = |q: usize| {
+            ns.get((ns.len() * q / 1_000).min(ns.len().saturating_sub(1)))
+                .copied()
+        };
         kept.0 = kept.0.min(at(500).unwrap_or(0));
         kept.1 = kept.1.min(at(990).unwrap_or(0));
         kept.2 = kept.2.max(ns.last().copied().unwrap_or(0));
@@ -302,8 +309,10 @@ fn rows_are_flat_at_p99() -> bool {
     const BATCH: usize = 32;
     /// The sizes, smallest first; the first is the printed base.
     const SIZES: [usize; 4] = [SMALL, MEDIUM, LARGE, LARGE * 10];
-    let legs: Vec<(Batch, [Vec<i64>; 7])> =
-        SIZES.iter().map(|n| (batch(*n), plain_columns(*n))).collect();
+    let legs: Vec<(Batch, [Vec<i64>; 7])> = SIZES
+        .iter()
+        .map(|n| (batch(*n), plain_columns(*n)))
+        .collect();
     let fresh = (u128::MAX, u128::MAX, 0u128);
     // Per size: (row leg, floor leg), each (smallest p50, smallest p99, max).
     let mut seen = [(fresh, fresh); SIZES.len()];
