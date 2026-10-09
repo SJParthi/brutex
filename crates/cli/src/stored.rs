@@ -545,9 +545,10 @@ pub fn nse_session_close_minute(day: i64) -> Option<u16> {
 /// than a close being invented. An exceptional (non-full) session on such a day
 /// answers `None` too: no source in the charter gives a share's close there.
 ///
-/// `digest` binds every answer and every reason, and enters the stored run
-/// identity, so the same bars judged against a different master are a
-/// different run.
+/// `digest` binds every answer and every unverified reason's CLASS, never its
+/// text (D-4750), and enters the stored run identity, so the same bars judged
+/// against a different master are a different run, and the same bars beside
+/// the same unusable master are one run wherever the store is mounted.
 #[derive(Debug, Clone)]
 pub struct CashCloses {
     schedule: pull::cash_auction::Schedule,
@@ -557,8 +558,8 @@ pub struct CashCloses {
 }
 
 /// Two sets of closes are equal when their digests are: the digest binds the
-/// share, every dated day, flag and master hash, and every unverified reason,
-/// and `Schedule` itself offers no comparison.
+/// share, every dated day, flag and master hash, and every unverified reason
+/// class, and `Schedule` itself offers no comparison.
 impl PartialEq for CashCloses {
     fn eq(&self, other: &Self) -> bool {
         self.digest == other.digest
@@ -616,7 +617,7 @@ impl CashCloses {
         self.unverified.get(&day).map(String::as_str)
     }
 
-    /// Identity term binding every dated answer and every refusal reason.
+    /// Identity term binding every dated answer and every refusal reason class.
     #[must_use]
     pub const fn digest(&self) -> [u8; 32] {
         self.digest
@@ -709,15 +710,30 @@ pub fn load_cash_closes(
     hash.update(&u64::try_from(share.len()).unwrap_or(u64::MAX).to_le_bytes());
     hash.update(share.as_bytes());
     for (day, civil) in required {
+        // THE REASON'S CLASS ENTERS THE DIGEST, ITS TEXT DOES NOT (G3-4,
+        // D-4750). The text can carry the store's absolute path or a lock's OS
+        // error, so hashing it made one span's identity depend on where the
+        // store was mounted. The class names which step failed: 1 no ISIN, 2
+        // the receipted master could not be used, 3 it was read and does not
+        // name this share, bound with its content hash. Marker 2 never equals
+        // the old marker 0, so no digest of either encoding equals the other's.
         let answer = isin
             .as_ref()
-            .ok_or_else(|| format!("{share} has no exact NSE ISIN in the universe table"))
+            .ok_or_else(|| {
+                (
+                    1_u8,
+                    None,
+                    format!("{share} has no exact NSE ISIN in the universe table"),
+                )
+            })
             .and_then(|isin| {
-                pull::cash_session_cache::read_local_lifecycle(&masters, civil).and_then(|master| {
-                    master
-                        .eligibility(share, isin.as_str())
-                        .map(|eligible| (eligible, master.provenance().sha256))
-                })
+                let master = pull::cash_session_cache::read_local_lifecycle(&masters, civil)
+                    .map_err(|why| (2, None, why))?;
+                let sha256 = master.provenance().sha256;
+                master
+                    .eligibility(share, isin.as_str())
+                    .map(|eligible| (eligible, sha256))
+                    .map_err(|why| (3, Some(sha256), why))
             });
         hash.update(&day.to_le_bytes());
         match answer {
@@ -727,10 +743,11 @@ pub fn load_cash_closes(
                 hash.update(&[1, u8::from(eligible)]);
                 hash.update(&sha256);
             }
-            Err(why) => {
-                hash.update(&[0]);
-                hash.update(&u64::try_from(why.len()).unwrap_or(u64::MAX).to_le_bytes());
-                hash.update(why.as_bytes());
+            Err((class, master, why)) => {
+                hash.update(&[2, class]);
+                if let Some(sha256) = master {
+                    hash.update(&sha256);
+                }
                 unverified.insert(day, why);
             }
         }
@@ -5501,10 +5518,15 @@ mod tests {
     /// Install one receipted NSE session master naming RELIANCE with `flag`
     /// for `day` under `store/session-masters`, exactly as the pull does.
     fn install_master(store: &Path, day: i64, flag: u8) {
+        install_master_naming(store, day, "RELIANCE", flag);
+    }
+
+    /// [`install_master`] for a master that names `symbol` and nothing else.
+    fn install_master_naming(store: &Path, day: i64, symbol: &str, flag: u8) {
         use std::io::Write as _;
-        let isin = brutex_core::universe::nse_isin("RELIANCE").expect("RELIANCE has an ISIN");
+        let isin = brutex_core::universe::nse_isin(symbol).expect("the symbol has an ISIN");
         let csv = format!(
-            "FinInstrmId,TckrSymb,SctySrs,ISIN,ElgbltyClsgAuctnSsn\n2885,RELIANCE,EQ,{},{flag}\n",
+            "FinInstrmId,TckrSymb,SctySrs,ISIN,ElgbltyClsgAuctnSsn\n2885,{symbol},EQ,{},{flag}\n",
             isin.as_str()
         );
         let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
@@ -5720,6 +5742,109 @@ mod tests {
         );
         let _ignored = std::fs::remove_dir_all(&eligible);
         let _ignored = std::fs::remove_dir_all(&ineligible);
+    }
+
+    /// G3-4, D-4750: the closes' digest binds WHY a date went unverified as a
+    /// stable class, never the free text, which carries the store's absolute
+    /// path and OS or lock-contention wording. Two stores at different paths
+    /// holding the same unreadable master (its lock path a directory, or its
+    /// receipt damaged) produced different digests, and so different run
+    /// identities for the same bars (§3 rule 5). The text stays for display.
+    #[test]
+    fn an_unreadable_master_binds_its_reason_class_and_not_its_path() {
+        let civil = cas_dated_day(OPEN_MONDAY_2026_08_03).expect("a CAS-era day");
+        let lock = format!(
+            ".NSE_CM_security_{:02}{:02}{:04}.csv.gz.lock",
+            civil.day(),
+            civil.month(),
+            civil.year()
+        );
+        let receipt = format!(
+            "NSE_CM_security_{:02}{:02}{:04}.csv.gz.receipt",
+            civil.day(),
+            civil.month(),
+            civil.year()
+        );
+        let days = [OPEN_MONDAY_2026_08_03];
+        let absent = load_cash_closes(Path::new(NO_STORE), "RELIANCE", days).expect("loads");
+        for (case, damage) in [
+            (
+                "lock-dir",
+                (|store: &Path, lock: &str, _: &str| {
+                    std::fs::create_dir_all(store.join("session-masters").join(lock))
+                        .expect("a directory where the lock belongs");
+                }) as fn(&Path, &str, &str),
+            ),
+            ("receipt", |store: &Path, _: &str, receipt: &str| {
+                install_master(store, OPEN_MONDAY_2026_08_03, 1);
+                std::fs::write(store.join("session-masters").join(receipt), b"damaged")
+                    .expect("the receipt is rewritten");
+            }),
+        ] {
+            let near = root(&format!("class-{case}"));
+            let far = root(&format!(
+                "class-{case}-at-another-much-longer-absolute-path"
+            ));
+            for store in [&near, &far] {
+                damage(store, &lock, &receipt);
+            }
+            let one = load_cash_closes(&near, "RELIANCE", days).expect("loads");
+            let two = load_cash_closes(&far, "RELIANCE", days).expect("loads");
+            let (why_one, why_two) = (
+                one.unverified_reason(OPEN_MONDAY_2026_08_03)
+                    .expect("held unverified"),
+                two.unverified_reason(OPEN_MONDAY_2026_08_03)
+                    .expect("held unverified"),
+            );
+            assert_ne!(
+                why_one, why_two,
+                "premise {case}: the free text names each store's own path"
+            );
+            assert!(
+                why_one.contains(near.to_string_lossy().as_ref()),
+                "{case}: {why_one}"
+            );
+            assert_eq!(
+                one.digest(),
+                two.digest(),
+                "{case}: the same unreadable master at two paths is one identity"
+            );
+            assert_eq!(
+                one.digest(),
+                absent.digest(),
+                "{case}: absent and unreadable answer the same None and bind one class"
+            );
+            assert_eq!(one.session_close_minute(OPEN_MONDAY_2026_08_03), None);
+            let _ignored = std::fs::remove_dir_all(&near);
+            let _ignored = std::fs::remove_dir_all(&far);
+        }
+        // For one share, a dated answer, an unreadable master and a master
+        // that does not name it are three facts and three digests.
+        let named = root("class-named");
+        install_master(&named, OPEN_MONDAY_2026_08_03, 1);
+        let other = root("class-other");
+        install_master_naming(&other, OPEN_MONDAY_2026_08_03, "TCS", 1);
+        let dated = load_cash_closes(&named, "RELIANCE", days).expect("loads");
+        let not_named = load_cash_closes(&other, "RELIANCE", days).expect("loads");
+        assert!(
+            not_named
+                .unverified_reason(OPEN_MONDAY_2026_08_03)
+                .is_some()
+        );
+        let digests = [dated.digest(), absent.digest(), not_named.digest()];
+        for (i, a) in digests.iter().enumerate() {
+            for b in digests.iter().skip(i + 1) {
+                assert_ne!(a, b, "dated, unreadable and not named are three facts");
+            }
+        }
+        // A word with no ISIN binds its class wherever the store is.
+        let no_isin = load_cash_closes(&named, "NOSUCHSHARE", days).expect("loads");
+        let no_isin_absent =
+            load_cash_closes(Path::new(NO_STORE), "NOSUCHSHARE", days).expect("loads");
+        assert!(no_isin.unverified_reason(OPEN_MONDAY_2026_08_03).is_some());
+        assert_eq!(no_isin.digest(), no_isin_absent.digest());
+        let _ignored = std::fs::remove_dir_all(&named);
+        let _ignored = std::fs::remove_dir_all(&other);
     }
 
     #[test]

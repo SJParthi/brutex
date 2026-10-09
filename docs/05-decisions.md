@@ -65104,3 +65104,45 @@ eligible share reached the index calendar there (G3-1).
 
 **Now.** D-4748 threads the share's closes through that builder. The index-only
 callers still pass none, and that is the statement D-2102 should have made.
+
+### D-4750 — The cash-closes digest binds a reason class, not the reason's text — 2026-10-09
+
+**Finding.** G3-4 (low). `stored::load_cash_closes` hashed each unverified
+day's free-text reason, and `bind_cash_closes` folds that digest into the
+stored anchored identity. Some reasons embed the absolute path of
+`<store>/session-masters/...` or OS and lock text. One example is "UNVERIFIED
+local lifecycle lock {path} unavailable: {why}". So the same bars and the same
+missing master gave different run identities depending on where the store was
+mounted and on transient lock state. That breaks §3 rule 5.
+
+**Corrects.** D-2102's sentence "The closes' digest binds every day, flag,
+master hash and unverified reason". It now binds every day, flag and master
+hash, and each unverified day's reason **class**.
+
+**Decision.** An unverified day hashes marker byte `2` and one class byte.
+The class says which step failed:
+
+- **1:** no exact NSE ISIN in the universe table.
+- **2:** the receipted master could not be used. It was absent, locked,
+  unreadable or corrupt.
+- **3:** the master was read and does not name this exact symbol and ISIN.
+  This class also binds that master's SHA-256, which is its content and not
+  its location.
+
+The free text is kept for display, and `unverified_reason` still returns it.
+The old encoding (`0`, length, text) is never written again. The new marker
+differs from it, so no digest of one encoding can equal one of the other.
+
+**What changes.** Only the identity of a stored run over an NSE cash share
+whose span holds at least one CAS full-session day whose close could not be
+read: the signal days plus the `GapFib` prior session. A span whose every CAS
+day was dated hashes exactly as before. So does every index run, and every
+share span before 2026-08-03.
+
+Test: `an_unreadable_master_binds_its_reason_class_and_not_its_path` (L1FD-02).
+Two store roots at different paths, each with a master made unusable two ways,
+give equal digests, equal to the absent master's. The three classes stay
+distinct for one share.
+
+**Rejected.** Classifying by matching the reason's text. That would make the
+identity depend on the wording of a message in another crate.
