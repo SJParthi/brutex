@@ -805,6 +805,21 @@ pub(crate) fn gates_refused_event(verb: &str, missing: usize) -> telemetry::Even
         .with("gates", ALL_GATES.len())
 }
 
+/// Puts [`crate::STORED_POOLED_PROVENANCE`] at the head of `out` unless it
+/// already leads it (G3-2, D-4752).
+///
+/// The three ledger pages call this immediately before their first
+/// store-derived figure and on success, never at the top of the page: a page
+/// refused before any store figure carries no banner, as D-1705 decided, and a
+/// success page is byte-identical to the one that pushed the banner first.
+/// Idempotent, so a page writing eight rungs carries it once. One prefix check
+/// and at most one O(page) insertion per page; never per bar or candidate.
+pub(crate) fn lead_with_pooled_banner(out: &mut String) {
+    if !out.starts_with(crate::STORED_POOLED_PROVENANCE) {
+        out.insert_str(0, crate::STORED_POOLED_PROVENANCE);
+    }
+}
+
 /// Runs the durable all-rung Step-3 chain and returns the operator's report.
 ///
 /// # What it writes
@@ -822,8 +837,10 @@ pub(crate) fn gates_refused_event(verb: &str, missing: usize) -> telemetry::Even
 /// for the whole run, outside any loop over bars or candidates. `CLAUDE.md` §3
 /// rule 4 bounds five per-operation costs and this is none of them.
 pub(crate) fn ledger_all(request: &LedgerAllRequest<'_>) -> String {
+    // NO BANNER YET (G3-2, D-4752): it leads only once a store figure is
+    // written, by `lead_with_pooled_banner`, so a refusal before any read
+    // carries none, as D-1705 decided.
     let mut out = String::new();
-    out.push_str(crate::STORED_POOLED_PROVENANCE);
     let _ = writeln!(
         out,
         "\nLEDGER-ALL  {} {:04}-{:02}..{:04}-{:02}  support {} ppm  stop ceiling {} points",
@@ -843,6 +860,7 @@ pub(crate) fn ledger_all(request: &LedgerAllRequest<'_>) -> String {
 
     match run_chain(request, &mut out) {
         Ok(written) => {
+            lead_with_pooled_banner(&mut out);
             let _ = writeln!(
                 out,
                 "\nCOMMITTED. {written} of {} rung Selection blocks were written rather than \
@@ -923,6 +941,7 @@ fn run_chain(request: &LedgerAllRequest<'_>, out: &mut String) -> Result<usize, 
         SELECTION_STAGE,
         selection_written,
     ));
+    lead_with_pooled_banner(out);
     let _ = writeln!(
         out,
         "\nBLOCKS WRITTEN RATHER THAN BYTE-IDENTICALLY REUSED, of {} rungs each\n  \

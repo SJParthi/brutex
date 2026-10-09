@@ -71,6 +71,14 @@ fn complete_native_search_reopens_all_ancestors_and_resumes_without_duplicating_
         crate::index_stop::tests::load_generated,
     )?;
     assert!(report.contains("Search exhausted: false"));
+    // SEVERAL RUNGS OVER TRAINING AND LATER MONTHS, SO THE POOLED BANNER
+    // (GAP15-21, D-4752), never the single-run one's "that instrument and
+    // that month".
+    assert!(
+        report.starts_with(crate::STORED_POOLED_PROVENANCE),
+        "{report}"
+    );
+    assert!(!report.contains(crate::STORED_PROVENANCE), "{report}");
     let first = observed.last().ok_or("complete progress missing")?;
     assert_eq!(first.completed_batches, 1);
     assert!(!first.exhausted);

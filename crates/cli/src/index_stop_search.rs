@@ -210,7 +210,9 @@ fn execute_observed_with(
         .thread_name(|index| format!("index-stop-{index}"))
         .build()
         .map_err(display)?;
-    let mut report = String::from(crate::STORED_PROVENANCE);
+    // MANY RUNS, SO THE POOLED BANNER (GAP15-21, D-4752): one run per rung
+    // and month window, never "that instrument and that month".
+    let mut report = String::from(crate::STORED_POOLED_PROVENANCE);
     let _ = writeln!(
         report,
         "\nSingle-stop search {}: {} on {:?}; {} parallel timeframe workers. Both long/short and both printed fill readings; criteria use pessimistic gross results. Exit is the completed signal-candle stop or 15:10 IST, with no target/trailing/horizon grid.\n",

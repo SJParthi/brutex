@@ -241,8 +241,9 @@ impl RungRoots {
 /// they are for `ledger-all` -- the two verbs share those, and a second run
 /// reuses rather than rewrites them.
 pub(crate) fn ledger_v6(request: &LedgerAllRequest<'_>) -> String {
+    // NO BANNER YET (G3-2, D-4752), as `ledger_all` states: the route puts it
+    // before the first rung's Selection, and a refusal before any carries none.
     let mut out = String::new();
-    out.push_str(crate::STORED_POOLED_PROVENANCE);
     let _ = writeln!(
         out,
         "\nLEDGER-V6  {} {:04}-{:02}..{:04}-{:02}  support {} ppm  stop ceiling {} points\n\
@@ -263,6 +264,7 @@ pub(crate) fn ledger_v6(request: &LedgerAllRequest<'_>) -> String {
 
     match run_route(request, &mut out) {
         Ok(selections) => {
+            crate::ledger_all::lead_with_pooled_banner(&mut out);
             let rungs = selections.len();
             let _ = writeln!(
                 out,
@@ -408,6 +410,7 @@ fn run_route(
 
         let (execution, summary) = committed_route;
         sizing_inputs.require_current()?;
+        crate::ledger_all::lead_with_pooled_banner(out);
         let selection =
             render_selection(rung, &roots.selection, execution, out).inspect_err(|why| {
                 crate::note(&rung_refused_event(
@@ -659,7 +662,9 @@ pub(crate) fn ledger_v6_replay(
     oos_from: (u16, u8),
     oos_to: (u16, u8),
 ) -> String {
-    let mut out = String::from(crate::STORED_POOLED_PROVENANCE);
+    // NO BANNER YET (G3-2, D-4752): `run_route` puts it before its first
+    // Selection, and a refusal before any carries none.
+    let mut out = String::new();
     let _ = writeln!(
         out,
         "GLOBAL REPLAY V4 — actual Selection V6 prefixes, OOS {}-{:02} through {}-{:02}",
@@ -668,6 +673,7 @@ pub(crate) fn ledger_v6_replay(
     crate::note(&run_started_event("ledger-v6-replay", request));
     match replay_route(request, oos_from, oos_to, &mut out) {
         Ok(audit) => {
+            crate::ledger_all::lead_with_pooled_banner(&mut out);
             if audit.witnesses == 0 {
                 out.push_str("\nNo strategies were selected. This is a complete zero-stream schedule; no OOS market bars or VIX references were loaded, so it does not attest market-data coverage for the requested period.\n");
             }

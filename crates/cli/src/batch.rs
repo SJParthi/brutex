@@ -933,7 +933,9 @@ fn render(
     tally: &Tally,
     rows: &[Row],
 ) -> String {
-    let mut out = String::from(crate::STORED_PROVENANCE);
+    // EVERY INSTRUMENT BY EVERY MONTH, EACH ITS OWN RUN, SO THE POOLED BANNER
+    // (GAP15-21, D-4752). Each run's identity is printed under its month.
+    let mut out = String::from(crate::STORED_POOLED_PROVENANCE);
     out.push_str(equity_note);
     let _ = writeln!(
         out,
@@ -1024,7 +1026,7 @@ fn month_lines(out: &mut String, rows: &[Row]) {
             //
             // Indented past the label so a reader scanning months is not made to
             // read 64 hex characters per line, and printed rather than omitted
-            // because `STORED_PROVENANCE` two screens above tells them it is
+            // because `STORED_POOLED_PROVENANCE` two screens above tells them it is
             // here. A run whose identity is not recorded is a run `CLAUDE.md` §3
             // rule 3 does not permit.
             if let Some(ref hex) = row.identity {
@@ -1216,6 +1218,7 @@ mod tests {
             "the verb prints it as a refusal"
         );
         assert!(!why.contains(crate::STORED_PROVENANCE), "{why}");
+        assert!(!why.contains(crate::STORED_POOLED_PROVENANCE), "{why}");
     }
 
     /// **A walk whose one swept month could not be filed says it swept, and
@@ -1277,6 +1280,7 @@ mod tests {
             "{why}"
         );
         assert!(!why.contains(crate::STORED_PROVENANCE), "{why}");
+        assert!(!why.contains(crate::STORED_POOLED_PROVENANCE), "{why}");
     }
 
     /// **A walk that offers a stock states corporate actions are unchecked;
@@ -1287,10 +1291,14 @@ mod tests {
     /// reader must know what a stock's figures are made of before reading one.
     #[test]
     fn a_walk_offering_a_stock_states_corporate_actions_are_unchecked_and_an_index_walk_does_not() {
+        // EVERY INSTRUMENT AND EVERY MONTH, SO THE POOLED BANNER (GAP15-21,
+        // D-4752). The walk sweeps one run per instrument-month and its tally
+        // sums them all; the single-run banner promised one identity and "that
+        // instrument and that month".
         let indices = beside_a_swept_month(&[]);
         assert!(
-            indices.starts_with(&format!("{}feed zerodha", crate::STORED_PROVENANCE)),
-            "an index walk is unchanged: {indices}"
+            indices.starts_with(&format!("{}feed zerodha", crate::STORED_POOLED_PROVENANCE)),
+            "an index walk carries no equity note: {indices}"
         );
         assert!(!indices.contains("CORPORATE ACTIONS"), "{indices}");
 
@@ -1298,12 +1306,15 @@ mod tests {
         assert!(
             mixed.starts_with(&format!(
                 "{}{}feed zerodha",
-                crate::STORED_PROVENANCE,
+                crate::STORED_POOLED_PROVENANCE,
                 runner::audit::CostScope::CashEquity.report_note()
             )),
             "{mixed}"
         );
         assert!(mixed.contains("RELIANCE"), "{mixed}");
+        for page in [&indices, &mixed] {
+            assert!(!page.contains(crate::STORED_PROVENANCE), "{page}");
+        }
     }
 
     /// **A month held anywhere but its own key's path is refused by name, and

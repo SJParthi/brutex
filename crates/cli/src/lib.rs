@@ -3308,6 +3308,15 @@ pub(crate) fn stored_provenance(underlying: &str) -> String {
     out
 }
 
+/// [`stored_provenance`] for a page over many runs of one symbol: the pooled
+/// banner, which promises no single run, then the same note a stock's page
+/// carries (GAP15-21, G3-2, D-4752).
+pub(crate) fn stored_pooled_provenance(underlying: &str) -> String {
+    let mut out = String::from(STORED_POOLED_PROVENANCE);
+    out.push_str(&stored::equity_note_for(underlying));
+    out
+}
+
 /// What a report over `underlying` states before any figure, for a reader
 /// outside this crate. D-0694, AF-19.
 ///
@@ -17323,6 +17332,9 @@ pub(crate) fn in_input_order<T, R>(items: &[T], each: impl FnMut(&T) -> R) -> Ve
 }
 
 /// The comparable-run provenance and support explanation above a range table.
+///
+/// The table is one run per rung over a span of months, so it opens with the
+/// pooled banner and never the single-run one (GAP15-21, D-4752).
 fn range_opening(
     vendor_word: &str,
     underlying: &str,
@@ -17331,7 +17343,7 @@ fn range_opening(
     support_ppm: Option<u64>,
 ) -> String {
     let (from, to) = span;
-    let mut out = stored_provenance(underlying);
+    let mut out = stored_pooled_provenance(underlying);
     let _ = writeln!(
         out,
         "feed {vendor_word} · {underlying} · {} · {}-{:02}..{}-{:02} · support {}",
@@ -25726,6 +25738,79 @@ mod tests {
                 !STORED_POOLED_PROVENANCE.contains(single),
                 "the pooled banner must not promise {single:?}"
             );
+        }
+    }
+
+    /// **Every page that reports more than one run opens with the pooled
+    /// banner, and none of them with the single-run one.** GAP15-21, G3-2,
+    /// D-1705, D-4752.
+    ///
+    /// D-1705 moved five pages to [`STORED_POOLED_PROVENANCE`] and three more
+    /// kept [`STORED_PROVENANCE`] over many runs: `range-all` (eight rungs over
+    /// a span of months), the single-stop search (several rungs over training
+    /// and later months) and `sweep-all` (every instrument and month). Each
+    /// page's opening function is listed here by file and name; its body must
+    /// name the pooled banner, directly or through
+    /// [`stored_pooled_provenance`] or
+    /// `ledger_all::lead_with_pooled_banner`, and must name neither the
+    /// single-run constant nor the single-run helpers. A new multi-run page is
+    /// added to this list when it is written; each page is also pinned by
+    /// rendering it, beside its own tests.
+    #[test]
+    fn every_multi_run_page_opens_with_the_pooled_banner() {
+        const PAGES: [(&str, &str, &str); 8] = [
+            ("pool.rs", include_str!("pool.rs"), "opening"),
+            ("ledger_v6.rs", include_str!("ledger_v6.rs"), "ledger_v6"),
+            (
+                "ledger_v6.rs",
+                include_str!("ledger_v6.rs"),
+                "ledger_v6_replay",
+            ),
+            ("ledger_all.rs", include_str!("ledger_all.rs"), "ledger_all"),
+            (
+                "boolean_catalog_prepared.rs",
+                include_str!("boolean_catalog_prepared.rs"),
+                "research_heading",
+            ),
+            ("lib.rs", include_str!("lib.rs"), "range_opening"),
+            (
+                "index_stop_search.rs",
+                include_str!("index_stop_search.rs"),
+                "execute_observed_with",
+            ),
+            ("batch.rs", include_str!("batch.rs"), "render"),
+        ];
+        for (file, source, name) in PAGES {
+            let start = ["\nfn ", "\npub(crate) fn ", "\npub fn "]
+                .iter()
+                .find_map(|prefix| source.find(&format!("{prefix}{name}(")))
+                .unwrap_or_else(|| panic!("{file} has no top-level fn {name}"));
+            let body = source
+                .get(start + 1..)
+                .and_then(|rest| rest.find("\n}\n").and_then(|end| rest.get(..end)))
+                .unwrap_or_else(|| panic!("{file}::{name} has no closing brace"));
+            assert!(
+                [
+                    "STORED_POOLED_PROVENANCE",
+                    "stored_pooled_provenance(",
+                    "lead_with_pooled_banner("
+                ]
+                .iter()
+                .any(|pooled| body.contains(pooled)),
+                "{file}::{name} reports many runs and must open with the pooled banner"
+            );
+            for single in [
+                "STORED_PROVENANCE)",
+                "STORED_PROVENANCE,",
+                "STORED_PROVENANCE;",
+                "stored_provenance(",
+                "stored_provenance_of(",
+            ] {
+                assert!(
+                    !body.contains(single),
+                    "{file}::{name} reports many runs and names the single-run banner: {single}"
+                );
+            }
         }
     }
 

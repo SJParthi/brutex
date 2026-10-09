@@ -65170,3 +65170,44 @@ The other bar-count lines were checked:
 Test: `the_ordinary_stored_sweep_withholds_and_names_a_holed_session`
 (L1FD-03), re-pinned on the new sentence. It also asserts that the old
 sentence is gone.
+
+### D-4752 — Every multi-run page opens with the pooled banner, and a ledger refusal carries none — 2026-10-09
+
+**Findings.** GAP15-21 and G3-2 (low). D-1705 moved five pages to
+`STORED_POOLED_PROVENANCE`. Three more pages are also over many runs, and they
+kept `STORED_PROVENANCE`, which promises one identity and "that instrument and
+that month":
+
+- `range-all` (`range_opening`): eight rungs over a span of months.
+- The single-stop search (`index_stop_search::execute_observed_with`): rungs
+  by two month windows.
+- `sweep-all` (`batch::render`): every instrument by every month.
+
+Separately, `ledger-all`, `ledger-v6` and `ledger-v6-replay` pushed the pooled
+banner as their first text. A feed word refused before any store read
+therefore still opened with "the bars below were read from files". D-1705
+says "Refusal pages still carry no banner".
+
+**Decision.**
+
+- The three pages open with the pooled banner. `range-all` uses the new
+  `stored_pooled_provenance(underlying)`: the pooled banner, then the same
+  equity note `stored_provenance` appends for a stock.
+- The ledger pages no longer start with the banner. `ledger_all::lead_with_pooled_banner`
+  puts it at the head of the page, once, immediately before the first
+  store-derived figure:
+  - in `ledger-all`'s chain, before `BLOCKS WRITTEN`;
+  - in `ledger-v6`'s route, before each rung's Selection rendering;
+  - in each page's success arm.
+- A success page is byte-identical to before. A page refused before any store
+  figure carries no banner.
+
+Tests (L1FD-04):
+
+- `every_multi_run_page_opens_with_the_pooled_banner`, a source-shape guard
+  over all eight multi-run page builders;
+- `range_all_opens_with_the_pooled_banner_and_a_stocks_note`;
+- `the_ledger_pages_take_the_pooled_banner_before_their_first_store_figure`;
+- `the_ledger_pages_promise_no_single_instrument_month_or_identity`, now
+  asserting no banner on a refusal;
+- the `sweep-all` and single-stop page tests, re-pinned.
