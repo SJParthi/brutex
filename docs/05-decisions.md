@@ -66408,3 +66408,41 @@ body: with the old `eprintln!` restored in `csv.rs` the child exited 101
 `unprinted()` rose by one. `crates/telemetry/tests/closed_stderr.rs` does the
 same for the writer, the first-failure event and a refusing sink's notice.
 Proof: FXA-04.
+
+### D-4414 — A kept vendor body is named in the log, and its name is made durable — 2026-10-09
+
+**Finding (sobs-11).** `pull::capture::record` and `record_unreadable` wrote a
+vendor body with `create_new`, `write_all` and `sync_all`, returned the path,
+and both callers in `pull::http` dropped it. A kept copy of an unreadable
+answer could not be found from the refusal that kept it, and nothing synced
+the `captures/` directory, so the file's name could be lost by a power cut
+even though its bytes were synced.
+
+**Decision.** After the file's `sync_all`, the capture syncs `captures/`, and
+also its parent when this call made `captures/`, because a new directory is
+itself an entry in its parent. Every capture that lands emits one
+`pull.capture` event naming `path`, `feed` and `kind` (`GET`, `POST` or
+`unreadable`): `Info` "vendor body kept" when both syncs held, and `Warn`
+"vendor body kept, and its name may not survive a power cut" with the failing
+directory and the reason in `why` when one did not. A directory sync that
+fails is not a refusal: the bytes landed, the path is still returned, and
+`capture::refused()` does not count it. The event carries no URL, body or
+header, the same rule as `note_refused`. Captures stay bounded per process, so
+the extra fsyncs are bounded too. On this ext4 VM, 300 runs of 4 KiB measured
+the directory open and fsync at p50 4.0 ms, p99 10.1 ms and max 26.2 ms. No
+other filesystem was measured.
+
+The `FetchError::BodyNotUnderstood` sentence does not carry the path. Only a
+source whose base URL names a real vendor has a feed and captures at all, so
+no offline test could drive that branch. The event is what links the two.
+`/logs` shows it; a page that lists `captures/` would be an `api` change, which
+is out of this fixer's scope.
+
+**Evidence.** A directory with mode `0o300` lets a file be created and refuses
+to be opened, so its fsync fails for real, where the mode bits bind (D-0995).
+`a_kept_capture_syncs_its_name_and_a_name_that_cannot_be_is_said_not_refused`
+covers four cases: an unopenable `captures/`, a new `captures/` under an
+unopenable root, an existing `captures/` under the same root (nothing is
+said), and a clean pass with nothing counted as refused. Two new rows in
+`emit_sites` drive the shipped recorders and read both events back from a
+file. With the emit removed, that test fails. Proof: FXA-05.

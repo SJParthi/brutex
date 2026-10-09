@@ -16419,3 +16419,15 @@ directory. Measured with a scratch probe on ext4 on this VM's virtual disk,
 100 events p50 11.9 ms, p99 19.0 ms, max 21.3 ms. It is device-bound, not
 O(1) in any sense the bench gate measures, and it is paid once per process
 exit, never per event. No other disk was measured.
+
+### A kept vendor capture now costs one or two directory `fsync`s (D-4414)
+
+Each capture that lands now also syncs `captures/`, and syncs its parent when
+it made `captures/`. That is one or two directory fsyncs on top of the file's
+own `sync_all`, plus one `pull.capture` event. Captures are bounded per process
+(`PER_SLOT` per feed and method, and `PER_SLOT` per feed for unreadable
+bodies), so the added cost is bounded by count, not by the pull's length. Each
+fsync is bound by the device. Measured on this VM's ext4, 300 runs of 4 KiB:
+the directory open and fsync took p50 4.0 ms, p99 10.1 ms, max 26.2 ms. The
+file's create, write and `sync_all` took p50 4.0 ms, p99 13.9 ms, max 19.5 ms.
+No other filesystem was measured.
