@@ -327,3 +327,32 @@ check in just after the 5-hour reset, resume. Weekly: save at 93%, stop at 98%.
 - If this container is gone before the push: recreate by merging origin/claude/project-thread-lx6ptl (614fdc4b) into origin/final/all-fixes (ff390a4f) and re-applying the resolutions above, or check whether final/all-fixes already moved past ff390a4f.
 - Decisions: this thread owns D-4100..D-4199; D-4182 used, D-4183 next.
 - After the push: the audit's final batch3 merges on top when the audit resumes (not 8102ca76).
+
+## 2026-10-09 16:58 UTC — PUSHED fe8aefc1 to final/all-fixes (FINAL SAVE, weekly 97%)
+- final/all-fixes: ff390a4f -> **fe8aefc1** (fast-forward, no force). Contents: 452a1bc9 (merge of claude/project-thread-lx6ptl@614fdc4b) + fe8aefc1 (D-4182, gates 1d/12/21/23).
+- This push cancelled the Gate 18 run on ff390a4f; a new CI run on fe8aefc1 started. Gate 18 takes ~30 h.
+- Validated locally BEFORE push: cargo fmt --check clean; cargo clippy --workspace --all-targets -D warnings clean; all 29 language-purity static gates OK (Gate 1e skipped locally; Gate 14 rc=127 is the known extraction overrun after its OK line).
+- NOT validated locally before push: the workspace tests. The first test build hit "No space left on device"; a re-run (/tmp/claude-0/integ/val4.sh) was still running in the old container. CI's Tests job is the check.
+- Disk trap: this container's allowance is ~40 GB. Before a full test build, delete stale target/debug/deps files older than the current build and /tmp/brutex-* test scratch.
+
+### Exact next steps for tomorrow (new account)
+1. Find the newest CI run on final/all-fixes (head fe8aefc1 or later). List its jobs. Watch for red non-Gate-18 jobs first (Tests, Coverage, Gate 8, web).
+2. For any red job: read its log, reproduce locally on a branch from origin/final/all-fixes, fix, validate (fmt, clippy, static gates via the language-purity steps with RUNNER_TEMP and SOURCE_SCAN set, run Gate 0 first; affected crates' tests), merge (never force), push once.
+3. Likely risk areas from the merge: crates/runner/src/significance.rs (both test sets kept: D-4150 turning_point tests and D-4505 ceiling test), crates/cli/src/lib.rs + selection_v6_tests.rs (both sides' tests kept), core docs tests (docs/04 GPORT-11 row, docs/05 tail order).
+4. When Gate 18 finishes: collect MISSED (check-run annotations) and TIMEOUT (job logs) survivors and kill each with a real test.
+5. The audit's final batch3 sha (not 8102ca76) merges on top of final/all-fixes when the audit resumes. Gates 1d/12/21/23 are already closed for 8102ca76's sites (D-4182).
+6. Decisions: this thread owns D-4100..D-4199; next is D-4183.
+
+### Paste-in prompt for the new account
+```
+Resume the PR #74 CI-to-green work on SJParthi/brutex (head branch
+final/all-fixes, currently fe8aefc1). Read in full: resume/pr74-ci-thread.md
+on branch fix-queue (the last section is newest), and CLAUDE.md on
+final/all-fixes. Then follow "Exact next steps for tomorrow" in that section.
+Rules: Rust only except web/. O(1) wherever possible, naming anything that
+can't be. Verify with real evidence, never guess. Merge commits only, never
+force-push. One PR only (#74), open no new PR. Never ask me to tap, paste or
+approve anything. Use D-4183 onward for new decisions. Save resume state to
+fix-queue resume/pr74-ci-thread.md after every step. Deliver results as
+comparison-table Artifacts.
+```
