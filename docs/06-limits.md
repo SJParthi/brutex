@@ -8108,6 +8108,17 @@ The metadata check is length, device/inode and nanosecond modification/change
 times: a same-length rewrite of a record outside the page that left all of
 those equal is not seen by that page, and a rewrite of a returned record is
 refused by its seal.
+
+One production append door, V1 or V2, runs one full open since D-4781
+(G4-4): the open, the append, then a re-read of only the committed Data and
+Completion pair through the writer's own handle. The re-read compares both
+generations by metadata, requires the physical record count to be exactly the
+completed pairs (no orphan) and a written pair to be the last, and compares the
+pair's bytes with the two records the indexed value encodes, O(1) in ledger
+size. Before D-4781 each door then dropped the handle and ran a second full
+`open_read` plus a hashing `reopen_audit`, two full opens per append. One append
+is still O(file bytes): the append's own generation checks content-hash the
+data file before it writes and after each of its two records.
 Lock acquisition, filesystem cache, `sync_data`, allocation and storage latency
 remain system-dependent.
 

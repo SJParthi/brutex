@@ -7052,3 +7052,11 @@ old line regex the same input and watched it pass.
 | G18-api-27 | The seek path's `records unreadable` line names the first file that refused a record, not the first file read (D-2046) | `api::bars::window_tests::the_unreadable_line_names_the_first_damaged_file_not_the_first_file` | ✓ |
 | G18-api-28 | The route test's HTTP exchange is bounded at 30 s per read and write, so a server that admits or answers nothing fails it rather than hanging (D-2047) | `api::ingest::route_tests::the_three_routes_answer_and_none_of_them_shadows_the_front_end` | ✓ |
 | G18-api-29 | A dropped calendar `Landing` marks its flight `Abandoned` (or answered), removes it from the flight table, and wakes every follower (D-2047) | `api::calendar_of::tests::a_calendar_landing_releases_its_flight_and_wakes_its_followers_when_dropped` | ✓ |
+
+### Lane 1-b fixer F: one Candidate writer per run, pair re-reads, hoisted OOS digests, handed-on sizing (D-4780 onward)
+
+| Id | Invariant | Proof | |
+|---|---|---|---|
+| L1FF-06 | Each Pre-Admission V1 and V2 append door, written or reused, scans its ledger once, and what it returns is what a fresh reader finds (D-4781) | `cli::pre_admission_data::tests::v1_and_v2_append_doors_scan_once_and_reread_only_their_pair` | ✓ |
+| L1FF-07 | The V1 and V2 pair re-read accepts the last written pair and an older reused pair, and refuses an older written pair, an absent authority, a moved generation, a Data or Completion record of another kind under a re-measured generation, an extra record and a replaced lock (D-4781) | `cli::pre_admission_data::tests::v1_reverify_refuses_every_disagreement_with_the_disk`, `cli::pre_admission_data::tests::v2_reverify_refuses_every_disagreement_with_the_disk` | ✓ |
+| L1FF-14 | §153 states the Pre-Admission door's one open and pair re-read and that an append still hashes the file; the doors call `reverify_committed` and no `open_read` (D-4781) | `cli::ledger_append_lookup_costs::a_pre_admission_append_door_opens_once_and_section_153_says_so` | ✓ |

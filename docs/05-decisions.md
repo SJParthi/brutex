@@ -65025,3 +65025,41 @@ on a live leader would derive a second time and lose the single-flight
 guarantee D-1443 exists for. **Honest limit:** the `Landing` kill depends on
 test order. A rename that sorted a single-flight test ahead of it would
 restore the timeout, so the ordering is pinned in the test's own doc.
+
+### D-4781 — The Pre-Admission V1 and V2 append doors re-read only their pair — 2026-10-09
+
+**What was observed.** G4-4 found a sibling of W2-cli3-4 that no document
+stated. Both Pre-Admission append doors ran the same sequence: `open` (a full
+scan plus a whole-file content hash), the append, `drop`, a fresh `open_read`
+(another full scan and content hash) and `reopen_audit` (a third hash). That is
+two full opens per append. The doors run once per family per rung, on ledgers at
+the shared store root.
+
+**Decided.** This is the D-1680 pattern. Each door runs one `open`, the append,
+then `reverify_committed` on the same handle under the shared lock:
+
+- The lock and data generations are compared by metadata.
+- The physical record count must be exactly twice the completed pairs the
+  handle indexed, so no orphan remains.
+- The authority must be in the index, and a written pair must be the last one.
+- The Data and Completion records on disk must be byte for byte the two records
+  the indexed value encodes.
+
+The re-read is O(1) in ledger size. The door then compares the re-read audit
+with the committed one and with the derived semantics, as two separate checks
+(D-2004). One door now scans the ledger once.
+
+**Honest limit.** One append is still O(file bytes). The append's own generation
+checks hash the whole data file: `require_unchanged` before writing, then one
+re-measure after each of the two records. Only the second open and the lookup's
+hash are gone. §153 says so.
+
+**Rejected.** Carrying one Pre-Admission writer per run, as D-4780 does for
+Candidate. The append's content-hash generation checks keep every append at
+O(file bytes) either way, so the class would not change.
+
+Tests:
+- `cli::pre_admission_data::tests::v1_and_v2_append_doors_scan_once_and_reread_only_their_pair`
+  (fails at 2 against 1 scans per door on the two-open code).
+- `cli::pre_admission_data::tests::v1_reverify_refuses_every_disagreement_with_the_disk`.
+- `cli::pre_admission_data::tests::v2_reverify_refuses_every_disagreement_with_the_disk`.

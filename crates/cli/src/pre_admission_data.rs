@@ -31,8 +31,11 @@
 //! the complete bounded file bytes.  A page checks file generations by
 //! metadata only (length, device/inode and nanosecond modification/change
 //! times) and re-reads and re-seals only its returned records, so it is
-//! proportional to the returned records (D-1681).  Calculating one
-//! validated fixed-record offset is O(1) in record count; no whole-ledger,
+//! proportional to the returned records (D-1681).  A production append door
+//! opens the ledger once and then re-reads only its committed pair through
+//! the same handle, by metadata generation, record count and the pair's exact
+//! bytes (D-4781); before D-4781 it ran a second full `open_read`.  Calculating
+//! one validated fixed-record offset is O(1) in record count; no whole-ledger,
 //! source measurement, allocation, hash, lock, sync or filesystem latency is
 //! described as O(1).
 //!
@@ -1106,6 +1109,8 @@ impl PreAdmissionDataLedgerV1 {
     }
 
     fn scan(&mut self) -> Result<(), PreAdmissionDataRefusal> {
+        #[cfg(test)]
+        PRE_ADMISSION_SCANS.with(|count| count.set(count.get().saturating_add(1)));
         verify_header(&mut self.data_file, &self.data_path)?;
         let file_len = self
             .data_file
@@ -1436,6 +1441,100 @@ impl PreAdmissionDataLedgerV1 {
         Ok(())
     }
 
+    /// Re-reads the one pair a production append just committed, through
+    /// this handle and under the shared lock, in place of a second full open
+    /// (G4-4, D-4781; the D-1680 pattern).
+    ///
+    /// The open that preceded the append validated every older pair, so only
+    /// the committed pair is read again. Both file generations are rechecked
+    /// by metadata, the physical record count must be exactly the completed
+    /// pairs this handle indexed (no orphan), a written pair must be the last
+    /// one, and the Data and Completion records on disk must be byte for byte
+    /// the two records the indexed value encodes. O(1) in ledger size; see
+    /// `cli::pre_admission_data::tests::v1_and_v2_append_doors_scan_once_and_reread_only_their_pair`.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a stale or replaced file, a record count this handle did not
+    /// commit, an absent authority, a written pair that is not the last, a
+    /// pair that differs on disk, or a lock failure.
+    fn reverify_committed(
+        &mut self,
+        committed: &PreAdmissionProductionCommitV1,
+    ) -> Result<PreAdmissionDataReopenAuditV1, PreAdmissionDataRefusal> {
+        self.lock_file
+            .lock_shared()
+            .map_err(|why| format!("cannot take shared pre-admission reverify lock: {why}"))?;
+        let result = self.reverify_committed_locked(committed);
+        let released = self
+            .lock_file
+            .unlock()
+            .map_err(|why| format!("cannot release pre-admission reverify lock: {why}"));
+        match (result, released) {
+            (Ok(audit), Ok(())) => Ok(audit),
+            (Err(why), _) | (Ok(_), Err(why)) => Err(why),
+        }
+    }
+
+    fn reverify_committed_locked(
+        &mut self,
+        committed: &PreAdmissionProductionCommitV1,
+    ) -> Result<PreAdmissionDataReopenAuditV1, PreAdmissionDataRefusal> {
+        require_metadata_generation(self.lock_generation, &self.lock_file, &self.lock_path)?;
+        require_metadata_generation(self.data_generation, &self.data_file, &self.data_path)?;
+        let file_len = self
+            .data_file
+            .metadata()
+            .map_err(|why| format!("cannot stat pre-admission reverify file: {why}"))?
+            .len();
+        let physical = record_count(file_len)?;
+        let paired = self
+            .completed_rows
+            .checked_mul(2)
+            .ok_or_else(|| "pre-admission reverify record count overflowed u64".to_owned())?;
+        if physical != paired {
+            return Err(format!(
+                "pre-admission ledger holds {physical} records on disk, not the {paired} this append committed"
+            ));
+        }
+        let authority_id = committed.audit().value.authority_id;
+        let audit = self.audits.get(&authority_id).copied().ok_or_else(|| {
+            format!(
+                "pre-admission authority {} disappeared after receipt-last append",
+                hex32(authority_id)
+            )
+        })?;
+        let completion_index = audit
+            .data_record_index
+            .checked_add(1)
+            .ok_or_else(|| "pre-admission reverify completion index overflowed u64".to_owned())?;
+        if matches!(committed, PreAdmissionProductionCommitV1::Written(_))
+            && completion_index.checked_add(1) != Some(physical)
+        {
+            return Err(format!(
+                "pre-admission authority {} was written but is not the last stored pair",
+                hex32(authority_id)
+            ));
+        }
+        if read_raw_record(&mut self.data_file, audit.data_record_index)?
+            != audit.value.record(RecordKindV1::Data)?
+        {
+            return Err(format!(
+                "pre-admission authority {} Data record differs on disk from the committed value",
+                hex32(authority_id)
+            ));
+        }
+        if read_raw_record(&mut self.data_file, completion_index)?
+            != audit.value.record(RecordKindV1::Completion)?
+        {
+            return Err(format!(
+                "pre-admission authority {} completion differs on disk from the committed value",
+                hex32(authority_id)
+            ));
+        }
+        Ok(audit)
+    }
+
     fn require_unchanged(&self) -> Result<(), PreAdmissionDataRefusal> {
         require_generation(self.lock_generation, &self.lock_file, &self.lock_path)?;
         require_generation(self.data_generation, &self.data_file, &self.data_path)
@@ -1751,21 +1850,22 @@ impl ProducedPreAdmissionDataV1 {
         root: impl AsRef<Path>,
         bounds: PreAdmissionDataBoundsV1,
     ) -> Result<PreAdmissionProductionCommitV1, PreAdmissionDataRefusal> {
-        let root = root.as_ref();
+        // ONE OPEN, THEN THE PAIR (G4-4, D-4781): the committed pair is
+        // re-read through the writer's own handle instead of a second full
+        // read-only open, so one append door scans the ledger once.
         let mut ledger = PreAdmissionDataLedgerV1::open(root, bounds)?;
         let committed = ledger.append_complete(&self.value)?;
         let expected = committed.audit();
+        let reopened = ledger.reverify_committed(&committed)?;
         drop(ledger);
-
-        let reopened = PreAdmissionDataLedgerV1::open_read(root, bounds)?
-            .reopen_audit(&self.value.authority_id())?
-            .ok_or_else(|| {
-                format!(
-                    "pre-admission authority {} disappeared after receipt-last append",
-                    hex32(self.value.authority_id())
-                )
-            })?;
-        if reopened != expected || !same_semantics(&reopened.value(), &self.value) {
+        // Two checks, not one `||` (G18-cli-a-05, D-2004).
+        if reopened != expected {
+            return Err(format!(
+                "pre-admission authority {} did not reopen with the exact committed audit",
+                hex32(self.value.authority_id())
+            ));
+        }
+        if !same_semantics(&reopened.value(), &self.value) {
             return Err(format!(
                 "pre-admission authority {} did not reopen with the exact derived semantics",
                 hex32(self.value.authority_id())
@@ -2395,6 +2495,8 @@ impl PreAdmissionDataLedgerV2 {
     }
 
     fn scan(&mut self) -> Result<(), PreAdmissionDataRefusal> {
+        #[cfg(test)]
+        PRE_ADMISSION_SCANS.with(|count| count.set(count.get().saturating_add(1)));
         verify_header_v2(&mut self.data_file, &self.data_path)?;
         let file_len = self
             .data_file
@@ -2652,6 +2754,90 @@ impl PreAdmissionDataLedgerV2 {
         Ok(())
     }
 
+    /// The V2 twin of [`PreAdmissionDataLedgerV1::reverify_committed`]
+    /// (G4-4, D-4781): the committed pair only, through this handle, under
+    /// the shared lock. O(1) in ledger size; see
+    /// `cli::pre_admission_data::tests::v1_and_v2_append_doors_scan_once_and_reread_only_their_pair`.
+    ///
+    /// # Errors
+    ///
+    /// The same refusals as the V1 door's.
+    fn reverify_committed(
+        &mut self,
+        committed: &PreAdmissionProductionCommitV2,
+    ) -> Result<PreAdmissionDataReopenAuditV2, PreAdmissionDataRefusal> {
+        self.lock_file
+            .lock_shared()
+            .map_err(|why| format!("cannot take shared pre-admission V2 reverify lock: {why}"))?;
+        let result = self.reverify_committed_locked(committed);
+        let released = self
+            .lock_file
+            .unlock()
+            .map_err(|why| format!("cannot release pre-admission V2 reverify lock: {why}"));
+        match (result, released) {
+            (Ok(audit), Ok(())) => Ok(audit),
+            (Err(why), _) | (Ok(_), Err(why)) => Err(why),
+        }
+    }
+
+    fn reverify_committed_locked(
+        &mut self,
+        committed: &PreAdmissionProductionCommitV2,
+    ) -> Result<PreAdmissionDataReopenAuditV2, PreAdmissionDataRefusal> {
+        require_metadata_generation(self.lock_generation, &self.lock_file, &self.lock_path)?;
+        require_metadata_generation(self.data_generation, &self.data_file, &self.data_path)?;
+        let file_len = self
+            .data_file
+            .metadata()
+            .map_err(|why| format!("cannot stat pre-admission V2 reverify file: {why}"))?
+            .len();
+        let physical = record_count_v2(file_len)?;
+        let paired = self
+            .completed_rows
+            .checked_mul(2)
+            .ok_or_else(|| "pre-admission V2 reverify record count overflowed u64".to_owned())?;
+        if physical != paired {
+            return Err(format!(
+                "pre-admission V2 ledger holds {physical} records on disk, not the {paired} this append committed"
+            ));
+        }
+        let authority_id = committed.audit().value.authority_id();
+        let audit = self.audits.get(&authority_id).copied().ok_or_else(|| {
+            format!(
+                "pre-admission V2 authority {} disappeared after receipt-last append",
+                hex32(authority_id)
+            )
+        })?;
+        let completion_index = audit.data_record_index.checked_add(1).ok_or_else(|| {
+            "pre-admission V2 reverify completion index overflowed u64".to_owned()
+        })?;
+        if matches!(committed, PreAdmissionProductionCommitV2::Written(_))
+            && completion_index.checked_add(1) != Some(physical)
+        {
+            return Err(format!(
+                "pre-admission V2 authority {} was written but is not the last stored pair",
+                hex32(authority_id)
+            ));
+        }
+        if read_raw_record_v2(&mut self.data_file, audit.data_record_index)?
+            != audit.value.record(RecordKindV2::Data)?
+        {
+            return Err(format!(
+                "pre-admission V2 authority {} Data record differs on disk from the committed value",
+                hex32(authority_id)
+            ));
+        }
+        if read_raw_record_v2(&mut self.data_file, completion_index)?
+            != audit.value.record(RecordKindV2::Completion)?
+        {
+            return Err(format!(
+                "pre-admission V2 authority {} completion differs on disk from the committed value",
+                hex32(authority_id)
+            ));
+        }
+        Ok(audit)
+    }
+
     fn require_unchanged(&self) -> Result<(), PreAdmissionDataRefusal> {
         require_generation_v2(self.lock_generation, &self.lock_file, &self.lock_path)?;
         require_generation_v2(self.data_generation, &self.data_file, &self.data_path)
@@ -2730,20 +2916,20 @@ impl ProducedPreAdmissionDataV2 {
         root: impl AsRef<Path>,
         bounds: PreAdmissionDataBoundsV2,
     ) -> Result<PreAdmissionProductionCommitV2, PreAdmissionDataRefusal> {
-        let root = root.as_ref();
+        // ONE OPEN, THEN THE PAIR (G4-4, D-4781), as the V1 door.
         let mut ledger = PreAdmissionDataLedgerV2::open(root, bounds)?;
         let committed = ledger.append_complete(&self.value)?;
         let expected = committed.audit();
+        let reopened = ledger.reverify_committed(&committed)?;
         drop(ledger);
-        let reopened = PreAdmissionDataLedgerV2::open_read(root, bounds)?
-            .reopen_audit(&self.value.authority_id())?
-            .ok_or_else(|| {
-                format!(
-                    "pre-admission V2 authority {} disappeared after receipt-last append",
-                    hex32(self.value.authority_id())
-                )
-            })?;
-        if reopened != expected || !same_semantics_v2(&reopened.value(), &self.value) {
+        // Two checks, not one `||` (G18-cli-a-05, D-2004).
+        if reopened != expected {
+            return Err(format!(
+                "pre-admission V2 authority {} did not reopen with the exact committed audit",
+                hex32(self.value.authority_id())
+            ));
+        }
+        if !same_semantics_v2(&reopened.value(), &self.value) {
             return Err(format!(
                 "pre-admission V2 authority {} did not reopen with exact derived semantics",
                 hex32(self.value.authority_id())
@@ -3600,11 +3786,19 @@ fn read_record(
     file: &mut File,
     index: u64,
 ) -> Result<(RecordKindV1, PreAdmissionDataV1), PreAdmissionDataRefusal> {
+    PreAdmissionDataV1::decode(&read_raw_record(file, index)?)
+}
+
+/// The literal bytes of one V1 record, undecoded.
+fn read_raw_record(
+    file: &mut File,
+    index: u64,
+) -> Result<[u8; RECORD_BYTES], PreAdmissionDataRefusal> {
     let mut raw = [0_u8; RECORD_BYTES];
     file.seek(SeekFrom::Start(record_offset(index)?))
         .and_then(|_| file.read_exact(&mut raw))
         .map_err(|why| format!("cannot read pre-admission record {index}: {why}"))?;
-    PreAdmissionDataV1::decode(&raw)
+    Ok(raw)
 }
 
 /// Appends one fixed record and makes it durable. A short write or a failed
@@ -3701,6 +3895,9 @@ fn generation_of(metadata: &std::fs::Metadata, content_digest: [u8; 32]) -> File
 thread_local! {
     /// Test-only count of whole-file V1 generation hashes on this thread.
     static V1_FILE_HASHES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Test-only count of full V1 or V2 ledger scans (one per open) on this
+    /// thread (D-4781).
+    static PRE_ADMISSION_SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 fn hash_file(file: &mut File, path: &Path) -> Result<[u8; 32], PreAdmissionDataRefusal> {
@@ -3884,11 +4081,19 @@ fn read_record_v2(
     file: &mut File,
     index: u64,
 ) -> Result<(RecordKindV2, PreAdmissionDataV2), PreAdmissionDataRefusal> {
+    PreAdmissionDataV2::decode(&read_raw_record_v2(file, index)?)
+}
+
+/// The literal bytes of one V2 record, undecoded.
+fn read_raw_record_v2(
+    file: &mut File,
+    index: u64,
+) -> Result<[u8; RECORD_BYTES_V2], PreAdmissionDataRefusal> {
     let mut raw = [0_u8; RECORD_BYTES_V2];
     file.seek(SeekFrom::Start(record_offset_v2(index)?))
         .and_then(|_| file.read_exact(&mut raw))
         .map_err(|why| format!("cannot read pre-admission V2 record {index}: {why}"))?;
-    PreAdmissionDataV2::decode(&raw)
+    Ok(raw)
 }
 
 fn file_generation_v2(
@@ -5207,6 +5412,326 @@ mod tests {
                 .len(),
             2,
             "documented limit: a page does not see a rewrite outside its range"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn v1_and_v2_append_doors_scan_once_and_reread_only_their_pair() -> TestResult {
+        // G4-4 / D-4781: each production append door opened the ledger, then
+        // dropped it and ran a second full `open_read`: two whole-file opens
+        // per append, on ledgers at the store root every run shares.
+        let root = test_dir()?;
+        let mut v1_commits = Vec::new();
+        for (tag, written) in [(30, true), (31, true), (30, false)] {
+            let produced = ProducedPreAdmissionDataV1 {
+                value: fixture(tag)?,
+            };
+            PRE_ADMISSION_SCANS.with(|count| count.set(0));
+            let committed = must(
+                produced.append_and_reopen(root.path(), bounds(4)?),
+                "the V1 door commits",
+            )?;
+            assert_eq!(
+                PRE_ADMISSION_SCANS.with(std::cell::Cell::get),
+                1,
+                "one full V1 scan per append door, not two"
+            );
+            assert_eq!(
+                matches!(committed, PreAdmissionProductionCommitV1::Written(_)),
+                written
+            );
+            v1_commits.push((produced.value, committed.audit()));
+        }
+        let mut v2_commits = Vec::new();
+        for (tag, written) in [(190, true), (191, true), (190, false)] {
+            let produced = ProducedPreAdmissionDataV2 {
+                value: zero_fixture_v2(tag)?,
+            };
+            PRE_ADMISSION_SCANS.with(|count| count.set(0));
+            let committed = must(
+                produced.append_and_reopen(root.path(), bounds_v2(4)?),
+                "the V2 door commits",
+            )?;
+            assert_eq!(
+                PRE_ADMISSION_SCANS.with(std::cell::Cell::get),
+                1,
+                "one full V2 scan per append door, not two"
+            );
+            assert_eq!(
+                matches!(committed, PreAdmissionProductionCommitV2::Written(_)),
+                written
+            );
+            v2_commits.push((produced.value, committed.audit()));
+        }
+        // What each door returned is exactly what a fresh reader finds.
+        let v1 = must(
+            PreAdmissionDataLedgerV1::open_read(root.path(), bounds(4)?),
+            "V1 reopens",
+        )?;
+        for (value, audit) in v1_commits {
+            assert_eq!(
+                must(v1.reopen_audit(&value.authority_id()), "V1 lookup")?,
+                Some(audit)
+            );
+        }
+        let v2 = must(
+            PreAdmissionDataLedgerV2::open_read(root.path(), bounds_v2(4)?),
+            "V2 reopens",
+        )?;
+        for (value, audit) in v2_commits {
+            assert_eq!(
+                must(v2.reopen_audit(&value.authority_id()), "V2 lookup")?,
+                Some(audit)
+            );
+        }
+        Ok(())
+    }
+
+    /// Writes `raw` at byte `offset` of `path` and syncs it.
+    fn overwrite_record(path: &Path, offset: u64, raw: &[u8]) -> TestResult {
+        let mut file = must(OpenOptions::new().write(true).open(path), "data reopens")?;
+        must(file.seek(SeekFrom::Start(offset)), "the record seeks")?;
+        must(file.write_all(raw), "the record writes")?;
+        must(file.sync_data(), "the record syncs")
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one adversarial sequence keeps every V1 re-read refusal in its disk order"
+    )]
+    fn v1_reverify_refuses_every_disagreement_with_the_disk() -> TestResult {
+        let root = test_dir()?;
+        let mut ledger = must(
+            PreAdmissionDataLedgerV1::open(root.path(), bounds(4)?),
+            "the ledger opens",
+        )?;
+        let first = must(
+            ledger.append_complete(&fixture(40)?),
+            "the first pair commits",
+        )?;
+        let second = must(
+            ledger.append_complete(&fixture(41)?),
+            "the second pair commits",
+        )?;
+        assert_eq!(
+            must(ledger.reverify_committed(&second), "the last written pair")?,
+            second.audit()
+        );
+        assert_eq!(
+            must(
+                ledger.reverify_committed(&PreAdmissionProductionCommitV1::Reused(first.audit())),
+                "an older reused pair"
+            )?,
+            first.audit()
+        );
+        assert!(
+            must_refuse(ledger.reverify_committed(&first), "an older written pair")?
+                .contains("was written but is not the last stored pair")
+        );
+        let other_root = test_dir()?;
+        let mut other = must(
+            PreAdmissionDataLedgerV1::open(other_root.path(), bounds(4)?),
+            "another ledger opens",
+        )?;
+        let foreign = must(
+            other.append_complete(&fixture(42)?),
+            "a foreign pair commits",
+        )?;
+        assert!(
+            must_refuse(ledger.reverify_committed(&foreign), "an absent authority")?
+                .contains("disappeared after receipt-last append")
+        );
+
+        let data_path = ledger.data_path.clone();
+        let value = second.audit().value;
+        let data_at = must(
+            record_offset(second.audit().data_record_index),
+            "the Data offset",
+        )?;
+        let completion_at = must(
+            record_offset(second.audit().data_record_index + 1),
+            "the completion offset",
+        )?;
+        let data_record = must(value.record(RecordKindV1::Data), "the Data record encodes")?;
+        let completion_record = must(
+            value.record(RecordKindV1::Completion),
+            "the completion encodes",
+        )?;
+        overwrite_record(&data_path, data_at, &completion_record)?;
+        assert!(
+            must_refuse(ledger.reverify_committed(&second), "a moved generation")?
+                .contains("changed after pre-admission open")
+        );
+        ledger.data_generation = must(file_generation(&ledger.data_file, &data_path), "remeasure")?;
+        assert!(
+            must_refuse(
+                ledger.reverify_committed(&second),
+                "a Data record of another kind"
+            )?
+            .contains("Data record differs on disk")
+        );
+        overwrite_record(&data_path, data_at, &data_record)?;
+        overwrite_record(&data_path, completion_at, &data_record)?;
+        ledger.data_generation = must(file_generation(&ledger.data_file, &data_path), "remeasure")?;
+        assert!(
+            must_refuse(
+                ledger.reverify_committed(&second),
+                "a completion of another kind"
+            )?
+            .contains("completion differs on disk")
+        );
+        overwrite_record(&data_path, completion_at, &completion_record)?;
+        ledger.data_generation = must(file_generation(&ledger.data_file, &data_path), "remeasure")?;
+        assert_eq!(
+            must(ledger.reverify_committed(&second), "the restored pair")?,
+            second.audit()
+        );
+
+        let end = must(std::fs::metadata(&data_path), "the data file measures")?.len();
+        overwrite_record(&data_path, end, &data_record)?;
+        ledger.data_generation = must(file_generation(&ledger.data_file, &data_path), "remeasure")?;
+        assert!(
+            must_refuse(ledger.reverify_committed(&second), "an extra record")?
+                .contains("records on disk, not the 4 this append committed")
+        );
+
+        let lock_path = ledger.lock_path.clone();
+        must(
+            std::fs::rename(&lock_path, root.path().join("displaced.lock")),
+            "the held lock is displaced",
+        )?;
+        must(File::create(&lock_path), "a new lock inode appears")?;
+        assert!(
+            must_refuse(ledger.reverify_committed(&second), "a replaced lock")?
+                .contains("no longer names")
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one adversarial sequence keeps every V2 re-read refusal in its disk order"
+    )]
+    fn v2_reverify_refuses_every_disagreement_with_the_disk() -> TestResult {
+        let root = test_dir()?;
+        let mut ledger = must(
+            PreAdmissionDataLedgerV2::open(root.path(), bounds_v2(4)?),
+            "the ledger opens",
+        )?;
+        let first = must(
+            ledger.append_complete(&zero_fixture_v2(180)?),
+            "the first pair commits",
+        )?;
+        let second = must(
+            ledger.append_complete(&zero_fixture_v2(181)?),
+            "the second pair commits",
+        )?;
+        assert_eq!(
+            must(ledger.reverify_committed(&second), "the last written pair")?,
+            second.audit()
+        );
+        assert_eq!(
+            must(
+                ledger.reverify_committed(&PreAdmissionProductionCommitV2::Reused(first.audit())),
+                "an older reused pair"
+            )?,
+            first.audit()
+        );
+        assert!(
+            must_refuse(ledger.reverify_committed(&first), "an older written pair")?
+                .contains("was written but is not the last stored pair")
+        );
+        let other_root = test_dir()?;
+        let mut other = must(
+            PreAdmissionDataLedgerV2::open(other_root.path(), bounds_v2(4)?),
+            "another ledger opens",
+        )?;
+        let foreign = must(
+            other.append_complete(&zero_fixture_v2(182)?),
+            "a foreign pair commits",
+        )?;
+        assert!(
+            must_refuse(ledger.reverify_committed(&foreign), "an absent authority")?
+                .contains("disappeared after receipt-last append")
+        );
+
+        let data_path = ledger.data_path.clone();
+        let value = second.audit().value;
+        let data_at = must(
+            record_offset_v2(second.audit().data_record_index),
+            "the Data offset",
+        )?;
+        let completion_at = must(
+            record_offset_v2(second.audit().data_record_index + 1),
+            "the completion offset",
+        )?;
+        let data_record = must(value.record(RecordKindV2::Data), "the Data record encodes")?;
+        let completion_record = must(
+            value.record(RecordKindV2::Completion),
+            "the completion encodes",
+        )?;
+        overwrite_record(&data_path, data_at, &completion_record)?;
+        assert!(
+            must_refuse(ledger.reverify_committed(&second), "a moved generation")?
+                .contains("changed after pre-admission open")
+        );
+        ledger.data_generation = must(
+            file_generation_v2(&ledger.data_file, &data_path),
+            "remeasure",
+        )?;
+        assert!(
+            must_refuse(
+                ledger.reverify_committed(&second),
+                "a Data record of another kind"
+            )?
+            .contains("Data record differs on disk")
+        );
+        overwrite_record(&data_path, data_at, &data_record)?;
+        overwrite_record(&data_path, completion_at, &data_record)?;
+        ledger.data_generation = must(
+            file_generation_v2(&ledger.data_file, &data_path),
+            "remeasure",
+        )?;
+        assert!(
+            must_refuse(
+                ledger.reverify_committed(&second),
+                "a completion of another kind"
+            )?
+            .contains("completion differs on disk")
+        );
+        overwrite_record(&data_path, completion_at, &completion_record)?;
+        ledger.data_generation = must(
+            file_generation_v2(&ledger.data_file, &data_path),
+            "remeasure",
+        )?;
+        assert_eq!(
+            must(ledger.reverify_committed(&second), "the restored pair")?,
+            second.audit()
+        );
+
+        let end = must(std::fs::metadata(&data_path), "the data file measures")?.len();
+        overwrite_record(&data_path, end, &data_record)?;
+        ledger.data_generation = must(
+            file_generation_v2(&ledger.data_file, &data_path),
+            "remeasure",
+        )?;
+        assert!(
+            must_refuse(ledger.reverify_committed(&second), "an extra record")?
+                .contains("records on disk, not the 4 this append committed")
+        );
+
+        let lock_path = ledger.lock_path.clone();
+        must(
+            std::fs::rename(&lock_path, root.path().join("displaced.lock")),
+            "the held lock is displaced",
+        )?;
+        must(File::create(&lock_path), "a new lock inode appears")?;
+        assert!(
+            must_refuse(ledger.reverify_committed(&second), "a replaced lock")?
+                .contains("no longer names")
         );
         Ok(())
     }

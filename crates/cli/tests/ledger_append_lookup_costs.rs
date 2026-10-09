@@ -107,6 +107,38 @@ fn section_150_states_one_open_per_production_append_and_no_data_hash() {
     assert!(header.contains("one production append costs O(rows + receipts)"));
 }
 
+#[test]
+fn a_pre_admission_append_door_opens_once_and_section_153_says_so() {
+    let mut doors = 0;
+    let mut rest = PRE_ADMISSION;
+    while let Some(at) = rest.find("    pub(crate) fn append_and_reopen(") {
+        let door = method(rest, "    pub(crate) fn append_and_reopen(");
+        assert_eq!(door.matches("::open(root, bounds)?").count(), 1);
+        assert!(door.contains("ledger.reverify_committed(&committed)?"));
+        assert!(
+            !door.contains("open_read"),
+            "a Pre-Admission append door opens the ledger twice again; re-measure §153"
+        );
+        doors += 1;
+        rest = rest.get(at + 1..).expect("a suffix");
+    }
+    assert_eq!(
+        doors, 2,
+        "Pre-Admission V1 and V2 each have one append door"
+    );
+
+    let text = flat(section(153));
+    for needed in [
+        "One production append door, V1 or V2, runs one full open since D-4781",
+        "two full opens per append",
+        "One append is still O(file bytes)",
+    ] {
+        assert!(text.contains(needed), "§153 no longer says `{needed}`");
+    }
+    let module = flat(PRE_ADMISSION.get(..3_400).expect("the module header"));
+    assert!(module.contains("opens the ledger once and then re-reads only its committed pair"));
+}
+
 /// The body of the method opened by `signature` in `source`, up to the next
 /// line that closes at one indent.
 fn method<'a>(source: &'a str, signature: &str) -> &'a str {
