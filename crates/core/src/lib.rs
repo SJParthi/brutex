@@ -13,6 +13,7 @@
 //!
 //! | Module | Owns |
 //! |---|---|
+//! | [`alias`] | every name an index goes by, and dated symbol changes, each sourced |
 //! | [`error`] | every error this crate can return |
 //! | [`instrument`] | the one identity every vendor resolves to |
 //! | [`isin`] | the cross-check that is deliberately not part of identity |
@@ -24,6 +25,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod alias;
 pub mod blake3;
 pub mod error;
 pub mod instrument;
