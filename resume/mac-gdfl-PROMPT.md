@@ -49,7 +49,8 @@ WORK, in this order (use Workflows; up to 6 agents while usage allows):
    route, Rust-only, control permutations, robustness on a shadow server, GDFL edge days, observability); a row is
    Correct only when a second agent reproduced it. Then a fresh audit round; repeat fix -> deploy -> verify until a
    whole round finds zero.
-6. AUTOMATE THE CHECKS (operator, 9 Oct): stop relying on agents to prove the data. Port the checks Claude ran by hand
+6. AUTOMATE INGEST AND THE CHECKS. Build from the reviewed design work-20260925/state/design/ingest-automation.md
+   (written 9 Oct by a design agent and an adversarial reviewer; follow its package order). AUTOMATE THE CHECKS (operator, 9 Oct): stop relying on agents to prove the data. Port the checks Claude ran by hand
    (work-20260925/state/gdfl-board/reconcile.py: rebuild a day's one-second bars from the raw GDFL file with the D-2802
    late-row rule and compare price/volume/OI with the store; completeness.py: every trading day present against the
    archive's day list and the calendar, no gaps or duplicates, journal seconds = stored seconds; the Zerodha minute
