@@ -60,6 +60,9 @@ const ROUTES = [
 	// it with the HTML fallback; `tests/proxy.test.js` caught it (D-1934).
 	'/selection-v6.json',
 	'/store.json',
+	// THE SCRUB the `/db` panel runs on request (sobs-10, D-4454): the census
+	// checked against the files it counts. JSON only; no page of its own.
+	'/verify.json',
 	'/audit.json',
 	// THE IN-FLIGHT TOP-N HEAP the backtest page polls while a sweep runs.
 	// Registered in `crates/api/src/server.rs` and missing from this list when
