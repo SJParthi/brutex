@@ -15257,7 +15257,14 @@ pass over the bars at a once-per-report boundary, O(bars).
   D-1502).** `booleanqualification_projection::row_detail` maps all of a
   row's folds into the page: O(F) per row and O(page x F) per page, F bounded
   by the saved run's `max_folds`, which `cli`'s Boolean OOS validation
-  enforces. The api crate states no bound of its own. Not timed.
+  enforces. **Since D-4443 the api crate has a bound of its own:**
+  `MAX_PAGE_FOLD_ROWS` = 16,384 (256 rows of 64 folds). A page whose rows ×
+  F would pass it is refused before a row is read, naming the largest `limit`
+  that fits. Rendering and serializing 16,384 fold rows through the page's own
+  `fold_row` measured 87.2 ms / 124 ms / 124 ms (n = 100, load 11.49) (p50 / p99 / max,
+  `latency_fold_rows_at_the_page_ceiling`, `api` test build (the workspace's optimized test profile), a shared four-CPU host running other builds; load average beside each); the route itself
+  is not timed, because a saved qualification can be built only by `cli`'s
+  private fixtures.
 - **The NSE catalogue is read whole per request, at most 1 MiB (UC-19,
   D-1502).** W1-api5-9's O(file bytes + U) now has a byte bound,
   `indexmap::MAX_CATALOGUE_BYTES`.

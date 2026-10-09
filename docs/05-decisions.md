@@ -66640,3 +66640,15 @@ admission page 6·C. A changed tree still refuses, from the read. One catalog
 check is measured by a proxy of its system calls. Proved by
 `an_evidence_pages_currency_cost_per_linked_catalog_is_stated`. FXB1-15.
 
+### D-4443 — A qualification page renders at most 16,384 folds — 2026-10-09
+
+**What was observed.** W1-api2-8: each qualification row renders all F of its
+later folds, and F is bounded only by the saved run's byte budget, so a page
+was O(limit × F) with no ceiling in `api`.
+
+**Decided.** `MAX_PAGE_FOLD_ROWS` = 16,384 (256 rows of 64 folds). A page
+whose rows × F passes it is refused before any row is read, naming the
+largest `limit` that fits, or that the qualification cannot be paged here
+when one row alone passes it. Proved by
+`a_page_past_the_fold_row_ceiling_is_refused_with_the_limit_that_fits`.
+FXB1-16.
