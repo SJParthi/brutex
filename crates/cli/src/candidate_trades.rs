@@ -30,7 +30,7 @@
 mod codec;
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -1305,31 +1305,62 @@ fn verify_header(raw: &[u8; HEADER], magic: [u8; 8]) -> Result<(), String> {
     }
 }
 fn write_exact(path: &Path, magic: [u8; 8], payload: &[u8]) -> Result<[u8; 32], String> {
+    write_exact_via(path, magic, payload, std::io::Write::write_all)
+}
+
+/// [`write_exact`] with the byte write injectable, so a test can stop it
+/// part-way the way a kill would.
+///
+/// WRITTEN ASIDE, THEN LINKED INTO ITS NAME. The file used to be created at
+/// its final name and only then locked and filled, so a reader that opened it
+/// in between, or after a kill mid-write, found it empty or short and refused
+/// it as "truncated", and the next writer met `AlreadyExists` over those
+/// bytes and refused every retry for good. The bytes now go to a hidden
+/// sibling unique to this process and call, are synced, and appear under the
+/// final name through `hard_link`, which refuses an existing name exactly as
+/// `create_new` did: the final name only ever holds a whole, sealed file.
+/// conc:cli2-5, D-3603.
+fn write_exact_via(
+    path: &Path,
+    magic: [u8; 8],
+    payload: &[u8],
+    mut write: impl FnMut(&mut File, &[u8]) -> std::io::Result<()>,
+) -> Result<[u8; 32], String> {
+    static ASIDE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let header = header(magic);
     let mut hash = brutex_core::blake3::Hasher::new();
     hash.update(&header);
     hash.update(payload);
     let digest = hash.finalize();
-    match OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .open(path)
-    {
-        Ok(file) => {
-            // A write or sync failure releases the lock through the guard's
-            // explicit unlock, never by close (D-0693).
-            let mut file = Flock::lock(file, path).map_err(io_error)?;
-            file.write_all(&header)
-                .and_then(|()| file.write_all(payload))
-                .and_then(|()| file.write_all(&digest))
-                .and_then(|()| file.sync_all())
+    match fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => {
+            let name = path
+                .file_name()
+                .ok_or("candidate detail path has no file name")?
+                .to_string_lossy();
+            let aside = path.with_file_name(format!(
+                ".{name}.{}.{}.partial",
+                std::process::id(),
+                ASIDE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&aside)
                 .map_err(io_error)?;
+            let written = write(&mut file, &header)
+                .and_then(|()| write(&mut file, payload))
+                .and_then(|()| write(&mut file, &digest))
+                .and_then(|()| file.sync_all());
+            drop(file);
+            let linked = written.and_then(|()| linked_or_lost_race(fs::hard_link(&aside, path)));
+            let removed = fs::remove_file(&aside);
+            linked.map_err(io_error)?;
+            removed.map_err(io_error)?;
             #[cfg(test)]
             DURABLE_SYNCS.with(|count| count.set(count.get().saturating_add(1)));
-            file.release().map_err(|u| io_error(u.why))?;
         }
-        Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(why) => return Err(io_error(why)),
     }
     let budget = (payload.len() as u64)
@@ -1345,6 +1376,15 @@ fn write_exact(path: &Path, magic: [u8; 8], payload: &[u8]) -> Result<[u8; 32], 
     #[cfg(test)]
     DURABLE_SYNCS.with(|count| count.set(count.get().saturating_add(1)));
     Ok(digest)
+}
+/// A link into the final name, where losing the race to another writer of
+/// the same name is not a failure: the winner's bytes are verified next, as
+/// they always were. Any other link error is (D-3603).
+fn linked_or_lost_race(linked: std::io::Result<()>) -> std::io::Result<()> {
+    match linked {
+        Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        other => other,
+    }
 }
 fn read_sealed(path: &Path, magic: [u8; 8], max_bytes: u64) -> Result<(Vec<u8>, [u8; 32]), String> {
     read_sealed_generation(path, magic, max_bytes).map(|(payload, seal, _)| (payload, seal))

@@ -2493,30 +2493,37 @@ impl ExecutionV4Ledger {
             if writable {
                 // ledgers-3, D-1910: the writer cuts a kill-torn tail under its exclusive
                 // lock; the bytes past the last whole record were never acknowledged.
-                for (file, path, stride) in [
+                // Each file is cut only when it begins with its own records'
+                // magic, so a renamed or foreign file reaches the scan's
+                // refusal uncut (CE-89, D-2795).
+                for (file, path, stride, magic) in [
                     (
                         &parameter_file,
                         &parameter_path,
                         EXECUTION_V4_PARAMETER_BYTES,
+                        &PARAMETER_MAGIC,
                     ),
                     (
                         &percentile_file,
                         &percentile_path,
                         EXECUTION_V4_PERCENTILE_BYTES,
+                        &PERCENTILE_MAGIC,
                     ),
                     (
                         &disposition_file,
                         &disposition_path,
                         EXECUTION_V4_DISPOSITION_BYTES,
+                        &DISPOSITION_MAGIC,
                     ),
                     (
                         &completion_file,
                         &completion_path,
                         EXECUTION_V4_COMPLETION_BYTES,
+                        &COMPLETION_MAGIC,
                     ),
                 ] {
                     let stride = usize_to_u64(stride, "heal stride")?;
-                    crate::fixed_tail::heal_torn_tail(file, path, 0, stride, &[])?;
+                    crate::fixed_tail::heal_torn_tail(file, path, 0, stride, magic)?;
                 }
             }
             let lock_generation = file_generation(&lock_file, &lock_path, LOCK_MAX_BYTES)?;
@@ -6727,7 +6734,20 @@ mod tests {
         file.write_all(&[1]).expect("append ragged byte");
         file.sync_data().expect("sync ragged byte");
         assert!(ExecutionV4Ledger::open_read(&ragged.path, bounds()).is_err());
-        // ledgers-3, D-1910: the next writer cuts the never-acknowledged tail.
+        // CE-89, D-2794/D-2795: the WRITABLE open refuses a file that does
+        // not begin with its records' magic, and cuts nothing.
+        let held = std::fs::read(ragged.path.join(DISPOSITION_FILE)).expect("ragged bytes");
+        assert!(ExecutionV4Ledger::open_write(&ragged.path, bounds()).is_err());
+        assert_eq!(
+            std::fs::read(ragged.path.join(DISPOSITION_FILE)).expect("ragged bytes kept"),
+            held,
+            "the writable open cut nothing"
+        );
+        // ledgers-3, D-1910: a torn record of its own (a prefix of its magic)
+        // is the never-acknowledged tail the next writer cuts.
+        std::fs::write(ragged.path.join(DISPOSITION_FILE), &DISPOSITION_MAGIC[..5])
+            .expect("torn disposition record");
+        assert!(ExecutionV4Ledger::open_read(&ragged.path, bounds()).is_err());
         drop(ExecutionV4Ledger::open_write(&ragged.path, bounds()).expect("writer heals"));
         assert_eq!(
             std::fs::metadata(ragged.path.join(DISPOSITION_FILE))

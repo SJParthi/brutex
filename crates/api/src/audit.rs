@@ -1323,6 +1323,21 @@ impl Journal {
                 Err(e) => return Err(named("cannot create the audit directory", &e)),
             }
         }
+        // IN-PROCESS WRITERS QUEUE; ONLY ANOTHER PROCESS IS REFUSED. The legs
+        // of one Pull press run in parallel and every leg appends here, as do
+        // a hand pull and a refused request. `flock` conflicts between two
+        // open file descriptions of ONE process, so a leg whose append met
+        // another leg's `write_all` + `sync_all` window was refused and its
+        // run went unrecorded. Held across the whole append so this process
+        // has one writer at a time; `Flock::try_lock` below is then met only
+        // by another process. One record is one `write_all` on an `O_APPEND`
+        // handle, so the wait is one fsync per queued writer, never a scan.
+        // conc:server1-1, D-2770.
+        #[cfg(test)]
+        tests::queued(&self.path);
+        let _one_writer = APPENDING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Every path below releases the append lock through the guard's
         // explicit unlock in its `Drop`, a refusal by returning and the
         // success path once the record is synced: closing the descriptor would
@@ -1751,6 +1766,11 @@ fn covered(image: &[u8; RECORD_LEN]) -> [u8; OFF_CRC] {
     }
     head
 }
+
+/// The one in-process journal writer at a time. See [`Journal::appended`]:
+/// the file lock refuses another process, and this makes this process's own
+/// writers wait for each other instead of refusing each other (D-2770).
+static APPENDING: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 #[allow(
@@ -2663,6 +2683,83 @@ mod tests {
             Log::Held {
                 records: 2,
                 bytes: 2 * RECORD_LEN_U64,
+                torn: None,
+            }
+        );
+    }
+
+    /// The journals a writer in this test binary has queued on, recorded just
+    /// before it waits for [`APPENDING`], so a test can tell "waiting" from
+    /// "not started" without a clock.
+    static QUEUED: std::sync::Mutex<std::collections::BTreeSet<PathBuf>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+    pub(super) fn queued(path: &Path) {
+        QUEUED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(path.to_path_buf());
+    }
+
+    fn has_queued(path: &Path) -> bool {
+        QUEUED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(path)
+    }
+
+    /// **Two writers in ONE process queue for the journal; neither is
+    /// refused.** conc:server1-1, D-2770.
+    ///
+    /// The legs of one Pull press run in parallel and each appends its run
+    /// record here. The file lock conflicts between two handles of one
+    /// process, so a leg that met another leg's append was refused and its
+    /// run was never recorded. The first writer is modelled by holding what
+    /// it holds mid-append (the in-process serialiser and the file lock);
+    /// the second must wait for it and then land.
+    #[test]
+    fn a_second_writer_in_this_process_waits_for_the_first_instead_of_being_refused() {
+        let root = scratch("audit-in-process-queue");
+        let journal = Journal::at(&root);
+        std::fs::create_dir_all(journal.path.parent().expect("a parent")).expect("audit dir");
+        let first_writer = APPENDING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let first_lock = store::flock::Flock::try_lock(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .append(true)
+                .create(true)
+                .open(&journal.path)
+                .expect("the journal handle"),
+            journal.path.clone(),
+        )
+        .expect("nothing else holds it");
+        let landed = std::thread::scope(|scope| {
+            let second = scope.spawn(|| {
+                journal.append(&Record::refused(
+                    Scope::Spot,
+                    Outcome::Stored,
+                    at(1),
+                    "second-leg",
+                    "",
+                ))
+            });
+            // No clock: the second writer either queues (recorded) or, without
+            // the serialiser, is refused at once (finished).
+            while !second.is_finished() && !has_queued(&journal.path) {
+                std::thread::yield_now();
+            }
+            drop(first_lock);
+            drop(first_writer);
+            second.join().expect("the second writer")
+        });
+        landed.expect("an in-process writer waits for the first and is not refused");
+        assert_eq!(
+            journal.look(),
+            Log::Held {
+                records: 1,
+                bytes: RECORD_LEN_U64,
                 torn: None,
             }
         );

@@ -3,6 +3,7 @@
 #![allow(clippy::expect_used, reason = "fixture failures must fail the test")]
 
 use super::*;
+use std::io::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 fn root() -> PathBuf {
@@ -1061,6 +1062,75 @@ fn a_capture_derives_slice_facts_once_and_counts_four_syncs_per_candidate_side()
         assert_eq!(
             reader.page(0, MAX_PAGE).expect("page").len() as u64,
             trades.min(MAX_PAGE as u64)
+        );
+    }
+}
+
+/// **A detail file stopped part-way never appears under its name, and does
+/// not wedge the retry.** conc:cli2-5, D-3603. A write that dies after the
+/// header (a panic stands in for the kill) leaves the final name absent; the
+/// retry lands whole and reads back sealed, and a second identical write
+/// reuses it.
+#[test]
+fn a_detail_write_stopped_part_way_leaves_no_torn_file_and_the_retry_lands() {
+    let dir = root();
+    std::fs::create_dir_all(&dir).expect("scratch");
+    let path = dir.join("detail.bin");
+    let died = std::panic::catch_unwind(|| {
+        let mut calls = 0;
+        let _ = write_exact_via(&path, TRADES, b"payload", |file, bytes| {
+            calls += 1;
+            assert!(calls < 2, "killed after the header");
+            file.write_all(bytes)
+        });
+    });
+    assert!(died.is_err(), "the write was stopped");
+    assert!(!path.exists(), "no torn file under the final name");
+    let digest = write_exact(&path, TRADES, b"payload").expect("the retry is not wedged");
+    let (payload, seal) = read_sealed(&path, TRADES, 1 << 20).expect("whole and sealed");
+    assert_eq!((payload.as_slice(), seal), (b"payload".as_slice(), digest));
+    assert_eq!(write_exact(&path, TRADES, b"payload"), Ok(digest), "reused");
+    assert!(
+        write_exact(&path, TRADES, b"different payload").is_err(),
+        "an existing file with other bytes is refused, never replaced"
+    );
+    assert_eq!(
+        read_sealed(&path, TRADES, 1 << 20).map(|(p, _)| p),
+        Ok(b"payload".to_vec())
+    );
+    let refused = write_exact_via(&dir.join("full.bin"), TRADES, b"x", |_, _| {
+        Err(std::io::Error::other("disk full"))
+    })
+    .expect_err("a failed write refuses");
+    assert!(refused.contains("disk full"), "{refused}");
+    assert!(!dir.join("full.bin").exists());
+    let left: Vec<_> = std::fs::read_dir(&dir)
+        .expect("listing")
+        .map(|entry| entry.expect("entry").file_name())
+        .filter(|name| name.to_string_lossy().contains("full.bin"))
+        .collect();
+    assert!(
+        left.is_empty(),
+        "the failed write's sibling is removed: {left:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Only a lost race to the same name is not a link failure (D-3603).
+#[test]
+fn only_a_lost_link_race_is_not_a_failure() {
+    assert!(linked_or_lost_race(Ok(())).is_ok());
+    assert!(
+        linked_or_lost_race(Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists))).is_ok()
+    );
+    for kind in [
+        std::io::ErrorKind::NotFound,
+        std::io::ErrorKind::PermissionDenied,
+        std::io::ErrorKind::StorageFull,
+    ] {
+        assert_eq!(
+            linked_or_lost_race(Err(std::io::Error::from(kind))).map_err(|why| why.kind()),
+            Err(kind)
         );
     }
 }

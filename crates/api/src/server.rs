@@ -5344,9 +5344,14 @@ type SharedGovernor = std::sync::Arc<std::sync::Mutex<pull::rate::Governor>>;
 /// `CLAUDE.md` §3 rule 6: a structural argument is not a
 /// measurement, however sound it is.
 fn shared_governor(site: &Site, feed: pull::vendor::Feed) -> Option<SharedGovernor> {
+    // A POISONED LOCK IS STILL READ. The slots are `Arc`s set once at
+    // startup; a panic elsewhere while holding the lock cannot have left one
+    // half-written. `.ok()?` turned poison into "no governor", and the source
+    // then ran with a fresh one of its own, a second instance spending the
+    // same vendor quota. conc:pull1-2, D-2799.
     site.budgets
         .lock()
-        .ok()?
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(feed as usize)?
         .as_ref()
         .map(std::sync::Arc::clone)
@@ -5463,6 +5468,11 @@ pub struct Site {
     /// writes them, and refusing one because the other is running would be a
     /// constraint neither of them has.
     pub sweep: std::sync::Mutex<Option<crate::sweeprun::Progress>>,
+    /// The one browser sweep ADMISSION in progress over this site, taken with
+    /// `try_lock` so a second press is refused at once rather than parking a
+    /// shared `detail::run` permit behind the first's I/O. Per `Site` so two
+    /// test sites never refuse each other. See `sweeprun::admit` (D-2776).
+    pub(crate) sweep_admission: std::sync::Mutex<()>,
     /// Everything the instrument masters produce, behind one lock so a refresh
     /// can replace it without a restart.
     ///
@@ -5610,6 +5620,7 @@ impl Site {
         // A file changed during parsing must remain visibly newer than this
         // snapshot, not be hidden by a timestamp taken after the read.
         let parsed_at = std::time::SystemTime::now();
+        let stamps = crate::mastersrun::stamps(masters);
         let read = universe(masters);
         // A PARSE THAT READ NOTHING MUST NOT REPLACE ONE THAT DID. Swapping an
         // empty universe in would take a working page to a blank one because a
@@ -5660,6 +5671,7 @@ impl Site {
         *held = Parsed {
             read,
             at: parsed_at,
+            stamps,
             targets,
             generation,
         };
@@ -5716,6 +5728,7 @@ impl Site {
             recovery_active: std::sync::Mutex::new(None),
             // NO SWEEP UNTIL SOMEBODY PRESSES RUN, for the reason above it.
             sweep: std::sync::Mutex::new(None),
+            sweep_admission: std::sync::Mutex::new(()),
             reload_lock: std::sync::Mutex::new(()),
             parsed: std::sync::RwLock::new(Parsed {
                 read,
@@ -5723,6 +5736,7 @@ impl Site {
                 // question is when THIS universe was read, and a lazily taken
                 // stamp would answer a different one.
                 at: std::time::SystemTime::now(),
+                stamps: Vec::new(),
                 targets,
                 generation: 0,
             }),
@@ -5749,11 +5763,19 @@ impl Site {
     /// The whole site, read off disk once.
     #[must_use]
     pub fn load(masters: &Path, store_root: &Path) -> Self {
-        Self::new(
+        // STAMPED BEFORE THE READ, for the reason `reparse` does: a master
+        // changed while it is parsed stays visibly changed. D-2757.
+        let stamps = crate::mastersrun::stamps(masters);
+        let mut site = Self::new(
             universe(masters),
             census::read_all(store_root),
             store_root.to_path_buf(),
-        )
+        );
+        site.parsed
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .stamps = stamps;
+        site
     }
 
     /// The same site, permitted to reach a live broker.
@@ -5892,6 +5914,11 @@ pub struct Parsed {
     pub read: Read,
     /// When this process parsed the masters into [`Self::read`].
     pub at: std::time::SystemTime,
+    /// Each master file's (mtime, length), taken just before the parse read
+    /// it, so `/masters/status.json` reports a file CHANGED since the parse
+    /// without comparing a filesystem's clock to this one. Empty for a site
+    /// that read no masters directory. D-2757 (CE-85).
+    pub stamps: Vec<crate::mastersrun::Stamp>,
     /// How many instruments each spot target names, counted from [`Self::read`].
     pub targets: [usize; ingest::SpotTarget::ALL.len()],
     /// Zero at load, and moved by every [`Site::reparse`] that swaps a universe
@@ -6920,8 +6947,14 @@ pub(crate) struct BrokerRun {
     /// Distinct from an empty `reached`: nothing was attempted, so nothing can
     /// be concluded about the vendor from it.
     pub blocked: Option<Blocked>,
-    /// Set when the operator stopped the sweep part-way, with the reason.
+    /// Set when the sweep stopped part-way, with the reason: an operator's
+    /// pause, the vendor-down breaker, or a credential stop.
     pub stopped: Option<String>,
+    /// Whether that stop was the OPERATOR's: the autopilot's stop epoch moved
+    /// (Pause, a shutdown). Only this one means "nothing failed, ask again
+    /// at once"; the breaker's stop is a vendor failure and must reach the
+    /// backoff. conc:autopilot-2, D-2798.
+    pub cancelled: bool,
     /// How long it took, in microseconds.
     pub took: u64,
     /// Whether the retry ladder judged the CREDENTIAL dead, structurally.
@@ -7293,13 +7326,35 @@ fn note_member_failure(
             .with("rung", telemetry::Value::Str(asked.granularity.dir()))
             .with("why", telemetry::Value::Str(&failure.why)),
     );
-    debug_assert!(
-        noted.is_written() || telemetry::global().is_none(),
-        "a member that reached the vendor and did not land is the failure this \
-         event exists to name"
-    );
-    site.autopilot
-        .fail(&failure.instrument, month, &failure.why);
+    settle_member_failure(noted, failure, month, site);
+}
+
+/// The half of [`note_member_failure`] that runs after the emit, whatever the
+/// emit answered.
+///
+/// A dropped log append is an ENVIRONMENTAL outcome (a full or erroring log
+/// volume), counted in the sink's own health, and it is most likely exactly
+/// when this event exists to be read. It used to be a `debug_assert!`, which
+/// in the dev-profile binary the operator runs panicked the pull before the
+/// in-memory failure below was recorded. It now degrades loudly instead: the
+/// failure is recorded, and its sentence says the log line was not. D-2751.
+fn settle_member_failure(
+    noted: telemetry::Emitted,
+    failure: &pull::ingest::Failure,
+    month: &str,
+    site: &Site,
+) {
+    if noted == telemetry::Emitted::Dropped {
+        let why = format!(
+            "{} (the log line for this failure could not be written; the \
+             sink's health on /logs counts the drop)",
+            failure.why
+        );
+        site.autopilot.fail(&failure.instrument, month, &why);
+    } else {
+        site.autopilot
+            .fail(&failure.instrument, month, &failure.why);
+    }
 }
 
 /// What the pull order has to say about this request, or [`None`] to proceed.
@@ -7541,10 +7596,10 @@ fn spot_mapping_refusal(
     let resolved: std::collections::HashSet<_> =
         targets.iter().map(|key| key.underlying.as_str()).collect();
     let expected: Vec<&str> = if asked.members.is_empty() {
-        asked
-            .target
-            .members()
-            .map_or_else(Vec::new, <[&str]>::to_vec)
+        // `expected`, not `members`: the swept surface has a compile-time
+        // roster and no published list, and reading `members` left it empty,
+        // so a swept name no master lists was never an issue. D-2759.
+        asked.target.expected().unwrap_or_default()
     } else {
         asked
             .members
@@ -8062,6 +8117,7 @@ pub(crate) async fn broker_run(
         // who presses Pause must not wait out the other seven hundred
         // instruments to be obeyed.
         if site.autopilot.stopped(epoch) {
+            out.cancelled = true;
             out.stopped = Some(format!(
                 "{} — stopped after {} of {} instruments. The partial month is \
                  refilled on resume, because the resume point is the store's own.",
@@ -9232,7 +9288,7 @@ async fn fetch_chunks(
                     // Emitted here, unwrapped, the reason is the whole field and
                     // fits. The bound rose to 512 later; what still holds is that
                     // the field carries the answer rather than the preamble.
-                    let noted = telemetry::emit(
+                    let _logged = telemetry::emit(
                         &telemetry::Event::error("pull.http", "vendor refused a window")
                             .with("instrument_id", telemetry::Value::Str(instrument_id))
                             .with("feed", telemetry::Value::Str(asked.feed.wire()))
@@ -9242,10 +9298,9 @@ async fn fetch_chunks(
                             .with("to", telemetry::Value::Str(&chunk.to().to_string()))
                             .with("vendor_said", telemetry::Value::Str(why)),
                     );
-                    debug_assert!(
-                        noted.is_written() || telemetry::global().is_none(),
-                        "the vendor's reason is the one field this event exists to carry"
-                    );
+                    // A dropped append is counted in the sink's health and is
+                    // not an invariant: the sentence below carries the vendor's
+                    // words whatever the log answered (D-2751).
                     format!(
                         "the broker did not answer with a window. This was \
                          request {} of {}, covering {}..={}. The {} chunk(s) \
@@ -10322,7 +10377,7 @@ fn note_instrument_refusal(
     of: usize,
     why: &str,
 ) {
-    let emitted = telemetry::emit(
+    let _logged = telemetry::emit(
         &telemetry::Event::error("pull.spot", "instrument refused")
             .with("instrument", telemetry::Value::Str(instrument))
             .with("month", telemetry::Value::Str(month))
@@ -10331,10 +10386,9 @@ fn note_instrument_refusal(
             .with("of", telemetry::Value::Uint(of as u64))
             .with("why", telemetry::Value::Str(why)),
     );
-    debug_assert!(
-        emitted.is_written() || telemetry::global().is_none(),
-        "a refusal that cannot be logged is the defect this event exists to remove"
-    );
+    // A dropped append is counted in the sink's health; it is not an
+    // invariant to assert, and asserting it panicked the dev-profile broker
+    // loop on a full log volume (D-2751).
 }
 
 /// What the page says when the breaker stops a run.
@@ -11443,18 +11497,36 @@ pub(crate) async fn pull_run_json(
 pub(crate) async fn pull_run_stop(
     axum::extract::State(site): axum::extract::State<Loaded>,
 ) -> (axum::http::StatusCode, axum::http::HeaderMap, String) {
-    let mut held = site
-        .run
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let stopping = match held.as_mut() {
-        Some(progress) if progress.running() => {
-            progress.stopping = true;
-            true
-        }
-        _ => false,
+    // THE SLOT IS HELD FOR THE FLAG, NOT FOR THE FSYNCS. Lock order stays
+    // `run` then `recovery_active`: the active-ID lock is taken while the slot
+    // is held, then the slot is dropped and the STOP is persisted under the
+    // active-ID lock alone, which is what serialises it with a clear or an
+    // activation. Held across the syncs, the slot stalled every chain's
+    // progress write and every `/pull/run.json` poll on its own worker.
+    // conc:runs-3, D-2775.
+    let (stopping, active) = {
+        let mut held = site
+            .run
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let stopping = match held.as_mut() {
+            Some(progress) if progress.running() => {
+                progress.stopping = true;
+                true
+            }
+            _ => false,
+        };
+        let active = stopping.then(|| {
+            site.recovery_active
+                .lock()
+                .map_err(|_| "recovery active-plan lock is poisoned".to_owned())
+        });
+        (stopping, active)
     };
-    if stopping && let Err(why) = crate::recovery_control::stop(&site) {
+    let persisted = active.map(|active| {
+        active.and_then(|active| crate::recovery_control::stop_active(&site, *active))
+    });
+    if let Some(Err(why)) = persisted {
         return (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             json_headers(),
@@ -17006,19 +17078,37 @@ async fn one_value_per_form_field(
     }
     let (parts, body) = request.into_parts();
     let bound = form_read_bound(parts.uri.path());
-    let Ok(bytes) = axum::body::to_bytes(body, bound).await else {
-        return (
-            axum::http::StatusCode::PAYLOAD_TOO_LARGE,
-            [(
-                axum::http::header::CONTENT_TYPE,
-                "text/plain; charset=utf-8",
-            )],
-            format!(
-                "REFUSED — the request body is larger than the {bound} bytes \
-                 this server reads. Nothing was read or run.\n"
-            ),
-        )
-            .into_response();
+    let bytes = match read_within(body, bound).await {
+        Ok(bytes) => bytes,
+        Err(BodyUnread::TooLarge) => {
+            return (
+                axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    "text/plain; charset=utf-8",
+                )],
+                format!(
+                    "REFUSED — the request body is larger than the {bound} bytes \
+                     this server reads. Nothing was read or run.\n"
+                ),
+            )
+                .into_response();
+        }
+        Err(BodyUnread::Broken(why)) => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    "text/plain; charset=utf-8",
+                )],
+                format!(
+                    "REFUSED — the request body could not be read: {why}. It was \
+                     malformed or cut off before its end, not too large. Nothing \
+                     was read or run.\n"
+                ),
+            )
+                .into_response();
+        }
     };
     if !reads_json_body(parts.uri.path())
         && let Ok(text) = std::str::from_utf8(&bytes)
@@ -17053,6 +17143,47 @@ async fn one_value_per_form_field(
         axum::body::Body::from(bytes),
     ))
     .await
+}
+
+/// Why [`read_within`] returned no body.
+#[derive(Debug, PartialEq, Eq)]
+enum BodyUnread {
+    /// More than the bound arrived, or was announced.
+    TooLarge,
+    /// The transport failed mid-body: a bad chunk-size line, a chunked body
+    /// cut off before its last chunk, a `Content-Length` body the peer
+    /// half-closed early. Its own arm because it used to be the `413` above,
+    /// which told the sender of a 10-byte body that it exceeded 8,192 bytes.
+    /// D-2753 (CE-101).
+    Broken(String),
+}
+
+/// The whole body, at most `bound` bytes, telling the two failures apart.
+///
+/// `axum::body::to_bytes` folds a length-limit error and a transport error
+/// into one `axum::Error`. This reads the frames itself so each failure keeps
+/// its own name. Same O(body) once per request, same bound.
+async fn read_within<B>(body: B, bound: usize) -> Result<axum::body::Bytes, BodyUnread>
+where
+    B: http_body::Body<Data = axum::body::Bytes>,
+    B::Error: std::fmt::Display,
+{
+    use http_body::Body as _;
+    let mut body = std::pin::pin!(body);
+    if usize::try_from(body.size_hint().lower()).map_or(true, |lower| lower > bound) {
+        return Err(BodyUnread::TooLarge);
+    }
+    let mut held: Vec<u8> = Vec::new();
+    while let Some(frame) = std::future::poll_fn(|cx| body.as_mut().poll_frame(cx)).await {
+        let frame = frame.map_err(|why| BodyUnread::Broken(why.to_string()))?;
+        if let Ok(data) = frame.into_data() {
+            if data.len() > bound.saturating_sub(held.len()) {
+                return Err(BodyUnread::TooLarge);
+            }
+            held.extend_from_slice(&data);
+        }
+    }
+    Ok(axum::body::Bytes::from(held))
 }
 
 /// The first query key that appears twice, or `None`.
@@ -17454,8 +17585,94 @@ fn route_table(assets: std::sync::Arc<assets::Assets>) -> axum::Router<Loaded> {
         // every line above keeps winning and nothing on disk can shadow one.
         .fallback(move |request: axum::extract::Request| {
             let assets = std::sync::Arc::clone(&assets);
-            async move { assets.respond(request.method(), request.uri().path()) }
+            async move {
+                let path = request.uri().path();
+                match route_variant(path) {
+                    Some(route) => route_variant_refusal(request.method(), path, route),
+                    None => assets.respond(request.method(), path),
+                }
+            }
         })
+}
+
+/// Every extensionless path [`route_table`] registers, in the order it does.
+///
+/// The fallback consults it to tell a SPELLING VARIANT of a server route
+/// (`/health/`, `//health`, `/Health`) from a front-end path. axum matches
+/// the raw path exactly and does no trailing-slash redirect, so a variant
+/// used to fall through to the shell and answer `200 text/html` — and a
+/// monitor pointed at `/health/` read "healthy" for ever, whatever `/health`
+/// said. A `.json` route needs no entry: its `.` already makes the shell
+/// answer 404. `route_variants_cover_every_extensionless_route` reads
+/// [`route_table`]'s own source so this list cannot drift. D-2752.
+const EXTENSIONLESS_ROUTES: &[&str] = &[
+    "/dashboard",
+    "/instruments",
+    "/pull",
+    "/pull/spot",
+    "/pull/fno",
+    "/pull/run",
+    "/pull/recovery",
+    "/pull/run/stop",
+    "/universe/resolve",
+    "/autopilot/pause",
+    "/autopilot/resume",
+    "/autopilot/control",
+    "/ingest/queue",
+    "/audit/page",
+    "/store",
+    "/bars",
+    "/logs",
+    "/backtest/run",
+    "/backtest/descend",
+    "/engine/command",
+    "/masters",
+    "/masters/refresh",
+    "/health",
+];
+
+/// The server route `path` is a spelling variant of, if it is one.
+///
+/// Empty segments are collapsed (one trailing `/`, a doubled `//`) and the
+/// comparison ignores ASCII case. A path that IS the route never reaches the
+/// fallback, so equality with the raw path is excluded. A fixed list of 23
+/// rows on the fallback path only.
+fn route_variant(path: &str) -> Option<&'static str> {
+    let mut normal = String::with_capacity(path.len());
+    for segment in path.split('/').filter(|segment| !segment.is_empty()) {
+        normal.push('/');
+        normal.push_str(segment);
+    }
+    EXTENSIONLESS_ROUTES
+        .iter()
+        .copied()
+        .find(|route| *route != path && route.eq_ignore_ascii_case(&normal))
+}
+
+/// `404`, naming the route the request almost spelled.
+///
+/// Not the shell (a `200` that hides a server route's own status), not a
+/// redirect (which would move a state-changing POST to a path the caller did
+/// not name), and not a `405` (the method is not the fault, the path is).
+fn route_variant_refusal(
+    method: &axum::http::Method,
+    path: &str,
+    route: &str,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    (
+        axum::http::StatusCode::NOT_FOUND,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )],
+        format!(
+            "no route answers {method} {path}: server routes match exactly, \
+             with no trailing-slash, doubled-slash or case variant. The route \
+             this spells is {route}.\n"
+        ),
+    )
+        .into_response()
 }
 
 /// The fetch-metadata header a browser stamps on every request it issues.
@@ -17822,6 +18039,10 @@ pub struct ConnectionLimits {
     /// See [`MAX_CONNECTIONS`]. Zero is read as one: a server that can never
     /// accept is a hang, not a limit.
     pub max_connections: usize,
+    /// How long, after the shutdown signal, in-flight requests may still run
+    /// before [`serve_limited`] returns without them. See [`SHUTDOWN_GRACE`]
+    /// and D-2771.
+    pub drain_timeout: std::time::Duration,
 }
 
 impl ConnectionLimits {
@@ -17830,6 +18051,7 @@ impl ConnectionLimits {
         head_read_timeout: HEAD_READ_TIMEOUT,
         body_read_timeout: BODY_READ_TIMEOUT,
         max_connections: MAX_CONNECTIONS,
+        drain_timeout: SHUTDOWN_GRACE,
     };
 }
 
@@ -18252,6 +18474,127 @@ impl tokio::io::AsyncWrite for HeadDeadline {
     }
 }
 
+/// `shutdown`, which on resolving first asks every pull walk to stop.
+///
+/// A hand `/pull/spot` walk answers only when it ends, and the graceful drain
+/// waited for it. Pausing the autopilot bumps the stop epoch that
+/// `broker_run` checks before every instrument, hand pulls included, so the
+/// walk breaks at its next instrument and journals the partial run inside the
+/// bounded drain rather than being dropped mid-walk. The process is ending,
+/// so the pause is never resumed. conc:server1-2, D-2771.
+fn stopping_walks(site: Loaded, shutdown: Shutdown) -> Shutdown {
+    Box::pin(async move {
+        let signalled = shutdown.await;
+        site.autopilot.pause();
+        signalled
+    })
+}
+
+/// conc:server1-2, D-2771: the shutdown signal stops pull walks, and the
+/// drain after it is bounded.
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod shutdown_tests {
+    use super::{ConnectionLimits, Loaded, Site, serve_limited, stopping_walks};
+    use std::time::Duration;
+    use tokio::io::AsyncWriteExt as _;
+
+    /// **The shutdown signal asks every pull walk to stop at its next
+    /// instrument.** A hand walk compares the epoch it captured at its start;
+    /// before the fix nothing on the shutdown path moved it.
+    #[tokio::test]
+    async fn the_shutdown_signal_stops_a_walk_that_captured_the_epoch_before_it() {
+        let root = crate::scratch::path("shutdown-stops-walks");
+        let site = Loaded::new(Site::load(&root.join("missing-masters"), &root));
+        let captured = site.autopilot.epoch();
+        let (fire, fired) = tokio::sync::oneshot::channel::<()>();
+        let wrapped = stopping_walks(
+            Loaded::clone(&site),
+            Box::pin(async move {
+                let _ = fired.await;
+                Ok(())
+            }),
+        );
+        assert!(
+            !site.autopilot.stopped(captured),
+            "wrapping the signal stops nothing"
+        );
+        fire.send(()).unwrap();
+        wrapped
+            .await
+            .expect("the signal's own outcome is passed through");
+        assert!(
+            site.autopilot.stopped(captured),
+            "a walk that started before the signal breaks at its next instrument"
+        );
+    }
+
+    /// **A request still running after the signal does not hold the server
+    /// open.** The handler never answers, as a half-hour walk does not within
+    /// any drain; `serve_limited` must still return once `drain_timeout`
+    /// passes. The outer bound only turns a regression into a failure rather
+    /// than a hang.
+    #[tokio::test]
+    async fn a_request_still_running_after_the_signal_does_not_hold_the_server_open() {
+        let _shared = crate::emitted::sink();
+        let from = crate::emitted::mark();
+        let (entered, mut inside) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let app = axum::Router::new().route(
+            "/forever",
+            axum::routing::get(move || {
+                let entered = entered.clone();
+                async move {
+                    let _ = entered.send(());
+                    std::future::pending::<()>().await;
+                    "never"
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let served = tokio::spawn(serve_limited(
+            listener,
+            app,
+            Box::pin(async move {
+                let _ = stopped.await;
+                Ok(())
+            }),
+            ConnectionLimits {
+                drain_timeout: Duration::from_millis(50),
+                ..ConnectionLimits::SERVED
+            },
+        ));
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(b"GET /forever HTTP/1.1\r\nHost: brutex\r\n\r\n")
+            .await
+            .unwrap();
+        inside.recv().await.expect("the request is in flight");
+        stop.send(()).unwrap();
+        let outcome = tokio::time::timeout(Duration::from_mins(1), served)
+            .await
+            .expect("serve returned after the bounded drain, not after the request")
+            .expect("the serve task joins");
+        assert!(outcome.is_ok(), "{outcome:?}");
+        drop(client);
+        // THE ABANDONED DRAIN IS ON THE ROLLING LOG. This is the proof
+        // `emitted` counts for `api.serve shutdown drain ended ...`.
+        let said = crate::emitted::landed(
+            from,
+            "api.serve",
+            "shutdown drain ended with requests still in flight",
+        );
+        assert!(
+            said.iter().any(|record| {
+                record.level == telemetry::Level::Warn
+                    && crate::emitted::counts(record, "grace_ms", 50)
+            }),
+            "the bounded drain names its grace: {said:?}"
+        );
+    }
+}
+
 /// Serves on an already-bound listener until `shutdown` resolves.
 ///
 /// The shutdown signal is a parameter rather than a `ctrl_c()` buried inside,
@@ -18300,14 +18643,49 @@ pub async fn serve_limited(
         limits.body_read_timeout,
         body_deadline,
     ));
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
+    // THE DRAIN IS BOUNDED. A graceful stop waits for every in-flight
+    // request, and a hand `/pull/spot` or `/pull/fno` answers only when its
+    // whole walk ends -- up to half an hour -- while `ctrl_c` keeps SIGINT, so
+    // a second Ctrl-C did nothing and SIGKILL mid-walk was the only way out.
+    // After the signal the requests get `drain_timeout`; then this returns
+    // without them, says so, and the caller's bounded runtime end follows.
+    // conc:server1-2, D-2771.
+    let (fired, heard) = tokio::sync::oneshot::channel::<()>();
+    let mut served = Box::pin(std::future::IntoFuture::into_future(
+        axum::serve(listener, app).with_graceful_shutdown(async move {
             // The signal's own error is not actionable: a failed ctrl-c
             // registration still means stop, and there is nothing else to do
             // about it here.
             let _ = shutdown.await;
-        })
-        .await
+            let _ = fired.send(());
+        }),
+    ));
+    let grace = limits.drain_timeout;
+    tokio::select! {
+        outcome = &mut served => outcome,
+        () = async move {
+            // A dropped sender means `serve` itself ended, and the arm above
+            // has the answer; this arm then never resolves.
+            if heard.await.is_err() {
+                std::future::pending::<()>().await;
+            }
+            tokio::time::sleep(grace).await;
+        } => {
+            let millis = u64::try_from(grace.as_millis()).unwrap_or(u64::MAX);
+            let _noted = telemetry::emit(
+                &telemetry::Event::warn(
+                    "api.serve",
+                    "shutdown drain ended with requests still in flight",
+                )
+                .with("grace_ms", telemetry::Value::Uint(millis)),
+            );
+            warn_line!(
+                "stopping: requests still in flight {millis} ms after the signal were not \
+                 waited for; a hand spot pull stops at its next instrument"
+            );
+            Ok(())
+        }
+    }
 }
 
 /// probeapi-1, D-1200: slow, partial, silent, oversized and crowding clients
@@ -18382,6 +18760,7 @@ mod head_deadline_tests {
             head_read_timeout: T,
             body_read_timeout: T,
             max_connections: cap,
+            drain_timeout: Duration::from_secs(30),
         }
     }
 
@@ -19128,7 +19507,8 @@ fn announce_universe(read: &Read) -> bool {
 /// kernel releases it when the last descriptor referring to that description
 /// closes, which includes a process that was killed — so an abandoned lock
 /// file never wedges the next start, the way a PID file written by hand does.
-/// The handle is kept alive for the whole session by this value.
+/// The handle is kept alive in [`serving_roots`] for as long as any
+/// `ServeLock` over that store lives in this process (D-2773).
 ///
 /// A live process releases it by an explicit unlock, never by closing its
 /// handle: a descriptor duplicated into a child another thread spawned would
@@ -19137,27 +19517,44 @@ fn announce_universe(read: &Read) -> bool {
 /// (D-0693).
 #[derive(Debug)]
 struct ServeLock {
-    /// The locked handle. `None` when this process already holds the lock — see
-    /// [`take_serve_lock`].
-    held: Option<store::flock::Flock<std::fs::File>>,
     /// The store this lock is over, canonical, so [`Drop`] releases the same
     /// key that was taken.
     root: PathBuf,
 }
 
+/// One store root served by this process: how many [`ServeLock`]s name it,
+/// and the one file lock they share.
+#[derive(Debug)]
+struct Serving {
+    holders: usize,
+    file: store::flock::Flock<std::fs::File>,
+}
+
 impl Drop for ServeLock {
-    /// Unlocks the file BEFORE freeing the in-process key. The other order
-    /// leaves a window in which a second serve in this process takes the key,
-    /// finds the file still locked, and refuses itself.
+    /// The LAST holder of a root unlocks its file and frees its key, both
+    /// under the set's lock, so no other take can see the key gone while the
+    /// file is still locked. An earlier holder only counts itself out.
+    ///
+    /// The set had no count: a pass-through's drop removed the key a live
+    /// holder owned, and the first holder's drop unlocked the file while a
+    /// pass-through still served the root. conc:server2-2, D-2773.
     fn drop(&mut self) {
-        drop(self.held.take());
-        if let Ok(mut held) = serving_roots().lock() {
-            held.remove(&self.root);
+        let mut held = serving_roots()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(serving) = held.get_mut(&self.root) {
+            serving.holders = serving.holders.saturating_sub(1);
+            if serving.holders == 0
+                && let Some(Serving { file, .. }) = held.remove(&self.root)
+            {
+                drop(file);
+            }
         }
     }
 }
 
-/// The store roots this process is already serving.
+/// The store roots this process is already serving, each with its holder
+/// count and its file lock.
 ///
 /// # Why a second serve inside ONE process is allowed
 ///
@@ -19167,10 +19564,11 @@ impl Drop for ServeLock {
 /// open file description, so a second handle in the same process would refuse
 /// itself. That would turn a suite into a race and would not detect one extra
 /// instance of the thing this guards against.
-fn serving_roots() -> &'static std::sync::Mutex<std::collections::BTreeSet<PathBuf>> {
-    static ROOTS: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<PathBuf>>> =
-        std::sync::OnceLock::new();
-    ROOTS.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeSet::new()))
+fn serving_roots() -> &'static std::sync::Mutex<std::collections::BTreeMap<PathBuf, Serving>> {
+    static ROOTS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::BTreeMap<PathBuf, Serving>>,
+    > = std::sync::OnceLock::new();
+    ROOTS.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
 }
 
 /// The name of the lock file inside the store root.
@@ -19219,27 +19617,17 @@ fn take_serve_lock(store_root: &Path, addr: std::net::SocketAddr) -> Result<Serv
     // canonicalization; reopening through that spelling would put the lock on
     // a different filesystem while `root` still names the first one.
     let path = key.join(SERVE_LOCK);
-    match serving_roots().lock() {
-        // A POISONED MUTEX IS NOT A LICENCE TO SKIP THE CHECK. It means another
-        // thread panicked holding it; the set is still readable and the lock
-        // below is still the real guard, so this continues rather than refusing
-        // a server for a fault in a test harness.
-        Err(poisoned) => {
-            if !poisoned.into_inner().insert(key.clone()) {
-                return Ok(ServeLock {
-                    held: None,
-                    root: key,
-                });
-            }
-        }
-        Ok(mut held) => {
-            if !held.insert(key.clone()) {
-                return Ok(ServeLock {
-                    held: None,
-                    root: key,
-                });
-            }
-        }
+    // ONE TAKE AT A TIME, AND THE KEY APPEARS ONLY WITH ITS FILE LOCK. The
+    // set is held across the open, the lock and the stamp, which run once per
+    // serve, so a concurrent take in this process either finds the root with
+    // its lock already held and joins it, or waits. A poisoned set is still
+    // readable and the file lock is still the real guard (as before).
+    let mut roots = serving_roots()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(serving) = roots.get_mut(&key) {
+        serving.holders = serving.holders.saturating_add(1);
+        return Ok(ServeLock { root: key });
     }
     let file = match std::fs::OpenOptions::new()
         .read(true)
@@ -19250,7 +19638,6 @@ fn take_serve_lock(store_root: &Path, addr: std::net::SocketAddr) -> Result<Serv
     {
         Ok(file) => file,
         Err(why) => {
-            release_root(&key);
             return Err(format!(
                 "REFUSED: the one-server lock {} could not be opened — {why}",
                 path.display()
@@ -19260,7 +19647,6 @@ fn take_serve_lock(store_root: &Path, addr: std::net::SocketAddr) -> Result<Serv
     let file = match store::flock::Flock::try_lock(file, path.clone()) {
         Ok(held) => held,
         Err(refusal) => {
-            release_root(&key);
             return Err(serve_lock_refusal(store_root, &path, &refusal));
         }
     };
@@ -19279,21 +19665,11 @@ fn take_serve_lock(store_root: &Path, addr: std::net::SocketAddr) -> Result<Serv
     // was taken left the PREVIOUS holder's line in the file, and a refused
     // second instance quoted that dead pid as the one holding the store -- the
     // misattribution R9-api-cx-2 fixed, back through the error path.
-    if let Err(refusal) = stamp_serve_lock(&file, addr, &path) {
-        drop(file);
-        release_root(&key);
-        return Err(refusal);
-    }
-    Ok(ServeLock {
-        held: Some(file),
-        root: key,
-    })
+    stamp_serve_lock(&file, addr, &path)?;
+    roots.insert(key.clone(), Serving { holders: 1, file });
+    Ok(ServeLock { root: key })
 }
 
-/// Writes this instance's `addr=… pid=…` line into the held serve lock, cut to
-/// its own length, and decides what a failure leaves (v3b-2, D-1481): a
-/// cleared file is served with one WARN event and a stderr line, an uncleared
-/// one is the refusal returned.
 /// Names why the one-server lock was refused (locks-1, D-1911).
 ///
 /// ONLY `WouldBlock` MEANS ANOTHER INSTANCE HOLDS IT. `TryLockError::Error` is
@@ -19344,6 +19720,10 @@ fn serve_lock_refusal(store_root: &Path, path: &Path, refusal: &std::fs::TryLock
     }
 }
 
+/// Writes this instance's `addr=… pid=…` line into the held serve lock, cut to
+/// its own length, and decides what a failure leaves (v3b-2, D-1481): a
+/// cleared file is served with one WARN event and a stderr line, an uncleared
+/// one is the refusal returned.
 fn stamp_serve_lock(
     file: &store::flock::Flock<std::fs::File>,
     addr: std::net::SocketAddr,
@@ -19420,13 +19800,6 @@ fn stamp_outcome(
              wrong process as the one serving this store.",
             path.display()
         )),
-    }
-}
-
-/// Drops a root out of the in-process set after a failed take.
-fn release_root(key: &Path) {
-    if let Ok(mut held) = serving_roots().lock() {
-        held.remove(key);
     }
 }
 
@@ -20281,6 +20654,7 @@ async fn run_in_over(
                     note_recovery_not_resumed(&why);
                     warn_line!("Recovery NOT resumed: {why}");
                 }
+                let shutdown = stopping_walks(Loaded::clone(&site), shutdown);
                 let code = stopped_over(
                     serve(
                         listener,
@@ -20458,7 +20832,7 @@ mod tests {
     /// A minute request over a window inside one month.
     fn minute_ask() -> ingest::SpotRequest {
         ingest::parse_spot(
-            "target=swept&from=2026-08-03&to=2026-08-05&granularity=1min",
+            "target=swept&member=NIFTY&from=2026-08-03&to=2026-08-05&granularity=1min",
             day(2026, 8, 10),
         )
         .expect("a real target and a window in the past")
@@ -21077,6 +21451,74 @@ mod tests {
             .outcome,
             audit::Outcome::Failed
         );
+    }
+
+    /// **A poisoned budget table still hands out the shared governor.**
+    /// conc:pull1-2, D-2799.
+    #[test]
+    fn a_poisoned_budget_table_still_shares_its_governor() {
+        let root = crate::scratch::path("budget-poison");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let site = Site::load(&root.join("missing-masters"), &root);
+        let before = shared_governor(&site, pull::vendor::Feed::Dhan).expect("Dhan is budgeted");
+        std::thread::scope(|scope| {
+            let _ = scope
+                .spawn(|| {
+                    let _held = site.budgets.lock();
+                    panic!("poison the budget table");
+                })
+                .join();
+        });
+        assert!(site.budgets.is_poisoned());
+        let after = shared_governor(&site, pull::vendor::Feed::Dhan)
+            .expect("poison does not turn the shared governor into none");
+        assert!(std::sync::Arc::ptr_eq(&before, &after));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A vendor-down breaker stop backs off; only an operator's stop retries
+    /// at once.** conc:autopilot-2, D-2798. The breaker used to set the same
+    /// `stopped` an operator's Pause sets, and `outcome_of` read every
+    /// non-credential stop as a pause: an immediate retry with no attempt
+    /// counted and no backoff, straight back into a vendor that had just failed
+    /// five instruments in a row.
+    #[test]
+    fn a_breaker_stop_backs_off_and_only_an_operator_stop_retries_at_once() {
+        let feed = || {
+            crate::autopilot::FeedState::new(
+                pull::vendor::Feed::Dhan,
+                brutex_core::vendor::Vendor::Dhan,
+                store::path::YearMonth::new(2026, 8).expect("a month"),
+            )
+        };
+        let mut breaker = BrokerRun {
+            attempted: 9,
+            ..BrokerRun::default()
+        };
+        breaker.stopped = Some(vendor_down_sentence(5, 5, 9));
+        breaker.record_stop();
+        let outcome = crate::autopilot::outcome_of(&breaker, false, None);
+        assert!(!outcome.stopped, "the breaker is not a pause");
+        let mut state = feed();
+        assert!(
+            matches!(state.observe(&outcome), crate::autopilot::Next::Wait { .. }),
+            "a vendor that just failed is backed off from"
+        );
+        assert_eq!(state.attempts, 1, "and the attempt is counted");
+
+        let mut paused = BrokerRun {
+            attempted: 9,
+            cancelled: true,
+            ..BrokerRun::default()
+        };
+        paused.stopped = Some("stopped after 2 of 9 instruments".to_owned());
+        paused.record_stop();
+        let outcome = crate::autopilot::outcome_of(&paused, false, None);
+        assert!(outcome.stopped, "an operator's stop is a stop");
+        let mut state = feed();
+        assert_eq!(state.observe(&outcome), crate::autopilot::Next::Retry);
+        assert_eq!(state.attempts, 0, "and costs no attempt");
     }
 
     #[test]
@@ -22990,6 +23432,78 @@ mod tests {
         drop(taken);
     }
 
+    /// How many `ServeLock`s in this process name `root`; zero when none.
+    fn serve_lock_holders(root: &Path) -> usize {
+        serving_roots()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(root)
+            .map_or(0, |serving| serving.holders)
+    }
+
+    /// A duplicate of the handle that holds `root`'s file lock, when one does.
+    fn serve_lock_file(root: &Path) -> Option<std::fs::File> {
+        serving_roots()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(root)
+            .and_then(|serving| serving.file.try_clone().ok())
+    }
+
+    /// Whether another open file description could lock `root`'s serve lock
+    /// now, which is what a second process would find. Released at once.
+    fn another_process_could_serve(root: &Path) -> bool {
+        let path = root.join(SERVE_LOCK);
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("the lock file");
+        store::flock::Flock::try_lock(file, path).is_ok()
+    }
+
+    /// **The serve lock is held while ANY serve in this process holds the
+    /// store, and freed only by the last.** conc:server2-2, D-2773.
+    ///
+    /// The in-process set had no count. A second serve got a pass-through
+    /// whose drop removed the key the first still owned, and the first's drop
+    /// unlocked the file while the pass-through still served the store, so a
+    /// second PROCESS could take it.
+    #[test]
+    fn the_serve_lock_is_released_by_the_last_holder_in_this_process_only() {
+        let root = crate::scratch::path("serve-lock-refcount");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let addr: std::net::SocketAddr = "127.0.0.1:9999".parse().expect("an address");
+        let first = take_serve_lock(&root, addr).expect("a free store");
+        let key = first.root.clone();
+        let joined = take_serve_lock(&root, addr).expect("the same process joins");
+        assert_eq!(serve_lock_holders(&key), 2);
+
+        drop(first);
+        assert_eq!(serve_lock_holders(&key), 1, "the joined serve still holds");
+        assert!(
+            !another_process_could_serve(&key),
+            "the store stays locked while a serve in this process still serves it"
+        );
+        let third = take_serve_lock(&root, addr).expect("joins the live holder, not refused");
+        drop(joined);
+        assert!(
+            !another_process_could_serve(&key),
+            "an earlier holder's drop does not free a key a later one still owns"
+        );
+        drop(third);
+        assert_eq!(serve_lock_holders(&key), 0);
+        assert!(
+            another_process_could_serve(&key),
+            "the last holder frees the store"
+        );
+        let again = take_serve_lock(&root, addr).expect("and the store can be served again");
+        assert_eq!(serve_lock_holders(&key), 1);
+        drop(again);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// **A dropped serve lock is released while a duplicate of its descriptor
     /// is still open.** D-0693.
     ///
@@ -23006,9 +23520,7 @@ mod tests {
         let addr: std::net::SocketAddr = "127.0.0.1:9999".parse().expect("an address");
 
         let first = take_serve_lock(&root, addr).expect("a free store");
-        let child = first
-            .held
-            .as_deref()
+        let child = serve_lock_file(&first.root)
             .expect("the first serve in this process holds the file lock")
             .try_clone()
             .expect("the duplicate a spawned child would hold");
@@ -23016,12 +23528,311 @@ mod tests {
 
         let second = take_serve_lock(&root, addr)
             .expect("the dropped serve lock was released despite the duplicate");
-        assert!(
-            second.held.is_some(),
+        assert_eq!(
+            serve_lock_holders(&second.root),
+            1,
             "and this serve holds the file lock itself, not an in-process pass"
         );
         drop(second);
         drop(child);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The variable that turns a run of the cross-process test below into the
+    /// OTHER `brutex api`: it names the store root that child serves.
+    const SERVE_LOCK_HOLDER: &str = "BRUTEX_SERVE_LOCK_HOLDER_CHILD";
+
+    /// The other process's half of
+    /// `another_process_is_refused_while_the_holder_lives_and_admitted_once_it_is_killed`:
+    /// takes the lock over `root` and prints one marker line, then holds it
+    /// until its standard input closes. A refusal is printed on one line.
+    fn hold_serve_lock_in_this_child(root: &Path) {
+        let addr: std::net::SocketAddr = "127.0.0.1:9999".parse().expect("an address");
+        match take_serve_lock(root, addr) {
+            Ok(lock) => {
+                println!("SERVE-LOCK-HELD pid={}", std::process::id());
+                let mut line = String::new();
+                let _ = std::io::stdin().read_line(&mut line);
+                drop(lock);
+                println!("SERVE-LOCK-RELEASED");
+            }
+            Err(why) => println!("SERVE-LOCK-REFUSED {}", why.replace('\n', " ")),
+        }
+    }
+
+    /// Starts this test binary as another process serving `root`, and returns
+    /// it with the first `SERVE-LOCK-` line it printed and the rest of its
+    /// output. Waits at most a minute, so a child that hangs fails the test
+    /// rather than the suite.
+    fn serve_lock_child(
+        root: &Path,
+    ) -> (
+        std::process::Child,
+        String,
+        std::sync::mpsc::Receiver<String>,
+    ) {
+        let mut child = std::process::Command::new(std::env::current_exe().expect("this binary"))
+            .args([
+                "--exact",
+                "server::tests::another_process_is_refused_while_the_holder_lives_and_admitted_once_it_is_killed",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(SERVE_LOCK_HOLDER, root)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("the other process starts");
+        let stdout = child.stdout.take().expect("its output");
+        let (send, lines) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // The harness prints `test <name> ... ` before the test's own
+            // output on the same line, so the marker is found, not prefixed.
+            for line in
+                std::io::BufRead::lines(std::io::BufReader::new(stdout)).map_while(Result::ok)
+            {
+                if let Some(at) = line.find("SERVE-LOCK-")
+                    && send.send(line[at..].to_owned()).is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let first = lines
+            .recv_timeout(std::time::Duration::from_mins(1))
+            .expect("the other process says whether it holds the store");
+        (child, first, lines)
+    }
+
+    /// **Two PROCESSES over one store: the second is refused naming the
+    /// first, a holder killed while holding frees the store, and a holder that
+    /// exits frees it too.** The adversarial matrix of D-2779.
+    ///
+    /// Every other serve-lock test stands a second open file description in
+    /// for the other process. This one runs the other process: a child of this
+    /// test binary that takes the lock through `take_serve_lock` itself, so
+    /// its registry is its own and only the file lock stands between the two.
+    #[test]
+    fn another_process_is_refused_while_the_holder_lives_and_admitted_once_it_is_killed() {
+        if let Some(root) = std::env::var_os(SERVE_LOCK_HOLDER) {
+            hold_serve_lock_in_this_child(Path::new(&root));
+            return;
+        }
+        let root = crate::scratch::path("serve-lock-processes");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let key = std::fs::canonicalize(&root).expect("canonical root");
+        let addr: std::net::SocketAddr = "127.0.0.1:9999".parse().expect("an address");
+        let mine = format!("addr={addr} pid={}\n", std::process::id());
+
+        // THE OTHER PROCESS HOLDS: this one is refused, by name, and keeps no key.
+        let (mut other, held, _) = serve_lock_child(&root);
+        let other_pid = other.id();
+        assert_eq!(held, format!("SERVE-LOCK-HELD pid={other_pid}"));
+        let refused = take_serve_lock(&root, addr).expect_err("another process serves it");
+        assert!(refused.contains("already serving this store"), "{refused}");
+        assert!(
+            refused.contains(&format!("pid={other_pid}")),
+            "the refusal names the process that holds it: {refused}"
+        );
+        assert_eq!(serve_lock_holders(&key), 0, "a refused take keeps no key");
+
+        // KILLED WHILE HOLDING: no unlock ran, and the store is free anyway.
+        other.kill().expect("SIGKILL the holder");
+        let _ = other.wait();
+        assert_eq!(
+            std::fs::read_to_string(key.join(SERVE_LOCK)).expect("the dead holder's stamp"),
+            format!("addr={addr} pid={other_pid}\n"),
+            "the killed holder's stamp is still in the file"
+        );
+        let taken = take_serve_lock(&root, addr).expect("a killed holder leaves nothing held");
+        assert_eq!(
+            std::fs::read_to_string(key.join(SERVE_LOCK)).expect("this stamp"),
+            mine,
+            "the dead holder's stale stamp is replaced, never quoted again"
+        );
+
+        // THIS PROCESS HOLDS: the other is refused, naming this one.
+        let (mut other, refused, _) = serve_lock_child(&root);
+        assert!(
+            refused.starts_with("SERVE-LOCK-REFUSED")
+                && refused.contains("already serving this store")
+                && refused.contains(&format!("pid={}", std::process::id())),
+            "{refused}"
+        );
+        assert!(other.wait().expect("the refused process exits").success());
+
+        // RELEASED BY THE LAST HOLDER HERE, the other process may serve; once
+        // it exits on its own, this one may serve again.
+        drop(taken);
+        let (mut other, held, lines) = serve_lock_child(&root);
+        assert_eq!(held, format!("SERVE-LOCK-HELD pid={}", other.id()));
+        assert!(
+            !another_process_could_serve(&key),
+            "the other process holds it"
+        );
+        drop(other.stdin.take());
+        assert_eq!(
+            lines
+                .recv_timeout(std::time::Duration::from_mins(1))
+                .expect("the other process releases"),
+            "SERVE-LOCK-RELEASED"
+        );
+        assert!(other.wait().expect("the holder exits").success());
+        let again = take_serve_lock(&root, addr).expect("free once the other process released");
+        assert_eq!(serve_lock_holders(&key), 1);
+        drop(again);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **Many serves of one store racing in one process share one file lock,
+    /// and only the last release frees it, whatever order they release in.**
+    /// D-2779.
+    ///
+    /// Sixteen threads take at once, so a take meets a take in progress; then
+    /// the holders are dropped in an interleaved order (odd first, then even
+    /// from the back), and the file must stay locked until the very last.
+    #[test]
+    fn racing_serves_in_one_process_share_one_lock_and_any_release_order_frees_it_last() {
+        const SERVES: usize = 16;
+        let root = crate::scratch::path("serve-lock-race");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let key = std::fs::canonicalize(&root).expect("canonical root");
+        let addr: std::net::SocketAddr = "127.0.0.1:9999".parse().expect("an address");
+        let start = std::sync::Arc::new(std::sync::Barrier::new(SERVES));
+        let takers: Vec<_> = (0..SERVES)
+            .map(|_| {
+                let (root, start) = (root.clone(), std::sync::Arc::clone(&start));
+                std::thread::spawn(move || {
+                    start.wait();
+                    take_serve_lock(&root, addr)
+                })
+            })
+            .collect();
+        let mut held: Vec<Option<ServeLock>> = takers
+            .into_iter()
+            .map(|taker| Some(taker.join().expect("a taker").expect("every serve joins")))
+            .collect();
+        assert_eq!(serve_lock_holders(&key), SERVES);
+        assert!(!another_process_could_serve(&key));
+        let order: Vec<usize> = (0..SERVES)
+            .filter(|at| at % 2 == 1)
+            .chain((0..SERVES).rev().filter(|at| at % 2 == 0))
+            .collect();
+        for (released, &at) in order.iter().enumerate() {
+            drop(held.get_mut(at).and_then(Option::take));
+            let left = SERVES - released - 1;
+            assert_eq!(serve_lock_holders(&key), left);
+            assert_eq!(
+                another_process_could_serve(&key),
+                left == 0,
+                "{left} holder(s) left: the file is free exactly when none is"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A serve lock the host will not open is refused by name, registers
+    /// nothing, and does not wedge the store once the permission is back.**
+    /// D-2779. Run where the mode bits bind (D-0995).
+    #[test]
+    #[cfg(unix)]
+    fn a_serve_lock_the_host_will_not_open_is_refused_and_registers_nothing() {
+        crate::isolated::where_permission_binds(
+            "server::tests::a_serve_lock_the_host_will_not_open_is_refused_and_registers_nothing",
+            a_serve_lock_the_host_will_not_open_is_refused_and_registers_nothing_body,
+        );
+    }
+
+    /// The test above, run where the mode bits bind.
+    #[cfg(unix)]
+    fn a_serve_lock_the_host_will_not_open_is_refused_and_registers_nothing_body() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = crate::scratch::path("serve-lock-permission");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let key = std::fs::canonicalize(&root).expect("canonical root");
+        let addr: std::net::SocketAddr = "127.0.0.1:9999".parse().expect("an address");
+        let mode = |path: &Path, bits: u32| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(bits)).expect("chmod");
+        };
+
+        // NO LOCK FILE, AND A ROOT THAT CANNOT GAIN ONE.
+        mode(&root, 0o555);
+        let why = take_serve_lock(&root, addr);
+        mode(&root, 0o755);
+        let why = why.expect_err("a lock file that cannot be created refuses");
+        assert!(why.contains("could not be opened"), "{why}");
+        assert!(why.contains("ermission denied"), "the host's words: {why}");
+        assert_eq!(serve_lock_holders(&key), 0, "nothing registered");
+
+        // A LOCK FILE THAT EXISTS AND CANNOT BE OPENED.
+        std::fs::write(key.join(SERVE_LOCK), b"addr=127.0.0.1:1 pid=1\n").expect("lock file");
+        mode(&key.join(SERVE_LOCK), 0o000);
+        let why = take_serve_lock(&root, addr);
+        mode(&key.join(SERVE_LOCK), 0o644);
+        let why = why.expect_err("an unopenable lock file refuses");
+        assert!(why.contains("could not be opened"), "{why}");
+        assert!(
+            !why.contains("already serving"),
+            "no instance is implied: {why}"
+        );
+        assert_eq!(serve_lock_holders(&key), 0, "nothing registered");
+
+        // THE PERMISSION BACK, the store is served at once.
+        let taken = take_serve_lock(&root, addr).expect("served once the host allows it");
+        assert_eq!(serve_lock_holders(&key), 1);
+        drop(taken);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **What a serve lock costs, measured.** D-2779.
+    ///
+    /// A fresh take (canonicalize, open, `flock`, stamp, register) followed by
+    /// the last release (unregister, unlock), and a join of a held root
+    /// followed by its release, each timed over 2,000 rounds and reported as
+    /// p50, p99 and max in microseconds. The numbers are for the record in
+    /// `docs/06-limits.md`, not a bound this test enforces: the take runs once
+    /// per `serve`, never per request. Each round's state is still asserted.
+    #[test]
+    fn the_serve_lock_take_and_release_are_measured() {
+        const ROUNDS: usize = 2_000;
+        let root = crate::scratch::path("serve-lock-cost");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let key = std::fs::canonicalize(&root).expect("canonical root");
+        let addr: std::net::SocketAddr = "127.0.0.1:9999".parse().expect("an address");
+        let percentiles = |mut micros: Vec<u128>| {
+            micros.sort_unstable();
+            let at = |share: usize| micros[(micros.len() - 1) * share / 100];
+            (at(50), at(99), micros[micros.len() - 1])
+        };
+        let (mut fresh, mut joined) = (Vec::with_capacity(ROUNDS), Vec::with_capacity(ROUNDS));
+        for _ in 0..ROUNDS {
+            let began = std::time::Instant::now();
+            let lock = take_serve_lock(&root, addr).expect("a free store");
+            drop(lock);
+            fresh.push(began.elapsed().as_micros());
+            assert_eq!(serve_lock_holders(&key), 0);
+        }
+        let holder = take_serve_lock(&root, addr).expect("a free store");
+        for _ in 0..ROUNDS {
+            let began = std::time::Instant::now();
+            let lock = take_serve_lock(&root, addr).expect("joins");
+            drop(lock);
+            joined.push(began.elapsed().as_micros());
+            assert_eq!(serve_lock_holders(&key), 1);
+        }
+        drop(holder);
+        assert!(another_process_could_serve(&key));
+        let (fresh, joined) = (percentiles(fresh), percentiles(joined));
+        println!(
+            "serve lock, {ROUNDS} rounds, microseconds p50/p99/max: fresh take+last release {}/{}/{}, join+release {}/{}/{}",
+            fresh.0, fresh.1, fresh.2, joined.0, joined.1, joined.2
+        );
+        assert!(fresh.0 <= fresh.1 && fresh.1 <= fresh.2);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -23176,8 +23987,9 @@ mod tests {
         // a regular lock file at the name, the same store is taken at once.
         std::fs::remove_file(&lock_path).expect("unlink");
         let taken = take_serve_lock(&root, addr).expect("the store is free again");
-        assert!(
-            taken.held.is_some(),
+        assert_eq!(
+            serve_lock_holders(&taken.root),
+            1,
             "a real file lock, not the in-process pass"
         );
         drop(taken);
@@ -24475,6 +25287,116 @@ mod tests {
             .expect("a graceful shutdown is not a failure");
     }
 
+    /// CE-100 / D-2752: a spelling variant of a server route is a 404 naming
+    /// the route, never the `200` front-end shell -- a monitor pointed at
+    /// `/health/` used to read "healthy" for ever, whatever `/health` said.
+    /// CE-99: an unrouted POST is a 404 naming the path, not a 405.
+    #[tokio::test]
+    async fn a_variant_of_a_server_route_is_refused_rather_than_served_the_shell() {
+        with_server("route-variant", |addr| async move {
+            for path in ["/health/", "//health", "/Health", "/store/", "/pull//"] {
+                let got = get(addr, path).await;
+                assert!(got.contains("404"), "{path}: {got}");
+                assert!(
+                    !got.contains("<title>shell</title>"),
+                    "{path} must not answer with the front end: {got}"
+                );
+                assert!(got.contains("server routes match exactly"), "{path}: {got}");
+            }
+            let health = get(addr, "/health").await;
+            assert!(
+                !health.contains("<title>shell</title>"),
+                "the route itself still answers: {health}"
+            );
+            let db = get(addr, "/db/").await;
+            assert!(
+                db.contains("200 OK"),
+                "a client route keeps the shell: {db}"
+            );
+            let posted = post(addr, "/pull/spot/", "vendor=dhan").await;
+            assert!(posted.contains("404"), "{posted}");
+            assert!(
+                posted.contains("no route answers POST /pull/spot/"),
+                "a wrong path is named as one: {posted}"
+            );
+        })
+        .await;
+    }
+
+    /// The variant list is [`route_table`]'s own extensionless routes, read
+    /// from its source, so a route added there without a row here fails.
+    #[test]
+    fn route_variants_cover_every_extensionless_route() {
+        let source = include_str!("server.rs");
+        let start = source
+            .find("fn route_table(")
+            .expect("route_table is in this file");
+        let end = start
+            + source[start..]
+                .find("\n}\n")
+                .expect("route_table has an end");
+        let body = &source[start..end];
+        let mut registered = Vec::new();
+        let mut rest = body;
+        while let Some(at) = rest.find(".route(") {
+            rest = &rest[at + ".route(".len()..];
+            let open = rest.find('"').expect("a route names a path");
+            let tail = &rest[open + 1..];
+            let close = tail.find('"').expect("a path is closed");
+            let path = &tail[..close];
+            if !path.contains('.') {
+                registered.push(path);
+            }
+        }
+        // `/backtest` is named only in a comment: the front end owns it.
+        registered.retain(|path| *path != "/backtest");
+        assert_eq!(registered, EXTENSIONLESS_ROUTES, "route_table drifted");
+        assert_eq!(route_variant("/health"), None, "the route itself is routed");
+        assert_eq!(route_variant("/health/"), Some("/health"));
+        assert_eq!(route_variant("/HEALTH"), Some("/health"));
+        assert_eq!(
+            route_variant("/db/"),
+            None,
+            "a client route is not a variant"
+        );
+    }
+
+    /// CE-101 / D-2753: a malformed chunked body is a `400` naming a body
+    /// that could not be read, never the `413` "larger than N bytes" it used to
+    /// share with a body that really was too large.
+    #[tokio::test]
+    async fn a_malformed_chunked_body_is_refused_as_unreadable_not_too_large() {
+        with_server("torn-chunk", |addr| async move {
+            let host = format!("localhost:{}", addr.port());
+            let request = format!(
+                "POST /autopilot/control HTTP/1.1\r\nHost: {host}\r\n\
+                 Origin: http://{host}\r\nSec-Fetch-Site: same-origin\r\n\
+                 Content-Type: application/x-www-form-urlencoded\r\n\
+                 Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n\
+                 zz\r\nx\r\n0\r\n\r\n"
+            );
+            let got = tokio::task::spawn_blocking(move || {
+                use std::io::{Read as _, Write as _};
+                let mut s = std::net::TcpStream::connect(addr).expect("connect");
+                s.write_all(request.as_bytes()).expect("write");
+                let mut buf = String::new();
+                let _ = s.read_to_string(&mut buf);
+                buf
+            })
+            .await
+            .expect("the client thread must not panic");
+            assert!(got.contains("400"), "{got}");
+            assert!(!got.contains("413"), "not a size refusal: {got}");
+            assert!(got.contains("could not be read"), "{got}");
+        })
+        .await;
+        // And the bound still answers as one.
+        let big = axum::body::Body::from(vec![b'a'; 9]);
+        assert_eq!(read_within(big, 8).await, Err(BodyUnread::TooLarge));
+        let fits = axum::body::Body::from(vec![b'a'; 8]);
+        assert_eq!(read_within(fits, 8).await.map(|b| b.len()), Ok(8));
+    }
+
     /// **A WRITE FROM ANOTHER ORIGIN IS REFUSED, OVER A REAL SOCKET.**
     ///
     /// The unit test below proves what [`cross_origin_refusal`] decides. This
@@ -25125,9 +26047,10 @@ mod tests {
             // one feed, and D-0120 put that on the receipt beside it.
             assert!(
                 swept.contains(
-                    "<th>This feed can name</th><td>2 — every name this target holds, by Dhan id</td>"
+                    "<th>This feed can name</th><td>2 of 210 — 208 cannot be named by Dhan"
                 ),
-                "the receipt says what THIS feed reaches, not what the universe holds: {swept}"
+                "the receipt says what THIS feed reaches, not what the universe holds; since \
+                 D-2759 the swept surface is counted against its 210-name roster: {swept}"
             );
         })
         .await;
@@ -26319,7 +27242,7 @@ mod tests {
             "swept",
             "Swept surface",
             2,
-            "2 — every name this target holds, by Dhan id",
+            "2 of 210 — 208 cannot be named by Dhan",
         ),
         (
             "indices",
@@ -30744,8 +31667,22 @@ mod tests {
         // fraction of, and "2 of 2" invites the reader to look for the zero.
         // Two since D-0506: the fixture's RELIANCE is an F&O underlying and
         // is swept beside the index.
+        // SINCE D-2759 the swept surface is counted against its own 210-name
+        // roster, so a fixture that lists two of them reaches two of 210.
         let whole = reach_text(ingest::SpotTarget::Swept, pull::vendor::Feed::Groww, &built);
-        assert_eq!(whole, "2 — every name this target holds, by Groww id");
+        assert!(
+            whole.starts_with("2 of 210 — 208 cannot be named by Groww: "),
+            "{whole}"
+        );
+        let whole = reach_text(
+            ingest::SpotTarget::Indices,
+            pull::vendor::Feed::Groww,
+            &built,
+        );
+        assert!(
+            whole.ends_with("— every name this target holds, by Groww id"),
+            "{whole}"
+        );
 
         // SHORT: both numbers, the first names, the remainder, and the route
         // that carries the rest.
@@ -33295,6 +34232,46 @@ mod tests {
         );
     }
 
+    /// CE-98 / D-2751: a log append the sink DROPPED (full or erroring log
+    /// volume) is an environmental outcome, not an invariant. The member's
+    /// failure is still recorded, and its sentence names the dropped line,
+    /// rather than a dev-profile `debug_assert!` panicking the pull first.
+    #[tokio::test]
+    async fn a_dropped_failure_log_line_still_records_the_failure_and_says_so() {
+        let empty = masters("dropped-note", None, None);
+        let site = Site::serving(&empty, &store_root("dropped-note"));
+        settle_member_failure(
+            telemetry::Emitted::Dropped,
+            &pull::ingest::Failure {
+                instrument: "DROPPEDLOG".to_owned(),
+                why: "the store refused the month".to_owned(),
+            },
+            "2026-08",
+            &site,
+        );
+        let status = site.autopilot.json();
+        assert!(
+            status.contains("DROPPEDLOG")
+                && status.contains("the store refused the month")
+                && status.contains("could not be written"),
+            "the failure is recorded and names the dropped log line: {status}"
+        );
+        settle_member_failure(
+            telemetry::Emitted::Written,
+            &pull::ingest::Failure {
+                instrument: "WRITTENLOG".to_owned(),
+                why: "a plain refusal".to_owned(),
+            },
+            "2026-08",
+            &site,
+        );
+        let status = site.autopilot.json();
+        assert!(
+            status.contains("a plain refusal\""),
+            "a written line adds nothing to the sentence: {status}"
+        );
+    }
+
     /// **THE SITE INSIDE `broker_run`'S LOOP, DRIVEN OVER A REAL UNIVERSE.**
     ///
     /// `pull.spot instrument refused` is the last of the three
@@ -33367,7 +34344,7 @@ mod tests {
             // undeclared on this feed, pinned by
             // `vendor::a_feed_serves_only_the_rungs_its_row_declares`, so the
             // SUBJECT is unchanged and only the rung exhibiting it moved.
-            "target=swept&from=2026-08-03&to=2026-08-05&granularity=5min",
+            "target=swept&member=NIFTY&from=2026-08-03&to=2026-08-05&granularity=5min",
             day(2026, 8, 10),
         )
         .expect("a real target and a window in the past");
@@ -33475,7 +34452,10 @@ mod tests {
             "the premise: no instrument, so nothing is asked of any vendor"
         );
         let asked = ingest::parse_spot(
-            "target=swept&from=2026-08-03&to=2026-08-05",
+            // `indices`, not `swept`: since D-2759 a whole swept pull over a
+            // universe that lists none of its 210 names refuses them by name
+            // before the loop, and this test is about the loop's events.
+            "target=indices&from=2026-08-03&to=2026-08-05",
             day(2026, 8, 10),
         )
         .expect("a real target and a window in the past");
@@ -33542,8 +34522,9 @@ mod tests {
 
         // A MEMBER THAT REACHED THE VENDOR AND DIED AT THE STORE. Driven
         // directly because the only other way in is through a live socket, and
-        // it is the one site in this file whose `debug_assert` already demands
-        // `is_written` — which, with no sink installed, was vacuous.
+        // it was once the one site in this file whose `debug_assert` demanded
+        // `is_written`; that assertion is gone (D-2751), and this test reads
+        // the line back instead.
         let from = crate::emitted::mark();
         note_member_failure(
             &pull::ingest::Failure {

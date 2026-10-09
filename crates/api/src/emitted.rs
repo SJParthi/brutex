@@ -79,11 +79,21 @@ use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
 /// record written afterwards would go somewhere no reader can find.
 pub(crate) fn sink() -> &'static telemetry::Sink {
     static PREPARED: std::sync::Once = std::sync::Once::new();
+    // ONE INSTALL AT A TIME. Two tests calling this at once both passed
+    // `install`'s emptiness check; the second's `Sink::open` of the same file
+    // was refused while the first had not yet published its sink, so
+    // `global()` was still empty and the `expect` below fired. Seen when
+    // `server::shutdown_tests` joined the `emitted` tests as a reader of this
+    // sink (D-2771).
+    static INSTALLING: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let dir = crate::scratch::path("telemetry");
     PREPARED.call_once(|| {
         let _ignored = std::fs::remove_dir_all(&dir);
     });
     let config = telemetry::Config::new(&dir).with_min_level(telemetry::Level::Trace);
+    let _one = INSTALLING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let installed = match telemetry::install(&config) {
         Ok(installed) => installed,
         Err(_refused) => telemetry::global()
@@ -815,10 +825,12 @@ fn cases() -> Vec<Case> {
             );
             progress.finished_micros = Some(2);
             progress.refusal = Some("no result was recorded".into());
-            crate::sweeprun::emit_completion(&progress, "sweep", 1);
+            crate::sweeprun::emit_completion(&progress, "sweep", std::time::Instant::now());
         }),
         mine: Box::new(|record| {
-            says(record, "operation", "sweep")
+            // CE-86 / D-2754: the duration is monotonic and says so.
+            says(record, "elapsed_basis", "monotonic")
+                && says(record, "operation", "sweep")
                 && says(record, "outcome", "refused")
                 && says(record, "why", "no result was recorded")
         }),
@@ -1631,7 +1643,12 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // 20 -> 21 at D-1920 (P1-17-02): `api.serve the serve lock is held but
     // could not be stamped`, driven through `note_unstamped_lock` and read back
     // by `server::tests::a_serve_lock_stamp_that_fails_is_cleared_or_refused_never_left_stale`.
-    const REACHED_IN_SERVER_TESTS: usize = 21;
+    // 20 -> 21 at D-2771: `api.serve shutdown drain ended with requests
+    // still in flight`, driven and read back by `server::shutdown_tests::
+    // a_request_still_running_after_the_signal_does_not_hold_the_server_open`.
+    // 21 -> 22 when both met in the PR #74 merge (D-2779): the two lines above
+    // were each written as 20 -> 21 on their own side, and both sites are driven.
+    const REACHED_IN_SERVER_TESTS: usize = 22;
     // Both production recovery boundaries are emitted and read back through
     // this installed sink by recovery::tests::
     // recovery_boundary_events_are_read_back_from_the_installed_sink.
@@ -1755,9 +1772,15 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     //
     // 63 -> 65 at D-1582 and D-1583, merged in: the two unreachable sites
     // named above.
+    //
+    // 63 -> 64 at D-2771: the bounded shutdown drain's WARN, driven in
+    // `server::shutdown_tests`.
+    //
+    // 65 -> 66 when both met in the PR #74 merge (D-2779): D-2771 counted its
+    // WARN as 63 -> 64 on a side without D-1765's two sites.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 65,
+        lib_sites, 66,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"

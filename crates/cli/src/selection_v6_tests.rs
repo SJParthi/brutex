@@ -126,9 +126,9 @@ fn incomplete_prefix_is_never_authority_and_a_foreign_one_is_set_aside() {
     assert!(persist(&scratch.0, bounds(1), &expected).expect("foreign tail set aside"));
     assert_eq!(std::fs::read(path).expect("completed bytes"), expected);
     assert_eq!(
-        std::fs::read(scratch.0.join(format!("{FILE_NAME}.abandoned-0")))
-            .expect("preserved foreign prefix"),
-        &foreign[..4096]
+        quarantined(&scratch.0, 0),
+        vec![foreign[..4096].to_vec()],
+        "preserved foreign prefix"
     );
 }
 
@@ -306,12 +306,10 @@ fn an_abandoned_partial_tail_neither_hides_committed_history_nor_wedges_a_new_so
         std::fs::read(&path).expect("repaired history"),
         [first.as_slice(), second.as_slice()].concat()
     );
-    let quarantine = scratch
-        .0
-        .join(format!("{FILE_NAME}.abandoned-{SELECTION_V6_BLOCK_BYTES}"));
     assert_eq!(
-        std::fs::read(&quarantine).expect("abandoned bytes kept aside"),
-        &foreign[..4096]
+        quarantined(&scratch.0, SELECTION_V6_BLOCK_BYTES),
+        vec![foreign[..4096].to_vec()],
+        "abandoned bytes kept aside"
     );
     require_committed(&scratch.0, bounds(3), &first).expect("first retained");
     require_committed(&scratch.0, bounds(3), &second).expect("second committed");
@@ -337,7 +335,9 @@ fn an_abandoned_tail_quarantine_that_is_not_a_regular_file_is_refused_and_never_
     let scratch = Scratch::new();
     let path = scratch.0.join(FILE_NAME);
     std::fs::write(&path, &frame(8)[..4096]).expect("foreign prefix");
-    let quarantine = scratch.0.join(format!("{FILE_NAME}.abandoned-0"));
+    // The name the repair will reach for: offset 0 and this tail's digest
+    // (D-2790), so the FIFO sits exactly where the comparison reads.
+    let quarantine = quarantine_path(&scratch.0, 0, &frame(8)[..4096]);
     assert!(
         std::process::Command::new("mkfifo")
             .arg(&quarantine)
@@ -366,6 +366,58 @@ fn an_abandoned_tail_quarantine_that_is_not_a_regular_file_is_refused_and_never_
         4096,
         "the ledger is not cut"
     );
+}
+
+/// Every quarantine set aside at `offset`, in name order.
+fn quarantined(root: &std::path::Path, offset: usize) -> Vec<Vec<u8>> {
+    let prefix = format!("{FILE_NAME}.abandoned-{offset}-");
+    let mut names: Vec<std::path::PathBuf> = std::fs::read_dir(root)
+        .expect("scratch listing")
+        .map(|entry| entry.expect("entry").path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(&prefix))
+        })
+        .collect();
+    names.sort();
+    names
+        .iter()
+        .map(|path| std::fs::read(path).expect("quarantine"))
+        .collect()
+}
+
+/// **A second interrupted write at the same offset does not wedge the rung.**
+/// CE-88, D-2790. A's persist dies leaving tail tA at offset X; B sets tA
+/// aside, then dies leaving tB at X; C must set tB aside too, rather than
+/// collide with tA's quarantine and refuse every source but B's retry.
+#[test]
+fn two_interrupted_writes_at_one_offset_each_get_their_own_quarantine() {
+    let scratch = Scratch::new();
+    let first = frame(21);
+    let a = frame(22);
+    let b = frame(23);
+    let c = frame(24);
+    assert!(persist(&scratch.0, bounds(3), &first).expect("first write"));
+    let path = scratch.0.join(FILE_NAME);
+    let committed = std::fs::read(&path).expect("committed");
+    std::fs::write(&path, [committed.as_slice(), &a[..4096]].concat()).expect("A dies");
+    // B's persist sets tA aside; B then dies mid-write at the same offset.
+    assert!(persist(&scratch.0, bounds(3), &b).expect("B appends"));
+    std::fs::write(&path, [committed.as_slice(), &b[..100]].concat()).expect("B dies");
+    assert!(
+        persist(&scratch.0, bounds(3), &c).expect("C is not wedged by tA's quarantine"),
+        "C appends"
+    );
+    assert_eq!(
+        std::fs::read(&path).expect("history"),
+        [first.as_slice(), c.as_slice()].concat()
+    );
+    let mut held = quarantined(&scratch.0, SELECTION_V6_BLOCK_BYTES);
+    held.sort();
+    let mut want = vec![a[..4096].to_vec(), b[..100].to_vec()];
+    want.sort();
+    assert_eq!(held, want, "both tails kept, neither lost");
 }
 
 /// Reseal a block after a deliberate edit, as a forger with the format would.

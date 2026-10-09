@@ -807,15 +807,44 @@ impl Assets {
     /// a 404 only for a path that does not look like an asset.
     #[must_use]
     pub fn respond(&self, method: &axum::http::Method, raw_path: &str) -> Response {
+        // NO ROUTE, NOT A WRONG METHOD. Every unrouted path lands here, so a
+        // POST to `/pull/spot/` or `/backtest/runn` is a wrong PATH, and a
+        // `405` told the caller to change a method that can never succeed --
+        // with no `Allow` header, which RFC 9110 §15.5.6 requires of a 405.
+        // `404` names the path as `not_found` does for a GET. D-2752 (CE-99).
         if method != axum::http::Method::GET && method != axum::http::Method::HEAD {
             return answer(
-                StatusCode::METHOD_NOT_ALLOWED,
+                StatusCode::NOT_FOUND,
                 "text/plain; charset=utf-8",
-                format!("{method} is not a method the front end answers\n").into_bytes(),
+                format!(
+                    "no route answers {method} {raw_path}. The front end \
+                     answers only GET and HEAD; every other method needs a \
+                     server route, spelled exactly.\n"
+                )
+                .into_bytes(),
             );
         }
-        let Some(root) = self.root.as_deref() else {
-            return self.not_built();
+        // NOT BUILT AT STARTUP IS ASKED AGAIN, NOT CACHED. The 503 below tells
+        // the operator to run the build; with the startup answer cached, the
+        // page stayed 503 after that command succeeded, until a restart the
+        // page never mentioned. So the not-built branch resolves the directory
+        // once per request (one `canonicalize`), and the served branch, the
+        // one that found it at startup, costs nothing extra. The banner and
+        // [`Build`] remain the startup observation they say they are.
+        // conc:server2-1, D-2772.
+        let built_since;
+        let root = match self.root.as_deref() {
+            Some(root) => root,
+            None => match std::fs::canonicalize(&self.named)
+                .ok()
+                .filter(|resolved| resolved.is_dir())
+            {
+                Some(resolved) => {
+                    built_since = resolved;
+                    built_since.as_path()
+                }
+                None => return self.not_built(),
+            },
         };
         let segments = match segments(raw_path) {
             Ok(segments) => segments,
@@ -1400,8 +1429,17 @@ mod tests {
         let dir = furnished("method");
         let assets = Assets::new(&dir);
         let (status, _, body) = read(assets.respond(&axum::http::Method::POST, "/db")).await;
-        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
         assert!(body.contains("POST"), "it names the method: {body}");
+        // CE-99 / D-2752: an unrouted POST is a wrong PATH, named as one --
+        // never a 405 without the `Allow` header RFC 9110 requires.
+        let (status, _, body) =
+            read(assets.respond(&axum::http::Method::POST, "/pull/spot/")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert!(
+            body.contains("no route answers POST /pull/spot/"),
+            "it names the method and the path: {body}"
+        );
         let (status, _, _) = read(assets.respond(&axum::http::Method::HEAD, "/")).await;
         assert_eq!(status, StatusCode::OK, "HEAD is a GET without a body");
     }
@@ -1491,6 +1529,42 @@ mod tests {
         assert!(!assets.built(), "a file named `build` is not a build");
         let (status, _, _) = get(&assets, "/").await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// **A build made after startup is served without a restart.**
+    /// conc:server2-1, D-2772.
+    ///
+    /// The 503 names the command that produces the build. The not-built
+    /// answer was cached at startup, so after that command succeeded every
+    /// page still answered the same 503 until the process restarted.
+    #[tokio::test]
+    async fn a_build_made_after_startup_is_served_without_a_restart() {
+        let dir = crate::scratch::path("assets-built-after-startup");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let assets = Assets::new(&dir);
+        assert!(!assets.built(), "the premise: nothing at startup");
+        let (status, _, body) = get(&assets, "/").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+
+        put(&dir, INDEX, "<!doctype html><title>built later</title>");
+        put(
+            &dir,
+            "_app/immutable/entry/app.js",
+            "export const later = 1;",
+        );
+        let (status, _, body) = get(&assets, "/").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.contains("built later"), "{body}");
+        let (status, _, body) = get(&assets, "/_app/immutable/entry/app.js").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, _, _) = get(&assets, "/../secret.txt").await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "a root resolved late keeps every refusal"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **`built()` was true for any directory that exists, and the banner said

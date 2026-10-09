@@ -279,7 +279,7 @@ where
         .map_err(|why| why.to_string())?;
     let mut missing = Vec::new();
     for day in days {
-        let lock = lock_day(root, day)?;
+        let lock = lock_day_shared(root, day)?;
         match read_entry(root, day)? {
             Some(bytes) => {
                 result.insert(day.days_from_epoch(), decode(&bytes)?);
@@ -323,7 +323,7 @@ where
         .map_err(|why| why.to_string())?;
     let mut missing = Vec::new();
     for day in days {
-        let lock = lock_day(root, day)?;
+        let lock = lock_day_shared(root, day)?;
         match read_entry(root, day)? {
             Some(bytes) => {
                 pending.insert(day.days_from_epoch(), decode(&bytes)?);
@@ -388,6 +388,31 @@ fn lock_path(root: &Path, day: Day) -> PathBuf {
 }
 
 fn lock_day(root: &Path, day: Day) -> Result<Flock<File>, String> {
+    let (file, path) = open_day_lock(root, day)?;
+    Flock::try_lock(file, path.clone()).map_err(|why| {
+        format!(
+            "cash-session cache lock {} unavailable: {why}",
+            path.display()
+        )
+    })
+}
+
+/// The lock a READ of one day's entry takes: shared, so two ingests that only
+/// read the same cached day do not refuse each other, while an installer's
+/// exclusive [`lock_day`] still excludes every reader. The read loops took the
+/// exclusive lock, and a second pull over an overlapping window was refused
+/// "unavailable" for a day neither of them was writing. conc:pull2-4, D-2799.
+fn lock_day_shared(root: &Path, day: Day) -> Result<Flock<File>, String> {
+    let (file, path) = open_day_lock(root, day)?;
+    Flock::try_lock_shared(file, path.clone()).map_err(|why| {
+        format!(
+            "cash-session cache lock {} unavailable: {why}",
+            path.display()
+        )
+    })
+}
+
+fn open_day_lock(root: &Path, day: Day) -> Result<(File, PathBuf), String> {
     fs::create_dir_all(root)
         .map_err(|why| format!("cannot create cash-session cache {}: {why}", root.display()))?;
     let path = lock_path(root, day);
@@ -399,12 +424,7 @@ fn lock_day(root: &Path, day: Day) -> Result<Flock<File>, String> {
         .truncate(false)
         .open(&path)
         .map_err(|why| format!("cannot open cache lock {}: {why}", path.display()))?;
-    Flock::try_lock(file, path.clone()).map_err(|why| {
-        format!(
-            "cash-session cache lock {} unavailable: {why}",
-            path.display()
-        )
-    })
+    Ok((file, path))
 }
 
 fn regular_file(path: &Path) -> Result<bool, String> {
@@ -1022,6 +1042,41 @@ mod tests {
             "2026-09-04: {count} exact cash identities, {partial} Partial and {unavailable} Unavailable lifecycle snapshots; no historical exemption inferred"
         );
         Ok(())
+    }
+
+    /// **Two reads of one cached day do not refuse each other; an installer
+    /// still excludes them.** conc:pull2-4, D-2799.
+    #[tokio::test]
+    async fn concurrent_reads_of_a_cached_day_share_its_lock_and_a_writer_excludes_them() {
+        let temp = Temp::new();
+        seed(&temp, 3);
+        let other_reader = lock_day_shared(&temp.0, day(3)).expect("another ingest reading day 3");
+        let read = prepare_with(&temp.0, window(3, 3), |_| async {
+            Err("network must not be used".to_owned())
+        })
+        .await
+        .expect("a second reader is not refused");
+        assert_eq!(read.len(), 1);
+        let mut cache = HashMap::new();
+        prepare_observed_with(&temp.0, &[day(3)], &mut cache, |_| async {
+            Err("network must not be used".to_owned())
+        })
+        .await
+        .expect("nor is an observed-day reader");
+        assert_eq!(cache.len(), 1);
+        assert!(
+            lock_day(&temp.0, day(3)).is_err(),
+            "an installer cannot take the day while it is read"
+        );
+        other_reader.release().expect("the other reader lets go");
+        let writer = lock_day(&temp.0, day(3)).expect("an installer");
+        let refused = prepare_with(&temp.0, window(3, 3), |_| async {
+            Err("network must not be used".to_owned())
+        })
+        .await
+        .expect_err("a reader waits for nobody and is refused by a writer");
+        assert!(refused.contains("unavailable"), "{refused}");
+        writer.release().expect("the installer lets go");
     }
 
     #[tokio::test]

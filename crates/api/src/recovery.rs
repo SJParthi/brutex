@@ -840,6 +840,29 @@ fn seeded(site: &Site, id: [u8; 32], units: Option<Vec<Record>>) -> Result<Journ
     Ok(journal)
 }
 
+/// What a finished recovery worker answers, given the run's own answer and
+/// whether its terminal control record was written.
+///
+/// The control append's `?` used to return ITS error and drop the run's, so a
+/// plan that blocked on, say, a refused vendor window was reported as only
+/// "No space left on device", and the operator acted on the wrong cause. Both
+/// are kept now: the run's reason first, the record's failure after it. A run
+/// that succeeded but could not record its end is a failure, because the next
+/// process will not see it as finished. conc:recovery-6, D-2798.
+fn terminal_outcome(
+    answer: Result<String, String>,
+    sealed: Result<(), String>,
+) -> Result<String, String> {
+    match (answer, sealed) {
+        (Ok(done), Ok(())) => Ok(done),
+        (Ok(_), Err(record)) => Err(format!(
+            "the recovery finished, but its end could not be recorded: {record}"
+        )),
+        (Err(why), Ok(())) => Err(why),
+        (Err(why), Err(record)) => Err(format!("{why}; recording that end also failed: {record}")),
+    }
+}
+
 async fn drive(site: Loaded, id: [u8; 32], prepared: Result<Journal, String>, explicit: bool) {
     // A caught unwind is not a clean finish; durable InFlight reservations are
     // intentionally left for the next process, still charged to their budget.
@@ -852,18 +875,20 @@ async fn drive(site: Loaded, id: [u8; 32], prepared: Result<Journal, String>, ex
             .and_then(|file| file.sync_all())
             .map_err(failure)?;
         let answer = execute(&worker_site, &mut journal, &mut attempts, explicit).await;
-        let mut control = journal
+        let sealed = journal
             .latest
             .get(&CONTROL)
             .cloned()
-            .ok_or("missing plan seal")?;
-        control.status = if answer.is_ok() {
-            Status::Verified
-        } else {
-            Status::Blocked
-        };
-        journal.append(control).map_err(failure)?;
-        answer
+            .ok_or_else(|| "missing plan seal".to_owned())
+            .and_then(|mut control| {
+                control.status = if answer.is_ok() {
+                    Status::Verified
+                } else {
+                    Status::Blocked
+                };
+                journal.append(control).map_err(failure)
+            });
+        terminal_outcome(answer, sealed)
     });
     let result = worker.await.map_err(failure).and_then(|result| result);
     let text = result.unwrap_or_else(|why| format!("Recovery BLOCKED: {why}. Existing source data is preserved; this is not complete coverage."));
@@ -971,6 +996,7 @@ async fn execute(
         // Reconcile each exact window on explicit resume; do not trust an old
         // green checkpoint after independent store changes. Child budgets stay.
         let assessment = assess(site, &item.body, &lifecycle).await;
+        let mut refused = None;
         match assessment {
             Ok(mut found) => {
                 for day in &found.retry_days {
@@ -988,19 +1014,15 @@ async fn execute(
                 item.status = Status::Blocked;
                 item.diagnostics = 1;
                 note(&item.body, &why);
-                let asked = checked(&item.body, ingest::today_ist().map_err(failure)?)?;
-                site.journal()
-                    .append(&crate::audit::Record::member_failure(
-                        crate::audit::Scope::Spot,
-                        std::time::SystemTime::now(),
-                        symbol(&asked)?,
-                        asked.window,
-                        &why,
-                    ))
-                    .map_err(failure)?;
+                refused = Some(why);
             }
         }
-        journal.append(item).map_err(failure)?;
+        if let Some(why) = refused {
+            let body = item.body.clone();
+            record_blocked(journal, item, || audit_receipt(site, &body, &why))?;
+        } else {
+            journal.append(item).map_err(failure)?;
+        }
         update(site, |progress| {
             if let Some(feed) = progress.feeds.first_mut() {
                 feed.legs_done = feed.legs_done.saturating_add(1);
@@ -1024,6 +1046,42 @@ async fn execute(
         "Reconciliation finished: {} stored windows verified against measured schedule; {} not applicable; {} unverified; {} missing/blocked. This is NOT complete historical coverage or point-in-time identity proof. Details: /pull/recovery.json and /audit. No source data was replaced.",
         counts.0, counts.1, counts.2, counts.3
     ))
+}
+
+/// The `/audit` receipt for a window the plan could not resolve.
+fn audit_receipt(site: &Loaded, body: &str, why: &str) -> Result<(), String> {
+    let asked = checked(body, ingest::today_ist().map_err(failure)?)?;
+    site.journal()
+        .append(&crate::audit::Record::member_failure(
+            crate::audit::Scope::Spot,
+            std::time::SystemTime::now(),
+            symbol(&asked)?,
+            asked.window,
+            why,
+        ))
+        .map_err(failure)
+}
+
+/// Records a window the plan could not resolve: the plan's own Blocked item
+/// FIRST, then the `/audit` receipt `receipt` writes.
+///
+/// The receipt's `?` ran before the item's append, so an audit journal that
+/// refused the receipt (busy, full) aborted the plan with the window never
+/// marked Blocked in it: the next resume found it still Queued and the
+/// operator's plan said nothing about it. The receipt's failure still ends the
+/// pass, loudly and by name; it no longer erases the plan's record.
+/// conc:recauto-2, D-2798.
+fn record_blocked(
+    journal: &mut Journal,
+    item: Record,
+    receipt: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    journal.append(item).map_err(failure)?;
+    receipt().map_err(|why| {
+        format!(
+            "the window is recorded Blocked in the plan, but its /audit receipt was refused: {why}"
+        )
+    })
 }
 
 fn note(body: &str, why: &str) {
@@ -1081,6 +1139,30 @@ fn stored_scope_key(body: &str) -> Result<String, String> {
     ))
 }
 
+/// The attempts a reconcile pass retries, in the journal's first-appearance
+/// order.
+///
+/// `latest` is a `HashMap`, whose walk order is seeded per process, so walking
+/// it sent the same interrupted requests to the vendor in a different order on
+/// every run and wrote the plan journal's bytes in that order too: two runs
+/// over one store were not byte-identical (`CLAUDE.md` §3 rule 5). `order` is
+/// the journal's own replayed key order, stable across restarts. One `get` per
+/// key. conc:recovery-3, D-2798.
+fn pending_in_order(attempts: &Journal, explicit: bool) -> Vec<Record> {
+    attempts
+        .order
+        .iter()
+        .filter_map(|key| attempts.latest.get(key))
+        .filter(|row| {
+            matches!(
+                row.status,
+                Status::Queued | Status::InFlight | Status::Unverified
+            ) || (explicit && row.status == Status::Blocked)
+        })
+        .cloned()
+        .collect()
+}
+
 /// Reconcile requests interrupted after storage but before their receipt, even
 /// if the parent's gap has disappeared. A lost receipt never invents new-row
 /// counts or marks the old request clean. Explicit reactivation may retry a
@@ -1105,18 +1187,7 @@ async fn reconcile_pending(
             .or_default()
             .push(asked.window);
     }
-    let pending: Vec<_> = attempts
-        .latest
-        .values()
-        .filter(|row| {
-            matches!(
-                row.status,
-                Status::Queued | Status::InFlight | Status::Unverified
-            ) || (explicit && row.status == Status::Blocked)
-        })
-        .cloned()
-        .collect();
-    for mut item in pending {
+    for mut item in pending_in_order(attempts, explicit) {
         if stopping(site) {
             return Err("stopped while reconciling interrupted requests".to_owned());
         }
@@ -2311,6 +2382,141 @@ mod tests {
         );
         assert!(!site.run.lock().unwrap().as_ref().unwrap().running());
         assert!(!root.exists());
+    }
+
+    /// **An unresolved window is recorded Blocked in the plan even when its
+    /// `/audit` receipt is refused.** conc:recauto-2, D-2798.
+    #[test]
+    fn a_refused_audit_receipt_does_not_erase_the_blocked_window() {
+        let root = crate::scratch::path("recovery-blocked-first");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut plan = Journal::open(&root.join("plan.bin")).unwrap();
+        let mut item = record(canonical(
+            "NIFTY",
+            "1min",
+            Window::new(date(2026, 7, 1), date(2026, 7, 1)).unwrap(),
+            "scan",
+        ));
+        item.status = Status::Blocked;
+        let key = item.key;
+        let why = record_blocked(&mut plan, item.clone(), || {
+            Err("audit journal is busy".to_owned())
+        })
+        .unwrap_err();
+        assert!(
+            why.contains("recorded Blocked") && why.ends_with("audit journal is busy"),
+            "{why}"
+        );
+        assert_eq!(
+            plan.latest.get(&key).map(|row| row.status),
+            Some(Status::Blocked)
+        );
+        drop(plan);
+        let reopened = Journal::open(&root.join("plan.bin")).unwrap();
+        assert_eq!(
+            reopened.latest.get(&key).map(|row| row.status),
+            Some(Status::Blocked),
+            "durably, before the receipt was tried"
+        );
+        drop(reopened);
+        let mut plan = Journal::open(&root.join("plan.bin")).unwrap();
+        let mut ran = false;
+        record_blocked(&mut plan, item, || {
+            ran = true;
+            Ok(())
+        })
+        .expect("a written receipt");
+        assert!(ran, "the receipt is still written");
+        drop(plan);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A failed terminal record never replaces the reason a recovery ended.**
+    /// conc:recovery-6, D-2798. All four combinations.
+    #[test]
+    fn a_failed_terminal_record_keeps_the_reason_the_run_ended() {
+        let ok = || Ok::<String, String>("Recovery complete".to_owned());
+        let blocked = || Err::<String, String>("vendor refused a window".to_owned());
+        let full = || Err::<(), String>("No space left on device".to_owned());
+        assert_eq!(terminal_outcome(ok(), Ok(())), ok());
+        assert_eq!(terminal_outcome(blocked(), Ok(())), blocked());
+        let both = terminal_outcome(blocked(), full()).unwrap_err();
+        assert!(
+            both.starts_with("vendor refused a window;")
+                && both.ends_with("No space left on device"),
+            "{both}"
+        );
+        let unrecorded = terminal_outcome(ok(), full()).unwrap_err();
+        assert!(
+            unrecorded.contains("could not be recorded")
+                && unrecorded.ends_with("No space left on device"),
+            "{unrecorded}"
+        );
+    }
+
+    /// **A reconcile pass retries interrupted attempts in the journal's own
+    /// order, every run.** conc:recovery-3, D-2798. Thirty-two keys make a
+    /// `HashMap` walk that matches insertion order vanishingly unlikely, and
+    /// every status is covered: only `Queued`, `InFlight` and `Unverified` are
+    /// retried, `Blocked` only on an explicit reactivation, and a key appended
+    /// twice keeps its first position with its latest state.
+    #[test]
+    fn interrupted_attempts_are_reconciled_in_journal_order() {
+        let root = crate::scratch::path("recovery-pending-order");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut attempts = Journal::open(&root.join("attempts.bin")).unwrap();
+        let statuses = [
+            Status::Queued,
+            Status::InFlight,
+            Status::Unverified,
+            Status::Blocked,
+            Status::Verified,
+            Status::Exhausted,
+        ];
+        let mut written = Vec::new();
+        for day in 1..=32_u32 {
+            let mut row = record(canonical(
+                "NIFTY",
+                "1min",
+                Window::new(date(2026, 7, 1), date(2026, 7, 1)).unwrap(),
+                &format!("gap{day}"),
+            ));
+            row.status = statuses[day as usize % statuses.len()];
+            attempts.append(row.clone()).unwrap();
+            written.push(row);
+        }
+        // The first key again, now Unverified: its place stays first.
+        let mut first = written[0].clone();
+        first.status = Status::Unverified;
+        attempts.append(first.clone()).unwrap();
+        written[0] = first;
+        for explicit in [false, true] {
+            let want: Vec<[u8; 32]> = written
+                .iter()
+                .filter(|row| {
+                    matches!(
+                        row.status,
+                        Status::Queued | Status::InFlight | Status::Unverified
+                    ) || (explicit && row.status == Status::Blocked)
+                })
+                .map(|row| row.key)
+                .collect();
+            let got: Vec<[u8; 32]> = pending_in_order(&attempts, explicit)
+                .iter()
+                .map(|row| row.key)
+                .collect();
+            assert_eq!(got, want, "explicit={explicit}");
+            assert!(!got.is_empty());
+        }
+        assert_eq!(
+            pending_in_order(&attempts, false)[0].status,
+            Status::Unverified,
+            "the latest state of a key, at its first position"
+        );
+        drop(attempts);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// audit-20261003 hunt-api-4, D-1584: ONE RETIRED SYMBOL CANNOT BLOCK

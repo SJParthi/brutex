@@ -65764,3 +65764,760 @@ the bars do not vouch for) still pay. `docs/06-limits.md` "What an append
 pays" and D-3302's section, and `docs/02-store-format.md`'s writer-door
 paragraph, now say which append pays which. Both decisions stay in this
 ledger unedited.
+
+### D-2770 — In-process journal writers queue; only another process is refused — 2026-10-04
+
+**Finding (conc:server1-1).** `Journal::appended` took the audit journal's
+`flock` with `try_lock`. The legs of one Pull press run in parallel and every
+leg appends its run record (and one record per failed member) to the same
+`audit/pull.journal`; `flock` conflicts between two open file descriptions of
+one process, so a leg whose append met another leg's `write_all` + `sync_all`
+window was refused ("this run is NOT in the journal") and its landed bars had
+no `/audit` row.
+
+**Decision.** A process-wide `APPENDING` mutex is held across the whole append,
+taken before the file lock. Writers in this process wait for each other (one
+fsync per queued writer); `Flock::try_lock` is then met only by another
+process, which is still refused by name, as before.
+
+**Proof.** `a_second_writer_in_this_process_waits_for_the_first_instead_of_being_refused`
+in `crates/api/src/audit.rs`; the cross-process refusal stays covered by
+`a_held_journal_lock_refuses_a_second_writer_without_appending`. FB-71.
+
+### D-2771 — Shutdown stops pull walks and bounds the drain — 2026-10-04
+
+**Finding (conc:server1-2).** After Ctrl-C, axum's graceful shutdown waited
+for every in-flight request, and a hand `/pull/spot` or `/pull/fno` answers
+only when its whole walk ends (up to half an hour). Nothing on the shutdown
+path moved the stop epoch `broker_run` checks before each instrument, and
+`ctrl_c` keeps SIGINT, so a second Ctrl-C did nothing and SIGKILL mid-walk
+was the only way out.
+
+**Decision.** The serve arm wraps the signal in `stopping_walks`, which pauses
+the autopilot when the signal fires: the epoch moves, and every spot walk
+(hand, press or autopilot) breaks at its next instrument and journals its
+partial run. `serve_limited` bounds the drain after the signal by
+`ConnectionLimits::drain_timeout` (`SHUTDOWN_GRACE`, 10 s, when served); a
+request still running then is not waited for, and a Warn event plus a stderr
+line say so. The F&O walk has no per-instrument stop check, so it is cut at
+the end of the bounded drain and runtime grace rather than journalling a
+partial run; that remains an honest limit. A second Ctrl-C is still not
+handled; the exit is now bounded without it.
+
+**Proof.** `the_shutdown_signal_stops_a_walk_that_captured_the_epoch_before_it`
+and `a_request_still_running_after_the_signal_does_not_hold_the_server_open`
+in `crates/api/src/server.rs` (`shutdown_tests`). FB-72.
+
+### D-2772 — A front end built after startup is served without a restart — 2026-10-04
+
+**Finding (conc:server2-1).** `Assets::new` resolved `web/build` once. When it
+was absent at startup, every page answered the 503 that names the build
+command, and kept answering it after that command succeeded, until a restart
+the page never mentioned.
+
+**Decision.** `Assets::respond` re-resolves the build directory on the
+not-built branch only (one `canonicalize` per request while nothing is
+built); the branch that found a build at startup costs nothing extra. The
+startup banner and `Build` stay the startup observation they are documented
+as. A build directory that is a symlink retargeted after startup is still
+resolved through the startup root; not changed here.
+
+**Proof.** `a_build_made_after_startup_is_served_without_a_restart` in
+`crates/api/src/assets.rs`. FB-73.
+
+### D-2773 — The in-process serve lock is counted; the last holder releases it — 2026-10-04
+
+**Finding (conc:server2-2).** The in-process set of served roots had no
+count. A second `take_serve_lock` of a root in one process got a
+pass-through whose drop removed the key the first still owned, and the
+first's drop unlocked `serve.lock` while the pass-through still served the
+store, so another process could serve it too.
+
+**Decision.** The set becomes a map from canonical root to a holder count and
+the one file lock. A take of a held root increments the count; a fresh take
+opens, locks and stamps the file while holding the map's lock and inserts the
+entry only on success. `ServeLock`'s drop decrements, and the last holder
+removes the entry and unlocks the file under the map's lock, so no take can
+see the key gone while the file is still locked. `release_root` is removed.
+
+**Proof.** `the_serve_lock_is_released_by_the_last_holder_in_this_process_only`
+in `crates/api/src/server.rs`. FB-74.
+
+### D-2774 — A status probe's look at the execution lease does not refuse a claimant — 2026-10-04
+
+**Finding (conc:runs-2).** `execution_lease::probe`, called by every
+`/backtest/run.json` poll, takes the lease file's exclusive lock for an
+instant. A `Lease::acquire` (CLI sweep or browser launch) that met that
+instant was refused `Busy`, "another sweep owns this store's execution
+lease", with no sweep running.
+
+**Decision.** A second empty file, `.sweep-execution-v1.probe-gate`, beside
+the lease. `acquire` creates it before the lease, tries the lease once, and on
+`Busy` takes the gate (blocking) and tries again; a probe holds the gate
+(blocking) around its look at the lease. Under the gate a refusal can only be
+an owner's (or a non-participating older binary's). Nobody holds the gate
+across a run, so the wait is one probe's open, lock, two stats and unlock.
+A lease file left by a binary that predates the gate is probed without it
+until a current claimant has created the gate. The gate is never removed;
+`verify` applies to it as to the lease.
+
+**Proof.** `a_claim_that_meets_a_probe_mid_look_owns_the_slot_once_the_probe_ends`
+in `crates/cli/src/execution_lease.rs`. FB-75.
+
+### D-2775 — A Stop press persists its STOP with the pull slot free — 2026-10-04
+
+**Finding (conc:runs-3).** `pull_run_stop` held `site.run` (a std mutex, on an
+async worker) through `recovery_control::stop`: directory creation, a journal
+append and three fsyncs. Every chain's progress write and every
+`/pull/run.json` poll blocked its own worker until the disk answered.
+
+**Decision.** The handler sets `stopping` and takes the active-ID lock while
+holding `site.run` (lock order `run` then `recovery_active`, unchanged), then
+drops `site.run` and persists through `recovery_control::stop_active` under
+the active-ID lock alone, which is what already serialises a STOP with a
+clear or an activation. Answers and refusals are unchanged.
+
+**Proof.** `the_stop_is_persisted_with_the_pull_slot_free` in
+`crates/api/src/recovery_control.rs`. FB-76.
+
+### D-2776 — A second browser sweep admission is refused, not queued — 2026-10-04
+
+**Finding (conc:runs-4).** Every sweep POST holds one of the four shared
+`detail::run` permits, then waited on the process-wide `ADMISSION` mutex
+while another admission did unbounded I/O. Three queued presses exhausted the
+pool, and every `detail::run` route (the run's own status poll included)
+answered `Saturated` until the first admission ended.
+
+**Decision.** The admission lock moves onto `Site` (`sweep_admission`) and is
+taken with `try_lock`: a press that meets another admission is refused
+`Busy` (409) at once, which is what the run being admitted would answer it,
+and holds its permit only for that refusal. Per `Site`, so two test sites
+never refuse each other. `docs/06-limits.md` is corrected to say so.
+
+**Proof.** `admission_io_runs_with_the_slot_unlocked_and_admissions_still_exclude_each_other`
+in `crates/api/src/sweeprun.rs`, now asserting the immediate refusal. FB-77.
+
+### D-2777 — An unchanged first page reuses the held search session — 2026-10-04
+
+**Finding (conc:apicache-2).** An unpinned `/expression-search.json` request
+dropped every held session of the same search and checkpoint and held a fresh
+reader that knew only the head, so one viewer's first-page load broke another
+viewer's deep pagination ("search cursor is not linked to this admitted
+snapshot") on any paused, stopped or exhausted search.
+
+**Decision.** `first_page` keeps a held session that observed exactly what
+the fresh reader observes (same root, identity, checkpoint, writer
+observation and interrupted count), moves it to the back of the LRU and
+serves from it; the fresh reader is dropped. Otherwise the old behaviour
+stands: same-checkpoint sessions are dropped, the fresh one held, at most
+eight. A pinned page also moves its session to the back of the LRU, so a
+session a viewer is paging through is not the first evicted by eight first
+pages of other searches (eviction is `pop_front`).
+
+**Proof.** `an_unchanged_first_page_keeps_the_held_session_and_its_learned_cursors`
+and `a_pinned_page_keeps_its_session_from_being_evicted_first` in
+`crates/api/src/expressionsearchjson.rs`. FB-78.
+
+### D-2778 — A finished browser task gives back the execution lease before its slot says finished — 2026-10-04
+
+**Finding (conc:runs-2, the sibling the finding names).** `TaskFinisher::finish`
+wrote the slot with `in_flight == false` and only then dropped itself, which
+is what released its execution lease. A press admitted in that gap passed the
+slot check and was refused `Busy` by `Lease::acquire`, "another sweep owns this
+store's execution lease", for a run that had ended. The abnormal-end path in
+`Drop` had the same order.
+
+**Decision.** Both paths drop the lease before taking the slot lock. Between
+the release and the publish a claimant (a CLI sweep, or the next press once the
+slot is written) may own the lease while the slot still shows the old run in
+flight; that answers a press `Busy` for one slot write, which is true, rather
+than the false "another sweep owns" for a run that ended.
+
+**Proof.** `a_finished_task_frees_the_execution_lease_before_its_slot_says_finished`
+in `crates/api/src/sweeprun.rs`, which holds the slot lock so `finish` stops at
+the publish and requires the lease to be free there. FB-79.
+
+### D-2779 — One serve-lock registry after the PR #74 merge: D-2773's counted map, D-1911's refusal text — 2026-10-06
+
+**Context.** This branch (D-2770..D-2778) was merged with PR #74's head after
+that head took the zero-work branch. Both sides had changed `take_serve_lock`
+in `crates/api/src/server.rs`. Theirs kept the original in-process
+`BTreeSet` of served roots, its `release_root` cleanup on every failed take,
+and its `ServeLock { held: Option<Flock>, root }` pass-through, and added
+`serve_lock_refusal` (locks-1, D-1911), which separates `WouldBlock` (another
+instance holds the lock, so its stamp is quoted) from `TryLockError::Error`
+(the host refused `flock`, and no instance is implied). Ours (D-2773) replaced
+the set with a map from canonical root to a holder count and the one file
+lock.
+
+**Decision.** One registry: D-2773's counted map. The set does not cover
+conc:server2-2. A pass-through's drop still removed the key a live holder
+owned, and the first holder's drop still unlocked the file while the
+pass-through served. So theirs could not stand in for ours. The refusal arm of
+the counted take now returns `serve_lock_refusal(store_root, &path, &refusal)`,
+so D-1911's host/instance split holds unchanged. `release_root` stays removed.
+The counted take holds the map's lock across open, lock and stamp, and inserts
+only on success, so a failed take has nothing to release. A failed stamp drops
+the file lock before the map's guard is released and leaves no entry, which is
+what D-1481's refusal path needs. D-2773's text stands as written; this entry
+is the note that its registry is the one that survived the merge.
+`stamp_serve_lock`'s doc comment, which the zero-work side had left stacked
+above `serve_lock_refusal`, goes back onto its own function.
+
+**Emit counts.** Each side moved `REACHED_IN_SERVER_TESTS` from 20 to 21 for a
+different site: D-1920 (P1-17-02) for the unstamped serve lock's WARN, D-2771
+for the bounded shutdown drain's WARN. Merged, the count is 22. The LIB target
+held 65 sites on their side (D-1765's two included) and 64 on ours, which
+counted D-2771's WARN as 63 -> 64 without D-1765. Merged, it holds 66. Both
+history lines are kept in `crates/api/src/emitted.rs`.
+
+**Proof.** `the_serve_lock_is_released_by_the_last_holder_in_this_process_only`
+(FB-74) and the D-1911 refusal tests in `crates/api/src/server.rs`, together
+with `emitted::tests` accounting for every site.
+
+**Adversarial matrix (2026-10-06).** The one mechanism is attacked where
+the earlier tests only stood a second open file description in for the
+other process. `another_process_is_refused_while_the_holder_lives_and_admitted_once_it_is_killed`
+runs the other `brutex api` as a real child process with its own
+registry: while it holds, this process is refused naming the child's pid
+and keeps no key; SIGKILL while holding frees the store with no unlock
+having run, and the dead holder's stamp is replaced, never quoted; while
+this process holds, the child is refused naming this pid; a child that
+releases and exits frees the store again.
+`racing_serves_in_one_process_share_one_lock_and_any_release_order_frees_it_last`
+takes the root from sixteen threads at once behind a barrier, so takes
+meet takes in progress, then releases in an interleaved order (odd
+indices, then even from the back): the file stays locked exactly while one
+holder is left. `a_serve_lock_the_host_will_not_open_is_refused_and_registers_nothing`
+runs where mode bits bind (D-0995): a root that cannot gain a lock file and
+a lock file that cannot be opened are each refused with the host's words,
+imply no other instance, register nothing, and the store is served once the
+permission is back. Crash while stamping is D-1481's existing test, stale
+stamps D-1446's.
+
+**Measured cost.** `the_serve_lock_take_and_release_are_measured`, 2,000
+rounds each, on the 4-core build box (run as uid 65534, debug-optimised
+test profile), three runs, microseconds p50/p99/max: a fresh take plus the
+last release 5/16/56, 5/21/119 and 5/18/85; a join of a held root plus its
+release 1/2/33, 1/6/82 and 1/6/21. The take runs once per `serve`, never
+per request, and is a canonicalize, an open, one `flock`, one stamp write
+and one map insert; the map holds one entry per served root. It is
+recorded in `docs/06-limits.md`, not claimed O(1): `canonicalize` walks the
+path's components.
+
+**The `cli` descent test.** The same merge's first attempt also fixed
+`the_elite_descent_refuses_a_top_the_api_cannot_serve_before_any_read`; PR
+#74's head had meanwhile fixed it as D-2001, so this branch takes D-2001's
+`crates/cli/src/lib.rs` unchanged and adds nothing to it.
+
+### D-2751 — A dropped log line degrades a member failure loudly instead of panicking the dev build — 2026-10-04
+
+**Finding (CE-98).** Three `debug_assert!`s in `api/src/server.rs` asserted
+that a `telemetry::emit` reached the file. `Emitted::Dropped` is an
+environmental outcome (a full or erroring log volume), already counted in the
+sink's health, and the operator runs the dev-profile binary, so a full log
+volume panicked `note_member_failure` before `site.autopilot.fail` recorded
+the failure, and panicked the vendor-refusal and broker-loop paths too.
+
+**Decision.** The three assertions are removed. The member-failure path is
+split into `settle_member_failure`, which records the failure whatever the
+emit answered and, when the append was dropped, appends to its sentence that
+the log line could not be written. The other two sites keep their emit and no
+longer assert on it.
+
+**Proof.** `a_dropped_failure_log_line_still_records_the_failure_and_says_so`
+in `crates/api/src/server.rs`. FB-91.
+
+### D-2752 — A spelling variant of a server route and an unrouted non-GET are 404s that name the path — 2026-10-04
+
+**Finding (CE-99, CE-100).** The router fallback served the front-end shell
+(200 `text/html`) for `/health/`, `//health` and `/Health`, so a monitor
+pointed at a variant read "healthy" whatever `/health` said; and every
+unrouted non-GET answered 405 "not a method the front end answers" with no
+`Allow` header, blaming the method for a wrong path.
+
+**Decision.** `EXTENSIONLESS_ROUTES` lists every extensionless path
+`route_table` registers; the fallback collapses empty segments and compares
+without ASCII case, and a variant of a listed route answers 404 naming the
+route it spells (no redirect, so a POST is never moved to a path the caller
+did not name). `Assets::respond` answers an unrouted non-GET/HEAD with 404
+naming the method and path. A source-reading test pins the list to
+`route_table`.
+
+**Proof.** `a_variant_of_a_server_route_is_refused_rather_than_served_the_shell`
+and `route_variants_cover_every_extensionless_route` in
+`crates/api/src/server.rs`; `only_get_and_head_reach_the_front_end` in
+`crates/api/src/assets.rs`. FB-92.
+
+### D-2753 — An unreadable request body is a 400, not "larger than N bytes" — 2026-10-04
+
+**Finding (CE-101).** `one_value_per_form_field` read the body with
+`axum::body::to_bytes`, whose single error covers the length limit and every
+transport failure, and answered every failure 413 "larger than the 8192
+bytes", including a 10-byte malformed chunked body.
+
+**Decision.** `read_within` reads the frames itself over `http_body::Body`
+(already a dependency): a size hint or data past the bound is `TooLarge`
+(413, as before), and a frame error is `Broken` (400, "could not be read",
+naming the transport's reason). Same bound, same single pass.
+
+**Proof.** `a_malformed_chunked_body_is_refused_as_unreadable_not_too_large`
+in `crates/api/src/server.rs`. FB-93.
+
+### D-2754 — An engine task's duration is monotonic and says so — 2026-10-04
+
+**Finding (CE-86).** The sweep, descent and command completion events
+recorded `elapsed_micros` as two wall-clock reads subtracted and clamped with
+`.max(0)`, so a backward NTP step recorded "took 0 µs", a measurement nobody
+took.
+
+**Decision.** Each spawn site takes a `std::time::Instant` beside its
+wall-clock `started`; `emit_completion` takes that `Instant`, emits
+`began.elapsed()` and labels it `elapsed_basis: monotonic`. `started` remains
+the wall-clock stamp the page shows.
+
+**Proof.** The `api.sweep an engine task finished` case of
+`every_reachable_emit_site_puts_a_record_in_the_file` in
+`crates/api/src/emitted.rs` requires `elapsed_basis: monotonic`. FB-94.
+
+### D-2755 — A CLI event stamped ahead of this clock is unageable, not "running" — 2026-10-04
+
+**Finding (CE-87).** `observe_elsewhere` aged the newest CLI event as
+`now - at` clamped at zero. The CLI sink resumes a floor that can sit ahead of
+this clock after a backward step, so a dead CLI read "running" at age 0 for
+the size of the step plus fifteen minutes.
+
+**Decision.** The age is kept signed and emitted signed. A `command started`
+marker whose newest event is ahead of this clock answers `unknown`, with a
+reason naming how many milliseconds ahead it is stamped.
+
+**Proof.** `a_sweep_running_outside_this_process_is_reported_from_the_log` in
+`crates/api/src/sweeprun.rs`, whose skewed-clock block previously asserted the
+clamp. FB-95.
+
+### D-2756 — A stepped-back clock cannot freeze the store probe or the stall recheck — 2026-10-04
+
+**Finding (CE-84).** The autopilot's store-probe deadline and stall-recheck
+stamp are wall-clock epoch seconds. A backward step postponed both by the size
+of the step, and a host whose clock was once ahead held them until real time
+caught up, while the page said "the next probe is in 60s".
+
+**Decision.** The finding's second remedy, keeping the stamps the page shows:
+`store_due` answers `Now` when the deadline is further away than the wait
+that armed it (`probe_secs(made - 1)`), which only a clock behind the arming
+instant can produce; `reconsider` treats `now < at_unix` as due, still within
+`STALL_RETRIES`, and its sentence says the clock stepped instead of claiming
+`STALL_RECHECK_SECS` of spacing. A clock inside the armed wait still waits.
+
+**Proof.** `a_clock_stepped_back_behind_a_stamp_does_not_freeze_the_probe_or_the_recheck`
+in `crates/api/src/autopilot.rs`. FB-96.
+
+### D-2757 — "Newer than the parse" means changed since the parse — 2026-10-04
+
+**Finding (CE-85).** `/masters/status.json` compared each master's mtime with
+the wall-clock instant of the parse. A clock corrected after the parse hid a
+changed master, and an mtime ahead of the clock demanded a restart that could
+not clear the flag.
+
+**Decision.** `mastersrun::stamps` records each `masters::SOURCES` file's
+(mtime, length) immediately before a parse reads it (`Site::load` and
+`Site::reparse`), held in `Parsed::stamps`; `status_rows` reports
+`newer_than_parse` as inequality with the current (mtime, length). A site
+built without reading a masters directory carries no stamps and answers
+`null`, not an unmeasured `false`. The JSON field names are unchanged.
+
+**Proof.** `a_master_is_newer_only_when_it_changed_since_the_parse_whatever_its_clock`
+in `crates/api/src/mastersrun.rs`. FB-97.
+
+### D-2758 — A native vendor id must be unique within its segment, not across segments — 2026-10-04
+
+**Finding (CE-91).** `NativeIds::build` keyed its reverse map by
+`(vendor, id)`. Dhan's `SECURITY_ID` is unique per exchange segment, so the
+NIFTY index (13) and the ABB share (NSE token 13) cancelled each other and
+Dhan stopped witnessing either in the Zerodha ISIN cross-check.
+
+**Decision.** The reverse map is keyed by `(vendor, key.segment, id)`. Every
+request carries the segment, so this is the scope a reused id can actually
+confuse; a reuse inside one segment still names neither instrument.
+
+**Proof.** `a_vendor_id_shared_across_segments_names_both_instruments` in
+`crates/api/src/merge.rs`. FB-98.
+
+### D-2759 — The swept target is counted and checked against its own roster — 2026-10-04
+
+**Finding (CE-92).** `swept` counted and pulled only what a loaded master
+listed: coverage walked `merged.by_key`, and `spot_mapping_refusal` took its
+expected names from `members()`, which is `None` for `Swept`. A swept name no
+master lists (an NSE rename, a refresh that dropped a row) was in neither
+`matched` nor `lacks`, and a whole-target pull attempted the rest with a
+clean receipt.
+
+**Decision.** `SpotTarget::expected` answers the swept roster, derived from
+`InstrumentKey::SWEPT` and `FNO_UNDERLYINGS` less `FNO_INDEX_UNDERLYINGS`
+(210 names; no list is copied), and `members()` for every other target.
+Coverage counts a roster name no master lists as lacking, with its own
+reason; `spot_mapping_refusal` reads `expected`, so a whole-target swept pull
+refuses such a name by name, as `fno` already did. `members()` is unchanged.
+The stale "`swept` is 2 of 2" sentence in `docs/06-limits.md` is corrected.
+
+**Proof.** `the_swept_surface_is_counted_per_feed_like_everything_else` in
+`crates/api/src/coverage.rs`. FB-99. The receipt tests over two-name fixtures
+(`the_receipt_reports_reach_for_the_feed_and_never_a_number_it_did_not_measure`,
+`each_spot_target_reports_its_own_population_and_not_a_neighbours`,
+`a_valid_window_is_echoed_with_the_wire_date_and_still_starts_nothing`) now
+read "2 of 210", and the run tests that pulled the whole swept target over
+those fixtures name their members (or use `indices`), because a whole swept
+pull over them now refuses the 208 unlisted names before the loop.
+
+### D-2790 — Selection V6 quarantines are named by offset and content — 2026-10-04
+
+**Finding (CE-88).** `set_aside_abandoned_tail` named its quarantine by the
+committed offset alone. Two interrupted writes with no commit between them
+land at one offset, so the second collided with the first's different bytes
+and every later persist refused: the wedge D-1569 removed, back after a
+second crash.
+
+**Decision.** The name is `<file>.abandoned-<offset>-<16 hex of a
+domain-separated BLAKE3 of the tail>`. The "same name, same bytes"
+idempotence check is kept; different bytes get a different name.
+
+**Proof.** `two_interrupted_writes_at_one_offset_each_get_their_own_quarantine`
+in `crates/cli/src/selection_v6_tests.rs`. FB-101.
+
+### D-2791 — The strict checksum audit names the interrupted-append extent — 2026-10-04
+
+**Finding (CE-90).** The strict audit refused a month holding bytes past its
+commit, the state `docs/02-store-format.md` §7 calls interrupted rather than
+damaged, under one sentence shared with four other causes, and nothing clears
+that extent.
+
+**Decision.** The audit still reads exact extents only and still refuses, but
+a sealed month whose data or sidecar is longer than its commit (and neither is
+shorter) is refused as "an interrupted append", with both byte counts against
+the committed extents. `docs/06-limits.md` records that such a month needs a
+covering re-append before the strict doors can audit it. Auditing the
+committed extent through the D-0688 tail proof is not done here.
+
+**Proof.** `bytes_past_the_commit_are_refused_as_an_interrupted_append_by_name`
+in `crates/store/src/checksum_audit_tests.rs`. FB-102.
+
+### D-2792 — Every reader of a recorded run says it is in sample and its validation is unrecorded — 2026-10-04
+
+**Finding (CE-93).** The ledger stores no validation state, and every reader
+but `range-all` (`cli top`, `/engine/top.json`, `/backtest.json`,
+`/frontier.json`, the `/backtest` crown and comparison board) showed recorded
+runs as finished results with no in-sample or multiplicity line.
+
+**Decision.** `cli::LEDGER_IN_SAMPLE` states it once: a recorded run is the
+best of its search on the bars it was chosen on, the ledger records no
+validation verdict, and the best across the ledger is an upper bound.
+`render_top_record` prints it under the banner, `/backtest.json` carries it
+as `in_sample` beside `best_complete`, `/frontier.json` carries it beside the
+equity note, and the page renders it in the crown and above the comparison
+board. **Partial:** the finding's `validated` byte in a new `Record` version
+is not added; the label covers every row, validated or not, which is true
+because no verdict is stored either way.
+
+**Proof.** `the_top_combinations_table_keeps_extreme_figures_apart_and_under_their_headers`
+in `crates/cli/src/columns_tests.rs`, `no_complete_run_is_none_rather_than_a_fabricated_winner`
+in `crates/api/src/backtest.rs` and
+`a_stock_runs_frontier_carries_the_equity_note_and_an_index_runs_is_unchanged`
+in `crates/api/src/frontierjson.rs`. FB-103.
+
+### D-2793 — Every ranked or listed stock total on `/backtest` says it is gross — 2026-10-04
+
+**Finding (CE-94).** The page rendered a run's `equity_note` only in the
+drill-down. The crown ("The answer"), the comparison board, the rung leaders
+and the ledger table printed a cash equity's totals with no gross-of-every-
+charge statement, although `CLAUDE.md` §1 requires one on every ranked equity
+report and `/backtest.json` already sends it.
+
+**Decision.** The crown renders `chargeScope(best)`'s statement (the server's
+note verbatim when sent); the comparison board renders the first gross
+statement among the rows it ranks; each rung-leader group carries the short
+gross label when its instrument is not a swept spot index; and the ledger
+table carries one gross line above it when any listed run is. All four read
+the one `chargeScope` helper the drill-down uses, so no second wording exists.
+Web only; `web/build` regenerated.
+
+**Proof.** `the crown and the comparison board state charges and the in-sample
+limit`, `a stock crowned over an index is labelled gross by the same helper`
+and `the rung leaders and the ledger table state charges for a stock` in
+`web/tests/charge-scope.test.js`. FB-104.
+
+### D-2794 — A writable open of Execution V4 and Anchored Search Lineage V4 cuts nothing it refuses — 2026-10-04
+
+**Finding (CE-89).** Reported at `1f4de71` (`final/all-fixes-zero`): both
+writers called `fixed_tail::heal_torn_tail` with an empty magic before any
+decode, so a renamed or foreign file was cut before it was refused, against
+D-1901.
+
+**Decision.** Not reproducible on this branch's base (`dee61cfd`): neither
+`fixed_tail` nor D-1901 exists here (`1f4de71` is not an ancestor), and both
+writable opens go straight to their scans, which refuse a length that is not a
+whole number of records ("ragged") without writing. Nothing in the writers is
+changed. The existing ragged-file tests are extended to the WRITABLE open and
+assert the bytes are unchanged, so a later merge that brings a pre-decode cut
+onto either path fails them rather than passing silently.
+
+**Proof.** `member_completion_ragged_and_canonical_order_attacks_fail_closed`
+in `crates/cli/src/anchored_search_lineage_v4.rs` and
+`retained_generation_symlink_hardlink_and_ragged_files_fail_closed` in
+`crates/cli/src/execution_v4.rs`. FB-105.
+
+### D-2795 — A headerless ledger's writer cuts a torn tail only from a file that begins with its records' magic — 2026-10-06
+
+**Context.** Merging `fixboard/pr74-ce2` into PR #74's head met two
+decisions about one line. D-1910 (ledgers-3) made the writable open of
+Execution V4 and Anchored Search Lineage V4 call
+`fixed_tail::heal_torn_tail`, so a kill-torn sub-record tail no longer
+wedges the ledger. D-2794 (CE-89) asked that a renamed or foreign file
+never be cut before it is refused, and extended the ragged-file tests to
+the writable open; it could not reproduce the defect on its own base,
+where `fixed_tail` did not exist. Here both exist. Both ledgers are
+headerless, so the heal was called with an empty magic, and an empty magic
+cuts any file. CE-89 therefore holds on this merge's inputs: PR #74's own
+version of the ragged-file test appended one foreign byte (`0x5a`) to an
+empty member file and asserted that the writer cuts it ("the writer cuts
+the ragged tail"), the opposite of D-2794's assertion on the same fixture.
+D-2794's tests were not run against D-1910's code here (a temporary revert
+was refused in this session), so that failure is read from the code, not
+measured.
+
+**Decision.** Each of the six files is healed with the 16-byte magic its
+own records begin with (`PARAMETER_MAGIC`, `PERCENTILE_MAGIC`,
+`DISPOSITION_MAGIC`, `COMPLETION_MAGIC`; `MEMBER_MAGIC`,
+`COMPLETION_MAGIC`). `heal_torn_tail` compares a file shorter than its
+magic over the bytes it has, so a torn FIRST record (a prefix of the
+magic) is still cut to nothing, while a file whose leading bytes are not
+that magic, or not a prefix of it, is left untouched and refused by the
+scan as "ragged". Headered callers are unchanged: their files are longer
+than the header before the comparison is reached. Both sides' tests are
+kept: CE-89's foreign byte (`0x5a`, `0x01`) is refused with its bytes
+unchanged, and D-1910's heal is exercised by a torn prefix of the
+records' own magic.
+
+**Limit.** The check names the file, not the tail: bytes past the last
+whole record of a file that begins with the right magic are cut whatever
+they are, as D-1910 decided, because no record past the last whole one was
+ever acknowledged.
+
+**Proof.** `a_file_shorter_than_its_magic_is_cut_only_when_it_is_a_prefix_of_it`
+in `crates/cli/src/fixed_tail.rs`;
+`retained_generation_symlink_hardlink_and_ragged_files_fail_closed` in
+`crates/cli/src/execution_v4.rs`;
+`member_completion_ragged_and_canonical_order_attacks_fail_closed` and
+`a_torn_record_of_its_own_is_cut_by_the_next_writer` in
+`crates/cli/src/anchored_search_lineage_v4.rs`. FB-106.
+
+**Also in this merge.** CE-65's bounded quarantine read (a FIFO at the
+quarantine name never holds the repair) met D-2790's offset-and-digest
+quarantine name. The name is now built by one function, `quarantine_path`
+in `crates/cli/src/selection_v6.rs`, which the CE-65 test calls so its FIFO
+sits at the name the repair reaches for.
+
+### D-2796 — The swept coverage line sorts its lacking names once — 2026-10-06
+
+**Finding.** Gate 11 rule 4 (docs/07 layer 12) refused
+`crates/api/src/coverage.rs` on the merged branch: D-2759 (CE-92) added a
+second `sort_unstable` to `from_master`, for the roster names no master
+lists, beside the existing sort of names listed without the vendor's id,
+and the allowlist holds one for that file. `fixboard/pr74-ce2` was
+validated with fmt, clippy, tests and the web gates, not the static gates.
+
+**Decision.** Both kinds of lacking name go into one vector of
+`(listed, symbol)` and are sorted once. `false` sorts before `true`, so
+the unlisted names still come first and each group is in name order: the
+same rows, reasons and order as D-2759's two sorts. The allowlist count is
+not raised.
+
+**Proof.** Gate 11 passes; `the_swept_surface_is_counted_per_feed_like_everything_else`
+and the other `coverage::tests` are unchanged and green.
+
+### D-2797 — The search-session cache is scanned through one helper bounded by a named constant — 2026-10-06
+
+**Finding.** Gate 11 rule 6 (a search is bounded by a compile-time table,
+never by the data) refused `crates/api/src/expressionsearchjson.rs` on the
+merged branch: D-2777 (conc:apicache-2) added a second
+`.iter().position(` to the cache of held search sessions, in
+`first_page`, beside the pinned-page lookup the allowlist already counts.
+The scan was bounded all along, by the literal `8` the cache is evicted at,
+but the gate cannot read that.
+
+**Decision.** Both lookups go through `held_at`, the one scan of the
+cache, and the bound is named: `SESSIONS_HELD = 8`, which `first_page`
+evicts at. Behaviour is unchanged. The allowlist count is not raised.
+
+**Proof.** Gate 11 passes;
+`an_unchanged_first_page_keeps_the_held_session_and_its_learned_cursors`
+and `a_pinned_page_keeps_its_session_from_being_evicted_first` are
+unchanged and green.
+
+**And `EXTENSIONLESS_ROUTES`.** D-2752 (CE-99) listed `/audit` among
+`route_table`'s extensionless routes; on PR #74's head D-1971 had moved the
+server's page to `/audit/page` and left `/audit` to the front end. The list
+names `/audit/page`, which is what
+`route_variants_cover_every_extensionless_route` reads out of
+`route_table`, so a variant of `/audit/page` is refused and `/audit` stays
+the front end's.
+
+### D-2798 — Recovery and autopilot outcomes are reported as they happened, in a stable order — 2026-10-06
+
+Four Fix Board concurrency rows, one locked choice: a recovery or autopilot
+pass reports the outcome that actually ended it, records what it decided
+before anything else can fail, and walks its work in an order that is the
+same on every run.
+
+- **conc:recovery-3.** `reconcile_pending` walked `attempts.latest`, a
+  `HashMap` seeded per process, so the same interrupted requests went to the
+  vendor, and their plan records were written, in a different order every
+  run (`CLAUDE.md` §3 rule 5). `pending_in_order` walks the journal's own
+  `order` (first appearance, replayed identically on restart), one `get` per
+  key.
+- **conc:recovery-6.** In `drive`, the terminal control append's `?`
+  returned its own error and dropped the run's, so a plan that blocked on a
+  vendor refusal was reported only as the disk error. `terminal_outcome`
+  keeps both, the run's reason first; a run that succeeded but could not
+  record its end is a failure, because the next process will not see it
+  finished.
+- **conc:recauto-2.** In `execute`, a window the plan could not resolve had
+  its `/audit` receipt written before the plan's own Blocked item, so a
+  refused receipt aborted the pass with the window still Queued in the plan.
+  `record_blocked` appends the plan item first; a refused receipt still ends
+  the pass, by name.
+- **conc:autopilot-2.** The vendor-down breaker set the same
+  `BrokerRun::stopped` an operator's Pause sets, and `outcome_of` read every
+  non-credential stop as a pause: an immediate retry, no attempt counted, no
+  backoff. `BrokerRun::cancelled` is set only where the stop epoch moved;
+  `outcome_of` reports `stopped` from it alone, so the breaker's stop is a
+  failure that reaches the backoff.
+
+**Rejected.** For recovery-6, keeping only the run's error: a run whose end
+was never recorded would then look finished to its caller and unfinished to
+the next process.
+
+**Proof.** `interrupted_attempts_are_reconciled_in_journal_order`,
+`a_failed_terminal_record_keeps_the_reason_the_run_ended` and
+`a_refused_audit_receipt_does_not_erase_the_blocked_window` in
+`crates/api/src/recovery.rs`;
+`a_breaker_stop_backs_off_and_only_an_operator_stop_retries_at_once` in
+`crates/api/src/server.rs`. FB-107.
+
+### D-2799 — Readers share, writers wait briefly, governors are kept, and new directories are synced — 2026-10-06
+
+Four Fix Board concurrency rows about locks and durability, one locked
+choice: a reader never takes a lock that refuses another reader, a writer
+that meets a momentary reader waits a bounded time instead of refusing, a
+rate governor is never lost by a caller that had none to share, and a
+directory a ledger is opened in is durable first.
+
+- **conc:pull2-4.** The cash-session cache's two read loops took each day's
+  EXCLUSIVE try-lock, so two pulls over overlapping windows refused each
+  other "unavailable" for a day neither was writing. They take
+  `lock_day_shared`; an installer's exclusive `lock_day` still excludes every
+  reader, and a reader is still refused, not queued, while one installs.
+- **conc:pull1-2.** `HttpSource::sharing(None)` replaced a budgeted source's
+  own governor with none and cleared its charge, so no permit was asked for
+  by anyone. `None` now leaves the source's own governor in place.
+  `server::shared_governor` read the budget table with `.lock().ok()?`, so a
+  poisoned lock meant "no shared governor" and a second instance spent the
+  same vendor quota; it reads through the poison, because the slots are
+  `Arc`s set once at startup.
+- **conc:cli1-2.** `operation_audit::begin` took the invocation index's
+  exclusive lock with one `try_lock`, and every status read holds that
+  index's shared lock for one record read, so a CLI start that met a poll
+  was refused "busy" with no writer alive. `within` retries `WouldBlock`
+  every millisecond for `INDEX_LOCK_WAIT` (1 s); a host refusal is not
+  retried, and a holder that does not let go is still refused as busy.
+- **conc:ledgerv6-3.** `RungRoots::create` and the Global Replay V4 root used
+  `create_dir_all` and synced no parent, so a ledger fsynced inside a
+  directory whose own entry a power loss dropped was not there after the
+  restart. `create_durably` syncs each directory from the new path's parent
+  up to the ledger root: O(depth) syncs, once per rung root per run.
+
+**Rejected.** For cli1-2, a blocking `lock`: an index holder on a hung
+mount would then hold a CLI start forever. For pull1-2, refusing on a
+poisoned budget table: the table cannot be half-written, and a refusal
+would stop every pull for a panic elsewhere.
+
+**Proof.** `concurrent_reads_of_a_cached_day_share_its_lock_and_a_writer_excludes_them`
+in `crates/pull/src/cash_session_cache.rs`;
+`sharing_nothing_keeps_the_sources_own_governor` in `crates/pull/src/http.rs`;
+`a_poisoned_budget_table_still_shares_its_governor` in
+`crates/api/src/server.rs`;
+`a_start_that_meets_a_status_read_waits_for_it_instead_of_refusing` and
+`within_retries_only_a_busy_lock_and_only_until_the_wait_ends` in
+`crates/cli/src/operation_audit_tests.rs`;
+`a_created_rung_root_syncs_every_parent_up_to_the_ledger_root` in
+`crates/cli/src/ledger_v6.rs`. FB-108, FB-109.
+
+### D-3600 — A vendor capture appears under its name only when whole — 2026-10-06
+
+**Finding (conc:pull1-3).** `capture::write_new_capture_with_stamp` created
+each capture at its final `.txt` name with `create_new` and then filled it,
+so a crash or kill mid-write left a torn fixture under a name that says it
+is complete (the failed-write cleanup cannot run after a kill).
+
+**Decision.** The bytes are written to a hidden `.<name>.partial` sibling and
+synced, then linked into the final name with `hard_link`, which refuses an
+existing name exactly as `create_new` did, so no capture is ever
+overwritten. The sibling is then removed and the directory synced. A kill
+can leave a hidden `.partial` file; it never ends in `.txt`, so nothing that
+lists captures takes it for one. A leftover sibling makes that one name
+attempt move to the next, as an existing capture does.
+
+**Proof.** `a_capture_stopped_part_way_never_appears_under_its_final_name` in
+`crates/pull/src/capture.rs`. FB-110.
+
+### D-3601 — One refused census row no longer drops the rows beside it — 2026-10-06
+
+**Finding (conc:pull2-2).** `ingest::record_all` returned on the first row
+`count` refused (for example a month whose row count went backwards), so
+every other row of the batch, one vendor answer's other contracts with their
+bars already landed, was never counted.
+
+**Decision.** Each refusal is collected; every row that counted is installed
+in the one install the batch already makes, and the batch then reports
+`<n> of <m> census row(s) refused; every other row was counted: <reasons>`
+in offered order. A batch whose install itself fails still reports only
+that. Callers already treat any `Some` as the census not covering the run,
+so nothing reads the partial install as complete.
+
+**Proof.** `one_refused_census_row_does_not_drop_the_batch` in
+`crates/pull/src/ingest.rs`. FB-111.
+
+### D-3602 — The build stamp's check-then-compile window is stated, not closed — 2026-10-06
+
+**Finding (conc:cli3-2).** `crates/cli/build.rs` verifies the working tree
+against HEAD once, before rustc reads `cli`'s sources and possibly before its
+dependencies compile. An edit saved in that window yields a binary stamped
+with a commit its bytes do not match, and §3 rule 3's `commit` term then
+names the wrong source for every run it records.
+
+**Decision.** State the limit where a reader of either file meets it: in the
+`build.rs` header and in `docs/06-limits.md` (§3 rule 6). The fix that would
+close it, a post-link re-verification against a digest of the verified blob
+set emitted beside the stamp, changes the launcher and CI and is left for an
+owner decision rather than built here.
+
+**Rejected.** Claiming the stamp proves the compiled bytes. It proves the
+tree at one instant before compilation.
+
+### D-3603 — A candidate detail file appears under its name only when whole — 2026-10-06
+
+**Finding (conc:cli2-5).** `candidate_trades::write_exact` created the file
+at its final name with `create_new`, then locked and filled it. A reader that
+took the shared lock in between, or met the file after a kill mid-write,
+found it empty or short and refused it as truncated, and every later writer
+met `AlreadyExists` over those bytes and refused the retry for good.
+
+**Decision.** The bytes go to a hidden sibling unique to this process and
+call (`.<name>.<pid>.<n>.partial`), are synced, and are linked into the final
+name with `hard_link`, which refuses an existing name as `create_new` did; a
+writer that loses the link race verifies the winner's bytes exactly as
+before. The sibling is removed after the link, and the directory sync that
+followed the write still follows it. Readers are unchanged. A kill can leave
+a hidden sibling; it never carries the final name.
+
+**Proof.** `a_detail_write_stopped_part_way_leaves_no_torn_file_and_the_retry_lands`
+in `crates/cli/src/candidate_trades/tests.rs`. FB-112.

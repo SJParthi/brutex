@@ -1251,18 +1251,40 @@ fn record_all(store_root: &Path, vendor: Vendor, held: &[Held]) -> Option<String
     };
     // RESERVED FROM THE BOUND IN HAND — at most one append per entry offered.
     let mut appends: Vec<Append> = Vec::with_capacity(held.len());
+    // ONE REFUSED ROW DOES NOT DROP THE BATCH. Its `return` used to discard
+    // every row already counted, so one month whose row count went backwards
+    // left a whole vendor answer's other contracts uncounted although their
+    // bars had landed. Each refusal is kept and named; every row that counted
+    // is installed. conc:pull2-2, D-3601.
+    let mut refused: Vec<String> = Vec::new();
     for one in held {
         match count(&mut census, *one) {
             Ok(Some(append)) => appends.push(append),
             Ok(None) => {}
-            Err(why) => return Some(why),
+            Err(why) => refused.push(why),
         }
     }
-    if let Err(why) = install_census(&lock, &census_path, &census, &appends, false) {
+    if !appends.is_empty()
+        && let Err(why) = install_census(&lock, &census_path, &census, &appends, false)
+    {
         note_census_unpublished(&census_path, appends.len(), &why);
         return Some(why);
     }
-    None
+    batch_refusal(&refused, held.len())
+}
+
+/// The reason a census batch reports when some of its rows were refused:
+/// how many, of how many, and each refusal in offered order. `None` when none
+/// was.
+fn batch_refusal(refused: &[String], offered: usize) -> Option<String> {
+    if refused.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{} of {offered} census row(s) refused; every other row was counted: {}",
+        refused.len(),
+        refused.join("; ")
+    ))
 }
 
 /// Writes a batch of census rows in ONE cycle — one lock, one read, one install.
@@ -3804,6 +3826,63 @@ mod tests {
             assert_eq!(headline.level(), level, "{found:?}");
             assert!(headline.message().contains(says), "{found:?}");
         }
+    }
+
+    /// **One refused census row does not drop the rows beside it.**
+    /// conc:pull2-2, D-3601. A month whose row count goes backwards is refused
+    /// by name; the new month offered with it in the same batch is counted.
+    #[test]
+    fn one_refused_census_row_does_not_drop_the_batch() {
+        let store =
+            std::env::temp_dir().join(format!("brutex-census-batch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&store);
+        std::fs::create_dir_all(&store).expect("store root");
+        let held = |month: u8, rows: u64| {
+            crate::manifest::Held::new(
+                crate::manifest::Entry {
+                    key: EntryKey {
+                        contract: None,
+                        exchange: brutex_core::instrument::Exchange::Nse,
+                        segment: brutex_core::instrument::Segment::Index,
+                        symbol: brutex_core::symbol::Symbol::new("NIFTY").expect("a symbol"),
+                        timeframe: Timeframe::MINUTE_1,
+                        month: store::path::YearMonth::new(2022, month).expect("a month"),
+                    },
+                    rows,
+                    first_ts_micros: 1_664_775_000_000_000,
+                    last_ts_micros: 1_664_775_060_000_000,
+                },
+                crate::manifest::Closes::UNKNOWN,
+            )
+        };
+        assert_eq!(
+            super::record_held(&store, Vendor::Groww, &[held(10, 100)]),
+            None,
+            "the seed"
+        );
+        let why = super::record_held(&store, Vendor::Groww, &[held(10, 50), held(11, 7)])
+            .expect("the backwards row is refused");
+        assert!(
+            why.starts_with("1 of 2 census row(s) refused; every other row was counted: "),
+            "{why}"
+        );
+        let census = super::read_census(
+            &crate::manifest::manifest_path(&store, Vendor::Groww),
+            Vendor::Groww,
+        )
+        .expect("the census");
+        assert_eq!(
+            census.held(&held(11, 7).entry.key),
+            Some(held(11, 7)),
+            "the good row beside it is counted"
+        );
+        assert_eq!(
+            census.held(&held(10, 100).entry.key),
+            Some(held(10, 100)),
+            "the refused row left the committed one untouched"
+        );
+        assert_eq!(super::batch_refusal(&[], 3), None);
+        let _ = std::fs::remove_dir_all(&store);
     }
 
     /// **A MEMBER'S ROWS ARE LANDED BORROWED, NOT CLONED.** o1api-36, D-1203.

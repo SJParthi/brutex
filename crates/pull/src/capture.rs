@@ -239,34 +239,77 @@ fn write_new_capture_with_stamp(
     bytes: &[u8],
     stamp: u128,
 ) -> Result<std::path::PathBuf, String> {
+    write_new_capture_via(dir, prefix, bytes, stamp, |file, bytes| {
+        file.write_all(bytes)
+    })
+}
+
+/// [`write_new_capture_with_stamp`] with the byte write injectable, so a test
+/// can stop it part-way the way a crash would.
+///
+/// WRITTEN ASIDE, THEN LINKED INTO ITS NAME. The capture used to be created at
+/// its final `.txt` name and filled in place, so a crash (or a kill, or a full
+/// disk the cleanup could not undo) left a torn fixture under a name that
+/// says it is complete. The bytes now go to a hidden `.partial` sibling, are
+/// synced, and only then appear under the final name through `hard_link`,
+/// which, like `create_new`, refuses an existing name: no capture is ever
+/// overwritten, and the final name is only ever whole. The directory is synced
+/// after the link so the name survives a power loss. conc:pull1-3, D-3600.
+fn write_new_capture_via(
+    dir: &std::path::Path,
+    prefix: &str,
+    bytes: &[u8],
+    stamp: u128,
+    mut write: impl FnMut(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
+) -> Result<std::path::PathBuf, String> {
     std::fs::create_dir_all(dir)
         .map_err(|why| format!("{} cannot be created — {why}", dir.display()))?;
 
     for attempt in 0..NAME_ATTEMPTS {
         let path = candidate_path(dir, prefix, stamp, attempt);
-        let opened = OpenOptions::new().write(true).create_new(true).open(&path);
+        if std::fs::symlink_metadata(&path).is_ok() {
+            continue;
+        }
+        let aside = partial_path(&path);
+        let opened = OpenOptions::new().write(true).create_new(true).open(&aside);
         let mut file = match opened {
             Ok(file) => file,
             Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(why) => return Err(format!("{} cannot be created — {why}", path.display())),
+            Err(why) => return Err(format!("{} cannot be created — {why}", aside.display())),
         };
 
-        if let Err(why) = file.write_all(bytes).and_then(|()| file.sync_all()) {
-            drop(file);
-            let cleanup = std::fs::remove_file(&path);
-            return Err(match cleanup {
-                Ok(()) => format!("{} could not be written and synced — {why}", path.display()),
-                Err(ref cleanup) if cleanup.kind() == std::io::ErrorKind::NotFound => {
-                    format!("{} could not be written and synced — {why}", path.display())
-                }
-                Err(cleanup) => format!(
-                    "{} could not be written and synced — {why}; its incomplete file also \
-                     could not be removed — {cleanup}",
-                    path.display()
-                ),
-            });
+        let written = write(&mut file, bytes).and_then(|()| file.sync_all());
+        drop(file);
+        let linked = written.and_then(|()| std::fs::hard_link(&aside, &path));
+        let cleanup = std::fs::remove_file(&aside);
+        match linked {
+            Ok(()) => {
+                std::fs::File::open(dir)
+                    .and_then(|directory| directory.sync_all())
+                    .map_err(|why| {
+                        format!(
+                            "{} was written but its directory could not be synced — {why}",
+                            path.display()
+                        )
+                    })?;
+                return Ok(path);
+            }
+            Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(why) => {
+                return Err(match cleanup {
+                    Ok(()) => format!("{} could not be written and synced — {why}", path.display()),
+                    Err(ref cleanup) if cleanup.kind() == std::io::ErrorKind::NotFound => {
+                        format!("{} could not be written and synced — {why}", path.display())
+                    }
+                    Err(cleanup) => format!(
+                        "{} could not be written and synced — {why}; its incomplete file {} \
+                         also could not be removed — {cleanup}",
+                        path.display(),
+                        aside.display()
+                    ),
+                });
+            }
         }
-        return Ok(path);
     }
 
     Err(format!(
@@ -274,6 +317,16 @@ fn write_new_capture_with_stamp(
          no existing capture was overwritten",
         dir.display()
     ))
+}
+
+/// The hidden sibling a capture is written to before it is linked into
+/// `path`. It does not end in `.txt`, so nothing that lists captures takes it
+/// for one.
+fn partial_path(path: &std::path::Path) -> std::path::PathBuf {
+    let name = path
+        .file_name()
+        .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+    path.with_file_name(format!(".{name}.partial"))
 }
 
 /// Production wrapper around the injectable stamp used by collision tests.
@@ -652,6 +705,63 @@ mod tests {
             record(&root, Feed::Gdfl, Method::Post, "https://x.test/p", "{}").is_some(),
             "so the POST answer is still captured"
         );
+    }
+
+    /// **A capture stopped part-way never appears under its final name.**
+    /// conc:pull1-3, D-3600. A write that dies after half the bytes (a panic
+    /// stands in for the kill: nothing after it runs) leaves at most the
+    /// hidden `.partial` sibling; the `.txt` name is absent, and the next write
+    /// of the same name lands whole.
+    #[test]
+    fn a_capture_stopped_part_way_never_appears_under_its_final_name() {
+        let dir = std::env::temp_dir().join(format!("brutex-capture-torn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let prefix = "dhan-GET-torn";
+        let stamp = 7_u128;
+        let died = std::panic::catch_unwind(|| {
+            let _ = write_new_capture_via(&dir, prefix, b"TEN BYTES!", stamp, |file, bytes| {
+                file.write_all(bytes.get(..5).unwrap_or(bytes))?;
+                panic!("killed mid-write");
+            });
+        });
+        assert!(died.is_err(), "the write was stopped");
+        let final_name = candidate_path(&dir, prefix, stamp, 0);
+        assert!(!final_name.exists(), "no torn capture under its final name");
+        let left: Vec<String> = std::fs::read_dir(&dir)
+            .expect("the capture directory")
+            .map(|entry| {
+                entry
+                    .expect("a listed capture")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert!(
+            left.iter()
+                .all(|name| name.ends_with(".partial") && name.starts_with('.')),
+            "only the hidden partial sibling is left: {left:?}"
+        );
+
+        let path = write_new_capture_with_stamp(&dir, prefix, b"TEN BYTES!", stamp)
+            .expect("the next write");
+        assert_eq!(std::fs::read(&path).expect("whole"), b"TEN BYTES!");
+        assert!(
+            path.extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("TXT"))
+        );
+
+        let refused = write_new_capture_via(&dir, "dhan-GET-full", b"x", stamp, |_, _| {
+            Err(std::io::Error::other("disk full"))
+        })
+        .expect_err("a failed write refuses");
+        assert!(refused.contains("disk full"), "{refused}");
+        assert!(!candidate_path(&dir, "dhan-GET-full", stamp, 0).exists());
+        assert!(
+            !partial_path(&candidate_path(&dir, "dhan-GET-full", stamp, 0)).exists(),
+            "and cleans up"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

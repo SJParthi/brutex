@@ -4429,8 +4429,11 @@ same and the evidence for it is now NSE's rather than a vendor's.
   them, which is what is served.
 
 This is a limit on `indices` alone. `NSE-INDIAVIX` is reference-only under
-`CLAUDE.md` §1 and the two swept series are named identically by both masters —
-`swept` is 2 of 2 for both feeds.
+`CLAUDE.md` §1 and the two swept series are named identically by both masters.
+`swept` is no longer two series: since D-0506 it is NIFTY, BANKNIFTY and the 208
+F&O shares, 210 names, and since D-2759 its coverage is counted against that
+compile-time roster, so a swept name no loaded master lists is counted as
+lacking and named rather than dropped from both sides of the count.
 
 ## 65. Reading a folder feed's reach is O(members), and it is a route rather than a page field for exactly that reason
 
@@ -9447,7 +9450,13 @@ it was written.
   damaged record past the commit, leave an entry no extent matches. The
   committed bars are refused until a strictly following append re-seals the
   block. The strict audit door (D-0525) refuses any bytes past the commit and
-  is unchanged. **Widened by D-0910:** a strictly following append now
+  is unchanged. Since D-2791 it refuses them under their own name ("an
+  interrupted append", with the data and sidecar byte counts against the
+  committed extents) rather than under its generic extent sentence. Nothing
+  in the store or the cli clears that extent: such a month stays
+  unauditable through `checksum-audit`, `sweep-audited-stored` and
+  `audit-audited-range` until a covering re-append at least as long as the
+  dead tail rewrites it, while ordinary readers keep serving it. **Widened by D-0910:** a strictly following append now
   verifies the old tail block before re-sealing it, so this state refuses
   every append as well as every read; see the D-0910 section below.
 - **The directory `fsync` after creating a `.crc` is not observable by any
@@ -11804,9 +11813,10 @@ would close this.
   still does file-system work with no constant bound (canonicalization, the
   lease, a log walk of up to 8 MiB, launch preparation, an audit `begin` with
   its syncs, a telemetry marker), on the blocking pool. A poll now holds the
-  slot for one clone and never waits on that work. A second admission still
-  waits for the first, behind the process-wide `ADMISSION` mutex, on a
-  blocking thread. Not timed.
+  slot for one clone and never waits on that work. A second admission no
+  longer waits for the first: it meets the site's admission lock with
+  `try_lock` and is refused `Busy` at once, so it never parks a shared
+  `detail::run` permit behind the first's I/O (D-2776). Not timed.
 - **The journal makes at most one directory per append.** `create_dir` of
   `audit/` replaces `create_dir_all`; a missing store root refuses the append
   instead of being recreated, so a pull into a root that does not exist loses
@@ -16051,3 +16061,67 @@ writer open, and on an append whose index the bars do not vouch for
 bucket). Each is an index damaged by something other than this writer's own
 failed append. Proving every entry would itself be the O(n) audit the index
 exists to avoid.
+
+## Shutdown, the audit journal and the execution lease — D-2770..D-2778, 4 October 2026
+
+- **The serve drain after the signal is bounded, not complete (D-2771).**
+  `serve_limited` waits `ConnectionLimits::drain_timeout` (`SHUTDOWN_GRACE`,
+  10 s, when served) after the signal and then returns without the requests
+  still in flight. A spot walk stops at its next instrument because the
+  signal moves the autopilot epoch. An F&O walk has no per-instrument stop
+  check, so it is cut at the end of the drain and the runtime's own bounded
+  end rather than journalling a partial run. A second Ctrl-C is not handled;
+  the exit is bounded without it. How long a spot instrument takes to reach
+  its next check is not measured.
+- **In-process journal writers wait for each other (D-2770).** The wait is one
+  record write and one fsync per writer ahead of it. The lock is taken per
+  record, so a leg appending one record per failed member does not hold it
+  across its loop; `std::sync::Mutex` is not fair, so a writer may be passed
+  by others more than once. Not timed.
+- **A claimant may wait for one probe's look at the execution lease
+  (D-2774).** The wait is one open, one lock, two stats and one unlock on the
+  store's file system: not constant-time, not timed.
+
+## The serve lock's take is once per serve, measured, and not constant-time — D-2779, 6 October 2026
+
+- **A fresh take is not O(1), and is not on any per-request path.**
+  `take_serve_lock` canonicalizes the configured root (one `stat`-like step
+  per path component), opens `serve.lock`, takes one `flock`, writes and
+  cuts the stamp, and inserts one entry in a map keyed by served root (one
+  entry per root this process serves, in practice one). It runs once per
+  `serve`. Measured by `the_serve_lock_take_and_release_are_measured`
+  (2,000 rounds, 4-core build box, uid 65534, test profile), microseconds
+  p50/p99/max over three runs: fresh take plus last release 5/16/56,
+  5/21/119, 5/18/85; join of a held root plus release 1/2/33, 1/6/82,
+  1/6/21. The p99 and max move with the host's file-system latency; no bound
+  is enforced.
+- **A take holds the registry's mutex across its open, lock and stamp.** A
+  concurrent take of any root in the same process waits for that one take;
+  the wait is the fresh-take cost above. Only one serve per process is the
+  production shape.
+
+## A CLI start may wait up to a second for the invocation index — D-2799, 6 October 2026
+
+- `operation_audit::begin` retries the index's exclusive lock every
+  millisecond for up to `INDEX_LOCK_WAIT` (1 s) while another description
+  holds it, so a start that meets a status read waits for that read. The
+  holders it waits for hold one record read or one append; the wait is not
+  timed and not constant-time. A holder that keeps the lock past the second
+  still refuses the start as busy.
+- `ledger_v6::create_durably` issues one directory sync per level between a
+  new rung root and the ledger root (two today), once per rung root per run.
+  Not timed.
+
+## The build stamp proves the tree as the build script read it — D-3602, 6 October 2026
+
+`crates/cli/build.rs` compares the working tree with HEAD once, when it runs,
+and stamps `BRUTEX_COMMIT` only on a match. rustc reads `cli`'s sources after
+the script exits, and Cargo may compile `cli`'s dependencies (`engine`,
+`runner`, `vocab`, `indicators`, `store`, `pull`, `costs`, `core`) beside it or
+after it. A file saved inside that window (an IDE's autosave does it unasked)
+is compiled into a binary that still carries the clean HEAD's commit, and runs
+it records name a commit whose source did not produce them. The next build
+re-verifies and unstamps; the binary already linked keeps the stamp. Not
+closed here: closing it needs a check after linking (a digest of the verified
+blob set beside the stamp, re-verified by CI and the launcher), which is not
+built. conc:cli3-2.

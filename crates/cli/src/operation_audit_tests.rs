@@ -529,3 +529,65 @@ fn an_empty_journal_left_by_a_crash_reads_as_its_unconfirmed_start() {
         );
     }
 }
+
+/// **A status read's momentary shared lock does not refuse a start.**
+/// conc:cli1-2, D-2799. The reader lets go after 50 ms, well inside
+/// `INDEX_LOCK_WAIT`, and the start then reserves the next ID.
+#[test]
+fn a_start_that_meets_a_status_read_waits_for_it_instead_of_refusing() {
+    let root = Scratch::new();
+    drop(begin(&root.0, Origin::Cli, "range-all").unwrap());
+    let index = File::open(base(&root.0).join("index.bin")).unwrap();
+    index.try_lock_shared().unwrap();
+    let reader = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        index.unlock().unwrap();
+    });
+    let started = begin(&root.0, Origin::Cli, "range-all")
+        .expect("a start waits out a status read rather than refusing busy");
+    assert_eq!(started.id(), ID_BASE + 2);
+    reader.join().unwrap();
+}
+
+/// `within` retries only `WouldBlock`, and only until the wait has passed.
+#[test]
+fn within_retries_only_a_busy_lock_and_only_until_the_wait_ends() {
+    let mut tries = 0_u32;
+    let answer = within(std::time::Duration::from_secs(1), || {
+        tries += 1;
+        if tries < 3 {
+            Err(std::fs::TryLockError::WouldBlock)
+        } else {
+            Ok(tries)
+        }
+    });
+    assert_eq!(answer.ok(), Some(3), "busy twice, then taken");
+
+    let mut tries = 0_u32;
+    let answer: Result<(), _> = within(std::time::Duration::from_secs(1), || {
+        tries += 1;
+        Err(std::fs::TryLockError::Error(std::io::Error::other(
+            "host refused",
+        )))
+    });
+    assert!(matches!(answer, Err(std::fs::TryLockError::Error(_))));
+    assert_eq!(tries, 1, "a host refusal is not retried");
+
+    let began = std::time::Instant::now();
+    let mut tries = 0_u32;
+    let answer: Result<(), _> = within(std::time::Duration::from_millis(30), || {
+        tries += 1;
+        Err(std::fs::TryLockError::WouldBlock)
+    });
+    assert!(matches!(answer, Err(std::fs::TryLockError::WouldBlock)));
+    assert!(began.elapsed() >= std::time::Duration::from_millis(30));
+    assert!(tries > 1, "busy is retried while the wait lasts");
+
+    let mut tries = 0_u32;
+    let answer: Result<(), _> = within(std::time::Duration::ZERO, || {
+        tries += 1;
+        Err(std::fs::TryLockError::WouldBlock)
+    });
+    assert!(matches!(answer, Err(std::fs::TryLockError::WouldBlock)));
+    assert_eq!(tries, 1, "no wait, one try");
+}
