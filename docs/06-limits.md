@@ -13787,6 +13787,32 @@ site below was opened and read against that test, and not one of the
     and the decision are now integer arithmetic on that fraction.
 ~~~~
 
+**runner/outcome.rs 26 -> 27 (D-4486, counted on the merged tree by the
+`intl` integration, 2026-10-09).** `pub const EXACT_PAISA_LIMIT: f64 = 2^53`,
+the bound `Edge::money_is_exact` compares each of the eight money totals
+against: below it an `f64` holds every integer exactly, so a total under it is
+the exact paisa sum and one at or past it is refused by name (`REFUSED, money
+inexact`). It is the guard that keeps a float money total from passing as
+exact, the direction this rule is allowed for. `runner/report.rs` stays at 4:
+the refusal row's new reason string was worded without the type name.
+
+### Gate 11 — rule 1. docs/07 layer 4: never `binary_search`.
+
+This rule had no reasons section: its one entry, `crates/store/src/file.rs 1`,
+is `BarFile::suffix_that_follows`'s `partition_point`, one search per append
+batch against the header's `last_ts_micros`, whose reason is in that
+function's doc.
+
+**runner/trade.rs 1 (D-4500, counted on the merged tree by the `intl`
+integration, 2026-10-09).** `trade::deadline_index`'s `partition_point` finds
+the first bar at or after a trade's time-exit deadline on the path's prefix
+before its first hole. That prefix is strictly ascending whole-minute bars of
+one IST day, at most 1,440, so the search makes at most 11 comparisons whatever
+the slice length (D-4500 states 12); measured p50 9, p99 10, max 10 by
+`runner::trade::tests::deadline_index_is_the_first_bar_at_or_after_the_deadline_within_twelve_probes`.
+It runs once per path whose time exit is unpriced, never per bar. A forward
+walk would be O(path).
+
 ### Gate 11 — rule 3. docs/07 law 2: pre-size every map.
 
 ~~~~text

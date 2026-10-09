@@ -69171,3 +69171,20 @@ directory: every row passed, and the directory held no entry afterwards (0
 
 **What changes.** The bench only. No crate source, output or format moves.
 
+
+### D-4487 — `CLAUDE.md` §3 rule 4 names the live mask-evaluation path, `Column::support_each` — 2026-10-09
+
+**What was observed.** D-4481 (audit `so1-1`) moved the sweep's support count
+from one candidate per pass over the column to blocks of 512 rows counted for a
+whole batch, through `engine::column::Column::support_each`. `CLAUDE.md` §3
+rule 4 still named `engine::column::Column::support` as "the production path".
+`support` remains as the one-candidate pass that FXD-03 prints and does not
+gate; it is not what the sweep calls. fxd recorded the stale name as
+NEEDS-OWNER rather than edit the law.
+
+**Decision.** The sentence now names `Column::support_each` and says what it
+does per bar. This corrects a stale fact, the way D-0208 and D-0210 corrected
+`CLAUDE.md` against the code: it does not widen or narrow any rule, and nothing
+else in the file is touched.
+
+**What changes.** One sentence of `CLAUDE.md`. No code, output or format.
