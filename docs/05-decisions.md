@@ -65180,3 +65180,117 @@ naming the lock, `the directory that holds it could not be measured`, and
 `Refused rather than run without the lock.` It also builds each of the three
 deferring cases, asserts the stat kind it really produces, and requires the
 deferral. R1286-rest-05.
+
+### D-4130 — The trimmed marker walk is tested against a record landing between its reads — 2026-10-08
+
+**What was observed.** Gate 18 run 1286 (head fbdabaec) reported
+`sweeprun::newest_sweep_marker` with the `&&` in
+`same(&through).is_some() && same(&through) == same(&lifecycle)` changed to
+`||` as MISSED. The two operands differ only when the re-read has a record
+at `found` whose sequence is not the marker's. That happens only when a CLI
+appends a lifecycle record BETWEEN the window read and the trimmed re-read.
+The function read the log itself, so no single-threaded test could land a
+record there, and under the mutant any trimmed walk was taken: a clean window
+whose `found` index named the newcomer instead of the marker.
+
+**Decided.** The body moved into `marker_window(read)`, which takes the
+bounded read as a closure; `newest_sweep_marker` passes the same
+`status_tail(dir, "cli.lifecycle", None, limit)` call it used to make, so
+what is read and how often are unchanged (at most two bounded reads). A test
+writes a torn line behind a finished sweep's marker, proves the quiet walk is
+trimmed to the marker, and then lands a newer `command started` from inside
+the second read. It requires reads of exactly 256 then 1, the whole first
+window kept with its malformed line, `found` still naming the finished
+marker's sequence, and the fault still raised (R1286-api-01).
+
+**Rejected.** Racing a writer thread against the reader. It would pass or
+fail by scheduling, which is no test.
+
+### D-4131 — The reading path's `records unreadable` line names the first damaged file — 2026-10-08
+
+**What was observed.** Run 1286 reported `bars::read_in_time` with the `!`
+deleted from `!bad.is_empty()` as MISSED. That makes the first CLEAN month the
+file the request's one `records unreadable` line names. G18-api-27 (D-2046)
+pins the seek path; nothing pinned the reading path, which a window takes when
+ordered by anything but time.
+
+**Decided.** A test orders a two-month window by close, once with February
+damaged after a clean January and once with January damaged before a clean
+February, and requires exactly one line, naming the damaged file. One flipped
+byte fails its record's whole checksum block, which in a ten-row month is all
+ten rows, so the test also requires ten named faults and the clean month's ten
+rows, whole (R1286-api-02).
+
+**Rejected.** Nothing else was needed: the code was right.
+
+### D-4132 — A permit free now is issued without a timer — 2026-10-08
+
+**What was observed.** Run 1286 reported `server::await_budget` with
+`wait > 0` changed to `wait >= 0` as MISSED. `wait` is unsigned, so the mutant
+sleeps on every call, a zero-length sleep when the governor grants now. The
+result is the same `Ok(())`, but not the same cost: Tokio's timer rounds a
+deadline up to its next millisecond tick, so every admitted request would
+yield and wait for a tick nobody asked for.
+
+**Decided.** A test polls `await_budget` once, with a no-op waker and no Tokio
+runtime, for each of two free Dhan permits, and requires `Ready(Ok(()))`.
+Outside a runtime, creating a timer panics, so `Ready` proves none was made
+(R1286-api-03).
+
+**Rejected.** Timing the call. A wall-clock bound under a millisecond is
+noise on a shared machine.
+
+### D-4133 — The front-end and universe banner lines are returned, not printed — 2026-10-08
+
+**What was observed.** Run 1286 reported `server::announce_front_end` replaced
+with `()`, and `server::announce_universe` replaced with `true` and with
+`false`, as MISSED. Both printed straight to stdout, which no test can read,
+and nothing checked `announce_universe`'s verdict.
+
+**Decided.** The G18-api-16 pattern (`log_announcement`): `announce_front_end`
+returns its line and `announce_universe` returns its lines beside the verdict,
+joined by `\n`, and the serve arm prints each with one `say!`. The bytes on
+stdout are unchanged. A test pins the front-end line for a missing build and a
+serving one, the clean universe line (`universe: ok`, `true`, none of the
+load's notes), and the degraded one (`DEGRADED`, every note, the exit-3
+sentence, `false`) (R1286-api-04, R1286-api-05). The startup banner's cost is
+unchanged: once per process, linear in the note bytes, as `docs/06-limits.md`
+already states.
+
+**Rejected.** Capturing stdout in a test. libtest's capture is not a public
+API and nextest runs each test in its own process.
+
+### D-4134 — A blocked recovery request is audited and recorded at its own status — 2026-10-08
+
+**What was observed.** Run 1286 reported `server::recovery_spot` replaced with
+`Ok(Default::default())` as MISSED. No test reached `recovery_spot` through
+`retry_day` with a free seat. The one that came closest held the seat and was
+refused before it.
+
+**Decided.** A test drives `retry_day` with the seat free on a site that may
+not reach a live broker, bounded at 10 s. It requires the budget-preserving
+refusal, word for word; the attempt recorded `Blocked` with one reserved
+attempt, `http_status` 503 and nothing committed, the same row in the plan;
+and exactly one whole audit record: `Spot`, `NotStarted`, the broker refusal
+as its note, and this day's window (R1286-api-06). The empty run the mutant
+returns leaves no audit record, records 502, and goes on to reassess.
+
+**Rejected.** Nothing else was needed.
+
+### D-4135 — A staging name that cannot be removed refuses with its own reason — 2026-10-08
+
+**What was observed.** Run 1286 reported `recovery::seeded` with the guard
+`why.kind() == NotFound` on the staging `remove_file` changed to `true` as
+MISSED. Every other removal error then passes silently. The activation still
+fails later, at `Journal::create_new`, but with that call's error instead of
+the real one.
+
+**Decided.** A test makes `active.bin.first` a directory, which `remove_file`
+refuses with `EISDIR`. It requires `seeded` to refuse with exactly that
+error's text, the directory untouched and no `active.bin` written
+(R1286-api-07). The mutant refuses one step later, with `create_new`'s
+`<path>: File exists`.
+
+**Rejected.** A permission-denied staging file: the box runs tests as root and
+as uid 65534, and `create_new` would refuse with the same `EACCES` text, so it
+cannot tell the two apart.

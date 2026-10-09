@@ -2613,6 +2613,80 @@ mod window_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// **THE READING PATH NAMES THE FIRST DAMAGED FILE TOO.** G18-api-27 pins
+    /// the seek path; ordered by close the window goes through `read_in_time`,
+    /// whose own `first_faulted` decides the `records unreadable` line. Both
+    /// placements of the damage: a clean month before a damaged one, and a
+    /// damaged month before a clean one, so neither "first file read" nor
+    /// "last damaged file" can pass for the rule. R1286-api-02, D-4131.
+    #[test]
+    fn the_reading_path_names_the_first_damaged_file_in_time_order() {
+        for (tag, damaged_first) in [
+            ("first-faulted-scan-feb", false),
+            ("first-faulted-scan-jan", true),
+        ] {
+            let root = scratch(tag);
+            let jan = YearMonth::new(2026, 1).expect("m");
+            let feb = YearMonth::new(2026, 2).expect("m");
+            write_month(&root, jan, 10, 1_000);
+            write_month(&root, feb, 10, 2_000);
+            let (damaged, clean) = if damaged_first {
+                (jan, feb)
+            } else {
+                (feb, jan)
+            };
+            damage_record(&root, damaged, 5);
+            let path_of = |month| {
+                open_classified(
+                    &root,
+                    PathParts {
+                        vendor: Vendor::Dhan,
+                        exchange: "NSE",
+                        segment: "INDEX",
+                        symbol: SYMBOL,
+                        contract: None,
+                        timeframe: Timeframe::MINUTE_1,
+                        month,
+                        file: FileKind::Bars,
+                    },
+                )
+                .map_err(|why| why.message)
+                .expect("the month opens")
+                .path()
+                .display()
+                .to_string()
+            };
+            let (damaged_path, clean_path) = (path_of(damaged), path_of(clean));
+            let from = crate::emitted::mark();
+            let page = window_over(&root, feb, SortKey::Close, false, 0, 20, false);
+            // One flipped byte fails its whole checksum block, which in a
+            // ten-row month is every row of it.
+            assert_eq!(page.faults.len(), 10, "{tag}: the damaged month is named");
+            let base = if damaged_first { 2_000 } else { 1_000 };
+            let mut closes: Vec<i64> = page.bars.iter().map(|row| row.bar.close).collect();
+            closes.sort_unstable();
+            assert_eq!(
+                closes,
+                (base..base + 10).collect::<Vec<i64>>(),
+                "{tag}: the clean month still reads whole"
+            );
+            let mine: Vec<telemetry::Record> =
+                crate::emitted::landed(from, "api.bars", "records unreadable")
+                    .into_iter()
+                    .filter(|record| {
+                        crate::emitted::says(record, "file", &damaged_path)
+                            || crate::emitted::says(record, "file", &clean_path)
+                    })
+                    .collect();
+            assert_eq!(mine.len(), 1, "{tag}: one line for the request: {mine:?}");
+            assert!(
+                crate::emitted::says(&mine[0], "file", &damaged_path),
+                "{tag}: {mine:?}"
+            );
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
     /// An unreadable LAST record of the month before is a named gap for the
     /// next month's first row, not "first in file" and not a number measured
     /// across the gap (Z1-slice11-F4).

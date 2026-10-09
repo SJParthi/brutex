@@ -2660,7 +2660,23 @@ fn uncertain_observation(at_millis: Option<i64>, why: &str) -> ExternalObservati
 /// marker, the window trimmed to end at that marker when damage behind it is
 /// all that would otherwise refuse (CE-11, D-1914).
 fn newest_sweep_marker(dir: &std::path::Path) -> (telemetry::Tail, Option<usize>) {
-    let mut lifecycle = status_tail(dir, "cli.lifecycle", None, 256);
+    marker_window(|limit| status_tail(dir, "cli.lifecycle", None, limit))
+}
+
+/// [`newest_sweep_marker`] over the bounded read it makes at most twice:
+/// `read(limit)` answers the newest `limit` lifecycle records of the log.
+///
+/// A PARAMETER SO THE RACE IT GUARDS CAN BE STAGED. The same-record check below
+/// exists for a CLI that appends a lifecycle record BETWEEN the window read and
+/// the trimmed re-read. No single-threaded fixture lands a record there, so
+/// with the read hard-wired no test could reach the check, and a mutant that
+/// let any trimmed walk through survived (R1286-api-01, D-4130). Production
+/// passes the same `status_tail` call the body used to make; nothing changed
+/// about what is read or how often.
+fn marker_window(
+    mut read: impl FnMut(usize) -> telemetry::Tail,
+) -> (telemetry::Tail, Option<usize>) {
+    let mut lifecycle = read(256);
     let mut found = None;
     for (index, record) in lifecycle.records.iter().enumerate() {
         let is_marker = matches!(
@@ -2689,7 +2705,7 @@ fn newest_sweep_marker(dir: &std::path::Path) -> (telemetry::Tail, Option<usize>
     if let Some(index) = found
         && tail_fault_unless_answered(&lifecycle, true).is_some()
     {
-        let through = status_tail(dir, "cli.lifecycle", None, index.saturating_add(1));
+        let through = read(index.saturating_add(1));
         let same = |tail: &telemetry::Tail| tail.records.get(index).map(|record| record.seq);
         if same(&through).is_some() && same(&through) == same(&lifecycle) {
             lifecycle = through;
@@ -7129,6 +7145,82 @@ mod tests {
         let newer = super::observe_elsewhere(&dir, i64::MAX);
         assert!(newer.body.contains("1 malformed records"), "{}", newer.body);
         assert!(!newer.launch_clear, "{}", newer.body);
+        drop(sink);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// R1286-api-01, D-4130: a lifecycle record that lands BETWEEN the window
+    /// read and the trimmed re-read moves every newest-first index by one, so
+    /// the trimmed walk no longer ends on the marker. The whole window is kept,
+    /// torn line and all, and `found` still names the marker in it. Taking the
+    /// trimmed walk instead would hand the caller a clean window whose `found`
+    /// index names the newcomer, and a launch cleared on a marker it never read.
+    #[test]
+    fn a_record_landing_between_the_two_reads_keeps_the_whole_window() {
+        let dir = crate::scratch::path("sweep-external-landed-between");
+        let _ = std::fs::remove_dir_all(&dir);
+        let sink = telemetry::Sink::open(&telemetry::Config::new(&dir)).expect("sink");
+        let marker = |message, phase, run| {
+            let event = telemetry::Event::info("cli.lifecycle", message)
+                .with("phase", phase)
+                .with("command", "sweep-stored");
+            assert_eq!(sink.emit_for_run(run, &event), telemetry::Emitted::Written);
+        };
+        marker("command started", "running", 63);
+        std::io::Write::write_all(
+            &mut std::fs::OpenOptions::new()
+                .append(true)
+                .open(telemetry::current_path(&dir))
+                .expect("the current log"),
+            b"{\"torn\n",
+        )
+        .expect("one malformed line");
+        marker("command started", "running", 64);
+        marker("command finished", "completed", 64);
+
+        // PREMISE: with nothing landing in between, the walk is trimmed to end
+        // at the marker, so the torn line behind it is out of the window.
+        let (quiet, found) = super::newest_sweep_marker(&dir);
+        assert_eq!(found, Some(0), "the newest record is the marker");
+        assert_eq!(quiet.records.len(), 1, "trimmed to the marker");
+        assert_eq!(quiet.malformed, 0, "the torn line is behind the marker");
+        let newest = quiet.records.first().expect("the marker");
+        assert_eq!(newest.message, "command finished");
+        let finished = newest.seq;
+
+        // THE RACE: a newer sweep starts between the two reads.
+        let mut reads = Vec::new();
+        let (raced, found) = super::marker_window(|limit| {
+            if !reads.is_empty() {
+                marker("command started", "running", 65);
+            }
+            reads.push(limit);
+            super::status_tail(&dir, "cli.lifecycle", None, limit)
+        });
+        assert_eq!(reads, vec![256, 1], "the window, then the trimmed re-read");
+        assert_eq!(found, Some(0));
+        assert_eq!(raced.records.len(), 3, "the whole first window is kept");
+        assert_eq!(raced.malformed, 1, "with its torn line");
+        assert_eq!(
+            raced.records.first().map(|record| record.seq),
+            Some(finished),
+            "`found` still names the marker the walk found"
+        );
+        assert!(
+            super::tail_fault_unless_answered(&raced, true).is_some(),
+            "the damage the trimmed walk would have hidden still refuses"
+        );
+
+        // The landed record is real: a fresh look reads the newer sweep, not
+        // the finished one, and does not clear a launch over it.
+        let now = super::observe_elsewhere(&dir, i64::MAX);
+        assert!(now.body.contains(r#""run":65"#), "{}", now.body);
+        assert!(
+            !now.body.contains(r#""status":"completed""#),
+            "{}",
+            now.body
+        );
+        assert!(!now.launch_clear, "{}", now.body);
         drop(sink);
         let _ = std::fs::remove_dir_all(dir);
     }

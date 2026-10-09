@@ -4521,9 +4521,9 @@ took C-15 from 1,433 – 2,100 ps per instrument per request to 0 – 280 ps.
   proportional to the universe, once per poll. It is not on a page path and no
   gate measures it. It is O(total note bytes), which at the real universe is
   ~35 index names and at the bench's synthetic 50,000 is 100 KB.
-* **The startup banner.** `announce_universe` prints the same lines when the
-  read is not clean. Once per process, so it is bounded by construction rather
-  than by design.
+* **The startup banner.** `announce_universe` builds the same lines, which the
+  serve arm prints, when the read is not clean. Once per process, so it is
+  bounded by construction rather than by design.
 * **Building the notes at all.** `Coverage::build` and `Join::build` are
   whole-universe passes, which is what D-0039 and D-0042 permit at LOAD and
   nowhere else. This is not a breach; it is named here so the load-time cost is
