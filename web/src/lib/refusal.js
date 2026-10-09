@@ -19,10 +19,41 @@
 // above is set. Its `why` is read only when the status is `unknown`: a running
 // or finished payload's `why` describes the run, not a refusal (W6, D-3216).
 //
+// AND THE AUDIT LAYER'S OWN ENVELOPE: every route in
+// `crates/api/src/operation_audit.rs` `AUDITED` can be refused before or after
+// its handler by the journal itself, with
+// `{"schema_version":1,"refusal":…,"code":"invocation_audit_unavailable",
+// "handler_completed":bool,"why":…}` or the read twin
+// `invocation_audit_read_unavailable` (no `handler_completed`). Its `why` is
+// the half that says whether the handler ran, so a validated one is read as
+// `refusal` and `why` together; an unvalidated one is read as a bare `refusal`
+// like any other body (F1, D-3218).
+//
 // A body that names none of them is not invented into one: the sentence then
 // says the route named no reason, which is itself the fact worth showing.
 
 const KEYS = ['error', 'refused', 'refusal'];
+
+/** Longest refusal or why the audit envelope may carry (`detail-refusal.js`'s bound). */
+const AUDIT_LIMIT = 4096;
+
+/**
+ * The audit layer's refusal and why, when `body` is exactly its envelope, or null.
+ * One validator for every reader: `detail-refusal.js`, `invocation-audit.js`
+ * and `refusalOf` all read the envelope through this.
+ * @param {unknown} body
+ * @returns {string | null}
+ */
+export function auditRefusal(body) {
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) return null;
+  const record = /** @type {Record<string, unknown>} */ (body);
+  const { refusal, why, code } = record;
+  const write = code === 'invocation_audit_unavailable' && typeof record.handler_completed === 'boolean';
+  const read = code === 'invocation_audit_read_unavailable' && !Object.hasOwn(record, 'handler_completed');
+  if (record.schema_version !== 1 || !(write || read) || typeof refusal !== 'string' || refusal.trim() === '' ||
+      refusal.length > AUDIT_LIMIT || typeof why !== 'string' || why.length > AUDIT_LIMIT) return null;
+  return why.trim() === '' ? refusal.trim() : `${refusal.trim()} ${why.trim()}`;
+}
 
 /**
  * The named reason in a parsed refusal body, or null when it names none.
@@ -31,6 +62,8 @@ const KEYS = ['error', 'refused', 'refusal'];
  */
 export function refusalOf(body) {
   if (body === null || typeof body !== 'object' || Array.isArray(body)) return null;
+  const audit = auditRefusal(body);
+  if (audit !== null) return audit;
   const record = /** @type {Record<string, unknown>} */ (body);
   for (const key of KEYS) {
     const value = record[key];

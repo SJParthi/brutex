@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { headerRefusal, headerRefusalFrom, reasonOf, refusalFrom, refusalOf, refusalSentence } from '../src/lib/refusal.js';
+import { auditRefusal, headerRefusal, headerRefusalFrom, reasonOf, refusalFrom, refusalOf, refusalSentence } from '../src/lib/refusal.js';
 import { readCalendar } from '../src/lib/calendar-owed.js';
 import { censusFailure, createCensusLoader } from '../src/lib/store-census.js';
 
@@ -111,4 +111,26 @@ test('an unknown running status is read for its why, and only an unknown one (W6
   }
   assert.equal(await refusalFrom('/backtest/run.json', Response.json({ running: { status: 'unknown', why } }, { status: 503 })),
     `/backtest/run.json answered HTTP 503: ${why}`);
+});
+
+// F1 (OBSV-19, D-3218): the audit layer refuses any audited route with its own
+// envelope, whose `why` says whether the handler ran. `refusalOf` read only
+// `refusal` from it, so /live.json, /frontier.json, /backtest/run.json and
+// /engine/boolean-launch.json readers dropped that half.
+test('an audit-layer envelope is read for its refusal and its why, and only a validated one (F1)', async () => {
+  const body = { schema_version: 1, refusal: 'bounded terminal audit could not settle: Busy', code: 'invocation_audit_unavailable',
+    handler_completed: true, why: 'The handler already ran. Its work may still be running or saved; inspect the exact invocation before retrying a write.' };
+  assert.equal(refusalOf(body), `${body.refusal} ${body.why}`);
+  assert.equal(await refusalFrom('/live.json', Response.json(body, { status: 503 })), `/live.json answered HTTP 503: ${body.refusal} ${body.why}`);
+  const read = { schema_version: 1, refusal: 'invocation index is busy', code: 'invocation_audit_read_unavailable', why: 'No audit snapshot was published.' };
+  assert.equal(refusalOf(read), 'invocation index is busy No audit snapshot was published.');
+  for (const damage of [{ schema_version: 2 }, { code: 'invocation_audit' }, { handler_completed: 1 }, { why: null }]) {
+    assert.equal(refusalOf({ ...body, ...damage }), body.refusal, `unvalidated ${JSON.stringify(damage)} falls back to the bare refusal key`);
+  }
+  assert.equal(refusalOf({ ...read, handler_completed: false }), read.refusal);
+  assert.equal(auditRefusal({ ...read, why: '  ' }), 'invocation index is busy', 'an empty why adds nothing');
+  assert.equal(auditRefusal({ ...read, refusal: 'r'.repeat(4096), why: 'w'.repeat(4096) }), `${'r'.repeat(4096)} ${'w'.repeat(4096)}`);
+  assert.equal(auditRefusal({ ...read, refusal: 'r'.repeat(4097) }), null);
+  assert.equal(auditRefusal({ ...read, why: 'w'.repeat(4097) }), null);
+  for (const bad of [null, [], 'text', {}]) assert.equal(auditRefusal(bad), null);
 });

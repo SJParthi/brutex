@@ -66589,3 +66589,32 @@ every status including the one that names its cause.
 keep their closing clause ("No launch was attempted." / "No sweep was
 submitted."). An older server's 404 now reads "answered HTTP 404 and named no
 reason", which is what was measured. OBSV-18.
+
+### D-3218 — The audit layer's own refusal is read by every detail reader, with whether the handler ran — 2026-10-09
+
+**What was observed.** Every route in `crates/api/src/operation_audit.rs`
+`AUDITED` (22 of them) can be refused by the audit journal itself, before or
+after its handler: 429 when the journal is busy, 503 otherwise, with
+`{"schema_version":1,"refusal":…,"code":"invocation_audit_unavailable",
+"handler_completed":bool,"why":…}` (`failure`), or the read twin
+`invocation_audit_read_unavailable` with no `handler_completed`
+(`read_failure`). `web/src/lib/detail-refusal.js` `detailRefusal` accepted only
+the detail envelope (`status:"refused"`, `rows:[]`), so every detail reader of
+an audited route — candidate trades, saved evidence, the Boolean catalog,
+evidence, qualified search, campaign and later comparison, Selection V6 and
+expression search — printed "(HTTP 429)." and dropped both the refusal and
+whether the handler had run. Only `invocation-audit.js` validated the envelope,
+in its own copy. `refusal.js` `refusalOf` read the envelope's bare `refusal`
+and dropped its `why`, so the `/live.json`, `/frontier.json`,
+`/backtest/run.json` and `/engine/boolean-launch.json` readers could not say
+whether the handler ran.
+
+**Decided.** One validator, `refusal.js` `auditRefusal`, moved from
+`invocation-audit.js` unchanged in what it accepts (schema 1; a write code with
+a boolean `handler_completed` or a read code without one; a non-blank refusal
+and a string why, each at most 4096). It answers "refusal why".
+`detailRefusal` reads it after the detail envelope, `refusalOf` reads it before
+its three keys, and `invocation-audit.js` now calls `detailRefusal` instead of
+its copy. An envelope that does not validate is still not echoed by
+`detailRefusal`, and is still read for its bare `refusal` by `refusalOf`, as
+before. OBSV-19.
