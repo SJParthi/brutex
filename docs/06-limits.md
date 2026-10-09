@@ -15472,8 +15472,9 @@ The rollback on a failed append is one `seek`, one `set_len` and one
 
 ## Walk-forward fold rung counts are derived per training window — D-1660, 3 October 2026
 
-`cli::fold_rungs` hands each walk-forward fold `grid_rungs` over its own
-training signal slice (GAP4-46). That is one `reference_price`, one
+`cli::walk_forward_rungs` hands each walk-forward fold `grid_rungs` over its
+own training signal slice (GAP4-46); this section once gave it a name no `cli`
+function has (G3-5, D-4739). That is one `reference_price`, one
 `grid_step_ppm` and one `max_stop_points` pass per fold, so **O(training
 bars) per fold and O(folds x span) per walk-forward shape**, beside the
 per-fold column build that already costs O(training bars). It runs on the

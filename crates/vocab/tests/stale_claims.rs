@@ -623,3 +623,24 @@ fn every_count_and_kind_the_documents_state_is_the_tables() {
     assert_eq!(next, COUNT, "the group table stops at {next} of {COUNT}");
 }
 
+/// G3-5 (D-4739): D-1660's limits section named `cli::fold_rungs`, a `cli`
+/// function that does not exist; the per-fold resolver is
+/// `cli::walk_forward_rungs`, and `runner::validate::fold_rungs` is the
+/// unrelated `BRUTEX_GRID_RUNGS` reader. The limits document names the real
+/// function, and the function is there under that name.
+#[test]
+fn the_limits_document_names_the_per_fold_rung_resolver_that_exists() {
+    let limits = read("docs/06-limits.md");
+    assert!(
+        !limits.contains("`cli::fold_rungs`"),
+        "docs/06-limits.md names cli::fold_rungs, which does not exist"
+    );
+    assert!(
+        limits.contains("`cli::walk_forward_rungs` hands each walk-forward fold"),
+        "docs/06-limits.md no longer names the per-fold resolver"
+    );
+    assert!(
+        read("crates/cli/src/lib.rs").contains("\nfn walk_forward_rungs() -> "),
+        "cli::walk_forward_rungs is gone; the limits document must follow it"
+    );
+}

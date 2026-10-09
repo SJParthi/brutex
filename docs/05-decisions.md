@@ -65204,3 +65204,18 @@ test refuses the old phrase anywhere in `stored.rs`. It failed before the edit
 with "stored.rs says again that same-day daily records are not offered".
 
 Invariant L1FC-11.
+
+### D-4739 — The per-fold rung resolver is `cli::walk_forward_rungs`; corrects D-1660 — 2026-10-09
+
+**Finding.** G3-5. D-1660 and the matching `docs/06-limits.md` section name
+`cli::fold_rungs`. No such `cli` function exists. The resolver is
+`cli::walk_forward_rungs`, and `runner::validate::fold_rungs` is the unrelated
+`BRUTEX_GRID_RUNGS` reader.
+
+**The decision.** `docs/06-limits.md` names `cli::walk_forward_rungs`. A
+`vocab` stale-claims test refuses `cli::fold_rungs` in that document and
+requires both the real name there and `fn walk_forward_rungs(` in
+`cli/src/lib.rs`. D-1660 stays as written; this entry corrects its function
+name.
+
+Invariant L1FC-12.
