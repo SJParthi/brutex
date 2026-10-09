@@ -316,3 +316,14 @@ check in just after the 5-hour reset, resume. Weekly: save at 93%, stop at 98%.
   1632 s test); no mutant outcome reported. 14 other shards passed so far. PR comment posted
   (issuecomment-6083937460). TODO when the run completes: `rerun_failed_jobs` on 37919296478
   ONCE (a run cannot re-run jobs while in progress). A second failure is real: read its log.
+
+## 2026-10-09 16:45 UTC — "push now": combined branch merged, 4 gates fixed (weekly 93% save)
+- Parthi (16:19 UTC): "push now dude". Coordinator agreed: fix the 4 gates, reconcile significance.rs, push, Gate 18 restarts.
+- Local branch `integ/combined` in /home/claude/brutex:
+  - `452a1bc9` merge of `claude/project-thread-lx6ptl`@614fdc4b onto final/all-fixes@ff390a4f. 5 conflicts resolved (cli lib.rs + selection_v6_tests.rs both kept; docs/04 + docs/05 tails both kept, GPORT-11 carries pricing.rs 25 and significance.rs 44; runner significance.rs reconciled: D-4505 ceiling inside student_t_two_sided_tail, D-4150 turning_point bisects the same tail, both test sets kept).
+  - `fe8aefc1` D-4182: gate 1d `WHOLE_TEXT_CELL` in .github/gates_tree.rs (DECLARED is now 56), gate 12 proofs named in api topjson.rs header (JR-07) and operation_audit_tests.rs latency doc (OAU-03), gate 21 loss.rs + sink.rs opens, gate 23 server.rs 4->7 and 20 latency-test prints.
+- Clippy clean on the merge; fmt clean; gates 1d/12/21/23 OK locally (rebuild the gate tools with Gate 0 first, or 1d reads a stale gates-tree binary).
+- Next: full static replay (/tmp/claude-0/integ/static4.sh) and every test binary (/tmp/claude-0/integ/val4.sh), then fetch + push `integ/combined:final/all-fixes` (no force). That push cancels the Gate 18 run on ff390a4f and restarts all CI.
+- If this container is gone before the push: recreate by merging origin/claude/project-thread-lx6ptl (614fdc4b) into origin/final/all-fixes (ff390a4f) and re-applying the resolutions above, or check whether final/all-fixes already moved past ff390a4f.
+- Decisions: this thread owns D-4100..D-4199; D-4182 used, D-4183 next.
+- After the push: the audit's final batch3 merges on top when the audit resumes (not 8102ca76).
