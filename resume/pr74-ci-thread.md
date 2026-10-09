@@ -238,3 +238,20 @@ check in just after the 5-hour reset, resume. Weekly: save at 93%, stop at 98%.
   merge r1286-{cli,api,rest,ord} + handed-over batches on a local branch from
   origin/final/all-fixes (merge commits), full validation (fmt, clippy, deny, tests as 65534,
   static gates), ONE push to final/all-fixes, then watch the new run.
+
+## 2026-10-09 05:20 UTC — pause for the 5-hour limit, resume at the 09:05 UTC check-in
+- rest fixer DONE: pr74/r1286-rest 33174d3b, all 10 survivors killed or restructured
+  (D-4150..D-4154, R1286-rest-01..06). Validated: fmt, clippy, tests as 65534 (only store
+  cited_commits env failure).
+- ordered.rs D-4180 (uncommitted in /home/claude/wt-ord, .config/nextest.toml only): hand-applied
+  mutants caught: update->() test 48/2060 in 122 s; delete ! test 48 in 130 s; ready->false test
+  47 in 88 s. The other six (line 98 x5, Finished::drop) run detached:
+  /tmp/claude-0/ord/manual2/run.sh, results in driver.log, `done` when finished. Draft decision:
+  /tmp/claude-0/ord/D-4180.md (verify the "Boolean pool test hung first" and D-0911 claims before
+  committing; add a test pinning both names against .config/nextest.toml).
+- Part 2 pre-run (rest crates, 43 mutants) runs detached in wt-rest under a 5 GiB memory cgroup:
+  /tmp/claude-0/p2/rest.sh, summary in /tmp/claude-0/p2/rest-summary.txt. store
+  time_index.rs:618:16 allocates without bound (why that cap exists).
+- cli fixer (pr74/r1286-cli) and api fixer (pr74/r1286-api) told to save and stop by 05:35.
+- Merge-leftover thread: claude/project-thread-lx6ptl 061c7004 is validated and ready for the
+  batched push (143/143 binaries, gates pass); it may send a newer sha after CI run 1287's Gate 18.
