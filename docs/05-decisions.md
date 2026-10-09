@@ -66508,3 +66508,18 @@ saying none was sent; `null` when neither names a failure.
 back to the body's reason (`reasonOf`). The loader and the roster use
 `headerRefusalFrom('/instruments.json', …)`; the HEAD survey, which has no
 body, uses `headerRefusal` in `refusalSentence('census HEAD', …)`. OBSV-13.
+
+### D-3213 — A refused frontier page names the server's refusal — 2026-10-09
+
+**What was observed.** Every non-2xx `/frontier.json` answer writes its cause
+in `refusal` (`crates/api/src/frontierjson.rs` `refuse`, `unavailable`,
+`too_large`, `range_refusal`): a 400 selector refusal, the 429 saturation
+sentence, a 503 preflight failure, the 413 row ceiling, the 416 range.
+`fetchCompleteFrontier` threw "/frontier.json answered 503 on page 0." and
+the reason was never read. `web/tests/frontier-pages.test.js` pinned that
+behaviour with a stub that had no body.
+
+**Decided.** A non-2xx (or a 2xx other than 200/206) throws "Frontier page
+<n> refused: " followed by `refusalFrom('/frontier.json', response)`. The
+pinned test now gives its HTML stub a `text()` and asserts the HTML is quoted
+with the status, still without parsing the body as JSON. OBSV-14.
