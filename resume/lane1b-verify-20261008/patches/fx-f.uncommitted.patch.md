@@ -201,7 +201,7 @@ index 2adcb535..b4c22be5 100644
          .map_err(|why| format!("all-rung {rung_name} BANKNIFTY refused: {why}"))?;
          roots.require_same(&format!(
 diff --git a/crates/cli/src/candidate_universe.rs b/crates/cli/src/candidate_universe.rs
-index 2bd12520..67de4120 100644
+index 2bd12520..c7e73124 100644
 --- a/crates/cli/src/candidate_universe.rs
 +++ b/crates/cli/src/candidate_universe.rs
 @@ -13,10 +13,12 @@
@@ -470,7 +470,7 @@ index 2bd12520..67de4120 100644
      build_candidate_signal_column(
          signal_bars,
          daily_references,
-@@ -1671,7 +1719,117 @@ pub(crate) fn candidate_signal_swept_v1(
+@@ -1671,7 +1719,121 @@ pub(crate) fn candidate_signal_swept_v1(
          rung_seconds,
          evaluation,
      )
@@ -524,7 +524,8 @@ index 2bd12520..67de4120 100644
 +        })
 +    }
 +
-+    /// The rows the column sweeps, warm-up excluded (D-2103). O(1).
++    /// The rows the column sweeps, warm-up excluded (D-2103), read from the
++    /// column's own census.
 +    pub(crate) fn swept(&self) -> u64 {
 +        self.column.census().swept
 +    }
@@ -535,7 +536,8 @@ index 2bd12520..67de4120 100644
 +    }
 +
 +    /// The column, for exactly the inputs it was built from. O(1): three
-+    /// separate comparisons, each refusing by name.
++    /// separate comparisons, each refusing by name, and no bar is read; see
++    /// `cli::candidate_universe::tests::a_prebuilt_signal_column_serves_exactly_the_inputs_it_was_built_from`.
 +    ///
 +    /// # Errors
 +    ///
@@ -572,7 +574,9 @@ index 2bd12520..67de4120 100644
 +    }
 +}
 +
-+/// The address and length of each slice, compared in O(1).
++/// The address and length of each slice, compared in O(1) without reading a
++/// bar; see
++/// `cli::candidate_universe::tests::a_prebuilt_signal_column_serves_exactly_the_inputs_it_was_built_from`.
 +fn slice_identities(
 +    signal_bars: &[Candle],
 +    daily_references: &[DailyReference],
@@ -589,7 +593,12 @@ index 2bd12520..67de4120 100644
  }
  
  /// Builds one exact anchored signal column from the typed daily reference and
-@@ -2702,11 +2860,28 @@ impl<'a> ProducedCandidateUniverseV1<'a> {
+@@ -2698,15 +2860,36 @@ impl<'a> ProducedCandidateUniverseV1<'a> {
+     ///
+     /// Returns any receipt-last append, exact-retry, corruption, stale-path,
+     /// bounds, I/O or reopen mismatch refusal. No partial audit is returned.
++    #[cfg(test)]
+     pub(crate) fn append_and_reopen(
          &self,
          root: impl AsRef<Path>,
          bounds: CandidateUniverseBoundsV1,
@@ -597,14 +606,17 @@ index 2bd12520..67de4120 100644
 +        self.append_and_reopen_with(&mut CandidateLedgerWriterV1::new(), root.as_ref(), bounds)
 +    }
 +
-+    /// [`Self::append_and_reopen`] through a writer the caller carries across
-+    /// a run, so the ledger is opened once per run rather than once per
-+    /// append (W2-cli3-4, D-4780).
++    /// Commits the complete block through a writer the caller carries across
++    /// a run, then re-reads and re-seals that block and its receipt from disk
++    /// through the same handle, before returning success. The ledger is
++    /// opened once per run rather than once per append (W2-cli3-4, D-4780).
 +    ///
 +    /// # Errors
 +    ///
-+    /// As [`Self::append_and_reopen`], plus a carried writer that was opened
-+    /// for another root or other bounds.
++    /// Returns any receipt-last append, exact-retry, catch-up, corruption,
++    /// stale-path, bounds, I/O or reopen mismatch refusal, and a carried
++    /// writer that was opened for another root or other bounds. No partial
++    /// audit is returned.
 +    pub(crate) fn append_and_reopen_with(
 +        &self,
 +        writer: &mut CandidateLedgerWriterV1,
@@ -619,7 +631,7 @@ index 2bd12520..67de4120 100644
      }
  
      /// Persists the same-pass Base records only after the exact Candidate
-@@ -2787,7 +2962,7 @@ pub(crate) fn produce_candidate_universe_v1<'a>(
+@@ -2787,7 +2970,7 @@ pub(crate) fn produce_candidate_universe_v1<'a>(
      bounds: CandidateUniverseBoundsV1,
      on_level: &dyn Fn(&engine::Frontier, usize, u64),
  ) -> Result<ProducedCandidateUniverseV1<'a>, CandidateUniverseRefusal> {
@@ -628,7 +640,7 @@ index 2bd12520..67de4120 100644
      let identities = production_identities(&source, sweeper)?;
      let descriptor = CandidateUniverseDescriptorV1::new(
          source.family,
-@@ -3191,6 +3366,8 @@ pub(crate) fn verify_population_v5_canonical_record(
+@@ -3191,6 +3374,8 @@ pub(crate) fn verify_population_v5_canonical_record(
      verify_population_candidate_canonical_record_v1(canonical_record)
  }
  
@@ -637,7 +649,7 @@ index 2bd12520..67de4120 100644
  #[cfg(test)]
  pub(crate) use tests::population_v5_test_canonical_candidate_record_for_identity;
  
-@@ -3253,6 +3430,9 @@ pub struct CandidateUniverseLedgerV1 {
+@@ -3253,6 +3438,9 @@ pub struct CandidateUniverseLedgerV1 {
      audits: HashMap<[u8; 32], CandidateUniverseReopenAuditV1>,
      orphan: Option<OrphanBlockV1>,
      total_rows: u64,
@@ -647,7 +659,7 @@ index 2bd12520..67de4120 100644
      lock_generation: FileGenerationV1,
      row_generation: FileGenerationV1,
      receipt_generation: FileGenerationV1,
-@@ -3294,6 +3474,10 @@ impl CandidateUniverseLedgerV1 {
+@@ -3294,6 +3482,10 @@ impl CandidateUniverseLedgerV1 {
          writable: bool,
      ) -> Result<Self, CandidateUniverseRefusal> {
          let (row_path, receipt_path, lock_path) = candidate_ledger_paths(root)?;
@@ -658,7 +670,7 @@ index 2bd12520..67de4120 100644
          let writer_lock = open_file(&lock_path, writable, writable)?;
          // The open lock is released by name on success and by the guard's
          // explicit unlock on every refusal, never by closing a descriptor: the
-@@ -3368,6 +3552,7 @@ impl CandidateUniverseLedgerV1 {
+@@ -3368,6 +3560,7 @@ impl CandidateUniverseLedgerV1 {
                  audits: HashMap::new(),
                  orphan: None,
                  total_rows: 0,
@@ -666,7 +678,7 @@ index 2bd12520..67de4120 100644
                  lock_generation,
                  row_generation,
                  receipt_generation,
-@@ -3423,6 +3608,7 @@ impl CandidateUniverseLedgerV1 {
+@@ -3423,6 +3616,7 @@ impl CandidateUniverseLedgerV1 {
              .try_reserve(capacity)
              .map_err(|why| format!("cannot reserve candidate completion audit index: {why}"))?;
          let mut committed = 0_u64;
@@ -674,7 +686,7 @@ index 2bd12520..67de4120 100644
          for index in 0..receipt_count {
              let receipt = read_receipt(&mut self.receipt_file, index)?;
              let end = committed
-@@ -3445,10 +3631,12 @@ impl CandidateUniverseLedgerV1 {
+@@ -3445,10 +3639,12 @@ impl CandidateUniverseLedgerV1 {
                      hex32(receipt.universe_id())
                  ));
              }
@@ -687,7 +699,7 @@ index 2bd12520..67de4120 100644
          self.row_generation = file_generation(&self.row_file, &self.row_path)?;
          self.receipt_generation = file_generation(&self.receipt_file, &self.receipt_path)?;
          Ok(())
-@@ -3752,7 +3940,10 @@ impl CandidateUniverseLedgerV1 {
+@@ -3752,7 +3948,10 @@ impl CandidateUniverseLedgerV1 {
          &mut self,
          prepared: &PreparedCandidateUniverseV1,
      ) -> Result<CandidateUniverseProductionCommitV1, CandidateUniverseRefusal> {
@@ -699,7 +711,7 @@ index 2bd12520..67de4120 100644
          let receipt = prepared.receipt;
          receipt.validate()?;
          if receipt.row_count > self.bounds.max_rows {
-@@ -3837,6 +4028,7 @@ impl CandidateUniverseLedgerV1 {
+@@ -3837,6 +4036,7 @@ impl CandidateUniverseLedgerV1 {
          )?;
          let audit = CandidateUniverseReopenAuditV1 { first_row, receipt };
          self.audits.insert(receipt.universe_id(), audit);
@@ -707,7 +719,7 @@ index 2bd12520..67de4120 100644
          self.orphan = None;
          self.receipt_generation = file_generation(&self.receipt_file, &self.receipt_path)?;
          Ok(CandidateUniverseProductionCommitV1::Written(audit))
-@@ -3927,6 +4119,156 @@ impl CandidateUniverseLedgerV1 {
+@@ -3927,6 +4127,156 @@ impl CandidateUniverseLedgerV1 {
          Ok(audit)
      }
  
@@ -864,7 +876,7 @@ index 2bd12520..67de4120 100644
      fn require_unchanged(&self) -> Result<(), CandidateUniverseRefusal> {
          require_generation(self.lock_generation, &self.writer_lock, &self.lock_path)?;
          require_generation(self.row_generation, &self.row_file, &self.row_path)?;
-@@ -3967,27 +4309,89 @@ fn candidate_ledger_paths(
+@@ -3967,27 +4317,89 @@ fn candidate_ledger_paths(
  }
  
  fn append_produced_candidate_universe_v1(
@@ -961,7 +973,7 @@ index 2bd12520..67de4120 100644
      // TWO CHECKS, NOT ONE `||` (G18-cli-a-05, D-2004). Either inequality alone
      // refuses; a joined guard let a mutant require both, and no honest fixture
      // can make the committed block reopen differently from its own audit. Each
-@@ -4504,7 +4908,8 @@ fn build_execution_v3_replay_authority(
+@@ -4504,7 +4916,8 @@ fn build_execution_v3_replay_authority(
      receipt: CandidateUniverseReceiptV1,
      authenticated: &[AuthenticatedCandidatePopulationRowV1],
  ) -> Result<CandidateExecutionReplayAuthorityV1, CandidateUniverseRefusal> {
@@ -971,7 +983,7 @@ index 2bd12520..67de4120 100644
      receipt.validate()?;
      let identities = production_identities_with_ladder(source, ladder)?;
      let descriptor = CandidateUniverseDescriptorV1::new(
-@@ -4663,7 +5068,6 @@ fn build_execution_v3_replay_authority(
+@@ -4663,7 +5076,6 @@ fn build_execution_v3_replay_authority(
              "Candidate Execution V3 terminal disposition count changed during replay".to_owned(),
          );
      }
@@ -979,7 +991,7 @@ index 2bd12520..67de4120 100644
      Ok(CandidateExecutionReplayAuthorityV1 {
          receipt,
          parameters: [long_parameter, short_parameter],
-@@ -4944,11 +5348,51 @@ thread_local! {
+@@ -4944,11 +5356,51 @@ thread_local! {
      pub(crate) static OOS_SOURCE_BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
  }
  
@@ -1032,7 +1044,7 @@ index 2bd12520..67de4120 100644
  }
  
  #[cfg(test)]
-@@ -6878,6 +7322,15 @@ mod tests {
+@@ -6878,6 +7330,15 @@ mod tests {
          );
      }
  
@@ -1048,7 +1060,7 @@ index 2bd12520..67de4120 100644
      pub(crate) fn population_v5_test_canonical_candidate_record() -> [u8; ROW_STRIDE_BYTES] {
          let raw = prepared(32).rows[0]
              .record()
-@@ -7603,6 +8056,14 @@ mod tests {
+@@ -7603,6 +8064,14 @@ mod tests {
          }
  
          fn source(&self) -> CandidateUniverseProductionSourceV1<'_> {
@@ -1063,13 +1075,12 @@ index 2bd12520..67de4120 100644
              CandidateUniverseProductionSourceV1::new(
                  InstrumentFamilyV1::Nifty,
                  60,
-@@ -7632,11 +8093,100 @@ mod tests {
+@@ -7632,11 +8101,100 @@ mod tests {
                      u64::try_from(self.daily_bars.len()).expect("daily length fits u64"),
                  )
                  .expect("daily load ceiling is nonzero"),
 +                prebuilt,
-             )
--            .expect("all production fixture sources agree")
++            )
 +        }
 +
 +        fn evaluation() -> CandidateEvaluationInputsV1 {
@@ -1087,7 +1098,8 @@ index 2bd12520..67de4120 100644
 +                &self.context,
 +                60,
 +                Self::evaluation(),
-+            )
+             )
+-            .expect("all production fixture sources agree")
 +            .expect("the fixture column builds")
          }
      }
@@ -1165,7 +1177,7 @@ index 2bd12520..67de4120 100644
      fn minute_bars(first_day: i64, last_day: i64) -> Vec<Candle> {
          let mut bars = Vec::new();
          let mut ordinal = 0_i64;
-@@ -9330,6 +9880,383 @@ mod tests {
+@@ -9330,6 +9888,388 @@ mod tests {
          );
      }
  
@@ -1345,8 +1357,11 @@ index 2bd12520..67de4120 100644
 +            .append_and_reverify(lock_root.path(), bounds, &prepared(98))
 +            .expect("the first append writes");
 +        let lock_path = lock_root.path().join(LOCK_FILE);
-+        std::fs::rename(&lock_path, lock_root.path().join("candidate.lock.displaced"))
-+            .expect("the held lock is displaced");
++        std::fs::rename(
++            &lock_path,
++            lock_root.path().join("candidate.lock.displaced"),
++        )
++        .expect("the held lock is displaced");
 +        File::create(&lock_path).expect("a new lock inode appears");
 +        assert!(
 +            locked
@@ -1399,7 +1414,9 @@ index 2bd12520..67de4120 100644
 +            .append(true)
 +            .open(&rows_path)
 +            .expect("rows open");
-+        file.write_all(&block).and_then(|()| file.sync_data()).expect("rows copy");
++        file.write_all(&block)
++            .and_then(|()| file.sync_data())
++            .expect("rows copy");
 +        let mut file = OpenOptions::new()
 +            .append(true)
 +            .open(&receipts_path)
@@ -1549,7 +1566,7 @@ index 2bd12520..67de4120 100644
      #[test]
      fn ragged_corrupt_and_stale_files_fail_closed() {
          let bounds = CandidateUniverseBoundsV1::new(32, 4).expect("fixture bounds are nonzero");
-@@ -9561,6 +10488,51 @@ mod tests {
+@@ -9561,6 +10501,51 @@ mod tests {
          assert!(refused.contains("could not reserve"), "{refused}");
      }
  
@@ -1580,8 +1597,8 @@ index 2bd12520..67de4120 100644
 +        let written = produced
 +            .append_and_reopen(root.path(), bounds)
 +            .expect("the production commits");
-+        let ledger = CandidateUniverseLedgerV1::open_read(root.path(), bounds)
-+            .expect("the ledger reopens");
++        let ledger =
++            CandidateUniverseLedgerV1::open_read(root.path(), bounds).expect("the ledger reopens");
 +        let authenticated = ledger
 +            .complete_population_rows(&written.audit())
 +            .expect("the rows authenticate");
@@ -1602,10 +1619,10 @@ index 2bd12520..67de4120 100644
      /// per Candidate block, however many closed masks are expanded through it,
      /// for production and for Execution V3 replay; a rerun is byte-identical.
 diff --git a/crates/cli/src/ledger_all.rs b/crates/cli/src/ledger_all.rs
-index 10a7ac6a..0d707586 100644
+index 10a7ac6a..f3714a8d 100644
 --- a/crates/cli/src/ledger_all.rs
 +++ b/crates/cli/src/ledger_all.rs
-@@ -874,18 +874,24 @@ fn run_chain(request: &LedgerAllRequest<'_>, out: &mut String) -> Result<usize,
+@@ -874,18 +874,31 @@ fn run_chain(request: &LedgerAllRequest<'_>, out: &mut String) -> Result<usize,
      let source_root = crate::store_root().map_err(|why| format!("stored source root: {why}"))?;
      let tree = LedgerTree::create(request.root)?;
  
@@ -1619,7 +1636,14 @@ index 10a7ac6a..0d707586 100644
 +    // commit consumes both rather than loading and building them again.
 +    let sizing = SizingInputs::new()?;
 +    let size = |_: usize, rung: &str| {
-+        size_rung(&source_root, vendor, request, LEDGER_ALL_VERB, rung, &sizing)
++        size_rung(
++            &source_root,
++            vendor,
++            request,
++            LEDGER_ALL_VERB,
++            rung,
++            &sizing,
++        )
 +    };
 +
      crate::note(&stage_started_event(LEDGER_ALL_VERB, POPULATION_STAGE));
@@ -1633,7 +1657,7 @@ index 10a7ac6a..0d707586 100644
          admission: &admission,
      })
      .inspect_err(|why| {
-@@ -1081,7 +1087,7 @@ struct Stage1<'a> {
+@@ -1081,7 +1094,7 @@ struct Stage1<'a> {
      tree: &'a LedgerTree,
      vendor: Vendor,
      request: &'a LedgerAllRequest<'a>,
@@ -1642,7 +1666,7 @@ index 10a7ac6a..0d707586 100644
      admission: &'a AdmissionPolicyV1,
  }
  
-@@ -1101,16 +1107,6 @@ fn commit_population(
+@@ -1101,16 +1114,6 @@ fn commit_population(
      let request = stage.request;
      let long_exit = exit_policy(Side::Long)?;
      let short_exit = exit_policy(Side::Short)?;
@@ -1659,7 +1683,7 @@ index 10a7ac6a..0d707586 100644
  
      commit_all_rung_stored_population_v5(&AllRungStoredPopulationV5Request {
          source_root: stage.source_root,
-@@ -1118,14 +1114,7 @@ fn commit_population(
+@@ -1118,14 +1121,7 @@ fn commit_population(
          vendor: stage.vendor,
          from: request.from,
          to: request.to,
@@ -1675,7 +1699,7 @@ index 10a7ac6a..0d707586 100644
          horizon: Horizon::DEFAULT,
          widths: Widths::pinned().map_err(|why| format!("pinned tolerances: {why}"))?,
          // ABSENT, and this caller may not derive it: `vwap::availability_of`
-@@ -1378,7 +1367,33 @@ fn execution_bounds() -> Result<ExecutionV3Bounds, String> {
+@@ -1378,7 +1374,33 @@ fn execution_bounds() -> Result<ExecutionV3Bounds, String> {
      .map_err(|why| format!("execution bounds: {why:?}"))
  }
  
@@ -1710,7 +1734,7 @@ index 10a7ac6a..0d707586 100644
  ///
  /// # Why not one shared threshold
  ///
-@@ -1389,79 +1404,77 @@ fn execution_bounds() -> Result<ExecutionV3Bounds, String> {
+@@ -1389,79 +1411,77 @@ fn execution_bounds() -> Result<ExecutionV3Bounds, String> {
  /// operator's support in ppm and resolving it against each rung's own bars asks
  /// the same question eight times.
  ///
@@ -1890,7 +1914,7 @@ index 7b9ff80c..3260a72c 100644
      request: &LedgerAllRequest<'_>,
      from: (u16, u8),
 diff --git a/crates/cli/src/pre_admission_data.rs b/crates/cli/src/pre_admission_data.rs
-index 664e7639..b13a8caa 100644
+index 664e7639..e537f52c 100644
 --- a/crates/cli/src/pre_admission_data.rs
 +++ b/crates/cli/src/pre_admission_data.rs
 @@ -31,8 +31,11 @@
@@ -1916,7 +1940,7 @@ index 664e7639..b13a8caa 100644
          verify_header(&mut self.data_file, &self.data_path)?;
          let file_len = self
              .data_file
-@@ -1436,6 +1441,99 @@ impl PreAdmissionDataLedgerV1 {
+@@ -1436,6 +1441,100 @@ impl PreAdmissionDataLedgerV1 {
          Ok(())
      }
  
@@ -1929,7 +1953,8 @@ index 664e7639..b13a8caa 100644
 +    /// by metadata, the physical record count must be exactly the completed
 +    /// pairs this handle indexed (no orphan), a written pair must be the last
 +    /// one, and the Data and Completion records on disk must be byte for byte
-+    /// the two records the indexed value encodes. O(1) in ledger size.
++    /// the two records the indexed value encodes. O(1) in ledger size; see
++    /// `cli::pre_admission_data::tests::v1_and_v2_append_doors_scan_once_and_reread_only_their_pair`.
 +    ///
 +    /// # Errors
 +    ///
@@ -2016,7 +2041,7 @@ index 664e7639..b13a8caa 100644
      fn require_unchanged(&self) -> Result<(), PreAdmissionDataRefusal> {
          require_generation(self.lock_generation, &self.lock_file, &self.lock_path)?;
          require_generation(self.data_generation, &self.data_file, &self.data_path)
-@@ -1751,21 +1849,22 @@ impl ProducedPreAdmissionDataV1 {
+@@ -1751,21 +1850,22 @@ impl ProducedPreAdmissionDataV1 {
          root: impl AsRef<Path>,
          bounds: PreAdmissionDataBoundsV1,
      ) -> Result<PreAdmissionProductionCommitV1, PreAdmissionDataRefusal> {
@@ -2050,7 +2075,7 @@ index 664e7639..b13a8caa 100644
              return Err(format!(
                  "pre-admission authority {} did not reopen with the exact derived semantics",
                  hex32(self.value.authority_id())
-@@ -2395,6 +2494,8 @@ impl PreAdmissionDataLedgerV2 {
+@@ -2395,6 +2495,8 @@ impl PreAdmissionDataLedgerV2 {
      }
  
      fn scan(&mut self) -> Result<(), PreAdmissionDataRefusal> {
@@ -2059,13 +2084,14 @@ index 664e7639..b13a8caa 100644
          verify_header_v2(&mut self.data_file, &self.data_path)?;
          let file_len = self
              .data_file
-@@ -2652,6 +2753,89 @@ impl PreAdmissionDataLedgerV2 {
+@@ -2652,6 +2754,90 @@ impl PreAdmissionDataLedgerV2 {
          Ok(())
      }
  
 +    /// The V2 twin of [`PreAdmissionDataLedgerV1::reverify_committed`]
 +    /// (G4-4, D-4781): the committed pair only, through this handle, under
-+    /// the shared lock. O(1) in ledger size.
++    /// the shared lock. O(1) in ledger size; see
++    /// `cli::pre_admission_data::tests::v1_and_v2_append_doors_scan_once_and_reread_only_their_pair`.
 +    ///
 +    /// # Errors
 +    ///
@@ -2149,7 +2175,7 @@ index 664e7639..b13a8caa 100644
      fn require_unchanged(&self) -> Result<(), PreAdmissionDataRefusal> {
          require_generation_v2(self.lock_generation, &self.lock_file, &self.lock_path)?;
          require_generation_v2(self.data_generation, &self.data_file, &self.data_path)
-@@ -2730,20 +2914,20 @@ impl ProducedPreAdmissionDataV2 {
+@@ -2730,20 +2916,20 @@ impl ProducedPreAdmissionDataV2 {
          root: impl AsRef<Path>,
          bounds: PreAdmissionDataBoundsV2,
      ) -> Result<PreAdmissionProductionCommitV2, PreAdmissionDataRefusal> {
@@ -2180,7 +2206,7 @@ index 664e7639..b13a8caa 100644
              return Err(format!(
                  "pre-admission V2 authority {} did not reopen with exact derived semantics",
                  hex32(self.value.authority_id())
-@@ -3600,11 +3784,16 @@ fn read_record(
+@@ -3600,11 +3786,19 @@ fn read_record(
      file: &mut File,
      index: u64,
  ) -> Result<(RecordKindV1, PreAdmissionDataV1), PreAdmissionDataRefusal> {
@@ -2188,7 +2214,10 @@ index 664e7639..b13a8caa 100644
 +}
 +
 +/// The literal bytes of one V1 record, undecoded.
-+fn read_raw_record(file: &mut File, index: u64) -> Result<[u8; RECORD_BYTES], PreAdmissionDataRefusal> {
++fn read_raw_record(
++    file: &mut File,
++    index: u64,
++) -> Result<[u8; RECORD_BYTES], PreAdmissionDataRefusal> {
      let mut raw = [0_u8; RECORD_BYTES];
      file.seek(SeekFrom::Start(record_offset(index)?))
          .and_then(|_| file.read_exact(&mut raw))
@@ -2198,7 +2227,7 @@ index 664e7639..b13a8caa 100644
  }
  
  /// Appends one fixed record and makes it durable. A short write or a failed
-@@ -3701,6 +3890,9 @@ fn generation_of(metadata: &std::fs::Metadata, content_digest: [u8; 32]) -> File
+@@ -3701,6 +3895,9 @@ fn generation_of(metadata: &std::fs::Metadata, content_digest: [u8; 32]) -> File
  thread_local! {
      /// Test-only count of whole-file V1 generation hashes on this thread.
      static V1_FILE_HASHES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
@@ -2208,7 +2237,7 @@ index 664e7639..b13a8caa 100644
  }
  
  fn hash_file(file: &mut File, path: &Path) -> Result<[u8; 32], PreAdmissionDataRefusal> {
-@@ -3884,11 +4076,19 @@ fn read_record_v2(
+@@ -3884,11 +4081,19 @@ fn read_record_v2(
      file: &mut File,
      index: u64,
  ) -> Result<(RecordKindV2, PreAdmissionDataV2), PreAdmissionDataRefusal> {
@@ -2229,7 +2258,7 @@ index 664e7639..b13a8caa 100644
  }
  
  fn file_generation_v2(
-@@ -5211,6 +5411,252 @@ mod tests {
+@@ -5211,6 +5416,318 @@ mod tests {
          Ok(())
      }
  
@@ -2316,9 +2345,18 @@ index 664e7639..b13a8caa 100644
 +    #[test]
 +    fn v1_reverify_refuses_every_disagreement_with_the_disk() -> TestResult {
 +        let root = test_dir()?;
-+        let mut ledger = must(PreAdmissionDataLedgerV1::open(root.path(), bounds(4)?), "the ledger opens")?;
-+        let first = must(ledger.append_complete(&fixture(40)?), "the first pair commits")?;
-+        let second = must(ledger.append_complete(&fixture(41)?), "the second pair commits")?;
++        let mut ledger = must(
++            PreAdmissionDataLedgerV1::open(root.path(), bounds(4)?),
++            "the ledger opens",
++        )?;
++        let first = must(
++            ledger.append_complete(&fixture(40)?),
++            "the first pair commits",
++        )?;
++        let second = must(
++            ledger.append_complete(&fixture(41)?),
++            "the second pair commits",
++        )?;
 +        assert_eq!(
 +            must(ledger.reverify_committed(&second), "the last written pair")?,
 +            second.audit()
@@ -2335,8 +2373,14 @@ index 664e7639..b13a8caa 100644
 +                .contains("was written but is not the last stored pair")
 +        );
 +        let other_root = test_dir()?;
-+        let mut other = must(PreAdmissionDataLedgerV1::open(other_root.path(), bounds(4)?), "another ledger opens")?;
-+        let foreign = must(other.append_complete(&fixture(42)?), "a foreign pair commits")?;
++        let mut other = must(
++            PreAdmissionDataLedgerV1::open(other_root.path(), bounds(4)?),
++            "another ledger opens",
++        )?;
++        let foreign = must(
++            other.append_complete(&fixture(42)?),
++            "a foreign pair commits",
++        )?;
 +        assert!(
 +            must_refuse(ledger.reverify_committed(&foreign), "an absent authority")?
 +                .contains("disappeared after receipt-last append")
@@ -2344,13 +2388,19 @@ index 664e7639..b13a8caa 100644
 +
 +        let data_path = ledger.data_path.clone();
 +        let value = second.audit().value;
-+        let data_at = must(record_offset(second.audit().data_record_index), "the Data offset")?;
++        let data_at = must(
++            record_offset(second.audit().data_record_index),
++            "the Data offset",
++        )?;
 +        let completion_at = must(
 +            record_offset(second.audit().data_record_index + 1),
 +            "the completion offset",
 +        )?;
 +        let data_record = must(value.record(RecordKindV1::Data), "the Data record encodes")?;
-+        let completion_record = must(value.record(RecordKindV1::Completion), "the completion encodes")?;
++        let completion_record = must(
++            value.record(RecordKindV1::Completion),
++            "the completion encodes",
++        )?;
 +        overwrite_record(&data_path, data_at, &completion_record)?;
 +        assert!(
 +            must_refuse(ledger.reverify_committed(&second), "a moved generation")?
@@ -2358,15 +2408,21 @@ index 664e7639..b13a8caa 100644
 +        );
 +        ledger.data_generation = must(file_generation(&ledger.data_file, &data_path), "remeasure")?;
 +        assert!(
-+            must_refuse(ledger.reverify_committed(&second), "a Data record of another kind")?
-+                .contains("Data record differs on disk")
++            must_refuse(
++                ledger.reverify_committed(&second),
++                "a Data record of another kind"
++            )?
++            .contains("Data record differs on disk")
 +        );
 +        overwrite_record(&data_path, data_at, &data_record)?;
 +        overwrite_record(&data_path, completion_at, &data_record)?;
 +        ledger.data_generation = must(file_generation(&ledger.data_file, &data_path), "remeasure")?;
 +        assert!(
-+            must_refuse(ledger.reverify_committed(&second), "a completion of another kind")?
-+                .contains("completion differs on disk")
++            must_refuse(
++                ledger.reverify_committed(&second),
++                "a completion of another kind"
++            )?
++            .contains("completion differs on disk")
 +        );
 +        overwrite_record(&data_path, completion_at, &completion_record)?;
 +        ledger.data_generation = must(file_generation(&ledger.data_file, &data_path), "remeasure")?;
@@ -2399,9 +2455,18 @@ index 664e7639..b13a8caa 100644
 +    #[test]
 +    fn v2_reverify_refuses_every_disagreement_with_the_disk() -> TestResult {
 +        let root = test_dir()?;
-+        let mut ledger = must(PreAdmissionDataLedgerV2::open(root.path(), bounds_v2(4)?), "the ledger opens")?;
-+        let first = must(ledger.append_complete(&zero_fixture_v2(180)?), "the first pair commits")?;
-+        let second = must(ledger.append_complete(&zero_fixture_v2(181)?), "the second pair commits")?;
++        let mut ledger = must(
++            PreAdmissionDataLedgerV2::open(root.path(), bounds_v2(4)?),
++            "the ledger opens",
++        )?;
++        let first = must(
++            ledger.append_complete(&zero_fixture_v2(180)?),
++            "the first pair commits",
++        )?;
++        let second = must(
++            ledger.append_complete(&zero_fixture_v2(181)?),
++            "the second pair commits",
++        )?;
 +        assert_eq!(
 +            must(ledger.reverify_committed(&second), "the last written pair")?,
 +            second.audit()
@@ -2418,8 +2483,14 @@ index 664e7639..b13a8caa 100644
 +                .contains("was written but is not the last stored pair")
 +        );
 +        let other_root = test_dir()?;
-+        let mut other = must(PreAdmissionDataLedgerV2::open(other_root.path(), bounds_v2(4)?), "another ledger opens")?;
-+        let foreign = must(other.append_complete(&zero_fixture_v2(182)?), "a foreign pair commits")?;
++        let mut other = must(
++            PreAdmissionDataLedgerV2::open(other_root.path(), bounds_v2(4)?),
++            "another ledger opens",
++        )?;
++        let foreign = must(
++            other.append_complete(&zero_fixture_v2(182)?),
++            "a foreign pair commits",
++        )?;
 +        assert!(
 +            must_refuse(ledger.reverify_committed(&foreign), "an absent authority")?
 +                .contains("disappeared after receipt-last append")
@@ -2427,32 +2498,53 @@ index 664e7639..b13a8caa 100644
 +
 +        let data_path = ledger.data_path.clone();
 +        let value = second.audit().value;
-+        let data_at = must(record_offset_v2(second.audit().data_record_index), "the Data offset")?;
++        let data_at = must(
++            record_offset_v2(second.audit().data_record_index),
++            "the Data offset",
++        )?;
 +        let completion_at = must(
 +            record_offset_v2(second.audit().data_record_index + 1),
 +            "the completion offset",
 +        )?;
 +        let data_record = must(value.record(RecordKindV2::Data), "the Data record encodes")?;
-+        let completion_record = must(value.record(RecordKindV2::Completion), "the completion encodes")?;
++        let completion_record = must(
++            value.record(RecordKindV2::Completion),
++            "the completion encodes",
++        )?;
 +        overwrite_record(&data_path, data_at, &completion_record)?;
 +        assert!(
 +            must_refuse(ledger.reverify_committed(&second), "a moved generation")?
 +                .contains("changed after pre-admission open")
 +        );
-+        ledger.data_generation = must(file_generation_v2(&ledger.data_file, &data_path), "remeasure")?;
++        ledger.data_generation = must(
++            file_generation_v2(&ledger.data_file, &data_path),
++            "remeasure",
++        )?;
 +        assert!(
-+            must_refuse(ledger.reverify_committed(&second), "a Data record of another kind")?
-+                .contains("Data record differs on disk")
++            must_refuse(
++                ledger.reverify_committed(&second),
++                "a Data record of another kind"
++            )?
++            .contains("Data record differs on disk")
 +        );
 +        overwrite_record(&data_path, data_at, &data_record)?;
 +        overwrite_record(&data_path, completion_at, &data_record)?;
-+        ledger.data_generation = must(file_generation_v2(&ledger.data_file, &data_path), "remeasure")?;
++        ledger.data_generation = must(
++            file_generation_v2(&ledger.data_file, &data_path),
++            "remeasure",
++        )?;
 +        assert!(
-+            must_refuse(ledger.reverify_committed(&second), "a completion of another kind")?
-+                .contains("completion differs on disk")
++            must_refuse(
++                ledger.reverify_committed(&second),
++                "a completion of another kind"
++            )?
++            .contains("completion differs on disk")
 +        );
 +        overwrite_record(&data_path, completion_at, &completion_record)?;
-+        ledger.data_generation = must(file_generation_v2(&ledger.data_file, &data_path), "remeasure")?;
++        ledger.data_generation = must(
++            file_generation_v2(&ledger.data_file, &data_path),
++            "remeasure",
++        )?;
 +        assert_eq!(
 +            must(ledger.reverify_committed(&second), "the restored pair")?,
 +            second.audit()
@@ -2460,7 +2552,10 @@ index 664e7639..b13a8caa 100644
 +
 +        let end = must(std::fs::metadata(&data_path), "the data file measures")?.len();
 +        overwrite_record(&data_path, end, &data_record)?;
-+        ledger.data_generation = must(file_generation_v2(&ledger.data_file, &data_path), "remeasure")?;
++        ledger.data_generation = must(
++            file_generation_v2(&ledger.data_file, &data_path),
++            "remeasure",
++        )?;
 +        assert!(
 +            must_refuse(ledger.reverify_committed(&second), "an extra record")?
 +                .contains("records on disk, not the 4 this append committed")
@@ -2483,7 +2578,7 @@ index 664e7639..b13a8caa 100644
      fn writer_refuses_missing_or_non_directory_root_without_creating_it() -> TestResult {
          let parent = test_dir()?;
 diff --git a/crates/cli/src/step3_all_rung_tests.rs b/crates/cli/src/step3_all_rung_tests.rs
-index e0cb4bdf..b21984e0 100644
+index e0cb4bdf..bfe5af1b 100644
 --- a/crates/cli/src/step3_all_rung_tests.rs
 +++ b/crates/cli/src/step3_all_rung_tests.rs
 @@ -8,8 +8,9 @@ use super::tests::{
@@ -2523,7 +2618,7 @@ index e0cb4bdf..b21984e0 100644
              horizon: Horizon::DEFAULT,
              widths: Widths::pinned().map_err(|why| format!("{why:?}"))?,
              availability: Availability::Absent,
-@@ -400,3 +403,74 @@ fn all_eight_stored_rungs_publish_exact_selection_chains_and_reuse_every_byte()
+@@ -400,3 +403,79 @@ fn all_eight_stored_rungs_publish_exact_selection_chains_and_reuse_every_byte()
      assert_eq!(published(&all_paths)?, original.expect("first publication"));
      Ok(())
  }
@@ -2580,9 +2675,14 @@ index e0cb4bdf..b21984e0 100644
 +            crate::candidate_universe::LEDGER_WRITER_OPENS.with(std::cell::Cell::get),
 +        ));
 +    }
-+    let [(named_loads, named_builds, named_scans), (sized_loads, sized_builds, sized_scans)]: [_;
-+        2] = counts.try_into().map_err(|_| "two measured runs")?;
-+    assert_eq!(named_loads, 16, "two families by eight rungs, one load each");
++    let [
++        (named_loads, named_builds, named_scans),
++        (sized_loads, sized_builds, sized_scans),
++    ]: [_; 2] = counts.try_into().map_err(|_| "two measured runs")?;
++    assert_eq!(
++        named_loads, 16,
++        "two families by eight rungs, one load each"
++    );
 +    assert_eq!(
 +        sized_loads, 16,
 +        "the eight sizing loads are the NIFTY commits' loads, not extra ones"
@@ -2599,7 +2699,7 @@ index e0cb4bdf..b21984e0 100644
 +    Ok(())
 +}
 diff --git a/crates/cli/src/step3_orchestrator.rs b/crates/cli/src/step3_orchestrator.rs
-index 4fb6d042..074696c0 100644
+index 4fb6d042..4e950501 100644
 --- a/crates/cli/src/step3_orchestrator.rs
 +++ b/crates/cli/src/step3_orchestrator.rs
 @@ -44,8 +44,8 @@ use crate::anchored_search_lineage_v4::{
@@ -2682,19 +2782,31 @@ index 4fb6d042..074696c0 100644
          )
          .map_err(|why| format!("Step 3 Execution V3 Candidate source refused: {why}"))?;
          if source.search_splits() != self.search_splits {
-@@ -3081,6 +3062,35 @@ pub(crate) fn commit_stored_candidate_pre_admission_authority_v1(
+@@ -3073,6 +3054,8 @@ pub fn commit_stored_candidate_pre_admission_v1(
+ /// minted only from the clean process-free stamp. An all-rung transaction can
+ /// retain one proof across its families. It owns a no-op progress observer;
+ /// no caller-authored commit, bars, digest, calendar or result is admitted.
++/// Production now reaches it only through the carried door below (D-4780).
++#[cfg(test)]
+ pub(crate) fn commit_stored_candidate_pre_admission_authority_v1(
+     request: StoredCandidatePreAdmissionRequestV1<'_>,
+     verified_commit: VerifiedBuildCommitV1<'_>,
+@@ -3081,6 +3064,38 @@ pub(crate) fn commit_stored_candidate_pre_admission_authority_v1(
      commit_stored_with_verified_build_v1(request, verified_commit, &no_progress_observer)
  }
  
-+/// [`commit_stored_candidate_pre_admission_authority_v1`] for a transaction
-+/// that carries one Candidate writer across all its appends (W2-cli3-4,
-+/// D-4780) and may hand the NIFTY commit the context and column its sizing
-+/// census already built (G4-2, D-4784).
++/// Commit the same public stored request while retaining its opaque
++/// sources, for a transaction that carries one Candidate writer across all
++/// its appends (W2-cli3-4, D-4780) and may hand the NIFTY commit the context
++/// and column its sizing census already built (G4-2, D-4784). It owns a
++/// no-op progress observer, and no caller-authored commit, bars, digest,
++/// calendar or result is admitted.
 +///
 +/// # Errors
 +///
-+/// As that door, plus a carried writer opened for another root or bounds, or
-+/// a sized context that names another request or whose sources changed.
++/// Every stored-request, build-proof, Candidate and Pre-Admission refusal,
++/// an extinct family, a carried writer opened for another root or bounds,
++/// or a sized context that names another request or whose sources changed.
 +pub(crate) fn commit_stored_candidate_pre_admission_authority_carried_v1(
 +    request: StoredCandidatePreAdmissionRequestV1<'_>,
 +    verified_commit: VerifiedBuildCommitV1<'_>,
@@ -2718,7 +2830,7 @@ index 4fb6d042..074696c0 100644
  /// Strict institutional door; ordinary callers retain the historical contract.
  ///
  /// It consumes the strict context the rung's sizing census already loaded
-@@ -3097,9 +3107,18 @@ pub(crate) fn commit_strict_candidate_pre_admission_authority_sized_v1(
+@@ -3097,9 +3112,18 @@ pub(crate) fn commit_strict_candidate_pre_admission_authority_sized_v1(
      request: StoredCandidatePreAdmissionRequestV1<'_>,
      config: &crate::audited_range_command::StrictConfig,
      sized: Option<strict::SizedNifty>,
@@ -2738,7 +2850,7 @@ index 4fb6d042..074696c0 100644
  }
  
  fn commit_stored_with_verified_build_v1(
-@@ -3137,9 +3156,14 @@ fn commit_family_with_inputs_v6(
+@@ -3137,6 +3161,7 @@ fn commit_family_with_inputs_v6(
          config,
          allow_extinct,
          None,
@@ -2746,14 +2858,7 @@ index 4fb6d042..074696c0 100644
      )
  }
  
-+#[expect(
-+    clippy::too_many_arguments,
-+    reason = "the stored request, build proof, observer and policy flags plus the sized hand-off and the run's carried Candidate writer"
-+)]
- fn commit_family_from_v6(
-     request: StoredCandidatePreAdmissionRequestV1<'_>,
-     verified_commit: VerifiedBuildCommitV1<'_>,
-@@ -3147,11 +3171,15 @@ fn commit_family_from_v6(
+@@ -3147,11 +3172,18 @@ fn commit_family_from_v6(
      config: Option<&crate::audited_range_command::StrictConfig>,
      allow_extinct: bool,
      sized: Option<strict::SizedNifty>,
@@ -2768,11 +2873,14 @@ index 4fb6d042..074696c0 100644
 +            let (context, column) = sized.into_context_for(&request, &root, config)?;
 +            (context, Some(column))
 +        }
-+        None => (load_bounded_stored_context_v1(&request, &root, config)?, None),
++        None => (
++            load_bounded_stored_context_v1(&request, &root, config)?,
++            None,
++        ),
      };
      root.strict.clone_from(&context.strict);
      let attempt = strict::begin(&context, &request, verified_commit.0)?;
-@@ -3160,8 +3188,9 @@ fn commit_family_from_v6(
+@@ -3160,8 +3192,9 @@ fn commit_family_from_v6(
          verified_commit,
          on_level,
          root,
@@ -2783,7 +2891,7 @@ index 4fb6d042..074696c0 100644
      );
      strict::finish(attempt, result)
  }
-@@ -3171,8 +3200,12 @@ fn commit_loaded_stored_v1(
+@@ -3171,8 +3204,12 @@ fn commit_loaded_stored_v1(
      verified_commit: VerifiedBuildCommitV1<'_>,
      on_level: &dyn Fn(&engine::Frontier, usize, u64),
      root: AdmittedRootV1,
@@ -2797,7 +2905,7 @@ index 4fb6d042..074696c0 100644
  ) -> Result<family_v6::StoredFamilyV6, String> {
      let resolved = resolve_stored_execution_v1(
          &context,
-@@ -3211,6 +3244,7 @@ fn commit_loaded_stored_v1(
+@@ -3211,6 +3248,7 @@ fn commit_loaded_stored_v1(
          request.bounds.signal_records,
          request.bounds.minute_records,
          request.bounds.daily_records,
@@ -2805,7 +2913,7 @@ index 4fb6d042..074696c0 100644
      )
      .map_err(|why| format!("Step 3 stored Candidate source refused: {why}"))?;
  
-@@ -3228,6 +3262,7 @@ fn commit_loaded_stored_v1(
+@@ -3228,6 +3266,7 @@ fn commit_loaded_stored_v1(
          request.bounds.pre_admission,
          on_level,
          allow_extinct,
@@ -2813,7 +2921,7 @@ index 4fb6d042..074696c0 100644
      )?;
      let search =
          StoredSearchMemberV4::bind_candidate(&committed.candidate_audit(), search_validation)?;
-@@ -3294,11 +3329,21 @@ struct StoredContextLoadSpecV1<'a> {
+@@ -3294,11 +3333,21 @@ struct StoredContextLoadSpecV1<'a> {
      daily_bound: StoredSpanLoadBoundV1,
  }
  
@@ -2835,7 +2943,7 @@ index 4fb6d042..074696c0 100644
      if let Some(config) = config {
          return strict::load(spec, root, config);
      }
-@@ -4095,6 +4140,7 @@ fn commit_candidate_pre_admission_authority_guarded_v1<'a>(
+@@ -4095,6 +4144,7 @@ fn commit_candidate_pre_admission_authority_guarded_v1<'a>(
          pre_admission_bounds,
          on_level,
          false,
@@ -2843,7 +2951,7 @@ index 4fb6d042..074696c0 100644
      )? {
          family_v6::CandidateCommitV6::Evaluated(committed) => Ok(*committed),
          family_v6::CandidateCommitV6::Extinct(_) => {
-@@ -4105,7 +4151,7 @@ fn commit_candidate_pre_admission_authority_guarded_v1<'a>(
+@@ -4105,7 +4155,7 @@ fn commit_candidate_pre_admission_authority_guarded_v1<'a>(
  
  #[expect(
      clippy::too_many_arguments,
@@ -2852,7 +2960,7 @@ index 4fb6d042..074696c0 100644
  )]
  fn commit_candidate_family_guarded_v6<'a>(
      root: &Path,
-@@ -4116,6 +4162,7 @@ fn commit_candidate_family_guarded_v6<'a>(
+@@ -4116,6 +4166,7 @@ fn commit_candidate_family_guarded_v6<'a>(
      pre_admission_bounds: PreAdmissionDataBoundsV1,
      on_level: &dyn Fn(&engine::Frontier, usize, u64),
      allow_extinct: bool,
@@ -2860,7 +2968,7 @@ index 4fb6d042..074696c0 100644
  ) -> Result<family_v6::CandidateCommitV6, String> {
      let candidate = produce_candidate_universe_v1(sweeper, source, candidate_bounds, on_level)
          .map_err(|why| format!("Step 3 Candidate production refused: {why}"))?;
-@@ -4130,8 +4177,12 @@ fn commit_candidate_family_guarded_v6<'a>(
+@@ -4130,8 +4181,12 @@ fn commit_candidate_family_guarded_v6<'a>(
      let prepared_receipt = candidate.receipt();
      let observations = candidate.observations().clone();
      require_admitted_root_v1(admitted_root, "before Candidate receipt-last append/reopen")?;
@@ -2875,10 +2983,10 @@ index 4fb6d042..074696c0 100644
      require_admitted_root_v1(admitted_root, "after Candidate receipt-last append/reopen")?;
      let candidate_audit = candidate_commit.audit();
 diff --git a/crates/cli/src/stored_post_training_oos.rs b/crates/cli/src/stored_post_training_oos.rs
-index 15172d90..59208688 100644
+index 15172d90..42cf7063 100644
 --- a/crates/cli/src/stored_post_training_oos.rs
 +++ b/crates/cli/src/stored_post_training_oos.rs
-@@ -219,11 +219,17 @@ pub(crate) struct StoredOosFoldV1<'c> {
+@@ -219,11 +219,18 @@ pub(crate) struct StoredOosFoldV1<'c> {
  }
  
  impl StoredOosFoldV1<'_> {
@@ -2896,11 +3004,12 @@ index 15172d90..59208688 100644
 +    /// identity and hashed all four streams to seal its run, Θ(S + Q + D + E)
 +    /// in hashing. Those streams are owned by the cohort and borrowed
 +    /// immutably by the fold, so the re-hash could not see a change; a
-+    /// changed stored file is what the held strict guards refuse.
++    /// changed stored file is what the held strict guards refuse. Proof:
++    /// `cli::step3_orchestrator::tests::strict_v6_fixture_tests::strict_v6_a_witness_hashes_no_stream_its_fold_already_hashed`.
      ///
      /// # Errors
      ///
-@@ -243,7 +249,7 @@ impl StoredOosFoldV1<'_> {
+@@ -243,7 +250,7 @@ impl StoredOosFoldV1<'_> {
          mut observer: Option<&mut StoredOosObserverV1<'_>>,
      ) -> Result<StoredPostTrainingOosWitnessV1, StoredPostTrainingOosRefusal> {
          let cohort = self.cohort;
@@ -2909,7 +3018,7 @@ index 15172d90..59208688 100644
          if self.specification.as_bytes() != &disposition.evaluation_spec_fingerprint() {
              return Err("stored OOS disposition evaluator differs before fold".to_owned());
          }
-@@ -268,7 +274,7 @@ impl StoredOosFoldV1<'_> {
+@@ -268,7 +275,7 @@ impl StoredOosFoldV1<'_> {
          cohort
              .root
              .require_same("after minting stored post-training OOS witness")?;
@@ -2918,7 +3027,7 @@ index 15172d90..59208688 100644
          let run_id = witness.run_id().bytes();
          let selected_exit_digest = witness.selected_exit_digest();
          let universe_digest = witness.universe_digest();
-@@ -371,7 +377,23 @@ impl StoredPostTrainingOosCohortV1 {
+@@ -371,7 +378,24 @@ impl StoredPostTrainingOosCohortV1 {
          self.audit
      }
  
@@ -2937,12 +3046,13 @@ index 15172d90..59208688 100644
 +    /// (O(M) metadata and receipt checks), the admitted root, and the audit
 +    /// fields compared in O(1). It hashes no stream: the cohort owns them and
 +    /// nothing can change them while it is borrowed, and a changed stored
-+    /// file is what the guards refuse.
++    /// file is what the guards refuse. Proof:
++    /// `cli::step3_orchestrator::tests::strict_v6_fixture_tests::strict_v6_a_witness_hashes_no_stream_its_fold_already_hashed`.
 +    fn require_current(&self) -> Result<(), StoredPostTrainingOosRefusal> {
          self.stored.require_current()?;
          self.root
              .require_same("while authenticating stored post-training OOS cohort")?;
-@@ -388,7 +410,6 @@ impl StoredPostTrainingOosCohortV1 {
+@@ -388,7 +412,6 @@ impl StoredPostTrainingOosCohortV1 {
              || last.ts_micros != self.audit.oos_last_ts_micros
              || usize_to_u64(execution.len(), "execution bars")? != self.audit.execution_bars
              || first.ts_micros <= training_last
@@ -2950,7 +3060,7 @@ index 15172d90..59208688 100644
          {
              return Err("stored post-training OOS cohort identity changed".to_owned());
          }
-@@ -533,6 +554,7 @@ impl StoredPostTrainingOosCohortV1 {
+@@ -533,6 +556,7 @@ impl StoredPostTrainingOosCohortV1 {
      }
  
      fn derive_cohort_id(&self) -> Result<[u8; 32], StoredPostTrainingOosRefusal> {
@@ -2958,7 +3068,7 @@ index 15172d90..59208688 100644
          let execution = self.execution()?;
          let execution_calendar = crate::stored::calendar_receipt_v2_for_bars(
              execution,
-@@ -636,3 +658,15 @@ fn hash_parts(domain: &[u8], parts: &[&[u8]]) -> [u8; 32] {
+@@ -636,3 +660,15 @@ fn hash_parts(domain: &[u8], parts: &[&[u8]]) -> [u8; 32] {
      }
      hasher.finalize()
  }
@@ -3505,7 +3615,7 @@ index 709cdff4..fdd33099 100644
              .is_err(),
              "a sized context whose source changed cannot be consumed"
 diff --git a/crates/cli/tests/ledger_append_lookup_costs.rs b/crates/cli/tests/ledger_append_lookup_costs.rs
-index 9467f410..0c7ba64c 100644
+index 9467f410..4a563396 100644
 --- a/crates/cli/tests/ledger_append_lookup_costs.rs
 +++ b/crates/cli/tests/ledger_append_lookup_costs.rs
 @@ -38,6 +38,7 @@ const STATISTICS: &str = include_str!("../src/population_statistics_v2.rs");
@@ -3544,7 +3654,7 @@ index 9467f410..0c7ba64c 100644
      let generation = function(CANDIDATE, "fn file_generation(");
      assert!(
          !generation.contains("hash") && !generation.contains("blake3"),
-@@ -92,19 +100,53 @@ fn section_150_states_one_open_per_production_append_and_no_data_hash() {
+@@ -92,19 +100,56 @@ fn section_150_states_one_open_per_production_append_and_no_data_hash() {
      for stale in [
          "and also hashes the data files",
          "Append, hashing, canonical-order validation and durability are proportional to the new block",
@@ -3587,7 +3697,10 @@ index 9467f410..0c7ba64c 100644
 +        doors += 1;
 +        rest = rest.get(at + 1..).expect("a suffix");
 +    }
-+    assert_eq!(doors, 2, "Pre-Admission V1 and V2 each have one append door");
++    assert_eq!(
++        doors, 2,
++        "Pre-Admission V1 and V2 each have one append door"
++    );
 +
 +    let text = flat(section(153));
 +    for needed in [
@@ -3602,7 +3715,7 @@ index 9467f410..0c7ba64c 100644
  }
  
  /// The body of the method opened by `signature` in `source`, up to the next
-@@ -230,8 +272,17 @@ fn the_ledger_v6_route_and_replay_costs_are_stated() {
+@@ -230,8 +275,17 @@ fn the_ledger_v6_route_and_replay_costs_are_stated() {
          "the route calls the door that always reloads NIFTY"
      );
      let sizing = function(STRICT_INPUTS, "pub(crate) fn size_sweeper(");
@@ -3621,7 +3734,7 @@ index 9467f410..0c7ba64c 100644
      let replay = function(LEDGER_V6, "fn replay_route(");
      assert!(replay.contains("run_route(request, out)?"));
      let start = LEDGER_V6.find("fn replay_route(").expect("replay_route");
-@@ -242,12 +293,34 @@ fn the_ledger_v6_route_and_replay_costs_are_stated() {
+@@ -242,12 +296,34 @@ fn the_ledger_v6_route_and_replay_costs_are_stated() {
              .expect("the rustdoc"),
      );
      assert!(doc.contains("O(full Step-4 route) per call"));
@@ -3656,7 +3769,7 @@ index 9467f410..0c7ba64c 100644
      ] {
          assert!(
              chapter.contains(needed),
-@@ -267,10 +340,18 @@ fn section_169_prices_the_oos_fold_once_per_cohort() {
+@@ -267,10 +343,18 @@ fn section_169_prices_the_oos_fold_once_per_cohort() {
      let text = flat(section(169));
      for needed in [
          "Since D-1684 Population V6 builds it once per family cohort",

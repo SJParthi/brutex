@@ -40,3 +40,5 @@ Usage rule (owner 2026-10-09): after the in-flight fixers finish, at most 2 agen
 save here, pause, check in just after 09:00 UTC. Resume: re-create worktrees from fbdabaec, `git am` each patch, finish
 each fixer's item list (table above), then merge into `final/all-fixes-xp04wq`, validate, push it, send branch+sha to
 the PR 74 CI thread.
+
+- 05:05 UTC re-save: a=93489016/5 b=48af6b95/2 c=63b2beba/9 d=2e2aadd1/8 e=fa3100b9/5 f=fbdabaec/0 (head/commits). Fixer D DONE (8/8 fixed, D-4748..D-4756; gates incl. 11 pass; touched cli modules 526 pass). Check-in armed for 09:05 UTC (trig_016mComA6rA1qmTfyX3xop6W).

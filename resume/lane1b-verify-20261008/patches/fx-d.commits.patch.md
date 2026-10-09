@@ -1,4 +1,4 @@
-From 66a4fc37ef327dc0a4fcd6a8f449a529fa67795c Mon Sep 17 00:00:00 2001
+From 3661b5fb6102b5803decd34dbf8dce0e6005a048 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Fri, 9 Oct 2026 04:41:36 +0000
 Subject: [PATCH 1/8] cli: judge a cash share's Boolean calendar against its
@@ -32,20 +32,20 @@ D-4748, D-4749, L1FD-01.
 Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01R6fBjvEpAjr5PZ8rpwQhV8
 ---
- crates/cli/src/boolean_candidate_tests.rs | 170 +++++++++++++++
+ crates/cli/src/boolean_candidate_tests.rs | 167 +++++++++++++++
  crates/cli/src/boolean_candidate_v1.rs    |  34 ++-
  crates/cli/src/candidate_universe.rs      |  51 ++++-
- crates/cli/src/stored.rs                  | 245 ++++++++++++++++++++--
+ crates/cli/src/stored.rs                  | 246 ++++++++++++++++++++--
  docs/04-invariants.md                     |   6 +
  docs/05-decisions.md                      |  79 +++++++
  docs/06-limits.md                         |  13 ++
- 7 files changed, 576 insertions(+), 22 deletions(-)
+ 7 files changed, 574 insertions(+), 22 deletions(-)
 
 diff --git a/crates/cli/src/boolean_candidate_tests.rs b/crates/cli/src/boolean_candidate_tests.rs
-index 59555dd4..e6220fcd 100644
+index 59555dd4..ebae024b 100644
 --- a/crates/cli/src/boolean_candidate_tests.rs
 +++ b/crates/cli/src/boolean_candidate_tests.rs
-@@ -544,6 +544,176 @@ fn complete_generated_months_measure_actual_accepted_periods_before_stats_fixtur
+@@ -544,6 +544,173 @@ fn complete_generated_months_measure_actual_accepted_periods_before_stats_fixtur
      Ok(())
  }
  
@@ -190,7 +190,6 @@ index 59555dd4..e6220fcd 100644
 +    };
 +
 +    let share = run("RELIANCE", ELIGIBLE_CLOSE, Some(1), None)?;
-+    eprintln!("eligible share ending 15:14 on CAS days: {share:?}");
 +    assert!(share.as_ref().is_ok_and(|days| *days > 0), "{share:?}");
 +
 +    let index = run("NIFTY", FULL_CLOSE, None, None)?;
@@ -204,13 +203,11 @@ index 59555dd4..e6220fcd 100644
 +    );
 +
 +    let unverified = run("RELIANCE", ELIGIBLE_CLOSE, Some(1), Some(3))?;
-+    eprintln!("eligible share with one master absent: {unverified:?}");
 +    let why = unverified.err().unwrap_or_default();
 +    assert!(why.contains("cash session close UNVERIFIED"), "{why}");
 +    assert!(!why.contains("is not complete"), "{why}");
 +
 +    let contradicted = run("RELIANCE", FULL_CLOSE, Some(1), None)?;
-+    eprintln!("eligible share whose store runs to 15:29: {contradicted:?}");
 +    let why = contradicted.err().unwrap_or_default();
 +    assert!(
 +        why.contains("past this share's dated session close"),
@@ -420,7 +417,7 @@ index 2bd12520..210e9bd9 100644
      .and_then(crate::stored::CalendarReceiptV2::require_complete)
      .map_err(|why| format!("candidate {name} exact complete calendar refused: {why}"))?;
 diff --git a/crates/cli/src/stored.rs b/crates/cli/src/stored.rs
-index 06143830..35b51f1a 100644
+index 06143830..aa35e8a6 100644
 --- a/crates/cli/src/stored.rs
 +++ b/crates/cli/src/stored.rs
 @@ -931,6 +931,20 @@ pub const CALENDAR_RECEIPT_SCHEMA_V2: u32 = 2;
@@ -444,7 +441,7 @@ index 06143830..35b51f1a 100644
  const NSE_OPEN_MINUTE_V2: i64 = 555;
  const CALENDAR_POLICY_DIGEST_DOMAIN_V2: &[u8] = b"brutex.calendar-policy.v2\0";
  const CALENDAR_POLICY_RUNGS_V2: [u32; 8] = [60, 120, 180, 300, 600, 900, 1_800, 3_600];
-@@ -1492,12 +1506,68 @@ fn expected_buckets_v2(
+@@ -1492,12 +1506,69 @@ fn expected_buckets_v2(
      Ok(expected)
  }
  
@@ -465,7 +462,8 @@ index 06143830..35b51f1a 100644
 +/// dated authority the stored read asks ([`CashCloses::session_close_minute`]),
 +/// so the receipt, the overlay and the minute-gap census cannot disagree about
 +/// a share's close. `None` is the index calendar, unchanged. O(1): one civil
-+/// conversion, and on a dated day one close lookup.
++/// conversion, and on a dated day one close lookup. **UNVERIFIED as a measured
++/// bound**, read off the source and recorded in `docs/06-limits.md` (D-4748).
 +fn receipt_session_v2(
 +    day: i64,
 +    session: Session,
@@ -513,7 +511,7 @@ index 06143830..35b51f1a 100644
      hasher: &mut brutex_core::blake3::Hasher,
  ) -> Result<OfferedCalendarFactsV2, Refusal>
  where
-@@ -1551,7 +1621,17 @@ where
+@@ -1551,7 +1622,17 @@ where
          }
          let decision = match pull::calendar::kind_of(day) {
              DayKind::Open(session) => {
@@ -531,7 +529,7 @@ index 06143830..35b51f1a 100644
                  if !expected.contains(bucket) {
                      return Err(format!(
                          "calendar receipt V2 timestamp {timestamp} is bucket {bucket} on measured open IST day {day}, but that bucket intersects no measured session window"
-@@ -1637,6 +1717,7 @@ fn hash_open_session_v2(
+@@ -1637,6 +1718,7 @@ fn hash_open_session_v2(
  fn hash_calendar_day_v2(
      day: i64,
      rung_minutes: i64,
@@ -539,7 +537,7 @@ index 06143830..35b51f1a 100644
      hasher: &mut brutex_core::blake3::Hasher,
  ) -> Result<CalendarDayFactsV2, Refusal> {
      hasher.update(b"D");
-@@ -1661,14 +1742,37 @@ fn hash_calendar_day_v2(
+@@ -1661,14 +1743,37 @@ fn hash_calendar_day_v2(
          });
      }
      match pull::calendar::kind_of(day) {
@@ -585,7 +583,7 @@ index 06143830..35b51f1a 100644
          DayKind::Closed => {
              hasher.update(&[2]);
              Ok(CalendarDayFactsV2 {
-@@ -1732,6 +1836,7 @@ pub fn calendar_receipt_v2(
+@@ -1732,6 +1837,7 @@ pub fn calendar_receipt_v2(
          rung_seconds,
          first_day,
          last_day,
@@ -593,7 +591,7 @@ index 06143830..35b51f1a 100644
      )
  }
  
-@@ -1754,20 +1859,63 @@ pub fn calendar_receipt_v2_for_bars(
+@@ -1754,20 +1860,63 @@ pub fn calendar_receipt_v2_for_bars(
      rung_seconds: u32,
      first_day: i64,
      last_day: i64,
@@ -657,7 +655,7 @@ index 06143830..35b51f1a 100644
  ) -> Result<CalendarReceiptV2, Refusal>
  where
      I: IntoIterator<Item = i64>,
-@@ -1791,23 +1939,30 @@ where
+@@ -1791,23 +1940,30 @@ where
      }
  
      let mut hasher = brutex_core::blake3::Hasher::new();
@@ -692,7 +690,7 @@ index 06143830..35b51f1a 100644
          expected = expected
              .checked_add(facts.expected)
              .ok_or_else(|| "calendar receipt V2 expected bucket count overflowed u64".to_owned())?;
-@@ -1857,7 +2012,7 @@ where
+@@ -1857,7 +2013,7 @@ where
  
      Ok(CalendarReceiptV2 {
          schema_version: CALENDAR_RECEIPT_SCHEMA_V2,
@@ -701,7 +699,7 @@ index 06143830..35b51f1a 100644
          rung_seconds,
          first_day,
          last_day,
-@@ -5416,6 +5571,70 @@ mod tests {
+@@ -5416,6 +5572,70 @@ mod tests {
          }
      }
  
@@ -898,7 +896,7 @@ index 12e9bf09..b8e6e10a 100644
 2.43.0
 
 
-From 4b8462e3427e7827ab7bda93e5c393ef40dec0e4 Mon Sep 17 00:00:00 2001
+From cd3bb0de239e96577c8e85bcd872d645ce84a8fb Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Fri, 9 Oct 2026 04:41:56 +0000
 Subject: [PATCH 2/8] cli: bind a stable reason class in the cash-closes digest
@@ -928,7 +926,7 @@ Claude-Session: https://claude.ai/code/session_01R6fBjvEpAjr5PZ8rpwQhV8
  3 files changed, 186 insertions(+), 18 deletions(-)
 
 diff --git a/crates/cli/src/stored.rs b/crates/cli/src/stored.rs
-index 35b51f1a..a20802ae 100644
+index aa35e8a6..7068caeb 100644
 --- a/crates/cli/src/stored.rs
 +++ b/crates/cli/src/stored.rs
 @@ -545,9 +545,10 @@ pub fn nse_session_close_minute(day: i64) -> Option<u16> {
@@ -1018,7 +1016,7 @@ index 35b51f1a..a20802ae 100644
                  unverified.insert(day, why);
              }
          }
-@@ -5500,10 +5517,15 @@ mod tests {
+@@ -5501,10 +5518,15 @@ mod tests {
      /// Install one receipted NSE session master naming RELIANCE with `flag`
      /// for `day` under `store/session-masters`, exactly as the pull does.
      fn install_master(store: &Path, day: i64, flag: u8) {
@@ -1036,7 +1034,7 @@ index 35b51f1a..a20802ae 100644
              isin.as_str()
          );
          let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
-@@ -5721,6 +5743,109 @@ mod tests {
+@@ -5722,6 +5744,109 @@ mod tests {
          let _ignored = std::fs::remove_dir_all(&ineligible);
      }
  
@@ -1209,7 +1207,7 @@ index cc72e831..e01e3835 100644
 2.43.0
 
 
-From 4d476bbbde56a8d3f8a3093a8802e5230e1a1556 Mon Sep 17 00:00:00 2001
+From cd2fca84d9415755173df8daa0533eea99da4d1e Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Fri, 9 Oct 2026 04:42:42 +0000
 Subject: [PATCH 3/8] cli: sweep-stored's withheld line names the swept count
@@ -1335,7 +1333,7 @@ index e01e3835..f659ea8d 100644
 2.43.0
 
 
-From 9f09e1ed9ce96afc1bf0d282c7b67adc49f1b8a2 Mon Sep 17 00:00:00 2001
+From e5d278c57137083c3cde3eea468d69a11c4f8707 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Fri, 9 Oct 2026 04:42:58 +0000
 Subject: [PATCH 4/8] cli: every multi-run page takes the pooled banner; ledger
@@ -1971,7 +1969,7 @@ index f659ea8d..b15b4935 100644
 2.43.0
 
 
-From 62ed48a4545371ff80f96025c641c456fe36c4ef Mon Sep 17 00:00:00 2001
+From cc9fd3578da1b7912e1f05c8d4843e35908e7fcd Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Fri, 9 Oct 2026 04:43:06 +0000
 Subject: [PATCH 5/8] cli: pin the audit's per-training walk-forward rungs
@@ -2141,7 +2139,7 @@ index b15b4935..8fa0a395 100644
 2.43.0
 
 
-From 555b90d4b46798e6e9badcac0aa7cde2cae0211f Mon Sep 17 00:00:00 2001
+From 0ddc868caecf1fcad648ed2e95992467dce058f5 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Fri, 9 Oct 2026 04:43:07 +0000
 Subject: [PATCH 6/8] cli: name a CAS prior session past its dated close
@@ -2172,10 +2170,10 @@ Claude-Session: https://claude.ai/code/session_01R6fBjvEpAjr5PZ8rpwQhV8
  3 files changed, 62 insertions(+), 6 deletions(-)
 
 diff --git a/crates/cli/src/stored.rs b/crates/cli/src/stored.rs
-index a20802ae..5ccba417 100644
+index 7068caeb..ba3f459c 100644
 --- a/crates/cli/src/stored.rs
 +++ b/crates/cli/src/stored.rs
-@@ -3641,6 +3641,22 @@ pub fn load_daily_context_bounded(
+@@ -3642,6 +3642,22 @@ pub fn load_daily_context_bounded(
      daily_context_from_span(daily, signal)
  }
  
@@ -2198,7 +2196,7 @@ index a20802ae..5ccba417 100644
  /// The minute the accepted prior session's final bar must open at (GAP12-6,
  /// D-1663, D-2102). `kind_of` is the index's venue-blind calendar, and from
  /// 2026-08-03 an NSE cash share's continuous session ends at 15:15 when that
-@@ -3766,7 +3782,8 @@ pub(crate) fn exact_minute_context_from_span(
+@@ -3767,7 +3783,8 @@ pub(crate) fn exact_minute_context_from_span(
          || last != Some(last_minute)
      {
          return Err(format!(
@@ -2208,7 +2206,7 @@ index a20802ae..5ccba417 100644
          ));
      }
      let prior_session_bars = u32::try_from(prior_session_bars).map_err(|_| {
-@@ -5554,12 +5571,23 @@ mod tests {
+@@ -5555,12 +5572,23 @@ mod tests {
  
      /// GAP12-6 closed (D-2102): a share's CAS-day prior session is judged
      /// against ITS dated close. Eligible ends at 15:14 and seeds; the same day
@@ -2235,7 +2233,7 @@ index a20802ae..5ccba417 100644
              let store = root(&format!("cas-dated-{flag}"));
              install_master(&store, OPEN_MONDAY_2026_08_03, flag);
              let context =
-@@ -5582,9 +5610,10 @@ mod tests {
+@@ -5583,9 +5611,10 @@ mod tests {
              assert_eq!(context.session_close_minute(OPEN_TUESDAY_2026_08_04), None);
              assert_eq!(context.cash_digest(), Some(cash.digest()));
              let why =
@@ -2295,7 +2293,7 @@ index 8fa0a395..1802944e 100644
 2.43.0
 
 
-From 4e30e488b976761c240b2446874dab86d2c88483 Mon Sep 17 00:00:00 2001
+From 70dec886a6f69a4e65ffd4d047f24705bd86f883 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Fri, 9 Oct 2026 04:43:07 +0000
 Subject: [PATCH 7/8] cli: validation evidence uses the audit's exact placement
@@ -2493,7 +2491,7 @@ index 1802944e..cb7571ac 100644
 2.43.0
 
 
-From 20577d698a7907a308dcea2e2c402b02b59527ef Mon Sep 17 00:00:00 2001
+From 2e2aadd1cf3fe49c6181b9a22c260c8a1e0cc002 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Fri, 9 Oct 2026 04:43:27 +0000
 Subject: [PATCH 8/8] cli: fold each daily bar at its IST midnight in cli
@@ -2523,12 +2521,12 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01R6fBjvEpAjr5PZ8rpwQhV8
 ---
  crates/cli/src/lib.rs                |  49 +++++-
- crates/cli/src/verify_daily_tests.rs | 244 +++++++++++++++++++++++++++
+ crates/cli/src/verify_daily_tests.rs | 240 +++++++++++++++++++++++++++
  docs/04-invariants.md                |   1 +
  docs/05-decisions.md                 |  47 ++++++
  docs/06-limits.md                    |  10 ++
  docs/11-findings.md                  |   7 +
- 6 files changed, 356 insertions(+), 2 deletions(-)
+ 6 files changed, 352 insertions(+), 2 deletions(-)
  create mode 100644 crates/cli/src/verify_daily_tests.rs
 
 diff --git a/crates/cli/src/lib.rs b/crates/cli/src/lib.rs
@@ -2610,10 +2608,10 @@ index d1b75188..239c2c79 100644
              .take(whole.len().saturating_sub(1).min(600))
 diff --git a/crates/cli/src/verify_daily_tests.rs b/crates/cli/src/verify_daily_tests.rs
 new file mode 100644
-index 00000000..4f6233e1
+index 00000000..99cd63a7
 --- /dev/null
 +++ b/crates/cli/src/verify_daily_tests.rs
-@@ -0,0 +1,244 @@
+@@ -0,0 +1,240 @@
 +//! V-04 on every daily stamp the store admits, folded as `cli verify` folds
 +//! it. F-CEC7A0, D-4756.
 +//!
@@ -2791,10 +2789,6 @@ index 00000000..4f6233e1
 +            );
 +            let set = set_positions(column.bits());
 +            let breached: BTreeSet<u16> = set.intersection(&cleared).copied().collect();
-+            eprintln!(
-+                "{underlying} daily stamped {stamp} IST: time-of-day/VWAP positions set {breached:?}; {} rows",
-+                column.bits().len()
-+            );
 +            assert!(
 +                breached.is_empty(),
 +                "{underlying} {stamp}: V-04 positions set on the daily rung: {breached:?}"
