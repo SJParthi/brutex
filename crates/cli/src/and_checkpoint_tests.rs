@@ -25,6 +25,8 @@ const fn chunk(bytes: usize) -> NonZeroUsize {
 std::thread_local! {
     /// Chunk buffers [`super::Chunks`] has reserved on this thread.
     pub(super) static RESERVATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Chunks [`super::Replay`] has read on this thread.
+    pub(super) static CHUNK_LOADS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 const LENGTHS: &str = "AND checkpoint boundary has invalid exact lengths";
@@ -1355,8 +1357,9 @@ fn a_replay_releases_each_chunk_before_reading_the_next() -> Result<(), String> 
         .and_then(|level| level.first())
         .ok_or("level 1 chunk")?;
     let mut stream = Replay {
-        journal: &journal,
+        entries: journal.entries(),
         limits: SMALL,
+        total: 0,
         prefix: &[],
         levels: &levels,
         level: 0,
@@ -1560,5 +1563,108 @@ fn an_unreadable_named_chunk_refuses_naming_its_sequence_depth_and_index() -> Re
         ),
         "{refused}"
     );
+    Ok(())
+}
+
+/// **AC-whp-o1-1, D-4520: a resume reads each level's chunks only when the
+/// walk needs that level.** A SMALL walk of the eight-position lattice (255
+/// survivors over eight levels, the widest in four 1,024-byte chunks) is
+/// completed and run again through the production door. When the restore
+/// hands depth `k` on, it has read exactly the chunks of depths 1 to `k + 1`
+/// and no more, so it holds two restored levels, never the history; every
+/// restored level is handed on, and the rerun ranks nothing new and
+/// publishes nothing.
+#[test]
+fn a_resume_reads_each_levels_chunks_only_when_the_walk_needs_that_level() -> Result<(), String> {
+    let scratch = Scratch::new().map_err(error)?;
+    let ladder = Ladder::with_min_hits(1).with_support_lanes(1);
+    let bits = column()?;
+    let first = sweep_evidence::begin(&scratch.0, ID, Operation::Sweep)?;
+    let expected = walk_within(
+        &scratch.0,
+        &first,
+        ladder,
+        &bits,
+        &POSITIONS,
+        SMALL,
+        &mut |_| Ok(()),
+    )?;
+    first.finish(Completion::Completed)?;
+    let (last, boundary) = newest_boundary(&scratch.0)?;
+    let chunks: Vec<u64> = boundary
+        .levels
+        .iter()
+        .scan(0, |read, pieces| {
+            *read += pieces.len() as u64;
+            Some(*read)
+        })
+        .collect();
+    let depth = expected.levels.len();
+    assert_eq!(chunks.len(), depth);
+    assert!(
+        boundary.levels.iter().any(|pieces| pieces.len() > 1),
+        "a level spans several chunks"
+    );
+    let again = sweep_evidence::begin(&scratch.0, ID, Operation::Sweep)?;
+    let mut handed = Vec::new();
+    let mut reports = 0;
+    CHUNK_LOADS.with(|count| count.set(0));
+    let streamed = walk_core(
+        &scratch.0,
+        &again,
+        ladder,
+        &bits,
+        &POSITIONS,
+        SMALL,
+        &mut |_| {
+            reports += 1;
+            Ok(())
+        },
+        |restored, reporter| {
+            assert!(restored.is_some(), "the rerun restores");
+            assert_eq!(
+                CHUNK_LOADS.with(std::cell::Cell::get),
+                0,
+                "no chunk is read before the walk asks for its level"
+            );
+            drive_streamed(
+                ladder,
+                &bits,
+                &POSITIONS,
+                ID,
+                restored,
+                reporter,
+                &mut |level, _| {
+                    handed.push((level.k, CHUNK_LOADS.with(std::cell::Cell::get)));
+                },
+            )
+        },
+    )?;
+    again.finish(Completion::Completed)?;
+    assert_eq!(reports, 1, "the terminal boundary is acknowledged once");
+    let restored = u32::try_from(depth - 1).map_err(error)?;
+    for &(k, loads) in &handed {
+        if k <= restored {
+            assert_eq!(
+                Some(&loads),
+                chunks.get(k as usize),
+                "handing on depth {k}, the chunks of depths 1..={} are read",
+                k + 1
+            );
+        }
+    }
+    assert_eq!(
+        handed.iter().map(|&(k, _)| k).collect::<Vec<_>>(),
+        (1..=u32::try_from(depth).map_err(error)?).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        streamed.levels,
+        expected
+            .levels
+            .iter()
+            .map(engine::keep::Tally::of)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(newest_boundary(&scratch.0)?.0, last, "nothing published");
     Ok(())
 }

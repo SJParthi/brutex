@@ -1178,3 +1178,481 @@ fn a_streamed_checkpointed_walk_hands_on_what_the_retaining_walk_retains() {
     assert_eq!(cases, 50);
     assert!(resumed_cases > cases);
 }
+
+/// A reader over a payload that counts, in `at`, every byte it has handed out,
+/// so a test can see how far a decoder has read when a level is handed on.
+struct Counted<'a> {
+    rest: &'a [u8],
+    at: &'a std::cell::Cell<usize>,
+}
+
+impl std::io::Read for Counted<'_> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        let taken = self.rest.read(out)?;
+        self.at.set(self.at.get() + taken);
+        Ok(taken)
+    }
+}
+
+/// Where each level of a [`CheckpointView::write_to`] payload ends: the
+/// prefix, then `56 + 56 × survivors` bytes per level.
+fn level_ends(prefix: usize, levels: &[engine::Frontier]) -> Vec<usize> {
+    levels
+        .iter()
+        .scan(prefix, |at, level| {
+            *at += 56 + 56 * level.frequent.len();
+            Some(*at)
+        })
+        .collect()
+}
+
+/// One streamed resume's observable answer: every level handed on, every
+/// boundary reported, and the tallies, halt and bars it returned.
+type Resumed = (
+    Vec<Handed>,
+    Vec<Vec<u8>>,
+    Vec<engine::keep::Tally>,
+    Option<engine::Halt>,
+    u64,
+);
+
+/// AC-whp-o1-1, D-4520: a resume from a payload still being decoded hands on,
+/// reports and returns exactly what the resume from the fully decoded
+/// checkpoint does, at every safe depth of every fixture, halted ladders
+/// included; offers every restored level to the caller's check, in depth
+/// order; and has decoded EXACTLY the level after the one it hands on, never
+/// further, so it holds at most two restored levels where the decoded resume
+/// held them all.
+#[test]
+fn a_restoring_resume_decodes_one_level_ahead_and_hands_on_what_the_decoded_resume_does() {
+    let mut resumes = 0;
+    let mut halted = 0;
+    for count in [0, 1, 2, 9, 65] {
+        for mixed in [false, true] {
+            let rows = masks(count, mixed);
+            let column = Column::try_from_rows(&rows).expect("column");
+            for threshold in [1, 2, count as u64] {
+                for ladder in [
+                    Ladder::with_min_hits(threshold).with_support_lanes(1),
+                    Ladder::with_min_hits(threshold)
+                        .with_support_lanes(1)
+                        .with_ceiling(3),
+                ] {
+                    let live = POSITIONS.to_vec();
+                    let Ok(retained) =
+                        ladder.walk_checkpointed(&column, &live, IDENTITY, &mut |_| Ok(()))
+                    else {
+                        continue;
+                    };
+                    halted += usize::from(retained.halted.is_some());
+                    for stop in retained.levels.iter().map(|level| level.k) {
+                        resume_both_ways(&column, &live, ladder, &retained.levels, stop);
+                        resumes += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert!(resumes > 60, "{resumes} resumes");
+    assert!(halted > 0, "a halted ladder was resumed");
+}
+
+/// Pauses `ladder`'s walk at depth `stop`, resumes the saved payload through
+/// the decoded door and through the restoring door, and requires the same
+/// answer, a check of every restored level in order, and that the restoring
+/// door had read exactly through depth `k + 1` when it handed depth `k` on.
+fn resume_both_ways(
+    column: &Column,
+    live: &[u32],
+    ladder: Ladder,
+    retained: &[engine::Frontier],
+    stop: u32,
+) {
+    let mut saved = Vec::new();
+    let mut prefix = 0;
+    let _ = ladder.walk_checkpointed(column, live, IDENTITY, &mut |view| {
+        if view.current().k == stop {
+            saved = encode(view);
+            let mut head = Vec::new();
+            view.write_prefix_to(&mut head).expect("prefix");
+            prefix = head.len();
+            return Err("pause".into());
+        }
+        Ok(())
+    });
+    let mut decoded: Resumed = Default::default();
+    let sweep = ladder
+        .resume_checkpointed_streamed(
+            column,
+            live,
+            IDENTITY,
+            decode(&saved),
+            &mut |view| {
+                decoded.1.push(boundary(view));
+                Ok(())
+            },
+            &mut |level, next| decoded.0.push(handed(level, next)),
+        )
+        .expect("decoded resume");
+    decoded.2 = sweep.levels;
+    decoded.3 = sweep.halted;
+    decoded.4 = sweep.bars;
+
+    let ends = level_ends(prefix, retained.get(..stop as usize).expect("restored"));
+    let at = std::cell::Cell::new(0);
+    let mut reader = Counted {
+        rest: &saved,
+        at: &at,
+    };
+    let restoring =
+        Checkpoint::restore_from(&mut reader, saved.len() as u64, IDENTITY).expect("restoring");
+    assert_eq!(at.get(), prefix, "no level is read before it is asked for");
+    assert_eq!(restoring.level_count(), stop as usize);
+    let mut checked = Vec::new();
+    let mut streamed: Resumed = Default::default();
+    let mut restored_hands = 0;
+    let sweep = ladder
+        .resume_restoring_streamed(
+            column,
+            live,
+            IDENTITY,
+            restoring,
+            &mut |level| {
+                checked.push(level.k);
+                Ok(())
+            },
+            &mut |view| {
+                streamed.1.push(boundary(view));
+                Ok(())
+            },
+            &mut |level, next| {
+                if level.k < stop {
+                    // Handing on level k, the decoder has read through level
+                    // k + 1 and no further.
+                    assert_eq!(
+                        Some(at.get()),
+                        ends.get(level.k as usize).copied(),
+                        "handing on depth {} of {stop}",
+                        level.k
+                    );
+                    restored_hands += 1;
+                }
+                streamed.0.push(handed(level, next));
+            },
+        )
+        .expect("restoring resume");
+    streamed.2 = sweep.levels;
+    streamed.3 = sweep.halted;
+    streamed.4 = sweep.bars;
+    assert_eq!(streamed, decoded, "resumed at depth {stop}");
+    assert_eq!(checked, (1..=stop).collect::<Vec<_>>());
+    assert_eq!(restored_hands, stop as usize - 1);
+    assert_eq!(at.get(), saved.len(), "the whole payload was read");
+}
+
+/// A depth-3 checkpoint of the all-true fixture, its prefix length and the
+/// ladder and column it came from.
+fn depth_three() -> (Vec<u8>, Ladder, Column) {
+    let rows = masks(9, false);
+    let column = Column::try_from_rows(&rows).expect("column");
+    let ladder = Ladder::with_min_hits(1).with_support_lanes(1);
+    let mut saved = Vec::new();
+    let _ = ladder.walk_checkpointed(&column, &POSITIONS, IDENTITY, &mut |view| {
+        if view.current().k == 3 {
+            saved = encode(view);
+            return Err("pause".into());
+        }
+        Ok(())
+    });
+    assert!(!saved.is_empty(), "the fixture reaches depth 3");
+    (saved, ladder, column)
+}
+
+/// What a restoring resume of `payload` did before it answered: how many
+/// levels it handed on and how many boundaries it reported.
+fn restore_refusal(
+    payload: &[u8],
+    ladder: Ladder,
+    column: &Column,
+    live: &[u32],
+    refuse_at: Option<u32>,
+) -> (Result<engine::keep::Streamed, Error>, usize, usize) {
+    let mut hands = 0;
+    let mut reports = 0;
+    let result = Checkpoint::restore_from(&mut &*payload, payload.len() as u64, IDENTITY).and_then(
+        |restoring| {
+            ladder.resume_restoring_streamed(
+                column,
+                live,
+                IDENTITY,
+                restoring,
+                &mut |level| {
+                    if Some(level.k) == refuse_at {
+                        Err(format!("depth {} refused by its caller", level.k))
+                    } else {
+                        Ok(())
+                    }
+                },
+                &mut |_| {
+                    reports += 1;
+                    Ok(())
+                },
+                &mut |_, _| hands += 1,
+            )
+        },
+    );
+    (result, hands, reports)
+}
+
+/// AC-whp-o1-1, D-4520: a restoring resume refuses every payload the decoded
+/// resume refuses, and reports no boundary before every restored level has
+/// been checked. A level refused by the caller's check, or by the decoder, is
+/// refused after only the levels before the one preceding it were handed on;
+/// trailing bytes refuse once the last level is read; a foreign identity or
+/// a foreign column refuses before any level is read; the accessors answer
+/// what the decoded checkpoint answers.
+#[test]
+fn a_restoring_resume_refuses_before_any_boundary_and_answers_from_its_header() {
+    let (saved, ladder, column) = depth_three();
+    let decoded = decode(&saved);
+    let mut whole = saved.as_slice();
+    let restoring =
+        Checkpoint::restore_from(&mut whole, saved.len() as u64, IDENTITY).expect("restoring");
+    assert_eq!(restoring.level_count(), decoded.levels().len());
+    assert_eq!(restoring.admitted(), decoded.admitted());
+    assert_eq!(restoring.pairs(), decoded.pairs());
+    assert!(restoring.admitted() > 0 && restoring.pairs() >= restoring.admitted() as u64);
+    assert_eq!(
+        restoring.into_checkpoint().expect("collected").levels(),
+        decoded.levels()
+    );
+
+    let (whole, hands, reports) = restore_refusal(&saved, ladder, &column, &POSITIONS, None);
+    assert!(whole.is_ok());
+    assert!(hands >= 3 && reports >= 1);
+
+    for (refuse_at, handed_before) in [(1, 0), (2, 0), (3, 1)] {
+        let (result, hands, reports) =
+            restore_refusal(&saved, ladder, &column, &POSITIONS, Some(refuse_at));
+        assert!(
+            matches!(result, Err(Error::Callback(ref why)) if *why == format!("depth {refuse_at} refused by its caller")),
+            "{result:?}"
+        );
+        assert_eq!(
+            (hands, reports),
+            (handed_before, 0),
+            "refused at {refuse_at}"
+        );
+    }
+
+    // The last level's last survivor below `min_hits`: decoded only as the
+    // resume frontier, after depth 1 was handed on.
+    let mut rare = saved.clone();
+    let hits = rare.len() - 8;
+    rare.get_mut(hits..)
+        .expect("last hits word")
+        .copy_from_slice(&0_u64.to_le_bytes());
+    assert!(Checkpoint::read_from(&mut rare.as_slice(), rare.len() as u64, IDENTITY).is_err());
+    let (result, hands, reports) = restore_refusal(&rare, ladder, &column, &POSITIONS, None);
+    assert!(
+        matches!(
+            result,
+            Err(Error::Invalid("invalid or noncanonical survivor"))
+        ),
+        "{result:?}"
+    );
+    assert_eq!((hands, reports), (1, 0));
+
+    let mut trailing = saved.clone();
+    trailing.push(0);
+    let (result, hands, reports) =
+        Checkpoint::restore_from(&mut trailing.as_slice(), trailing.len() as u64, IDENTITY)
+            .map_or_else(
+                |error| (Err(error), 0, 0),
+                |_| restore_refusal(&trailing, ladder, &column, &POSITIONS, None),
+            );
+    assert!(
+        matches!(result, Err(Error::Invalid("trailing payload bytes"))),
+        "{result:?}"
+    );
+    assert_eq!((hands, reports), (1, 0));
+
+    let at = std::cell::Cell::new(0);
+    let mut counted = Counted {
+        rest: &saved,
+        at: &at,
+    };
+    let foreign = Checkpoint::restore_from(&mut counted, saved.len() as u64, [0; 32]);
+    assert!(matches!(foreign, Err(Error::Invalid("foreign identity"))));
+    assert!(at.get() < 192, "refused inside the header");
+
+    let other_column = Column::try_from_rows(&masks(8, false)).expect("column");
+    let (result, hands, reports) = restore_refusal(&saved, ladder, &other_column, &POSITIONS, None);
+    assert!(
+        matches!(
+            result,
+            Err(Error::Invalid(
+                "run identity, column, offers or configuration mismatch"
+            ))
+        ),
+        "{result:?}"
+    );
+    assert_eq!((hands, reports), (0, 0));
+}
+
+/// The first `n` live vocabulary positions, and `n + 1` rows over them in
+/// which every combination is frequent at `min_hits = 1` and none is always
+/// true: one row holds every position, and row `i` every position but the
+/// `i`-th. A combination of `k` positions hits `1 + n - k` rows.
+fn every_combination_frequent(n: usize) -> (Vec<u32>, Column) {
+    let live: Vec<u32> = (0..u16::try_from(vocab::table::COUNT).expect("vocabulary fits u16"))
+        .filter(|&position| vocab::table::is_live(position))
+        .take(n)
+        .map(u32::from)
+        .collect();
+    assert_eq!(live.len(), n, "the vocabulary has {n} live positions");
+    let all = live.iter().fold(ConditionMask::ZERO, |mask, &position| {
+        mask.with_bit(position)
+    });
+    let rows: Vec<ConditionMask> = std::iter::once(all)
+        .chain(live.iter().map(|&position| all.without_bit(position)))
+        .collect();
+    (live, Column::try_from_rows(&rows).expect("column"))
+}
+
+/// p50, p99 and max of `ns`, sorted in place, and the 1/5/15-minute load.
+fn quantiles(ns: &mut [u128]) -> String {
+    ns.sort_unstable();
+    let at = |per_mille: usize| {
+        ns.get((ns.len() * per_mille / 1_000).min(ns.len() - 1))
+            .copied()
+            .expect("a measurement of at least one call")
+    };
+    let load = std::fs::read_to_string("/proc/loadavg").map_or_else(
+        |why| format!("unread ({why})"),
+        |text| {
+            text.split_whitespace()
+                .take(3)
+                .collect::<Vec<_>>()
+                .join(" ")
+        },
+    );
+    format!(
+        "p50 {} us  p99 {} us  max {} us  n {}  load {load}",
+        at(500) / 1_000,
+        at(990) / 1_000,
+        ns.last().copied().expect("a measurement") / 1_000,
+        ns.len()
+    )
+}
+
+/// **Measured, not asserted for time** (AC-whp-o1-1, D-4520). Run on purpose:
+///
+/// ```text
+/// cargo test -p engine --test resume_readiness -- --ignored --nocapture restore_measured
+/// ```
+///
+/// The terminal checkpoint of an 18-position sweep in which every one of the
+/// 262,143 combinations survives (depth 18, plus the empty depth 19), resumed
+/// through both doors. It prints the payload's bytes, the most survivor bytes
+/// the restoring door holds at once (two adjacent levels, read off the
+/// decoder's position) against what the decoded door holds (every level), and
+/// both doors' wall time. `docs/06-limits.md` records the printed lines.
+#[test]
+#[ignore = "a measurement, run on purpose; it asserts no time"]
+fn restore_measured_on_every_combination_of_eighteen_positions() {
+    const N: usize = 18;
+    const RUNS: usize = 100;
+    let (live, column) = every_combination_frequent(N);
+    let ladder = Ladder::with_min_hits(1).with_support_lanes(1);
+    let mut saved = Vec::new();
+    let mut prefix = 0;
+    let retained = ladder
+        .walk_checkpointed(&column, &live, IDENTITY, &mut |view| {
+            if view.terminal() {
+                saved = encode(view);
+                let mut head = Vec::new();
+                view.write_prefix_to(&mut head).expect("prefix");
+                prefix = head.len();
+            }
+            Ok(())
+        })
+        .expect("walk");
+    let survivors: usize = retained
+        .levels
+        .iter()
+        .map(|level| level.frequent.len())
+        .sum();
+    assert_eq!(survivors, (1 << N) - 1);
+    let ends = level_ends(prefix, &retained.levels);
+    let mut window = 0;
+    let mut times = [Vec::new(), Vec::new()];
+    for _ in 0..RUNS {
+        let started = std::time::Instant::now();
+        let decoded = decode(&saved);
+        ladder
+            .resume_checkpointed_streamed(
+                &column,
+                &live,
+                IDENTITY,
+                decoded,
+                &mut |_| Ok(()),
+                &mut |_, _| {},
+            )
+            .expect("decoded resume");
+        times[0].push(started.elapsed().as_nanos());
+
+        let at = std::cell::Cell::new(0);
+        let mut reader = Counted {
+            rest: &saved,
+            at: &at,
+        };
+        let started = std::time::Instant::now();
+        let restoring =
+            Checkpoint::restore_from(&mut reader, saved.len() as u64, IDENTITY).expect("restoring");
+        ladder
+            .resume_restoring_streamed(
+                &column,
+                &live,
+                IDENTITY,
+                restoring,
+                &mut |_| Ok(()),
+                &mut |_| Ok(()),
+                &mut |level, _| {
+                    let k = level.k as usize;
+                    let start = k
+                        .checked_sub(2)
+                        .map_or(prefix, |at| ends.get(at).copied().expect("a level end"));
+                    window = window.max(at.get() - start);
+                },
+            )
+            .expect("restoring resume");
+        times[1].push(started.elapsed().as_nanos());
+    }
+    let largest_pair = ends
+        .windows(3)
+        .map(|three| match three {
+            [first, _, third] => third - first,
+            _ => 0,
+        })
+        .chain(std::iter::once(
+            ends.get(1).copied().expect("two levels") - prefix,
+        ))
+        .max()
+        .expect("levels");
+    assert_eq!(window, largest_pair, "two adjacent levels, never more");
+    println!(
+        "restore N={N}: payload {} bytes, {survivors} survivors in {} levels; decoded door holds {} level bytes, restoring door at most {window}",
+        saved.len(),
+        retained.levels.len(),
+        saved.len() - prefix
+    );
+    println!(
+        "decoded door (read_from + resume): {}",
+        quantiles(&mut times[0])
+    );
+    println!(
+        "restoring door (restore_from + resume): {}",
+        quantiles(&mut times[1])
+    );
+}

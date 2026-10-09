@@ -90,20 +90,44 @@ impl Checkpoint {
         max_bytes: u64,
         expected_identity: [u8; 32],
     ) -> Result<Self, Error> {
-        let mut input = Decoder {
+        Self::restore_from(reader, max_bytes, expected_identity)?.into_checkpoint()
+    }
+
+    /// Decode the header, offers and exclusions of one exact envelope payload
+    /// within `max_bytes`, check everything that needs no level, and leave
+    /// the levels in `reader` for [`Restoring::next_level`] to decode one at
+    /// a time. AC-whp-o1-1, D-4520.
+    ///
+    /// [`Self::read_from`] is this followed by every level, so both refuse
+    /// exactly the same payloads; only the order in which a payload with
+    /// several faults names its first one differs.
+    ///
+    /// # Errors
+    /// As [`Self::read_from`], for every refusal that needs no level.
+    /// The caller must verify the payload's cryptographic seal BEFORE calling.
+    pub fn restore_from<R: Read>(
+        reader: &mut R,
+        max_bytes: u64,
+        expected_identity: [u8; 32],
+    ) -> Result<Restoring<'_, R>, Error> {
+        let mut decoder = Decoder {
             reader,
             remaining: max_bytes,
         };
-        let (mut checkpoint, counts) = input.header(expected_identity)?;
-        checkpoint.live = input.live(counts.0)?;
-        checkpoint.progress.excluded = input.excluded(counts.1)?;
-        checkpoint.levels = input.levels(counts.2)?;
-        let mut extra = [0_u8; 1];
-        if input.reader.read(&mut extra)? != 0 {
-            return Err(Error::Invalid("trailing payload bytes"));
-        }
-        checkpoint.validate()?;
-        Ok(checkpoint)
+        let (mut head, counts) = decoder.header(expected_identity)?;
+        head.live = decoder.live(counts.0)?;
+        head.progress.excluded = decoder.excluded(counts.1)?;
+        decoder.count(counts.2, LEVEL_BYTES)?;
+        let (allowed, distinct) = head.validate_head(counts.2)?;
+        Ok(Restoring {
+            decoder,
+            head,
+            count: counts.2,
+            decoded: 0,
+            admitted: 0,
+            allowed,
+            distinct,
+        })
     }
 
     /// All levels already recorded, including the current complete or halted level.
@@ -203,18 +227,15 @@ impl Checkpoint {
         .write_to(writer)
     }
 
-    fn validate(&self) -> Result<(), Error> {
-        let first = self.levels.first().ok_or(Error::Invalid("no level"))?;
+    /// Every check of [`Self::read_from`] that needs no level: the ladder,
+    /// the singleton pair count, the halt and the exclusions. Returns the
+    /// mask a survivor may draw from and how many distinct positions were
+    /// offered, which the levels are checked against as they are decoded.
+    fn validate_head(&self, count: usize) -> Result<(ConditionMask, usize), Error> {
         let mut offered = std::collections::HashSet::new();
         offered.try_reserve(self.live.len())?;
         offered.extend(self.live.iter().copied());
-        if self.ladder.min_hits == 0
-            || self.ladder.ceiling == 0
-            || self.ladder.pair_budget == 0
-            || first.generated != crate::len_u64(self.live.len())
-            || first.excluded != crate::len_u64(self.progress.excluded.len())
-            || first.duplicates != crate::len_u64(self.live.len() - offered.len())
-        {
+        if self.ladder.min_hits == 0 || self.ladder.ceiling == 0 || self.ladder.pair_budget == 0 {
             return Err(Error::Invalid("singleton accounting"));
         }
         let allowed = self
@@ -233,39 +254,17 @@ impl Checkpoint {
             .fold(allowed, |mask, excluded| {
                 mask.without_bit(excluded.position)
             });
-        let mut admitted = 0_u64;
-        for (offset, level) in self.levels.iter().enumerate() {
-            validate_level(
-                level,
-                offset,
-                self.levels.len(),
-                self.progress.bars,
-                self.ladder.min_hits,
-                allowed,
-            )?;
-            if offset > 0 {
-                admitted = admitted
-                    .checked_add(level.generated)
-                    .ok_or(Error::Invalid("admitted overflow"))?;
-            }
-        }
-        if admitted != crate::len_u64(self.progress.admitted)
-            || self.progress.admitted > self.ladder.ceiling
-            || admitted > self.progress.pairs
-            || (self.progress.halted.is_none() && self.progress.pairs > self.ladder.pair_budget)
-        {
-            return Err(Error::Invalid("cumulative candidate or pair accounting"));
-        }
-        if self.levels.len() == 1 && self.progress.pairs != 0 {
+        if count == 1 && self.progress.pairs != 0 {
             return Err(Error::Invalid("singleton pair accounting"));
         }
-        self.validate_halt()?;
-        self.validate_excluded(&offered)
+        self.validate_halt(count)?;
+        self.validate_excluded(&offered)?;
+        Ok((allowed, offered.len()))
     }
 
-    fn validate_halt(&self) -> Result<(), Error> {
+    fn validate_halt(&self, count: usize) -> Result<(), Error> {
         if let Some(halt) = self.progress.halted
-            && (u64::from(halt.k) != crate::len_u64(self.levels.len())
+            && (u64::from(halt.k) != crate::len_u64(count)
                 || halt.k < 2
                 || halt.ceiling != self.ladder.ceiling
                 || halt.pair_budget != self.ladder.pair_budget
@@ -295,6 +294,136 @@ impl Checkpoint {
             {
                 return Err(Error::Invalid("invalid exclusion"));
             }
+        }
+        Ok(())
+    }
+}
+
+/// A checkpoint payload decoded one level at a time. AC-whp-o1-1, D-4520.
+///
+/// [`Checkpoint::read_from`] decodes every level before it returns, so a
+/// resume that went through it held the whole restored history at once:
+/// O(total survivors), however soon each level was handed on. This holds the
+/// header, the offers and the exclusions, and decodes and checks one level per
+/// [`Self::next_level`]. Every check [`Checkpoint::read_from`] makes is made:
+/// the ones that need no level by [`Checkpoint::restore_from`], each level's
+/// own as it is decoded, and the trailing bytes and the cumulative counters
+/// before the LAST level is returned. A caller that hands each level on and
+/// drops it holds at most two levels at once; a level handed on before a later
+/// one refuses is handed to a caller whose result that refusal then discards.
+pub struct Restoring<'r, R> {
+    decoder: Decoder<'r, R>,
+    /// Everything but the levels, which stay in the reader.
+    head: Checkpoint,
+    count: usize,
+    decoded: usize,
+    admitted: u64,
+    allowed: ConditionMask,
+    distinct: usize,
+}
+
+impl<R: Read> Restoring<'_, R> {
+    /// How many levels the payload holds, the current one included.
+    #[must_use]
+    pub const fn level_count(&self) -> usize {
+        self.count
+    }
+
+    /// Exact cumulative admitted joined candidates the header records.
+    #[must_use]
+    pub const fn admitted(&self) -> usize {
+        self.head.progress.admitted
+    }
+
+    /// Exact cumulative pairs walked, as the header records them.
+    #[must_use]
+    pub const fn pairs(&self) -> u64 {
+        self.head.progress.pairs
+    }
+
+    /// [`Checkpoint::validate_for`], answered from the header alone.
+    ///
+    /// # Errors
+    /// As [`Checkpoint::validate_for`].
+    pub fn validate_for(
+        &self,
+        ladder: Ladder,
+        column: &Column,
+        live: &[u32],
+        expected_identity: [u8; 32],
+    ) -> Result<(), Error> {
+        self.head
+            .validate_for(ladder, column, live, expected_identity)
+    }
+
+    /// Decode and check the next level; `None` once every level has been
+    /// returned. The last level is returned only after the payload's
+    /// trailing bytes and cumulative counters are checked.
+    ///
+    /// # Errors
+    /// Every level refusal of [`Checkpoint::read_from`], when the level that
+    /// carries it is reached.
+    pub fn next_level(&mut self) -> Result<Option<Frontier>, Error> {
+        if self.decoded == self.count {
+            return Ok(None);
+        }
+        let level = self.decoder.level()?;
+        let offset = self.decoded;
+        let head = &self.head;
+        if offset == 0
+            && (level.generated != crate::len_u64(head.live.len())
+                || level.excluded != crate::len_u64(head.progress.excluded.len())
+                || level.duplicates != crate::len_u64(head.live.len() - self.distinct))
+        {
+            return Err(Error::Invalid("singleton accounting"));
+        }
+        validate_level(
+            &level,
+            offset,
+            self.count,
+            head.progress.bars,
+            head.ladder.min_hits,
+            self.allowed,
+        )?;
+        if offset > 0 {
+            self.admitted = self
+                .admitted
+                .checked_add(level.generated)
+                .ok_or(Error::Invalid("admitted overflow"))?;
+        }
+        self.decoded += 1;
+        if self.decoded == self.count {
+            self.finish()?;
+        }
+        Ok(Some(level))
+    }
+
+    /// Every level, collected: what [`Checkpoint::read_from`] returns.
+    ///
+    /// # Errors
+    /// As [`Self::next_level`], or a refused allocation.
+    pub fn into_checkpoint(mut self) -> Result<Checkpoint, Error> {
+        let mut levels = crate::reserved(self.count)?;
+        while let Some(level) = self.next_level()? {
+            levels.push(level);
+        }
+        let mut checkpoint = self.head;
+        checkpoint.levels = levels;
+        Ok(checkpoint)
+    }
+
+    fn finish(&mut self) -> Result<(), Error> {
+        let mut extra = [0_u8; 1];
+        if self.decoder.reader.read(&mut extra)? != 0 {
+            return Err(Error::Invalid("trailing payload bytes"));
+        }
+        let progress = &self.head.progress;
+        if self.admitted != crate::len_u64(progress.admitted)
+            || progress.admitted > self.head.ladder.ceiling
+            || self.admitted > progress.pairs
+            || (progress.halted.is_none() && progress.pairs > self.head.ladder.pair_budget)
+        {
+            return Err(Error::Invalid("cumulative candidate or pair accounting"));
         }
         Ok(())
     }
@@ -659,15 +788,11 @@ impl Ladder {
         column: &Column,
         live: &[u32],
         expected_identity: [u8; 32],
-        mut checkpoint: Checkpoint,
+        checkpoint: Checkpoint,
         reporter: Reporter<'_>,
         on_retire: Retirement<'_>,
     ) -> Result<keep::Streamed, Error> {
         checkpoint.validate_for(self, column, live, expected_identity)?;
-        let current = checkpoint
-            .levels
-            .pop()
-            .ok_or(Error::Invalid("no resume frontier"))?;
         let mut sink = Handing {
             tallies: crate::reserved(crate::level_slots())?,
             streamed: 0,
@@ -679,15 +804,59 @@ impl Ladder {
         };
         let halted_at = checkpoint.progress.halted.map(|halt| halt.k);
         let mut restored = checkpoint.levels.into_iter();
-        if let Some(mut level) = restored.next() {
-            for next in restored {
-                sink.hand(&level, Some(&next));
-                level = next;
-            }
-            let successor = Some(&current).filter(|next| halted_at != Some(next.k));
-            sink.hand(&level, successor);
-        }
+        let current = hand_restored(&mut sink, halted_at, || Ok(restored.next()))?;
         let tail = self.continue_walk(column, current, checkpoint.progress, &mut sink)?;
+        Ok(streamed_of(sink, tail))
+    }
+
+    /// [`Self::resume_checkpointed_streamed`] from a payload still being
+    /// decoded: each restored level is decoded, checked, offered to `check`,
+    /// handed on with its successor and dropped before the level after its
+    /// successor is decoded, so the restore holds at most two levels, not the
+    /// whole restored history. AC-whp-o1-1, D-4520.
+    ///
+    /// The levels handed on, the boundaries reported and the result are those
+    /// of [`Self::resume_checkpointed_streamed`] over
+    /// [`Checkpoint::read_from`] of the same payload.
+    ///
+    /// # Errors
+    /// As [`Self::resume_checkpointed_streamed`] and [`Restoring::next_level`];
+    /// a refusal by `check` is [`Error::Callback`]. A level refused after
+    /// earlier ones were handed on refuses the whole resume, and no boundary
+    /// is reported before every restored level has been checked.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the streamed resume's six inputs plus the payload and its caller's per-level check"
+    )]
+    pub fn resume_restoring_streamed<R: Read>(
+        self,
+        column: &Column,
+        live: &[u32],
+        expected_identity: [u8; 32],
+        mut restoring: Restoring<'_, R>,
+        check: &mut dyn FnMut(&Frontier) -> Result<(), String>,
+        reporter: Reporter<'_>,
+        on_retire: Retirement<'_>,
+    ) -> Result<keep::Streamed, Error> {
+        restoring.validate_for(self, column, live, expected_identity)?;
+        let mut sink = Handing {
+            tallies: crate::reserved(crate::level_slots())?,
+            streamed: 0,
+            identity: expected_identity,
+            ladder: self,
+            live,
+            reporter,
+            on_retire,
+        };
+        let halted_at = restoring.head.progress.halted.map(|halt| halt.k);
+        let current = hand_restored(&mut sink, halted_at, || {
+            let level = restoring.next_level()?;
+            if let Some(level) = &level {
+                check(level).map_err(Error::Callback)?;
+            }
+            Ok(level)
+        })?;
+        let tail = self.continue_walk(column, current, restoring.head.progress, &mut sink)?;
         Ok(streamed_of(sink, tail))
     }
 
@@ -707,6 +876,26 @@ impl Ladder {
             halted: tail.halted,
         })
     }
+}
+
+/// Hands every restored level but the last to `sink` in depth order, each
+/// with the level after it as its successor (none when that level is the
+/// partial one a halt left), and returns the last: the resume frontier. Each
+/// level is dropped once it has been handed on, so at most two are held.
+fn hand_restored(
+    sink: &mut Handing<'_>,
+    halted_at: Option<u32>,
+    mut next: impl FnMut() -> Result<Option<Frontier>, Error>,
+) -> Result<Frontier, Error> {
+    let mut held = next()?.ok_or(Error::Invalid("no resume frontier"))?;
+    while let Some(following) = next()? {
+        sink.hand(
+            &held,
+            Some(&following).filter(|level| halted_at != Some(level.k)),
+        );
+        held = following;
+    }
+    Ok(held)
 }
 
 fn streamed_of(sink: Handing<'_>, tail: crate::Tail) -> keep::Streamed {
@@ -884,36 +1073,31 @@ impl<R: Read> Decoder<'_, R> {
         }
         Ok(excluded)
     }
-    fn levels(&mut self, count: usize) -> Result<Vec<Frontier>, Error> {
-        self.count(count, LEVEL_BYTES)?;
-        let mut levels = crate::reserved(count)?;
-        for _ in 0..count {
-            let k = self.position()?;
-            let length = self.size()?;
-            let mut level = Frontier {
-                k,
-                generated: self.word()?,
-                duplicates: self.word()?,
-                excluded: self.word()?,
-                pruned: self.word()?,
-                infrequent: self.word()?,
-                frequent: Vec::new(),
-            };
-            self.count(length, ITEM_BYTES)?;
-            level.frequent = crate::reserved(length)?;
-            for _ in 0..length {
-                let mut mask = [0_u64; 6];
-                for word in &mut mask {
-                    *word = self.word()?;
-                }
-                level.frequent.push(Itemset {
-                    mask: ConditionMask::from_words(mask),
-                    hits: self.word()?,
-                });
+    fn level(&mut self) -> Result<Frontier, Error> {
+        let k = self.position()?;
+        let length = self.size()?;
+        let mut level = Frontier {
+            k,
+            generated: self.word()?,
+            duplicates: self.word()?,
+            excluded: self.word()?,
+            pruned: self.word()?,
+            infrequent: self.word()?,
+            frequent: Vec::new(),
+        };
+        self.count(length, ITEM_BYTES)?;
+        level.frequent = crate::reserved(length)?;
+        for _ in 0..length {
+            let mut mask = [0_u64; 6];
+            for word in &mut mask {
+                *word = self.word()?;
             }
-            levels.push(level);
+            level.frequent.push(Itemset {
+                mask: ConditionMask::from_words(mask),
+                hits: self.word()?,
+            });
         }
-        Ok(levels)
+        Ok(level)
     }
 }
 

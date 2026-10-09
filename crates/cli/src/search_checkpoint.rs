@@ -46,6 +46,19 @@ pub(crate) struct Journal {
     poisoned: bool,
 }
 
+/// Reads one journal's recorded entries exactly as [`Journal::read`] does,
+/// holding the journal's directory and identity, not the journal (D-4520).
+pub(crate) struct Entries {
+    directory: PathBuf,
+    identity: [u8; 32],
+}
+
+impl Entries {
+    pub(crate) fn read(&self, sequence: u64, max_bytes: u64) -> Result<Saved, String> {
+        read_saved(&self.directory, self.identity, sequence, max_bytes)
+    }
+}
+
 /// One fully verified checkpoint; payload format belongs to its versioned caller.
 pub(crate) struct Saved {
     pub sequence: u64,
@@ -211,6 +224,16 @@ impl Journal {
 
     pub(crate) fn read(&self, sequence: u64, max_bytes: u64) -> Result<Saved, String> {
         read_saved(&self.directory, self.identity, sequence, max_bytes)
+    }
+
+    /// An owned reader of this journal's entries: [`Self::read`] without a
+    /// borrow of the journal, so a resume can keep reading recorded entries
+    /// while the walk it feeds publishes new ones (AC-whp-o1-1, D-4520).
+    pub(crate) fn entries(&self) -> Entries {
+        Entries {
+            directory: self.directory.clone(),
+            identity: self.identity,
+        }
     }
 
     pub(crate) fn publish(

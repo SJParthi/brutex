@@ -21,18 +21,27 @@
 //! the newest boundary record and streams its prefix and every named chunk,
 //! each checked against its recorded seal, through the engine's own decoder.
 //! No entry holds more than one chunk of one level. D-0712.
+//!
+//! # A resume restores one level at a time
+//!
+//! The decoder hands the walk each restored level as it reaches it, checked
+//! against its depth row, and the ranker takes it and drops it before the
+//! level after the next is read: a resume holds at most two restored levels
+//! and one chunk, where it held the whole restored history until D-4520
+//! (AC-whp-o1-1).
 
 use std::io::{self, Read, Write};
 use std::num::NonZeroUsize;
 use std::path::Path;
 
+use engine::Frontier;
 use engine::Ladder;
 #[cfg(test)]
 use engine::Sweep;
-use engine::resume::{Checkpoint, CheckpointView};
+use engine::resume::{Checkpoint, CheckpointView, Restoring};
 use indicators::column::Column;
 
-use crate::search_checkpoint::Journal;
+use crate::search_checkpoint::{Entries, Journal};
 use crate::sweep_evidence::{Attempt, DepthRow};
 
 const NAMESPACE: &str = "and-checkpoint-v2";
@@ -126,26 +135,50 @@ pub(crate) fn run(
                     crate::emit_ladder_level(view.current(), view.admitted(), view.pairs());
                     Ok(())
                 },
-                |checkpoint, reporter| match checkpoint {
-                    Some(checkpoint) => ladder.resume_checkpointed_streamed(
+                |restored, reporter| {
+                    drive_streamed(
+                        ladder,
                         &bits,
                         &runner::live_positions(),
                         attempt.identity(),
-                        checkpoint,
+                        restored,
                         reporter,
                         on_retire,
-                    ),
-                    None => ladder.walk_checkpointed_streamed(
-                        &bits,
-                        &runner::live_positions(),
-                        attempt.identity(),
-                        reporter,
-                        on_retire,
-                    ),
+                    )
                 },
             )
         },
     )
+}
+
+/// The production engine door: a resume restores level by level, each
+/// level checked against its depth row and handed to `on_retire` before the
+/// level after the next is read (D-4520); a fresh walk hands each level on as
+/// it retires (D-1844).
+fn drive_streamed(
+    ladder: Ladder,
+    bits: &engine::column::Column,
+    live: &[u32],
+    identity: [u8; 32],
+    restored: Option<Restored<'_, '_>>,
+    reporter: &mut dyn FnMut(&CheckpointView<'_>) -> Result<(), String>,
+    on_retire: engine::resume::Retirement<'_>,
+) -> Result<engine::keep::Streamed, engine::resume::Error> {
+    match restored {
+        Some(Restored {
+            restoring,
+            mut rows,
+        }) => ladder.resume_restoring_streamed(
+            bits,
+            live,
+            identity,
+            restoring,
+            &mut |level| rows.level(level).map(drop),
+            reporter,
+            on_retire,
+        ),
+        None => ladder.walk_checkpointed_streamed(bits, live, identity, reporter, on_retire),
+    }
 }
 
 #[cfg(test)]
@@ -181,8 +214,15 @@ fn walk_within(
         live,
         limits,
         after_saved,
-        |checkpoint, reporter| match checkpoint {
-            Some(checkpoint) => {
+        |restored, reporter| match restored {
+            Some(Restored {
+                restoring,
+                mut rows,
+            }) => {
+                let checkpoint = restoring.into_checkpoint()?;
+                for level in checkpoint.levels() {
+                    rows.level(level).map_err(engine::resume::Error::Callback)?;
+                }
                 ladder.resume_checkpointed(column, live, attempt.identity(), checkpoint, reporter)
             }
             None => ladder.walk_checkpointed(column, live, attempt.identity(), reporter),
@@ -206,7 +246,7 @@ fn walk_core<R>(
     limits: Limits,
     after_saved: &mut dyn FnMut(&CheckpointView<'_>) -> Result<(), String>,
     drive: impl FnOnce(
-        Option<engine::resume::Checkpoint>,
+        Option<Restored<'_, '_>>,
         &mut dyn FnMut(&CheckpointView<'_>) -> Result<(), String>,
     ) -> Result<R, engine::resume::Error>,
 ) -> Result<R, String> {
@@ -217,21 +257,34 @@ fn walk_core<R>(
         .as_ref()
         .map(|(sequence, seal, _)| (*sequence, *seal));
     let mut previous = acknowledged.map_or(0, |(sequence, _)| sequence);
-    let (checkpoint, mut rows, mut levels) = match recovered {
-        Some((sequence, _, boundary)) => {
-            let checkpoint = replay(&journal, &boundary, attempt.identity(), limits)?;
-            checkpoint
+    // The recovered boundary is read, not copied, by the restore; the walk
+    // extends these copies of its rows and chunk lists, at most `MAX_ROWS`
+    // of each.
+    let (mut rows, mut levels) = recovered.as_ref().map_or_else(
+        || (Vec::new(), Vec::new()),
+        |(_, _, boundary)| (boundary.rows.clone(), boundary.levels.clone()),
+    );
+    let mut replays = match &recovered {
+        Some((_, _, boundary)) => Some(Replay::of(journal.entries(), boundary, limits)?),
+        None => None,
+    };
+    let restored = match (&recovered, replays.as_mut()) {
+        (Some((sequence, _, boundary)), Some(replays)) => {
+            let restored =
+                Restored::open(replays, &boundary.rows, attempt.identity(), Some(attempt))?;
+            restored
+                .restoring
                 .validate_for(ladder, column, live, attempt.identity())
                 .map_err(error)?;
             crate::note(
                 &telemetry::Event::info("cli.sweep", "AND checkpoint recovered")
-                    .with("sequence", sequence)
+                    .with("sequence", *sequence)
                     .with("depth", u64::try_from(boundary.rows.len()).map_err(error)?)
                     .with("interrupted_reservations", journal.interrupted()),
             );
-            (Some(checkpoint), boundary.rows, boundary.levels)
+            Some(restored)
         }
-        None => (None, Vec::new(), Vec::new()),
+        _ => None,
     };
     rows.try_reserve_exact(MAX_ROWS.saturating_sub(rows.len()))
         .map_err(error)?;
@@ -239,12 +292,9 @@ fn walk_core<R>(
         .try_reserve_exact(MAX_ROWS.saturating_sub(levels.len()))
         .map_err(error)?;
     // The current boundary is emitted once by the engine's resume callback.
-    // Only earlier rows are rehydrated here, with their original counters.
-    if checkpoint.is_some() {
-        for row in rows.iter().take(rows.len().saturating_sub(1)) {
-            attempt.level(*row)?;
-        }
-    }
+    // Each earlier row is rehydrated, with its original counters, by the
+    // restore's row check once its level has been read back and checked
+    // against it (`RowCheck::level`), never before.
     let mut checkpointed = |view: &CheckpointView<'_>| {
         let row = DepthRow::of(view.current(), view.admitted(), view.pairs());
         let depth = usize::try_from(row.k).map_err(error)?;
@@ -270,10 +320,11 @@ fn walk_core<R>(
         attempt.level(row)?;
         after_saved(view)
     };
-    let sweep = drive(checkpoint, &mut checkpointed).map_err(error)?;
+    let sweep = drive(restored, &mut checkpointed).map_err(error)?;
     // Reopen the final boundary and every chunk it names before returning a
     // rankable run. Checking the exact acknowledged seals also rejects a newly
     // resealed replacement, not only accidental byte corruption.
+    let entries = journal.entries();
     let final_saved = journal
         .latest(limits.entry)?
         .ok_or("AND final checkpoint is absent")?;
@@ -283,7 +334,7 @@ fn walk_core<R>(
     let named = decode_boundary(&final_saved.payload, final_saved.sequence)?;
     for (level, pieces) in named.levels.iter().enumerate() {
         for (index, piece) in pieces.iter().enumerate() {
-            if read_named(&journal, piece, level, index, limits)?.seal != piece.seal {
+            if read_named(&entries, piece, level, index, limits)?.seal != piece.seal {
                 return Err("AND final checkpoint chunk differs from its acknowledgment".into());
             }
         }
@@ -603,44 +654,130 @@ fn decode_boundary(bytes: &[u8], sequence: u64) -> Result<Boundary, String> {
     })
 }
 
-/// Rebuilds the engine checkpoint a boundary record names.
+/// Rebuilds the engine checkpoint a boundary record names, whole: every
+/// level decoded and checked against its depth row. The walk does not call
+/// this; it restores level by level through [`Restored`] (D-4520).
+#[cfg(test)]
 fn replay(
     journal: &Journal,
     boundary: &Boundary,
     identity: [u8; 32],
     limits: Limits,
 ) -> Result<Checkpoint, String> {
-    let total = boundary
-        .levels
-        .iter()
-        .flatten()
-        .try_fold(
-            u64::try_from(boundary.prefix.len()).map_err(error)?,
-            |sum, piece| sum.checked_add(piece.length),
-        )
-        .ok_or("AND checkpoint history length overflow")?;
-    let mut stream = Replay {
-        journal,
-        limits,
-        prefix: &boundary.prefix,
-        levels: &boundary.levels,
-        level: 0,
-        piece: 0,
-        chunk: Vec::new(),
-        at: 0,
-    };
-    let checkpoint = Checkpoint::read_from(&mut stream, total, identity).map_err(error)?;
-    validate_rows(&checkpoint, &boundary.rows)?;
+    let mut replays = Replay::of(journal.entries(), boundary, limits)?;
+    let Restored {
+        restoring,
+        mut rows,
+    } = Restored::open(&mut replays, &boundary.rows, identity, None)?;
+    let checkpoint = restoring.into_checkpoint().map_err(error)?;
+    for level in checkpoint.levels() {
+        rows.level(level)?;
+    }
     Ok(checkpoint)
+}
+
+/// A recovered boundary's engine payload, decoded from its chunks one level
+/// at a time, and the check each restored level passes before the walk hands
+/// it on (AC-whp-o1-1, D-4520).
+struct Restored<'r, 'b> {
+    restoring: Restoring<'r, Replay<'b>>,
+    rows: RowCheck<'b>,
+}
+
+impl<'r, 'b> Restored<'r, 'b> {
+    /// Opens the payload `replays` reads, refusing a foreign identity and a
+    /// depth history whose length is not the payload's level count before
+    /// any level is read.
+    fn open(
+        replays: &'r mut Replay<'b>,
+        rows: &'b [DepthRow],
+        identity: [u8; 32],
+        attempt: Option<&'b Attempt>,
+    ) -> Result<Self, String> {
+        let total = replays.total;
+        let restoring = Checkpoint::restore_from(replays, total, identity).map_err(error)?;
+        if rows.len() != restoring.level_count() {
+            return Err("AND checkpoint depth history length mismatch".into());
+        }
+        let rows = RowCheck {
+            rows,
+            next: 0,
+            admitted: 0,
+            pairs: 0,
+            final_admitted: u64::try_from(restoring.admitted()).map_err(error)?,
+            final_pairs: restoring.pairs(),
+            attempt,
+        };
+        Ok(Self { restoring, rows })
+    }
+}
+
+/// Checks each restored level, in depth order, against the depth row its
+/// boundary record holds for it: what `validate_rows` checked over the whole
+/// decoded history before D-4520, one level at a time. With an attempt, each
+/// row before the resume frontier's is recorded in it once its level has
+/// passed; the frontier's own row is recorded when the engine reports its
+/// boundary again.
+struct RowCheck<'b> {
+    rows: &'b [DepthRow],
+    next: usize,
+    admitted: u64,
+    pairs: u64,
+    /// The payload header's cumulative counters, which the last row reaches.
+    final_admitted: u64,
+    final_pairs: u64,
+    attempt: Option<&'b Attempt>,
+}
+
+impl RowCheck<'_> {
+    /// Checks the next restored level against its row and returns the row.
+    fn level(&mut self, level: &Frontier) -> Result<DepthRow, String> {
+        let offset = self.next;
+        let row = *self
+            .rows
+            .get(offset)
+            .ok_or("AND checkpoint depth history length mismatch")?;
+        if offset > 0 {
+            self.admitted = self
+                .admitted
+                .checked_add(level.generated)
+                .ok_or("AND admitted counter overflow")?;
+        }
+        let expected = DepthRow::of(
+            level,
+            usize::try_from(self.admitted).map_err(error)?,
+            row.pairs,
+        );
+        if expected != row
+            || row.pairs < self.pairs
+            || row.pairs < self.admitted
+            || (offset == 0 && row.pairs != 0)
+        {
+            return Err("AND checkpoint depth history differs from the retained search".into());
+        }
+        self.pairs = row.pairs;
+        self.next = offset + 1;
+        if self.next == self.rows.len() {
+            if self.admitted != self.final_admitted || self.pairs != self.final_pairs {
+                return Err("AND checkpoint final counters disagree".into());
+            }
+        } else if let Some(attempt) = self.attempt {
+            attempt.level(row)?;
+        }
+        Ok(row)
+    }
 }
 
 /// The prefix, then every named chunk's level bytes, in depth order. Each
 /// chunk is read only when the decoder reaches it, and the one before it is
 /// released first (`self.chunk = Vec::new();` ahead of the read), so at most
-/// one chunk payload is held beside the checkpoint being rebuilt.
+/// one chunk payload is held beside the level being decoded.
 struct Replay<'a> {
-    journal: &'a Journal,
+    entries: Entries,
     limits: Limits,
+    /// Every byte the decoder may read: the prefix and every named chunk's
+    /// level bytes.
+    total: u64,
     prefix: &'a [u8],
     levels: &'a [Vec<Piece>],
     level: usize,
@@ -648,6 +785,32 @@ struct Replay<'a> {
     /// The chunk payload being read, and the read position within it.
     chunk: Vec<u8>,
     at: usize,
+}
+
+impl<'a> Replay<'a> {
+    /// The reader of the payload `boundary` names.
+    fn of(entries: Entries, boundary: &'a Boundary, limits: Limits) -> Result<Self, String> {
+        let total = boundary
+            .levels
+            .iter()
+            .flatten()
+            .try_fold(
+                u64::try_from(boundary.prefix.len()).map_err(error)?,
+                |sum, piece| sum.checked_add(piece.length),
+            )
+            .ok_or("AND checkpoint history length overflow")?;
+        Ok(Self {
+            entries,
+            limits,
+            total,
+            prefix: &boundary.prefix,
+            levels: &boundary.levels,
+            level: 0,
+            piece: 0,
+            chunk: Vec::new(),
+            at: 0,
+        })
+    }
 }
 
 impl Replay<'_> {
@@ -662,7 +825,9 @@ impl Replay<'_> {
             // Release the chunk just read before reading the next, so two
             // chunk payloads are never held at once.
             self.chunk = Vec::new();
-            let saved = read_named(self.journal, piece, self.level, self.piece, self.limits)?;
+            let saved = read_named(&self.entries, piece, self.level, self.piece, self.limits)?;
+            #[cfg(test)]
+            tests::CHUNK_LOADS.with(|count| count.set(count.get() + 1));
             let [_, depth, index, _] = chunk_header(&saved.payload)?;
             if saved.seal != piece.seal
                 || u64::try_from(saved.payload.len()).map_err(error)?
@@ -706,49 +871,19 @@ impl Read for Replay<'_> {
 /// its completion marker among them, refuses naming the chunk's sequence and
 /// its one-based depth and zero-based index beside the journal's own reason.
 fn read_named(
-    journal: &Journal,
+    entries: &Entries,
     piece: &Piece,
     level: usize,
     index: usize,
     limits: Limits,
 ) -> Result<crate::search_checkpoint::Saved, String> {
-    journal.read(piece.sequence, limits.entry).map_err(|why| {
+    entries.read(piece.sequence, limits.entry).map_err(|why| {
         format!(
             "AND checkpoint chunk {} (depth {}, index {index}) named by its boundary record cannot be read: {why}",
             piece.sequence,
             level.saturating_add(1)
         )
     })
-}
-
-fn validate_rows(checkpoint: &Checkpoint, rows: &[DepthRow]) -> Result<(), String> {
-    if rows.len() != checkpoint.levels().len() {
-        return Err("AND checkpoint depth history length mismatch".into());
-    }
-    let mut admitted = 0_u64;
-    let mut pairs = 0_u64;
-    for (offset, (level, row)) in checkpoint.levels().iter().zip(rows).enumerate() {
-        if offset > 0 {
-            admitted = admitted
-                .checked_add(level.generated)
-                .ok_or("AND admitted counter overflow")?;
-        }
-        let expected = DepthRow::of(level, usize::try_from(admitted).map_err(error)?, row.pairs);
-        if expected != *row
-            || row.pairs < pairs
-            || row.pairs < admitted
-            || (offset == 0 && row.pairs != 0)
-        {
-            return Err("AND checkpoint depth history differs from the retained search".into());
-        }
-        pairs = row.pairs;
-    }
-    if admitted != u64::try_from(checkpoint.admitted()).map_err(error)?
-        || pairs != checkpoint.pairs()
-    {
-        return Err("AND checkpoint final counters disagree".into());
-    }
-    Ok(())
 }
 
 fn read_word(input: &mut &[u8]) -> Result<u64, String> {

@@ -184,12 +184,18 @@ fn limits_section_5_names_the_retaining_stored_door() {
     assert!(!five.contains("only ranked entry points take the streamed result"));
     let door = read("crates/cli/src/and_checkpoint.rs");
     let run = section(&door, "pub(crate) fn run(", "fn ");
+    // The engine door moved into `drive_streamed`, which a test also drives
+    // (D-4520); it walks fresh and resumes level by level.
+    let drive = section(&door, "fn drive_streamed(", "fn ");
     assert!(
         run.contains("runner::rank_checkpointed_streamed(")
-            && run.contains("walk_checkpointed_streamed(")
+            && run.contains("drive_streamed(")
+            && drive.contains("walk_checkpointed_streamed(")
+            && drive.contains("resume_restoring_streamed(")
             && !run.contains("rank_checkpointed_sweep("),
         "the stored door retains its sweep again; revisit docs/06-limits.md §5"
     );
+    assert!(five.contains("**Since D-4520 a resume restores one level at a time:**"));
     let resume = flat(&read("docs/20-sweep-resume.md"));
     assert!(!resume.contains("Encoding uses fixed scratch space"));
     assert!(resume.contains("`BoundedBytes`"));

@@ -186,9 +186,26 @@ about the other path. D-1448.
 `Tally`; every level is already durable in the journal when it retires. The
 retained `Sweep` and the after-the-walk `runner::rank_checkpointed_sweep` are
 no longer on these doors, so their retention is that of the streamed path
-below. A resume still decodes the journal's earlier levels into one
+below. A resume still decoded the journal's earlier levels into one
 `Checkpoint` before handing them on in depth order, so a resumed attempt's
-peak includes the restored history once; a fresh attempt's does not.
+peak included the restored history once; a fresh attempt's did not.
+**Since D-4520 a resume restores one level at a time:** `walk_core` opens
+the payload with `Checkpoint::restore_from` and drives
+`Ladder::resume_restoring_streamed`, which decodes each restored level from
+its chunks only when the walk needs it, checks it (and its depth row), hands
+it on and drops it, so a resume holds at most two restored levels and one
+chunk. Measured on the terminal checkpoint of an 18-position sweep in which
+all 262,143 combinations survive (14,681,408 payload bytes): the decoded
+door held all 14,681,072 level bytes, the restoring door at most 5,173,280
+(two adjacent levels, read off the decoder's position, asserted equal to
+the largest adjacent pair). Time stays O(restored history), because the
+ranker scores every restored survivor: decoded door p50 18.3 ms, p99 31.3 ms,
+max 31.3 ms; restoring door p50 20.8 ms, p99 38.7 ms, max 38.7 ms (n = 100,
+so p99 is the max; load 3.09 3.41 2.88 on 4 vCPUs shared with other builds;
+`restore_measured_on_every_combination_of_eighteen_positions`, `#[ignore]`d,
+run on purpose). `a_restoring_resume_decodes_one_level_ahead_and_hands_on_what_the_decoded_resume_does`
+(engine) and `a_resume_reads_each_levels_chunks_only_when_the_walk_needs_that_level`
+(cli) prove the one-level look-ahead by count.
 `a_streamed_checkpointed_walk_hands_on_what_the_retaining_walk_retains`
 (engine) and `the_streamed_door_ranks_what_the_retained_sweep_ranked` (cli)
 require the same levels, boundaries and ranking, fresh and resumed. Counted,

@@ -7278,3 +7278,10 @@ old line regex the same input and watched it pass.
 | ONEAUTH-22 | The browser's `CAMPAIGN_RUNGS` is `cli::EVERY_RUNG` in its order, and `charge-scope.js`'s own charge list is `runner::audit`'s equity header verbatim, its trades sentence naming each of the eight charges (D-3519) | `web/tests/boolean-campaign.test.js` · *the campaign rung list is cli::EVERY_RUNG, in its order*; `web/tests/charge-scope.test.js` · *the page's charge list is the audit header's* | ✓ |
 | ONEAUTH-23 | `telemetry::civil_from_days`, `cli::stability::Grain::Month`, `costs::day` both ways and `store::path::YearMonth::ist_bounds_micros` name `pull::session::Day`'s date on every day from 1970-01-01 to 9999-12-31 that each admits, and the store's months tile (D-3521) | `every_civil_date_copy_names_the_same_day` in `crates/cli/tests/one_civil_calendar.rs` | ✓ |
 | ONEAUTH-24 | Every `D-NNNN` cited by the root `.md` and `.toml` files, `.config/`, `config/`, `.claude/` and `web/`'s sources heads a ledger entry, and nothing under `target`, `node_modules`, `build` or `.svelte-kit` is read (D-3520) | `every_cited_decision_heads_an_entry` in `crates/core/tests/citations.rs` | ✓ |
+
+### Audit fixer defc (D-4520 to D-4534)
+
+| Id | Invariant | Test that proves it | Status |
+|---|---|---|---|
+| DEFC-01 | A resume from a payload still being decoded hands on, reports and returns what the resume from the decoded checkpoint does at every safe depth, halted ladders included; when it hands depth `k` on it has read the payload exactly through depth `k + 1`; a caller or decoder refusal reports no boundary (AC-whp-o1-1, D-4520) | `engine` `resume_readiness::a_restoring_resume_decodes_one_level_ahead_and_hands_on_what_the_decoded_resume_does`; `resume_readiness::a_restoring_resume_refuses_before_any_boundary_and_answers_from_its_header` | ✓ |
+| DEFC-02 | The stored sweep's production door reads no chunk before the walk asks for a level, and has read exactly the chunks of depths 1 to `k + 1` when it hands depth `k` on (AC-whp-o1-1, D-4520) | `cli::and_checkpoint::tests::a_resume_reads_each_levels_chunks_only_when_the_walk_needs_that_level` | ✓ |

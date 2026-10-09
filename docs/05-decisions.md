@@ -68996,3 +68996,45 @@ ending where the next starts) to `pull`'s answer. The copies stay; the
 
 **Left open, for the owner.** Whether `rust-toolchain.toml` and `Cargo.toml`
 join the auto-merge workflow's sensitive paths (D-3510) is not decided here.
+
+### D-4520 — A stored sweep resume restores one level at a time — 2026-10-09
+
+**Finding (AC-whp-o1-1; left PARTIAL by D-1844).** D-1844 made the stored
+sweep doors rank each level as it retires, but a resume still decoded the
+journal's whole restored history into one `engine::resume::Checkpoint`
+(`Checkpoint::read_from`) before handing any level on: a resumed attempt's
+peak held O(total restored survivors), the cost D-1448 measured at 6.35 GB.
+
+**The change.**
+- `engine`: `Checkpoint::restore_from` decodes the header, offers and
+  exclusions and makes every check that needs no level; `Restoring::next_level`
+  decodes and checks one level, and checks the trailing bytes and cumulative
+  counters before it returns the last. `Checkpoint::read_from` is
+  `restore_from` followed by every level, so the two refuse exactly the same
+  payloads (only which of several faults is named first can differ).
+  `Ladder::resume_restoring_streamed` hands each restored level on, with its
+  successor, before the level after that successor is decoded, after the
+  caller's per-level `check`; a refusal there is `Error::Callback`.
+- `cli::and_checkpoint`: `walk_core` reads the recovered boundary's chunks
+  through an owned `search_checkpoint::Entries` (so the reader can live
+  while the journal publishes) and drives the production door through
+  `drive_streamed`. `RowCheck` checks each restored level against its depth
+  row as `validate_rows` checked the whole history, and records each earlier
+  row in the attempt only once its level has passed; before, every row was
+  recorded after the whole history had been checked, so a resume refused at
+  depth `k` now leaves the rows below `k` recorded, as a fresh walk refused
+  at `k` does.
+
+**No output changes.** The levels handed on, every boundary, the tallies and
+the ranking are those of the decoded resume; the journal format is
+unchanged, so every existing journal resumes.
+
+**Measured.** On the terminal checkpoint of an 18-position sweep (262,143
+survivors, 14.7 MB) the restoring door holds at most 5,173,280 level bytes
+where the decoded door held 14,681,072; its time stays O(restored history),
+p50 20.8 ms, p99 38.7 ms (n = 100). Figures in `docs/06-limits.md` §5.
+
+**Proof.** `engine` `resume_readiness::a_restoring_resume_decodes_one_level_ahead_and_hands_on_what_the_decoded_resume_does`
+and `a_restoring_resume_refuses_before_any_boundary_and_answers_from_its_header`;
+`cli::and_checkpoint::tests::a_resume_reads_each_levels_chunks_only_when_the_walk_needs_that_level`.
+DEFC-01, DEFC-02.
