@@ -66649,3 +66649,71 @@ under §2's "without exception" is a ruling on the law, and a gate must not
 widen the law to match the tree (gate 1's own comment, D-0210). `CLAUDE.md` is
 not edited here. Until the owner rules, the five Node actions outside the web
 job are named, pinned and fenced, not licensed.
+
+### D-4492 — `.claude/launch.json` is read by a gate and holds exactly the two run configurations, the first a `cargo` invocation — 2026-10-09
+
+**Finding (srust-3, low).** `CLAUDE.md` §2 admits `.json` only under `.claude/`
+on the ground that exactly one tracked file uses it, `.claude/launch.json`,
+carrying the two run configurations `docs/07-plan.md` §0 names. No gate read
+that file: gate 1 and gate 1b matched its path and extension only. Its first
+configuration was `"runtimeExecutable": "sh"` with `["-c", "exec cargo run
+--release -p api -- serve"]` — a shell handed a program written in a tracked
+file outside `web/`. The `sh -c` form dates from the `BRUTEX_COMMIT=$(git
+rev-parse HEAD)` prefix that D-1970 removed; after that it carried only
+`exec`. Any edit could have made it `perl -e …` or `node -e …`, or added a
+second `runtimeExecutable` that a JSON reader keeping the last key would run,
+or an `env` key, and every gate stayed green. Nor did anything hold "exactly
+one tracked file": `.gitignore` ignores `/.claude/*` but `git add -f` tracks
+past it, and a `.claude/settings.json` (whose hooks are shell commands) or a
+`.claude/commands/*.md` passed gates 1 and 1b.
+
+**Probes, before** (scratch copy of base 21443a2a, gates 0, 1, 1b, 1g and 15
+run from `.github/workflows/ci.yml`; all five exit 0 for each): P18 config 1
+`perl` `["-e", "print 1"]`; P19 `node` `["-e", "1"]`; P20 `cargo` with its
+arguments followed by a second `"runtimeExecutable": "sh"` and `"runtimeArgs":
+["-c", "echo probe"]`; P21 a force-added `.claude/settings.json` with a
+`SessionStart` command hook; P22 a force-added `.claude/commands/x.md`; P23 an
+`"env": {"RUSTC_WRAPPER": "/bin/sh"}` key beside a correct `cargo` line.
+
+**The decision.**
+
+1. The first configuration starts `cargo` itself, with `["run", "--release",
+   "-p", "api", "--", "serve"]`. Without a shell, `exec` has nothing to
+   replace; the program and arguments are the ones the shell used to run, and
+   the name text is unchanged. That the preview tools start this form the way
+   they start the second configuration's `npm` is the same `runtimeExecutable`
+   mechanism; it was **not run in a preview tool here** (UNVERIFIED).
+2. `launch` in `.github/gh_json.rs` — the one JSON parser the gates already
+   build and test — reads the file and refuses: anything but one document; a
+   key twice in any object (the parser's `get` answers the first, `JSON.parse`
+   keeps the last); top-level keys other than exactly `version` and
+   `configurations`; a `version` other than `0.0.1`; a count other than two;
+   per configuration, keys other than exactly `name`, `runtimeExecutable`,
+   `runtimeArgs`, `port`, `url`; a name that does not start with §0's name
+   (`brutex — the whole application`, then `web — Vite dev server`, in that
+   order) or carries a control character; a program other than `cargo`, then
+   `npm`; an argument list other than the pinned one; a port other than 8080,
+   then 5173; an address other than `http://127.0.0.1:8080`, then
+   `http://localhost:5173`. Since program and arguments are pinned exactly, a
+   shell, `env`, `perl`, `node`, an absolute path to cargo, a `--config`
+   argument to cargo and an `npm exec` are all refused, not just the ones a
+   list would name.
+3. The second configuration stays: §0 names it, and `npm --prefix web run dev`
+   starts `web/package.json`'s own `dev` script by name — the `web/` exception
+   (D-0052, D-0053) reached by path, not a program carried in this file.
+4. Gate 1b (`gate_1b` in `.github/gates_tree.rs`) also refuses every tracked
+   path outside `web/` with a `.claude` component, in any letter case, other
+   than `.claude/launch.json`. This holds §2's sentence; it does not change
+   it, and `CLAUDE.md` is not edited.
+5. The gate 1b step builds `gh_json` and runs `launch < .claude/launch.json`;
+   gate 0 already runs `gh_json`'s tests.
+
+`crates/cli/src/operator_boundary_tests.rs`'s
+`the_launch_configuration_states_what_build_rs_actually_stamps` asserted the
+old `"exec cargo run --release -p api -- serve"` string and now asserts
+`"runtimeExecutable": "cargo"` and the absence of `"runtimeExecutable":
+"sh"`. Its predicates were checked against the file with `grep -F`; the test
+itself was **not run** here, because this fixer may not build `cli`.
+
+**Probes, after:** each of P18–P23, and P24 (the old `sh -c` shape), is
+refused by gate 1b; the real tree passes. Invariant FXE-05.

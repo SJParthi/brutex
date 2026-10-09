@@ -333,13 +333,26 @@ jobs:
           # of failure as a permissive one accepting an illegal file: the gate
           # stopped describing the rule it was written to enforce.
           #
-          # `.claude/` is the run configuration IntelliJ and the preview tools
-          # read. It is operator tooling, not source, and it is not shipped.
+          # `.claude/` is the run configuration the preview tools read (not
+          # IntelliJ; see gate 1). It is operator tooling, not source, and it
+          # is not shipped.
           # The listing first: `git ls-files ... | grep || true` swallowed a git
           # that failed and printed OK over nothing (AC-gates-law-10, D-1104).
           # A git that fails stops the step, and an empty listing is refused.
           # D-2311: the rule is `gate_1b` in .github/gates_tree.rs.
+          #
+          # D-4492 (srust-3): `.claude/launch.json` is the only tracked path
+          # under any `.claude` directory outside web/, and it is READ, not
+          # matched by extension: one JSON document, no key twice, exactly the
+          # two configurations docs/07-plan.md section 0 names, each program and
+          # argument list pinned -- `cargo run --release -p api -- serve` and
+          # `npm --prefix web run dev` -- so no shell or other interpreter is
+          # handed a program there. The reader is `launch` in .github/gh_json.rs,
+          # whose tests gate 0 ran.
           "${RUNNER_TEMP:-/tmp}/gates-tree" gate-1b
+          gj="${RUNNER_TEMP:-/tmp}/gh-json"
+          rustc --edition=2024 -D warnings .github/gh_json.rs -o "$gj"
+          "$gj" launch < .claude/launch.json
 
       - name: Gate 1g — no tracked configuration runs a program
         run: |

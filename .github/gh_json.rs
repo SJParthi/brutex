@@ -16,6 +16,11 @@
 //!
 //! `gh api --paginate` prints one JSON document per page with nothing between
 //! them, so every reader takes a STREAM of documents.
+//!
+//! One reader is not about GitHub: `launch` holds `.claude/launch.json` to the
+//! two run configurations `docs/07-plan.md` section 0 names, for gate 1b
+//! (srust-3, D-4492). It lives here because this is the one JSON parser the
+//! gates already build and test.
 
 #![forbid(unsafe_code)]
 
@@ -409,6 +414,169 @@ fn field(text: &str, key: &str) -> Result<Vec<String>, String> {
     }
 }
 
+// ------------------------------------------------- .claude/launch.json --
+
+/// One run configuration `docs/07-plan.md` section 0 names: the text its name
+/// starts with, the program it starts, that program's arguments, its port and
+/// its address.
+struct Launch {
+    name: &'static str,
+    program: &'static str,
+    args: &'static [&'static str],
+    port: &'static str,
+    url: &'static str,
+}
+
+/// srust-3, D-4492. The two configurations, in section 0's order. The first
+/// used to be `sh -c "exec cargo run ..."`: a shell handed a program written
+/// in this file, which any edit could lengthen. It is `cargo` itself now. The
+/// second starts `web/`'s own `dev` script by name through npm, which is the
+/// `web/` exception (D-0052, D-0053) reached by path, not a program carried
+/// here.
+const LAUNCH: [Launch; 2] = [
+    Launch {
+        name: "brutex — the whole application",
+        program: "cargo",
+        args: &["run", "--release", "-p", "api", "--", "serve"],
+        port: "8080",
+        url: "http://127.0.0.1:8080",
+    },
+    Launch {
+        name: "web — Vite dev server",
+        program: "npm",
+        args: &["--prefix", "web", "run", "dev"],
+        port: "5173",
+        url: "http://localhost:5173",
+    },
+];
+
+/// A key that appears twice in one object, anywhere in the document. This
+/// parser's `get` answers the first; `JSON.parse` keeps the last, so a second
+/// `runtimeExecutable` would let this rule read `cargo` while the launcher
+/// starts something else.
+fn duplicate_key(v: &Json) -> Option<String> {
+    match v {
+        Json::Arr(items) => items.iter().find_map(duplicate_key),
+        Json::Obj(fields) => fields.iter().enumerate().find_map(|(i, (k, x))| {
+            if fields[..i].iter().any(|(j, _)| j == k) {
+                Some(k.clone())
+            } else {
+                duplicate_key(x)
+            }
+        }),
+        _ => None,
+    }
+}
+
+/// `v` is an object whose keys are exactly `keys`, in any order. A key the
+/// launcher reads that is not listed here (`env`, `cwd`, `program`, ...) is a
+/// second way to say what runs, so none is admitted.
+fn keys_exactly(v: &Json, keys: &[&str], what: &str) -> Result<(), String> {
+    let Json::Obj(fields) = v else {
+        return Err(format!("{what} is not an object: {v:?}"));
+    };
+    let mut got: Vec<&str> = fields.iter().map(|(k, _)| k.as_str()).collect();
+    let mut want = keys.to_vec();
+    got.sort_unstable();
+    want.sort_unstable();
+    if got == want {
+        Ok(())
+    } else {
+        Err(format!(
+            "{what} has the keys {got:?}; exactly {want:?} are admitted (D-4492)"
+        ))
+    }
+}
+
+/// `.claude/launch.json` is exactly the two run configurations
+/// `docs/07-plan.md` section 0 names (srust-3, D-4492): one document, no key
+/// twice, no key beyond the five each configuration needs, and each program
+/// and argument list pinned, so no shell, `env` or other interpreter can be
+/// handed a program here. Answers one line per configuration.
+fn launch(text: &str) -> Result<Vec<String>, String> {
+    let doc = one(text)?;
+    if let Some(k) = duplicate_key(&doc) {
+        return Err(format!(
+            "the key `{k}` appears twice in one object: this rule would read the first and the launcher the last (D-4492)"
+        ));
+    }
+    keys_exactly(&doc, &["version", "configurations"], "the document")?;
+    let version = doc.str_at(&["version"])?;
+    if version != "0.0.1" {
+        return Err(format!(
+            "`version` is {version:?}; the format this rule reads is \"0.0.1\" (D-4492)"
+        ));
+    }
+    let configs = doc
+        .get("configurations")
+        .ok_or("no `configurations`")?
+        .items()?;
+    if configs.len() != LAUNCH.len() {
+        return Err(format!(
+            "{} configurations; docs/07-plan.md section 0 names exactly {} (D-4492)",
+            configs.len(),
+            LAUNCH.len()
+        ));
+    }
+    let mut out = Vec::new();
+    for (n, (c, want)) in (1..).zip(configs.iter().zip(&LAUNCH)) {
+        keys_exactly(
+            c,
+            &["name", "runtimeExecutable", "runtimeArgs", "port", "url"],
+            &format!("configuration {n}"),
+        )?;
+        let name = c.str_at(&["name"])?;
+        if !name.starts_with(want.name) || name.chars().any(char::is_control) {
+            return Err(format!(
+                "configuration {n} is named {name:?}; it must be the one section 0 names, `{}`, on one line (D-4492)",
+                want.name
+            ));
+        }
+        let program = c.str_at(&["runtimeExecutable"])?;
+        if program != want.program {
+            return Err(format!(
+                "configuration {n} starts `{program}`; it may start only `{}` (D-4492): a shell, `env` or any other interpreter runs a program written in this file",
+                want.program
+            ));
+        }
+        let args = c
+            .get("runtimeArgs")
+            .ok_or_else(|| format!("configuration {n} has no `runtimeArgs`"))?
+            .items()
+            .map_err(|e| format!("configuration {n}: `runtimeArgs` is not an array: {e}"))?
+            .iter()
+            .map(|a| match a {
+                Json::Str(s) => Ok(s.as_str()),
+                other => Err(format!("configuration {n}: an argument is {other:?}")),
+            })
+            .collect::<Result<Vec<&str>, String>>()?;
+        if args != want.args {
+            return Err(format!(
+                "configuration {n} passes `{program}` {args:?}; only {:?} is admitted (D-4492)",
+                want.args
+            ));
+        }
+        match c.get("port") {
+            Some(Json::Num(p)) if p == want.port => {}
+            other => {
+                return Err(format!(
+                    "configuration {n}: `port` is {other:?}, not {} (D-4492)",
+                    want.port
+                ));
+            }
+        }
+        let url = c.str_at(&["url"])?;
+        if url != want.url {
+            return Err(format!(
+                "configuration {n}: `url` is {url:?}, not {:?} (D-4492)",
+                want.url
+            ));
+        }
+        out.push(format!("{}: {program} {}", want.name, args.join(" ")));
+    }
+    Ok(out)
+}
+
 fn answer(args: &[String], text: &str) -> Result<Vec<String>, String> {
     let arg = |k: usize| {
         args.get(k)
@@ -424,8 +592,9 @@ fn answer(args: &[String], text: &str) -> Result<Vec<String>, String> {
         Some("approvers") => approvers(text, arg(1)?),
         Some("ci-run-count") => ci_run_count(text),
         Some("field") => field(text, arg(1)?),
+        Some("launch") => launch(text),
         _ => Err(
-            "usage: gh_json <armed|pr-for-head SHA|pr-fields|check-runs|filenames|approvers SHA|ci-run-count|field KEY> < json"
+            "usage: gh_json <armed|pr-for-head SHA|pr-fields|check-runs|filenames|approvers SHA|ci-run-count|field KEY|launch> < json"
                 .to_owned(),
         ),
     }
@@ -624,5 +793,200 @@ mod tests {
         assert_eq!(run(&["ci-run-count"], page).unwrap(), ["3"]);
         assert!(run(&["ci-run-count"], "{}").is_err());
         assert!(run(&["nonsense"], "{}").is_err());
+    }
+
+    /// The tracked file's shape, one configuration per entry: the name, the
+    /// program, its arguments, and anything spliced in after `runtimeArgs`.
+    fn launch_doc(configs: &[(&str, &str, &str, &str)]) -> String {
+        let one = |(name, program, args, extra): &(&str, &str, &str, &str)| {
+            let (port, url) = if name.starts_with("web") {
+                ("5173", "http://localhost:5173")
+            } else {
+                ("8080", "http://127.0.0.1:8080")
+            };
+            format!(
+                "{{\"name\": \"{name}\", \"runtimeExecutable\": \"{program}\", \"runtimeArgs\": {args},{extra} \"port\": {port}, \"url\": \"{url}\"}}"
+            )
+        };
+        let all: Vec<String> = configs.iter().map(one).collect();
+        format!(
+            "{{\"version\": \"0.0.1\", \"configurations\": [{}]}}\n",
+            all.join(", ")
+        )
+    }
+
+    const APP: (&str, &str, &str, &str) = (
+        "brutex — the whole application (press Run on THIS one).",
+        "cargo",
+        "[\"run\", \"--release\", \"-p\", \"api\", \"--\", \"serve\"]",
+        "",
+    );
+    const WEB: (&str, &str, &str, &str) = (
+        "web — Vite dev server (FRONT-END DEVELOPMENT ONLY, needs Node)",
+        "npm",
+        "[\"--prefix\", \"web\", \"run\", \"dev\"]",
+        "",
+    );
+
+    #[test]
+    fn launch_admits_the_two_configurations_section_0_names() {
+        assert_eq!(
+            run(&["launch"], &launch_doc(&[APP, WEB])).unwrap(),
+            [
+                "brutex — the whole application: cargo run --release -p api -- serve",
+                "web — Vite dev server: npm --prefix web run dev",
+            ]
+        );
+        // Key order and whitespace are not what this rule reads.
+        let reordered = "{\"configurations\": [\
+            {\"url\": \"http://127.0.0.1:8080\", \"port\": 8080, \"runtimeArgs\": [\"run\",\"--release\",\"-p\",\"api\",\"--\",\"serve\"], \"runtimeExecutable\": \"cargo\", \"name\": \"brutex — the whole application\"},\
+            {\"name\": \"web — Vite dev server\", \"runtimeExecutable\": \"npm\", \"runtimeArgs\": [\"--prefix\",\"web\",\"run\",\"dev\"], \"port\": 5173, \"url\": \"http://localhost:5173\"}\
+            ], \"version\": \"0.0.1\"}";
+        assert_eq!(run(&["launch"], reordered).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn launch_refuses_an_interpreter_a_second_key_and_a_third_configuration() {
+        let app = |program, args, extra| (APP.0, program, args, extra);
+        let cargo = APP.2;
+        let refused: Vec<(&str, String)> = vec![
+            // The shape this file had: a shell handed a program.
+            (
+                "starts `sh`",
+                launch_doc(&[
+                    app(
+                        "sh",
+                        "[\"-c\", \"exec cargo run --release -p api -- serve\"]",
+                        "",
+                    ),
+                    WEB,
+                ]),
+            ),
+            (
+                "starts `perl`",
+                launch_doc(&[app("perl", "[\"-e\", \"print 1\"]", ""), WEB]),
+            ),
+            (
+                "starts `node`",
+                launch_doc(&[app("node", "[\"-e\", \"1\"]", ""), WEB]),
+            ),
+            (
+                "starts `bash`",
+                launch_doc(&[app("bash", "[\"-c\", \"cargo run\"]", ""), WEB]),
+            ),
+            ("starts `env`", launch_doc(&[app("env", cargo, ""), WEB])),
+            (
+                "starts `/usr/bin/cargo`",
+                launch_doc(&[app("/usr/bin/cargo", cargo, ""), WEB]),
+            ),
+            (
+                "configuration 2 starts `node`",
+                launch_doc(&[APP, (WEB.0, "node", "[\"web/x.js\"]", "")]),
+            ),
+            (
+                "only [\"run\"",
+                launch_doc(&[
+                    app(
+                        "cargo",
+                        "[\"--config\", \"build.rustc-wrapper='w'\", \"run\", \"--release\", \"-p\", \"api\", \"--\", \"serve\"]",
+                        "",
+                    ),
+                    WEB,
+                ]),
+            ),
+            (
+                "only [\"--prefix\"",
+                launch_doc(&[
+                    APP,
+                    (
+                        WEB.0,
+                        "npm",
+                        "[\"exec\", \"--\", \"node\", \"-e\", \"1\"]",
+                        "",
+                    ),
+                ]),
+            ),
+            (
+                "an argument is",
+                launch_doc(&[app("cargo", "[\"run\", 1]", ""), WEB]),
+            ),
+            (
+                "`runtimeArgs` is not",
+                launch_doc(&[app("cargo", "\"run\"", ""), WEB]),
+            ),
+            // The rule would read `cargo`; JSON.parse keeps `sh`.
+            (
+                "appears twice",
+                launch_doc(&[
+                    app(
+                        "cargo",
+                        cargo,
+                        " \"runtimeExecutable\": \"sh\", \"runtimeArgs\": [\"-c\", \"x\"],",
+                    ),
+                    WEB,
+                ]),
+            ),
+            (
+                "keys",
+                launch_doc(&[
+                    app("cargo", cargo, " \"env\": {\"RUSTC_WRAPPER\": \"w\"},"),
+                    WEB,
+                ]),
+            ),
+            (
+                "keys",
+                launch_doc(&[app("cargo", cargo, " \"cwd\": \"crates\","), WEB]),
+            ),
+            ("names exactly 2", launch_doc(&[APP, WEB, WEB])),
+            ("names exactly 2", launch_doc(&[APP])),
+            ("is named", launch_doc(&[WEB, APP])),
+            (
+                "is named",
+                launch_doc(&[
+                    ("brutex — the whole application\\nx", APP.1, APP.2, ""),
+                    WEB,
+                ]),
+            ),
+            ("is named", launch_doc(&[("brutex", APP.1, APP.2, ""), WEB])),
+            (
+                "`port` is",
+                launch_doc(&[APP, WEB]).replace("\"port\": 8080", "\"port\": \"8080\""),
+            ),
+            (
+                "`port` is",
+                launch_doc(&[APP, WEB]).replace("\"port\": 5173", "\"port\": 5174"),
+            ),
+            (
+                "`url` is",
+                launch_doc(&[APP, WEB]).replace("127.0.0.1:8080", "0.0.0.0:8080"),
+            ),
+            (
+                "`version` is",
+                launch_doc(&[APP, WEB]).replace("0.0.1", "0.0.2"),
+            ),
+            (
+                "keys",
+                launch_doc(&[APP, WEB]).replace("{\"version\"", "{\"x\": 1, \"version\""),
+            ),
+            (
+                "appears twice",
+                launch_doc(&[APP, WEB])
+                    .replace("{\"version\"", "{\"configurations\": [], \"version\""),
+            ),
+            (
+                "one JSON document",
+                format!("{0}{0}", launch_doc(&[APP, WEB])),
+            ),
+            ("not an object", "[]".to_owned()),
+            ("one JSON document", String::new()),
+        ];
+        for (why, doc) in &refused {
+            match run(&["launch"], doc) {
+                Ok(lines) => panic!("admitted {lines:?}: {doc}"),
+                Err(e) => assert!(e.contains(why), "{why:?} not in {e:?}: {doc}"),
+            }
+        }
+        assert!(duplicate_key(&one("[{\"a\": {\"b\": 1, \"b\": 2}}]").unwrap()).is_some());
+        assert!(duplicate_key(&one("[{\"a\": 1}, {\"a\": 2}]").unwrap()).is_none());
     }
 }

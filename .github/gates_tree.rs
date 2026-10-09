@@ -572,8 +572,19 @@ fn gate_1e_verdict(phase: Phase, invoked: Option<&str>, status: i32, out: &str) 
 
 // ------------------------------------------------------------- gate 1b --
 
+/// The one tracked file a `.claude` directory may hold (CLAUDE.md section 2).
+const LAUNCH_JSON: &str = ".claude/launch.json";
+
 /// `grep -E '\.(json|yml)$' | grep -Ev '^(\.github/|\.claude/|web/)'`, read
 /// per line of each name as the old newline listing was.
+///
+/// D-4492 (srust-3): and outside `web/`, no tracked path but
+/// `.claude/launch.json` has a `.claude` component, in any letter case. The
+/// tools that read that directory also read a settings file whose hooks are
+/// shell commands, and command and agent files in `.md`, which every other
+/// gate admits by extension; section 2 says exactly one tracked file uses the
+/// directory, and this is that sentence held. The file itself is read by
+/// `gh_json launch`, in the gate 1b step.
 fn gate_1b(listing: &[String]) -> Report {
     let mut r = Report::default();
     if listing.is_empty() {
@@ -590,13 +601,27 @@ fn gate_1b(listing: &[String]) -> Report {
                 .any(|p| l.starts_with(p))
         })
         .collect();
-    if bad.is_empty() {
-        r.say("OK.");
-    } else {
+    let claude: Vec<&String> = listing
+        .iter()
+        .filter(|n| !n.starts_with("web/") && n.as_str() != LAUNCH_JSON)
+        .filter(|n| n.split('/').any(|c| c.eq_ignore_ascii_case(".claude")))
+        .collect();
+    if !bad.is_empty() {
         r.refuse("CONFIG OUTSIDE ITS HOME:");
         for b in bad {
             r.say(b);
         }
+    }
+    if !claude.is_empty() {
+        r.refuse(format!(
+            "UNDER .claude/ ONLY {LAUNCH_JSON} IS TRACKED (CLAUDE.md section 2, D-4492):"
+        ));
+        for c in claude {
+            r.say(c);
+        }
+    }
+    if !r.refused {
+        r.say("OK.");
     }
     r
 }
@@ -3559,6 +3584,44 @@ mod tests {
             assert!(r.text().starts_with("CONFIG OUTSIDE ITS HOME:\n"));
         }
         assert!(!gate_1b(&names(&["x.yaml", "x.jsonl", "x.yml.md"])).refused);
+    }
+
+    #[test]
+    fn gate_1b_admits_one_file_under_claude() {
+        let ok = gate_1b(&names(&[
+            ".claude/launch.json",
+            "web/.claude/settings.json",
+            "docs/claude.md",
+            "x.claude/a.md",
+        ]));
+        assert!(!ok.refused, "{}", ok.text());
+        assert_eq!(ok.text(), "OK.");
+        for p in [
+            ".claude/settings.json",
+            ".claude/settings.local.json",
+            ".claude/commands/x.md",
+            ".claude/agents/x.md",
+            ".claude/launch.json.md",
+            ".claude/x/launch.json",
+            ".Claude/commands/x.md",
+            ".CLAUDE/launch.json",
+            "docs/.claude/x.md",
+            "crates/a/.claude/settings.toml",
+        ] {
+            let r = gate_1b(&names(&[".claude/launch.json", p]));
+            assert!(r.refused, "{p}");
+            assert!(
+                r.text()
+                    .contains("UNDER .claude/ ONLY .claude/launch.json IS TRACKED (CLAUDE.md section 2, D-4492):\n"),
+                "{}",
+                r.text()
+            );
+            assert!(r.text().ends_with(p), "{}", r.text());
+            assert!(!r.text().contains("OK."));
+        }
+        // Both clauses report, and neither hides the other.
+        let both = gate_1b(&names(&["docs/.claude/x.json"])).text();
+        assert!(both.starts_with("CONFIG OUTSIDE ITS HOME:\ndocs/.claude/x.json\nUNDER .claude/"));
     }
 
     // ---- gate 1g ----
