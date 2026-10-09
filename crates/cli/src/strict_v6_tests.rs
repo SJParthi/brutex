@@ -358,12 +358,31 @@ mod strict_v6_fixture_tests {
             Ok(())
         };
         crate::candidate_universe::OOS_SOURCE_BUILDS.with(|count| count.set(0));
+        crate::candidate_universe::OOS_RUN_DIGESTS.with(|count| count.set(0));
+        crate::candidate_universe::OOS_INTEGRITY_CHECKS.with(|count| count.set(0));
         crate::stored_post_training_oos::COHORT_ID_DERIVATIONS.with(|count| count.set(0));
         let fold = cohort.fold_recorded(&mut record)?;
+        let built = (
+            crate::candidate_universe::OOS_RUN_DIGESTS.with(std::cell::Cell::get),
+            crate::candidate_universe::OOS_INTEGRITY_CHECKS.with(std::cell::Cell::get),
+        );
         let mut witnesses = Vec::new();
         for _ in 0..3 {
             witnesses.push(fold.mint_witness_recorded(&disposition, &mut record)?);
         }
+        // W3-runner2-3, D-4521: the source hashes its run digests once and
+        // checks its streams whole once, both when it is built; a witness
+        // hashes neither. Each witness re-hashed all four streams for its run
+        // and three of them, with the column, for an integrity check before.
+        assert_eq!(built, (1, 1), "building the source hashes and checks once");
+        assert_eq!(
+            (
+                crate::candidate_universe::OOS_RUN_DIGESTS.with(std::cell::Cell::get),
+                crate::candidate_universe::OOS_INTEGRITY_CHECKS.with(std::cell::Cell::get),
+            ),
+            built,
+            "three witnesses of one source hash no stream"
+        );
         // W2-cli16-1, D-4468: the cohort identity is derived once, by the
         // fold, and never per witness; it was 1 + 2 per witness (7) before.
         assert_eq!(

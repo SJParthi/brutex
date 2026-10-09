@@ -1189,6 +1189,9 @@ pub(crate) struct CandidateGlobalReplayOosSourceV1<'a> {
     execution_series: ExecutionSeriesV1<'a>,
     execution_column: Column,
     data_digest: [u8; 32],
+    /// The run sources every witness's run is sealed against, hashed once
+    /// here rather than once per witness (W3-runner2-3, D-4521).
+    run_digests: ExecutionDigestsV1,
     signal_load_bound: StoredSpanLoadBoundV1,
     minute_load_bound: StoredSpanLoadBoundV1,
     daily_load_bound: StoredSpanLoadBoundV1,
@@ -1279,12 +1282,20 @@ impl<'a> CandidateGlobalReplayOosSourceV1<'a> {
             rung_seconds,
             &evaluation,
         )?;
-        let data_digest = runner::identity::data_digest_with_daily_reference(
+        // ONCE PER SOURCE, NOT PER WITNESS (W3-runner2-3, D-4521): the signal,
+        // minute-context and daily streams are hashed here, with the exact
+        // execution slice, and every witness's run is sealed against these
+        // digests in O(1).
+        #[cfg(test)]
+        OOS_RUN_DIGESTS.with(|count| count.set(count.get().saturating_add(1)));
+        let run_digests = ExecutionDigestsV1::of_daily_reference(
             signal_bars,
             reference_minute_context,
+            execution_series.bars(),
             daily_reference,
         )
         .map_err(|why| format!("Global Replay OOS daily data identity refused: {why:?}"))?;
+        let data_digest = run_digests.data_digest();
         let mut source = Self {
             family,
             rung_seconds,
@@ -1298,6 +1309,7 @@ impl<'a> CandidateGlobalReplayOosSourceV1<'a> {
             execution_series,
             execution_column,
             data_digest,
+            run_digests,
             signal_load_bound,
             minute_load_bound,
             daily_load_bound,
@@ -1309,6 +1321,8 @@ impl<'a> CandidateGlobalReplayOosSourceV1<'a> {
     }
 
     fn require_integrity(&self) -> Result<(), CandidateUniverseRefusal> {
+        #[cfg(test)]
+        OOS_INTEGRITY_CHECKS.with(|count| count.set(count.get().saturating_add(1)));
         let first = self
             .execution_series
             .bars()
@@ -1327,13 +1341,15 @@ impl<'a> CandidateGlobalReplayOosSourceV1<'a> {
             &self.execution_column,
             self.execution_series.bars().len(),
         )?;
-        if self.data_digest
-            != runner::identity::data_digest_with_daily_reference(
-                self.signal_bars,
-                self.reference_minute_context,
-                self.daily_reference,
-            )
-            .map_err(|why| format!("Global Replay OOS data identity refused: {why:?}"))?
+        let fresh = ExecutionDigestsV1::of_daily_reference(
+            self.signal_bars,
+            self.reference_minute_context,
+            self.execution_series.bars(),
+            self.daily_reference,
+        )
+        .map_err(|why| format!("Global Replay OOS data identity refused: {why:?}"))?;
+        if self.data_digest != fresh.data_digest()
+            || self.run_digests != fresh
             || self.source_id != derive_global_replay_oos_source_id(self)
         {
             return Err("Global Replay OOS source identity changed after construction".to_owned());
@@ -1359,6 +1375,18 @@ impl<'a> CandidateGlobalReplayOosSourceV1<'a> {
 
     /// Call the fallible identity publisher immediately before trade replay.
     /// The existing mint entry point preserves its original caller contract.
+    ///
+    /// **No stream is hashed here (W3-runner2-3, D-4521).** The run is sealed
+    /// with [`ExecutionRunV1::with_digests`] against the digests [`Self::new`]
+    /// took once, O(1) per witness; it was `new_with_daily_reference`, which
+    /// hashed the signal, minute-context, daily and execution streams again
+    /// for every witness, after [`Self::require_integrity`] had hashed the
+    /// first three and the execution column again. `new` ends with that
+    /// integrity check, and nothing can change a source after it: every
+    /// stream is a shared borrow for `'a`, the column and every digest are
+    /// private fields, and no method takes `&mut self` — D-4468's argument for
+    /// the cohort a fold borrows. Counted by
+    /// `strict_v6_one_oos_fold_serves_every_witness_of_its_cohort`.
     pub(crate) fn mint_witness_recorded(
         &self,
         ladder: engine::Ladder,
@@ -1366,7 +1394,6 @@ impl<'a> CandidateGlobalReplayOosSourceV1<'a> {
         disposition: &ExecutionDispositionV1,
         before_replay: &mut dyn FnMut([u8; 32]) -> Result<(), String>,
     ) -> Result<GlobalReplayWitnessUniverseV1, CandidateUniverseRefusal> {
-        self.require_integrity()?;
         let selected = disposition.selected().ok_or_else(|| {
             "Global Replay OOS winner has no authorized selected-exit capability".to_owned()
         })?;
@@ -1407,14 +1434,8 @@ impl<'a> CandidateGlobalReplayOosSourceV1<'a> {
             commit: self.execution_series.commit(),
             feed: self.execution_series.feed(),
         };
-        let execution_run = ExecutionRunV1::new_with_daily_reference(
-            &run,
-            self.signal_bars,
-            self.reference_minute_context,
-            self.execution_series.bars(),
-            self.daily_reference,
-        )
-        .map_err(|why| format!("Global Replay OOS exact run refused: {why:?}"))?;
+        let execution_run = ExecutionRunV1::with_digests(&run, &self.run_digests)
+            .map_err(|why| format!("Global Replay OOS exact run refused: {why:?}"))?;
         let oos = OosExecutionSeriesV1::new(self.execution_series, 0)
             .map_err(|why| format!("Global Replay OOS boundary refused: {why:?}"))?;
         before_replay(execution_run.run_id().bytes())?;
@@ -4942,6 +4963,12 @@ thread_local! {
     /// Test-only count of [`CandidateGlobalReplayOosSourceV1::new`] calls on
     /// this thread.
     pub(crate) static OOS_SOURCE_BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Test-only count, on this thread, of the run digests a Global Replay
+    /// OOS source hashes for its witnesses (W3-runner2-3, D-4521).
+    pub(crate) static OOS_RUN_DIGESTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Test-only count, on this thread, of a Global Replay OOS source's
+    /// whole-stream integrity checks (W3-runner2-3, D-4521).
+    pub(crate) static OOS_INTEGRITY_CHECKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
