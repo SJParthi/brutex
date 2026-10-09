@@ -65114,3 +65114,92 @@ the sum of its screens rather than overlapping them. NOT MEASURED.
   not be seen.
 - It relies on rustfmt's layout: a function closes with `}` at its own
   indentation.
+
+### D-4701 — A `sweep-all` month whose column build refuses seals its Refused terminal in the ordered phase, and a seal that fails is named — 2026-10-09
+
+**What was wrong.** G1-2. `batch::sweep_chunk` has four phases:
+
+1. Prepare, in parallel.
+2. Begin every attempt with one `begin_many`, in input order.
+3. Build and sweep, in parallel.
+4. File, one month at a time, in input order.
+
+A month can begin and then have its column build refuse. That happens to a
+1-minute series that is missing a session's closing minute, which is
+D-1707's premise; D-1781/D-1707 measured 28 such minutes on NIFTY. When it
+did, `sweep_prepared` returned the refused row and dropped its begun
+`Attempt` inside the rayon worker. `Attempt::drop` then journaled the
+Refused terminal to the shared `attempts.bin` from that worker, in
+completion order. D-1701's rule is that everything durable happens in input
+order.
+
+**Decided.**
+- **The attempt comes out of phase 3.** `sweep_prepared` returns the
+  attempt beside the refusal, as `Err((Row, Attempt))`. Phase 3 carries
+  `(Row, Option<Attempt>)` out; the attempt is `None` for a month that was
+  never begun.
+- **Phase 4 seals it in input order.** `batch::refuse_begun` calls
+  `attempt.finish(Completion::Refused)`. A seal that fails is added to the
+  row's reason, as "; sealing its refused terminal failed: ..", rather than
+  dropped. The attempt's `Drop` then makes its usual best-effort terminal,
+  and that too now happens in the ordered phase.
+- **Two tests.**
+  - `batch::stored_tests::a_chunk_files_its_column_refusals_in_input_order`
+    sweeps three months whose column build refuses, with the first held
+    back, on a 3-thread pool. The journal's terminals must be the begun
+    identities in input order, each must be Refused, and no ledger row is
+    written. The premise, that each refusal came from the column build after
+    a begin, is asserted first.
+  - `batch::stored_tests::a_refused_months_terminal_is_sealed_and_a_failed_seal_is_named`
+    drives `refuse_begun` alone. A seal that succeeds leaves the reason
+    exactly as the column gave it and journals one Refused terminal. With
+    the journal obstructed, the reason carries the seal's failure.
+- **One fixture.** `audited_stored::with_unsourceable_close_of` writes
+  D-1707's short-close store for several symbols in one root.
+
+**Measured before the fix.** On the unfixed tree the order test failed at
+`batch_stored_tests.rs:380` with "each begun month's Refused terminal, in
+input order": the held-back month's terminal was journaled last. The seal
+test has no unfixed form, because `refuse_begun` is new. Against a mutant
+that leaves the attempt to its `Drop`, it failed at
+`batch_stored_tests.rs:465` with the bare reason "the column refused".
+
+**What changes in results.** The terminal bytes and completion are the same.
+Only their order in `attempts.bin` changes, and it now follows the input. No
+format changes.
+
+### D-4702 — The `sweep-all` order test runs on its own 3-thread and 1-thread pools, and a `begin_many` refused partway is driven — 2026-10-09
+
+**What was wrong.** GAP13-13 had two test gaps.
+- `batch::stored_tests::a_chunk_files_its_months_in_input_order_whatever_order_they_finish`
+  ran on the global rayon pool. On a 1-thread runner the months finish in
+  input order whatever the code does, so a revert of D-1701 passed it.
+- No test refused `begin_many` after it had begun part of a chunk. D-1701's
+  rule is that the months it began still sweep, and only the rest are
+  refused, by name. That rule was stated and not driven.
+
+**Decided.**
+- **The order test builds its own pools.** It runs once on a 3-thread pool
+  and once on a 1-thread pool, built inside the test. The held-back seam is
+  thread-local and is read on the thread that calls `sweep_chunk`, so it is
+  set inside each pool. On each pool, ledger row i must be input month i,
+  the attempt tokens must rise, and the journal's last terminal must be the
+  last month's.
+- **The partway refusal is driven.**
+  `batch::stored_tests::a_begin_refused_partway_sweeps_the_months_it_began_and_names_the_rest`
+  obstructs the second month's `starts.bin` with a directory, so
+  `begin_many` admits month 0 and refuses at month 1.
+  - Month 0 must complete and file the chunk's one ledger row.
+  - Months 1 and 2 must refuse with the same reason, each naming its
+    identity.
+
+**Proof.** Both tests passed on the unfixed tree, because the code was
+right. Each one is proven against a temporary mutant, measured with
+`RAYON_NUM_THREADS=1`:
+- **Filing moved back into the parallel phase** (the pre-D-1701 shape). A
+  verbatim copy of the old test passed. The new one failed in its 3-thread
+  half, at `batch_stored_tests.rs:267`, with "3 thread(s): ledger row 0 is
+  input month 0".
+- **A begin refusal refusing every month.** The partway test failed at
+  month 0's completion check, with "sweep evidence I/O refused: Is a
+  directory (os error 21)".

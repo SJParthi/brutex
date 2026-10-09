@@ -15469,7 +15469,10 @@ The rollback on a failed append is one `seek`, one `set_len` and one
 - **`sweep-all` files in input order behind a barrier per chunk.** Each chunk
   of at most the rayon pool's width loads and sweeps its months in parallel,
   then files them one at a time; the next chunk starts only when the chunk's
-  slowest month is filed. Wall-clock is therefore the sum over chunks of each
+  slowest month is filed. A month whose column build refuses after its
+  attempt began is sealed Refused in that same sequential phase (D-4701),
+  one terminal append, where its attempt's `Drop` had journaled it from the
+  worker. Wall-clock is therefore the sum over chunks of each
   chunk's slowest month plus its sequential filing (one ledger append and one
   terminal per month), not the parallel makespan of the whole walk. Memory per
   chunk is what one month per worker holds, as before.
