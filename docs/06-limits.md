@@ -12513,12 +12513,21 @@ no bench row covers these routes, so each is UNVERIFIED as a measurement.
   truncation of `catalog.bin`). Two clients alternating captures make every
   request cold, as for the trade reader below: that part is the bound of a
   one-slot cache, not of the route.
-- **The exact candidate trade page keeps one reader (W1-api2-3).**
-  `candidatejson::trade_page` holds a single slot; a change of key re-runs
-  `TradeReader::open`, which re-reads, re-hashes and re-sums every trade row of
-  the selected candidate: O(trades of that candidate), bounded by
-  `MAX_SCAN_BYTES`. Alternating between two candidates makes every request
-  cold. A warm page is O(page).
+- **The exact candidate trade page keeps eight readers (W1-api2-3).**
+  `candidatejson::trade_page` held a single slot, so alternating between two
+  candidates made every request cold. **Since D-4434 it keeps
+  `TRADE_READERS_KEPT` = 8**, the least recently used evicted, each served
+  only for its exact root, summary and key, and a reader whose page refuses is
+  dropped. A miss still re-runs `TradeReader::open`, which re-reads, re-hashes
+  and re-sums every trade row of the selected candidate: O(trades of that
+  candidate), bounded by `MAX_SCAN_BYTES`; nine or more candidates visited in
+  rotation still miss every time, which is the bound of any finite cache. A
+  warm page is O(page) plus a scan of at most eight kept keys. Measured by
+  `latency_trade_reader_warm_page_and_cold_open` (`api` test build (the workspace's optimized test profile), a shared four-CPU host running other builds; load average beside each, p50 / p99
+  / max): a 16-row page cycling through eight kept readers 4.11 µs / 9.5 µs / 8.08 ms (n = 4,000, load 11.49); a cold
+  open of a candidate with no trades, which is the open's fixed part only,
+  70.2 µs / 8.13 ms / 16.2 ms (n = 1,000, load 11.49). The cold open's O(trades) part is not timed: the fixture's
+  candidates trade nothing.
 - **`/engine/top.json` repeats its cold walk on every request while a refusal
   persists (W1-api6-3).** `topjson::report` uses `SELECTION.with_verified`,
   which drops the handle when a refresh refuses and does not cache the
@@ -16352,7 +16361,7 @@ of this build on this box, labelled as such, not budgets a gate holds.
 | W1-api5-2 | `census_now` on a miss reads every manifest | A miss is caused by a moved stamp, and for the reason above a moved stamp cannot be served by re-reading only the tail; a hit stays five `stat` calls | per manifest as the row above |
 | W1-pull1-0 | `prepare_observed_with` revalidates each day's receipt per body, O(D x B) | Per-day receipt revalidation is D-0519's guarantee; a body is accepted only against receipts proven for that body | not timed here |
 | W1-api1-6 | O(C) currency checks per page, C linked catalogs | Each check is the page's proof that catalog is still the one the statistics were computed over; C is fixed when the statistics artifact is written, nothing in a request widens it | not timed here |
-| W1-api2-3 | one trade-reader slot; a change of candidate re-reads its trades | Any bounded cache can be made to miss by alternating keys; warm pages are O(page) | not timed here |
+| W1-api2-3 | eight trade-reader slots since D-4434; a ninth candidate in rotation re-reads its trades | Any bounded cache can be made to miss by rotating keys; warm pages are O(page) | warm page 4.11 µs / 9.5 µs / 8.08 ms (n = 4,000, load 11.49); cold open, fixed part 70.2 µs / 8.13 ms / 16.2 ms (n = 1,000, load 11.49) (D-4434) |
 | W1-api6-3 | a persisting `/engine/top.json` refusal repeats its cold walk | A cached refusal would keep refusing after a repair that leaves the file's generation where it was | not timed here |
 | W1-api3-0 | one journal file per audited request | Per request it is O(1) (two 256-byte appends and one create); the growth is the append-only audit record itself (§3 rule 8, D-1445) | not timed here |
 | o1api-4 | `param` scans the query once per field | Bounded by the 8,192-byte query cap and the route's fixed field count, so constant per request | not timed here |

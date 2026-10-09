@@ -66459,3 +66459,22 @@ returning, as the install refusal already did. OBSV-11.
 
 **Rejected.** Refusing the whole batch louder. The siblings' bars are on disk
 and their rows are sound; dropping them is the loss, not the noise.
+
+### D-4434 — Eight trade readers are kept, and the crate's latency measurements share one harness — 2026-10-09
+
+**What was observed.** W1-api2-3: `/candidate-trades.json`'s exact trade page
+held one reader, so two clients alternating candidates made every request a
+cold `TradeReader::open` (O(trades of that candidate)). Nothing in `api`
+measured a route's latency.
+
+**Decided.** `candidatejson::trade_page` keeps up to `TRADE_READERS_KEPT` = 8
+readers, least recently used evicted, each served only for its exact root,
+summary and key; a reader whose page refuses is dropped, never kept. A new
+test-only module `api::latency` times a call `n` times and prints p50, p99,
+max, n and the load average; every `#[ignore]`d latency measurement in the
+crate uses it and is run on purpose with
+`cargo test -p api --lib -- --ignored --nocapture latency`. Figures are in
+`docs/06-limits.md`. Proved by
+`trade_readers_keep_eight_candidates_warm_and_evict_the_least_recent`.
+FXB1-05, FXB1-06.
+

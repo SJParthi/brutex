@@ -5662,7 +5662,7 @@ old line regex the same input and watched it pass.
 | JR-03 | **A Boolean evidence page's O(C) currency cost is stated**, and each projection still checks currency before and after its page. W1-api1-6, D-1444 | `api::booleanevidencejson::tests::an_evidence_pages_currency_cost_per_linked_catalog_is_stated` | ✓ |
 | JR-04 | **The qualified campaign route's uncached O(H) history walk is stated.** W1-api1-4, D-1444 | `api::booleancampaignjson::tests::the_qualified_campaign_history_walk_per_request_is_stated` | ✓ |
 | JR-05 | **A candidate page's five whole-catalog reads are counted off the source and stated.** W1-api2-2, D-1444 | `api::candidatejson::tests::a_candidate_pages_catalog_reads_are_counted_and_stated` | ✓ |
-| JR-06 | **The trade page's single slot and O(trades) cold re-read are stated.** W1-api2-3, D-1444 | `api::candidatejson::tests::a_trade_pages_single_slot_and_cold_reread_are_stated` | ✓ |
+| JR-06 | **The trade page keeps eight readers, least recent evicted, and a cold re-read is O(trades of the candidate).** W1-api2-3, D-1444, D-4434 | `api::candidatejson::tests::trade_readers_keep_eight_candidates_warm_and_evict_the_least_recent` | ✓ |
 | JR-07 | **A persistent refusal in `/engine/top.json` costs one cold open per request (100 of 100), and the first request after a repair is served.** W1-api6-3, D-1444 | `api::topjson::tests::a_persistent_refusal_reopens_on_every_request_and_the_cost_is_stated` | ✓ |
 
 ### Execution V3 replay memo — D-0994
@@ -7113,3 +7113,10 @@ old line regex the same input and watched it pass.
 | OBSV-11 | One census row `record_held` cannot count is named in the log and does not drop the other rows of its batch (D-3210) | `one_refused_row_does_not_drop_the_rest_of_the_batch` in `crates/pull/src/ingest.rs` | ✓ |
 | OBSV-09 | A `/pull/run/stop` 503 that says `stopping:true, stop_persisted:false` keeps the stop taken and shows the server's warning in a state no poll clears; any other failure is "could not be delivered" (D-3208) | `web/tests/ingest-errors.test.js` · *a Stop the server took in memory but could not persist says so, and stays taken* | ✓ |
 | OBSV-10 | An older `/audit.json` page carrying `runs_error`, or no `runs` list, is shown as an error and is not counted as a page held (D-3209) | `web/tests/audit-pages.test.js` · *an older page the server could not read is an error, never an empty page held (OBSV-10)* | ✓ |
+
+### Fixer B1: api per-request bounds (D-4430 to D-4443)
+
+| ID | Invariant | Proven by | Status |
+|---|---|---|---|
+| FXB1-05 | The trade page keeps at most eight readers, serves a kept one only for its exact key, evicts the least recent, and drops one whose page refuses (D-4434) | `trade_readers_keep_eight_candidates_warm_and_evict_the_least_recent` in `crates/api/src/candidatejson.rs` | ✓ |
+| FXB1-06 | The latency harness reports nearest-rank p50 and p99 over sorted timings and refuses a run of no calls (D-4434) | `quantiles_are_nearest_rank_over_the_sorted_timings` in `crates/api/src/latency.rs` | ✓ |
