@@ -52,7 +52,7 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use engine::column::Column;
+use engine::column::{Column, SUPPORT_BLOCK_ROWS, support_block};
 use engine::{Itemset, Ladder, support};
 use vocab::ConditionMask;
 
@@ -289,10 +289,47 @@ fn candidate(k: usize) -> ConditionMask {
     m
 }
 
-/// Cost per bar, in picoseconds, of the support method the live ladder calls.
+/// Cost per bar, in picoseconds, of the support method the live ladder calls,
+/// [`Column::support_each`], asked of ONE candidate.
+///
+/// Until D-4481 this timed [`Column::support`], which the walk called once per
+/// candidate. The walk now counts each lane's whole slice through
+/// `support_each`, so the rows that use this helper (C-E-02, C-E-03, C-E-05,
+/// C-E-06, C-E-09) time the function that ships, at the one-candidate end of
+/// its range, where it does the most memory traffic per hit test.
 fn support_ps_per_bar(column: &Column, mask: &ConditionMask) -> u128 {
     let n = u128::from(column.bars()).max(1);
-    once_ps(|| column.support(black_box(mask))) / n
+    let mut one = [Itemset {
+        mask: *mask,
+        hits: 0,
+    }];
+    once_ps(|| {
+        column.support_each(black_box(&mut one));
+        one.first().map_or(0, |item| item.hits)
+    }) / n
+}
+
+/// How many candidates the batch rows count at once.
+///
+/// A lane of `drain` holds up to `BATCH_PER_LANE` (8,192) candidates and k=1
+/// holds up to 384; 64 is far below either, so the row does not flatter the
+/// batch by making it larger than a small level's lane would be.
+const BATCH_CANDIDATES: usize = 64;
+
+/// [`BATCH_CANDIDATES`] distinct candidates over [`DRAWN_FROM`]: candidate `i`
+/// requires the drawn positions named by the set bits of `i + 1`, so every one
+/// is a different non-empty subset and most of them match some bars.
+fn batch_candidates() -> Vec<Itemset> {
+    (1..=BATCH_CANDIDATES)
+        .map(|subset| Itemset {
+            mask: DRAWN_FROM
+                .iter()
+                .enumerate()
+                .filter(|(slot, _)| subset >> slot & 1 == 1)
+                .fold(ConditionMask::ZERO, |m, (_, &bit)| m.with_bit(bit)),
+            hits: 0,
+        })
+        .collect()
 }
 
 /// C-E-01 — the per-bar cost of support counting does not grow with the column.
@@ -301,20 +338,61 @@ fn support_ps_per_bar(column: &Column, mask: &ConditionMask) -> u128 {
 /// front of it: 1,000,000 bars must cost 100 times what 10,000 do, not more. A
 /// drifting constant is how an O(bars) measurement becomes superlinear without
 /// anything in the source looking like a nested loop.
+///
+/// # What it times since D-4481, and why the old number was not the answer
+///
+/// This timed ONE candidate through `Column::support`, the way the walk used
+/// to count, and printed 0.663x for the million-bar leg once -- while the same
+/// call measured 1.2 ns per bar at 10^4 and 4.4 to 18 ns at 10^6 on a loaded
+/// four-vCPU box (so1-1). One candidate per pass streams the whole column from
+/// memory for six word-ANDs a bar, so its per-bar cost is the memory system's,
+/// and the minimum of eight trials catches whichever trial the cache happened
+/// to favour. The walk now counts a lane's whole slice in one blocked pass, and
+/// this row walks the column exactly as [`Column::support_each`] does -- every
+/// full block in order, each counted for [`BATCH_CANDIDATES`] candidates by
+/// [`support_block`] -- timing each block, `TRIALS` passes with the three
+/// columns taken in turn, and compares the MEDIAN block per (bar, candidate)
+/// pair. One call over a million bars runs for tens of milliseconds, so on a
+/// shared box every trial of it is preempted and the minimum of eight is the
+/// scheduler's number; a block is microseconds, and the median of thousands
+/// of them is the code's. The one-candidate figure is printed by FXD-03 and
+/// named in `docs/06-limits.md`.
 fn support_costs_the_same_per_bar_at_every_column_length() -> bool {
-    let mask = candidate(3);
-    let mut sizes = COLUMNS.iter();
-    let Some(first) = sizes.next() else {
+    let columns: Vec<Vec<ConditionMask>> = COLUMNS.iter().map(|&n| column(n)).collect();
+    let mut items = batch_candidates();
+    let mut per_block: Vec<Vec<u128>> = columns
+        .iter()
+        .map(|rows| Vec::with_capacity(rows.len() / SUPPORT_BLOCK_ROWS * TRIALS as usize))
+        .collect();
+    for _ in 0..TRIALS {
+        for (rows, times) in columns.iter().zip(per_block.iter_mut()) {
+            for block in rows.chunks_exact(SUPPORT_BLOCK_ROWS) {
+                let start = Instant::now();
+                support_block(black_box(block), &mut items);
+                times.push(start.elapsed().as_nanos());
+            }
+        }
+    }
+    let pairs = u128::try_from(SUPPORT_BLOCK_ROWS * BATCH_CANDIDATES).unwrap_or(1);
+    let ps_per_pair: Vec<u128> = per_block
+        .iter_mut()
+        .map(|times| {
+            times.sort_unstable();
+            rank(times, 500) * 1_000 / pairs
+        })
+        .collect();
+    let Some(&base) = ps_per_pair.first() else {
         refuse("COLUMNS is empty, so there is no baseline")
     };
-    let base = support_ps_per_bar(&owned_column(*first), &mask);
-
     let mut ok = true;
-    for n in sizes {
+    for (n, &at) in COLUMNS.iter().zip(&ps_per_pair).skip(1) {
         ok &= ratio(
-            &format!("C-E-01 support: {first} bars -> {n} bars"),
+            &format!(
+                "C-E-01 support_each x{BATCH_CANDIDATES}: {} bars -> {n} bars",
+                COLUMNS.first().copied().unwrap_or(0)
+            ),
             base,
-            support_ps_per_bar(&owned_column(*n), &mask),
+            at,
         );
     }
     ok
@@ -465,57 +543,124 @@ fn result_append_costs_the_same_however_many_are_held() -> bool {
     ok
 }
 
-/// The sizes the p99 rows sweep: 10^3 to 10^6 offered positions or held
-/// results.
+/// The sizes the p99 rows sweep: 10^3 to 10^6 offered positions, held
+/// results or bars.
 const P99_SIZES: [usize; 4] = [1_000, 10_000, 100_000, 1_000_000];
 
-/// Rounds per p99 row, samples per round, and operations per sample.
+/// Operations per sample in O1P-03 and O1P-04.
 ///
 /// A probe or a push is a few nanoseconds, below what one `Instant` pair
 /// resolves cleanly, so each sample times [`P99_BATCH`] consecutive
-/// operations and the distribution is of those batches. The row gates the
-/// SMALLEST of the rounds' p99s: a shared runner can only make a round
-/// slower, and a tail the operation itself pays lands in every round.
-const P99_ROUNDS: usize = 5;
-const P99_SAMPLES: usize = 10_000;
+/// operations and the distribution is of those batches.
 const P99_BATCH: usize = 32;
 
-/// One p99 row's shape at one size, nanoseconds per [`P99_BATCH`] operations.
+/// Groups per p99 row, and samples per size inside one group (D-4482).
+///
+/// # Why groups, and why the gate reads their median
+///
+/// The rows used to run every round of 10^3, then every round of 10^4, and so
+/// on, and to gate the smallest round p99 of each size against the smallest of
+/// 10^3. On this shared four-vCPU box that breached O1P-04 with no defect in
+/// the code (so1-3): the base was measured in one stretch of the machine's
+/// load and the size it was divided into in another, and a two-sided ceiling
+/// fails a quiet base as readily as a loud comparand.
+///
+/// So every group measures every size, back to back, starting at a different
+/// size each group, and each group yields its own p99 ratio against its own
+/// 10^3. A load spike lands inside one or two groups and moves their ratios;
+/// an O(n) operation moves every group's. The row gates the MEDIAN of the
+/// nine paired ratios, so it takes five disturbed groups of nine to move the
+/// verdict, and `the_interleaved_statistic_can_pass_and_can_fail` proves both
+/// halves of that on fixed numbers before any row is trusted.
+const P99_GROUPS: usize = 9;
+const P99_GROUP_SAMPLES: usize = 5_000;
+
+/// One size's shape inside one group, nanoseconds per sample.
+#[derive(Clone, Copy)]
 struct Tail {
     p50: u128,
     p99: u128,
     max: u128,
 }
 
-/// The sample at `permille` thousandths of a sorted round.
+/// The sample at `permille` thousandths of a sorted group.
 fn rank(sorted: &[u128], permille: usize) -> u128 {
     let at = (sorted.len() * permille / 1_000).min(sorted.len().saturating_sub(1));
     sorted.get(at).copied().unwrap_or(0)
 }
 
-/// Times `batch` once per sample; it is handed the sample's number.
-fn tail(mut batch: impl FnMut(u64) -> usize) -> Tail {
-    let mut out = Tail {
-        p50: u128::MAX,
-        p99: u128::MAX,
-        max: 0,
-    };
-    let mut ns = Vec::with_capacity(P99_SAMPLES);
-    let mut call = 0u64;
-    for _ in 0..P99_ROUNDS {
-        ns.clear();
-        for _ in 0..P99_SAMPLES {
-            let start = Instant::now();
-            black_box(batch(call));
-            ns.push(start.elapsed().as_nanos());
-            call = call.wrapping_add(1);
+/// Times `sample` `samples` times; it is handed a number that differs per call.
+///
+/// The first `warmup` calls run untimed. Inside a group the sizes run back to
+/// back, so a size's tables start the group evicted by the size before it;
+/// what the row asks about is the operation on a table it has been using,
+/// and a cold start would put the eviction, not the operation, at the p99.
+fn group_tail(
+    warmup: usize,
+    samples: usize,
+    salt: u64,
+    mut sample: impl FnMut(u64) -> usize,
+) -> Tail {
+    let mut ns = Vec::with_capacity(samples);
+    for at in 0..(warmup + samples) as u64 {
+        let start = Instant::now();
+        black_box(sample(salt.wrapping_mul(1 << 32) ^ at));
+        let took = start.elapsed().as_nanos();
+        if at >= warmup as u64 {
+            ns.push(took);
         }
-        ns.sort_unstable();
-        out.p50 = out.p50.min(rank(&ns, 500));
-        out.p99 = out.p99.min(rank(&ns, 990));
-        out.max = out.max.max(ns.last().copied().unwrap_or(0));
+    }
+    ns.sort_unstable();
+    Tail {
+        p50: rank(&ns, 500),
+        p99: rank(&ns, 990),
+        max: ns.last().copied().unwrap_or(0),
+    }
+}
+
+/// Every size inside every group: `measure(at, n, group)` is the samples of
+/// size `n`, which is `sizes[at]`.
+///
+/// Returns one vector per size, holding that size's [`P99_GROUPS`] tails in
+/// group order. Inside a group the sizes run back to back, and the size that
+/// goes first rotates, so a load that rises through a group does not always
+/// land on the same size.
+fn interleaved(
+    sizes: &[usize],
+    mut measure: impl FnMut(usize, usize, usize) -> Tail,
+) -> Vec<Vec<Tail>> {
+    let mut out: Vec<Vec<Tail>> = sizes
+        .iter()
+        .map(|_| Vec::with_capacity(P99_GROUPS))
+        .collect();
+    for group in 0..P99_GROUPS {
+        for step in 0..sizes.len() {
+            let at = (step + group) % sizes.len();
+            if let (Some(&n), Some(row)) = (sizes.get(at), out.get_mut(at)) {
+                row.push(measure(at, n, group));
+            }
+        }
     }
     out
+}
+
+/// The median of the per-group ratios `at[g] / base[g]`, in thousandths, with
+/// the smallest and largest beside it.
+///
+/// `None` when the two sides hold different numbers of groups, when there are
+/// none, or when any sample timed at zero: a ratio over an operation the
+/// optimiser deleted is not a measurement, as [`ratio`] says.
+fn median_ratio_permille(base: &[u128], at: &[u128]) -> Option<(u128, u128, u128)> {
+    if base.len() != at.len() || base.is_empty() || base.contains(&0) || at.contains(&0) {
+        return None;
+    }
+    let mut ratios: Vec<u128> = base.iter().zip(at).map(|(b, a)| a * 1_000 / b).collect();
+    ratios.sort_unstable();
+    Some((
+        ratios.get(ratios.len() / 2).copied()?,
+        ratios.first().copied()?,
+        ratios.last().copied()?,
+    ))
 }
 
 /// A fixed-seed generator for the probed positions. `SplitMix64`'s finaliser.
@@ -526,46 +671,142 @@ fn mix(seed: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-/// Prints one size's p50 / p99 / max and, when `gated`, holds its p99 to
-/// [`CEILING_PERMILLE`] of the 10^3 one in either direction, as [`ratio`]
-/// does. Units are nanoseconds per [`P99_BATCH`] operations, so this prints
-/// its own line rather than [`ratio`]'s per-bar one.
-fn tail_row(label: &str, n: usize, base_p99: u128, at: &Tail, gated: bool) -> bool {
-    println!(
-        "  {label:<44} n={n:>9}  p50 {:>6} ns  p99 {:>6} ns  max {:>8} ns  per {P99_BATCH}",
-        at.p50, at.p99, at.max
-    );
-    if n == P99_SIZES[0] {
-        return true;
-    }
-    if base_p99 == 0 || at.p99 == 0 {
-        println!("  {label} p99 UNMEASURABLE — a side timed at zero");
-        return false;
-    }
-    p99_ratio(
-        &format!("{label} p99, {n} against 1000"),
-        base_p99,
-        at.p99,
-        gated,
-    )
+/// Is a median ratio inside [`CEILING_PERMILLE`] in either direction?
+///
+/// Two-sided for the reason [`ratio`] gives: an operation that got CHEAPER
+/// with the input is as much a dependence on it as one that got dearer.
+fn within_ceiling(median_permille: u128) -> bool {
+    median_permille > 0
+        && median_permille <= CEILING_PERMILLE
+        && 1_000_000 / median_permille <= CEILING_PERMILLE
 }
 
-/// One p99 comparison under [`CEILING_PERMILLE`], in either direction, as
-/// [`ratio`] compares; a row that is not `gated` is printed and passes.
-fn p99_ratio(label: &str, base: u128, at: u128, gated: bool) -> bool {
-    let up = at * 1_000 / base;
-    let down = base * 1_000 / at;
-    let ok = !gated || up.max(down) <= CEILING_PERMILLE;
-    println!(
-        "  {label}: ratio {}.{:03}x  {}",
-        up / 1_000,
-        up % 1_000,
-        match (gated, ok) {
-            (false, _) => "REPORTED, not gated",
-            (true, true) => "ok",
-            (true, false) => "BREACH",
+/// The median of one field over a size's groups.
+fn median_of(tails: &[Tail], field: impl Fn(&Tail) -> u128) -> u128 {
+    let mut v: Vec<u128> = tails.iter().map(field).collect();
+    v.sort_unstable();
+    v.get(v.len() / 2).copied().unwrap_or(0)
+}
+
+/// Prints one interleaved row and returns whether it held.
+///
+/// Per size: the median over groups of p50 and of p99, the largest max of any
+/// group, and -- past the base -- the median paired p99 ratio with the range of
+/// the nine. A size `gated` refuses returns `true` after printing.
+fn interleaved_row(
+    label: &str,
+    unit: &str,
+    sizes: &[usize],
+    tails: &[Vec<Tail>],
+    gated: impl Fn(usize) -> bool,
+) -> bool {
+    let Some(base) = tails.first() else {
+        refuse(&format!("{label}: no size was measured"))
+    };
+    let base_p99: Vec<u128> = base.iter().map(|t| t.p99).collect();
+    let mut ok = true;
+    for (&n, groups) in sizes.iter().zip(tails) {
+        println!(
+            "  {label:<36} n={n:>9}  p50 {:>8} ns  p99 {:>8} ns  max {:>9} ns  per {unit}",
+            median_of(groups, |t| t.p50),
+            median_of(groups, |t| t.p99),
+            groups.iter().map(|t| t.max).max().unwrap_or(0),
+        );
+        if n == sizes.first().copied().unwrap_or(0) {
+            continue;
         }
-    );
+        let at_p99: Vec<u128> = groups.iter().map(|t| t.p99).collect();
+        let Some((median, low, high)) = median_ratio_permille(&base_p99, &at_p99) else {
+            println!("  {label} p99 UNMEASURABLE — a group timed at zero");
+            ok = false;
+            continue;
+        };
+        let gate = gated(n);
+        let held = !gate || within_ceiling(median);
+        println!(
+            "  {label} p99, {n} against {}: median of {P99_GROUPS} paired ratios \
+             {}.{:03}x (range {}.{:03}x..{}.{:03}x)  {}",
+            sizes.first().copied().unwrap_or(0),
+            median / 1_000,
+            median % 1_000,
+            low / 1_000,
+            low % 1_000,
+            high / 1_000,
+            high % 1_000,
+            match (gate, held) {
+                (false, _) => "REPORTED, not gated",
+                (true, true) => "ok",
+                (true, false) => "BREACH",
+            }
+        );
+        ok &= held;
+    }
+    ok
+}
+
+/// The statistic the p99 rows gate is itself tested, on fixed numbers, before
+/// any row trusts it (D-4482).
+///
+/// A gate that cannot fail is not a gate, and one that fails on noise is the
+/// so1-3 finding. Nine quiet base groups against: four groups disturbed
+/// tenfold in either direction (noise: passes); every group four times
+/// dearer (an O(n) operation: fails); five of nine disturbed (a majority:
+/// fails); every group four times cheaper (fails, two-sided); and a zero
+/// sample (unmeasurable: refused).
+fn the_interleaved_statistic_can_pass_and_can_fail() -> bool {
+    let quiet = [100_u128; P99_GROUPS];
+    let noisy = [1_000, 100, 100, 1_000, 100, 10, 100, 100, 1_000];
+    let grown = [400_u128; P99_GROUPS];
+    let shrunk = [25_u128; P99_GROUPS];
+    let majority = [1_000, 1_000, 1_000, 1_000, 1_000, 100, 100, 100, 100];
+    let mut zero = quiet;
+    if let Some(first) = zero.first_mut() {
+        *first = 0;
+    }
+    let verdict =
+        |at: &[u128]| median_ratio_permille(&quiet, at).map(|(m, _, _)| within_ceiling(m));
+    let checks = [
+        (
+            "four of nine groups disturbed tenfold passes",
+            verdict(&noisy),
+            Some(true),
+        ),
+        (
+            "a quiet base against itself passes",
+            verdict(&quiet),
+            Some(true),
+        ),
+        (
+            "every group four times dearer fails",
+            verdict(&grown),
+            Some(false),
+        ),
+        (
+            "every group four times cheaper fails",
+            verdict(&shrunk),
+            Some(false),
+        ),
+        (
+            "five of nine disturbed fails",
+            verdict(&majority),
+            Some(false),
+        ),
+        ("a zero sample is unmeasurable", verdict(&zero), None),
+        (
+            "unequal group counts are unmeasurable",
+            median_ratio_permille(&quiet, &quiet[1..]).map(|(m, _, _)| within_ceiling(m)),
+            None,
+        ),
+    ];
+    let mut ok = true;
+    for (what, got, want) in checks {
+        let held = got == want;
+        println!(
+            "  p99 statistic self-test: {what:<48} {}",
+            if held { "ok" } else { "BROKEN" }
+        );
+        ok &= held;
+    }
     ok
 }
 
@@ -577,75 +818,430 @@ fn p99_ratio(label: &str, base: u128, at: u128, gated: bool) -> bool {
 /// load would stay green there. O1P-03 rejects a different, uniformly drawn,
 /// already-offered position on every operation, through the production
 /// [`engine::primitives::offer`]. O1P-04 pushes through
-/// [`engine::primitives::append`] into a vector reserved for every push the
-/// round makes — the reservation production makes before a level — so the
-/// distribution is of pushes that fit, which is the claim C-E-11 states.
+/// [`engine::primitives::append`] into a vector reserved before the pushes —
+/// the reservation production makes before a level — so the distribution is
+/// of pushes that fit, which is the claim C-E-11 states.
 ///
-/// The append's p99 is about fourteen times its p50 at EVERY size: a
-/// reservation is address space, not memory, and the first push into each
-/// untouched page takes the page fault. Touching the reservation first took
-/// the p99 from 3,019 ns to 780 ns per 32 pushes on the box that measured it
-/// (D-3301). The fault is per page, not per held result, so it is flat and
-/// the row gates it; `docs/06-limits.md` states the constant.
+/// Since D-4482 (so1-3) the gated O1P-04 row holds exactly `n` results at
+/// every timed push, its pages written by the warm-up, so what it gates is
+/// the push and nothing else. The first push into an untouched page takes a
+/// minor fault (D-3301: 3,019 ns against 780 ns per 32 pushes with the pages
+/// touched); that shape is printed beside it as `first touch` and not gated,
+/// because whether a reservation's pages are fresh is the allocator's state,
+/// not a property of `n`. `docs/06-limits.md` states both.
+///
+/// Both rows are measured in [`interleaved`] groups and gated on the median
+/// paired ratio since D-4482; see [`P99_GROUPS`].
 fn rule_four_primitives_are_flat_at_p99() -> bool {
-    let mut ok = true;
-    let mut base_dup = 0u128;
-    let mut base_push = 0u128;
     let one = Itemset {
         mask: candidate(3),
         hits: 1,
     };
-    for (step, n) in P99_SIZES.into_iter().enumerate() {
-        let mut set = offered_of(n);
+    let mut sets: Vec<std::collections::HashSet<u32>> =
+        P99_SIZES.iter().map(|&n| offered_of(n)).collect();
+    let dup = interleaved(&P99_SIZES, |at, n, group| {
+        let Some(set) = sets.get_mut(at) else {
+            refuse("O1P-03: no offered set for a measured size")
+        };
         let width = u64::try_from(n).unwrap_or(1).max(1);
-        let dup = tail(|call| {
+        group_tail(P99_GROUP_SAMPLES, P99_GROUP_SAMPLES, group as u64, |call| {
             let mut rejected = 0usize;
             for at in 0..P99_BATCH as u64 {
                 let position = u32::try_from(mix(call.wrapping_mul(64) ^ at) % width).unwrap_or(0);
-                if !engine::primitives::offer(&mut set, black_box(position)) {
+                if !engine::primitives::offer(set, black_box(position)) {
                     rejected = rejected.saturating_add(1);
                 }
             }
             rejected
-        });
-        drop(set);
-        if dup.p50 == 0 {
-            refuse("O1P-03: a batch of duplicate probes timed at zero");
-        }
-
-        // Held `n` before the first timed push, room for every push after.
-        let mut out: Vec<Itemset> = Vec::with_capacity(n + P99_ROUNDS * P99_SAMPLES * P99_BATCH);
-        for _ in 0..n {
-            engine::primitives::append(&mut out, one);
-        }
-        let push = tail(|_| {
+        })
+    });
+    drop(sets);
+    // HELD EXACTLY `n` AT EVERY TIMED PUSH (D-4482). Each sample truncates
+    // back to `n` -- O(1) for a `Copy` element -- before its pushes, so the
+    // size the row names is the size every push meets. The rows used to let
+    // the vector grow by every push of every round, so the 10^3 base ended its
+    // rounds holding 1.6 million and an O(n) append could not separate the
+    // sizes; a scan planted on every 1,024th push read 1.117x at 10^4 and
+    // 2.062x at 10^5 that way, breaching only at 10^6. The
+    // `n` held are built with `vec!`, not through `append`, so a planted O(n)
+    // append does not make the setup quadratic. The warm-up samples write the
+    // reservation's pages before any timed push.
+    let push = interleaved(&P99_SIZES, |_, n, group| {
+        let mut out: Vec<Itemset> = vec![one; n];
+        out.reserve_exact(P99_BATCH);
+        group_tail(
+            P99_GROUP_SAMPLES / 5,
+            P99_GROUP_SAMPLES,
+            group as u64,
+            |_| {
+                out.truncate(n);
+                for _ in 0..P99_BATCH {
+                    engine::primitives::append(&mut out, black_box(one));
+                }
+                out.len()
+            },
+        )
+    });
+    // Every push into a fresh page, the shape a level's first pushes have.
+    let untouched = interleaved(&P99_SIZES, |_, n, group| {
+        let mut out: Vec<Itemset> = vec![one; n];
+        out.reserve_exact(P99_GROUP_SAMPLES * P99_BATCH);
+        group_tail(0, P99_GROUP_SAMPLES, group as u64, |_| {
             for _ in 0..P99_BATCH {
                 engine::primitives::append(&mut out, black_box(one));
             }
             out.len()
+        })
+    });
+    // k=1 offers one position per live condition, so its table never
+    // holds more than `ConditionMask::BITS` (384). 10^4 is 26x past that and
+    // is gated. 10^5 was gated too until D-4482: there the table is 640 KiB,
+    // and on a shared four-vCPU box it competes for the level-two cache with
+    // whatever else runs, so its p99 moved between 2.3x and 5.3x of 10^3 with
+    // the machine's load while the code stood still. It is printed, as 10^6
+    // always was; `docs/06-limits.md` names both (D-3301, D-4482).
+    let mut ok = interleaved_row(
+        "O1P-03 k=1 duplicate rejection",
+        "32 probes",
+        &P99_SIZES,
+        &dup,
+        |n| n <= 10_000,
+    );
+    ok &= interleaved_row(
+        "O1P-04 result append",
+        "32 pushes",
+        &P99_SIZES,
+        &push,
+        |_| true,
+    );
+    // THE FIRST TOUCH OF EACH PAGE, printed and not gated (D-4482). A push
+    // into a page of the reservation nothing has written yet takes a minor
+    // fault. Whether a reservation's pages are fresh depends on the
+    // allocator, not on `n`: glibc hands a freed block below its mapping
+    // threshold back with its pages already touched, and maps a block past
+    // that threshold afresh. With every size's reservation sized alike, only
+    // the 10^6 one crosses it, so only 10^6 faulted, and its p99 read about
+    // 4x the others in every group -- a fact about the allocator's state that
+    // a gate on the push cannot honestly carry.
+    ok &= interleaved_row(
+        "O1P-04 append, first touch",
+        "32 pushes",
+        &P99_SIZES,
+        &untouched,
+        |_| false,
+    );
+    ok
+}
+
+/// FXD-02 — one block of the production support pass costs the same per bar at
+/// p99 whatever column it was cut from, 10^3 to 10^6 bars (so1-1, D-4481).
+///
+/// Each sample is one [`support_block`] call -- the unit
+/// [`Column::support_each`] repeats -- over a block of
+/// [`SUPPORT_BLOCK_ROWS`] rows drawn uniformly from the column, counting
+/// [`FXD02_CANDIDATES`] candidates. The block is drawn at random, not walked
+/// in order, so at 10^6 bars nearly every sample starts with its block out of
+/// the cache: the row prices the fetch the walk pays once per block, which is
+/// the cost that grew with the column when the walk counted one candidate per
+/// pass. Every sample does the same work at every size, so the p99s are
+/// directly comparable, and the row is gated two-sided at every size on the
+/// median paired ratio.
+fn one_support_block_is_flat_at_p99() -> bool {
+    // The rows of each column. `Column` hands out no rows, and an accessor
+    // added to production for a bench would be the wrong way round, so the
+    // bench's own deterministic generator is asked again: `support_block` takes
+    // a slice of rows, which is exactly what `support_each` hands it.
+    let rows: Vec<Vec<ConditionMask>> = P99_SIZES.iter().map(|&n| column(n)).collect();
+    let mut items: Vec<Itemset> = batch_candidates()
+        .into_iter()
+        .take(FXD02_CANDIDATES)
+        .collect();
+    let tails = interleaved(&P99_SIZES, |at, _, group| {
+        let Some(rows) = rows.get(at) else {
+            refuse("FXD-02: no column for a measured size")
+        };
+        let blocks = u64::try_from(rows.len() / SUPPORT_BLOCK_ROWS)
+            .unwrap_or(1)
+            .max(1);
+        group_tail(FXD02_SAMPLES, FXD02_SAMPLES, group as u64, |call| {
+            let start = usize::try_from(mix(call) % blocks).unwrap_or(0) * SUPPORT_BLOCK_ROWS;
+            let block = rows.get(start..start + SUPPORT_BLOCK_ROWS).unwrap_or(&[]);
+            support_block(black_box(block), &mut items);
+            block.len()
+        })
+    });
+    interleaved_row(
+        "FXD-02 support block",
+        "512 bars x 16 candidates",
+        &P99_SIZES,
+        &tails,
+        |_| true,
+    )
+}
+
+/// Candidates per FXD-02 sample. Sixteen keeps one sample near ten
+/// microseconds: long against the timer, and short against a scheduler
+/// slice, so a preemption lands in well under one sample in a hundred and a
+/// shared box does not decide the p99.
+const FXD02_CANDIDATES: usize = 16;
+
+/// Samples per size inside one FXD-02 group.
+const FXD02_SAMPLES: usize = 1_000;
+
+/// FXD-03 — REPORTED, NOT GATED: one candidate per pass over the whole column,
+/// the shape the walk counted in until D-4481 and the shape a lane still has
+/// when a level's tail batch leaves it one candidate.
+///
+/// Its per-bar cost is the memory system's -- a whole column streamed for six
+/// word-ANDs a bar -- and it grows as the column leaves each cache level; the
+/// figure is printed so `docs/06-limits.md` can quote it rather than claim it.
+fn one_candidate_per_pass_is_reported() -> bool {
+    let columns: Vec<Column> = [10_000_usize, 100_000, 1_000_000]
+        .iter()
+        .map(|&n| owned_column(n))
+        .collect();
+    let sizes: Vec<usize> = columns
+        .iter()
+        .map(|c| usize::try_from(c.bars()).unwrap_or(0))
+        .collect();
+    let mask = candidate(3);
+    let tails = interleaved(&sizes, |at, n, group| {
+        let Some(owned) = columns.get(at) else {
+            refuse("FXD-03: no column for a measured size")
+        };
+        let per_bar_group = group_tail(1, FXD03_SAMPLES, group as u64, |_| {
+            let mut one = [Itemset { mask, hits: 0 }];
+            owned.support_each(black_box(&mut one));
+            usize::try_from(one.first().map_or(0, |item| item.hits)).unwrap_or(0)
         });
-        if push.p50 == 0 {
-            refuse("O1P-04: a batch of pushes timed at zero");
+        let bars = u128::try_from(n).unwrap_or(1).max(1);
+        // Picoseconds per bar, so sizes 100x apart print on one scale.
+        Tail {
+            p50: per_bar_group.p50 * 1_000 / bars,
+            p99: per_bar_group.p99 * 1_000 / bars,
+            max: per_bar_group.max * 1_000 / bars,
         }
-        if step == 0 {
-            base_dup = dup.p99;
-            base_push = push.p99;
+    });
+    interleaved_row(
+        "FXD-03 one candidate per pass",
+        "bar, x1000 (ps)",
+        &sizes,
+        &tails,
+        |_| false,
+    )
+}
+
+/// Samples per size inside one FXD-03 group.
+const FXD03_SAMPLES: usize = 20;
+
+/// FXD-08 — each level's two sorts, timed at the widths a sweep reaches
+/// (W3-engine1-1, D-4483).
+///
+/// A level is ordered once by [`engine::primitives::sort_level`], the
+/// canonical sort the walk publishes it in, and indexed once by
+/// [`engine::primitives::JoinProbe::try_new`], whose keyed prefix vector is
+/// the second sort (plus the membership set). Both are comparison sorts, so
+/// a level costs O(|F| log |F|) beyond its join: per level, never per bar
+/// and never per pair. `docs/06-limits.md` said "not timed here"; this row is
+/// the timing it quotes.
+///
+/// The fixture is |F| distinct three-bit masks spread over 370 positions,
+/// handed to the sort in a scrambled order (the order a join emits is not
+/// the canonical one) and to the index already sorted (the order the walk
+/// hands it the previous level in). Every size runs inside every one of
+/// [`FXD08_GROUPS`] groups, rotated, as the p99 rows do (D-4482).
+///
+/// GATED: the median over groups of the paired ratio of the group's median
+/// time per item per log2 |F|, each wider frontier against 10^3, must stay
+/// at or under [`FXD08_CEILING_PERMILLE`]. It is NOT flat, and the row does
+/// not pretend it is: on the box D-4483 measured, the sort's figure rose
+/// about 2x, 4x and 6x at 10^4, 10^5 and 10^6, because a wider level of
+/// these masks ties on more leading words (each comparison reads further
+/// into its seven-word key) and moves 56-byte items through caches it no
+/// longer fits. Both effects are bounded -- a comparison reads at most seven
+/// words -- and the ceiling is that bound on top of the usual three: a sort
+/// that went quadratic multiplies the figure by |F| / log |F|, at least 60x
+/// at 10^5, and fails. One-sided, because fixed per-call work amortised over
+/// a wider level makes the figure FALL, which is not a dependence on |F|.
+fn each_level_sort_is_n_log_n() -> bool {
+    let scrambled: Vec<Vec<Itemset>> = FXD08_SIZES.iter().map(|&w| frontier_of(w)).collect();
+    let canonical: Vec<Vec<Itemset>> = scrambled
+        .iter()
+        .map(|level| {
+            let mut sorted = level.clone();
+            engine::primitives::sort_level(&mut sorted);
+            sorted
+        })
+        .collect();
+    // The fixture is what the row says it is: distinct masks, a sort that
+    // orders them, and an index that keeps every one.
+    for (level, sorted) in scrambled.iter().zip(&canonical) {
+        let ordered = sorted.is_sorted_by_key(|i| (i.mask.words(), i.hits));
+        let mut masks: Vec<[u64; 6]> = level.iter().map(|i| i.mask.words()).collect();
+        masks.sort_unstable();
+        masks.dedup();
+        let width = engine::primitives::JoinProbe::try_new(sorted)
+            .ok()
+            .map(|probe| probe.width());
+        if !ordered || masks.len() != level.len() || width != Some(level.len()) {
+            refuse("FXD-08: the fixture is not |F| distinct masks the sort orders");
         }
-        // k=1 offers one position per live condition, so its table never
-        // holds more than `ConditionMask::BITS` (384). 10^5 is already 260x
-        // past that and is gated; at 10^6 the table outgrows the cache and
-        // a probe pays a miss, which `docs/06-limits.md` names (D-3301).
-        let in_domain = n <= 100_000;
-        ok &= tail_row(
-            "O1P-03 k=1 duplicate rejection",
-            n,
-            base_dup,
-            &dup,
-            in_domain,
+    }
+    let widest = FXD08_SIZES.iter().copied().max().unwrap_or(0);
+    let mut work: Vec<Itemset> = Vec::with_capacity(widest);
+    let sizes = FXD08_SIZES.len();
+    let mut sort_ns: Vec<Vec<u128>> = vec![Vec::new(); sizes];
+    let mut index_ns: Vec<Vec<u128>> = vec![Vec::new(); sizes];
+    let mut sort_groups: Vec<Vec<u128>> = vec![Vec::with_capacity(FXD08_GROUPS); sizes];
+    let mut index_groups: Vec<Vec<u128>> = vec![Vec::with_capacity(FXD08_GROUPS); sizes];
+    for group in 0..FXD08_GROUPS {
+        for step in 0..sizes {
+            let at = (step + group) % sizes;
+            let (Some(level), Some(sorted), Some(&samples)) =
+                (scrambled.get(at), canonical.get(at), FXD08_SAMPLES.get(at))
+            else {
+                refuse("FXD-08: no fixture for a measured size")
+            };
+            let mut sorting = Vec::with_capacity(samples);
+            let mut indexing = Vec::with_capacity(samples);
+            for _ in 0..samples {
+                work.clear();
+                work.extend_from_slice(level);
+                let start = Instant::now();
+                engine::primitives::sort_level(black_box(&mut work));
+                sorting.push(start.elapsed().as_nanos());
+                black_box(work.first());
+
+                let start = Instant::now();
+                let probe = engine::primitives::JoinProbe::try_new(black_box(sorted));
+                indexing.push(start.elapsed().as_nanos());
+                // Dropped outside the timed span: freeing the index is not
+                // building it.
+                black_box(probe.map(|p| p.width()).ok());
+            }
+            let per_item_log = |ns: &mut Vec<u128>| -> u128 {
+                ns.sort_unstable();
+                rank(ns, 500) * 1_000 / item_log(level.len())
+            };
+            if let (Some(all_sort), Some(all_index), Some(sg), Some(ig)) = (
+                sort_ns.get_mut(at),
+                index_ns.get_mut(at),
+                sort_groups.get_mut(at),
+                index_groups.get_mut(at),
+            ) {
+                all_sort.extend_from_slice(&sorting);
+                all_index.extend_from_slice(&indexing);
+                sg.push(per_item_log(&mut sorting));
+                ig.push(per_item_log(&mut indexing));
+            }
+        }
+    }
+    let sort_ok = level_sort_row("FXD-08 level sort", &mut sort_ns, &sort_groups);
+    let index_ok = level_sort_row("FXD-08 level index", &mut index_ns, &index_groups);
+    sort_ok && index_ok
+}
+
+/// Frontier widths FXD-08 sorts and indexes: 10^3 to 10^6 survivors.
+///
+/// 10^6 is a level of 56 MB of `Itemset`s, past which `Ladder`'s own memory
+/// ceiling refuses before a sort is reached on most machines this runs on.
+const FXD08_SIZES: [usize; 4] = [1_000, 10_000, 100_000, 1_000_000];
+
+/// Samples per size inside one FXD-08 group, fewer as one sort grows: a
+/// 10^6-wide sort takes tenths of a second on the box D-4483 measured.
+const FXD08_SAMPLES: [usize; 4] = [200, 40, 8, 2];
+
+/// FXD-08 groups.
+const FXD08_GROUPS: usize = 5;
+
+/// The FXD-08 ceiling: seven times [`CEILING_PERMILLE`], one for each word a
+/// level-sort comparison may read (six mask words and `hits`). The index's
+/// keyed pairs compare up to twelve words and are held to the same seven.
+const FXD08_CEILING_PERMILLE: u128 = 7 * CEILING_PERMILLE;
+
+/// `width x floor(log2 width)`, the comparison count a level sort scales by.
+fn item_log(width: usize) -> u128 {
+    let width = u128::try_from(width).unwrap_or(1).max(2);
+    width * u128::from(width.ilog2())
+}
+
+/// |F| distinct three-bit masks over positions 0..370, in a scrambled order.
+///
+/// Position `i % 128`, then `128 + (i / 128) % 128`, then
+/// `256 + (i / 16_384) % 114`: injective below 1,867,776, so every mask is
+/// distinct at every width this row uses.
+fn frontier_of(width: usize) -> Vec<Itemset> {
+    let mut keyed: Vec<(u64, Itemset)> = (0..width)
+        .map(|i| {
+            let n = u32::try_from(i).unwrap_or(u32::MAX);
+            let mask = ConditionMask::default()
+                .with_bit(n % 128)
+                .with_bit(128 + (n / 128) % 128)
+                .with_bit(256 + (n / 16_384) % 114);
+            let seed = i as u64;
+            (
+                mix(seed),
+                Itemset {
+                    mask,
+                    hits: mix(!seed) % 100_000,
+                },
+            )
+        })
+        .collect();
+    keyed.sort_unstable_by_key(|(key, _)| *key);
+    keyed.into_iter().map(|(_, item)| item).collect()
+}
+
+/// Prints one FXD-08 row: per width p50 / p99 / max of every sample, then
+/// the median paired ratio of the per-item-per-log2 figure against 10^3.
+fn level_sort_row(label: &str, all: &mut [Vec<u128>], groups: &[Vec<u128>]) -> bool {
+    let Some(base) = groups.first() else {
+        refuse(&format!("{label}: no size was measured"))
+    };
+    let mut ok = true;
+    for ((&width, ns), per) in FXD08_SIZES.iter().zip(all.iter_mut()).zip(groups) {
+        ns.sort_unstable();
+        println!(
+            "  {label:<22} |F|={width:>9}  p50 {:>11} ns  p99 {:>11} ns  max {:>11} ns  \
+             ({} samples)  p50 {} ps per item x log2|F|",
+            rank(ns, 500),
+            rank(ns, 990),
+            ns.last().copied().unwrap_or(0),
+            ns.len(),
+            median_of_values(per),
         );
-        ok &= tail_row("O1P-04 result append", n, base_push, &push, true);
+        if width == FXD08_SIZES.first().copied().unwrap_or(0) {
+            continue;
+        }
+        let Some((median, low, high)) = median_ratio_permille(base, per) else {
+            println!("  {label} UNMEASURABLE — a group timed at zero");
+            ok = false;
+            continue;
+        };
+        let held = median <= FXD08_CEILING_PERMILLE;
+        println!(
+            "  {label} per item x log2|F|, {width} against {}: median of {FXD08_GROUPS} \
+             paired ratios {}.{:03}x (range {}.{:03}x..{}.{:03}x), ceiling {}x  {}",
+            FXD08_SIZES.first().copied().unwrap_or(0),
+            median / 1_000,
+            median % 1_000,
+            low / 1_000,
+            low % 1_000,
+            high / 1_000,
+            high % 1_000,
+            FXD08_CEILING_PERMILLE / 1_000,
+            if held { "ok" } else { "BREACH" }
+        );
+        ok &= held;
     }
     ok
+}
+
+/// The median of a list of per-group figures.
+fn median_of_values(values: &[u128]) -> u128 {
+    let mut v = values.to_vec();
+    v.sort_unstable();
+    v.get(v.len() / 2).copied().unwrap_or(0)
 }
 
 /// C-E-08 — one pair of the join costs the same whatever the frontier holds.
@@ -971,7 +1567,7 @@ fn main() {
         core::mem::size_of::<Ladder>(),
         ConditionMask::BITS
     );
-    let mut ok = true;
+    let mut ok = the_interleaved_statistic_can_pass_and_can_fail();
     ok &= support_stays_within_its_budget();
     ok &= live_column_costs_like_the_fixed_width_reference();
     ok &= support_costs_the_same_per_bar_at_every_column_length();
@@ -983,6 +1579,9 @@ fn main() {
     ok &= duplicate_rejection_costs_the_same_however_much_is_seen();
     ok &= result_append_costs_the_same_however_many_are_held();
     ok &= rule_four_primitives_are_flat_at_p99();
+    ok &= one_support_block_is_flat_at_p99();
+    ok &= one_candidate_per_pass_is_reported();
+    ok &= each_level_sort_is_n_log_n();
     ok &= live_support_is_flat_across_the_entire_mask_width();
     ok &= a_ladder_walk_does_not_get_dearer_per_bar();
     if ok {

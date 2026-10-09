@@ -22,6 +22,8 @@
 
 use vocab::ConditionMask;
 
+use crate::Itemset;
+
 /// One packed fingerprint word covers this many bars.
 const BARS_PER_WORD: usize = 64;
 
@@ -108,6 +110,37 @@ impl Column {
         })
     }
 
+    /// The support of every item's mask, written into its `hits`, in ONE blocked
+    /// pass over the column. This is what the walk calls (so1-1, D-4481).
+    ///
+    /// # Why a second entry point, and what it does NOT change
+    ///
+    /// The per-bar operation is unchanged: every (bar, candidate) pair still takes
+    /// exactly one fixed-six-word [`ConditionMask::hits`] call, through
+    /// [`support_block`]'s fold, which has [`Self::support`]'s shape and answer
+    /// (`engine::column::tests::the_blocked_count_is_the_one_candidate_count`).
+    /// What changes is the ORDER the pairs are visited in. [`Self::support`] walks
+    /// the whole column once per candidate, so a batch of `c` candidates streamed
+    /// `c` copies of a 58.7 MB column from memory, and its per-bar cost grew with
+    /// the column as it fell out of each cache level -- measured 1.2 ns per bar at
+    /// 10^4 bars against 4.4 to 18 ns at 10^6 on a loaded four-vCPU box, while a
+    /// read of one word per bar grew the same way (D-4481). Here the column is cut
+    /// into [`SUPPORT_BLOCK_ROWS`]-row blocks and every candidate is counted
+    /// against a block while it sits in the level-one cache, so the column crosses
+    /// the memory bus once per call rather than once per candidate. The bench row
+    /// `FXD-02` holds the per-bar p99 of one block flat from 10^3 to 10^6 bars.
+    ///
+    /// Each item's previous `hits` is overwritten, never added to. An empty column
+    /// writes zero into every item; an empty slice is a no-op.
+    pub fn support_each(&self, items: &mut [Itemset]) {
+        for item in items.iter_mut() {
+            item.hits = 0;
+        }
+        for block in self.rows.chunks(SUPPORT_BLOCK_ROWS) {
+            support_block(block, items);
+        }
+    }
+
     /// The support count AND the identity of the bars it counted, in ONE pass.
     ///
     /// # Why this exists, and what it measured
@@ -176,6 +209,41 @@ impl Column {
     }
 }
 
+/// Rows per block of [`Column::support_each`].
+///
+/// 512 masks of 48 bytes is 24 KiB: inside a 32 KiB level-one data cache, the
+/// smallest common size, and half of the 48 KiB one on the box D-4481 measured.
+/// That probe timed blocks of 128 to 4,096 rows and could not tell them apart
+/// within its noise; 512 is chosen for the cache headroom, not for a measured
+/// optimum.
+pub const SUPPORT_BLOCK_ROWS: usize = 512;
+
+/// Adds each item's support within `block` to its `hits`, saturating.
+///
+/// One [`block_hits`] fold per item, so one fixed-six-word hit test per (row,
+/// item) pair and nothing proportional to an item's popcount. Exposed so
+/// `benches/ratio.rs` times the unit [`Column::support_each`] repeats, rather
+/// than a copy of it.
+pub fn support_block(block: &[ConditionMask], items: &mut [Itemset]) {
+    for item in items.iter_mut() {
+        item.hits = item.hits.saturating_add(block_hits(block, &item.mask));
+    }
+}
+
+/// How many rows of `block` carry every bit `candidate` requires.
+///
+/// The same fold as [`Column::support`], over one block. Kept out of line
+/// because the D-4481 probe measured the inlined closure form at about twice the
+/// out-of-line cost per bar on a cache-resident column (2.4 against 1.17 ns at
+/// 10^3 bars, test profile). Why the inlined code is slower was not
+/// investigated; `FXD-02` in `benches/ratio.rs` times what ships.
+#[inline(never)]
+fn block_hits(block: &[ConditionMask], candidate: &ConditionMask) -> u64 {
+    block.iter().fold(0_u64, |hits, row| {
+        hits.saturating_add(u64::from(row.hits(candidate)))
+    })
+}
+
 /// The identity of a SET OF BARS: 128 bits folded over the bitmap the candidate
 /// selects, by [`Column::support_fingerprinted`].
 ///
@@ -238,8 +306,9 @@ const FINGERPRINT_MIX_HI: u64 = 0xff51_afd7_ed55_8ccd;
 mod tests {
     use super::{
         BARS_PER_WORD, Column, FINGERPRINT_MIX_HI, FINGERPRINT_MIX_LO, FINGERPRINT_SEED_HI,
-        FINGERPRINT_SEED_LO, HitSet, set_positions,
+        FINGERPRINT_SEED_LO, HitSet, SUPPORT_BLOCK_ROWS, set_positions, support_block,
     };
+    use crate::Itemset;
     use vocab::ConditionMask;
 
     /// A deterministic bit source. No `rand`: §3.5 wants the same inputs to give the
@@ -516,6 +585,150 @@ mod tests {
             assert!(
                 !code.contains(banned),
                 "`{banned}` in `support`: candidate depth must not control live support work"
+            );
+        }
+    }
+
+    /// **The blocked count is the one-candidate count**, item for item (so1-1,
+    /// D-4481).
+    ///
+    /// [`Column::support_each`] visits the (bar, candidate) pairs in a different
+    /// order from [`Column::support`] and must reach the same answer for every
+    /// candidate. The lengths straddle every block edge -- empty, one bar, one
+    /// short of a block, exactly one, one past it, and two and a bit -- and the
+    /// candidates include the empty mask (every bar), a dead bit (no bar), single
+    /// bits and a three-bit mask. Every item starts at `u64::MAX`, so a count that
+    /// added to its previous value instead of replacing it saturates and fails.
+    #[test]
+    fn the_blocked_count_is_the_one_candidate_count() {
+        let live = [3_u32, 70, 150, 233];
+        let candidates = [
+            ConditionMask::ZERO,
+            ConditionMask::ZERO.with_bit(300),
+            ConditionMask::ZERO.with_bit(3),
+            ConditionMask::ZERO.with_bit(150),
+            ConditionMask::ZERO.with_bit(3).with_bit(70).with_bit(233),
+        ];
+        for bars in [
+            0,
+            1,
+            SUPPORT_BLOCK_ROWS - 1,
+            SUPPORT_BLOCK_ROWS,
+            SUPPORT_BLOCK_ROWS + 1,
+            2 * SUPPORT_BLOCK_ROWS + 77,
+        ] {
+            let owned = Column::from_rows(&column(41, bars, &live, 2));
+            let mut items: Vec<Itemset> = candidates
+                .iter()
+                .map(|&mask| Itemset {
+                    mask,
+                    hits: u64::MAX,
+                })
+                .collect();
+            owned.support_each(&mut items);
+            for item in &items {
+                assert_eq!(
+                    item.hits,
+                    owned.support(&item.mask),
+                    "{bars} bars, {:?}: the blocked count disagrees",
+                    item.mask.words()
+                );
+            }
+            assert_eq!(
+                items.first().map(|i| i.hits),
+                Some(owned.bars()),
+                "the empty candidate hits every one of {bars} bars"
+            );
+            assert_eq!(
+                items.get(1).map(|i| i.hits),
+                Some(0),
+                "a dead bit hits none"
+            );
+        }
+
+        let mut nothing: Vec<Itemset> = Vec::new();
+        Column::from_rows(&column(5, 900, &live, 2)).support_each(&mut nothing);
+        assert!(nothing.is_empty(), "an empty slice is a no-op");
+    }
+
+    /// One block adds to what an item already holds, and saturates rather than
+    /// wrapping.
+    ///
+    /// [`support_block`] is the unit the bench times, so its own contract is
+    /// pinned: an empty block adds nothing, a block adds its count, and a count
+    /// one short of `u64::MAX` stops there.
+    #[test]
+    fn one_block_adds_its_count_and_saturates() {
+        let rows = column(17, 300, &[3, 70], 1);
+        let mask = ConditionMask::ZERO.with_bit(3);
+        let expected = Column::from_rows(&rows).support(&mask);
+        assert!(
+            expected > 0 && expected < 300,
+            "the fixture must split the bars"
+        );
+        let mut items = [
+            Itemset { mask, hits: 5 },
+            Itemset {
+                mask,
+                hits: u64::MAX - 1,
+            },
+        ];
+        support_block(&[], &mut items);
+        assert_eq!(
+            items.map(|i| i.hits),
+            [5, u64::MAX - 1],
+            "an empty block adds nothing"
+        );
+        support_block(&rows, &mut items);
+        assert_eq!(
+            items.map(|i| i.hits),
+            [5 + expected, u64::MAX],
+            "a block adds its count, saturating"
+        );
+    }
+
+    /// The blocked fold is one fixed-width hit test per row, like `support`.
+    ///
+    /// The same structural guard as
+    /// [`the_live_support_body_is_one_fixed_width_hit_test`], asked of the fold
+    /// the sweep now runs. A result test cannot see a candidate-position loop
+    /// come back, because it reaches the same count.
+    #[test]
+    fn the_blocked_fold_is_one_fixed_width_hit_test() {
+        const ANCHOR: &str =
+            "\nfn block_hits(block: &[ConditionMask], candidate: &ConditionMask) -> u64 {\n";
+        let source = include_str!("column.rs");
+        let body = source
+            .split_once(ANCHOR)
+            .and_then(|(_, rest)| rest.split_once("\n}\n"))
+            .map(|(body, _)| body);
+        assert!(
+            body.is_some(),
+            "`block_hits` no longer has the signature `{ANCHOR}` closing at column zero"
+        );
+        let code: String = body
+            .unwrap_or_default()
+            .lines()
+            .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(code.matches("row.hits(candidate)").count(), 1);
+        assert_eq!(code.matches(".fold(").count(), 1, "one fold over the block");
+        for banned in [
+            "set_positions",
+            "popcount",
+            "for ",
+            "while ",
+            "loop ",
+            ".all(",
+            ".any(",
+            ".filter(",
+            ".count(",
+            ".get(",
+        ] {
+            assert!(
+                !code.contains(banned),
+                "`{banned}` in `block_hits`: candidate depth must not control live support work"
             );
         }
     }

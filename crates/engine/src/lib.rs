@@ -40,7 +40,7 @@
 //!
 //! | operation | cost | why |
 //! |---|---|---|
-//! | mask evaluation | O(1) per bar in [`column::Column::support`] | one fixed-six-word [`vocab::ConditionMask::hits`] call per bar |
+//! | mask evaluation | O(1) per bar per candidate in [`column::Column::support_each`] | one fixed-six-word [`vocab::ConditionMask::hits`] call per bar per candidate, the column walked once per batch in 512-row blocks (D-4481) |
 //! | condition lookup | O(1) | direct index into `vocab`'s fixed table |
 //! | duplicate rejection | expected O(1) at k=1; **absent at k≥2** | one pre-sized `offered`-set insert at k=1; the injective prefix join needs no candidate set |
 //! | result append | O(1) amortised | `Vec::push`; k=1 reserves the offered width and later levels reserve a capped previous-frontier heuristic |
@@ -51,6 +51,13 @@
 //! live sweep bypassed it for a Theta(k) bitmap intersection. The column now owns
 //! row masks and calls `hits` exactly once per bar; the source guard and `C-E-02`
 //! bind the live path rather than a reference helper.
+//!
+//! **Since D-4481 the live path is [`column::Column::support_each`]**, which
+//! performs that same one `hits` per bar for each candidate of a batch, block by
+//! block, so the column is streamed once per batch rather than once per
+//! candidate (so1-1). [`column::Column::support`] keeps the one-candidate form
+//! as the reference the blocked count is tested against; the sweep no longer
+//! calls it.
 //!
 //! *Mask evaluation.* `hits` is constant and branchless. The old live
 //! [`column::Column::support`] intersected one bitmap per named position, so its
@@ -148,6 +155,16 @@ pub mod primitives {
     #[inline]
     pub fn append(out: &mut Vec<Itemset>, item: Itemset) {
         out.push(item);
+    }
+
+    /// The canonical level order: the one comparison sort each level's
+    /// survivors pass through before the level is published.
+    ///
+    /// Routed here so `benches/ratio.rs` FXD-08 times the production sort
+    /// rather than a copy of it (W3-engine1-1, D-4483). O(|F| log |F|) per
+    /// level, never per bar or per pair; `docs/06-limits.md` quotes FXD-08.
+    pub fn sort_level(level: &mut [Itemset]) {
+        crate::sort_canonically(level);
     }
 
     /// One prior frontier indexed exactly as the level join indexes it.
@@ -1512,7 +1529,17 @@ impl Ladder {
         // width; a long caller list with repeats is legal (each is counted in
         // `duplicates`) and must not size this vector (p7num-3, D-2666).
         let mut first: Vec<Itemset> = reserved(live.len().min(vocab::table::COUNT))?;
-        // Both counted inside the loop below, so every entry in `live` increments exactly
+        // Every live position, in caller order, and then its singleton waiting
+        // for a count. The same bound as `first`: distinct live positions. The
+        // positions are kept beside the counts so an exclusion is named by the
+        // position the caller gave rather than recovered from its mask.
+        let mut positions: Vec<u32> = reserved(live.len().min(vocab::table::COUNT))?;
+        let mut measured: Vec<Itemset> = reserved(live.len().min(vocab::table::COUNT))?;
+        // Each refused-as-not-live position, with how many measured positions
+        // preceded it in the caller's list, so the second pass below names the
+        // exclusions in exactly the order one pass did.
+        let mut not_live: Vec<(usize, u32)> = reserved(live.len())?;
+        // Both counted inside the loops below, so every entry in `live` increments exactly
         // one bucket and `Frontier::reconciles` becomes an invariant of the loop rather
         // than an identity one residual makes true by construction.
         let mut duplicates = 0_u64;
@@ -1544,15 +1571,32 @@ impl Ladder {
             }
             let live_position = u16::try_from(p).is_ok_and(vocab::table::is_live);
             if p >= ConditionMask::BITS || !live_position {
+                not_live.push((positions.len(), p));
+                continue;
+            }
+            positions.push(p);
+        }
+        measured.extend(positions.iter().map(|&p| Itemset {
+            mask: ConditionMask::default().with_bit(p),
+            hits: 0,
+        }));
+
+        // ONE BLOCKED PASS FOR EVERY POSITION (so1-1, D-4481). This loop called
+        // `Column::support` once per position, so k=1 streamed the column from
+        // memory up to 384 times; `support_each` counts every position against
+        // each cache-resident block, with the same one hit test per bar.
+        column.support_each(&mut measured);
+
+        let mut refused = not_live.into_iter().peekable();
+        for (at, (Itemset { mask: m, hits }, p)) in measured.into_iter().zip(positions).enumerate()
+        {
+            while let Some((_, dead)) = refused.next_if(|(before, _)| *before == at) {
                 excluded_positions.push(Excluded {
-                    position: p,
+                    position: dead,
                     support: None,
                     reason: Why::NotLive,
                 });
-                continue;
             }
-            let m = ConditionMask::default().with_bit(p);
-            let hits = column.support(&m);
             if hits == 0 {
                 excluded_positions.push(Excluded {
                     position: p,
@@ -1576,7 +1620,14 @@ impl Ladder {
                 infrequent = infrequent.saturating_add(1);
             }
         }
-        sort_canonically(&mut first);
+        for (_, p) in refused {
+            excluded_positions.push(Excluded {
+                position: p,
+                support: None,
+                reason: Why::NotLive,
+            });
+        }
+        primitives::sort_level(&mut first);
         let generated = len_u64(live.len());
         // `duplicates` was hardcoded `0` here, under a comment claiming none were
         // possible because "`live` is deduplicated". `live` is deduplicated BY THIS LOOP,
@@ -2063,7 +2114,7 @@ impl Ladder {
                 breach,
             ));
         }
-        sort_canonically(&mut out);
+        primitives::sort_level(&mut out);
         Ok((
             joined_frontier(k, out, generated, pruned, infrequent),
             halted,
@@ -2284,8 +2335,10 @@ fn without_highest(m: &ConditionMask) -> ConditionMask {
 ///
 /// # Sized so the spawn disappears, and no larger
 ///
-/// A lane's share of one batch is this many `Column::support` calls. At the
-/// benched cost — 1.2 to 5.0 microseconds per candidate on 100,000 bars — that
+/// A lane's share of one batch is this many candidates, counted in one
+/// `Column::support_each` pass (D-4481). At the benched cost — 1.2 to 5.0
+/// microseconds per candidate on 100,000 bars, measured one candidate per pass
+/// before D-4481 — that
 /// is 10 to 40 milliseconds of work against a thread spawn of roughly 50
 /// microseconds, so the spawn is under half a per cent.
 ///
@@ -2347,14 +2400,16 @@ fn lanes() -> usize {
 /// reads the previous frontier — and those are hash probes and integer adds.
 /// (This named a `seen` set admitting or rejecting duplicates; that set is
 /// deleted, D-1440.) Moving them would need locks and would change when
-/// a budget fires, which changes the ANSWER. `Column::support` is the opposite:
-/// it takes `&Column`, touches no shared state, and costs `Theta(bars)`. Only
-/// the expensive, shared-nothing half is spread.
+/// a budget fires, which changes the ANSWER. Support counting is the opposite:
+/// it takes `&Column`, touches no shared state, and costs `Theta(bars)` per
+/// candidate. Only the expensive, shared-nothing half is spread, and each lane
+/// counts its whole slice in one blocked pass, [`Column::support_each`], so a
+/// lane streams the column once rather than once per candidate (D-4481).
 ///
 /// # Determinism
 ///
 /// Workers write support counts into disjoint, positionally fixed slices of one
-/// `counts` vector, and after every worker has finished one serial loop appends
+/// `counted` vector, and after every worker has finished one serial loop appends
 /// the survivors to `out` in candidate order through
 /// [`primitives::append`] — so `out` receives the same sequence a single lane
 /// would have produced. (This described per-chunk `parts` vectors that no
@@ -2382,25 +2437,21 @@ fn drain(
     }
     let width = batch.len().div_ceil(lane_count.max(1)).max(1);
     out.try_reserve(batch.len()).map_err(|_| Breach::Memory)?;
-    let mut counts = reserved(batch.len()).map_err(|_| Breach::Memory)?;
-    counts.resize(batch.len(), 0_u64);
+    let mut counted: Vec<Itemset> = reserved(batch.len()).map_err(|_| Breach::Memory)?;
+    counted.extend(batch.iter().map(|&mask| Itemset { mask, hits: 0 }));
     std::thread::scope(|scope| {
-        for (masks, hits) in batch.chunks(width).zip(counts.chunks_mut(width)) {
+        for lane in counted.chunks_mut(width) {
             std::thread::Builder::new()
-                .spawn_scoped(scope, move || {
-                    for (mask, count) in masks.iter().zip(hits) {
-                        *count = column.support(mask);
-                    }
-                })
+                .spawn_scoped(scope, move || column.support_each(lane))
                 .map_err(|_| Breach::Workers)?;
         }
         Ok(())
     })?;
     // All worker results commit together in original candidate order. No
     // worker owns a growing result vector and this loop cannot allocate.
-    for (mask, hits) in batch.iter().zip(counts) {
-        if hits >= min_hits {
-            primitives::append(out, Itemset { mask: *mask, hits });
+    for item in counted {
+        if item.hits >= min_hits {
+            primitives::append(out, item);
         } else {
             *infrequent = infrequent.saturating_add(1);
         }
@@ -2526,8 +2577,14 @@ mod tests {
             "the shipping region precedes the tests"
         );
         assert!(shipping.contains("primitives::append(&mut first, Itemset { mask: m, hits });"));
-        assert!(shipping.contains("primitives::append(out, Itemset { mask: *mask, hits });"));
+        assert!(shipping.contains("primitives::append(out, item);"));
         assert!(!shipping.contains(".push(Itemset"));
+        // AND EVERY LEVEL IS ORDERED THROUGH THE ONE SORT FXD-08 TIMES
+        // (W3-engine1-1, D-4483): k=1 and every joined level, and no other
+        // call of the sort it fronts.
+        assert!(shipping.contains("primitives::sort_level(&mut first);"));
+        assert!(shipping.contains("primitives::sort_level(&mut out);"));
+        assert_eq!(shipping.matches("sort_canonically(&mut").count(), 0);
     }
 
     /// Eight positions over sixty-four bars -- a column the ladder climbs.
@@ -4129,6 +4186,36 @@ mod tests {
         };
         primitives::append(&mut out, item);
         assert_eq!(out, vec![item]);
+        // `sort_level` puts any order of a level back in the order the walk
+        // published it (W3-engine1-1, D-4483).
+        for level in &s.levels {
+            let mut reversed = level.frequent.clone();
+            reversed.reverse();
+            primitives::sort_level(&mut reversed);
+            assert_eq!(reversed, level.frequent, "k={}", level.k);
+        }
+        assert!(
+            s.levels.iter().any(|l| l.frequent.len() > 1),
+            "a level of two or more, or the reversal proves nothing"
+        );
+        // Mask first, hits second: the same mask at two counts orders by the
+        // count, and two masks order by their words whatever their counts.
+        let one = ConditionMask::default().with_bit(1);
+        let two = ConditionMask::default().with_bit(2);
+        let mut keyed = vec![
+            Itemset { mask: two, hits: 1 },
+            Itemset { mask: one, hits: 9 },
+            Itemset { mask: one, hits: 3 },
+        ];
+        primitives::sort_level(&mut keyed);
+        assert_eq!(
+            keyed,
+            vec![
+                Itemset { mask: one, hits: 3 },
+                Itemset { mask: one, hits: 9 },
+                Itemset { mask: two, hits: 1 },
+            ]
+        );
     }
 
     /// The default ceiling, named once so the test above reads clearly.
@@ -4663,11 +4750,20 @@ mod tests {
         // `column.rs` check below already uses, and it separates the two by what
         // they ARE rather than by how they happen to be written.
         let shipped = src.split("#[cfg(test)]").next().unwrap_or(src);
+        // BOTH SITES COUNT A WHOLE SLICE IN ONE BLOCKED PASS (so1-1, D-4481).
+        // They called `column.support` once per candidate, which streamed the
+        // column from memory once per candidate; a site that went back to that
+        // would pass every result test, so the spelling is pinned here.
         assert_eq!(
-            shipped.matches(concat!("column.", "support(")).count(),
+            shipped.matches(concat!("column.", "support_each(")).count(),
             2,
             "both support sites in the sweep -- k=1 and the batch `drain` the \
-             level join feeds -- must read the owned fixed-width column."
+             level join feeds -- must count through the blocked column pass."
+        );
+        assert_eq!(
+            shipped.matches(concat!("column.", "support(")).count(),
+            0,
+            "and neither may fall back to one column walk per candidate"
         );
         assert!(
             shipped.contains(concat!("Column::", "try_from_rows(bar_bits)")),
@@ -5781,6 +5877,65 @@ mod caller_input {
         assert!(
             s.all_frequent()
                 .all(|i| vocab::table::only_live(i.mask) == i.mask)
+        );
+    }
+
+    /// k=1 counts every position in one blocked pass and still names its
+    /// exclusions in the caller's order (so1-1, D-4481).
+    ///
+    /// The pass that used to measure each position as it met it is now two: one
+    /// that dedups and refuses, one blocked count, then a merge. The merge is the
+    /// part that can reorder, so the fixture puts a not-live position before the
+    /// first measured one, between measured ones, and after the last, beside a
+    /// measured always-false and always-true position and a repeat.
+    #[test]
+    fn exclusions_are_named_in_caller_order_around_the_blocked_count() {
+        let b = bars(&[&[0, 9], &[1, 9], &[0, 1, 9]]);
+        let live = [240_u32, 3, 0, 9_999, 9, 6, 1, 3, 19];
+        let s = Ladder::with_min_hits(1).walk(&b, &live);
+        let named: Vec<(u32, Option<u64>, Why)> = s
+            .excluded
+            .iter()
+            .map(|e| (e.position, e.support, e.reason))
+            .collect();
+        assert_eq!(
+            named,
+            vec![
+                (240, None, Why::NotLive),
+                (3, Some(0), Why::AlwaysFalse),
+                (9_999, None, Why::NotLive),
+                (9, Some(3), Why::AlwaysTrue),
+                (6, None, Why::NotLive),
+                (19, None, Why::NotLive),
+            ],
+            "every exclusion, in the order the caller listed its position"
+        );
+        let first = s.levels.first().cloned().unwrap_or_default();
+        assert_eq!(
+            first
+                .frequent
+                .iter()
+                .map(|i| (i.mask, i.hits))
+                .collect::<Vec<_>>(),
+            vec![
+                (ConditionMask::default().with_bit(0), 2),
+                (ConditionMask::default().with_bit(1), 2),
+            ],
+            "and the measured survivors keep their counts"
+        );
+        assert_eq!(first.duplicates, 1, "the repeated 3 is a duplicate");
+        assert_eq!(first.excluded, 6);
+        assert!(first.reconciles(), "1 + 6 + 0 + 2 == 9 offered");
+
+        let none_live = Ladder::with_min_hits(1).walk(&b, &[240, 6]);
+        assert_eq!(
+            none_live
+                .excluded
+                .iter()
+                .map(|e| e.position)
+                .collect::<Vec<_>>(),
+            vec![240, 6],
+            "with nothing to measure, every refusal is still named in order"
         );
     }
 

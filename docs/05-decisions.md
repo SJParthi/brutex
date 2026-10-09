@@ -66493,3 +66493,186 @@ measurement, as `runner::rank` did.
 
 **Store, digests and outputs.** None change. No run constructed `Best`, so no
 stored output, digest or report was ever derived from it.
+
+### D-4481 — Support is counted a batch at a time, block by block, not one candidate per pass over the column — 2026-10-09
+
+**What was observed.** Audit finding so1-1. The sweep counted every candidate
+with its own `Column::support` pass over the whole column: one
+`ConditionMask::hits` per bar, six word-ANDs against 48 bytes fetched. Once
+the column leaves the level-two cache the pass is bound by the fetch, so its
+per-bar cost grows with the column: the audit measured p99 per bar 1.87× to
+3.04× from 10^3 to 10^6 bars, and C-E-01 1.8× to 2.7× from 10^4 to 10^6 on
+this box. `docs/04-invariants.md` recorded C-E-01 at 0.663× (an M4 Pro, and the
+minimum of whole passes, which hides a tail) and called the difference noise;
+`docs/06-limits.md` said mask evaluation had "no size that grows". Re-measured
+here one candidate per pass (FXD-03): p50 about 1.2 / 2.0 / 6.4 ns a bar at
+10^4 / 10^5 / 10^6.
+
+**Decided.** `Column::support_each(&mut [Itemset])` counts a slice of
+candidates in one walk of the column, in blocks of `SUPPORT_BLOCK_ROWS` = 512
+rows (24 KiB, half the 48 KiB L1d of the box measured): every candidate is
+counted against a block before the next block is read, so each block is
+fetched once per batch. `support_block` is the per-block unit; its row fold
+`block_hits` is out of line (`#[inline(never)]`) because a probe measured the
+inlined closure form at about 2.4 ns a bar against 1.17 ns; the cause was not
+investigated. `drain` gives each support lane its slice of the batch and k=1
+counts all its offered positions in one call, then classifies them in the
+caller's order. The per-(bar, candidate) operation is the same one `hits`, and
+the count is the same: tested against `Column::support` at 0, 1, 511, 512, 513
+and 1,101 bars. `Column::support` stays as that reference and is no longer
+called by the sweep. C-E-01 now times `support_each` over 64 candidates
+(median of five block walks): 0.994× / 1.000×. FXD-02 gates one block's p99
+at 10^3 to 10^6 bars: 1.064× / 1.212× / 1.321×, and 0.932× / 1.232× / 1.287×
+with four extra CPU-bound processes running. FXD-03 prints the
+one-candidate pass on every run.
+
+**What stays, named.** A lane that holds one candidate -- a level's tail
+drain, a level of a few survivors -- is the old shape and pays FXD-03's
+per-bar cost. That is the memory system's, not an operation count: counting
+one candidate reads every bar's 48 bytes once however it is arranged.
+`docs/06-limits.md` names it.
+
+**Rejected.** Gating the one-candidate pass flat: it is not flat on any machine
+whose cache is smaller than the column, so the gate would be false or red.
+
+**Needs the owner.** `CLAUDE.md` §3 rule 4 names
+`engine::column::Column::support` as the production mask-evaluation path. It
+no longer is: the sweep calls `Column::support_each`, which performs the same
+one fixed-six-word `hits` per bar for each candidate. The rule's content holds;
+its method name is stale. This entry does not edit `CLAUDE.md`, which no
+agent message may authorise.
+
+**Store, digests and outputs.** None change. Counts are identical by test, the
+level order is the same canonical sort, and k=1 names its exclusions in the
+same order (`exclusions_are_named_in_caller_order_around_the_blocked_count`).
+
+### D-4482 — The p99 rows measure every size inside each of nine groups and gate the median paired ratio — 2026-10-09
+
+**What was observed.** Audit finding so1-3. O1P-03 and O1P-04 ran all rounds
+of 10^3, then all of 10^4, and so on, and gated each size's smallest round p99
+against the smallest 10^3 one, two-sided. The base and the comparand were
+measured in different stretches of the machine's load: in the audit's run 1
+of 4, O1P-04's 10^3 p99 read 11,458 ns against a normal 3,469 to 3,593, so 10^4
+came out at 0.309× and BREACHED on unchanged code. O1P-04's vector also grew
+by every push of every round, so its "10^3" ended holding 1.6 million; a scan
+planted on every 1,024th push read 1.117× at 10^4 and 2.062× at 10^5 under
+that design and breached only at 10^6.
+
+**Decided.** Each p99 row runs 9 groups. Inside a group every size is
+measured back to back after a warm-up, starting at a different size each
+group, and each group gives its own p99 ratio against its own 10^3. The row
+gates the median of the nine, so a load spike must disturb five groups to
+move the verdict while an O(n) operation moves all nine.
+`the_interleaved_statistic_can_pass_and_can_fail` runs before any row and
+proves the statistic on fixed numbers. O1P-04 truncates its pre-touched vector
+to exactly `n` before every sample, so the size it names is the size it
+holds; the first-touch shape is printed beside it and not gated, because
+whether a reservation's pages are fresh is the allocator's state (only 10^6
+crosses glibc's mapping threshold). O1P-03 gates 10^4 only: production's k=1
+table never holds more than 384 positions, and at 10^5 its p99 moved between
+1.35× and 4.66× with the machine's load.
+
+**Proved both ways.** Clean, at load 9.4: O1P-03 1.062× at 10^4; O1P-04 0.761×
+/ 0.676× / 0.825×. With four extra CPU-bound processes running (load 9.6 rising
+to 11.7): 1.382×; 1.005× / 0.986× / 1.027×. Planted O(n) scans: in `append` on
+every 32nd push, 12.955× / 9,867× / 19,835× at load 16.6 to 17.4; in `offer`
+for one position in 64, 8.832× at 10^4, load 11.9. Neither plant was
+committed.
+
+**Store, digests and outputs.** None. Bench-only.
+
+### D-4483 — Each level's sorts are measured and kept, not removed — 2026-10-09
+
+**What was observed.** Audit finding W3-engine1-1: every level sorts its
+survivors canonically (`sort_canonically`) and its index sorts the keyed
+prefix pairs (`JoinIndex::try_new`), O(|F| log |F|) per level, and
+`docs/06-limits.md` recorded it as "not timed here".
+
+**Decided.** Keep both, measure both. Canonical order is the output's identity
+(§3 rule 5), and the prefix join walks prefix blocks in the index's order,
+which decides what a level halted by the pair budget emits; neither can be
+replaced by an unordered structure without changing outputs. Both production
+sort sites now call `engine::primitives::sort_level`, and the FXD-08 row times
+it and `JoinProbe::try_new` at 10^3 to 10^6 survivors (p50 / p99 / max in
+`docs/06-limits.md`): the sort 23.5 µs / 0.716 ms / 22.6 ms / 306 ms at p50.
+Per item per log2 |F| the figure grows (sort 2.11× / 5.32× / 6.55×, index 0.84×
+/ 3.65× / 8.73× against 10^3) because wider levels tie on more leading key
+words and outgrow the caches; both causes are bounded, and the row gates the
+ratio at 21×, seven key words on top of the 3.0× ceiling, which a quadratic
+sort fails at 10^5.
+
+**Store, digests and outputs.** None change: `sort_level` is the same sort.
+
+### D-4484 — An expression's scratch is chosen from its stack height, two bit planes wide — 2026-10-09
+
+**What was observed.** Audit finding o1engine-22: D-1455 sized `evaluate`'s
+scratch from the program's LENGTH (8, 64 or 576 one-byte slots), so a
+599-instruction AND of 300 conditions, whose stack never stands taller than
+two, cleared 576 bytes on every bar. The per-bar cost still followed scratch
+capacity, not the program's shape, and nothing timed it.
+
+**Decided.** `Expression` carries its stack `height`, measured once by
+`from_parts` (the one constructor `decode`, `parse` and the search use) and
+never encoded. `evaluate` walks two bit planes, truth and known, of
+`Tier::of(height).words()` words: one per plane up to height 64, nine (576
+values, the deepest 1,151 instructions reach) past it. Kleene AND, OR and NOT
+are bit operations on `(true, known)` pairs, tested equal to `Truth`'s table
+over every program of up to five instructions on seven symbols and 2,000
+longer seeded ones under all 27 assignments. FXD-04 holds the
+per-instruction p99 from 1 to 1,151 instructions (0.32× to 0.35×, one-sided)
+and FXD-05 height 576 against height 2 at 1,151 instructions (1.440×,
+two-sided), load 7.6.
+
+**Store, digests and outputs.** None change. The wire format and `VERSION` are
+untouched, `height` is a function of `code` and `len` so equality is
+unchanged, and every program answers what it answered before.
+
+### D-4485 — The search node's sibling comparison is measured and bounded, not removed — 2026-10-09
+
+**What was observed.** Audit finding o1engine-23: each `Cursor::advance`
+node is O(1) plus one canonical-order comparison of the two subtrees a join
+combines, up to 575 instruction pairs, and the cost was "stated from the
+code's shape; not timed".
+
+**Decided.** Keep the comparison and bound it. It defines canonical order, and
+an O(1) form would need the order of two arbitrary subtrees from O(1) state:
+a per-position common-prefix length still leaves the join comparing the
+second sibling against the first from where that prefix ends. FXD-06 decodes
+the worst node -- the last placement of a 1,151-instruction program whose two
+575-instruction siblings are identical -- and gates its p99 against the same
+placement with siblings that differ at once at 3.0×; measured 1.541× (p99
+2,560 ns against 1,696 ns, load 7.6). A realistic three-bit search is
+reported beside it: 37 ns p50, 584 ns p99 per node over 200,000 nodes.
+
+**Store, digests and outputs.** None. Bench and documents only.
+
+### D-4486 — A ranked row whose money total an `f64` may have rounded is refused by name — 2026-10-09
+
+**What was observed.** Audit finding GAP16-26: D-1173 made `edge`'s money
+exact `i128`/`i64` and converted each value to `f64` once, which is exact only
+below 2^53 paisa. Past it the conversion rounds, and the rounded total would be
+ranked, persisted as IEEE bits in `cli`'s sweep-evidence row and printed, as
+though it were the sum.
+
+**Decided.** `Edge::money_is_exact` is true exactly when all eight money
+fields (four sums, four extrema) are finite and strictly below
+`EXACT_PAISA_LIMIT` (2^53) in magnitude. A field of exactly 2^53 is refused
+too: it is also what 2^53 + 1 converts to, so the stored value cannot prove
+which it was. `rank` refuses every inexact row under every lens, counts it in
+`Ranked::inexact` (read by `Ranked::inexact()`), and the FINDINGS report, on
+the retained and the streamed path, prints `REFUSED, money inexact` with the
+count whenever it is not zero. The mean and `t` are statistics (§7) and are
+not asked.
+
+**Rejected.** Changing `Edge`'s money fields to integers: `cli` persists their
+IEEE bits and `api` serves them, so that is a new sweep-evidence row version in
+`cli`, which this change may not build. Clamping or saturating: a different
+number presented as the sum, which §4 bans.
+
+**Store, digests and outputs.** No format changes. A report prints the new line
+only when something was refused, so every report with nothing refused is
+byte-identical. A run is affected only if some money total reached 2^53 paisa
+(about 9.0 × 10^13 rupees); over the 1,222,791 bars `crates/engine`'s bench
+says an instrument holds, that needs an average of about 7.4 × 10^9 paisa
+(7.4 crore rupees) per bar. That is arithmetic on those two figures, not a
+scan of stored outputs.

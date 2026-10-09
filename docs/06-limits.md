@@ -11901,23 +11901,76 @@ time is within run-to-run noise. Not measured on a multi-year span.
   the subtree ending there and the stack depth after it, and checks a new
   choice from those. The record is derived, never encoded: `CURSOR_BYTES`
   stays 3,086 and `decode` rebuilds it in O(at). The sibling comparison is
-  kept because canonical order is defined by it. Stated from the code's
-  shape; not timed. Proved by
+  kept because canonical order is defined by it. Proved by
   `vocab::expression_search::invariant_tests::the_incremental_prefix_check_admits_exactly_what_the_full_rewalk_did`
   and `a_resumed_search_records_exactly_what_the_live_one_does`.
+- **The sibling comparison is measured and bounded, not removed (D-4485).**
+  Making it O(1) would need the order of two arbitrary subtrees from O(1)
+  state; the cursor could carry a longest-common-prefix length per position,
+  but the join that consumes two siblings must still compare the second
+  sibling against the first from where their common prefix ends, and that
+  suffix is the comparison. So the node is O(1) plus O(LCP), at most 575
+  instruction pairs (two siblings of 575 make the largest join of a
+  1,151-instruction program). The `FXD-06` row of `crates/vocab/benches/ratio.rs`
+  times exactly that worst node -- a cursor decoded at the last position of a
+  1,151-instruction program whose two 575-instruction siblings are identical,
+  so the comparison reads all 575 pairs -- against the same placement with
+  siblings that differ at the first pair. Both emit the program, so both pay
+  the candidate's fixed-width copy and its height measurement (D-4484); the
+  only difference is the comparison. Measured 2026-10-09 on the shared
+  four-vCPU box, load average 7.6, 9 interleaved groups of 5,000 nodes:
+
+  | Node | p50 | p99 | max |
+  |---|---|---|---|
+  | siblings differ at once | 1,318 ns | 1,696 ns | 15.7 ms |
+  | siblings identical, 575 pairs | 1,913 ns | 2,560 ns | 4.0 ms |
+  | realistic search, three bits, 200,000 nodes from the start (20,307 candidates; reported) | 37 ns | 584 ns | 11.6 ms |
+
+  The median paired p99 ratio, identical against differing, was **1.541×**
+  and is gated at 3.0×. The maxima are the scheduler. The worst node's
+  ~1.3 µs floor is the emission of a 1,151-instruction candidate, paid once per
+  candidate and then amortised over every bar the candidate is evaluated on.
 
 ## Boolean expression evaluation is Θ(program length) per bar (audit o1engine-22)
 
 - **`vocab::expression::Expression::evaluate` costs one step per instruction,
   at most 1,151, on every bar it is asked about.** It is not O(1) in the
   program and cannot be, because every instruction can change the answer;
-  it is O(1) in the bar count and allocates nothing. Its scratch stack is
-  sized to the program by `Tier::of(len).slots()`: 8 slots up to 15 instructions, 64
-  up to 127, and 576 (the deepest stack 1,151 instructions can reach) past
-  that, so the slots initialised per bar are at most `4.5 * len + 8`. Until
-  this audit every bar cleared all 1,151 slots, even for a one-condition rule.
-  Stated from the code's shape; not timed. Proved by
-  `vocab::expression::invariant_tests::the_scratch_stack_is_sized_to_the_program_and_the_deepest_still_evaluates`.
+  it is O(1) in the bar count and allocates nothing.
+- **Its scratch no longer scales with its length (D-4484).** D-1455 sized a
+  slot stack from the program's LENGTH (8, 64 or 576 one-byte slots), so a
+  599-instruction AND of 300 conditions, whose stack never stands taller than
+  two, still cleared 576 bytes a bar. Since D-4484 `evaluate` walks two bit
+  planes (truth and known) whose width is chosen from the program's stack
+  HEIGHT, measured once when the program is built: one 64-bit word per plane
+  up to height 64, which covers every program shorter than 129 instructions
+  and every AND or OR chain, and nine words per plane (576 values) past it.
+  Per bar that is two cleared words or eighteen, never a function of length.
+  Measured 2026-10-09 by the `FXD-04` and `FXD-05` rows of
+  `crates/vocab/benches/ratio.rs` (load average 7.6, 9 interleaved groups,
+  every sample 1,151 instructions of work):
+
+  | Program | p50 | p99 | max, per instruction |
+  |---|---|---|---|
+  | chain, 1 instruction | 7.27 ns | 19.13 ns | 3.58 µs |
+  | chain, 15 instructions | 3.16 ns | 6.66 ns | 3.56 µs |
+  | chain, 127 instructions | 3.17 ns | 6.43 ns | 3.56 µs |
+  | chain, 1,151 instructions (height 2) | 3.06 ns | 6.57 ns | 4.90 µs |
+  | height 576, 1,151 instructions | 4.64 ns | 10.51 ns | 7.01 µs |
+
+  The per-instruction p99 against one instruction is gated one-sided (each
+  call's fixed dispatch is amortised over more instructions; 0.32× to 0.35×).
+  Height 576 against height 2 at the same length is gated two-sided and read
+  **1.440×**: the deep planes live in memory where the shallow ones live in
+  two registers. Bounded by the nine-word tier; not flat, and named here.
+  The maxima are the scheduler. Proved by
+  `vocab::expression::invariant_tests::the_scratch_is_sized_to_the_program_height_and_the_deepest_still_evaluates`
+  and
+  `vocab::expression::invariant_tests::the_bit_planes_answer_exactly_what_the_kleene_table_answers`.
+- **The height costs one pass at construction.** `Expression::from_parts`
+  measures it in one walk of at most 1,151 instructions; `decode`, `parse` and
+  the search's candidate emission each call it once per program, never per
+  bar.
 
 ## Rupee text is read at most 64 bytes at a time (D-1437)
 
@@ -12879,6 +12932,41 @@ previous level's `|F_{k-1}|` survivors, sorts by twelve-word keys and dedups;
 Both are comparison sorts, so each level costs `O(|F| log |F|)` comparisons
 beyond the join, and the cost grows with the frontier. It replaced an
 `|F|^2 / 2` pairwise scan, and it is per level, never per pair or per bar.
+
+**Measured since D-4483 (W3-engine1-1).** Both sorts are routed through
+`engine::primitives` (`sort_level` is the canonical sort every level is
+published in; `JoinProbe::try_new` builds the index) and the `FXD-08` row of
+`crates/engine/benches/ratio.rs` times them on |F| distinct three-bit masks
+over 370 positions -- scrambled for the sort, as a join emits them, and
+already sorted for the index, as the walk hands it the previous level. 5
+interleaved groups; 2026-10-09, shared four-vCPU Xeon, load average 9.4:
+
+| |F| | level sort p50 / p99 / max | index p50 / p99 / max | samples |
+|---|---|---|---|
+| 10^3 | 23.5 µs / 80.4 µs / 4.93 ms | 22.1 µs / 56.3 µs / 8.08 ms | 1,000 |
+| 10^4 | 0.716 ms / 10.0 ms / 12.8 ms | 0.268 ms / 8.65 ms / 10.7 ms | 200 |
+| 10^5 | 22.6 ms / 44.5 ms / 44.5 ms | 14.3 ms / 27.9 ms / 27.9 ms | 40 |
+| 10^6 | 306 ms / 347 ms / 347 ms | 405 ms / 453 ms / 453 ms | 10 |
+
+At 10^5 and 10^6 the p99 is the max, because the row takes 40 and 10
+samples there. **It is n log n with a constant that grows, and the row says
+so rather than gating it flat.** Per item per log2 |F|, the sort's median
+paired ratio against 10^3 was 2.11× / 5.32× / 6.55× at 10^4 / 10^5 / 10^6, and
+the index's 0.84× / 3.65× / 8.73×: a wider level of these masks ties on more
+leading words, so each comparison reads further into its key (at most seven
+words for the sort, twelve for the index), and 56-byte items stop fitting the
+caches. Both causes are bounded, and the row gates the ratio at 21× -- seven
+words on top of the usual 3.0× -- which a quadratic sort (at least 60× at
+10^5) fails. With four extra CPU-bound processes running (load 9.6 rising to
+11.7) the medians were 2.12× / 5.41× / 9.82× and 0.88× / 3.46× / 9.90×.
+
+**In proportion.** The 10^5 survivors of a level were each counted against
+every bar to become survivors: at C-E-01's 1.26 ns per bar per candidate, over
+a 100,000-bar column, that is about 126 µs a survivor and 12.6 s for the level,
+against the sort's 22.6 ms. That is arithmetic on the two measurements, not a
+timed sweep. The sort is not removed: canonical order is the output's identity (§3
+rule 5), and the prefix join walks prefix blocks in the index's order, which
+decides what a level halted by the pair budget emitted.
 
 **The top-results keeper is gone, and its O(log cap) with it (D-4480).**
 `keep::Best::offer` refused in one root comparison and admitted with a
@@ -16073,7 +16161,19 @@ block before it; D-3309 removed that.
 **Still at the minimum of a mean:** mask evaluation (`C-E-*`, `C-V-*`),
 condition lookup, and every other row in the thirteen benches apart from
 C-T-01b and the O1P rows. The `hits` test and the compile-time name table have
-no size that grows, so there is nothing for a 10^3 → 10^6 sweep to vary. The
+no size that grows, so there is nothing for a 10^3 → 10^6 sweep to vary.
+
+**That last sentence was wrong about mask evaluation, and so1-1 found it
+(D-4481).** One `hits` has no size, but the sweep did not evaluate one: it
+walked the whole column once per candidate, and that walk's per-bar cost has
+the column's size in it, because the column leaves the caches. FXD-03 times
+that one-candidate pass at p50 / p99 and measured about 1.2 / 2.0 / 6.4 ns a
+bar at 10^4 / 10^5 / 10^6 bars on 2026-10-09 (load 9.4; reported, not gated).
+Since D-4481 the sweep counts a batch of candidates per 512-row block
+(`Column::support_each`), so a block is fetched once for the whole batch;
+FXD-02 gates one block's p99 at 10^3 to 10^6 bars (1.06× / 1.21× / 1.32×), and
+C-E-01, now on `support_each`, read 0.994× / 1.000×. See "The support pass
+walks the column once per batch" below. The
 two rule-4 operations that do grow, bar lookup and the k=1 table, are now
 covered. Round 2 below adds O1P-05 for the manifest lookup and O1P-06 for
 `tail`.
@@ -16091,6 +16191,12 @@ per live condition, so the table never holds more than `ConditionMask::BITS`,
 384 entries. O1P-03 gates 10^4 and 10^5 and only prints 10^6. Gating 10^6 at
 a ratio this close to 3.0 would make a red build a matter of luck.
 
+**Since D-4482 it gates 10^4 only.** At 10^5 the table is about 640 KiB and on
+this shared box competes for the level-two cache with whatever else runs: in
+the interleaved rows below it read 1.35× quiet and 4.66× with four extra
+CPU-bound processes running, while the code stood still. 10^4 is 26× past the
+384 positions production can offer.
+
 ### A reserved append's p99 is a page fault, about 14× its p50 (D-3301)
 
 `Vec::with_capacity` reserves address space, not memory. The first push into
@@ -16104,6 +16210,98 @@ microseconds per fresh page, is real and is paid by `engine::drain`'s
 reserved `out` as well. Touching every reserved page ahead of time would move
 that cost to the reservation and make a level that never fills it pay for
 pages it never uses, so it was not done.
+
+### The p99 rows are interleaved and gate a median of paired ratios (D-4482)
+
+**What was wrong (so1-3).** O1P-03 and O1P-04 ran every round of 10^3, then
+every round of 10^4, and so on, and gated each size's smallest round p99
+against the smallest 10^3 one, two-sided. The base and the size divided into
+it were measured in different stretches of the machine's load, so when the
+base's window ran slow the gate failed on unchanged code: the audit's run 1 of
+4 read O1P-04's 10^3 p99 at 11,458 ns against a normal 3,469 to 3,593, so 10^4
+came out at **0.309× and BREACHED** (load about 3.5). One stretch of load was
+being divided by another. And O1P-04's vector grew by every push of every
+round, so its "10^3" ended holding 1.6 million and an O(n) append could not
+separate the small sizes: a scan planted on every 1,024th push read 1.117× at
+10^4 and 2.062× at 10^5 that way, and breached only at 10^6 (28×).
+
+**What the rows do now.** Each row runs 9 groups; inside each group every size
+is measured back to back (5,000 samples after a warm-up), starting at a
+different size each group, and each group yields its own p99 ratio against its
+own 10^3. The row gates the MEDIAN of the 9 paired ratios, so a load spike
+must disturb five groups of nine to move the verdict, while an O(n) operation
+moves all nine. The O1P-04 vector is truncated to exactly `n` before every
+sample. `the_interleaved_statistic_can_pass_and_can_fail` runs first and
+proves, on fixed numbers, that the statistic passes four of nine groups
+disturbed tenfold and fails every group four times dearer, every group four
+times cheaper, five of nine disturbed, and a zero sample.
+
+**Measured 2026-10-09, shared four-vCPU Xeon, release bench profile.** p99 per
+32 operations, median over groups; ratios are the median paired ratio:
+
+| Row | 10^3 / 10^4 / 10^5 / 10^6 p99 | ratio at 10^4 / 10^5 / 10^6 | load average |
+|---|---|---|---|
+| O1P-03 | 633 / 656 / 810 / 2,828 ns | **1.062×** / 1.349× / 4.425× (only 10^4 gated) | 9.4 |
+| O1P-03, four extra spinners | -- | **1.382×** / 4.655× / 11.220× | 9.6 rising to 11.7 |
+| O1P-04 | 390 / 338 / 336 / 370 ns | **0.761× / 0.676× / 0.825×** | 9.4 |
+| O1P-04, four extra spinners | -- | **1.005× / 0.986× / 1.027×** | 9.6 rising to 11.7 |
+| O1P-04 first touch (not gated) | 858 / 828 / 817 / 3,571 ns | 0.940× / 1.007× / 4.223× | 9.4 |
+
+Maxima were 4 to 14 ms at every size, which is the scheduler, and are not a
+bound. **Both gates bite under load.** An O(n) scan planted in `append` on
+every 32nd push read 12.955× / 9,867× / 19,835× at load 16.6 to 17.4; a
+key-dependent O(n) scan planted in `offer` for one position in 64 read 8.832×
+at the gated 10^4, load 11.9. Both plants were reverted; neither was
+committed.
+
+**The first-touch row is printed and not gated.** A push into an untouched
+page takes the minor fault above. Whether a reservation's pages are fresh is
+the allocator's state: glibc reuses a freed block below its mapping threshold
+with its pages already written and maps a larger one afresh, so with every
+size's reservation sized alike only 10^6 faulted. Its 4.2× is that fact, not a
+dependence of the push on `n`.
+
+### The support pass walks the column once per batch, not once per candidate (D-4481)
+
+**What was wrong (so1-1).** The sweep counted every candidate with its own
+`Column::support` pass over the whole column: six word-ANDs a bar against 48
+bytes fetched a bar. Once the column leaves the level-two cache that pass is
+bound by the fetch, so its per-bar cost grew with the column. The audit
+measured p99 per bar 1.87× to 3.04× from 10^3 to 10^6 bars, and C-E-01, which
+took the minimum of whole passes, recorded 0.663× and called the difference
+noise.
+
+**The fix.** `Column::support_each` counts a whole slice of candidates: it
+walks the column in blocks of `SUPPORT_BLOCK_ROWS` (512 rows, 24 KiB, half the
+measured L1d) and counts every candidate against a block before moving on, so
+each block is fetched once for the batch. The drain hands each lane its slice
+of the batch and k=1 counts all its positions in one call. The per-bar,
+per-candidate operation is unchanged -- one `ConditionMask::hits` -- and the
+result is the same count, tested against `Column::support` at block edges.
+
+**Measured 2026-10-09, shared four-vCPU Xeon, release bench profile, load
+average 9.4:**
+
+| Row | What | 10^3 / 10^4 / 10^5 / 10^6 bars | Ratio |
+|---|---|---|---|
+| FXD-02 | one 512-row block, 16 candidates, p99 (gated) | 22.2 / 22.6 / 25.9 / 28.6 µs | 1.064× / 1.212× / **1.321×** median paired |
+| FXD-02, four extra spinners | same | -- | 0.932× / 1.232× / 1.287× |
+| C-E-01 | `support_each`, 64 candidates, median of block walks, per bar | -- / 1.263 / 1.256 / 1.264 ns | 0.994× / **1.000×** |
+| FXD-03 | one candidate per pass (reported, not gated), p50 per bar | -- / 1.22 / 1.96 / 6.38 ns | -- |
+
+FXD-02's blocks are drawn at random from the whole column, so at 10^6 nearly
+every sample starts with its block out of cache: the row prices the one fetch
+a batch pays per block, and that fetch is now shared by every candidate in the
+lane.
+
+**What remains, and it is inherent to a pass that counts few candidates.** A
+lane holding ONE candidate is the old shape exactly: the whole column streamed
+for six word-ANDs a bar, FXD-03's 1.2 → 6.4 ns a bar. It happens where a batch
+is small -- a level's tail drain, a level of a handful of survivors, or a
+batch split across many lanes -- and the cost is the memory system's, not an
+operation count: no rearrangement counts one candidate without reading every
+bar's 48 bytes once. The bound is the memory bandwidth per bar, at most
+FXD-03's figure, and FXD-03 prints it on every bench run.
 
 ### The `.tix` rebuild, measured — and that an append can pay it (D-3302)
 
@@ -16356,7 +16554,7 @@ of this build on this box, labelled as such, not budgets a gate holds.
 | W1-api3-0 | one journal file per audited request | Per request it is O(1) (two 256-byte appends and one create); the growth is the append-only audit record itself (§3 rule 8, D-1445) | not timed here |
 | o1api-4 | `param` scans the query once per field | Bounded by the 8,192-byte query cap and the route's fixed field count, so constant per request | not timed here |
 | W3-engine1-0, ET-o1-proof-coverage-2 | the subset prune is Θ(k) per candidate | Apriori's prune must test the k-2 subsets that are not the join's two parents; C-E-12 times one probe | C-E-12 (engine bench) |
-| W3-engine1-1 | each level is sorted, O(F log F) | Canonical order is what makes a sweep's output byte-identical across runs (§3 rule 5) and what the prefix join walks; the sort is per level, not one of rule 4's five per-operation primitives | not timed here |
+| W3-engine1-1 | each level is sorted, O(F log F) | Canonical order is what makes a sweep's output byte-identical across runs (§3 rule 5) and what the prefix join walks; the sort is per level, not one of rule 4's five per-operation primitives | measured by FXD-08, D-4483: sort 23.5 µs / 0.72 ms / 22.6 ms / 306 ms p50 at |F| = 10^3 / 10^4 / 10^5 / 10^6; see "Indexing each level sorts it" |
 | W3-engine1-2, o1engine-20 | ~~`keep::Best::offer` admits in O(log cap)~~ REMOVED by D-4480 | It had no production caller and no measurement, so the type was deleted with its tests; `engine/tests/production_callers.rs` refuses its return | none: removed |
 
 **Not removed and not inherent, now measured: o1api-33 (D-2291).**
@@ -16378,7 +16576,10 @@ p50s agree with the table; the tails are wider under the heavier load.
 
 **Not costs.** ET-bars-candles-store-3 (an off-session bar is admitted by
 `store` because `store` may not depend on `pull`'s calendar, §5; S-30-session
-states it). GAP16-26 is closed by D-1173 (money accumulated in `i64`/`i128`,
-one conversion to `f64` at the edge). ET-strategies-trades-ranking-costs-9 is
+states it). GAP16-26 was closed by D-1173 (money accumulated in `i64`/`i128`,
+one conversion to `f64` at the edge) only below 2^53 paisa; since D-4486 a
+money total at or past 2^53 never reaches a ranked, stored or printed row:
+`Edge::money_is_exact` is false for it, `rank` refuses the row and counts it
+in `Ranked::inexact`, and the FINDINGS report prints the count. ET-strategies-trades-ranking-costs-9 is
 the §72 text corrected by D-1448. rustonly-4 is `xdg-open` as the operating
 system's URL handler, kept by D-1202 and off with `BRUTEX_NO_OPEN`.
