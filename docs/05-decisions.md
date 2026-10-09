@@ -69037,3 +69037,47 @@ counts `finish_press`'s borrowed `rows_now_off_worker(site)` beside the four
 `in_resumable_order`; fails if the sort is removed or keyed by underlying),
 `server::tests::the_browser_is_opened_only_when_the_operator_asked_for_it`
 (now also requires the asked value in quotes), and the whole `api` lib suite.
+
+### D-4471 — `cli` implements grid cost model V3 and refuses V2 by name — 2026-10-09
+
+**What was observed.** D-4500 made `printed_ohlcv_cost_model_id_v3` the cost
+model `runner` implements and refuses V2 by name
+(`ExitGridErrorV1::SupersededCostModelIdV2`), leaving `cli` naming V2 in
+production (`execution_capability::exact_execution_law_digest_v1`,
+`ledger_all`'s exit policy) and in twelve test fixtures, so every policy the
+`cli` built was refused by resolution.
+
+**The change.** Every `cli` site names `printed_ohlcv_cost_model_id_v3`:
+production in `execution_capability.rs` and `ledger_all.rs`, fixtures in
+`anchored_search_lineage_v4`, `boolean_candidate_grid`,
+`boolean_candidate_tests`, `candidate_universe`, `execution_disposition_v2`,
+`global_replay`, `institutional_evidence`, `ledger_exit_policy_tests`,
+`population_admission_writer`, `selection_v4_authority`,
+`step3_orchestrator` and `stored_data_completeness`. The law's versioning
+rule is kept, not bypassed: no version is mutated in place. V2's id is
+unchanged and `cli`'s three cost-model checks (parameters, the stored
+parameter scalar, the resolved grid) all go through
+`runner::exit_grid_policy::implemented_cost_model`, which refuses V2 by name;
+the stored scalar's model is checked BEFORE its law digest, so an execution
+parameter record written by the build before D-4500 (V2 model, law digest
+under V2) is refused naming `SupersededCostModelIdV2`, never replayed and
+never refused only as "law digest differs". As D-1514 recorded for V1→V2,
+`exact_execution_law_digest_v1` hashes the implemented id, so every
+execution-law digest, execution parameter id and policy digest this build
+computes differs from one computed before it.
+
+**Tests.** `cli::execution_capability::tests::every_cost_model_check_refuses_the_superseded_v1_model_by_name`
+now also requires the law digest to differ from the one under V2, and a record
+exactly as the V2 build wrote it to be refused naming V2, and V2 in each of
+the three checks' refusal table. `cli::ledger_all::exit_policy_tests::every_admitted_runtime_resolution_binds_exact_axes_without_changing_risk`
+keeps the V1 record and the D-1514 V2 captures as records (the same two-rung
+policy rebuilt under each must still hash to them), requires the CLI wiring
+to equal the V3 reconstruction field for field and to differ from both
+records, and pins the two V3 digests from this build (labelled as not an
+independent capture). The lib tests of every switched module ran green as
+uid 65534: `execution_capability` 13, `ledger_all` 18, `step3_orchestrator`
+33, `execution_disposition_v2` 12, `candidate_universe` 117,
+`anchored_search_lineage_v4` 10, `stored_data_completeness` 8,
+`global_replay` 48, `population_admission_writer` 16,
+`selection_v4_authority` 7, `boolean_candidate` 61, `institutional_evidence`
+23.
