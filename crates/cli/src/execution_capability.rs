@@ -43,7 +43,7 @@ use runner::excursion::Side;
 use runner::exit_grid_policy::{
     ExecutionResolutionV1, ExecutionRunV1, ExecutionSeriesV1, ExitGridPolicyV1, ExitGridSelectorV1,
     ForcedStopV1, RangeResolutionV1, RatioLimitsV1, RationalPercentileV1, ResolvedExitGridV1,
-    RungPlanV1, SelectedExitV1, printed_ohlcv_cost_model_id_v2,
+    RungPlanV1, SelectedExitV1, printed_ohlcv_cost_model_id_v3,
 };
 use runner::grid::{Chosen, Ttp};
 use runner::identity::Params;
@@ -150,7 +150,7 @@ pub fn exact_execution_law_digest_v1() -> [u8; 32] {
     hasher.update(&ENTRY_DELAY_MINUTES.to_le_bytes());
     hasher.update(&[FORCED_EXIT_POLICY_TAG]);
     hasher.update(&FORCED_EXIT_IST_MINUTE.to_le_bytes());
-    hasher.update(&printed_ohlcv_cost_model_id_v2());
+    hasher.update(&printed_ohlcv_cost_model_id_v3());
     hasher.finalize()
 }
 
@@ -3735,7 +3735,7 @@ mod tests {
             RatioLimitsV1::new(100, 500, 10_000).expect("test ratio limits"),
             1_000_000,
             ExitGridSelectorV1::GuaranteedFloor,
-            printed_ohlcv_cost_model_id_v2(),
+            printed_ohlcv_cost_model_id_v3(),
             ForcedStopV1::Disabled,
             0,
             0,
@@ -3818,19 +3818,34 @@ mod tests {
 
     /// D-1514: each of the three cost-model checks here refuses the superseded
     /// V1 model by name and an unknown one generically, and the execution law
-    /// digest binds V2 rather than V1.
+    /// digest binds V2 rather than V1. D-4500 and D-4471: V2 is superseded in
+    /// turn and refused by its own name by the same three checks, and the
+    /// law digest binds V3, so a record written under V2 is refused, naming
+    /// V2, before its law digest is compared.
     #[test]
     fn every_cost_model_check_refuses_the_superseded_v1_model_by_name() {
         use runner::exit_grid_policy::printed_ohlcv_cost_model_id_v1 as v1;
+        use runner::exit_grid_policy::printed_ohlcv_cost_model_id_v2 as v2;
         let shipped = exact_execution_law_digest_v1();
-        assert_eq!(shipped, law_digest_under(printed_ohlcv_cost_model_id_v2()));
+        assert_eq!(shipped, law_digest_under(printed_ohlcv_cost_model_id_v3()));
         assert_ne!(shipped, law_digest_under(v1()));
+        assert_ne!(shipped, law_digest_under(v2()));
 
         let valid = parameters(TradeDirectionV1::Long, 3);
-        let scalar = ParameterScalarV1::from_parameters(&valid).expect("V2 scalar");
+        let scalar = ParameterScalarV1::from_parameters(&valid).expect("V3 scalar");
         assert_eq!(scalar.validate_shape(), Ok(()));
+        // A record exactly as the build before D-4500 wrote it: V2 model and
+        // the law digest under V2. Refused by the model's name, first.
+        let mut before_v3 = scalar.clone();
+        before_v3.cost_model_id = v2();
+        before_v3.execution_law_digest = law_digest_under(v2());
+        let refused = before_v3
+            .validate_shape()
+            .expect_err("a V2 record is refused");
+        assert!(refused.contains("SupersededCostModelIdV2"), "{refused}");
         for (model, needle) in [
             (v1(), "SupersededCostModelIdV1"),
+            (v2(), "SupersededCostModelIdV2"),
             ([8; 32], "UnsupportedCostModelId"),
         ] {
             let mut old = valid.clone();

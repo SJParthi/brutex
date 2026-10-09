@@ -414,6 +414,62 @@ fn the_corrected_sentences_do_not_return() {
     );
 }
 
+/// Four `docs/06-limits.md` statements the code had already made false, each
+/// retracted by D-4489 (audits rnew-2, r53-2, srust-6, sobs-17), and the code
+/// fact that made it false, read where it is declared, so neither the sentence
+/// nor the reason it is gone can drift back unseen.
+#[test]
+fn the_limits_sentences_the_code_falsified_stay_retracted() {
+    let limits = flat(&read("docs/06-limits.md"));
+    for stale in [
+        "an index file would be a new store format version",
+        "are not bounded in time, so 256 of them can hold every slot",
+        "71 inline awk programs remain in `ci.yml`",
+        "the event ceilings bound one at roughly 2.2 KiB of content",
+        "inflate that past about 14 KiB",
+    ] {
+        assert!(
+            !limits.contains(stale),
+            "docs/06-limits.md says again: {stale}"
+        );
+    }
+    for (file, fact) in [
+        (
+            "crates/store/src/time_index.rs",
+            "//! The time index — `<yyyy-mm>.tix` beside a month's `.bin`",
+        ),
+        (
+            "crates/api/src/server.rs",
+            "pub const BODY_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);",
+        ),
+        (".github/source_scan.rs", "const AWK_IN_CI: usize = 0;"),
+        (
+            "crates/telemetry/src/tail.rs",
+            "the widest line is just over **41 KB**",
+        ),
+        (
+            "crates/telemetry/src/tail.rs",
+            "pub const MAX_LINE_BYTES: usize = 64 * 1024;",
+        ),
+    ] {
+        assert!(
+            flat(&read(file)).contains(&flat(fact)),
+            "{file} no longer holds the fact D-4489 rests on: {fact}"
+        );
+    }
+    for corrected in [
+        "answers `first_at_or_after` with one index entry read (D-2329",
+        "are cut at `BODY_READ_TIMEOUT`, 10 seconds from the moment the head was delivered",
+        "set the pin to 0, so section 2 now holds in `ci.yml` for awk",
+        "so the widest line is just over 41 KB",
+    ] {
+        assert!(
+            limits.contains(corrected),
+            "docs/06-limits.md lost: {corrected}"
+        );
+    }
+}
+
 /// R9-csr-cx-4: the weekday bits' comments said NSE does not trade on a
 /// weekend, beside a paragraph and a charter (`docs/00-charter.md` §3) that
 /// record six weekend sessions and 1,710 bars. The behaviour (a weekend bar sets

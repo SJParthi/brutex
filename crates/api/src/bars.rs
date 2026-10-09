@@ -1133,6 +1133,41 @@ fn reserved_window(total: u64) -> Result<Vec<WindowBar>, String> {
     Ok(all)
 }
 
+/// The window's extremes from each month's kept fold, every month's unreadable
+/// records named in time order, and the first month that had one (W1-api5-4,
+/// D-4439).
+///
+/// The window's widest range and heaviest volume are the widest and heaviest
+/// of its months, and a month's are kept by [`month_fold`] until its file
+/// moves, so a `ts` page with `extremes=1` costs the seek page plus one probe a
+/// month instead of every record of every month. `stamps` are the files'
+/// stamps taken before they were opened; a month without one is folded again.
+fn kept_extremes<'f>(
+    files: &'f [BarFile],
+    desc: bool,
+    stamps: Option<&std::collections::HashMap<std::path::PathBuf, crate::answer_memo::FileStamp>>,
+) -> (Extremes, Vec<String>, Option<&'f BarFile>) {
+    let mut top = Extremes::default();
+    let mut named = Vec::new();
+    let mut first_faulted = None;
+    let in_time: Vec<&BarFile> = if desc {
+        files.iter().rev().collect()
+    } else {
+        files.iter().collect()
+    };
+    for file in in_time {
+        let before = stamps.and_then(|stamps| stamps.get(file.path())).copied();
+        let fold = month_fold(file, before);
+        top.range = top.range.max(fold.extremes.range);
+        top.volume = top.volume.max(fold.extremes.volume);
+        if !fold.faults.is_empty() {
+            first_faulted = first_faulted.or(Some(file));
+        }
+        named.extend(fold.faults);
+    }
+    (top, named, first_faulted)
+}
+
 /// One page of bars across a range of months, in one request.
 ///
 /// # The two paths, and why only one of them scans
@@ -1254,28 +1289,9 @@ pub fn window(
         // record of every month is named, as the full read named them, in
         // time order; the page's own are among them.
         let extremes = want_extremes.then(|| {
-            let mut top = Extremes::default();
-            let mut named = Vec::new();
-            first_faulted = None;
-            let in_time: Vec<&BarFile> = if desc {
-                files.iter().rev().collect()
-            } else {
-                files.iter().collect()
-            };
-            for file in in_time {
-                let before = stamps
-                    .as_ref()
-                    .and_then(|stamps| stamps.get(file.path()))
-                    .copied();
-                let fold = month_fold(file, before);
-                top.range = top.range.max(fold.extremes.range);
-                top.volume = top.volume.max(fold.extremes.volume);
-                if !fold.faults.is_empty() {
-                    first_faulted = first_faulted.or(Some(file));
-                }
-                named.extend(fold.faults);
-            }
+            let (top, named, first) = kept_extremes(&files, desc, stamps.as_ref());
             record_faults = named;
+            first_faulted = first;
             top
         });
         if let Some(file) = first_faulted {

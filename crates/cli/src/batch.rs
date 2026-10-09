@@ -376,7 +376,7 @@ fn sweep_under(
     for row in &rows {
         tally.fold(row);
     }
-    note_refusals(&rows, &tally);
+    note_tally(&tally);
     at_least_one_filed(&holdings.census, tally.offered, &rows)?;
 
     // A STOCK AMONG THE MONTHS OFFERED PUTS ITS STATEMENT ON THE REPORT: gross
@@ -398,25 +398,18 @@ fn sweep_under(
     ))
 }
 
-/// One Warn per refused instrument-month, then the walk's own tally, at Warn
-/// when any month refused (conc13-7, D-2643).
+/// The walk's own tally, at Warn when any month refused (conc13-7, D-2643).
 ///
 /// Only swept months emitted anything (`stored month swept`, Info), so a walk
 /// with refused months logged nothing but its successes and the refused count
-/// lived in stdout alone. Emitted here, after the sequential fold and in input
-/// order, at the instrument-month granularity this module already reports at
-/// -- never from a worker and never inside a month.
-fn note_refusals(rows: &[Row], tally: &Tally) {
-    for row in rows {
-        if let Some(why) = row.refused.as_deref() {
-            crate::note(
-                &telemetry::Event::warn("cli.sweep", "stored month refused")
-                    .with("label", row.label.as_str())
-                    .with("why", why)
-                    .with("ran", row.ran),
-            );
-        }
-    }
+/// lived in stdout alone. Emitted here, after the sequential fold, once per
+/// walk -- never from a worker and never inside a month.
+///
+/// Each refused month's own Warn is [`note_refused`]'s (OBSV-06, D-3205),
+/// written as the month is folded. This wrote a second "stored month refused"
+/// for the same month until the merge of the two branches that each added one
+/// left one writer (D-4661).
+fn note_tally(tally: &Tally) {
     let walked = if tally.refused > 0 {
         telemetry::Event::warn("cli.sweep", "stored walk tallied")
     } else {

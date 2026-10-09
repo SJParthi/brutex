@@ -381,16 +381,33 @@ async fn failed_audit_start_never_polls_the_handler() {
     assert_eq!(body["handler_completed"], false);
 }
 
-/// One poll of a journal a blocking-pool writer may be appending to. `None` is
-/// a read that met the append: BUSY by design ("retry the read"), and the race
-/// the poll waits out. Any other refusal fails the test. CI run 1288 failed
+/// One poll of a journal a blocking-pool writer may be appending to.
+enum Polled {
+    /// The read answered: the record, or `None` when it is not written yet.
+    Read(Option<Record>),
+    /// The read met the append: BUSY by design ("retry the read"), and the
+    /// race the poll waits out.
+    Busy,
+}
+
+impl Polled {
+    /// The record of a poll that answered, which must exist by then.
+    fn written(self) -> Option<Record> {
+        match self {
+            Self::Read(record) => Some(record.expect("the record is written")),
+            Self::Busy => None,
+        }
+    }
+}
+
+/// Reads `id` once. Any refusal but BUSY fails the test. CI run 1288 failed
 /// the test below on exactly that BUSY, through an `unwrap` (D-4622).
-fn poll(root: &std::path::Path, id: u64) -> Option<Option<Record>> {
+fn poll(root: &std::path::Path, id: u64) -> Polled {
     match journal::read(root, id) {
-        Ok(record) => Some(record),
+        Ok(record) => Polled::Read(record),
         Err(why) => {
             assert!(journal::is_busy(&why), "{why}");
-            None
+            Polled::Busy
         }
     }
 }
@@ -421,7 +438,7 @@ async fn cancelled_request_records_cancellation_and_never_completed() {
     // it is awaited rather than assumed to have happened inside the abort.
     let mut phase = None;
     for _ in 0..500 {
-        if let Some(seen) = poll(&root.0, ID_BASE + 1) {
+        if let Polled::Read(seen) = poll(&root.0, ID_BASE + 1) {
             phase = seen.map(|record| record.phase);
         }
         if phase.is_some_and(Phase::terminal) {
@@ -460,7 +477,7 @@ async fn a_write_whose_client_goes_away_records_the_handlers_real_outcome() {
     release.notify_one();
     let mut record = None;
     for _ in 0..500 {
-        if let Some(seen) = poll(&root.0, ID_BASE + 1).map(Option::unwrap)
+        if let Some(seen) = poll(&root.0, ID_BASE + 1).written()
             && seen.phase.terminal()
         {
             record = Some(seen);
@@ -502,7 +519,7 @@ async fn a_read_whose_client_goes_away_writes_cancelled_off_the_async_worker() {
     assert!(connection.await.unwrap_err().is_cancelled());
     let mut record = None;
     for _ in 0..500 {
-        if let Some(seen) = poll(&root.0, ID_BASE + 1).map(Option::unwrap)
+        if let Some(seen) = poll(&root.0, ID_BASE + 1).written()
             && seen.phase.terminal()
         {
             record = Some(seen);

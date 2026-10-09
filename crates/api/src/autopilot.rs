@@ -3710,11 +3710,36 @@ fn stand_off(site: &Loaded, holder: &str) -> u64 {
     SEAT_WAIT_SECS
 }
 
-/// What holds the run slot, in the words the stand-off uses, or `None`.
+/// What holds the run slot, in the words the stand-off uses, or `None`:
+/// [`round`] stands off for it before it takes a seat.
 ///
-/// `recovery_active` is set under `site.run` by `recovery::claim` and cleared
-/// before the slot is released, and is read here in the same order, run then
-/// active (conc6-4, D-2697).
+/// The seat standoff is correct and it was not sufficient. `pull_spot` takes
+/// its feed's seat and DROPS IT WHEN THE LEG RETURNS, while
+/// `pullrun::conduct` runs a press of many legs across many passes. Between
+/// any two legs the mask reads zero, and `take_every_seat` is a
+/// `compare_exchange(0, ALL)` — so the autopilot wins that gap and holds
+/// every feed for a whole month's pass. The operator's next leg then 409s,
+/// `conduct` sleeps `RETRY_WAIT` and tries again, and the two drivers spend
+/// one shared token's quota against each other for as long as both keep
+/// going.
+///
+/// `site.run` is the press-shaped fact: `conduct` claims it before the first
+/// leg and releases it after the summary, so it covers the gaps the seats
+/// cannot. One uncontended lock take per tick, against a tick that takes
+/// minutes.
+///
+/// READ THROUGH A POISONED LOCK rather than around it. A panic while holding
+/// it means somebody's run ended abnormally; the flag is still readable, and
+/// refusing to look would stand the backfill off forever on the strength of
+/// one panicked request. Same position `pullrun::with_progress` takes.
+///
+/// AND THE HOLDER IS NAMED. Recovery claims the same slot, including a plan
+/// the server resumed by itself at boot, and this said "a hand-made pull" for
+/// both (conc6-4, D-2697). `recovery_active` is set under `site.run` by
+/// `recovery::claim` and cleared before the slot is released, and is read
+/// here in the same order, run then active. The explanation moved here from
+/// `round`'s body, as the other branch moved it into `hand_press_running`
+/// (D-4470); this function is that one, naming its holder (D-4659).
 fn run_holder(site: &Site) -> Option<&'static str> {
     let run = site
         .run
@@ -3757,31 +3782,7 @@ async fn round(
     // could starve the requests it is supposed to stay out of the way of. So it
     // is checked before any work, and it waits rather than spinning.
     // THE PRESS FIRST, AND THE SEAT SECOND — because a seat is per LEG and a
-    // press is not.
-    //
-    // The standoff below is correct and it was not sufficient. `pull_spot` takes
-    // its feed's seat and DROPS IT WHEN THE LEG RETURNS, while
-    // `pullrun::conduct` runs a press of many legs across many passes. Between
-    // any two legs the mask reads zero, and `take_every_seat` is a
-    // `compare_exchange(0, ALL)` — so the autopilot wins that gap and holds
-    // every feed for a whole month's pass. The operator's next leg then 409s,
-    // `conduct` sleeps `RETRY_WAIT` and tries again, and the two drivers spend
-    // one shared token's quota against each other for as long as both keep
-    // going.
-    //
-    // `site.run` is the press-shaped fact: `conduct` claims it before the first
-    // leg and releases it after the summary, so it covers the gaps the seats
-    // cannot. One uncontended lock take per tick, against a tick that takes
-    // minutes.
-    //
-    // READ THROUGH A POISONED LOCK rather than around it. A panic while holding
-    // it means somebody's run ended abnormally; the flag is still readable, and
-    // refusing to look would stand the backfill off forever on the strength of
-    // one panicked request. Same position `pullrun::with_progress` takes.
-    //
-    // AND THE HOLDER IS NAMED. Recovery claims the same slot, including a plan
-    // the server resumed by itself at boot, and this said "a hand-made pull"
-    // for both (conc6-4, D-2697).
+    // press is not. See `run_holder`, which also names what holds the slot.
     if let Some(holder) = run_holder(site) {
         return Pass::owed(stand_off(site, holder));
     }
@@ -8915,7 +8916,14 @@ mod tests {
         let mut feeds = drivable(yesterday);
         telemetry::in_run(run, async {
             for _ in 0..3 {
-                let pass = round(&site, &mut feeds, &[], pull::vendor::Granularity::Minute1).await;
+                let pass = round(
+                    &site,
+                    &mut feeds,
+                    &[],
+                    pull::vendor::Granularity::Minute1,
+                    site.autopilot.epoch(),
+                )
+                .await;
                 assert_eq!(pass.wait, IDLE_POLL_SECS);
             }
         })
@@ -9060,12 +9068,14 @@ mod tests {
     async fn dropping_the_supervisors_hold_aborts_the_task_it_holds() {
         let held = std::sync::Arc::new(());
         let inside = std::sync::Arc::clone(&held);
-        let hold = Aborting(tokio::spawn(async move {
-            let _inside = inside;
+        // `inside` lives in the task until the task is dropped: the pending
+        // future never returns, so the `drop` after it only names the capture.
+        let supervisor = Aborting(tokio::spawn(async move {
             std::future::pending::<()>().await;
+            drop(inside);
         }));
         tokio::task::yield_now().await;
-        drop(hold);
+        drop(supervisor);
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             while std::sync::Arc::strong_count(&held) > 1 {
                 tokio::task::yield_now().await;

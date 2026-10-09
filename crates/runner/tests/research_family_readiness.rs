@@ -348,6 +348,50 @@ fn cash_uses_identical_observed_levels_without_becoming_a_legacy_index() -> Test
     Ok(())
 }
 
+// The same four resolutions under cost model V2, pinned from the build at
+// D-1514 (not an independent capture). They stay as that record too: D-4500
+// made the grid cost model V3, so a V2 policy is now refused by name and
+// these values are never produced again.
+const RECORDED_V2: [[u8; 32]; 4] = [
+    [
+        242, 239, 165, 44, 219, 143, 118, 70, 240, 4, 246, 50, 233, 77, 122, 103, 72, 235, 46, 162,
+        148, 193, 127, 68, 172, 156, 69, 182, 84, 179, 77, 0,
+    ],
+    [
+        28, 113, 71, 223, 92, 254, 33, 215, 42, 36, 245, 109, 209, 227, 232, 246, 222, 221, 209,
+        253, 174, 197, 177, 31, 218, 244, 90, 160, 50, 57, 210, 133,
+    ],
+    [
+        111, 222, 3, 157, 209, 41, 75, 127, 129, 15, 29, 150, 216, 112, 49, 222, 166, 215, 243,
+        152, 27, 178, 141, 1, 124, 170, 167, 49, 235, 133, 227, 236,
+    ],
+    [
+        17, 139, 116, 92, 224, 19, 129, 104, 71, 186, 192, 5, 70, 117, 247, 132, 229, 23, 51, 156,
+        226, 235, 200, 45, 23, 216, 49, 88, 83, 224, 137, 59,
+    ],
+];
+// The same four under cost model V3, pinned from this build at D-4500 (not
+// an independent capture). Only the model term changed, so each differs
+// from both records above.
+const EXPECTED_V3: [[u8; 32]; 4] = [
+    [
+        164, 105, 143, 243, 252, 119, 232, 217, 196, 88, 14, 144, 73, 157, 112, 144, 253, 15, 42,
+        174, 40, 99, 218, 202, 69, 201, 129, 157, 248, 12, 169, 135,
+    ],
+    [
+        7, 241, 34, 215, 153, 235, 130, 150, 106, 197, 222, 33, 26, 233, 253, 221, 83, 50, 230,
+        234, 98, 116, 98, 250, 240, 230, 11, 78, 0, 24, 76, 99,
+    ],
+    [
+        219, 38, 68, 182, 134, 92, 148, 46, 95, 241, 205, 106, 131, 126, 45, 30, 39, 189, 45, 29,
+        131, 240, 222, 225, 90, 48, 145, 73, 26, 21, 233, 37,
+    ],
+    [
+        242, 113, 4, 149, 118, 223, 99, 214, 181, 65, 20, 187, 191, 34, 188, 168, 158, 54, 164, 15,
+        250, 45, 164, 136, 152, 13, 214, 64, 16, 118, 52, 111,
+    ],
+];
+
 #[test]
 fn legacy_resolution_identity_matches_the_recorded_pre_extraction_library() -> TestResult {
     // Captured from the prior compiled runner9d3d9971a1dd87bf, not calculated
@@ -389,51 +433,8 @@ fn legacy_resolution_identity_matches_the_recorded_pre_extraction_library() -> T
             ],
         ),
     ];
-    // The same four resolutions under cost model V2, pinned from the build at
-    // D-1514 (not an independent capture). They stay as that record too: D-4500
-    // made the grid cost model V3, so a V2 policy is now refused by name and
-    // these values are never produced again.
-    let recorded_v2: [[u8; 32]; 4] = [
-        [
-            242, 239, 165, 44, 219, 143, 118, 70, 240, 4, 246, 50, 233, 77, 122, 103, 72, 235, 46,
-            162, 148, 193, 127, 68, 172, 156, 69, 182, 84, 179, 77, 0,
-        ],
-        [
-            28, 113, 71, 223, 92, 254, 33, 215, 42, 36, 245, 109, 209, 227, 232, 246, 222, 221,
-            209, 253, 174, 197, 177, 31, 218, 244, 90, 160, 50, 57, 210, 133,
-        ],
-        [
-            111, 222, 3, 157, 209, 41, 75, 127, 129, 15, 29, 150, 216, 112, 49, 222, 166, 215, 243,
-            152, 27, 178, 141, 1, 124, 170, 167, 49, 235, 133, 227, 236,
-        ],
-        [
-            17, 139, 116, 92, 224, 19, 129, 104, 71, 186, 192, 5, 70, 117, 247, 132, 229, 23, 51,
-            156, 226, 235, 200, 45, 23, 216, 49, 88, 83, 224, 137, 59,
-        ],
-    ];
-    // The same four under cost model V3, pinned from this build at D-4500 (not
-    // an independent capture). Only the model term changed, so each differs
-    // from both records above.
-    let expected_v3: [[u8; 32]; 4] = [
-        [
-            164, 105, 143, 243, 252, 119, 232, 217, 196, 88, 14, 144, 73, 157, 112, 144, 253, 15,
-            42, 174, 40, 99, 218, 202, 69, 201, 129, 157, 248, 12, 169, 135,
-        ],
-        [
-            7, 241, 34, 215, 153, 235, 130, 150, 106, 197, 222, 33, 26, 233, 253, 221, 83, 50, 230,
-            234, 98, 116, 98, 250, 240, 230, 11, 78, 0, 24, 76, 99,
-        ],
-        [
-            219, 38, 68, 182, 134, 92, 148, 46, 95, 241, 205, 106, 131, 126, 45, 30, 39, 189, 45,
-            29, 131, 240, 222, 225, 90, 48, 145, 73, 26, 21, 233, 37,
-        ],
-        [
-            242, 113, 4, 149, 118, 223, 99, 214, 181, 65, 20, 187, 191, 34, 188, 168, 158, 54, 164,
-            15, 250, 45, 164, 136, 152, 13, 214, 64, 16, 118, 52, 111,
-        ],
-    ];
     let bars = training();
-    for (((name, side, v1), v2), v3) in recorded_v1.into_iter().zip(recorded_v2).zip(expected_v3) {
+    for (((name, side, v1), v2), v3) in recorded_v1.into_iter().zip(RECORDED_V2).zip(EXPECTED_V3) {
         let key = InstrumentKey::index(Exchange::Nse, name)?;
         let series =
             ExecutionSeriesV1::new(&key, "generated-test", "generated-build", [7; 32], &bars)?;

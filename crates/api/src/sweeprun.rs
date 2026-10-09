@@ -4074,11 +4074,11 @@ mod tests {
             .filter(|record| crate::emitted::says(record, "route", route))
             .collect();
             assert_eq!(lines.len(), 1, "{route}: one line per press: {lines:?}");
-            assert_eq!(lines[0].level, telemetry::Level::Warn, "{route}");
+            let line = lines.first().expect("the one line");
+            assert_eq!(line.level, telemetry::Level::Warn, "{route}");
             assert!(
-                crate::emitted::says(&lines[0], "why", "BRUTEX_COMMIT"),
-                "{route}: the refusal's own sentence: {:?}",
-                lines[0]
+                crate::emitted::says(line, "why", "BRUTEX_COMMIT"),
+                "{route}: the refusal's own sentence: {line:?}"
             );
         }
         assert!(site.sweep.lock().expect("private slot").is_none());
@@ -5347,24 +5347,8 @@ mod tests {
         assert_eq!(listing(&store), before, "unstamped descend wrote");
         // sobs-9, D-4447: THE BUDGET'S REFUSAL REACHES THIS CHILD'S LOG, once
         // per route and naming it, beside the unstamped one above.
-        let budget_lines = || {
-            telemetry::tail(
-                &root.join("logs"),
-                telemetry::global()
-                    .expect("this child's one sink")
-                    .keep_files(),
-                &telemetry::Query::last(telemetry::MAX_LIMIT).from_target("api.sweep"),
-            )
-            .records
-            .into_iter()
-            .filter(|record| {
-                record.message
-                    == "a sweep was refused because this server's environment sets a screen budget"
-            })
-            .collect::<Vec<_>>()
-        };
         assert!(
-            budget_lines().is_empty(),
+            budget_refusals(root).is_empty(),
             "nothing refused for a budget yet"
         );
 
@@ -5400,28 +5384,8 @@ mod tests {
             );
             assert_eq!(listing(&store), before, "{route} wrote into the store");
         }
-        // `tail` answers newest first; the presses are listed in the order made.
-        let logged: Vec<String> = budget_lines()
-            .iter()
-            .rev()
-            .map(|record| {
-                assert!(
-                    record
-                        .field("why")
-                        .and_then(telemetry::OwnedValue::as_str)
-                        .is_some_and(|why| why.contains("BRUTEX_SCREEN_BUDGET_MS is set")),
-                    "the refusal's own sentence rides on the line: {record:?}"
-                );
-                assert_eq!(record.level, telemetry::Level::Warn, "{record:?}");
-                record
-                    .field("route")
-                    .and_then(telemetry::OwnedValue::as_str)
-                    .unwrap_or_default()
-                    .to_owned()
-            })
-            .collect();
         assert_eq!(
-            logged,
+            budget_refusal_routes(&budget_refusals(root)),
             [
                 super::RUN_ROUTE,
                 super::DESCEND_ROUTE,
@@ -5458,28 +5422,7 @@ mod tests {
             1,
         ));
 
-        // THE WORDS WHOSE RUN PRICES NO SCREEN ARE NOT REFUSED FOR ONE, at the
-        // ROUTE and not only in `prices_a_screen`: nothing asked whether
-        // `command_with_configuration` consults the predicate at all, and with
-        // the guard applied to every word this suite stayed green. D-0695. The
-        // strict word refuses the budget through its own admission, in its own
-        // words and before the slot, and never with this route's sentence.
-        for words in &ORDINARY_WORDS[2..] {
-            let (status, _, body) = super::command_with(&site, &command_body(words), Some(STAMP));
-            assert!(
-                !body.contains("BRUTEX_SCREEN_BUDGET_MS is set in this server's environment"),
-                "{words} was refused a budget its run never prices: {body}"
-            );
-            if words.contains("audit-audited-range") {
-                assert!(
-                    body.contains("strict_runtime_settings_invalid")
-                        && body.contains("BRUTEX_SCREEN_BUDGET_MS"),
-                    "the strict word names the budget through its own admission: {body}"
-                );
-            } else {
-                assert_eq!(status, axum::http::StatusCode::CONFLICT, "{words}: {body}");
-            }
-        }
+        the_unpriced_words_are_not_refused_a_budget(&site, STAMP);
 
         // A VALUE THE BUDGET READER CANNOT USE REFUSES NO ROUTE: it is no
         // budget, and `cli` names it under KNOB REFUSED and runs without one.
@@ -5495,6 +5438,75 @@ mod tests {
         }
         cli::knobs::clear_all();
         println!("SERVER-BUDGET refused 4 routes");
+    }
+
+    /// Every screen-budget refusal in [`server_budget_child`]'s own log,
+    /// newest first, as `tail` answers.
+    fn budget_refusals(root: &std::path::Path) -> Vec<telemetry::Record> {
+        telemetry::tail(
+            &root.join("logs"),
+            telemetry::global()
+                .expect("this child's one sink")
+                .keep_files(),
+            &telemetry::Query::last(telemetry::MAX_LIMIT).from_target("api.sweep"),
+        )
+        .records
+        .into_iter()
+        .filter(|record| {
+            record.message
+                == "a sweep was refused because this server's environment sets a screen budget"
+        })
+        .collect()
+    }
+
+    /// The route each budget refusal names, in the order the presses were
+    /// made, each line checked to be a `Warn` carrying the refusal's sentence.
+    fn budget_refusal_routes(lines: &[telemetry::Record]) -> Vec<String> {
+        // `tail` answers newest first; the presses are listed in the order made.
+        lines
+            .iter()
+            .rev()
+            .map(|record| {
+                assert!(
+                    record
+                        .field("why")
+                        .and_then(telemetry::OwnedValue::as_str)
+                        .is_some_and(|why| why.contains("BRUTEX_SCREEN_BUDGET_MS is set")),
+                    "the refusal's own sentence rides on the line: {record:?}"
+                );
+                assert_eq!(record.level, telemetry::Level::Warn, "{record:?}");
+                record
+                    .field("route")
+                    .and_then(telemetry::OwnedValue::as_str)
+                    .unwrap_or_default()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    /// THE WORDS WHOSE RUN PRICES NO SCREEN ARE NOT REFUSED FOR ONE, at the
+    /// ROUTE and not only in `prices_a_screen`: nothing asked whether
+    /// `command_with_configuration` consults the predicate at all, and with
+    /// the guard applied to every word this suite stayed green. D-0695. The
+    /// strict word refuses the budget through its own admission, in its own
+    /// words and before the slot, and never with this route's sentence.
+    fn the_unpriced_words_are_not_refused_a_budget(site: &crate::server::Loaded, stamp: &str) {
+        for words in ORDINARY_WORDS.iter().skip(2) {
+            let (status, _, body) = super::command_with(site, &command_body(words), Some(stamp));
+            assert!(
+                !body.contains("BRUTEX_SCREEN_BUDGET_MS is set in this server's environment"),
+                "{words} was refused a budget its run never prices: {body}"
+            );
+            if words.contains("audit-audited-range") {
+                assert!(
+                    body.contains("strict_runtime_settings_invalid")
+                        && body.contains("BRUTEX_SCREEN_BUDGET_MS"),
+                    "the strict word names the budget through its own admission: {body}"
+                );
+            } else {
+                assert_eq!(status, axum::http::StatusCode::CONFLICT, "{words}: {body}");
+            }
+        }
     }
 
     /// The server-budget refusal through the request journal the production

@@ -63,7 +63,7 @@ use runner::admission::{AdmissionPolicyDraftV1, AdmissionPolicyV1};
 use runner::excursion::Side;
 use runner::exit_grid_policy::{
     ExecutionResolutionV1, ExitGridPolicyV1, ExitGridSelectorV1, ForcedStopV1, RangeResolutionV1,
-    RatioLimitsV1, RationalPercentileV1, RungPlanV1, printed_ohlcv_cost_model_id_v2,
+    RatioLimitsV1, RationalPercentileV1, RungPlanV1, printed_ohlcv_cost_model_id_v3,
 };
 use runner::outcome::Horizon;
 use runner::topn::{RankingPolicyV1, Weights};
@@ -283,7 +283,7 @@ fn exit_policy_with(side: Side, raw: Option<&str>) -> Result<ExitGridPolicyV1, S
         // refuses explicitly rather than losing cells to it.
         EXIT_CELL_CEILING,
         ExitGridSelectorV1::GuaranteedFloor,
-        printed_ohlcv_cost_model_id_v2(),
+        printed_ohlcv_cost_model_id_v3(),
         ForcedStopV1::Disabled,
         u64::MAX,
         u64::MAX,

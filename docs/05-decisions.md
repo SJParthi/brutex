@@ -73346,3 +73346,390 @@ the early return.
 
 **Decided.** The probe calls `note_blocked(CONFLICT, "slot", …)` before it
 returns.
+
+### D-4470 — The merged `api` crate passes clippy without a new lint exception — 2026-10-09
+
+**What was observed.** `cargo clippy -p api --all-targets -- -D warnings` on
+the audit integration tree (a7a27dc3) refused the `api` library (9 errors) and
+its test target (22): four production functions past `too_many_lines`
+(`autopilot::round` 102, `server::broker_run_scoped` 102, `bars::window` 109,
+`pullrun::conduct_with` 140), three test functions past it, unbackticked
+`E_v` in two doc comments, a `{value:?}` on an `OsStr`, indexing in two test
+modules whose exception does not take `indexing_slicing`, two `_`-prefixed
+bindings kept only to capture a value, a similar-name pair and a
+`push_str(&format!(..))`.
+
+**The change.** No `#[allow]` or `#[expect]` was added. Each long function
+lost code to a named helper that carries the comment it came with:
+`autopilot::hand_press_running` (the press-before-seat read),
+`server::publish_on_the_wire` (D-0057's `now` object) and
+`server::in_resumable_order` (the whole-key sort), `bars::kept_extremes` (the
+kept month folds, D-4439), and `pullrun::note_owed` and `finish_press` (the
+press's owing-pass line and its summary). The test functions were split into
+helpers the same way. Indexing in tests became `first()` with an `expect`, or
+a fixed array. The browser-open refusal now prints the asked value with
+`OsStr::display` in quotes instead of `Debug` (`BRUTEX_OPEN is "yes", and only
+1 opens a browser`); a non-UTF-8 byte now shows as U+FFFD rather than `\xFF`.
+No answer, event or exit code otherwise changes.
+
+**Two stale source-shape tests repaired on the way.**
+`server::cost_limits_tests::w1_api5_7_a_scrub_opens_one_page_and_walks_the_log_once_per_snapshot`
+still looked for the closure block and the memo call written before D-4435
+made both one call; it now reads the code as D-4435 left it.
+`w1_api5_4_the_window_still_reads_its_range_and_orders_only_the_page` reads
+the fold walk in `kept_extremes` and requires `window` to call it.
+`pullrun::tests::the_row_count_runs_off_the_worker_and_a_panic_is_not_a_count`
+counts `finish_press`'s borrowed `rows_now_off_worker(site)` beside the four
+`(&site)` calls.
+
+**Tests.** `server::tests::a_runs_targets_are_ordered_by_the_whole_key`
+(new: four shuffles of three keys, two sharing an underlying, each sorted by
+`in_resumable_order`; fails if the sort is removed or keyed by underlying),
+`server::tests::the_browser_is_opened_only_when_the_operator_asked_for_it`
+(now also requires the asked value in quotes), and the whole `api` lib suite.
+
+### D-4471 — `cli` implements grid cost model V3 and refuses V2 by name — 2026-10-09
+
+**What was observed.** D-4500 made `printed_ohlcv_cost_model_id_v3` the cost
+model `runner` implements and refuses V2 by name
+(`ExitGridErrorV1::SupersededCostModelIdV2`), leaving `cli` naming V2 in
+production (`execution_capability::exact_execution_law_digest_v1`,
+`ledger_all`'s exit policy) and in twelve test fixtures, so every policy the
+`cli` built was refused by resolution.
+
+**The change.** Every `cli` site names `printed_ohlcv_cost_model_id_v3`:
+production in `execution_capability.rs` and `ledger_all.rs`, fixtures in
+`anchored_search_lineage_v4`, `boolean_candidate_grid`,
+`boolean_candidate_tests`, `candidate_universe`, `execution_disposition_v2`,
+`global_replay`, `institutional_evidence`, `ledger_exit_policy_tests`,
+`population_admission_writer`, `selection_v4_authority`,
+`step3_orchestrator` and `stored_data_completeness`. The law's versioning
+rule is kept, not bypassed: no version is mutated in place. V2's id is
+unchanged and `cli`'s three cost-model checks (parameters, the stored
+parameter scalar, the resolved grid) all go through
+`runner::exit_grid_policy::implemented_cost_model`, which refuses V2 by name;
+the stored scalar's model is checked BEFORE its law digest, so an execution
+parameter record written by the build before D-4500 (V2 model, law digest
+under V2) is refused naming `SupersededCostModelIdV2`, never replayed and
+never refused only as "law digest differs". As D-1514 recorded for V1→V2,
+`exact_execution_law_digest_v1` hashes the implemented id, so every
+execution-law digest, execution parameter id and policy digest this build
+computes differs from one computed before it.
+
+**Tests.** `cli::execution_capability::tests::every_cost_model_check_refuses_the_superseded_v1_model_by_name`
+now also requires the law digest to differ from the one under V2, and a record
+exactly as the V2 build wrote it to be refused naming V2, and V2 in each of
+the three checks' refusal table. `cli::ledger_all::exit_policy_tests::every_admitted_runtime_resolution_binds_exact_axes_without_changing_risk`
+keeps the V1 record and the D-1514 V2 captures as records (the same two-rung
+policy rebuilt under each must still hash to them), requires the CLI wiring
+to equal the V3 reconstruction field for field and to differ from both
+records, and pins the two V3 digests from this build (labelled as not an
+independent capture). The lib tests of every switched module ran green as
+uid 65534: `execution_capability` 13, `ledger_all` 18, `step3_orchestrator`
+33, `execution_disposition_v2` 12, `candidate_universe` 117,
+`anchored_search_lineage_v4` 10, `stored_data_completeness` 8,
+`global_replay` 48, `population_admission_writer` 16,
+`selection_v4_authority` 7, `boolean_candidate` 61, `institutional_evidence`
+23.
+
+### D-4501 — `outcome.rs` names the ordering it relies on: `rank::rank`, not `rank::walk` — 2026-10-09
+
+**What was observed (audit `r64-3`, low).** Five comments in
+`crates/runner/src/outcome.rs` (lines 2464, 2499, 3154, 3215 and 4002 of the
+audited tree) said `rank::walk` orders results on `edge.t.abs()`. No function
+`walk` exists in `crates/runner/src/rank.rs`; the ordering is `rank::rank`'s,
+through `impl Ord for rank::Scored`. The first of the five is a production
+comment that justifies the zero-spread guard in `outcome::edge`, so a reader
+looking for the site that makes the guard necessary found nothing.
+
+**Decision.** The five comments name `rank::rank`; the production one says the
+old name never existed and cites this entry. `crates/runner/Cargo.toml`'s own
+note, which already records the `rank::walk` mistake until D-1498, is unchanged.
+
+**What changes.** Comments only. No code, output, digest or format moves.
+
+### D-4502 — The session window's comment matches the index table it reads: 15:30, not 15:15; supersedes D-0151's index row — 2026-10-09
+
+**What was observed (audit `satk-4`, low).** The comment in
+`pull::session::Window::verdict` said that from 2026-08-03 the swept index
+"now stops at 15:15" and that its 15:15–15:29 bars are "not continuous-session
+bars". `NSE_INDEX_SESSIONS` in `crates/pull/src/vendor.rs`, which the function
+reads, keeps 15:30 from 2026-08-03 by the operator's rule of 2026-08-20 ("the
+extension applies to futures and options ALONE ... Nothing else moved").
+Probe P11 kept 15:15:00 and 15:29:59 on 2026-08-04 and dropped 15:30:00. D-0151
+still tabulates the index row at 15:15, and no decision recorded its reversal.
+
+**Decision.** The comment states the table: derivatives extend to 15:40 (last
+bar 15:39); cash and the index keep 15:30 (last bar 15:29). An amendment
+paragraph names the two retracted sentences and why 15:15 was an inference
+about a derived value, not a published hour. **This entry supersedes D-0151's
+`NSE_INDEX_SESSIONS` row**: from 2026-08-03 the index closes at 15:30, as the
+table has said since the operator's rule. The charter's open question — whether
+the index minutes 15:15–15:29 carry the frozen or the indicative auction index —
+stays UNVERIFIED.
+
+**What changes.** A comment and the decision record. The window's behaviour,
+which already followed the table, does not move.
+
+### D-4503 — A walk-forward fold says when its candidates' closure is unproved — 2026-10-09
+
+**What was observed (audits `W3-runner1-3`, `c4a-7`, `AC-whp-cx-2`).** D-1496
+gave `closed::Closed` a `closure_complete` flag, but the walk-forward still
+called `closed()` and read `kept` without it: on a halted fold the candidate
+set may hold sets that are not closed, and the audit row said only that the
+fold "ranked a truncated candidate set". `ClosureVerdict::Closed` and `cli`'s
+`ClosureV1::Closed` said "No immediate superset has equal support", which is
+false by design for a superset `engine`'s join prunes as uninformative under
+`vocab::implication`: it has equal support and is never built.
+
+**Decision.** `FoldResult` gains `closure_unproved`, set at both walk-forward
+call sites from `!closed.closure_complete` rather than inferred from `halted`.
+`Validated::closure_unproved_folds()` counts them, O(folds). `audit::walk_forward`
+prints a row "whose closure is UNPROVED" with the count, zero included, and
+marks each such fold's candidate count with `?`. The two `Closed` docs say
+"closed relative to the informative lattice the sweep walks". `FoldProgress`,
+which `cli` builds by name, does not carry the flag; its `candidates` doc says
+so. `kept` itself is unchanged, as D-1496 decided.
+
+**What changes.** One new public field (default `false`, so every `..Default`
+literal in `cli` still builds) and one new audit row and marker in the
+walk-forward report text. No digest, stored format or run identity moves.
+
+**Tests.** `runner::validate::tests::a_fold_whose_closure_is_unproved_is_labelled_and_counted`
+(FXR-08).
+
+### D-4504 — The closure check is timed: bench row C-R-06 — 2026-10-09
+
+**What was observed (audit `c4a-6`).** D-1496 stated the cost of
+`closed::redundant_between` — an O(|lower|) `HashMap` copy of each lower level
+and one probe per set bit of each upper itemset — and recorded "Not timed".
+
+**Decision.** `crates/runner/benches/ratio.rs` gains `C-R-06`: per insertion or
+probe, `closed::redundant_count` on one 10,124-bar column swept at the bench's
+support (37,065 units, extinct at k=12) and at half of it (302,837 units, up to
+20,004 sets a level, halted at the 50,000 ceiling), gated at the bench's 2.5x
+ceiling, and the larger sweep's per-unit p50, p99 and maximum over 201 trials.
+The first draft compared `sessions(8)` with `sessions(32)` at one support
+fraction; both produced the same twelve levels and the same 37,065 units, so it
+measured nothing that grows, and was replaced before it was committed.
+
+**Measured** 2026-10-09 on the 4-CPU audit box at load average 4.5, one run:
+73,772 -> 69,971 ps a unit (0.948x); p50 74,803, p99 125,353, max 134,992 ps a
+unit, n = 201 trials, each trial one whole `redundant_count`, so these are
+percentiles of a trial's mean per-unit cost, not of single probes. Not measured
+on CI. `docs/06-limits.md`'s D-1496 entry records the figures.
+
+**Tests.** `C-R-06` in `docs/04-invariants.md`; `core`'s `cost_invariants`
+reconciles the printed id with the declared row.
+
+### D-4505 — The Student-t tail is read at 10^7 degrees of freedom past that — 2026-10-09
+
+**What was observed (audit `satk-7`).** `student_t_two_sided_tail` loses digits
+as `df` grows, because `ln B(df/2, 1/2)` is a difference of two large `ln Γ`
+values and `x = df / (df + t^2)` rounds toward one. The audit measured the
+Student-t Bonferroni bar BELOW the normal bar at `df = 1e9` and `1e12` — the
+anti-conservative direction — more than a whole t-unit wrong past `1e14`, and
+the tail of `t = 6` at exactly `1.0` at `df = 1e18`.
+
+**Decision.** `STUDENT_DF_CEILING = 10_000_000`: above it the tail, and so the
+bar and `clears_bonferroni`, are taken at the ceiling. For a fixed `|t|` the
+true tail falls toward the normal tail as `df` grows, so the ceiling's tail is
+the heavier one: conservative to within its own error.
+
+**Measured, by a scratch harness outside the repository that runs this file's
+own functions** (the incomplete beta, its continued fraction, `ln Γ`, the
+normal quantile and the bisection are byte-identical copies, checked by hash;
+the tail is the same expression with the ceiling as a parameter, and the
+measurement at `df = 1e7` above is with the ceiling lifted): against a four-term
+Fisher expansion, over `t` 1.9 to 9.6 in steps of 0.001, the tail's relative
+error at `df = 1e7` is at most `1.382e-8` (signed `-1.38e-8` to `+4.7e-9`),
+against a Student-minus-normal gap of `5.546e-7` at `t = 1.96` — about forty
+times, not the "four orders" the WIP doc estimated. The same harness read
+`1.708e-6` at `1e6`, `3.872e-8` at `1e8` and `7.616e-7` at `1e9`, where the gap
+is `5.546e-9`, so a higher ceiling would cross. The ceiling's bar sits `2.370e-7`
+(one trial) to `2.149e-5` t-units (`u64::MAX` trials) above the normal bar. On a
+geometric grid of 296 `df` values and 43 trial counts no bar rose with `df` and
+none was at or below the normal bar; the tail rose in 69 of 237,096 readings,
+all at `t <= 1.70`, below any bar, by at most `3.418e-8` relative. Between
+ADJACENT `df` values the bar does rise by rounding: 28,150 of 105,000 adjacent
+pairs at five sample points up to the ceiling, by at most `1.711e-8` t-units.
+So the doc says "monotone to its rounding", not "monotone".
+
+**What changes.** A row whose `df` exceeds `10^7` is judged on the bar at
+`10^7`: at most `2.149e-5` t-units stricter than the normal bar, where it was
+judged on a bar that could fall below it. Real runs reach such `df` only with
+more than ten million observations in one row. No stored format or digest moves.
+
+**Tests.** `runner::significance::tests::the_student_t_bar_is_monotone_within_its_rounding_and_never_below_the_normal_bar_at_any_df`
+(FXR-07).
+
+### D-4506 — A zero bootstrap block takes no draw and reads as no evidence — 2026-10-09
+
+**What was observed (audit `satk-8`).** `bootstrap::reality_check` and `spa`
+accepted `block == 0` and ran it as a block of ONE (`block <= 1` in
+`stationary_indices_into`): a caller asking for a block nobody can draw got an
+i.i.d. bootstrap and a p-value that could clear. Legacy `romano_wolf` did the
+same. The doc on `white_reality_check_receipt_v1` already promised the legacy
+API answers a zero block `p = 1`.
+
+**Decision.** At `block == 0`, `reality_check` and `spa` take no draw:
+`Verdict::draws` is 0 and `p = 1`, which never clears; periods, strategies and
+the observed statistic are still reported. `romano_wolf` treats a zero block as
+malformed and returns empty, as it already did above `MAX_BLOCK`.
+
+**What changes.** A zero-block call that could clear no longer can. Every other
+block is unchanged. No stored format or digest moves.
+
+**Tests.** `runner::bootstrap::tests::a_zero_block_takes_no_draw_and_reads_as_no_evidence`
+(FXR-06).
+
+### D-4420 — The store bench removes every scratch directory it makes, loudly when it cannot — 2026-10-09
+
+**What was observed (audit `so1-6`).** `crates/store/benches/ratio.rs`'s
+`loaded` made `$TMPDIR/brutex-bench-<name>-<pid>`, filled a month file there and
+returned a bare `PathBuf` that nothing removed, so every `cargo bench -p store`
+left its directories behind; fxa measured 16 directories and 81 MB after one
+run.
+
+**Decision.** `loaded` returns a `Scratch` guard with the file; a tuple drops in
+field order, so the file closes before its directory is removed. A removal
+that fails prints `BENCH SCRATCH NOT REMOVED` with the path and reason rather
+than being swallowed. `process::exit` runs no destructor, so a setup refusal
+after the directory exists goes through `Scratch::refuse`, which removes it
+first. Removing a stale directory of the same process id ignores only
+`NotFound`; any other failure refuses the bench by name.
+
+**Measured.** One run of `cargo bench -p store` on the merged tree
+(2026-10-09, load average 3.65 to 2.46) with `TMPDIR` set to a new empty
+directory: every row passed, and the directory held no entry afterwards (0
+`brutex-bench-*`).
+
+**What changes.** The bench only. No crate source, output or format moves.
+
+
+### D-4487 — `CLAUDE.md` §3 rule 4 names the live mask-evaluation path, `Column::support_each` — 2026-10-09
+
+**What was observed.** D-4481 (audit `so1-1`) moved the sweep's support count
+from one candidate per pass over the column to blocks of 512 rows counted for a
+whole batch, through `engine::column::Column::support_each`. `CLAUDE.md` §3
+rule 4 still named `engine::column::Column::support` as "the production path".
+`support` remains as the one-candidate pass that FXD-03 prints and does not
+gate; it is not what the sweep calls. fxd recorded the stale name as
+NEEDS-OWNER rather than edit the law.
+
+**Decision.** The sentence now names `Column::support_each` and says what it
+does per bar. This corrects a stale fact, the way D-0208 and D-0210 corrected
+`CLAUDE.md` against the code: it does not widen or narrow any rule, and nothing
+else in the file is touched.
+
+**What changes.** One sentence of `CLAUDE.md`. No code, output or format.
+
+### D-4488 — Gate 14's bench pins follow the merged benches, and gate 12's two new claims say UNVERIFIED — 2026-10-09
+
+**What was observed.** On the merged audit tree gate 14 refused three benches
+whose measurement-point counts no longer matched their exact pins: `lake` 7
+against 6 (FXA-10, D-4419), `runner` 4 against 3 (C-R-06, D-4504) and `engine`
+13 against 14. The engine drop was not a deleted row: D-4482 replaced the one
+`p99_ratio` call with five p99 rows through a helper named `interleaved_row`,
+which the gate's count (call sites of a helper whose name ends in `ratio`)
+cannot see, so five gated rows could have been deleted with the gate green.
+Gate 12 refused two cost claims with no proof or UNVERIFIED beside them:
+`core::vendor::holds_test_marker` (D-4507) and `runner::grid::Candidate::timed_at`
+(D-4500). It also refuses two `api` claims, which are not this integration's
+crates.
+
+**Decision.** The helper is renamed `interleaved_ratio`, so the engine count is
+18 and every p99 row is a counted point. The pins become lake 7 (row ids gain
+FXA-10), runner 4 (gains C-R-06) and engine 18, with a one-line note in the
+table's comment. The two claims say UNVERIFIED as a time beside what does test
+them, and `docs/06-limits.md` lists both.
+
+**What changes.** CI configuration, one bench helper's name and two doc
+comments. No code path, output or format moves.
+
+### D-4489 — Four `docs/06-limits.md` statements the code had falsified are corrected and guarded — 2026-10-09
+
+**What was observed.** Audits found four limits statements contradicted by the
+code they describe: the D-2290 kept-costs table said time lookup is a 14-probe
+bisection and that an index "would be a new store format version", while D-2329
+built the per-month `.tix` index (`rnew-2`); the slow-client section said
+clients with a complete head and a slow body are not bounded in time, while
+D-1510's `BODY_READ_TIMEOUT` cuts them at 10 s (`r53-2`, a merge kept both
+texts); the language-purity section said 71 inline awk programs remain in
+`ci.yml`, while commit 2a74690d set `AWK_IN_CI` to 0 (`srust-6`); and section
+47 said the widest log line is about 14 KiB, while `telemetry::tail` says just
+over 41 KB since D-1323 and a probe wrote 38,977 bytes (`sobs-17`).
+
+**Decision.** Each statement is rewritten to the code's fact, with a note of
+what it said and this entry. `vocab`'s `stale_claims` test
+`the_limits_sentences_the_code_falsified_stay_retracted` refuses the five stale
+phrases, requires the corrected ones, and reads the five code facts they rest
+on where they are declared (the `.tix` module, `BODY_READ_TIMEOUT`,
+`AWK_IN_CI`, `tail`'s 41 KB and `MAX_LINE_BYTES`). The `.tix` row now carries
+this integration's one store bench run: `O1P-02` p50 274 to 289 ns, p99 295 to
+410 ns from 1,000 to 1,000,000 records.
+
+**What changes.** Documentation and one test. No code path moves.
+
+### D-4659 — The audit's paused head `8102ca76` is merged, and the autopilot's stand-off keeps naming its holder — 2026-10-09
+
+**What was merged.** `wip/audit-fx/integ` at `8102ca76`, which is
+`a7a27dc3` plus `audit/int-u` (`api` clippy, D-4470; grid cost model V3,
+D-4471) and `audit/int-l` (runner clippy; D-4420, D-4487 to D-4489, D-4501 to
+D-4506). The audit thread sent it as its paused head. It is not
+`wip/audit-batch3-integ`, which comes when the audit resumes. Five files
+conflicted; ledgers keep both tails, ours first.
+
+**`crates/api/src/autopilot.rs`.** Theirs moved the stand-off's
+explanation out of `round` into `hand_press_running`, to bring `round`
+under clippy's line limit (D-4470). Ours has `run_holder`, which answers the
+same question and also names what holds the slot (conc6-4, D-2697). Kept
+`run_holder`, with theirs' explanation as its doc, and `round` points to it.
+`hand_press_running` is not kept.
+
+**`crates/api/src/server.rs`.** Theirs' two helpers split out of the run
+(`in_resumable_order` and `publish_on_the_wire`, D-4470) are kept, and ours'
+doc for `broker_run_scoped` names its `epoch` (D-4625).
+
+### D-4660 — The press's closing row count is over its own feeds — 2026-10-09
+
+**What was observed.** Theirs split `finish_press` out of `conduct`
+(D-4470) on a side where every conductor count was the all-feed
+`rows_now_off_worker(site)`. Ours counts only the feeds the press drives, at
+all five sites (press-1, D-2574; D-4614). The merged conductor counted its
+start, ticker and passes over the press's feeds, and its close over every
+feed, so "rows added" would include other feeds' landings.
+
+**Decided.** `finish_press` takes the press's `vendors` and calls
+`rows_in_off_worker(site, vendors)`. The source test requires that call once,
+the conductor's other four, and no all-feed count in the conductor. MRG-15.
+
+### D-4661 — One "stored month refused" per refused month — 2026-10-09
+
+**What the tests found.** The full test run on `bff477f0` failed two `cli`
+tests that expect one `cli.sweep` "stored month refused" per refused month,
+and found two:
+- `a_month_refused_before_sweeping_is_logged_with_its_reason`: four events
+  for two months;
+- `a_walk_whose_swept_month_could_not_be_filed_says_it_swept`: two events for
+  one month.
+
+Both branches merged by D-4614 had added the per-month line. Conc13-7
+(D-2643) writes it from `note_refusals` with `label`, `why` and `ran`;
+OBSV-06 (D-3205) writes it from `note_refused` with `feed`, `label`,
+`identity`, `swept` and `reason` as each month is folded. No textual
+conflict marked it.
+
+**Decided.** `note_refused` is the one per-month writer. It carries the feed
+and the identity a refusal swept under, and the tests of both decisions
+match on `label` alone or on its fields. `note_refusals` keeps only the walk's
+tally ("stored walk tallied") and is renamed `note_tally`. ZQ-50 holds as
+written. MRG-16.
+
+**Fixes also made while validating this merge.**
+- `candidatejson::page_through` is `#[cfg(test)]`, since only tests drive a
+  cache of their own (D-4655).
+- `press_with` moves its `Loaded` into the press and keeps a clone for the
+  handle slot, for clippy's `needless_pass_by_value` (D-4626).
+- Theirs' empty-universe autopilot test passes `round` the stop epoch that
+  ours' `round` takes (D-2695).

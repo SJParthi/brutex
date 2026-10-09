@@ -948,7 +948,10 @@ const TEST_MARKERS: [&str; 2] = ["NSETEST", "BSETEST"];
 /// O(1). It runs after [`MasterRow::over_wide`], so `field` is at most
 /// [`MAX_FIELD_BYTES`] bytes and fits the stack buffer exactly; the `zip`
 /// cannot drop a byte of a field that passed that gate. Two needles of seven
-/// bytes over at most 64 folded bytes: a fixed bound, no allocation.
+/// bytes over at most 64 folded bytes: a fixed bound, no allocation. The
+/// 64-byte edge is exercised by
+/// `core::vendor::tests::a_test_marker_is_found_whatever_its_spacing_or_case`;
+/// no bench times it, so the time is UNVERIFIED (`docs/06-limits.md`).
 fn holds_test_marker(field: &str) -> bool {
     let mut folded = [0u8; MAX_FIELD_BYTES];
     let mut len = 0usize;

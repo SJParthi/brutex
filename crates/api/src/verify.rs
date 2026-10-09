@@ -66,7 +66,7 @@ pub const MAX_NAMED: usize = 50;
 /// How many held entries one answer opens, and the page size when `limit=` is
 /// not given.
 ///
-/// One answer used to open every file the counter held: E_v opens for E_v
+/// One answer used to open every file the counter held: `E_v` opens for `E_v`
 /// entries, so the request grew with the store, without limit (W1-api5-7,
 /// W1-api6-0). A page of this many is about a fifth of one feed's indices and
 /// stocks for one month and one timeframe, and it is the bound the measured

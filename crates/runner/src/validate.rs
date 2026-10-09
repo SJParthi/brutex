@@ -7664,6 +7664,19 @@ pub(crate) mod tests {
         for fold in &complete.folds {
             assert!(!out.contains(&format!("{}?", fold.considered)), "{out}");
         }
+
+        // The exact V4 search refuses an incomplete sweep before it prices a
+        // fold, and still READS the flag rather than assuming it.
+        let exact = anchored_search_fixture_v4();
+        assert!(!exact.validated().folds.is_empty());
+        assert!(
+            exact
+                .validated()
+                .folds
+                .iter()
+                .all(|fold| !fold.closure_unproved)
+        );
+        assert_eq!(exact.validated().closure_unproved_folds(), 0);
     }
 
     #[test]

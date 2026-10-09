@@ -228,9 +228,13 @@ fn w1_api5_4_the_window_still_reads_its_range_and_orders_only_the_page() {
         window.contains("page_of(all, offset, limit, order)"),
         "{window}"
     );
+    // The fold walk moved into `kept_extremes` to keep `window` under
+    // clippy's line bound (D-4470); the window still calls it.
+    let kept = item(BARS, "fn kept_extremes<'f>(");
     assert!(
-        window.contains("let fold = month_fold(file, before);"),
-        "a ts window takes its extremes from the kept month folds: {window}"
+        window.contains("kept_extremes(&files, desc, stamps.as_ref())")
+            && kept.contains("let fold = month_fold(file, before);"),
+        "a ts window takes its extremes from the kept month folds: {window}\n{kept}"
     );
     assert!(window.contains("scan_admitted(total)?;"), "{window}");
     assert!(BARS.contains("pub const MAX_SCAN_WINDOW_RECORDS: u64 = 1 << 20;"));
@@ -346,12 +350,20 @@ fn w1_api5_7_a_scrub_opens_one_page_and_walks_the_log_once_per_snapshot() {
         handler.contains("verify_reading(&site, feed, &asked, offset, limit)"),
         "{handler}"
     );
-    assert!(handler.contains("run_store_read(move || {"), "{handler}");
+    // The page arguments made the closure one call (D-4435), so the body is
+    // `verify_reading` itself rather than a block.
+    assert!(
+        handler.contains("run_store_read(move || verify_reading("),
+        "{handler}"
+    );
     assert!(!handler.contains("crate::verify::vendor("), "{handler}");
     assert!(!handler.contains("census_now("), "{handler}");
     let reading = item(SERVER, "fn verify_reading(");
     assert!(
-        reading.contains("site.verify_memo.of_census(&censuses, 0, feed, || {"),
+        // Since D-4435 the memo keeps the newest-per-key list, one per
+        // census snapshot, and the page is checked against it.
+        reading
+            .contains(".of_census(&censuses, 0, feed, || (crate::verify::newest(census), true))"),
         "{reading}"
     );
     assert!(reading.contains("crate::verify::vendor("), "{reading}");

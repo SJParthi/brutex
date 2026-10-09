@@ -2312,7 +2312,7 @@ mod tests {
     use runner::exit_grid_policy::{
         EvaluatedExitGridV1, ExecutionResolutionV1, ExecutionRunV1, ExecutionSeriesV1,
         ExitGridPolicyV1, ExitGridSelectorV1, ForcedStopV1, RangeResolutionV1, RatioLimitsV1,
-        RationalPercentileV1, ResolvedExitGridV1, RungPlanV1, printed_ohlcv_cost_model_id_v2,
+        RationalPercentileV1, ResolvedExitGridV1, RungPlanV1, printed_ohlcv_cost_model_id_v3,
     };
     use runner::grid::{Cell, TradeRow};
     use runner::identity::{Direction, Params, Run};
@@ -2354,7 +2354,7 @@ mod tests {
             RatioLimitsV1::new(1, 10_000, 1).expect("wide exact ratio interval"),
             1_000,
             ExitGridSelectorV1::GuaranteedFloor,
-            printed_ohlcv_cost_model_id_v2(),
+            printed_ohlcv_cost_model_id_v3(),
             ForcedStopV1::Disabled,
             u64::MAX,
             u64::MAX,

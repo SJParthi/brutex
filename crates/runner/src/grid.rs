@@ -1631,7 +1631,8 @@ impl Candidate {
     /// -- the manufactured square-off RULE 1c of `crate::trade::walk` refuses --
     /// and would offer that bar's open as a time-exit attribution beside a
     /// target touched there. Every other path's hole is at or before
-    /// `time_exit`, so this is `time_exit - entry` unchanged. O(1): two reads.
+    /// `time_exit`, so this is `time_exit - entry` unchanged. O(1): two reads,
+    /// UNVERIFIED as a timed measurement (`docs/06-limits.md`, D-4500).
     fn timed_at(&self) -> usize {
         let span = self.time_exit.saturating_sub(self.entry);
         self.hole.map_or(span, |hole| hole.max(span))

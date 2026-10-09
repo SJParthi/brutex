@@ -2716,13 +2716,21 @@ mod tests {
     #[tokio::test]
     async fn every_refused_recovery_names_its_stage_and_reason_in_the_log() {
         let _installed = crate::emitted::sink();
-        let blocked = |from: u64, stage: &str| -> Vec<telemetry::Record> {
-            crate::emitted::landed(from, "pull.recovery", "recovery blocked")
-                .into_iter()
-                .filter(|event| crate::emitted::says(event, "stage", stage))
-                .collect()
-        };
+        a_bad_body_and_a_held_slot_are_logged_at_warn().await;
+        a_refused_preflight_and_preparation_are_logged_at_error().await;
+        a_blocked_activation_is_logged_at_error().await;
+    }
 
+    /// Every "recovery blocked" line at `stage` written since `from`.
+    fn blocked(from: u64, stage: &str) -> Vec<telemetry::Record> {
+        crate::emitted::landed(from, "pull.recovery", "recovery blocked")
+            .into_iter()
+            .filter(|event| crate::emitted::says(event, "stage", stage))
+            .collect()
+    }
+
+    /// A body that is not a plan (400), and a held run slot (409): both Warn.
+    async fn a_bad_body_and_a_held_slot_are_logged_at_warn() {
         // A BODY THAT IS NOT A PLAN: 400, Warn, no plan named.
         let root = crate::scratch::path("sobs8-request");
         let site = Loaded::new(Site::load(&root.join("missing-masters"), &root));
@@ -2770,7 +2778,11 @@ mod tests {
             "{slot:?}"
         );
         std::fs::remove_dir_all(&scratch).unwrap();
+    }
 
+    /// A preflight the saved history refuses (503), and a preparation whose
+    /// predecessor was never activated here (503): both Error.
+    async fn a_refused_preflight_and_preparation_are_logged_at_error() {
         // A PREFLIGHT THE SAVED HISTORY REFUSES: 503, Error.
         let (scratch, site, body, id) = missing_fixture("sobs8-preflight");
         let from = crate::emitted::mark();
@@ -2817,7 +2829,11 @@ mod tests {
         );
         std::fs::remove_dir_all(&fresh).unwrap();
         std::fs::remove_dir_all(scratch).unwrap();
+    }
 
+    /// An activation whose source store is not a directory: Error, and nothing
+    /// is created.
+    async fn a_blocked_activation_is_logged_at_error() {
         // A BLOCKED ACTIVATION: the source store is not a directory.
         let gone = crate::scratch::path("sobs8-activation");
         let site = Loaded::new(Site::load(

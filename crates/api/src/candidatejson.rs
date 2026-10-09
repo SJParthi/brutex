@@ -439,7 +439,8 @@ fn trade_page(
     Ok(page)
 }
 /// One page through the kept readers, opening one when none serves `key`:
-/// [`trade_page`]'s three steps over one `Vec` with no lock between them.
+/// [`trade_page`]'s three steps over one `Vec` with no lock between them, for
+/// the tests that drive a cache of their own (D-4655).
 ///
 /// The readers are held least recently paged first, so a hit moves to the
 /// end and a miss with every slot full evicts the front. Finding the reader
@@ -454,6 +455,7 @@ fn trade_page(
 /// its own refusal said to reopen. The refusal still answers this request; the
 /// next one cold-opens and re-verifies every row and the seal, as every sibling
 /// cache does. D-2763, apicache-1.
+#[cfg(test)]
 fn page_through(
     kept: &mut Vec<Cached>,
     root: &Path,

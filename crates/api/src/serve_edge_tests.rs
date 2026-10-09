@@ -132,7 +132,8 @@ fn latency_query_fields_scan_per_field_against_split_once() -> Result<(), String
     let mut raw = String::with_capacity(MAX_REQUEST_TARGET_BYTES);
     let mut n = 0;
     while raw.len() + tail.len() + 12 < MAX_REQUEST_TARGET_BYTES - 64 {
-        raw.push_str(&format!("pad{n}=x&"));
+        std::fmt::Write::write_fmt(&mut raw, format_args!("pad{n}=x&"))
+            .map_err(|e| e.to_string())?;
         n += 1;
     }
     raw.push_str(tail.trim_start_matches('&'));
