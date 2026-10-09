@@ -2528,6 +2528,86 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// **A BLOCKED SOURCE REQUEST IS AUDITED, RECORDED AT ITS OWN STATUS, AND
+    /// STOPS THE DAY.** R1286-api-06, D-4134.
+    ///
+    /// With the seat free, `retry_day` reserves one attempt and hands the seat
+    /// to `server::recovery_spot`, which runs the broker path and appends the
+    /// audit record BEFORE it answers. A test site may never reach a live
+    /// broker, so that run is blocked with `503`: the audit journal gains
+    /// exactly one `Spot` record refusing this day's window, the attempt is
+    /// recorded `Blocked` at `503`, and the day stops with the
+    /// budget-preserving refusal. A `recovery_spot` that answered an empty run
+    /// without running the broker path would leave no audit record, record a
+    /// `502` nobody received, and treat the empty receipt as a clean one.
+    #[tokio::test]
+    async fn a_blocked_source_request_is_audited_and_stops_the_day() {
+        let root = crate::scratch::path("recovery-spot-audited");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let site = Loaded::new(Site::load(&root.join("missing-masters"), &root));
+        std::fs::create_dir_all(super::root(&site)).unwrap();
+        let mut plan = Journal::open(&root.join("plan.bin")).unwrap();
+        let mut attempts = Journal::open(&super::root(&site).join("attempts.bin")).unwrap();
+        let day = date(2026, 8, 27);
+        let parent = canonical("NIFTY", "1day", Window::new(day, day).unwrap(), "scan");
+        let audit = crate::audit::Journal::at(&site.store_root);
+        assert_eq!(
+            audit.look(),
+            crate::audit::Log::Absent,
+            "premise: no record"
+        );
+
+        // BOUNDED, so a run that is not blocked fails here rather than waiting
+        // out `RETRY_WAIT` between attempts.
+        let ran = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            retry_day(&site, &mut plan, &mut attempts, &parent, day, &None),
+        )
+        .await
+        .expect("a blocked request answers at once, with no retry wait");
+        assert_eq!(
+            ran,
+            Err(
+                "source request blocked, stopped or credentials unavailable; inspect /audit; \
+                 budgets preserved"
+                    .to_owned()
+            )
+        );
+
+        assert_eq!(attempts.latest.len(), 1, "one unit was attempted");
+        let item = attempts.latest.values().next().unwrap().clone();
+        assert_eq!(item.status, Status::Blocked);
+        assert_eq!(item.attempts, 1, "one attempt reserved, none refunded");
+        assert_eq!(item.http_status, 503, "the run's own refusal status");
+        assert_eq!(item.committed, 0);
+        assert_eq!(plan.latest[&item.key], item, "the plan holds the same row");
+
+        let crate::audit::Log::Held { records, torn, .. } = audit.look() else {
+            panic!("the blocked run was not audited: {:?}", audit.look());
+        };
+        assert_eq!(
+            (records, torn),
+            (1, None),
+            "one whole record, no member failures"
+        );
+        let entry = audit.page(records, 0, 1).unwrap().remove(0);
+        let record = entry.decoded.unwrap();
+        assert_eq!(record.scope, crate::audit::Scope::Spot);
+        assert_eq!(record.outcome, crate::audit::Outcome::NotStarted);
+        assert!(
+            record
+                .note
+                .starts_with("this process may not reach a live broker"),
+            "{}",
+            record.note
+        );
+        let days = day.days_from_epoch();
+        assert_eq!((record.from_days, record.to_days), (days, days));
+        drop((plan, attempts));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn failed_receipts_and_unknown_coverage_never_become_verified() {
         for balances in [true, false] {

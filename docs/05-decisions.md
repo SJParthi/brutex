@@ -65104,3 +65104,20 @@ already states.
 
 **Rejected.** Capturing stdout in a test. libtest's capture is not a public
 API and nextest runs each test in its own process.
+
+### D-4134 — A blocked recovery request is audited and recorded at its own status — 2026-10-08
+
+**What was observed.** Run 1286 reported `server::recovery_spot` replaced with
+`Ok(Default::default())` as MISSED. No test reached `recovery_spot` through
+`retry_day` with a free seat. The one that came closest held the seat and was
+refused before it.
+
+**Decided.** A test drives `retry_day` with the seat free on a site that may
+not reach a live broker, bounded at 10 s. It requires the budget-preserving
+refusal, word for word; the attempt recorded `Blocked` with one reserved
+attempt, `http_status` 503 and nothing committed, the same row in the plan;
+and exactly one whole audit record: `Spot`, `NotStarted`, the broker refusal
+as its note, and this day's window (R1286-api-06). The empty run the mutant
+returns leaves no audit record, records 502, and goes on to reassess.
+
+**Rejected.** Nothing else was needed.
