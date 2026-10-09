@@ -31833,3 +31833,6 @@ mod derived_floor_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod r1286_cli_tests;
