@@ -1342,6 +1342,17 @@ impl Journal {
                 bytes / RECORD_LEN_U64,
             ));
         }
+        // A JOURNAL THAT HOLDS NO RECORD YET CAN BE LOST WHOLE (sobs-12,
+        // D-4446). `sync_all` below makes the record and the file's own inode
+        // durable, and nothing made the NAME durable: a file created by this
+        // open, or an `audit/` made by the `create_dir` above, lives in a
+        // directory entry still in the page cache, so a power cut after the
+        // first "synced" record could leave no journal at all. Synced before
+        // the record is written, so a refusal here appends nothing. Only while
+        // the journal is empty: at most two directory syncs, once.
+        if bytes == 0 {
+            first_record_durable(&self.path)?;
+        }
         write_rolled_back(
             &mut file,
             &self.path,
@@ -1448,6 +1459,62 @@ impl Journal {
         out.reverse();
         Ok(out)
     }
+}
+
+/// Syncs the journal's directory and the store root above it, so the names a
+/// first append depends on survive a power cut (sobs-12, D-4446).
+///
+/// Both, every time the journal is empty, rather than only when this process
+/// created them: an earlier process may have created either and died before
+/// syncing, and an empty journal is exactly the state that leaves behind.
+/// The root is synced and never created; `appended` refuses a missing one.
+///
+/// # Errors
+///
+/// The directory that would not sync and the OS's reason. Nothing is
+/// appended after it.
+fn first_record_durable(path: &Path) -> Result<(), String> {
+    let audit = path.parent().unwrap_or_else(|| Path::new("."));
+    for dir in [Some(audit), audit.parent()].into_iter().flatten() {
+        let dir = if dir.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            dir
+        };
+        sync_dir(dir).map_err(|e| {
+            format!(
+                "{}: the journal holds no record yet and the directory {} could not \
+                 be synced, so a power cut could lose the journal file whole; \
+                 nothing was appended — {e}",
+                path.display(),
+                dir.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Every directory [`sync_dir`] synced on this thread, in order.
+    static DIR_SYNCS: std::cell::RefCell<Vec<PathBuf>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
+    /// Fails the next [`sync_dir`] on this thread: a directory `fsync` does
+    /// not fail on request on a developer's disk.
+    static FAIL_DIR_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// One directory `fsync`: open the directory and `sync_all` it.
+fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    {
+        DIR_SYNCS.with(|seen| seen.borrow_mut().push(dir.to_path_buf()));
+        if FAIL_DIR_SYNC.with(|fail| fail.replace(false)) {
+            return Err(std::io::Error::other("injected directory sync failure"));
+        }
+    }
+    std::fs::File::open(dir)?.sync_all()
 }
 
 /// Writes `image` at the end of a journal that held exactly `at` bytes under
@@ -2413,6 +2480,64 @@ mod tests {
                 torn: None,
             },
             "five whole records and nothing past them"
+        );
+    }
+
+    /// sobs-12, D-4446: the first append syncs `audit/` and the store root
+    /// before its record is written, a later append syncs neither, and a
+    /// directory that will not sync refuses the append with nothing written.
+    #[test]
+    fn the_first_record_syncs_its_directory_and_the_root_and_later_ones_do_not() {
+        let root = scratch("audit-first-dir-sync");
+        let journal = Journal::at(&root);
+        let record = |i: i64| Record::refused(Scope::Spot, Outcome::Refused, at(i), "s", "n");
+        DIR_SYNCS.with(|seen| seen.borrow_mut().clear());
+        FAIL_DIR_SYNC.with(|fail| fail.set(true));
+        let refused = journal
+            .append(&record(1))
+            .expect_err("a directory that will not sync refuses");
+        assert!(refused.contains("could not be synced"), "{refused}");
+        assert!(refused.contains("nothing was appended"), "{refused}");
+        assert!(
+            refused.contains("injected directory sync failure"),
+            "{refused}"
+        );
+        assert_eq!(
+            journal.look(),
+            Log::Held {
+                records: 0,
+                bytes: 0,
+                torn: None
+            },
+            "the file exists and holds nothing: the record was never written"
+        );
+        DIR_SYNCS.with(|seen| seen.borrow_mut().clear());
+        journal.append(&record(2)).expect("the retry appends");
+        let audit = journal.path.parent().expect("audit/").to_path_buf();
+        assert_eq!(
+            DIR_SYNCS.with(|seen| seen.borrow().clone()),
+            [audit, root.clone()],
+            "an empty journal syncs audit/ and then the root, even on a retry"
+        );
+        DIR_SYNCS.with(|seen| seen.borrow_mut().clear());
+        journal.append(&record(3)).expect("a second record appends");
+        assert!(
+            DIR_SYNCS.with(|seen| seen.borrow().is_empty()),
+            "a journal that already holds a record syncs no directory"
+        );
+        assert_eq!(journal.look().records(), 2);
+    }
+
+    /// A journal path with no parent component syncs the working directory,
+    /// never the empty path the OS would refuse.
+    #[test]
+    fn a_bare_journal_name_syncs_the_working_directory() {
+        DIR_SYNCS.with(|seen| seen.borrow_mut().clear());
+        first_record_durable(Path::new("pull.journal")).expect("`.` syncs");
+        assert_eq!(
+            DIR_SYNCS.with(|seen| seen.borrow().clone()),
+            [PathBuf::from(".")],
+            "`pull.journal`'s parent is the empty path, which is `.`"
         );
     }
 
