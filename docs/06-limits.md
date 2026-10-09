@@ -15980,3 +15980,13 @@ after 2026-08-03 also pays one `CashCloses::session_close_minute`: two
 civil-day conversion. An index receipt, built with `None`, pays nothing more.
 **UNVERIFIED as a measured bound.** No bench times either receipt, so this is
 read off the source.
+
+### `cli verify` maps each daily bar to its IST midnight (D-4756)
+
+`verify_series` was a copy of the first `limit` bars. On the `1day` rung it now
+also computes each bar's IST day, compares it with the previous bar's, and
+writes the midnight stamp. That is two Euclidean divisions and one comparison
+per bar, so it stays O(limit) time with no allocation beyond the copy it
+already made. It runs twice per `cli verify`, at limits 600 and 900, and never
+on a sweep.
+**UNVERIFIED as a measured bound**, read off the source.

@@ -97,6 +97,8 @@ mod readonly_file;
 mod results_report_tests;
 #[cfg(test)]
 mod screen_policy_tests;
+#[cfg(test)]
+mod verify_daily_tests;
 
 #[cfg_attr(
     not(test),
@@ -8550,10 +8552,53 @@ pub fn verify(vendor_word: &str, underlying: &str) -> String {
     out
 }
 
+/// The first `limit` bars of `span` exactly as `cli verify` folds them.
+///
+/// ON THE DAILY RUNG EACH BAR IS RESTAMPED AT ITS IST DAY'S MIDNIGHT, the
+/// stamp `pull::fold` writes for that rung, before the evaluator sees it
+/// (F-CEC7A0, D-4756). The store admits a daily bar at any whole second and
+/// vendors stamp one at midnight, the open or the close (D-0915); folded as
+/// stored, a 09:15 daily bar landed inside the session and set `early_morning`
+/// (position 44), so V-04 held only for the midnight stamp. Read-side only:
+/// no stored byte changes, and prices, volume and the IST day are kept. Two
+/// daily bars on one IST day are refused by name, never folded as two sessions
+/// or merged into one. Two Euclidean divisions and one comparison per bar,
+/// O(`limit`).
+fn verify_series(span: &stored::Span, limit: usize) -> Result<Vec<indicators::Candle>, String> {
+    const DAY_MICROS: i64 = 86_400_000_000;
+    if span.timeframe != "1day" {
+        return Ok(span.bars.iter().take(limit).copied().collect());
+    }
+    let mut previous = None;
+    span.bars
+        .iter()
+        .take(limit)
+        .map(|bar| {
+            let day = indicators::ist_day(bar.ts_micros);
+            if previous == Some(day) {
+                return Err(format!(
+                    "the stored daily series holds two daily bars on IST day {day}; `cli verify` folds one bar per IST session and refuses rather than choose one"
+                ));
+            }
+            previous = Some(day);
+            // The time into its IST day, removed: `ist_day`'s own arithmetic,
+            // so the restamped bar keeps exactly the day it was stored on.
+            let into_day = bar
+                .ts_micros
+                .saturating_add(indicators::IST_OFFSET_MICROS)
+                .rem_euclid(DAY_MICROS);
+            Ok(indicators::Candle {
+                ts_micros: bar.ts_micros.saturating_sub(into_day),
+                ..*bar
+            })
+        })
+        .collect()
+}
+
 /// Matching refusals or empty columns cannot establish measured properties.
 fn measured_series_checks(span: &stored::Span) -> Result<[Check; 2], String> {
     let determinism = {
-        let short: Vec<indicators::Candle> = span.bars.iter().take(600).copied().collect();
+        let short = verify_series(span, 600)?;
         // THIS IS THE SWEEP, NOT A TRADE AUDIT. The loaded series is daily and
         // therefore cannot legally enter `audit_bars` without a separately
         // stored one-minute execution path. Sending it through that door would
@@ -8594,7 +8639,7 @@ fn measured_series_checks(span: &stored::Span) -> Result<[Check; 2], String> {
     // conditions must not change because LATER bars exist, so a column built on
     // a prefix must agree with the same rows of a column built on the whole.
     let causality = {
-        let whole: Vec<indicators::Candle> = span.bars.iter().take(900).copied().collect();
+        let whole = verify_series(span, 900)?;
         let prefix: Vec<indicators::Candle> = whole
             .iter()
             .take(whole.len().saturating_sub(1).min(600))

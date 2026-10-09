@@ -65282,3 +65282,50 @@ differ now gets the refusal.
 
 Test: `the_supplied_diagnostic_is_the_audits_exact_placement_not_the_legacy_adapter`
 (L1FD-07). In its one fold the two figures differ.
+
+### D-4756 — `cli verify` folds each daily bar at its IST midnight, so V-04 holds for every daily stamp the store admits — 2026-10-09
+
+**Finding.** F-CEC7A0 (gap). V-04 says time-of-day and VWAP bits are clear on
+a daily timeframe. D-1790 proved it in `indicators` for bars stamped at IST
+midnight, the daily rung's anchor (`pull/tests/anchor.rs`). The store admits
+a daily bar at any whole second: vendors stamp one at midnight, at the open or
+at the close (D-0915). `cli verify` folds the stored daily series through the
+production evaluator as stored.
+
+MEASURED before this change, by the new test: NIFTY daily bars over fifteen
+months, written through `store` and folded as `cli verify` folds them, gave a
+108-row column. With the midnight stamp no V-04 position was set. With the
+09:15 stamp, `early_morning` (position 44) was set, and the test stopped
+there. The share and the 15:30 stamp were not reached before the change, so
+nothing is claimed about them from that run. After it, all six folds (two
+instruments, three stamps) give one column per instrument, bit for bit, with
+no V-04 position set.
+
+**Decision.** `cli::verify_series` restamps each bar of a `1day` span at its
+IST day's midnight before it reaches the evaluator. That is the stamp
+`pull::fold` writes for the daily rung. Two daily bars on one IST day are
+refused by name ("two daily bars") rather than folded as two sessions or
+merged into one. The prices, volume and IST day of every bar are unchanged.
+
+This is read-side only. **No stored byte changes**, no store format version
+moves, and no ingest path changes. `cli verify` is the only production fold of
+a daily series: `swept_rung` refuses `1day`, and the daily reference context
+reads OHLC values, never stamps.
+
+**Rejected.**
+
+- Refusing a non-midnight daily bar at the store's write boundary. That
+  would leave every daily file already written at 09:15 or 15:30 refused on
+  read, or require rewriting it. Both break append-only history (§3 rule 8).
+- Refusing it in `cli verify`. That would make verify unusable on a feed that
+  stamps at the open, and the bar's IST day is the only fact a daily stamp
+  carries.
+
+Tests (L1FD-08):
+
+- `every_daily_stamp_the_store_admits_folds_with_no_time_of_day_or_vwap_bit`.
+  It also asserts that the three stamps fold to one column, bit for bit,
+  known mask included.
+- `two_daily_bars_on_one_ist_day_are_refused_by_name`.
+- `only_the_daily_rung_is_restamped_and_the_limit_bounds_the_fold`: an
+  intraday span is never restamped.
