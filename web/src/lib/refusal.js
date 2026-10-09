@@ -94,6 +94,16 @@ export async function reasonOf(response) {
   } catch {
     return null;
   }
+  return reasonOfText(text);
+}
+
+/**
+ * `reasonOf` for a body already read as text, for a reader that must parse the
+ * same body as something else first (`/backtest.json`'s ledger-shaped 503).
+ * @param {string} text
+ * @returns {string | null}
+ */
+export function reasonOfText(text) {
   if (text.trim() === '') return null;
   try {
     return refusalOf(JSON.parse(text));

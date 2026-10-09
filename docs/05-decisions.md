@@ -66648,3 +66648,38 @@ generation as a non-negative safe integer or null, and `generationStep` takes
 no difference across a null. The strip says "not comparable" for such a
 difference instead of "unchanged", and the footer renders an unknown count as
 "—". OBSV-20, OBSV-21.
+
+### D-3220 — The backtest page's own readers name the server's reason on every refusal — 2026-10-09
+
+**What was observed.** Seven readers on `web/src/routes/backtest/+page.svelte`
+dropped the reason a refusing server had written:
+
+1. `fetchTrades` (`/trades.json`) and `fetchTop` (`/engine/top.json`) parsed
+   the body before checking the status. A plain-text refusal became a JSON
+   parse error, and a JSON one was shown as its bare `refusal` with no route
+   or status.
+2. `fetchLedger` (`/backtest.json`) printed "answered 429" alone for every
+   status but 404 and 503. A 503 that was not ledger-shaped, such as the
+   audit layer's envelope on this audited route, was reported as "`runs` is
+   not an array".
+3. `fetchVocab` (`/vocab.json`) printed the status alone.
+4. `loadSeries` and `loadBenchmark` (`/bars/window.json`) printed "answered
+   400" and "answered 400/200", although the route sends `{"error":…}` and
+   one of the two endpoints had not refused at all.
+5. `loadRungs` (`/store.json`) did `if (!response.ok) return;`. The switcher
+   had already been cleared, so an unreadable census, an unknown feed or an
+   UNAVAILABLE master removed it with nothing said.
+
+**Decided.** Each reader checks the status first and names the route, the
+status and the body's reason through `refusal.js`.
+- `/store.json` is read through `headerRefusalFrom`, because it stamps an
+  unreadable census in headers (D-3212).
+- `/backtest.json` reads a 503 as text. A ledger-shaped one is still admitted
+  as a ledger; anything else is named through the new `reasonOfText`, the
+  text half of `reasonOf`. A 200 that is not JSON still fails as a parse
+  error.
+- The buy-and-hold reference names each refused endpoint and only those.
+- The rung switcher renders "Timeframe switcher unavailable: <reason>" where
+  it would have been.
+
+Every new await is followed by the reader's existing staleness check. OBSV-22.

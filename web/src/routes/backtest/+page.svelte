@@ -83,7 +83,7 @@
   import { feeds, selectFeed } from '$lib/feeds.svelte.js';
   import { readStoreCensus } from '$lib/store.svelte.js';
   import { censusFailure } from '$lib/store-census.js';
-  import { refusalFrom } from '$lib/refusal.js';
+  import { headerRefusalFrom, reasonOfText, refusalFrom, refusalSentence } from '$lib/refusal.js';
   import { sweptSymbolOf } from '$lib/instrument.js';
   /* RENAMED ON IMPORT. This page's Run control owns a state object called
      `ask` — what the operator is asking the sweep for — and the fetch helper
@@ -1352,14 +1352,20 @@
       /** @type {any} */
       let body = null;
       let response = null;
+      // THE STATUS BEFORE THE BODY (F2, D-3220). This parsed every reply as
+      // JSON first, so a plain-text refusal became a parse error, and a JSON
+      // one was shown as its bare `refusal` with neither route nor status.
+      /** @type {string | null} */
+      let refused = null;
       let page = 0;
       for (let hop = 0; hop < PAGE_GUARD; hop += 1) {
         response = await ask_(
           `/trades.json?identity=${encodeURIComponent(identity)}&page=${page}`
         );
-        body = await response.json();
+        if (response.ok) body = await response.json();
+        else refused = await refusalFrom('/trades.json', response);
         if (!tradeGate.admits(ticket, openRun?.identity)) return;
-        if (!response.ok) break;
+        if (refused !== null) break;
         if (!Array.isArray(body?.trades)) break;
         pagedRows.push(...body.trades);
         const next = body.next_page;
@@ -1367,14 +1373,14 @@
         page = Number(next);
         if (!Number.isSafeInteger(page) || page < 0) break;
       }
-      if (!response || !response.ok) {
+      if (!response || refused !== null) {
         tradeList = {
           phase: 'failed',
           rows: [],
           periods: null,
           policy: null,
           direction: null,
-          why: body?.refusal ?? `/trades.json answered ${response?.status ?? 'nothing'}`
+          why: refused ?? '/trades.json was not asked'
         };
         return;
       }
@@ -2162,12 +2168,14 @@
         // NAMED, NOT SWALLOWED. Without the table the page can still show the
         // raw words, and it must say WHY it is showing numbers instead of
         // names rather than looking like a run with no conditions.
+        // WITH THE BODY'S REASON, not the status alone (F2, D-3220).
+        const refused = await refusalFrom('/vocab.json', response);
         vocab = {
           phase: 'failed',
           version: 0,
           bits: new Map(),
           why:
-            `/vocab.json answered ${response.status}. Masks below are shown as raw ` +
+            `${refused}. Masks below are shown as raw ` +
             `words because the condition table could not be read. A 404 means this ` +
             `page is newer than the running binary — the page comes off disk and the ` +
             `route does not.`
@@ -2232,17 +2240,27 @@
         `/engine/top.json?feed=${encodeURIComponent(feed)}` +
           `&underlying=${encodeURIComponent(underlying)}`
       );
-      const body = await response.json();
-      if (!response.ok || !body.report) {
+      // THE STATUS BEFORE THE BODY (F2, D-3220): a refusal is read for its
+      // reason by `refusalFrom`, not parsed as a report and lost to a parse
+      // error or shown without its route and status.
+      if (!response.ok) {
         top = {
           phase: 'failed',
           report: '',
           why:
-            body.refusal ??
-            `/engine/top.json answered ${response.status}. The ranked ` +
-              `evidence could not be read; this response does not establish ` +
-              `whether it committed. A 404 means the running binary is ` +
-              `older than this page.`
+            `${await refusalFrom('/engine/top.json', response)}. The ranked ` +
+            `evidence could not be read; this response does not establish ` +
+            `whether it committed. A 404 means the running binary is ` +
+            `older than this page.`
+        };
+        return;
+      }
+      const body = await response.json();
+      if (!body?.report) {
+        top = {
+          phase: 'failed',
+          report: '',
+          why: body?.refusal ?? '/engine/top.json answered with neither a report nor a refusal.'
         };
         return;
       }
@@ -2295,6 +2313,12 @@
         // hours, every rebuild of this page reached them instantly, and none
         // of the route did. The message said "the API refused the request",
         // which is true and useless. It now names the cause and the fix.
+        //
+        // ANY OTHER STATUS IS NAMED WITH THE BODY'S REASON (F2, D-3220). This
+        // said "answered 429" alone, and `/backtest.json` is an audited route:
+        // the audit layer's busy 429 names its refusal and whether the handler
+        // ran (`crates/api/src/operation_audit.rs` `failure`).
+        const refused = response.status === 404 ? '' : await refusalFrom('/backtest.json', response);
         if (seq !== ledgerSeq) return;
         load = {
           phase: 'failed',
@@ -2305,21 +2329,36 @@
                 `does not provide the ordinary sweep ledger at this address. Check the app ` +
                 `address and configured result store. This response alone does not establish ` +
                 `whether results exist, which binary is running, or whether a restart will help.`
-              : `/backtest.json answered ${response.status}. That is the API refusing the ` +
+              : `${refused}. That is the API refusing the ` +
                 `request itself, not the ledger being empty — the two are different facts ` +
                 `and only one of them is fixable by sweeping something.`
         };
         return;
       }
-      const body = await response.json();
+      // A 503 IS READ AS TEXT, THEN PARSED (F2, D-3220). The ledger route's own
+      // 503 keeps the ledger shape (`crates/api/src/backtest.rs` `respond`) and
+      // is admitted below like any ledger. Anything else answered 503 -- the
+      // audit layer's envelope, a proxy page -- is not a ledger, and its reason
+      // is named rather than reported as "`runs` is not an array" or as a JSON
+      // parse error. A 200 that is not JSON still throws, as it always did.
+      const text = await response.text();
       if (seq !== ledgerSeq) return;
+      /** @type {unknown} */
+      let body;
+      try {
+        body = JSON.parse(text);
+      } catch (error) {
+        if (response.ok) throw error;
+      }
       const checked = validateLedgerPayload(body);
       if (!checked.ok) {
         if (seq !== ledgerSeq) return;
         load = {
           phase: 'failed',
           body: null,
-          why: `${checked.why} Nothing from it was ranked or opened.`
+          why: response.ok
+            ? `${checked.why} Nothing from it was ranked or opened.`
+            : `${refusalSentence('/backtest.json', response.status, reasonOfText(text))}. Nothing from it was ranked or opened.`
         };
         return;
       }
@@ -4733,13 +4772,17 @@
          impossible, defeated one layer lower at the fetch. */
       if (seq !== seriesSeq) return;
       if (!response.ok) {
+        // THE ROUTE'S `error`, NOT THE STATUS ALONE (F2, D-3220): the window
+        // route answers a bad span or rung 400 with `{"error":…}`.
+        const refused = await refusalFrom('/bars/window.json', response);
+        if (seq !== seriesSeq) return;
         series = {
           phase: 'failed',
           bars: [],
           total: 0,
           months_read: 0,
           months_missing: 0,
-          why: `The bar window answered ${response.status}. The run's own figures above are unaffected — they were computed when the sweep ran, not now.`
+          why: `${refused}. The run's own figures above are unaffected — they were computed when the sweep ran, not now.`
         };
         return;
       }
@@ -4790,11 +4833,13 @@
     if (!run) {
       rungsSeq += 1;
       storeRungs = [];
+      rungsWhy = '';
       return;
     }
     untrack(() => {
       chartRung = run.timeframe;
       storeRungs = [];
+      rungsWhy = '';
       loadRungs(run);
     });
   });
@@ -4866,6 +4911,8 @@
    * @type {{ name: string, months: number }[]}
    */
   let storeRungs = $state([]);
+  /** Why the rung switcher is absent, when `/store.json` refused (F2, D-3220). */
+  let rungsWhy = $state('');
 
   /**
    * The rungs the store actually holds for one instrument.
@@ -4891,7 +4938,17 @@
         ms: 30_000
       });
       if (seq !== rungsSeq) return;
-      if (!response.ok) return;
+      if (!response.ok) {
+        // SAID, NOT SILENT (F2, D-3220). This returned with the switcher
+        // already cleared, so a refused census -- unreadable, an unknown feed,
+        // the master UNAVAILABLE -- left no switcher and no reason.
+        // `/store.json` names an unreadable census in its headers, so the
+        // header helper reads them before the body.
+        const refused = await headerRefusalFrom('/store.json', response);
+        if (seq !== rungsSeq) return;
+        rungsWhy = refused;
+        return;
+      }
       const rows = await response.json();
       if (seq !== rungsSeq) return;
       /** @type {Map<string, number>} */
@@ -4921,11 +4978,13 @@
         .filter(([name]) => /min$/.test(name) || name === own)
         .map(([name, count]) => ({ name, months: count }))
         .sort((a, b) => byRung(a.name, b.name));
-    } catch {
+    } catch (error) {
       if (seq !== rungsSeq) return;
       // A census that will not load costs the SWITCHER and nothing else: the
       // chart still draws the run's own rung, which is the one that matters.
+      // The reason is still said where the switcher would be.
       storeRungs = [];
+      rungsWhy = error instanceof Error ? error.message : String(error);
     }
   }
 
@@ -4996,13 +5055,23 @@
       ]);
       if (seq !== benchSeq) return;
       if (!firstResponse.ok || !lastResponse.ok) {
+        // EACH REFUSED ENDPOINT WITH ITS OWN REASON (F2, D-3220). This printed
+        // "answered 400/200": two statuses, no `error`, and no word on which
+        // of the two had refused.
+        const [firstWhy, lastWhy] = await Promise.all([
+          firstResponse.ok ? null : refusalFrom('/bars/window.json', firstResponse),
+          lastResponse.ok ? null : refusalFrom('/bars/window.json', lastResponse)
+        ]);
+        if (seq !== benchSeq) return;
+        const named = [
+          firstWhy === null ? null : `The first span endpoint: ${firstWhy}`,
+          lastWhy === null ? null : `${firstWhy === null ? 'The' : 'the'} last span endpoint: ${lastWhy}`
+        ].filter((part) => part !== null);
         bench = {
           phase: 'failed',
           open: 0,
           close: 0,
-          why:
-            `The span endpoints answered ${firstResponse.status}/${lastResponse.status}, ` +
-            'so the current-store buy-and-hold reference has no price pair.'
+          why: `${named.join('; ')}. The current-store buy-and-hold reference has no price pair.`
         };
         return;
       }
@@ -8766,6 +8835,8 @@
                     </button>
                   {/each}
                 </div>
+              {:else if rungsWhy}
+                <span class="dim" role="status">Timeframe switcher unavailable: {rungsWhy}</span>
               {/if}
             </div>
 
