@@ -296,12 +296,34 @@ fn the_ledger_v6_route_and_replay_costs_are_stated() {
             .expect("the rustdoc"),
     );
     assert!(doc.contains("O(full Step-4 route) per call"));
+    assert!(doc.contains("It stays a full re-proof by decision (D-4785)"));
+    for (source, signature) in [
+        (CANDIDATE, "    pub(crate) fn anchored_search_v4("),
+        (CANDIDATE, "fn build_execution_v3_replay_authority("),
+    ] {
+        let body = if signature.starts_with("    ") {
+            method(source, signature)
+        } else {
+            function(source, signature)
+        };
+        assert!(
+            !body.contains("source.validate()?") && !body.contains("self.validate()?"),
+            "`{signature}` re-validates its source again; re-measure the W2-cli7-2 bound"
+        );
+    }
+    let production = function(CANDIDATE, "pub(crate) fn produce_candidate_universe_v1<");
+    assert!(!production.contains("source.validate()?"));
 
     let chapter = chapter(CHAPTER);
     for needed in [
         "One `run_route` now makes 16 strict loads (8 rungs x 2 families)",
         "where before it made 24",
         "a rerun over fully committed authorities still costs the full Step-4 route",
+        "a replay that trusted its own sealed output would prove nothing",
+        "16 Apriori sweeps; 16 Search V4 walk-forward runs; 16 complete two-sided grid expansions",
+        "8 Statistics bootstraps of B draws each",
+        "a production source is validated once, at construction",
+        "The documented alternative is G4's §A",
     ] {
         assert!(
             chapter.contains(needed),

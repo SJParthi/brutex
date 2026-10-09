@@ -712,6 +712,11 @@ pub(crate) fn ledger_v6_replay(
 /// candidates; `docs/06-limits.md` states it (W2-cli7-2, D-1683). Invariant
 /// LBE-11 pins the statement; the route's per-rung load count is
 /// `cli::step3_orchestrator::tests::strict_v6_fixture_tests::strict_v6_the_nifty_commit_consumes_the_sizing_load_once`.
+///
+/// It stays a full re-proof by decision (D-4785): a replay that trusted its
+/// own sealed output would prove nothing that output does not already claim.
+/// The limits state its exact cost bound and the documented cheaper
+/// alternative, which needs an owner decision.
 fn replay_route(
     request: &LedgerAllRequest<'_>,
     from: (u16, u8),

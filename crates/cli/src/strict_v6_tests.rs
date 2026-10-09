@@ -547,6 +547,34 @@ mod strict_v6_fixture_tests {
     }
 
     #[test]
+    fn strict_v6_a_family_commit_validates_its_source_once() -> Result<(), String> {
+        // W2-cli7-2 / D-4785: the family commit validated its Candidate source
+        // at construction, again before Search V4 and again before production,
+        // each time re-hashing every stream, both columns and the data term.
+        let fixture = StoredSuccessFixture::new()?;
+        let config = strict_fixture_config(&fixture)?;
+        let long = exit_policy(Side::Long)?;
+        let short = exit_policy(Side::Short)?;
+        let sweeper = Sweeper::new(engine::Ladder::with_min_hits(1_000_000));
+        crate::candidate_universe::SOURCE_VALIDATIONS.with(|count| count.set(0));
+        drop(commit_family_from_v6(
+            fixture_request(&fixture.source, "NIFTY", &sweeper, &long, &short)?,
+            VerifiedBuildCommitV1(FIXTURE_COMMIT),
+            &|_, _, _| {},
+            Some(&config),
+            true,
+            None,
+            &mut crate::candidate_universe::CandidateLedgerWriterV1::new(),
+        )?);
+        assert_eq!(
+            crate::candidate_universe::SOURCE_VALIDATIONS.with(std::cell::Cell::get),
+            1,
+            "Search V4 and production re-validate nothing construction proved"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn strict_v6_the_nifty_commit_consumes_the_sizing_column_once() -> Result<(), String> {
         // G4-3 / D-4783: sizing built NIFTY's whole Candidate signal column to
         // read its swept count and dropped it; the NIFTY commit built it again.

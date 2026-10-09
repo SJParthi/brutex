@@ -985,6 +985,8 @@ impl<'a> CandidateUniverseProductionSourceV1<'a> {
         reason = "validation compares every retained Candidate and Search V4 source term in one fail-closed boundary"
     )]
     fn validate(&self) -> Result<(), CandidateUniverseRefusal> {
+        #[cfg(test)]
+        SOURCE_VALIDATIONS.with(|count| count.set(count.get().saturating_add(1)));
         require_rung(self.rung_seconds)?;
         if self.horizon.as_bars() == 0 {
             return Err("candidate production horizon is zero".to_owned());
@@ -1105,7 +1107,9 @@ impl<'a> CandidateUniverseProductionSourceV1<'a> {
         &self,
         sweeper: &Sweeper,
     ) -> Result<AnchoredSearchValidationV4, CandidateUniverseRefusal> {
-        self.validate()?;
+        // VALIDATED ONCE, AT CONSTRUCTION (W2-cli7-2, D-4785): this source has
+        // no `&mut` path, so its streams and columns are what construction
+        // proved, and re-hashing them here re-read memory that cannot change.
         let signal_length_micros = signal_length_micros(self.rung_seconds)?;
         let mut builder = CandidateSearchColumnBuilderV1 {
             full_signal: self.signal_bars,
@@ -2966,7 +2970,7 @@ pub(crate) fn produce_candidate_universe_v1<'a>(
     bounds: CandidateUniverseBoundsV1,
     on_level: &dyn Fn(&engine::Frontier, usize, u64),
 ) -> Result<ProducedCandidateUniverseV1<'a>, CandidateUniverseRefusal> {
-    source.validate()?;
+    // Validated once, at construction (W2-cli7-2, D-4785).
     let identities = production_identities(&source, sweeper)?;
     let descriptor = CandidateUniverseDescriptorV1::new(
         source.family,
@@ -4915,7 +4919,8 @@ fn build_execution_v3_replay_authority(
     receipt: CandidateUniverseReceiptV1,
     authenticated: &[AuthenticatedCandidatePopulationRowV1],
 ) -> Result<CandidateExecutionReplayAuthorityV1, CandidateUniverseRefusal> {
-    source.validate()?;
+    // The source was validated at its construction and cannot change, so it is
+    // not re-hashed before or after this replay (W2-cli7-2, D-4785).
     receipt.validate()?;
     let identities = production_identities_with_ladder(source, ladder)?;
     let descriptor = CandidateUniverseDescriptorV1::new(
@@ -5074,7 +5079,6 @@ fn build_execution_v3_replay_authority(
             "Candidate Execution V3 terminal disposition count changed during replay".to_owned(),
         );
     }
-    source.validate()?;
     Ok(CandidateExecutionReplayAuthorityV1 {
         receipt,
         parameters: [long_parameter, short_parameter],
@@ -5374,6 +5378,15 @@ thread_local! {
     /// Test-only count of `CandidateUniverseLedgerV1::scan` calls (one per
     /// full open) on this thread.
     pub(crate) static LEDGER_SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only count of full production-source validations on this thread:
+    /// each one re-hashes every stream, both columns and the data term
+    /// (W2-cli7-2, D-4785).
+    pub(crate) static SOURCE_VALIDATIONS: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -10493,6 +10506,51 @@ mod tests {
         let refused = reserve_directional_grid_rows(&mut rows, usize::MAX)
             .expect_err("usize::MAX rows cannot be reserved");
         assert!(refused.contains("could not reserve"), "{refused}");
+    }
+
+    #[test]
+    fn production_and_its_replay_validate_each_source_once_at_construction() {
+        // W2-cli7-2 / D-4785: inside the full re-proof, production re-ran the
+        // source's whole validation (every stream, both columns and the data
+        // term re-hashed) after construction had just proved it, and the
+        // Execution V3 replay ran it twice more around its own replay.
+        let fixture = ProductionFixture::new();
+        SOURCE_VALIDATIONS.with(|count| count.set(0));
+        let source = fixture.source();
+        assert_eq!(SOURCE_VALIDATIONS.with(std::cell::Cell::get), 1);
+        let (_, max_singleton_support, _) =
+            maximum_nontrivial_live_singleton_support(&source.signal_column);
+        let ladder = engine::Ladder::with_min_hits(max_singleton_support);
+        let sweeper = Sweeper::new(ladder);
+        let bounds = CandidateUniverseBoundsV1::new(1_000_000, 4)
+            .expect("production fixture bounds are explicit");
+        let produced = produce_candidate_universe_v1(&sweeper, source, bounds, &|_, _, _| {})
+            .expect("the fixture production completes");
+        assert_eq!(
+            SOURCE_VALIDATIONS.with(std::cell::Cell::get),
+            1,
+            "production re-validates nothing its source's construction proved"
+        );
+        let root = test_dir();
+        let written = produced
+            .append_and_reopen(root.path(), bounds)
+            .expect("the production commits");
+        let ledger =
+            CandidateUniverseLedgerV1::open_read(root.path(), bounds).expect("the ledger reopens");
+        let authenticated = ledger
+            .complete_population_rows(&written.audit())
+            .expect("the rows authenticate");
+        SOURCE_VALIDATIONS.with(|count| count.set(0));
+        let replay = fixture
+            .source()
+            .execution_v3_replay_authority(ladder, written.audit().receipt(), &authenticated)
+            .expect("the replay reproduces the dispositions");
+        assert_eq!(replay.receipt(), written.audit().receipt());
+        assert_eq!(
+            SOURCE_VALIDATIONS.with(std::cell::Cell::get),
+            1,
+            "the replay's source is validated at its construction only"
+        );
     }
 
     /// D-0990: the series-invariant execution authority is sealed exactly once

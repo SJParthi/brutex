@@ -65248,3 +65248,72 @@ That would raise peak memory eightfold.
 Tests:
 - `cli::step3_orchestrator::all_rung_tests::all_rung_sizing_hands_each_nifty_context_to_its_commit_and_one_writer_serves_every_append`
   (fails at 24 against 16 loads on the up-front sizing code).
+
+### D-4785 — Ledger V6 replay stays a full re-proof, and the duplicated validation inside it is removed — 2026-10-09
+
+**What was observed.** W2-cli7-2 was DOCUMENTED-ONLY. `replay_route` calls the
+complete `run_route`, and G4's §A sketches a cheaper replay that would trust a
+sealed route manifest. Before choosing, the route was searched for work
+duplicated inside the full re-proof that could go without trusting any sealed
+output. Five cases were found:
+
+- the NIFTY column built twice (D-4783);
+- `ledger-all`'s extra loads (D-4784);
+- one Candidate ledger open per append (D-4780);
+- the Pre-Admission doors' second open (D-4781);
+- a fifth, decided here. `CandidateUniverseProductionSourceV1::validate`
+  re-hashes every stream, both columns and the data term:
+  Θ(S + Q + D + E + columns). It ran at construction, then again before
+  Search V4 and again before production, and twice more around the Execution V3
+  replay on that replay's own freshly constructed source.
+
+**Decided.**
+- **Validate once, at construction.** The calls in `anchored_search_v4`,
+  `produce_candidate_universe_v1` and `build_execution_v3_replay_authority` are
+  removed. The source has no `&mut` path, its slices are borrowed immutably, its
+  columns are owned, and construction validated all of them, so the later calls
+  re-read memory that cannot change. A family commit now validates its source
+  once where it validated it three times, and the replay once where it validated
+  it three times.
+- **The replay stays a full re-proof.** A replay that trusted its own sealed
+  output would prove nothing that output does not already claim. Its value is
+  that every authority is re-derived from the bytes on disk under the running
+  binary.
+
+**The exact cost of one replay, which is one `ledger-v6` run.**
+- 16 strict loads, 8 rungs x 2 families, each O(M + B + source bytes).
+- 16 Candidate column builds. The NIFTY build is the sizing census's.
+- 16 execution projections.
+- 16 Apriori sweeps.
+- 16 Search V4 walk-forward runs.
+- 16 complete two-sided grid expansions.
+- 16 Execution V3 replay column rebuilds, memoized to one per family (D-0994).
+- 8 Statistics bootstraps of B draws each.
+- 8 recomputations each of Admission V4, Finalization V4, Population V6,
+  Execution V4 and Selection V6.
+- One writable Candidate ledger open plus its catch-ups.
+- One Pre-Admission door open per family.
+- Every successor ledger's open and reopen.
+- The OOS witness work: one fold per family cohort and O(M) plus the Runner
+  replay per witness (D-4782).
+
+**Documented alternative: G4's §A.** It adds a route manifest keyed by both
+universe ids and every policy term, and a rehydrated selection whose winners
+are re-derived and checked against the sealed digests. It would remove the
+sweeps, the Search V4 runs, the grid expansions, the bootstraps and the
+downstream recomputation. That would leave 16 loads, 16 column builds and at
+most 200 winner grid evaluations. It needs a new authority and format, and a
+contract change: Global Replay V4 would accept a sealed record plus rebuilt
+winners where it now accepts only a live, re-proved chain. That is an owner
+decision, and it is not taken here.
+
+**Rejected.** Handing the production signal column to the Execution V3 replay,
+which would remove those 16 rebuilds. It would keep a column copy alive per
+family until that family's replay. `ledger-all` commits all 16 families in
+phase one before any successor runs, so peak memory would rise by up to 16
+columns.
+
+Tests:
+- `cli::candidate_universe::tests::production_and_its_replay_validate_each_source_once_at_construction`.
+- `cli::step3_orchestrator::tests::strict_v6_fixture_tests::strict_v6_a_family_commit_validates_its_source_once`.
+- `cli::ledger_append_lookup_costs::the_ledger_v6_route_and_replay_costs_are_stated`.

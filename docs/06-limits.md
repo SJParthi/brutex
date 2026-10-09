@@ -15461,14 +15461,32 @@ Holding the context until the NIFTY commit does not raise the peak: the old
 route held one context at a time and so does this one.
 
 W2-cli7-2: `ledger-v6-replay` (and every `ledger-v6` rerun) runs the complete
-route before anything decides reuse. Reuse is keyed by data digest, the data
+route before anything decides reuse, and since D-4785 that is a decision, not
+an omission: a replay that trusted its own sealed output would prove nothing
+that output does not already claim. Reuse is keyed by data digest, the data
 digest needs the strict load, and the load is the dominant term, so a rerun
-over fully committed authorities still costs the full Step-4 route: 16 strict
-loads, eight Search V4 sweeps per family and every commit's reopen. That is
-not O(1) and not proportional to new work. Making it so would need a durable
-request-keyed index of committed routes that a replay could consult before
-loading, which is a new authority and a new format; D-1683 does not add one and
-states the cost here instead.
+over fully committed authorities still costs the full Step-4 route. One replay,
+which is one `ledger-v6` run, costs exactly: 16 strict loads (8 rungs x 2
+families), each O(M + B + source bytes); 16 Candidate column builds (NIFTY's is
+the sizing census's, D-4783) and 16 execution projections; 16 Apriori sweeps;
+16 Search V4 walk-forward runs; 16 complete two-sided grid expansions; 16
+Execution V3 replay column rebuilds, memoized to one per family (D-0994); 8
+Statistics bootstraps of B draws each; 8 recomputations each of Admission V4,
+Finalization V4, Population V6, Execution V4 and Selection V6; one writable
+Candidate ledger open plus its catch-ups (D-4780); one Pre-Admission door open
+per family (D-4781); every successor ledger's open and reopen; and the OOS
+witness work, one fold per family cohort and O(M) plus the Runner replay per
+witness (D-4782). That is not O(1) and not proportional to new work. D-4785
+removed the work this re-proof duplicated without trusting anything sealed: a
+production source is validated once, at construction, where it was validated
+three times per family commit and three times per Execution V3 replay, each
+re-hashing every stream, both columns and the data term. The documented
+alternative is G4's §A: a route manifest keyed by both universe ids and every
+policy term, plus a rehydrated selection whose winners are re-derived and
+checked against the sealed digests, would leave 16 loads, 16 column builds and
+at most 200 winner grid evaluations. It is a new authority, a new format and a
+Global Replay V4 contract change, which is an owner decision; D-4785 does not
+take it.
 
 ## A sweep-evidence ranking is buffered whole before its one write — D-1741, 3 October 2026
 
