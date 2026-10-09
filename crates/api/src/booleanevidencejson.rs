@@ -1,8 +1,8 @@
 //! Bounded observation-only views of saved Boolean statistics and admission.
 //! An unpinned first page reuses a held model that is still current
-//! (`detail::must_admit`); every page checks currency once per linked catalog,
-//! several times. `docs/06-limits.md`, D-1444, states both costs, which are
-//! UNVERIFIED as measurements.
+//! (`detail::must_admit`); every page checks currency through the one read
+//! that serves it (D-4442), each check walking every linked catalog.
+//! `docs/06-limits.md`, D-1444, states both costs and the measured proxy.
 use axum::http::{StatusCode, Uri};
 use cli::boolean_evidence::{
     Admission, Qualification, Statistics, StatisticsRow, StatisticsSource, StatisticsSummary,
@@ -370,8 +370,13 @@ fn base(asked: &Asked, pin: [u8; 32], total: usize, rows: Vec<Value>) -> Result<
     put(&mut body, "rows", Value::Array(rows))?;
     Ok(body)
 }
+/// One statistics page. Its currency is proven by the one call that reads it:
+/// `rows` and `splits` each hold the observation lease and check every linked
+/// catalog before and after the page (`Statistics::with_current`), and the
+/// in-memory `sources` arm makes the one `require_current` that does the same.
+/// Since D-4442 there is no second check before and after that call: both
+/// re-proved what the bracketed read proves, at 2·C catalog checks each.
 fn statistics(reader: &Statistics, asked: &Asked) -> Result<Value, String> {
-    reader.require_current()?;
     let pin = reader.completion_digest();
     if asked.completion.is_some_and(|expected| expected != pin) {
         return Err("statistics completion pin differs".to_owned());
@@ -379,7 +384,7 @@ fn statistics(reader: &Statistics, asked: &Asked) -> Result<Value, String> {
     let (total,rows)=match asked.kind.as_str() {
         "candidates"=>(reader.summary().candidates,reader.rows(pin,asked.offset,asked.limit)?.iter().enumerate().map(|(n,row)|statistics_row(reader,asked.offset+n,row)).collect::<Result<Vec<_>,_>>()?),
         "splits"=>(reader.summary().splits,reader.splits(pin,asked.offset,asked.limit)?.iter().enumerate().map(|(n,row)|json!({"index":(asked.offset+n).to_string(),"train_mask":row.train_mask.to_string(),"test_mask":row.test_mask.to_string(),"bottom_half":row.bottom_half,"rankable":row.rankable,"scores_digest":crate::server::hex32(row.scores_digest)})).collect()),
-        "sources"=>{let sources=reader.sources();let end=asked.offset.checked_add(asked.limit).ok_or("source page overflow")?.min(sources.len());let page=sources.get(asked.offset..end).ok_or("source offset outside extent")?;(sources.len(),page.iter().enumerate().map(|(n,row)|source(asked.offset+n,row)).collect())},
+        "sources"=>{reader.require_current()?;let sources=reader.sources();let end=asked.offset.checked_add(asked.limit).ok_or("source page overflow")?.min(sources.len());let page=sources.get(asked.offset..end).ok_or("source offset outside extent")?;(sources.len(),page.iter().enumerate().map(|(n,row)|source(asked.offset+n,row)).collect())},
         _=>return Err("unknown statistics page kind".to_owned()),
     };
     let mut body = base(asked, pin, total, rows)?;
@@ -389,11 +394,14 @@ fn statistics(reader: &Statistics, asked: &Asked) -> Result<Value, String> {
         "admitted_bytes",
         json!(reader.admitted_bytes().to_string()),
     )?;
-    reader.require_current()?;
     Ok(body)
 }
+/// One admission page. `Admission::rows` holds the admission lease and the
+/// linked statistics' bracket around its read, and `Statistics::rows` brackets
+/// the observations it is compared with, so both halves of the page are proven
+/// current by the calls that read them. Since D-4442 there is no extra
+/// `require_current` before and after: each was 2·C more catalog checks.
 fn admission(reader: &Admission, asked: &Asked) -> Result<Value, String> {
-    reader.require_current()?;
     let pin = reader.completion_digest();
     if asked.completion.is_some_and(|expected| expected != pin) {
         return Err("admission completion pin differs".to_owned());
@@ -447,7 +455,6 @@ fn admission(reader: &Admission, asked: &Asked) -> Result<Value, String> {
                 .to_string()
         ),
     )?;
-    reader.require_current()?;
     Ok(body)
 }
 fn source(index: usize, row: &StatisticsSource) -> Value {

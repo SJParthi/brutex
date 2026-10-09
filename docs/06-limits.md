@@ -12199,12 +12199,28 @@ rule 6); every bound is read from the source.
   an offset at or past the end compares nothing. Before, it partitioned at
   `offset + limit` and ordered everything before that; the query string does
   not cap `offset`. `api::bars::tests::the_page_orders_only_itself_wherever_the_offset_lands`
-  counts the comparisons. **What remains:** a request whose sort is not `ts`,
-  or that asks `extremes=1`, still reads every bar in its month range (one
-  `read_record` per bar), folds the change over them, and holds them all in
-  memory: O(n) reads and O(n) memory, and `n` reaches about 1.9 million at
-  `MAX_WINDOW_MONTHS` = 240 (the figure `bars.rs` states). The `ts` sort
-  without extremes is the bounded seek path and is unchanged.
+  counts the comparisons. **What remains:** a request whose sort is not `ts`
+  still reads every bar in its month range (one `read_record` per bar), folds
+  the change over them, and holds them all in memory: O(n) reads and O(n)
+  memory, and `n` reaches about 1.9 million at `MAX_WINDOW_MONTHS` = 240 (the
+  figure `bars.rs` states). **Since D-4439 that scan has a ceiling, and a
+  `ts` window with extremes no longer scans.** A non-`ts` sort whose months
+  hold more than `MAX_SCAN_WINDOW_RECORDS` = 1,048,576 records is refused by
+  name from the month headers before a bar is read, so the O(n) above is at
+  most that many reads. A `ts` window with `extremes=1` seeks its page as the
+  plain `ts` path does and takes the extremes from `month_fold`: one fold per
+  month file, kept in `MONTH_FOLDS` (at most `MONTH_FOLDS_KEPT` = 4,096,
+  cleared whole when full) under one `stat` of the file taken before it was
+  opened and the open handle's header, and kept only when a second `stat`
+  after the read equals the first. A month is read once until its file moves;
+  its unreadable records are kept with the fold and named on every answer.
+  Proved by `api::bars::window_tests::a_ts_window_with_extremes_reads_each_month_once_until_it_moves`
+  and `api::bars::window_tests::a_scan_past_its_ceiling_is_refused_by_name`.
+  Measured by `latency_window_extremes_and_scan` (240 one-minute months of
+  8,250 bars, `api` test build (the workspace's optimized test profile), a shared four-CPU host running other builds; load average beside each): a first `ts` + extremes request
+  484 ms / 484 ms / 484 ms (n = 1, load 11.14); the same with every month's fold kept 10.9 ms / 25.5 ms / 30.7 ms (n = 200, load 11.14); `ts` without
+  extremes 7.61 ms / 21.5 ms / 21.6 ms (n = 200, load 11.14); a close-order scan of 127 months (1,047,750 records,
+  just under the ceiling) 822 ms / 925 ms / 925 ms (n = 10, load 11.14). p50 / p99 / max.
 * **UC-20 (a freshness bug, not a cost).** `/store?show=gaps` built its axis
   from `Site::series` and its cells from `Site::censuses`, both read at boot.
   It now builds the axis with `census::held_series` over the request's fresh
@@ -12266,16 +12282,26 @@ rule 6); every bound is read from the source.
   contains `x`" without testing each distinct symbol; the walk tests each
   entry once at O(1) (a substring of at most 24 bytes). Proved by
   `api::server::tests::a_store_filter_is_walked_once_per_snapshot`.
-* **W1-api5-7 — `verify_json`.** `verify::vendor` walks `Manifest::newest`,
-  which builds a set over the whole append log (O(log length)), and opens one
+* **W1-api5-7 — `verify_json`.** `verify::vendor` walked `Manifest::newest`,
+  which builds a set over the whole append log (O(log length)), and opened one
   bar file per held entry, reading its header and two records: O(E_v) file
   opens per request. The route doc said "O(1) per entry ... nothing is read
   whole"; corrected to name the log walk. Since D-2281 the scrub runs on the
-  store-read pool, not on the request's runtime worker (W1-api6-0). The
-  O(E_v) opens are inherent: a scrub is the request to open every month the
-  census claims and check it against the file, and an answer from anything
-  less would be a census validated against itself, which is what the route
-  exists not to be.
+  store-read pool, not on the request's runtime worker (W1-api6-0). **Since
+  D-4435 one answer checks one page:** `offset=` and `limit=`, with
+  `MAX_VERIFY_PAGE` = 1,024 the default and the ceiling, and `next_offset`
+  naming where the next page starts. The newest-entry list is built once per
+  census snapshot and kept in `verify_memo`, so the O(log length) walk is paid
+  by the first request after a pull, not by every request, and a page is at
+  most 1,024 opens. An answer that does not cover every held entry never says
+  "verified". Checking every month the census claims is still O(E_v) opens in
+  all, now spread over E_v / 1,024 requests; that total is inherent, because a
+  scrub is the request to open every month and check it against the file, and
+  an answer from anything less would be a census validated against itself.
+  Proved by `api::server::verification_route_tests::scrub_route_opens_no_more_than_a_page_of_a_larger_counter`.
+  Measured by `latency_scrub_page_at_the_ceiling` (`api` test build (the workspace's optimized test profile), a shared four-CPU host running other builds; load average beside each): a page
+  of 1,024 held files 44.5 ms / 73.5 ms / 76.6 ms (n = 200, load 9.72); the memo's miss, `Manifest::newest` over
+  10^5 log entries, 59.4 ms / 84.4 ms / 84.4 ms (n = 50, load 9.72). p50 / p99 / max.
 * **W1-api5-8 — `bars_json` past the last bar.** When `from=` lies after the
   month's last stored bar, the bisection returns `n_valid` and the fallback
   reads the whole month to answer `[]`: O(n_valid) reads instead of
@@ -12285,9 +12311,14 @@ rule 6); every bound is read from the source.
   tail fails that check and the bisection refuses, so a landing that survives
   it proves the window empty and `[]` is answered after
   `ceil(log2(n_valid + 1))` reads. An unsealed month has nothing that detects
-  zero-filled records, which is why it alone keeps the full read: that part
-  is inherent to the file it was born as. Proved by
+  zero-filled records, which is why it alone kept the full read. Proved by
   `api::server::tests::bars_json_past_a_sealed_months_last_bar_reads_no_more_than_the_bisection`.
+  **Since D-4432 a `from` past the header's `last_ts_micros` costs one record
+  read in either kind of month:** `past_the_last_bar` reads record
+  `n_valid - 1` and answers `[]` when it carries the header's stamp (or, unsealed,
+  is the all-zero record an interrupted append leaves); a disagreeing or
+  unreadable record falls through to the paths above, which name the damage.
+  Proved by `api::server::tests::bars_json_past_the_headers_last_stamp_reads_one_record`.
 * **W1-api5-9 — `indexmap_json`.** A build: `nse_indices.csv` is read and
   parsed whole (`indexmap::Published::read`), and every key of the merged
   universe is filtered to the index symbols: O(file bytes + U). **Since
@@ -12345,10 +12376,18 @@ rule 6); every bound is read from the source.
   file, and the directory again); the terminal is one append and its `fsync`.
   The directory insert at `create_new` and the lookup at each read depend on
   the filesystem and on the directory's entry count, which grows with every
-  audited request ever served. Disk use is O(history). `begin` and the
-  terminal are not timed. The read side, including its directory lookup, is
-  measured to 10^4 invocations by D-3303's section below. No larger directory
-  has been measured.
+  audited request ever served. Disk use is O(history). **Since D-4441
+  `begin` and the terminal are timed together** by
+  `api::operation_audit::tests::latency_audit_begin_and_terminal_by_directory_size`
+  (`api` test build (the workspace's optimized test profile), a shared four-CPU host running other builds; load average beside each, 200 requests at each size, p50 / p99 / max): with 100
+  real invocations already held 31.1 ms / 48.4 ms / 52 ms (n = 200, load 11.73); 1,000 21.5 ms / 128 ms / 132 ms (n = 200, load 12.46); 10,000
+  28 ms / 44 ms / 45.6 ms (n = 200, load 11.28); and, as a proxy for a 10^5-entry directory, 10,200 real
+  invocations beside 90,000 empty files that are not journal entries
+  28 ms / 44 ms / 49.5 ms (n = 200, load 11.15). The read side, including its directory lookup, is measured to
+  10^4 invocations by D-3303's section below. No larger directory of real
+  invocations has been measured. Retention or sharding would be a new journal
+  layout (`invocations-v2`) in `cli`, with its own decision; it is not made
+  here.
   `api::operation_audit::tests::each_audited_request_adds_one_file_and_one_index_slot_and_nothing_is_removed`
   pins the byte and file counts, not the latency.
 - **The terminal is owed, so it is not refused by a full detail pool.**
@@ -12456,8 +12495,12 @@ below is timed.
 Six audit findings (W1-api1-4, W1-api1-5, W1-api1-6, W1-api2-2, W1-api2-3,
 W1-api6-3) named a JSON route whose per-request cost grows with saved evidence
 and was stated nowhere here. One of them is narrowed in code; the rest are
-stated as they are. Every bound below is read off the source. None is timed:
-no bench row covers these routes, so each is UNVERIFIED as a measurement.
+stated as they are. Every bound below is read off the source. None was
+timed: no bench row covers these routes, so each was UNVERIFIED as a
+measurement. Since D-4440 the bullets for W1-api1-4, W1-api1-6 and W1-api2-3
+carry a measurement by `api::latency` (`api` test build (the workspace's optimized test profile), a shared four-CPU host running other builds; load average beside each), each under the
+decision its bullet names, or say exactly what was timed in the route's
+place; W1-api6-3 says why its one read is counted rather than timed.
 
 - **`/boolean-candidates.json` and the Boolean evidence routes: an unpinned
   first page reuses a held reader that is still current (W1-api1-5).**
@@ -12476,14 +12519,24 @@ no bench row covers these routes, so each is UNVERIFIED as a measurement.
   the slot's mutex, so a concurrent request to the same route waits for it.
   `booleanoosjson` and `indexstopjson` keep the old shape (every unpinned first
   page is cold); they were not in the finding and are unchanged.
-- **The Boolean evidence pages check currency once per linked catalog, several
-  times a page (W1-api1-6).** `booleanevidencejson::admission` makes four
-  currency calls per page and `statistics` three; each walks the statistics
-  artifact's C linked source catalogs, and each check is a shared `flock`,
-  an unlock and six `metadata` calls, before and after the work. So a warm
-  page costs O(C) system calls, independent of its 1..=256 rows: the audit's
-  reading is about 112·C for an admission page. It is bounded by C, which the
-  statistics artifact fixes when it is written; nothing in the request widens it.
+- **The Boolean evidence pages check currency once per linked catalog, a
+  fixed number of times a page (W1-api1-6).** `booleanevidencejson::admission`
+  made four currency calls per page and `statistics` three, plus the reuse
+  check `detail::must_admit` makes on an unpinned page. **Since D-4442 the
+  outer pair is gone from both:** `admission` makes two currency calls (the
+  admission rows and the linked statistics rows, each bracketed by the read
+  that serves it) and `statistics` one (its `rows` or `splits`, or the in-memory
+  `sources` arm's own check). Each call walks the statistics artifact's C
+  linked source catalogs before and after its work, and each catalog check is
+  a shared `flock`, an unlock and six `metadata` calls on each side. So a warm
+  unpinned page is 4·C catalog checks for statistics and 6·C for admission,
+  was 8·C and 10·C: O(C) system calls, independent of its 1..=256 rows,
+  bounded by C, which the statistics artifact fixes when it is written. One
+  catalog check is timed by a proxy of exactly those system calls on a real
+  owner/body/receipt trio (5.5 µs / 18.6 µs / 16.3 ms (n = 20,000, load 11.49), p50 / p99 / max,
+  `latency_one_catalog_currency_check_proxy`); a saved evidence tree can be
+  built only by `cli`'s private fixtures, so the route is not timed, and the
+  page's figure is that proxy times 4·C or 6·C, an extrapolation.
 - **`/boolean-qualified-campaign.json` has no cache (W1-api1-4).**
   `booleancampaignjson::render_qualified` opens
   `QualifiedCampaign` on every GET: O(H) snapshot reads and 2H decodes over the
@@ -12499,6 +12552,12 @@ no bench row covers these routes, so each is UNVERIFIED as a measurement.
   reservation walk underneath is bounded by `DIRECTORY_LIMIT` (1,000,000
   directories) and every read by `detail::MAX_SCAN_BYTES`, so the cost is
   bounded per request though it grows with H; there is no cache by design.
+  **Measured since D-4440** (`latency_qualified_campaign_by_history_length`,
+  `api` test build (the workspace's optimized test profile), a shared four-CPU host running other builds; load average beside each, p50 / p99 / max): H = 1 ⟨a14_1⟩; H = 100 ⟨a14_100⟩;
+  H = 1,000 ⟨a14_1000⟩; H = 7,000 ⟨a14_7000⟩, just under the history
+  admission `MAX_SCAN_BYTES` allows (about 7,100 records of 9,200 bytes).
+  `a_qualified_history_of_h_records_is_read_whole_for_every_answer` proves the
+  oldest of 40 records, damaged in place, refuses the page.
 - **`/candidate-trades.json` read the whole sealed catalog more than once a
   page (W1-api2-2).** `candidatejson::render` called
   `candidate_trades::read_model` twice itself (open, and the "changed during
@@ -12516,20 +12575,37 @@ no bench row covers these routes, so each is UNVERIFIED as a measurement.
   truncation of `catalog.bin`). Two clients alternating captures make every
   request cold, as for the trade reader below: that part is the bound of a
   one-slot cache, not of the route.
-- **The exact candidate trade page keeps one reader (W1-api2-3).**
-  `candidatejson::trade_page` holds a single slot; a change of key re-runs
-  `TradeReader::open`, which re-reads, re-hashes and re-sums every trade row of
-  the selected candidate: O(trades of that candidate), bounded by
-  `MAX_SCAN_BYTES`. Alternating between two candidates makes every request
-  cold. A warm page is O(page).
+- **The exact candidate trade page keeps eight readers (W1-api2-3).**
+  `candidatejson::trade_page` held a single slot, so alternating between two
+  candidates made every request cold. **Since D-4434 it keeps
+  `TRADE_READERS_KEPT` = 8**, the least recently used evicted, each served
+  only for its exact root, summary and key, and a reader whose page refuses is
+  dropped. A miss still re-runs `TradeReader::open`, which re-reads, re-hashes
+  and re-sums every trade row of the selected candidate: O(trades of that
+  candidate), bounded by `MAX_SCAN_BYTES`; nine or more candidates visited in
+  rotation still miss every time, which is the bound of any finite cache. A
+  warm page is O(page) plus a scan of at most eight kept keys. Measured by
+  `latency_trade_reader_warm_page_and_cold_open` (`api` test build (the workspace's optimized test profile), a shared four-CPU host running other builds; load average beside each, p50 / p99
+  / max): a 16-row page cycling through eight kept readers 4.11 µs / 9.5 µs / 8.08 ms (n = 4,000, load 11.49); a cold
+  open of a candidate with no trades, which is the open's fixed part only,
+  70.2 µs / 8.13 ms / 16.2 ms (n = 1,000, load 11.49). The cold open's O(trades) part is not timed: the fixture's
+  candidates trade nothing.
 - **`/engine/top.json` repeats its cold walk on every request while a refusal
-  persists (W1-api6-3).** `topjson::report` uses `SELECTION.with_verified`,
-  which drops the handle when a refresh refuses and does not cache the
-  refusal. The next request runs `Selection::open` again: the cold index walk
-  of the results ledger and the seal-verified re-reads up to the bad record,
-  O(history) bounded by `MAX_SCAN_BYTES`, then the same 503. Nothing is cached
-  across the damage on purpose: a cached refusal would keep refusing after the
-  operator repaired the file.
+  persists, until D-4433 (W1-api6-3).** `topjson::report` used
+  `SELECTION.with_verified`, which dropped the handle when a refresh refused,
+  so the next request ran `Selection::open` again: the cold index walk of the
+  results ledger and the seal-verified re-reads up to the bad record,
+  O(history) bounded by `MAX_SCAN_BYTES`, then the same 503. **Since D-4433
+  the fold stops at the damaged record and keeps the handle**, with the
+  refusal in `Selection::stalled`: each later request refreshes the handle
+  (constant metadata checks on an unchanged file) and reads that one record
+  again, so the refusal is re-proven from the bytes at one record read per
+  request, never served from a cache. A repair moves the file's generation,
+  the refresh refuses and the next request opens cold and is served.
+  `a_persistent_refusal_costs_one_read_per_request_and_a_repair_is_seen`
+  counts zero cold opens over the persistent refusal and one after the
+  repair. Not timed: the one read is a `BarFile`-class record read, the same
+  operation the D-2290 table times.
 
 ## The cold bar lookup is measured, and it has its own budget — D-0914, 2 October 2026
 
@@ -13955,6 +14031,16 @@ trace:
                      compile-time cap -- a vendor adding index series grows it
                      -- and it is recorded that way rather than as a bound.
 
+CORRECTION (so1-5, D-4438, 9 October 2026). "Not one is reachable from an HTTP
+handler" stopped being true when `POST /masters/refresh` was added:
+`mastersrun::reload` calls `Site::reparse`, which runs `universe()` and so all
+three sorts, once per press. Each is still bounded as stated above (750 names,
+2 groups per bucket, 35 index series). Since D-4438 the refresh calls
+`Site::reparse_if_moved`, which stamps every master and does not reach
+`universe()` when none moved since the parse being served; a press after a
+master moved still pays the parse and these sorts, on a blocking thread. The
+text above is kept as written, with this note, rather than overwritten.
+
 WHAT THIS DOES NOT COVER, said plainly so the entry cannot be read as wider
 than it is: `crates/api`'s own ratio bench reports THIRTY C-15 breaches, up to
 2,346 ps per instrument per request against a 1,000 ps ceiling. That is
@@ -15182,8 +15268,9 @@ pass over the bars at a once-per-report boundary, O(bars).
   held entry. **Since D-2281 it runs on the store-read pool**
   (`detail::run_store_read` behind `verify_reading`, the same eight-slot bound
   `/folder.json` and `/indexmap.json` share, 429 past it), so no runtime worker
-  waits on the scrub. The O(log length + E_v) itself is inherent: a scrub is
-  asked to open every month the census claims. Not timed.
+  waits on the scrub. **Since D-4435 one answer opens at most
+  `MAX_VERIFY_PAGE` = 1,024 months and the log walk is kept per census
+  snapshot**; the W1-api5-7 bullet of the D-1446 section has the measurement.
 - **The conductor's row count runs on a runtime task (W1-api3-1, D-1502).**
   The D-1382 entry above states the cost of `pullrun::rows_now`. **Since
   D-2282 every async caller (the ticker, the pass loop and recovery) goes
@@ -15196,7 +15283,14 @@ pass over the bars at a once-per-report boundary, O(bars).
   D-1502).** `booleanqualification_projection::row_detail` maps all of a
   row's folds into the page: O(F) per row and O(page x F) per page, F bounded
   by the saved run's `max_folds`, which `cli`'s Boolean OOS validation
-  enforces. The api crate states no bound of its own. Not timed.
+  enforces. **Since D-4443 the api crate has a bound of its own:**
+  `MAX_PAGE_FOLD_ROWS` = 16,384 (256 rows of 64 folds). A page whose rows ×
+  F would pass it is refused before a row is read, naming the largest `limit`
+  that fits. Rendering and serializing 16,384 fold rows through the page's own
+  `fold_row` measured 87.2 ms / 124 ms / 124 ms (n = 100, load 11.49) (p50 / p99 / max,
+  `latency_fold_rows_at_the_page_ceiling`, `api` test build (the workspace's optimized test profile), a shared four-CPU host running other builds; load average beside each); the route itself
+  is not timed, because a saved qualification can be built only by `cli`'s
+  private fixtures.
 - **The NSE catalogue is read whole per request, at most 1 MiB (UC-19,
   D-1502).** W1-api5-9's O(file bytes + U) now has a byte bound,
   `indexmap::MAX_CATALOGUE_BYTES`.
@@ -16369,11 +16463,11 @@ of this build on this box, labelled as such, not budgets a gate holds.
 | W1-api5-1, W1-pull2-0, W1-pull2-6 | `read_census` per body and per rolling answer: the whole census read, decoded and checksummed under the lock | D-0036: every committed entry is re-verified before the census is appended to. No metadata test tells an append from a rewrite plus an append (both move length and clocks), so a decoded census held across calls would append to a census that rotted in place as if it were sound | `Manifest::load` 15,857 entries (2.06 MB): 5.64 ms / 15.4 ms; 93,776 entries (12.0 MB, §34's projection): 70.7 ms / 95.6 ms |
 | W1-api5-2 | `census_now` on a miss reads every manifest | A miss is caused by a moved stamp, and for the reason above a moved stamp cannot be served by re-reading only the tail; a hit stays five `stat` calls | per manifest as the row above |
 | W1-pull1-0 | `prepare_observed_with` revalidates each day's receipt per body, O(D x B) | Per-day receipt revalidation is D-0519's guarantee; a body is accepted only against receipts proven for that body | not timed here |
-| W1-api1-6 | O(C) currency checks per page, C linked catalogs | Each check is the page's proof that catalog is still the one the statistics were computed over; C is fixed when the statistics artifact is written, nothing in a request widens it | not timed here |
-| W1-api2-3 | one trade-reader slot; a change of candidate re-reads its trades | Any bounded cache can be made to miss by alternating keys; warm pages are O(page) | not timed here |
-| W1-api6-3 | a persisting `/engine/top.json` refusal repeats its cold walk | A cached refusal would keep refusing after a repair that leaves the file's generation where it was | not timed here |
-| W1-api3-0 | one journal file per audited request | Per request it is O(1) (two 256-byte appends and one create); the growth is the append-only audit record itself (§3 rule 8, D-1445) | not timed here |
-| o1api-4 | `param` scans the query once per field | Bounded by the 8,192-byte query cap and the route's fixed field count, so constant per request | not timed here |
+| W1-api1-6 | O(C) currency checks per page, C linked catalogs; since D-4442 4·C (statistics) and 6·C (admission), was 8·C and 10·C | Each check is the page's proof that catalog is still the one the statistics were computed over; C is fixed when the statistics artifact is written, nothing in a request widens it | one catalog check, by a proxy of its system calls: 5.5 µs / 18.6 µs / 16.3 ms (n = 20,000, load 11.49) (D-4442) |
+| W1-api2-3 | eight trade-reader slots since D-4434; a ninth candidate in rotation re-reads its trades | Any bounded cache can be made to miss by rotating keys; warm pages are O(page) | warm page 4.11 µs / 9.5 µs / 8.08 ms (n = 4,000, load 11.49); cold open, fixed part 70.2 µs / 8.13 ms / 16.2 ms (n = 1,000, load 11.49) (D-4434) |
+| W1-api6-3 | since D-4433 a persisting `/engine/top.json` refusal costs one record read, not its cold walk | A cached refusal would keep refusing after a repair; re-reading the one damaged record is the proof, and a repair moves the generation | one record read, the class the rows above time; counted, not timed (D-4433) |
+| W1-api3-0 | one journal file per audited request | Per request it is O(1) (two 256-byte appends and one create); the growth is the append-only audit record itself (§3 rule 8, D-1445) | `begin` + terminal at 10^4 held 28 ms / 44 ms / 45.6 ms (n = 200, load 11.28); proxy 10^5 entries 28 ms / 44 ms / 49.5 ms (n = 200, load 11.15) (D-4441) |
+| o1api-4 | since D-4436 `Query::parse` splits once and each field is one probe; `param` remains for one-field readers | Bounded by the 8,192-byte query cap and the route's fixed field count, so constant per request | 11 fields of an 8 KiB query: by `param` 170 µs / 4.4 ms / 23 ms (n = 20,000, load 10.73); by `Query` 78.6 µs / 4.15 ms / 16.2 ms (n = 20,000, load 10.73) (D-4436) |
 | W3-engine1-0, ET-o1-proof-coverage-2 | the subset prune is Θ(k) per candidate | Apriori's prune must test the k-2 subsets that are not the join's two parents; C-E-12 times one probe | C-E-12 (engine bench) |
 | W3-engine1-1 | each level is sorted, O(F log F) | Canonical order is what makes a sweep's output byte-identical across runs (§3 rule 5) and what the prefix join walks; the sort is per level, not one of rule 4's five per-operation primitives | not timed here |
 | W3-engine1-2, o1engine-20 | `keep::Best::offer` admits in O(log cap) | It has no production caller (`engine/tests/production_callers.rs` fails the day one appears), so no run pays it | none: no caller |
@@ -16497,3 +16591,34 @@ fails that, as the planted scan in FXA-10's row shows.
 No crate depends on `lake` today, so no request or command pays this. A
 caller that reads a large batch at random rows pays its memory, not the
 crate; one that walks it pays the per-row cost C-L-02 holds flat.
+
+**Since D-4430 it is not started at all unless asked:** the server prints its
+address, and only `BRUTEX_OPEN=1` starts the handler (`BRUTEX_NO_OPEN` still
+refuses even an ask).
+
+## Two api routes whose ceilings no section named, measured — D-4437 and D-4438, 9 October 2026
+
+Measured by `api::latency` (`api` test build (the workspace's optimized test profile), a shared four-CPU host running other builds; load average beside each), p50 / p99 / max.
+
+- **`/live.json` lists the live folder and copies rows per request, within
+  three ceilings (so1-4, D-4437).** `livejson::respond` serves
+  `cli::live::CensusCache`, whose refresh lists the live folder (at most
+  `LIVE_ENTRY_LIMIT` = 4,096 entries), stats each run and clones each run it
+  keeps (at most `LIVE_RUN_LIMIT` = 128 runs of `LIVE_ROW_LIMIT` = 256 rows).
+  Every one of the three is a constant, so a request is bounded; one run or one
+  row past either of the last two is refused by name, which
+  `api::livejson::tests::the_live_route_answers_at_its_ceilings_and_refuses_past_them`
+  proves at 128 runs of 256 rows. At those ceilings
+  (`latency_live_json_at_its_ceilings`): a warm answer {so4_warm}; a cold
+  `CensusCache::refresh` {so4_cold}. The per-request folder listing and clone
+  are `cli`'s and are unchanged here.
+- **A master refresh rebuilt the whole universe on every press (so1-5,
+  D-4438).** `POST /masters/refresh` called `Site::reparse`, which runs
+  `universe()` (catalog, join and coverage builds, the three sorts the gate-11
+  note above called startup-only). Since D-4438 it calls
+  `Site::reparse_if_moved`: one `stat` per master compared with the stamps the
+  held parse was taken under, and no parse when none moved. A press after a
+  master moved pays the parse, on a blocking thread. Measured
+  (`latency_master_refresh_skip_and_parse`, a 20,000-row Groww fixture
+  master): nothing moved {so5_skip}; a full reparse {so5_parse}. Proved by
+  `api::server::tests::a_refresh_with_no_master_moved_does_not_reparse`.

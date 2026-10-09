@@ -117,3 +117,87 @@ fn a_rows_index_is_the_offset_plus_its_place_on_the_page() {
         assert_eq!(super::row_index(offset, n), index, "{offset} + {n}");
     }
 }
+
+/// **A qualification page renders at most `MAX_PAGE_FOLD_ROWS` folds, and past
+/// it is refused by name before a row is read.** W1-api2-8, D-4443.
+#[test]
+fn a_page_past_the_fold_row_ceiling_is_refused_with_the_limit_that_fits() {
+    assert_eq!(MAX_PAGE_FOLD_ROWS, 16_384);
+    for (rows, folds) in [
+        (0, 0),
+        (0, 1 << 40),
+        (256, 64),
+        (1, 16_384),
+        (16_384, 1),
+        (128, 128),
+    ] {
+        assert!(
+            fold_rows_admitted(rows, folds).is_ok(),
+            "{rows} x {folds} fits"
+        );
+    }
+    let why = fold_rows_admitted(256, 65).unwrap_err();
+    assert!(why.contains("16640 fold rows"), "{why}");
+    assert!(why.contains("ask limit=252 or less"), "{why}");
+    assert!(why.contains("D-4443"), "{why}");
+    assert!(
+        fold_rows_admitted(252, 65).is_ok(),
+        "the limit it names fits"
+    );
+    assert!(fold_rows_admitted(253, 65).is_err(), "and is the largest");
+    assert!(fold_rows_admitted(2, 8_193).is_err());
+    let one = fold_rows_admitted(1, 16_385).unwrap_err();
+    assert!(one.contains("cannot be paged here"), "{one}");
+    assert!(
+        fold_rows_admitted(usize::MAX, 2).is_err(),
+        "an overflow is not a fit"
+    );
+    let source = include_str!("booleanqualification_projection.rs");
+    let project = &source[source.find("pub(super) fn project(").unwrap()..];
+    let check = project.find("fold_rows_admitted(").unwrap();
+    assert!(
+        check < project.find("reader.rows(pin").unwrap(),
+        "the ceiling is checked before any row is read"
+    );
+    assert!(project.contains(
+        "asked\n            .limit\n            .min(reader.row_count().saturating_sub(asked.offset)),\n        reader.fold_count(),"
+    ));
+}
+
+/// The fold row a page serves keeps every saved figure exactly, as text.
+#[test]
+fn a_fold_row_serves_each_saved_figure_as_exact_text() {
+    let row = fold_row(3, [19_000, 19_030], [u64::MAX, 7, 2], i64::MIN);
+    assert_eq!(row["index"], "3");
+    assert_eq!(row["first_day"], "19000");
+    assert_eq!(row["last_day"], "19030");
+    assert_eq!(row["sessions"], u64::MAX.to_string());
+    assert_eq!(row["trades"], "7");
+    assert_eq!(row["wins"], "2");
+    assert_eq!(row["return_paisa"], i64::MIN.to_string());
+}
+
+/// What a page at the ceiling spends rendering its folds: `MAX_PAGE_FOLD_ROWS`
+/// calls of the page's own `fold_row`, serialized. A saved qualification can
+/// be built only by `cli`'s private fixtures, so this times the fold half of
+/// the page, not the route. W1-api2-8, D-4443.
+#[test]
+#[ignore = "a latency measurement, run on purpose: see crate::latency"]
+fn latency_fold_rows_at_the_page_ceiling() -> Result<(), String> {
+    let timed = crate::latency::Timed::run(100, || {
+        let rows = (0..MAX_PAGE_FOLD_ROWS)
+            .map(|n| {
+                let day = i64::try_from(n).unwrap_or(0);
+                fold_row(n % 64, [day, day + 30], [21, 40, 19], -1_234_567)
+            })
+            .collect::<Vec<_>>();
+        serde_json::to_string(&rows)
+            .map(drop)
+            .map_err(|why| why.to_string())
+    })?;
+    println!(
+        "{}",
+        timed.line("16,384 fold rows rendered and serialized (one page at the ceiling)")
+    );
+    Ok(())
+}

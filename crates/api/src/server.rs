@@ -808,6 +808,56 @@ fn field_value<'a>(pair: &'a str, name: &str) -> Option<&'a str> {
     pair.strip_prefix(name)?.strip_prefix('=')
 }
 
+/// How many fields a [`Query`] reserves room for before its first insert.
+///
+/// No route or form this server reads names more than a few dozen fields;
+/// a longer query grows the map, which [`MAX_REQUEST_TARGET_BYTES`] and
+/// [`MAX_FORM_BYTES`] bound. D-4436.
+const QUERY_FIELDS_RESERVED: usize = 32;
+
+/// One query string or form body, split ONCE, read by field name in one hash
+/// probe each.
+///
+/// # Why (o1api-4, D-4436)
+///
+/// [`param`] scans the whole string per call, so a reader of `k` fields paid
+/// `k` scans of up to [`MAX_REQUEST_TARGET_BYTES`] (or a form body's bound).
+/// A reader that names three or more fields parses once here instead: one
+/// scan of the string, then O(1) expected per field, so its cost is one pass
+/// however many fields it reads. Each key keeps its FIRST value, exactly as
+/// `param`'s first match does, and a pair without `=` names nothing, exactly
+/// as `param` reads it;
+/// `api::server::serve_edge_tests::a_split_query_answers_every_field_as_param_does`
+/// holds the two readers equal over every form the existing tests use. A
+/// repeated field is still read with [`params`], one pass, as a list.
+#[derive(Debug)]
+pub struct Query<'a> {
+    first: std::collections::HashMap<&'a str, &'a str>,
+}
+
+impl<'a> Query<'a> {
+    /// Splits `raw` once.
+    #[must_use]
+    pub fn parse(raw: &'a str) -> Self {
+        let mut first = std::collections::HashMap::with_capacity(QUERY_FIELDS_RESERVED);
+        for pair in raw.split('&') {
+            if let Some((key, value)) = pair.split_once('=') {
+                first.entry(key).or_insert(value);
+            }
+        }
+        Self { first }
+    }
+
+    /// The decoded value of `name`, or empty when it is absent: [`param`]'s
+    /// answer, in one hash probe.
+    #[must_use]
+    pub fn param(&self, name: &str) -> String {
+        self.first
+            .get(name)
+            .map_or_else(String::new, |value| percent_decode(value))
+    }
+}
+
 /// EVERY value a repeated field carries, in the order they were sent.
 ///
 /// # Why a second reader and not a wider `param`
@@ -1081,12 +1131,13 @@ async fn page(
     axum::extract::State(site): axum::extract::State<Loaded>,
     uri: axum::http::Uri,
 ) -> axum::response::Html<String> {
-    let raw = uri.query().unwrap_or("");
-    let typed = parse_query(raw);
-    let sort = param(raw, "sort");
-    let all = param(raw, "all") == "1";
-    let u = param(raw, "u");
-    let page = page_number(raw);
+    // ONE SCAN for all five fields (o1api-4, D-4436).
+    let query = Query::parse(uri.query().unwrap_or(""));
+    let typed = query.param("q");
+    let sort = query.param("sort");
+    let all = query.param("all") == "1";
+    let u = query.param("u");
+    let page = query.param("page").parse().unwrap_or(0);
     axum::response::Html(instruments_html_from(
         &site.universe().read,
         &typed,
@@ -2237,7 +2288,12 @@ fn day_window_bounds(query: &str) -> Result<(Option<i64>, Option<i64>), String> 
 ///
 /// One comparison per known rung — two — so this is constant work.
 fn timeframe_param(query: &str) -> Result<store::path::Timeframe, String> {
-    let raw = param(query, "timeframe");
+    timeframe_value(&param(query, "timeframe"))
+}
+
+/// [`timeframe_param`] over a value already read, for a reader that parsed
+/// its query once ([`Query`]). D-4436.
+fn timeframe_value(raw: &str) -> Result<store::path::Timeframe, String> {
     if raw.is_empty() {
         return Ok(store::path::Timeframe::MINUTE_1);
     }
@@ -2269,7 +2325,12 @@ fn timeframe_param(query: &str) -> Result<store::path::Timeframe, String> {
 /// One spelling of one parse, so `month` and the range's `to` cannot disagree
 /// about what a month looks like.
 fn month_param(query: &str, key: &str) -> Result<store::path::YearMonth, String> {
-    let raw = param(query, key);
+    month_value(&param(query, key), key)
+}
+
+/// [`month_param`] over a value already read, for a reader that parsed its
+/// query once ([`Query`]). D-4436.
+fn month_value(raw: &str, key: &str) -> Result<store::path::YearMonth, String> {
     raw.split_once('-')
         .and_then(|(y, m)| store::path::YearMonth::new(y.parse().ok()?, m.parse().ok()?).ok())
         .ok_or_else(|| format!("{raw:?} is not a YYYY-MM month for {key:?}"))
@@ -2312,15 +2373,15 @@ impl Addressed {
     ///
     /// The refusal sentence, ready to render.
     fn parse(query: &str) -> Result<Self, String> {
-        let Some(vendor) = ingest::parse_vendor(&param(query, "feed")) else {
-            return Err(format!(
-                "{:?} is not a feed this build can read",
-                param(query, "feed")
-            ));
+        // ONE SCAN of the query for all seven fields (o1api-4, D-4436).
+        let query = Query::parse(query);
+        let feed = query.param("feed");
+        let Some(vendor) = ingest::parse_vendor(&feed) else {
+            return Err(format!("{feed:?} is not a feed this build can read"));
         };
         // `YYYY-MM`, the same spelling every other route uses.
-        let month = month_param(query, "month")?;
-        let timeframe = timeframe_param(query)?;
+        let month = month_value(&query.param("month"), "month")?;
+        let timeframe = timeframe_value(&query.param("timeframe"))?;
         // THE CONTRACT IS ITS OWN PARAMETER, and absent is a real answer.
         //
         // A spot series has no contract segment and its path is one level
@@ -2331,7 +2392,7 @@ impl Addressed {
         // refuses by name rather than falling back to `None`: falling back would
         // read the UNDERLYING's month and answer with a different instrument's
         // bars, which is the one failure worse than a 400.
-        let raw_contract = param(query, "contract");
+        let raw_contract = query.param("contract");
         let contract = if raw_contract.is_empty() {
             None
         } else {
@@ -2352,9 +2413,9 @@ impl Addressed {
             month,
             timeframe,
             contract,
-            exchange: param(query, "exchange"),
-            segment: param(query, "segment"),
-            symbol: param(query, "symbol"),
+            exchange: query.param("exchange"),
+            segment: query.param("segment"),
+            symbol: query.param("symbol"),
         })
     }
 
@@ -2549,6 +2610,23 @@ async fn bars_json(
     // after the bisection's `ceil(log2(n_valid + 1))` reads instead of
     // `n_valid`. A file born without the flag has nothing that could detect the
     // zeros, so it keeps the full read.
+    //
+    // AND PAST THE HEADER'S LAST STAMP, NO BISECTION AT ALL (W1-api5-8, D-4432).
+    // A month born without `FLAG_CHECKSUMS` kept the whole read above, and
+    // every month paid the bisection. The header answers it first:
+    // `Header::advance` refuses any batch that does not begin after the
+    // committed `last_ts_micros`, and sets it to the batch's last stamp, so
+    // no committed bar is stamped past it -- including the records an
+    // interrupted append left as zeros, whose stamps the header carries even
+    // though their bytes never landed. A `from` after it is an empty window.
+    // The one record read is the content check: the last record must be the
+    // bar the header names (in a sealed month that read verifies its block),
+    // or, in an unsealed month, the zeros of an interrupted append. Anything
+    // else -- a refusal, a different stamp -- is a file whose bytes disagree
+    // with its header, and it takes the path below, which reads and names it.
+    if from_micros.is_some_and(|at| past_the_last_bar(&file, at)) {
+        return (axum::http::StatusCode::OK, json(), "[]".to_owned());
+    }
     let landed = from_micros
         .and_then(|at| file.first_at_or_after(at).ok())
         .and_then(|index| usize::try_from(index).ok());
@@ -2592,6 +2670,28 @@ async fn bars_json(
         );
     }
     (axum::http::StatusCode::OK, json(), out)
+}
+
+/// Whether `from` lies after every bar `file` has committed, proven by its
+/// header and one record read. See the D-4432 comment in [`bars_json`].
+///
+/// True only when the header holds a record, `from` is after the header's
+/// `last_ts_micros`, and record `n_valid - 1` reads as the bar that stamp
+/// names -- or, in a month born without checksums, as the all-zero record an
+/// interrupted append leaves. A read that refuses or disagrees is `false`,
+/// and the caller's slower path reads and names the damage.
+fn past_the_last_bar(file: &store::file::BarFile, from: i64) -> bool {
+    let header = file.header();
+    let Some(last) = header.n_valid.checked_sub(1) else {
+        return false;
+    };
+    if from <= header.last_ts_micros {
+        return false;
+    }
+    file.read_record(last).is_ok_and(|bar| {
+        bar.ts_micros == header.last_ts_micros
+            || (!header.checksums_present() && bar == store::format::Bar::default())
+    })
 }
 
 /// Whether one stored instrument-month is COMPLETE, and where it is not.
@@ -3409,29 +3509,25 @@ struct WindowAsk {
     offset: usize,
     limit: usize,
     want_extremes: bool,
+    /// The three path words, read in the same one scan. D-4436.
+    exchange: String,
+    segment: String,
+    symbol: String,
 }
 
 impl WindowAsk {
     /// Reads one, or names the first thing wrong with it.
     fn parse(query: &str) -> Result<Self, String> {
-        let Some(vendor) = ingest::parse_vendor(&param(query, "feed")) else {
-            return Err(format!(
-                "{:?} is not a feed this build can read",
-                param(query, "feed")
-            ));
+        // ONE SCAN of the query for all eleven fields (o1api-4, D-4436).
+        let query = Query::parse(query);
+        let feed = query.param("feed");
+        let Some(vendor) = ingest::parse_vendor(&feed) else {
+            return Err(format!("{feed:?} is not a feed this build can read"));
         };
-        let month_of = |key: &str| {
-            let raw = param(query, key);
-            raw.split_once('-')
-                .and_then(|(y, m)| {
-                    store::path::YearMonth::new(y.parse().ok()?, m.parse().ok()?).ok()
-                })
-                .ok_or_else(|| format!("{raw:?} is not a YYYY-MM month for {key:?}"))
-        };
-        let from = month_of("from")?;
-        let to = month_of("to")?;
-        let timeframe = timeframe_param(query)?;
-        let raw_contract = param(query, "contract");
+        let from = month_value(&query.param("from"), "from")?;
+        let to = month_value(&query.param("to"), "to")?;
+        let timeframe = timeframe_value(&query.param("timeframe"))?;
+        let raw_contract = query.param("contract");
         let contract = if raw_contract.is_empty() {
             None
         } else {
@@ -3441,17 +3537,17 @@ impl WindowAsk {
                 })?,
             )
         };
-        let sort = bars::SortKey::parse(&param(query, "sort")).ok_or_else(|| {
+        let asked_sort = query.param("sort");
+        let sort = bars::SortKey::parse(&asked_sort).ok_or_else(|| {
             format!(
-                "{:?} is not a column this grid sorts on. Accepted: ts, o, h, l, c, v, oi.",
-                param(query, "sort")
+                "{asked_sort:?} is not a column this grid sorts on. Accepted: ts, o, h, l, c, v, oi."
             )
         })?;
         // A NON-NUMBER IS A REFUSAL, NOT A ZERO. `offset=banana` silently
         // reading from the top would answer a different question than the one
         // asked, and the pager would look right while showing the wrong rows.
         let number = |key: &str, fallback: usize| {
-            let raw = param(query, key);
+            let raw = query.param(key);
             if raw.is_empty() {
                 Ok(fallback)
             } else {
@@ -3463,7 +3559,7 @@ impl WindowAsk {
         // reader of a store asks for first: the newest row. Anything else that
         // is not `asc` or `desc` is refused: `dir=ASC` once answered newest
         // first with a 200 (Z1-slice14-F3, D-1762).
-        let desc = match param(query, "dir").as_str() {
+        let desc = match query.param("dir").as_str() {
             "" | "desc" => true,
             "asc" => false,
             other => {
@@ -3473,7 +3569,7 @@ impl WindowAsk {
             }
         };
         // Same rule: `extremes=yes` once dropped the extremes silently.
-        let want_extremes = match param(query, "extremes").as_str() {
+        let want_extremes = match query.param("extremes").as_str() {
             "" | "0" | "false" => false,
             "1" | "true" => true,
             other => {
@@ -3505,6 +3601,9 @@ impl WindowAsk {
                 }
             },
             want_extremes,
+            exchange: query.param("exchange"),
+            segment: query.param("segment"),
+            symbol: query.param("symbol"),
         })
     }
 }
@@ -3539,9 +3638,9 @@ async fn bars_window_json(
     let window = match bars::window(
         &site.store_root,
         asked.vendor,
-        &param(query, "exchange"),
-        &param(query, "segment"),
-        &param(query, "symbol"),
+        &asked.exchange,
+        &asked.segment,
+        &asked.symbol,
         asked.timeframe,
         asked.contract,
         asked.from,
@@ -4914,20 +5013,19 @@ fn store_body(
 /// an operator saw the disagreement is a repair nobody audited — `CLAUDE.md`
 /// §4 wants the reason surfaced rather than swallowed by a fix.
 ///
-/// # Cost
+/// # Cost, and why it is paged
 ///
-/// One bar file opened per held entry (its header and two records read), and
-/// the walk is the ask: a scrub of a vendor is a scrub of every month it
-/// claims. Nothing is sorted. The walk itself is `Manifest::newest`, which
-/// builds a set over the manifest's whole append log, so a request is
-/// `O(log length)` in memory plus `O(E_v)` file opens. This said "O(1) per entry
-/// ... nothing is read whole" and left the log walk out. W1-api5-7, D-1446;
-/// `docs/06-limits.md`'s D-1446 section.
-///
-/// **UNVERIFIED as a measurement.** The bound is argued from the
-/// shape of the code and no bench in this workspace times it.
-/// `CLAUDE.md` §3 rule 6: a structural argument is not a
-/// measurement, however sound it is.
+/// One bar file opened per checked entry (its header and two records read).
+/// Until D-4435 one request checked every month the counter claimed, E_v
+/// opens for E_v entries, so its cost grew with the store (W1-api5-7,
+/// W1-api6-0). It checks one page now: `offset=` (default 0) and `limit=`
+/// (default and ceiling [`crate::verify::MAX_VERIFY_PAGE`]), and the answer
+/// carries `held`, `offset`, `limit` and `next_offset` so a reader can walk
+/// the rest. `verified` is true only for an answer that covered every held
+/// entry. The newest-per-key list a page is cut from is built once per census
+/// snapshot (`Site::verify_memo`), so the `O(log length)` walk of
+/// `Manifest::newest` is paid by the first request after a pull, not by every
+/// one. Measured at the ceiling in `docs/06-limits.md`'s D-4435 section.
 async fn verify_json(
     axum::extract::State(site): axum::extract::State<Loaded>,
     uri: axum::http::Uri,
@@ -4946,10 +5044,23 @@ async fn verify_json(
             no_such_feed_json(&asked),
         );
     };
-    // OFF THE ASYNC WORKERS, AND ADMITTED: a scrub opens one bar file per held
-    // entry, and running it inline held a runtime worker for the whole walk.
-    // W1-api6-0, D-2281.
-    match crate::detail::run_store_read(move || verify_reading(&site, feed, &asked)).await {
+    let window = verify_window(&param(query, "offset"), &param(query, "limit"));
+    let (offset, limit) = match window {
+        Ok(window) => window,
+        Err(why) => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                headers,
+                verify_refused_json(&why, &asked),
+            );
+        }
+    };
+    // OFF THE ASYNC WORKERS, AND ADMITTED: a scrub opens one bar file per
+    // checked entry, and running it inline held a runtime worker for the whole
+    // page. W1-api6-0, D-2281.
+    match crate::detail::run_store_read(move || verify_reading(&site, feed, &asked, offset, limit))
+        .await
+    {
         Ok((code, body)) => (code, headers, body),
         Err(why) => {
             let (code, body) = crate::detail::admission_refused(
@@ -5004,8 +5115,41 @@ fn note_scrub(feed: Vendor, report: &crate::verify::Report) {
     );
 }
 
+/// `/verify.json`'s `offset=` and `limit=`, each defaulted when absent and
+/// refused by name when not a number. The bounds against the counter are
+/// [`crate::verify::vendor`]'s. D-4435.
+fn verify_window(offset: &str, limit: &str) -> Result<(u64, u64), String> {
+    let number = |name: &str, text: &str, absent: u64| -> Result<u64, String> {
+        if text.is_empty() {
+            return Ok(absent);
+        }
+        text.parse::<u64>()
+            .map_err(|_| format!("{name}={text} is not a whole number"))
+    };
+    Ok((
+        number("offset", offset, 0)?,
+        number("limit", limit, crate::verify::MAX_VERIFY_PAGE)?,
+    ))
+}
+
+/// A `/verify.json` page refused before any file was opened, in the shape
+/// [`no_such_feed_json`] answers a feed with. D-4435.
+fn verify_refused_json(why: &str, asked: &str) -> String {
+    format!(
+        r#"{{"refused":{},"feed":{}}}"#,
+        render::json_string(why),
+        render::json_string(asked),
+    )
+}
+
 /// [`verify_json`]'s census read, scrub and render, run on the store-read pool.
-fn verify_reading(site: &Site, feed: Vendor, asked: &str) -> (axum::http::StatusCode, String) {
+fn verify_reading(
+    site: &Site,
+    feed: Vendor,
+    asked: &str,
+    offset: u64,
+    limit: u64,
+) -> (axum::http::StatusCode, String) {
     // FRESH, NEVER THE STARTUP SNAPSHOT. A scrub answering from a census read
     // at boot would verify a store that has since been written to.
     let (censuses, _entries) = census_now(site);
@@ -5016,7 +5160,27 @@ fn verify_reading(site: &Site, feed: Vendor, asked: &str) -> (axum::http::Status
         );
     };
 
-    let report = crate::verify::vendor(&site.store_root, census);
+    // ONCE PER CENSUS SNAPSHOT: the snapshot is replaced, never mutated, so
+    // its newest-per-key list is too. The generation is the census's alone;
+    // the universe parse does not enter a scrub. D-4435.
+    let newest = site
+        .verify_memo
+        .of_census(&censuses, 0, feed, || (crate::verify::newest(census), true));
+    let report = match crate::verify::vendor(
+        &site.store_root,
+        census,
+        newest.as_deref().map(Vec::as_slice),
+        offset,
+        limit,
+    ) {
+        Ok(report) => report,
+        Err(why) => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                verify_refused_json(&why, asked),
+            );
+        }
+    };
     note_scrub(feed, &report);
     // A DISAGREEMENT IS NOT A SERVER FAULT, so it is 200 with the finding in
     // the body: the request was answered correctly and the ANSWER is bad news.
@@ -5035,12 +5199,18 @@ fn verify_reading(site: &Site, feed: Vendor, asked: &str) -> (axum::http::Status
         .collect::<Vec<_>>()
         .join(",");
     let body = format!(
-        "{{\"feed\":{},\"verified\":{},\"say\":{},\"seen\":{},\"agreed\":{},\
+        "{{\"feed\":{},\"verified\":{},\"say\":{},\"held\":{},\"offset\":{},\
+         \"limit\":{limit},\"next_offset\":{},\"seen\":{},\"agreed\":{},\
          \"missing\":{},\"rows\":{},\"bounds\":{},\"unreadable\":{},\
          \"undrawn\":{},\"findings\":[{named}],\"refused\":{}}}",
         render::json_string(feed.as_str()),
         report.verified(),
         render::json_string(&report.say()),
+        report.held,
+        report.offset,
+        report
+            .next_offset
+            .map_or_else(|| "null".to_owned(), |at| at.to_string()),
         t.seen(),
         t.agreed,
         t.missing,
@@ -5538,6 +5708,11 @@ pub struct Site {
     /// `/instruments.json`'s answer per feed, for one census snapshot and one
     /// universe parse. See [`crate::answer_memo`]. W1-api5-3, D-2285.
     instruments_memo: crate::answer_memo::CensusMemo<Vendor, InstrumentsAnswer>,
+    /// `/verify.json`'s newest-per-key entry list per feed, for one census
+    /// snapshot, so a page is cut by position and the log walk is paid once
+    /// per snapshot. See [`crate::verify::newest`]. W1-api5-7, D-4435.
+    verify_memo:
+        crate::answer_memo::CensusMemo<Vendor, Option<std::sync::Arc<Vec<pull::manifest::Entry>>>>,
     /// `/calendar.json`'s served answers per feed and symbol, for one census
     /// snapshot. See [`crate::answer_memo`]. W1-api5-5, D-2286.
     calendar_memo: crate::answer_memo::CensusMemo<
@@ -5734,10 +5909,53 @@ impl Site {
     ///
     /// The verdict, when the fresh parse reads no vendor at all.
     pub fn reparse(&self, masters: &Path) -> Result<String, String> {
+        self.reparse_unless(masters, false)
+    }
+
+    /// [`Site::reparse`], SKIPPED when no master has moved since the parse
+    /// this site answers from. What `POST /masters/refresh` calls.
+    ///
+    /// # Why (so1-5, D-4438)
+    ///
+    /// A refresh re-parsed every master and rebuilt the merged universe, its
+    /// catalogue orders, join and coverage, every time it was pressed, while
+    /// `pull::masters::land` already declines to rewrite a master whose bytes
+    /// are unchanged. So a refresh that landed nothing new rebuilt the same
+    /// universe from the same bytes. The skip compares one `stat` per master
+    /// (device, inode, length and both clocks, [`MasterStamps`]) with the
+    /// stamps taken BEFORE the parse being answered from; any write moves the
+    /// status-change time, so a master that reads differently cannot keep its
+    /// stamp. A stamp that could not be taken never matches, and the parse
+    /// runs. The answer says which happened.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`Site::reparse`] refuses with, when it runs.
+    pub fn reparse_if_moved(&self, masters: &Path) -> Result<String, String> {
+        self.reparse_unless(masters, true)
+    }
+
+    /// [`Site::reparse`], or nothing when `skip_unmoved` and every master's
+    /// stamp is the one the held parse was taken under.
+    fn reparse_unless(&self, masters: &Path, skip_unmoved: bool) -> Result<String, String> {
         let _reload = self
             .reload_lock
             .lock()
             .map_err(|_| "master reload lock poisoned; previous universe retained".to_owned())?;
+        // TAKEN BEFORE THE READ, like `parsed_at` below: a master written
+        // during the parse keeps a stamp the next refresh does not match.
+        let stamps = MasterStamps::of(masters);
+        if skip_unmoved {
+            let held = self.universe();
+            if stamps.is_some() && held.masters == stamps {
+                return Ok(format!(
+                    "no master moved since the parse this process answers from \
+                     (generation {}), so the universe was not re-parsed: {}",
+                    held.generation,
+                    held.read.notes.join(" · ")
+                ));
+            }
+        }
         // A file changed during parsing must remain visibly newer than this
         // snapshot, not be hidden by a timestamp taken after the read.
         let parsed_at = std::time::SystemTime::now();
@@ -5795,6 +6013,7 @@ impl Site {
             targets,
             target_keys,
             generation,
+            masters: stamps,
         };
         Ok(summary)
     }
@@ -5841,6 +6060,7 @@ impl Site {
             census: std::sync::Mutex::new(None),
             census_wire: store_wire::Cache::default(),
             instruments_memo: crate::answer_memo::Memo::default(),
+            verify_memo: crate::answer_memo::Memo::default(),
             calendar_memo: crate::answer_memo::Memo::default(),
             indexmap_memo: crate::answer_memo::Memo::default(),
             store_filter_memo: crate::answer_memo::Memo::with_cap(STORE_FILTERS_KEPT),
@@ -5864,6 +6084,9 @@ impl Site {
                 targets,
                 target_keys,
                 generation: 0,
+                // UNKNOWN until `Site::load` names the directory it parsed,
+                // and an unknown stamp never lets a refresh skip its parse.
+                masters: None,
             }),
             censuses,
             series,
@@ -5888,11 +6111,18 @@ impl Site {
     /// The whole site, read off disk once.
     #[must_use]
     pub fn load(masters: &Path, store_root: &Path) -> Self {
-        Self::new(
+        // Stamped BEFORE the parse, as `Site::reparse` stamps (D-4438).
+        let stamps = MasterStamps::of(masters);
+        let mut site = Self::new(
             universe(masters),
             census::read_all(store_root),
             store_root.to_path_buf(),
-        )
+        );
+        site.parsed
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .masters = stamps;
+        site
     }
 
     /// The same site, permitted to reach a live broker.
@@ -6051,6 +6281,39 @@ pub struct Parsed {
     /// `autopilot::SeriesCache` compares it to know whether its work lists are
     /// still the universe's (W1-api1-1, D-0949).
     pub generation: u64,
+    /// One `stat` of every master, taken before this parse read them, or
+    /// `None` when that is unknown. [`Site::reparse_if_moved`] skips a parse
+    /// only when a fresh set equals it. so1-5, D-4438.
+    pub(crate) masters: Option<MasterStamps>,
+}
+
+/// What one `stat` of each master said: the directory and, per master in
+/// [`master_paths`] order, its stamp or `None` for a master that is not
+/// there. so1-5, D-4438.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MasterStamps {
+    dir: PathBuf,
+    files: Vec<Option<crate::answer_memo::FileStamp>>,
+}
+
+impl MasterStamps {
+    /// Stamps every master under `dir`, or `None` when any `stat` failed for
+    /// a reason other than absence: a stamp that could not be taken must not
+    /// compare equal to anything.
+    pub(crate) fn of(dir: &Path) -> Option<Self> {
+        let mut files = Vec::with_capacity(Vendor::MASTERED.len());
+        for (_, path) in master_paths(dir) {
+            match crate::answer_memo::FileStamp::of(&path) {
+                Ok(stamp) => files.push(Some(stamp)),
+                Err(why) if why.kind() == std::io::ErrorKind::NotFound => files.push(None),
+                Err(_) => return None,
+            }
+        }
+        Some(Self {
+            dir: dir.to_path_buf(),
+            files,
+        })
+    }
 }
 
 /// How many instruments each spot target names.
@@ -19895,45 +20158,52 @@ fn log_level_from(raw: Option<&str>) -> (telemetry::Config, String) {
     (config, note)
 }
 
-/// The environment variable that suppresses opening a browser on start.
+/// The environment variable that ASKS for a browser on start: `1` opens one.
+///
+/// Opening is opt-in (rustonly-4, D-4430). Absent, or any other value, the
+/// server prints its address and spawns nothing.
+pub const OPEN_ENV: &str = "BRUTEX_OPEN";
+
+/// The environment variable that refuses a browser on start, whatever
+/// [`OPEN_ENV`] says. Kept from when opening was the default, so a launcher
+/// that still sets it keeps the meaning it had (D-4430).
 pub const NO_OPEN_ENV: &str = "BRUTEX_NO_OPEN";
 
-/// Opens the operator's browser at `url`, and returns what happened.
+/// What the start-up launch did, for [`opening_line`].
+#[derive(Debug, PartialEq, Eq)]
+enum Launch {
+    /// The operating system's URL handler was started.
+    Opened,
+    /// Nothing was spawned because nobody asked, or [`NO_OPEN_ENV`] refused;
+    /// the reason names the variable.
+    Declined(String),
+    /// The handler was asked for and could not be started; the reason names it.
+    Failed(String),
+}
+
+/// Opens the operator's browser at `url` only when [`OPEN_ENV`] is `1`, and
+/// returns what happened.
+///
+/// # Opt-in, and why it changed (rustonly-4, D-4430)
+///
+/// This opened a browser on every start unless [`NO_OPEN_ENV`] was set. Off
+/// macOS and Windows the handler is `xdg-open`, whose freedesktop.org
+/// `xdg-utils` implementation is a shell script, so a default start could run
+/// a shell. Whether a given host's `xdg-open` is that script, a wrapper, or
+/// absent is UNVERIFIED. The default now spawns nothing: the banner prints the
+/// address, and the IDE run configuration (`.claude/launch.json`) already
+/// names the same URL for the IDE to open. An operator who wants the window
+/// sets `BRUTEX_OPEN=1`, and only then is the handler started.
 ///
 /// # Why this is not a violation of `CLAUDE.md` §2
 ///
 /// §2 forbids "any `build.rs` that invokes an external process". This is not a
 /// build script: nothing here runs during `cargo build`, and gate 2 greps
-/// `*build.rs` for exactly that reason. The bare-machine promise §2 protects —
-/// that `cargo build`, `cargo test` and `cargo clippy` pass with no foreign
-/// toolchain — is untouched, because the only thing spawned here is the
-/// operating system's own URL handler, at run time, on a machine that by
-/// definition already has a browser the operator is about to look at.
-///
-/// # On Linux the handler may be a script, and that is allowed (rustonly-4, D-1202)
-///
-/// Off macOS and Windows the handler is `xdg-open`. The freedesktop.org
-/// `xdg-utils` implementation of it is a shell script, so on such a host this
-/// binary can start a shell at run time. Whether a given host's `xdg-open` is
-/// that script, a wrapper, or absent is UNVERIFIED and is not this crate's to
-/// decide: it is the operator's desktop, chosen and installed by them, exactly
-/// as `open` and `explorer.exe` are on the other two families.
-///
-/// D-1202 records why that is not the "interpreted runtime, as a dependency, a
-/// dev-dependency, or a tool" `CLAUDE.md` §2 forbids: nothing in the workspace
-/// names it, `cargo build`, `cargo test` and `cargo clippy` never reach it (no
-/// test calls [`open_in_browser`]; the tests drive [`open_unless_suppressed`]
-/// only on its suppressed arm, and a `:0` listener never opens), the URL it is
-/// handed is this server's own `http://` loopback address and never operator
-/// text, and [`NO_OPEN_ENV`] turns it off. A spawn failure is printed, never
-/// swallowed.
-///
-/// # Why it is opt-OUT rather than opt-in
-///
-/// The whole stated run procedure is one click, and a procedure whose last step
-/// is "now go and type the address yourself" is not one click. A default that
-/// has to be enabled would leave every fresh clone in the state this function
-/// exists to remove.
+/// `*build.rs` for exactly that reason. `cargo build`, `cargo test` and `cargo
+/// clippy` never reach the spawn (no test calls [`open_in_browser`]; the tests
+/// drive [`open_if_asked`] only on its declining arms, and a `:0` listener is
+/// never opened), and the URL handed to it is this server's own `http://`
+/// loopback address, never operator text. D-1202 records the rest.
 ///
 /// # Why a failure is reported rather than swallowed
 ///
@@ -19942,8 +20212,12 @@ pub const NO_OPEN_ENV: &str = "BRUTEX_NO_OPEN";
 /// silent failure would leave an operator waiting for a window that is never
 /// coming, so the caller prints the URL. `CLAUDE.md` §4: degrade loudly and
 /// name the reason.
-fn open_in_browser(url: &str) -> Result<(), String> {
-    open_unless_suppressed(url, std::env::var_os(NO_OPEN_ENV).as_deref())
+fn open_in_browser(url: &str) -> Launch {
+    open_if_asked(
+        url,
+        std::env::var_os(OPEN_ENV).as_deref(),
+        std::env::var_os(NO_OPEN_ENV).as_deref(),
+    )
 }
 
 /// The URL launcher available on one supported host family.
@@ -19976,17 +20250,38 @@ const fn browser_handler(host: BrowserHost) -> (&'static str, &'static [&'static
     }
 }
 
-/// [`open_in_browser`] with the opt-out as an argument, so a test owns it.
+/// [`open_in_browser`] with both variables as arguments, so a test owns them.
 ///
 /// Split out because the workspace denies `unsafe_code` and `std::env::set_var`
-/// is `unsafe` in edition 2024 — so the suppression arm is untestable while the
-/// variable is read inside the function. That constraint pushed toward the same
-/// shape [`log_dir_from`] already has, and the lint was right: a function that
-/// reads process-global state is one no test can pin without racing every other
-/// test in the binary.
-fn open_unless_suppressed(url: &str, suppressed: Option<&std::ffi::OsStr>) -> Result<(), String> {
-    if suppressed.is_some() {
-        return Err(format!("{NO_OPEN_ENV} is set"));
+/// is `unsafe` in edition 2024 — so the declining arms are untestable while the
+/// variables are read inside the function. That constraint pushed toward the
+/// same shape [`log_dir_from`] already has, and the lint was right: a function
+/// that reads process-global state is one no test can pin without racing every
+/// other test in the binary.
+///
+/// `asked` must be exactly `1`. A refusal wins over an ask, and an ask with any
+/// other value (`0`, `yes`, empty) is declined by name rather than read as a
+/// yes: the side that spawns nothing is the safe one (D-4430).
+fn open_if_asked(
+    url: &str,
+    asked: Option<&std::ffi::OsStr>,
+    refused: Option<&std::ffi::OsStr>,
+) -> Launch {
+    if refused.is_some() {
+        return Launch::Declined(format!("{NO_OPEN_ENV} is set"));
+    }
+    match asked {
+        None => {
+            return Launch::Declined(format!(
+                "opening a browser is opt-in; set {OPEN_ENV}=1 to have it opened"
+            ));
+        }
+        Some(value) if value != "1" => {
+            return Launch::Declined(format!(
+                "{OPEN_ENV} is {value:?}, and only 1 opens a browser"
+            ));
+        }
+        Some(_) => {}
     }
     // THE HANDLER IS THE PLATFORM'S, NEVER A BROWSER BY NAME. Naming a browser
     // picks one the operator may not use and may not have; the OS already knows
@@ -20007,6 +20302,7 @@ fn open_unless_suppressed(url: &str, suppressed: Option<&std::ffi::OsStr>) -> Re
                 .map(drop)
                 .map_err(|why| format!("{program}: the child cannot be reaped: {why}"))
         })
+        .map_or_else(Launch::Failed, |()| Launch::Opened)
 }
 
 /// Waits for `child` on a thread of its own, so it is reaped when it exits.
@@ -20160,17 +20456,19 @@ fn first_event_note(first: telemetry::Emitted) -> Option<String> {
 /// ADDRESS rather than on a test flag: a flag has to be remembered by every
 /// future harness, and the one that forgets is the one that opens the window.
 /// `open` is a parameter so a test proves that without a browser. G18-api-16.
-fn opening_line(
-    addr: std::net::SocketAddr,
-    open: impl FnOnce(&str) -> Result<(), String>,
-) -> String {
+///
+/// A launch nobody asked for is not a failure, and the line says so in other
+/// words: `address:` with the reason, where a failed launch keeps its
+/// `NOT OPENED` (D-4430).
+fn opening_line(addr: std::net::SocketAddr, open: impl FnOnce(&str) -> Launch) -> String {
     let home = format!("http://{addr}/");
     if addr.port() == 0 {
         "  opening: skipped — port 0 addresses nothing".to_owned()
     } else {
         match open(&home) {
-            Ok(()) => format!("  opening: {home}"),
-            Err(why) => format!("  opening: NOT OPENED ({why}) — go to {home}"),
+            Launch::Opened => format!("  opening: {home}"),
+            Launch::Declined(why) => format!("  address: {home} — not opened ({why})"),
+            Launch::Failed(why) => format!("  opening: NOT OPENED ({why}) — go to {home}"),
         }
     }
 }
@@ -21580,6 +21878,112 @@ mod tests {
         site.reparse(&dir).expect("restored input reloads");
         assert!(site.universe().at >= before);
         assert_eq!(site.universe().read.merged.by_key.len(), count);
+    }
+
+    /// **A refresh whose masters did not move is answered without a parse;
+    /// any write, a replacement, an appearance, a removal or an unknown stamp
+    /// parses again, and a refused parse is never skipped into.** so1-5,
+    /// D-4438.
+    #[test]
+    fn a_refresh_with_no_master_moved_does_not_reparse() {
+        let groww = format!("{GROWW_HEAD}NSE,CASH,,NIFTY,IDX,,NIFTY,,,NSE-NIFTY\n");
+        let dir = masters("reparse-if-moved", Some(&groww), Some(DHAN_HEAD));
+        let site = Loaded::new(site("reparse-if-moved", &dir));
+        let generation = || site.universe().generation;
+        let start = generation();
+        assert!(
+            site.universe().masters.is_some(),
+            "the boot parse is stamped"
+        );
+
+        let said = site.reparse_if_moved(&dir).expect("unchanged masters");
+        assert!(said.starts_with("no master moved"), "{said}");
+        assert_eq!(generation(), start, "the boot parse still answers");
+        assert_eq!(
+            crate::mastersrun::reload(&site, &dir).expect("a skipped reload is a reload"),
+            said
+        );
+        assert_eq!(generation(), start);
+
+        // The same bytes written again: the status-change time moves.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(dir.join("groww_instruments.csv"), &groww).expect("rewrite");
+        site.reparse_if_moved(&dir).expect("a rewrite parses");
+        assert_eq!(generation(), start + 1);
+        site.reparse_if_moved(&dir).expect("and is then unchanged");
+        assert_eq!(generation(), start + 1);
+
+        // A master that goes is a parse, which refuses the lost feed; one
+        // that comes back is a parse, which is accepted.
+        let zerodha = dir.join("zerodha_instruments.csv");
+        std::fs::remove_file(&zerodha).expect("remove fixture only");
+        let why = site
+            .reparse_if_moved(&dir)
+            .expect_err("a lost feed parses and refuses");
+        assert!(why.contains("previously readable feed"), "{why}");
+        assert_eq!(generation(), start + 1);
+        std::fs::write(&zerodha, ZERODHA_HEAD).expect("restore fixture");
+        site.reparse_if_moved(&dir)
+            .expect("a returned master parses");
+        assert_eq!(generation(), start + 2);
+
+        // A damaged master refuses, keeps the held parse, and stays refused:
+        // the refusal did not record its stamps, so it is never skipped.
+        site.reparse_if_moved(&dir).expect("settled");
+        let settled = generation();
+        std::fs::write(
+            dir.join("groww_instruments.csv"),
+            format!("{GROWW_HEAD}broken\n"),
+        )
+        .expect("damage fixture only");
+        for _ in 0..2 {
+            let why = site.reparse_if_moved(&dir).expect_err("damage refuses");
+            assert!(why.contains("previous universe retained"), "{why}");
+        }
+        assert_eq!(generation(), settled);
+        std::fs::write(dir.join("groww_instruments.csv"), &groww).expect("repair");
+        site.reparse_if_moved(&dir).expect("a repair parses");
+        assert_eq!(generation(), settled + 1);
+
+        // An unknown stamp never matches.
+        site.parsed
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .masters = None;
+        site.reparse_if_moved(&dir).expect("parses");
+        assert_eq!(generation(), settled + 2);
+
+        // `reparse` itself is unconditional, as every caller before D-4438
+        // relies on.
+        site.reparse(&dir).expect("parses");
+        assert_eq!(generation(), settled + 3);
+        assert_eq!(MasterStamps::of(&dir), site.universe().masters);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What a refresh's reparse costs when nothing moved (four `stat`s and a
+    /// lock) against a parse of the same fixture masters. A measurement, run
+    /// on purpose; the numbers are in `docs/06-limits.md`'s D-4438 row. so1-5.
+    #[test]
+    #[ignore = "a latency measurement, run on purpose: see crate::latency"]
+    fn latency_master_refresh_skip_and_parse() {
+        let mut groww = String::from(GROWW_HEAD);
+        for n in 0..20_000 {
+            let isin = (0..10)
+                .map(|d| format!("INE{n:06}A0{d}"))
+                .find(|isin| brutex_core::isin::Isin::new(isin).is_ok())
+                .expect("one check digit verifies");
+            let _ = writeln!(groww, "NSE,CASH,,SYM{n},EQ,EQ,{isin},,,NSE-SYM{n}");
+        }
+        let dir = masters("reparse-latency", Some(&groww), Some(DHAN_HEAD));
+        let site = Loaded::new(site("reparse-latency", &dir));
+        let skip = crate::latency::Timed::run(2_000, || site.reparse_if_moved(&dir).map(drop))
+            .expect("skip");
+        let parse = crate::latency::Timed::run(20, || site.reparse(&dir).map(drop)).expect("parse");
+        println!("masters: {} groww rows, {} bytes", 20_000, groww.len());
+        println!("{}", skip.line("reparse_if_moved, nothing moved"));
+        println!("{}", parse.line("reparse, 20,000-row fixture master"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -26571,32 +26975,52 @@ mod tests {
         assert!(
             include_str!("server.rs")
                 .contains(".and_then(|child| {\n            reap_detached(child)"),
-            "open_unless_suppressed hands its child to the reaper"
+            "open_if_asked hands its child to the reaper"
         );
     }
 
-    /// `BRUTEX_NO_OPEN` is honoured, and the refusal names the variable rather
-    /// than reporting a spawn that never happened.
+    /// Opening a browser is opt-in (rustonly-4, D-4430): nothing is spawned
+    /// unless `BRUTEX_OPEN` is exactly `1`, `BRUTEX_NO_OPEN` refuses even an
+    /// ask, and each decline names the variable that decided it.
     ///
     /// The spawning arm is deliberately not exercised: asserting it would open
     /// a browser window on the machine running the suite, and a test with a
     /// visible side effect on the operator's desktop is one they will disable.
     #[test]
-    fn the_browser_is_not_opened_when_the_operator_said_not_to() {
-        let why = open_unless_suppressed("http://127.0.0.1:8080/", Some(std::ffi::OsStr::new("1")))
-            .expect_err("it must refuse when the variable is set");
-        assert!(
-            why.contains(NO_OPEN_ENV),
-            "the refusal names the variable that caused it: {why}"
-        );
-        // AN EMPTY VALUE STILL SUPPRESSES. `var_os` returns `Some("")` for
-        // `BRUTEX_NO_OPEN=`, and an operator who wrote that meant "off" — the
-        // test pins the presence rule rather than a truthiness one.
-        assert!(
-            open_unless_suppressed("http://127.0.0.1:8080/", Some(std::ffi::OsStr::new("")))
-                .is_err(),
-            "presence suppresses, whatever the value"
-        );
+    fn the_browser_is_opened_only_when_the_operator_asked_for_it() {
+        let url = "http://127.0.0.1:8080/";
+        let declined = |launch: Launch| match launch {
+            Launch::Declined(why) => why,
+            other => panic!("nothing may be spawned here: {other:?}"),
+        };
+        // ABSENT: THE DEFAULT SPAWNS NOTHING, and says how to ask.
+        let why = declined(open_if_asked(url, None, None));
+        assert!(why.contains("opt-in") && why.contains(OPEN_ENV), "{why}");
+        // ANY VALUE BUT `1` IS NOT AN ASK, the empty one included.
+        for value in ["", "0", "yes", "true", "11", " 1"] {
+            let why = declined(open_if_asked(url, Some(std::ffi::OsStr::new(value)), None));
+            assert!(
+                why.contains(OPEN_ENV) && why.contains("only 1 opens"),
+                "{value:?}: {why}"
+            );
+        }
+        // A REFUSAL WINS over an ask, and over silence, whatever its value.
+        for refused in ["", "1", "0"] {
+            for asked in [None, Some("1"), Some("0")] {
+                let why = declined(open_if_asked(
+                    url,
+                    asked.map(std::ffi::OsStr::new),
+                    Some(std::ffi::OsStr::new(refused)),
+                ));
+                assert_eq!(
+                    why,
+                    format!("{NO_OPEN_ENV} is set"),
+                    "{asked:?} {refused:?}"
+                );
+            }
+        }
+        assert_eq!(OPEN_ENV, "BRUTEX_OPEN");
+        assert_eq!(NO_OPEN_ENV, "BRUTEX_NO_OPEN");
     }
 
     /// The Windows row is the regression proof: the URL is appended later as
@@ -28188,6 +28612,191 @@ mod tests {
             "the bisection walked up through the zeros to n_valid; an unsealed \
              month must still be read, and its three real bars returned: {body}"
         );
+    }
+
+    /// **PAST THE HEADER'S LAST STAMP, A MONTH IS ANSWERED FROM ITS HEADER AND
+    /// ONE RECORD (W1-api5-8, D-4432)** -- sealed or not.
+    ///
+    /// An unsealed month (a forged version-2 file: three real bars, then seven
+    /// records of zeros under a header naming ten, `last_ts` the third bar's)
+    /// used to be read whole to answer a window past its end. Record 5, inside
+    /// the zeros, is overwritten with a bar stamped 2024-01-03: a whole read
+    /// returns it, so an empty answer for `from=2024-01-02` proves the month
+    /// was not read. The content check is pinned both ways: the same month
+    /// with its LAST record replaced by a bar the header does not name is read
+    /// (and returns that bar), and a sealed month whose last record is in a
+    /// zero tail is read and its damage named, never answered empty. At
+    /// exactly the last stamp the window is not past it.
+    #[tokio::test]
+    #[expect(clippy::too_many_lines, reason = "three forged months and their asks")]
+    async fn bars_json_past_the_headers_last_stamp_reads_one_record() {
+        use std::os::unix::fs::FileExt as _;
+        let month = store::path::YearMonth::new(2024, 1).expect("a legal month");
+        // 2024-01-01 12:00 IST plus `m` minutes.
+        let stamp = |m: i64| ((19_723 * 86_400 - 19_800 + 6 * 3_600) + m * 60) * 1_000_000;
+        let bar = |m: i64| store::format::Bar {
+            ts_micros: stamp(m),
+            open: 100,
+            high: 110,
+            low: 90,
+            close: 105,
+            volume: 1,
+            open_interest: i64::MIN,
+        };
+        let path = store::path::StorePath::new(store::path::PathParts {
+            vendor: Vendor::Dhan,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: store::path::Timeframe::MINUTE_1,
+            month,
+            file: store::path::FileKind::Bars,
+        })
+        .expect("a legal path");
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the id is the cross-check `open` folds; any 32 bits serve"
+        )]
+        let symbol_id = brutex_core::universe::fnv1a("NIFTY") as u32;
+        let v2 = store::layout::Layout::V2;
+        // Three real bars and seven records of zeros, the header naming ten;
+        // `then` rewrites records after the image is laid out.
+        let forge = |root: &std::path::Path, then: &dyn Fn(&mut Vec<u8>)| {
+            let genesis = store::header::Header::genesis_at(v2, symbol_id, 60, 0);
+            let named = genesis.advance(10, stamp(0), stamp(2)).expect("a commit");
+            let mut image = vec![0u8; usize::try_from(store::format::HEADER_LEN).expect("small")];
+            for commit in [
+                genesis.commit().expect("genesis"),
+                named.commit().expect("commit"),
+            ] {
+                let at = usize::try_from(commit.offset).expect("small");
+                image
+                    .iter_mut()
+                    .skip(at)
+                    .zip(commit.bytes)
+                    .for_each(|(dst, src)| *dst = src);
+            }
+            for m in 0..3 {
+                image.extend_from_slice(&bar(m).image());
+            }
+            image.resize(
+                usize::try_from(v2.offset_of(10).expect("an offset")).expect("small"),
+                0,
+            );
+            then(&mut image);
+            let bin = path.to_path_buf(root);
+            std::fs::create_dir_all(bin.parent().expect("a parent")).expect("the directory");
+            std::fs::write(&bin, &image).expect("the forged month");
+        };
+        let put = |image: &mut Vec<u8>, index: u64, at: store::format::Bar| {
+            let from = usize::try_from(v2.offset_of(index).expect("an offset")).expect("small");
+            image
+                .iter_mut()
+                .skip(from)
+                .zip(at.image())
+                .for_each(|(dst, src)| *dst = src);
+        };
+        // 2024-01-03 10:00 IST, inside the month and past every real bar.
+        let later = |minutes: i64| store::format::Bar {
+            ts_micros: stamp(2 * 1_440 - 120 + minutes),
+            ..bar(0)
+        };
+        let ask = |root: &std::path::Path, tag: &str, window: &str| {
+            let site = std::sync::Arc::new(Site::serving(&masters(tag, None, None), root));
+            let uri: axum::http::Uri = format!(
+                "/bars.json?feed=dhan&exchange=NSE&segment=INDEX&symbol=NIFTY\
+                 &timeframe=1min&month=2024-01{window}"
+            )
+            .parse()
+            .expect("a uri");
+            async move { bars_json(axum::extract::State(site), uri).await }
+        };
+
+        // UNSEALED, A ZERO TAIL, A STRAY BAR INSIDE THE ZEROS.
+        let root = store_root("barspastheader");
+        forge(&root, &|image| put(image, 5, later(0)));
+        let file = store::file::BarFile::open_existing(&root, path, symbol_id).expect("opens");
+        assert!(!file.header().checksums_present(), "the premise: unsealed");
+        assert_eq!(file.header().last_ts_micros, stamp(2));
+        assert!(past_the_last_bar(&file, stamp(2) + 1));
+        assert!(
+            !past_the_last_bar(&file, stamp(2)),
+            "at the last stamp is not past it"
+        );
+        assert!(!past_the_last_bar(&file, stamp(0)));
+        drop(file);
+        let (code, _, body) = ask(&root, "barspastheader", "&from=2024-01-02").await;
+        assert_eq!(
+            (code, body.as_str()),
+            (axum::http::StatusCode::OK, "[]"),
+            "answered from the header: a whole read would have returned record 5"
+        );
+        let (code, _, body) = ask(&root, "barspastheader", "&from=2024-01-01").await;
+        assert_eq!(code, axum::http::StatusCode::OK, "{body}");
+        assert!(body.matches("\"t\":").count() >= 3, "{body}");
+
+        // UNSEALED, THE LAST RECORD IS A BAR THE HEADER DOES NOT NAME: read.
+        let root = store_root("barspastheadermismatch");
+        forge(&root, &|image| put(image, 9, later(5)));
+        let file = store::file::BarFile::open_existing(&root, path, symbol_id).expect("opens");
+        assert!(
+            !past_the_last_bar(&file, stamp(2) + 1),
+            "a disagreeing last record"
+        );
+        drop(file);
+        let (code, _, body) = ask(&root, "barspastheadermismatch", "&from=2024-01-02").await;
+        assert_eq!(code, axum::http::StatusCode::OK, "{body}");
+        assert_eq!(
+            body.matches("\"t\":").count(),
+            1,
+            "the month is read, and the bar the header does not name is what it holds: {body}"
+        );
+
+        // SEALED, A ZERO TAIL: the last record fails its block check.
+        let root = store_root("barspastheadersealed");
+        let mut file =
+            store::file::BarFile::open_or_create(&root, path, symbol_id).expect("a bar file");
+        file.append(&(0..3).map(bar).collect::<Vec<_>>())
+            .expect("legal bars");
+        let header = file.header();
+        drop(file);
+        let layout = store::layout::Layout::CURRENT;
+        let bin = path.to_path_buf(&root);
+        let raw = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&bin)
+            .expect("the month opens for the fault");
+        let from = layout.offset_of(3).expect("an offset");
+        let to = layout.offset_of(10).expect("an offset");
+        raw.write_all_at(&vec![0u8; usize::try_from(to - from).expect("small")], from)
+            .expect("the zero extent");
+        let mut grown = header;
+        grown.n_valid = 10;
+        grown.generation = header.generation + 1;
+        let commit = grown.commit().expect("a header image");
+        raw.write_all_at(&commit.bytes, commit.offset)
+            .expect("the header names the zeros");
+        drop(raw);
+        let file = store::file::BarFile::open_existing(&root, path, symbol_id).expect("opens");
+        assert!(file.header().checksums_present(), "the premise: sealed");
+        assert!(
+            !past_the_last_bar(&file, stamp(2) + 1),
+            "the zeros fail their block"
+        );
+        drop(file);
+        let (code, _, body) = ask(&root, "barspastheadersealed", "&from=2024-01-02").await;
+        assert_ne!(
+            (code, body.as_str()),
+            (axum::http::StatusCode::OK, "[]"),
+            "a sealed zero tail is never answered empty from its header"
+        );
+
+        // AN EMPTY MONTH IS NEVER PAST ANYTHING BY THIS PROOF.
+        let root = store_root("barspastheaderempty");
+        let file =
+            store::file::BarFile::open_or_create(&root, path, symbol_id).expect("a bar file");
+        assert!(!past_the_last_bar(&file, i64::MAX));
     }
 
     /// **A COMPLETE SESSION SCORES ZERO LOSSES, AND ONE MISSING MINUTE IS
@@ -30288,8 +30897,11 @@ mod tests {
         // needle matches that prose and the test fails on its own explanation.
         // Measured: this test's first version did exactly that. The call site is
         // what decides, so the call site is what is matched.
+        // Since D-4435 the newest-per-key list is built once per census
+        // snapshot and the scrub walks one page of it.
         assert!(
-            source.contains("for entry in manifest.newest()"),
+            source.contains("Some(Arc::new(manifest.newest()))")
+                && source.contains("for entry in page {"),
             "the scrub must walk one row per instrument-month"
         );
         assert!(
@@ -31095,7 +31707,7 @@ mod tests {
         assert_eq!(
             opening_line(zero, |url| {
                 asked.push(url.to_owned());
-                Ok(())
+                Launch::Opened
             }),
             "  opening: skipped — port 0 addresses nothing"
         );
@@ -31104,14 +31716,22 @@ mod tests {
         assert_eq!(
             opening_line(bound, |url| {
                 asked.push(url.to_owned());
-                Ok(())
+                Launch::Opened
             }),
             "  opening: http://127.0.0.1:8123/"
         );
         assert_eq!(asked, ["http://127.0.0.1:8123/"]);
         assert_eq!(
-            opening_line(bound, |_| Err("no launcher".to_owned())),
+            opening_line(bound, |_| Launch::Failed("no launcher".to_owned())),
             "  opening: NOT OPENED (no launcher) — go to http://127.0.0.1:8123/"
+        );
+        // NOT ASKED IS NOT A FAILURE (D-4430): the address, and why it was
+        // not opened, without the failure's capitals.
+        assert_eq!(
+            opening_line(bound, |_| Launch::Declined(
+                "BRUTEX_OPEN is not set".to_owned()
+            )),
+            "  address: http://127.0.0.1:8123/ — not opened (BRUTEX_OPEN is not set)"
         );
     }
 

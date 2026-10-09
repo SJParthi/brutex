@@ -67568,3 +67568,208 @@ max. The limits line that credited C-L-01 is corrected.
 to 5.1x, 10.2x and 18.1x at the first three sizes, while C-L-01's two
 `row(last)` comparisons read 1.04x and 0.82x and passed. Proof: FXA-10.
 
+### D-4430 — The server opens a browser only when asked — 2026-10-09
+
+**What was observed.** rustonly-4: `api` started the operating system's URL
+handler on every start unless `BRUTEX_NO_OPEN` was set. Off macOS and Windows
+that handler is `xdg-open`, whose freedesktop.org implementation is a shell
+script, so a default start could run a shell. D-1202 kept the handler and
+made it switchable off; the finding asked for the opposite default.
+
+**Decided.** Opening is opt-in. `BRUTEX_OPEN` set to exactly `1` asks for the
+handler; absent or any other value spawns nothing, and the start-up banner
+prints the address with the reason it was not opened (`not opened
+(BRUTEX_OPEN is not set)`). `BRUTEX_NO_OPEN` is kept as a veto that wins
+over an ask, so a launcher that still sets it keeps its meaning. The handler
+list itself (D-1202) is unchanged. Proved by `open_if_asked`'s tests in
+`crates/api/src/server.rs`. FXB1-01.
+
+**Rejected.** Dropping the handler. An operator who wants the window keeps it
+with one variable; nothing in the default path runs an outside program.
+
+### D-4431 — An oversized index catalogue is refused for its size before its text — 2026-10-09
+
+**What was observed.** r64-6: `indexmap::Published::read` read at most
+`MAX_CATALOGUE_BYTES + 1` bytes and decoded them as UTF-8 before checking the
+length, so a file larger than the bound whose cut fell inside a multi-byte
+character was refused as "stream did not contain valid UTF-8" rather than for
+its size.
+
+**Decided.** The capped read keeps raw bytes, judges the length first, and
+decodes only a file within the bound. Proved by
+`an_oversized_catalogue_cut_inside_a_character_is_refused_by_size`. FXB1-02.
+
+### D-4432 — `/bars.json` past the header's last stamp answers after one record read — 2026-10-09
+
+**What was observed.** W1-api5-8: a `from=` after the month's last bar paid
+the bisection, and in a month born without `FLAG_CHECKSUMS` a landing at
+`n_valid` fell back to reading the whole month to answer `[]`.
+
+**Decided.** `bars_json` first asks `past_the_last_bar`: when `from` is past
+the header's `last_ts_micros`, it reads the one record at `n_valid - 1` and
+answers `[]` when that record carries the header's stamp (or, in a month born
+without checksums, is the all-zero record an interrupted append leaves). An
+unreadable or disagreeing record, or an empty month, falls through to the
+existing bisection, so a damaged tail is still found by the path that found
+it before. Proved by
+`bars_json_past_the_headers_last_stamp_reads_one_record`. FXB1-03.
+
+### D-4433 — A persistent `/engine/top.json` refusal costs one record read, not a cold walk — 2026-10-09
+
+**What was observed.** W1-api6-3: a damaged results-ledger record made
+`Selection::refresh` refuse, `with_verified` dropped the handle, and every
+following request ran `Selection::open` again: an O(history) cold walk to the
+same 503.
+
+**Decided.** The fold stops at the first record that will not read and keeps
+the handle with the refusal in `Selection::stalled`. Every later request
+refreshes the handle (constant metadata checks) and reads that one record
+again, so the refusal is re-proven from the bytes each time. A repair moves
+the file's generation, the refresh refuses and the next request opens cold,
+so a repair is seen at once. No refusal is cached as an answer. Proved by
+`a_persistent_refusal_costs_one_read_per_request_and_a_repair_is_seen`.
+FXB1-04.
+
+### D-4434 — Eight trade readers are kept, and the crate's latency measurements share one harness — 2026-10-09
+
+**What was observed.** W1-api2-3: `/candidate-trades.json`'s exact trade page
+held one reader, so two clients alternating candidates made every request a
+cold `TradeReader::open` (O(trades of that candidate)). Nothing in `api`
+measured a route's latency.
+
+**Decided.** `candidatejson::trade_page` keeps up to `TRADE_READERS_KEPT` = 8
+readers, least recently used evicted, each served only for its exact root,
+summary and key; a reader whose page refuses is dropped, never kept. A new
+test-only module `api::latency` times a call `n` times and prints p50, p99,
+max, n and the load average; every `#[ignore]`d latency measurement in the
+crate uses it and is run on purpose with
+`cargo test -p api --lib -- --ignored --nocapture latency`. Figures are in
+`docs/06-limits.md`. Proved by
+`trade_readers_keep_eight_candidates_warm_and_evict_the_least_recent`.
+FXB1-05, FXB1-06.
+
+### D-4435 — `/verify.json` checks one page of at most 1,024 months — 2026-10-09
+
+**What was observed.** W1-api5-7 and W1-api6-0: a scrub walked
+`Manifest::newest` (O(log length)) and opened every held month of the feed on
+every request; moving it to the store-read pool (D-2281) kept the cost.
+
+**Decided.** `verify::vendor` checks one page: `offset` (default 0) and
+`limit` (default and ceiling `MAX_VERIFY_PAGE` = 1,024; 0 or past the
+ceiling is refused by name, as is an offset past the held entries). The newest-entry list is built once per census snapshot and kept in
+`Site::verify_memo`, so the log walk is paid once per snapshot. The report
+carries `held`, `offset`, `limit` and `next_offset`, and a clean partial page
+says "not verified" and names the range it checked: only an answer that
+covers every held entry may say "verified". Proved by
+`scrub_route_checks_one_page_and_names_the_rest` and
+`scrub_route_opens_no_more_than_a_page_of_a_larger_counter`. FXB1-07.
+
+### D-4436 — A query string is split once per request — 2026-10-09
+
+**What was observed.** o1api-4: `param(query, name)` scanned the whole query
+for every field asked, so a request asking k fields paid k scans of up to
+8,192 bytes.
+
+**Decided.** `server::Query::parse` splits the query once into a map of the
+first value per key (pre-sized for `QUERY_FIELDS_RESERVED` = 32 keys), and
+`Query::param` answers each field with one probe, decoded exactly as `param`
+decodes. The bars window, the addressed bars routes, the instruments page,
+the ingest forms and `/logs.json` use it. Repeated keys keep the FIRST value,
+as `param` did. Proved by `a_split_query_answers_every_field_as_param_does`.
+FXB1-08.
+
+### D-4437 — `/live.json`'s ceilings are tested at their limits and measured — 2026-10-09
+
+**What was observed.** so1-4: `livejson::respond` serves
+`cli::live::CensusCache`, whose refresh lists the live folder and copies rows
+per request, bounded by `LIVE_ENTRY_LIMIT` (4,096), `LIVE_RUN_LIMIT` (128)
+and `LIVE_ROW_LIMIT` (256), none of which `docs/06-limits.md` named.
+
+**Decided.** No code change in `cli` (out of this fix's scope). The route is
+tested at 128 runs of 256 rows, and one run or one row past either ceiling is
+refused by name; the warm answer and the cold refresh are measured at the
+ceilings and recorded. Proved by
+`the_live_route_answers_at_its_ceilings_and_refuses_past_them`. FXB1-09.
+
+### D-4438 — A master refresh with no master moved does not reparse the universe — 2026-10-09
+
+**What was observed.** so1-5: `POST /masters/refresh` called `Site::reparse`,
+which re-ran `universe()` (catalog, join and coverage builds) on every press,
+while `docs/06-limits.md` said the universe's sorts were startup-only.
+
+**Decided.** `Parsed` carries `MasterStamps` (device, inode, length, modified
+and status-change time of each master, taken before the parse). The refresh
+calls `Site::reparse_if_moved`: when every stamp equals the held parse's, it
+answers that no master moved and keeps the parse; otherwise it parses as
+before. A master that cannot be stamped (any error but not-found) makes the
+stamps absent, so the refresh parses. The reparse runs on `spawn_blocking`.
+`reparse` itself stays unconditional. Proved by
+`a_refresh_with_no_master_moved_does_not_reparse`. FXB1-10.
+
+### D-4439 — A `ts` window's extremes come from kept month folds; a scan has a ceiling — 2026-10-09
+
+**What was observed.** W1-api5-4: `extremes=1` and every non-`ts` sort read
+every bar of the window's months on every request: O(n) reads and memory, n
+up to about 1.9 million at `MAX_WINDOW_MONTHS` = 240.
+
+**Decided.** A `ts` window with extremes now seeks its page and takes the
+extremes from `month_fold`: one fold per month file, kept in `MONTH_FOLDS`
+(at most `MONTH_FOLDS_KEPT` = 4,096, cleared whole when full) under the
+file's stamp and header, and kept only when a stat after the read equals the
+one before it. A moved file is read again. A non-`ts` sort still reads its
+range, now refused by name past `MAX_SCAN_WINDOW_RECORDS` = 1,048,576
+records. Proved by
+`a_ts_window_with_extremes_reads_each_month_once_until_it_moves` and
+`a_scan_past_its_ceiling_is_refused_by_name`. FXB1-11, FXB1-12.
+
+### D-4440 — The qualified campaign's whole-history read is measured, and kept — 2026-10-09
+
+**What was observed.** W1-api1-4: `/boolean-qualified-campaign.json` reads
+and authenticates its H acknowledged records on every GET; argued inherent,
+never timed.
+
+**Decided.** Kept: the page's `"history_checked":true` says every record was
+read for THIS answer, and a record that rots in place with its metadata
+unchanged is invisible to any cache keyed on metadata. A test proves the
+oldest of 40 records, damaged, refuses the page; the GET is measured at
+H = 1, 100, 1,000 and 7,000. Proved by
+`a_qualified_history_of_h_records_is_read_whole_for_every_answer`. FXB1-13.
+
+### D-4441 — The audit journal's per-request cost is measured as its directory grows — 2026-10-09
+
+**What was observed.** W1-api3-0: each audited request creates one file in
+the flat `audit/invocations-v1/` directory, with no retention, rotation or
+sharding; the cost of `begin` and the terminal was never timed.
+
+**Decided.** Measured to 10^4 real invocations and, by a labelled proxy, to
+10^5 directory entries. Sharding or retention is a new journal layout (a new
+version under D-1445 and `docs/02-store-format.md`) in `cli`, and is left to
+the owner. FXB1-14.
+
+### D-4442 — A Boolean evidence page proves currency through the read that serves it — 2026-10-09
+
+**What was observed.** W1-api1-6: `statistics` and `admission` each called
+`require_current` before and after their page, around `rows`/`splits` reads
+that already hold the lease and check every linked catalog before and after.
+A warm unpinned statistics page made 8·C catalog checks, an admission page
+10·C.
+
+**Decided.** The two outer calls are removed from both. The only one left is
+the in-memory `sources` arm's, which has no bracketed read of its own. A warm
+unpinned statistics page is now 4·C (the reuse check and the page read), an
+admission page 6·C. A changed tree still refuses, from the read. One catalog
+check is measured by a proxy of its system calls. Proved by
+`an_evidence_pages_currency_cost_per_linked_catalog_is_stated`. FXB1-15.
+
+### D-4443 — A qualification page renders at most 16,384 folds — 2026-10-09
+
+**What was observed.** W1-api2-8: each qualification row renders all F of its
+later folds, and F is bounded only by the saved run's byte budget, so a page
+was O(limit × F) with no ceiling in `api`.
+
+**Decided.** `MAX_PAGE_FOLD_ROWS` = 16,384 (256 rows of 64 folds). A page
+whose rows × F passes it is refused before any row is read, naming the
+largest `limit` that fits, or that the qualification cannot be paged here
+when one row alone passes it. Proved by
+`a_page_past_the_fold_row_ceiling_is_refused_with_the_limit_that_fits`.
+FXB1-16.

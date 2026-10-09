@@ -146,17 +146,21 @@ fn asked(raw: &str) -> Asked {
     // digit is in the unreserved set — and would have turned any other input
     // into a `%XX` soup that parses to the default, which is the same answer for
     // the wrong reason.
-    let limit = crate::server::param(raw, "limit")
+    //
+    // ONE SCAN for all five fields (o1api-4, D-4436).
+    let fields = crate::server::Query::parse(raw);
+    let limit = fields
+        .param("limit")
         .parse::<usize>()
         .unwrap_or(50)
         .clamp(1, PAGE_LIMIT);
-    let level_word = crate::server::param(raw, "level");
+    let level_word = fields.param("level");
     let level = telemetry::Level::of_label(&level_word.to_ascii_lowercase());
-    let target = crate::server::param(raw, "target");
+    let target = fields.param("target");
     // ZERO IS "EVERY RUN", not run zero. An event outside a backfill omits the
     // key entirely, so there is no run zero to ask for and the value is free to
     // mean the absence of a filter.
-    let run_word = crate::server::param(raw, "run");
+    let run_word = fields.param("run");
     let run = run_word
         .parse::<u64>()
         .ok()
@@ -165,7 +169,7 @@ fn asked(raw: &str) -> Asked {
     // `since` is a canonical non-negative integer of milliseconds no larger
     // than `i64::MAX`, read the way `run` is: `+3`, `03` and `3.0` are not
     // quietly read as some instant, and an unreadable one is NAMED.
-    let since_word = crate::server::param(raw, "since");
+    let since_word = fields.param("since");
     let since = since_word
         .parse::<u64>()
         .ok()
