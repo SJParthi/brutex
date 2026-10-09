@@ -4004,8 +4004,8 @@ the new tail tests add no uncovered line, and the three are still the
 `fstat`-failure arm. **Not yet shown:** that the workspace profile in CI
 counts exactly 20.
 
-**2026-10-09 follow-up (D-4654).** The audit's fix integration (`a7a27dc3`)
-added three telemetry files, `loss.rs`, `say.rs` and `scope.rs`, and new tests
+**2026-10-09 follow-up (D-4654).** The audit's fix integration
+(`a7a27dc3`, which `main`'s squash merge does not keep) added three telemetry files, `loss.rs`, `say.rs` and `scope.rs`, and new tests
 in `record.rs` and `sink.rs`, and left gate 20's declaration as it was. A
 crate-scoped `cargo llvm-cov`-equivalent profile of the merged tree
 (`-C instrument-coverage`, every `telemetry` test binary, run as root) counts
@@ -16049,8 +16049,8 @@ UNVERIFIED as measurements.
 - **Inline awk in `ci.yml` (D-2342): none left.** Gate 0 refuses an `awk`
   program operand, and the scanner's `AWK_IN_CI` must EQUAL the count of
   inline programs in `ci.yml`. At D-2342 that count was 71, a pinned ratchet;
-  commit 2a74690d moved the last of them into `.github/*.rs` tools and set
-  the pin to 0, so section 2 now holds in `ci.yml` for awk as it does in every
+  commit 2a74690d, which `main`'s squash merge does not keep, moved the
+  last of them into `.github/*.rs` tools and set the pin to 0, so section 2 now holds in `ci.yml` for awk as it does in every
   other file. (This bullet still described the 71 until D-4489, audit
   srust-6.)
 - **What Gate 0 reads as a command (D-2342).** Words are split on whitespace

@@ -74287,3 +74287,16 @@ rewriting any of them would change what an audited fix asserts. Holding the
 merge for the audit's final batch was rejected by Parthi's "push now"
 (2026-10-09 16:19 UTC). That batch merges on top of this one when the audit
 resumes.
+
+### D-4183 — Two commits the merged limits cite are listed as squashed — 2026-10-09
+
+**What was observed.** On the merge of D-4182,
+`store`'s `every_commit_the_store_records_cite_is_on_main_or_says_why_not`
+failed: `docs/06-limits.md` cites `a7a27dc3` (D-4654, the audit's fix
+integration) and `2a74690d` (D-4489, the commit that set gate 0's inline-awk
+pin to 0). Neither is an ancestor of `main`. Both are ancestors of this
+branch, so PR 74's squash merge drops them.
+
+**Decided.** Both join `NOT_ON_MAIN` as `Off::Squashed`, and each citing
+sentence says "`main`'s squash merge does not keep", as `950ead28`'s does.
+The test refuses the same things it did before.
