@@ -190,11 +190,393 @@ fn body<'a>(source: &'a str, name: &str) -> &'a str {
     &rest[..end]
 }
 
+/// The functions that sweep AND RECORD one rung. Each writes preparation and
+/// probe attempts, frontier, trade and receipt blocks and a `runs.bin` row
+/// from inside itself, so two in flight at once file them in thread-completion
+/// order (GAP13-13) and each takes the whole machine's ceiling and every core
+/// (R9-cli-o1-0). D-1701, D-4700.
+const RECORDING_KERNELS: [&str; 2] = ["one_rung", "one_rung_cached"];
+
+/// Every spelling in this crate that puts work on another thread.
+pub(crate) const PARALLEL: [&str; 12] = [
+    "par_iter",
+    "par_bridge",
+    "par_chunks",
+    "par_extend",
+    "par_drain",
+    "rayon::join",
+    "rayon::scope",
+    "rayon::spawn",
+    "ThreadPoolBuilder",
+    "thread::spawn",
+    "thread::scope",
+    "ordered::map",
+];
+
+/// A function that calls a recording rung kernel (level 1) or calls a
+/// non-test level-1 caller (level 2), as [`recording_callers`] finds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Caller {
+    /// Its file, below `src`.
+    pub(crate) file: String,
+    pub(crate) name: String,
+    /// A `#[test]`, or any function in a test-only file or `mod tests`.
+    pub(crate) test: bool,
+    pub(crate) level: u8,
+    /// From its head line to its closing brace.
+    pub(crate) body: String,
+}
+
+/// Every `.rs` file under this crate's `src`, as its path below `src` and its
+/// text, read when the test runs, in path order. A new file is in the scan the
+/// day it is added: there is no list to forget to extend.
+pub(crate) fn sources() -> Vec<(String, String)> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut pending = vec![root.clone()];
+    let mut found = Vec::new();
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).expect("a source directory") {
+            let path = entry.expect("a directory entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                let name = path
+                    .strip_prefix(&root)
+                    .expect("below src")
+                    .to_string_lossy()
+                    .into_owned();
+                found.push((name, std::fs::read_to_string(&path).expect("a source file")));
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+fn is_ident(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// `line` with its leading visibility and qualifier words removed, so a
+/// function head reads `fn name(`.
+fn without_qualifiers(line: &str) -> &str {
+    let mut rest = line.trim_start();
+    loop {
+        let before = rest;
+        for word in [
+            "pub(crate) ",
+            "pub(super) ",
+            "pub ",
+            "const ",
+            "async ",
+            "unsafe ",
+        ] {
+            rest = rest.strip_prefix(word).unwrap_or(rest);
+        }
+        if rest == before {
+            return rest;
+        }
+    }
+}
+
+/// The byte offset of each CALL `name(` in `text`: not on a comment line, not
+/// inside a string literal on its line, not a definition (`fn name(`), not a
+/// method (`.name(`) and not the tail of a longer name.
+fn calls(text: &str, name: &str) -> Vec<usize> {
+    let needle = format!("{name}(");
+    let mut out = Vec::new();
+    let mut line_start = 0;
+    for line in text.split_inclusive('\n') {
+        if !line.trim_start().starts_with("//") {
+            let mut from = 0;
+            while let Some(found) = line.get(from..).and_then(|rest| rest.find(&needle)) {
+                let at = from + found;
+                from = at + needle.len();
+                let before = &line[..at];
+                let quotes = before.matches('"').count() - before.matches("\\\"").count();
+                if before
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| is_ident(c) || c == '.')
+                    || before.ends_with("fn ")
+                    || quotes % 2 == 1
+                {
+                    continue;
+                }
+                out.push(line_start + at);
+            }
+        }
+        line_start += line.len();
+    }
+    out
+}
+
+/// The function whose body holds byte `at` of `text`: its name, whether it is
+/// a test, and its text from its head line to its closing brace. A function
+/// that closes before `at` (one nested earlier in the same body) is skipped.
+fn enclosing(text: &str, at: usize) -> Option<(String, bool, String)> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    for line in text.split_inclusive('\n') {
+        lines.push((start, line));
+        start += line.len();
+    }
+    let index = lines.iter().rposition(|&(start, _)| start <= at)?;
+    let test_file = text.starts_with("#![cfg(test)]");
+    let test_module = text.find("\nmod tests {").is_some_and(|module| module < at);
+    for head in (0..=index).rev() {
+        let (head_start, line) = lines[head];
+        let Some(after) = without_qualifiers(line).strip_prefix("fn ") else {
+            continue;
+        };
+        let name: String = after.chars().take_while(|&c| is_ident(c)).collect();
+        if name.is_empty() {
+            continue;
+        }
+        let indent = &line[..line.len() - line.trim_start().len()];
+        let close = format!("{indent}}}");
+        let Some(&(end_start, end_line)) = lines
+            .get(head + 1..)?
+            .iter()
+            .find(|(_, l)| l.trim_end() == close)
+        else {
+            continue;
+        };
+        if end_start < at {
+            continue;
+        }
+        let marked = lines[..head]
+            .iter()
+            .rev()
+            .map(|(_, l)| l.trim())
+            .take_while(|l| !l.is_empty() && *l != "}")
+            .any(|l| l == "#[test]");
+        let body = text[head_start..end_start + end_line.len()].to_owned();
+        return Some((name, marked || test_file || test_module, body));
+    }
+    None
+}
+
+/// Every function in `sources` that calls one of `names`, at `level`.
+///
+/// # Errors
+///
+/// A call outside any function: refused rather than skipped.
+fn callers_of(
+    sources: &[(String, String)],
+    names: &[String],
+    level: u8,
+) -> Result<Vec<Caller>, String> {
+    let mut found: Vec<Caller> = Vec::new();
+    for (file, text) in sources {
+        for name in names {
+            for at in calls(text, name) {
+                let (caller, test, body) = enclosing(text, at)
+                    .ok_or_else(|| format!("{file}: a call of {name} outside any fn"))?;
+                let row = Caller {
+                    file: file.clone(),
+                    name: caller,
+                    test,
+                    level,
+                    body,
+                };
+                if !found.contains(&row) {
+                    found.push(row);
+                }
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// Every caller of a [`RECORDING_KERNELS`] function in `sources`: level 1.
+///
+/// # Errors
+///
+/// As [`callers_of`].
+pub(crate) fn kernel_callers(sources: &[(String, String)]) -> Result<Vec<Caller>, String> {
+    let kernels: Vec<String> = RECORDING_KERNELS.iter().map(|k| (*k).to_owned()).collect();
+    callers_of(sources, &kernels, 1)
+}
+
+/// Every caller of each non-test level-1 caller that is not itself a kernel:
+/// level 2. Found by scanning, so a new verb, file or wrapper is checked the
+/// day it lands.
+///
+/// # Errors
+///
+/// A wrapper whose name is defined in more than one file, so its callers
+/// cannot be told apart by name: refused rather than skipped.
+pub(crate) fn wrapper_callers(
+    sources: &[(String, String)],
+    level_one: &[Caller],
+) -> Result<Vec<Caller>, String> {
+    let mut wrappers: Vec<String> = level_one
+        .iter()
+        .filter(|c| !c.test && !RECORDING_KERNELS.contains(&c.name.as_str()))
+        .map(|c| c.name.clone())
+        .collect();
+    wrappers.sort();
+    wrappers.dedup();
+    for wrapper in &wrappers {
+        let head = format!("fn {wrapper}(");
+        let generic = format!("fn {wrapper}<");
+        let defined: Vec<&str> = sources
+            .iter()
+            .filter(|(_, text)| {
+                text.lines().any(|line| {
+                    let line = without_qualifiers(line);
+                    line.starts_with(&head) || line.starts_with(&generic)
+                })
+            })
+            .map(|(file, _)| file.as_str())
+            .collect();
+        if defined.len() != 1 {
+            return Err(format!(
+                "`{wrapper}` calls a recording rung kernel and is defined in {defined:?}; \
+                 a wrapper needs a crate-unique name so its callers can be checked"
+            ));
+        }
+    }
+    callers_of(sources, &wrappers, 2)
+}
+
+/// [`kernel_callers`] then [`wrapper_callers`].
+///
+/// # Errors
+///
+/// As either.
+pub(crate) fn recording_callers(sources: &[(String, String)]) -> Result<Vec<Caller>, String> {
+    let mut found = kernel_callers(sources)?;
+    let more = wrapper_callers(sources, &found)?;
+    found.extend(more);
+    Ok(found)
+}
+
+/// The first [`PARALLEL`] spelling in `body`, if any.
+pub(crate) fn parallel_in(body: &str) -> Option<&'static str> {
+    PARALLEL.iter().copied().find(|token| body.contains(token))
+}
+
+/// **Every function in this crate that calls a recording rung kernel, and
+/// every function that calls one of those, runs it on the calling thread:**
+/// no parallel spelling anywhere in its body, and no level-1 production
+/// caller raises `SharedBy`. Found by scanning every file under `src`, not a
+/// list, so `pool-oos`'s pass 1 (a rayon parallel map over the surface around
+/// `one_rung`, G1-1) fails here, and so would the next verb that copies it.
+/// GAP13-13, R9-cli-o1-0, D-1701, D-4700.
+#[test]
+fn every_caller_of_a_recording_rung_kernel_runs_it_in_input_order() {
+    let sources = sources();
+    let level_one = kernel_callers(&sources).unwrap_or_else(|why| panic!("{why}"));
+    let mut callers = level_one.clone();
+    for caller in &level_one {
+        assert_eq!(
+            parallel_in(&caller.body),
+            None,
+            "{} `{}` calls a recording rung kernel and spells parallel work",
+            caller.file,
+            caller.name
+        );
+    }
+    callers.extend(wrapper_callers(&sources, &level_one).unwrap_or_else(|why| panic!("{why}")));
+    for caller in &callers {
+        assert_eq!(
+            parallel_in(&caller.body),
+            None,
+            "{} `{}` (level {}) calls a recording rung kernel and spells parallel work",
+            caller.file,
+            caller.name,
+            caller.level
+        );
+        if caller.level == 1 && !caller.test {
+            assert!(
+                !caller.body.contains("SharedBy::these"),
+                "{} `{}`: one sweep in flight shares nothing",
+                caller.file,
+                caller.name
+            );
+        }
+    }
+    let has = |file: &str, name: &str, level: u8| {
+        callers
+            .iter()
+            .any(|c| c.file == file && c.name == name && c.level == level && !c.test)
+    };
+    assert!(has("lib.rs", "sweep_rungs", 1), "{callers:#?}");
+    assert!(has("lib.rs", "one_rung", 1), "{callers:#?}");
+    assert!(has("lib.rs", "descend_in", 1), "{callers:#?}");
+    assert!(has("pool.rs", "screen_pass_one", 1), "{callers:#?}");
+    assert!(
+        has("pool.rs", "run_under", 2),
+        "pool pass 1 is the shared one"
+    );
+    assert!(has("pool_oos.rs", "run_under", 2), "pool-oos pass 1 is too");
+}
+
+/// The scan finds a parallel caller, skips comments, strings, methods,
+/// definitions and an earlier nested function, follows a wrapper one level
+/// up, and refuses a wrapper whose name is not unique.
+#[test]
+fn the_recording_caller_scan_sees_calls_and_nothing_else() {
+    let kernel = concat!("one_rung", "(");
+    let wrap = concat!("wrapper", "(");
+    let file = format!(
+        "fn wrapper(items: &[u8]) {{\n    \
+         fn nested() {{}}\n    \
+         // {kernel}x) in a comment\n    \
+         let s = \"{kernel}\";\n    \
+         x.{kernel}1);\n    \
+         items.par_iter().map(|i| {kernel}i));\n\
+         }}\n\
+         fn outer() {{\n    \
+         {wrap}&[]);\n\
+         }}\n\
+         #[test]\n\
+         fn a_test() {{\n    \
+         crate::{kernel}1);\n\
+         }}\n"
+    );
+    let callers = recording_callers(&[("x.rs".to_owned(), file.clone())]).expect("scanned");
+    let named: Vec<(&str, u8, bool)> = callers
+        .iter()
+        .map(|c| (c.name.as_str(), c.level, c.test))
+        .collect();
+    assert_eq!(
+        named,
+        [
+            ("wrapper", 1, false),
+            ("a_test", 1, true),
+            ("outer", 2, false)
+        ]
+    );
+    assert_eq!(parallel_in(&callers[0].body), Some("par_iter"));
+    assert_eq!(parallel_in(&callers[1].body), None);
+    assert_eq!(parallel_in(&callers[2].body), None);
+    let twice = [
+        ("x.rs".to_owned(), file),
+        ("y.rs".to_owned(), "fn wrapper() {\n}\n".to_owned()),
+    ];
+    assert!(
+        recording_callers(&twice).is_err_and(|why| why.contains("crate-unique")),
+        "an ambiguous wrapper is refused"
+    );
+    let quiet = "fn f() {\n    // one_rung(\n    let s = \"one_rung(\";\n}\n";
+    assert!(
+        recording_callers(&[("q.rs".to_owned(), quiet.to_owned())])
+            .expect("scanned")
+            .is_empty()
+    );
+}
+
 /// **Every whole-command fan-out that writes the shared journal or ledger
 /// writes in input order: the Boolean family pools as ordered lanes (D-1556),
-/// `range-all` and pool pass 1 one call at a time through `in_input_order`
-/// (D-1701, kept over D-1556 for those two by D-1709).** None is an indexed
-/// parallel map or a private thread pool.
+/// `range-all` and pool pass 1 -- `pool`'s and `pool-oos`'s, one shared
+/// `screen_pass_one` -- one call at a time through `in_input_order` (D-1701,
+/// kept over D-1556 for those two by D-1709; D-4700).** None is an indexed
+/// parallel map or a private thread pool. Every OTHER caller of a recording
+/// rung kernel is found by scanning, in
+/// `every_caller_of_a_recording_rung_kernel_runs_it_in_input_order`.
 #[test]
 fn every_whole_command_fan_out_writes_in_input_order() {
     for (file, source, name, shape) in [
@@ -207,8 +589,8 @@ fn every_whole_command_fan_out_writes_in_input_order() {
         (
             "pool.rs",
             include_str!("pool.rs"),
-            "fn run_under(",
-            "crate::in_input_order(&surface,",
+            "fn screen_pass_one(",
+            "crate::in_input_order(surface,",
         ),
         (
             "boolean_catalog_prepared.rs",

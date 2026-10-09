@@ -40,6 +40,108 @@ pub(crate) fn with_warmed_store_of<R>(
     run(&owner.root)
 }
 
+/// A NIFTY store whose minutes WALK: 2025-02-28 and every session of March,
+/// April and May 2025, each minute from [`varied_session`], the price walking
+/// on from one session to the next. Each session's 1day bar spans its
+/// minutes, and from March the 5min and 60min months are those minutes folded
+/// by `pull::fold`, the one fold authority, so every signal bar closes on its
+/// last minute's close, as the exact-minute overlay checks.
+///
+/// GAP13-15's 60min rung needs both halves. The warmed store's constant
+/// prices hold every condition on every bar, and a month of 60min bars is too
+/// few: on this walk, May alone halted the 60min ladder at every support from
+/// 60% to 99% (measured), and March to May, 213 swept bars, completed at each.
+/// The warmed store also samples one minute per 5min bar, which only constant
+/// prices let past that overlay. D-4704.
+pub(crate) fn with_varied_store<R>(run: impl FnOnce(&std::path::Path) -> R) -> R {
+    let mut days = vec![(2_u8, 28_u8)];
+    for (month, last) in [(3_u8, 31_u8), (4, 30), (5, 31)] {
+        days.extend((1..=last).map(|date| (month, date)));
+    }
+    with_varied_store_over(&days, &[3, 4, 5], run)
+}
+
+/// [`with_varied_store`] over `days`, each `(month, date)` of 2025 in order,
+/// a date that is no session skipped; the 5min and 60min months are written
+/// for each month in `coarse`. The price walks on from one session's close
+/// to the next session's open.
+fn with_varied_store_over<R>(
+    days: &[(u8, u8)],
+    coarse: &[u8],
+    run: impl FnOnce(&std::path::Path) -> R,
+) -> R {
+    let root = std::env::temp_dir().join(format!(
+        "brutex-audited-varied-fixture-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir(&root).expect("scratch");
+    let fixture = Fixture {
+        root,
+        symbol: "NIFTY",
+    };
+    let mut walk = Walk {
+        price: 100_000,
+        state: 0x9E37_79B9_7F4A_7C15,
+    };
+    for &(month, day) in days {
+        let rows = varied_session(month, day, &mut walk);
+        let (Some(first), Some(last)) = (rows.first(), rows.last()) else {
+            continue;
+        };
+        fixture.write(month, Timeframe::MINUTE_1, &rows);
+        let daily = Bar {
+            high: rows.iter().map(|bar| bar.high).max().unwrap_or(first.high),
+            low: rows.iter().map(|bar| bar.low).min().unwrap_or(first.low),
+            close: last.close,
+            volume: rows.iter().map(|bar| bar.volume).sum(),
+            ..*first
+        };
+        fixture.write(month, Timeframe::DAY_1, &[daily]);
+        if coarse.contains(&month) {
+            for (secs, timeframe) in [(300, Timeframe::MINUTE_5), (3_600, Timeframe::MINUTE_60)] {
+                let folded = pull::fold::fold_from_bars(
+                    &rows,
+                    pull::fold::Bucket::of_secs(secs).expect("a width"),
+                    pull::fold::Bucket::MINUTE,
+                )
+                .expect("whole minutes fold");
+                fixture.write(month, timeframe, &folded);
+            }
+        }
+    }
+    run(&fixture.root)
+}
+
+/// The generated price walk [`varied_session`] steps: the price and a
+/// 64-bit linear congruential state.
+struct Walk {
+    price: i64,
+    state: u64,
+}
+
+/// [`generated_session`]'s minutes with a price that walks: each minute
+/// steps by a multiple of 5 paisa in -100..=100, drawn from `walk`'s
+/// generator, so the series is reproducible and neither stands still nor
+/// repeats; every bar spans 15 paisa beyond its open and close.
+fn varied_session(month: u8, date: u8, walk: &mut Walk) -> Vec<Bar> {
+    let mut rows = generated_session(month, date);
+    for bar in &mut rows {
+        walk.state = walk
+            .state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        let draw = i64::try_from((walk.state >> 33) % 41).expect("below 41");
+        let open = walk.price;
+        walk.price += (draw - 20) * 5;
+        bar.open = open;
+        bar.close = walk.price;
+        bar.high = open.max(walk.price) + 15;
+        bar.low = open.min(walk.price) - 15;
+    }
+    rows
+}
+
 /// A warmed NIFTY store whose one-minute series stops `cut` minutes early on
 /// 2025-05-06, every other file as [`with_warmed_store`] writes it. The cut is
 /// at the session's end, so no interior minute is missing and
@@ -51,29 +153,32 @@ pub(crate) fn with_unsourceable_close<R>(
     cut: usize,
     run: impl FnOnce(&std::path::Path, i64) -> R,
 ) -> R {
-    const SHORT_DAY: u8 = 6;
     let fixture = Fixture::for_symbol("NIFTY");
-    let mut short_day = None;
-    for day in 5..=13 {
-        let rows = generated_session(5, day);
-        if rows.is_empty() {
-            continue;
-        }
-        let minutes = if day == SHORT_DAY {
-            short_day = rows.first().map(|bar| indicators::ist_day(bar.ts_micros));
-            &rows[..rows.len().saturating_sub(cut)]
-        } else {
-            &rows[..]
-        };
-        fixture.write(5, Timeframe::MINUTE_1, minutes);
-        fixture.write(5, Timeframe::DAY_1, &rows[..1]);
-        fixture.write(
-            5,
-            Timeframe::MINUTE_5,
-            &rows.iter().step_by(5).copied().collect::<Vec<_>>(),
-        );
+    let short_day = fixture.warm_cutting_one_close(cut);
+    run(&fixture.root, short_day)
+}
+
+/// [`with_unsourceable_close`] for every symbol in `symbols`, in one root:
+/// each symbol's months written exactly as that function writes NIFTY's. The
+/// first symbol's fixture owns (and removes) the root, as in
+/// [`with_warmed_store_of`]. G1-2, D-4701.
+pub(crate) fn with_unsourceable_close_of<R>(
+    symbols: &[&'static str],
+    cut: usize,
+    run: impl FnOnce(&std::path::Path) -> R,
+) -> R {
+    let (&first, rest) = symbols.split_first().expect("at least one symbol");
+    let owner = Fixture::for_symbol(first);
+    owner.warm_cutting_one_close(cut);
+    for &symbol in rest {
+        let other = std::mem::ManuallyDrop::new(Fixture {
+            root: owner.root.clone(),
+            symbol,
+        });
+        other.seed();
+        other.warm_cutting_one_close(cut);
     }
-    run(&fixture.root, short_day.expect("2025-05-06 is a session"))
+    run(&owner.root)
 }
 
 struct Fixture {
@@ -136,6 +241,32 @@ impl Fixture {
                 &rows.iter().step_by(5).copied().collect::<Vec<_>>(),
             );
         }
+    }
+    /// [`Self::warm`], with the one-minute series of 2025-05-06 stopping `cut`
+    /// minutes early; returns that day's IST day number. D-1707.
+    fn warm_cutting_one_close(&self, cut: usize) -> i64 {
+        const SHORT_DAY: u8 = 6;
+        let mut short_day = None;
+        for day in 5..=13 {
+            let rows = generated_session(5, day);
+            if rows.is_empty() {
+                continue;
+            }
+            let minutes = if day == SHORT_DAY {
+                short_day = rows.first().map(|bar| indicators::ist_day(bar.ts_micros));
+                &rows[..rows.len().saturating_sub(cut)]
+            } else {
+                &rows[..]
+            };
+            self.write(5, Timeframe::MINUTE_1, minutes);
+            self.write(5, Timeframe::DAY_1, &rows[..1]);
+            self.write(
+                5,
+                Timeframe::MINUTE_5,
+                &rows.iter().step_by(5).copied().collect::<Vec<_>>(),
+            );
+        }
+        short_day.expect("2025-05-06 is a session")
     }
     fn path(&self, month: u8, timeframe: Timeframe) -> PathBuf {
         let key = stored::swept_index(self.symbol).expect("key");
@@ -2774,6 +2905,63 @@ fn a_reused_range_rung_reads_its_own_row_and_not_the_newest_with_its_key() {
             .is_err_and(|why| why.contains("holds no row")),
         "{missing:?}"
     );
+    crate::knobs::clear_all();
+}
+
+/// **`one_rung_cached` itself, driven through run A, run B and A again, hands
+/// the rerun A's own row.** W2-cli8-9 test gap, D-1700, D-4703.
+///
+/// The test above calls `recorded_row` directly, so rewiring the success arm
+/// of `one_rung_cached` back to a key lookup -- the newest row with the feed,
+/// instrument, rung, span and `min_hits`, as `latest_for` read it -- passed
+/// it. This drives the arm. A and B share every key term and differ by commit,
+/// so B's row is the newest with the key, and A's rerun must come back as A's.
+#[test]
+fn a_range_rung_rerun_through_one_rung_cached_returns_its_own_row() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    crate::knobs::set("BRUTEX_VALIDATE", "0");
+    let fixture = Fixture::warmed();
+    let rung = |commit: &'static str| {
+        crate::one_rung_cached(
+            crate::RungAsk {
+                vendor_word: "zerodha",
+                underlying: fixture.symbol,
+                rung: "5min",
+                from: (2025, 5),
+                to: (2025, 5),
+                support_ppm: Some(600_000),
+                attempt: Some(21),
+            },
+            crate::RungStore {
+                root: Ok(fixture.root.clone()),
+                commit: Some(commit),
+            },
+            &mut crate::AuditCache::default(),
+        )
+        .outcome
+        .map_err(|why| format!("{commit}: {why}"))
+        .expect("the rung records")
+    };
+    let a = rung("generated-one-rung-readback-a");
+    let b = rung("generated-one-rung-readback-b");
+    let again = rung("generated-one-rung-readback-a");
+    assert_ne!(a.identity, b.identity, "premise: two runs");
+    assert_eq!(
+        (a.min_hits, &a.feed, &a.underlying, &a.timeframe),
+        (b.min_hits, &b.feed, &b.underlying, &b.timeframe),
+        "premise: one key"
+    );
+    let mut ledger = crate::results::Results::open_read(&fixture.root).expect("ledger");
+    assert_eq!(ledger.len().expect("rows"), 2, "the rerun appends nothing");
+    assert_eq!(
+        ledger.read(1).expect("newest").identity,
+        b.identity,
+        "premise: the newest row with the key is B's"
+    );
+    assert_eq!(again.identity, a.identity, "the rerun returns its own row");
+    assert_eq!(again, ledger.read(0).expect("A's stored row"));
+    assert_eq!(a, again);
     crate::knobs::clear_all();
 }
 

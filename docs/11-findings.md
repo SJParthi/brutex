@@ -1079,3 +1079,30 @@ Narrative only, as above. No row is added or removed. The `F-CEC7A0` row above
 stays OPEN until the squash merge reaches `main`.
 
 - **`F-CEC7A0`** (`gap`) — V-04 was proved only for daily bars stamped at IST midnight, while the store admits any whole-second stamp and `cli verify` folded the stored stamp as it was: a 09:15 daily bar set `early_morning` (position 44). Where: `crates/cli/src/lib.rs` (`verify_series`, `measured_series_checks`); `crates/cli/src/verify_daily_tests.rs`; `docs/04-invariants.md` V-04, L1FD-08. Disposition: IN PROGRESS — fixed on `final/all-fixes` (D-4756); lands with the squash merge to `main`.
+
+### Correction: two ordered-write records credit superseded decisions — 2026-10-09
+
+Narrative only. No row is added to the tables above, and no row above is
+edited, because this file is append-only. D-4706 records the correction.
+
+- **audit-20261003 hunt-conc-1 (KNOWN GAP13-13)**, the table row that
+  credits **D-1564**. It credits D-1564's windowed four-phase walk and says
+  `range-all`, `pool` and the Boolean pools "are stated as
+  completion-ordered … not changed". Both halves were superseded.
+  - `sweep-all`: D-1708 kept D-1701's shape over D-1564. Chunks are one
+    month per worker. Every attempt in a chunk is begun by one `begin_many`
+    in input order, and the months are then filed one at a time in input
+    order.
+  - `range-all` and `pool` pass 1: these were changed. They run `one_rung`
+    one call at a time in input order (D-1701), and D-1709 kept that shape.
+  - The Boolean family pools write through `ordered::map` lanes (D-1556).
+- **audit-20261003 hunt-conc-1** (`range-all`, `pool` pass 1), the narrative
+  bullet that credits **D-1556**. For those two loops D-1709 superseded it
+  and kept D-1701's one-at-a-time loop over D-1556's ordered lanes. D-1556
+  still holds for the Boolean family pools (hunt-conc-2).
+- **`pool-oos` pass 1 (G1-1)** re-introduced the pre-D-1701 parallel shape
+  in a verb added after D-1701. IN PROGRESS — fixed on `final/all-fixes`
+  (D-4700); lands with the squash merge to `main`.
+- **A `sweep-all` month whose column build refused (G1-2)** still journaled
+  its Refused terminal from a rayon worker. IN PROGRESS — fixed on
+  `final/all-fixes` (D-4701); lands with the squash merge to `main`.

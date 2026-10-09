@@ -110,23 +110,29 @@ fn section_126_names_the_forward_cursor_that_cuts_fold_prefixes_not_a_binary_sea
 
 #[test]
 fn section_113_prices_a_trade_walk_by_the_column_rows_it_visits() {
-    let walk = function(TRADE, "fn walk_core(");
-    // Since D-1186 the walk starts at `first_row`, the first row that can
-    // fire, and visits every row from there; `index` stays the column row.
-    let row_loop = "for (offset, (bits, &signal)) in rows.enumerate() {";
+    let walk = function(TRADE, "fn walk_core<'r>(");
+    // Since D-4707 the walk loops over the rows its caller hands it, each
+    // carrying its column row as `index`: every row from `first_row` on
+    // (`rows_from`, D-1186), or exactly the rows `walk_over_rows` was given
+    // (`rows_listed`).
+    let row_loop = "for (index, bits, signal) in rows {";
     let at = walk
         .find(row_loop)
-        .expect("walk_core no longer loops over the column rows; re-measure §113");
-    assert!(
-        flat(&walk[..at]).contains(".get(first_row..)"),
-        "the walk no longer starts at its first live row; re-measure §113",
-    );
+        .expect("walk_core no longer loops over the rows it is handed; re-measure §113");
     let after = flat(&walk[at + row_loop.len()..]);
     assert!(
-        after.starts_with(
-            "let index = first_row.saturating_add(offset); if !fires(bits, index) { continue; }"
-        ),
+        after.starts_with("if !fires(bits, index) { continue; }"),
         "the row loop no longer asks `fires` of every row it visits first",
+    );
+    let from = flat(function(TRADE, "fn rows_from("));
+    assert!(
+        from.contains(".get(first_row..)") && from.contains("first_row.saturating_add(offset)"),
+        "the walk no longer starts at its first live row; re-measure §113",
+    );
+    let listed = flat(function(TRADE, "fn rows_listed<'c>("));
+    assert!(
+        listed.contains("rows.iter()") && !listed.contains(".get(first_row"),
+        "`rows_listed` no longer yields exactly the listed rows; re-measure §113",
     );
 
     let text = flat(section(113));
@@ -137,6 +143,11 @@ fn section_113_prices_a_trade_walk_by_the_column_rows_it_visits() {
     assert!(
         text.contains("A trade walk is linear in the rows of the column it walks"),
         "§113 does not state the row-linear bound",
+    );
+    assert!(
+        text.contains("`walk_over_rows` hands it exactly the strictly ascending rows")
+            && text.contains("so that walk is linear in the list"),
+        "§113 does not state the listed walk's bound (D-4707)",
     );
 }
 

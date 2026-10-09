@@ -1,6 +1,6 @@
 #![cfg(test)]
 //! Generated finite stores exercise batch publication and its refusal ledger.
-#![allow(clippy::expect_used)]
+#![allow(clippy::expect_used, clippy::indexing_slicing)]
 
 use super::*;
 use crate::results::Results;
@@ -169,72 +169,310 @@ fn batch_publication_failure_is_durable_refusal_and_a_repaired_retry_can_complet
     crate::knobs::clear_all();
 }
 
+/// `run` on a rayon pool of exactly `threads`, so a verdict about order never
+/// depends on the width of the machine running the test. The slow seam is a
+/// thread-local read by `sweep_chunk`'s caller, so a test sets it inside `run`.
+fn on_pool<R: Send>(threads: usize, run: impl FnOnce() -> R + Send) -> R {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .expect("a pool")
+        .install(run)
+}
+
+/// The three May months of `rung` in a store [`with_warmed_store_of`] or
+/// [`with_unsourceable_close_of`] wrote, in walk order.
+///
+/// [`with_warmed_store_of`]: crate::audited_stored::with_warmed_store_of
+/// [`with_unsourceable_close_of`]: crate::audited_stored::with_unsourceable_close_of
+fn may_months(root: &Path, rung: &str) -> Vec<Held> {
+    let wanted: Vec<Held> = catalog::walk(root)
+        .expect("fixture census")
+        .held
+        .into_iter()
+        .filter(|held| {
+            held.timeframe.as_str() == rung && held.month.year() == 2025 && held.month.month() == 5
+        })
+        .collect();
+    assert_eq!(wanted.len(), 3, "premise: three May months at {rung}");
+    wanted
+}
+
+/// The identities of the shared journal's TERMINAL rows, in journal order:
+/// each attempt's second row, its first being the start `begin` allocated.
+fn journaled_terminals(root: &Path) -> Vec<[u8; 32]> {
+    let journal = fs::read(
+        root.join("results")
+            .join("sweep-evidence-v1")
+            .join("attempts.bin"),
+    )
+    .expect("the shared journal");
+    let mut seen = std::collections::HashMap::new();
+    let mut terminals = Vec::new();
+    for row in journal.get(16..).expect("a header").chunks(96) {
+        let identity: [u8; 32] = row[8..40].try_into().expect("32 bytes");
+        let token: [u8; 8] = row[..8].try_into().expect("8 bytes");
+        let rows = seen.entry(token).or_insert(0_u8);
+        *rows += 1;
+        if *rows == 2 {
+            terminals.push(identity);
+        }
+    }
+    terminals
+}
+
+/// A 64-character identity as its bytes.
+fn identity_bytes(hex: &str) -> [u8; 32] {
+    let bytes: Vec<u8> = (0..32)
+        .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).expect("hex"))
+        .collect();
+    bytes.try_into().expect("32 bytes")
+}
+
 /// **A chunk files its months in INPUT order, whatever order they finish
-/// in.** GAP13-13, D-1701.
+/// in, on a three-thread pool and on a one-thread pool.** GAP13-13, D-1701,
+/// D-4702.
 ///
 /// Three instrument-months sweep in one chunk while the FIRST is held back,
 /// so it finishes last. Its ledger row is still row 0, the attempt tokens rise
 /// in input order, and the journal's last terminal is the last month's.
 /// Before D-1701 each worker appended its own row and began its own attempt,
-/// so the held-back month was filed last.
+/// so the held-back month was filed last. The pool is built here: on the
+/// global pool a one-thread runner finished the months in input order anyway
+/// and could not see a revert (GAP13-13 test gap, D-4702).
 #[test]
 fn a_chunk_files_its_months_in_input_order_whatever_order_they_finish() {
     let _knobs = crate::knobs::serially();
     crate::knobs::clear_all();
-    crate::audited_stored::with_warmed_store_of(&["NIFTY", "BANKNIFTY", "RELIANCE"], |root| {
-        let wanted: Vec<Held> = catalog::walk(root)
-            .expect("fixture census")
-            .held
-            .into_iter()
-            .filter(|held| {
-                held.timeframe.as_str() == "1min"
-                    && held.month.year() == 2025
-                    && held.month.month() == 5
-            })
-            .collect();
-        assert_eq!(wanted.len(), 3, "premise: three May months");
-        let chunk: Vec<&Held> = wanted.iter().collect();
-        slow_symbol(Some(chunk.first().expect("a first month").symbol.as_str()));
-        let rows = sweep_chunk(root, &chunk, u64::MAX, COMMIT);
-        slow_symbol(None);
-        assert_eq!(rows.len(), 3);
-        for row in &rows {
-            require_completed(row);
-        }
-        let mut ledger = Results::open_read(root).expect("ledger");
-        assert_eq!(ledger.len().expect("rows"), 3);
-        let mut previous = 0;
-        for (index, row) in (0_u64..).zip(&rows) {
-            let identity = row.identity.as_ref().expect("identity");
-            assert_eq!(
-                &ledger.read(index).expect("row").identity_hex(),
-                identity,
-                "ledger row {index} is input month {index}"
-            );
-            let bytes: Vec<u8> = (0..32)
-                .map(|i| u8::from_str_radix(&identity[i * 2..i * 2 + 2], 16).expect("hex"))
-                .collect();
-            let evidence =
-                sweep_evidence::read(root, bytes.try_into().expect("32 bytes"), 1_048_576)
+    for threads in [3, 1] {
+        crate::audited_stored::with_warmed_store_of(&["NIFTY", "BANKNIFTY", "RELIANCE"], |root| {
+            let wanted = may_months(root, "1min");
+            let chunk: Vec<&Held> = wanted.iter().collect();
+            let first = chunk.first().expect("a first month").symbol.clone();
+            let rows = on_pool(threads, || {
+                slow_symbol(Some(first.as_str()));
+                let rows = sweep_chunk(root, &chunk, u64::MAX, COMMIT);
+                slow_symbol(None);
+                rows
+            });
+            assert_eq!(rows.len(), 3);
+            for row in &rows {
+                require_completed(row);
+            }
+            let mut ledger = Results::open_read(root).expect("ledger");
+            assert_eq!(ledger.len().expect("rows"), 3);
+            let mut previous = 0;
+            for (index, row) in (0_u64..).zip(&rows) {
+                let identity = row.identity.as_ref().expect("identity");
+                assert_eq!(
+                    &ledger.read(index).expect("row").identity_hex(),
+                    identity,
+                    "{threads} thread(s): ledger row {index} is input month {index}"
+                );
+                let evidence = sweep_evidence::read(root, identity_bytes(identity), 1_048_576)
                     .expect("evidence")
                     .expect("its attempt");
-            assert_eq!(evidence.completion, Completion::Completed);
-            assert!(
-                evidence.attempt > previous,
-                "attempt tokens rise in input order"
+                assert_eq!(evidence.completion, Completion::Completed);
+                assert!(
+                    evidence.attempt > previous,
+                    "{threads} thread(s): attempt tokens rise in input order"
+                );
+                previous = evidence.attempt;
+            }
+            let last = sweep_evidence::latest(root, 1_048_576)
+                .expect("journal")
+                .expect("a terminal");
+            assert_eq!(
+                Some(crate::identity_hex(&last.identity)),
+                rows.last().and_then(|row| row.identity.clone()),
+                "{threads} thread(s): the last terminal journaled is the last input month's"
             );
-            previous = evidence.attempt;
-        }
-        let last = sweep_evidence::latest(root, 1_048_576)
-            .expect("journal")
-            .expect("a terminal");
+        });
+    }
+    crate::knobs::clear_all();
+}
+
+/// **A begin that refuses partway through a chunk sweeps exactly the months it
+/// began and refuses the rest by name.** GAP13-13 test gap, D-1701, D-4702.
+///
+/// The second month's `starts.bin` is a directory, so `begin_many` makes the
+/// first month's start durable and then refuses at the second. The first
+/// month still sweeps and is filed; the second and third are refused with the
+/// begin's reason and their identities, and file nothing.
+#[test]
+fn a_begin_refused_partway_sweeps_the_months_it_began_and_names_the_rest() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    crate::audited_stored::with_warmed_store_of(&["NIFTY", "BANKNIFTY", "RELIANCE"], |root| {
+        let wanted = may_months(root, "1min");
+        let chunk: Vec<&Held> = wanted.iter().collect();
+        let second = prepare(root, chunk[1], u64::MAX, COMMIT)
+            .map_err(|row| row.refused)
+            .expect("premise: the second month is identified")
+            .id
+            .hex();
+        fs::create_dir_all(
+            root.join("results")
+                .join("sweep-evidence-v1")
+                .join(&second)
+                .join("starts.bin"),
+        )
+        .expect("an obstructed start index");
+        let rows = sweep_chunk(root, &chunk, u64::MAX, COMMIT);
+        assert_eq!(rows.len(), 3);
+        require_completed(&rows[0]);
+        let why = rows[1]
+            .refused
+            .clone()
+            .expect("the second month is refused");
+        assert!(!why.is_empty());
+        assert_eq!(rows[1].identity.as_deref(), Some(second.as_str()));
         assert_eq!(
-            Some(crate::identity_hex(&last.identity)),
-            rows.last().and_then(|row| row.identity.clone()),
-            "the last terminal journaled is the last input month's"
+            rows[2].refused.as_deref(),
+            Some(why.as_str()),
+            "the same begin"
+        );
+        assert!(rows[2].identity.is_some());
+        for row in &rows[1..] {
+            assert!(
+                !row.ran && !row.completed && row.bars == 0,
+                "{:?}",
+                row.refused
+            );
+        }
+        let mut ledger = Results::open_read(root).expect("ledger");
+        assert_eq!(
+            ledger.len().expect("rows"),
+            1,
+            "only the begun month is filed"
+        );
+        assert_eq!(
+            Some(ledger.read(0).expect("row").identity_hex()),
+            rows[0].identity.clone()
         );
     });
     crate::knobs::clear_all();
+}
+
+/// **A month whose column build refuses files its Refused terminal in INPUT
+/// order, as every other month files.** G1-2, D-4701.
+///
+/// Three 5min months each miss the closing minutes of one session, so each is
+/// loaded, identified and begun, and its column build then refuses. The first
+/// is held back. Before D-4701 each refused attempt was dropped inside its
+/// rayon worker, whose `Drop` journaled the Refused terminal there, in thread
+/// completion order: the held-back month's terminal landed last.
+#[test]
+fn a_chunk_files_its_column_refusals_in_input_order() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    crate::audited_stored::with_unsourceable_close_of(
+        &["NIFTY", "BANKNIFTY", "RELIANCE"],
+        5,
+        |root| {
+            let wanted = may_months(root, "5min");
+            let chunk: Vec<&Held> = wanted.iter().collect();
+            let first = chunk.first().expect("a first month").symbol.clone();
+            let rows = on_pool(3, || {
+                slow_symbol(Some(first.as_str()));
+                let rows = sweep_chunk(root, &chunk, u64::MAX, COMMIT);
+                slow_symbol(None);
+                rows
+            });
+            assert_eq!(rows.len(), 3);
+            let mut begun = Vec::new();
+            for row in &rows {
+                assert!(
+                    !row.ran && row.refused.as_ref().is_some_and(|why| !why.is_empty()),
+                    "premise: the column build refused: {:?}",
+                    row.refused
+                );
+                begun.push(identity_bytes(row.identity.as_ref().expect("identified")));
+            }
+            assert!(
+                !Results::path(root).exists(),
+                "a refused month files no row"
+            );
+            assert_eq!(
+                journaled_terminals(root),
+                begun,
+                "each begun month's Refused terminal, in input order"
+            );
+            for identity in begun {
+                let evidence = sweep_evidence::read(root, identity, 1_048_576)
+                    .expect("evidence")
+                    .expect("its attempt");
+                assert_eq!(evidence.completion, Completion::Refused);
+            }
+        },
+    );
+    crate::knobs::clear_all();
+}
+
+/// **A begun month whose column refused is sealed Refused by phase 4, and a
+/// seal that fails is named on its row, not swallowed.** G1-2, D-4701.
+///
+/// `refuse_begun` is driven alone, twice, on one scratch evidence root. A
+/// seal that succeeds leaves the row's reason exactly as the column gave it
+/// and journals the identity's Refused terminal. With the shared journal
+/// replaced by a directory, the seal fails, and the row's reason is the
+/// column's followed by the seal's own failure. Leaving the attempt to its
+/// `Drop` instead -- what phase 3 did inside the worker until D-4701 --
+/// writes the same terminal when it can, so only the failing seal tells the
+/// two apart.
+#[test]
+fn a_refused_months_terminal_is_sealed_and_a_failed_seal_is_named() {
+    let root =
+        std::env::temp_dir().join(format!("brutex-batch-refuse-begun-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("scratch");
+    let refused = |byte: u8| {
+        Row::refused_before(
+            "zerodha NIFTY 5min 2025-05".to_owned(),
+            Some(format!("{byte:02x}").repeat(32)),
+            "the column refused".to_owned(),
+        )
+    };
+    let sealed = [7_u8; 32];
+    let attempt = sweep_evidence::begin(&root, sealed, sweep_evidence::Operation::Sweep)
+        .expect("a begun attempt");
+    let row = refuse_begun(refused(7), attempt);
+    assert_eq!(row.refused.as_deref(), Some("the column refused"));
+    assert!(!row.ran && !row.completed);
+    assert_eq!(journaled_terminals(&root), vec![sealed]);
+    assert_eq!(
+        sweep_evidence::read(&root, sealed, 1_048_576)
+            .expect("evidence")
+            .expect("its attempt")
+            .completion,
+        Completion::Refused
+    );
+
+    let unsealed = [8_u8; 32];
+    let attempt = sweep_evidence::begin(&root, unsealed, sweep_evidence::Operation::Sweep)
+        .expect("a second begun attempt");
+    let journal = root
+        .join("results")
+        .join("sweep-evidence-v1")
+        .join("attempts.bin");
+    let aside = journal.with_extension("aside");
+    fs::rename(&journal, &aside).expect("move the journal aside");
+    fs::create_dir(&journal).expect("obstruct the journal");
+    let row = refuse_begun(refused(8), attempt);
+    fs::remove_dir(&journal).expect("clear the obstruction");
+    fs::rename(&aside, &journal).expect("restore the journal");
+    let why = row.refused.expect("still refused");
+    assert!(
+        why.starts_with("the column refused; sealing its refused terminal failed: ")
+            && why.len() > "the column refused; sealing its refused terminal failed: ".len(),
+        "{why}"
+    );
+    assert_eq!(
+        journaled_terminals(&root),
+        vec![sealed],
+        "no terminal reached the obstructed journal"
+    );
+    fs::remove_dir_all(&root).expect("scratch removed");
 }
 
 /// A chunk whose every month refuses before identification begins nothing and

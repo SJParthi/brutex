@@ -730,3 +730,106 @@ fn a_catalog_at_the_byte_bound_is_written_and_one_byte_over_is_refused() {
     );
     assert!(!over.exists(), "nothing was written");
 }
+
+/// `walk_span` as it stood before D-4705: [`runner::trade::walk`] once per
+/// candidate, so the slice facts were rebuilt for every one. The reference
+/// the hoisted walk must equal.
+fn walk_span_per_candidate_facts(
+    span: &PreparedSpan,
+    horizon: runner::outcome::Horizon,
+    union: &[Candidate],
+    book: bool,
+) -> super::Walked {
+    let bars = span.bars.as_slice();
+    let mut out = super::Walked {
+        days: crate::session_index(bars),
+        tallies: Vec::new(),
+        bookings: Vec::new(),
+    };
+    for (at, candidate) in union.iter().enumerate() {
+        let mask = vocab::ConditionMask::from_words(candidate.words);
+        let walked = runner::trade::walk(bars, &span.column, &mask, horizon, candidate.direction);
+        let mut tally = super::Tally::default();
+        for trade in &walked.trades {
+            let (entry, exit) = (&bars[trade.entry_bar], &bars[trade.exit_bar]);
+            let ppm = i64::try_from(i128::from(trade.worst) * 1_000_000 / i128::from(entry.open))
+                .expect("fits");
+            tally.trades += 1;
+            tally.sum_ppm += i128::from(ppm);
+            if book {
+                out.bookings
+                    .push((at, indicators::ist_day(exit.ts_micros), ppm));
+            }
+        }
+        out.tallies.push(tally);
+    }
+    out
+}
+
+/// **`walk_span` over a span equals the per-candidate walk it replaced, byte
+/// for byte: days, every tally and every booking, on both sides, booked and
+/// not, at two horizons.** G2-4, D-4705.
+#[test]
+fn the_hoisted_walk_equals_the_per_candidate_walk() {
+    let spans = [
+        prepared(span(FIRST_MONDAY, 6, 2_000_000, 200, true)),
+        prepared(span(FIRST_MONDAY, 6, 10_000, 1, false)),
+    ];
+    let mut family = Vec::new();
+    for words in [mask(MONDAY), mask(TUESDAY), [0; 6], {
+        let mut both = mask(MONDAY);
+        both[usize::try_from(TUESDAY / 64).expect("word")] |= 1 << (TUESDAY % 64);
+        both
+    }] {
+        for direction in [Direction::Long, Direction::Short] {
+            family.push(Candidate { words, direction });
+        }
+    }
+    let mut fired = 0;
+    for span in &spans {
+        for horizon in [
+            span.horizon,
+            runner::outcome::Horizon::bars(40).expect("40"),
+        ] {
+            for book in [true, false] {
+                let hoisted = walk_span(span, horizon, &family, book).expect("walked");
+                let reference = walk_span_per_candidate_facts(span, horizon, &family, book);
+                assert_eq!(hoisted.days, reference.days);
+                assert_eq!(hoisted.tallies, reference.tallies, "{horizon:?} {book}");
+                assert_eq!(hoisted.bookings, reference.bookings, "{horizon:?} {book}");
+                fired += hoisted.tallies.iter().filter(|t| t.trades > 0).count();
+            }
+        }
+    }
+    assert!(
+        fired > 0,
+        "premise: candidates fire, so the comparison reads trades"
+    );
+}
+
+/// **`walk_span` builds the span's slice facts ONCE, not once per union
+/// candidate.** G2-4, the sixth site of AC-whp-o1-2's defect, D-4705.
+#[test]
+fn walk_span_builds_its_slice_facts_once() {
+    let source = include_str!("pool_oos.rs");
+    let from = source
+        .find("\npub(crate) fn walk_span(")
+        .expect("walk_span");
+    let body = source
+        .get(from..)
+        .and_then(|rest| rest.find("\n}\n").and_then(|to| rest.get(..to)))
+        .expect("its body");
+    assert!(!body.contains(concat!("trade::walk", "(")), "{body}");
+    assert_eq!(
+        body.matches(concat!("SliceFacts", "::of(")).count(),
+        1,
+        "{body}"
+    );
+    assert!(body.contains(concat!("trade::walk_over", "(")), "{body}");
+    let facts = body.find(concat!("SliceFacts", "::of(")).expect("facts");
+    let lanes = body.find(".par_iter()").expect("the candidate lanes");
+    assert!(
+        facts < lanes,
+        "the facts are built before the candidate loop"
+    );
+}

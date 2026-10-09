@@ -66273,3 +66273,428 @@ Tests:
 - `cli::candidate_universe::tests::production_and_its_replay_validate_each_source_once_at_construction`.
 - `cli::step3_orchestrator::tests::strict_v6_fixture_tests::strict_v6_a_family_commit_validates_its_source_once`.
 - `cli::ledger_append_lookup_costs::the_ledger_v6_route_and_replay_costs_are_stated`.
+
+### D-4700 — `pool-oos` pass 1 is `pool`'s pass 1, one instrument at a time in surface order, and the order guard reads every caller of a recording rung kernel — 2026-10-09
+
+**What was wrong.** G1-1, which leaves GAP13-13 and R9-cli-o1-0 PARTIAL.
+`pool_oos::run_under` screened its surface with
+`surface.par_iter().map(|symbol| Screened { outcome: crate::one_rung(..) })`.
+That is the shape D-1701 removed from `pool`. `pool-oos` was added after
+D-1701 (D-1576) with its own copy of pass 1. Every screen writes durable
+records from inside itself: preparation and probe attempts, frontier, trade
+and receipt blocks, its `runs.bin` row and its terminals. Here they were all
+written from rayon workers, so they landed in thread-completion order. Up to
+the pool's width of sweeps also ran at once, while
+`SWEEPS_SHARING_THIS_MACHINE` stayed at its resting 1, so each one took the
+whole machine's candidate ceiling and every core. D-1709 measured that
+oversubscription: eight such sweeps claimed 157 GB of 48.
+
+Neither guard could see it.
+`ordered::tests::every_whole_command_fan_out_writes_in_input_order` and
+`pool::tests::every_outer_loop_over_one_rung_runs_in_input_order` each named
+fixed files and functions, and neither read `pool_oos.rs`.
+
+**Decided.**
+- **One pass-1 function serves both verbs.** `pool::screen_pass_one` is
+  `crate::in_input_order(surface, ..)` around `one_rung_cached`. It takes the
+  root `run` resolved and the commit stamp as arguments, and raises no
+  `SharedBy`. That is D-1709's shape: one sweep in flight, the counter's 1
+  is true, and each sweep's own support lanes and pricing use every core.
+  `pool::run_under` and `pool_oos::run_under` both call it.
+  - `pool`'s pass 2 moved into `pool::price_surface`, so no caller of a
+    recording kernel spells parallel work itself.
+- **The guard is exhaustive within its reach.**
+  `ordered::tests::every_caller_of_a_recording_rung_kernel_runs_it_in_input_order`
+  reads every `.rs` file under `crates/cli/src` at test time.
+  - It finds each call of `one_rung(` and `one_rung_cached(`. A definition, a
+    method, a longer name, a comment and a string literal are not calls.
+  - For each call it finds the enclosing function. It then finds each
+    non-test caller of those functions, one level up.
+  - No body at either level may spell a parallel primitive: `par_iter`,
+    `par_bridge`, `par_chunks`, `par_extend`, `par_drain`, `rayon::join`,
+    `rayon::scope`, `rayon::spawn`, `ThreadPoolBuilder`, `thread::spawn`,
+    `thread::scope` or `ordered::map`.
+  - No first-level caller may raise `SharedBy::these`.
+  - A wrapper whose name is defined in two files is refused, not guessed.
+  - The test requires the callers it knows to be found, so a scanner that
+    found nothing would fail.
+  - `the_recording_caller_scan_sees_calls_and_nothing_else` holds the scanner
+    to a synthetic source.
+  - `pool::tests::every_outer_loop_over_one_rung_runs_in_input_order` now
+    reads its callers through the same scanner instead of a list.
+- **A behavioural test drives the order.**
+  `pool::tests::pass_one_files_in_surface_order_on_any_pool_width` runs
+  `screen_pass_one` over three instruments, with the first one held back
+  1.5 s by a test seam. It runs once on an explicit 4-thread pool and once
+  on a 1-thread pool. On each, ledger row i must be screen i, by identity and
+  by instrument, and the attempt tokens must rise.
+  `the_pass_one_seam_holds_back_exactly_the_named_screen` pins the seam.
+- **Two stale texts are corrected.** `pool.rs`'s module header said pass 1
+  screens "in parallel". Two test docs said pass 1 reads its root from the
+  environment.
+
+**Measured before the fix.** On the unfixed tree the scanner test failed at
+`ordered_tests.rs:471` with "pool.rs `run_under` calls a recording rung
+kernel and spells parallel work". That body held pass 2's `par_iter` beside
+pass 1, which is why pass 2 moved out. With only that moved, the test failed
+with the same message for `pool_oos.rs`'s `run_under`, which is the defect.
+The order test, with `screen_pass_one`'s map made parallel, failed at
+`pool.rs:4051` with "4 thread(s): ledger row 0 is surface instrument 0".
+
+**What changes in results.** Nothing stored changes shape, digest or
+identity. It is the same `one_rung_cached` call under the same root and the
+same stamp: `run` resolves the root from the environment and hands it
+through, where `one_rung` used to resolve it again from that same
+environment. Only two things change: the order in which `pool-oos` pass 1
+appends, and how many sweeps it runs at once. A `pool-oos` pass 1 now costs
+the sum of its screens rather than overlapping them. NOT MEASURED.
+
+**Rejected.**
+- `SharedBy::these(n)` around a parallel pass 1. D-1709 rejected this: the
+  divided ceiling enters `policy_of` and so the run identity, and each screen
+  would then record a run that differs from `range-rung`'s.
+- Adding `pool_oos.rs` to the fixed lists. The defect was a file the list did
+  not name, and the next one would be another.
+
+**Honest limit.** The scanner reads text, not a syntax tree.
+- It follows callers two levels up. A third wrapper level, a call through a
+  function pointer or a macro, or a parallel primitive not on its list would
+  not be seen.
+- It relies on rustfmt's layout: a function closes with `}` at its own
+  indentation.
+
+### D-4701 — A `sweep-all` month whose column build refuses seals its Refused terminal in the ordered phase, and a seal that fails is named — 2026-10-09
+
+**What was wrong.** G1-2. `batch::sweep_chunk` has four phases:
+
+1. Prepare, in parallel.
+2. Begin every attempt with one `begin_many`, in input order.
+3. Build and sweep, in parallel.
+4. File, one month at a time, in input order.
+
+A month can begin and then have its column build refuse. That happens to a
+1-minute series that is missing a session's closing minute, which is
+D-1707's premise; D-1781/D-1707 measured 28 such minutes on NIFTY. When it
+did, `sweep_prepared` returned the refused row and dropped its begun
+`Attempt` inside the rayon worker. `Attempt::drop` then journaled the
+Refused terminal to the shared `attempts.bin` from that worker, in
+completion order. D-1701's rule is that everything durable happens in input
+order.
+
+**Decided.**
+- **The attempt comes out of phase 3.** `sweep_prepared` returns the
+  attempt beside the refusal, as `Err((Row, Attempt))`. Phase 3 carries
+  `(Row, Option<Attempt>)` out; the attempt is `None` for a month that was
+  never begun.
+- **Phase 4 seals it in input order.** `batch::refuse_begun` calls
+  `attempt.finish(Completion::Refused)`. A seal that fails is added to the
+  row's reason, as "; sealing its refused terminal failed: ..", rather than
+  dropped. The attempt's `Drop` then makes its usual best-effort terminal,
+  and that too now happens in the ordered phase.
+- **Two tests.**
+  - `batch::stored_tests::a_chunk_files_its_column_refusals_in_input_order`
+    sweeps three months whose column build refuses, with the first held
+    back, on a 3-thread pool. The journal's terminals must be the begun
+    identities in input order, each must be Refused, and no ledger row is
+    written. The premise, that each refusal came from the column build after
+    a begin, is asserted first.
+  - `batch::stored_tests::a_refused_months_terminal_is_sealed_and_a_failed_seal_is_named`
+    drives `refuse_begun` alone. A seal that succeeds leaves the reason
+    exactly as the column gave it and journals one Refused terminal. With
+    the journal obstructed, the reason carries the seal's failure.
+- **One fixture.** `audited_stored::with_unsourceable_close_of` writes
+  D-1707's short-close store for several symbols in one root.
+
+**Measured before the fix.** On the unfixed tree the order test failed at
+`batch_stored_tests.rs:380` with "each begun month's Refused terminal, in
+input order": the held-back month's terminal was journaled last. The seal
+test has no unfixed form, because `refuse_begun` is new. Against a mutant
+that leaves the attempt to its `Drop`, it failed at
+`batch_stored_tests.rs:465` with the bare reason "the column refused".
+
+**What changes in results.** The terminal bytes and completion are the same.
+Only their order in `attempts.bin` changes, and it now follows the input. No
+format changes.
+
+### D-4702 — The `sweep-all` order test runs on its own 3-thread and 1-thread pools, and a `begin_many` refused partway is driven — 2026-10-09
+
+**What was wrong.** GAP13-13 had two test gaps.
+- `batch::stored_tests::a_chunk_files_its_months_in_input_order_whatever_order_they_finish`
+  ran on the global rayon pool. On a 1-thread runner the months finish in
+  input order whatever the code does, so a revert of D-1701 passed it.
+- No test refused `begin_many` after it had begun part of a chunk. D-1701's
+  rule is that the months it began still sweep, and only the rest are
+  refused, by name. That rule was stated and not driven.
+
+**Decided.**
+- **The order test builds its own pools.** It runs once on a 3-thread pool
+  and once on a 1-thread pool, built inside the test. The held-back seam is
+  thread-local and is read on the thread that calls `sweep_chunk`, so it is
+  set inside each pool. On each pool, ledger row i must be input month i,
+  the attempt tokens must rise, and the journal's last terminal must be the
+  last month's.
+- **The partway refusal is driven.**
+  `batch::stored_tests::a_begin_refused_partway_sweeps_the_months_it_began_and_names_the_rest`
+  obstructs the second month's `starts.bin` with a directory, so
+  `begin_many` admits month 0 and refuses at month 1.
+  - Month 0 must complete and file the chunk's one ledger row.
+  - Months 1 and 2 must refuse with the same reason, each naming its
+    identity.
+
+**Proof.** Both tests passed on the unfixed tree, because the code was
+right. Each one is proven against a temporary mutant, measured with
+`RAYON_NUM_THREADS=1`:
+- **Filing moved back into the parallel phase** (the pre-D-1701 shape). A
+  verbatim copy of the old test passed. The new one failed in its 3-thread
+  half, at `batch_stored_tests.rs:267`, with "3 thread(s): ledger row 0 is
+  input month 0".
+- **A begin refusal refusing every month.** The partway test failed at
+  month 0's completion check, with "sweep evidence I/O refused: Is a
+  directory (os error 21)".
+
+### D-4703 — `one_rung_cached` is driven A, then B with the same key, then A again, end to end — 2026-10-09
+
+**What was wrong.** W2-cli8-9 test gap. D-1700 made the success arm of
+`one_rung_cached` read a rung's row back through `recorded_row`, by the
+identity its page names, rather than taking the newest row that matches its
+key. Both of its tests call `recorded_row` directly. If the arm were
+rewired back to a key lookup, every test would still pass.
+
+**Decided.**
+`audited_stored::tests::a_range_rung_rerun_through_one_rung_cached_returns_its_own_row`
+calls `one_rung_cached` three times on one warmed store, at 5min with a
+fixed support, under three explicit commits:
+1. "generated-one-rung-readback-a"
+2. "-b"
+3. "-a" again
+
+The first two runs share feed, instrument, rung, span and `min_hits`, and
+have different identities. The second run is the ledger's newest row. The
+third run's row must have the first run's identity, must equal ledger row 0,
+and must equal the first run's row field for field. The premises are
+asserted first: two distinct identities, one key, and two ledger rows.
+
+**Proof.** The test passed on the unfixed tree, because the arm is right.
+Against a temporary mutant whose arm reads the newest ledger row, it failed
+at `audited_stored_tests.rs:2960`: the rerun's identity was B's. Under the
+same mutant, `a_reused_range_rung_reads_its_own_row_and_not_the_newest_with_its_key`,
+which calls `recorded_row` directly, still passed.
+
+### D-4704 — Pool pass 2 is held to the cell pass 1 recorded, at 5min and 60min, for every recorded row — 2026-10-09
+
+**What was wrong.** GAP13-15 test gap.
+`pool::tests::the_pool_prices_a_span_exactly_where_the_audit_path_does`
+holds `price_all` to `audit_path_cell`, a cell that the test module
+re-assembles from the audit path's functions. Three things followed:
+- A divergence in what pass 1 actually records, in `price_grids` or the tier
+  cascade, would move neither side of that test.
+- Only the empty mask was priced.
+- 60min, the rung the finding measured, was never exercised. The warmed
+  store's constant prices halt a 60min ladder, because every condition holds
+  on every bar.
+
+**Decided.**
+`pool::tests::pass_two_prices_each_frontier_row_as_pass_one_recorded_it`
+runs at 5min over May 2025 and at 60min over March to May:
+1. `screen_pass_one` screens NIFTY.
+2. The test reads that run's frontier rows by its recorded identity.
+3. `union_of` and `price_all` price the union.
+4. Each frontier row's `(mask, side)` must get from `price_all` the cell the
+   row carries: trades, wins, pessimistic net, worst trade, drawdown,
+   smallest win, gross win and gross loss. A row with no trade must get no
+   cell.
+
+Its premise is that at least one recorded row with a non-empty mask traded.
+On this store every recorded row has a non-empty mask, and
+`the_pool_prices_a_span_exactly_where_the_audit_path_does` keeps the empty
+mask. The ceiling is named (`BRUTEX_CEILING=4096`), so the ladder's reach
+does not follow the machine.
+
+The store is `audited_stored::with_varied_store`:
+- a reproducible random walk through 2025-02-28 and every session of March
+  to May;
+- its 1day bars span each session's minutes;
+- its 5min and 60min months are folded by `pull::fold`, so every signal bar
+  closes on its last minute's close, as the exact-minute overlay requires.
+
+Two simpler stores failed, both measured:
+- The warmed store's 5min bars are sampled minutes. Varied prices fail that
+  overlay ("SignalCloseMismatch").
+- One month of 60min bars halted the ladder at every support from 60% to
+  99%, on either walk. March to May, 213 swept bars, completed at each.
+
+**Proof.** Measured against temporary mutants of the levels `price_grids`
+builds for what pass 1 records:
+- One more rung. The test failed at 60min: "60min rank 1 Long: pass 2's cell
+  is pass 1's recorded cell", pessimistic -4595 against -4525. Under the
+  same mutant `the_pool_prices_a_span_exactly_where_the_audit_path_does`
+  still passed, which is the gap. The 5min half did not differ, which is
+  why the 60min half is needed.
+- A doubled step. Pass 1 then refused to record ("could not reproduce its
+  selected exit cell on an exact grid rebuild"), so the test failed at its
+  premise.
+- No forced stop, and no ratio targets. These recorded the same cells on
+  this store, and the test passed. They are equivalent here, not caught.
+
+**Honest limit.** The fixture's prices are generated and say nothing about a
+market. The test pins that the two passes agree, not what a cell is worth.
+A drift that moves no recorded cell on this store is not seen.
+
+### D-4705 — `pool_oos::walk_span` builds its slice facts once per span — 2026-10-09
+
+**What was wrong.** G2-4 is the sixth site of AC-whp-o1-2's defect, which
+D-1730 fixed at its first five. `walk_span` called `runner::trade::walk`
+once per union candidate, and `walk` rebuilds `SliceFacts::of(bars, column)`
+on every call. A span therefore paid U builds where one suffices.
+
+**Decided.** `walk_span` builds `SliceFacts::of(bars, &span.column)` once,
+before the parallel map over the union. Each candidate then calls
+`runner::trade::walk_over(.., &facts)`.
+
+Two tests:
+- `pool_oos::tests::the_hoisted_walk_equals_the_per_candidate_walk` holds
+  the output byte for byte against the old per-candidate shape, which the
+  test keeps as its reference. It covers:
+  - two generated spans and two horizons;
+  - booking on and off;
+  - the masks MONDAY, TUESDAY, empty and MONDAY|TUESDAY;
+  - each mask Long and Short.
+
+  Days, tallies and bookings must all be equal, with the premise that some
+  candidate fired.
+- `pool_oos::tests::walk_span_builds_its_slice_facts_once` reads
+  `walk_span`'s body. It must hold no `trade::walk(`, exactly one
+  `SliceFacts::of(`, and `trade::walk_over(`, and the facts must be built
+  before `.par_iter()`.
+
+**Measured before the fix.** The source test failed at
+`pool_oos_tests.rs:816` on `!body.contains("trade::walk(")`.
+
+**What changes in results.** Nothing. `walk` is `walk_over` over facts it
+builds itself (`runner/src/trade.rs`), and the equality test drives that.
+
+**Cost.** One O(B) facts build per span instead of U. Each candidate's walk
+is unchanged: it still visits every row of the column, which is Θ(B) per
+candidate. `docs/06-limits.md` states it.
+
+### D-4706 — Two false texts about pass 1's sharing and order are corrected — 2026-10-09
+
+**What was wrong.** G1-3. Two texts stated something about pass 1 that is not
+true.
+- **`range_rung_arm`'s doc** (`crates/cli/src/lib.rs`) said that, asked for
+  one rung, it "sets `SharedBy::these(1)`". No code does that. Since D-1701,
+  `sweep_rungs` raises no `SharedBy`, and D-1709 kept that shape, so one
+  sweep is in flight and the counter stays at its resting 1. The only
+  production `SharedBy::these` is in `batch.rs`.
+- **Two places in `docs/11-findings.md`** credit superseded decisions.
+  - The table row for audit-20261003 hunt-conc-1 (KNOWN GAP13-13) credits
+    D-1564. It says `range-all`, `pool` and the Boolean pools are "stated as
+    completion-ordered … not changed".
+  - The narrative bullets credit D-1556 for `range-all` and `pool` pass 1.
+  - Both were superseded: by D-1701 and D-1708 for `sweep-all`, and by
+    D-1701 and D-1709 for `range-all` and `pool` pass 1.
+
+**Decided.**
+- The doc now states what holds and says what it claimed until this entry.
+- `docs/11-findings.md` is append-only, so no row there is edited. A
+  narrative correction at its tail names the superseding decisions. It adds
+  no `F-` row and cites no commit.
+
+`pool.rs`'s "in parallel" header, the third text G1-3 names, is corrected
+with the code under D-4700.
+
+**What changes in results.** Nothing. These are text changes only.
+
+### D-4707 — Pool pass 2 walks each candidate over its rarest bit's posting list — 2026-10-09
+
+**What was wrong.** R9-cli-o1-1. Pass 2 priced each union candidate with one
+`grid::evaluate_over`, and that walk visits every row of the projected
+one-minute column before it prices. Each candidate cost Θ(B_exec + cells × T)
+however seldom its mask fired. The union grows with the surface, so pass 2 was
+up to Θ(I² × top × B_exec), and the rare setups the pool exists to find
+(T small, B_exec large) are exactly where that walk dominates.
+
+**Decided.**
+- `runner::trade::walk_core` takes the rows it visits as an iterator of
+  `(row, bits, source)`, in place of a first row.
+  - `rows_from` yields every row from a first row on. It is what every
+    earlier entry point passes, so their walks are the same loop as before
+    (D-1186).
+  - `rows_listed` yields exactly a caller's list.
+- `runner::trade::walk_over_rows` checks the list before it walks: the rows
+  must ascend strictly and lie inside the column. A row out of order,
+  repeated or past the end refuses the whole walk with a reason, and nothing
+  is walked. `runner::grid::evaluate_over_rows` is `evaluate_over` over that
+  walk.
+- `cli::pool::price_all` builds one `Postings` per instrument. It is one
+  pass over the projected column that posts each row under every bit it sets
+  among the bits the union names. Each non-empty mask is then priced over the
+  shortest list among its own bits.
+  - The empty mask names no bit and fires on every row, so it keeps
+    `evaluate_over`.
+  - A refused list refuses the instrument's pass 2 with that reason. It does
+    not fall back to the every-row walk.
+
+**Why the figures cannot move.** The walk changes state only on a row the
+mask fires on, and it records bars by the row's source index, never by the
+row's place in the list. A row the mask fires on sets every bit the mask
+names, so it is on each of those bits' lists. Any one bit's list therefore
+holds every firing row, and each listed row is still asked the full mask
+test. So the rarest bit's list and every row give the same trades, which
+makes the grid and the cell the same too. Choosing a list other than the
+rarest changes only the cost.
+
+**Proof.**
+- `runner::trade::tests::a_walk_over_a_superset_of_the_firing_rows_equals_the_full_walk`
+  compares the listed walk with `walk_over` for every table bit, alone and
+  with its neighbour. It checks both directions, over the bit's own rows
+  and over every row. Premises: some mask fired, and some firing bit's list
+  was shorter than the column. It also checks the refusals, the last row
+  and the empty list.
+- `runner::grid::tests::a_grid_over_a_superset_of_the_firing_rows_is_the_same_grid`
+  compares whole grids, bit by bit and side by side, and checks a refused
+  list.
+- `cli::pool::tests::pass_two_over_posting_lists_prices_what_every_row_prices`
+  runs on the generated random-walk store, at 5min (May 2025) and 60min
+  (March to May). The union is drawn from the prepared column: the empty
+  mask, ten bits that split the rows, five pairs, a triple and a table bit
+  no row sets, each both ways. `price_all` must equal a test-local copy of
+  the every-row pass 2, and each listed grid must equal the every-row grid.
+  Premises: a mask traded over a list shorter than the column, the never-set
+  bit priced nothing over an empty list both ways, and the empty mask
+  traded.
+- `cli::pool::tests::postings_list_each_named_bits_rows_and_rarest_is_the_shortest`
+  checks four things:
+  - each named bit's list is exactly the rows that set it;
+  - an unnamed bit posts nothing;
+  - the empty mask has no list;
+  - `rarest` returns the shorter list, the rarer bit's own list, over pairs
+    of uneven count.
+  The byte-identity test cannot see a choice of list, because every bit's
+  list gives the same figures. This test is what holds the choice.
+- `cli::pool::tests::the_pool_prepares_projects_and_prices_in_order_inside_price_all`
+  now requires, in this order: the facts, then `Postings::of(&column,
+  &named)`, then `postings.rarest(&mask)`, then `evaluate_over_rows(`.
+- `limits_doc_drift::section_113_prices_a_trade_walk_by_the_column_rows_it_visits`
+  reads the new loop, `rows_from`, `rows_listed` and §113's statement of the
+  listed walk.
+
+**Measured before the fix.** With `price_all` put back to one `evaluate_over` per candidate and every
+new test kept, the source order test failed at `pool.rs:3262`:
+"`Postings::of(&column, &named)` must appear in `fn price_all(`'s body after
+the previous step". The two posting tests passed on that build. That is
+expected: they hold an equivalence and the `Postings` type itself, which the
+before-fix body leaves unused.
+
+**What changes in results.** Nothing. Every cell pass 2 prints is the cell
+the every-row walk priced. `pass_two_prices_each_frontier_row_as_pass_one_recorded_it`
+(D-4704) still holds every recorded frontier row to pass 1's cell.
+
+**Cost.** Per instrument, the posting pass is Θ(B_exec + P) time and Θ(P)
+memory for P postings. Per candidate, choosing the list is O(BITS), and the
+walk is Θ(R + cells × T) for the rarest list's R rows. R counts the rows one
+bit is set on, not the rows the mask fires on. A rare conjunction of common
+bits therefore still walks its rarest bit's rows. Where R = B_exec the worst
+case is unchanged at Θ(I² × top × B_exec). `docs/06-limits.md` §171 and §113
+state it, and the `pool.rs` header and `price_all`'s doc state it too. This
+is stated from the code's shape and was not timed.

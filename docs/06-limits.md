@@ -6806,10 +6806,13 @@ the forward vector and the session table remain linear in B and cannot be O(1)
 total while retaining one answer per input bar.
 
 The larger operations keep their real bounds. A trade walk is linear in the
-rows of the column it walks: `walk_core` visits every row from the first one
-that can fire (D-1186; rows before it are all-zero and cannot) and asks `fires`
-of each, so a row that never fires still costs one test, and the signal count bounds only the work after a row
-fires. (This sentence used to say the walk was linear in the signals it decides,
+rows of the column it walks: `walk_core` visits the rows its caller hands it
+and asks `fires` of each, so a row that never fires still costs one test, and the signal count bounds only the work after a row
+fires. Every entry point but one hands it every row from the first one that
+can fire (`rows_from`, D-1186; rows before it are all-zero and cannot).
+`walk_over_rows` hands it exactly the strictly ascending rows its caller
+lists, which must hold every row the mask fires on (`rows_listed`, D-4707), so
+that walk is linear in the list, plus O(|list|) to check its order. (This sentence used to say the walk was linear in the signals it decides,
 which understated it; D-1204 corrects it.) Excursion/crossing construction reads the relevant
 paths. An exit grid evaluates its bounded configured cells over ordered
 candidates, and chosen-row replay plus persistence is output-sensitive. The
@@ -8848,7 +8851,8 @@ made exact by exposing each cell's trade sequence from the grid, which is a
 change inside the pricing loop and is not made. Every report labels the
 column as a bound.
 
-Cost: pass 1 is I screens, one at a time in surface order (D-1701), each
+Cost: pass 1 is I screens, one at a time in surface order (D-1701), in
+`pool::screen_pass_one`, which `pool-oos` shares since D-4700, each
 what `range-rung` costs on that instrument, with that screen's sweep and
 pricing parallel inside it. The union admits the parent ledger and receipt
 sidecar once, O(L + R) for L ledger rows and R receipts, then reads one
@@ -8859,15 +8863,29 @@ execution series (D-1702): per instrument the loads, column, projection and
 one `SliceFacts`, O(B_sig + B_exec) -- times W + 1 for the column, where W is
 the number of exact-minute-unsourceable days withheld, because pass 1's own
 build reloads both contexts and rebuilds after each one (D-1707, at most 64) --
-and per union candidate one
-`grid::evaluate_over`, which walks every row of the projected column before it
-prices, Θ(B_exec + cells × T). So pass 2 is
-Θ(I × (B_sig + B_exec) + I × U × (B_exec + cells × T)). U is the union of
-every instrument's kept frontier (at most `top` rows a run), so U grows with
-I, up to I × `top`, and pass 2 is up to Θ(I² × top × B_exec) when T is small
-and B_exec large -- the rare-setup case the pool exists for. This said "I × U
-grid evaluations, each O(cells × T)", which left the B_exec walk out
-(R9-cli-o1-1). The fold is one pass over I × U cells. None of this is a rule-4
+then one posting pass over the projected column (D-4707): per row one
+six-word intersection with the bits the union names and one push per bit left
+set, Θ(B_exec + P) time and Θ(P) memory for the P rows posted. Per union
+candidate pass 2 then picks the shortest posting list among the bits the mask
+names, O(BITS) with no row read, and runs one `grid::evaluate_over_rows` over
+it, Θ(R + cells × T) for the list's R rows. So pass 2 is
+Θ(I × (B_sig + B_exec + P) + I × U × (R + cells × T)), with P at most B_exec
+times the named bits and R at most B_exec. R counts the rows the RAREST BIT
+is set on, not the rows the mask fires on: a rare conjunction of common bits
+still walks every row of its rarest bit, and the empty mask, which names no
+bit, keeps `grid::evaluate_over`'s walk of every row. U is the union of every
+instrument's kept frontier (at most `top` rows a run), so U grows with I, up
+to I × `top`, and where R = B_exec pass 2 is still Θ(I² × top × B_exec): the
+lists shorten the walk, they do not change the worst case. The cells are the
+every-row walk's cells exactly, because the walk changes state only on a row
+the mask fires on and each such row is on every one of its bits' lists
+(`pass_two_over_posting_lists_prices_what_every_row_prices`). Until D-4707
+every candidate walked every row of the projected column, Θ(B_exec + cells ×
+T), and pass 2 was Θ(I × (B_sig + B_exec) + I × U × (B_exec + cells × T)), up
+to Θ(I² × top × B_exec) when T is small and B_exec large -- the rare-setup
+case the pool exists for. Before that this said "I × U grid evaluations, each
+O(cells × T)", which left the B_exec walk out (R9-cli-o1-1). The fold is one
+pass over I × U cells. None of this is a rule-4
 primitive, and none of it is constant in I or U. Stated from the code's shape;
 not timed.
 
@@ -13072,8 +13090,13 @@ not:
   to `runs.bin` follow input order. D-1709 keeps this shape over D-1556's
   ordered lanes for those two loops. The Boolean family pools run as
   `ordered::map` lanes (D-1556, "Ordered lanes" below), so their writes follow
-  input order too. Reports are gathered in input order and every ledger
-  lookup is by identity. A plain `descend` step's cost is stated under
+  input order too. `pool-oos` pass 1 was a parallel map around `one_rung`
+  from D-1576 until D-4700 (G1-1), so its rows followed thread completion and
+  its concurrent sweeps each took the whole machine; it now calls
+  `pool::screen_pass_one`, the one function `pool` pass 1 runs, and an order
+  guard reads every caller of `one_rung`/`one_rung_cached` in the crate
+  rather than a list of files. Reports are gathered in input order and every
+  ledger lookup is by identity. A plain `descend` step's cost is stated under
   "Plain `descend` (D-1557)" below, which replaced the D-1567 statement here.
 - **`latest_for` (D-1567, removed by D-1700).** It was O(runs) per call: it
   opened the results ledger, which builds the identity index and hashes the
@@ -15250,13 +15273,22 @@ Let I be the surface's instruments, U the discovered union, B a span's bars,
 N the later IST sessions and D the bootstrap draws (`bootstrap_draws(N)`, at
 most 100,000).
 
-- **`pool-oos` judging.** Each span costs I × U walks of O(B) each, plus one
+- **`pool-oos` judging.** Each span costs I × U walks of O(B) each, over one
+  `SliceFacts` build of O(B) per span (D-4705; until then each candidate's
+  `trade::walk` rebuilt it, U builds per span, G2-4), plus one
   Romano-Wolf stepdown and one Reality Check of O(D × U × N) each. Neither
   is a §3 rule-4 primitive. Nothing here is measured: UNVERIFIED. Fills are
   on the signal rung's bars, as the audit stack's bootstrap family's are, so
   on a rung above one minute they are coarser than the exit grid's minute
   replay. One later span is one draw. Multiplicity across separate
   `pool-oos` invocations is not controlled (gaps-12).
+- **`pool-oos` pass 1 (D-4700).** One screen at a time in surface order,
+  through `pool::screen_pass_one`, so each screen is what `range-rung` costs
+  on that instrument, with its sweep and pricing parallel inside it, and pass
+  1 costs the sum of I screens. Until D-4700 it was a rayon map of up to the
+  pool's width of whole-machine sweeps at once, with nothing raising
+  `SWEEPS_SHARING_THIS_MACHINE` (G1-1): the oversubscription D-1709 measured
+  at 157 GB claimed of 48. The wall-clock change is NOT MEASURED.
 - **`pool-oos` memory (D-2300).** The spans are streamed: each lane prepares
   one span, walks every union candidate over it, and drops its bars and
   column before the next, so at most one span per running Rayon lane is
@@ -15579,11 +15611,15 @@ The rollback on a failed append is one `seek`, one `set_len` and one
 - **`sweep-all` files in input order behind a barrier per chunk.** Each chunk
   of at most the rayon pool's width loads and sweeps its months in parallel,
   then files them one at a time; the next chunk starts only when the chunk's
-  slowest month is filed. Wall-clock is therefore the sum over chunks of each
+  slowest month is filed. A month whose column build refuses after its
+  attempt began is sealed Refused in that same sequential phase (D-4701),
+  one terminal append, where its attempt's `Drop` had journaled it from the
+  worker. Wall-clock is therefore the sum over chunks of each
   chunk's slowest month plus its sequential filing (one ledger append and one
   terminal per month), not the parallel makespan of the whole walk. Memory per
   chunk is what one month per worker holds, as before.
-- **`range-all` and pool pass 1 run `one_rung` one call at a time.** Each
+- **`range-all` and pool pass 1 run `one_rung` one call at a time** (and
+  `pool-oos` pass 1, the same function since D-4700). Each
   sweep's support lanes and each screen's candidate pricing are still
   parallel, and each call now gets the whole machine's ceiling and cores; what
   no longer overlaps is each rung's or instrument's span loads, column folds

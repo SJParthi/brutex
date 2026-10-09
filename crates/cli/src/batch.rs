@@ -516,15 +516,23 @@ fn held_back(slow: Option<&str>, symbol: &str) -> bool {
 /// 2. Begin every identified month's attempt with one `begin_many`, in input
 ///    order, so attempt tokens follow input order.
 /// 3. Build the column and sweep each month under its attempt, in parallel.
-///    The only writes are each attempt's own depth rows, in its own file.
-/// 4. File each swept month -- ledger row, then the attempt's terminal -- one
-///    at a time, in input order.
+///    The only writes are each attempt's own depth rows, in its own file. A
+///    month whose column build refuses carries its attempt OUT of this phase
+///    unfinished (G1-2, D-4701).
+/// 4. File each swept month -- ledger row, then the attempt's terminal -- and
+///    seal each refused month's Refused terminal, one at a time, in input
+///    order.
 ///
 /// Until this, `one` did all four inside the rayon worker, so the ledger rows,
 /// the attempt tokens and the journal's terminals were appended in thread
 /// completion order and `cli results` listed one store's identical rerun
 /// differently. A begin refusal refuses exactly the months it left without an
 /// attempt, by name; the months it began still sweep.
+///
+/// Until D-4701 a month whose column build refused in phase 3 dropped its
+/// attempt inside the rayon worker, and the attempt's `Drop` journaled the
+/// Refused terminal to the shared `attempts.bin` from there, in completion
+/// order. It is now sealed in phase 4 with every other terminal.
 ///
 /// The cost of the order is a barrier per chunk: a chunk's slowest month holds
 /// the next chunk back. `docs/06-limits.md` states it.
@@ -564,24 +572,46 @@ fn sweep_chunk(root: &std::path::Path, chunk: &[&Held], min_hits: u64, commit: &
             }
         })
         .collect();
-    let swept: Vec<Result<Swept<'_>, Row>> = staged
+    let swept: Vec<Result<Swept<'_>, NotSwept>> = staged
         .into_par_iter()
         .map(|staged| {
-            let (p, attempt) = staged?;
+            let (p, attempt) = staged.map_err(|row| (row, None))?;
             #[cfg(test)]
             if held_back(slow.as_deref(), p.held.symbol.as_str()) {
                 std::thread::sleep(std::time::Duration::from_millis(300));
             }
-            sweep_prepared(p, attempt)
+            sweep_prepared(p, attempt).map_err(|(row, attempt)| (row, Some(attempt)))
         })
         .collect();
     swept
         .into_iter()
         .map(|swept| match swept {
             Ok(swept) => file_swept(root, swept, min_hits),
-            Err(row) => row,
+            Err((row, None)) => row,
+            Err((row, Some(attempt))) => refuse_begun(row, *attempt),
         })
         .collect()
+}
+
+/// A month that did not sweep: its row, and the attempt it began, when it
+/// began one. Phase 3 hands the attempt back unfinished so phase 4 seals it
+/// in input order (D-4701). Boxed, because an attempt is several hundred
+/// bytes and every `Err` the phase carries would be that size.
+type NotSwept = (Row, Option<Box<crate::sweep_evidence::Attempt>>);
+
+/// A begun month whose column build refused: its Refused terminal, sealed
+/// here, in input order, rather than by the attempt's `Drop` inside a rayon
+/// worker (G1-2, D-4701). A seal that fails is added to the row's reason;
+/// the attempt's `Drop` then makes its own best-effort Refused terminal, as
+/// it always did.
+fn refuse_begun(mut row: Row, attempt: crate::sweep_evidence::Attempt) -> Row {
+    if let Err(why) = attempt.finish(crate::sweep_evidence::Completion::Refused) {
+        let refused = row.refused.take().unwrap_or_default();
+        row.refused = Some(format!(
+            "{refused}; sealing its refused terminal failed: {why}"
+        ));
+    }
+    row
 }
 
 /// One instrument-month through all four phases of [`sweep_chunk`]: the
@@ -763,11 +793,13 @@ fn prepare<'h>(
     })
 }
 
-/// Builds one month's column and sweeps it under its begun attempt.
+/// Builds one month's column and sweeps it under its begun attempt. A column
+/// that refuses returns the attempt unfinished beside the row, for phase 4 to
+/// seal in input order (D-4701).
 fn sweep_prepared(
     prepared: Prepared<'_>,
     attempt: crate::sweep_evidence::Attempt,
-) -> Result<Swept<'_>, Row> {
+) -> Result<Swept<'_>, (Row, Box<crate::sweep_evidence::Attempt>)> {
     let Prepared {
         held,
         label,
@@ -788,7 +820,10 @@ fn sweep_prepared(
     ) {
         Ok(column) => column,
         Err(why) => {
-            return Err(Row::refused_before(label, Some(id.hex()), why));
+            return Err((
+                Row::refused_before(label, Some(id.hex()), why),
+                Box::new(attempt),
+            ));
         }
     };
     let outcome = Sweeper::new(ladder).run_prepared_streamed_reporting(
