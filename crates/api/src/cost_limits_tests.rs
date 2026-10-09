@@ -207,6 +207,11 @@ fn w1_api5_4_the_window_still_reads_its_range_and_orders_only_the_page() {
             "O(n) reads and O(n) memory",
             "`MAX_WINDOW_MONTHS` = 240",
             "the_page_orders_only_itself_wherever_the_offset_lands",
+            "Since D-4439",
+            "`month_fold`",
+            "`MAX_SCAN_WINDOW_RECORDS` = 1,048,576",
+            "p99",
+            "a_ts_window_with_extremes_reads_each_month_once_until_it_moves",
         ],
     );
     let window = item(BARS, "pub fn window(");
@@ -221,6 +226,12 @@ fn w1_api5_4_the_window_still_reads_its_range_and_orders_only_the_page() {
         window.contains("page_of(all, offset, limit, order)"),
         "{window}"
     );
+    assert!(
+        window.contains("let fold = month_fold(file, before);"),
+        "a ts window takes its extremes from the kept month folds: {window}"
+    );
+    assert!(window.contains("scan_admitted(total)?;"), "{window}");
+    assert!(BARS.contains("pub const MAX_SCAN_WINDOW_RECORDS: u64 = 1 << 20;"));
     assert!(
         !window.contains("all.sort_by(order)") && !window.contains("want - 1"),
         "nothing outside the page is ordered: {window}"

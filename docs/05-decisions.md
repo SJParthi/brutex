@@ -66598,3 +66598,19 @@ stamps absent, so the refresh parses. The reparse runs on `spawn_blocking`.
 `reparse` itself stays unconditional. Proved by
 `a_refresh_with_no_master_moved_does_not_reparse`. FXB1-10.
 
+### D-4439 — A `ts` window's extremes come from kept month folds; a scan has a ceiling — 2026-10-09
+
+**What was observed.** W1-api5-4: `extremes=1` and every non-`ts` sort read
+every bar of the window's months on every request: O(n) reads and memory, n
+up to about 1.9 million at `MAX_WINDOW_MONTHS` = 240.
+
+**Decided.** A `ts` window with extremes now seeks its page and takes the
+extremes from `month_fold`: one fold per month file, kept in `MONTH_FOLDS`
+(at most `MONTH_FOLDS_KEPT` = 4,096, cleared whole when full) under the
+file's stamp and header, and kept only when a stat after the read equals the
+one before it. A moved file is read again. A non-`ts` sort still reads its
+range, now refused by name past `MAX_SCAN_WINDOW_RECORDS` = 1,048,576
+records. Proved by
+`a_ts_window_with_extremes_reads_each_month_once_until_it_moves` and
+`a_scan_past_its_ceiling_is_refused_by_name`. FXB1-11, FXB1-12.
+

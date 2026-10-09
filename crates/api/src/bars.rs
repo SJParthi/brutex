@@ -548,6 +548,24 @@ pub const MAX_WINDOW_MONTHS: usize = 240;
 /// The most rows one window request may return.
 pub const MAX_WINDOW_LIMIT: usize = 1_000;
 
+/// The most stored records a window ordered by anything but `ts` may read.
+///
+/// Such an order is a question no index answers, so every record of the
+/// window is read, change-folded and held, and [`MAX_WINDOW_MONTHS`] alone
+/// let that reach about 1.9 million one-minute bars in one request
+/// (W1-api5-4). 2^20 is about ten years of one-minute bars for one series, or
+/// every daily bar the range cap allows many times over. A window past it is
+/// refused by name, before any record is read, rather than cut. The cost at
+/// the ceiling is measured in `docs/06-limits.md`'s D-4439 row. D-4439.
+pub const MAX_SCAN_WINDOW_RECORDS: u64 = 1 << 20;
+
+/// How many months' extremes [`month_fold`] keeps before it starts over.
+///
+/// One entry per stored instrument-month ever asked for with `extremes=1`;
+/// a full map is dropped whole rather than grown, so memory stays bounded by
+/// this and a working set past it pays the cold read it paid before D-4439.
+pub const MONTH_FOLDS_KEPT: usize = 4_096;
+
 /// Which column a window is ordered by.
 ///
 /// # Why `Ts` is not just another variant
@@ -818,6 +836,94 @@ fn extremes_of(bars: &[WindowBar]) -> Extremes {
     })
 }
 
+/// One month's extremes and unreadable records, as [`extremes_of`] and
+/// [`slots`] find them over every record, with the header the open handle
+/// read them under.
+#[derive(Debug, Clone)]
+struct MonthFold {
+    header: store::header::Header,
+    extremes: Extremes,
+    faults: Vec<String>,
+}
+
+/// The kept folds, by bar-file path, each under the stamp its file had
+/// BEFORE it was opened. See [`MONTH_FOLDS_KEPT`].
+type KeptFolds =
+    std::collections::HashMap<std::path::PathBuf, (crate::answer_memo::FileStamp, MonthFold)>;
+
+/// See [`KeptFolds`].
+static MONTH_FOLDS: std::sync::LazyLock<std::sync::Mutex<KeptFolds>> =
+    std::sync::LazyLock::new(|| {
+        std::sync::Mutex::new(std::collections::HashMap::with_capacity(MONTH_FOLDS_KEPT))
+    });
+
+/// The extremes and unreadable records of one month, read whole only when no
+/// kept fold answers for the file as it now stands. W1-api5-4, D-4439.
+///
+/// # When a kept fold answers
+///
+/// `before` is one `stat` of the path taken BEFORE the window opened it. A
+/// kept fold answers only when that stamp (device, inode, length, both
+/// clocks) and the open handle's whole header (generation, `n_valid`, both
+/// stamps) equal the ones it was kept under. Any write moves the
+/// status-change time and any commit moves the generation, so a month that
+/// reads differently cannot match.
+///
+/// # When a fold is kept
+///
+/// Only when a second `stat`, taken after every record was read, equals
+/// `before`: then nothing replaced or wrote the file between the stamp and
+/// the read, so the handle read the stamped file. A fold whose stamps differ,
+/// or whose stamp could not be taken, still answers this request and is not
+/// kept, so the next request reads the month again. Unreadable records are
+/// kept with it and named on every answer, exactly as a full read names
+/// them, so a kept fold never hides a fault.
+fn month_fold(file: &BarFile, before: Option<crate::answer_memo::FileStamp>) -> MonthFold {
+    let header = file.header();
+    let path = file.path();
+    if let Some(stamp) = before {
+        let kept = MONTH_FOLDS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(path)
+            .filter(|(kept, fold)| *kept == stamp && fold.header == header)
+            .map(|(_, fold)| fold.clone());
+        if let Some(fold) = kept {
+            return fold;
+        }
+    }
+    #[cfg(test)]
+    tests::COLD_FOLDS.with(|count| count.set(count.get() + 1));
+    let mut extremes = Extremes::default();
+    let mut faults = Vec::new();
+    for slot in 0..header.n_valid {
+        match file.read_record(slot) {
+            Ok(bar) => {
+                extremes.range = extremes.range.max(bar.high.saturating_sub(bar.low));
+                extremes.volume = extremes.volume.max(bar.volume);
+            }
+            Err(why) => faults.push(format!("record {slot}: {why}")),
+        }
+    }
+    let fold = MonthFold {
+        header,
+        extremes,
+        faults,
+    };
+    if let Some(stamp) = before
+        && crate::answer_memo::FileStamp::of(path).ok() == Some(stamp)
+    {
+        let mut kept = MONTH_FOLDS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if kept.len() >= MONTH_FOLDS_KEPT && !kept.contains_key(path) {
+            kept.clear();
+        }
+        kept.insert(path.to_path_buf(), (stamp, fold.clone()));
+    }
+    fold
+}
+
 /// The rows at `offset..offset+limit` of a window, WITHOUT reading the rest.
 ///
 /// The files arrive in the order their rows come out in, so the prefix sum over
@@ -1045,10 +1151,16 @@ fn reserved_window(total: u64) -> Result<Vec<WindowBar>, String> {
 ///
 /// Ordered by anything else, it reads every row once, sorts, and slices. That
 /// is the honest price of a question the store has no index for, and it is paid
-/// here rather than by moving every row to a browser.
+/// here rather than by moving every row to a browser. Since D-4439 a window
+/// of more than [`MAX_SCAN_WINDOW_RECORDS`] stored records is refused by name
+/// on that path before a record is read.
 ///
-/// `want_extremes` forces the reading path either way, because the widest range
-/// in a window is not knowable from a header.
+/// `want_extremes` used to force the reading path either way, because the
+/// widest range in a window is not knowable from a header. Since D-4439 a
+/// `ts` window keeps its seek page and takes the extremes from each month's
+/// kept fold ([`month_fold`]): the first request after a month's file moves
+/// reads that month whole, and every other request costs one `stat` and one
+/// probe per month (W1-api5-4).
 ///
 /// # Errors
 ///
@@ -1097,6 +1209,22 @@ pub fn window(
         ordered.reverse();
     }
 
+    // STAMPED BEFORE THE OPEN, for the kept month folds (D-4439): a fold is
+    // served only for a file whose stamp before this open is the one it was
+    // kept under. Only the seek path with extremes asks; one `stat` a month.
+    let parts = PathParts {
+        vendor,
+        exchange,
+        segment,
+        symbol,
+        contract,
+        timeframe,
+        month: from,
+        file: FileKind::Bars,
+    };
+    let stamps =
+        (want_extremes && !sort.scans()).then(|| stamp_months(store_root, parts, &ordered));
+
     /* OPENED ONCE, HELD FOR THE REQUEST. A month with no file is counted and
     skipped: a sparse store is legal and the count is what tells a reader a
     gap from a refusal. */
@@ -1104,20 +1232,7 @@ pub fn window(
         files,
         missing,
         mut faults,
-    } = open_window_months(
-        store_root,
-        PathParts {
-            vendor,
-            exchange,
-            segment,
-            symbol,
-            contract,
-            timeframe,
-            month: from,
-            file: FileKind::Bars,
-        },
-        &ordered,
-    )?;
+    } = open_window_months(store_root, parts, &ordered)?;
     if files.is_empty() {
         return Ok(Window {
             total: 0,
@@ -1134,8 +1249,40 @@ pub fn window(
         .map(|f| f.header().n_valid)
         .fold(0u64, u64::saturating_add);
 
-    if !sort.scans() && !want_extremes {
-        let (bars, mut record_faults, first_faulted) = seek_page(&files, desc, offset, limit);
+    if !sort.scans() {
+        let (bars, mut record_faults, mut first_faulted) = seek_page(&files, desc, offset, limit);
+        // EXTREMES WITHOUT THE READING PATH (W1-api5-4, D-4439). The window's
+        // widest range and heaviest volume are the widest and heaviest of its
+        // months, and a month's are kept by `month_fold` until its file moves,
+        // so a `ts` page with `extremes=1` is the seek page plus one probe a
+        // month instead of every record of every month. Every unreadable
+        // record of every month is named, as the full read named them, in
+        // time order; the page's own are among them.
+        let extremes = want_extremes.then(|| {
+            let mut top = Extremes::default();
+            let mut named = Vec::new();
+            first_faulted = None;
+            let in_time: Vec<&BarFile> = if desc {
+                files.iter().rev().collect()
+            } else {
+                files.iter().collect()
+            };
+            for file in in_time {
+                let before = stamps
+                    .as_ref()
+                    .and_then(|stamps| stamps.get(file.path()))
+                    .copied();
+                let fold = month_fold(file, before);
+                top.range = top.range.max(fold.extremes.range);
+                top.volume = top.volume.max(fold.extremes.volume);
+                if !fold.faults.is_empty() {
+                    first_faulted = first_faulted.or(Some(file));
+                }
+                named.extend(fold.faults);
+            }
+            record_faults = named;
+            top
+        });
         if let Some(file) = first_faulted {
             note_unreadable_records(file, &record_faults, bars.len(), offset);
         }
@@ -1146,9 +1293,14 @@ pub fn window(
             months_missing: missing,
             bars,
             faults,
-            extremes: None,
+            extremes,
         });
     }
+
+    // A SCAN PAST ITS CEILING IS REFUSED BY NAME, before a record is read
+    // (W1-api5-4, D-4439): ordering by a price column reads and holds every
+    // record of the window.
+    scan_admitted(total)?;
 
     /* ---- THE READING PATH. One pass, then order, then slice. ----
     THE CHANGE IS FOLDED PER FILE, BEFORE ANYTHING IS SORTED, because it is
@@ -1266,6 +1418,49 @@ fn page_of<T>(
     page
 }
 
+/// Whether a window of `total` stored records may be read whole to order it
+/// by a price column: at most [`MAX_SCAN_WINDOW_RECORDS`], refused by name
+/// past it. W1-api5-4, D-4439.
+///
+/// # Errors
+///
+/// The sentence naming `total` and the ceiling.
+fn scan_admitted(total: u64) -> Result<(), String> {
+    if total > MAX_SCAN_WINDOW_RECORDS {
+        return Err(format!(
+            "ordering by a column other than ts reads every stored record of the \
+             window, {total} here, and one request reads at most \
+             {MAX_SCAN_WINDOW_RECORDS} (MAX_SCAN_WINDOW_RECORDS); ask for fewer \
+             months, or order by ts, which seeks"
+        ));
+    }
+    Ok(())
+}
+
+/// One `stat` of each month's bar file, by the path [`open_window_months`]
+/// opens it at, for every month whose path is valid and whose stamp could be
+/// taken. A month missing here is simply never served from a kept fold.
+fn stamp_months(
+    root: &std::path::Path,
+    parts: PathParts<'_>,
+    months: &[YearMonth],
+) -> std::collections::HashMap<std::path::PathBuf, crate::answer_memo::FileStamp> {
+    let mut stamps = std::collections::HashMap::with_capacity(months.len());
+    for month in months {
+        let Ok(path) = StorePath::new(PathParts {
+            month: *month,
+            ..parts
+        }) else {
+            continue;
+        };
+        let path = path.to_path_buf(root);
+        if let Ok(stamp) = crate::answer_memo::FileStamp::of(&path) {
+            stamps.insert(path, stamp);
+        }
+    }
+    stamps
+}
+
 struct OpenedWindow {
     files: Vec<BarFile>,
     missing: usize,
@@ -1318,6 +1513,11 @@ fn open_window_months(
 )]
 mod tests {
     use super::*;
+
+    thread_local! {
+        /// Months [`month_fold`] read whole on this thread.
+        pub(super) static COLD_FOLDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
 
     /// **NO FLOAT REACHES A PRICE, INCLUDING ON THE WAY TO A SCREEN.**
     ///
@@ -2184,6 +2384,193 @@ mod window_tests {
              which is only five rows long"
         );
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A `ts` window with extremes reads each month whole once, until that
+    /// month's file moves; its pages are the seek pages, its extremes are the
+    /// full read's, and a kept fold still names every unreadable record.**
+    /// W1-api5-4, D-4439.
+    #[test]
+    fn a_ts_window_with_extremes_reads_each_month_once_until_it_moves() {
+        let root = scratch("kept-folds");
+        let (jan, feb, mar) = (
+            YearMonth::new(2026, 1).expect("m"),
+            YearMonth::new(2026, 2).expect("m"),
+            YearMonth::new(2026, 3).expect("m"),
+        );
+        write_month(&root, jan, 10, 1_000);
+        write_month(&root, feb, 40, 2_000);
+        write_month(&root, mar, 25, 3_000);
+        let cold = || super::tests::COLD_FOLDS.with(std::cell::Cell::get);
+        let start = cold();
+        let ask = |desc, offset, extremes| {
+            window_over(&root, mar, SortKey::Ts, desc, offset, 7, extremes)
+        };
+
+        let first = ask(false, 3, true);
+        assert_eq!(cold() - start, 3, "each month is read whole once");
+        let top = first.extremes.expect("asked for");
+        assert_eq!(
+            (top.range, top.volume),
+            (20, 78),
+            "over every month, not the page"
+        );
+        assert_eq!(
+            first.bars,
+            ask(false, 3, false).bars,
+            "the page is the seek page"
+        );
+        assert_eq!(first.total, 75);
+        // The full read's extremes, from the reading path a price order takes.
+        let full = window_over(&root, mar, SortKey::Close, false, 0, 1, true);
+        assert_eq!(full.extremes, Some(top));
+
+        for (desc, offset) in [(false, 0), (true, 0), (true, 40), (false, 74)] {
+            let again = ask(desc, offset, true);
+            assert_eq!(again.extremes, Some(top));
+            assert_eq!(again.bars, ask(desc, offset, false).bars);
+        }
+        assert_eq!(cold() - start, 3, "every later page is warm");
+
+        // A month rewritten under the same name is read again, and only it.
+        let path = |month| {
+            StorePath::new(PathParts {
+                vendor: Vendor::Dhan,
+                exchange: "NSE",
+                segment: "INDEX",
+                symbol: SYMBOL,
+                contract: None,
+                timeframe: Timeframe::MINUTE_1,
+                month,
+                file: FileKind::Bars,
+            })
+            .expect("a legal path")
+            .to_path_buf(&root)
+        };
+        std::fs::remove_file(path(feb)).expect("owned fixture");
+        write_month(&root, feb, 60, 2_000);
+        let grown = ask(false, 0, true);
+        assert_eq!(cold() - start, 4, "only the moved month is read again");
+        assert_eq!(
+            grown.extremes.expect("asked").volume,
+            118,
+            "59*2, the new month's"
+        );
+        assert_eq!(grown.total, 95);
+
+        // A damaged record is named on the cold read AND on every warm one.
+        damage_record(&root, mar, 4);
+        let damaged = ask(false, 0, true);
+        assert_eq!(cold() - start, 5);
+        // A sealed block refuses every record it holds, so the damage is named
+        // once per record of that block, record 4 among them.
+        assert!(
+            damaged
+                .faults
+                .iter()
+                .any(|fault| fault.starts_with("record 4:")),
+            "{:?}",
+            damaged.faults
+        );
+        let warm = ask(true, 0, true);
+        assert_eq!(cold() - start, 5, "warm");
+        assert_eq!(
+            warm.faults, damaged.faults,
+            "a kept fold never hides a fault"
+        );
+        assert_eq!(
+            full_faults(&root, mar),
+            damaged.faults,
+            "and names exactly what the full read names"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The record faults the reading path names for the window to `to`.
+    fn full_faults(root: &std::path::Path, to: YearMonth) -> Vec<String> {
+        window_over(root, to, SortKey::Close, false, 0, 1, true).faults
+    }
+
+    /// **A price order past `MAX_SCAN_WINDOW_RECORDS` is refused by name, and
+    /// the ceiling itself is admitted.** W1-api5-4, D-4439.
+    #[test]
+    fn a_scan_past_its_ceiling_is_refused_by_name() {
+        assert_eq!(scan_admitted(MAX_SCAN_WINDOW_RECORDS), Ok(()));
+        assert_eq!(scan_admitted(0), Ok(()));
+        let why = scan_admitted(MAX_SCAN_WINDOW_RECORDS + 1).expect_err("past it");
+        assert!(why.contains("1048577 here"), "{why}");
+        assert!(why.contains("MAX_SCAN_WINDOW_RECORDS"), "{why}");
+        let source = include_str!("bars.rs");
+        let window_body = source
+            .split_once("\npub fn window(")
+            .expect("window")
+            .1
+            .split_once("\n}\n")
+            .expect("its end")
+            .0;
+        let at = |needle: &str| window_body.find(needle).expect(needle);
+        assert!(
+            at("scan_admitted(total)?;") < at("read_in_time("),
+            "refused before any record is read"
+        );
+    }
+
+    /// What a `ts` page with extremes and a price-ordered page cost over long
+    /// windows of full one-minute months: the first request (every month read)
+    /// against a later one (kept folds), and a price order at about the scan
+    /// ceiling. A measurement, run on purpose; the numbers are in
+    /// `docs/06-limits.md`'s D-4439 row. W1-api5-4.
+    #[test]
+    #[ignore = "a latency measurement, run on purpose: see crate::latency"]
+    fn latency_window_extremes_and_scan() {
+        let root = scratch("latency");
+        let months = months_of(
+            YearMonth::new(2006, 1).expect("m"),
+            YearMonth::new(2025, 12).expect("m"),
+        )
+        .expect("240 months");
+        for month in &months {
+            write_month(&root, *month, 8_250, 1_000);
+        }
+        let ask = |to: YearMonth, sort, extremes| {
+            window(
+                &root,
+                Vendor::Dhan,
+                "NSE",
+                "INDEX",
+                SYMBOL,
+                Timeframe::MINUTE_1,
+                None,
+                YearMonth::new(2006, 1).expect("m"),
+                to,
+                sort,
+                true,
+                0,
+                200,
+                extremes,
+            )
+        };
+        let last = YearMonth::new(2025, 12).expect("m");
+        let cold =
+            crate::latency::Timed::run(1, || ask(last, SortKey::Ts, true).map(drop)).expect("cold");
+        let warm = crate::latency::Timed::run(200, || ask(last, SortKey::Ts, true).map(drop))
+            .expect("warm");
+        let seek = crate::latency::Timed::run(200, || ask(last, SortKey::Ts, false).map(drop))
+            .expect("seek");
+        // 127 months of 8,250 is 1,047,750 records, just under 2^20.
+        let scan_to = months[126];
+        let scan = crate::latency::Timed::run(10, || ask(scan_to, SortKey::Close, false).map(drop))
+            .expect("scan");
+        let refused = ask(months[127], SortKey::Close, false).expect_err("past the ceiling");
+        println!("{}", cold.line("ts + extremes, 240 x 8,250, first request"));
+        println!("{}", warm.line("ts + extremes, 240 x 8,250, kept folds"));
+        println!("{}", seek.line("ts, no extremes, 240 x 8,250"));
+        println!(
+            "{}",
+            scan.line("close order, 127 x 8,250 = 1,047,750 records")
+        );
+        println!("128 months refused: {refused}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

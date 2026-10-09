@@ -12196,12 +12196,28 @@ rule 6); every bound is read from the source.
   an offset at or past the end compares nothing. Before, it partitioned at
   `offset + limit` and ordered everything before that; the query string does
   not cap `offset`. `api::bars::tests::the_page_orders_only_itself_wherever_the_offset_lands`
-  counts the comparisons. **What remains:** a request whose sort is not `ts`,
-  or that asks `extremes=1`, still reads every bar in its month range (one
-  `read_record` per bar), folds the change over them, and holds them all in
-  memory: O(n) reads and O(n) memory, and `n` reaches about 1.9 million at
-  `MAX_WINDOW_MONTHS` = 240 (the figure `bars.rs` states). The `ts` sort
-  without extremes is the bounded seek path and is unchanged.
+  counts the comparisons. **What remains:** a request whose sort is not `ts`
+  still reads every bar in its month range (one `read_record` per bar), folds
+  the change over them, and holds them all in memory: O(n) reads and O(n)
+  memory, and `n` reaches about 1.9 million at `MAX_WINDOW_MONTHS` = 240 (the
+  figure `bars.rs` states). **Since D-4439 that scan has a ceiling, and a
+  `ts` window with extremes no longer scans.** A non-`ts` sort whose months
+  hold more than `MAX_SCAN_WINDOW_RECORDS` = 1,048,576 records is refused by
+  name from the month headers before a bar is read, so the O(n) above is at
+  most that many reads. A `ts` window with `extremes=1` seeks its page as the
+  plain `ts` path does and takes the extremes from `month_fold`: one fold per
+  month file, kept in `MONTH_FOLDS` (at most `MONTH_FOLDS_KEPT` = 4,096,
+  cleared whole when full) under one `stat` of the file taken before it was
+  opened and the open handle's header, and kept only when a second `stat`
+  after the read equals the first. A month is read once until its file moves;
+  its unreadable records are kept with the fold and named on every answer.
+  Proved by `api::bars::window_tests::a_ts_window_with_extremes_reads_each_month_once_until_it_moves`
+  and `api::bars::window_tests::a_scan_past_its_ceiling_is_refused_by_name`.
+  Measured by `latency_window_extremes_and_scan` (240 one-minute months of
+  8,250 bars, `api` test build (the workspace's optimized test profile), a shared four-CPU host running other builds; load average beside each): a first `ts` + extremes request
+  484 ms / 484 ms / 484 ms (n = 1, load 11.14); the same with every month's fold kept 10.9 ms / 25.5 ms / 30.7 ms (n = 200, load 11.14); `ts` without
+  extremes 7.61 ms / 21.5 ms / 21.6 ms (n = 200, load 11.14); a close-order scan of 127 months (1,047,750 records,
+  just under the ceiling) 822 ms / 925 ms / 925 ms (n = 10, load 11.14). p50 / p99 / max.
 * **UC-20 (a freshness bug, not a cost).** `/store?show=gaps` built its axis
   from `Site::series` and its cells from `Site::censuses`, both read at boot.
   It now builds the axis with `census::held_series` over the request's fresh
