@@ -261,7 +261,10 @@ fn tree(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
             } else {
                 let bytes =
                     std::fs::read(&path).unwrap_or_else(|why| panic!("{}: {why}", path.display()));
-                out.insert(path.strip_prefix(dir).unwrap().to_path_buf(), bytes);
+                // ADAPTED (D-3317 item 4): the journal less what names its
+                // runs, which carry the second each started.
+                let rel = path.strip_prefix(dir).unwrap().to_path_buf();
+                out.insert(rel.clone(), crate::gdfl_fixtures::as_compared(&rel, bytes));
             }
         }
     }

@@ -275,10 +275,13 @@ fn r4_04_a_day_whose_old_bars_differ_is_refused_by_name_never_rewritten() {
         assert_eq!(bars_tree(&root), held, "run {attempt}: never rewritten");
         let text = journal_text(&root);
         let last = text.lines().last().unwrap();
+        // ADAPTED (D-3317): the D-2822 stats are followed by the run's fields
+        // and the stage that failed, so the line no longer ends at them.
         assert!(
             last.starts_with(&format!(
                 "incomplete stocks 2024-04-01 * definition={BAR_DEFINITION} files=1 "
-            )) && last.ends_with(" late=1 late_unresolved=0 max_back_s=7"),
+            )) && last.contains(" late=1 late_unresolved=0 max_back_s=7 ")
+                && last.contains(" stage=file reason="),
             "{text}"
         );
     }
@@ -759,9 +762,12 @@ fn r4_11_a_journal_this_branch_wrote_before_definition_existed_is_resumed_as_its
     // Nothing already written is rewritten: the old journal is a prefix.
     let after = journal_text(&root);
     assert!(after.starts_with(&written), "{after}");
-    for appended in after[written.len()..].lines() {
+    // ADAPTED (D-3317 item 4): the run's `run` line comes first, once.
+    assert!(after[written.len()..].starts_with("run "), "{after}");
+    for (at, appended) in after[written.len()..].lines().enumerate() {
         assert!(
-            appended.starts_with("begin stocks 2024-04-")
+            (at == 0 && appended.starts_with("run "))
+                || appended.starts_with("begin stocks 2024-04-")
                 || appended.starts_with("done stocks 2024-04-")
                     && appended.contains(&format!(" definition={BAR_DEFINITION} ")),
             "{appended}"

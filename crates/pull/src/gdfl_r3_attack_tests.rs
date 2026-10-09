@@ -280,7 +280,11 @@ fn tree(dir: &Path, under: &str) -> BTreeMap<PathBuf, Vec<u8>> {
             } else {
                 let rel = path.strip_prefix(dir).unwrap().to_path_buf();
                 if rel.starts_with(under) {
-                    out.insert(rel, std::fs::read(&path).unwrap());
+                    // ADAPTED (D-3317 item 4): the journal less what names
+                    // its runs, which carry the second each started.
+                    let bytes =
+                        crate::gdfl_fixtures::as_compared(&rel, std::fs::read(&path).unwrap());
+                    out.insert(rel, bytes);
                 }
             }
         }
@@ -567,8 +571,11 @@ fn r3_02_random_crash_histories_always_load_to_the_lines_written_whole() {
                         open.remove(&key);
                         done.insert(key);
                     }
+                    // ADAPTED (D-3317): the last closing line of a key wins,
+                    // so an `incomplete` after a `done` leaves it not done.
                     _ => {
                         open.remove(&key);
+                        done.remove(&key);
                     }
                 }
             }
@@ -1043,6 +1050,7 @@ fn want_cm(kind: CmKind, world: &[(Day, Vec<Cm>)], only: &[&str]) -> WantCm {
                 want.failures.push((file, "does not fit an i64"));
             }
         }
+        let read_clean = !files.is_empty();
         for (symbol, expect) in files {
             want.totals.file(&expect, *on);
             want.series
@@ -1051,7 +1059,17 @@ fn want_cm(kind: CmKind, world: &[(Day, Vec<Cm>)], only: &[&str]) -> WantCm {
                 .extend(expect.bars.into_iter().filter(|b| in_session(*on, b)));
         }
         want.failures.extend(late);
-        if want.failures.len() == before {
+        // ADAPTED (D-3317): a day closes `done` with no failure, or with
+        // refusals when at least one file read clean and every refusal is the
+        // vendor's own bytes. Every refusal here is, but a quantity past
+        // `i64`, which this import refuses (`Stage::File`).
+        let day_failures = want.failures.get(before..).unwrap_or_default();
+        if day_failures.is_empty()
+            || (read_clean
+                && day_failures
+                    .iter()
+                    .all(|(_, why)| *why != "does not fit an i64"))
+        {
             want.clean_days += 1;
         }
     }
@@ -1362,13 +1380,25 @@ fn r3_07_a_run_of_filters_over_one_store_converges_on_the_unfiltered_store() {
         assert_eq!(failures_of(&all), failures_of(&alone), "{ctx}");
         assert_eq!(tree(&s1, "bars"), tree(&s2, "bars"), "{ctx}");
         let again = run_nfo_world(&root, &world, &s1, &[]);
-        let clean = world.len() - {
-            let mut dirty = BTreeSet::new();
-            for f in &all.failures {
-                dirty.insert(f.instrument.get(..10).unwrap_or_default().to_owned());
-            }
-            dirty.len()
-        };
+        // ADAPTED (D-3317): a day with failures still closes `done` when it
+        // read a file clean and every refusal is the vendor's own bytes; the
+        // run names those days, and none of them holds this import's own
+        // refusal of a file (a quantity past `i64`).
+        let mut dirty: BTreeMap<String, bool> = BTreeMap::new();
+        for f in &all.failures {
+            let own = f.why.contains("does not fit an i64");
+            *dirty
+                .entry(f.instrument.get(..10).unwrap_or_default().to_owned())
+                .or_default() |= own;
+        }
+        for closed in &all.closed_with_refusals {
+            assert_eq!(
+                dirty.get(&closed.to_string()),
+                Some(&false),
+                "{ctx}: {closed} closed with refusals"
+            );
+        }
+        let clean = world.len() - dirty.len() + all.closed_with_refusals.len();
         assert_eq!(again.days_skipped, clean, "{ctx}: {again:?}");
         assert_eq!(again.seconds_committed, 0, "{ctx}");
         std::fs::remove_dir_all(root).unwrap();

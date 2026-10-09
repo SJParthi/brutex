@@ -205,3 +205,58 @@ fn the_dispatched_verb_reads_the_process_environment() {
     );
     assert!(out.contains("GDFL IMPORT"), "{out}");
 }
+
+/// D-3317: `--retry-refused` is a flag, never a symbol, so the journal key
+/// stays `*`; the run's `run` line names the source this binary measured and
+/// the receipt lists how each day closed.
+#[test]
+fn the_retry_flag_is_never_a_symbol_and_the_run_line_names_the_source() {
+    let root = scratch("retry");
+    let store = root.join("store");
+    std::fs::create_dir_all(&store).unwrap();
+    let ts = root.join("ts");
+    std::fs::create_dir_all(&ts).unwrap();
+    let env = env_of(&[(TICKSTORE_VAR, ts.clone())]);
+    let mut out = String::new();
+    let code = command_with(
+        &[
+            "indices",
+            "tickstore",
+            "2024-04-01",
+            "2024-04-01",
+            RETRY_REFUSED,
+        ],
+        &env,
+        &|| Ok(store.clone()),
+        &mut out,
+    );
+    assert_eq!(code, OK, "{out}");
+    for part in [
+        "days not in source  1 2024-04-01",
+        "days done, refused  0",
+        "days incomplete     0",
+        "days all refused    0",
+    ] {
+        assert!(out.contains(part), "{out} lacks {part:?}");
+    }
+    let journal = std::fs::read_to_string(pull::gdfl_import::journal_path(&store)).unwrap();
+    let mut lines = journal.lines();
+    let run = lines.next().unwrap();
+    assert!(
+        run.starts_with("run ")
+            && run.contains(" source=tickstore ")
+            && run.contains(" archive_bytes=0 ")
+            && run.contains(" format_sha256=unmeasured"),
+        "{journal}"
+    );
+    let commit = crate::commit_stamp().unwrap_or("unstamped");
+    assert!(run.contains(&format!(" commit={commit} ")), "{run}");
+    assert!(
+        lines
+            .next()
+            .is_some_and(|l| l.starts_with("refused indices 2024-04-01 * ")
+                && l.contains(" reason=day_not_held ")),
+        "{journal}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}

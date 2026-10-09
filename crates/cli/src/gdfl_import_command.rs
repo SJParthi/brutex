@@ -22,13 +22,24 @@
 //!
 //! The run's counts and every failure by name; the exit code is `FAILED` when
 //! any failure was named, so a script cannot read a partial import as clean.
+//! A census refusal stops the run: the receipt of what it did before the
+//! refused day is printed, then `GDFL IMPORT REFUSED` naming the census's
+//! room, the day's batch and the days imported before it (D-3317 item 7).
+//! Every run measures its archive into a `pull::gdfl_import::Origin` and
+//! stamps this binary's commit on it, so "run started" and the journal's `run`
+//! line say where the bars came from (D-3317 item 4; DB-G56).
+//!
+//! `--retry-refused`, anywhere after `TO`, reads again every day of the range
+//! closed done with refusals (D-3317 item 2); it is never a symbol.
 
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use pull::gdfl_archive::Archive;
-use pull::gdfl_import::{ImportKind, Report, Run, run_cm, run_nfo};
+use pull::gdfl_import::{
+    ImportKind, Origin, Report, Run, RunOptions, SourceKind, run_cm_from, run_nfo_from,
+};
 use pull::gdfl_nfo::{NfoTickStore, NfoZips};
 use pull::gdfl_tickstore::TickStore;
 use pull::session::Day;
@@ -41,6 +52,8 @@ pub(crate) const TICKSTORE_VAR: &str = "BRUTEX_GDFL_TICKSTORE";
 pub(crate) const CM_ARCHIVE_VAR: &str = "BRUTEX_GDFL_CM_ARCHIVE";
 /// The directory of the vendor's yearly options zips.
 pub(crate) const NFO_ARCHIVES_VAR: &str = "BRUTEX_GDFL_NFO_ARCHIVES";
+/// The flag that reads again the days closed done with refusals (D-3317).
+pub(crate) const RETRY_REFUSED: &str = "--retry-refused";
 
 /// `YYYY-MM-DD` as a day, or why not.
 fn day(text: &str) -> Result<Day, String> {
@@ -106,7 +119,12 @@ pub(crate) fn command_with(
             return MISUSED;
         }
     };
-    let only: Vec<String> = only.iter().map(|word| (*word).to_owned()).collect();
+    let retry_refused = only.contains(&RETRY_REFUSED);
+    let only: Vec<String> = only
+        .iter()
+        .filter(|word| **word != RETRY_REFUSED)
+        .map(|word| (*word).to_owned())
+        .collect();
     let roots = root(var, env).and_then(|data| Ok((data, store()?)));
     let result = roots.and_then(|(data, store)| {
         let run = Run {
@@ -116,28 +134,50 @@ pub(crate) fn command_with(
             only: &only,
             store_root: &store,
         };
+        // WHERE THE DATA CAME FROM AND WHAT BUILT IT (D-3317 item 4; DB-G56):
+        // the source, the archive's path, bytes and identity, and this
+        // binary's commit, in "run started" and the journal's `run` line.
+        let origin_kind = if *source == "tickstore" {
+            SourceKind::TickStore
+        } else {
+            SourceKind::Zip
+        };
+        let origin = Origin::measure(origin_kind, &data, crate::commit_stamp());
+        let options = RunOptions {
+            origin: Some(&origin),
+            retry_refused,
+        };
         let report = match (*source, kind) {
-            ("tickstore", ImportKind::Options) => run_nfo(&NfoTickStore::new(&data), &run),
-            ("tickstore", _) => run_cm(&TickStore::new(&data), &run),
-            ("zip", ImportKind::Options) => run_nfo(&NfoZips::new(&data), &run),
+            ("tickstore", ImportKind::Options) => {
+                run_nfo_from(&NfoTickStore::new(&data), &run, options)
+            }
+            ("tickstore", _) => run_cm_from(&TickStore::new(&data), &run, options),
+            ("zip", ImportKind::Options) => run_nfo_from(&NfoZips::new(&data), &run, options),
             _ => {
                 let archive =
                     Archive::open(&data).map_err(|w| format!("{}: {w}", data.display()))?;
-                run_cm(&archive, &run)
+                run_cm_from(&archive, &run, options)
             }
         };
-        report
-            .map(|report| (report, store.clone()))
-            .map_err(|why| why.to_string())
+        Ok((report, store))
     });
     match result {
-        Ok((report, store)) => {
+        Ok((Ok(report), store)) => {
             render(out, kind, source, &store, &report);
             if report.failures.is_empty() {
                 OK
             } else {
                 FAILED
             }
+        }
+        Ok((Err(refusal), store)) => {
+            // A census refusal stopped the run part way (D-3317 item 7): what
+            // it did before the refused day is on disk, so it is printed too.
+            if let Some(done) = refusal.report() {
+                render(out, kind, source, &store, done);
+            }
+            let _ = writeln!(out, "GDFL IMPORT REFUSED: {refusal}");
+            FAILED
         }
         Err(why) => {
             let _ = writeln!(out, "GDFL IMPORT REFUSED: {why}");
@@ -189,6 +229,24 @@ fn render(out: &mut String, kind: ImportKind, source: &str, store: &Path, report
         "  days resumed        {} {}",
         report.resumed.len(),
         days(&report.resumed)
+    );
+    let _ = writeln!(
+        out,
+        "  days done, refused  {} {}",
+        report.closed_with_refusals.len(),
+        days(&report.closed_with_refusals)
+    );
+    let _ = writeln!(
+        out,
+        "  days incomplete     {} {}",
+        report.closed_incomplete.len(),
+        days(&report.closed_incomplete)
+    );
+    let _ = writeln!(
+        out,
+        "  days all refused    {} {}",
+        report.closed_refused.len(),
+        days(&report.closed_refused)
     );
     let _ = writeln!(out, "  files read          {}", report.files);
     let _ = writeln!(out, "  files not wanted    {}", report.files_skipped);
