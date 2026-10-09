@@ -463,6 +463,7 @@ an absent overlay or a pricing refusal can leave different row counts.
 | `.grk` | computed Greeks and their provenance, 80-byte records, version 8 |
 | `.grk.crc` | Greek block checksums, using the Greek file's own geometry |
 | `.tix` | the bar file's time index, version 1 (§8.1, D-2329) |
+| `.prv` | where the month's bars came from, one record per landing, version 1 (§8.3, D-3334) |
 | `.lock` | the advisory lock one writer holds for the month (§5, §9) |
 
 ```
@@ -648,6 +649,138 @@ Every one of those names is rendered by `store::path::StorePath` and nothing
 else. The vendor is the first segment (D-0019); every segment is
 case-canonical, because two segments differing only in case are two files on
 ext4 and one file on APFS.
+
+### 8.3 `.prv` — provenance sidecar, version 1 (D-3334)
+
+**Why it exists.** A bar record has no field saying where it came from, and
+nothing else in the store did either: no row could be audited back to its GDFL
+archive member or its Zerodha pull, and a month built from the GDFL zip looked
+exactly like one built from the tick store, although the two sources differ
+(DB-078, DB-G56). The record cannot widen (§3 is 56 bytes forever), so this is a
+new sibling at its own version, written by `store::provenance` and nothing else.
+
+```
+bars/<vendor>/NSE/INDEX/NIFTY/1s/2019-03.prv
+bars/<vendor>/NSE/FNO/<underlying>/<contract>/1s/2019-03.prv
+```
+
+**One record per landing.** A landing is one `BarFile::append` that committed
+bars to the month — a GDFL import of one day's file, one Zerodha request window.
+An append that answered `AlreadyPresent` wrote nothing and is not a landing.
+
+**Bar files are never touched.** Writing a record opens the `.prv` and nothing
+else; the `.bin`, `.crc`, `.tix` and `.lock` are byte-identical before and after
+(`store::provenance::the_bar_files_are_byte_identical_after_a_record`, in
+`crates/store/tests/provenance.rs`).
+
+**Commit order: the bars first, the record after.** `provenance::record` takes
+the writer's open `BarFile` and the `Appended::Committed` its last append
+returned, refuses one that is not the handle's newest commit, and takes the
+generation from the handle. A crash between the two leaves bars no record names
+— reported as unrecorded and rebuilt from the journal by `/provenance.json`
+(WP-38b), labelled reconstructed — never a record naming bars that do not exist.
+
+Magic `BRUTEXP1`, version `1`, stride `256`, at most **1024** records, so a
+`.prv` is never longer than **262,208** bytes. Every integer is little-endian.
+
+**Header, 64 bytes at offset 0:**
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 8 | magic `BRUTEXP1` |
+| 8 | 2 | version `1` |
+| 10 | 2 | record stride `256` |
+| 12 | 4 | timeframe seconds, as the bar header |
+| 16 | 4 | symbol id, as the bar header |
+| 20 | 2 | year of the month |
+| 22 | 1 | month |
+| 23 | 1 | reserved, zero |
+| 24 | 8 | vendor, its store name zero-padded (`gdfl`, `zerodha`) |
+| 32 | 24 | the first 24 bytes of BLAKE3 over the bar file's store path, `bars/<vendor>/…/<yyyy-mm>.bin` |
+| 56 | 4 | reserved, zero |
+| 60 | 4 | CRC-32C over bytes `0..60` |
+
+A reader recomputes the vendor, timeframe, month and path digest from the path
+it was asked for and refuses any difference by name, so a sidecar copied beside
+another month or another instrument is refused, not read. The writer also
+refuses a header whose symbol id is not its bar file's.
+
+**Record *n*, 256 bytes at `64 + 256·n`:**
+
+| Offset | Size | Field | Notes |
+|---|---|---|---|
+| 0 | 8 | `vendor` | equal to the header's; another vendor is refused |
+| 8 | 1 | `source_kind` | `1` `archive_member`, `2` `tickstore_day`, `3` `vendor_endpoint`; any other byte is refused |
+| 9 | 1 | `flags` | bit 0: the build carried a commit stamp; bit 1: `source_name` is a prefix; other bits zero |
+| 10 | 2 | `name_len` | bytes of `source_name` kept, 1 to 128 |
+| 12 | 4 | `bar_definition` | the D-2822 definition that built the bars; `0` where none applies (vendor-built bars) |
+| 16 | 8 | `source_bytes` | the member's uncompressed size from the archive's directory, the tick-store file's length, or the response body's |
+| 24 | 4 | `source_crc32` | the member's CRC-32 from the archive's directory; `0` for the other kinds |
+| 28 | 4 | `ist_day` | `yyyymmdd`: the day the journal keys the landing by — the GDFL trading day of the imported file, or the IST day a pull ran |
+| 32 | 32 | `source_name_blake3` | BLAKE3 of the whole source name |
+| 64 | 8 | `first_index` | the first bar this landing appended |
+| 72 | 8 | `n_bars` | how many it appended; never zero |
+| 80 | 8 | `journal_ordinal` | the line of `imports/gdfl.journal`, or the record of `audit/pull.journal`, the landing wrote |
+| 88 | 8 | `bar_file_generation` | the bar file's commit generation that published these bars |
+| 96 | 8 | `landed_at` | when the record was written, UTC epoch microseconds, `i64`, positive |
+| 104 | 20 | `commit` | the build commit's SHA-1 object name; all zero when flag bit 0 is clear |
+| 124 | 128 | `source_name` | UTF-8, zero-padded past `name_len` |
+| 252 | 4 | `record_crc` | CRC-32C over bytes `0..252` followed by *n* as 8 little-endian bytes |
+
+**The source name.** D-3334 names the digest, `source_name_blake3`; this
+format also keeps the name itself (`source_name`, `name_len`, and flag bit 1),
+so a record says where its bars came from without a journal beside it. An
+archive member is named by the archives that hold it,
+outermost first, each followed by `!`, then the member's name as the innermost
+archive's directory spells it. A tick-store day is its path below the tick-store
+root. An endpoint is its path alone; a name of that kind holding `?` is refused,
+because a query string is not part of the path and can carry credentials. A name
+longer than 128 bytes keeps its longest prefix that ends on a character boundary
+(so at least 125 bytes), sets flag bit 1, and is still identified exactly by
+`source_name_blake3`; a whole name must hash to it, or the record is refused.
+
+**Which records count.** The checksum binds a record to its position. The
+records are the longest run from ordinal 0 that each pass it; everything after
+them is the **tail**: an append that was interrupted, or a last record damaged
+after it was written — this format cannot tell those two apart, so the reader
+never serves either and reports the tail's length. The next append writes at
+the end of the run, over the tail, as a bar file's next append writes over the
+bytes past its commit counter (§7). A record that fails while a later one
+passes was damaged in place, and the whole sidecar is refused naming it. A
+record that passes its checksum with an impossible field (an unknown kind, a
+flag, a `name_len`, a day that is no date, `n_bars` zero, a commit without its
+flag) is refused naming the field. Consecutive records must be in bar order —
+each starts at or after the end of the one before, at a later generation — or
+the sidecar is refused: a sidecar whose ranges overlap could not say which
+landing wrote a bar.
+
+**Created on the first landing.** The header is written, `fdatasync`ed and its
+directory synced before any record. A `.prv` shorter than its header, or nothing
+but zeros, is **unborn**: its creator died before its first record, it holds
+none, and the next landing writes the header again.
+
+**One writer at a time.** An append takes an exclusive advisory lock on the
+`.prv` itself (never the month's `.lock`, which the bar writer holds) and
+refuses by name when another holds it. A reader takes none: a record still
+being written is tail, not a record.
+
+**Reading is a path probe.** `store::provenance::read` is one `open` (never
+through a final symlink), one `fstat` and one positional read of at most 262,208
+bytes. `Sidecar::covering(i)` answers the record that appended bar `i` by a
+binary search over at most 1024 records, or none for a bar no landing recorded.
+Both are bounded by constants, not by the store, the month's bar count or the
+number of months (`CLAUDE.md` §3 rule 4). `Sidecar::check_bars` refuses a
+sidecar with a record past the bar file's commit counter.
+
+**What it costs on disk.** A month of daily landings holds about 21 records:
+`64 + 21·256` = 5,440 bytes. **UNVERIFIED as a measured total** across the
+store: it is one more small file per month written after D-3334.
+
+**What it does not prove.** The CRC-32C is integrity, not authentication; a
+record rewritten by hand with a recomputed checksum is read as written. A record
+says what its writer stated about the source; nothing here re-reads the archive
+or the endpoint. A month written before D-3334 has no `.prv` until its next
+landing, and its earlier bars stay unrecorded.
 
 ---
 

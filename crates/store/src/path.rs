@@ -181,6 +181,7 @@ const _: () = {
         overlay_checksums,
         greek_checksums,
         time_index,
+        provenance,
     ] = FileKind::ALL;
     assert!(bars.extension().len() <= MAX_EXTENSION_LEN);
     assert!(checksums.extension().len() <= MAX_EXTENSION_LEN);
@@ -190,6 +191,7 @@ const _: () = {
     assert!(overlay_checksums.extension().len() <= MAX_EXTENSION_LEN);
     assert!(greek_checksums.extension().len() <= MAX_EXTENSION_LEN);
     assert!(time_index.extension().len() <= MAX_EXTENSION_LEN);
+    assert!(provenance.extension().len() <= MAX_EXTENSION_LEN);
 };
 
 /// The length of a rendered path, root excluded, when every segment is at its
@@ -700,11 +702,16 @@ pub enum FileKind {
     /// bars, maintained by `BarFile::append`, never a record stream itself.
     /// See [`crate::time_index`]. D-2329.
     TimeIndex,
+    /// Where the month's bars came from: one fixed-size record per landing
+    /// that appended to the month, append-only, at its own format version.
+    /// Written after the bars it names are committed and never touching them.
+    /// See [`crate::provenance`]. D-3334.
+    Provenance,
 }
 
 impl FileKind {
     /// Every sibling file a month has.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Bars,
         Self::Checksums,
         Self::Overlay,
@@ -713,6 +720,7 @@ impl FileKind {
         Self::OverlayChecksums,
         Self::GreekChecksums,
         Self::TimeIndex,
+        Self::Provenance,
     ];
 
     /// The file extension, dot included.
@@ -727,6 +735,7 @@ impl FileKind {
             Self::OverlayChecksums => ".ovl.crc",
             Self::GreekChecksums => ".grk.crc",
             Self::TimeIndex => ".tix",
+            Self::Provenance => ".prv",
         }
     }
 
@@ -742,7 +751,8 @@ impl FileKind {
             | Self::Lock
             | Self::OverlayChecksums
             | Self::GreekChecksums
-            | Self::TimeIndex => None,
+            | Self::TimeIndex
+            | Self::Provenance => None,
         }
     }
 }
