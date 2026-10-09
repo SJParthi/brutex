@@ -612,9 +612,215 @@ fn production_tokens(src: &str) -> Result<Vec<Token>, String> {
 
 // ------------------------------------------------- browser code (1f) --
 
+/// The only `<script>` elements a decision licenses, and only in a page a
+/// crate serves: external, `defer`, empty, and loading one of these two files
+/// from `web/` at request time (D-0060 licensed `/typeahead.js`, D-1106 named
+/// both). A tracked `.html` or `.css` outside `web/` is licensed none: no
+/// decision allows a script there (srust-1, D-4490).
+const LICENSED_LOADERS: [&str; 2] = ["/typeahead.js", "/masters.js"];
+
+/// Elements that open a document or a plug-in of their own, each of which can
+/// run script that no tag walk of the outer page sees (srust-1, D-4490).
+const EMBEDDING_TAGS: [&str; 8] = [
+    "iframe",
+    "frame",
+    "frameset",
+    "embed",
+    "object",
+    "applet",
+    "portal",
+    "fencedframe",
+];
+
+/// HTML's whitespace inside a tag: tab, line feed, form feed, carriage
+/// return and space.
+fn html_space(c: char) -> bool {
+    matches!(c, '\t' | '\n' | '\u{c}' | '\r' | ' ')
+}
+
+/// One attribute of a start tag: its lowercased name and, when it has one,
+/// its value with the quotes removed.
+type Attr = (String, Option<String>);
+
+/// One start tag as the HTML tokenizer reads it, from the `<` at `start`: its
+/// name (everything up to whitespace, `/` or `>`), each attribute with its
+/// value if it has one, and the index just past the `>` that ends it (the
+/// text's length when none does). A `>` inside a quoted value does not end
+/// the tag, so `<a title=">" onclick=x>` carries `onclick` here as it does in
+/// a browser; the old walk ended that tag at the first `>`.
+fn start_tag(c: &[char], start: usize) -> (String, Vec<Attr>, usize) {
+    let mut i = start + 1;
+    let mut name = String::new();
+    while let Some(&ch) = c.get(i) {
+        if html_space(ch) || ch == '/' || ch == '>' {
+            break;
+        }
+        name.push(ch);
+        i += 1;
+    }
+    let mut attrs = Vec::new();
+    loop {
+        while c.get(i).is_some_and(|&ch| html_space(ch) || ch == '/') {
+            i += 1;
+        }
+        match c.get(i) {
+            None => return (name, attrs, c.len()),
+            Some('>') => return (name, attrs, i + 1),
+            Some(_) => {}
+        }
+        // A leading `=` is part of the name, as the tokenizer reads it.
+        let mut attr = String::from(c[i]);
+        i += 1;
+        while let Some(&ch) = c.get(i) {
+            if html_space(ch) || matches!(ch, '/' | '>' | '=') {
+                break;
+            }
+            attr.push(ch);
+            i += 1;
+        }
+        let mut j = i;
+        while c.get(j).is_some_and(|&ch| html_space(ch)) {
+            j += 1;
+        }
+        if c.get(j) != Some(&'=') {
+            attrs.push((attr, None));
+            continue;
+        }
+        i = j + 1;
+        while c.get(i).is_some_and(|&ch| html_space(ch)) {
+            i += 1;
+        }
+        let mut value = String::new();
+        match c.get(i) {
+            Some(&q @ ('"' | '\'')) => {
+                i += 1;
+                while let Some(&ch) = c.get(i) {
+                    i += 1;
+                    if ch == q {
+                        break;
+                    }
+                    value.push(ch);
+                }
+            }
+            _ => {
+                while let Some(&ch) = c.get(i) {
+                    if html_space(ch) || ch == '>' {
+                        break;
+                    }
+                    value.push(ch);
+                    i += 1;
+                }
+            }
+        }
+        attrs.push((attr, Some(value)));
+    }
+}
+
+/// An attribute value as a browser hands it to a URL parser: character
+/// references decoded (`&#106;`, `&#x6A`, `&colon;`, `&Tab;`, with or without
+/// the `;`), then lowercased, tab, line feed and carriage return removed
+/// anywhere, and leading and trailing spaces and controls trimmed. Percent
+/// escapes are left alone, because no browser decodes them before reading a
+/// scheme: `data%3a...` is a relative path, not a data URL. A named reference
+/// outside the table is left as written; none of them spells an ASCII letter
+/// or the `:` a scheme needs.
+fn url_view(value: &str) -> String {
+    const NAMED: [(&str, char); 18] = [
+        ("colon", ':'),
+        ("tab", '\t'),
+        ("newline", '\n'),
+        ("sol", '/'),
+        ("comma", ','),
+        ("semi", ';'),
+        ("lpar", '('),
+        ("rpar", ')'),
+        ("lt", '<'),
+        ("gt", '>'),
+        ("amp", '&'),
+        ("quot", '"'),
+        ("apos", '\''),
+        ("equals", '='),
+        ("period", '.'),
+        ("plus", '+'),
+        ("excl", '!'),
+        ("nbsp", ' '),
+    ];
+    let c: Vec<char> = value.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < c.len() {
+        if c[i] != '&' {
+            out.push(c[i]);
+            i += 1;
+            continue;
+        }
+        if c.get(i + 1) == Some(&'#') {
+            // Every digit is read, however many leading zeros pad it:
+            // `&#00000000000000106;` is `j` to a browser.
+            let hex = matches!(c.get(i + 2), Some('x' | 'X'));
+            let (radix, from) = if hex { (16, i + 3) } else { (10, i + 2) };
+            let mut to = from;
+            while c.get(to).is_some_and(|d| d.is_digit(radix)) {
+                to += 1;
+            }
+            if to > from {
+                let run: String = c[from..to].iter().collect();
+                // Too large for a `u32` is too large for a character: U+FFFD.
+                let code = u32::from_str_radix(&run, radix).unwrap_or(u32::MAX);
+                out.push(char::from_u32(code).unwrap_or('\u{fffd}'));
+                i = to + usize::from(c.get(to) == Some(&';'));
+                continue;
+            }
+        }
+        let rest: String = c[i + 1..].iter().take(8).collect();
+        let lower = rest.to_lowercase();
+        let mut named = None;
+        for (n, ch) in NAMED {
+            if lower.starts_with(n) {
+                named = Some((n, ch));
+                break;
+            }
+        }
+        match named {
+            Some((n, ch)) => {
+                out.push(ch);
+                i += 1 + n.len() + usize::from(c.get(i + 1 + n.len()) == Some(&';'));
+            }
+            None => {
+                out.push('&');
+                i += 1;
+            }
+        }
+    }
+    let flat: String = out
+        .to_lowercase()
+        .chars()
+        .filter(|ch| !matches!(ch, '\t' | '\n' | '\r'))
+        .collect();
+    flat.trim_matches(|ch: char| ch <= ' ').to_owned()
+}
+
+/// Does a decoded attribute value carry a `data:` URL? The scheme must start
+/// the value or follow a character that can open a URL inside one (`url(data:`,
+/// `url('data:`, `0;url=data:`, a `srcset` entry after `, `), and something
+/// other than a space must follow it. So prose such as `market data: 5 rows`
+/// in a `title` is not one, a path such as `/data:x` is not one, and
+/// `data:,alert(1)` is.
+fn has_data_url(v: &str) -> bool {
+    v.match_indices("data:").any(|(at, _)| {
+        let before = v[..at].chars().next_back();
+        let after = v[at + "data:".len()..].chars().next();
+        before.is_none_or(|b| b.is_whitespace() || matches!(b, '(' | '\'' | '"' | ',' | ';' | '='))
+            && after.is_some_and(|a| !a.is_whitespace())
+    })
+}
+
 /// Every way this repository has seen, or an audit has shown, browser code
-/// riding inside a Rust string. `text` is one literal's decoded content.
-fn browser_findings(text: &str) -> Vec<String> {
+/// riding inside a Rust string or a tracked page. `text` is one literal's
+/// decoded content, or one `.html`/`.css` file. `licensed` names the script
+/// sources a decision allows in it: `LICENSED_LOADERS` for a crate's string
+/// literals, none for a tracked page.
+fn browser_findings(text: &str, licensed: &[&str]) -> Vec<String> {
     let lower = text.to_lowercase();
     let mut out = Vec::new();
     // Prose in this repository says "document." and "window." as English, so
@@ -640,48 +846,84 @@ fn browser_findings(text: &str) -> Vec<String> {
             out.push(format!("browser API `{word}`"));
         }
     }
-    // Walk every tag.
-    let bytes: Vec<char> = lower.chars().collect();
+    // `fetch(` as a call, not as the end of a longer word (`prefetch(`): the
+    // audit's data-URL payload was a bare `fetch(` (srust-1, D-4490).
+    if lower.match_indices("fetch(").any(|(at, _)| {
+        lower[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|b| !(b.is_alphanumeric() || b == '_' || b == '$'))
+    }) {
+        out.push("browser API `fetch(`".to_owned());
+    }
+    // Walk every start tag as the HTML tokenizer reads it.
+    let c: Vec<char> = lower.chars().collect();
     let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] != '<' || !bytes.get(i + 1).is_some_and(|c| c.is_ascii_alphabetic()) {
+    while i < c.len() {
+        if c[i] != '<' || !c.get(i + 1).is_some_and(char::is_ascii_alphabetic) {
             i += 1;
             continue;
         }
-        let mut j = i + 1;
-        while j < bytes.len() && bytes[j] != '>' {
-            j += 1;
-        }
-        let tag: String = bytes[i + 1..j].iter().collect();
-        let name: String = tag
-            .chars()
-            .take_while(|c| c.is_ascii_alphanumeric())
-            .collect();
-        let attrs: Vec<String> = tag[name.len()..]
-            .split(|c: char| c.is_whitespace() || c == '/')
-            .filter(|a| !a.is_empty())
-            .map(|a| a.split('=').next().unwrap_or("").trim().to_owned())
-            .collect();
-        for a in &attrs {
+        let (name, attrs, end) = start_tag(&c, i);
+        for (a, value) in &attrs {
             if a.len() > 2 && a.starts_with("on") && a[2..].chars().all(|c| c.is_ascii_alphabetic())
             {
                 out.push(format!("inline handler `{a}=` on <{name}>"));
             }
-        }
-        if name == "script" {
-            let has_src = attrs.iter().any(|a| a == "src");
-            let rest: String = bytes
-                .get(j + 1..)
-                .map_or(String::new(), |r| r.iter().collect());
-            let closed_empty = rest.trim_start().starts_with("</script>");
-            let unterminated = j >= bytes.len();
-            if !has_src {
-                out.push("a <script> without its own src attribute".to_owned());
-            } else if !closed_empty && !unterminated {
-                out.push("a <script src> whose element has a body".to_owned());
+            if a == "srcdoc" {
+                out.push(format!(
+                    "a `srcdoc` document on <{name}>: a whole page inside an attribute"
+                ));
+            }
+            let Some(value) = value else {
+                continue;
+            };
+            let v = url_view(value);
+            if v.contains("javascript:") || v.contains("vbscript:") {
+                out.push(format!("a script URL in `{a}=` on <{name}>"));
+            }
+            if has_data_url(&v) {
+                out.push(format!(
+                    "a `data:` URL in `{a}=` on <{name}>: a document or a script carried inline"
+                ));
             }
         }
-        i = j;
+        if EMBEDDING_TAGS.contains(&name.as_str()) {
+            out.push(format!(
+                "an embedded frame <{name}>: a document of its own that no tag walk reads"
+            ));
+        }
+        if name == "base" {
+            out.push(
+                "a <base>: it re-points every relative src, the licensed loaders' too".to_owned(),
+            );
+        }
+        if name == "script" {
+            let src: Vec<&str> = attrs
+                .iter()
+                .filter(|(a, _)| a == "src")
+                .filter_map(|(_, v)| v.as_deref())
+                .collect();
+            let shape_ok = attrs.len() == 2
+                && attrs.iter().any(|(a, v)| a == "defer" && v.is_none())
+                && src.len() == 1
+                && licensed.contains(&src[0]);
+            let rest: String = c.get(end..).map_or(String::new(), |r| r.iter().collect());
+            let closed_empty = rest.trim_start().starts_with("</script>");
+            if licensed.is_empty() {
+                out.push(
+                    "a <script> in a tracked page outside web/: no decision licenses one there (D-4490)"
+                        .to_owned(),
+                );
+            } else if !(shape_ok && closed_empty) {
+                out.push(format!(
+                    "a <script> no decision licenses: only {} may appear, each as \
+                     `<script src=\"…\" defer></script>` (D-1106, D-4490)",
+                    licensed.join(" and ")
+                ));
+            }
+        }
+        i = end.max(i + 1);
     }
     out
 }
@@ -690,7 +932,7 @@ fn browser_scan(path: &str, src: &str) -> Result<Vec<String>, String> {
     let tokens = production_tokens(src)?;
     let mut out = Vec::new();
     let mut report = |line: usize, text: &str| {
-        for f in browser_findings(text) {
+        for f in browser_findings(text, &LICENSED_LOADERS) {
             out.push(format!("{path}:{line}: {f}"));
         }
     };
@@ -3359,7 +3601,7 @@ fn content_findings(path: &str, bytes: &[u8]) -> Vec<String> {
                 }
             }
             if path.ends_with(".html") || path.ends_with(".css") {
-                for f in browser_findings(text) {
+                for f in browser_findings(text, &[]) {
                     out.push(format!("{path}: {f}"));
                 }
             }
@@ -3850,6 +4092,146 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_script_in_a_data_url_a_frame_or_an_encoded_attribute_is_refused() {
+        // srust-1, D-4490. Each shape passed gates 1 and 1f before: any
+        // `<script>` with a `src` was accepted, `srcdoc` and frames were not
+        // read, no attribute value was decoded, and a `>` inside a quoted
+        // value ended the tag early.
+        for html in [
+            // The audit's P6, P7, P8 and P9.
+            "<script src=\"data:text/javascript,fetch(%22/x%22)\"></script>",
+            "<script src=\"data:text/javascript;base64,ZmV0Y2goIi94Iik=\"></script>",
+            "<iframe srcdoc=\"&lt;script&gt;fetch(1)&lt;/script&gt;\"></iframe>",
+            "<svg><script href=\"data:text/javascript,fetch(1)\"></script></svg>",
+            // A script source, or a shape, no decision licenses.
+            "<script src=\"https://example.com/x.js\" defer></script>",
+            "<script src=\"//example.com/typeahead.js\" defer></script>",
+            "<script src=\"/typeahead.js\"></script>",
+            "<script src=\"/typeahead.js\" defer type=module></script>",
+            "<script src=\"/typeahead.js\" src=\"/x.js\" defer></script>",
+            "<script src=\"/typeahead.js\" defer=x></script>",
+            "<script defer src='/masters.js'>x()</script>",
+            "<script src=/typeahead.js defer>",
+            // Frames, plug-ins, and the tag that re-points every src.
+            "<iframe src=\"/x\"></iframe>",
+            "<IFRAME SRC=/x>",
+            "<frameset><frame src=/x></frameset>",
+            "<embed src=\"/x\">",
+            "<object type=x></object>",
+            "<applet code=x></applet>",
+            "<portal src=/x></portal>",
+            "<fencedframe></fencedframe>",
+            "<base href=\"https://example.com/\">",
+            "<div srcdoc=x></div>",
+            // A scheme spelled with references, controls or another case.
+            "<a href=\"&#106;avascript:go()\">x</a>",
+            "<a href=\"&#x6A;avascript&colon;go()\">x</a>",
+            "<a href=\"&#00000000000000106;avascript:go()\">x</a>",
+            "<a href=\"java&Tab;script:go()\">x</a>",
+            "<a href=\"java&#9;script:go()\">x</a>",
+            "<a href=\"java&NewLine;script:go()\">x</a>",
+            "<a href=\"vbscript:go\">x</a>",
+            "<a href=\"data:text/html,x\">x</a>",
+            "<a href=\"DATA&colon;text/html,x\">x</a>",
+            "<a href=\" data:,x\">x</a>",
+            "<form action=\"javascript:go()\"></form>",
+            "<button formaction=data:,x>x</button>",
+            "<link rel=stylesheet href=\"data:text/css,x\">",
+            "<img src=\"data:image/svg+xml,<svg onload=go()>\">",
+            "<img srcset=\"a.png 1x, data:image/svg+xml,x 2x\">",
+            "<meta http-equiv=refresh content=\"0;url=data:text/html,x\">",
+            "<meta http-equiv=refresh content=\"0;url=java&#115;cript:go()\">",
+            "<div style=\"background:url(data:image/svg+xml,x)\"></div>",
+            "<div style=\"background:url('data:image/svg+xml,x')\"></div>",
+            // A `>` inside a quoted value does not end the tag.
+            "<a title=\">\" onclick=go()>x</a>",
+            "<a title='>' href=java&#115;cript:go()>x</a>",
+            // Handlers after a slash, a newline or a form feed.
+            "<img/onerror=go()>",
+            "<img src=x /onerror=go()>",
+            "<svg\nonload\n=go()>",
+            "<svg\u{c}onload=go()>",
+            // The audit's bare call, and a member call.
+            "fetch(\"/x\")",
+            "x=window.fetch(1)",
+        ] {
+            assert!(
+                !browser_findings(html, &LICENSED_LOADERS).is_empty(),
+                "passed in a crate literal: {html}"
+            );
+            assert!(
+                !browser_findings(html, &[]).is_empty(),
+                "passed in a tracked page: {html}"
+            );
+        }
+        // The audit's P10 and P11: the same shapes as a production literal
+        // in a crate, and a frame joined from pieces by `concat!`.
+        for src in [
+            "pub const A: &str = \"<script src=\\\"data:text/javascript,fetch(1)\\\"></script>\";",
+            "pub const B: &str = \"<iframe srcdoc=\\\"&lt;script&gt;fetch(1)&lt;/script&gt;\\\"></iframe>\";",
+            "pub const C: &str = concat!(\"<if\", \"rame src=/x>\");",
+            "pub const D: &str = \"<a href=\\\"&#106;avascript:go()\\\">x</a>\";",
+        ] {
+            assert!(!browser(src).is_empty(), "passed: {src}");
+        }
+    }
+
+    #[test]
+    fn prose_plain_markup_and_the_licensed_loaders_still_pass() {
+        // srust-1, D-4490: what the real tree carries, and the prose the
+        // stricter reading must not refuse.
+        for html in [
+            "<p title=\"market data: 5 rows\">raw data: joins and gaps</p>",
+            "refused before opening market data: this binary has no stamp",
+            "<form method=\"get\" action=\"/instruments\"><input name=q></form>",
+            "<svg viewBox=\"0 0 12 12\" role=\"img\"><rect x=\"1\"/></svg>",
+            "<meta http-equiv=\"refresh\" content=\"15\">",
+            "<a href=\"/data:x\">x</a>",
+            "<a href=\"https://example.com/a?b=1&amp;c=2\">x</a>",
+            "&lt;script&gt;alert(1)&lt;/script&gt; arrives escaped",
+            "a < b, c > d, x <- y, <!-- a note -->, 1 <2",
+            "an <i>iframe</i> and a base in prose",
+            "prefetch(x) is a word, not a call",
+            "<div class=\"on\" data-x=\"once=1\"></div>",
+            "<script src=\"/typeahead.js\" defer></script>",
+            "<SCRIPT SRC=\"/typeahead.js\" DEFER></SCRIPT>",
+            "<p>x</p>\n<script src='/masters.js' defer>\n</script>",
+        ] {
+            assert!(
+                browser_findings(html, &LICENSED_LOADERS).is_empty(),
+                "refused: {html}: {:?}",
+                browser_findings(html, &LICENSED_LOADERS)
+            );
+        }
+        // A tracked page is licensed no script, the loaders included.
+        for page in [
+            "<script src=\"/typeahead.js\" defer></script>",
+            "<script src=\"/masters.js\" defer></script>",
+        ] {
+            assert!(!browser_findings(page, &[]).is_empty(), "passed: {page}");
+        }
+    }
+
+    #[test]
+    fn a_reference_is_decoded_as_a_browser_decodes_it() {
+        // srust-1, D-4490.
+        assert_eq!(url_view("&#106;avascript&colon;x"), "javascript:x");
+        assert_eq!(url_view("&#X6a;&#x41"), "ja");
+        assert_eq!(url_view("&#0000000000000000106;"), "j");
+        assert_eq!(url_view("&#99999999999;x"), "\u{fffd}x");
+        assert_eq!(url_view("java&Tab;scr&NewLine;ipt:"), "javascript:");
+        assert_eq!(url_view("  \u{1}DATA:x \u{7f}"), "data:x \u{7f}");
+        assert_eq!(url_view("&amp;&lt&unknown;&"), "&<&unknown;&");
+        assert_eq!(url_view("data%3atext/html"), "data%3atext/html");
+        assert!(has_data_url("data:,x"));
+        assert!(has_data_url("url(data:x)"));
+        assert!(has_data_url("0;url=data:x"));
+        assert!(!has_data_url("market data: 5"));
+        assert!(!has_data_url("/data:x"));
+        assert!(!has_data_url("data:"));
+    }
+
     // ---- module closure (gates 2, 13, 1) ----
 
     #[test]
@@ -4318,6 +4700,29 @@ mod tests {
             ("crates/a/src/y.rs", &[0xff, 0xfe, b'a'][..]),
             ("docs/p.html", &b"<p onclick=go()>x</p>"[..]),
             ("docs/s.html", &b"<script>go()</script>"[..]),
+            // srust-1, D-4490: the audit's P6 to P9 as tracked pages, and
+            // the licensed loader, which no decision allows in a page.
+            (
+                "docs/p6.html",
+                &b"<script src=\"data:text/javascript,fetch(%22/x%22)\"></script>"[..],
+            ),
+            (
+                "docs/p7.html",
+                &b"<script src=\"data:text/javascript;base64,ZmV0Y2goIi94Iik=\"></script>"[..],
+            ),
+            (
+                "docs/p8.html",
+                &b"<iframe srcdoc=\"&lt;script&gt;fetch(1)&lt;/script&gt;\"></iframe>"[..],
+            ),
+            (
+                "docs/p9.html",
+                &b"<svg><script href=\"data:text/javascript,fetch(1)\"></script></svg>"[..],
+            ),
+            (
+                "docs/l.html",
+                &b"<script src=\"/typeahead.js\" defer></script>"[..],
+            ),
+            ("docs/x.css", &b"a{background:url(javascript:go())}"[..]),
         ] {
             assert!(!content_findings(path, bytes).is_empty(), "passed: {path}");
         }

@@ -181,7 +181,9 @@ jobs:
           #
           #   1. `source_scan content`: outside web/, no NUL byte, nothing that
           #      is not UTF-8, no `.rs` opening with a shebang, and no browser
-          #      code in a `.html` or `.css`. Also no NAME holding a control
+          #      code in a `.html` or `.css`: no `<script>` of any kind, frame,
+          #      `srcdoc`, script or `data:` URL, read as gate 1f reads them
+          #      (D-4490). Also no NAME holding a control
           #      character, a non-ASCII byte, `"` or `\` (git quotes those in
           #      every listing read without `-z`), and no `mutants::skip`
           #      token in crate code: `#[cfg_attr(miri, mutants::skip)]`
@@ -426,6 +428,16 @@ jobs:
           # `cookie`/`write`/`body`, `window.location`, `window.open(`,
           # `addEventListener`, `innerHTML`, `outerHTML`, `XMLHttpRequest`,
           # `await fetch(`, `eval(`).
+          #
+          # D-4490 (srust-1): a `<script src>` used to pass whatever its value,
+          # so `src="data:text/javascript,..."` and `<iframe srcdoc=...>`
+          # passed here and in gate 1. Tags are now read as the HTML tokenizer
+          # reads them (a `>` inside quotes does not end one), every attribute
+          # value is decoded (`&#106;`, `&colon;`, `&Tab;`), and refused are: a
+          # script or `data:` URL, `srcdoc`, a frame or plug-in element,
+          # `<base>`, a bare `fetch(`, and every `<script>` but the two the
+          # decisions license, `/typeahead.js` and `/masters.js`, external,
+          # `defer` and empty. A tracked `.html` outside web/ is licensed none.
           #
           # WHAT IT CANNOT SEE: markup assembled at run time from pieces that
           # are not one literal or one `concat!` -- `format!("<scr{}", "ipt>")`.

@@ -66459,3 +66459,65 @@ returning, as the install refusal already did. OBSV-11.
 
 **Rejected.** Refusing the whole batch louder. The siblings' bars are on disk
 and their rows are sound; dropping them is the loss, not the noise.
+
+### D-4490 — Gates 1 and 1f read a script by what it loads, and refuse a frame, a `srcdoc` and a script or `data:` URL — 2026-10-09
+
+**What was observed (srust-1).** `.github/source_scan.rs` `browser_findings`,
+which gate 1 runs over every tracked `.html` and `.css` outside `web/` and gate
+1f over every production string literal under `crates/`, accepted any
+`<script>` that had a `src`, whatever the value. It never read `srcdoc`, never
+decoded an attribute value, never looked at a frame element, and ended every
+tag at its first `>`, so `<a title=">" onclick=go()>` carried no handler to it.
+The audit's probes, rerun here on a scratch copy of 21443a2a with the gate
+scripts extracted from `ci.yml`: `<script src="data:text/javascript,fetch(..)">`
+and its base64 form as `docs/p6.html`/`docs/p7.html`, `<iframe
+srcdoc="&lt;script&gt;fetch(1)&lt;/script&gt;">` as `docs/p8.html`, the
+`>`-in-quotes handler and `href="&#106;avascript:go()"` as `docs/p6b.html`, and
+the first and third as a `pub const` appended to `crates/api/src/render.rs`
+(P10, P11): gates 1, 1f and 15 all exited 0.
+
+**The decision.** Tags are read as the HTML tokenizer reads them: a name runs to
+whitespace, `/` or `>`; a quoted value runs to its closing quote, a `>` inside it
+included; an unquoted one to whitespace or `>`. Every attribute value is read as
+a browser hands it to a URL parser: numeric references (any number of leading
+zeros), `&colon;`, `&Tab;`, `&NewLine;` and fifteen other named references
+decoded, lowercased, tab and line breaks removed, leading controls trimmed.
+Refused, case-blind, in both places:
+
+- a `javascript:` or `vbscript:` URL anywhere in a decoded value;
+- a `data:` URL in a decoded value — at its start or after `(`, a quote, `,`,
+  `;`, `=` or a space, and followed by something other than a space, so a
+  `title="market data: 5 rows"` and a path `/data:x` pass;
+- a `srcdoc` attribute on any element;
+- `<iframe>`, `<frame>`, `<frameset>`, `<embed>`, `<object>`, `<applet>`,
+  `<portal>`, `<fencedframe>`, and `<base>` (it re-points every relative `src`,
+  the licensed loaders' included);
+- a bare `fetch(` call (not `prefetch(`), beside the existing browser APIs;
+- every `<script>` but the two decisions license: D-0060 licensed the
+  `/typeahead.js` tag and D-1106 named it with `/masters.js`. Each must be
+  exactly `src` (one of the two) and a valueless `defer`, with an empty body.
+  A tracked `.html` or `.css` outside `web/` is licensed no script at all: no
+  decision allows one there, and none is tracked today (`git ls-files` shows
+  every `.html` and `.css` under `web/`).
+
+The real tree passes both gates unchanged (`source_scan browser` over every
+tracked `crates/*.rs` and `source_scan content` over the tracked listing both
+exit 0), and every probe above is refused after the change; the commands and
+outputs are in the fixer's report. Invariant FXE-01.
+
+**What it still cannot see.** Markup assembled at run time from pieces that are
+not one literal or one `concat!`, as D-1106 states. Percent escapes are not
+decoded: no browser decodes them before it reads a scheme, so `data%3a…` is a
+relative path. A `<script>` written as text inside `<style>` or `<textarea>` is
+refused although a browser reads it as text — failing closed.
+
+**Rejected.** Decoding character references in the whole text before the tag
+walk, as the audit suggested. Text content is inert to a browser, and
+`&lt;script&gt;` in text is exactly how `render.rs` escapes operator input —
+`every_page_carries_the_one_script_this_repository_chose_and_no_other` proves
+the injection "arrives escaped" that way (D-0060). Decoding it would refuse the
+escaping that makes a page safe. Values are decoded because that is where a
+browser decodes before it acts. Refusing every `data:` substring: 14 string
+literals under `crates/` (`source_scan strings`, test code included) carry it
+in prose, such as "refused before opening market data:" in
+`crates/cli/src/step3_orchestrator.rs` and "cannot stat Population V6 data:".

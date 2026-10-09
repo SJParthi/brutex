@@ -1045,7 +1045,9 @@ fn gate_1f_verdict(files: usize, browser: &Scan) -> Report {
         }
     } else {
         r.say("OK — no <script> body, no browser API and no inline handler");
-        r.say("     appears in any .rs production region under crates/.");
+        r.say("     appears in any .rs production region under crates/, and no");
+        r.say("     script but the two licensed loaders, no frame, srcdoc or");
+        r.say("     script or data: URL either (D-4490).");
     }
     r
 }
@@ -3835,6 +3837,10 @@ mod tests {
         let r = gate_1f_verdict(3, &ok());
         assert!(!r.refused);
         assert!(r.text().contains("OK — no <script> body"));
+        assert!(
+            r.text()
+                .contains("no frame, srcdoc or\n     script or data: URL")
+        );
     }
 
     // ---- gate 1c ----
