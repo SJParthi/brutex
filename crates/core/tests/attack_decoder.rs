@@ -7,7 +7,7 @@
 //! identical (`CLAUDE.md` §3 rule 5). Every case asserts a value or a named
 //! refusal; a panic anywhere is itself the failure.
 //!
-//! The `DPD-` invariants and D-3150..D-3159 are the decisions these pin.
+//! The `DPD-` invariants and D-3150..D-3158 are the decisions these pin.
 
 #![allow(
     clippy::expect_used,

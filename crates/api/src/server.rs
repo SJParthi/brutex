@@ -24510,8 +24510,11 @@ mod tests {
                 "{DHAN_HEAD}NSE,I,NA,INDEX,NIFTY,NIFTY,INDEX,NA,0001-01-01,,,1333\n"
             )),
         );
+        // `member=NIFTY`: the masters hold the one index, and D-2759's swept
+        // mapping gate refuses a whole-surface basket they cannot map (422)
+        // before the day pass is read (D-4662, the D-4612 trap again).
         let asked = ingest::parse_spot(
-            "target=swept&from=2026-08-03&to=2026-08-05&granularity=1min",
+            "target=swept&member=NIFTY&from=2026-08-03&to=2026-08-05&granularity=1min",
             day(2026, 8, 10),
         )
         .expect("a real target and a window in the past");

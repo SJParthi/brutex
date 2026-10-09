@@ -650,29 +650,36 @@ mod tests {
         let root = crate::scratch::path("livejson-ceilings");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("a temp root");
-        full_live_store(&root, 3, cli::live::LIVE_ROW_LIMIT);
+        let at_ceiling = full_live_store(&root, 3, cli::live::LIVE_ROW_LIMIT);
         let (status, _, body) = respond(Ok(root.clone()));
         assert_eq!(status, axum::http::StatusCode::OK, "{body}");
         assert!(body.contains(r#""count":3"#), "{body}");
         assert!(body.contains(r#""kept":256"#), "{body}");
 
         // One row past the per-run ceiling is refused, never cut.
-        full_live_store(&root, 1, cli::live::LIVE_ROW_LIMIT + 1);
+        let past_rows = full_live_store(&root, 1, cli::live::LIVE_ROW_LIMIT + 1);
         let (status, _, body) = respond(Ok(root.clone()));
         assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
         assert!(body.contains("live snapshot limit of 256 rows"), "{body}");
+        drop((at_ceiling, past_rows));
         let _ = std::fs::remove_dir_all(&root);
 
         std::fs::create_dir_all(&root).expect("a temp root");
-        full_live_store(&root, cli::live::LIVE_RUN_LIMIT + 1, 1);
+        let past_runs = full_live_store(&root, cli::live::LIVE_RUN_LIMIT + 1, 1);
         let (status, _, body) = respond(Ok(root.clone()));
         assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
         assert!(body.contains("exceeds 128 runs"), "{body}");
+        drop(past_runs);
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// `runs` live files under `root`, each with `rows` ranked rows.
-    fn full_live_store(root: &std::path::Path, runs: usize, rows: usize) {
+    /// `runs` live files under `root`, each with `rows` ranked rows, and the
+    /// open views that write them. HELD by the caller, because a dropped
+    /// `Live` removes its own file (conc17-1, D-2641): this built the files and
+    /// dropped every view, so the route saw an empty store (D-4662).
+    #[must_use]
+    fn full_live_store(root: &std::path::Path, runs: usize, rows: usize) -> Vec<cli::live::Live> {
+        let mut held = Vec::with_capacity(runs);
         for nth in 0..runs {
             let mut identity = [0_u8; 32];
             identity[..8].copy_from_slice(&(nth as u64 + 1).to_le_bytes());
@@ -709,7 +716,9 @@ mod tests {
                 },
             )
             .expect("the rows publish");
+            held.push(live);
         }
+        held
     }
 
     /// What `/live.json` costs at its ceilings: `LIVE_RUN_LIMIT` runs of
@@ -722,7 +731,7 @@ mod tests {
         let root = crate::scratch::path("livejson-latency");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("a temp root");
-        full_live_store(&root, cli::live::LIVE_RUN_LIMIT, cli::live::LIVE_ROW_LIMIT);
+        let held = full_live_store(&root, cli::live::LIVE_RUN_LIMIT, cli::live::LIVE_ROW_LIMIT);
         let mut bytes = 0;
         let warm = crate::latency::Timed::run(100, || {
             let (status, _, body) = respond(Ok(root.clone()));
@@ -744,6 +753,7 @@ mod tests {
             "{}",
             cold.line("CensusCache::refresh, 128 runs x 256 rows, cold")
         );
+        drop(held);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -845,8 +845,8 @@ fn browser_findings(text: &str, licensed: &[&str]) -> Vec<String> {
         "xmlhttprequest",
         // P15-10, D-2517: `fetch(..).then(..)` needs no `await`, and the
         // element collections and `location` members are reached without
-        // the members above.
-        "fetch(",
+        // the members above. A bare `fetch(` call is the boundary-read check
+        // below (D-4490), so `prefetch(` in prose is not one (D-4662).
         "document.getelementsby",
         "location.hash",
         "location.href",
@@ -5017,7 +5017,7 @@ mod tests {
         }
         // The documented blind spot stays unseen, and says so at the head.
         assert!(browser("fn f() -> String { format!(\"<{t}>\", t = \"script\") }").is_empty());
-        assert!(browser_findings("fetch(").contains(&"browser API `fetch(`".to_owned()));
+        assert!(browser_findings("fetch(", &[]).contains(&"browser API `fetch(`".to_owned()));
     }
 
     #[test]
@@ -6930,9 +6930,20 @@ mod tests {
         ] {
             assert!(!workflow_findings("w", bad).is_empty(), "passed: {bad}");
         }
+        // A quoted `sed` is text to this form reading, but D-4493 refuses the
+        // word on every line that is not a comment and names the cost: an
+        // `echo` may not say it either. Both halves are pinned (D-4662).
+        let quoted = "          echo \"use sed here\"\n";
+        let words: Vec<&str> = quoted.split_whitespace().collect();
+        assert!(runner_programs(&words).is_empty(), "{quoted}");
+        assert!(
+            workflow_findings("w", quoted)
+                .iter()
+                .any(|f| f.contains("runs a sed program")),
+            "passed: {quoted}"
+        );
         for good in [
             "          sed_free=1\n",
-            "          echo \"use sed here\"\n",
             "          git ls-files -z\n",
             "          git rev-parse HEAD\n",
             "          find . -name '*.rs' -exec rustfmt --check {} +\n",

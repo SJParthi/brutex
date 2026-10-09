@@ -1158,8 +1158,11 @@ mod tests {
     /// `CLAUDE.md` §1 fixed the engine surface "at exactly these" two indices (quoted split, so this doc does not match itself),
     /// which D-0506 made false. On the old source the needle is present twice
     /// and this fails; the needle is split so this test does not match itself.
-    /// The second half pins what the docs now say the function does: two
-    /// always-on rows, both spot indices, no equity seeded.
+    /// The second half pins what the docs now say the function does: 210
+    /// always-on rows, the two spot indices and the 208 F&O shares, every one
+    /// NSE and no contract. It pinned two rows and no equity until D-3507
+    /// seeded the shares; the merge that kept D-3507's code kept this test's
+    /// first half and moved its second to the surface D-3507 names (D-4662).
     #[test]
     fn the_axis_docs_do_not_say_the_surface_is_two_indices() {
         let source = include_str!("census.rs");
@@ -1172,16 +1175,21 @@ mod tests {
         let stale = concat!("fixes the surface", " at exactly");
         assert_eq!(source.matches(stale).count(), 0);
         let swept = swept_series();
-        assert_eq!(swept.len(), 2);
+        assert_eq!(swept.len(), 210);
         for s in &swept {
-            assert_eq!(s.segment, Segment::Index);
             assert_eq!(s.exchange, Exchange::Nse);
             assert!(s.contract.is_none());
         }
+        let indices = swept.iter().filter(|s| s.segment == Segment::Index).count();
+        let shares = swept.iter().filter(|s| s.segment == Segment::Cash).count();
+        assert_eq!((indices, shares), (2, 208));
         assert!(swept.contains(&nifty()));
         assert!(swept.contains(&series(Segment::Index, "BANKNIFTY")));
-        // An empty census list still yields exactly the two always-on rows.
-        assert_eq!(held_series(&[]), swept);
+        // An empty census list still yields exactly the always-on rows, in
+        // the axis's sorted order rather than `swept_surface`'s.
+        let mut axis = swept;
+        axis.sort_unstable();
+        assert_eq!(held_series(&[]), axis);
     }
 
     /// The spot index series, as the store spells it.

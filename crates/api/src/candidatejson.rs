@@ -477,10 +477,20 @@ fn take_serving(
     summary: &Summary,
     key: Key,
 ) -> Option<Cached> {
-    let at = kept
-        .iter()
-        .position(|held| held.serves(root, summary, key))?;
+    let at = slot_of(kept, |held| held.serves(root, summary, key))?;
     Some(kept.remove(at))
+}
+/// The index of the first kept reader `wanted` accepts. A plain loop over a
+/// vector [`TRADE_READERS_KEPT`] bounds, as the cache's search was before
+/// D-4655 split it, so gate 11's rule 6 reads no data-bounded search here
+/// (D-4662).
+fn slot_of(kept: &[Cached], wanted: impl Fn(&Cached) -> bool) -> Option<usize> {
+    for (at, held) in kept.iter().enumerate() {
+        if wanted(held) {
+            return Some(at);
+        }
+    }
+    None
 }
 /// Pages `held`, cold-opening a reader first when there is none. Reads files;
 /// no cache lock is held here. A failed page drops the reader rather than
@@ -519,7 +529,7 @@ fn serve(
 /// full cache evicts its least recently paged. At most
 /// [`TRADE_READERS_KEPT`] comparisons. D-4434, D-4655.
 fn keep(kept: &mut Vec<Cached>, held: Cached) {
-    if let Some(at) = kept.iter().position(|other| other.same_as(&held)) {
+    if let Some(at) = slot_of(kept, |other| other.same_as(&held)) {
         kept.remove(at);
     } else if kept.len() >= TRADE_READERS_KEPT {
         kept.remove(0);

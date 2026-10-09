@@ -726,10 +726,11 @@ fn every_proved_day_is_full(file: &store::file::BarFile, own: &[i64]) -> bool {
 /// The UTC micros stamp of minute-of-day `minute` on IST day `day`; the
 /// inverse of [`ist`]. `None` where the arithmetic would overflow.
 fn minute_stamp(day: i64, minute: u16) -> Option<i64> {
-    const IST_OFFSET_SECS: i64 = 5 * 3600 + 30 * 60;
+    // `pull::session`'s offset, as [`ist`] reads it: a private copy here was
+    // the bare re-typing D-3512 refuses (D-4662).
     day.checked_mul(86_400)?
         .checked_add(i64::from(minute) * 60)?
-        .checked_sub(IST_OFFSET_SECS)?
+        .checked_sub(pull::session::IST_OFFSET_SECS)?
         .checked_mul(1_000_000)
 }
 

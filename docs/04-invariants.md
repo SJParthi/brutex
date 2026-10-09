@@ -7505,7 +7505,7 @@ old line regex the same input and watched it pass.
 | FXD-09 | **No ranked row carries a money total an `f64` may have rounded.** `Edge::money_is_exact` is true exactly when all eight money fields are finite and below 2^53 in magnitude: each field alone at ±(2^53 − 1) passes and at ±2^53, 2^53 + 1, the `i64` extremes, 2^63, −2^64, NaN and ±infinity fails; the mean and `t` are not asked. `rank` refuses an inexact row under every lens, counts it in `Ranked::inexact`, keeps every exact row, agrees incrementally, and the FINDINGS report (retained and streamed) prints `REFUSED, money inexact` with the count; an ordinary series refuses nothing and prints no such line (GAP16-26, D-4486) | `runner::outcome::money_tests::money_is_exact_below_two_to_the_fifty_three_in_every_field`; `runner::outcome::money_tests::an_ordinary_series_is_exact_money`; `runner::outcome::money_tests::every_sum_is_the_exact_sum_converted_once`; `runner::rank::tests::a_row_whose_money_is_not_exact_is_refused_by_name` | ✓ |
 
 
-### Audit fixer fxr (D-4500 to D-4519)
+### Audit fixer fxr (D-4500 to D-4508)
 
 | ID | Invariant | Proven by | Status |
 |---|---|---|---|
@@ -7561,7 +7561,7 @@ old line regex the same input and watched it pass.
 | MRG-11 | One census row `record_held` refuses is named and does not drop its siblings, and a failed census append is a typed fault whose count is the entries that landed and whose sentence names that count beside the one asked for (D-4618; D-3210; D-2528; D-2529; D-3203) | `pull::ingest::tests::one_refused_row_does_not_drop_the_rest_of_the_batch`, `pull::ingest::tests::a_failed_append_names_how_many_entries_landed` | ✓ |
 | MRG-12 | A cash-session cache install whose injected directory barrier fails is "crash durability UNVERIFIED"; a later install of the same bytes syncs through the same barrier before it confirms, fails while it fails, and syncs exactly once when it holds (D-4618; D-3202; D-2533) | `pull::cash_session_cache::tests::a_reinstall_after_a_failed_directory_sync_syncs_again` | ✓ |
 
-### Merge of the audit's fix integration onto the integration — D-4647 to D-4660, 9 October 2026
+### Merge of the audit's fix integration onto the integration — D-4647 to D-4662, 9 October 2026
 
 | ID | Invariant | Test that proves it | Status |
 |---|---|---|---|
@@ -7569,8 +7569,9 @@ old line regex the same input and watched it pass.
 | MRG-14 | A feed's backoff, stall and halt each write exactly one `autopilot` event, naming feed, month and the tick's own cause, and nothing else lands for them (D-4657; D-2595; D-4453) | `a_stall_and_a_halt_are_logged_once_each_with_feed_and_month`, `a_halt_a_stall_and_a_backoff_are_logged` in `crates/api/src/autopilot.rs` | ✓ |
 | MRG-15 | The press's closing row count is over the press's own feeds, the same door as its other four counts, and no conductor count is the all-feed one (D-4660; D-2574; D-4614) | `api::pullrun::tests::the_row_count_runs_off_the_worker_and_a_panic_is_not_a_count` | ✓ |
 | MRG-16 | A refused instrument-month in a `sweep-all` walk writes exactly one `cli.sweep` "stored month refused", carrying feed, label, identity, swept and reason, and the walk writes one tally (D-4661; D-2643; D-3205) | `a_month_refused_before_sweeping_is_logged_with_its_reason`, `a_walk_whose_swept_month_could_not_be_filed_says_it_swept` in `crates/cli/src/batch.rs`, `a_walk_with_a_refused_month_logs_it_and_exits_failed` in `crates/cli/src/batch_stored_tests.rs` | ✓ |
+| MRG-17 | A merge keeps every check of both sides running. Gate 0 compiles, no IST offset is re-typed outside its authorities, every cited decision heads an entry, the census pins the 210-row surface, the live-route ceiling test holds its views open, and the refused-run log test asks a basket its masters can map (D-4662; D-3512; D-3504; D-3507; D-2641; D-2759) | `browser_findings` self-tests in `.github/source_scan.rs`, `crates/core/tests/one_ist_offset.rs`, `crates/core/tests/citations.rs`, `census::tests::the_axis_docs_do_not_say_the_surface_is_two_indices`, `livejson::tests::the_live_route_answers_at_its_ceilings_and_refuses_past_them`, `server::tests::a_run_refused_before_it_starts_is_logged_with_its_reason` | ✓ |
 
-### Audit integration `intl` (D-4487 to D-4489, D-4509 to D-4519)
+### Audit integration `intl` (D-4487 to D-4489)
 
 | ID | Invariant | Proven by | Status |
 |---|---|---|---|

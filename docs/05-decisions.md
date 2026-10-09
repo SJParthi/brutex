@@ -73733,3 +73733,65 @@ written. MRG-16.
   handle slot, for clippy's `needless_pass_by_value` (D-4626).
 - Theirs' empty-universe autopilot test passes `round` the stop epoch that
   ours' `round` takes (D-2695).
+
+### D-4662 — Six checks the merge of `8102ca76` failed, each fixed where it broke — 2026-10-09
+
+**What the checks found.** The test run and the static gates on `1d98ec9c`
+(the merge of the audit's paused head) failed six checks no textual conflict
+had marked. Each is one side's rule meeting the other side's code:
+- **Gate 0 did not compile.** `.github/source_scan.rs` gained a `licensed`
+  argument on `browser_findings` on one side, and a self-test on the other
+  side still called it with one argument. The call passes `&[]`, the same
+  as the other self-tests that want no licensed loader.
+- **Gate 0's self-tests then refused two inputs.** First, the browser word
+  list carried P15-10's bare `"fetch("` (D-2517) beside srust-1's
+  boundary-read `fetch(` check (D-4490), so `prefetch(x)` in prose was
+  refused. The bare word is dropped. The boundary check refuses every
+  `fetch(` call, with or without `await`. Second, D-3511's self-test passed
+  `echo "use sed here"`, which D-4493 refuses as a word and names as the
+  cost. This one fails on the audit's `8102ca76` as well. The case now pins
+  both halves: D-3511's form reading treats the quoted word as text, and
+  D-4493's word rule refuses it.
+- **Gate 11 rule 6.** The trade-reader cache that D-4655 split searched
+  `kept` with `.iter().position(`. Both searches go through `slot_of`, a
+  plain loop over a vector `TRADE_READERS_KEPT` bounds, as the audit's
+  `page_through` was written.
+- **`core/one_ist_offset` (D-3512).** `api::calendar_of::minute_stamp`
+  re-typed the IST offset as a private `const`. It now reads
+  `pull::session::IST_OFFSET_SECS`, as `ist`, its inverse in the same file,
+  already did.
+- **`core/citations` (D-3504, D-3520).** Four citations named numbers that
+  head no entry. Two `attack_decoder.rs` headers cited `D-3150..D-3159`, but
+  the run ends at D-3158 (D-3154 was never written). Two `docs/04` section
+  headings named the ranges the audit reserved, `D-4500 to D-4519` and
+  `D-4509 to D-4519`, but `D-4509..D-4519` head nothing yet. Each now names
+  the entries that exist, as D-3504 did for `D-2710 onward` and
+  `D-1600..D-1619`. When the audit writes D-4509 onward, its headings can
+  name them again.
+- **`census::tests::the_axis_docs_do_not_say_the_surface_is_two_indices`
+  (D-2570).** Its second half pinned two swept rows and no equity. D-3507,
+  whose code the merge kept (D-4656), seeds all 210. The first half (no stale
+  surface claim in the docs) is kept. The second half now pins 210 rows,
+  2 indices and 208 shares, all NSE with no contract.
+- **`livejson::tests::the_live_route_answers_at_its_ceilings_and_refuses_past_them`
+  (D-4437).** Its fixture opened each `Live`, published it and dropped it.
+  D-2641 made a dropped `Live` remove its own file, so the route saw an
+  empty store (`"count":0`). `full_live_store` now returns the open views,
+  and the test and the latency measurement hold them while they read.
+- **`server::tests::a_run_refused_before_it_starts_is_logged_with_its_reason`
+  (D-4450).** It asked for `target=swept` with masters holding NIFTY alone.
+  D-2759's swept mapping gate refused the whole-surface basket with a 422
+  before the day pass was read, so the 409 it expects never came. It asks
+  `member=NIFTY`, which is the D-4612 trap again.
+
+No rule is widened. Every one of these checks still runs and still refuses
+what it was written to refuse. MRG-17.
+
+**Not fixed here, and why.** Gates 1d, 12, 21 and 23 still refuse four sets
+of sites the audit's `8102ca76` brought. That head refuses the same sites
+when only its failing Gate 0 self-test is set aside:
+- 1d: two undeclared test literals in `crates/pull`.
+- 12: two cost claims that name no proof.
+- 21: two telemetry file-open sites.
+- 23: ten print sites.
+They belong to the audit's own open items and land with its final integration.

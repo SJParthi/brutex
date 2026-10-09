@@ -4,7 +4,7 @@
 //!
 //! Fixed-seed splitmix64 throughout, so a rerun is byte identical. Every case
 //! asserts a value or a refusal; a panic is itself the failure. `DPD-`
-//! invariants, D-3150..D-3159.
+//! invariants, D-3150..D-3158.
 
 #![allow(
     clippy::expect_used,
