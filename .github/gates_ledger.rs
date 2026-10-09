@@ -479,6 +479,11 @@ fn row_id(line: &str) -> Option<&str> {
         return None;
     }
     let after = after.strip_prefix('`').unwrap_or(after);
+    // D-3503: `| ID — claim |` shares the cell with its claim and is a row.
+    let after = [" — ", " – ", ": "]
+        .iter()
+        .find_map(|sep| after.strip_prefix(sep))
+        .map_or(after, |_| "|");
     after
         .trim_start_matches(' ')
         .starts_with('|')
@@ -2579,6 +2584,26 @@ mod tests {
         let (ok, text) = g27(&long);
         assert!(!ok);
         assert!(text.contains(&format!("      1:| A-10 | {}\n", "x".repeat(99))));
+    }
+
+    #[test]
+    fn gate27_reads_an_id_that_shares_its_cell_with_the_claim() {
+        // D-3503 (ONEAUTH-04): 17 rows wrote `| AU-O1STORE-2 — **claim** |`,
+        // the reader wanted `|` after the id, and a second row with the same
+        // id passed in either shape.
+        let doc = "| AU-O1STORE-2 — **a** | t | ✓ |\n| AU-O1STORE-2 | b | t | ✓ |\n";
+        let (ok, text) = g27(doc);
+        assert!(!ok);
+        assert!(text.contains("AU-O1STORE-2"), "{text}");
+        assert_eq!(
+            row_id("| `AU-PROBESTORE-7a` — **x** |"),
+            Some("AU-PROBESTORE-7a")
+        );
+        assert_eq!(row_id("| C-1 x |"), None);
+        assert_eq!(row_id("| C-1 -- x |"), None);
+        assert_eq!(row_id("| C-1 —x |"), None);
+        assert_eq!(row_id("| C4-RUNNER-01: claim |"), Some("C4-RUNNER-01"));
+        assert_eq!(row_id("| C-1:x |"), None);
     }
 
     #[test]

@@ -66459,3 +66459,389 @@ returning, as the install refusal already did. OBSV-11.
 
 **Rejected.** Refusing the whole batch louder. The siblings' bars are on disk
 and their rows are sound; dropping them is the loss, not the noise.
+
+### D-3500 — Gate 0's spawn scan refuses the constructor reached by another spelling — 2026-10-06
+
+**What was observed.** Lens L4 (one authority) built `.github/source_scan.rs`
+at `969493e` and handed `spawns` five one-line files that each start `sh`:
+a `type` alias of `std::process::Command`, the qualified
+`<std::process::Command>::new`, `Command::new` taken as a value
+(`let f = Command::new; f("sh")`), `["sh"].map(Command::new)`, and an
+`impl .. for Command` whose `Self::new("sh")` is the constructor. Each exited
+0. The scan read only the literal `Command :: new (` token run, so the
+argument of every other spelling was never read. Gate 2 refuses the ident
+`Command` in a build script outright, but crate code outside `build.rs` had
+only this scan, and gate 1e's PATH stubs see only what a build or test
+actually runs.
+
+**Decided.** `spawn_findings` asks `hidden_constructor` about every `Command`
+token first, and refuses: `Command :: new` not followed by `(`; `Command >`
+followed by `::`; `for [path ::] Command` followed by `{` or `where`; and any
+statement opening with `[pub [(..)]] type` that holds the token. Each refusal
+names the spelling. Type positions crate code uses (`&mut Command`,
+`-> Command`, `Option<Command>`, `Vec::<Command>`, a field, a `use` group, and
+every impl of a file's own `enum` or `struct Command`) stay clean; the whole
+tree is clean under the widened scan. Round 3 (D-3515) added the attribute-led
+alias, the turbofish `Command::<>::new`, `impl .. for (Command)` and
+`Command<>`, and `<$c>::new` in a macro. Proved by
+`a_spawn_through_another_spelling_of_the_constructor_is_refused`, which failed
+first on the type-alias line.
+
+**Not closed.** A constructor reached through a macro that builds the path
+from fragments, or through a trait method on another type that returns a
+`Command`, is still not read; gate 1e's runtime stubs remain the second signal.
+
+### D-3501 — A manifest comment naming a banned crate says it is banned — 2026-10-06
+
+**What was observed.** `crates/pull/Cargo.toml` said rustls "reaches `ring`
+0.17.14", that `nm target/release/api` shows "72 `ring_core` symbols", and that
+"the binary is not free of C: `ring` arrives through the `reqwest` line". D-0211
+removed `ring` (the `-no-provider` feature and `rustls-graviola`) and D-0212
+banned it in `deny.toml`. `cargo tree --workspace --locked -i ring --target all`
+prints nothing on `969493e`; `ring` keeps only a `Cargo.lock` entry for an
+optional edge. The coordinator's Rust-only scan raised it; L4 reproduced it.
+
+**Decided.** The two `pull` paragraphs now state the current provider and the
+ban, and `lake`'s `encryption` sentence says `deny.toml` bans `ring`. `deny.toml`
+is the one authority on which native crates may build, so
+`core/tests/graph.rs` reads its `[bans] deny` list and refuses any run of
+manifest comment lines that names a banned crate in backticks without saying
+`deny.toml` (`a_manifest_comment_naming_a_banned_crate_says_it_is_banned`). On
+the old manifests it named five mentions: `lake/Cargo.toml:10 ring`,
+`pull/Cargo.toml:89 ring`, and `pull/Cargo.toml:115` `aws-lc-rs`,
+`aws-lc-sys`, `ring`.
+
+**Rejected.** A test that the resolved graph holds no banned crate: that is
+`cargo deny check`'s job already (D-0212), and a test cannot run cargo
+(D-2344). The defect here was the prose, not the graph.
+
+### D-3502 — `CLAUDE.md` §5 and `AGENTS.md` §5 are checked against the manifests — 2026-10-06
+
+**What was observed.** `docs/06-limits.md` ("The hand-drawn crate graphs are
+checked by nothing — D-0683") recorded that `cli`'s `pull` and `vocab` arrows
+were missing from the law's picture for three weeks while the checked
+`docs/01-architecture.md` table carried both, and that a check deriving the
+pictures from the manifests was "still not built". Lens L4's scope (d) names
+it.
+
+**Decided.** `core/tests/graph.rs` reads the first fenced block of `## 5.` in
+`CLAUDE.md` and `AGENTS.md`: `depends on NOTHING a · b` gives each root no
+arrows, `x y <-- a · b` gives each consumer `{x, y}`, a consumer drawn twice is
+refused, and the drawn map must equal the thirteen manifests' declared
+workspace dependencies both ways
+(`the_law_pictures_of_the_graph_are_the_manifests`). Dropping `vocab` from
+`cli`'s row in `CLAUDE.md` turns it red. §5's sentence "nothing parses this
+block as a whole" is replaced in both files; this entry is that edit's
+authority. The ASCII diagram above `docs/01-architecture.md`'s table is still
+unparsed.
+
+### D-3503 — Gates 10b and 27 read an id that shares its cell with the claim — 2026-10-06
+
+**What was observed.** Seventeen rows of `docs/04-invariants.md` write the
+id and the claim in one cell, `| AU-O1STORE-2 — **…** | proof | ✓ |`
+(AU-PROBEAPI-6, AU-O1CLI-2..6, AU-O1ENGINE-22..24 and -40, AU-O1STORE-1..2,
+AU-PROBESTORE-4..6, -7a, -7b). `invariant_id` in `.github/gates_tree.rs`
+(gate 10b) and `row_id` in `.github/gates_ledger.rs` (gate 27) take an id only
+when `|` follows it, so these seventeen were never counted and a second row
+with any of their ids passed both gates. D-1185 cites "Invariant
+AU-O1STORE-2", which therefore resolved by eye only.
+
+**Decided.** Both readers take ` — ` (space, em dash, space) after the id as
+the end of the id, exactly like `|`; `| I-1 x |`, `| I-1 - x |` and an em dash
+without the spaces still read nothing. Proved by
+`gate_10b_reads_an_id_that_shares_its_cell_with_the_claim` and
+`gate27_reads_an_id_that_shares_its_cell_with_the_claim`, each red on the old
+reader. The seventeen ids are unique today, so both gates stay green.
+
+**Rejected.** Rewriting the seventeen rows into the four-column shape: it
+reorders cells gate 10 reads for the proof and status, and the next author
+would write the shape again with nothing refusing it.
+
+### D-3504 — Every cited decision heads an entry; every cited `I-` invariant has a row — 2026-10-06
+
+**What was observed.** `docs/06-limits.md` (D-0684) records that gate 27b
+checks uniqueness only: "A number that heads nothing is not reported." Lens L4
+resolved every `D-NNNN` in the tracked tree outside `web/` against the
+ledger's headings and found, besides the known D-0051 and D-0676 and the
+gate-test fixture D-1234, two dangling citations: `docs/04-invariants.md`'s
+heading "Fixboard numeric passes 5 and 6 (D-2710 onward)" (the run starts at
+D-2712) and `.github/source_scan.rs`'s "audit-20261003 (D-1600..D-1619)" (the
+run ends at D-1614). `crates/core/src/vendor.rs` cited invariant `I-41`; the
+`I-` rows ended at `I-39`.
+
+**Decided.** The heading reads D-2712, the range D-1614, and `I-41` gets the
+row its test always proved. `crates/core/tests/citations.rs` walks the root
+documents and manifests, `docs/` but the ledger, `.github/` and `crates/`, and
+fails on any `D-NNNN` that heads nothing unless it is one of three named
+unwritten numbers, each with its reason; it fails on any `I-` id cited under
+`crates/` with no row. On `0edc1a0` it named D-2710, D-1619 and I-41.
+
+**Not closed.** Other invariant prefixes (`C-`, `X-`, `AF-`, …) cited in code
+are not resolved: the same shapes name findings, fixtures and retired rows,
+and no reader yet tells them apart.
+
+### D-3505 — `pull::rolling::shift_six` rounds a negative tie by core's half-up rule — 2026-10-06
+
+**What was observed.** `shift_six` (the implied-volatility reader) says it
+rounds "half-up at the seventh decimal, which is the same rule `CLAUDE.md` §7
+gives for snapping a price — one rounding rule for the whole product". The one
+authority for that rule is `core::price::Paisa::from_rupee_text_half_up`, which
+sends a tie toward positive infinity (`-14.5` is `-14`). `shift_six` added one
+to the magnitude whenever the seventh digit was 5 or more and negated after,
+so `-0.0000005` read as `-1` millionth where the rule gives `0`.
+
+**Decided.** For a negative value the magnitude grows only past the tie (a
+seventh digit above 5, or 5 with a nonzero digit after it); positive values are
+unchanged. `a_negative_tie_rounds_by_the_one_rule_core_gives_a_price` pins six
+named cases and compares 3,100 texts (both signs, two whole parts, fractions of
+seven to nine digits) with core's function applied to the text with the point
+moved four places; it failed first on `-0.0000005`.
+
+**Effect on stored bytes.** Only a vendor implied volatility that is negative
+and an exact tie at the seventh decimal reads differently; files written before
+keep their bytes (append-only), and a re-pull of such a row writes the
+corrected millionth.
+
+### D-3506 — One function builds each shared results path — 2026-10-06
+
+**What was observed.** `results/population-write.lock`, the one lock every
+population, admission, execution and Selection V4 writer and joined reader
+holds, was built in six places: a private `lock_path` in
+`execution_capability.rs`, `admission_store.rs`, `execution_disposition_v2.rs`
+and `population.rs`, and inline in `selection_v4_authority.rs` and
+`admission_join.rs`. `results/runs.bin` was built by
+`cli::results::Results::path` and again by `api::backtest::path_in`. All
+agreed, and nothing kept them agreeing: a renamed lock in one writer would lock
+a file no other writer locks while every write still succeeded. The refuter
+found no divergence today and confirmed nothing guarded it (`unguarded`).
+
+**Decided.** `cli::population::population_write_lock` is the one construction
+of the lock path and the five other sites call it; `api::backtest::path_in`
+calls `Results::path`. `cli/tests/one_path_authority.rs` counts each
+`.join("…")` construction across every crate's `src/` and requires exactly one,
+in its owner's file; it named the six lock sites before the change.
+
+### D-3507 — `InstrumentKey::swept_surface` enumerates the engine surface; `/store` names all 210 — 2026-10-06
+
+**What was observed.** D-0048 makes the `/store` coverage axis "the union of
+what the censuses hold and what the engine sweeps", so a swept instrument the
+store lacks is still a row. D-0506 and D-0682 widened the sweep to the 208 F&O
+shares, and `api::census::swept_series` kept `["BANKNIFTY", "NIFTY"]`, its doc
+quoting a §1 that no longer says it: on an empty store `/store?show=gaps`
+showed two rows, and a swept share nobody had pulled had no row anywhere. Core
+offered `is_sweepable` (a yes or no) but no enumeration, so a caller that
+needed the list wrote its own. Five `api` comments still called the surface "a
+two-element table", "a TWO-ROW table" or "two instruments".
+
+**Decided.** `core::instrument::InstrumentKey::swept_surface` yields the two
+`SWEPT` indices and then each NSE cash equity of `FNO_UNDERLYINGS`, every
+candidate filtered through `is_sweepable`;
+`the_swept_surface_is_exactly_what_is_sweepable_admits` compares it with the
+predicate over every index and cash key the universe can spell on both
+exchanges. `swept_series` maps it, and `held_series` sorts the axis it joins.
+An empty store's gaps view is now
+210 rows × 36 months = 7,560 cells over 38 pages of 200; the indices sort
+first, so page 1 still opens on them. Nine tests that encoded the two-row
+axis were re-derived (grid rows 360 → 7,848, page counts, the clamp's last
+page) and `A-18` restated. The comments are corrected.
+
+**Cost.** `held_series` stays O(keys log keys) (`docs/06-limits.md` §32) with
+210 more keys; a page still renders 200 cells.
+
+**Not changed.** The `web/` comments that say 213 equities
+(`web/src/routes/terminal/+page.svelte`, `web/src/lib/terminal.svelte.js`) are
+left: a comment edit rebuilds hashed `web/build` chunks Gate W1 compares, and
+that churn belongs with the next `web/` change.
+
+### D-3508 — Gate 1 refuses a committed cargo-mutants marker in any tracked file — 2026-10-06
+
+**What was observed.** Commits 92bcd1a and 99d8217 on `pr74/g18-rest`
+carried a live mutation out of an `--in-place` cargo-mutants run:
+`crates/telemetry/src/tail.rs:503` read `while pos >= /* ~ <marker> ~ */ 0`,
+an endless loop (repaired in 0d8c386). The marker is the text cargo-mutants
+writes into every line it mutates, "changed by cargo-" followed by
+"mutants". No language-purity gate read for it, so only the slow test and
+mutation jobs could have stopped it, and an endless loop stops them by timing
+out. The coordinator raised it to lens L4.
+
+**Decided.** `source_scan content` (gate 1) refuses any tracked file outside
+`web/` that holds the marker, naming the line. The needle is the constant
+`MUTANT_MARKER`, held in two pieces so the tool's own source does not hold it
+whole, and no tracked file may spell it whole either (this entry splits it).
+`a_live_mutation_marker_is_refused_in_any_tracked_file` failed first on the
+`tail.rs` shape; planting the marker on that line and running the gate 1 step
+exited 1 naming `crates/telemetry/src/tail.rs:503`.
+
+### D-3509 — `CLAUDE.md` §10 is compared with the files under `docs/` — 2026-10-06
+
+**What was observed.** §10 is the one statement of which documents bind. It
+listed eight documents while fourteen existed (D-0212 item 5) and then said
+"all fourteen are listed now" while 25 more existed (D-1764), each found by a
+reader rather than a check; `CLAUDE.md` itself records that "nothing checks
+this file". A new `docs/36-…` today would sit outside both the table and the
+"`docs/12-` to `docs/35-`" sentence with every gate green.
+
+**Decided.** `crates/core/tests/citations.rs` reads §10's table rows and the
+range its "hold no authority" sentence names, requires every row to name an
+existing file, and requires every `.md` under `docs/` to be a row, a numbered
+report inside that range, or under `docs/research-policy/`
+(`every_document_is_classified_by_the_law`). Planting `docs/36-probe.md` turns
+it red. No law text changes: the table, the range and the files agree today.
+
+### D-3510 — Gates 1g and 2 refuse every door to a nightly toolchain — 2026-10-06
+
+**What was observed.** Gate 1g allowlisted the keys of `rust-toolchain.toml`
+and never read `toolchain.channel`'s value, so `"nightly-2026-09-01"` passed.
+`RUSTC_BOOTSTRAP: 1` in a workflow (which turns the pinned stable cargo into a
+nightly one) and `cargo +toolchain` were refused by no gate. Once nightly is
+on, four manifest keys run code cargo picks and no gate read them:
+`cargo-features`, `profile.*.rustflags` (a linker, or `overflow-checks=off`
+past gate 25, which reads only the `overflow-checks` key),
+`profile.*.codegen-backend`, and `package.metabuild` (a build-dependency run as
+a build script, with no `build.rs` for gate 2 to see). The refuter reproduced
+every part on a clone: gates 0, 1g, 13 and 25 all printed OK, and stable
+`cargo metadata` accepted the manifest with `RUSTC_BOOTSTRAP=1`.
+
+**Decided.** Gate 1g refuses a `toolchain.channel` that is not a quoted run of
+one to three dot-separated digit groups (`"1.97.1"`), and its environment-name
+list gains `RUSTC_BOOTSTRAP` and `__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS`;
+its other-door rule refuses `cargo +…`. `source_scan build-keys` prints
+`package.metabuild`, `cargo-features` and any `profile.…rustflags` or
+`profile.…codegen-backend` leaf, so gate 2 (which refuses every line it prints)
+and gate 13 layer 3 refuse them in every TOML spelling. Proved by
+`gate_1g_refuses_every_door_to_a_nightly_toolchain` and
+`a_nightly_only_manifest_key_is_a_build_key`, both red first.
+
+**Needs the owner.** `auto-merge.yml`'s sensitive-path list covers `.github/`,
+`CLAUDE.md` and `CODEOWNERS`, not `rust-toolchain.toml` or `Cargo.toml`, so a
+change to those two alone auto-merges on green CI. Whether they need a
+code-owner review is a policy choice, not a gate defect; UNVERIFIED that it is
+wanted.
+
+### D-3511 — Gate 0 refuses a program run through sed, make, git, find, env or xargs — 2026-10-06
+
+**What was observed.** Gate 0's inline-program reading knew interpreters by
+name. A workflow step could still run a program written inline or assembled at
+run time through tools that are not on that list: GNU sed's `e` command and
+the `e` flag of `s` (`sed "s/.*/$PROG/e"`), `make --eval`, a git `!` alias
+(`git -c alias.x="!$PROG" x`), `find -exec "$PROG"`, `env -S "$PROG"`, and
+`xargs -I{} sh -c '{}'` (a shell's `-c` program that is each input line). The
+refuter ran twelve such lines through `source_scan workflow`; ten passed. And
+gate 12's step still piped the scanner's `fns` output through an inline
+`sed -E` program, which D-2315 calls a second language in a tracked file.
+
+**Decided.** `inline_programs` reads, over the whole unsplit line,
+`runner_programs`: a `sed` script any of whose commands is `e` or an `s` with
+an `e` flag, `make -E`/`--eval`, `git -c alias.…`/`git config alias.…` with a
+`!` value, `find -exec`/`-execdir`/`-ok`/`-okdir` of a `$` word, and `env
+-S`/`--split-string`; a shell's `-c` program holding `{}` counts as assembled
+at run time. Round 3 (D-3515) found that reading sed scripts leaks (attached
+`-e`, `{` blocks, `I` address flags, `\%re%` addresses, `-f -`), so `sed`,
+`make`, `rustup`, `git -c`, `git --config-env` and `git config` — none used by
+any workflow — are refused outright, `env -S` in any flag cluster, and an
+`xargs -I R` whose shell `-c` program holds `R`. `find … -exec rustfmt {} +`,
+gate 6d's `xargs -I{} env {}` and gate 0's own `xargs … "$tool"` stay clean. Gate 12 reads `FILE:LINE:name` through
+`gates-ledger path-declarations`, the reading gate 10 already uses, so no
+inline `sed` program remains in a workflow. Proved by
+`a_program_runner_that_is_not_an_interpreter_is_refused`, red first.
+
+**Not closed.** `xargs "$tool"` and `find -exec "$tool"` cannot be told from a
+hostile `$PROG` by text alone; a named program in a variable is the D-2344
+limit gate 0 already records.
+
+### D-3512 — The IST offset is spelled only by its authorities — 2026-10-06
+
+**What was observed.** `pull::session::IST_OFFSET_SECS` is pinned to
+`store::path::IST_OFFSET_SECS`, and `indicators::IST_OFFSET_MICROS` documents
+itself as "one definition, three crates". Production code re-typed the offset
+as a bare literal in seven places, each agreeing today and none tied to an
+authority: `indicators/src/orb.rs` (a private `IST_OFFSET_MICROS`),
+`pull/src/gaps.rs` (a private `IST_OFFSET_SECS` inside `ist`),
+`cli/src/boolean_oos_reader.rs` (two), `cli/src/boolean_qualification_reader.rs`
+and `runner/src/expression_oos.rs` (two).
+
+**Decided.** Each names an authority it may depend on: `indicators` its own
+constant, `pull` `session`'s, `cli` and `runner` `indicators::IST_OFFSET_MICROS`.
+`crates/core/tests/one_ist_offset.rs` walks every crate's `src/`, skips
+`*_tests.rs` and each column-0 `#[cfg(test)] mod` (past multi-line
+attributes), and refuses any spelling of 19,800 seconds outside the three
+definitions and `session`'s pin; it listed the seven sites before the change.
+Round 3 (D-3515) found the first reader stopped at an indented
+`#[cfg(test)]` statement and missed `api/src/bars.rs` (two, spelled
+`5 * 3600 + 1800`), `api/src/calendar_of.rs` (two) and
+`runner/src/expression_validation.rs`; those name the authority now too. Test
+fixtures keep their literals.
+
+### D-3513 — `pull::ssm` dates its SigV4 stamp with `telemetry::civil_from_days` — 2026-10-06
+
+**What was observed.** `pull/src/ssm.rs` carried a private Hinnant
+`civil_from_days` whose comment said `pull` "does not take `costs`, and
+`docs/01-architecture.md` gives it `core` and `store` only" — false since
+D-0206 (`costs`), D-0217 (`greeks`) and the `telemetry` arrow. Nothing tested
+it: its only caller, `now_stamp`, reads the clock and runs only against real
+AWS.
+
+**Decided.** `now_stamp` calls a pure `stamp_of(secs)` built on
+`telemetry::civil_from_days`, and the private copy and its comment are gone.
+`the_amz_date_is_the_civil_stamp_of_the_clock` pins the epoch, both ends of a
+leap day, 2000-02-29, the last second of 2100-02-28 (a century year that is
+not a leap year), and a known instant.
+
+**Not closed.** About a dozen other civil-date conversions remain (`costs`,
+`store`, `pull::session`, `cli` and `indicators` test helpers among them).
+Several are forced by the graph — `indicators` may depend on `vocab` alone
+(gate 22), and `costs` and `store` do not depend on `telemetry` — so a single
+authority would have to live in `core`. Recorded in `docs/06-limits.md`.
+
+### D-3514 — The backtest chart's month presets use the 375-minute session — 2026-10-06
+
+**What was observed.** `web/src/routes/backtest/+page.svelte` computed a
+month as `Math.round((555 * 60) / secs) * 21` bars while its doc said "a
+6.25-hour session". 555 is the minute of the 09:15 open past IST midnight; a
+regular session is 375 one-minute bars (`pull::session::BARS_PER_REGULAR_SESSION`).
+Every preset spanned about 1.48 times its label: at one minute "1M" was 11,655
+bars against 7,875, so "3M" showed about 4.4 months.
+
+**Decided.** `web/src/lib/presets.js` holds `barsPerMonth`: a session's bars
+at the rung, rounded up as the fold counts a short last bucket, times 21, one a
+session at daily and wider, and zero for a rung with no length.
+`web/tests/backtest-presets.test.js` pins the fold's per-session counts (375,
+188, 75, 38, 25, 13, 7) from `pull/tests/anchor.rs`; it failed first because
+the module did not exist. `web/build` is rebuilt (Gate W1), with the deferred
+`web/` comments of D-3507 (213 equities, now 208) in the same build.
+svelte-check stays at 0 and W2's 870 tests pass.
+
+**Not closed.** The 375 is a copy in the browser of a fact the api does not
+serve; serving `BARS_PER_REGULAR_SESSION` would make it one authority.
+
+### D-3515 — Round 3 of lens L4: the lens's own gates, attacked and corrected — 2026-10-06
+
+**What was observed.** A fresh-eyes adversarial review of D-3500..D-3514
+proved each new gate leaky or wrong in places, by running the tools on crafted
+input: the spawn scan passed `#[allow(..)] type C = Command;`,
+`Command::<>::new`, `impl .. for (Command)`, `Command<>` and `<$c>::new` in a
+macro, and refused `Vec::<Command>` and a local `enum Command`'s `Display`
+impl; gate 0 passed eleven sed, git, env, make and xargs forms (each run and
+seen to execute); gate 1g passed `"cargo" +nightly`, `cargo '+nightly'` and a
+`\` continuation; gates 10b and 27 still skipped six `| C4-RUNNER-0N: claim |`
+rows; the IST-offset test stopped at an indented `#[cfg(test)]` and missed
+five production sites; and `cli/tests/one_path_authority.rs` counted only
+`.join("runs.bin")`.
+
+**Decided.** Each is closed in its own gate and proved by its test, the
+review's inputs added to the refused lists: the spawn scan reads past
+attributes, refuses the turbofish, the parenthesised and `<>` impl targets and
+the metavariable constructor, requires a qualified self `<` not preceded by
+`::`, and exempts impls in a file declaring its own `Command`; gate 0 refuses
+the six tools by name and the three forms by shape (D-3511); gate 1g reads
+`cargo +` with quotes removed and continuations joined; the id readers take
+` — `, ` – ` and `: `; the IST test skips only test modules (D-3512); and the
+path test counts any production string literal ending in either name, skipping
+test modules, with a planted `"x/results/runs.bin"` in `api` turning it red.
+
+**Recorded.** The D-0370 and D-0372 duplicate headings the coordinator asked
+about are D-0684's: issued twice on 2026-08-29, tabled there with subject and
+writing commit, kept because the ledger is append-only and citations name
+them, and pinned by gate 27b to exactly two headings each while every other
+number must head one. No change is needed; gate 27b is the gate that refuses
+duplicate decision ids.

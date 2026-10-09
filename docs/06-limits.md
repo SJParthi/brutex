@@ -9254,6 +9254,11 @@ from all three pictures, and `pull` from `CLAUDE.md`, until D-0683. A gate that
 derives the pictures from `cargo metadata --no-deps` would close this. D-0208
 recorded that option as open, and it is still not built.
 
+**Closed for two of the three pictures by D-3502.** `core/tests/graph.rs`
+parses the `CLAUDE.md` §5 and `AGENTS.md` §5 blocks and compares them with the
+thirteen manifests both ways. The diagram above `docs/01-architecture.md`'s
+table is still checked by nothing.
+
 ## Decision numbers are unique in one tree, not across unmerged branches — D-0684
 
 Gate 27b fails a tree in which a decision number heads more than one entry,
@@ -15009,7 +15014,11 @@ bounds are all nonzero.
   binds it, or the body of the `fn` it calls) and must name only
   `current_exe`, a `CARGO_BIN_EXE_*` path or a listed program; anything it
   cannot resolve is refused. A value threaded through two functions, a field,
-  or another file is not followed, and is refused rather than read. `sh` and
+  or another file is not followed, and is refused rather than read. D-3500:
+  a constructor reached by a `type` alias, `<Command>::new`, the value
+  `Command::new` or an `impl .. for Command` is refused; one reached through a
+  macro that assembles the path, or a trait method on another type returning a
+  `Command`, is still not read. `sh` and
   `bash` are now shadowed on gate 1e's PATH: git starts a shell by the absolute
   path it was built with, and `core`'s `findings` and `store`'s
   `cited_commits` tests ran on 2026-10-04 with both stubbed and invoked
@@ -16383,3 +16392,34 @@ states it). GAP16-26 is closed by D-1173 (money accumulated in `i64`/`i128`,
 one conversion to `f64` at the edge). ET-strategies-trades-ranking-costs-9 is
 the §72 text corrected by D-1448. rustonly-4 is `xdg-open` as the operating
 system's URL handler, kept by D-1202 and off with `BRUTEX_NO_OPEN`.
+
+## One-authority lens L4, round 2 — what is recorded rather than fixed — 2026-10-06
+
+- **Civil-date conversions are not one authority (D-3513).** Hinnant's
+  algorithm is written in `telemetry::clock`, `costs::day`, `store::path`,
+  `pull::session`, `cli::stored`, `cli::vix_reference`, `cli::stability` and
+  test helpers in `api` and `indicators`. `indicators` may depend on `vocab`
+  alone (gate 22), and `costs` and `store` do not depend on `telemetry`, so the
+  one authority would have to be in `core`. Each copy is tested where it lives;
+  no test compares them with one another.
+- **The eight-rung list is written by hand about twenty times** (the cost is
+  recorded above; the drift risk was not). `cli::EVERY_RUNG`,
+  `CALENDAR_POLICY_RUNGS_V2`, the `CANONICAL_RUNGS` of the selection and
+  replay versions, `runner::portfolio::SUPPORTED_RUNGS_MINUTES`, and the web's
+  `CAMPAIGN_RUNGS` are not tied to `store::path::Timeframe` by any test. Most
+  drift fails loudly (a rung is refused); the web's index-to-label lookups do
+  not.
+- **`sweep-all`, `pool`, `range-all` and `descend` restart from nothing after
+  an interruption.** Only `sweep-stored` (through `cli::and_checkpoint`) and the
+  expression and Boolean searches resume; `docs/20-sweep-resume.md` says the
+  others do not inherit it, without naming them. A rerun is safe (§3 rule 5) and
+  redoes every month or instrument. Making them resumable needs a per-unit
+  completion journal keyed by run identity — a design change, not a fix.
+- **`auto-merge.yml` reads CODEOWNERS with a text pipeline.** It takes every
+  `@word`, so an e-mail's domain, a mention in a trailing comment and a team's
+  organisation would each count as an approver, and the owners of all paths are
+  pooled. Latent: the file holds three lines, all `@SJParthi`, is read from the
+  base branch, and editing it is itself a sensitive change.
+- **`cargo +toolchain`, `RUSTC_BOOTSTRAP` and the nightly manifest keys are
+  refused by name (D-3510).** A spelling built at run time from pieces is the
+  limit gate 1g's environment-name rule already records.

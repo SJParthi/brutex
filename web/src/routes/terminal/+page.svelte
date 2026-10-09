@@ -91,7 +91,7 @@
   const tabs = $derived(tabsFrom(keys));
 
   /* STOCKS OPENS, because it is the tab the engine surface is ABOUT: section 1
-     names the 213 F&O cash equities as the thing being swept, and a future or
+     names the 208 F&O cash equities as the thing being swept, and a future or
      an option is stored and never swept. */
   let activeTab = $state('stocks');
   const tab = $derived(tabs.find((t) => t.id === activeTab) ?? tabs[0]);
@@ -303,8 +303,8 @@
        right one's shape, which is the defect this page exists to avoid.
 
      Therefore a quote-backed sort widens the fetch to the whole matching set,
-     and the set is bounded. 250 covers the engine surface — 213 F&O equities
-     plus the indices — and refuses anything pathological rather than firing
+     and the set is bounded. 250 covers the engine surface — 208 F&O equities
+     plus the two indices, 210 (D-0682) — and refuses anything pathological rather than firing
      an unbounded number of requests at a click. The quotes are cached per
      (feed, key, timeframe, month), so the cost is paid once per window and
      every later sort of the same window is free.

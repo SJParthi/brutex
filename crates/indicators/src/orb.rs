@@ -33,12 +33,12 @@
 //! is the caller's, because only the caller knows the rung; this module reports
 //! [`Orb::window_closed`] so the caller can abstain per run rather than per bar.
 
-use crate::Candle;
+// The crate's one IST offset (D-3512); this file kept a private copy.
+use crate::{Candle, IST_OFFSET_MICROS};
 use vocab::{ConditionMask, Tolerance};
 
 /// Minutes from IST midnight to the NSE open, 09:15.
 const OPEN_MINUTE: i64 = 9 * 60 + 15;
-const IST_OFFSET_MICROS: i64 = 19_800 * 1_000_000;
 const MICROS_PER_MINUTE: i64 = 60 * 1_000_000;
 const MINUTES_PER_DAY: i64 = 24 * 60;
 

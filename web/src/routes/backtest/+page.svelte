@@ -83,6 +83,7 @@
   import { feeds, selectFeed } from '$lib/feeds.svelte.js';
   import { readStoreCensus } from '$lib/store.svelte.js';
   import { censusFailure } from '$lib/store-census.js';
+  import { barsPerMonth } from '$lib/presets.js';
   import { refusalFrom } from '$lib/refusal.js';
   import { sweptSymbolOf } from '$lib/instrument.js';
   /* RENAMED ON IMPORT. This page's Run control owns a state object called
@@ -5600,17 +5601,15 @@
   /**
    * The presets, in bars, derived from the rung's own length.
    *
-   * A month is a different number of bars at every rung — roughly 1,375 at
-   * 30-minute and 21 at daily — so a preset list in BARS would mean a
-   * different span at each rung. These are computed from the rung's seconds
-   * against a 6.25-hour session, so "3M" is three months whatever the rung.
+   * A month is a different number of bars at every rung — 273 at 30-minute
+   * and 21 at daily — so a preset list in BARS would mean a different span at
+   * each rung. `barsPerMonth` computes them from the rung's seconds against a
+   * 375-minute session, so "3M" is three months whatever the rung (D-3514).
    */
   const presets = $derived.by(() => {
     const secs = rungSeconds(chartRung || openRun?.timeframe || '');
     if (!secs) return [];
-    // 555 minutes of session, 21 sessions a month — the same 555 the store's
-    // own alignment notes use.
-    const perMonth = secs >= 86_400 ? 21 : Math.max(1, Math.round((555 * 60) / secs) * 21);
+    const perMonth = Math.max(1, barsPerMonth(secs));
     return [
       { label: '1M', bars: perMonth },
       { label: '3M', bars: perMonth * 3 },

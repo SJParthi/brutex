@@ -2512,6 +2512,18 @@ struct PopulationPaths {
     receipt_v4: PathBuf,
 }
 
+/// `<root>/results/population-write.lock`, the one lock every population,
+/// admission, execution and Selection V4 writer and joined reader holds.
+///
+/// The only place this path is built (D-3506): four writers built it in a
+/// private `lock_path` and two readers inline, and a rename in one of them
+/// would have locked a file no other writer locks while every write still
+/// succeeded. `cli/tests/one_path_authority.rs` counts the construction.
+#[must_use]
+pub(crate) fn population_write_lock(root: &Path) -> PathBuf {
+    root.join("results").join("population-write.lock")
+}
+
 /// Open population row/receipt files and their in-memory exact indexes.
 #[derive(Debug)]
 pub struct PopulationLedger {
@@ -2578,7 +2590,7 @@ impl PopulationLedger {
     }
 
     fn lock_path(root: &Path) -> PathBuf {
-        root.join("results").join("population-write.lock")
+        population_write_lock(root)
     }
 
     /// Opens existing population files without creating any path.

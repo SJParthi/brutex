@@ -3530,7 +3530,8 @@ async fn tick(
         // This read `SpotTarget::Swept` under a comment saying *"SWEPT, AND IT
         // MEANS ALL OF THEM"*. **That sentence was false.**
         // `SpotTarget::names` resolves `Swept` to `InstrumentKey::is_sweepable`,
-        // which is a TWO-ROW table — `NSE-NIFTY` and `NSE-BANKNIFTY` — while
+        // which was then a TWO-ROW table — `NSE-NIFTY` and `NSE-BANKNIFTY`; it
+        // admits 210 since D-0506 and D-0682 (D-3507) — while
         // [`tracked_series`] and the completion probe both walk
         // `catalog::tracked`, the union of `INDEX` and `TOTAL_MARKET` at roughly
         // 765 rows.
@@ -3560,7 +3561,8 @@ async fn tick(
         //
         // # This does NOT widen the sweep, and cannot
         //
-        // `CLAUDE.md` §1 fixes the swept surface at two instruments. This target
+        // `CLAUDE.md` §1 fixes the swept surface at the two indices and the 208
+        // F&O shares (`InstrumentKey::swept_surface`, D-3507). This target
         // decides what is **stored**, which §1 explicitly permits to be wider —
         // it is the same distinction `SpotTarget::Indices` and `::Equities` have
         // always had. `InstrumentKey::SWEPT` is untouched, so nothing here
@@ -4189,7 +4191,8 @@ mod tests {
     ///
     /// The blocker this pins, and it is arithmetic rather than a race: the tick
     /// asked `SpotTarget::Swept`, which `names` resolves to
-    /// `InstrumentKey::is_sweepable` — a **two-row** table — while
+    /// `InstrumentKey::is_sweepable` — then a **two-row** table, 210 keys since
+    /// D-0506 and D-0682 — while
     /// [`tracked_series`] and the completion probe both walk `catalog::tracked`,
     /// roughly **765** rows. Two series were fetched and 765 were graded, so
     /// every month reported ~763 still short *forever*, `Settled::Complete` was
