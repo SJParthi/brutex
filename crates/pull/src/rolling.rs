@@ -389,6 +389,9 @@ pub enum RollingError {
         field: &'static str,
         /// The cell exactly as the vendor wrote it.
         text: String,
+        /// Why it is not a count, in words: a fraction, out of range, not a
+        /// number, negative, or the null sentinel (audit r64-4, D-4508).
+        why: &'static str,
     },
     /// A decimal cell that is present and cannot be read exactly — not text
     /// or a number, or a form the six-place shift does not read (an exponent,
@@ -416,6 +419,10 @@ pub enum RollingError {
         field: &'static str,
         /// The cell exactly as the vendor wrote it.
         text: String,
+        /// Why it is not a stamp, in words: a fraction, out of range, not a
+        /// number, the null sentinel, or microseconds past `i64` (audit
+        /// r64-4, D-4508).
+        why: &'static str,
     },
 }
 
@@ -473,11 +480,11 @@ impl core::fmt::Display for RollingError {
                  reads exactly. Refused rather than stored as the absence the \
                  vendor did not state"
             ),
-            Self::Uncountable { field, text } => write!(
+            Self::Uncountable { field, text, why } => write!(
                 f,
                 "a `{field}` cell holds {text}, which is not a non-negative whole \
                  count, or is i64::MIN, the store's open-interest null sentinel \
-                 (CLAUDE.md §7). Refused rather than stored as a zero, a \
+                 (CLAUDE.md §7): {why}. Refused rather than stored as a zero, a \
                  truncation or an absence the vendor did not state"
             ),
             Self::NotAPrice { field, text } => write!(
@@ -486,11 +493,11 @@ impl core::fmt::Display for RollingError {
                  and smaller than half a paisa. Neither is a price: stored, it \
                  would read as a negative or as a zero the vendor did not send"
             ),
-            Self::Unstampable { field, text } => write!(
+            Self::Unstampable { field, text, why } => write!(
                 f,
                 "a `{field}` cell holds {text}, which is not a whole number of \
-                 epoch seconds whose microseconds fit an i64. Refused rather than \
-                 filed at the epoch or saturated to the end of time"
+                 epoch seconds whose microseconds fit an i64: {why}. Refused \
+                 rather than filed at the epoch or saturated to the end of time"
             ),
         }
     }
@@ -862,26 +869,30 @@ fn optional<'a>(
 /// rule). It replaced `number`, which answered `0` — the epoch — for every cell
 /// it could not read (c4a-3, W1-pull3-7, D-1491).
 fn stamp(cell: Option<&serde_json::Value>, field: &'static str) -> Result<i64, RollingError> {
-    let refuse = || RollingError::Unstampable {
+    let refuse = |why: &'static str| RollingError::Unstampable {
         field,
         text: cell.map_or_else(|| "an absent cell".to_owned(), serde_json::Value::to_string),
+        why,
     };
-    let cell = cell.ok_or_else(refuse)?;
+    let cell = cell.ok_or_else(|| refuse("the cell is absent"))?;
+    // A WHOLE NUMBER WITH ANY NUMBER OF ZERO DECIMALS IS ACCEPTED (audit
+    // r64-4, D-4508). This read the text through `csv::paisa`, a two-decimal
+    // price reader, so `1700000000.000` was refused as unreadable while
+    // `1700000000.0` and `1.7e9` were accepted.
     let seconds = if let Some(whole) = cell.as_i64() {
         whole
     } else {
-        let number = cell.as_number().ok_or_else(refuse)?;
-        let hundredths = crate::csv::paisa(&crate::http::number_text(number).ok_or_else(refuse)?)
-            .ok_or_else(refuse)?;
-        if hundredths % 100 != 0 {
-            return Err(refuse());
-        }
-        hundredths / 100
+        let number = cell
+            .as_number()
+            .ok_or_else(|| refuse("it is not a number"))?;
+        crate::http::whole_number(number).map_err(|not| refuse(not.reason()))?
     };
     if seconds == i64::MIN {
-        return Err(refuse());
+        return Err(refuse("it is i64::MIN, the store's null sentinel"));
     }
-    seconds.checked_mul(1_000_000).ok_or_else(refuse)
+    seconds
+        .checked_mul(1_000_000)
+        .ok_or_else(|| refuse("its microseconds do not fit an i64"))
 }
 
 /// One count cell — open interest or volume — as a count, or a refusal naming it.
@@ -895,23 +906,25 @@ fn stamp(cell: Option<&serde_json::Value>, field: &'static str) -> Result<i64, R
 /// An open-interest `null` never reaches here: the caller reads it as the
 /// sentinel. A volume `null` does, and is refused (c4a-3, D-1491).
 fn count(cell: &serde_json::Value, field: &'static str) -> Result<i64, RollingError> {
-    let refuse = || RollingError::Uncountable {
+    let refuse = |why: &'static str| RollingError::Uncountable {
         field,
         text: cell.to_string(),
+        why,
     };
+    // Any number of zero decimals, as `stamp` reads them (audit r64-4, D-4508).
     let whole = if let Some(whole) = cell.as_i64() {
         whole
     } else {
-        let number = cell.as_number().ok_or_else(refuse)?;
-        let hundredths = crate::csv::paisa(&crate::http::number_text(number).ok_or_else(refuse)?)
-            .ok_or_else(refuse)?;
-        if hundredths % 100 != 0 {
-            return Err(refuse());
-        }
-        hundredths / 100
+        let number = cell
+            .as_number()
+            .ok_or_else(|| refuse("it is not a number"))?;
+        crate::http::whole_number(number).map_err(|not| refuse(not.reason()))?
     };
+    if whole == i64::MIN {
+        return Err(refuse("it is i64::MIN, the store's null sentinel"));
+    }
     if whole < 0 {
-        return Err(refuse());
+        return Err(refuse("a count is never negative"));
     }
     Ok(whole)
 }
@@ -1724,7 +1737,7 @@ mod tests {
             assert!(
                 matches!(
                     &got,
-                    Err(RollingError::Uncountable { field: "oi", text }) if text == cell
+                    Err(RollingError::Uncountable { field: "oi", text, .. }) if text == cell
                 ),
                 "{why}: {cell} gave {got:?}"
             );
@@ -1786,7 +1799,7 @@ mod tests {
         ] {
             let got = with_cells(&stamp, "1", "100.0");
             assert!(
-                matches!(&got, Err(RollingError::Unstampable { field: "timestamp", text }) if *text == stamp),
+                matches!(&got, Err(RollingError::Unstampable { field: "timestamp", text, .. }) if *text == stamp),
                 "{why}: {stamp} gave {got:?}"
             );
         }
@@ -1807,7 +1820,7 @@ mod tests {
         ] {
             let got = with_cells(&STAMP.to_string(), volume, "100.0");
             assert!(
-                matches!(&got, Err(RollingError::Uncountable { field: "volume", text }) if text == volume),
+                matches!(&got, Err(RollingError::Uncountable { field: "volume", text, .. }) if text == volume),
                 "{why}: {volume} gave {got:?}"
             );
         }
@@ -1829,6 +1842,79 @@ mod tests {
             .to_string();
         assert!(
             said.contains("`timestamp`") && said.contains("null"),
+            "{said}"
+        );
+    }
+
+    /// **A WHOLE NUMBER WRITTEN WITH ANY NUMBER OF ZERO DECIMALS IS READ, AND
+    /// EVERY REFUSAL SAYS WHY** (audit r64-4, D-4508).
+    ///
+    /// `7.000` and `1700000000.000` went through the two-decimal price reader
+    /// and were refused as unreadable while `7.0` and `1.7e9` were accepted.
+    #[test]
+    fn a_whole_number_with_three_or_more_zero_decimals_is_read_and_refusals_say_why() {
+        let zeros = format!("7.{}", "0".repeat(100_000));
+        let max = format!("{}.000", i64::MAX);
+        for (stamp, want) in [
+            (format!("{STAMP}.000"), STAMP * 1_000_000),
+            (format!("{STAMP}.0000000"), STAMP * 1_000_000),
+            ("-0.000".to_owned(), 0),
+            ("-19800.000".to_owned(), -19_800_000_000),
+        ] {
+            let rows = with_cells(&stamp, "1", "100.0").unwrap_or_else(|e| panic!("{stamp}: {e}"));
+            assert_eq!(rows[0].bar.ts_micros, want, "{stamp}");
+        }
+        for (volume, want) in [
+            ("7.000", 7),
+            ("7.0000000", 7),
+            (zeros.as_str(), 7),
+            ("-0.000", 0),
+            (max.as_str(), i64::MAX),
+        ] {
+            let rows =
+                with_cells(&STAMP.to_string(), volume, "100.0").unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(rows[0].bar.volume, want);
+        }
+        let rows = with_oi("12345.000").expect("a whole open interest");
+        assert_eq!(rows[0].bar.open_interest, 12_345);
+
+        let stamp_why = |stamp: &str| match with_cells(stamp, "1", "100.0") {
+            Err(RollingError::Unstampable { why, .. }) => why,
+            other => panic!("{stamp}: {other:?}"),
+        };
+        assert!(stamp_why(&format!("{STAMP}.5")).contains("fraction"));
+        assert!(stamp_why(&format!("{STAMP}.000001")).contains("fraction"));
+        assert!(stamp_why("9223372036854775808.000").contains("outside i64"));
+        assert!(stamp_why(r#""x""#).contains("not a number"));
+        assert!(stamp_why(&format!("{}.0", i64::MIN)).contains("null sentinel"));
+        assert!(stamp_why(&i64::MIN.to_string()).contains("null sentinel"));
+        assert!(stamp_why(&format!("{}.000", i64::MAX)).contains("microseconds"));
+
+        let volume_why = |volume: &str| match with_cells(&STAMP.to_string(), volume, "100.0") {
+            Err(RollingError::Uncountable { why, .. }) => why,
+            other => panic!("{volume}: {other:?}"),
+        };
+        assert!(volume_why("2.500").contains("fraction"));
+        assert!(volume_why("9223372036854775808.000").contains("outside i64"));
+        assert!(volume_why("null").contains("not a number"));
+        assert!(volume_why(&format!("{}.0", i64::MIN)).contains("null sentinel"));
+        assert!(volume_why(&i64::MIN.to_string()).contains("null sentinel"));
+        assert!(volume_why("-1.000").contains("never negative"));
+        assert!(volume_why("-1").contains("never negative"));
+
+        // The reason reaches the message an operator reads.
+        let said = with_cells(&STAMP.to_string(), "2.500", "100.0")
+            .expect_err("a fraction")
+            .to_string();
+        assert!(
+            said.contains("2.500") && said.contains("fraction"),
+            "{said}"
+        );
+        let said = with_cells(&format!("{STAMP}.5"), "1", "100.0")
+            .expect_err("a fraction")
+            .to_string();
+        assert!(
+            said.contains("fraction") && said.contains("timestamp"),
             "{said}"
         );
     }

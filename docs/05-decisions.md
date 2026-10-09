@@ -66596,3 +66596,50 @@ which never reached this tree.
 (eleven spacings and cases on an index row, a contract row and the trading
 symbol, a marker in the last bytes at the 64-byte gate, and near misses and real
 names that must stay kept); it fails on the raw scan.
+
+### D-4508 — A whole number with any number of zero decimals is a whole number; a fraction is refused by name — 2026-10-09
+
+**What was observed (audit `r64-4`, low).** Since D-1570 a JSON number carries
+the vendor's own digits. `rolling::stamp`, `rolling::count` and
+`http::one_number` read a non-integer number through `csv::paisa`, the
+two-decimal price reader, and kept it when the hundredths were a multiple of
+100. A whole number written with three or more decimals (`7.000`,
+`1700000000.000`, `-0.000`) was therefore refused as unreadable, while `7.0` and
+`1.7e9` were accepted (probe `zz_audit_r64_1`), against D-1491's "an integer or
+a whole-number decimal". The same reader multiplied by 100 first, so a whole
+number above `i64::MAX / 100` written with a point was refused too, and every
+refusal read "not a whole number" whatever the reason.
+
+**Decision.** One reader, `http::whole_number`, used by all three. It accepts
+an optional `-`, digits, an optional point followed by at least one digit, and
+an optional `e`/`E` exponent with an optional sign; it is a whole number when no
+non-zero digit lands after the point, at any exponent and with any number of
+zeros. It refuses by name, `NotWhole::{NotDecimal, Fractional, OutOfRange}`,
+and the reason reaches the refusal: `RollingError::Uncountable` and
+`RollingError::Unstampable` gain a `why: &'static str` field, and
+`one_number`'s message ends in the reason. An exponent past `i64` decides by
+its sign (a fraction below, out of range above) and a zero mantissa is zero at
+any exponent. O(text length) in one pass plus at most 19 digit steps; nothing
+is written for digits the exponent moves past the text.
+
+**What changes.** These cells, refused before, are now read: whole numbers
+with three or more zero decimals, `-0.000` (zero), and whole numbers between
+`i64::MAX / 100` and `i64::MAX` written with a point. `i64::MIN` written with a
+point (`-9223372036854775808.0`) is now produced by the reader and is refused
+as the null sentinel in all three callers; `one_number` checks it after both of
+its arms (its old comment said that arm could not produce it, and is amended).
+Fractions, text, booleans, nulls, negatives (for counts) and stamps whose
+microseconds overflow are refused as before, now with their reason. No stored
+format or digest changes: every value now accepted is the integer its text
+states.
+
+**Tests.** `pull::http::tests::a_whole_number_with_any_zero_decimals_reads_and_a_fraction_is_refused_by_name`
+(45 texts: `i64::MAX` and `i64::MIN` with zero decimals, `-0.000`, a hundred
+thousand zeros, exponents on, inside and past the digits and past `i64`, the
+one-past-`i64` neighbours, malformed exponents and points; and the same through
+`one_number` from JSON) and
+`pull::rolling::tests::a_whole_number_with_three_or_more_zero_decimals_is_read_and_refusals_say_why`
+(stamps, volumes and open interest with zero decimals; the reason for a
+fraction, an out-of-range whole, a non-number, the sentinel, a negative and a
+microsecond overflow, and in the displayed message). Both fail on the old
+readers.
