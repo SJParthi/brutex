@@ -2,6 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {settleComparison} from '../src/lib/bounded-comparison.js';
+import {codeOf,effects} from './page-code-fixture.js';
 const flush=()=>new Promise(resolve=>setImmediate(resolve));
 
 test('complete-frontier groups stay within two active reads and preserve independent refusals/order',async()=>{
@@ -27,8 +28,37 @@ test('invalid concurrency and already-cancelled work issue no requests',async()=
 });
 
 test('actual comparison is opt-in, bounded, aborted on close/replacement, and still reads complete frontiers',()=>{
- const page=readFileSync(new URL('../src/routes/backtest/+page.svelte',import.meta.url),'utf8');
- assert.match(page,/comparisonRequested = \$state\(false\)/);assert.match(page,/if \(comparisonRequested\) void fetchBoard\(rankableRuns\)/);
+ // MATCHED AGAINST CODE, NOT TEXT (P19-05, D-2564). Every comment is blanked
+ // first, so a pattern kept alive inside `/* … */` or `<!-- … -->` no longer
+ // satisfies it.
+ const page=codeOf(readFileSync(new URL('../src/routes/backtest/+page.svelte',import.meta.url),'utf8'));
+ assert.match(page,/comparisonRequested = \$state\(false\)/);
  assert.match(page,/settleComparison\(selected, 2,/);assert.match(page,/fetchCompleteFrontier\(run.identity, \(url\) =>\s*ask_\(url, \{ signal: controller.signal \}\)/);
- assert.match(page,/return \(\) => \{ boardSeq \+= 1; boardAbort\?\.abort\(\); \}/);assert.match(page,/Load saved prefix comparison/);
+ assert.match(page,/Load saved prefix comparison/);
+});
+
+test('the board effect is EXECUTED: it fetches only when asked, and its cleanup aborts and invalidates (P19-05)',()=>{
+ // The finding's mutation commented the cleanup out -- `/* return () => {…} */`
+ // -- and the old text match still passed. Here the page's own effect callback
+ // runs, so a cleanup that is not returned is a cleanup that is not there.
+ const source=readFileSync(new URL('../src/routes/backtest/+page.svelte',import.meta.url),'utf8');
+ const board=effects(source).filter(body=>body.includes('fetchBoard(rankableRuns)'));
+ assert.equal(board.length,1,'exactly one effect owns the comparison board');
+ const run=new Function('requested','controller',`
+  let comparisonRequested=requested,boardSeq=0,boardAbort=controller,board=null;
+  const rankableRuns=['row'],fetched=[];
+  const fetchBoard=(rows)=>{fetched.push(rows);};
+  const cleanup=(${board[0]})();
+  return {cleanup,fetched,seq:()=>boardSeq,board:()=>board};`);
+ for(const requested of [true,false]){
+  const controller=new AbortController(),app=run(requested,controller);
+  assert.deepEqual(app.fetched,requested?[['row']]:[],'fetched only when the operator asked');
+  assert.equal(app.seq(),requested?0:1,'closing invalidates at once');
+  assert.equal(controller.signal.aborted,!requested,'closing aborts at once');
+  if(!requested)assert.deepEqual(app.board(),{phase:'idle',groups:[],why:''});
+  assert.equal(typeof app.cleanup,'function','the effect returns its cleanup');
+  app.cleanup();
+  assert.equal(app.seq(),requested?1:2,'teardown/replacement invalidates every in-flight batch');
+  assert.equal(controller.signal.aborted,true,'teardown/replacement aborts the in-flight reads');
+ }
 });

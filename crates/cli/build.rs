@@ -67,6 +67,16 @@
 //! only when it is canonical, equals locally resolvable HEAD, and the index and
 //! working tree both equal that commit. A dirty build is deliberately
 //! unstamped: naming HEAD would claim that HEAD produced bytes it did not.
+//!
+//! # What the stamp proves, and what it cannot
+//!
+//! The tree is compared once, when this script runs. rustc reads `cli`'s own
+//! sources after the script exits, and Cargo may compile `cli`'s normal
+//! dependencies alongside it or after it, so a file saved during that window
+//! is compiled into a binary stamped with the clean HEAD it no longer matches.
+//! `rerun-if-changed` makes the NEXT build re-verify; it cannot reach the
+//! binary already linked. The stamp proves the tree as this script read it,
+//! not as rustc read it. conc:cli3-2, D-3602, `docs/06-limits.md`.
 
 mod build_provenance;
 mod commit_stamp;

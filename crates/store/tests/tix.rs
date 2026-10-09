@@ -589,3 +589,58 @@ fn an_index_damaged_under_a_live_writer_is_rebuilt_before_its_append() {
         assert_eq!(reader.first_at_or_after(bar.ts_micros), Ok(row as u64));
     }
 }
+
+#[test]
+fn a_torn_entry_under_a_live_writer_is_rebuilt_alone_and_the_answers_stay_exact() {
+    // D-3134. A failed append can tear only the entry of the last committed
+    // bar's bucket; the next append rebuilds THAT entry from its own bars, in
+    // a bounded number of reads, rather than the whole month (D-3302's
+    // O(n_valid)). Proved by an unrelated earlier entry, damaged on purpose,
+    // that the repair does not touch: a whole rebuild rewrites it clean.
+    let tf = Timeframe::MINUTE_1;
+    let bars = month_of(3, 375, 60);
+    let root = Root::new();
+    write(&root, tf, &bars, 375);
+    let mut writer = root.writer(tf);
+    assert_eq!(writer.time_lookup(), TimeLookup::Indexed);
+
+    let entry_at = |ts: i64| {
+        let slot = (ts - JUNE_START) / (60 * MICROS);
+        64 + usize::try_from(slot / 64).unwrap() * 16
+    };
+    let mut raw = fs::read(root.tix(tf)).unwrap();
+    let torn = entry_at(bars.last().unwrap().ts_micros);
+    raw[torn + 3] ^= 0x5A;
+    let untouched = 64; // bucket 0: June 1, 00:00 to 01:04 IST, holds no bar
+    raw[untouched] ^= 0xFF;
+    write_in_place(&root.tix(tf), &raw);
+    let damaged_early = raw[untouched..untouched + 16].to_vec();
+
+    let more: Vec<Bar> = (0..30).map(|k| bar(at(9, k * 60))).collect();
+    assert!(matches!(
+        writer.append(&more),
+        Ok(Appended::Committed { .. })
+    ));
+    drop(writer);
+
+    let after = fs::read(root.tix(tf)).unwrap();
+    assert_eq!(
+        after[untouched..untouched + 16],
+        damaged_early[..],
+        "only the torn entry and the append's own entries were written"
+    );
+    assert_ne!(
+        after[torn..torn + 16],
+        raw[torn..torn + 16],
+        "the torn entry was rewritten"
+    );
+
+    let mut now = bars.clone();
+    now.extend(more);
+    let reader = root.reader(tf);
+    assert_eq!(reader.time_lookup(), TimeLookup::Indexed);
+    for ts in probes(&now).into_iter().filter(|&ts| ts > now[0].ts_micros) {
+        let truth = now.partition_point(|b| b.ts_micros < ts) as u64;
+        assert_eq!(reader.first_at_or_after(ts), Ok(truth), "ts={ts}");
+    }
+}

@@ -81,7 +81,18 @@ pub(crate) fn stop(site: &Site) -> Result<(), String> {
         .recovery_active
         .lock()
         .map_err(|_| "recovery active-plan lock is poisoned".to_owned())?;
-    match *active {
+    stop_active(site, *active)
+}
+
+/// [`stop`], for a caller already holding the active-ID lock, whose guard is
+/// what keeps a clear or an activation from interleaving with this write.
+/// `POST /pull/run/stop` takes that lock under `site.run` and then drops
+/// `site.run` before calling this, so the fsyncs below never hold the pull
+/// slot (conc:runs-3, D-2775).
+pub(crate) fn stop_active(site: &Site, active: Option<[u8; 32]>) -> Result<(), String> {
+    #[cfg(test)]
+    tests::before_persist();
+    match active {
         Some(id) => persist(site, id, Status::Blocked),
         None => Ok(()),
     }
@@ -199,6 +210,54 @@ mod tests {
     use crate::server::Loaded;
     use axum::extract::State;
     use axum::http::StatusCode;
+
+    thread_local! {
+        /// Run once just before a STOP is persisted.
+        static BEFORE_PERSIST: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn before_persist() {
+        if let Some(hook) = BEFORE_PERSIST.with(|slot| slot.borrow_mut().take()) {
+            hook();
+        }
+    }
+
+    /// **A Stop press persists its STOP with the pull slot free.**
+    /// conc:runs-3, D-2775.
+    ///
+    /// `pull_run_stop` held `site.run` through directory creation, a journal
+    /// append and three fsyncs on an async worker, so every chain's progress
+    /// write and every `/pull/run.json` poll blocked its own worker until the
+    /// disk answered. The hook stands where the fsyncs begin and asks whether
+    /// the slot can be taken there.
+    #[tokio::test]
+    async fn the_stop_is_persisted_with_the_pull_slot_free() {
+        let (root, site) = fixture("recovery-control-stop-slot-free");
+        let id = [11; 32];
+        let site = Loaded::new(site);
+        *site.run.lock().unwrap() = Some(Progress::claimed());
+        activate(&site, id);
+        let seen = std::rc::Rc::new(std::cell::Cell::new(None));
+        let (probe_site, probe_seen) = (Loaded::clone(&site), std::rc::Rc::clone(&seen));
+        BEFORE_PERSIST.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                probe_seen.set(Some(probe_site.run.try_lock().is_ok()));
+            }));
+        });
+        let (status, _, body) = crate::server::pull_run_stop(State(Loaded::clone(&site))).await;
+        BEFORE_PERSIST.with(|slot| slot.borrow_mut().take());
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            seen.get(),
+            Some(true),
+            "the STOP's fsyncs ran with `site.run` free"
+        );
+        assert!(site.run.lock().unwrap().as_ref().unwrap().stopping);
+        let restarted = Site::load(&root.join("missing-masters"), &root);
+        assert!(is_stopped(&restarted, id).unwrap());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     fn fixture(name: &str) -> (PathBuf, Site) {
         let root = crate::scratch::path(name);

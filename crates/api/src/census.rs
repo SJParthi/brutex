@@ -303,7 +303,46 @@ impl VendorCensus {
 #[must_use]
 pub fn read_vendor(root: &Path, vendor: Vendor) -> VendorCensus {
     let path = manifest_path(root, vendor);
-    let state = match sized(&path) {
+    let state = state_read_twice_if_degraded(&path, vendor, sized);
+    note_read(vendor, &path, &state);
+    VendorCensus {
+        vendor,
+        path,
+        state,
+    }
+}
+
+/// One read of the manifest, and ONE more when the first loaded degraded
+/// (pull2-5, D-2536).
+///
+/// This read takes no lock, so it can overlap a writer's slot commit: the
+/// newest slot then fails its checksum, the manifest loads from the older one
+/// and reports `degraded_reason`, and since D-1786 the browser refuses any
+/// non-empty `x-brutex-census-degraded` — so one overlapping read blanked the
+/// selected-feed page for a census that was whole a moment later. A degraded
+/// first read is read once more and the second kept when it is NOT degraded;
+/// a census still degraded on the second read is genuinely damaged and is
+/// reported exactly as before. At most two reads, so the extra cost is one
+/// bounded manifest read, and only on a degraded census
+/// (`docs/06-limits.md`, D-2536).
+fn state_read_twice_if_degraded(
+    path: &Path,
+    vendor: Vendor,
+    mut read: impl FnMut(&Path) -> std::io::Result<Result<Vec<u8>, String>>,
+) -> Census {
+    let degraded = |state: &Census| matches!(state, Census::Held { manifest } if manifest.degraded_reason().is_some());
+    let first = state_of(read(path), vendor);
+    if !degraded(&first) {
+        return first;
+    }
+    let second = state_of(read(path), vendor);
+    let whole = matches!(second, Census::Held { .. }) && !degraded(&second);
+    if whole { second } else { first }
+}
+
+/// What one read of the manifest's bytes says the census is.
+fn state_of(read: std::io::Result<Result<Vec<u8>, String>>, vendor: Vendor) -> Census {
+    match read {
         Err(e) => Census::of_io_error(&e),
         Ok(Err(reason)) => Census::Unreadable {
             reason,
@@ -328,7 +367,11 @@ pub fn read_vendor(root: &Path, vendor: Vendor) -> VendorCensus {
                 },
             }
         }
-    };
+    }
+}
+
+/// The `api.census read` line for one vendor's census.
+fn note_read(vendor: Vendor, path: &Path, state: &Census) {
     // THE COUNTER'S OWN STATE, NAMED — held, absent, or unreadable.
     //
     // These three are not interchangeable and the difference decides what the
@@ -382,11 +425,6 @@ pub fn read_vendor(root: &Path, vendor: Vendor) -> VendorCensus {
         "state" => telemetry::Value::Str(said),
         "path" => telemetry::Value::Str(&path.display().to_string()),
     );
-    VendorCensus {
-        vendor,
-        path,
-        state,
-    }
 }
 
 /// The bytes at `path`, if this reader may hold them.
@@ -795,11 +833,16 @@ pub fn grid_rows(series: usize) -> usize {
 ///   unreadable contributes nothing and says so elsewhere — [`VendorCensus::note`]
 ///   is already loud about it, and inventing rows for it here would be a
 ///   different lie from the one just fixed.
-/// * **Swept.** `NSE-INDEX-NIFTY` and `NSE-INDEX-BANKNIFTY`, always. `CLAUDE.md`
-///   §1 fixes the engine surface at exactly these two, so their absence is the
-///   single most important thing this page can report. Before the first ingest
-///   there is nothing held at all, and a blank grid would say nothing where
-///   "two rows, neither held" says what to do next.
+/// * **Always on.** `NSE-INDEX-NIFTY` and `NSE-INDEX-BANKNIFTY`, held or not.
+///   They are the two spot indices of the engine surface `CLAUDE.md` §1 names;
+///   the surface is wider than them — it also takes the cash equities of the
+///   208 F&O underlyings that are shares (D-0506, D-0682) — but only the two
+///   indices are seeded here. An equity on the surface that is not held has no
+///   row on `/store`; it appears once a census holds it. Before the first
+///   ingest there is nothing held at all, and a blank grid would say nothing
+///   where "two rows, neither held" says what to do next. (This said §1 fixed
+///   the surface "at exactly" the two indices, which stopped being true at
+///   D-0506; Z1-slice12-F2, D-2570.)
 ///
 /// # Cost
 ///
@@ -1074,10 +1117,14 @@ pub fn held_page(
         .collect()
 }
 
-/// The two series the engine sweeps, as the store spells them.
+/// The two spot-index series the engine sweeps, as the store spells them.
 ///
-/// `CLAUDE.md` §1 fixes the surface at exactly these two. They are always on the
-/// axis, held or not, so an empty store still names what it is missing.
+/// They are the always-on rows of the axis, held or not, so an empty store
+/// still names what it is missing. They are NOT the whole engine surface:
+/// `CLAUDE.md` §1 also sweeps the cash equities of the 208 F&O underlyings that
+/// are shares (D-0506, D-0682), and those are not seeded here — an unheld swept
+/// equity has no row on `/store`. Seeding all 210 would be a product choice the
+/// page has not made (Z1-slice12-F2, D-2570).
 #[must_use]
 pub fn swept_series() -> Vec<Series> {
     ["BANKNIFTY", "NIFTY"]
@@ -1107,6 +1154,36 @@ mod tests {
 
     fn day(y: u16, m: u8, d: u8) -> Day {
         Day::new(y, m, d).expect("a real date")
+    }
+
+    /// Z1-slice12-F2, D-2570: the `held_series` and `swept_series` docs said
+    /// `CLAUDE.md` §1 fixed the engine surface "at exactly these" two indices (quoted split, so this doc does not match itself),
+    /// which D-0506 made false. On the old source the needle is present twice
+    /// and this fails; the needle is split so this test does not match itself.
+    /// The second half pins what the docs now say the function does: two
+    /// always-on rows, both spot indices, no equity seeded.
+    #[test]
+    fn the_axis_docs_do_not_say_the_surface_is_two_indices() {
+        let source = include_str!("census.rs");
+        let needle = concat!("exactly these", " two");
+        assert_eq!(
+            source.matches(needle).count(),
+            0,
+            "a stale surface claim is back"
+        );
+        let stale = concat!("fixes the surface", " at exactly");
+        assert_eq!(source.matches(stale).count(), 0);
+        let swept = swept_series();
+        assert_eq!(swept.len(), 2);
+        for s in &swept {
+            assert_eq!(s.segment, Segment::Index);
+            assert_eq!(s.exchange, Exchange::Nse);
+            assert!(s.contract.is_none());
+        }
+        assert!(swept.contains(&nifty()));
+        assert!(swept.contains(&series(Segment::Index, "BANKNIFTY")));
+        // An empty census list still yields exactly the two always-on rows.
+        assert_eq!(held_series(&[]), swept);
     }
 
     /// The spot index series, as the store spells it.
@@ -1440,6 +1517,79 @@ mod tests {
         assert!(note.contains("DEGRADED CENSUS"), "{note}");
         assert!(note.contains("recovered generation 1"), "{note}");
         assert!(note.contains(&why), "the refusal itself is carried: {note}");
+    }
+
+    /// **ONE READ THAT OVERLAPPED A SLOT COMMIT IS READ AGAIN, NOT SERVED AS
+    /// DEGRADED (pull2-5, D-2536).**
+    ///
+    /// The reader is injected: its first answer is a census whose newest slot
+    /// fails its checksum (the torn moment of a commit), its second the same
+    /// census whole. On the old code `read_vendor` read once, so the census
+    /// came back degraded and the first assertion failed. Walked: torn then
+    /// whole (whole kept), torn both times (degraded kept, two reads), whole
+    /// first (one read), torn then unreadable and torn then absent (the
+    /// degraded first read kept, never a worse second).
+    #[test]
+    fn a_census_torn_on_one_read_is_read_again_and_whole_is_kept() {
+        type Answer = std::io::Result<Result<Vec<u8>, String>>;
+        let good = ManifestHeader {
+            generation: 1,
+            ..ManifestHeader::genesis(Vendor::Groww)
+        }
+        .image();
+        let image = |slot0: &[u8; 64]| {
+            let mut bytes = vec![0u8; HEADER_LEN_USIZE];
+            bytes.get_mut(..64).expect("room").copy_from_slice(slot0);
+            bytes
+                .get_mut(16_384..16_448)
+                .expect("room")
+                .copy_from_slice(&good);
+            bytes
+        };
+        let mut damaged = ManifestHeader::genesis(Vendor::Groww).image();
+        damaged[16] ^= 0xFF;
+        let torn = image(&damaged);
+        let whole = image(&ManifestHeader::genesis(Vendor::Groww).image());
+        let path = Path::new("UNUSED.man");
+        let run = |answers: Vec<Answer>| {
+            let mut answers = answers.into_iter();
+            let mut reads = 0_usize;
+            let state = state_read_twice_if_degraded(path, Vendor::Groww, |_| {
+                reads += 1;
+                answers.next().expect("asked at most as often as scripted")
+            });
+            (state, reads)
+        };
+        let degraded_of = |state: &Census| match state {
+            Census::Held { manifest } => manifest.degraded_reason().map(|why| why.to_string()),
+            Census::Absent | Census::Unreadable { .. } => None,
+        };
+
+        let (state, reads) = run(vec![Ok(Ok(torn.clone())), Ok(Ok(whole.clone()))]);
+        assert_eq!(reads, 2);
+        assert!(matches!(state, Census::Held { .. }), "{}", state.name());
+        assert_eq!(degraded_of(&state), None, "the whole second read is kept");
+
+        let (state, reads) = run(vec![Ok(Ok(torn.clone())), Ok(Ok(torn.clone()))]);
+        assert_eq!(reads, 2);
+        assert!(degraded_of(&state).is_some(), "damaged twice is damaged");
+
+        let (state, reads) = run(vec![Ok(Ok(whole.clone()))]);
+        assert_eq!(reads, 1, "a whole census is read once");
+        assert_eq!(degraded_of(&state), None);
+
+        for worse in [
+            Ok(Err("REFUSED".to_owned())),
+            Err(std::io::ErrorKind::NotFound.into()),
+        ] {
+            let (state, reads) = run(vec![Ok(Ok(torn.clone())), worse]);
+            assert_eq!(reads, 2);
+            assert!(
+                degraded_of(&state).is_some(),
+                "the degraded first read stands: {}",
+                state.name()
+            );
+        }
     }
 
     #[test]

@@ -970,9 +970,9 @@ pub trait Row: Copy + PartialEq {
     ///
     /// A [`Bar`] has four prices that must bracket each other. An [`Overlay`]
     /// has no such relation — a spot and a volatility constrain nothing about
-    /// one another, and an all-zero overlay is a legal reading — so it answers
-    /// `true` because there is genuinely nothing to violate, not because the
-    /// check was skipped.
+    /// one another, and an all-zero overlay is a legal reading — but neither
+    /// field may be negative unless it is the [`OI_NULL`] absent marker
+    /// (STO-1, D-2607).
     fn is_sane(&self) -> bool;
 
     /// The two counts, when one of them is impossible.
@@ -1044,8 +1044,12 @@ impl Row for Overlay {
         Self::decode(bytes)
     }
 
+    /// Neither a spot price nor a volatility is ever negative, so each field
+    /// is [`OI_NULL`] (absent) or at least zero. A negative spot or IV was
+    /// committed before this check (STO-1, D-2607).
     fn is_sane(&self) -> bool {
-        true
+        (self.spot == OI_NULL || self.spot >= 0)
+            && (self.iv_micros == OI_NULL || self.iv_micros >= 0)
     }
 
     fn bad_counts(&self) -> Option<(i64, i64)> {
@@ -1204,6 +1208,20 @@ pub enum FormatError {
         /// The timestamp that did not follow it.
         next: i64,
     },
+    /// The committed header's `last_ts_micros` is not the stamp of the last
+    /// record it counts.
+    ///
+    /// `append` decides whether a batch FOLLOWS the month from that one header
+    /// field. A slot whose checksum is good but whose range is wrong steered a
+    /// bar stamped behind held records into the file as a commit, leaving the
+    /// month out of order and every later bisection answering a neighbour.
+    /// Refused before anything is written. audit-20261004 store-1, D-3140.
+    LastStampDisagrees {
+        /// What the header advertises.
+        header: i64,
+        /// What record `n_valid - 1` actually carries.
+        record: i64,
+    },
     /// A slot's stored checksum does not match its bytes.
     SlotChecksum {
         /// The checksum the slot carries.
@@ -1343,6 +1361,10 @@ impl std::fmt::Display for FormatError {
             Self::TimestampsOutOfOrder { previous, next } => {
                 write!(f, "timestamp {next} does not follow {previous}")
             }
+            Self::LastStampDisagrees { header, record } => write!(
+                f,
+                "header last timestamp {header} is not its last record's {record}"
+            ),
             Self::SlotChecksum { stored, computed } => {
                 write!(f, "header slot checksum {stored:#010x} != {computed:#010x}")
             }

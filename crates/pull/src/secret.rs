@@ -237,6 +237,13 @@ pub enum SecretError {
     Empty,
     /// The source could not be reached.
     Unreachable,
+    /// The parameter holds a value with leading or trailing whitespace.
+    ///
+    /// Configuration, like [`SecretError::Empty`]: a newline stored with a
+    /// token fails at send time inside the HTTP client, where it used to read
+    /// as a transport fault and be retried. Refused where it arrives instead,
+    /// never trimmed (P1-19-01, D-2525).
+    Padded,
 }
 
 impl fmt::Display for SecretError {
@@ -246,6 +253,7 @@ impl fmt::Display for SecretError {
             Self::NotFound => f.write_str("no parameter at that path"),
             Self::Empty => f.write_str("the parameter holds an empty value"),
             Self::Unreachable => f.write_str("the parameter store could not be reached"),
+            Self::Padded => f.write_str("the parameter holds a whitespace-padded value"),
         }
     }
 }

@@ -88,7 +88,9 @@ fn w1_api5_0_the_observation_is_taken_once_per_instrument_and_its_rest_is_named(
     );
     let land = item(SERVER, "async fn land_spot(");
     let (before, inside) = land
-        .split_once("for bodies in landed.bodies.chunks(1)")
+        // `enumerate` since equity-1 (D-2575): a refused body names every
+        // window it stopped by its index.
+        .split_once("for (at, bodies) in landed.bodies.chunks(1).enumerate()")
         .expect("land_spot walks its bodies one at a time");
     assert!(
         before.contains("ingestion_observations(landed, site)"),

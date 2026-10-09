@@ -480,6 +480,37 @@ impl Vwap {
         Ok(self.bits(bar.close, tolerance))
     }
 
+    /// `x = 3V·close − pv`: the close's exact distance from VWAP, on the `3V`
+    /// scale (ind1-1, ind1-2, D-2612).
+    ///
+    /// Inside `i128` for every close a fold has seen, since `3V·close <= pv`'s
+    /// own bound there. A close on a zero-volume bar is not folded and can
+    /// leave it; then `|3V·close|` exceeds `i128::MAX` while `|pv| <= 10^34`,
+    /// so the side is the close's own sign and the distance is past every band
+    /// (`m²·D <= 9·V·p2v < 10^68`), which [`Reach::Beyond`] carries exactly.
+    fn reach(&self, close: i64) -> Reach {
+        self.v
+            .checked_mul(3)
+            .and_then(|scaled| scaled.checked_mul(i128::from(close)))
+            .and_then(|scaled| scaled.checked_sub(self.pv))
+            .map_or(Reach::Beyond(close.cmp(&0)), Reach::Within)
+    }
+
+    /// `D = V·p2v − pv²` as a 256-bit value, so `σ = √D / 3V` exactly.
+    ///
+    /// Non-negative for every folded state by Cauchy–Schwarz; a hostile private
+    /// state that breaks it is clamped to zero, the same clamp [`Self::sigma`]
+    /// applies.
+    fn dispersion(&self) -> (u128, u128) {
+        let spread = wide_mul(self.v.unsigned_abs(), self.p2v.unsigned_abs());
+        let mean = wide_mul(self.pv.unsigned_abs(), self.pv.unsigned_abs());
+        if spread < mean {
+            (0, 0)
+        } else {
+            wide_sub(spread, mean)
+        }
+    }
+
     /// The 20 positions for one closing price.
     ///
     /// # Cost
@@ -504,11 +535,24 @@ impl Vwap {
         // set, because retiring a shipped position needs a decisions entry and a
         // VOCAB_VERSION bump, and quietly setting only one would make the shipped
         // pair silently dead instead.
-        if close > vwap {
+        //
+        // EXACT, NOT FLOORED (ind1-2, ind1-1, D-2612): every side and band test
+        // below is decided on the unrounded rationals. `value()` and `sigma()`
+        // floor, and a close equal to the floor of a fractional VWAP is below
+        // it, while `floor(vwap) ± m·floor(σ)` put a band edge up to 1 + m paisa
+        // from the true one. The floored levels still feed the near bands and
+        // the representability gate, which are unchanged.
+        let reach = self.reach(close);
+        let dispersion = self.dispersion();
+        let side = match reach {
+            Reach::Within(x) => x.cmp(&0),
+            Reach::Beyond(side) => side,
+        };
+        if side == core::cmp::Ordering::Greater {
             mask = set(mask, 52);
             mask = set(mask, 143);
         }
-        if close < vwap {
+        if side == core::cmp::Ordering::Less {
             mask = set(mask, 53);
             mask = set(mask, 144);
         }
@@ -531,13 +575,16 @@ impl Vwap {
             let Some((upper, lower)) = band_levels(vwap, sigma, *multiple) else {
                 continue;
             };
-            if close > upper {
+            // close > vwap + m·σ  ⇔  x > m·√D  ⇔  x > 0 and x² > m²·D, with
+            // x = 3V·close − pv and D = V·p2v − pv² (so σ = √D / 3V).
+            let outside = band_outside(reach, dispersion, *multiple);
+            if outside && side == core::cmp::Ordering::Greater {
                 mask = set(mask, above);
             }
-            if close < lower {
+            if outside && side == core::cmp::Ordering::Less {
                 mask = set(mask, below);
             }
-            if lower <= close && close <= upper {
+            if !outside {
                 mask = set(mask, inside);
             }
             mask = near(mask, near_up, tolerance, close, upper, sigma);
@@ -596,6 +643,44 @@ const fn wide_mul(a: u128, b: u128) -> (u128, u128) {
     let low = (low_low & LOW) + ((middle & LOW) << 64);
     let high = high_high + (high_low >> 64) + (low_high >> 64) + (middle >> 64);
     (high, low)
+}
+
+/// A close's exact distance from VWAP: `3V·close − pv` when it fits `i128`,
+/// otherwise only its side, which is then past every band.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reach {
+    Within(i128),
+    Beyond(core::cmp::Ordering),
+}
+
+/// `a − b` for 256-bit `(high, low)` pairs with `a >= b`.
+const fn wide_sub(a: (u128, u128), b: (u128, u128)) -> (u128, u128) {
+    let (low, borrow) = a.1.overflowing_sub(b.1);
+    (a.0.wrapping_sub(b.0).wrapping_sub(borrow as u128), low)
+}
+
+/// `a · k` for a 256-bit `a` and a small `k`, or `None` past 256 bits.
+fn wide_times(a: (u128, u128), k: u128) -> Option<(u128, u128)> {
+    const LOW: u128 = u64::MAX as u128;
+    let low_low = (a.1 & LOW).checked_mul(k)?;
+    let low_high = (a.1 >> 64).checked_mul(k)?.checked_add(low_low >> 64)?;
+    let low = (low_low & LOW) | ((low_high & LOW) << 64);
+    let high = a.0.checked_mul(k)?.checked_add(low_high >> 64)?;
+    Some((high, low))
+}
+
+/// Whether the close lies strictly outside `vwap ± m·σ`, exactly:
+/// `x² > m²·D` (ind1-1, D-2612). A product past 256 bits on the right is
+/// above any `x²` an `i128` can square, so it reads as inside.
+fn band_outside(reach: Reach, dispersion: (u128, u128), multiple: i128) -> bool {
+    let Reach::Within(x) = reach else {
+        return true;
+    };
+    let squared = wide_mul(x.unsigned_abs(), x.unsigned_abs());
+    let m = multiple.unsigned_abs();
+    m.checked_mul(m)
+        .and_then(|m2| wide_times(dispersion, m2))
+        .is_some_and(|edge| squared > edge)
 }
 
 /// Truth and availability share exactly the same representable band bounds.
@@ -902,6 +987,85 @@ mod tests {
         }
     }
 
+    /// ind1-1, ind1-2, D-2612: every side and band bit agrees with the exact
+    /// rational answer, checked against a plain-`i128` oracle on small
+    /// sessions where nothing can overflow. The audit's own session comes
+    /// first: exact VWAP 1016.65, σ 1.93, band-1 upper 1018.58, so close 1018
+    /// is NOT above it (the floored edge was 1017). Then a close equal to the
+    /// floor of a fractional VWAP (1000.5) is below it.
+    #[test]
+    fn side_and_band_bits_are_decided_on_the_exact_rationals() {
+        let bar = |minute: i64, high: i64, low: i64, close: i64, volume: i64| Candle {
+            high,
+            low,
+            open: close,
+            close,
+            ..at(minute, close, volume)
+        };
+        let oracle = |v: &Vwap, close: i64| -> Vec<(u16, bool)> {
+            let x = 3 * v.v * i128::from(close) - v.pv;
+            let d = v.v * v.p2v - v.pv * v.pv;
+            let mut out = vec![(52, x > 0), (53, x < 0), (143, x > 0), (144, x < 0)];
+            for (m, (above, below, _, _, inside)) in BAND_SIGMA.iter().zip(BAND_POSITIONS) {
+                let outside = x * x > m * m * d;
+                out.push((above, outside && x > 0));
+                out.push((below, outside && x < 0));
+                out.push((inside, !outside));
+            }
+            out
+        };
+        let check = |bars: &[Candle], close: i64| {
+            let mut v = Vwap::for_slice(Availability::Present);
+            for b in bars {
+                v.fold(b).expect("a legal bar");
+            }
+            let bits = v.bits(close, tol());
+            for (position, want) in oracle(&v, close) {
+                assert_eq!(
+                    bits.get(u32::from(position)),
+                    want,
+                    "position {position} at close {close} over {bars:?}"
+                );
+            }
+            bits
+        };
+        let audit = [
+            bar(0, 1016, 1014, 1014, 602),
+            bar(1, 1020, 1017, 1017, 37),
+            bar(2, 1017, 1016, 1016, 470),
+            bar(3, 1022, 1018, 1018, 481),
+        ];
+        let bits = check(&audit, 1018);
+        assert!(!bits.get(146), "1018 is inside band 1 (upper edge 1018.58)");
+        let half = [at(0, 1001, 5), at(1, 1000, 5)];
+        let bits = check(&half, 1000);
+        assert!(
+            bits.get(53) && bits.get(144),
+            "1000 is below a VWAP of 1000.5"
+        );
+
+        // A deterministic sweep of small sessions.
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = |span: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            i64::try_from(seed % span).expect("small")
+        };
+        for _ in 0..2_000 {
+            let bars: Vec<Candle> = (0..4)
+                .map(|minute| {
+                    let low = 990 + next(20);
+                    let high = low + next(6);
+                    let close = low + next(u64::try_from(high - low + 1).expect("small"));
+                    bar(minute, high, low, close, 1 + next(700))
+                })
+                .collect();
+            let close = 985 + next(40);
+            check(&bars, close);
+        }
+    }
+
     /// Every position is live and its kind matches how this module sets it.
     #[test]
     fn the_positions_agree_with_the_vocabulary() {
@@ -1202,30 +1366,31 @@ mod tests {
     ///
     /// `exactly_one_relation_holds_per_band` already asserts the exclusivity,
     /// and it did not catch this: its four closes are round numbers that never
-    /// land on a computed edge. The edge has to be COMPUTED from the live VWAP
-    /// and sigma to be tested, which is what this does.
+    /// land on a computed edge.
+    ///
+    /// Since D-2612 the bands are decided on the exact rationals, so a floored
+    /// `vwap ± m·sigma` is no longer an edge at all. The fixture therefore
+    /// builds a session whose VWAP and sigma are EXACT integers — equal volume
+    /// at `P - d` and `P + d`, so VWAP is `P` and sigma is `d` with no residue —
+    /// and the edges `P ± m·d` are then the true edges, inside, with one paisa
+    /// past each outside.
     #[test]
     fn a_close_exactly_on_a_band_edge_is_inside_that_band() {
+        const P: i64 = 2_500_000;
+        const D: i64 = 1_000;
         let mut v = Vwap::for_slice(Availability::Present);
         for minute in 0..60 {
-            let price = 2_500_000 + (minute * 137) % 4_000;
-            assert!(v.step(&at(minute, price, 1_000 + minute), tol()).is_ok());
+            let price = if minute % 2 == 0 { P - D } else { P + D };
+            assert!(v.step(&at(minute, price, 1_000), tol()).is_ok());
         }
-        let vwap = v.value().expect("a primed session has a vwap");
-        let sigma = v.sigma().expect("and a sigma");
-        assert!(
-            sigma > 0,
-            "the fixture must have spread, or the edges collapse"
-        );
+        assert_eq!(v.value(), Some(P), "the fixture's VWAP is exact");
+        assert_eq!(v.sigma(), Some(D), "and so is its sigma");
 
         for (band, (multiple, (above, below, _, _, inside))) in
             BAND_SIGMA.iter().zip(BAND_POSITIONS).enumerate()
         {
-            let offset = i64::try_from(multiple * i128::from(sigma)).expect("fits");
-            for (edge, name) in [
-                (vwap.saturating_add(offset), "upper"),
-                (vwap.saturating_sub(offset), "lower"),
-            ] {
+            let offset = i64::try_from(multiple * i128::from(D)).expect("fits");
+            for (edge, name) in [(P + offset, "upper"), (P - offset, "lower")] {
                 let mask = v.bits(edge, tol());
                 assert!(
                     mask.get(u32::from(inside)),
@@ -1236,6 +1401,10 @@ mod tests {
                     "band {band}: a close on the {name} edge is not outside it"
                 );
             }
+            let past = v.bits(P + offset + 1, tol());
+            assert!(past.get(u32::from(above)) && !past.get(u32::from(inside)));
+            let past = v.bits(P - offset - 1, tol());
+            assert!(past.get(u32::from(below)) && !past.get(u32::from(inside)));
         }
     }
 

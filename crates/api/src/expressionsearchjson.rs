@@ -112,46 +112,121 @@ struct Session {
 }
 fn render(root: &Path, asked: &Asked) -> Result<String, String> {
     static SESSIONS: OnceLock<Mutex<VecDeque<Session>>> = OnceLock::new();
-    let mut sessions = SESSIONS
-        .get_or_init(|| Mutex::new(VecDeque::new()))
-        .lock()
-        .map_err(|_| "search snapshot cache poisoned")?;
-    let index = if let Some(snapshot) = asked.snapshot {
-        sessions
-            .iter()
-            .position(|held| {
-                held.root == root
-                    && held.identity == asked.identity
-                    && held.reader.progress().checkpoint == Some(snapshot)
-            })
-            .ok_or("search snapshot is not admitted or expired; refresh its first page")?
-    } else {
-        let Some(reader) = Reader::open(root, asked.identity, crate::detail::MAX_SCAN_BYTES)?
-        else {
-            return Ok(json!({"schema_version":1,"status":"missing","identity":crate::server::hex32(asked.identity),"why":"No recorded expression-search checkpoint namespace exists for this exact search ID.","rows":[],"refusal":null}).to_string());
-        };
-        sessions.retain(|held| {
-            held.root != root
-                || held.identity != asked.identity
-                || held.reader.progress().checkpoint != reader.progress().checkpoint
-        });
-        if sessions.len() == 8 {
-            sessions.pop_front();
-        }
-        sessions.push_back(Session {
+    let slot = SESSIONS.get_or_init(|| Mutex::new(VecDeque::new()));
+    if let Some(snapshot) = asked.snapshot {
+        // A WARM PAGE of an already-open reader, under the lock as before: it
+        // is bounded by `MAX_SCAN_BYTES` and keeps a concurrent page of the
+        // same snapshot from being refused as "expired" while it is out.
+        // The session it pages is moved to the back of the LRU first
+        // (conc:apicache-2, D-2777), found through `held_at` (D-2797).
+        let mut sessions = slot.lock().map_err(|_| "search snapshot cache poisoned")?;
+        let at = held_at(&sessions, |held| {
+            held.root == root
+                && held.identity == asked.identity
+                && held.reader.progress().checkpoint == Some(snapshot)
+        })
+        .ok_or("search snapshot is not admitted or expired; refresh its first page")?;
+        let index = most_recent(&mut sessions, at);
+        let held = sessions
+            .get_mut(index)
+            .ok_or("search snapshot cache entry missing")?;
+        let page = held
+            .reader
+            .page(asked.cursor, asked.limit, crate::detail::MAX_SCAN_BYTES)?;
+        return Ok(body(held.reader.progress(), &page, asked.limit));
+    }
+    // THE COLD OPEN AND ITS FIRST PAGE RUN WITH THE LOCK RELEASED (expr-3,
+    // D-2576). The mutex used to be held across `Reader::open` — a read of the
+    // whole checkpoint namespace up to `MAX_SCAN_BYTES` — so every other search
+    // request parked on it inside `detail::run`, each holding a detail permit,
+    // and the other detail routes answered 429 behind one cold open. The lock
+    // is now taken only to install the opened reader, and installing goes
+    // through `first_page` (conc:apicache-2, D-2777): a held session that
+    // observed exactly what the fresh reader observes is kept with every
+    // cursor it learned and the fresh reader is dropped. An unpinned page is
+    // always the head page (a cursor requires its snapshot), so the answer
+    // paged from the fresh reader is the one the kept session would give.
+    #[cfg(test)]
+    crate::detail::note_slot_free(slot);
+    let Some(mut reader) = Reader::open(root, asked.identity, crate::detail::MAX_SCAN_BYTES)?
+    else {
+        return Ok(json!({"schema_version":1,"status":"missing","identity":crate::server::hex32(asked.identity),"why":"No recorded expression-search checkpoint namespace exists for this exact search ID.","rows":[],"refusal":null}).to_string());
+    };
+    let answer = reader
+        .page(asked.cursor, asked.limit, crate::detail::MAX_SCAN_BYTES)
+        .map(|page| body(reader.progress(), &page, asked.limit));
+    let fresh = reader.progress();
+    let same_search = |held: &Session| held.root == root && held.identity == asked.identity;
+    let (checkpoint, writer, interrupted) =
+        (fresh.checkpoint, fresh.writer_observed, fresh.interrupted);
+    let mut sessions = slot.lock().map_err(|_| "search snapshot cache poisoned")?;
+    first_page(
+        &mut sessions,
+        Session {
             root: root.to_path_buf(),
             identity: asked.identity,
             reader,
-        });
-        sessions.len() - 1
-    };
-    let held = sessions
-        .get_mut(index)
-        .ok_or("search snapshot cache entry missing")?;
-    let page = held
-        .reader
-        .page(asked.cursor, asked.limit, crate::detail::MAX_SCAN_BYTES)?;
-    Ok(body(held.reader.progress(), &page, asked.limit))
+        },
+        |held| {
+            let observed = held.reader.progress();
+            same_search(held)
+                && observed.checkpoint == checkpoint
+                && observed.writer_observed == writer
+                && observed.interrupted == interrupted
+        },
+        |held| same_search(held) && held.reader.progress().checkpoint == checkpoint,
+    );
+    answer
+}
+/// Where an unpinned first page is served from, as an index into `sessions`.
+///
+/// A held session that observed exactly what `fresh` observes (`unchanged`) is
+/// kept and moved to the back: its reader has learned every cursor another
+/// viewer paged to, and the fresh reader knows only the head. Replacing it
+/// broke that viewer's next page with "search cursor is not linked to this
+/// admitted snapshot" whenever anyone loaded the first page of a paused,
+/// stopped or exhausted search. Otherwise held sessions of the same snapshot
+/// (`superseded`) are dropped and `fresh` is held, the oldest evicted past
+/// eight. conc:apicache-2, D-2777.
+fn first_page<S>(
+    sessions: &mut VecDeque<S>,
+    fresh: S,
+    unchanged: impl Fn(&S) -> bool,
+    superseded: impl Fn(&S) -> bool,
+) -> usize {
+    if let Some(at) = held_at(sessions, &unchanged) {
+        return most_recent(sessions, at);
+    }
+    sessions.retain(|held| !superseded(held));
+    if sessions.len() == SESSIONS_HELD {
+        sessions.pop_front();
+    }
+    sessions.push_back(fresh);
+    sessions.len() - 1
+}
+/// How many search sessions this process holds; the oldest is evicted past it.
+const SESSIONS_HELD: usize = 8;
+/// The index of the first held session `hit` accepts.
+///
+/// THE ONE SCAN OF THE CACHE, BOUNDED BY [`SESSIONS_HELD`], a compile-time
+/// constant, never by the data: [`first_page`] never lets the cache grow past
+/// it. A pinned page and an unpinned first page both look up through here
+/// (D-2777, D-2797).
+fn held_at<S>(sessions: &VecDeque<S>, hit: impl Fn(&S) -> bool) -> Option<usize> {
+    sessions.iter().position(hit)
+}
+/// Moves the session at `at` to the back of the LRU and returns its new index.
+///
+/// Used by a pinned page as well as a reused first page: eviction is
+/// `pop_front`, so a session a viewer is actively paging through must not stay
+/// at the front by insertion order, or eight first pages of OTHER searches
+/// evict it mid-walk ("snapshot is not admitted or expired").
+/// conc:apicache-2, D-2777.
+fn most_recent<S>(sessions: &mut VecDeque<S>, at: usize) -> usize {
+    if let Some(used) = sessions.remove(at) {
+        sessions.push_back(used);
+    }
+    sessions.len().saturating_sub(1)
 }
 fn anchor_json(anchor: Option<Anchor>) -> Value {
     anchor.map_or(Value::Null,|anchor|json!({"sequence":anchor.sequence.to_string(),"seal":crate::server::hex32(anchor.seal)}))
@@ -173,6 +248,86 @@ fn body(progress: &Progress, page: &Page, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **One viewer's first page does not discard another viewer's cursors.**
+    /// conc:apicache-2, D-2777.
+    ///
+    /// A session is modelled as (snapshot, cursors learned). Viewer A has
+    /// paged to two cursors on snapshot 7; viewer B's unpinned load of the
+    /// same, unchanged snapshot must be served from A's session, which keeps
+    /// what A learned. A snapshot that moved on still replaces the old one.
+    #[test]
+    fn an_unchanged_first_page_keeps_the_held_session_and_its_learned_cursors() {
+        let mut sessions: VecDeque<(u32, Vec<u32>)> =
+            VecDeque::from([(7, vec![7, 70, 700]), (8, vec![8])]);
+        let at = first_page(
+            &mut sessions,
+            (7, vec![7]),
+            |held| held.0 == 7,
+            |held| held.0 == 7,
+        );
+        assert_eq!(sessions.len(), 2, "no second session for one snapshot");
+        assert_eq!(
+            sessions.get(at),
+            Some(&(7, vec![7, 70, 700])),
+            "viewer A's learned cursors survive viewer B's first page"
+        );
+        assert_eq!(at, 1, "and the kept session is the most recently used");
+
+        let at = first_page(&mut sessions, (9, vec![9]), |_| false, |held| held.0 == 7);
+        assert_eq!(sessions.get(at), Some(&(9, vec![9])));
+        assert_eq!(
+            sessions,
+            VecDeque::from([(8, vec![8]), (9, vec![9])]),
+            "a superseded snapshot is dropped"
+        );
+        for snapshot in 10..20 {
+            first_page(&mut sessions, (snapshot, vec![]), |_| false, |_| false);
+        }
+        assert_eq!(sessions.len(), 8, "still at most eight held");
+    }
+
+    /// **A session a viewer is paging through is not evicted by insertion
+    /// order.** conc:apicache-2, D-2777. A pinned page moves its session to
+    /// the back, so eight first pages of other searches evict older, idle
+    /// sessions first.
+    #[test]
+    fn a_pinned_page_keeps_its_session_from_being_evicted_first() {
+        let mut sessions: VecDeque<u32> = (0..8).collect();
+        let at = most_recent(&mut sessions, 0);
+        assert_eq!((at, sessions.get(at)), (7, Some(&0)), "moved to the back");
+        for other in 100..107 {
+            first_page(&mut sessions, other, |_| false, |_| false);
+        }
+        assert!(
+            sessions.contains(&0),
+            "seven newer first pages evict the idle sessions, not the one in use"
+        );
+        assert_eq!(sessions.len(), 8);
+    }
+    /// expr-3, D-2576: a first page's cold `Reader::open` runs with the
+    /// session cache's mutex FREE. The namespace is absent, so the open finds
+    /// nothing and the answer is `missing` — what matters is the probe taken
+    /// at the open point. On the old `render` the guard was held across the
+    /// open and the probe recorded `false`.
+    #[test]
+    fn a_slow_cold_open_does_not_park_other_detail_permits() -> Result<(), String> {
+        let id = "cd".repeat(32);
+        let asked = Asked::parse(&format!("identity={id}"))?;
+        crate::detail::SLOT_FREE_AT_OPEN.with(|cell| cell.set(None));
+        // Absent namespace: `missing`, or a refusal naming the path; either
+        // way the open was reached, which is what the probe needs.
+        let answer = render(&crate::scratch::path("expr3-cold-unlocked"), &asked);
+        assert_eq!(
+            crate::detail::SLOT_FREE_AT_OPEN.with(std::cell::Cell::get),
+            Some(true),
+            "the reader was opened with the session cache locked"
+        );
+        if let Ok(answer) = answer {
+            assert!(answer.contains(r#""status":"missing""#), "{answer}");
+        }
+        Ok(())
+    }
     #[test]
     fn exact_snapshot_and_cursor_pairs_refuse_splicing_or_unbounded_queries() -> Result<(), String>
     {

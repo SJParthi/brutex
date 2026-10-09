@@ -780,7 +780,10 @@ fn the_fake_source_answers_from_memory_and_can_be_told_to_refuse() {
     let returning = FakeSource::returning(vec![row]);
     assert_eq!(
         returning.window(&request).expect("the fake answers"),
-        RawWindow { rows: vec![row] },
+        RawWindow {
+            rows: vec![row],
+            skipped: pull::fetch::DecodeSkips::default()
+        },
         "and it answers with exactly the rows it was built from"
     );
 
@@ -884,7 +887,10 @@ fn every_timestamp_encoding_lands_the_same_instant() {
             open_interest: None,
         };
         let landed = fetch::land(
-            &RawWindow { rows: vec![row] },
+            &RawWindow {
+                rows: vec![row],
+                skipped: pull::fetch::DecodeSkips::default(),
+            },
             &request,
             encoding,
             PriceScale::Paisa,
@@ -928,6 +934,7 @@ fn a_timestamp_that_names_no_instant_refuses_the_whole_window() {
     };
     let refused = fetch::land(
         &RawWindow {
+            skipped: pull::fetch::DecodeSkips::default(),
             rows: vec![good, bad],
         },
         &request(),
@@ -1085,7 +1092,8 @@ fn a_run_balances_only_when_every_row_is_accounted_for() {
     census.count(DropReason::AfterWindow);
 
     let balanced = Ingested {
-        pending: None,
+        decoder_skips: pull::fetch::DecodeSkips::default(),
+        pending: Vec::new(),
         bars_committed: 0,
         derived_files: 0,
         members: 1,
@@ -1226,7 +1234,10 @@ fn a_price_that_leaves_the_paisa_grid_refuses_the_window_and_names_its_field() {
     let mut sentences = HashSet::with_capacity(rows.len());
     for row in rows {
         let refused = fetch::land(
-            &RawWindow { rows: vec![row] },
+            &RawWindow {
+                rows: vec![row],
+                skipped: pull::fetch::DecodeSkips::default(),
+            },
             &request(),
             TimestampEncoding::EpochSecondsUtc,
             PriceScale::Rupees,
@@ -1254,6 +1265,7 @@ fn a_price_that_leaves_the_paisa_grid_refuses_the_window_and_names_its_field() {
     // The same value in paisa is not converted and therefore not refused.
     let landed = fetch::land(
         &RawWindow {
+            skipped: pull::fetch::DecodeSkips::default(),
             rows: vec![rows[0]],
         },
         &request(),
@@ -1306,7 +1318,10 @@ fn borrowed_rows_land_exactly_as_a_window_does() {
     let request = request();
     for (rows, scale) in cases {
         let encoding = TimestampEncoding::EpochSecondsUtc;
-        let window = RawWindow { rows: rows.clone() };
+        let window = RawWindow {
+            rows: rows.clone(),
+            skipped: pull::fetch::DecodeSkips::default(),
+        };
         let owned = format!("{:?}", fetch::land(&window, &request, encoding, scale));
         let scheduled = format!(
             "{:?}",

@@ -749,6 +749,63 @@ fn refusal_detail(status: u16, body: &str) -> String {
     }
 }
 
+/// The class of a fault AWS NAMED, or `None` for a name this build has no
+/// class for.
+///
+/// # Why the name outranks the status
+///
+/// This used to be decided by `AccessDenied` or 403, then `ParameterNotFound`
+/// or 404, and everything else was `Unreachable`, which the caller reads as
+/// transport. An expired session, an unknown key, a bad signature (a clock
+/// skewed past what AWS accepts lands here) and a malformed request are none of
+/// them fixed by asking again, yet each was told "worth retrying" and every
+/// instrument paid its own read (conc8-3, D-2692). Which HTTP status AWS sends
+/// them under is not recorded in the charter and is not assumed here.
+///
+/// The identity, the signature and the key are the role's problem, so
+/// `AccessDenied`. A missing parameter, a missing version and a request AWS
+/// says is malformed all send the operator to the configured path, so
+/// `NotFound`. A throttle, AWS's own failure and a write conflict are the only
+/// three that a later read can clear.
+const fn fault_kind(name: &str) -> Option<SecretError> {
+    Some(match name.as_bytes() {
+        b"AccessDeniedException"
+        | b"ExpiredTokenException"
+        | b"UnrecognizedClientException"
+        | b"InvalidSignatureException"
+        | b"MissingAuthenticationToken"
+        | b"InvalidKeyId" => SecretError::AccessDenied,
+        b"ParameterNotFound" | b"ParameterVersionNotFound" | b"ValidationException" => {
+            SecretError::NotFound
+        }
+        b"ThrottlingException" | b"InternalServerError" | b"TooManyUpdates" => {
+            SecretError::Unreachable
+        }
+        _ => return None,
+    })
+}
+
+/// Which of the port's meanings a refused read is: the fault AWS named, read
+/// from the same allowlist [`refusal_detail`] echoes, and the status only when
+/// it named none.
+fn refusal_kind(status: u16, body: &str) -> SecretError {
+    // The first listed name the body carries decides; the list is a fixed
+    // twelve, so this is a compile-time bound, not a search over the data.
+    for name in AWS_FAULTS {
+        if body.contains(name) {
+            if let Some(kind) = fault_kind(name) {
+                return kind;
+            }
+            break;
+        }
+    }
+    match status {
+        403 => SecretError::AccessDenied,
+        404 => SecretError::NotFound,
+        _ => SecretError::Unreachable,
+    }
+}
+
 /// AWS fault names this build will repeat back, and nothing else.
 ///
 /// An ALLOWLIST rather than a filter, because the thing being kept out is not a
@@ -879,6 +936,47 @@ fn wire_headers(identity: &AwsIdentity) -> Vec<(&'static str, &str)> {
     }
 }
 
+/// Refuses a parameter value this build will not send as a credential.
+///
+/// # Empty, and whitespace-padded (P1-19-01, D-2525)
+///
+/// Empty was always refused. A value with leading or trailing whitespace —
+/// most often a newline pasted into the console with the token — was returned
+/// as it was: a newline then failed inside the HTTP client at send time and
+/// was reported as a transport fault ("was not reached") and retried like a
+/// network blip, never reaching the credential law. A padded value is now
+/// refused HERE, at the one place it arrives, as configuration. The value is
+/// never quoted and never trimmed: trimming would send a credential the
+/// operator did not store, which is a guess about what they meant.
+///
+/// # Errors
+///
+/// [`SecretError::Empty`] for an empty value and [`SecretError::Padded`] for a
+/// value with leading or trailing whitespace. Neither detail carries a byte of
+/// the value.
+fn refuse_unusable_value(value: &str) -> Result<(), SsmError> {
+    if value.is_empty() {
+        return Err(SsmError {
+            detail: "the parameter exists and holds nothing. An empty \
+                     credential is not a credential, and this build will not \
+                     send one to a broker."
+                .to_owned(),
+            kind: SecretError::Empty,
+        });
+    }
+    if value.trim() != value {
+        return Err(SsmError {
+            detail: "the parameter's value begins or ends with whitespace, \
+                     most often a newline stored with the token. This build \
+                     will not send it and will not trim it: re-store the \
+                     credential without the padding."
+                .to_owned(),
+            kind: SecretError::Padded,
+        });
+    }
+    Ok(())
+}
+
 /// One live `GetParameter` call, signed and sent.
 ///
 /// # This is the function that makes it real
@@ -972,13 +1070,7 @@ pub async fn get_parameter(
     if !status.is_success() {
         // AWS names its faults in the body; the port's four variants are what
         // an operator acts on. Mapped rather than flattened.
-        let kind = if text.contains("AccessDenied") || status.as_u16() == 403 {
-            SecretError::AccessDenied
-        } else if text.contains("ParameterNotFound") || status.as_u16() == 404 {
-            SecretError::NotFound
-        } else {
-            SecretError::Unreachable
-        };
+        let kind = refusal_kind(status.as_u16(), &text);
         // THE BODY IS NEVER QUOTED, AND THIS IS THE §8 LINE.
         //
         // The 300 characters of `text` that used to be spliced here were the
@@ -1012,15 +1104,7 @@ pub async fn get_parameter(
     }
 
     let value = value_of(&text)?;
-    if value.is_empty() {
-        return Err(SsmError {
-            detail: "the parameter exists and holds nothing. An empty \
-                     credential is not a credential, and this build will not \
-                     send one to a broker."
-                .to_owned(),
-            kind: SecretError::Empty,
-        });
-    }
+    refuse_unusable_value(&value)?;
     // THE CREDENTIAL READ HAPPENED — AND NOT ONE BYTE OF THE CREDENTIAL.
     //
     // `CLAUDE.md` §8 keeps the parameter PATH out of every tracked file because
@@ -1151,6 +1235,95 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
               keep panics out of the crate rather than out of its tests"
 )]
 mod tests {
+    /// **conc8-3: a permanent fault is classed by its NAME, whatever the
+    /// status.** An expired or unknown identity, a bad signature (a skewed
+    /// clock lands here) and a malformed request are not fixed by retrying.
+    /// Classed as `Unreachable` they read as transport, so the run neither
+    /// stopped nor named the fault class. The status AWS sends them under is
+    /// not assumed: each is checked under 400 and under 500.
+    #[test]
+    fn a_permanent_parameter_store_fault_is_classed_by_its_name() {
+        for status in [400, 500] {
+            for (name, kind) in [
+                ("AccessDeniedException", SecretError::AccessDenied),
+                ("ExpiredTokenException", SecretError::AccessDenied),
+                ("UnrecognizedClientException", SecretError::AccessDenied),
+                ("InvalidSignatureException", SecretError::AccessDenied),
+                ("MissingAuthenticationToken", SecretError::AccessDenied),
+                ("InvalidKeyId", SecretError::AccessDenied),
+                ("ParameterNotFound", SecretError::NotFound),
+                ("ParameterVersionNotFound", SecretError::NotFound),
+                ("ValidationException", SecretError::NotFound),
+                ("ThrottlingException", SecretError::Unreachable),
+                ("InternalServerError", SecretError::Unreachable),
+                ("TooManyUpdates", SecretError::Unreachable),
+            ] {
+                let body = format!(r#"{{"__type":"{name}","message":"Refused."}}"#);
+                assert_eq!(refusal_kind(status, &body), kind, "{name} under {status}");
+            }
+        }
+        // EVERY ALLOWLISTED NAME HAS A CLASS OF ITS OWN, so a name added to
+        // `AWS_FAULTS` without one fails here rather than falling to the status.
+        for name in AWS_FAULTS {
+            assert!(fault_kind(name).is_some(), "{name} has no class");
+        }
+        // NO NAME: the status decides, as before.
+        assert_eq!(refusal_kind(403, "{}"), SecretError::AccessDenied);
+        assert_eq!(refusal_kind(404, "{}"), SecretError::NotFound);
+        assert_eq!(refusal_kind(400, "{}"), SecretError::Unreachable);
+        assert_eq!(refusal_kind(503, "<html>"), SecretError::Unreachable);
+    }
+
+    /// **A WHITESPACE-PADDED VALUE IS REFUSED WHERE IT ARRIVES (P1-19-01,
+    /// D-2525).**
+    ///
+    /// On the old code only `is_empty` was checked, so every padded case below
+    /// was returned as a credential: there was no `refuse_unusable_value` and no
+    /// `SecretError::Padded`, and a newline then failed inside the HTTP client as
+    /// a transport fault. Every leading and trailing ASCII whitespace byte is
+    /// walked on both ends, the whitespace-only values, the empty value, and
+    /// interior whitespace, which is not padding and is left to the header
+    /// check in `HttpSource::new`.
+    #[test]
+    fn a_whitespace_padded_parameter_value_is_refused_and_never_quoted() {
+        use crate::secret::SecretError;
+        let empty = refuse_unusable_value("").expect_err("empty refuses");
+        assert_eq!(empty.kind, SecretError::Empty);
+        for pad in [' ', '\t', '\n', '\r', '\u{0b}', '\u{0c}', '\u{a0}'] {
+            for value in [
+                format!("{pad}SECRETVALUE"),
+                format!("SECRETVALUE{pad}"),
+                format!("{pad}SECRETVALUE{pad}"),
+                format!("{pad}"),
+                format!("{pad}{pad}"),
+            ] {
+                let refused = refuse_unusable_value(&value).expect_err("padding refuses");
+                assert_eq!(refused.kind, SecretError::Padded, "{pad:?}");
+                assert!(
+                    !refused.detail.contains("SECRETVALUE"),
+                    "the value is never quoted: {}",
+                    refused.detail
+                );
+            }
+        }
+        for usable in ["SECRETVALUE", "S", "SECRET VALUE", "KEY:TOKEN"] {
+            assert!(
+                refuse_unusable_value(usable).is_ok(),
+                "{usable:?} has no padding"
+            );
+        }
+        // THE CALL SITE USES IT: `get_parameter` reads no value past it.
+        let source = include_str!("ssm.rs");
+        let body = source
+            .split("pub async fn get_parameter(")
+            .nth(1)
+            .expect("get_parameter exists");
+        assert!(
+            body.contains("refuse_unusable_value(&value)?;"),
+            "get_parameter refuses an unusable value before returning it"
+        );
+    }
+
     /// §8 — the parameter path never reaches the output, whatever AWS says.
     #[test]
     fn a_refusal_never_repeats_the_body_that_names_the_parameter() {

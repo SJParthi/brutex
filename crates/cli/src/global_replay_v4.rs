@@ -513,11 +513,19 @@ impl VixLookup for VixCatalog<'_> {
             // re-opened from the same file, so the stamp is unchanged and only
             // the read repeats. The scan is over at most `VIX_MONTHS_HELD`
             // keys, a constant.
+            //
+            // WAITED FOR, BOUNDED, NEVER ABSENCE (replay-5, D-2636). The open
+            // happens after the whole replay, and CE-8's eviction re-opens a
+            // month later still, so a VIX pull holding the month for a moment
+            // refused a multi-hour run at its end. A writer is waited for a
+            // constant second; past it the refusal names the month as busy.
+            // It is never turned into an absent stamp.
             make_room(&mut self.months, VIX_MONTHS_HELD);
             self.months.try_reserve(1).map_err(|why| why.to_string())?;
             self.months.insert(
                 (feed, month),
-                VixReferenceMonth::open(self.root, feed, month)?,
+                VixReferenceMonth::open_waiting(self.root, feed, month)
+                    .map_err(crate::vix_reference::VixOpenRefusal::into_reason)?,
             );
         }
         self.months

@@ -296,6 +296,35 @@ impl SpotTarget {
         }
     }
 
+    /// The names a whole-target request is expected to reach: [`Self::members`]
+    /// where a published list defines the target, and the engine surface's
+    /// own roster for [`Self::Swept`]. `None` for the two targets defined by
+    /// what a vendor master calls an index or by a predicate.
+    #[must_use]
+    pub fn expected(self) -> Option<Vec<&'static str>> {
+        match self {
+            // THE ENGINE SURFACE IS A COMPILE-TIME ROSTER, NOT A MASTER'S
+            // CHOICE. `InstrumentKey::SWEPT` plus the F&O underlyings that are
+            // shares (`FNO_UNDERLYINGS` less `FNO_INDEX_UNDERLYINGS`), DERIVED
+            // from those two lists rather than copied, so a name no loaded
+            // master lists -- renamed by NSE, or dropped by a refresh -- is
+            // counted as lacking and refused by name instead of silently
+            // narrowing the swept pull. D-2759 (CE-92).
+            Self::Swept => Some(
+                brutex_core::instrument::InstrumentKey::SWEPT
+                    .iter()
+                    .map(|&(_, symbol)| symbol)
+                    .chain(universe::FNO_UNDERLYINGS.iter().copied().filter(|name| {
+                        universe::FNO_INDEX_UNDERLYINGS
+                            .iter()
+                            .all(|index| index != name)
+                    }))
+                    .collect(),
+            ),
+            other => other.members().map(<[&str]>::to_vec),
+        }
+    }
+
     /// The published constituent list that DEFINES this target, when a
     /// published list is what defines it.
     ///
@@ -2126,7 +2155,6 @@ fn waiting_json(status: &crate::autopilot::Status, paused: bool, seat: bool) -> 
 /// 4. Otherwise the backfill's own sentence, which is written on every
 ///    transition and is never empty — see [`crate::autopilot::Status::why`].
 fn blocked_by(status: &crate::autopilot::Status, paused: bool) -> String {
-    use crate::autopilot::Phase;
     if paused {
         return format!(
             "the operator's pause. Nothing is asked of any vendor until a resume, and \
@@ -2149,7 +2177,9 @@ fn blocked_by(status: &crate::autopilot::Status, paused: bool) -> String {
         );
     }
     if status.feeds.is_empty() {
-        if status.phase == Phase::Halted {
+        // The task's own word, not the phase: the clock wait is `Halted` and
+        // alive (autopilot-3, CE-46, D-2508).
+        if status.task_returned {
             return format!(
                 "nothing, because the backfill task is not running: {}",
                 status.why()
@@ -4325,6 +4355,7 @@ mod route_tests {
             &Status {
                 phase: Phase::Halted,
                 detail: String::from("the clock is unusable"),
+                task_returned: true,
                 ..Status::default()
             },
             false,

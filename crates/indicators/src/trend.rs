@@ -224,12 +224,30 @@ impl Ema {
         if denominator <= 0 {
             return;
         }
-        // ema += (target - ema) * 2 / (n + 1), all integer. `div_euclid` and not `/`:
-        // the numerator is negative whenever price is below the average, and
-        // truncation toward zero would bias the average upward on every down step.
+        // ema += (target - ema) * 2 / (n + 1), all integer, TRUNCATED TOWARD
+        // ZERO (ind1-2, D-2613). This was `div_euclid`, which floors: an up step
+        // fell short of the exact one but a down step overshot it, so after a fall
+        // the average reached a flat price exactly and `close_below_ema` went
+        // silent forever, while after the mirror-image rise it stalled below and
+        // `close_above_ema` stayed set. The exact average never reaches the price
+        // from either side. Truncation keeps the state strictly on the side it
+        // approaches from, as the exact one is, and is symmetric under reflecting
+        // price: each step falls short of the exact step by under one scaled unit
+        // in BOTH directions.
         let delta = target.saturating_sub(self.scaled);
-        let step = delta.saturating_mul(2).div_euclid(denominator);
+        let step = delta.saturating_mul(2) / denominator;
         self.scaled = self.scaled.saturating_add(step);
+    }
+
+    /// The average in millionths of a paisa ([`SCALE`]), unfloored, or `None`
+    /// before the first candle.
+    ///
+    /// What a side test compares against (ind1-2, D-2613): `value` floors, and
+    /// a close equal to the floor of a fractional average is BELOW it, which a
+    /// compare against the floored paisa reported as "on" it.
+    #[must_use]
+    pub const fn scaled(&self) -> Option<i128> {
+        if self.seeded { Some(self.scaled) } else { None }
     }
 
     /// The average in paisa, or `None` before the first candle.
@@ -984,15 +1002,20 @@ impl TrendState {
         // and nothing downstream could tell that bit from one backed by two hundred
         // candles. Folding the gate into `value` instead would have starved
         // `SuperTrend::fold` of its seed — see `Ema::warm`.
+        //
+        // EXACT, NOT FLOORED (ind1-2, D-2613): the close is lifted to the
+        // average's own scale and compared with the unfloored state, so a close
+        // equal to the floor of a fractional average reads as below it.
+        let close_scaled = i128::from(close).saturating_mul(SCALE);
         if self.fast.warm()
-            && let Some(fast) = self.fast.value()
+            && let Some(fast) = self.fast.scaled()
         {
-            mask = side(mask, close, fast, 0, 1);
+            mask = side(mask, close_scaled, fast, 0, 1);
         }
         if self.slow.warm()
-            && let Some(slow) = self.slow.value()
+            && let Some(slow) = self.slow.scaled()
         {
-            mask = side(mask, close, slow, 2, 3);
+            mask = side(mask, close_scaled, slow, 2, 3);
         }
         // 4–5: the averages against each other. BOTH must have folded their own period,
         // so the slow one governs and this pair is the last of the six to speak. Gating
@@ -1000,7 +1023,7 @@ impl TrendState {
         // which is a statement about the seed and not about the market.
         if self.fast.warm()
             && self.slow.warm()
-            && let (Some(fast), Some(slow)) = (self.fast.value(), self.slow.value())
+            && let (Some(fast), Some(slow)) = (self.fast.scaled(), self.slow.scaled())
         {
             mask = side(mask, fast, slow, 4, 5);
         }
@@ -1078,7 +1101,13 @@ fn set(mask: ConditionMask, index: u16) -> ConditionMask {
 /// average would report itself as beneath it — the same defect that made position 227
 /// fire on every zero-body bar and handed an undirected tri-star to the bearish bit.
 /// Making it structural means it cannot be forgotten at the fourth call site.
-fn side(mask: ConditionMask, value: i64, level: i64, above: u16, below: u16) -> ConditionMask {
+fn side<T: Ord + Copy>(
+    mask: ConditionMask,
+    value: T,
+    level: T,
+    above: u16,
+    below: u16,
+) -> ConditionMask {
     side_by(mask, value.cmp(&level), above, below)
 }
 
@@ -1370,6 +1399,54 @@ mod tests {
             !mask.get(4) && !mask.get(5),
             "ema20 == ema200 sets neither 4 nor 5"
         );
+    }
+
+    /// ind1-2, D-2613: the audit's mirror pair. 200 bars at 10,000 or 30,000
+    /// paisa, then 1,000 at 20,000: the exact averages approach 20,000 from
+    /// below and from above and never reach it, so a rise must keep
+    /// `close_above_ema*` (0, 2) and the mirror fall must keep `close_below_ema*`
+    /// (1, 3). Before, the fall reported neither: the floored step reached the
+    /// price exactly from above, and the floored level hid the side.
+    #[test]
+    fn a_flat_price_after_a_rise_and_after_a_fall_report_mirror_sides() {
+        let run = |start: i64| {
+            let mut t = TrendState::default();
+            for i in 0..1_200_i64 {
+                let price = if i < 200 { start } else { 20_000 };
+                t.step(&candle(i * 60_000_000, price, price, price), tol())
+                    .expect("sane candle");
+            }
+            t.bits(20_000, tol())
+        };
+        let after_rise = run(10_000);
+        let after_fall = run(30_000);
+        assert!(
+            after_rise.get(0) && !after_rise.get(1),
+            "above ema20 after a rise"
+        );
+        assert!(
+            after_rise.get(2) && !after_rise.get(3),
+            "above ema200 after a rise"
+        );
+        assert!(
+            after_fall.get(1) && !after_fall.get(0),
+            "below ema20 after a fall"
+        );
+        assert!(
+            after_fall.get(3) && !after_fall.get(2),
+            "below ema200 after a fall"
+        );
+
+        // And the state itself stays on the side it approaches from.
+        let mut up = Ema::new(20);
+        let mut down = Ema::new(20);
+        for i in 0..1_200 {
+            up.fold(if i < 200 { 10_000 } else { 20_000 });
+            down.fold(if i < 200 { 30_000 } else { 20_000 });
+        }
+        let target = 20_000 * SCALE;
+        assert!(up.scaled().expect("seeded") < target);
+        assert!(down.scaled().expect("seeded") > target);
     }
 
     /// A rising series puts the fast average above the slow one.

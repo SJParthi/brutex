@@ -68,10 +68,14 @@ impl Fold {
 
 /// `folds` contiguous test windows over `bars`, each purged and embargoed.
 ///
-/// The embargo is `horizon` bars, matching the outcome window: a bar that far
-/// past the test range is the first whose label shares no data with it. Using
-/// the horizon rather than a separate constant means there is no second number
-/// to get wrong, and no caller to ask for one.
+/// The purge and the embargo are each `horizon + 1` bars, matching a TRADE's
+/// window rather than the bare forward label: a signal at `i` fills on `i + 1`
+/// and exits on `i + 1 + horizon`, so a bar that far past the test range is the
+/// first that shares no bar with a test trade. Both were `horizon`, which let
+/// the last training trade exit ON the first test bar and the first
+/// post-embargo bar BE the last test trade's exit (p18num-1, D-2545). Using the
+/// horizon rather than a separate constant means there is no second number to
+/// get wrong, and no caller to ask for one.
 ///
 /// Returns an empty vector when `folds` is zero or the series is too short to
 /// hold a single test window — a fold that cannot be honoured is not returned
@@ -84,6 +88,8 @@ impl Fold {
 #[must_use]
 pub fn purged_folds(bars: usize, horizon: Horizon, folds: usize) -> Vec<Fold> {
     let h = horizon.as_bars() as usize;
+    // The bars one trade spans past its signal: the fill bar and `h` more.
+    let reach = h.saturating_add(1);
     if folds == 0 || bars == 0 || bars < folds {
         return Vec::new();
     }
@@ -104,14 +110,17 @@ pub fn purged_folds(bars: usize, horizon: Horizon, folds: usize) -> Vec<Fold> {
             test_start.saturating_add(width)
         };
 
-        // PURGE BEFORE. A training bar at `i` has an outcome window reaching
-        // `i + h`, so it must end before the test range begins: `i + h <
-        // test_start`, hence `i < test_start - h`.
-        let left_end = test_start.saturating_sub(h);
+        // PURGE BEFORE. A TRADE from signal `i` fills on `i + 1` and exits on
+        // `i + 1 + h`, so its window reaches one bar further than the forward
+        // label `i..i + h` this used to purge for: `i + 1 + h < test_start`,
+        // hence `i < test_start - (h + 1)`. With `h` alone the last training
+        // signal's exit bar WAS `test_start` (p18num-1, D-2545).
+        let left_end = test_start.saturating_sub(reach);
         let left = 0..left_end;
 
-        // EMBARGO AFTER. Training resumes `h` bars past the test window.
-        let right_start = test_end.saturating_add(h).min(bars);
+        // EMBARGO AFTER. The last test signal `test_end - 1` exits on
+        // `test_end + h`, so training resumes on the bar after that one.
+        let right_start = test_end.saturating_add(reach).min(bars);
         let right = right_start..bars;
 
         out.push(Fold {
@@ -262,6 +271,20 @@ pub fn rolling_folds(bars: usize, horizon: Horizon, splits: usize) -> Vec<Fold> 
 /// evaluator sees an unbroken prefix, which is the only thing it can honestly
 /// be given.
 ///
+/// # The `H`-bar purge separates LABELS, and slicing separates TRADES
+///
+/// A trade from the last training signal `t - 1` fills on `t` and exits on
+/// `t + H`, which is `test.start` itself: as index arithmetic the two halves
+/// share one bar. What keeps a training trade out of the test period is not
+/// this gap but the caller's physical slice — `validate`'s anchored V4 fold
+/// (`walk_forward_exact_grid_v4`) hands the training search only the
+/// execution bars stamped before the first test signal (its training
+/// execution cursor's `before(.., test_open)`), so no training trade can exit
+/// at or after it. A caller that indexes the full series with
+/// these ranges instead inherits the one-bar overlap; [`purged_folds`] purges
+/// `H + 1` for exactly that reason (p18num-1, D-2545). The same holds for
+/// [`rolling_folds`].
+///
 /// # What it costs, stated rather than hidden
 ///
 /// An anchored walk-forward tests each period once and trains on everything
@@ -393,14 +416,15 @@ mod tests {
     #[test]
     fn no_training_bar_can_see_into_its_test_window() {
         // THE PROPERTY THIS MODULE EXISTS FOR, asserted directly: for every fold
-        // and every training bar, the outcome window [i, i+h] must not overlap
+        // and every training bar, the TRADE window [i, i+1+h] must not overlap
         // the test range. A plain split violates this on its last h bars, and
-        // nothing about the result looks wrong when it does.
+        // nothing about the result looks wrong when it does. This read `i + 15`,
+        // the forward label, and so certified a one-bar overlap (p18num-1).
         let bars = 1_000;
         let horizon = h(15);
         for fold in purged_folds(bars, horizon, 5) {
             for i in fold.train.0.clone().chain(fold.train.1.clone()) {
-                let window_end = i.saturating_add(15);
+                let window_end = i.saturating_add(1 + 15);
                 let overlaps = i < fold.test.end && window_end >= fold.test.start;
                 assert!(
                     !overlaps,
@@ -410,6 +434,57 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// NO TRADE WALKED FROM A TRAINING SIGNAL EXITS INSIDE ITS TEST WINDOW, AND
+    /// NO TEST TRADE EXITS ON A RESUMED TRAINING BAR.
+    ///
+    /// p18num-1, D-2545. A trade from signal `i` fills on `i + 1` and exits on
+    /// `i + 1 + h` (`crate::trade::walk` with `Sourced::Signal`). With a purge
+    /// and embargo of `h`, the last left-training signal's exit bar was
+    /// `test.start` and the last test signal's exit bar was the first resumed
+    /// training bar — both assertions below fail on the old code at every
+    /// middle fold. Enumerated over horizons 1, 2, 3, 5 and 15, fold counts 2
+    /// to 9 and three series lengths (one not divisible by any fold count),
+    /// and the bound is shown TIGHT: one bar less of purge would overlap.
+    #[test]
+    fn no_trade_walked_from_a_training_bar_exits_inside_its_test_window() {
+        let mut middle_folds = 0_u32;
+        for horizon in [1_u32, 2, 3, 5, 15] {
+            let reach = usize::try_from(horizon).expect("a u32 fits") + 1;
+            for folds in 2..=9_usize {
+                for bars in [200_usize, 997, 1_000] {
+                    for f in purged_folds(bars, h(horizon), folds) {
+                        for i in f.train.0.clone() {
+                            assert!(
+                                i + reach < f.test.start,
+                                "h {horizon}, {folds} folds: training trade from {i} \
+                                 exits on {} inside test {:?}",
+                                i + reach,
+                                f.test
+                            );
+                        }
+                        let last_test_exit = f.test.end - 1 + reach;
+                        for i in f.train.1.clone() {
+                            assert!(
+                                i > last_test_exit,
+                                "h {horizon}: resumed training bar {i} is at or before \
+                                 the last test exit {last_test_exit}"
+                            );
+                        }
+                        // Tight on both sides: the purge is exactly a trade window.
+                        if !f.train.0.is_empty() && !f.train.1.is_empty() {
+                            middle_folds += 1;
+                            assert_eq!(f.train.0.end - 1 + reach, f.test.start - 1);
+                            assert_eq!(f.train.1.start, last_test_exit + 1);
+                            assert_eq!(f.purged, reach);
+                            assert_eq!(f.embargoed, reach);
+                        }
+                    }
+                }
+            }
+        }
+        assert!(middle_folds > 100, "{middle_folds} middle folds exercised");
     }
 
     #[test]
@@ -431,8 +506,13 @@ mod tests {
     fn purge_and_embargo_are_counted_and_the_counts_are_honest() {
         let folds = purged_folds(1_000, h(20), 5);
         let middle = folds.get(2).expect("five folds");
-        assert_eq!(middle.purged, 20, "a middle fold purges a full horizon");
-        assert_eq!(middle.embargoed, 20, "and embargoes a full horizon");
+        // A trade spans its fill bar and the horizon, so both are `h + 1`
+        // (p18num-1, D-2545; they were 20).
+        assert_eq!(
+            middle.purged, 21,
+            "a middle fold purges a full trade window"
+        );
+        assert_eq!(middle.embargoed, 21, "and embargoes a full trade window");
 
         // The first fold has no training data before it, so nothing to purge.
         let first = folds.first().expect("five folds");

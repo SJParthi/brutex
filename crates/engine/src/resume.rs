@@ -530,6 +530,23 @@ impl Ladder {
         reporter: Reporter<'_>,
     ) -> Result<Sweep, Error> {
         checkpoint.validate_for(self, column, live, expected_identity)?;
+        // A HOST HALT IS NOT AN ANSWER (engine-1, CE-9, D-2614). The walk no
+        // longer saves a Memory or Workers halt, but a journal written before
+        // that change can hold one, and replaying it would return this
+        // machine's refusal as the run's outcome for good. It cannot be
+        // rewound either: the pair count at the level below was never saved.
+        // So it is refused by name, and the operator removes that checkpoint
+        // to rerun the level.
+        if let Some(Halt {
+            breach: Breach::Memory | Breach::Workers,
+            ..
+        }) = checkpoint.progress.halted
+        {
+            return Err(Error::Invalid(
+                "checkpoint holds a host Memory or Workers halt, which is never replayed; \
+                 remove it to rerun the level",
+            ));
+        }
         let current = checkpoint
             .levels
             .pop()

@@ -324,7 +324,10 @@ fn drive_duplicate_candles(scratch: &Scratch) {
     let first = *rows.first().expect("a full session");
     rows.insert(1, first);
     let done = crate::ingest::from_window(
-        &RawWindow { rows },
+        &RawWindow {
+            rows,
+            skipped: crate::fetch::DecodeSkips::default(),
+        },
         INSTRUMENT,
         "emit-sites",
         &scratch.store(),
@@ -340,7 +343,10 @@ fn drive_duplicate_candles(scratch: &Scratch) {
 fn drive_request_minutes(scratch: &Scratch) {
     let request = request_over(Window::new(window().from(), window().from()).expect("one day"));
     let done = crate::ingest::from_window(
-        &RawWindow { rows: Vec::new() },
+        &RawWindow {
+            rows: Vec::new(),
+            skipped: crate::fetch::DecodeSkips::default(),
+        },
         INSTRUMENT,
         "emit-sites",
         &scratch.store(),
@@ -377,7 +383,10 @@ fn drive_bad_candles(scratch: &Scratch, conflict: bool) {
         rows.push(RawRow { volume: 2, ..row });
     }
     let done = crate::ingest::from_window(
-        &RawWindow { rows },
+        &RawWindow {
+            rows,
+            skipped: crate::fetch::DecodeSkips::default(),
+        },
         INSTRUMENT,
         "emit-sites",
         &scratch.store(),
@@ -848,26 +857,6 @@ static SITES: &[Site] = &[
         drive: drive_csv_refused,
     },
     Site {
-        at: "crates/pull/src/masters.rs — note_index_skips",
-        target: "pull.masters",
-        message: "index entries skipped",
-        // THE CATEGORY BY NAME (CE-58): a category whose value is not a list
-        // of names is skipped under MR-04, and the skip is the line.
-        says: ("category", Says::Holds("Thematic")),
-        drive: drive_index_skipped,
-    },
-    Site {
-        at: "crates/pull/src/masters.rs — note_index_skips, elements only",
-        target: "pull.masters",
-        message: "index entries skipped",
-        // AN ELEMENT SKIPPED IN A CATEGORY THAT IS A LIST still emits, and
-        // names that category: the line fires on either count, and its
-        // category falls back to the first that lost an element (G18-rest-16,
-        // D-2076).
-        says: ("category", Says::Holds("Sectoral")),
-        drive: drive_index_element_skipped,
-    },
-    Site {
         at: "crates/pull/src/archive.rs:278",
         target: "pull.archive",
         message: "folder walked",
@@ -1242,23 +1231,6 @@ fn drive_csv_decoded(_scratch: &Scratch) {
     assert_eq!(rows.len(), 3, "three rows in, three rows out");
 }
 
-/// An index document with one category that is not a list and one element
-/// that is not a name. Both are skipped (MR-04) and the good name converts.
-fn drive_index_skipped(_scratch: &Scratch) {
-    let csv = crate::masters::nse_index_csv(r#"{"Broad":["NIFTY 50",42],"Thematic":"NIFTY X"}"#)
-        .expect("the good name still converts");
-    assert!(csv.contains("NIFTY 50,Broad\n"), "{csv}");
-}
-
-/// An index document whose every category is a list, one of them holding an
-/// element that is not a name: an element skip and no category skip.
-fn drive_index_element_skipped(_scratch: &Scratch) {
-    let csv =
-        crate::masters::nse_index_csv(r#"{"Broad":["NIFTY 50"],"Sectoral":["NIFTY BANK",7]}"#)
-            .expect("the good names still convert");
-    assert!(csv.contains("NIFTY BANK,Sectoral\n"), "{csv}");
-}
-
 /// A CSV row that is two fields where five are required.
 fn drive_csv_refused(_scratch: &Scratch) {
     assert!(
@@ -1313,6 +1285,7 @@ fn drive_folder_refused(scratch: &Scratch) {
 fn drive_land(_scratch: &Scratch) {
     let request = request_over(window());
     let raw = RawWindow {
+        skipped: crate::fetch::DecodeSkips::default(),
         rows: vec![RawRow {
             timestamp: 0,
             open: 1,
@@ -1610,9 +1583,11 @@ fn drive_run_named(scratch: &Scratch) {
 /// entirely. The row asserted against it produced no records at all — an empty
 /// file, which is what a drive on the wrong path looks like.
 ///
-/// Two bars either side of a month boundary. The store addresses ONE month per
-/// file, so a batch needing two is refused at the `address` stage — which is a
-/// real refusal with a real caller, not a fault invented to reach a log line.
+/// A plan naming BSE. D-0017 narrows ingest to NSE, so `ingest::identify`
+/// refuses the member at the `address` stage — a real refusal with a real
+/// caller, not a fault invented to reach a log line. This drive used two bars
+/// either side of a month boundary until D-3136 made `from_rows` file such a
+/// batch one month per file, as the spot door does.
 fn drive_not_filed(scratch: &Scratch) {
     let store = scratch.store();
     let request = request_over(crossing());
@@ -1625,7 +1600,7 @@ fn drive_not_filed(scratch: &Scratch) {
         volume: 1,
         open_interest: i64::MIN,
     };
-    // 2022-10-03 and 2022-11-03, both inside `crossing()`, in two months.
+    // 2022-10-03 and 2022-11-03, both inside `crossing()`.
     let bars = [at(1_664_775_000), at(1_667_453_400)];
     let done = crate::ingest::from_rows(
         &bars,
@@ -1633,13 +1608,15 @@ fn drive_not_filed(scratch: &Scratch) {
         INSTRUMENT,
         "emit-sites",
         &store,
-        plan_over(&request),
+        crate::ingest::Plan {
+            exchange: "BSE",
+            ..plan_over(&request)
+        },
     );
     assert_eq!(
         done.failures.len(),
         1,
-        "a batch spanning two months is one member's refusal, and the store \
-         addresses one month per file"
+        "a member on an exchange this build does not pull is one refusal"
     );
     assert_eq!(
         done.bars_stored, 0,

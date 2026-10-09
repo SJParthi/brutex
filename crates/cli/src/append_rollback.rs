@@ -9,9 +9,12 @@
 //! before the attempt and the next append starts at a record boundary. When
 //! the truncation also fails both errors are named: nothing is hidden (§4).
 //!
-//! A failed durability barrier after a whole write is not this helper's case:
-//! the whole record is a valid orphan that each ledger's exact-retry rule
-//! already continues, so it is left in place.
+//! A failed durability barrier after a whole write is not this helper's case,
+//! and it is NOT safe to leave in place: after a failed `fsync` the pages are
+//! clean and readable, so a later barrier "confirms" bytes that never reached
+//! the device. A live ledger routes its barriers through
+//! `crate::fixed_tail::sync_or_roll_back`, which cuts the block (D-1900,
+//! D-2555).
 //!
 //! What it does per append: one `seek` and one write, and one `set_len` only
 //! when the write fails.

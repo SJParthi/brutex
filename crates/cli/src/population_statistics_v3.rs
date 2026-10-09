@@ -2867,20 +2867,25 @@ fn header() -> Result<[u8; HEADER_BYTES], PopulationStatisticsV3Refusal> {
 }
 
 fn ensure_header(file: &mut File, path: &Path) -> Result<(), PopulationStatisticsV3Refusal> {
-    let len = file
-        .metadata()
-        .map_err(|why| format!("cannot stat {}: {why}", path.display()))?
-        .len();
-    if len == 0 {
-        let bytes = header()?;
-        file.seek(SeekFrom::Start(0))
-            .and_then(|_| file.write_all(&bytes))
-            .and_then(|()| file.sync_all())
-            .map_err(|why| format!("cannot initialize {}: {why}", path.display()))?;
+    // conc5-1 (D-2644): the shared writer header rule.
+    let init = crate::fixed_tail::init_or_heal_header(file, path, &header()?, File::sync_all)
+        .map_err(|why| format!("cannot initialize {}: {why}", path.display()))?;
+    if init == crate::fixed_tail::HeaderInit::Written {
         // The new names are durable too (D-1903, pop2-5).
         return sync_parent(path);
     }
-    verify_header(file, path)
+    verify_header(file, path)?;
+    // pop2-3, D-2625 (extends D-1910): bytes past the last whole record were
+    // never acknowledged; the writer cuts them under the same lock. A reader
+    // keeps refusing them as ragged in `record_count`.
+    crate::fixed_tail::heal_torn_tail(
+        file,
+        path,
+        POPULATION_STATISTICS_V3_HEADER_BYTES,
+        POPULATION_STATISTICS_V3_RECORD_STRIDE,
+        &header()?,
+    )?;
+    Ok(())
 }
 
 /// Makes the directory entries of `path`'s parent durable.
@@ -3964,10 +3969,15 @@ mod tests {
                 0,
                 "case {case} ends on a whole record"
             );
-            drop(PopulationStatisticsV3Ledger::open_read(
-                &case_root,
-                bounds()?,
-            )?);
+            // A fault on the header's own barrier (hooked since conc5-1,
+            // D-2644) cuts a fresh file to nothing, which a reader refuses as
+            // no ledger; any longer cut ledger still opens read-only.
+            if len > 0 {
+                drop(PopulationStatisticsV3Ledger::open_read(
+                    &case_root,
+                    bounds()?,
+                )?);
+            }
             assert!(matches!(
                 produced.append_and_reopen(&case_root, bounds()?)?,
                 PopulationStatisticsV3Commit::Written(_)
@@ -4217,5 +4227,97 @@ mod tests {
             .expect_err("an absent parent cannot be synced");
         assert!(refusal.starts_with("cannot sync "), "{refusal}");
         sync_parent(&root.path().join(DATA_FILE)).expect("an existing parent syncs");
+    }
+
+    /// pop2-3, D-2625: the Statistics V3 writer cuts a sub-record tail left by
+    /// a killed append, back to the exact committed bytes, and a reader still
+    /// refuses it; a whole trailing stride of foreign bytes is never cut. On
+    /// the old code `record_count` refused the writer as ragged too.
+    #[test]
+    fn a_kill_torn_tail_is_cut_by_the_writer_and_refused_by_a_reader() -> Result<(), String> {
+        let root = TestDir::new()?;
+        let stride = usize::try_from(POPULATION_STATISTICS_V3_RECORD_STRIDE)
+            .map_err(|why| why.to_string())?;
+        for stray in [1, 32, stride / 2, stride - 1, stride] {
+            let ledger_root = root.child(&format!("torn-tail-{stray}"))?;
+            let produced = produced_fixture(
+                StatisticsFamilyTerminalV3::Evaluated,
+                StatisticsFamilyTerminalV3::NaturallyExtinct,
+                33,
+            )?;
+            produced.append_and_reopen(&ledger_root, bounds()?)?;
+            let path = ledger_root.join(DATA_FILE);
+            let whole = std::fs::read(&path).map_err(|why| why.to_string())?;
+            let mut file = OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .map_err(|why| why.to_string())?;
+            file.write_all(&vec![0x5a; stray])
+                .map_err(|why| why.to_string())?;
+            drop(file);
+            assert!(
+                PopulationStatisticsV3Ledger::open_read(&ledger_root, bounds()?).is_err(),
+                "{stray}: a reader refuses"
+            );
+            let opened = PopulationStatisticsV3Ledger::open_writer(&ledger_root, bounds()?);
+            if stray == stride {
+                assert!(opened.is_err(), "a whole foreign stride is refused");
+                assert_eq!(
+                    std::fs::metadata(&path)
+                        .map_err(|why| why.to_string())?
+                        .len(),
+                    whole.len() as u64 + stray as u64,
+                    "a whole record is never cut"
+                );
+            } else {
+                drop(opened.map_err(|why| format!("{stray}: the writer heals: {why}"))?);
+                assert_eq!(std::fs::read(&path).map_err(|why| why.to_string())?, whole);
+                PopulationStatisticsV3Ledger::open_read(&ledger_root, bounds()?)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// pop2-6, D-2626: a strict prefix of the Statistics V3 header (1 to 63
+    /// bytes) is cut and rewritten by the writer; the reader alone refuses it
+    /// and changes nothing, and foreign short bytes are still refused and
+    /// kept. On the old code the writer refused "shorter than Statistics V3
+    /// header" on every open.
+    #[test]
+    fn a_torn_statistics_v3_header_is_cut_and_rewritten() -> Result<(), String> {
+        let root = TestDir::new()?;
+        let expected = header()?;
+        for kept in [1, 32, HEADER_BYTES - 1] {
+            let ledger_root = root.child(&format!("torn-header-{kept}"))?;
+            File::create(ledger_root.join(LOCK_FILE)).map_err(|why| why.to_string())?;
+            let path = ledger_root.join(DATA_FILE);
+            std::fs::write(&path, &expected[..kept]).map_err(|why| why.to_string())?;
+            assert!(PopulationStatisticsV3Ledger::open_read(&ledger_root, bounds()?).is_err());
+            assert_eq!(
+                std::fs::read(&path).map_err(|why| why.to_string())?,
+                &expected[..kept]
+            );
+            drop(
+                PopulationStatisticsV3Ledger::open_writer(&ledger_root, bounds()?)
+                    .map_err(|why| format!("{kept}: the writer rewrites: {why}"))?,
+            );
+            assert_eq!(
+                std::fs::read(&path).map_err(|why| why.to_string())?,
+                expected.to_vec()
+            );
+            PopulationStatisticsV3Ledger::open_read(&ledger_root, bounds()?)?;
+        }
+        let foreign_root = root.child("foreign-short-header")?;
+        File::create(foreign_root.join(LOCK_FILE)).map_err(|why| why.to_string())?;
+        let path = foreign_root.join(DATA_FILE);
+        let mut foreign = expected[..32].to_vec();
+        foreign[0] ^= 1;
+        std::fs::write(&path, &foreign).map_err(|why| why.to_string())?;
+        assert!(PopulationStatisticsV3Ledger::open_writer(&foreign_root, bounds()?).is_err());
+        assert_eq!(
+            std::fs::read(&path).map_err(|why| why.to_string())?,
+            foreign
+        );
+        Ok(())
     }
 }

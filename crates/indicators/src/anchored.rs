@@ -40,8 +40,9 @@
 //!   or previous-day-volume bit.
 //!
 //! [`crate::gap::GapFib`] is deliberately NOT changed.  Its specification is
-//! the last three intraday bars of the signal stream against today's first
-//! three, not daily OHLC.  [`GapReferenceSource`] exposes that boundary so a
+//! the signal stream's last 3-minute clock bucket of the previous session
+//! against today's first, not daily OHLC (clock buckets since D-1441, not
+//! three bars; Z1-slice08-F4).  [`GapReferenceSource`] exposes that boundary so a
 //! caller cannot mistake this path for an external `GapFib` anchor.
 
 use crate::daily::{DailyLevels, Unusable};
@@ -270,8 +271,17 @@ impl DailyReferenceCensus {
 /// The explicit `GapFib` boundary on this path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GapReferenceSource {
-    /// Existing semantics: signal stream's last three bars versus today's first three.
-    SignalSeriesLastThreeIntradayBars,
+    /// The signal stream's previous-session LAST 3-minute clock bucket versus
+    /// today's FIRST 3-minute clock bucket, each bucket being
+    /// [`crate::gap::candle_bucket`] of a bar's own stamp on the grid anchored
+    /// at IST midnight.
+    ///
+    /// Renamed from `SignalSeriesLastThreeIntradayBars` (Z1-slice08-F4,
+    /// D-2543): since D-1441 `GapFib` folds clock spans, not three bars, so a
+    /// session missing a minute holds two bars in that candle and a rung of
+    /// three minutes or more holds one. The old name described the fold D-1441
+    /// retired.
+    SignalSeriesThreeMinuteBuckets,
 }
 
 /// An evaluator whose previous-day families are driven by sealed daily OHLCV.
@@ -447,7 +457,7 @@ impl<'a> AnchoredEvaluator<'a> {
     /// Existing `GapFib` remains signal-local on this anchored path.
     #[must_use]
     pub const fn gap_reference_source(&self) -> GapReferenceSource {
-        GapReferenceSource::SignalSeriesLastThreeIntradayBars
+        GapReferenceSource::SignalSeriesThreeMinuteBuckets
     }
 
     /// Completed eligible daily sessions held by the fixed Prev5 ring.
@@ -2735,6 +2745,38 @@ mod tests {
         }
     }
 
+    /// THE GAP BOUNDARY IS NAMED FOR THE FOLD THAT RUNS: 3-MINUTE CLOCK
+    /// BUCKETS, NOT THREE BARS.
+    ///
+    /// Z1-slice08-F4, D-2543. The variant was `SignalSeriesLastThreeIntradayBars`
+    /// and its doc said "last three bars versus today's first three", while
+    /// `GapFib` has folded `gap::candle_bucket` clock spans since D-1441. The
+    /// name is read through `Debug`, so on the old code the first assertion
+    /// fails on the string rather than on a missing variant. The bucket is then
+    /// pinned at its edges: 09:15, 09:16 and 09:17 share one bucket, 09:18
+    /// opens the next, and 15:27-15:29 is one bucket — so a session missing
+    /// 09:16 still has ONE first candle of two bars, which is what the name now
+    /// says and the old one did not.
+    #[test]
+    fn the_gap_reference_source_names_the_clock_bucket_fold() {
+        let evaluator = evaluator(&[]);
+        let name = format!("{:?}", evaluator.gap_reference_source());
+        assert_eq!(name, "SignalSeriesThreeMinuteBuckets");
+        assert!(!name.contains("Bars"), "{name}");
+
+        let bucket = |minute: i64| crate::gap::candle_bucket(ts(20_003, minute));
+        let open = bucket(OPEN_IST_MINUTE);
+        assert_eq!(bucket(OPEN_IST_MINUTE + 1), open);
+        assert_eq!(bucket(OPEN_IST_MINUTE + 2), open);
+        assert_eq!(bucket(OPEN_IST_MINUTE + 3), open + 1);
+        assert_eq!(bucket(OPEN_IST_MINUTE - 1), open - 1);
+        let last = bucket(15 * 60 + 29);
+        assert_eq!(bucket(15 * 60 + 27), last);
+        assert_eq!(bucket(15 * 60 + 28), last);
+        assert_eq!(bucket(15 * 60 + 30), last + 1);
+        assert_eq!(bucket(15 * 60 + 26), last - 1);
+    }
+
     #[test]
     fn census_is_deterministic_and_gapfib_boundary_is_explicit() {
         let references = [
@@ -2756,7 +2798,7 @@ mod tests {
             }
             assert_eq!(
                 evaluator.gap_reference_source(),
-                GapReferenceSource::SignalSeriesLastThreeIntradayBars
+                GapReferenceSource::SignalSeriesThreeMinuteBuckets
             );
             evaluator.reference_census()
         };

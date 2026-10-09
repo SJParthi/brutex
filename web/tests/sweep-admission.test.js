@@ -54,6 +54,29 @@ test('only exact accepted attempt tokens or explicit refusals settle POST uncert
   }
 });
 
+test('an audit start refused before dispatch settles the launch as failed (log-1, D-2501)', () => {
+  const body = () => ({ schema_version: 1, refusal: 'invocation journal busy',
+    code: 'invocation_audit_unavailable', handler_completed: false,
+    why: 'The handler was not dispatched because its required audit start was unavailable.' });
+  assert.deepEqual(sweepSubmission(503, body()),
+    { phase: 'failed', attempt: '', why: 'invocation journal busy', confirmed: true });
+  /** @type {[number, (b:any)=>void][]} */ const damage = [
+    [503, b => { b.handler_completed = true; }], [503, b => { b.handler_completed = 'false'; }],
+    [503, b => { delete b.handler_completed; }], [503, b => { b.code = 'invocation_audit_read_unavailable'; }],
+    [503, b => { b.schema_version = 2; }], [503, b => { b.refusal = '   '; }], [503, b => { b.refusal = 7; }],
+    [503, b => { b.refusal = 'x'.repeat(4097); }], [503, b => { b.attempt = '1'; }],
+    [503, b => { b.attempt_key = '1'; }], [503, b => { b.started = true; }],
+    [429, () => {}], [500, () => {}], [202, () => {}]
+  ];
+  for (const [status, mutate] of damage) {
+    const damaged = body(); mutate(damaged);
+    const outcome = sweepSubmission(status, damaged);
+    assert.equal(outcome.confirmed, false, JSON.stringify([status, damaged]));
+    assert.equal(outcome.phase, 'unknown');
+  }
+  assert.equal(sweepSubmission(503, { ...body(), refusal: 'x'.repeat(4096) }).confirmed, true, 'the bound is inclusive');
+});
+
 test('page keeps research selection usable and separates full-width settings from the Run button', () => {
   const page = readFileSync(new URL('../src/routes/backtest/+page.svelte', import.meta.url), 'utf8');
   const tree = parse(page);

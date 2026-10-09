@@ -26,8 +26,10 @@
 ///
 /// The shutdown signal is passed IN rather than installed inside the server,
 /// so that every arm of [`api::server::run`] is drivable from a test without a
-/// signal and without a hard kill. Ctrl-C is what an operator has; an
-/// already-resolved future is what a test has.
+/// signal and without a hard kill. Ctrl-C, `SIGTERM` and `SIGHUP` are what an
+/// operator has (`api::server::operator_shutdown`; lifecycle-2, D-2572 — it
+/// was Ctrl-C alone, so a `SIGTERM` ended the process with no drain and no
+/// exit line); an already-resolved future is what a test has.
 ///
 /// THE RUNTIME IS BUILT AND ENDED BY HAND, not by `#[tokio::main]`, whose
 /// runtime drop waits forever for a running sweep's blocking thread — Ctrl-C
@@ -49,14 +51,18 @@ fn main() -> std::process::ExitCode {
     };
     let code = runtime.block_on(async {
         match text_args(raw) {
-            Ok(args) => api::server::run(&args, Box::pin(tokio::signal::ctrl_c())).await,
+            Ok(args) => api::server::run(&args, api::server::operator_shutdown()).await,
             Err(refusal) => {
                 eprintln!("{refusal}");
                 api::server::MISUSED
             }
         }
     });
-    let _abandoned = api::server::end_runtime(runtime, api::server::SHUTDOWN_GRACE);
+    // THE ABANDONED COUNT DECIDES THE CODE. It was bound to `_abandoned` and
+    // dropped, so a stop that lost engine work exited 0 under an Error line
+    // saying the results were lost (conc16-2, D-2587).
+    let abandoned = api::server::end_runtime(runtime, api::server::SHUTDOWN_GRACE);
+    let code = api::server::exit_after_shutdown(code, abandoned);
     note_exit(code, count);
     std::process::ExitCode::from(code)
 }

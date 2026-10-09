@@ -813,9 +813,13 @@ fn a_tabled_day_window_seals_exactly_what_the_full_row_walk_did() {
         }
     }
     assert_eq!(windows, 240);
+    // RE-TAKEN for D-2612 and D-2613 (ind1-1, ind1-2): the fixture's column
+    // is built by the evaluator, whose VWAP, EMA and gap-mid bits are now
+    // decided exactly, so the evaluated rows change. Which rows and periods a
+    // window takes did not: reverting `indicators` alone restores the old pin.
     let pin: [u8; 32] = [
-        115, 168, 60, 123, 173, 208, 37, 133, 254, 72, 232, 166, 232, 107, 241, 176, 137, 227, 42,
-        200, 185, 248, 182, 169, 204, 8, 90, 7, 172, 20, 223, 148,
+        185, 123, 135, 9, 87, 116, 122, 15, 32, 179, 174, 50, 66, 101, 148, 130, 121, 210, 155,
+        149, 149, 108, 19, 77, 3, 161, 99, 135, 17, 223, 226, 80,
     ];
     assert_eq!(fold.finalize(), pin);
 }

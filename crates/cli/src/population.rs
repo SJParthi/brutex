@@ -3619,20 +3619,34 @@ impl PopulationLedger {
         }
         let new_blocks =
             index_rows_range(&mut self.row_file, &self.row_path, self.row_scanned, len)?;
+        // VALIDATE THE WHOLE BATCH, THEN INSERT (determinism-3, D-2637). The
+        // loop inserted while it checked, so a refusal left every block the
+        // map happened to visit first in the index, and named whichever
+        // duplicate the map's random order reached first: a retry on the same
+        // handle then named a different population, or a block that was never
+        // duplicated at all. The duplicate named is now the FILE-FIRST one
+        // (lowest first row), and nothing is inserted until none is found.
+        let mut first_duplicate: Option<(u64, [u8; 32])> = None;
+        for (identity, facts) in &new_blocks {
+            if self.raw_blocks.contains_key(identity)
+                && first_duplicate.is_none_or(|(first, _)| facts.block.first < first)
+            {
+                first_duplicate = Some((facts.block.first, *identity));
+            }
+        }
+        if let Some((_, identity)) = first_duplicate {
+            return Err(format!(
+                "{} gained a duplicate/non-contiguous block for population {}",
+                self.row_path.display(),
+                hex(&identity)
+            ));
+        }
         reserve_map(
             &mut self.raw_blocks,
             new_blocks.len(),
             "population-block index",
         )?;
-        for (identity, facts) in new_blocks {
-            if self.raw_blocks.insert(identity, facts).is_some() {
-                return Err(format!(
-                    "{} gained a duplicate/non-contiguous block for population {}",
-                    self.row_path.display(),
-                    hex(&identity)
-                ));
-            }
-        }
+        self.raw_blocks.extend(new_blocks);
         self.row_scanned = len;
         self.row_generation =
             validated_generation(&self.row_file, &self.row_path, len, "population row file")?;
@@ -4940,18 +4954,17 @@ fn ensure_header(
     magic: [u8; 8],
     version: u32,
 ) -> Result<(), PopulationRefusal> {
-    let len = measured_len(file, path)?;
-    if len != 0 {
-        return Ok(());
-    }
     let mut header = [0_u8; HEADER_BYTES];
     let mut encoder = Encoder::new(&mut header);
     encoder.bytes(&magic)?;
     encoder.u32(version)?;
     encoder.zeros(4)?;
     encoder.finish()?;
-    file.write_all(&header)
-        .and_then(|()| file.sync_all())
+    // conc5-1 (D-2644): the shared writer header rule. Called only from the
+    // writer's open, under its exclusive lock; the directory is synced by
+    // that caller.
+    crate::fixed_tail::init_or_heal_header(file, path, &header, File::sync_all)
+        .map(drop)
         .map_err(|why| {
             format!(
                 "{} could not receive a durable header: {why}",
@@ -8112,5 +8125,118 @@ mod tests {
                 .expect_err("every receipt lacks its rows");
             assert!(why.contains(&super::hex(&digest(1))), "{why}");
         }
+    }
+
+    /// determinism-3 (D-2637): a foreign append of two duplicated blocks and
+    /// fresh ones is refused by the FILE-FIRST duplicate, on every retry, and
+    /// leaves the writer's block index exactly as it was. On the old code the
+    /// refusal named whichever duplicate the map's random order reached first
+    /// and inserted every block visited before it, so across eight fresh maps
+    /// the named identity or the index size differed.
+    #[test]
+    fn a_foreign_duplicate_block_is_refused_by_its_first_identity_and_a_retry_names_the_same_one() {
+        for round in 0..8_u8 {
+            let root = root(&format!("foreign-duplicate-{round}"));
+            let _ = std::fs::remove_dir_all(&root);
+            let (p, q) = (digest(21), digest(22));
+            let mut ledger = PopulationLedger::open(&root).expect("ledger");
+            for id in [p, q] {
+                let rows = two_rows(id);
+                ledger
+                    .append_complete(&rows, &receipt(id, &rows))
+                    .expect("committed");
+            }
+            assert_eq!(ledger.raw_blocks.len(), 2);
+            // Foreign rows in file order: Q again, P again, then fresh R, S, T.
+            let mut file = OpenOptions::new()
+                .append(true)
+                .open(PopulationLedger::row_path(&root))
+                .expect("row file");
+            for id in [q, p, digest(23), digest(24), digest(25)] {
+                for row in two_rows(id) {
+                    file.write_all(&row.to_bytes().expect("row bytes"))
+                        .expect("foreign row");
+                }
+            }
+            file.sync_all().expect("foreign rows durable");
+            drop(file);
+            let fresh = two_rows(digest(26));
+            let fresh_receipt = receipt(digest(26), &fresh);
+            for attempt in 0..2 {
+                let why = ledger
+                    .append_complete(&fresh, &fresh_receipt)
+                    .expect_err("a duplicated block refuses");
+                assert!(
+                    why.contains(&super::hex(&q)),
+                    "round {round} attempt {attempt}: the file-first duplicate is named: {why}"
+                );
+                assert!(!why.contains(&super::hex(&p)), "{why}");
+                assert_eq!(
+                    ledger.raw_blocks.len(),
+                    2,
+                    "round {round} attempt {attempt}: no block was inserted"
+                );
+            }
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    /// determinism-3 (D-2637): a foreign append with no duplicate is absorbed
+    /// whole, and an append with exactly one duplicate names that one.
+    #[test]
+    fn a_foreign_append_is_absorbed_whole_or_refused_by_its_one_duplicate() {
+        let root = root("foreign-clean");
+        let _ = std::fs::remove_dir_all(&root);
+        let mut ledger = PopulationLedger::open(&root).expect("ledger");
+        let p = digest(31);
+        let rows = two_rows(p);
+        ledger
+            .append_complete(&rows, &receipt(p, &rows))
+            .expect("committed");
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(PopulationLedger::row_path(&root))
+            .expect("row file");
+        for id in [digest(32), digest(33)] {
+            for row in two_rows(id) {
+                file.write_all(&row.to_bytes().expect("row bytes"))
+                    .expect("foreign row");
+            }
+        }
+        drop(file);
+        let r = digest(34);
+        let fresh = two_rows(r);
+        // The orphans are receipt-less; whatever the append decides about
+        // them, the index first absorbed both without a duplicate refusal.
+        let outcome = ledger.append_complete(&fresh, &receipt(r, &fresh));
+        if let Err(why) = &outcome {
+            assert!(!why.contains("gained a duplicate"), "{why}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+
+        let root = self::root("foreign-one-duplicate");
+        let _ = std::fs::remove_dir_all(&root);
+        let mut ledger = PopulationLedger::open(&root).expect("ledger");
+        let rows = two_rows(p);
+        ledger
+            .append_complete(&rows, &receipt(p, &rows))
+            .expect("committed");
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(PopulationLedger::row_path(&root))
+            .expect("row file");
+        for id in [digest(35), p] {
+            for row in two_rows(id) {
+                file.write_all(&row.to_bytes().expect("row bytes"))
+                    .expect("foreign row");
+            }
+        }
+        drop(file);
+        let why = ledger
+            .append_complete(&fresh, &receipt(r, &fresh))
+            .expect_err("the one duplicate refuses");
+        assert!(why.contains(&super::hex(&p)), "{why}");
+        assert_eq!(ledger.raw_blocks.len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

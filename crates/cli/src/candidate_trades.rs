@@ -30,7 +30,7 @@
 mod codec;
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -319,7 +319,11 @@ impl<'a> Capture<'a> {
     ) -> Result<Self, String> {
         let model = model_of(expression);
         let directory = directory_for(root, &attempt.identity(), attempt.token(), model);
-        fs::create_dir_all(&directory).map_err(io_error)?;
+        // Up to four NEW levels (`results/<model>/<identity>/<token>`), and
+        // only the leaf was ever synced (by `write_exact`): a power loss could
+        // lose the attempt directory beneath a durable `Completed` row.
+        // Each new level's parent is synced before the next (xcut-3, D-2623).
+        crate::durable_dir::create_all(&directory).map_err(io_error)?;
         let mut start = Encoder::default();
         start.bytes(&attempt.identity());
         start.word(attempt.token());
@@ -740,6 +744,11 @@ pub fn read_model(
     let dir = directory_for(root, &identity, attempt, model);
     let path = dir.join("catalog.bin");
     if !path.try_exists().map_err(io_error)? {
+        return Ok(None);
+    }
+    // cli2-5, D-2624: an empty catalog is a seal that was never written —
+    // the same answer as no catalog, not a damaged one.
+    if fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_file() && meta.len() == 0) {
         return Ok(None);
     }
     #[cfg(test)]
@@ -1305,31 +1314,75 @@ fn verify_header(raw: &[u8; HEADER], magic: [u8; 8]) -> Result<(), String> {
     }
 }
 fn write_exact(path: &Path, magic: [u8; 8], payload: &[u8]) -> Result<[u8; 32], String> {
+    write_exact_via(path, magic, payload, std::io::Write::write_all)
+}
+
+/// [`write_exact`] with the byte write injectable, so a test can stop it
+/// part-way the way a kill would.
+///
+/// WRITTEN ASIDE, THEN LINKED INTO ITS NAME. The file used to be created at
+/// its final name and only then locked and filled, so a reader that opened it
+/// in between, or after a kill mid-write, found it empty or short and refused
+/// it as "truncated", and the next writer met `AlreadyExists` over those
+/// bytes and refused every retry for good. The bytes now go to a hidden
+/// sibling unique to this process and call, are synced, and appear under the
+/// final name through `hard_link`, which refuses an existing name exactly as
+/// `create_new` did: the final name only ever holds a whole, sealed file.
+/// conc:cli2-5, D-3603.
+fn write_exact_via(
+    path: &Path,
+    magic: [u8; 8],
+    payload: &[u8],
+    mut write: impl FnMut(&mut File, &[u8]) -> std::io::Result<()>,
+) -> Result<[u8; 32], String> {
+    static ASIDE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let header = header(magic);
     let mut hash = brutex_core::blake3::Hasher::new();
     hash.update(&header);
     hash.update(payload);
     let digest = hash.finalize();
-    match OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .open(path)
-    {
-        Ok(file) => {
-            // A write or sync failure releases the lock through the guard's
-            // explicit unlock, never by close (D-0693).
-            let mut file = Flock::lock(file, path).map_err(io_error)?;
-            file.write_all(&header)
-                .and_then(|()| file.write_all(payload))
-                .and_then(|()| file.write_all(&digest))
-                .and_then(|()| file.sync_all())
+    match fs::symlink_metadata(path) {
+        // An existing name is compared below; an EMPTY regular file there (an
+        // older writer's interrupted `create_new`) is first filled in place
+        // under its lock (cli2-5, D-2624).
+        Ok(_) => fill_empty_remnant(path, &header, payload, &digest)?,
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => {
+            let name = path
+                .file_name()
+                .ok_or("candidate detail path has no file name")?
+                .to_string_lossy();
+            let aside = path.with_file_name(format!(
+                ".{name}.{}.{}.partial",
+                std::process::id(),
+                ASIDE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            let file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&aside)
                 .map_err(io_error)?;
+            // HELD FROM CREATION UNTIL THE ASIDE NAME IS GONE (D-4602). The
+            // unlink of the aside after the link changes the inode's ctime,
+            // which every pinned `FileGeneration` compares: D-2624's reason for
+            // not taking a staging name. A reader reaches this inode only
+            // through the final name, after the link, and takes its shared
+            // lock before it pins a generation, so while this exclusive lock
+            // is held it meets `busy` and retries, and no generation is ever
+            // pinned before the unlink.
+            let mut held = Flock::lock(file, aside.as_path()).map_err(io_error)?;
+            let written = write(&mut held, &header)
+                .and_then(|()| write(&mut held, payload))
+                .and_then(|()| write(&mut held, &digest))
+                .and_then(|()| crate::fixed_tail::sync_all_hooked(&held, &aside));
+            let linked = written.and_then(|()| linked_or_lost_race(fs::hard_link(&aside, path)));
+            let removed = fs::remove_file(&aside);
+            let released = held.release().map_err(|unreleased| unreleased.why);
+            linked.map_err(io_error)?;
+            removed.map_err(io_error)?;
+            released.map_err(io_error)?;
             #[cfg(test)]
             DURABLE_SYNCS.with(|count| count.set(count.get().saturating_add(1)));
-            file.release().map_err(|u| io_error(u.why))?;
         }
-        Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(why) => return Err(io_error(why)),
     }
     let budget = (payload.len() as u64)
@@ -1345,6 +1398,91 @@ fn write_exact(path: &Path, magic: [u8; 8], payload: &[u8]) -> Result<[u8; 32], 
     #[cfg(test)]
     DURABLE_SYNCS.with(|count| count.set(count.get().saturating_add(1)));
     Ok(digest)
+}
+/// A link into the final name, where losing the race to another writer of
+/// the same name is not a failure: the winner's bytes are verified next, as
+/// they always were. Any other link error is (D-3603).
+fn linked_or_lost_race(linked: std::io::Result<()>) -> std::io::Result<()> {
+    match linked {
+        Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        other => other,
+    }
+}
+
+/// Writes the header, payload and seal at offset 0 and syncs, under the
+/// guard's exclusive lock, then releases it by name.
+///
+/// A failed write or barrier cuts the file back to 0 bytes before the lock is
+/// released (`fixed_tail`, D-1900), so what it leaves is the empty remnant the
+/// next writer fills, never a partial file every retry refuses as different
+/// bytes (cli2-5, D-2624).
+fn write_whole(
+    mut file: Flock<File, &Path>,
+    path: &Path,
+    header: &[u8; HEADER],
+    payload: &[u8],
+    digest: &[u8; 32],
+) -> Result<(), String> {
+    use std::io::Write as _;
+    if let Err(why) = file
+        .write_all(header)
+        .and_then(|()| file.write_all(payload))
+        .and_then(|()| file.write_all(digest))
+    {
+        return Err(io_error(crate::fixed_tail::roll_back(
+            &file,
+            &path.display(),
+            0,
+            &format!("cannot write {}: {why}", path.display()),
+        )));
+    }
+    crate::fixed_tail::sync_all_or_roll_back(&file, path, 0).map_err(io_error)?;
+    #[cfg(test)]
+    DURABLE_SYNCS.with(|count| count.set(count.get().saturating_add(1)));
+    file.release().map_err(|u| io_error(u.why))
+}
+
+/// The existing-name arm of [`write_exact_via`]. Only an empty regular file
+/// whose exclusive lock is free, and which is still empty once the lock is
+/// held, is filled; every other case (a whole file, a symbolic link, a live
+/// writer holding the lock) is left for the caller's comparison to judge.
+fn fill_empty_remnant(
+    path: &Path,
+    header: &[u8; HEADER],
+    payload: &[u8],
+    digest: &[u8; 32],
+) -> Result<(), String> {
+    let existing = fs::symlink_metadata(path).map_err(io_error)?;
+    if !existing.is_file() || existing.len() != 0 {
+        return Ok(());
+    }
+    let opened = {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(store::open_flags::O_NOFOLLOW_NONBLOCK)
+            .open(path)
+            .map_err(io_error)?
+    };
+    let file = match Flock::try_lock(opened, path) {
+        Ok(file) => file,
+        Err(std::fs::TryLockError::WouldBlock) => return Ok(()),
+        Err(std::fs::TryLockError::Error(why)) => return Err(io_error(why)),
+    };
+    if file.metadata().map_err(io_error)?.len() != 0 {
+        return file.release().map_err(|u| io_error(u.why));
+    }
+    write_whole(file, path, header, payload, digest)?;
+    crate::note(
+        &telemetry::Event::warn("cli.ledger", "empty candidate detail filled")
+            .with("path", path.display().to_string().as_str())
+            .with(
+                "reason",
+                "a 0-byte detail file is an interrupted create, never acknowledged",
+            ),
+    );
+    Ok(())
 }
 fn read_sealed(path: &Path, magic: [u8; 8], max_bytes: u64) -> Result<(Vec<u8>, [u8; 32]), String> {
     read_sealed_generation(path, magic, max_bytes).map(|(payload, seal, _)| (payload, seal))
@@ -1364,6 +1502,12 @@ fn read_sealed_generation(
     let generation = crate::result_set::file_generation(&file, path)?;
     let metadata = file.metadata().map_err(io_error)?;
     let len = metadata.len();
+    if metadata.is_file() && len == 0 {
+        // cli2-5, D-2624: an empty file is an older writer's interrupted
+        // `create_new` or a write cut back to nothing, which the next writer
+        // of this name fills; it is contention, not damage.
+        return Err(EMPTY_DETAIL.to_owned());
+    }
     if !metadata.is_file() || len < (HEADER + SEAL) as u64 || len > max_bytes {
         return Err(
             "candidate detail file is nonregular, truncated or above its byte admission".to_owned(),
@@ -1390,6 +1534,10 @@ fn read_sealed_generation(
     file.release().map_err(|u| io_error(u.why))?;
     Ok((payload, seal, generation))
 }
+
+/// The refusal for a 0-byte detail file (cli2-5, D-2624). It says "busy",
+/// like [`busy`], because a retry after the next writer is the remedy.
+const EMPTY_DETAIL: &str = "candidate detail is busy: the file is empty, an interrupted write the next writer fills; retry this exact saved page";
 
 fn busy(why: std::fs::TryLockError) -> String {
     match why {

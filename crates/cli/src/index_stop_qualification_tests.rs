@@ -1172,3 +1172,75 @@ fn saved_statistics_are_the_three_separate_procedures_bit_for_bit() {
         }
     }
 }
+
+/// Z1-slice19-F1, D-2622: publication opens its own qualification under the
+/// record bound recovery re-verifies it with, not a byte bound standing in
+/// for one. Measured on the source because a qualification whose
+/// `split_count + Σ folds` lies between `capture.records` and four times the
+/// capture's bytes needs a generated family far larger than these fixtures.
+/// On the old code `publish` passed `request.bounds.bytes` as `max_records`
+/// and `Request` had no `records`, so every assertion below failed. The
+/// behavioural half — the bound refuses a body it does not admit — is
+/// `publication_refuses_what_its_record_bound_does_not_admit`.
+#[test]
+fn publish_and_recovery_apply_the_same_record_bound() {
+    let source = include_str!("index_stop_qualification.rs");
+    let (_, publish) = source
+        .split_once("fn publish(request: &Request<'_>")
+        .unwrap();
+    let publish = publish.split_once("\nfn current(").unwrap().0;
+    let open = publish.split_once("Reader::open(").unwrap().1;
+    let open = open.split_once(')').unwrap().0;
+    let arguments: Vec<&str> = open
+        .split(',')
+        .map(str::trim)
+        .filter(|argument| !argument.is_empty())
+        .collect();
+    assert_eq!(
+        arguments,
+        [
+            "request.root",
+            "identity",
+            "request.bounds.bytes",
+            "request.records"
+        ],
+        "{open}"
+    );
+    let search = include_str!("index_stop_search.rs");
+    let (_, produced) = search
+        .split_once("qualification::produce(qualification::Request {")
+        .unwrap();
+    let produced = produced.split_once("})?;").unwrap().0;
+    assert!(
+        produced.contains("records: config.capture.records,"),
+        "{produced}"
+    );
+    let checkpoint = include_str!("index_stop_search_checkpoint.rs");
+    assert!(checkpoint.contains("qualification::verify_search_slot_bounded("));
+    let recovery = include_str!("index_stop_search.rs");
+    assert!(
+        recovery.contains(
+            "request.configuration.capture.records,\n        request.configuration.replay_nodes,"
+        ),
+        "recovery's record bound is the capture's records"
+    );
+}
+
+/// Z1-slice19-F1, D-2622: the record bound `publish` now passes is a real
+/// admission. A published qualification reopens under the fixture's bound
+/// and is refused under 0 and 1 (each ancestor holds two records), so a `Request::records`
+/// smaller than what was produced refuses the produce instead of
+/// acknowledging a result recovery would refuse.
+#[test]
+fn publication_refuses_what_its_record_bound_does_not_admit() {
+    let fixture = Fixture::new(false);
+    drop(fixture.publish());
+    let id = identity(&fixture.facts);
+    assert!(Reader::open(&fixture.root.0, id, BYTES, 100_000).is_ok());
+    for refused in [0_u64, 1] {
+        assert!(
+            Reader::open(&fixture.root.0, id, BYTES, refused).is_err(),
+            "a bound of {refused} records must refuse"
+        );
+    }
+}

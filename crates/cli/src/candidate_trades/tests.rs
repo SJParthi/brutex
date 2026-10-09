@@ -3,6 +3,7 @@
 #![allow(clippy::expect_used, reason = "fixture failures must fail the test")]
 
 use super::*;
+use std::io::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 fn root() -> PathBuf {
@@ -627,6 +628,7 @@ fn actual_audit_refuses_a_failed_capture_before_publishing_its_parent() {
         500,
         Some(&id),
         crate::AuditOptions {
+            fold_support: runner::validate::FoldSupport::Scaled,
             prepared_column: Some(column.clone()),
             replay: None,
             execution: None,
@@ -1063,4 +1065,247 @@ fn a_capture_derives_slice_facts_once_and_counts_four_syncs_per_candidate_side()
             trades.min(MAX_PAGE as u64)
         );
     }
+}
+
+/// **A detail file stopped part-way never appears under its name, and does
+/// not wedge the retry.** conc:cli2-5, D-3603. A write that dies after the
+/// header (a panic stands in for the kill) leaves the final name absent; the
+/// retry lands whole and reads back sealed, and a second identical write
+/// reuses it.
+#[test]
+fn a_detail_write_stopped_part_way_leaves_no_torn_file_and_the_retry_lands() {
+    let dir = root();
+    std::fs::create_dir_all(&dir).expect("scratch");
+    let path = dir.join("detail.bin");
+    let died = std::panic::catch_unwind(|| {
+        let mut calls = 0;
+        let _ = write_exact_via(&path, TRADES, b"payload", |file, bytes| {
+            calls += 1;
+            assert!(calls < 2, "killed after the header");
+            file.write_all(bytes)
+        });
+    });
+    assert!(died.is_err(), "the write was stopped");
+    assert!(!path.exists(), "no torn file under the final name");
+    let digest = write_exact(&path, TRADES, b"payload").expect("the retry is not wedged");
+    let (payload, seal) = read_sealed(&path, TRADES, 1 << 20).expect("whole and sealed");
+    assert_eq!((payload.as_slice(), seal), (b"payload".as_slice(), digest));
+    assert_eq!(write_exact(&path, TRADES, b"payload"), Ok(digest), "reused");
+    assert!(
+        write_exact(&path, TRADES, b"different payload").is_err(),
+        "an existing file with other bytes is refused, never replaced"
+    );
+    assert_eq!(
+        read_sealed(&path, TRADES, 1 << 20).map(|(p, _)| p),
+        Ok(b"payload".to_vec())
+    );
+    let refused = write_exact_via(&dir.join("full.bin"), TRADES, b"x", |_, _| {
+        Err(std::io::Error::other("disk full"))
+    })
+    .expect_err("a failed write refuses");
+    assert!(refused.contains("disk full"), "{refused}");
+    assert!(!dir.join("full.bin").exists());
+    let left: Vec<_> = std::fs::read_dir(&dir)
+        .expect("listing")
+        .map(|entry| entry.expect("entry").file_name())
+        .filter(|name| name.to_string_lossy().contains("full.bin"))
+        .collect();
+    assert!(
+        left.is_empty(),
+        "the failed write's sibling is removed: {left:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **The aside is locked from its creation until its name is gone.** D-4602.
+/// Unlinking the aside after the link changes the inode's ctime, which every
+/// pinned generation compares (D-2624), so a reader must never pin one in
+/// that window: a shared lock on the inode, taken while the writer runs,
+/// would block, and a reader meets `busy` instead. Without the writer's lock
+/// the shared lock below is granted.
+#[test]
+fn a_detail_being_written_is_locked_against_every_reader() {
+    let dir = root();
+    std::fs::create_dir_all(&dir).expect("scratch");
+    let path = dir.join("locked.bin");
+    let mut probed = 0;
+    write_exact_via(&path, TRADES, b"payload", |file, bytes| {
+        let aside = std::fs::read_dir(&dir)
+            .expect("listing")
+            .map(|entry| entry.expect("entry").path())
+            .find(|name| name.to_string_lossy().ends_with(".partial"))
+            .expect("the aside exists while it is written");
+        let reader = File::open(&aside).expect("the aside opens");
+        assert!(
+            matches!(
+                Flock::try_lock_shared(&reader, aside.as_path()),
+                Err(std::fs::TryLockError::WouldBlock)
+            ),
+            "a reader meets the writer's lock"
+        );
+        probed += 1;
+        file.write_all(bytes)
+    })
+    .expect("the write lands");
+    assert_eq!(
+        probed, 3,
+        "header, payload and seal were each written under the lock"
+    );
+    assert!(read_sealed(&path, TRADES, 1 << 20).is_ok());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Only a lost race to the same name is not a link failure (D-3603).
+#[test]
+fn only_a_lost_link_race_is_not_a_failure() {
+    assert!(linked_or_lost_race(Ok(())).is_ok());
+    assert!(
+        linked_or_lost_race(Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists))).is_ok()
+    );
+    for kind in [
+        std::io::ErrorKind::NotFound,
+        std::io::ErrorKind::PermissionDenied,
+        std::io::ErrorKind::StorageFull,
+    ] {
+        assert_eq!(
+            linked_or_lost_race(Err(std::io::Error::from(kind))).map_err(|why| why.kind()),
+            Err(kind)
+        );
+    }
+}
+
+/// cli2-5, D-2624: an empty `catalog.bin` — what a reader sees between a
+/// writer's `create_new` and its lock, or what a kill there leaves — reads as
+/// no catalog, and an empty detail file is answered busy, not as the
+/// corruption "truncated". On the old code both refused with "nonregular,
+/// truncated or above its byte admission", so the first assertion failed. A
+/// file with ANY byte short of a whole header and seal is still truncated,
+/// at every length from 1 to one byte short.
+#[test]
+fn an_empty_catalog_reads_as_absent_and_an_empty_detail_is_busy_not_truncated() {
+    let root = root();
+    let identity = [61_u8; 32];
+    let directory = directory_for(&root, &identity, 7, Model::And);
+    crate::durable_dir::create_all(&directory).expect("attempt directory");
+    let catalog = directory.join("catalog.bin");
+    fs::write(&catalog, b"").expect("empty catalog");
+    assert!(matches!(
+        read_model(&root, identity, 7, Model::And, DEFAULT_MAX_BYTES),
+        Ok(None)
+    ));
+    let why = read_sealed(&catalog, CATALOG, DEFAULT_MAX_BYTES).expect_err("empty");
+    assert!(why.contains("busy"), "{why}");
+    assert!(!why.contains("truncated"), "{why}");
+    for len in [1, HEADER, HEADER + SEAL - 1] {
+        fs::write(&catalog, vec![0_u8; len]).expect("partial catalog");
+        let why = read_model(&root, identity, 7, Model::And, DEFAULT_MAX_BYTES)
+            .expect_err("a partial catalog is damage");
+        assert!(why.contains("truncated"), "{len}: {why}");
+    }
+}
+
+/// cli2-5, D-2624: a 0-byte file at a detail's final name, left by a kill
+/// between `create_new` and the first byte, is filled by the next writer of
+/// that name, and the retry is idempotent after it. On the old code
+/// `write_exact`'s `AlreadyExists` arm re-read the empty file and refused it
+/// as truncated on every retry, so the first `expect` failed. A file that
+/// holds other whole bytes is still refused, and an empty file whose lock a
+/// live writer holds is left to that writer: the call answers busy and
+/// writes nothing.
+#[test]
+fn a_zero_byte_remnant_is_filled_by_the_next_writer_and_nothing_else_is() {
+    let root = root();
+    fs::create_dir_all(&root).expect("root");
+    let path = root.join("0-0-long-trades.bin");
+    fs::write(&path, b"").expect("kill remnant");
+    let digest = write_exact(&path, TRADES, b"exact payload").expect("the remnant is filled");
+    let (payload, seal) = read_sealed(&path, TRADES, DEFAULT_MAX_BYTES).expect("whole");
+    assert_eq!((payload.as_slice(), seal), (&b"exact payload"[..], digest));
+    assert_eq!(
+        write_exact(&path, TRADES, b"exact payload"),
+        Ok(digest),
+        "an exact retry is idempotent"
+    );
+    let why = write_exact(&path, TRADES, b"other payload").expect_err("other bytes");
+    assert!(why.contains("different bytes"), "{why}");
+
+    let held = root.join("0-0-short-trades.bin");
+    fs::write(&held, b"").expect("live writer's file");
+    let owner = File::open(&held).expect("live writer");
+    owner.lock().expect("the live writer's lock");
+    let why = write_exact(&held, TRADES, b"exact payload").expect_err("held");
+    assert!(why.contains("busy"), "{why}");
+    owner.unlock().expect("release");
+    assert_eq!(fs::metadata(&held).expect("held file").len(), 0);
+    assert!(write_exact(&held, TRADES, b"exact payload").is_ok());
+}
+
+/// cli2-5, D-2624, D-3603, D-4602: a failed barrier on a detail write leaves
+/// nothing under the final name, because the bytes are synced under the aside
+/// name before the link, so the retry lands rather than refusing a partial or
+/// unproven file for good. On the code before D-2624 the synced-or-not bytes
+/// stayed in place; D-2624 cut them back to 0 bytes; the merged write never
+/// links an unsynced file at all.
+#[test]
+fn a_failed_detail_barrier_leaves_nothing_under_the_name_and_the_retry_lands() {
+    let root = root();
+    fs::create_dir_all(&root).expect("root");
+    let path = root.join("1-0-long-candidate.bin");
+    {
+        let _armed = crate::fixed_tail::fault::Armed::arm(
+            "1-0-long-candidate.bin",
+            crate::fixed_tail::fault::Kind::Sync,
+        );
+        let why = write_exact(&path, CANDIDATE, b"candidate").expect_err("injected");
+        assert!(why.contains("injected sync fault"), "{why}");
+    }
+    assert!(
+        matches!(fs::symlink_metadata(&path), Err(why) if why.kind() == std::io::ErrorKind::NotFound),
+        "an unsynced detail never takes its final name"
+    );
+    let aside_left = fs::read_dir(&root)
+        .expect("root")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().ends_with(".partial"))
+        .count();
+    assert_eq!(aside_left, 0, "the aside is removed after a failed barrier");
+    let digest = write_exact(&path, CANDIDATE, b"candidate").expect("the retry lands");
+    assert_eq!(
+        read_sealed(&path, CANDIDATE, DEFAULT_MAX_BYTES).expect("whole"),
+        (b"candidate".to_vec(), digest)
+    );
+}
+
+/// xcut-3, D-2623: the attempt directory
+/// `results/<model>/<identity>/<token>` is created by the durable walker,
+/// which syncs each new level's parent, and never by `create_dir_all`, which
+/// synced none of up to four new levels. Measured on the source because a
+/// lost directory entry cannot be produced without a power cut; on the old
+/// code `begin_digested` called `create_dir_all`, so the first assertion
+/// failed. The behavioural half: a capture on a store with no candidate
+/// tree lays out every level and its start file.
+#[test]
+fn candidate_trades_creates_each_level_durably() {
+    let source = include_str!("../candidate_trades.rs");
+    let (_, begin) = source
+        .split_once("fn begin_digested(")
+        .expect("begin_digested exists");
+    let begin = begin
+        .split_once("\n    }\n")
+        .map_or(begin, |(body, _)| body);
+    assert!(!begin.contains("create_dir_all("), "{begin}");
+    assert!(
+        begin.contains("crate::durable_dir::create_all(&directory)"),
+        "{begin}"
+    );
+    let root = root();
+    let attempt = attempt(&root);
+    assert!(
+        !root.join("results").join("candidate-trades-v1").exists(),
+        "the premise: no candidate tree yet"
+    );
+    let (bars, column) = fixture();
+    let capture = Capture::begin(&root, &attempt, bars, column).expect("capture");
+    assert!(capture.directory.join("start.bin").is_file());
+    assert!(capture.directory.starts_with(root.join("results")));
 }

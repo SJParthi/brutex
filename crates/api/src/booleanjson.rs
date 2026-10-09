@@ -186,34 +186,49 @@ fn render_with_budget(
     // One bounded catalog, including all decoded child observations. No scan of
     // other identities and no accumulation of a process-wide unbounded history.
     static CACHE: OnceLock<Mutex<Option<Cached>>> = OnceLock::new();
-    let mut cache = CACHE
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .map_err(|_| "Boolean catalog cache poisoned")?;
-    let held = cache.as_ref().filter(|held| {
-        held.root == root && held.identity == asked.identity && held.budget == budget
-    });
-    if crate::detail::must_admit(held.is_some(), asked.completion.is_some(), || {
-        held.is_some_and(|held| held.reader.require_current().is_ok())
-    }) {
-        *cache = None;
+    let slot = CACHE.get_or_init(|| Mutex::new(None));
+    let warm = {
+        let mut cache = slot.lock().map_err(|_| "Boolean catalog cache poisoned")?;
+        let held = cache.as_ref().filter(|held| {
+            held.root == root && held.identity == asked.identity && held.budget == budget
+        });
+        if crate::detail::must_admit(held.is_some(), asked.completion.is_some(), || {
+            held.is_some_and(|held| held.reader.require_current().is_ok())
+        }) {
+            *cache = None;
+            None
+        } else {
+            let held = cache
+                .as_ref()
+                .ok_or("catalog cache admission disappeared")?;
+            Some(project(&held.reader, asked)?)
+        }
+    };
+    let mut body = if let Some(body) = warm {
+        body
+    } else {
+        // THE COLD OPEN RUNS WITH THE LOCK RELEASED (expr-3, D-2576). It
+        // authenticates and decodes the whole catalog up to the budget, and
+        // the guard used to be held across it, so every other catalog
+        // request parked here inside `detail::run` holding a detail permit.
+        // The lock is retaken only to install the opened reader.
         #[cfg(test)]
         COLD_ADMISSIONS.with(|count| count.set(count.get() + 1));
+        #[cfg(test)]
+        crate::detail::note_slot_free(slot);
         let reader = Reader::open(root, asked.identity, budget.bytes()).map_err(|why| budget.context(&format!(
             "Catalog {} unavailable under configured evidence root {}: {why}. The dashboard BRUTEX_STORE must match the catalog command OUTPUT_ROOT; no other folder was searched.",
             crate::server::hex32(asked.identity), root.display()
         )))?;
-        *cache = Some(Cached {
+        let projected = project(&reader, asked);
+        *slot.lock().map_err(|_| "Boolean catalog cache poisoned")? = Some(Cached {
             root: root.to_path_buf(),
             identity: asked.identity,
             budget,
             reader,
         });
-    }
-    let held = cache
-        .as_ref()
-        .ok_or("catalog cache admission disappeared")?;
-    let mut body = project(&held.reader, asked)?;
+        projected?
+    };
     body.as_object_mut()
         .ok_or("catalog projection object absent")?
         .insert(
