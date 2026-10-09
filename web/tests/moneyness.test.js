@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { databaseSource, dbSource } from './database-page-fixture.js';
 import {
   SPOT_CHUNK, SPOT_WHY, chainsFrom, chainKey, intrinsic, moneyness, optionCells, readSpots, rungOf, spotKey
 } from '../src/lib/moneyness.js';
@@ -124,13 +124,20 @@ test('spot is asked once per underlying, rung and month, in chunks, and each ins
 });
 
 test('the page draws the three columns from the spot read and only for options', () => {
-  const page = readFileSync(new URL('../src/routes/db/+page.svelte', import.meta.url), 'utf8');
-  assert.match(page, /readSpots\(feed, rows, controller\.signal\)/);
-  assert.match(page, /optionCells\(b, spotMap\.get\(spotKey\(b\)\), spotChains\)/);
-  assert.match(page, /const OPTION_COLS = new Set\(\[\s*'side',\s*'strike',\s*'mny',\s*'intr',\s*'extr',/);
-  assert.match(page, /\.bgrid\.lean\.nooption > tbody > tr > td:nth-child\(n \+ 15\)/);
+  // WP-00 split the page: the spot read and the cells are in DbOptionCells.svelte,
+  // the column set in notes-bars.js and the grid's positional CSS in
+  // DbBarsGrid.svelte — with the option cells' own copy, scoped through
+  // `:global(...)` to the grid's row, in DbOptionCells.svelte.
+  const page = databaseSource();
+  const cells = dbSource('../src/routes/db/DbOptionCells.svelte');
+  const grid = dbSource('../src/routes/db/DbBarsGrid.svelte');
+  assert.match(cells, /readSpots\(feed, rows, controller\.signal\)/);
+  assert.match(cells, /optionCells\(b, db\.spotMap\.get\(spotKey\(b\)\), db\.spotChains\)/);
+  assert.match(dbSource('../src/lib/db/notes-bars.js'), /const OPTION_COLS = new Set\(\[\s*'side',\s*'strike',\s*'mny',\s*'intr',\s*'extr',/);
+  assert.match(grid, /\.bgrid\.lean\.nooption > tbody > tr > td:nth-child\(n \+ 15\)/);
+  assert.match(cells, /:global\(\.bgrid\.lean\.nooption > tbody > tr\) > td:nth-child\(n \+ 15\)/);
   // Since D-2830 the greeks (20 onward) are option columns, not hidden for all.
   assert.doesNotMatch(page, /\.bgrid\.lean > tbody > tr > td:nth-child\(n \+ 20\)/);
-  assert.match(page, /\.bgrid\.lean > tbody > tr > td:nth-child\(9\) \{/);
+  assert.match(grid, /\.bgrid\.lean > tbody > tr > td:nth-child\(9\) \{/);
   assert.doesNotMatch(page, /none: NO_SPOT\b/);
 });

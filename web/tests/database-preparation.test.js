@@ -102,7 +102,8 @@ test('the DB route publishes only a complete current raw snapshot and names its 
   assert.match(page.source,/return \(\) => controller.abort\(\)/);
   assert.match(page.source,/Preparing the database view for/);
   assert.doesNotMatch(page.source,/denominators\(rows\)/);
-  assert.match(page.source,/if \(view !== 'bars' \|\| !filter \|\| !kind \|\| !timeframe\) \{\s*return \{ all: \[\], read: \[\], held: 0 \}/);
+  // `barPlan` reads the selection's rungs off the shared state since WP-00 split the page.
+  assert.match(page.source,/if \(db\.view !== 'bars' \|\| !db\.filter \|\| !db\.kind \|\| !db\.timeframe\) \{\s*return \{ all: \[\], read: \[\], held: 0 \}/);
   assert.equal(denomKey('2025-01','1min'),'2025-01\0'+'1min');
 });
 

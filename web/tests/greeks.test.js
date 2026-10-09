@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { databaseSource, dbSource } from './database-page-fixture.js';
 import {
   GREEK_CHUNK, GREEK_WHY, cellOf, greekCell, greekKey, greekText, greekWhyText, ivText, readGreeks
 } from '../src/lib/greeks.js';
@@ -115,12 +116,15 @@ test('a one-second bar shows its second and a minute bar its minute', () => {
 });
 
 test('the page draws the greeks from the server and computes no model', () => {
-  const page = readFileSync(new URL('../src/routes/db/+page.svelte', import.meta.url), 'utf8');
+  // WP-00 split the page: the greek read and cells are in DbOptionCells.svelte,
+  // the bar time in DbBarsGrid.svelte and the column set in notes-bars.js.
+  const page = databaseSource();
+  const cells = dbSource('../src/routes/db/DbOptionCells.svelte');
   const lib = readFileSync(new URL('../src/lib/greeks.js', import.meta.url), 'utf8');
-  assert.match(page, /readGreeks\(feed, rows, controller\.signal\)/);
-  assert.match(page, /greekCell\(b, greekMap\.get\(greekKey\(b\)\)\)/);
-  assert.match(page, /barTimeLabel\(b\.ts, TF_SECS\.get\(b\.tf\)\)/);
-  assert.match(page, /'extr',\s*'iv',\s*'delta',\s*'gamma',\s*'theta',\s*'vega',\s*'rho'/);
+  assert.match(cells, /readGreeks\(feed, rows, controller\.signal\)/);
+  assert.match(cells, /greekCell\(b, db\.greekMap\.get\(greekKey\(b\)\)\)/);
+  assert.match(dbSource('../src/routes/db/DbBarsGrid.svelte'), /barTimeLabel\(b\.ts, TF_SECS\.get\(b\.tf\)\)/);
+  assert.match(dbSource('../src/lib/db/notes-bars.js'), /'extr',\s*'iv',\s*'delta',\s*'gamma',\s*'theta',\s*'vega',\s*'rho'/);
   assert.doesNotMatch(page, /none: NO_GREEK\b/);
   // No Black-Scholes in the browser: the greeks module takes no exp, log or
   // root at all, and neither file holds a normal CDF. (The page's own

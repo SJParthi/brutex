@@ -2849,10 +2849,11 @@ fn what_refusing_an_absence_costs_is_what_its_doc_says() {
             })
             .collect()
     }
-    let source = include_str!("server.rs");
+    // In `census_cache.rs` since WP-01 moved the census cache out of `server.rs`.
+    let source = include_str!("census_cache.rs");
     let (above, from) = source
-        .split_once("\nfn refuse_contradicted_absences(")
-        .expect("`refuse_contradicted_absences` is in server.rs");
+        .split_once("\npub(super) fn refuse_contradicted_absences(")
+        .expect("`refuse_contradicted_absences` is in census_cache.rs");
     let body = from.split_once("\n}\n").expect("its body ends").0;
     let mut doc: Vec<&str> = above
         .lines()
@@ -2881,8 +2882,8 @@ fn what_refusing_an_absence_costs_is_what_its_doc_says() {
         "a row left unchanged costs the index and `stamp_could_read`: {before}"
     );
     let judge = source
-        .split_once("\nfn stamp_could_read(")
-        .expect("`stamp_could_read` is in server.rs")
+        .split_once("\npub(super) fn stamp_could_read(")
+        .expect("`stamp_could_read` is in census_cache.rs")
         .1
         .split_once("\n}\n")
         .expect("its body ends")
@@ -3046,10 +3047,11 @@ fn method<'a>(source: &'a str, head: &str) -> &'a str {
 /// its doc as one line, and `docs/06-limits.md`'s "What that line costs"
 /// with every run of whitespace made one space.
 fn line_cost_texts() -> (&'static str, String, String) {
-    let server = include_str!("server.rs");
+    // In `census_cache.rs` since WP-01 moved the census cache out of `server.rs`.
+    let server = include_str!("census_cache.rs");
     let (above, from) = server
-        .split_once("\nfn refuse_contradicted_absences(")
-        .expect("`refuse_contradicted_absences` is in server.rs");
+        .split_once("\npub(super) fn refuse_contradicted_absences(")
+        .expect("`refuse_contradicted_absences` is in census_cache.rs");
     let body = from.split_once("\n}\n").expect("its body ends").0;
     let mut doc: Vec<&str> = above
         .lines()

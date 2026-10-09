@@ -58,9 +58,12 @@ test('cancellation stops queued month reads and does not return an incomplete su
 });
 
 test('the actual month cache replaces an aborted request and a late old result cannot replace or delete the newer page',async()=>{
-  const source=readFileSync(new URL('../src/routes/db/+page.svelte',import.meta.url),'utf8');
+  // WP-00 moved the page's bar read into `barsRead`, in DbBarsGrid.svelte's
+  // module script; `readBarFile` is the same declaration, one function deeper.
+  const source=readFileSync(new URL('../src/routes/db/DbBarsGrid.svelte',import.meta.url),'utf8');
   const ast=parse(source);
-  const node=ast.instance?.content.body.find((/** @type {any} */ node)=>node.type==='FunctionDeclaration'&&node.id?.name==='readBarFile');
+  const barsRead=ast.module?.content.body.find((/** @type {any} */ node)=>node.type==='ExportNamedDeclaration'&&node.declaration?.id?.name==='barsRead')?.declaration;
+  const node=barsRead?.body.body.find((/** @type {any} */ node)=>node.type==='FunctionDeclaration'&&node.id?.name==='readBarFile');
   assert.ok(node);
   const cache=new Map();
   /** @type {((value:any)=>void)[]} */
