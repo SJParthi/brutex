@@ -759,3 +759,15 @@ test('native work sizing is additive, preserved exactly, and never converted to 
   assert.equal(validateBooleanLaunchMetadata(body).work_model.conjunction_program_lower_bound, String((1n << 384n) - 1n));
   const wrong = metadata(); wrong.work_model = { ...body.work_model, eta_seconds: 10 }; assert.throws(() => validateBooleanLaunchMetadata(wrong), /unmeasured total or ETA/);
 });
+
+// W6 (OBSV-17, D-3216): the exact-attempt read's 503 names its cause in `running.why`.
+test('an unreadable exact attempt names the server reason and is not resent (W6)', async () => {
+  const why = 'persistent invocation read unavailable: Saturated';
+  const plan = planFor();
+  const testRun = driver(url => url === '/engine/command' ? accepted() : response({ running: {
+    where: 'browser', status: 'unknown', requested_attempt: ATTEMPT, in_flight: false, why, refusal: null, report: null } }, 503));
+  await testRun.launch.start(plan);
+  assert.equal(testRun.latest().phase, 'unknown');
+  assert.equal(testRun.latest().why, `Exact attempt status is unavailable: /backtest/run.json answered HTTP 503: ${why}. The launch will not be resent.`);
+  assert.equal(testRun.calls.filter(call => call.body).length, 1);
+});

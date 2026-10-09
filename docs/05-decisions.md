@@ -66553,3 +66553,23 @@ the same envelope through `detailRefusal`.
 **Decided.** `fetchSweepEvidence` throws `detailRefusal(response, …)`: the
 status sentence followed by the bounded `refusal`, and the status sentence
 alone for a body that is not the envelope (a proxy's HTML). OBSV-16.
+
+### D-3216 — An unreadable execution status is shown with its `running.why` — 2026-10-09
+
+**What was observed.** `/backtest/run.json` answers an exact attempt it cannot
+read with 503 (a malformed `?attempt=` with 400), and the global view's failed
+external read with 503, each as `{"running":{"status":"unknown","why":…}}`
+(`crates/api/src/sweeprun.rs` `browser_attempt_unknown`, `unknown_status`).
+None of `refusalOf`'s three keys (D-1789) is set, so the reason was unreadable
+by the shared helper, and six readers printed the status alone:
+`receipt-batch.js` `observe`, `boolean-launch.js` `observe`,
+`index-stop-launch.js` `observe`, and the backtest page's `pollSweep`,
+`adoptRunning` and `refreshCurrentAdmission`.
+
+**Decided.** `refusalOf` reads `running.why` after the three top-level keys,
+and only when `running.status` is `unknown`: a running or finished payload's
+`why` describes the run and is not a refusal. Every one of the six readers
+puts `refusalFrom('/backtest/run.json', response)` in its existing sentence;
+the page's two pollers ask their ticket again after the body is read, so a
+replaced read publishes nothing. No reader's resend or launch rule moved: each
+still refuses to resend and still leaves the state `unknown`. OBSV-17.

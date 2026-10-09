@@ -94,3 +94,21 @@ test('a stamped refusal names the failed half only: an unreadable census, a mast
   assert.equal(await headerRefusalFrom('/instruments.json', Response.json([], { status: 503, headers: { 'x-brutex-census-state': 'unreadable', 'x-brutex-census-note': 'n' } })),
     '/instruments.json answered HTTP 503: the store census is unreadable: n');
 });
+
+// W6 (OBSV-17, D-3216): `/backtest/run.json` answers an unreadable attempt with
+// 503 (or a malformed `?attempt=` with 400) and the reason nested in
+// `{"running":{"status":"unknown","why":…}}` (`crates/api/src/sweeprun.rs`
+// `browser_attempt_unknown`, `unknown_status`). None of the three top-level keys
+// carries it, so every reader printed the status alone.
+test('an unknown running status is read for its why, and only an unknown one (W6)', async () => {
+  const why = 'persistent invocation read unavailable: Saturated';
+  assert.equal(refusalOf({ running: { where: 'browser', status: 'unknown', requested_attempt: '9', in_flight: false, why, refusal: null, report: null } }), why);
+  assert.equal(refusalOf({ running: { where: 'cli', status: 'unknown', in_flight: false, why: `  ${why}  `, refusal: null } }), why);
+  assert.equal(refusalOf({ error: 'top level first', running: { status: 'unknown', why } }), 'top level first');
+  for (const body of [{ running: null }, { running: { status: 'running', why } }, { running: { status: 'unknown', why: '' } },
+    { running: { status: 'unknown', why: 7 } }, { running: { status: 'unknown' } }, { running: [why] }, { running: why }]) {
+    assert.equal(refusalOf(body), null, JSON.stringify(body));
+  }
+  assert.equal(await refusalFrom('/backtest/run.json', Response.json({ running: { status: 'unknown', why } }, { status: 503 })),
+    `/backtest/run.json answered HTTP 503: ${why}`);
+});

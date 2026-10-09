@@ -2451,10 +2451,11 @@
       const response = await ask_('/backtest/run.json', { cache: 'no-store', signal: ticket.signal });
       if (!ticket.current()) return;
       if (!response.ok) {
+        // THE SERVER'S `running.why`, NOT THE STATUS ALONE (W6, D-3216).
+        const why = await refusalFrom('/backtest/run.json', response);
+        if (!ticket.current()) return;
         launchAdmission = { available: false, why: 'The execution status could not be read. Rechecking before another launch.' };
-        adoptWhy =
-          `/backtest/run.json answered ${response.status}, so this page cannot say whether a ` +
-          `sweep is running. Execution state is unknown; retrying.`;
+        adoptWhy = `${why}. This page cannot say whether a sweep is running; retrying.`;
         sweep = { phase: 'unknown', run: null, why: adoptWhy };
         statusRequests.schedule(pollSweep, 2000);
         return;
@@ -2499,9 +2500,12 @@
       const response = await ask_(submittedAttempt ? `/backtest/run.json?attempt=${submittedAttempt}` : '/backtest/run.json', { cache: 'no-store', signal: ticket.signal });
       if (!ticket.current()) return;
       if (!response.ok) {
+        // THE SERVER'S `running.why`, NOT THE STATUS ALONE (W6, D-3216).
+        const why = await refusalFrom('/backtest/run.json', response);
+        if (!ticket.current()) return;
         launchAdmission = { available: false, why: 'The execution status could not be read. Rechecking before another launch.' };
         invalidateLive();
-        sweep = { phase: 'unknown', run: sweep.run, why: `/backtest/run.json answered ${response.status}; execution state is unknown. Retrying.` };
+        sweep = { phase: 'unknown', run: sweep.run, why: `${why}. Execution state is unknown; retrying.` };
         statusRequests.schedule(pollSweep, 2000);
         return;
       }
@@ -2674,7 +2678,7 @@
     try {
       const response = await ask_('/backtest/run.json', { cache: 'no-store', signal: ticket.signal });
       if (!ticket.current()) return;
-      if (!response.ok) throw new Error(`The execution check answered ${response.status}.`);
+      if (!response.ok) throw new Error(`The execution check failed: ${await refusalFrom('/backtest/run.json', response)}`);
       const body = await response.json();
       if (!ticket.current()) return;
       observedRunning(body);

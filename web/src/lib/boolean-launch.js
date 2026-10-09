@@ -1,5 +1,6 @@
 import { ask } from './ask.js';
 import { sweepOutcome } from './sweep.js';
+import { refusalFrom } from './refusal.js';
 import { validateIndexConsistencyPolicy } from './index-consistency.js';
 import { validateBooleanWorkModel } from './boolean-work-model.js';
 import { NATIVE_POLICY_FIELDS, NATIVE_POLICY_NAMES } from './native-policy-schema.js';
@@ -351,7 +352,8 @@ export function createBooleanLaunch({ request = ask, changed, onSearch, wait = p
     if (!current(id)) return;
     const response = await request(`/backtest/run.json?attempt=${encodeURIComponent(/** @type {string} */ (state.attempt))}`, { cache: 'no-store', signal });
     if (!current(id)) return;
-    if (!response.ok) throw new Error(`Exact attempt status is unavailable (HTTP ${response.status}). The launch will not be resent.`);
+    // THE SERVER'S `running.why`, NOT THE STATUS ALONE (W6, D-3216).
+    if (!response.ok) throw new Error(`Exact attempt status is unavailable: ${await refusalFrom('/backtest/run.json', response)}. The launch will not be resent.`);
     const body = await response.json();
     if (!current(id)) return;
     const observed = booleanLaunchObservation(body?.running, state.plan ?? recordedPlan(body?.running), /** @type {string} */ (state.attempt), state);

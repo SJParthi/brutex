@@ -1,4 +1,5 @@
 import { sweepOutcome } from './sweep.js';
+import { refusalFrom } from './refusal.js';
 
 // This bounds browser bookkeeping, not the engine's search or support policy.
 export const MAX_RECEIPT_JOBS = 4096;
@@ -117,7 +118,8 @@ export function createReceiptBatch({ request, changed, wait = () => new Promise(
     if (!attempt) throw new Error('An exact accepted attempt is required before checking status.');
     const response = await request(`/backtest/run.json?attempt=${encodeURIComponent(attempt)}`, { cache: 'no-store' });
     if (disposed) return;
-    if (!response.ok) throw new Error(`Attempt status is unavailable (HTTP ${response.status}). No other job will start.`);
+    // THE SERVER'S `running.why`, NOT THE STATUS ALONE (W6, D-3216).
+    if (!response.ok) throw new Error(`Attempt status is unavailable: ${await refusalFrom('/backtest/run.json', response)}. No other job will start.`);
     const body = await response.json();
     if (disposed) return;
     const outcome = receiptObservation(body.running, job);

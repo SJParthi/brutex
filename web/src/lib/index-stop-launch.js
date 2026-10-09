@@ -1,5 +1,6 @@
 import {ask} from './ask.js';
 import {createPageRequests} from './page-requests.js';
+import {refusalFrom} from './refusal.js';
 import {validateNativeResearchPolicy} from './boolean-launch.js';
 import {validateIndexConsistencyPolicy} from './index-consistency.js';
 import {CAMPAIGN_RUNGS} from './boolean-campaign.js';
@@ -142,7 +143,7 @@ export function createIndexStopLaunch({changed,request=ask,visible=()=>typeof do
  const publish=()=>{if(!disposed)changed(freeze(structuredClone(state)));};
  /** @param {unknown} why */const unknown=why=>{state={...state,phase:'unknown',why:why instanceof Error?why.message:String(why)};publish();};
  /** @param {import('./page-requests.js').ReadTicket} ticket */
- async function observe(ticket){try{const response=await request(`/backtest/run.json?attempt=${encodeURIComponent(state.attempt)}`,{cache:'no-store',signal:ticket.signal});if(!ticket.current())return;if(!response.ok)throw new Error(`This exact attempt could not be read (HTTP ${response.status}); its launch will not be resent.`);const body=await response.json();if(!ticket.current())return;state=indexStopLaunchObservation(body?.running,state.plan,state.attempt,state);failures=0;publish();}catch(why){if(ticket.current()){failures=Math.min(4,failures+1);unknown(why);}}finally{if(ticket.current()&&visible()&&['running','unknown'].includes(state.phase))reads.schedule(observe,Math.min(30000,interval*2**failures));}}
+ async function observe(ticket){try{const response=await request(`/backtest/run.json?attempt=${encodeURIComponent(state.attempt)}`,{cache:'no-store',signal:ticket.signal});if(!ticket.current())return;if(!response.ok)throw new Error(`This exact attempt could not be read: ${await refusalFrom('/backtest/run.json',response)}; its launch will not be resent.`);const body=await response.json();if(!ticket.current())return;state=indexStopLaunchObservation(body?.running,state.plan,state.attempt,state);failures=0;publish();}catch(why){if(ticket.current()){failures=Math.min(4,failures+1);unknown(why);}}finally{if(ticket.current()&&visible()&&['running','unknown'].includes(state.phase))reads.schedule(observe,Math.min(30000,interval*2**failures));}}
  const recheck=()=>{if(disposed||!uint(state.attempt)||postAbort)return;reads.cancel();if(visible())return reads.run(observe);};
  const unlisten=listen(()=>{reads.cancel();if(visible()&&['running','unknown'].includes(state.phase))void recheck();});
  return {

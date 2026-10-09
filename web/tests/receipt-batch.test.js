@@ -219,3 +219,15 @@ test('the actual page wires strict mode, supported rungs, exact settings and tru
   assert.match(component, /controller\.dispose\(\)/);
   assert.doesNotMatch(component, /\/backtest\/run['"]|ledger-v6['"]|15:30/);
 });
+
+// W6 (OBSV-17, D-3216): the exact-attempt read's 503 names its cause in `running.why`.
+test('an unreadable exact attempt names the server reason and starts nothing else (W6)', async () => {
+  const why = 'persistent invocation read unavailable: Saturated';
+  const plan = receiptPlan(input());
+  const testRun = driver(url => url === '/engine/command' ? accepted('55') : response({ running: {
+    where: 'browser', status: 'unknown', requested_attempt: '55', in_flight: false, why, refusal: null, report: null } }, 503));
+  await testRun.batch.start(plan);
+  assert.equal(testRun.latest().phase, 'unknown');
+  assert.equal(testRun.latest().why, `Attempt status is unavailable: /backtest/run.json answered HTTP 503: ${why}. No other job will start.`);
+  assert.equal(testRun.calls.filter(call => call.body).length, 1);
+});

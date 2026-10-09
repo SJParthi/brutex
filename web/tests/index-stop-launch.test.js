@@ -189,3 +189,15 @@ test('acknowledged results automatically open one exact timeframe comparison and
  assert.equal((source.match(/<IndexStopQualification /g)??[]).length,1);assert.match(source,/<IndexStopQualification initialIdentity=\{selectedComparison.identity\} initialCompletion=\{selectedComparison.completion\} autoLoad=\{true\}/);
  const nav=/<nav class="controls" aria-label="Choose saved results timeframe">([\s\S]*?)<\/nav>/.exec(source);assert.ok(nav);assert.match(nav[1],/onclick=\{\(\)=>\{savedTimeframe=row.timeframe;\}\}/);assert.doesNotMatch(nav[1],/controller|start|POST|fetch|request/);
 });
+
+// W6 (OBSV-17, D-3216): the exact-attempt read's 503 names its cause in `running.why`.
+test('an unreadable exact attempt names the server reason and its launch is not resent (W6)',async()=>{
+ const why='persistent invocation read unavailable: Saturated',p=plan(),states=/** @type {any[]} */([]),calls=/** @type {any[]} */([]);
+ const ctl=createIndexStopLaunch({changed:s=>states.push(s),listen:()=>()=>{},interval:100000,request:async(url,options)=>{calls.push({url,options});return options?.method==='POST'?reply({accepted:true,attempt:ATTEMPT,refusal:null},202):/** @type {any} */(Response.json({running:{where:'browser',status:'unknown',requested_attempt:ATTEMPT,in_flight:false,why,refusal:null,report:null}},{status:503}));}});
+ try{
+  await ctl.start(p);await tick();
+  assert.equal(states.at(-1).phase,'unknown');
+  assert.equal(states.at(-1).why,`This exact attempt could not be read: /backtest/run.json answered HTTP 503: ${why}; its launch will not be resent.`);
+  assert.equal(calls.filter(c=>c.options?.method==='POST').length,1);
+ }finally{ctl.dispose();}
+});

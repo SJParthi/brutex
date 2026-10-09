@@ -12,6 +12,13 @@
 //             /indexmap, /instruments, /universes and /verify share
 //   refusal   `/masters/status.json` and the masters refresh
 //
+// AND ONE NESTED SHAPE: `/backtest/run.json` answers an attempt it cannot read
+// (503) or a malformed `?attempt=` (400) with
+// `{"running":{"status":"unknown","why":…}}` (`crates/api/src/sweeprun.rs`
+// `browser_attempt_unknown`, `unknown_status`), and none of the three keys
+// above is set. Its `why` is read only when the status is `unknown`: a running
+// or finished payload's `why` describes the run, not a refusal (W6, D-3216).
+//
 // A body that names none of them is not invented into one: the sentence then
 // says the route named no reason, which is itself the fact worth showing.
 
@@ -28,6 +35,11 @@ export function refusalOf(body) {
   for (const key of KEYS) {
     const value = record[key];
     if (typeof value === 'string' && value.trim() !== '') return value.trim();
+  }
+  const running = record.running;
+  if (running !== null && typeof running === 'object' && !Array.isArray(running)) {
+    const { status, why } = /** @type {Record<string, unknown>} */ (running);
+    if (status === 'unknown' && typeof why === 'string' && why.trim() !== '') return why.trim();
   }
   return null;
 }
