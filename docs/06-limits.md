@@ -3577,10 +3577,15 @@ given to somebody else to diagnose — which is the whole reason
 truncated, concatenated, hand-edited, or simply not ours. A reader that exhausts
 memory on such a file is no use at exactly the moment it is needed.
 
-`MAX_LINE_BYTES` is 64 KiB, far above any line this crate can write: the event
-ceilings bound one at roughly 2.2 KiB of content, and JSON escaping cannot
-inflate that past about 14 KiB even if every byte needs a `\u00XX`. A run longer
-than that is not a line of ours.
+`MAX_LINE_BYTES` is 64 KiB, above any line this crate can write by about a
+third: the event ceilings bound one at 6,832 bytes of content (target 48,
+message 256, twelve fields of a 32-byte key and a 512-byte value), and JSON
+escaping inflates a control byte sixfold to `\u00XX`, so the widest line is
+just over 41 KB; an audit probe wrote one of 38,977 bytes. A run longer than
+64 KiB is not a line of ours. (This said about 2.2 KiB of content and 14 KiB
+escaped, the arithmetic from when a string value was capped at 128 bytes;
+`telemetry::tail` was corrected by D-1323 and this paragraph by D-4489, audit
+sobs-17.)
 
 The refusal is **counted, not silent** — `malformed` is what this reader already
 says about bytes it stepped over, so an oversized run gets the same number and
@@ -13378,10 +13383,15 @@ not:
   ahead of it. Measured in the test with a cap of 4, a 400 ms deadline and 16
   partial clients: the real request was answered, after at least two waves.
   The listener is loopback-only, so the client doing this is local.
-  **That bound is for partial heads only.** Clients that send a complete head
-  and then a slow body (the first bullet) are not bounded in time, so 256 of
-  them can hold every slot for as long as they like (audit-20261003
-  attacksweep-1b). Leading blank lines before a request line used to be read
+  **That bound is for partial heads only, and a slow body has its own.**
+  Clients that send a complete head and then a slow body (the first bullet)
+  are cut at `BODY_READ_TIMEOUT`, 10 seconds from the moment the head was
+  delivered (D-1510),
+  so 256 of them hold every slot for at most that long per wave
+  (`a_crowd_of_body_drippers_cannot_starve_a_real_request`). This sentence
+  said such clients were unbounded in time (audit-20261003 attacksweep-1b),
+  which was true before D-1510 and survived a merge beside it; corrected by
+  D-4489 (audit r53-2). Leading blank lines before a request line used to be read
   as a complete head and held a slot the same way; since D-1580 they are
   skipped and the deadline keeps running (attacksweep-1).
 - **A pipelined second request can be cut.** The deadline restarts after a
@@ -15874,13 +15884,13 @@ UNVERIFIED as measurements.
 
 ## Language-purity gate limits after the RO sweep — D-2340..D-2350 and D-2321..D-2325, 4 October 2026
 
-- **Inline awk in `ci.yml` (D-2342).** Gate 0 now refuses an `awk` program
-  operand, but 71 inline awk programs remain in `ci.yml`, all in gates that
-  pre-date the scanner. They are a pinned ratchet, not an exemption: the
-  scanner's `AWK_IN_CI` must EQUAL the count, so a new program anywhere is
-  refused and a removed one forces the pin down. Moving each into a
-  `.github/*.rs` tool is the remaining work; until then section 2 holds for
-  every other file and is bounded, not met, in this one.
+- **Inline awk in `ci.yml` (D-2342): none left.** Gate 0 refuses an `awk`
+  program operand, and the scanner's `AWK_IN_CI` must EQUAL the count of
+  inline programs in `ci.yml`. At D-2342 that count was 71, a pinned ratchet;
+  commit 2a74690d moved the last of them into `.github/*.rs` tools and set
+  the pin to 0, so section 2 now holds in `ci.yml` for awk as it does in every
+  other file. (This bullet still described the 71 until D-4489, audit
+  srust-6.)
 - **What Gate 0 reads as a command (D-2342).** Words are split on whitespace
   and on `;`, `&&`, `||`, `|`, `$(`, a backtick and `<(`; quoting is not
   parsed. A program named by a variable (`p=node; $p -e x`), a name assembled
@@ -16738,7 +16748,7 @@ of this build on this box, labelled as such, not budgets a gate holds.
 
 | Finding | Cost that stays | Why it is inherent | Measured (p50 / p99 / max) |
 |---|---|---|---|
-| W3-store1-0, W3-store1-1 | `first_at_or_after` is a bisection, at most `ceil(log2(n_valid + 1))` = 14 probes at the one-minute month ceiling; `already_stored` adds the batch | Records are not dense on the minute grid (holidays, Muhurat, vendor holes), so a stamp has no computable index, and an index file would be a new store format version; 14 is a constant of the format | 28.5 µs / 64.3 µs / 6.2 ms per lookup over 11,625 sealed records (each probe pays its block's verify) |
+| W3-store1-0, W3-store1-1 | A month with a usable `.tix` index answers `first_at_or_after` with one index entry read (D-2329; `C-TIX-01`, `C-TIX-02`, `O1P-02`: p50 274 to 289 ns, p99 295 to 410 ns from 1,000 to 1,000,000 records in one run on 2026-10-09). The bisection, at most `ceil(log2(n_valid + 1))` = 14 probes at the one-minute month ceiling, is the legacy path for a month with no usable index; `already_stored` adds the batch | Records are not dense on the minute grid (holidays, Muhurat, vendor holes), so a stamp has no computable offset in the bar file itself; D-2329 built the per-month `.tix` index that maps a minute to its record, so the bisection is kept only where no index is held. (This row said an index would need a new store format version, which D-2329 had already answered; corrected by D-4489, audit rnew-2.) | Bisection only: 28.5 µs / 64.3 µs / 6.2 ms per lookup over 11,625 sealed records (each probe pays its block's verify) |
 | R9-csr-o1-0 | one `fstat` per tail-block verification | It is how records past the commit are found (D-0688); skipping it refuses a sealed-past-commit tail an interrupted append leaves | `fstat` 386 ns / 488 ns; a cold tail-block read with it 1.56 µs / 2.05 µs, an interior block without it 3.47 µs / 4.39 µs |
 | W1-pull2-5 | `committed_cash_days` reads every committed record of each month asked | Its contract is that a corrupt month refuses; only reading every block verifies every block, and the days come from the records because the bar format holds no per-day index | whole verified month, fresh handle, 11,625 records: 1.03 ms / 5.12 ms / 5.13 ms |
 | W1-pull2-3 | `derive_all` re-reads and re-folds the month on a rerun that wrote nothing | The rerun is how a derivation blocked by missing schedule evidence is retried, and `reconcile_derived`'s full re-proof is the only check that finds a derived conflict; skipping it needs a per-rung resume point the format does not record | same month walk as above |

@@ -69211,3 +69211,27 @@ them, and `docs/06-limits.md` lists both.
 
 **What changes.** CI configuration, one bench helper's name and two doc
 comments. No code path, output or format moves.
+
+### D-4489 — Four `docs/06-limits.md` statements the code had falsified are corrected and guarded — 2026-10-09
+
+**What was observed.** Audits found four limits statements contradicted by the
+code they describe: the D-2290 kept-costs table said time lookup is a 14-probe
+bisection and that an index "would be a new store format version", while D-2329
+built the per-month `.tix` index (`rnew-2`); the slow-client section said
+clients with a complete head and a slow body are not bounded in time, while
+D-1510's `BODY_READ_TIMEOUT` cuts them at 10 s (`r53-2`, a merge kept both
+texts); the language-purity section said 71 inline awk programs remain in
+`ci.yml`, while commit 2a74690d set `AWK_IN_CI` to 0 (`srust-6`); and section
+47 said the widest log line is about 14 KiB, while `telemetry::tail` says just
+over 41 KB since D-1323 and a probe wrote 38,977 bytes (`sobs-17`).
+
+**Decision.** Each statement is rewritten to the code's fact, with a note of
+what it said and this entry. `vocab`'s `stale_claims` test
+`the_limits_sentences_the_code_falsified_stay_retracted` refuses the five stale
+phrases, requires the corrected ones, and reads the five code facts they rest
+on where they are declared (the `.tix` module, `BODY_READ_TIMEOUT`,
+`AWK_IN_CI`, `tail`'s 41 KB and `MAX_LINE_BYTES`). The `.tix` row now carries
+this integration's one store bench run: `O1P-02` p50 274 to 289 ns, p99 295 to
+410 ns from 1,000 to 1,000,000 records.
+
+**What changes.** Documentation and one test. No code path moves.

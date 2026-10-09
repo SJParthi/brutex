@@ -7282,3 +7282,9 @@ old line regex the same input and watched it pass.
 | ONEAUTH-22 | The browser's `CAMPAIGN_RUNGS` is `cli::EVERY_RUNG` in its order, and `charge-scope.js`'s own charge list is `runner::audit`'s equity header verbatim, its trades sentence naming each of the eight charges (D-3519) | `web/tests/boolean-campaign.test.js` · *the campaign rung list is cli::EVERY_RUNG, in its order*; `web/tests/charge-scope.test.js` · *the page's charge list is the audit header's* | ✓ |
 | ONEAUTH-23 | `telemetry::civil_from_days`, `cli::stability::Grain::Month`, `costs::day` both ways and `store::path::YearMonth::ist_bounds_micros` name `pull::session::Day`'s date on every day from 1970-01-01 to 9999-12-31 that each admits, and the store's months tile (D-3521) | `every_civil_date_copy_names_the_same_day` in `crates/cli/tests/one_civil_calendar.rs` | ✓ |
 | ONEAUTH-24 | Every `D-NNNN` cited by the root `.md` and `.toml` files, `.config/`, `config/`, `.claude/` and `web/`'s sources heads a ledger entry, and nothing under `target`, `node_modules`, `build` or `.svelte-kit` is read (D-3520) | `every_cited_decision_heads_an_entry` in `crates/core/tests/citations.rs` | ✓ |
+
+### Audit integration `intl` (D-4487 to D-4489, D-4509 to D-4519)
+
+| ID | Invariant | Proven by | Status |
+|---|---|---|---|
+| INTL-01 | Four `docs/06-limits.md` statements the code falsified stay retracted: the `.tix` lookup is one entry read and the bisection is legacy; a slow body is cut at `BODY_READ_TIMEOUT` (10 s); no inline awk remains in `ci.yml` (`AWK_IN_CI` is 0); the widest log line is just over 41 KB. The stale phrases are refused, the corrected ones required, and each code fact is read where it is declared (D-4489) | `vocab::stale_claims::the_limits_sentences_the_code_falsified_stay_retracted` | ✓ |
