@@ -57,8 +57,11 @@ test('a 304 that turns a held census degraded is refused, not served from the ea
 });
 
 test('every page that folds the selected census shows the refusal', () => {
-  // /db and /markets already render `store.error`; /terminal did not.
-  assert.match(source('../src/routes/db/+page.svelte'), /store\.error/);
+  // /db and /markets already render `store.error`; /terminal did not. Since
+  // WP-00 split /db, its census reading — `error`, folded from `store.error` —
+  // is in DbCensusBanner.svelte, and the shell renders that `error`.
+  assert.match(source('../src/routes/db/DbCensusBanner.svelte'), /store\.error/);
+  assert.match(source('../src/routes/db/+page.svelte'), /\{#if db\.error\}/);
   assert.match(source('../src/routes/markets/+page.svelte'), /store\.error/);
   const terminal = source('../src/routes/terminal/+page.svelte');
   assert.match(terminal, /\{#if store\.state === 'error'\}\s*<p class="tcensus" role="alert">/);

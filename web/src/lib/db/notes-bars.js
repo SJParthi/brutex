@@ -1,0 +1,320 @@
+/**
+ * /db — THE BAR GRID'S COLUMNS AND WHAT EACH ONE SAYS
+ *
+ * Every column of the bar grid with its width and its reason, the groups over
+ * them, the read budgets, and the sentence behind every withheld change.
+ *
+ * Every line below was MOVED out of `routes/db/+page.svelte` by WP-00 (the /db
+ * page split). The only edits to a moved line are the ones the move needs: a
+ * page-level name that now lives in another file is imported, or, for state,
+ * read as `db.<name>`; a plain module exports what it declares; and a callback
+ * over such a value marks its parameter `any`, the way the page already did
+ * elsewhere. Nothing was fixed in the move: every defect the audit found is
+ * still present byte for byte, and is fixed by the package that owns this file
+ * next.
+ *
+ * Owner after WP-00: WP-52 (bars data path, pager, go-to, extremes, export).
+ *
+ * A PLAIN MODULE, NOT A `.svelte.js` ONE: it holds constants and pure
+ * functions only, so `node --test` can import it with no compiler. Imports
+ * are relative for the same reason — `$lib` is a Vite alias node cannot see.
+ */
+import { fmt } from './notes-labels.js';
+
+/* ---------------------------------------------------------------------
+   WHAT HAS NO SOURCE, SAID ONCE EACH.
+
+   Every sentence below reaches the screen twice - on the disabled sort
+   button's title and on every cell in that column - so the reason cannot
+   be on one and missing from the other.
+   --------------------------------------------------------------------- */
+export const NO_PREMKT =
+  'a pre-market percentage needs a pre-open session price, and the store’s bar record carries none: docs/02-store-format.md fixes the record at timestamp, open, high, low, close, volume and open interest, and /bars.json returns exactly those seven fields. There is nothing on this wire to divide.';
+export const NO_SPOT_SORT =
+  'spot is read for the rows on this page only (/spot.json, D-2807), so there is no order over the whole selection to sort by.';
+/* SOURCED SINCE D-2830. The greeks were "no source" because no rate and no
+   time to expiry were measured; D-2810 sourced the rate (RBI 91-day T-bill)
+   and D-2831 states the expiry instant, and `/greeks.json` solves each bar
+   in Rust. Like spot, they are read for the page's rows only. */
+export const NO_GREEK_SORT =
+  'greeks are solved for the rows on this page only (/greeks.json, D-2830), so there is no order over the whole selection to sort by.';
+
+/* ---------------------------------------------------------------------
+   THE BAR GRID'S COLUMNS - all twenty-four, in the approved order.
+
+   `none` is the reason a column has no source. A column with `none` set
+   renders a NAMED dash in every cell and its sort button is DISABLED
+   wearing that same sentence: a sort control over a column of unknowns
+   reorders nothing while claiming to have worked.
+   --------------------------------------------------------------------- */
+export const BAR_COLS = [
+  /* THE DAY AND THE MINUTE ARE TWO COLUMNS, because a grid is read DOWN a
+     column. One `18 Aug 2026, 15:29` cell put every row's minute at a
+     different x — the day in front of it is a different width on the 9th and
+     the 18th — so the one field a reader scans a bar table for could not be
+     scanned at all. Sorting still keys on `ts`, the instant, so splitting the
+     DISPLAY changes no order. */
+  {
+    key: 'ts',
+    label: 'Date',
+    w: 116,
+    why: 'the bar’s own opening day, IST - the store holds the instant in microseconds'
+  },
+  {
+    key: 'tod',
+    label: 'Time',
+    w: 84,
+    why: 'the bar’s own opening minute, IST - to the SECOND on a 1s rung, where sixty bars share each minute; absent on a day rung, where every bar opens at the same one'
+  },
+  {
+    key: 'tf',
+    label: 'TF',
+    w: 68,
+    why: 'the bar length, sorted by DURATION and never by spelling'
+  },
+  { key: 'o', label: 'Open', w: 104, num: true, why: 'paisa integer, straight from the store' },
+  { key: 'h', label: 'High', w: 104, num: true, why: 'paisa integer, straight from the store' },
+  { key: 'l', label: 'Low', w: 104, num: true, why: 'paisa integer, straight from the store' },
+  { key: 'c', label: 'Close', w: 108, num: true, why: 'paisa integer, straight from the store' },
+  {
+    key: 'vol',
+    label: 'Volume',
+    w: 116,
+    num: true,
+    why: 'contracts or shares traded inside this bar'
+  },
+  { key: 'premkt', label: 'Pre-mkt %', w: 102, num: true, none: NO_PREMKT },
+  {
+    key: 'chg',
+    label: 'Change %',
+    w: 102,
+    num: true,
+    why: 'this bar’s close against the PREVIOUS BAR’s close in the same month file, in integer basis points'
+  },
+  {
+    key: 'oi',
+    label: 'Open interest',
+    w: 124,
+    num: true,
+    why: 'the stored open interest. i64::MIN is the null sentinel and renders as unknown; a zero is a real zero'
+  },
+  {
+    key: 'oichg',
+    label: 'OI chg %',
+    w: 100,
+    num: true,
+    why: 'this bar’s open interest against the previous bar’s, in integer basis points'
+  },
+  {
+    key: 'exp',
+    label: 'Expiry',
+    w: 116,
+    why: 'the contract’s expiry day, parsed from the stored name'
+  },
+  {
+    key: 'dte',
+    label: 'Days to exp',
+    w: 106,
+    num: true,
+    why: 'whole calendar days from this bar’s IST day to the expiry day - negative after it'
+  },
+  { key: 'side', label: 'Type', w: 72, why: 'CE or PE, from the stored name' },
+  { key: 'strike', label: 'Strike', w: 96, num: true, why: 'paisa integer, from the stored name' },
+  /* `num: true` — MEASURED, NOT ASSUMED. Every neighbour on this side of the
+     table carries it (`dte`, `strike`, `intr`, `extr`, `iv`, and the four
+     Greeks) and this one did not, so its HEADER rendered left-aligned over a
+     CELL that rendered right: the only column on the table whose label and
+     value face opposite edges. Found by reading the computed styles of all
+     twenty-four columns rather than by looking, which is also how the two
+     "clipped" columns turned out not to be clipped at all. */
+  /* SOURCED SINCE D-2807, PER BAR. Spot is the underlying's stored close at
+     this bar's own instant, feed and rung (`/spot.json`), read for the rows
+     on THIS PAGE only — so no order over the whole selection exists to sort
+     by, and the sort button says so rather than ordering one page. */
+  {
+    key: 'mny',
+    label: 'Moneyness',
+    w: 106,
+    num: true,
+    nosort: NO_SPOT_SORT,
+    why: 'ATM, ITM-k or OTM+k: k listed strikes of this expiry from the strike nearest the underlying’s close at this bar’s own instant'
+  },
+  {
+    key: 'intr',
+    label: 'Intrinsic',
+    w: 100,
+    num: true,
+    nosort: NO_SPOT_SORT,
+    why: 'the underlying’s close at this bar’s instant over the strike (CE) or the strike over it (PE), never below zero, in paisa'
+  },
+  {
+    key: 'extr',
+    label: 'Extrinsic',
+    w: 100,
+    num: true,
+    nosort: NO_SPOT_SORT,
+    why: 'this bar’s close less intrinsic, in paisa; not clipped, so a close below intrinsic shows negative'
+  },
+  /* SOLVED PER BAR, ON THE SERVER (D-2830). Each figure is
+     `pull::pricing::bar_greeks` on this bar's close, the underlying's close
+     at the same instant, the time to the expiry day's session close (D-2831)
+     and the T-bill rate as of the release before this bar's day (D-2810).
+     Zero carry: no dividend yield is sourced. Units are in each `why`. */
+  {
+    key: 'iv',
+    label: 'IV %',
+    w: 86,
+    num: true,
+    nosort: NO_GREEK_SORT,
+    why: 'the Black-Scholes volatility that reproduces this bar’s close, in percent, solved on the server'
+  },
+  {
+    key: 'delta',
+    label: 'Delta',
+    w: 86,
+    num: true,
+    nosort: NO_GREEK_SORT,
+    why: 'change in premium per unit change in the underlying, at the solved volatility'
+  },
+  {
+    key: 'gamma',
+    label: 'Gamma',
+    w: 96,
+    num: true,
+    nosort: NO_GREEK_SORT,
+    why: 'change in delta per rupee of the underlying'
+  },
+  {
+    key: 'theta',
+    label: 'Theta',
+    w: 88,
+    num: true,
+    nosort: NO_GREEK_SORT,
+    why: 'rupees of premium per calendar day (365-day year), negative when time decays it'
+  },
+  {
+    key: 'vega',
+    label: 'Vega',
+    w: 86,
+    num: true,
+    nosort: NO_GREEK_SORT,
+    why: 'rupees of premium per one percentage point of volatility'
+  },
+  {
+    key: 'rho',
+    label: 'Rho',
+    w: 84,
+    num: true,
+    nosort: NO_GREEK_SORT,
+    why: 'rupees of premium per one percentage point of the risk-free rate'
+  }
+];
+/** By key, so a cell reaches its own column's reason without an index. */
+export const BAR_META = (() => {
+  /** @type {Record<string, any>} */
+  const m = {};
+  for (const c of BAR_COLS) m[c.key] = c;
+  return m;
+})();
+
+export const OPTION_COLS = new Set([
+  'side',
+  'strike',
+  'mny',
+  'intr',
+  'extr',
+  'iv',
+  'delta',
+  'gamma',
+  'theta',
+  'vega',
+  'rho'
+]);
+export const FUTURE_COLS = new Set(['exp', 'dte']);
+/* ------------------------------------------------------------------
+   FIVE GROUPS, AND THEY ARE THE SCHEMA'S OWN SHAPE, NOT A DECORATION.
+
+   Twenty-five columns is a wall. Nothing in it says that Open/High/Low/Close
+   are one reading of one bar, or where the contract facts stop and the
+   greeks begin, so every column costs the same amount of looking as every
+   other one. The grouping below invents nothing: each group is a CONTIGUOUS
+   RUN of `BAR_COLS` in the order that list already had —
+
+     When      1..3    ts, tod, tf
+     Price     4..7    o, h, l, c
+     Flow      8..12   vol, premkt, chg, oi, oichg
+     Contract  13..19  exp, dte, side, strike, mny, intr, extr
+     Greeks    20..25  iv, delta, gamma, theta, vega, rho
+
+   — and that contiguity is why a band can be drawn over them at all. A group
+   that had to skip a column could not be one heading.
+
+   THE BAND IS ONE CELL PER COLUMN, NOT `colspan`. Columns are hidden by
+   `display: none` at fixed `nth-child` positions — see the long note over
+   those rules for why hiding beats filtering here — and a `colspan` counts
+   SLOTS, not visible columns, so a spanning cell would drift the moment a
+   group lost a member. One `<th>` per column, carrying the label on the
+   group's first VISIBLE column and nothing on the rest, cannot disagree with
+   the grid. The existing hide rules match `thead > tr > th:nth-child(N)` in
+   ANY row of the head, so they gate this row for free.
+   ------------------------------------------------------------------ */
+export const BAR_GROUPS = [
+  { id: 'when', label: 'When', keys: ['ts', 'tod', 'tf'] },
+  { id: 'price', label: 'Price', keys: ['o', 'h', 'l', 'c'] },
+  { id: 'flow', label: 'Flow', keys: ['vol', 'premkt', 'chg', 'oi', 'oichg'] },
+  {
+    id: 'contract',
+    label: 'Contract',
+    keys: ['exp', 'dte', 'side', 'strike', 'mny', 'intr', 'extr']
+  },
+  { id: 'greeks', label: 'Greeks', keys: ['iv', 'delta', 'gamma', 'theta', 'vega', 'rho'] }
+];
+
+
+/* EVERY COLUMN IS IN EXACTLY ONE GROUP, AND ONE ADDED LATER WITHOUT A GROUP
+   IS FINDABLE RATHER THAN SILENT. A new key nobody grouped would carry no
+   band label, and the band would read as a gap the eye blames on the layout
+   rather than on the column list. The table publishes any such key on
+   `data-ungrouped` — the same debug-attribute convention `data-boxh` and
+   `data-fit` already earned on this grid — so the answer is one inspection
+   away instead of a puzzle. `CLAUDE.md` §4: degrade loudly, name the reason. */
+export const GROUPED_KEYS = new Set(BAR_GROUPS.flatMap((g) => g.keys));
+export const BAR_UNGROUPED = BAR_COLS.filter((c) => !GROUPED_KEYS.has(c.key)).map((c) => c.key);
+
+
+/** A PARTITION, AND IT SUMS: sourced + unsourced = every column drawn. */
+export const BAR_SOURCED = BAR_COLS.filter((c) => !c.none).length;
+export const BAR_UNSOURCED = BAR_COLS.length - BAR_SOURCED;
+
+/* ---------------------------------------------------------------------
+   THE READ BUDGET - a CHOICE, not a count the page took for the reader.
+
+   `/bars.json` is one month per request and about 81 bytes per bar on the
+   wire, so "read everything that matched" is a request storm on a 206-row
+   census. The budget is a control with its cost on its face; `0` means
+   every matched instrument-month and the option says so.
+   --------------------------------------------------------------------- */
+export const READ_BUDGETS = [1, 3, 6, 12, 24, 0];
+/** @param {number} n */
+export const budgetLabel = (n) => (n === 0 ? 'Every one' : `${fmt(n)} newest`);
+
+/** Why one bar's percentage is not a number. One code, one sentence. */
+export const BAR_WHY = {
+  first_bar_in_file:
+    'this is the first bar of the earliest month this request read, so the close it would be measured against is in a month the request did not read. It is not a zero.',
+  previous_close_zero:
+    'the previous close is zero paisa, and a ratio against zero is not a number.',
+  oi_null:
+    'open interest on this bar is the store’s null sentinel, i64::MIN - this feed stamps none for this segment. It is NOT zero; a zero here would be a real zero.',
+  oi_null_before:
+    'the previous bar carries no open interest, so there is nothing to measure this one against.',
+  previous_oi_zero: 'the previous open interest is zero, and a ratio against zero is not a number.',
+  previous_unreadable:
+    'the bar before this one failed its checksum and was not read, so there is no trusted value to measure this one against. Its own value is shown; only the change is withheld.',
+  overflow:
+    'the change does not fit the integer range the server measures in, so it is withheld rather than shown wrapped. Both values are real.'
+};
+/** @param {string | null} code */
+export const barWhyText = (code) =>
+  (code === null ? null : /** @type {any} */ (BAR_WHY)[code]) ??
+  'unknown, and this page did not record why - which is a defect here, not a fact about the store.';

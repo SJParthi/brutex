@@ -1,8 +1,10 @@
 // THE TWO /db COMPLETENESS DEFECTS, EACH WITH THE STATE THAT PRODUCED IT.
 //
 // `node --test web/tests/` — the runner is node's own, so this costs no
-// dependency and no toolchain. It runs the same module `routes/db/+page.svelte`
-// imports; nothing here is a copy of the page's arithmetic.
+// dependency and no toolchain. It runs the same module the /db page imports —
+// since WP-00 split `routes/db/+page.svelte`, that is `$lib/db/decoration.js`
+// (the per-row denominator) and `routes/db/DbCoverageGrid.svelte` (the month
+// roll-up); nothing here is a copy of the page's arithmetic.
 //
 // Both cases below were REPRODUCED against the shipped page before the fix, by
 // running its own expressions over these exact rows.
