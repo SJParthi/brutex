@@ -756,3 +756,46 @@ fn an_uninspectable_rung_path_is_refused_not_reported_absent() {
     }
     assert_eq!(refused, 1);
 }
+
+/// **A page that starts at or past the last block is an empty page for every
+/// `from`, including one whose byte offset cannot be represented.**
+/// R1286-cli-01, D-4100.
+///
+/// The seek to block `from` is made only when the page shows a block. A page
+/// past the end shows none, so its offset is never computed: `from` at
+/// `u64::MAX / BLOCK_BYTES + 1`, the smallest block index whose offset
+/// overflows a `u64`, and at `u64::MAX`, each read as `total` blocks and an
+/// empty page, never as a refused rung. The blocks are never decoded either,
+/// so two structurally sealed frames suffice.
+#[test]
+fn a_page_past_the_end_never_computes_its_offset_even_one_that_overflows() {
+    let root = Scratch::new();
+    let rung = crate::ledger_all::LEDGER_RUNGS[0];
+    let directory = root.0.join("selection").join(rung);
+    std::fs::create_dir_all(&directory).expect("rung directory");
+    std::fs::write(
+        directory.join(FILE_NAME),
+        [frame(1).as_slice(), frame(2).as_slice()].concat(),
+    )
+    .expect("two blocks");
+    let first_overflowing = u64::MAX / BLOCK_BYTES + 1;
+    assert!(
+        first_overflowing.checked_mul(BLOCK_BYTES).is_none()
+            && (first_overflowing - 1).checked_mul(BLOCK_BYTES).is_some(),
+        "premise: the smallest block index whose offset overflows"
+    );
+    for asked in [2, 3, first_overflowing - 1, first_overflowing, u64::MAX] {
+        let read = read_stored_selection_v6(&root.0, asked, 4)
+            .into_iter()
+            .find(|(name, _)| *name == rung)
+            .map(|(_, read)| read);
+        match read {
+            Some(StoredSelectionV6Rung::Records {
+                total,
+                from,
+                records,
+            }) => assert_eq!((total, from, records.len()), (2, asked, 0), "from {asked}"),
+            other => panic!("from {asked}: an empty page, not {other:?}"),
+        }
+    }
+}
