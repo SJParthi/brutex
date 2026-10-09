@@ -16980,3 +16980,8 @@ Measured by `api::latency` (`api` test build (the workspace's optimized test pro
   The reported p99 ratio against 2,480 rows read 45.1x at 2,480,000, above the
   24.5x to 36.0x of D-4419's six runs: that ratio is memory, is printed and not
   gated, and one run is not a range.
+- **Two O(1) claims carry no timing (gate 12 on the merged tree).**
+  `core::vendor::holds_test_marker` (D-4507) folds at most 64 bytes into a
+  stack buffer and searches two seven-byte needles; its 64-byte edge is
+  tested, its time is not. `runner::grid::Candidate::timed_at` (D-4500) is two
+  field reads and a `max`; no bench row covers the grid walk that calls it.

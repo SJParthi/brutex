@@ -693,7 +693,7 @@ fn median_of(tails: &[Tail], field: impl Fn(&Tail) -> u128) -> u128 {
 /// Per size: the median over groups of p50 and of p99, the largest max of any
 /// group, and -- past the base -- the median paired p99 ratio with the range of
 /// the nine. A size `gated` refuses returns `true` after printing.
-fn interleaved_row(
+fn interleaved_ratio(
     label: &str,
     unit: &str,
     sizes: &[usize],
@@ -900,14 +900,14 @@ fn rule_four_primitives_are_flat_at_p99() -> bool {
     // whatever else runs, so its p99 moved between 2.3x and 5.3x of 10^3 with
     // the machine's load while the code stood still. It is printed, as 10^6
     // always was; `docs/06-limits.md` names both (D-3301, D-4482).
-    let mut ok = interleaved_row(
+    let mut ok = interleaved_ratio(
         "O1P-03 k=1 duplicate rejection",
         "32 probes",
         &P99_SIZES,
         &dup,
         |n| n <= 10_000,
     );
-    ok &= interleaved_row(
+    ok &= interleaved_ratio(
         "O1P-04 result append",
         "32 pushes",
         &P99_SIZES,
@@ -923,7 +923,7 @@ fn rule_four_primitives_are_flat_at_p99() -> bool {
     // the 10^6 one crosses it, so only 10^6 faulted, and its p99 read about
     // 4x the others in every group -- a fact about the allocator's state that
     // a gate on the push cannot honestly carry.
-    ok &= interleaved_row(
+    ok &= interleaved_ratio(
         "O1P-04 append, first touch",
         "32 pushes",
         &P99_SIZES,
@@ -970,7 +970,7 @@ fn one_support_block_is_flat_at_p99() -> bool {
             block.len()
         })
     });
-    interleaved_row(
+    interleaved_ratio(
         "FXD-02 support block",
         "512 bars x 16 candidates",
         &P99_SIZES,
@@ -1022,7 +1022,7 @@ fn one_candidate_per_pass_is_reported() -> bool {
             max: per_bar_group.max * 1_000 / bars,
         }
     });
-    interleaved_row(
+    interleaved_ratio(
         "FXD-03 one candidate per pass",
         "bar, x1000 (ps)",
         &sizes,

@@ -69188,3 +69188,26 @@ does per bar. This corrects a stale fact, the way D-0208 and D-0210 corrected
 else in the file is touched.
 
 **What changes.** One sentence of `CLAUDE.md`. No code, output or format.
+
+### D-4488 — Gate 14's bench pins follow the merged benches, and gate 12's two new claims say UNVERIFIED — 2026-10-09
+
+**What was observed.** On the merged audit tree gate 14 refused three benches
+whose measurement-point counts no longer matched their exact pins: `lake` 7
+against 6 (FXA-10, D-4419), `runner` 4 against 3 (C-R-06, D-4504) and `engine`
+13 against 14. The engine drop was not a deleted row: D-4482 replaced the one
+`p99_ratio` call with five p99 rows through a helper named `interleaved_row`,
+which the gate's count (call sites of a helper whose name ends in `ratio`)
+cannot see, so five gated rows could have been deleted with the gate green.
+Gate 12 refused two cost claims with no proof or UNVERIFIED beside them:
+`core::vendor::holds_test_marker` (D-4507) and `runner::grid::Candidate::timed_at`
+(D-4500). It also refuses two `api` claims, which are not this integration's
+crates.
+
+**Decision.** The helper is renamed `interleaved_ratio`, so the engine count is
+18 and every p99 row is a counted point. The pins become lake 7 (row ids gain
+FXA-10), runner 4 (gains C-R-06) and engine 18, with a one-line note in the
+table's comment. The two claims say UNVERIFIED as a time beside what does test
+them, and `docs/06-limits.md` lists both.
+
+**What changes.** CI configuration, one bench helper's name and two doc
+comments. No code path, output or format moves.
