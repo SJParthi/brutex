@@ -65215,3 +65215,12 @@ two-thread pool: it passes only when two rows are inside the hook at once
 (bounded wait of 20 s), and the band's figures equal a one-thread pool's.
 With `iter_mut` it failed "two rows of the band were never measured at the
 same moment".
+
+### D-4723 — The band docs sit on `measure_top` and `measured_band` — 2026-10-09
+
+**Finding.** G2-1. Three doc blocks ran on with no item between them, so
+`measure_top`'s and `measured_band`'s docs both attached to `TOP_CEILING`.
+
+**Decision.** Each block moved onto its own item; `TOP_CEILING` keeps only
+its own. `each_screen_band_doc_sits_on_its_own_item` reads the doc directly
+above each of the three items; it failed on `measure_top`'s empty doc.

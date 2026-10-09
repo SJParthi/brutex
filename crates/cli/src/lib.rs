@@ -14336,18 +14336,43 @@ fn calendar_terms(c: &Consistency) -> (i64, i128) {
     (c.weakest_bp(), c.worst_day)
 }
 
-/// Measure consistency for the rows that will actually be printed.
+/// The most rows one listing may ask to print: `BRUTEX_TOP` and every argv
+/// `TOP` are refused above it, by name (W2-cli8-7, D-1727).
 ///
-/// # Why the caller does not do this inline
-///
-/// Two reasons, and the first is a bug that was measured. Inline, this ran
-/// inside the screening loop -- over `screen_cap()` combinations, ten
-/// thousand by default -- and every one paid for a full trade-by-trade
-/// re-walk when only `top` are ever rendered. A single-month screen that
-/// had taken seconds stopped finishing inside 280.
-///
-/// The second is that [`screen`] was 113 lines with it, past the hundred
-/// clippy enforces.
+/// `measure_top` measures `measured_band(top)` = `8 x top` rows, each a full
+/// exit-grid rebuild plus seven calendar grains, so an unbounded `top` was an
+/// unbounded per-request cost. A thousand printed rows is a page nobody reads
+/// whole; past it the cost grows and the answer does not.
+pub(crate) const TOP_CEILING: usize = 1_000;
+
+/// `BRUTEX_TOP`, or the documented 25 with the unusable value NAMED by
+/// [`crate::knobs::refused`]. Zero and anything above [`TOP_CEILING`] are
+/// unusable: zero lists nothing, and past the ceiling the measured band is an
+/// unbounded per-request cost (D-1727).
+fn top_from_knob() -> usize {
+    let Some(raw) = crate::knobs::var("BRUTEX_TOP") else {
+        return 25;
+    };
+    crate::knobs::machine_count(&raw, TOP_CEILING).unwrap_or_else(|| {
+        crate::knobs::refuse_value("BRUTEX_TOP", &raw);
+        25
+    })
+}
+
+// Every TOP the door admits is one the frontier can serve (D-1981).
+const _: () = assert!(TOP_CEILING <= frontier::MAX_ROWS);
+
+/// The refusal for a `TOP` outside `1..=TOP_CEILING`, or `None`.
+pub(crate) const fn top_refusal(top: usize) -> Option<&'static str> {
+    if top == 0 {
+        Some("TOP must be 1 or more")
+    } else if top > TOP_CEILING {
+        Some("TOP must be 1000 or fewer: each printed row costs eight measured rows")
+    } else {
+        None
+    }
+}
+
 /// How many rows get their seven-grain calendar measured, given a wanted top N.
 ///
 /// # The circularity this exists to break
@@ -14388,43 +14413,6 @@ fn calendar_terms(c: &Consistency) -> (i64, i128) {
 /// what is printed, which is enough for the calendar gate to demote a measured
 /// row and still have a measured replacement, and independent of how wide the
 /// search was.
-/// The most rows one listing may ask to print: `BRUTEX_TOP` and every argv
-/// `TOP` are refused above it, by name (W2-cli8-7, D-1727).
-///
-/// `measure_top` measures `measured_band(top)` = `8 x top` rows, each a full
-/// exit-grid rebuild plus seven calendar grains, so an unbounded `top` was an
-/// unbounded per-request cost. A thousand printed rows is a page nobody reads
-/// whole; past it the cost grows and the answer does not.
-pub(crate) const TOP_CEILING: usize = 1_000;
-
-/// `BRUTEX_TOP`, or the documented 25 with the unusable value NAMED by
-/// [`crate::knobs::refused`]. Zero and anything above [`TOP_CEILING`] are
-/// unusable: zero lists nothing, and past the ceiling the measured band is an
-/// unbounded per-request cost (D-1727).
-fn top_from_knob() -> usize {
-    let Some(raw) = crate::knobs::var("BRUTEX_TOP") else {
-        return 25;
-    };
-    crate::knobs::machine_count(&raw, TOP_CEILING).unwrap_or_else(|| {
-        crate::knobs::refuse_value("BRUTEX_TOP", &raw);
-        25
-    })
-}
-
-// Every TOP the door admits is one the frontier can serve (D-1981).
-const _: () = assert!(TOP_CEILING <= frontier::MAX_ROWS);
-
-/// The refusal for a `TOP` outside `1..=TOP_CEILING`, or `None`.
-pub(crate) const fn top_refusal(top: usize) -> Option<&'static str> {
-    if top == 0 {
-        Some("TOP must be 1 or more")
-    } else if top > TOP_CEILING {
-        Some("TOP must be 1000 or fewer: each printed row costs eight measured rows")
-    } else {
-        None
-    }
-}
-
 const fn measured_band(top: usize) -> usize {
     const WIDEN: usize = 8;
     const FLOOR: usize = 32;
@@ -14432,6 +14420,18 @@ const fn measured_band(top: usize) -> usize {
     if widened < FLOOR { FLOOR } else { widened }
 }
 
+/// Measure consistency for the rows that will actually be printed.
+///
+/// # Why the caller does not do this inline
+///
+/// Two reasons, and the first is a bug that was measured. Inline, this ran
+/// inside the screening loop -- over `screen_cap()` combinations, ten
+/// thousand by default -- and every one paid for a full trade-by-trade
+/// re-walk when only `top` are ever rendered. A single-month screen that
+/// had taken seconds stopped finishing inside 280.
+///
+/// The second is that [`screen`] was 113 lines with it, past the hundred
+/// clippy enforces.
 fn measure_top(
     rows: &mut [Screened<'_>],
     bars: &[indicators::Candle],

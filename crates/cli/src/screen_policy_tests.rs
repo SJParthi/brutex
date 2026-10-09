@@ -1996,3 +1996,50 @@ fn the_measured_band_measures_two_rows_at_once() {
 }
 
 // ---------------------------------------------------------------------------
+// G2-1 (D-4723) and G2-2 (D-4724): documentation attached to its own item, and
+// no limit describing a removed function as current.
+// ---------------------------------------------------------------------------
+
+/// The `///` lines directly above the item that starts at `head` in `lib.rs`.
+fn doc_above(head: &str) -> String {
+    let source = include_str!("lib.rs");
+    let (before, _) = source
+        .split_once(head)
+        .unwrap_or_else(|| panic!("{head} is no longer in lib.rs"));
+    let mut doc: Vec<&str> = before
+        .lines()
+        .rev()
+        .take_while(|line| line.trim_start().starts_with("///"))
+        .collect();
+    doc.reverse();
+    doc.join("\n")
+}
+
+/// G2-1, D-4723. Commit b489169 (D-1727) inserted `TOP_CEILING` between three
+/// doc blocks and their items, so `measure_top`'s and `measured_band`'s docs
+/// both attached to the constant and the two functions carried none. Each doc
+/// now sits on its own item.
+#[test]
+fn each_screen_band_doc_sits_on_its_own_item() {
+    const MEASURE: &str = "Measure consistency for the rows that will actually be printed";
+    const BAND: &str = "How many rows get their seven-grain calendar measured";
+    const CEILING: &str = "The most rows one listing may ask to print";
+    let measure = doc_above("\nfn measure_top(");
+    let band = doc_above("\nconst fn measured_band(");
+    let ceiling = doc_above("\npub(crate) const TOP_CEILING");
+    assert!(measure.contains(MEASURE), "measure_top's doc:\n{measure}");
+    assert!(
+        !measure.contains(BAND) && !measure.contains(CEILING),
+        "{measure}"
+    );
+    assert!(band.contains(BAND), "measured_band's doc:\n{band}");
+    assert!(!band.contains(MEASURE) && !band.contains(CEILING), "{band}");
+    assert!(
+        ceiling.trim_start().starts_with(&format!("/// {CEILING}")),
+        "TOP_CEILING's doc:\n{ceiling}"
+    );
+    assert!(
+        !ceiling.contains(MEASURE) && !ceiling.contains(BAND),
+        "{ceiling}"
+    );
+}

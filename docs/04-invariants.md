@@ -7068,3 +7068,4 @@ old line regex the same input and watched it pass.
 | L1FB-09 | Reading three rungs' rows back by identity over one root opens the results ledger once (D-4720) | `cli::results_report_tests::a_rungs_readback_opens_the_ledger_once_per_root_not_once_per_rung` | ✓ |
 | L1FB-10 | The results listing holds at most `LIST_ROWS` rows at every step of its fold, and exactly the newest 40 matching rows at the end, at unchanged capacity (D-4721) | `cli::screen_policy_tests::the_results_listing_retains_a_bounded_window` | ✓ |
 | L1FB-11 | `measure_top` measures two rows of its band at the same moment on a two-thread pool, and the figures equal a one-thread pool's (D-4722) | `cli::screen_policy_tests::the_measured_band_measures_two_rows_at_once` | ✓ |
+| L1FB-12 | `measure_top`, `measured_band` and `TOP_CEILING` each carry their own doc and no other's (D-4723) | `cli::screen_policy_tests::each_screen_band_doc_sits_on_its_own_item` | ✓ |
