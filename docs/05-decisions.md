@@ -65211,3 +65211,24 @@ Tests (L1FD-04):
 - `the_ledger_pages_promise_no_single_instrument_month_or_identity`, now
   asserting no banner on a refusal;
 - the `sweep-all` and single-stop page tests, re-pinned.
+
+### D-4753 — The audit's walk-forward is pinned to price each fold on its own training rungs — 2026-10-09
+
+**Finding.** G3-6 (test gap), GAP4-46's cli wiring. `both_shapes` passes
+`walk_forward_rungs()` to the anchored walk-forward. That is
+`FoldRungs::PerTraining(&grid_rungs)`, so each fold resolves its exit rungs
+from its own training slice. No test failed if the argument went back to
+`FoldRungs::Fixed(grid_rungs(&bars))`, the whole-span count. Under that count
+every fold reads rungs sized by bars it may not see.
+
+**Decision.** A test-only recorder, `WALK_FORWARD_FOLD_RUNGS`, keeps each
+anchored fold's `(train_bars, resolved_rungs)` from `audit_bars_work`. The new
+test drives `audit_bars` over generated sessions whose later third is wider,
+so the whole-span rung count differs from at least one fold's training count.
+It asserts every fold resolved `grid_rungs` of exactly its own training
+prefix. Production behaviour is unchanged.
+
+Test: `the_audit_prices_each_walk_forward_fold_with_its_own_training_rung_count`
+(L1FD-05). It passes on the current code. Proof by mutation: with the call
+reverted to `Fixed(grid_rungs(&bars))` it fails, and the recorded failure is
+in the commit body.

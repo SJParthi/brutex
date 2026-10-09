@@ -6150,6 +6150,15 @@ fn walk_forward_rungs() -> runner::validate::FoldRungs<'static> {
     )
 }
 
+// Each anchored walk-forward fold's training length and resolved rung count,
+// as the last audit on this thread received them from `both_shapes`, so a test
+// can pin the policy the audit really passed (G3-6, D-4753). Test builds only.
+#[cfg(test)]
+thread_local! {
+    static WALK_FORWARD_FOLD_RUNGS: std::cell::RefCell<Vec<(usize, Option<usize>)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// The identity word for [`walk_forward_rungs`]' policy, appended to [`policy_of`] as
 /// its twenty-first term. Zero is never written: an identity minted before the
 /// term existed has twenty terms, and `with_policy` folds the length first.
@@ -22445,6 +22454,14 @@ fn audit_bars_work(
             )
         })
     });
+    #[cfg(test)]
+    WALK_FORWARD_FOLD_RUNGS.with(|seen| {
+        *seen.borrow_mut() = folds
+            .folds
+            .iter()
+            .map(|fold| (fold.train_bars, fold.resolved_rungs))
+            .collect();
+    });
     // PBO, WHICH USED TO BE A `None` FOR A REASON THAT IS NOW FIXED.
     //
     // `pbo::place` ranks a fold's candidates in-sample, finds where the winner
@@ -26710,6 +26727,62 @@ mod tests {
         assert_ne!(
             derived[20], pinned[20],
             "the two policies are different computations and must key apart"
+        );
+    }
+
+    /// G3-6, D-4753: the AUDIT hands `both_shapes` the per-training policy,
+    /// so each anchored fold prices with the rung count of exactly its own
+    /// training bars. The test above pins `walk_forward_rungs` itself; nothing
+    /// pinned its call site, and reverting that argument to the whole-span
+    /// count (`FoldRungs::Fixed(grid_rungs(&bars))`) passed every cli test
+    /// while identity term 21 still claimed per-fold sizing. The final third
+    /// is widened so the whole span's count differs from each fold's.
+    #[test]
+    fn the_audit_prices_each_walk_forward_fold_with_its_own_training_rung_count() {
+        let _guard = crate::knobs::serially();
+        crate::knobs::clear_all();
+        let mut bars = synthetic::sessions(12);
+        let late = bars.len() / 3 * 2;
+        for bar in bars.get_mut(late..).expect("the final third") {
+            bar.high = bar.high.saturating_add(bar.high / 50);
+        }
+        let whole = grid_rungs(&bars);
+        super::WALK_FORWARD_FOLD_RUNGS.with(|seen| seen.borrow_mut().clear());
+        let report = super::audit_bars(
+            &evaluator(),
+            bars.clone(),
+            "GENERATED TEST FIXTURE",
+            1_400,
+            None,
+            super::AuditOptions {
+                prepared_column: None,
+                replay: None,
+                execution: None,
+                native_minute_execution: true,
+                recording: None,
+                rules: crate::Rules::BASELINE,
+                lens: runner::rank::Lens::Detectability,
+                ceiling: Some(50_000),
+                validate: true,
+                cost: runner::audit::CostScope::IndexSpot,
+            },
+        );
+        let seen = super::WALK_FORWARD_FOLD_RUNGS.with(std::cell::RefCell::take);
+        assert!(!seen.is_empty(), "the audit walked no fold:\n{report}");
+        for (train, resolved) in &seen {
+            let training = bars
+                .get(..*train)
+                .expect("an anchored fold trains on a prefix of the span");
+            assert_eq!(
+                *resolved,
+                Some(grid_rungs(training)),
+                "the fold of {train} training bars, whole span {whole}"
+            );
+        }
+        assert!(
+            seen.iter().any(|(_, resolved)| *resolved != Some(whole)),
+            "premise: some fold's own count must differ from the whole span's {whole}, \
+             or a revert to the whole-span count would pass: {seen:?}"
         );
     }
 
