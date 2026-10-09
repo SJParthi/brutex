@@ -65189,3 +65189,18 @@ asserts both halves: the doc says so, and `overfitting_of`'s release body
 makes the call. D-1544's sentence for the other four primitives still holds.
 
 Invariant L1FC-10.
+
+### D-4738 — The GAP4-48 assertion's message says what the filter does — 2026-10-09
+
+**Finding.** G3-8. In `daily_context_is_strictly_prior_parallel_and_explicitly_unverified`,
+the assertion message read "same-day and future daily bytes cannot enter the
+offered stream". The assertion's next line proves that Tuesday's same-day
+record is offered. D-1664 says the filter limits the offered set and drops
+only the last signal day and later.
+
+**The decision.** The message now reads "daily records on or after the last
+signal day are not offered; an earlier signal day's same-day record is". A
+test refuses the old phrase anywhere in `stored.rs`. It failed before the edit
+with "stored.rs says again that same-day daily records are not offered".
+
+Invariant L1FC-11.
