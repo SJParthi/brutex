@@ -3250,7 +3250,15 @@
    * F&O membership is not the engine surface, and a rule that is right by
    * coincidence is the invention §3 rule 1 forbids.
    *
-   * @type {{ label: string, note: string, matched: number } | null}
+   * `matched` IS NULL WHEN THE SERVER DID NOT COUNT. A feed that publishes no
+   * instrument master is answered `"counted_from":"no master"` with every count
+   * `null` (`crates/api/src/coverage.rs`, `target_json`); this read that null as
+   * `Number(null ?? 0)` and the cover sentence said "0 of N are swept" -- a
+   * measurement of a file the feed does not have. A refused or failed read set
+   * the whole surface to null and dropped the server's reason. Both are kept
+   * now: `countedFrom` is the server's own word, `why` the refusal (W1, D-3211).
+   *
+   * @type {{ label: string, note: string, matched: number | null, countedFrom: string | null, why: string } | null}
    */
   let sweptSurface = $state(null);
 
@@ -3483,7 +3491,12 @@
       });
       if (!catalogGate.admits(ticket, activeFeed)) return;
       if (!response.ok) {
-        sweptSurface = null;
+        // THE SERVER'S REASON, NOT A SILENT GAP. A refusal costs the count and
+        // nothing else -- the span, the rungs and the run all still work -- but
+        // the sentence says why the count is missing (W1, D-3211).
+        const why = await refusalFrom('/universes.json', response);
+        if (!catalogGate.admits(ticket, activeFeed)) return;
+        sweptSurface = { label: 'Swept', note: '', matched: null, countedFrom: null, why };
         return;
       }
       const body = await response.json();
@@ -3491,19 +3504,30 @@
       const target = (body?.targets ?? []).find(
         (/** @type {{ target?: string } | null | undefined} */ t) => t?.target === 'swept'
       );
+      const matched = target?.matched;
       sweptSurface = target
         ? {
             label: String(target.label ?? 'Swept'),
             note: String(target.note ?? ''),
-            matched: Number(target.matched ?? 0)
+            // A COUNT OR NOTHING. `null` is "not counted" on the wire and stays
+            // so here; only an exact non-negative integer is a measurement.
+            matched: Number.isSafeInteger(matched) && matched >= 0 ? matched : null,
+            countedFrom: typeof target.counted_from === 'string' && target.counted_from.trim()
+              ? target.counted_from.trim()
+              : null,
+            why: ''
           }
         : null;
-    } catch {
+    } catch (error) {
       if (!catalogGate.admits(ticket, activeFeed)) return;
-      // An absent surface costs the SENTENCE and nothing else. The span, the
-      // rungs and the run all still work, and the route still refuses what it
-      // will not sweep.
-      sweptSurface = null;
+      // A failed read costs the count, and the sentence says so by name.
+      sweptSurface = {
+        label: 'Swept',
+        note: '',
+        matched: null,
+        countedFrom: null,
+        why: error instanceof Error ? error.message : String(error)
+      };
     }
   }
 
@@ -3691,7 +3715,12 @@
       );
     }
     if (sweptSurface) {
-      parts.push(`${exact(sweptSurface.matched)} of ${exact(catalog.held.length)} are swept`);
+      // NOT MEASURED IS SAID, NEVER DRAWN AS ZERO (W1, D-3211).
+      parts.push(
+        sweptSurface.matched === null
+          ? `swept count not measured (${sweptSurface.why || sweptSurface.countedFrom || 'the server sent no count'})`
+          : `${exact(sweptSurface.matched)} of ${exact(catalog.held.length)} are swept`
+      );
     }
     return parts.join(' · ');
   });

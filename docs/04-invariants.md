@@ -7098,7 +7098,7 @@ old line regex the same input and watched it pass.
 | AGD-15 | A Selection V6 snapshot is one authenticated read (two preparations, one committed-block scan) and takes its envelope from the block that read proved; Selection V5 and V6 reads still derive their selection on both sides of the read (W2-cli14-1/2/3, D-1848) | `cli::selection_v6_source::tests::a_selection_v6_read_counts_its_population_replays_and_the_limits_say_so`; `a_selection_v5_read_derives_its_selection_on_both_sides` in `crates/cli/tests/limits_inherent_rechecks.rs` | ✓ |
 | AGD-16 | The checkpointed streamed walk hands on exactly the levels, successors, boundaries and tallies the retaining walk retains, fresh and resumed; the stored sweep doors rank through it and return the ranking of the retained sweep (AC-whp-o1-1, D-1844) | `engine` `resume_readiness::a_streamed_checkpointed_walk_hands_on_what_the_retaining_walk_retains`; `cli::and_checkpoint::tests::the_streamed_door_ranks_what_the_retained_sweep_ranked` | ✓ |
 
-### Observability lens L1 (D-3200 to D-3210)
+### Observability lens L1 (D-3200 to D-3211)
 
 | ID | Invariant | Proven by | Status |
 |---|---|---|---|
@@ -7113,3 +7113,4 @@ old line regex the same input and watched it pass.
 | OBSV-11 | One census row `record_held` cannot count is named in the log and does not drop the other rows of its batch (D-3210) | `one_refused_row_does_not_drop_the_rest_of_the_batch` in `crates/pull/src/ingest.rs` | ✓ |
 | OBSV-09 | A `/pull/run/stop` 503 that says `stopping:true, stop_persisted:false` keeps the stop taken and shows the server's warning in a state no poll clears; any other failure is "could not be delivered" (D-3208) | `web/tests/ingest-errors.test.js` · *a Stop the server took in memory but could not persist says so, and stays taken* | ✓ |
 | OBSV-10 | An older `/audit.json` page carrying `runs_error`, or no `runs` list, is shown as an error and is not counted as a page held (D-3209) | `web/tests/audit-pages.test.js` · *an older page the server could not read is an error, never an empty page held (OBSV-10)* | ✓ |
+| OBSV-12 | The backtest page keeps `/universes.json`'s `matched:null` as `null` beside `counted_from`, and a refused or failed read keeps its reason; the cover sentence then says "swept count not measured (…)", never "0 of N" (D-3211) | `web/tests/swept-surface.test.js` · *a swept target counted from no master keeps its null count and never reads "0 of N" (W1)* | ✓ |

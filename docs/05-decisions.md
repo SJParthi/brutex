@@ -66459,3 +66459,30 @@ returning, as the install refusal already did. OBSV-11.
 
 **Rejected.** Refusing the whole batch louder. The siblings' bars are on disk
 and their rows are sound; dropping them is the loss, not the noise.
+
+### D-3211 — The backtest page keeps an uncounted swept surface uncounted — 2026-10-09
+
+**What was observed.** `/universes.json` answers a feed with no instrument
+master `"counted_from":"no master"` with every count `null`
+(`crates/api/src/coverage.rs` `target_json`). The backtest page's
+`loadSurface` read the swept target's `matched` as `Number(target.matched ??
+0)`, so the page held `matched: 0`, and `coverNote` built "0 of N are swept"
+from it: a measurement of a file the feed does not publish. A refused read
+(the unknown-feed 400 names its reason in `refused`) and a thrown read both set
+the surface to `null` and dropped the reason. Measured on this base: `coverNote`
+is a `$derived` with no render site in the template (`grep -n coverNote`
+finds only its declaration and one comment), so the invented zero lived in the
+page's state and its sentence rather than on screen; the finding is fixed at
+both.
+
+**Decided.** `sweptSurface.matched` is an exact non-negative safe integer or
+`null`, beside `countedFrom` (the server's own word) and `why` (the refusal).
+A non-2xx is read through `refusalFrom('/universes.json', response)`, a thrown
+read keeps its message, and the feed gate is asked again after the reason is
+read. `coverNote` says "swept count not measured (<why or counted_from>)"
+whenever `matched` is `null`; a measured count, a real zero included, is shown
+as before. OBSV-12, `web/tests/swept-surface.test.js`.
+
+**Rejected.** Rendering `coverNote` in the template. It was never rendered on
+this base, and placing a new line on the backtest form is a layout decision
+outside this finding.
