@@ -255,3 +255,24 @@ check in just after the 5-hour reset, resume. Weekly: save at 93%, stop at 98%.
 - cli fixer (pr74/r1286-cli) and api fixer (pr74/r1286-api) told to save and stop by 05:35.
 - Merge-leftover thread: claude/project-thread-lx6ptl 061c7004 is validated and ready for the
   batched push (143/143 binaries, gates pass); it may send a newer sha after CI run 1287's Gate 18.
+
+## 2026-10-09 09:25 UTC — resumed after the usage reset
+- The box restarted near 09:00 (uptime 0): every detached job died mid-mutation. Four files were
+  left mutated (wt-cli lib.rs, wt-api server.rs, wt-rest ssm.rs, wt-ord ordered.rs) and were
+  restored with `git checkout --`. After any restart, grep worktrees for "changed by cargo-mutants".
+- Local branch integ/r1286 in /home/claude/brutex (not pushed): fbdabaec + pr74/r1286-rest
+  (ff 33174d3b) + merge r1286-api (896b9eda) + merge r1286-cli (c6d4ffbe) + 026a67b2
+  (.config/nextest.toml D-4180 priorities for the ordered turn tests and the cli/api kill tests,
+  plus test `ordered::tests::the_d_4180_priority_names_both_turn_tests`). D-4180 decision text is
+  NOT written yet (draft /tmp/claude-0/ord/D-4180.md); add it with measured rows.
+- ordered.rs hand runs (before the restart): caught update->(), delete !, ready->false, || -> &&,
+  >= -> < (tests 47/48 of 2060, 88-130 s). The rest re-run under cargo-mutants (phase "ord").
+- Unattended mutation queue (no agents), /tmp/claude-0/integ/summary.txt:
+  phase 0 build twice (checks no cli rebuild), ord 12, cli1 24, api1 2, p4api 29, p4cli 32
+  (run-1286 untested remapped + mutants on lines the fixes changed). Main checkout has
+  .git/packed-refs created by `git pack-refs` so the cli build script watches no missing path.
+- rest Part 2 (wt-rest): core 1/1, lake 2+1u, indicators 4+2u, store 7+2u, pull 8+1u caught;
+  runner 15 running; then new-line mutants vwap 6 + grid 1 (/tmp/claude-0/p2/rest-summary.txt).
+- Blocker for the push: lx6ptl 061c7004 and audit de932e5b each merge cleanly onto integ/r1286
+  but conflict with each other in 48 files incl. web/build. Asked the Merge leftover thread to
+  merge the audit branch into its own, rebuild web/build and send one sha.
