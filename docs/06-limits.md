@@ -16285,8 +16285,10 @@ not per evaluation.
 - Core universe membership and vocab name lookup use compile-time tables
   whose size does not change with data, so there is no n to sweep. Their
   probe counts are asserted by tests (`docs/07-o1-architecture.md` layer 4).
-- The lake row read `Batch::row` is an index into a decoded batch, which
-  C-L-01 measures.
+- The lake row read `Batch::row` was listed here as measured by C-L-01. It
+  was not: C-L-01 re-reads index 0 and the last index, two rows that stay in
+  the cache. FXA-10 is its p99 row now (so1-2, D-4419), and its cost past the
+  cache is stated in the fxa section at the end of this file.
 - The api routes are measured by D-1446's and D-0954's sections, not by a
   bench. That remains UNVERIFIED as a measurement.
 
@@ -16465,3 +16467,30 @@ bound that does not grow. Measured on this VM in release, 200,000 builds of a
 416–507 ns before. The decoder's repeated-key checks are a `u16` mask for the
 line keys and at most `MAX_FIELDS` comparisons per field key. They are argued
 from the code, not timed.
+
+### `Batch::row` is flat in probes and in what it adds, not in time past the cache (D-4419)
+
+`lake::batch::Batch::row` reads one value from each of seven columns, whatever
+the batch holds: O(1) in probes. Its TIME at a random row follows the bytes the
+columns span, 56 per row, because past the cache each of the seven reads is a
+miss. Measured by FXA-10 on this 4-core cloud box (L2 2 MiB per core, L3
+shared) at a load average of 10 to 13, six runs, 32 random rows per sample:
+
+| Rows | Column bytes | p50 | p99 | p99 against 2,480 rows |
+|---|---|---|---|---|
+| 2,480 | 139 KB | 301–318 ns | 313–454 ns | 1x |
+| 24,800 | 1.4 MB | 475–489 ns | 1,044–1,141 ns | 2.5x–3.6x |
+| 248,000 | 14 MB | 1.45–1.58 µs | 2.80–3.55 µs | 6.9x–11.2x |
+| 2,480,000 | 139 MB | 4.33–4.50 µs | 10.6–11.8 µs | 24.5x–36.0x |
+
+The max of every size was 4 to 24 ms, which is the scheduler at that load,
+not the read. The p99 ratios above include the floor leg's own columns, which
+FXA-10 keeps resident beside the batch; measured without them, the 24,800-row
+ratio was 1.6x to 4.0x over twelve runs, which is why that ratio is printed and
+not gated. What IS gated is the row's p99 against seven plain reads of the same
+memory: 0.95x to 1.46x at every size. A read that touched more than its own row
+fails that, as the planted scan in FXA-10's row shows.
+
+No crate depends on `lake` today, so no request or command pays this. A
+caller that reads a large batch at random rows pays its memory, not the
+crate; one that walks it pays the per-row cost C-L-02 holds flat.

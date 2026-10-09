@@ -66581,3 +66581,35 @@ for a cut-to-the-same-spelling key, three underflowing literals refused, and
 `0.0`, `-0.0`, `0e-999` and `5e-324` kept. Four existing tests built their
 ceiling cases from one repeated key; they now use distinct keys of the same
 width. Proof: FXA-09.
+
+### D-4419 — `Batch::row` gets a random-index p99 row, gated against the memory it must touch — 2026-10-09
+
+**Finding (so1-2).** `docs/06-limits.md` said `Batch::row` "is an index into a
+decoded batch, which C-L-01 measures". C-L-01 re-reads index 0 and the last
+index: two rows that stay in the cache, as a minimum of means. That is the
+blind spot D-3307 found in C-12. The audit's probe at random rows measured p99
+3.0x to 6.0x at 248,000 rows and 13x to 37x at 2,480,000, against 2,480.
+
+**Re-verified.** On this box, the row's random-index p99 against 2,480 rows:
+1.6x to 4.0x at 24,800 (twelve runs, two over 3.0x), 6.0x to 10.0x at 248,000
+and 13x to 36x at 2,480,000. Nothing in `row` grows with the batch. It reads
+seven columns at one index. The growth is seven cache misses.
+
+**Decision.** A size-against-size p99 gate on this operation would gate the
+cache, and at 24,800 rows it went red on unchanged code two runs in twelve. So
+FXA-10 gates the row against its own floor instead: seven bounds-checked reads
+of seven plain `Vec<i64>` columns of the same length, at the same kind of
+random index, timed sample by sample in alternation with the row's samples so
+a burst of load lands on both. Every round visits all four sizes after an
+untimed walk that reads every value. The walk goes through `black_box`
+because `iter().count()` elided the loads and left the medium batch cold. The
+row's p99 against the floor's p99 is gated under the shared 3.0x ceiling at
+2,480, 24,800, 248,000 and 2,480,000 rows. Each size's p99 against 2,480 rows
+is printed and not gated, and `docs/06-limits.md` states it with p50, p99 and
+max. The limits line that credited C-L-01 is corrected.
+
+**Evidence.** Six runs at a load average of 11 to 13: gated ratio 0.95x to
+1.46x at every size. An O(n) fold planted in `row` on one call in fifty took it
+to 5.1x, 10.2x and 18.1x at the first three sizes, while C-L-01's two
+`row(last)` comparisons read 1.04x and 0.82x and passed. Proof: FXA-10.
+

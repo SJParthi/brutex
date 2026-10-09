@@ -134,11 +134,27 @@ fn refuse(why: &str) -> ! {
     std::process::exit(1)
 }
 
+/// A scratch directory that is removed when it goes out of scope.
+///
+/// `loaded` used to hand back a bare `PathBuf` that nothing removed, and the
+/// name carries the process id, so every `cargo bench -p store` left its month
+/// files behind: one run measured 16 directories and 81 MB in `$TMPDIR`
+/// (so1-6, D-4420). A setup refusal exits before the drop runs and leaves its
+/// one directory; the next run of the same process id empties it first.
+struct Scratch(std::path::PathBuf);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ignored = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// A bars file holding `n` committed records, and the directory that owns it.
 ///
-/// The directory is returned so it outlives the file; dropping it first would
-/// unlink the bytes the measurement is about.
-fn loaded(name: &str, n: u64) -> (BarFile, std::path::PathBuf) {
+/// The directory is returned so it outlives the file, and it is removed when
+/// the caller drops it. A tuple drops its fields in order, so the file closes
+/// before its directory goes.
+fn loaded(name: &str, n: u64) -> (BarFile, Scratch) {
     let root = std::env::temp_dir().join(format!("brutex-bench-{name}-{}", std::process::id()));
     let _ignored = std::fs::remove_dir_all(&root);
     // `open_or_create` never creates the store root (D-1522: a missing root
@@ -169,7 +185,7 @@ fn loaded(name: &str, n: u64) -> (BarFile, std::path::PathBuf) {
     if let Err(e) = file.append(&batch) {
         refuse(&format!("the bench file would not fill: {e}"));
     }
-    (file, root)
+    (file, Scratch(root))
 }
 
 /// 2024-06-01 00:00 IST in epoch microseconds, where every bench bar starts.
