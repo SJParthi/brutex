@@ -276,3 +276,23 @@ check in just after the 5-hour reset, resume. Weekly: save at 93%, stop at 98%.
 - Blocker for the push: lx6ptl 061c7004 and audit de932e5b each merge cleanly onto integ/r1286
   but conflict with each other in 48 files incl. web/build. Asked the Merge leftover thread to
   merge the audit branch into its own, rebuild web/build and send one sha.
+
+## 2026-10-09 10:35 UTC — run 1286 fixes pushed to PR 74
+- Pushed `final/all-fixes` fbdabaec..ff390a4f (fast-forward, no force). Session subscribed to
+  PR #74 activity. Artifact: https://claude.ai/artifact/QDahHQP9CXecbn1ihdEnLJ
+- Commits over fbdabaec: rest fixes (ff to 33174d3b), merge api 896b9eda, merge cli c6d4ffbe,
+  026a67b2 (nextest priorities + pin test), 3f3dde6b (gates 1d and 11; D-4180, D-4181,
+  R1286-ord-01), ff390a4f (15 review findings: bars both-months-damaged case, pin test checks
+  module path and priority 100, GPORT-11/limits 44, D-4131/4135/4151/4152/4180 wording).
+- Local proof before the push: 28 static gates pass (on 3f3dde6b and ff390a4f); build gates
+  13c 552 s, 6d 439 s pass; clippy -D warnings pass; 127 test binaries as uid 65534: 123 pass,
+  4 env-only (api/cli program binaries refuse /root store; core findings + store cited_commits
+  fail on git "dubious ownership" as nobody and pass as root). After ff390a4f: api, cli, store,
+  runner lib tests and all core tests 15/15 pass as root.
+- Next: wait for CI (Gate 18 ~30 h). If Gate 1e hits the flaky api test
+  operation_audit::tests::cancelled_request_records_cancellation_and_never_completed, port the
+  merge thread's D-4622 test fix. Merge the combined lx6ptl+audit sha from the merge-leftover
+  thread (session_01UQpSgcb4nDRnDnd3ajjWJc) on top when it arrives; validate; push.
+- Open, not fixed: crates/cli/build_provenance.rs watches the repo root, so every local cargo
+  call rebuilds cli (~6 min). CI copy mode is unaffected. Needs its own decision.
+- Usage at 10:25 UTC: 5-hour 80%, weekly 76% (coordinator): no new agents.
