@@ -65121,3 +65121,21 @@ as its note, and this day's window (R1286-api-06). The empty run the mutant
 returns leaves no audit record, records 502, and goes on to reassess.
 
 **Rejected.** Nothing else was needed.
+
+### D-4135 — A staging name that cannot be removed refuses with its own reason — 2026-10-08
+
+**What was observed.** Run 1286 reported `recovery::seeded` with the guard
+`why.kind() == NotFound` on the staging `remove_file` changed to `true` as
+MISSED. Every other removal error then passes silently. The activation still
+fails later, at `Journal::create_new`, but with that call's error instead of
+the real one.
+
+**Decided.** A test makes `active.bin.first` a directory, which `remove_file`
+refuses with `EISDIR`. It requires `seeded` to refuse with exactly that
+error's text, the directory untouched and no `active.bin` written
+(R1286-api-07). The mutant refuses one step later, with `create_new`'s
+`<path>: File exists`.
+
+**Rejected.** A permission-denied staging file: the box runs tests as root and
+as uid 65534, and `create_new` would refuse with the same `EACCES` text, so it
+cannot tell the two apart.

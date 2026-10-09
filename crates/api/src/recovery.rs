@@ -2608,6 +2608,46 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// **A STAGING NAME THAT WILL NOT BE REMOVED REFUSES WITH ITS OWN REASON.**
+    /// R1286-api-07, D-4135.
+    ///
+    /// D-2762 removes a staging file a crashed first activation left behind,
+    /// and only `NotFound` — nothing there — is not a refusal. Here the staging
+    /// name is a DIRECTORY, which `remove_file` refuses with `EISDIR`. The
+    /// activation must stop on that sentence, before any pointer journal is
+    /// opened: carrying on would refuse later with `create_new`'s "File
+    /// exists", naming a symptom of the obstacle instead of the obstacle.
+    #[test]
+    fn a_staging_name_that_cannot_be_removed_refuses_with_its_own_reason() {
+        let root = crate::scratch::path("recovery-staging-directory");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let site = Site::load(&root.join("missing-masters"), &root);
+        let units = plan(
+            vec![leg("NIFTY", "1min", date(2026, 8, 27), date(2026, 8, 27))],
+            today(),
+        )
+        .unwrap();
+        let id = scope_identity(&units);
+        let staging = super::root(&site).join("active.bin.first");
+        std::fs::create_dir_all(&staging).unwrap();
+        let removal = std::fs::remove_file(&staging).unwrap_err();
+        assert_ne!(
+            removal.kind(),
+            std::io::ErrorKind::NotFound,
+            "premise: removing the staging name fails for another reason"
+        );
+
+        let refused = seeded(&site, id, Some(units)).map(drop);
+        assert_eq!(refused, Err(removal.to_string()));
+        assert!(staging.is_dir(), "the obstacle is named, not removed");
+        assert!(
+            !active_path(&site).exists(),
+            "no activation pointer was written"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn failed_receipts_and_unknown_coverage_never_become_verified() {
         for balances in [true, false] {
