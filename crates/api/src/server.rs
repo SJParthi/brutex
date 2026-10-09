@@ -5016,8 +5016,8 @@ fn store_body(
 /// # Cost, and why it is paged
 ///
 /// One bar file opened per checked entry (its header and two records read).
-/// Until D-4435 one request checked every month the counter claimed, E_v
-/// opens for E_v entries, so its cost grew with the store (W1-api5-7,
+/// Until D-4435 one request checked every month the counter claimed, `E_v`
+/// opens for `E_v` entries, so its cost grew with the store (W1-api5-7,
 /// W1-api6-0). It checks one page now: `offset=` (default 0) and `limit=`
 /// (default and ceiling [`crate::verify::MAX_VERIFY_PAGE`]), and the answer
 /// carries `held`, `offset`, `limit` and `next_offset` so a reader can walk
@@ -8414,6 +8414,54 @@ pub(crate) async fn broker_run(
     telemetry::in_run(run, broker_run_scoped(asked, site, censuses)).await
 }
 
+/// Sorts a run's targets so the run is reproducible: `HashMap` order is not
+/// stable between processes, and an unordered backfill resumes in a different
+/// place after every restart.
+///
+/// BY THE WHOLE KEY, AND IT USED TO BE BY `underlying` ALONE. That is a
+/// PARTIAL key: `InstrumentKey` is `{exchange, segment, underlying, kind}`,
+/// so two targets sharing an underlying compared EQUAL and an unstable sort
+/// left them in whatever order the `HashMap` iterator produced. The sentence
+/// directly above promised the reproducibility the key could not deliver --
+/// and a partial key under an unstable sort is the one combination where the
+/// promise is not merely weaker but false, because `sort_unstable` is
+/// explicitly free to reorder equal elements.
+///
+/// `InstrumentKey` derives `Ord` over every field, so the total order costs
+/// nothing to ask for: the same NIFTY under two segments now lands in the
+/// same place on every process, which is what §3 rule 5 asks of a backfill
+/// that resumes.
+fn in_resumable_order(targets: &mut [brutex_core::instrument::InstrumentKey]) {
+    targets.sort_unstable();
+}
+
+/// WHAT IS ON THE WIRE, RIGHT NOW: the run's `index`-th of `of` targets.
+///
+/// This is the difference between a page that shows a backfill working and
+/// one an operator cannot tell from a hang — D-0057's `now` object. One
+/// uncontended lock per instrument, against an instrument that costs a network
+/// round trip, so it is free in the only units that matter.
+fn publish_on_the_wire(
+    site: &Site,
+    asked: &ingest::SpotRequest,
+    instrument: &brutex_core::instrument::InstrumentKey,
+    month: &str,
+    index: usize,
+    of: usize,
+) {
+    site.autopilot.publish(|status| {
+        status.now = Some(crate::autopilot::InFlight {
+            instrument: instrument.underlying.to_string(),
+            month: month.to_owned(),
+            timeframe: asked.granularity.to_string(),
+            feed: asked.feed.display().to_owned(),
+            index: index.saturating_add(1),
+            of,
+            since: std::time::Instant::now(),
+        });
+    });
+}
+
 /// [`broker_run`], inside its run's scope: the refusals before a run starts,
 /// and the run.
 async fn broker_run_scoped(
@@ -8450,24 +8498,7 @@ async fn broker_run_scoped(
         );
     }
     let mut dated = std::collections::HashMap::new();
-    // Sorted so a run is reproducible: `HashMap` order is not stable between
-    // processes, and an unordered backfill resumes in a different place after
-    // every restart.
-    //
-    // BY THE WHOLE KEY, AND IT USED TO BE BY `underlying` ALONE. That is a
-    // PARTIAL key: `InstrumentKey` is `{exchange, segment, underlying, kind}`,
-    // so two targets sharing an underlying compared EQUAL and an unstable sort
-    // left them in whatever order the `HashMap` iterator produced. The sentence
-    // directly above promised the reproducibility the key could not deliver --
-    // and a partial key under an unstable sort is the one combination where the
-    // promise is not merely weaker but false, because `sort_unstable` is
-    // explicitly free to reorder equal elements.
-    //
-    // `InstrumentKey` derives `Ord` over every field, so the total order costs
-    // nothing to ask for: the same NIFTY under two segments now lands in the
-    // same place on every process, which is what §3 rule 5 asks of a backfill
-    // that resumes.
-    targets.sort_unstable();
+    in_resumable_order(&mut targets);
 
     // THE PULL ORDER, AND THIS IS WHERE IT BITES. `crate::ladder` carries the
     // rule and the operator's own words for it.
@@ -8535,22 +8566,7 @@ async fn broker_run_scoped(
             ));
             break;
         }
-        // WHAT IS ON THE WIRE, RIGHT NOW. This is the difference between a page
-        // that shows a backfill working and one an operator cannot tell from a
-        // hang — D-0057's `now` object. One uncontended lock per instrument,
-        // against an instrument that costs a network round trip, so it is free
-        // in the only units that matter.
-        site.autopilot.publish(|status| {
-            status.now = Some(crate::autopilot::InFlight {
-                instrument: instrument.underlying.to_string(),
-                month: month.clone(),
-                timeframe: asked.granularity.to_string(),
-                feed: asked.feed.display().to_owned(),
-                index: index.saturating_add(1),
-                of: targets.len(),
-                since: std::time::Instant::now(),
-            });
-        });
+        publish_on_the_wire(site, asked, instrument, &month, index, targets.len());
         // THE NEXT LANES, FETCHED TOGETHER when nothing fetched is waiting.
         // Landing stays one instrument at a time and in target order below,
         // so the store, the census and every per-instrument decision see
@@ -20278,7 +20294,8 @@ fn open_if_asked(
         }
         Some(value) if value != "1" => {
             return Launch::Declined(format!(
-                "{OPEN_ENV} is {value:?}, and only 1 opens a browser"
+                "{OPEN_ENV} is \"{}\", and only 1 opens a browser",
+                value.display()
             ));
         }
         Some(_) => {}
@@ -21103,6 +21120,27 @@ mod tests {
             segment,
             underlying: brutex_core::symbol::Symbol::new(name).expect("a legal symbol"),
             kind: brutex_core::instrument::Kind::Index,
+        }
+    }
+
+    /// A run's targets come out in one total order whatever order they went
+    /// in, and two that share an underlying are ordered by the rest of the
+    /// key, so a resumed backfill restarts where the last one stood.
+    #[test]
+    fn a_runs_targets_are_ordered_by_the_whole_key() {
+        use brutex_core::instrument::Segment;
+        let mut sorted = vec![
+            spot_key("NIFTY", Segment::Cash),
+            spot_key("BANKNIFTY", Segment::Index),
+            spot_key("NIFTY", Segment::Index),
+        ];
+        sorted.sort();
+        // Two NIFTYs: a sort by underlying alone would leave them in input order.
+        assert_eq!(sorted[1].underlying, sorted[2].underlying);
+        for shuffle in [[2, 0, 1], [1, 2, 0], [2, 1, 0], [0, 2, 1]] {
+            let mut targets: Vec<_> = shuffle.iter().map(|&at| sorted[at]).collect();
+            super::in_resumable_order(&mut targets);
+            assert_eq!(targets, sorted, "{shuffle:?}");
         }
     }
 
@@ -27006,7 +27044,9 @@ mod tests {
         for value in ["", "0", "yes", "true", "11", " 1"] {
             let why = declined(open_if_asked(url, Some(std::ffi::OsStr::new(value)), None));
             assert!(
-                why.contains(OPEN_ENV) && why.contains("only 1 opens"),
+                why.contains(OPEN_ENV)
+                    && why.contains("only 1 opens")
+                    && why.contains(&format!("is \"{value}\",")),
                 "{value:?}: {why}"
             );
         }

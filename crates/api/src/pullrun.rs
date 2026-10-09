@@ -1239,21 +1239,7 @@ where
             progress.passes = passes;
             progress.rows_now = after;
         });
-        let owed = outcomes
-            .iter()
-            .filter(|outcome| **outcome == PassOutcome::Retry)
-            .count();
-        if owed > 0 {
-            note_press(
-                telemetry::Level::Warn,
-                "pass ended with legs owed",
-                run,
-                &[
-                    ("pass", telemetry::Value::Uint(u64::from(passes))),
-                    ("feeds_owed", telemetry::Value::Uint(owed as u64)),
-                ],
-            );
-        }
+        note_owed(run, passes, &outcomes);
         if stopping(&site, run)
             || outcomes
                 .iter()
@@ -1292,13 +1278,43 @@ where
     // handle returns only once the task has actually stopped. D-2760.
     ticker.abort();
     let _cancelled = ticker.await;
-    let current_rows = rows_now_off_worker(&site).await;
+    finish_press(&site, run, &outcomes, started_rows).await;
+}
+
+/// A pass that ended owing legs says so, with how many feeds owe one.
+fn note_owed(run: u64, passes: u32, outcomes: &[PassOutcome]) {
+    let owed = outcomes
+        .iter()
+        .filter(|outcome| **outcome == PassOutcome::Retry)
+        .count();
+    if owed > 0 {
+        note_press(
+            telemetry::Level::Warn,
+            "pass ended with legs owed",
+            run,
+            &[
+                ("pass", telemetry::Value::Uint(u64::from(passes))),
+                ("feeds_owed", telemetry::Value::Uint(owed as u64)),
+            ],
+        );
+    }
+}
+
+/// The press's summary, written to its progress document and then to the log,
+/// once the passes are over and the row ticker has stopped.
+async fn finish_press(
+    site: &Loaded,
+    run: u64,
+    outcomes: &[PassOutcome],
+    started_rows: Option<u64>,
+) {
+    let current_rows = rows_now_off_worker(site).await;
     let mut verdict = None;
-    with_progress(&site, run, |progress| {
+    with_progress(site, run, |progress| {
         progress.rows_now = current_rows;
         let summary = run_summary(
             progress,
-            &outcomes,
+            outcomes,
             current_rows
                 .zip(started_rows)
                 .map(|(now, start)| now.saturating_sub(start)),
@@ -1649,8 +1665,14 @@ mod tests {
             conductor
                 .matches("rows_now_off_worker(&site).await")
                 .count(),
-            5
+            4
         );
+        // The press's closing count, in `finish_press`, which borrows its site.
+        assert_eq!(
+            conductor.matches("rows_now_off_worker(site).await").count(),
+            1
+        );
+        assert!(!conductor.contains("rows_now(site)"));
         assert_eq!(
             recovery
                 .matches("crate::pullrun::rows_now_off_worker(site).await")
@@ -4139,6 +4161,38 @@ mod tests {
         })
         .await
         .expect("the press finishes and says so");
+        press_story_names_each_leg_and_the_verdict(&story, generation, &held);
+
+        // THE LEGS' OWN EVENTS ARE IN THE STORY: one per request made.
+        let legs_said = story.iter().filter(|r| r.message == "sobs5 leg").count() as u64;
+        assert!(legs_said >= 4, "every request's own line: {story:?}");
+        // AND NOTHING ELSE IS: the press, its legs, and the census reads and
+        // growth those legs did.
+        assert!(
+            story.iter().all(|r| r.target == "api.pullrun"
+                || r.target == "pull.member"
+                || r.target == "pull.manifest"
+                || r.target.starts_with("api.census")),
+            "only the press's own work carries its id: {:?}",
+            story
+                .iter()
+                .map(|r| (&r.target, &r.message))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !story.iter().any(|r| r.message == "sobs5 unrelated"),
+            "the audit's probe P9: another task's event is not filed under the press"
+        );
+    }
+
+    /// The press's own lines in [`a_press_logs_its_legs_and_verdict_under_one_run_and_nothing_else`]:
+    /// its start, the halted feed, the owed leg, the owing pass and the
+    /// verdict, which is the page's verdict.
+    fn press_story_names_each_leg_and_the_verdict(
+        story: &[telemetry::Record],
+        generation: u64,
+        held: &Loaded,
+    ) {
         let said = |message: &str| -> Vec<&telemetry::Record> {
             story.iter().filter(|r| r.message == message).collect()
         };
@@ -4182,32 +4236,11 @@ mod tests {
         assert!(crate::emitted::counts(finished[0], "feeds_halted", 1));
         assert!(crate::emitted::says(finished[0], "summary", "INCOMPLETE"));
         assert_eq!(
-            observed(&held).finished.as_deref(),
+            observed(held).finished.as_deref(),
             finished[0]
                 .field("summary")
                 .and_then(telemetry::OwnedValue::as_str),
             "the log's verdict is the page's verdict"
-        );
-
-        // THE LEGS' OWN EVENTS ARE IN THE STORY: one per request made.
-        let legs_said = said("sobs5 leg").len() as u64;
-        assert!(legs_said >= 4, "every request's own line: {story:?}");
-        // AND NOTHING ELSE IS: the press, its legs, and the census reads and
-        // growth those legs did.
-        assert!(
-            story.iter().all(|r| r.target == "api.pullrun"
-                || r.target == "pull.member"
-                || r.target == "pull.manifest"
-                || r.target.starts_with("api.census")),
-            "only the press's own work carries its id: {:?}",
-            story
-                .iter()
-                .map(|r| (&r.target, &r.message))
-                .collect::<Vec<_>>()
-        );
-        assert!(
-            !story.iter().any(|r| r.message == "sobs5 unrelated"),
-            "the audit's probe P9: another task's event is not filed under the press"
         );
     }
 
@@ -4250,7 +4283,8 @@ mod tests {
             generation,
             vec![leg("zerodha", "1day")],
             move |_site, _leg| {
-                let _held = &boom;
+                // Captures `boom`, so cloning this request clones it.
+                let Boom = &boom;
                 std::future::ready(receipt(200, "STORED"))
             },
         );

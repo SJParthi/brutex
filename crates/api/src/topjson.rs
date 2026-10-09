@@ -517,11 +517,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let path = cli::results::Results::path(&dir);
         let mut ledger = cli::results::Results::open(&dir).expect("ledger");
-        let mut lengths = Vec::new();
-        for (id, profit) in [(1, 100), (2, 300), (3, 200)] {
+        let lengths = [(1, 100), (2, 300), (3, 200)].map(|(id, profit)| {
             ledger.append(&row(id, "NIFTY", profit)).expect("append");
-            lengths.push(std::fs::metadata(&path).expect("measured").len());
-        }
+            std::fs::metadata(&path).expect("measured").len()
+        });
         drop(ledger);
         let stride = lengths[2] - lengths[1];
         // Inside record 1's payload, well clear of its seal.
