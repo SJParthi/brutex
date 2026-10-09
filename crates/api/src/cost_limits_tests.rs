@@ -288,20 +288,33 @@ fn w1_api5_6_a_filtered_store_page_walks_and_copies_every_entry() {
 }
 
 #[test]
-fn w1_api5_7_a_scrub_walks_the_append_log_and_opens_a_file_per_entry() {
+fn w1_api5_7_a_scrub_opens_one_page_and_walks_the_log_once_per_snapshot() {
     names(
         "W1-api5-7",
         &[
             "`verify_json`",
             "`Manifest::newest`",
             "O(log length)",
-            "O(E_v) file opens",
-            "corrected",
-            "Since D-2281",
-            "inherent",
+            "Since D-4435",
+            "`MAX_VERIFY_PAGE` = 1,024",
+            "`next_offset`",
+            "`verify_memo`",
+            "p99",
+            "scrub_route_opens_no_more_than_a_page_of_a_larger_counter",
         ],
     );
-    assert!(VERIFY.contains("for entry in manifest.newest() {"));
+    let vendor = item(VERIFY, "pub fn vendor(");
+    assert!(vendor.contains("for entry in page {"), "{vendor}");
+    assert!(
+        vendor.contains("if limit == 0 || limit > MAX_VERIFY_PAGE {"),
+        "{vendor}"
+    );
+    assert!(!vendor.contains(".newest()"), "the page is cut, not walked");
+    assert!(VERIFY.contains("pub const MAX_VERIFY_PAGE: u64 = 1_024;"));
+    assert!(
+        item(VERIFY, "pub fn newest(").contains("Some(Arc::new(manifest.newest()))"),
+        "the log walk is the memo's build"
+    );
     let newest = MANIFEST
         .split_once("    pub fn newest(&self) -> Vec<Entry> {")
         .expect("Manifest::newest")
@@ -313,23 +326,22 @@ fn w1_api5_7_a_scrub_walks_the_append_log_and_opens_a_file_per_entry() {
         newest.contains("for held in self.log.iter().rev()"),
         "{newest}"
     );
-    assert!(
-        SERVER.contains("/// `O(log length)` in memory plus `O(E_v)` file opens."),
-        "the route's own doc names the log walk"
-    );
     // The scrub runs on the store-read pool, never on the handler's own task
     // (W1-api6-0, D-2281).
     let handler = item(SERVER, "async fn verify_json(");
     assert!(
-        handler.contains("run_store_read(move || verify_reading(&site, feed, &asked))"),
+        handler.contains("verify_reading(&site, feed, &asked, offset, limit)"),
         "{handler}"
     );
+    assert!(handler.contains("run_store_read(move || {"), "{handler}");
     assert!(!handler.contains("crate::verify::vendor("), "{handler}");
     assert!(!handler.contains("census_now("), "{handler}");
+    let reading = item(SERVER, "fn verify_reading(");
     assert!(
-        item(SERVER, "fn verify_reading(")
-            .contains("crate::verify::vendor(&site.store_root, census)")
+        reading.contains("site.verify_memo.of_census(&censuses, 0, feed, || {"),
+        "{reading}"
     );
+    assert!(reading.contains("crate::verify::vendor("), "{reading}");
 }
 
 #[test]

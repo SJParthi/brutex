@@ -12263,16 +12263,26 @@ rule 6); every bound is read from the source.
   contains `x`" without testing each distinct symbol; the walk tests each
   entry once at O(1) (a substring of at most 24 bytes). Proved by
   `api::server::tests::a_store_filter_is_walked_once_per_snapshot`.
-* **W1-api5-7 — `verify_json`.** `verify::vendor` walks `Manifest::newest`,
-  which builds a set over the whole append log (O(log length)), and opens one
+* **W1-api5-7 — `verify_json`.** `verify::vendor` walked `Manifest::newest`,
+  which builds a set over the whole append log (O(log length)), and opened one
   bar file per held entry, reading its header and two records: O(E_v) file
   opens per request. The route doc said "O(1) per entry ... nothing is read
   whole"; corrected to name the log walk. Since D-2281 the scrub runs on the
-  store-read pool, not on the request's runtime worker (W1-api6-0). The
-  O(E_v) opens are inherent: a scrub is the request to open every month the
-  census claims and check it against the file, and an answer from anything
-  less would be a census validated against itself, which is what the route
-  exists not to be.
+  store-read pool, not on the request's runtime worker (W1-api6-0). **Since
+  D-4435 one answer checks one page:** `offset=` and `limit=`, with
+  `MAX_VERIFY_PAGE` = 1,024 the default and the ceiling, and `next_offset`
+  naming where the next page starts. The newest-entry list is built once per
+  census snapshot and kept in `verify_memo`, so the O(log length) walk is paid
+  by the first request after a pull, not by every request, and a page is at
+  most 1,024 opens. An answer that does not cover every held entry never says
+  "verified". Checking every month the census claims is still O(E_v) opens in
+  all, now spread over E_v / 1,024 requests; that total is inherent, because a
+  scrub is the request to open every month and check it against the file, and
+  an answer from anything less would be a census validated against itself.
+  Proved by `api::server::verification_route_tests::scrub_route_opens_no_more_than_a_page_of_a_larger_counter`.
+  Measured by `latency_scrub_page_at_the_ceiling` (`api` test build (the workspace's optimized test profile), a shared four-CPU host running other builds; load average beside each): a page
+  of 1,024 held files 44.5 ms / 73.5 ms / 76.6 ms (n = 200, load 9.72); the memo's miss, `Manifest::newest` over
+  10^5 log entries, 59.4 ms / 84.4 ms / 84.4 ms (n = 50, load 9.72). p50 / p99 / max.
 * **W1-api5-8 — `bars_json` past the last bar.** When `from=` lies after the
   month's last stored bar, the bisection returns `n_valid` and the fallback
   reads the whole month to answer `[]`: O(n_valid) reads instead of
@@ -15188,8 +15198,9 @@ pass over the bars at a once-per-report boundary, O(bars).
   held entry. **Since D-2281 it runs on the store-read pool**
   (`detail::run_store_read` behind `verify_reading`, the same eight-slot bound
   `/folder.json` and `/indexmap.json` share, 429 past it), so no runtime worker
-  waits on the scrub. The O(log length + E_v) itself is inherent: a scrub is
-  asked to open every month the census claims. Not timed.
+  waits on the scrub. **Since D-4435 one answer opens at most
+  `MAX_VERIFY_PAGE` = 1,024 months and the log walk is kept per census
+  snapshot**; the W1-api5-7 bullet of the D-1446 section has the measurement.
 - **The conductor's row count runs on a runtime task (W1-api3-1, D-1502).**
   The D-1382 entry above states the cost of `pullrun::rows_now`. **Since
   D-2282 every async caller (the ticker, the pass loop and recovery) goes

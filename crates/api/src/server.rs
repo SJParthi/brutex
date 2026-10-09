@@ -4953,20 +4953,19 @@ fn store_body(
 /// an operator saw the disagreement is a repair nobody audited — `CLAUDE.md`
 /// §4 wants the reason surfaced rather than swallowed by a fix.
 ///
-/// # Cost
+/// # Cost, and why it is paged
 ///
-/// One bar file opened per held entry (its header and two records read), and
-/// the walk is the ask: a scrub of a vendor is a scrub of every month it
-/// claims. Nothing is sorted. The walk itself is `Manifest::newest`, which
-/// builds a set over the manifest's whole append log, so a request is
-/// `O(log length)` in memory plus `O(E_v)` file opens. This said "O(1) per entry
-/// ... nothing is read whole" and left the log walk out. W1-api5-7, D-1446;
-/// `docs/06-limits.md`'s D-1446 section.
-///
-/// **UNVERIFIED as a measurement.** The bound is argued from the
-/// shape of the code and no bench in this workspace times it.
-/// `CLAUDE.md` §3 rule 6: a structural argument is not a
-/// measurement, however sound it is.
+/// One bar file opened per checked entry (its header and two records read).
+/// Until D-4435 one request checked every month the counter claimed, E_v
+/// opens for E_v entries, so its cost grew with the store (W1-api5-7,
+/// W1-api6-0). It checks one page now: `offset=` (default 0) and `limit=`
+/// (default and ceiling [`crate::verify::MAX_VERIFY_PAGE`]), and the answer
+/// carries `held`, `offset`, `limit` and `next_offset` so a reader can walk
+/// the rest. `verified` is true only for an answer that covered every held
+/// entry. The newest-per-key list a page is cut from is built once per census
+/// snapshot (`Site::verify_memo`), so the `O(log length)` walk of
+/// `Manifest::newest` is paid by the first request after a pull, not by every
+/// one. Measured at the ceiling in `docs/06-limits.md`'s D-4435 section.
 async fn verify_json(
     axum::extract::State(site): axum::extract::State<Loaded>,
     uri: axum::http::Uri,
@@ -4985,10 +4984,23 @@ async fn verify_json(
             no_such_feed_json(&asked),
         );
     };
-    // OFF THE ASYNC WORKERS, AND ADMITTED: a scrub opens one bar file per held
-    // entry, and running it inline held a runtime worker for the whole walk.
-    // W1-api6-0, D-2281.
-    match crate::detail::run_store_read(move || verify_reading(&site, feed, &asked)).await {
+    let window = verify_window(&param(query, "offset"), &param(query, "limit"));
+    let (offset, limit) = match window {
+        Ok(window) => window,
+        Err(why) => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                headers,
+                verify_refused_json(&why, &asked),
+            );
+        }
+    };
+    // OFF THE ASYNC WORKERS, AND ADMITTED: a scrub opens one bar file per
+    // checked entry, and running it inline held a runtime worker for the whole
+    // page. W1-api6-0, D-2281.
+    match crate::detail::run_store_read(move || verify_reading(&site, feed, &asked, offset, limit))
+        .await
+    {
         Ok((code, body)) => (code, headers, body),
         Err(why) => {
             let (code, body) = crate::detail::admission_refused(
@@ -5001,8 +5013,41 @@ async fn verify_json(
     }
 }
 
+/// `/verify.json`'s `offset=` and `limit=`, each defaulted when absent and
+/// refused by name when not a number. The bounds against the counter are
+/// [`crate::verify::vendor`]'s. D-4435.
+fn verify_window(offset: &str, limit: &str) -> Result<(u64, u64), String> {
+    let number = |name: &str, text: &str, absent: u64| -> Result<u64, String> {
+        if text.is_empty() {
+            return Ok(absent);
+        }
+        text.parse::<u64>()
+            .map_err(|_| format!("{name}={text} is not a whole number"))
+    };
+    Ok((
+        number("offset", offset, 0)?,
+        number("limit", limit, crate::verify::MAX_VERIFY_PAGE)?,
+    ))
+}
+
+/// A `/verify.json` page refused before any file was opened, in the shape
+/// [`no_such_feed_json`] answers a feed with. D-4435.
+fn verify_refused_json(why: &str, asked: &str) -> String {
+    format!(
+        r#"{{"refused":{},"feed":{}}}"#,
+        render::json_string(why),
+        render::json_string(asked),
+    )
+}
+
 /// [`verify_json`]'s census read, scrub and render, run on the store-read pool.
-fn verify_reading(site: &Site, feed: Vendor, asked: &str) -> (axum::http::StatusCode, String) {
+fn verify_reading(
+    site: &Site,
+    feed: Vendor,
+    asked: &str,
+    offset: u64,
+    limit: u64,
+) -> (axum::http::StatusCode, String) {
     // FRESH, NEVER THE STARTUP SNAPSHOT. A scrub answering from a census read
     // at boot would verify a store that has since been written to.
     let (censuses, _entries) = census_now(site);
@@ -5013,7 +5058,27 @@ fn verify_reading(site: &Site, feed: Vendor, asked: &str) -> (axum::http::Status
         );
     };
 
-    let report = crate::verify::vendor(&site.store_root, census);
+    // ONCE PER CENSUS SNAPSHOT: the snapshot is replaced, never mutated, so
+    // its newest-per-key list is too. The generation is the census's alone;
+    // the universe parse does not enter a scrub. D-4435.
+    let newest = site
+        .verify_memo
+        .of_census(&censuses, 0, feed, || (crate::verify::newest(census), true));
+    let report = match crate::verify::vendor(
+        &site.store_root,
+        census,
+        newest.as_deref().map(Vec::as_slice),
+        offset,
+        limit,
+    ) {
+        Ok(report) => report,
+        Err(why) => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                verify_refused_json(&why, asked),
+            );
+        }
+    };
     // A DISAGREEMENT IS NOT A SERVER FAULT, so it is 200 with the finding in
     // the body: the request was answered correctly and the ANSWER is bad news.
     // A refusal — a counter that could not be read at all — is 503, because
@@ -5031,12 +5096,18 @@ fn verify_reading(site: &Site, feed: Vendor, asked: &str) -> (axum::http::Status
         .collect::<Vec<_>>()
         .join(",");
     let body = format!(
-        "{{\"feed\":{},\"verified\":{},\"say\":{},\"seen\":{},\"agreed\":{},\
+        "{{\"feed\":{},\"verified\":{},\"say\":{},\"held\":{},\"offset\":{},\
+         \"limit\":{limit},\"next_offset\":{},\"seen\":{},\"agreed\":{},\
          \"missing\":{},\"rows\":{},\"bounds\":{},\"unreadable\":{},\
          \"undrawn\":{},\"findings\":[{named}],\"refused\":{}}}",
         render::json_string(feed.as_str()),
         report.verified(),
         render::json_string(&report.say()),
+        report.held,
+        report.offset,
+        report
+            .next_offset
+            .map_or_else(|| "null".to_owned(), |at| at.to_string()),
         t.seen(),
         t.agreed,
         t.missing,
@@ -5534,6 +5605,11 @@ pub struct Site {
     /// `/instruments.json`'s answer per feed, for one census snapshot and one
     /// universe parse. See [`crate::answer_memo`]. W1-api5-3, D-2285.
     instruments_memo: crate::answer_memo::CensusMemo<Vendor, InstrumentsAnswer>,
+    /// `/verify.json`'s newest-per-key entry list per feed, for one census
+    /// snapshot, so a page is cut by position and the log walk is paid once
+    /// per snapshot. See [`crate::verify::newest`]. W1-api5-7, D-4435.
+    verify_memo:
+        crate::answer_memo::CensusMemo<Vendor, Option<std::sync::Arc<Vec<pull::manifest::Entry>>>>,
     /// `/calendar.json`'s served answers per feed and symbol, for one census
     /// snapshot. See [`crate::answer_memo`]. W1-api5-5, D-2286.
     calendar_memo: crate::answer_memo::CensusMemo<
@@ -5837,6 +5913,7 @@ impl Site {
             census: std::sync::Mutex::new(None),
             census_wire: store_wire::Cache::default(),
             instruments_memo: crate::answer_memo::Memo::default(),
+            verify_memo: crate::answer_memo::Memo::default(),
             calendar_memo: crate::answer_memo::Memo::default(),
             indexmap_memo: crate::answer_memo::Memo::default(),
             store_filter_memo: crate::answer_memo::Memo::with_cap(STORE_FILTERS_KEPT),
@@ -30183,8 +30260,11 @@ mod tests {
         // needle matches that prose and the test fails on its own explanation.
         // Measured: this test's first version did exactly that. The call site is
         // what decides, so the call site is what is matched.
+        // Since D-4435 the newest-per-key list is built once per census
+        // snapshot and the scrub walks one page of it.
         assert!(
-            source.contains("for entry in manifest.newest()"),
+            source.contains("Some(Arc::new(manifest.newest()))")
+                && source.contains("for entry in page {"),
             "the scrub must walk one row per instrument-month"
         );
         assert!(

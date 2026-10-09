@@ -66540,3 +66540,19 @@ crate uses it and is run on purpose with
 `trade_readers_keep_eight_candidates_warm_and_evict_the_least_recent`.
 FXB1-05, FXB1-06.
 
+### D-4435 — `/verify.json` checks one page of at most 1,024 months — 2026-10-09
+
+**What was observed.** W1-api5-7 and W1-api6-0: a scrub walked
+`Manifest::newest` (O(log length)) and opened every held month of the feed on
+every request; moving it to the store-read pool (D-2281) kept the cost.
+
+**Decided.** `verify::vendor` checks one page: `offset` (default 0) and
+`limit` (default and ceiling `MAX_VERIFY_PAGE` = 1,024; 0 or past the
+ceiling is refused by name, as is an offset past the held entries). The newest-entry list is built once per census snapshot and kept in
+`Site::verify_memo`, so the log walk is paid once per snapshot. The report
+carries `held`, `offset`, `limit` and `next_offset`, and a clean partial page
+says "not verified" and names the range it checked: only an answer that
+covers every held entry may say "verified". Proved by
+`scrub_route_checks_one_page_and_names_the_rest` and
+`scrub_route_opens_no_more_than_a_page_of_a_larger_counter`. FXB1-07.
+
