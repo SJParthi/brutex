@@ -111,7 +111,10 @@ fn the_vendor_and_solved_paths_refuse_the_same_premiums_under_the_same_arm() {
         if arm.is_some() {
             bounded += 1;
         }
-        for vol in [0.05, 0.2, 1.5] {
+        // Every one below one: a vendor figure at or above
+        // `MAX_UNAMBIGUOUS_VENDOR_VOLATILITY` is refused by its unit screen
+        // before the premium is read (grk-1, D-2603, D-4609).
+        for vol in [0.05, 0.2, 0.95] {
             let vendor = pull::pricing::price(q, Some(vol), rate(), YearBasis::Calendar365);
             if arm.is_some() {
                 assert_eq!(
@@ -130,6 +133,24 @@ fn the_vendor_and_solved_paths_refuse_the_same_premiums_under_the_same_arm() {
         if let Ok(row) = solved {
             solved_ok += 1;
             assert!(matches!(row.vol_from, VolSource::Solved { .. }));
+            if row.volatility >= pull::pricing::MAX_UNAMBIGUOUS_VENDOR_VOLATILITY {
+                // A solved figure the unit screen would refuse from a vendor:
+                // the vendor path refuses it by name rather than price it.
+                assert!(
+                    matches!(
+                        pull::pricing::price(
+                            q,
+                            Some(row.volatility),
+                            rate(),
+                            YearBasis::Calendar365
+                        ),
+                        Err(PricingError::VendorVolatilityUnitAmbiguous { .. })
+                    ),
+                    "case {case}: {q:?}: a solved vol of {} as a vendor figure",
+                    row.volatility
+                );
+                continue;
+            }
             let again =
                 pull::pricing::price(q, Some(row.volatility), rate(), YearBasis::Calendar365)
                     .unwrap_or_else(|why| {

@@ -7308,10 +7308,11 @@ old line regex the same input and watched it pass.
 | ZX-103 | A stated stop in points never reaches a walk-forward fold; its in-sample conversion is span-relative and stated as a limit (D-3697; audit-find-17 #6) | `a_stated_stop_is_span_relative_in_sample_and_never_reaches_a_fold` in `crates/cli/src/lookahead_tests.rs` | ✓ |
 | ZX-104 | A 503 `invocation_audit_unavailable` with `handler_completed: false` settles a sweep launch as failed and confirmed; every damaged or other-status variant stays unknown (D-2501; log-1) | `web/tests/sweep-admission.test.js` · *an audit start refused before dispatch settles the launch as failed (log-1, D-2501)* | ✓ |
 
-### Integration of the data-path, Fix Board and zero-round branches — D-4600 to D-4608, 9 October 2026
+### Integration of the data-path, Fix Board and zero-round branches — D-4600 to D-4612, 9 October 2026
 
 | ID | Invariant | Test that proves it | Status |
 |---|---|---|---|
 | MRG-01 | A candidate detail's aside is held under an exclusive lock from its creation until its name is unlinked, so a reader of the final name meets `busy` in the link-to-unlink window and never pins a generation the unlink's ctime change would break (D-4602; D-3603; D-2624) | `a_detail_being_written_is_locked_against_every_reader` in `crates/cli/src/candidate_trades/tests.rs` | ✓ |
 | MRG-02 | The autopilot's Stop reaches only a walk that captured a generation; a process shutdown reaches every walk, hand walks included (D-4608; D-2771; D-2695) | `a_pause_stops_only_the_autopilots_walk_and_a_shutdown_stops_every_walk` in `crates/api/src/autopilot.rs`; `the_shutdown_signal_stops_a_walk_that_captured_the_epoch_before_it` in `crates/api/src/server.rs` | ✓ |
 | MRG-03 | A head-deadline write is interim, and keeps a delivered head delivered, only when it is a 1xx status head of either version and carries nothing after its blank line, on the plain and the vectored path (D-4605; D-3688; D-2597) | `only_a_lone_interim_line_is_interim` and `an_interim_write_on_either_path_keeps_the_head_delivered` in `crates/api/src/server.rs` | ✓ |
+| MRG-04 | An append whose resume entry is TORN (present in full, failing its check) rebuilds that entry alone; one whose resume entry is CUT (the index ends before it) rebuilds the whole index, so an index cut back under a live writer is complete again after the append (D-4611; D-3134; D-2077) | `an_index_damaged_under_a_live_writer_is_rebuilt_before_its_append` and `a_torn_entry_under_a_live_writer_is_rebuilt_alone_and_the_answers_stay_exact` in `crates/store/tests/tix.rs` | ✓ |

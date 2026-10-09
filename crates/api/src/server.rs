@@ -36318,8 +36318,13 @@ mod tests {
         );
         let site = Site::serving(&dir, &store_root("pause-gap"));
         let censuses = vec![day_pass_held(Vendor::Dhan, "NIFTY", month_of(2026, 8))];
+        // `member=NIFTY`: the masters above map NIFTY alone, and a whole swept
+        // target now refuses every unmapped name before the loop (D-2759), so
+        // the run would stop at the mapping and never reach the pause. The
+        // subset is mapped, and the pause is the only thing left to stop it
+        // (D-4612).
         let asked = ingest::parse_spot(
-            "target=swept&from=2026-08-03&to=2026-08-05&granularity=5min",
+            "target=swept&member=NIFTY&from=2026-08-03&to=2026-08-05&granularity=5min",
             day(2026, 8, 10),
         )
         .expect("a real target and a window in the past");

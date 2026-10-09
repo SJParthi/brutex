@@ -1659,7 +1659,10 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // The three lines above were counted on the zero/next side, without
     // D-2771's site; both sides' sites are driven, and the figure is re-taken
     // after the zero/next merge.
-    const REACHED_IN_SERVER_TESTS: usize = 22; // MERGE-RETAKE
+    // 24 -> 25 at that merge (D-4610): the zero/next side's 24 plus D-2771's
+    // shutdown drain WARN, which the other side drove; measured on the merged
+    // tree by the sum below.
+    const REACHED_IN_SERVER_TESTS: usize = 25;
     // Both production recovery boundaries are emitted and read back through
     // this installed sink by recovery::tests::
     // recovery_boundary_events_are_read_back_from_the_installed_sink.
@@ -1815,10 +1818,12 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     //
     // The two lines above were counted on the zero/next side, without D-2771's
     // site; the figure is re-taken after the zero/next merge.
+    //
+    // 76 -> 77 at that merge (D-4610): the zero/next side's 76 plus D-2771's
+    // WARN. Measured: `lib_emit_sites()` returns 77 on the merged tree.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites,
-        66, // MERGE-RETAKE
+        lib_sites, 77,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"

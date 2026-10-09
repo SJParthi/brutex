@@ -555,7 +555,9 @@ impl Session {
         let reader = BarFile::open_existing(root, bars_path(), SYMBOL).expect("reader");
         let second =
             BarFile::open_existing(root, bars_path(), SYMBOL).expect("a second reader shares");
-        assert!(matches!(open(root), Err(StoreError::Locked { .. })));
+        // Refused by name as READERS, not as another writer (barflow-1,
+        // D-2552; D-4612).
+        assert!(matches!(open(root), Err(StoreError::ReaderHolds { .. })));
         for (index, want) in self.model.iter().enumerate() {
             let index = u64::try_from(index).unwrap();
             assert_eq!(reader.read_record(index).expect("read"), *want);

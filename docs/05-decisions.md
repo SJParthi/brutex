@@ -68795,3 +68795,108 @@ generation, the generation having moved. Shutdown stops every walk again
 **Proof.** `a_pause_stops_only_the_autopilots_walk_and_a_shutdown_stops_every_walk`
 walks the whole truth table, and the D-2771 shutdown test now also asserts
 that a hand walk stops (MRG-02).
+
+### D-4609 — A vendor volatility's unit screen runs ahead of the premium screen, and two data-path tests are re-taken for it — 2026-10-09
+
+**The overlap.** `pull::pricing::price` merged without a textual conflict and
+now holds both vendor-path screens: D-2603 (grk-1) refuses a vendor
+volatility that is NaN, not positive, or at or above
+`MAX_UNAMBIGUOUS_VENDOR_VOLATILITY` (1.0) as `VendorVolatilityUnitAmbiguous`,
+and D-3114/D-3117 then refuse a premium outside the solver's no-arbitrage
+bounds. Both stand: the unit is unverified (`CLAUDE.md` §3 rule 1), so a
+figure that could be a percent read as a decimal is refused before anything
+reads the premium.
+
+**Tests re-taken.** Two data-path tests assumed no unit screen.
+`dpp_vendor_volatility_is_screened_by_the_model` expected `Model(_)` for
+eight hostile figures; each is in the unit screen's domain, so it now
+expects `VendorVolatilityUnitAmbiguous` carrying that exact figure.
+`the_vendor_and_solved_paths_refuse_the_same_premiums_under_the_same_arm`
+tried vendor volatilities 0.05, 0.2 and 1.5. 1.5 is now refused by unit, so
+the third figure is 0.95. Its round trip, which re-prices a solved
+volatility as a vendor one, now asserts the unit refusal for a solved figure
+at or above 1.0 and the bit-identical greeks below it. DPR-06 still holds in
+the range where a vendor figure is accepted at all.
+
+### D-4610 — Three figures each side re-took on its own are re-taken once more on the merged tree — 2026-10-09
+
+**The overlap.** Three pinned figures moved on both sides of the
+integration, each side re-taking from the same earlier value, so neither
+side's figure is the merged tree's.
+
+- `gap::tests::complete_sessions_through_the_evaluator_are_byte_identical`
+  digests all 384 positions over the complete-session fixture. D-3402 and
+  D-3403 (zero/next) moved it from 9_976_369_688_448_099_888 to
+  3_321_827_449_681_235_504; D-2613 (base) moved it from the same value to
+  1_794_190_917_626_450_722. The merged tree carries both changes and
+  measures 17_175_828_523_226_610_466. The gap family's own count, 4,092,
+  is unchanged on every side, and the gap-only pin above it did not move.
+- `emitted::the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten`
+  counts the api library's emit sites. zero/next counted 76 and 24 reached
+  in server tests, both without D-2771's shutdown drain WARN, which the base
+  carries and drives in `server::shutdown_tests`. The merged tree measures
+  77 sites, and 25 server-test sites makes the partition sum to 77.
+
+**Decision.** Each figure is the merged tree's measurement, written beside
+the history of the earlier re-takes, not a reconciliation by arithmetic.
+
+### D-4611 — A torn index entry is repaired alone; a cut one rebuilds the whole index — 2026-10-09
+
+**The conflict.** D-2077 (G18-rest-26) proves that an index cut back to its
+header under a live writer is rebuilt before the next append, so the month
+is indexed again afterwards. D-3134 then let an append whose resume entry
+fails its check rebuild that one entry from at most 65 bar reads instead of
+the whole month. Merged as written, the cut index met the D-3134 path: the
+last committed bucket's entry was rewritten past a hole of zeros, the other
+entries stayed missing, and the next reader bisected (`Bisection(Entry {
+bucket: 53 })` measured) where D-2077's test requires `Indexed`.
+
+**Decision.** `repair_torn_entry` first asks whether the entry is still
+there: one `fstat` on the open `.tix`, and an index whose length ends
+before that entry's last byte is not a tear. An append that failed on this
+handle writes over its entries in place and never leaves the file ending
+before the entry it resumes from (`put_entries` starts at that entry and
+sets the length after its own), so a short index was cut from outside and
+everything before the entry may be gone too. That case returns `None` and
+takes the whole rebuild, loudly, as D-2077 wrote. A torn entry of full
+length is still repaired alone (D-3134). The added cost is one `fstat` on
+the repair path only, which is already off the O(1) append path.
+
+**Proof.** MRG-04: `an_index_damaged_under_a_live_writer_is_rebuilt_before_its_append`
+(cut, whole rebuild, `Indexed`) and
+`a_torn_entry_under_a_live_writer_is_rebuilt_alone_and_the_answers_stay_exact`
+(torn in place, one entry rewritten, an unrelated damaged entry untouched).
+
+### D-4612 — Four tests one side wrote are re-taken for a rule the other side added — 2026-10-09
+
+Each test below was written on one side of the integration and asserted a
+behaviour the other side had since changed on purpose. The behaviour stands
+and the test is re-taken; none of these changes production code.
+
+- `contracts_order_by_strike_numerically_and_agree_with_equality` (core-1,
+  D-2609, zero/next) parsed `2025-09-30-0500000-CE` to show that two
+  spellings of one strike stay ordered and never compare `Equal`. D-3151
+  (data path) made `Contract::parse` accept only what `Contract::of`
+  renders, so that spelling is now refused and no second spelling of a
+  strike can exist. The test asserts the refusal, and in its place asserts
+  that a future sorts after an option of its own expiry, which is the
+  byte-compared branch of the order. The whole-text tie-break in `Ord` is
+  kept: it agrees with `Eq` for every contract that can exist.
+- `a_pause_after_the_autopilots_check_stops_the_run_before_any_instrument`
+  (autopilot-1, D-2506, zero/next) asked for the whole swept target over
+  masters that map NIFTY alone. D-2759 (CE-92, Fix Board) refuses every unmapped
+  name of a whole swept target before the loop with a 422, so the run
+  stopped at the mapping and never reached the pause. The request now names
+  `member=NIFTY`, a fully mapped subset, as the refusal itself tells an
+  operator to do, and the pause is again the only thing that stops it.
+- `one_hundred_thousand_random_operations_agree_with_an_in_memory_vec`
+  (DPS-02, data path) expected a writer open beside two live readers to be
+  refused as `Locked`. barflow-1 (D-2552, zero/next) names that refusal
+  `ReaderHolds`, so a reader is not reported as a second writer. The walk
+  now expects `ReaderHolds`; a writer beside a writer is still `Locked`.
+- `an_address_stage_refusal_names_its_origin` (DPM-14, D-3700, data path)
+  shared its scratch tag, `month-span`, with the test above it in the same
+  binary. The two run at once, and either one's `Drop` removed the other's
+  store mid-run: measured as `.../bars/zerodha does not exist` under the
+  default thread count, green with `--test-threads=1`. It now has its own
+  root, `address-stage`.

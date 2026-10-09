@@ -543,6 +543,10 @@ fn dpp_extreme_quotes_refuse_by_name_and_never_report_nan() {
     }
 }
 
+/// A vendor volatility no model accepts is refused before it prices. Since
+/// the merge with grk-1 (D-2603, D-4609) every one of these is refused by the
+/// unit screen first, which runs ahead of the model: each is NaN, not
+/// positive, or at or above `MAX_UNAMBIGUOUS_VENDOR_VOLATILITY`.
 #[test]
 fn dpp_vendor_volatility_is_screened_by_the_model() {
     for bad in [
@@ -557,7 +561,11 @@ fn dpp_vendor_volatility_is_screened_by_the_model() {
     ] {
         let got = price(atm_call(), Some(bad), rate(), YearBasis::Calendar365);
         assert!(
-            matches!(got, Err(PricingError::Model(_))),
+            matches!(
+                got,
+                Err(PricingError::VendorVolatilityUnitAmbiguous { sent })
+                    if sent.to_bits() == bad.to_bits()
+            ),
             "vendor vol {bad} gave {got:?}"
         );
     }

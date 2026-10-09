@@ -3058,11 +3058,26 @@ impl BarFile {
     /// header slot that commits them. Logged as `store.tix` "time index
     /// rebuilt from the bars" with scope `one torn entry` by `append`, after
     /// that write and only if it happened (D-3135). D-3134.
+    ///
+    /// A TORN ENTRY IS PRESENT; A CUT ONE IS NOT (D-4611). An append that
+    /// failed on this handle wrote over its entries in place and never left
+    /// the file ending before them (`put_entries`), so an index that no longer
+    /// reaches past this entry was cut from outside, and every entry before it
+    /// may be gone with it: `None`, and the caller rebuilds the whole index
+    /// (D-2077). One `fstat`.
     fn repair_torn_entry(&self, why: &Why) -> Option<(u64, Entry)> {
         let Why::Entry { bucket } = why else {
             return None;
         };
         let tix = self.tix.as_ref()?;
+        let Some(TixState::Ready(index)) = tix.state.get() else {
+            return None;
+        };
+        let reaches =
+            crate::time_index::entry_offset(*bucket).saturating_add(crate::time_index::ENTRY_LEN);
+        if index.metadata().ok()?.len() < reaches {
+            return None;
+        }
         let held = Held::of(&self.header);
         let (found, entry) = crate::time_index::recover(&tix.geometry, held, |row| {
             self.read_row::<Bar>(row).map(|bar| bar.ts_micros)

@@ -704,10 +704,18 @@ mod tests {
             ]
             .map(str::to_owned)
         );
-        // Two spellings of one value stay distinct and ordered, never Equal.
-        let padded = Contract::parse("2025-09-30-0500000-CE").expect("parses");
-        assert_ne!(padded.cmp(&five), std::cmp::Ordering::Equal);
-        assert_eq!(padded.cmp(&five), five.cmp(&padded).reverse());
+        // A second spelling of one strike is not a contract at all (D-3151),
+        // so the order never has to choose between two spellings of one
+        // value; the whole-text tie-break stays, and agrees with `Eq` for
+        // every contract that can exist (D-4612).
+        assert_eq!(Contract::parse("2025-09-30-0500000-CE"), None);
+        // A part that is not all digits is compared by its bytes, as before:
+        // the future sorts after every option of its own expiry.
+        let future = Contract::of(Kind::Future {
+            expiry: Expiry::new(2025, 9, 30).expect("a real expiry"),
+        })
+        .expect("fits");
+        assert_eq!(future.cmp(&fifteen), std::cmp::Ordering::Greater);
         // Expiry still leads the strike.
         let later = Contract::of(Kind::Option {
             expiry: Expiry::new(2025, 10, 28).expect("a real expiry"),
