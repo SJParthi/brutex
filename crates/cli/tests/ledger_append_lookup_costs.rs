@@ -16,6 +16,9 @@
 //!   per rung, and its replay's full-route cost was stated nowhere.
 //! * W2-cli3-3 (D-1684): the stored OOS source was rebuilt for every witness
 //!   while §169 priced minting by the replay alone.
+//! * W2-cli12-1 (D-4764): the two-open Statistics V2 append and the step's
+//!   third open are one open per step; the tests named in LBE-09 keep their
+//!   names and now pin the one open.
 //!
 //! Every file a constant below names is read at compile time, so a rename
 //! fails the build rather than skipping the check. A separate test crate, as
@@ -35,6 +38,7 @@ const CANDIDATE: &str = include_str!("../src/candidate_universe.rs");
 const PRE_ADMISSION: &str = include_str!("../src/pre_admission_data.rs");
 const OBSERVATIONS: &str = include_str!("../src/population_observations_v1.rs");
 const STATISTICS: &str = include_str!("../src/population_statistics_v2.rs");
+const STEP3: &str = include_str!("../src/step3_orchestrator.rs");
 const LEDGER_V6: &str = include_str!("../src/ledger_v6.rs");
 const STRICT_INPUTS: &str = include_str!("../src/strict_v6_inputs.rs");
 const POPULATION_V6: &str = include_str!("../src/population_v6.rs");
@@ -203,19 +207,37 @@ fn section_154_states_index_reads_the_bounded_reserve_and_the_two_open_append() 
     let open = method(STATISTICS, "    fn open_inner(");
     assert!(open.contains("bounds.audits.min(stored_records)"));
     assert!(!open.contains("try_reserve(usize_of(bounds.audits,"));
-    let append = function(STATISTICS, "pub fn append_population_statistics_v2(");
-    assert!(append.contains("PopulationStatisticsV2Ledger::open_writer(root, bounds)?"));
-    assert!(append.contains("PopulationStatisticsV2Ledger::open_read(root, bounds)?"));
+    // One open per append and per step since D-4764: the door re-reads its
+    // block through the writer's handle and hands that handle to the step.
+    let door = function(STATISTICS, "pub fn append_population_statistics_v2(");
+    assert!(door.contains("append_and_retain_ledger(") && !door.contains("open_read("));
+    let append = function(STATISTICS, "fn append_and_retain_ledger(");
+    assert_eq!(append.matches("open_writer(").count(), 1);
+    assert!(
+        !append.contains("open_read("),
+        "the append reopens its root again; re-measure §154"
+    );
+    assert!(append.contains("ledger.reverify_committed(&committed)?"));
+    let projection = function(STEP3, "fn prepare_admission_statistics_projection_v3(");
+    assert!(
+        !projection.contains("open_read("),
+        "the step opens its Statistics root a third time; re-measure §154"
+    );
 
     let text = flat(section(154));
     for needed in [
         "so the per-candidate summaries cost O(C·(P+S)) in total",
         "never the configured `max_audits` ceiling",
-        "One append through `append_population_statistics_v2` runs two full opens",
-        "A appends to one root cost O(A²) block validations in total",
+        "One append through `append_population_statistics_v2` runs one full open",
+        "A appends to one root cost O(A²) block validations in total, with constant 1",
+        "a step scans its Statistics root once where it scanned three times",
     ] {
         assert!(text.contains(needed), "§154 no longer says `{needed}`");
     }
+    assert!(
+        !text.contains("runs two full opens"),
+        "§154 still prices two opens"
+    );
 }
 
 #[test]

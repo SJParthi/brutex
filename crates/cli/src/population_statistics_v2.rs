@@ -7,8 +7,13 @@
 //! split-derived PBO, White, SPA and candidate-specific Romano--Wolf evidence.
 //!
 //! The public writer accepts only an opaque prepared capability, syncs the raw
-//! block before its Completion, drops the writable handle and freshly reopens
-//! the exact audit read-only.  The production constructor accepts only a sealed
+//! block before its Completion and then re-reads the exact committed block
+//! through the same handle under a current content generation.  In this module
+//! "freshly reopened" means exactly that: re-read and re-validated from disk
+//! under a generation measured after the write, the bytes before the block
+//! proven unchanged since the open's scan validated them (D-4764).  Before
+//! D-4764 the writer dropped its handle and ran a second full read-only open.
+//! The production constructor accepts only a sealed
 //! paired Observation V1 capability, its exact freshly reopened durable audit,
 //! and the two exact Pre-Admission reopen audits.  Caller-authored period rows,
 //! split scores and digests remain unreachable.
@@ -2679,6 +2684,37 @@ impl PopulationStatisticsV2Ledger {
         require_generation(self.lock_generation, &self.lock_file, &self.lock_path)?;
         require_generation(self.data_generation, &self.data_file, &self.data_path)
     }
+
+    /// [`Self::require_unchanged`] that also returns the generation-domain
+    /// digest of the data file's first `cut` bytes, from the same pass.
+    fn require_unchanged_with_prefix(
+        &self,
+        cut: u64,
+    ) -> Result<VerifiedPrefixV2, PopulationStatisticsV2Refusal> {
+        require_generation(self.lock_generation, &self.lock_file, &self.lock_path)?;
+        require_metadata_generation(self.data_generation, &self.data_file, &self.data_path)?;
+        let (observed, digest) = measure_generation(
+            &self.data_file,
+            &self.data_path,
+            self.data_generation.len,
+            cut,
+        )?;
+        if observed != self.data_generation {
+            return Err(format!(
+                "{} changed after population-statistics open; cached audit refused",
+                self.data_path.display()
+            ));
+        }
+        Ok(VerifiedPrefixV2 { len: cut, digest })
+    }
+}
+
+/// The first `len` bytes of the data file, named by their generation-domain
+/// digest, as last proven equal to bytes a scan validated (D-4764).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct VerifiedPrefixV2 {
+    len: u64,
+    digest: [u8; 32],
 }
 
 fn require_admission_projection_source_v3(
@@ -3032,6 +3068,8 @@ fn validate_complete_block(
     first: u64,
     manifest: &PopulationStatisticsManifestV2,
 ) -> Result<PopulationStatisticsV2ReopenAudit, PopulationStatisticsV2Refusal> {
+    #[cfg(test)]
+    BLOCK_VALIDATIONS.with(|count| count.set(count.get().saturating_add(1)));
     let candidates = validate_candidate_records(file, first, manifest)?;
     let returns = validate_period_records(file, first, manifest, &candidates)?;
     validate_split_records(file, first, manifest, &candidates)?;
@@ -3430,9 +3468,10 @@ impl PreparedObservationStatisticsV2 {
         self.link
     }
 
-    /// Appends existing Statistics V2 bytes receipt-last and freshly reopens them.
+    /// Appends existing Statistics V2 bytes receipt-last and re-reads the
+    /// committed block from disk through the writer's handle (D-4764).
     ///
-    /// The reopened audit is checked again against both exact Pre-Admission
+    /// The re-read audit is checked again against both exact Pre-Admission
     /// audits and the detached Observation link before success is returned.
     ///
     /// # Errors
@@ -3444,14 +3483,35 @@ impl PreparedObservationStatisticsV2 {
         root: impl AsRef<Path>,
         bounds: PopulationStatisticsV2Bounds,
     ) -> Result<PopulationStatisticsObservationCommitV2, PopulationStatisticsV2Refusal> {
-        let append = append_population_statistics_v2(root, bounds, &self.prepared)?;
+        self.append_and_retain_reader(root, bounds)
+            .map(|(commit, _reader)| commit)
+    }
+
+    /// [`Self::append_and_reopen`], handing back the ledger whose open and
+    /// re-read produced the commit, so the step-3 Admission V3 projection reads
+    /// through it instead of opening the root again (W2-cli12-1, D-4764).
+    pub(crate) fn append_and_retain_reader(
+        &self,
+        root: impl AsRef<Path>,
+        bounds: PopulationStatisticsV2Bounds,
+    ) -> Result<
+        (
+            PopulationStatisticsObservationCommitV2,
+            PopulationStatisticsV2Ledger,
+        ),
+        PopulationStatisticsV2Refusal,
+    > {
+        let (append, reader) = append_and_retain_ledger(root.as_ref(), bounds, &self.prepared)?;
         let audit = append.audit();
         audit.verify_pre_admission_pair(self.nifty_pre_admission, self.banknifty_pre_admission)?;
         self.link.require_reopened_statistics(audit)?;
-        Ok(PopulationStatisticsObservationCommitV2 {
-            statistics: append,
-            link: self.link,
-        })
+        Ok((
+            PopulationStatisticsObservationCommitV2 {
+                statistics: append,
+                link: self.link,
+            },
+            reader,
+        ))
     }
 }
 
@@ -3665,6 +3725,27 @@ fn build_raw_splits(
 thread_local! {
     /// Test-only count of full-ledger scans (one per open) on this thread.
     static STATISTICS_SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only count of complete-block validations (each one re-reads a
+    /// block and reruns its bootstrap) on this thread.
+    static BLOCK_VALIDATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Full Statistics V2 ledger scans run on this thread since the last
+/// [`reset_statistics_scans_for_test`]; test-only, for callers outside this
+/// module that must count the opens one step pays (W2-cli12-1).
+#[cfg(test)]
+pub(crate) fn statistics_scans_for_test() -> u64 {
+    STATISTICS_SCANS.with(std::cell::Cell::get)
+}
+
+/// Zeroes this thread's Statistics V2 scan count; test-only.
+#[cfg(test)]
+pub(crate) fn reset_statistics_scans_for_test() {
+    STATISTICS_SCANS.with(|count| count.set(0));
 }
 
 #[cfg(test)]
@@ -4583,7 +4664,8 @@ fn observation_statistics_link(
     Ok(value)
 }
 
-/// Result of an exact receipt-last append followed by a fresh read-only reopen.
+/// Result of an exact receipt-last append whose committed block was then
+/// re-read from disk under a current generation (D-4764).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PopulationStatisticsV2Append {
     /// New Data/raw rows and then Completion were durably appended.
@@ -4593,7 +4675,7 @@ pub enum PopulationStatisticsV2Append {
 }
 
 impl PopulationStatisticsV2Append {
-    /// Freshly reopened audit produced by either exact branch.
+    /// Re-read audit produced by either exact branch.
     #[must_use]
     pub const fn audit(self) -> PopulationStatisticsV2ReopenAudit {
         match self {
@@ -4607,7 +4689,16 @@ impl PopulationStatisticsV2Ledger {
         &mut self,
         prepared: &PreparedPopulationStatisticsV2,
     ) -> Result<PopulationStatisticsV2Append, PopulationStatisticsV2Refusal> {
-        self.require_unchanged()?;
+        // The prefix a new block lands after: the whole file, or the bytes
+        // before a trailing orphan this append resumes or discards. Its digest
+        // comes out of the same pass that proves the file is still the one the
+        // open's scan validated, and every re-measure after an owned write
+        // must reproduce it (D-4764).
+        let cut = match self.orphan {
+            Some(orphan) => record_offset(orphan.first_record)?,
+            None => self.data_generation.len,
+        };
+        let verified = self.require_unchanged_with_prefix(cut)?;
         if let Some(existing) = self.audits.get(&prepared.manifest.audit_id).copied() {
             let planned = prepared.records(existing.sequence(), existing.first_record)?;
             compare_planned_records(&mut self.data_file, existing.first_record, &planned)?;
@@ -4615,7 +4706,7 @@ impl PopulationStatisticsV2Ledger {
         }
         if let Some(orphan) = self.orphan {
             if orphan.manifest.audit_id == prepared.manifest.audit_id {
-                return self.resume_orphan(prepared, &orphan);
+                return self.resume_orphan(prepared, &orphan, verified);
             }
             // A FOREIGN RECEIPT-LESS ORPHAN IS SCRATCH (D-1905, pop2-4): no
             // Completion ever acknowledged it, and refusing every other audit
@@ -4627,19 +4718,17 @@ impl PopulationStatisticsV2Ledger {
                 &format!("audit {}", hex32(orphan.manifest.audit_id)),
             )?;
             self.orphan = None;
-            self.data_generation =
-                file_generation(&self.data_file, &self.data_path, self.bounds.file_bytes)?;
+            self.remeasure_after_owned_write(verified)?;
         }
         if self.completed_audits >= self.bounds.audits {
             return Err("population-statistics append reached audit bound".to_owned());
         }
         self.bounds.validate_manifest(&prepared.manifest)?;
-        let first = record_count(
-            self.data_file
-                .metadata()
-                .map_err(|why| format!("cannot stat append file: {why}"))?
-                .len(),
-        )?;
+        // The block is planned right after the verified prefix, never after
+        // bytes nothing verified: a file that grew since `verified` was
+        // measured fails the block re-read and the reverify's record count
+        // (D-4764).
+        let first = record_count(verified.len)?;
         let planned = prepared.records(self.completed_audits, first)?;
         let added_bytes = u64_of(planned.len(), "planned records")?
             .checked_mul(POPULATION_STATISTICS_V2_RECORD_STRIDE)
@@ -4698,8 +4787,7 @@ impl PopulationStatisticsV2Ledger {
             .completed_audits
             .checked_add(1)
             .ok_or_else(|| "completed audit count overflowed".to_owned())?;
-        self.data_generation =
-            file_generation(&self.data_file, &self.data_path, self.bounds.file_bytes)?;
+        self.remeasure_after_owned_write(verified)?;
         Ok(PopulationStatisticsV2Append::Written(audit))
     }
 
@@ -4707,6 +4795,7 @@ impl PopulationStatisticsV2Ledger {
         &mut self,
         prepared: &PreparedPopulationStatisticsV2,
         orphan: &OrphanV2,
+        verified: VerifiedPrefixV2,
     ) -> Result<PopulationStatisticsV2Append, PopulationStatisticsV2Refusal> {
         if orphan.manifest.audit_id != prepared.manifest.audit_id {
             return Err(format!(
@@ -4786,9 +4875,122 @@ impl PopulationStatisticsV2Ledger {
             .checked_add(1)
             .ok_or_else(|| "completed audit count overflowed".to_owned())?;
         self.orphan = None;
-        self.data_generation =
-            file_generation(&self.data_file, &self.data_path, self.bounds.file_bytes)?;
+        self.remeasure_after_owned_write(verified)?;
         Ok(PopulationStatisticsV2Append::Written(audit))
+    }
+
+    /// Re-measures the data generation after this handle wrote, and refuses
+    /// unless the bytes before the block it wrote still hash to the digest the
+    /// pre-write check measured over the scan-validated file. A blind
+    /// re-measure would adopt any non-cooperating edit made to an older block
+    /// during the append, which the second full open D-4764 removed used to
+    /// catch.
+    fn remeasure_after_owned_write(
+        &mut self,
+        verified: VerifiedPrefixV2,
+    ) -> Result<(), PopulationStatisticsV2Refusal> {
+        let (observed, prefix) = measure_generation(
+            &self.data_file,
+            &self.data_path,
+            self.bounds.file_bytes,
+            verified.len,
+        )?;
+        if prefix != verified.digest {
+            return Err(format!(
+                "{} changed below byte {} during the population-statistics append; refused",
+                self.data_path.display(),
+                verified.len
+            ));
+        }
+        self.data_generation = observed;
+        Ok(())
+    }
+
+    /// Re-reads one block this handle committed and returns its audit, under
+    /// the shared lock: the generation must be current, the file must end where
+    /// a written block ends (or hold a reused one), the index must hold exactly
+    /// this audit, the block is re-read and recomputed from disk by
+    /// [`validate_complete_block`], the same function a full open runs, and the
+    /// whole file must still match the content generation measured after the
+    /// write. That generation was itself measured only after the bytes before
+    /// the block were proven unchanged since the open's scan, so every byte of
+    /// the file is accounted for without a second full open (W2-cli12-1,
+    /// D-4764). Cost: O(this block + bootstrap) plus one content generation of
+    /// the file (two hash passes).
+    ///
+    /// # Errors
+    ///
+    /// Refuses a changed or replaced file, a physical record count other than
+    /// the committed one, an audit this handle did not index, a block that no
+    /// longer recomputes, any re-read difference, lock or I/O failure.
+    pub(crate) fn reverify_committed(
+        &mut self,
+        committed: &PopulationStatisticsV2Append,
+    ) -> Result<PopulationStatisticsV2ReopenAudit, PopulationStatisticsV2Refusal> {
+        self.lock_file
+            .lock_shared()
+            .map_err(|why| format!("cannot take population-statistics reverify lock: {why}"))?;
+        let result = self.reverify_committed_locked(committed);
+        let released = self
+            .lock_file
+            .unlock()
+            .map_err(|why| format!("cannot release population-statistics reverify lock: {why}"));
+        match (result, released) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(why), _) | (Ok(_), Err(why)) => Err(why),
+        }
+    }
+
+    fn reverify_committed_locked(
+        &mut self,
+        committed: &PopulationStatisticsV2Append,
+    ) -> Result<PopulationStatisticsV2ReopenAudit, PopulationStatisticsV2Refusal> {
+        let expected = committed.audit();
+        require_metadata_generation(self.lock_generation, &self.lock_file, &self.lock_path)?;
+        require_metadata_generation(self.data_generation, &self.data_file, &self.data_path)?;
+        let indexed = self
+            .audits
+            .get(&expected.audit_id())
+            .copied()
+            .ok_or_else(|| {
+                format!(
+                    "population-statistics committed audit {} is absent from this handle's index",
+                    hex32(expected.audit_id())
+                )
+            })?;
+        if indexed != expected {
+            return Err(format!(
+                "population-statistics committed audit {} differs from this handle's index",
+                hex32(expected.audit_id())
+            ));
+        }
+        let block_end = expected
+            .first_record
+            .checked_add(expected.manifest.block_record_count()?)
+            .ok_or_else(|| "population-statistics committed block end overflowed".to_owned())?;
+        let records = record_count(self.data_generation.len)?;
+        let in_place = match committed {
+            PopulationStatisticsV2Append::Written(_) => records == block_end,
+            PopulationStatisticsV2Append::Reused(_) => records >= block_end,
+        };
+        if !in_place {
+            return Err(format!(
+                "population-statistics file holds {records} records; the committed block ends at record {block_end}"
+            ));
+        }
+        let reread = validate_complete_block(
+            &mut self.data_file,
+            expected.first_record,
+            &expected.manifest,
+        )?;
+        if reread != expected {
+            return Err(format!(
+                "population-statistics audit {} did not re-read with exact semantics",
+                hex32(expected.audit_id())
+            ));
+        }
+        self.require_unchanged()?;
+        Ok(reread)
     }
 
     fn append(
@@ -4810,13 +5012,17 @@ impl PopulationStatisticsV2Ledger {
     }
 }
 
-/// Durably appends one opaque prepared block and freshly reopens it read-only.
+/// Durably appends one opaque prepared block and re-reads it from disk.
 ///
 /// The directory must already exist.  The writer never manufactures a missing
 /// configured root.  Data, candidate, period and split records are synced
 /// before the Completion record is appended and synced.  Success is returned
-/// only after dropping the writable ledger, opening a new read-only ledger and
-/// finding the byte-identical recomputed audit.
+/// only after [`PopulationStatisticsV2Ledger::reverify_committed`] re-read and
+/// recomputed exactly the committed block through the writer's own handle and
+/// the whole file still matched the content generation measured after the
+/// write (W2-cli12-1, D-4764). One call is one full open (O(sum over the A
+/// stored audits of (C·(P+S) + bootstrap))) plus O(the committed block); before
+/// D-4764 a second full read-only open followed.
 ///
 /// This is a durability boundary, not a preparation authority: callers cannot
 /// construct [`PreparedPopulationStatisticsV2`] through the public API.
@@ -4831,30 +5037,32 @@ pub fn append_population_statistics_v2(
     bounds: PopulationStatisticsV2Bounds,
     prepared: &PreparedPopulationStatisticsV2,
 ) -> Result<PopulationStatisticsV2Append, PopulationStatisticsV2Refusal> {
-    let root = root.as_ref();
-    let mut writer = PopulationStatisticsV2Ledger::open_writer(root, bounds)?;
-    let committed = writer.append(prepared)?;
-    let expected = committed.audit();
-    drop(writer);
+    append_and_retain_ledger(root.as_ref(), bounds, prepared).map(|(append, _ledger)| append)
+}
 
-    let reopened = PopulationStatisticsV2Ledger::open_read(root, bounds)?
-        .reopen_audit(&expected.audit_id())?
-        .ok_or_else(|| {
-            format!(
-                "population-statistics audit {} disappeared after receipt-last append",
-                hex32(expected.audit_id())
-            )
-        })?;
-    if reopened != expected {
-        return Err(format!(
-            "population-statistics audit {} did not freshly reopen with exact semantics",
-            hex32(expected.audit_id())
-        ));
-    }
-    Ok(match committed {
-        PopulationStatisticsV2Append::Written(_) => PopulationStatisticsV2Append::Written(reopened),
-        PopulationStatisticsV2Append::Reused(_) => PopulationStatisticsV2Append::Reused(reopened),
-    })
+/// The append door's body: ONE open, the append, and a re-read of only the
+/// committed block through the same handle, which is then handed back so a
+/// caller that reads the root next (the step-3 Admission V3 projection) does
+/// not open and re-validate it a third time (W2-cli12-1, D-4764).
+///
+/// The handed-back ledger was opened writable, but its only write path,
+/// `append`, is private to this module, so no caller can write through it.
+fn append_and_retain_ledger(
+    root: &Path,
+    bounds: PopulationStatisticsV2Bounds,
+    prepared: &PreparedPopulationStatisticsV2,
+) -> Result<
+    (PopulationStatisticsV2Append, PopulationStatisticsV2Ledger),
+    PopulationStatisticsV2Refusal,
+> {
+    let mut ledger = PopulationStatisticsV2Ledger::open_writer(root, bounds)?;
+    let committed = ledger.append(prepared)?;
+    let reread = ledger.reverify_committed(&committed)?;
+    let append = match committed {
+        PopulationStatisticsV2Append::Written(_) => PopulationStatisticsV2Append::Written(reread),
+        PopulationStatisticsV2Append::Reused(_) => PopulationStatisticsV2Append::Reused(reread),
+    };
+    Ok((append, ledger))
 }
 
 fn compare_planned_records(
@@ -5699,6 +5907,18 @@ fn file_generation(
     path: &Path,
     max_bytes: u64,
 ) -> Result<FileGenerationV2, PopulationStatisticsV2Refusal> {
+    measure_generation(file, path, max_bytes, 0).map(|(generation, _)| generation)
+}
+
+/// [`file_generation`], also returning the generation-domain digest of the
+/// first `cut` bytes, taken from the first of its two hash passes. A `cut`
+/// past the measured length refuses: the bytes it names are gone.
+fn measure_generation(
+    file: &File,
+    path: &Path,
+    max_bytes: u64,
+    cut: u64,
+) -> Result<(FileGenerationV2, [u8; 32]), PopulationStatisticsV2Refusal> {
     let held_before = file
         .metadata()
         .map_err(|why| format!("cannot stat held {}: {why}", path.display()))?;
@@ -5724,7 +5944,13 @@ fn file_generation(
             path.display()
         ));
     }
-    let content_digest = hash_file(&mut named, path, measured_len)?;
+    if cut > measured_len {
+        return Err(format!(
+            "{} holds {measured_len} bytes, fewer than the {cut} it held when last verified",
+            path.display()
+        ));
+    }
+    let (prefix_digest, content_digest) = hash_file_split(&mut named, path, measured_len, cut)?;
     let repeated_digest = hash_file(&mut named, path, measured_len)?;
     if repeated_digest != content_digest {
         return Err(format!(
@@ -5762,7 +5988,7 @@ fn file_generation(
             path.display()
         ));
     }
-    Ok(generation_of(&held_after, content_digest))
+    Ok((generation_of(&held_after, content_digest), prefix_digest))
 }
 
 #[cfg(unix)]
@@ -5793,12 +6019,44 @@ fn hash_file(
     path: &Path,
     exact_bytes: u64,
 ) -> Result<[u8; 32], PopulationStatisticsV2Refusal> {
+    hash_file_split(file, path, exact_bytes, 0).map(|(_, digest)| digest)
+}
+
+/// One generation-hash read pass over exactly `exact_bytes`, returning the
+/// digest of the first `cut` bytes and of all of them. The first `cut` bytes
+/// feed two hashers from the same buffer, so the file is read once. `cut`
+/// must not exceed `exact_bytes`.
+fn hash_file_split(
+    file: &mut File,
+    path: &Path,
+    exact_bytes: u64,
+    cut: u64,
+) -> Result<([u8; 32], [u8; 32]), PopulationStatisticsV2Refusal> {
     file.seek(SeekFrom::Start(0))
         .map_err(|why| format!("cannot seek {} for generation hash: {why}", path.display()))?;
-    let mut hasher = Hasher::new();
-    hasher.update(GENERATION_DOMAIN);
+    let rest = exact_bytes
+        .checked_sub(cut)
+        .ok_or_else(|| "generation hash cut lies past the measured bytes".to_owned())?;
+    let mut prefix = Hasher::new();
+    prefix.update(GENERATION_DOMAIN);
+    let mut whole = Hasher::new();
+    whole.update(GENERATION_DOMAIN);
+    hash_exact(file, path, &mut [&mut prefix, &mut whole], cut, exact_bytes)?;
+    hash_exact(file, path, &mut [&mut whole], rest, exact_bytes)?;
+    Ok((prefix.finalize(), whole.finalize()))
+}
+
+/// Feeds exactly `bytes` more bytes of `file` into every hasher in `hashers`;
+/// `exact_bytes` only names the generation in the refusal.
+fn hash_exact(
+    file: &mut File,
+    path: &Path,
+    hashers: &mut [&mut Hasher],
+    bytes: u64,
+    exact_bytes: u64,
+) -> Result<(), PopulationStatisticsV2Refusal> {
     let mut buffer = [0_u8; READ_CHUNK_BYTES];
-    let mut remaining = exact_bytes;
+    let mut remaining = bytes;
     while remaining != 0 {
         let requested = usize_of(
             remaining.min(READ_CHUNK_BYTES as u64),
@@ -5817,11 +6075,12 @@ fn hash_file(
                 path.display()
             ));
         }
-        hasher.update(
-            buffer
-                .get(..read)
-                .ok_or_else(|| "generation hash read exceeded buffer".to_owned())?,
-        );
+        let chunk = buffer
+            .get(..read)
+            .ok_or_else(|| "generation hash read exceeded buffer".to_owned())?;
+        for hasher in hashers.iter_mut() {
+            hasher.update(chunk);
+        }
         remaining = remaining
             .checked_sub(
                 u64::try_from(read)
@@ -5829,7 +6088,39 @@ fn hash_file(
             )
             .ok_or_else(|| "generation hash remaining-byte underflowed".to_owned())?;
     }
-    Ok(hasher.finalize())
+    Ok(())
+}
+
+/// The metadata half of [`require_generation`]: the held file and the file the
+/// path names (not followed through a link) must be one inode whose length and
+/// nanosecond modification/change times are the cached ones. It reads no
+/// content.
+fn require_metadata_generation(
+    expected: FileGenerationV2,
+    file: &File,
+    path: &Path,
+) -> Result<(), PopulationStatisticsV2Refusal> {
+    let held = file
+        .metadata()
+        .map_err(|why| format!("cannot stat held {}: {why}", path.display()))?;
+    let named = std::fs::symlink_metadata(path)
+        .map_err(|why| format!("cannot stat named {}: {why}", path.display()))?;
+    #[cfg(unix)]
+    if (held.dev(), held.ino()) != (named.dev(), named.ino()) {
+        return Err(format!("held file no longer names {}", path.display()));
+    }
+    // One comparison of both measurements: on Unix they are one inode.
+    if (
+        generation_of(&held, expected.content_digest),
+        generation_of(&named, expected.content_digest),
+    ) != (expected, expected)
+    {
+        return Err(format!(
+            "{} changed after population-statistics open; cached audit refused",
+            path.display()
+        ));
+    }
+    Ok(())
 }
 
 fn require_generation(
@@ -5837,6 +6128,7 @@ fn require_generation(
     file: &File,
     path: &Path,
 ) -> Result<(), PopulationStatisticsV2Refusal> {
+    require_metadata_generation(expected, file, path)?;
     if file_generation(file, path, expected.len)? != expected {
         return Err(format!(
             "{} changed after population-statistics open; cached audit refused",
@@ -6565,18 +6857,220 @@ mod tests {
         );
     }
 
+    /// Zeroes both test counters and returns a closure reading them.
+    fn counted() -> impl Fn() -> (u64, u64) {
+        STATISTICS_SCANS.with(|count| count.set(0));
+        BLOCK_VALIDATIONS.with(|count| count.set(0));
+        || {
+            (
+                STATISTICS_SCANS.with(std::cell::Cell::get),
+                BLOCK_VALIDATIONS.with(std::cell::Cell::get),
+            )
+        }
+    }
+
+    /// LBE-09 names this test, and invariant rows are append-only, so the name
+    /// stays. What it pinned, two full scans per append, D-4764 removed: it now
+    /// witnesses that one written and one reused append each scan once.
+    /// `one_append_runs_one_full_scan_and_rereads_only_its_block` is the proof.
     #[test]
     fn one_append_runs_two_full_scans_as_section_154_states() {
-        // W2-cli12-1 / D-1682: the cost is documented, not removed.
         let root = TempRoot::new("two-scans");
         STATISTICS_SCANS.with(|count| count.set(0));
         append_population_statistics_v2(root.path(), bounds(), &fixture(5))
             .expect("the first append writes");
-        assert_eq!(STATISTICS_SCANS.with(std::cell::Cell::get), 2);
+        assert_eq!(STATISTICS_SCANS.with(std::cell::Cell::get), 1);
         STATISTICS_SCANS.with(|count| count.set(0));
         append_population_statistics_v2(root.path(), bounds(), &fixture(5))
             .expect("the retry is reused");
-        assert_eq!(STATISTICS_SCANS.with(std::cell::Cell::get), 2);
+        assert_eq!(STATISTICS_SCANS.with(std::cell::Cell::get), 1);
+    }
+
+    #[test]
+    fn one_append_runs_one_full_scan_and_rereads_only_its_block() {
+        // W2-cli12-1: the door opened the ledger twice (the writer's open and
+        // a fresh read-only reopen), so every append re-validated every stored
+        // block twice. It now opens once and re-reads only its own block.
+        // (scans, block validations) for A audits already stored: the open
+        // validates A blocks, a written append validates its new block, and
+        // the reverify re-reads that one block, so A + 2 (A + 1 when reused).
+        let root = TempRoot::new("one-scan");
+        let read = counted();
+        let first = append_population_statistics_v2(root.path(), bounds(), &fixture(5))
+            .expect("the first append writes");
+        assert!(matches!(first, PopulationStatisticsV2Append::Written(_)));
+        assert_eq!(read(), (1, 2), "A = 0: one open, the new block twice");
+
+        let read = counted();
+        let second = append_population_statistics_v2(root.path(), bounds(), &fixture(6))
+            .expect("a second audit writes");
+        assert!(matches!(second, PopulationStatisticsV2Append::Written(_)));
+        assert_eq!(
+            read(),
+            (1, 3),
+            "A = 1: the stored block once, the new block twice"
+        );
+
+        let read = counted();
+        let reused = append_population_statistics_v2(root.path(), bounds(), &fixture(5))
+            .expect("the exact retry is reused");
+        assert!(matches!(reused, PopulationStatisticsV2Append::Reused(_)));
+        assert_eq!(
+            read(),
+            (1, 3),
+            "A = 2 reused: two stored blocks, then the reused block"
+        );
+
+        let orphan_root = TempRoot::new("one-scan-orphan");
+        orphan_fixture(orphan_root.path(), &fixture(2));
+        let read = counted();
+        let resumed = append_population_statistics_v2(orphan_root.path(), bounds(), &fixture(2))
+            .expect("the exact orphan retry completes");
+        assert!(matches!(resumed, PopulationStatisticsV2Append::Written(_)));
+        assert_eq!(read(), (1, 2), "orphan resume: the completed block twice");
+    }
+
+    /// Flips one byte in place at absolute `offset`, without resealing.
+    fn flip_byte(path: &Path, offset: u64) {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .expect("fixture file opens");
+        let mut byte = [0_u8; 1];
+        file.seek(SeekFrom::Start(offset))
+            .and_then(|_| file.read_exact(&mut byte))
+            .expect("fixture byte reads");
+        byte[0] ^= 0x01;
+        file.seek(SeekFrom::Start(offset))
+            .and_then(|_| file.write_all(&byte))
+            .and_then(|()| file.sync_all())
+            .expect("fixture byte writes");
+    }
+
+    #[test]
+    fn a_post_write_remeasure_adopts_only_a_reproduced_prefix() {
+        // D-4764: the removed second full open caught an older block edited by
+        // a non-cooperating writer while this handle appended. The re-measure
+        // after an owned write now refuses unless the bytes below the cut hash
+        // to the digest measured, in the same pass as the unchanged check,
+        // before the write.
+        let root = TempRoot::new("prefix-window");
+        append_population_statistics_v2(root.path(), bounds(), &fixture(5))
+            .expect("first audit writes");
+        let path = root.path().join(DATA_FILE);
+        let mut ledger =
+            PopulationStatisticsV2Ledger::open_writer(root.path(), bounds()).expect("writer opens");
+        let cut = ledger.data_generation.len;
+        assert_eq!(cut, record_offset(14).expect("offset"));
+        let verified = ledger
+            .require_unchanged_with_prefix(cut)
+            .expect("an unchanged file verifies");
+        assert_eq!(verified.len, cut);
+
+        // The split pass agrees with one-shot hashes of the prefix and the file.
+        let mut named = open_file(&path, false, false).expect("named file opens");
+        assert_eq!(
+            hash_file_split(&mut named, &path, cut, cut / 2).expect("split hashes"),
+            (
+                hash_file(&mut named, &path, cut / 2).expect("prefix hashes"),
+                hash_file(&mut named, &path, cut).expect("file hashes")
+            )
+        );
+        assert_eq!(
+            verified.digest,
+            hash_file(&mut named, &path, cut).expect("file hashes"),
+            "the verified prefix of the whole file is the file's content digest"
+        );
+        assert!(
+            measure_generation(&ledger.data_file, &path, cut, cut + 1)
+                .expect_err("a cut past the file refuses")
+                .contains("fewer than the")
+        );
+
+        // An owned write past the cut is adopted.
+        write_bytes(&path, &[0_u8; RECORD_BYTES]);
+        ledger
+            .remeasure_after_owned_write(verified)
+            .expect("an untouched prefix is adopted");
+        assert_eq!(
+            ledger.data_generation.len,
+            cut + POPULATION_STATISTICS_V2_RECORD_STRIDE
+        );
+        let adopted = ledger.data_generation;
+
+        // An edit below the cut is refused and nothing is adopted.
+        flip_byte(&path, record_offset(3).expect("offset") + 40);
+        let why = ledger
+            .remeasure_after_owned_write(verified)
+            .expect_err("an edited prefix is refused");
+        assert!(why.contains("changed below byte"), "{why}");
+        assert_eq!(ledger.data_generation, adopted);
+    }
+
+    #[test]
+    fn reverify_rereads_only_what_this_handle_committed() {
+        let root = TempRoot::new("reverify");
+        let first = append_population_statistics_v2(root.path(), bounds(), &fixture(5))
+            .expect("first audit writes")
+            .audit();
+        append_population_statistics_v2(root.path(), bounds(), &fixture(6))
+            .expect("second audit writes");
+        let path = root.path().join(DATA_FILE);
+        let mut ledger =
+            PopulationStatisticsV2Ledger::open_read(root.path(), bounds()).expect("reader opens");
+
+        assert_eq!(
+            ledger
+                .reverify_committed(&PopulationStatisticsV2Append::Reused(first))
+                .expect("a reused block before the end re-reads"),
+            first
+        );
+        let why = ledger
+            .reverify_committed(&PopulationStatisticsV2Append::Written(first))
+            .expect_err("a written block must end the file");
+        assert!(
+            why.contains("holds 28 records; the committed block ends at record 14"),
+            "{why}"
+        );
+
+        let mut foreign = first;
+        foreign.manifest.audit_id = [0xEE; 32];
+        let why = ledger
+            .reverify_committed(&PopulationStatisticsV2Append::Reused(foreign))
+            .expect_err("an audit this handle did not index");
+        assert!(why.contains("absent from this handle's index"), "{why}");
+
+        let mut differs = first;
+        differs.completion_record_digest = [0x11; 32];
+        let why = ledger
+            .reverify_committed(&PopulationStatisticsV2Append::Reused(differs))
+            .expect_err("an audit unlike the index");
+        assert!(why.contains("differs from this handle's index"), "{why}");
+
+        ledger.audits.insert(first.audit_id(), differs);
+        let why = ledger
+            .reverify_committed(&PopulationStatisticsV2Append::Reused(differs))
+            .expect_err("the disk disagrees with the index");
+        assert!(
+            why.contains("did not re-read with exact semantics"),
+            "{why}"
+        );
+        ledger.audits.insert(first.audit_id(), first);
+
+        // A same-length edit to ANOTHER block, under metadata re-measured to
+        // match (a rewrite inside one timestamp tick): only the content hash
+        // the re-read still runs can see it.
+        flip_byte(&path, record_offset(20).expect("offset") + 40);
+        let metadata = std::fs::metadata(&path).expect("ledger measures");
+        ledger.data_generation = generation_of(&metadata, ledger.data_generation.content_digest);
+        let why = ledger
+            .reverify_committed(&PopulationStatisticsV2Append::Reused(first))
+            .expect_err("the content generation still refuses");
+        assert!(
+            why.contains("changed after population-statistics open"),
+            "{why}"
+        );
     }
 
     #[test]

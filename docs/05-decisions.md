@@ -65025,3 +65025,64 @@ on a live leader would derive a second time and lose the single-flight
 guarantee D-1443 exists for. **Honest limit:** the `Landing` kill depends on
 test order. A rename that sorted a single-flight test ahead of it would
 restore the timeout, so the ordering is pinned in the test's own doc.
+
+### D-4764 — A Statistics V2 append re-reads its block through the writer's handle, and the step reads through it: one full scan per append and per step — 2026-10-09
+
+**What was wrong.** W2-cli12-1: `append_population_statistics_v2` ran two full
+opens, the writer's and a fresh read-only reopen after the writer was dropped.
+Each re-validated every stored block and reran every stored bootstrap. The
+step-3 orchestrator then opened the root a third time for its Admission V3
+projection. One step paid three full scans, and A appends cost O(A²) block
+validations with constant 2. D-1682 stated the cost and kept the reopen.
+
+**Decided.** One open. After the receipt-last write, `reverify_committed`
+re-reads exactly the committed block through the writer's own handle, under the
+shared lock:
+
+- the generation must be current by metadata;
+- a written block must end the file, and a reused one must lie inside it;
+- the index must hold exactly this audit;
+- `validate_complete_block`, the function an open runs per block, must
+  recompute it to the identical audit;
+- the whole file must still match its content generation.
+
+The door hands that handle back with the commit (`append_and_retain_reader`),
+and the orchestrator's Admission V3 projection reads through it instead of
+opening the root again. "Freshly reopened" in this module now means re-read and
+re-validated from disk under a generation measured after the write, with every
+byte before the block proven unchanged since the open's scan validated it. No
+byte, format, identity or projection type changes.
+
+That last clause closes a hole the removed second open used to cover. A blind
+re-measure after an owned write would adopt a non-cooperating edit made to an
+older block during the append. The pre-write check now returns, from the same
+hash pass, the digest of the bytes the block lands after: the whole file, or
+the bytes before a trailing orphan. Every re-measure after a write must
+reproduce that digest or refuses, and the block is planned at that verified
+length, never after bytes nothing verified.
+
+Cost: one full open, O(sum over the A stored audits of (C·(P+S) +
+bootstrap)), plus two validations of the new block and a constant number of
+whole-file generation hash passes with no recomputation. A appends cost O(A²)
+block validations with constant 1, and a step scans its root once where it
+scanned three times. `docs/06-limits.md` §154 states it.
+
+**Supersedes** D-1682's rejection of the writer-handle re-read and the claim in
+LBE-09 that an append runs two full scans. The two tests LBE-09 names keep their
+names, because invariant rows are append-only, and now pin one scan; L1FE-01 to
+L1FE-04 state what holds.
+
+**Rejected.** Re-measuring the generation after the write without the prefix
+digest: it adopts edits made during the append. A sealed verified-prefix
+sidecar letting an open skip recomputing unchanged blocks: a new authority,
+behind an unkeyed seal an adversary with write access could re-forge.
+
+Tests: `cli::population_statistics_v2::tests::one_append_runs_one_full_scan_and_rereads_only_its_block`
+(failed first on the unfixed door: "A = 0: one open, the new block twice",
+left (2, 2), right (1, 2)),
+`cli::step3_orchestrator::tests::stored_pair_commits_observation_and_statistics_then_reuses_exact_bytes`
+(failed first: "one Statistics V2 scan per written step", left 3, right 1),
+`cli::population_statistics_v2::tests::one_append_runs_two_full_scans_as_section_154_states`,
+`cli::population_statistics_v2::tests::a_post_write_remeasure_adopts_only_a_reproduced_prefix`,
+`cli::population_statistics_v2::tests::reverify_rereads_only_what_this_handle_committed`,
+`cli::ledger_append_lookup_costs::section_154_states_index_reads_the_bounded_reserve_and_the_two_open_append`.

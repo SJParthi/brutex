@@ -8152,15 +8152,27 @@ audit index for at most the records the file holds, never the configured
 `max_audits` ceiling: before D-1682 every open, empty or not, reserved
 `max_audits` slots (production passes 1<<24) before anything was counted.
 
-One append through `append_population_statistics_v2` runs two full opens: the
-writer's, then a fresh read-only reopen after the writer is dropped. Each full
-open validates every stored block and reruns every stored block's bootstrap
-procedures, so one append costs two passes of O(sum over the A stored audits of
-(C·(P+S) + bootstrap)) plus the new block, and A appends to one root cost
-O(A²) block validations in total. The step-3 orchestrator then opens the root
-once more for its Admission V3 projection. D-1682 keeps the fresh reopen,
-because the Observation link and every projection type name a freshly
-reopened audit as their source; the cost is stated here instead.
+One append through `append_population_statistics_v2` runs one full open, the
+writer's. After the receipt-last write it re-reads only the committed block
+through the same handle (`reverify_committed`, which runs
+`validate_complete_block`, the function an open runs per block), and the whole
+file must still match a content generation measured after the write. That
+generation is adopted only when the bytes the block landed after reproduce the
+digest the pre-write check measured, in the same hash pass, over the file the
+open's scan validated, so a non-cooperating edit to an older block made during
+the append is refused rather than adopted. A full open validates every stored
+block and reruns every stored block's bootstrap procedures, so one append costs
+one pass of O(sum over the A stored audits of (C·(P+S) + bootstrap)), plus two
+validations of the new block and a constant number of whole-file generation
+hash passes with no recomputation, and A appends to one root cost O(A²) block
+validations in total, with constant 1 where it was 2. The step-3 orchestrator
+reads its Admission V3 projection through that same handle, so a step scans its
+Statistics root once where it scanned three times (W2-cli12-1, D-4764). Before
+D-4764 the door dropped the writer and ran a second full read-only open, and
+the orchestrator opened the root a third time; D-1682 had kept that because
+the Observation link and every projection type name a freshly reopened audit.
+D-4764 defines "freshly reopened" as re-read and re-validated from disk under a
+generation measured after the write; no byte, identity or type changes.
 
 The eight focused tests use controlled, test-private source rows. The public
 API can durably append and freshly reopen only an opaque prepared capability;

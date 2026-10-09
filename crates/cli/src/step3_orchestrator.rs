@@ -2495,8 +2495,11 @@ pub(crate) fn commit_stored_observation_statistics_v2(
         "before Statistics V2 receipt-last append/reopen",
     )?;
     roots.require_same("before Statistics V2 receipt-last append/reopen")?;
-    let statistics = prepared_statistics
-        .append_and_reopen(roots.statistics.path(), statistics_bounds)
+    // The writer's own handle comes back with the commit and is the Admission
+    // V3 reader below: the root is scanned once per step, not three times
+    // (W2-cli12-1, D-4764).
+    let (statistics, statistics_reader) = prepared_statistics
+        .append_and_retain_reader(roots.statistics.path(), statistics_bounds)
         .map_err(|why| format!("Step 3 Statistics V2 commit refused: {why}"))?;
     roots.require_same("after Statistics V2 receipt-last append/reopen")?;
     require_exact_stored_source_root_pair_v2(
@@ -2518,11 +2521,11 @@ pub(crate) fn commit_stored_observation_statistics_v2(
         "after final Observation-to-Statistics projection revalidation",
     )?;
     let (statistics_reader, admission_projection) = prepare_admission_statistics_projection_v3(
+        statistics_reader,
         &roots,
         &projection,
         &nifty_source,
         &banknifty_source,
-        statistics_bounds,
     )?;
 
     Ok(CommittedStoredObservationStatisticsV2 {
@@ -2540,12 +2543,15 @@ pub(crate) fn commit_stored_observation_statistics_v2(
     })
 }
 
+/// Scans the complete committed family through `reader`, the handle whose open
+/// and re-read produced the Statistics commit (D-4764), rather than opening the
+/// root a third time.
 fn prepare_admission_statistics_projection_v3(
+    mut reader: PopulationStatisticsV2Ledger,
     roots: &AdmittedObservationStatisticsRootsV2,
     projection: &PopulationStatisticsV2ProjectionSource,
     nifty_source: &CommittedStoredCandidatePreAdmissionV1,
     banknifty_source: &CommittedStoredCandidatePreAdmissionV1,
-    statistics_bounds: PopulationStatisticsV2Bounds,
 ) -> Result<
     (
         PopulationStatisticsV2Ledger,
@@ -2553,11 +2559,6 @@ fn prepare_admission_statistics_projection_v3(
     ),
     Step3OrchestratorRefusal,
 > {
-    let mut reader =
-        PopulationStatisticsV2Ledger::open_read(roots.statistics.path(), statistics_bounds)
-            .map_err(|why| {
-                format!("Step 3 Admission V3 Statistics read-only reopen refused: {why}")
-            })?;
     let authority = reader
         .prepare_admission_projection_v3(projection)
         .map_err(|why| {
@@ -5533,6 +5534,7 @@ mod tests {
             &long,
             &short,
         )?;
+        crate::population_statistics_v2::reset_statistics_scans_for_test();
         let mut first = commit_stored_observation_statistics_v2(
             first_nifty,
             first_banknifty,
@@ -5542,6 +5544,14 @@ mod tests {
             statistics_bounds,
             procedure,
         )?;
+        // W2-cli12-1: the step scanned the Statistics root three times (the
+        // writer's open, a fresh reopen, and the Admission V3 reader's open).
+        // The writer's handle is now the reader, so the step scans it once.
+        assert_eq!(
+            crate::population_statistics_v2::statistics_scans_for_test(),
+            1,
+            "one Statistics V2 scan per written step"
+        );
 
         assert!(matches!(
             first.observation_commit(),
@@ -6022,6 +6032,7 @@ mod tests {
             &long,
             &short,
         )?;
+        crate::population_statistics_v2::reset_statistics_scans_for_test();
         let mut retry = commit_stored_observation_statistics_v2(
             retry_nifty,
             retry_banknifty,
@@ -6031,6 +6042,11 @@ mod tests {
             statistics_bounds,
             procedure,
         )?;
+        assert_eq!(
+            crate::population_statistics_v2::statistics_scans_for_test(),
+            1,
+            "one Statistics V2 scan per reused step"
+        );
         assert!(matches!(
             retry.observation_commit(),
             ObservationAuthorityCommitV1::Reused(_)
