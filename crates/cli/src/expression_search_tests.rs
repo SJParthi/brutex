@@ -612,3 +612,62 @@ fn an_exhausted_rerun_publishes_no_further_checkpoint() -> Result<(), String> {
     );
     Ok(())
 }
+
+/// **`expression-backtest-stored` exits `MISUSED` with the usage for an
+/// argument it does not understand, and `FAILED` without it for work it could
+/// not do.** R1286-cli-04, D-4100.
+///
+/// The verb's own exit code was asserted nowhere: the P8-03 table names
+/// `expression-search-stored` but not the priced verb beside it. Each line is
+/// dispatched as the binary dispatches it. A malformed search argument (an
+/// unknown feed, month 13), a malformed pricing argument (`HORIZON` 0,
+/// `GRID_STEP_PPM` 0) and a malformed pricing knob are each `MISUSED` (2);
+/// year 1999, a month no feed holds, is the work's refusal and `FAILED` (1).
+/// Neither is `OK` (0). Knobs are cleared under the serial lock, because the
+/// pricing plan reads them and a malformed one is itself a misuse.
+#[test]
+fn the_priced_verb_exits_misused_for_its_arguments_and_failed_for_its_work() {
+    let _serial = crate::knobs::serially();
+    crate::knobs::clear_all();
+    let words =
+        |line: &str| -> Vec<String> { line.split_whitespace().map(str::to_owned).collect() };
+    for line in [
+        "expression-backtest-stored nosuchfeed NIFTY 1min 2026 1 all 1 1 1 3 1 100",
+        "expression-backtest-stored zerodha NIFTY 1min 2026 13 all 1 1 1 3 1 100",
+        "expression-backtest-stored zerodha NIFTY 1min 2026 1 all 1 1 1 0 1 100",
+        "expression-backtest-stored zerodha NIFTY 1min 2026 1 all 1 1 1 3 1 0",
+    ] {
+        let mut out = String::new();
+        assert_eq!(
+            crate::dispatch(&words(line), &mut out),
+            crate::MISUSED,
+            "{line}:\n{out}"
+        );
+        assert!(out.starts_with("refused: "), "{line}:\n{out}");
+        assert!(
+            out.contains(crate::USAGE),
+            "a misuse carries the usage: {line}"
+        );
+    }
+    let line = "expression-backtest-stored zerodha NIFTY 1min 1999 1 all 1 1 1 3 1 100";
+    let mut out = String::new();
+    assert_eq!(
+        crate::dispatch(&words(line), &mut out),
+        crate::FAILED,
+        "{line}:\n{out}"
+    );
+    assert!(out.starts_with("refused: "), "{out}");
+    assert!(
+        !out.contains(crate::USAGE),
+        "a refused job is not a misuse:\n{out}"
+    );
+    crate::knobs::set("BRUTEX_MIN_WIN_RATE_BP", "20000");
+    let mut out = String::new();
+    assert_eq!(
+        crate::dispatch(&words(line), &mut out),
+        crate::MISUSED,
+        "a malformed pricing knob is refused before any work:\n{out}"
+    );
+    assert!(out.contains("BRUTEX_MIN_WIN_RATE_BP"), "{out}");
+    crate::knobs::clear_all();
+}
