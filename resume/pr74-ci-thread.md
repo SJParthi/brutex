@@ -296,3 +296,16 @@ check in just after the 5-hour reset, resume. Weekly: save at 93%, stop at 98%.
 - Open, not fixed: crates/cli/build_provenance.rs watches the repo root, so every local cargo
   call rebuilds cli (~6 min). CI copy mode is unaffected. Needs its own decision.
 - Usage at 10:25 UTC: 5-hour 80%, weekly 76% (coordinator): no new agents.
+
+## 2026-10-09 14:25 UTC — CI on ff390a4f; combined sha held back
+- CI run 37919296478 on ff390a4f: Gate W, 1+2, 3-6, 8, Coverage GREEN. Gate 18 shards running.
+- Merge-leftover sent claude/project-thread-lx6ptl @ 614fdc4b (audit paused head 8102ca76 on
+  bff477f0 + D-4659..D-4662). Not pushed: language-purity gates 1d, 12, 21, 23 fail on it and on
+  the audit's own 8102ca76 (audit open items), and a push would cancel the running Gate 18.
+- Trial merge onto ff390a4f conflicts in 5 files: cli/src/lib.rs (keep both test modules),
+  cli/src/selection_v6_tests.rs (keep both tests), docs/04, docs/05 (keep both tails), and
+  runner/src/significance.rs, which needs reconciling: audit D-4505 adds STUDENT_DF_CEILING
+  = 10,000,000 (bar AT the ceiling past it) while D-4150's tests check df up to 100,000,000 and
+  import turning_point. Re-run the R1286-rest-01/-02 tests after resolving.
+- Plan: wait for Gate 18 on ff390a4f and the audit's final sha; then merge both once, validate,
+  push. Coordinator told (14:25).
