@@ -66446,3 +66446,35 @@ unopenable root, an existing `captures/` under the same root (nothing is
 said), and a clean pass with nothing counted as refused. Two new rows in
 `emit_sites` drive the shipped recorders and read both events back from a
 file. With the emit removed, that test fails. Proof: FXA-05.
+
+### D-4415 — The lake reader refuses a dictionary-encoded page that has no dictionary before it — 2026-10-09
+
+**Finding (satk-9, medium).** A chunk starts at `dictionary_page_offset`, or
+at `data_page_offset` when the footer has none. If a footer loses its
+dictionary offset, the chunk starts past the dictionary. `parquet`'s value
+decoder then `expect`s a dictionary it was never given ("Decoder for dict
+should have been set", `parquet` 59.2 `decoder.rs:213`), and
+`[profile.release]` turns that panic into an abort. The audit reached it with
+one flipped footer byte: 8 of the single-byte flips of a 1,923-byte
+dictionary file panicked.
+
+**Decision.** `LakePageReader` records whether its chunk has handed out a
+dictionary page. A `PLAIN_DICTIONARY` or `RLE_DICTIONARY` data page with no
+dictionary before it is refused as a `ParquetError::General` naming the
+encoding and the missing dictionary, and the caller surfaces it as
+`LakeError::PageDecode` naming the column. The check is one boolean per page.
+
+The suggested footer-level check is not added. It would refuse a chunk whose
+`encodings` list a dictionary encoding while `dictionary_page_offset` is
+absent. But a writer may legally leave that offset unset and put the
+dictionary page at `data_page_offset`. The page walk reads that file
+correctly, and a footer rule would refuse it.
+
+**Evidence.**
+`a_dictionary_chunk_whose_footer_lost_its_dictionary_offset_is_refused_not_panicked`
+drops the offset through `patch_footer` on `volume` and on `open_interest`,
+and gets a named refusal for each.
+`no_single_flipped_byte_in_a_dictionary_file_panics_the_reader` keeps the
+audit's probe. It flips every byte of a 7,907-byte dictionary file with masks
+0x01, 0x80 and 0xff, which is 23,721 reads. Without the check 9 of them
+panicked and both tests failed; with it none panics. Proof: FXA-06.

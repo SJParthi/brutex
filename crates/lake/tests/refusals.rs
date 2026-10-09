@@ -1767,3 +1767,86 @@ fn an_integer_column_annotated_as_anything_but_a_signed_integer_is_refused_by_na
         }
     }
 }
+
+/// A DICTIONARY-ENCODED CHUNK WHOSE FOOTER LOST ITS DICTIONARY OFFSET IS
+/// REFUSED BY NAME, NOT PANICKED ON. satk-9, D-4415.
+///
+/// The reader starts a chunk at `dictionary_page_offset`, or at
+/// `data_page_offset` when the footer has none. A footer that lost the
+/// dictionary offset therefore starts the chunk at its data page, past the
+/// dictionary, and `parquet`'s value decoder then `expect`s a dictionary it was
+/// never given — "Decoder for dict should have been set", a panic that the
+/// release profile's `panic = "abort"` turns into a dead process. The audit
+/// reached it with one flipped footer byte (P28: byte 1,646 xor 0x80). This
+/// drops the offset through `patch_footer`, on `volume` and `open_interest`
+/// separately, and wants the read to come back as a named refusal.
+#[test]
+fn a_dictionary_chunk_whose_footer_lost_its_dictionary_offset_is_refused_not_panicked() {
+    let good = dictionary_cash_file(100);
+    // The control: the same file, footer untouched, reads all of its rows.
+    let batch = read_back("dict-control", &good).expect("the unedited file reads");
+    assert_eq!(batch.len(), 100);
+
+    for (leaf, column) in [(5, "volume"), (OI, "open_interest")] {
+        let cut = patch_footer(&good, |meta| {
+            let chunk = &mut meta.row_groups[0].columns[leaf];
+            let held = chunk.meta_data.as_mut().expect("chunk metadata");
+            assert!(
+                held.dictionary_page_offset.is_some(),
+                "the writer dictionary-encoded {column}, so it has an offset to lose"
+            );
+            held.dictionary_page_offset = None;
+        });
+        let read = std::panic::catch_unwind(|| read_back(&format!("dict-cut-{leaf}"), &cut));
+        let Ok(read) = read else {
+            panic!("{column}: the reader panicked on a missing dictionary offset");
+        };
+        match read {
+            Err(LakeError::PageDecode {
+                column: named,
+                reason,
+            }) => {
+                assert_eq!(named, column, "the refusal names the chunk");
+                assert!(
+                    reason.contains("no dictionary page before it"),
+                    "{column}: {reason}"
+                );
+            }
+            other => panic!("{column}: wanted a named page refusal, got {other:?}"),
+        }
+    }
+}
+
+/// NO SINGLE FLIPPED BYTE ANYWHERE IN A DICTIONARY-ENCODED FILE PANICS THE
+/// READER. satk-9, D-4415.
+///
+/// The audit's probe P27, kept: every byte of a dictionary-encoded file
+/// flipped by three masks, each copy opened and read in full. A refusal is
+/// fine and expected; a read that succeeds is fine (a flipped statistic or an
+/// unused byte changes nothing the reader judges); a panic is the failure,
+/// because in a release build it is an abort. Eight of the audit's flips
+/// panicked before the dictionary check.
+#[test]
+fn no_single_flipped_byte_in_a_dictionary_file_panics_the_reader() {
+    let good = dictionary_cash_file(100);
+    let mut panicked = Vec::new();
+    for at in 0..good.len() {
+        for mask in [0x01_u8, 0x80, 0xff] {
+            let mut bad = good.clone();
+            bad[at] ^= mask;
+            let read = std::panic::catch_unwind(move || {
+                LakeFile::from_bytes(bad).and_then(|file| file.read_all())
+            });
+            if read.is_err() {
+                panicked.push((at, mask));
+            }
+        }
+    }
+    assert!(
+        panicked.is_empty(),
+        "{} of {} flips panicked the reader, first at {:?}",
+        panicked.len(),
+        good.len() * 3,
+        panicked.first()
+    );
+}
