@@ -68216,3 +68216,187 @@ byte-identical. A run is affected only if some money total reached 2^53 paisa
 says an instrument holds, that needs an average of about 7.4 × 10^9 paisa
 (7.4 crore rupees) per bar. That is arithmetic on those two figures, not a
 scan of stored outputs.
+
+### D-4500 — A level exit before an unpriced time exit is priced, under grid cost model V3 — 2026-10-09
+
+**What was observed (audit `lookahead`, high; `r64-5`, medium).** D-1514
+priced a level exit strictly before a hole ON a path and left three
+unpriceable paths block-only in `trade::walk_core`: the horizon bar missing or
+refused (`horizon_bar` answers `None`), the slice or the session's 15:09 proof
+ending before the deadline (`deadline > forced_stamp && !forced.real`), and an
+exit record `round_trip` cannot price. Each pushed `held(.., false, ..)`, and
+every grid door built `block_only: true` from it, so a stop that had closed the
+position at bar N vanished from every cell when a bar after N was the horizon
+minute or when the data stopped after N. Probe `zz_audit_r64_2` on the
+`hole_after_exit` fixture: horizon bar removed, 6 of 6 earlier stop rows lost;
+slice cut two bars after the stop, 6 of 6 lost; the bar before the horizon
+removed, 0 of 6 lost. `docs/06-limits.md` called the three conservative
+"because nothing before a hole was what made them unpriceable"; the hole was
+after the stop. `CLAUDE.md` §3 rule 7.
+
+**The change.**
+
+- `trade::Occupancy` gains `time_unpriced_at`: where the path's own time exit
+  has no price. A missing or refused horizon bar: the first bar at or after
+  the deadline on the path's whole prefix (`trade::deadline_index`, a binary
+  search over at most 1,440 strictly ascending whole-minute bars of one IST
+  day, so at most 12 comparisons whatever the slice length; measured p50 9,
+  p99 10, max 10 over the 375-bar sessions of the `holed` fixture). A cut:
+  `forced.bar + 1`, one past the last held bar. An unpriceable exit record:
+  the exit bar. On each, `priceable_before_hole` is set when the entry is
+  priceable both ways, and `Occupancy::hole_offset` is the earliest of
+  `first_refused`, `first_missing` and `time_unpriced_at`. The amended field
+  docs keep the old sentence and say why it was wrong.
+- `grid::Candidate::timed_at` is `max(time_exit - entry, hole)`, and
+  `pessimistic_offset` and the on-time-exit-bar argument of `ExitChoices::of`
+  read it. They differ only on a cut path, whose time exit is one past its last
+  held bar: a level-less variant stays unpriced (no square-off is manufactured
+  at the data's last minute, RULE 1c), and a target touched on the last held
+  bar is not paired with a time-exit attribution that is not due there.
+- Unchanged: every occupancy extent and `open_until` (a refused variant still
+  blocks to the time exit), the time-exit walk (`Trades::trades`, `eligible`,
+  `signals`, `while_open`, `too_late`), `outcome::forward`, the sweep, and the
+  replay labels of refused paths (`BlockOnly` as before).
+
+**Which results change, and the new version.** Wherever a walk path's time
+exit is unpriced for one of the three reasons and a variant's level exit falls
+strictly before that place, that cell gains the trade (money, counts, MAE,
+drawdown, rows) and may admit a later signal the old block refused. That
+reaches every grid door (`evaluate*`, `with_levels`, `per_trade`,
+`materialize_*`, the resolved-policy and expression grids, walk-forward scoring
+through `validate`) and the V1 replay universe, its candidate paths and every
+digest sealed over them. A slice with none of the three paths is
+byte-identical. Because cell money changed, the grid is a new cost model:
+`exit_grid_policy::printed_ohlcv_cost_model_id_v3` is the one this build
+implements. The V2 identity's value is unchanged and is refused by name,
+`ExitGridErrorV1::SupersededCostModelIdV2`, by resolution and by both resolved
+grids' runtime integrity checks; V1 is still `SupersededCostModelIdV1`. The
+policy digest hashes the id, so every `ExitGridPolicyV1` digest, resolved-grid
+digest and anything sealed over one that this build computes differs from one
+computed before it, on clean data too, and a stored artefact naming V2 is
+refused rather than replayed under arithmetic that did not produce it.
+
+**What the `cli` must change (not built here).** `cli` still names
+`printed_ohlcv_cost_model_id_v2()` as the implemented model, in production at
+`execution_capability.rs` (`exact_execution_law_digest_v1`, line 153) and
+`ledger_all.rs` (line 285), and in fixtures and tests in
+`anchored_search_lineage_v4.rs`, `boolean_candidate_grid.rs`,
+`boolean_candidate_tests.rs`, `candidate_universe.rs`,
+`execution_disposition_v2.rs`, `global_replay.rs`,
+`institutional_evidence.rs`, `ledger_exit_policy_tests.rs`,
+`population_admission_writer.rs`, `selection_v4_authority.rs`,
+`step3_orchestrator.rs` and `stored_data_completeness.rs`. Each must name
+`_v3`, `execution_capability.rs`'s refusal table (line 3833) gains
+`SupersededCostModelIdV2`, and every cli pin that hashes the model id is
+re-pinned. Until then the cli's policies are refused by name, loudly; none is
+replayed under the wrong model.
+
+**What it still does not do.** `grid::money_envelope_fits` reads every bar of
+every occupied path through its exit bar, and a later bar priced so large that
+`max |price| × paths × 4` leaves `i64` refuses the WHOLE grid, every path
+counted in `refused_paths`: a representability refusal of the whole sample,
+loud, and not an exit decision, so it is not made causal here. The legacy
+`grid::evaluate` derives its rung ladders from the time-exit trades' whole-path
+excursions and answers no cell when no time-exit trade exists; a ladder is the
+search grid chosen over the sample, not an exit decision, and the resolved V1
+policy door does not take that path.
+
+**Tests.** `runner::hole_after_exit::a_missing_horizon_bar_after_a_stop_leaves_the_stop_priced`,
+`a_refused_horizon_bar_after_a_stop_leaves_the_stop_priced`,
+`an_unfillable_horizon_record_after_a_stop_leaves_the_stop_priced` and
+`the_data_ending_anywhere_after_a_stop_leaves_the_stop_priced` (every cut from
+the bar after the stop to past its horizon) each fail on the code before this
+decision. `no_row_that_closed_before_a_cut_depends_on_any_bar_after_it` is the
+property itself: for every fifth cut across a session close, a session boundary
+and an open, under a stop, a target and the time exit, the rows that closed
+before the cut are identical with every later bar removed, altered in price, or
+refused; it fails on the old walk and fails again with `timed_at` reduced to the
+span. `runner::trade::tests::each_unpriced_time_exit_is_located_where_its_price_is_absent`,
+`deadline_index_is_the_first_bar_at_or_after_the_deadline_within_twelve_probes`
+(against a brute-force scan, deadlines on, off and outside the minute grid and
+at both `i64` extremes), the amended
+`a_path_held_only_by_a_hole_says_where_it_can_still_be_priced` and
+`hole_offset_is_the_earlier_hole_and_only_on_a_path_priced_before_it`;
+`runner::grid::tests::a_path_cut_before_its_deadline_has_no_time_exit_on_its_last_bar`;
+`runner::exit_grid_policy::tests::a_policy_naming_the_superseded_v1_cost_model_is_refused_by_name`
+and `a_resolved_grid_sealed_under_the_v1_cost_model_is_refused_at_runtime`
+now cover V2 as well; `runner::research_family_readiness::legacy_resolution_identity_matches_the_recorded_pre_extraction_library`
+keeps the V1 and V2 digests as records and pins the four V3 digests from this
+build (not an independent capture).
+
+### D-4507 — An exchange test listing is found whatever its spacing or case — 2026-10-09
+
+**What was observed (audit `satk-1`, low).** `core::vendor::decode_master_row`
+declined a row as `Skip::TestInstrument` when its raw `underlying` or
+`trading_symbol` contained `NSETEST` or `BSETEST`, case-sensitive. The identity
+built from the same field later goes through `collapse_spaces` and
+`Symbol::new`, which remove spaces and upper-case, so an index row spelled
+`NSE TEST`, `BSE TEST 1` or `nsetest` passed the filter and was KEPT as the real
+index `NSETEST`, `BSETEST1` or `NSETEST` (probe P03).
+
+**Decision.** The scan runs on the folded field: `holds_test_marker` copies the
+field into a `[u8; MAX_FIELD_BYTES]` buffer with every ASCII whitespace byte
+removed and every ASCII letter upper-cased, and searches that for either
+marker. It is applied to both fields, as before. It is at least as broad as the
+identity's own normalisation, so no spelling that reaches the store as a
+marker's symbol can pass it. O(1): it runs after `MasterRow::over_wide`, so the
+field is at most 64 bytes and fits the buffer exactly.
+
+**What changes.** Rows whose underlying or trading symbol carries a marker in
+any spacing or case are declined as `TestInstrument` instead of kept. No stored
+format, digest or vocabulary changes. Nothing else in the filter changes: a
+hyphenated `NSE-TEST` is still not a marker, because the identity rule does not
+remove a hyphen either. This supersedes the unmerged D-3152 fix (case only),
+which never reached this tree.
+
+**Tests.** `core::vendor::tests::a_test_marker_is_found_whatever_its_spacing_or_case`
+(eleven spacings and cases on an index row, a contract row and the trading
+symbol, a marker in the last bytes at the 64-byte gate, and near misses and real
+names that must stay kept); it fails on the raw scan.
+
+### D-4508 — A whole number with any number of zero decimals is a whole number; a fraction is refused by name — 2026-10-09
+
+**What was observed (audit `r64-4`, low).** Since D-1570 a JSON number carries
+the vendor's own digits. `rolling::stamp`, `rolling::count` and
+`http::one_number` read a non-integer number through `csv::paisa`, the
+two-decimal price reader, and kept it when the hundredths were a multiple of
+100. A whole number written with three or more decimals (`7.000`,
+`1700000000.000`, `-0.000`) was therefore refused as unreadable, while `7.0` and
+`1.7e9` were accepted (probe `zz_audit_r64_1`), against D-1491's "an integer or
+a whole-number decimal". The same reader multiplied by 100 first, so a whole
+number above `i64::MAX / 100` written with a point was refused too, and every
+refusal read "not a whole number" whatever the reason.
+
+**Decision.** One reader, `http::whole_number`, used by all three. It accepts
+an optional `-`, digits, an optional point followed by at least one digit, and
+an optional `e`/`E` exponent with an optional sign; it is a whole number when no
+non-zero digit lands after the point, at any exponent and with any number of
+zeros. It refuses by name, `NotWhole::{NotDecimal, Fractional, OutOfRange}`,
+and the reason reaches the refusal: `RollingError::Uncountable` and
+`RollingError::Unstampable` gain a `why: &'static str` field, and
+`one_number`'s message ends in the reason. An exponent past `i64` decides by
+its sign (a fraction below, out of range above) and a zero mantissa is zero at
+any exponent. O(text length) in one pass plus at most 19 digit steps; nothing
+is written for digits the exponent moves past the text.
+
+**What changes.** These cells, refused before, are now read: whole numbers
+with three or more zero decimals, `-0.000` (zero), and whole numbers between
+`i64::MAX / 100` and `i64::MAX` written with a point. `i64::MIN` written with a
+point (`-9223372036854775808.0`) is now produced by the reader and is refused
+as the null sentinel in all three callers; `one_number` checks it after both of
+its arms (its old comment said that arm could not produce it, and is amended).
+Fractions, text, booleans, nulls, negatives (for counts) and stamps whose
+microseconds overflow are refused as before, now with their reason. No stored
+format or digest changes: every value now accepted is the integer its text
+states.
+
+**Tests.** `pull::http::tests::a_whole_number_with_any_zero_decimals_reads_and_a_fraction_is_refused_by_name`
+(45 texts: `i64::MAX` and `i64::MIN` with zero decimals, `-0.000`, a hundred
+thousand zeros, exponents on, inside and past the digits and past `i64`, the
+one-past-`i64` neighbours, malformed exponents and points; and the same through
+`one_number` from JSON) and
+`pull::rolling::tests::a_whole_number_with_three_or_more_zero_decimals_is_read_and_refusals_say_why`
+(stamps, volumes and open interest with zero decimals; the reason for a
+fraction, an out-of-range whole, a non-number, the sentinel, a negative and a
+microsecond overflow, and in the displayed message). Both fail on the old
+readers.

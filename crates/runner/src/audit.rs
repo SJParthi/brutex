@@ -1313,6 +1313,22 @@ pub fn walk_forward(out: &mut String, v: &Validated) {
             "PARTIAL -- these folds ranked a truncated candidate set"
         },
     );
+    // THE CLOSURE FLAG, READ AND PRINTED (D-4503, audit W3-runner1-3, c4a-7).
+    // A halted fold's `candidates` are not only truncated: `closed` cannot see
+    // a superset on a level that was never finished, so some of them may be
+    // counted and priced as closed when they are not. Unconditional, like the
+    // row above, so a zero is visible.
+    let unproved = v.closure_unproved_folds();
+    row(
+        out,
+        "  whose closure is UNPROVED",
+        &unproved.to_string(),
+        if unproved == 0 {
+            "every fold's candidates were checked against a complete level above"
+        } else {
+            "marked ? below -- their candidates may include sets that are not closed"
+        },
+    );
     row(
         out,
         "  still positive out of sample",
@@ -1339,7 +1355,13 @@ pub fn walk_forward(out: &mut String, v: &Validated) {
             f.chosen_side.map_or("-", |d| d.as_str()),
             f.train_bars,
             f.test_bars,
-            f.considered,
+            // `?` after the count when this fold's closure is unproved
+            // (D-4503); the row above the table says what that means.
+            format!(
+                "{}{}",
+                f.considered,
+                if f.closure_unproved { "?" } else { "" }
+            ),
             f.in_sample.worst,
             f.out_of_sample.worst,
             // THE COLUMN `held_up` ACTUALLY JUDGES, and it was not on this table.

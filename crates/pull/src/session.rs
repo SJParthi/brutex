@@ -1191,21 +1191,26 @@ impl Window {
         // directly, for every venue and every day, and on 2026-08-03 that
         // became wrong in the one place it matters most.
         //
-        // NSE's CAS change (NSE/CMTR/74466) moved the three segments apart:
-        // the swept INDEX now stops at 15:15, because every share it is
-        // computed from is CAS-eligible and leaves continuous trading then;
-        // cash keeps 15:30; derivatives extend to 15:40. `crate::vendor` had
-        // all three encoded, with citations, in `NSE_INDEX_SESSIONS`,
+        // NSE's CAS change (NSE/CMTR/74466) moved the segments apart from
+        // 2026-08-03: derivatives extend to 15:40 (last bar 15:39); cash and
+        // the swept INDEX keep 15:30 (last bar 15:29). `crate::vendor` has
+        // each encoded, with citations, in `NSE_INDEX_SESSIONS`,
         // `NSE_CASH_SESSIONS` and `NSE_DERIVATIVES_SESSIONS` — and this
         // function never opened them.
         //
-        // So for the two instruments the engine exists to sweep, fifteen
-        // one-minute bars a day from 15:15 to 15:29 were admitted as ordinary
-        // session bars. The charter records what is in them as UNVERIFIED:
-        // the frozen actual index or the indicative auction index, both
-        // published, and only measurement can say which. Either way they are
-        // not continuous-session bars, they went to disk, and §3 rule 8 makes
-        // the month unrewritable.
+        // **Amended by D-4502 (audit satk-4).** This paragraph said the index
+        // "now stops at 15:15, because every share it is computed from is
+        // CAS-eligible", and the next one called its 15:15-15:29 bars "not
+        // continuous-session bars". Neither is what the table this function
+        // reads says. `NSE_INDEX_SESSIONS` keeps 15:30 from 2026-08-03 by the
+        // operator's rule of 2026-08-20 ("the extension applies to futures and
+        // options ALONE ... Nothing else moved"), and the vendors send index
+        // bars through 15:29. 15:15 was an inference from the cash closing
+        // auction about a derived value, not a published trading hour. So an
+        // index bar from 15:15 to 15:29 is KEPT as a session bar, and the
+        // charter's open question -- whether those minutes carry the frozen
+        // index or the indicative auction index -- is still UNVERIFIED and
+        // still a question for measurement, not for this window.
         //
         // Reading the table also removes the second source of truth. The
         // constants remain as the ANCHOR row's value — every table names them

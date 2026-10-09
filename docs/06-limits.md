@@ -15909,6 +15909,26 @@ UNVERIFIED as measurements.
   exit record that cannot be priced; each still blocks to its time exit, the
   conservative extent, because nothing before a hole was what made them
   unpriceable.
+  **Amended by D-4500 (audit `lookahead`, `r64-5`): the last three were not
+  conservative, they were the look-ahead.** Each is a hole AT the time exit,
+  after any stop before it, and blocking the whole path let a missing horizon
+  bar, or the data ending, erase a stop bars earlier (probe `zz_audit_r64_2`:
+  6 of 6 earlier stop rows lost). Since D-4500 a level exit before each is
+  priced; only a level exit at or after a hole stays unpriced.
+- **Unpriced time exits (D-4500).** `Occupancy` grows by one
+  `Option<usize>`. The walk spends, per path whose time exit is unpriced, one
+  `entry_is_priceable` check, and on a missing or refused horizon bar two
+  prefix reads and one binary search over the path's whole prefix: at most
+  1,440 strictly ascending whole-minute bars of one IST day, so at most 12
+  comparisons whatever the slice length. MEASURED as a count, not a time
+  (`runner::trade::tests::deadline_index_is_the_first_bar_at_or_after_the_deadline_within_twelve_probes`):
+  p50 9, p99 10, max 10 comparisons over 375-bar sessions. The grid's
+  `timed_at` is two reads. No time is measured: no bench row covers the walk.
+  **Still not causal, and loud:** `grid::money_envelope_fits` refuses the
+  whole grid when any bar of any held path, later ones included, is priced so
+  large that `max |price| × paths × 4` leaves `i64`; and the legacy
+  `grid::evaluate` places its derived ladder on whole-path excursions of the
+  time-exit trades and answers no cell when there is none.
 ## Two Fibonacci rungs can fire on one bar below an 11-paisa range — D-1861, 4 October 2026
 
 This is a limit on a stated property, not on a cost. On exact levels two rungs

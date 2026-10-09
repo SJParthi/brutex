@@ -190,3 +190,190 @@ fn a_refused_stop_bar_is_never_priced() {
         "no priced row may read the refused stop bar"
     );
 }
+
+// ---------------------------------------------------------------------------
+// D-4500: the three holes D-1514 left open (audit `lookahead`, `r64-5`).
+//
+// D-1514 priced a level exit before a hole ON the path. A path whose own TIME
+// exit had no price for any other reason stayed block-only: its horizon bar
+// missing or refused, the data ending before its deadline, or its exit record
+// unfillable. So a stop at bar N still vanished when a bar after N was the
+// horizon minute, or when the data simply stopped after N. Probe
+// `zz_audit_r64_2` measured 6 of 6 earlier stop rows lost both ways.
+// ---------------------------------------------------------------------------
+
+/// Every chosen exit the prefix property is checked under: the stop, a target
+/// near enough to be touched, and the level-less time exit.
+const TARGET: Chosen = Chosen {
+    stop: None,
+    target: Some(0),
+    tsl: None,
+    ttp: None,
+};
+
+/// [`rows`] with a target rung near enough to fire inside a hold.
+fn rows_near(bars: &[Candle], chosen: Chosen) -> Vec<TradeRow> {
+    let (stops, targets, trails) = (ladder(300), ladder(600), ladder(900_000));
+    let column = Column::build(bars, &mut evaluator());
+    per_trade(
+        bars,
+        &column,
+        &ConditionMask::ZERO,
+        Horizon::bars(HOLD).expect("a non-zero horizon"),
+        Side::Long,
+        Ladders {
+            stops: &stops,
+            targets: &targets,
+            trails: &trails,
+        },
+        chosen,
+    )
+    .map_or_else(Vec::new, |(_, rows)| rows)
+}
+
+/// The probes: early stop exits on the clean fixture, each with its horizon
+/// bar `entry + HOLD` inside the slice.
+fn probes(bars: &[Candle]) -> Vec<TradeRow> {
+    let found = early_stops(&rows(bars, STOP));
+    assert!(
+        found.len() >= 3,
+        "the fixture must hold stop exits well inside their hold: {}",
+        found.len()
+    );
+    found
+}
+
+/// The stop `probe` is still a row, unchanged, after `damage` at `at`, and
+/// every row that closed before `at` is unchanged.
+fn stays(bars: &[Candle], damaged: &[Candle], probe: TradeRow, at: usize, what: &str) {
+    let after = rows(damaged, STOP);
+    assert!(
+        after.contains(&probe),
+        "{what} at {at}, after a stop that closed at {}: the stop must stay priced, unchanged",
+        probe.exit_bar
+    );
+    assert_eq!(
+        decided_before(&after, at),
+        decided_before(&rows(bars, STOP), at),
+        "{what} at {at}: every trade that closed before it is unchanged"
+    );
+}
+
+#[test]
+fn a_missing_horizon_bar_after_a_stop_leaves_the_stop_priced() {
+    let bars = choppy();
+    for probe in probes(&bars) {
+        let horizon = probe.entry_bar.saturating_add(HOLD as usize);
+        let mut damaged = bars.clone();
+        damaged.remove(horizon);
+        stays(&bars, &damaged, probe, horizon, "a missing horizon bar");
+    }
+}
+
+#[test]
+fn a_refused_horizon_bar_after_a_stop_leaves_the_stop_priced() {
+    let bars = choppy();
+    for probe in probes(&bars) {
+        let horizon = probe.entry_bar.saturating_add(HOLD as usize);
+        let mut damaged = bars.clone();
+        let bar = damaged.get_mut(horizon).expect("inside the slice");
+        bar.close = bar.high.saturating_add(1);
+        stays(&bars, &damaged, probe, horizon, "a refused horizon bar");
+    }
+}
+
+/// The horizon record accepted by the evaluator but unfillable: a high under
+/// one tick, which `costs::fill::Bar` refuses. The walk's `round_trip` then has
+/// no exit price, and only that record is the hole.
+#[test]
+fn an_unfillable_horizon_record_after_a_stop_leaves_the_stop_priced() {
+    let bars = choppy();
+    for probe in probes(&bars) {
+        let horizon = probe.entry_bar.saturating_add(HOLD as usize);
+        let mut damaged = bars.clone();
+        let bar = damaged.get_mut(horizon).expect("inside the slice");
+        (bar.open, bar.high, bar.low, bar.close) = (3, 4, 2, 3);
+        let column = Column::build(&damaged, &mut evaluator());
+        let accepted = column.acceptance().expect("a checked column");
+        assert_eq!(
+            accepted.get(horizon),
+            Some(&true),
+            "premise: the evaluator accepts the sub-tick record, so only the fill refuses it"
+        );
+        stays(
+            &bars,
+            &damaged,
+            probe,
+            horizon,
+            "an unfillable horizon record",
+        );
+    }
+}
+
+/// The data ending at EVERY bar after a stop, up to and past its horizon.
+#[test]
+fn the_data_ending_anywhere_after_a_stop_leaves_the_stop_priced() {
+    let bars = choppy();
+    for probe in probes(&bars) {
+        let horizon = probe.entry_bar.saturating_add(HOLD as usize);
+        for cut in probe.exit_bar.saturating_add(1)..=horizon.saturating_add(1) {
+            let damaged = bars.get(..cut).expect("inside the slice").to_vec();
+            stays(&bars, &damaged, probe, cut, "the data ending");
+        }
+    }
+}
+
+/// THE PREFIX PROPERTY ITSELF, under a stop, a target and the time exit: for
+/// every cut `c` across a session close and the open of the next, the rows
+/// that closed before `c` are identical whether the bars from `c` on are
+/// (a) removed, (b) altered in price, or (c) refused. An exit decided at bar
+/// N is decided by bars `0..=N`. `CLAUDE.md` §3 rule 7.
+#[test]
+fn no_row_that_closed_before_a_cut_depends_on_any_bar_after_it() {
+    let bars = choppy();
+    let clean: Vec<Vec<TradeRow>> = [STOP, TARGET, TIME]
+        .into_iter()
+        .map(|chosen| rows_near(&bars, chosen))
+        .collect();
+    assert!(
+        clean.iter().all(|rows| rows.len() >= 10),
+        "the fixture must trade under every chosen exit: {:?}",
+        clean.iter().map(Vec::len).collect::<Vec<_>>()
+    );
+    let mut compared = 0_usize;
+    // From forty bars before the end of the sixth session, past its 15:09
+    // square-off, to an hour into the seventh: a close, a boundary, an open.
+    for cut in (6 * BARS_PER_SESSION - 40..7 * BARS_PER_SESSION + 60).step_by(5) {
+        let removed = bars.get(..cut).expect("inside").to_vec();
+        let mut altered = bars.clone();
+        for bar in altered.get_mut(cut..).unwrap_or_default() {
+            // A different later market: every later bar moved, still a valid
+            // bar the evaluator accepts.
+            let shift = (bar.high - bar.low).max(1);
+            bar.open = bar.open.saturating_add(shift);
+            bar.high = bar.high.saturating_add(shift.saturating_mul(2));
+            bar.low = bar.low.saturating_add(shift);
+            bar.close = bar.close.saturating_add(shift);
+        }
+        let mut refused = bars.clone();
+        for bar in refused.get_mut(cut..).unwrap_or_default() {
+            bar.close = bar.high.saturating_add(1);
+        }
+        for (chosen, before) in [STOP, TARGET, TIME].into_iter().zip(&clean) {
+            let want = decided_before(before, cut);
+            for (later, what) in [
+                (&removed, "removed"),
+                (&altered, "altered"),
+                (&refused, "refused"),
+            ] {
+                assert_eq!(
+                    decided_before(&rows_near(later, chosen), cut),
+                    want,
+                    "{chosen:?}: bars from {cut} on {what} moved a row that closed before them"
+                );
+                compared = compared.saturating_add(want.len());
+            }
+        }
+    }
+    assert!(compared > 1_000, "the property was exercised: {compared}");
+}

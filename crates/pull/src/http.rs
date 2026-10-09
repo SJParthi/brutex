@@ -1531,6 +1531,160 @@ pub(crate) fn number_text(number: &serde_json::Number) -> Option<String> {
     Some(out)
 }
 
+/// Why a JSON number is not a whole `i64` (audit r64-4, D-4508).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NotWhole {
+    /// The text is not an optional `-`, decimal digits, an optional point
+    /// with digits after it, and an optional `e`/`E` exponent.
+    NotDecimal,
+    /// A non-zero digit falls after the point: a fraction, not a whole number.
+    Fractional,
+    /// A whole number, and outside `i64`.
+    OutOfRange,
+}
+
+impl NotWhole {
+    /// The reason in words, for a refusal that names it.
+    pub(crate) const fn reason(self) -> &'static str {
+        match self {
+            Self::NotDecimal => "it is not a decimal number",
+            Self::Fractional => "it has a non-zero digit after the point, so it is a fraction",
+            Self::OutOfRange => "it is a whole number outside i64",
+        }
+    }
+}
+
+/// A JSON number that is exactly a whole number, as an `i64`, or the reason
+/// it is not (audit r64-4, D-4508).
+///
+/// # Why the price reader could not do this
+///
+/// Since D-1570 a [`serde_json::Number`] carries the vendor's own digits, so a
+/// whole count written `7.000` arrives as `7.000` rather than as an `f64` that
+/// printed `7.0`. The count and stamp readers sent that text through
+/// [`crate::csv::paisa`], a TWO-decimal price reader, and a third decimal is a
+/// refusal there: `7.000`, `1700000000.000` and `-0.000` were refused as
+/// unreadable while `7.0` and `1.7e9` were accepted. D-1491 accepts a
+/// whole-number decimal, and that reader also multiplied by 100 first, so a
+/// whole number above `i64::MAX / 100` written with a point was refused as well.
+///
+/// # What this accepts
+///
+/// Any number of digits after the point, so long as every one is zero, and
+/// any exponent: `7.000`, `7.` followed by a hundred thousand zeros, `0.7e1`,
+/// `-0.000` (zero), `9223372036854775807.000` and `-9223372036854775808.0`
+/// (the caller decides whether `i64::MIN` is legal for its field). A non-zero
+/// digit after the point, wherever the exponent puts it, is [`NotWhole::Fractional`].
+/// A zero mantissa is zero at any exponent, even one past `i64`.
+///
+/// # Cost
+///
+/// O(text length) in one pass, plus at most 19 digit steps to accumulate the
+/// magnitude: the text is the cell the body already holds, bounded by the
+/// response cap, and nothing is allocated beyond `to_string`. No exponent
+/// widens the work: digits the exponent moves past the text are zeros that
+/// are counted, not written.
+pub(crate) fn whole_number(number: &serde_json::Number) -> Result<i64, NotWhole> {
+    whole_text(&number.to_string())
+}
+
+/// [`whole_number`] on the vendor's text itself.
+fn whole_text(text: &str) -> Result<i64, NotWhole> {
+    let (mantissa, exponent) = match text.find(['e', 'E']) {
+        None => (text, None),
+        Some(at) => (
+            text.get(..at).ok_or(NotWhole::NotDecimal)?,
+            Some(
+                text.get(at.saturating_add(1)..)
+                    .ok_or(NotWhole::NotDecimal)?,
+            ),
+        ),
+    };
+    // An exponent, when there is one, is a sign and digits; `7e` is not `7`.
+    if exponent.is_some_and(|exponent| !exponent_reads(exponent)) {
+        return Err(NotWhole::NotDecimal);
+    }
+    let (negative, unsigned) = match mantissa.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, mantissa),
+    };
+    let (whole, fraction) = match unsigned.split_once('.') {
+        Some((whole, fraction)) if !fraction.is_empty() => (whole, fraction),
+        Some(_) => return Err(NotWhole::NotDecimal),
+        None => (unsigned, ""),
+    };
+    let decimal = |part: &str| part.bytes().all(|byte| byte.is_ascii_digit());
+    if whole.is_empty() || !decimal(whole) || !decimal(fraction) {
+        return Err(NotWhole::NotDecimal);
+    }
+    // The digits as one run, `whole` then `fraction`, with the point after
+    // `whole.len()` of them before the exponent moves it.
+    let digit = |at: usize| {
+        whole
+            .as_bytes()
+            .get(at)
+            .or_else(|| fraction.as_bytes().get(at.checked_sub(whole.len())?))
+            .map_or(0, |byte| byte.saturating_sub(b'0'))
+    };
+    let width = whole.len().saturating_add(fraction.len());
+    // The first and last non-zero digits. All zero is zero at any exponent.
+    let mut first = None;
+    let mut last = 0_usize;
+    for at in 0..width {
+        if digit(at) != 0 {
+            first = first.or(Some(at));
+            last = at;
+        }
+    }
+    let Some(first) = first else {
+        return Ok(0);
+    };
+    // Where the point lands, in digits from the start of the run. An exponent
+    // past `i64` puts it past every digit (a magnitude past `i64`) or before
+    // every digit (a fraction), and either answer is decided by its sign.
+    let shift: i128 = match exponent.map(|exponent| (exponent, exponent.parse::<i64>())) {
+        None => 0,
+        Some((_, Ok(shift))) => i128::from(shift),
+        Some((exponent, Err(_))) if exponent.starts_with('-') => {
+            return Err(NotWhole::Fractional);
+        }
+        Some(_) => return Err(NotWhole::OutOfRange),
+    };
+    let point = i128::try_from(whole.len())
+        .map_err(|_| NotWhole::OutOfRange)?
+        .saturating_add(shift);
+    let first_at = i128::try_from(first).map_err(|_| NotWhole::OutOfRange)?;
+    let last_at = i128::try_from(last).map_err(|_| NotWhole::OutOfRange)?;
+    if last_at >= point {
+        return Err(NotWhole::Fractional);
+    }
+    // `|i64::MIN|` has nineteen digits, so a twentieth is out of range
+    // whatever it is, and nineteen bounds the loop below.
+    if point.saturating_sub(first_at) > 19 {
+        return Err(NotWhole::OutOfRange);
+    }
+    let mut magnitude: i128 = 0;
+    let mut at = first_at;
+    while at < point {
+        let place = usize::try_from(at).map_err(|_| NotWhole::OutOfRange)?;
+        magnitude = magnitude
+            .saturating_mul(10)
+            .saturating_add(i128::from(digit(place)));
+        at = at.saturating_add(1);
+    }
+    let signed = if negative { -magnitude } else { magnitude };
+    i64::try_from(signed).map_err(|_| NotWhole::OutOfRange)
+}
+
+/// Whether an exponent is an optional sign and at least one decimal digit.
+fn exponent_reads(exponent: &str) -> bool {
+    let digits = exponent
+        .strip_prefix('-')
+        .or_else(|| exponent.strip_prefix('+'))
+        .unwrap_or(exponent);
+    !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 /// One price value, whatever shape carried it.
 ///
 /// Shared by both response shapes so a rupee is converted the same way whether
@@ -2221,36 +2375,42 @@ fn kept<'a>(
 /// reachable branch to check, and an unreachable branch is a coverage hole with
 /// a comment on it.
 ///
+/// **Amended by D-4508 (audit r64-4).** The second arm no longer divides by
+/// 100: it reads any whole-number decimal with [`whole_number`], which CAN
+/// produce `i64::MIN` from `-9223372036854775808.0`. So the sentinel check now
+/// runs after both arms, and that branch is reachable and tested.
+///
 /// # Errors
 ///
-/// [`FetchError::TransportFailed`] naming the field and the value.
+/// [`FetchError::TransportFailed`] naming the field, the value and the reason:
+/// not a number, a fraction, a whole number past `i64`, or the sentinel.
 fn one_number(v: &serde_json::Value, name: &str) -> Result<i64, FetchError> {
-    if let Some(n) = v.as_i64() {
-        if n == i64::MIN {
-            return Err(FetchError::TransportFailed {
-                detail: format!(
-                    "{name:?} holds {v}, which is the value this store reserves \
-                     for a field the vendor did NOT send (CLAUDE.md §7: \
-                     i64::MIN is the open-interest null and zero means zero). \
-                     Stored, it would read back as an absence rather than as \
-                     the number that arrived, so it is refused here where the \
-                     vendor's own value is still visible."
-                ),
-            });
-        }
-        return Ok(n);
-    }
-    let refuse = || FetchError::TransportFailed {
-        detail: format!("{name:?} holds {v}, which is not a whole number"),
-    };
-    let number = v.as_number().ok_or_else(refuse)?;
-    let hundredths =
-        crate::csv::paisa(&number_text(number).ok_or_else(refuse)?).ok_or_else(refuse)?;
-    if hundredths % 100 == 0 {
-        Ok(hundredths / 100)
+    // ANY NUMBER OF ZERO DECIMALS IS A WHOLE NUMBER (audit r64-4, D-4508).
+    // This read the text through `csv::paisa`, a two-decimal price reader, so
+    // `7.000` refused the whole answer as unreadable while `7.0` was accepted;
+    // a fraction is now refused by name, and so is a whole number past `i64`.
+    let n = if let Some(n) = v.as_i64() {
+        n
     } else {
-        Err(refuse())
+        let refuse = |why: &str| FetchError::TransportFailed {
+            detail: format!("{name:?} holds {v}, which is not a whole number: {why}"),
+        };
+        let number = v.as_number().ok_or_else(|| refuse("it is not a number"))?;
+        whole_number(number).map_err(|not| refuse(not.reason()))?
+    };
+    if n == i64::MIN {
+        return Err(FetchError::TransportFailed {
+            detail: format!(
+                "{name:?} holds {v}, which is the value this store reserves \
+                 for a field the vendor did NOT send (CLAUDE.md §7: \
+                 i64::MIN is the open-interest null and zero means zero). \
+                 Stored, it would read back as an absence rather than as \
+                 the number that arrived, so it is refused here where the \
+                 vendor's own value is still visible."
+            ),
+        });
     }
+    Ok(n)
 }
 
 /// One VOLUME, which counts shares traded and is therefore never negative.
@@ -7179,6 +7339,106 @@ mod tests {
             one_number(&serde_json::json!(41), "open_interest").expect("an ordinary count"),
             41
         );
+    }
+
+    /// **A WHOLE NUMBER WITH ANY NUMBER OF ZERO DECIMALS IS A WHOLE NUMBER,
+    /// AND A FRACTION IS REFUSED BY NAME** (audit r64-4, D-4508).
+    ///
+    /// Since D-1570 the reader sees the vendor's own digits, and the two-decimal
+    /// price reader it went through refused `7.000` as unreadable. The extremes:
+    /// `i64::MAX` and `i64::MIN` with zero decimals, `-0.000`, a hundred
+    /// thousand zeros, exponents that land the point on, inside and past the
+    /// digits, exponents past `i64`, and the one-digit-past-`i64` neighbours.
+    #[test]
+    fn a_whole_number_with_any_zero_decimals_reads_and_a_fraction_is_refused_by_name() {
+        use super::{NotWhole, whole_text};
+        let zeros = format!("7.{}", "0".repeat(100_000));
+        let max = format!("{}.000", i64::MAX);
+        let min = format!("{}.0", i64::MIN);
+        for (text, want) in [
+            ("7", Ok(7)),
+            ("7.0", Ok(7)),
+            ("7.00", Ok(7)),
+            ("7.000", Ok(7)),
+            ("7.0000000", Ok(7)),
+            (zeros.as_str(), Ok(7)),
+            ("1700000000.000", Ok(1_700_000_000)),
+            ("-0.000", Ok(0)),
+            ("-0", Ok(0)),
+            ("0.000", Ok(0)),
+            (max.as_str(), Ok(i64::MAX)),
+            (min.as_str(), Ok(i64::MIN)),
+            ("1.7e9", Ok(1_700_000_000)),
+            ("1.7E+9", Ok(1_700_000_000)),
+            ("0.7e1", Ok(7)),
+            ("700e-2", Ok(7)),
+            ("7000.000e-3", Ok(7)),
+            ("0e-1", Ok(0)),
+            ("0.000e99999999999999999999", Ok(0)),
+            ("-0e-99999999999999999999", Ok(0)),
+            ("9.223372036854775807e18", Ok(i64::MAX)),
+            ("7.5", Err(NotWhole::Fractional)),
+            ("7.0001", Err(NotWhole::Fractional)),
+            ("-0.001", Err(NotWhole::Fractional)),
+            ("5e-1", Err(NotWhole::Fractional)),
+            ("7e-99999999999999999999", Err(NotWhole::Fractional)),
+            ("9223372036854775808.000", Err(NotWhole::OutOfRange)),
+            ("-9223372036854775809.0", Err(NotWhole::OutOfRange)),
+            ("1e19", Err(NotWhole::OutOfRange)),
+            ("1e20", Err(NotWhole::OutOfRange)),
+            ("1e21", Err(NotWhole::OutOfRange)),
+            ("123456789012345678901", Err(NotWhole::OutOfRange)),
+            ("7e99999999999999999999", Err(NotWhole::OutOfRange)),
+            ("", Err(NotWhole::NotDecimal)),
+            ("-", Err(NotWhole::NotDecimal)),
+            (".5", Err(NotWhole::NotDecimal)),
+            ("7.", Err(NotWhole::NotDecimal)),
+            ("7.0x", Err(NotWhole::NotDecimal)),
+            ("x7", Err(NotWhole::NotDecimal)),
+            ("7e", Err(NotWhole::NotDecimal)),
+            ("7e+", Err(NotWhole::NotDecimal)),
+            ("7e1.5", Err(NotWhole::NotDecimal)),
+            ("0e", Err(NotWhole::NotDecimal)),
+            ("0ex", Err(NotWhole::NotDecimal)),
+            ("--7", Err(NotWhole::NotDecimal)),
+        ] {
+            let shown = text.get(..40).unwrap_or(text);
+            assert_eq!(whole_text(text), want, "{shown}");
+        }
+        // Each reason is distinct and names itself.
+        assert!(NotWhole::Fractional.reason().contains("fraction"));
+        assert!(NotWhole::OutOfRange.reason().contains("outside i64"));
+        assert!(NotWhole::NotDecimal.reason().contains("not a decimal"));
+
+        // Through `one_number`, from a JSON body, as the vendor sends it.
+        let read = |body: &str| {
+            let v: serde_json::Value = serde_json::from_str(body).expect("JSON");
+            one_number(&v, "volume")
+        };
+        for (body, want) in [
+            ("7.000", 7),
+            ("1700000000.000", 1_700_000_000),
+            ("-0.000", 0),
+            (max.as_str(), i64::MAX),
+            (zeros.as_str(), 7),
+        ] {
+            let shown = body.get(..40).unwrap_or(body);
+            assert_eq!(read(body).expect(shown), want, "{shown}");
+        }
+        for (body, says) in [
+            ("7.5", "fraction"),
+            ("9223372036854775808.000", "outside i64"),
+            (min.as_str(), "did NOT send"),
+            ("\"7\"", "not a number"),
+        ] {
+            let Err(FetchError::TransportFailed { detail }) = read(body) else {
+                panic!("{body} must be refused")
+            };
+            assert!(
+                detail.contains(says) && detail.contains("\"volume\""),
+                "{body}: {detail}"
+            );
+        }
     }
 
     /// And the refusal reaches the whole decode, not just the leaf.
