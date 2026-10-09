@@ -65103,3 +65103,16 @@ Tests:
 **Honest limit.** The midpoint `0.5 * (low + high)` overflows above `2^1023`,
 so `turning_point` reports a turning point at or above that as `+inf`. The
 widest Student-t bar any `u64` trial count has is about `2^67.7`.
+
+### D-4154 — `worst_mae` is folded with `max`, because a tie assigns what is already held — 2026-10-08
+
+**What was observed.** Gate 18 run 1286 left
+`if worst_of_this > cell.worst_mae { cell.worst_mae = worst_of_this; }` in
+`runner::grid::one_variant` with `>` as `>=` MISSED. `Ppm` is `i64`. On a tie
+the mutant assigns the value the cell already holds, so no input can tell the
+two apart.
+
+**Decided.** `cell.worst_mae = cell.worst_mae.max(worst_of_this);`. `Ord::max`
+on `i64` returns the larger value, and either one on a tie, which is the same
+integer. Every result is the same, and no operator is left to mutate. The
+grid's existing excursion tests pin the figure. R1286-rest-06.

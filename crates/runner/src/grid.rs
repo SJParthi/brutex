@@ -4573,10 +4573,13 @@ fn one_variant(
         // `worst_mae` is gated by a maximum, so it takes the reading rounded UP
         // (p3floor-2, D-1769); `went_against` stays the floored figure the
         // trade rows and the all-trades sum have always carried.
+        //
+        // `max`, not `if worst_of_this > cell.worst_mae` (R1286-rest-06,
+        // D-4154): on a tie the `if` assigned the value already held, so `>`
+        // and `>=` were one program and Gate 18 run 1286 could not kill the
+        // second. `Ppm` is `i64`, and `max` keeps the same value on every input.
         let worst_of_this = c.cross.adverse_ppm_ceil_at(pess_off, c.entry_pess, side);
-        if worst_of_this > cell.worst_mae {
-            cell.worst_mae = worst_of_this;
-        }
+        cell.worst_mae = cell.worst_mae.max(worst_of_this);
 
         if pess > 0 {
             cell.wins = cell.wins.saturating_add(1);
