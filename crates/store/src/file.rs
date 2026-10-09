@@ -143,9 +143,11 @@
 //! passing a block because a mismatch *might* be this case is still refused,
 //! as `CLAUDE.md` §4 requires.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::fs::{self, File, TryLockError};
 use std::io::{self, ErrorKind};
+use std::mem::Discriminant;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock, PoisonError};
@@ -1322,7 +1324,8 @@ enum TixState {
     /// The index is open and describes the committed bars.
     Ready(File),
     /// It does not, for this reason, and every lookup bisects (D-1434). The
-    /// reason was written to the log when this state was entered.
+    /// reason was written to the log the first time this process entered
+    /// this state for this month and kind of reason (D-3340).
     Bisecting(Why),
 }
 
@@ -1333,9 +1336,35 @@ pub enum TimeLookup {
     /// Through the month's `.tix` index: at most one entry read and one bar
     /// read per lookup, whatever the month holds.
     Indexed,
-    /// By the D-1434 bisection, for the reason named — which this handle has
-    /// also written to the log as a `store.tix` warning.
+    /// By the D-1434 bisection, for the reason named — which this process has
+    /// also written to the log as a `store.tix` warning, once per file and
+    /// kind of reason (D-3340).
     Bisection(Why),
+}
+
+/// What [`BarFile::index_existing`] found beside one month, and what it left.
+/// D-3340, WP-15.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Reindexed {
+    /// The `.tix` already described the committed bars, and nothing was
+    /// written: a second run over the same months changes no byte.
+    Kept,
+    /// The `.tix` was written from the committed bars, because of the reason
+    /// named — [`Why::Absent`] for a month written before D-2329.
+    Built(Why),
+    /// No index can describe these bars, for the reason named. No `.tix` is
+    /// left claiming them; every lookup bisects and the log says why.
+    Unindexable(Why),
+}
+
+/// One month through [`BarFile::index_existing`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexedMonth {
+    /// The committed bars the month holds, from its header.
+    pub n_valid: u64,
+    /// What the index step found and did.
+    pub outcome: Reindexed,
 }
 
 /// The only geometry a `.ovl` file may have.
@@ -1700,6 +1729,102 @@ impl BarFile {
             table_of(path.file()),
             Access::Read,
         )
+    }
+
+    /// Builds, or confirms, one month's `.tix` time index through the writer's
+    /// half of opening, and changes nothing else. D-3340, WP-15; DB-064,
+    /// DB-G81.
+    ///
+    /// # Why a door of its own
+    ///
+    /// The writer door already builds the index of a month that lacks one
+    /// (`Self::index_on_open`, D-2329), so [`Self::open_or_create`] would do
+    /// it — and would also create a month that is not there and open its bars
+    /// for writing. A rebuild over named months must do neither:
+    ///
+    /// * a month that is not there is [`StoreError::Missing`], with nothing
+    ///   created — no directory, no bar file, no `.lock`, no `.tix`;
+    /// * the bar file and its checksum sidecar are opened READ-ONLY, so no
+    ///   byte of either can move, whatever the index step does;
+    /// * the `.tix` is the one file written, through the same
+    ///   `Self::index_on_open` an appending writer runs, so the index this
+    ///   builds is the index an append would have kept. Only a month that has
+    ///   no `.lock` at all gains one, exactly as from a writer.
+    ///
+    /// # Exclusive, and refused rather than waited for
+    ///
+    /// The month's lock is taken EXCLUSIVE and non-blocking — the writer's
+    /// own — so a month another process holds, a writer appending or a reader
+    /// mid-request, is [`StoreError::Locked`] and nothing is written to it.
+    /// Rerunning is safe: a month already indexed is [`Reindexed::Kept`] after
+    /// one 64-byte and two 16-byte reads.
+    ///
+    /// # No link below the root
+    ///
+    /// Every component from the root down to the bar file is asked with
+    /// `symlink_metadata` first, as the writer door does (CE-62, D-2686), so
+    /// the `.tix` lands beside the bars it describes and never wherever a
+    /// link points — a test server's shadow root, whose `bars` is a link into
+    /// the real store, is refused as [`StoreError::Symlinked`].
+    ///
+    /// # Cost
+    ///
+    /// To build: every committed record, through the verified read path,
+    /// once per month — O(`n_valid`) — plus one write of the entries. To keep:
+    /// three reads.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::NotABarPath`] for any other file kind;
+    /// [`StoreError::Symlinked`] for a link below the root;
+    /// [`StoreError::Missing`] (or another open refusal) when the month's bar
+    /// file is not a readable regular file; [`StoreError::Locked`] when
+    /// another holder has the month; whatever `Self::validated` refuses about
+    /// the month; and whatever writing the `.tix` refuses.
+    pub fn index_existing(
+        root: &Path,
+        path: StorePath<'_>,
+        symbol_id: u32,
+    ) -> Result<IndexedMonth, StoreError> {
+        if path.file() != FileKind::Bars {
+            return Err(StoreError::NotABarPath { found: path.file() });
+        }
+        let bars_path = path.to_path_buf(root);
+        let lock_path = path.with_file(FileKind::Lock).to_path_buf(root);
+        refuse_links_below(root, &bars_path)?;
+        // READ-ONLY AND NEVER CREATED. `open_read` has no `create`, so a month
+        // that is not there is `ENOENT`, named, before the lock is touched.
+        let bars = open_read(&bars_path).map_err(|why| why.refusal(&bars_path))?;
+        refuse_link(&lock_path)?;
+        let lock = Flock::try_lock(
+            writer_open(open_rw(&lock_path), &lock_path)?,
+            lock_path.clone(),
+        )
+        .map_err(|refusal| lock_fault(&lock_path, refusal))?;
+        // MEASURED UNDER THE LOCK, so no append can move the length between
+        // the measurement and the header it is checked against.
+        let len = fault(bars.metadata(), &bars_path, Action::Measure)?.len();
+        let mut file = Self::validated(
+            bars,
+            bars_path,
+            Some(path.with_file(FileKind::Checksums).to_path_buf(root)),
+            time_index_path(root, path),
+            Some(lock),
+            len,
+            symbol_id,
+            path.timeframe().secs(),
+            path.month(),
+            table_of(path.file()),
+            // The READ door's sidecar handling: the `.crc` opened read-only
+            // and never made. The index step is run below, by hand, so its
+            // outcome can be reported.
+            Access::Read,
+        )?;
+        let outcome = file.index_on_open()?;
+        Ok(IndexedMonth {
+            n_valid: file.header.n_valid,
+            outcome,
+        })
     }
 
     /// Opt-in audited read with nonblocking regular-file opens for all three files.
@@ -2081,8 +2206,10 @@ impl BarFile {
         };
         // THE WRITER KEEPS THE INDEX IN STEP, SO IT DECIDES AT OPEN. A reader
         // decides at its first lookup instead (`Self::tix_state`). D-2329.
+        // What it found is the log's to say (`store.tix`), not the writer's
+        // caller's: an appending writer needs the index kept, not a receipt.
         if access == Access::Write {
-            file.index_on_open()?;
+            let _logged_by_the_step = file.index_on_open()?;
         }
         Ok(file)
     }
@@ -2621,9 +2748,12 @@ impl BarFile {
     /// by the D-1434 bisection: at most `ceil(log2(n_valid + 1))` record reads,
     /// asserted by
     /// `store::file::first_at_or_after_never_probes_more_than_the_bisection_height`.
-    /// The handle writes one `store.tix` warning naming why, and
-    /// [`Self::time_lookup`] reports which path it takes. A writer open of such
-    /// a month builds the index (`docs/02-store-format.md` §8.1).
+    /// The process writes one `store.tix` warning naming why — once per month
+    /// and kind of reason, not once per handle (D-3340) — and
+    /// [`Self::time_lookup`] reports which path it takes, on every handle. A
+    /// writer open of such a month builds the index
+    /// (`docs/02-store-format.md` §8.1), and so does [`Self::index_existing`],
+    /// which changes nothing else.
     ///
     /// # Errors
     ///
@@ -2732,32 +2862,55 @@ impl BarFile {
     /// reads; otherwise the index is rebuilt from the bars, once, which reads
     /// every committed record (`Self::rebuild_index`). That is the explicit
     /// migration path for a month written before D-2329 or by another writer:
-    /// a writer open, through this door.
-    fn index_on_open(&mut self) -> Result<(), StoreError> {
+    /// a writer open, through this door — or [`Self::index_existing`], which
+    /// runs this step alone and reports what it did (D-3340).
+    ///
+    /// The answer says what was found and done: [`Reindexed::Kept`] when the
+    /// index already described the bars and nothing was written,
+    /// [`Reindexed::Built`] naming why it had to be written, and
+    /// [`Reindexed::Unindexable`] naming why no index can be kept.
+    fn index_on_open(&mut self) -> Result<Reindexed, StoreError> {
         let Some(tix) = self.tix.as_ref() else {
-            return Ok(());
+            return Ok(Reindexed::Unindexable(Why::NotBars));
         };
         let existed = matches!(fs::symlink_metadata(&tix.path), Ok(meta) if meta.is_file());
         let index = fault(open_rw(&tix.path), &tix.path, Action::Open)?;
         if !existed {
             fsync_dir(tix.path.parent().unwrap_or(&tix.path))?;
         }
-        let state = if self.header.n_valid == 0 {
-            let fresh = fault(index.metadata(), &tix.path, Action::Measure)?.len()
-                == crate::time_index::HEADER_LEN
-                && self.confirm_index(&index, tix).is_ok();
-            if !fresh {
-                write_index(&index, tix, &[])?;
-            }
-            TixState::Ready(index)
+        // WHY IT MUST BE WRITTEN, NAMED AS WHAT IT IS. An index this open just
+        // made is ABSENT — confirming the empty file it created would call it
+        // "shorter than its header", and the rebuild line would then blame a
+        // damaged index for a month that never had one (D-3340). An empty
+        // month's index is its header and nothing else, so entries past the
+        // header describe bars that never committed.
+        let checked = if !existed {
+            Err(Why::Absent)
+        } else if self.header.n_valid == 0
+            && fault(index.metadata(), &tix.path, Action::Measure)?.len()
+                != crate::time_index::HEADER_LEN
+        {
+            Err(Why::Stale)
         } else {
-            match self.confirm_index(&index, tix) {
-                Ok(()) => TixState::Ready(index),
-                Err(why) => self.rebuild_index(index, tix, &why)?,
+            self.confirm_index(&index, tix)
+        };
+        let (state, outcome) = match checked {
+            Ok(()) => (TixState::Ready(index), Reindexed::Kept),
+            Err(why) if self.header.n_valid == 0 => {
+                write_index(&index, tix, &[])?;
+                (TixState::Ready(index), Reindexed::Built(why))
+            }
+            Err(why) => {
+                let state = self.rebuild_index(index, tix, &why)?;
+                let outcome = match &state {
+                    TixState::Ready(_) => Reindexed::Built(why),
+                    TixState::Bisecting(cannot) => Reindexed::Unindexable(cannot.clone()),
+                };
+                (state, outcome)
             }
         };
         self.set_tix_state(state);
-        Ok(())
+        Ok(outcome)
     }
 
     /// Replaces this handle's index state — the writer's, at open or after a
@@ -3738,7 +3891,8 @@ fn put_entries(
 }
 
 /// Enters the bisecting state for `why`, saying so. The one place the
-/// `store.tix` warning is decided, so no path can fall back silently.
+/// `store.tix` warning is decided, so no path can fall back silently — and
+/// no month is named twice for one kind of reason (D-3340).
 fn bisecting(path: &Path, why: Why) -> TixState {
     note_lookup_bisects(path, &why);
     TixState::Bisecting(why)
@@ -3765,13 +3919,63 @@ fn index_refused(path: &Path, why: &Why) -> StoreError {
     }
 }
 
-/// `store.tix`, WARN: this month's time lookups bisect, and why. Once when a
-/// handle decides it, and once per lookup whose entry fails after that.
+/// The months, and the kinds of reason, this process has already named in a
+/// `store.tix` bisection warning. D-3340.
+///
+/// # Why there is a memory at all
+///
+/// A read handle decides its index once, and every HTTP request opens its own
+/// handle, so a month with no `.tix` wrote one WARN per request: one per
+/// `/spot.json` chunk of 400 instants, 101 of them in one live 64 MiB log
+/// window, crowding out the evidence the window exists to keep (DB-064,
+/// DB-G81, DB-G88). The first says everything the hundredth does.
+///
+/// # Keyed by the KIND of reason as well as the month
+///
+/// A month whose index goes from absent to stale is a new fact and is named
+/// again; a damaged entry is named once whichever bucket a lookup meets,
+/// because `std::mem::discriminant` does not see the bucket. So a month is
+/// warned about at most once per variant of [`Why`], in this process.
+///
+/// # What it costs
+///
+/// One lock and one hash insert per bisecting DECISION — never on the indexed
+/// path, never per bisection probe — O(1) expected. Held entries are bounded
+/// by the months this process opened times the variants of [`Why`], and a
+/// month that is later indexed simply stops asking.
+static WARNED: OnceLock<Mutex<HashSet<Warned>>> = OnceLock::new();
+
+/// One month named bisecting, and the kind of reason it was named for.
+type Warned = (PathBuf, Discriminant<Why>);
+
+/// Whether this is the first time this process names `path` bisecting for a
+/// reason of `why`'s kind — and, from now on, that it has.
+fn first_warning(path: &Path, why: &Why) -> bool {
+    WARNED
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert((path.to_path_buf(), std::mem::discriminant(why)))
+}
+
+/// `store.tix`, WARN: this month's time lookups bisect, and why — ONCE per
+/// month and kind of reason in this process ([`WARNED`], D-3340), whether a
+/// handle decided it or a lookup's entry failed after that. Each handle
+/// still answers [`BarFile::time_lookup`] with the reason, every time.
 fn note_lookup_bisects(path: &Path, why: &Why) {
+    if !first_warning(path, why) {
+        return;
+    }
     let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::warn("store.tix", "time lookup falls back to bisection")
             .with("file", telemetry::Value::Str(&path.display().to_string()))
-            .with("reason", telemetry::Value::Str(&why.to_string())),
+            .with("reason", telemetry::Value::Str(&why.to_string()))
+            .with(
+                "repeats",
+                telemetry::Value::Str(
+                    "not logged again for this file and kind of reason in this process (D-3340)",
+                ),
+            ),
     );
 }
 
