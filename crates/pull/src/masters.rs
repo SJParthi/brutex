@@ -440,8 +440,10 @@ struct IndexSkips<'a> {
     categories_with_elements: Vec<&'a str>,
 }
 
-/// One `Warn` line and one `eprintln!` when the conversion skipped anything,
-/// and nothing when it skipped nothing. The line carries both counts and the
+/// One `Warn` line and one stderr line when the conversion skipped anything,
+/// and nothing when it skipped nothing. The stderr line goes through
+/// `telemetry::stderr_line`, which cannot panic on a closed stream (r53-1,
+/// D-4413). The line carries both counts and the
 /// first skipped category; the stderr sentence names every one, so a category
 /// NSE reshaped is visible on a default run rather than missing from
 /// `nse_indices.csv` with the master reported `Written`. CE-58, D-2682.
@@ -464,7 +466,7 @@ fn note_index_skips(skipped: &IndexSkips<'_>) {
             .with("elements", telemetry::Value::Uint(skipped.elements))
             .with("category", telemetry::Value::Str(first)),
     );
-    eprintln!(
+    let _printed = telemetry::stderr_line(format_args!(
         "brutex: the NSE index list carried {} categor(ies) that are not a list \
          of names ({:?}) and {} list element(s) that are not a name (in {:?}); \
          those were skipped and every other name converted (MR-04)",
@@ -472,7 +474,7 @@ fn note_index_skips(skipped: &IndexSkips<'_>) {
         skipped.categories,
         skipped.elements,
         skipped.categories_with_elements
-    );
+    ));
 }
 
 /// Which kind of transport a fetch is going out on.

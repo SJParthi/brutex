@@ -1533,10 +1533,24 @@ impl Sink {
             // turns one failure into a second denial of service, on the one
             // stream still working. The count in `health()` is the running
             // total; this is the notice that there is a count to look at.
-            eprintln!(
+            //
+            // AND IT CANNOT PANIC. `eprintln!` did, on a closed stderr, and the
+            // release profile aborts on a panic: the notice that a log could
+            // not be written killed the process it described (r53-1, D-4413).
+            // A notice the stream refused is said where the page reads.
+            let printed = crate::say::stderr_line(format_args!(
                 "telemetry: {why}\ntelemetry: this is the ONLY notice; the running count of \
                  lost events is Sink::health().dropped"
-            );
+            ));
+            if !printed {
+                *self
+                    .last_error
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = Some(format!(
+                    "{why} (and this notice could not be written to stderr; \
+                     telemetry::unprinted() counts such lines)"
+                ));
+            }
         }
     }
 }

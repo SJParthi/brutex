@@ -66371,3 +66371,40 @@ the newline and is a line of its own. The notice now says that instead of
 "the next event will fuse". A whole file still gains no byte at open, and the
 newline is led with once. Proof: FXA-03, which fails with the flag forced to
 `false` (checked on this tree).
+
+### D-4413 — Production stderr lines in `pull` and `telemetry` cannot panic, and a refused line is counted and logged — 2026-10-09
+
+**Finding (r53-1, telemetry and pull sites).** `eprintln!` panics when stderr
+is a closed pipe ("failed printing to stderr: Broken pipe (os error 32)"), and
+`[profile.release]` sets `panic = "abort"`. The r53 audit ran
+`pull::csv::decode` with stderr on a closed pipe and it panicked; with abort,
+a long backfill whose operator's terminal went away dies with signal 6 on a
+line that only described a degraded decode. The same shape was at six
+`pull::http` decode notices, `pull::csv::note_decoded`,
+`pull::masters::note_index_skips` and the sink's own last-resort notice
+`telemetry::sink::Sink::report`.
+
+**Decision.** `telemetry::stderr_line(format_args!(..))` (`crates/telemetry/src/say.rs`)
+writes one line and flushes through the locked stream and never panics. A
+refused line is counted in `telemetry::unprinted()`, and the first refused
+line that a sink records is written to the installed sink as a
+`telemetry.stderr` `Warn` naming the error — once, because a stream that is
+gone stays gone; a failure before any sink exists leaves the next one to try.
+Every production stderr line in `pull` and `telemetry` goes through it; each
+of those pull lines already sits beside an event carrying the same fact, so a
+closed stderr loses only the terminal copy, and that loss is recorded. The
+sink's own notice, when refused, is also named in `Health::last_error`.
+Gate 23's declarations move with the code: the four `eprintln!` entries leave
+clause A and `telemetry/src/say.rs` declares its one `stderr()` handle in
+clause A2, so a new `eprintln!` in either crate is refused by the gate.
+
+The `api` and `cli` sites the audit also named are not edited here (other
+fixers own those crates); they can call the same `telemetry::stderr_line`.
+
+**Evidence.** `crates/pull/tests/closed_stderr.rs` re-runs its binary with
+stderr on a pipe whose read end is closed and decodes the audit's degraded
+body: with the old `eprintln!` restored in `csv.rs` the child exited 101
+(panic) and the test failed; with this change it passes, the rows decode and
+`unprinted()` rose by one. `crates/telemetry/tests/closed_stderr.rs` does the
+same for the writer, the first-failure event and a refusing sink's notice.
+Proof: FXA-04.

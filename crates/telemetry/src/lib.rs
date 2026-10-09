@@ -128,6 +128,7 @@ mod json;
 mod level;
 mod loss;
 mod record;
+mod say;
 mod sink;
 mod tail;
 mod value;
@@ -140,6 +141,7 @@ pub use crate::json::LineFault;
 pub use crate::level::{LEVELS, Level};
 pub use crate::loss::LEDGER_NAME;
 pub use crate::record::Record;
+pub use crate::say::{stderr_line, unprinted};
 pub use crate::sink::{
     BASENAME, Config, DEFAULT_KEEP_FILES, DEFAULT_MAX_FILE_BYTES, EXTENSION, Emitted, FileTarget,
     Health, MAX_TARGET_LEVELS, MIN_FILE_BYTES, Sink, Target, current_path, dir_beneath_store,

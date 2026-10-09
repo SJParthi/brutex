@@ -139,11 +139,11 @@ impl Loss {
         }
         let (body, tail) = bytes.split_at(BODY_BYTES);
         let mut at = Cursor { bytes: body, at: 0 };
-        at.expect(HEAD, "the record's head")?;
+        at.literal(HEAD, "the record's head")?;
         let issued = at.number()?;
-        at.expect(LOST, "` lost=`")?;
+        at.literal(LOST, "` lost=`")?;
         let lost = at.number()?;
-        at.expect(FIRST, "` first=`")?;
+        at.literal(FIRST, "` first=`")?;
         let first = at.number()?;
         let (marker, rest) = tail.split_at(SUM.len());
         if marker != SUM {
@@ -182,7 +182,7 @@ struct Cursor<'a> {
 impl Cursor<'_> {
     /// The next bytes are exactly `want`, or the record is refused naming
     /// `what`.
-    fn expect(&mut self, want: &[u8], what: &str) -> Result<(), String> {
+    fn literal(&mut self, want: &[u8], what: &str) -> Result<(), String> {
         let end = self.at.saturating_add(want.len());
         if self.bytes.get(self.at..end) == Some(want) {
             self.at = end;
