@@ -1,0 +1,6 @@
+# fxl4 pause note (worktree /home/claude/wt-l4, branch audit/l4)
+
+- Merge origin/attack/one-authority: DONE (9b47820c). Validated: core/indicators/lake/pull/runner clippy+tests (core findings history tests fail only as uid 65534, pass as root); static gates except 1e; docs gates; web W1-W6.
+- Round 4 D-3516..D-3522, ONEAUTH-16..24 (web IST/session + markets candle grid, IST reader, 09:15 open authorities, web rung/charge lists, citations widening, civil-date comparison, non-defects): WIP (70e2c987, "WIP (not validated)"). fmt, clippy -D warnings (core indicators pull runner lake api cli), static gates except 1e, gates 10/10b/27/27b, W1-W6 all pass. Left: the uid-65534 test run stopped at 29/88 binaries (all 29 passed). Exact next step: `JOBS=1 CARGO_PROFILE_DEV_DEBUG=line-tables-only CARGO_INCREMENTAL=0 /tmp/claude-0/bin/validate.sh /home/claude/wt-l4 /home/claude/t-l4 core indicators pull runner lake api cli`, rerun any failure as root, then reword the commit (amend the message only) and write /tmp/claude-0/audit/out/fxl4-report.md.
+- D-3510 (rust-toolchain.toml/Cargo.toml as auto-merge sensitive paths): NOT-STARTED by design; stays OPEN for the owner.
+- Final report (fxl4-report.md): NOT-STARTED.

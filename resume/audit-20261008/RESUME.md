@@ -56,3 +56,20 @@ and send branch + sha to the PR 74 CI thread, which batches pushes.
   as uid 65534, doctests, gates 10/10b/27/27b/W1); (5) mutation pre-run on `git diff fbdabaec <head> -- crates` per crate,
   kill survivors; (6) push wip/audit-batch3-integ and send branch+sha to the PR 74 CI thread; (7) Artifact
   https://claude.ai/artifact/7cvC2yoWTHviHri8zz4TPx from out/*.tsv plus fixer outcomes.
+
+## PAUSED 2026-10-09 ~05:30 UTC for the usage window (resume check-in armed 09:05 UTC)
+Every fixer committed and stopped; branches pushed as `wip/audit-fx/<name>`; notes in `fixers/` here.
+| fixer | branch head | done | WIP / not started |
+|---|---|---|---|
+| fxe CI gates | merged in integ | srust-1..5 (D-4490..4494) | owner: srust-5 Node actions |
+| fxw web | merged in integ | W1-W7, F1-F7 (D-3211..3224) | owner: 2 policy items in fxw-report |
+| fxa telemetry/pull/store/lake | 8ec02b03 | sobs-2,3,11,13; r53-1; satk-2,5,6,9 (D-4410..4418) | WIP so1-2, so1-6; not started rnew-2, rnew-3, W1-pull1-0, sobs-16, sobs-17, sobs-19, r53-2; ET-bars-candles-store-3 owner; o1api-33 |
+| fxb1 api costs | 32896202 | 14 items (D-4430..4443) | WIP W1-api1-4; re-run api suite+clippy (4 fixes unverified) |
+| fxb2 api logging | fae2225e | 11 items (D-4445..4455) | clippy api/telemetry not re-run; sobs-18 dropped |
+| fxc cli | 5cd98c62 | 9 items + W2-cli16-1 (D-4460..4469) | WIP W2-cli10-0 (re-run clippy); not started items 7-11 |
+| fxd engine/vocab | 2cfa70ae | o1engine-20 (D-4480) | WIP so1-1, so1-3, W3-engine1-1, o1engine-22/23, GAP16-26 (D-4481..4486); runner suite, gates, mutants |
+| fxr runner/pull/core | ce2090fd | lookahead+r64-5 (D-4500), satk-1, r64-4 | WIP satk-7/8, closure items, c4a-6, comments; not started W3-runner2-3/2-5, satk-3, r64-2, W1-pull3-4. cli must switch to printed_ohlcv_cost_model_id_v3 (D-4500) or its policies are refused |
+| fxl4 one-authority | 70e2c987 | merge 9b47820c validated (non api/cli) | WIP round 4 (D-3516..3522); re-run validate for 7 crates; D-3510 owner |
+After 09:05: at most 2 agents. Finish WIP per notes, merge all into audit/integ, cli switch to cost model v3, full
+validation, mutation survivors (api so far: answer_memo Debug, candidatejson summary_for), push, hand to PR 74 thread,
+then the Artifact.

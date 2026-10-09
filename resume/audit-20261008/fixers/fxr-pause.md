@@ -1,0 +1,27 @@
+# fxr pause status (worktree /home/claude/wt-fx-r, branch audit/fx-r)
+
+- lookahead + r64-5: DONE (ee165879, D-4500, FXR-01..03). The cli must switch to printed_ohlcv_cost_model_id_v3 (D-4500 lists the files).
+- satk-1: DONE (4fae799b, D-4507, FXR-04).
+- r64-4: DONE (da568b3e, D-4508, FXR-05).
+- satk-8: WIP in ce2090fd. Code and test are written but not compiled. Next: cargo test -p runner --lib bootstrap::tests::a_zero_block_takes_no_draw_and_reads_as_no_evidence, then write D-4506 and an FXR row.
+- satk-7: WIP in ce2090fd. The STUDENT_DF_CEILING=1e7 cap is in place. Measured (scratch tmeas): tail error <=1.4e-8 relative at df 1e7 for t 1.9..9.6, against a Student-minus-normal gap of 5.5e-7 at t=1.96. Next:
+  - correct the doc's "1e-8 / four orders / 2.3e-5" claims to these figures;
+  - rerun `tmeas bars` and `tmeas mono` (release binary at /home/claude/t-fxr/tmeas/release/tmeas);
+  - write test the_student_t_bar_is_monotone_and_never_below_the_normal_bar_at_any_df;
+  - amend the docs of clears_bonferroni and bonferroni_t_student;
+  - write D-4505.
+- W3-runner1-3 / c4a-7 / AC-whp-cx-2: WIP in ce2090fd. Written: FoldResult::closure_unproved, the audit row and ? marks, and the doc amendments. Not compiled. Next:
+  - compile and run validate::tests::a_fold_whose_closure_is_unproved_is_labelled_and_counted;
+  - write D-4503 and an FXR row.
+- c4a-6: WIP in ce2090fd. The C-R-06 bench row is written but not compiled or run. Next:
+  - cargo bench -p runner --bench ratio for p50/p99/max;
+  - add a C-R-06 row to docs/04-invariants.md (core cost_invariants fails without it);
+  - write D-4504 and amend docs/06-limits for D-1496.
+- r64-3: WIP in ce2090fd (comments fixed). Next: write D-4501.
+- satk-4: WIP in ce2090fd (comment fixed). Next: write D-4502, superseding D-0151's index row.
+- W3-runner2-3: NOT-STARTED. Plan: the cli hoists ExecutionDigestsV1::of_daily_reference per slice at candidate_universe.rs:1410.
+- W3-runner2-5: NOT-STARTED (exit_grid_policy.rs ~589: a binary search on timestamp instead of position).
+- satk-3: NOT-STARTED (Bucket::try_of_secs refuses non-dividing widths; a new decision reverses D-1532).
+- r64-2: NOT-STARTED.
+- W1-pull3-4: NOT-STARTED.
+- Checks so far: runner suite green before the WIP; pull suite green at da568b3e; core vendor tests green; clippy is clean for pull and core; fmt is clean; docs gates were green at ee165879. No mutants run yet.
