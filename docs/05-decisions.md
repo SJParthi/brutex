@@ -68996,3 +68996,88 @@ ending where the next starts) to `pull`'s answer. The copies stay; the
 
 **Left open, for the owner.** Whether `rust-toolchain.toml` and `Cargo.toml`
 join the auto-merge workflow's sensitive paths (D-3510) is not decided here.
+
+### D-4470 — The merged `api` crate passes clippy without a new lint exception — 2026-10-09
+
+**What was observed.** `cargo clippy -p api --all-targets -- -D warnings` on
+the audit integration tree (a7a27dc3) refused the `api` library (9 errors) and
+its test target (22): four production functions past `too_many_lines`
+(`autopilot::round` 102, `server::broker_run_scoped` 102, `bars::window` 109,
+`pullrun::conduct_with` 140), three test functions past it, unbackticked
+`E_v` in two doc comments, a `{value:?}` on an `OsStr`, indexing in two test
+modules whose exception does not take `indexing_slicing`, two `_`-prefixed
+bindings kept only to capture a value, a similar-name pair and a
+`push_str(&format!(..))`.
+
+**The change.** No `#[allow]` or `#[expect]` was added. Each long function
+lost code to a named helper that carries the comment it came with:
+`autopilot::hand_press_running` (the press-before-seat read),
+`server::publish_on_the_wire` (D-0057's `now` object) and
+`server::in_resumable_order` (the whole-key sort), `bars::kept_extremes` (the
+kept month folds, D-4439), and `pullrun::note_owed` and `finish_press` (the
+press's owing-pass line and its summary). The test functions were split into
+helpers the same way. Indexing in tests became `first()` with an `expect`, or
+a fixed array. The browser-open refusal now prints the asked value with
+`OsStr::display` in quotes instead of `Debug` (`BRUTEX_OPEN is "yes", and only
+1 opens a browser`); a non-UTF-8 byte now shows as U+FFFD rather than `\xFF`.
+No answer, event or exit code otherwise changes.
+
+**Two stale source-shape tests repaired on the way.**
+`server::cost_limits_tests::w1_api5_7_a_scrub_opens_one_page_and_walks_the_log_once_per_snapshot`
+still looked for the closure block and the memo call written before D-4435
+made both one call; it now reads the code as D-4435 left it.
+`w1_api5_4_the_window_still_reads_its_range_and_orders_only_the_page` reads
+the fold walk in `kept_extremes` and requires `window` to call it.
+`pullrun::tests::the_row_count_runs_off_the_worker_and_a_panic_is_not_a_count`
+counts `finish_press`'s borrowed `rows_now_off_worker(site)` beside the four
+`(&site)` calls.
+
+**Tests.** `server::tests::a_runs_targets_are_ordered_by_the_whole_key`
+(new: four shuffles of three keys, two sharing an underlying, each sorted by
+`in_resumable_order`; fails if the sort is removed or keyed by underlying),
+`server::tests::the_browser_is_opened_only_when_the_operator_asked_for_it`
+(now also requires the asked value in quotes), and the whole `api` lib suite.
+
+### D-4471 — `cli` implements grid cost model V3 and refuses V2 by name — 2026-10-09
+
+**What was observed.** D-4500 made `printed_ohlcv_cost_model_id_v3` the cost
+model `runner` implements and refuses V2 by name
+(`ExitGridErrorV1::SupersededCostModelIdV2`), leaving `cli` naming V2 in
+production (`execution_capability::exact_execution_law_digest_v1`,
+`ledger_all`'s exit policy) and in twelve test fixtures, so every policy the
+`cli` built was refused by resolution.
+
+**The change.** Every `cli` site names `printed_ohlcv_cost_model_id_v3`:
+production in `execution_capability.rs` and `ledger_all.rs`, fixtures in
+`anchored_search_lineage_v4`, `boolean_candidate_grid`,
+`boolean_candidate_tests`, `candidate_universe`, `execution_disposition_v2`,
+`global_replay`, `institutional_evidence`, `ledger_exit_policy_tests`,
+`population_admission_writer`, `selection_v4_authority`,
+`step3_orchestrator` and `stored_data_completeness`. The law's versioning
+rule is kept, not bypassed: no version is mutated in place. V2's id is
+unchanged and `cli`'s three cost-model checks (parameters, the stored
+parameter scalar, the resolved grid) all go through
+`runner::exit_grid_policy::implemented_cost_model`, which refuses V2 by name;
+the stored scalar's model is checked BEFORE its law digest, so an execution
+parameter record written by the build before D-4500 (V2 model, law digest
+under V2) is refused naming `SupersededCostModelIdV2`, never replayed and
+never refused only as "law digest differs". As D-1514 recorded for V1→V2,
+`exact_execution_law_digest_v1` hashes the implemented id, so every
+execution-law digest, execution parameter id and policy digest this build
+computes differs from one computed before it.
+
+**Tests.** `cli::execution_capability::tests::every_cost_model_check_refuses_the_superseded_v1_model_by_name`
+now also requires the law digest to differ from the one under V2, and a record
+exactly as the V2 build wrote it to be refused naming V2, and V2 in each of
+the three checks' refusal table. `cli::ledger_all::exit_policy_tests::every_admitted_runtime_resolution_binds_exact_axes_without_changing_risk`
+keeps the V1 record and the D-1514 V2 captures as records (the same two-rung
+policy rebuilt under each must still hash to them), requires the CLI wiring
+to equal the V3 reconstruction field for field and to differ from both
+records, and pins the two V3 digests from this build (labelled as not an
+independent capture). The lib tests of every switched module ran green as
+uid 65534: `execution_capability` 13, `ledger_all` 18, `step3_orchestrator`
+33, `execution_disposition_v2` 12, `candidate_universe` 117,
+`anchored_search_lineage_v4` 10, `stored_data_completeness` 8,
+`global_replay` 48, `population_admission_writer` 16,
+`selection_v4_authority` 7, `boolean_candidate` 61, `institutional_evidence`
+23.

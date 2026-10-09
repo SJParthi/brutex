@@ -3399,6 +3399,36 @@ fn stand_off(site: &Loaded, holder: &str) -> u64 {
     SEAT_WAIT_SECS
 }
 
+/// Whether a hand-made press holds the run slot, which [`round`] stands off
+/// for before it takes a seat.
+///
+/// The seat standoff is correct and it was not sufficient. `pull_spot` takes
+/// its feed's seat and DROPS IT WHEN THE LEG RETURNS, while
+/// `pullrun::conduct` runs a press of many legs across many passes. Between
+/// any two legs the mask reads zero, and `take_every_seat` is a
+/// `compare_exchange(0, ALL)` — so the autopilot wins that gap and holds
+/// every feed for a whole month's pass. The operator's next leg then 409s,
+/// `conduct` sleeps `RETRY_WAIT` and tries again, and the two drivers spend
+/// one shared token's quota against each other for as long as both keep
+/// going.
+///
+/// `site.run` is the press-shaped fact: `conduct` claims it before the first
+/// leg and releases it after the summary, so it covers the gaps the seats
+/// cannot. One uncontended lock take per tick, against a tick that takes
+/// minutes.
+///
+/// READ THROUGH A POISONED LOCK rather than around it. A panic while holding
+/// it means somebody's run ended abnormally; the flag is still readable, and
+/// refusing to look would stand the backfill off forever on the strength of
+/// one panicked request. Same position `pullrun::with_progress` takes.
+fn hand_press_running(site: &Loaded) -> bool {
+    site.run
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .is_some_and(crate::pullrun::Progress::running)
+}
+
 async fn round(
     site: &Loaded,
     feeds: &mut [FeedState],
@@ -3419,34 +3449,8 @@ async fn round(
     // could starve the requests it is supposed to stay out of the way of. So it
     // is checked before any work, and it waits rather than spinning.
     // THE PRESS FIRST, AND THE SEAT SECOND — because a seat is per LEG and a
-    // press is not.
-    //
-    // The standoff below is correct and it was not sufficient. `pull_spot` takes
-    // its feed's seat and DROPS IT WHEN THE LEG RETURNS, while
-    // `pullrun::conduct` runs a press of many legs across many passes. Between
-    // any two legs the mask reads zero, and `take_every_seat` is a
-    // `compare_exchange(0, ALL)` — so the autopilot wins that gap and holds
-    // every feed for a whole month's pass. The operator's next leg then 409s,
-    // `conduct` sleeps `RETRY_WAIT` and tries again, and the two drivers spend
-    // one shared token's quota against each other for as long as both keep
-    // going.
-    //
-    // `site.run` is the press-shaped fact: `conduct` claims it before the first
-    // leg and releases it after the summary, so it covers the gaps the seats
-    // cannot. One uncontended lock take per tick, against a tick that takes
-    // minutes.
-    //
-    // READ THROUGH A POISONED LOCK rather than around it. A panic while holding
-    // it means somebody's run ended abnormally; the flag is still readable, and
-    // refusing to look would stand the backfill off forever on the strength of
-    // one panicked request. Same position `pullrun::with_progress` takes.
-    let pressing = site
-        .run
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .as_ref()
-        .is_some_and(crate::pullrun::Progress::running);
-    if pressing {
+    // press is not. See `hand_press_running`.
+    if hand_press_running(site) {
         return Pass::owed(stand_off(site, "a hand-made pull is running"));
     }
 
@@ -7796,12 +7800,14 @@ mod tests {
     async fn dropping_the_supervisors_hold_aborts_the_task_it_holds() {
         let held = std::sync::Arc::new(());
         let inside = std::sync::Arc::clone(&held);
-        let hold = Aborting(tokio::spawn(async move {
-            let _inside = inside;
+        // `inside` lives in the task until the task is dropped: the pending
+        // future never returns, so the `drop` after it only names the capture.
+        let supervisor = Aborting(tokio::spawn(async move {
             std::future::pending::<()>().await;
+            drop(inside);
         }));
         tokio::task::yield_now().await;
-        drop(hold);
+        drop(supervisor);
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             while std::sync::Arc::strong_count(&held) > 1 {
                 tokio::task::yield_now().await;
