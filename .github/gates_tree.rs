@@ -1672,7 +1672,23 @@ const TELEMETRY_FIELD: &str = "
     timeframe
     agreed differed day_absent minute_absent
     contradicted close_differs range_wider volume_above largest_breach
+    count first_day last_day audit
+    vendor_empty withheld_unmeasured_session calendar_unverified unordered_stamps
+    incomplete_minutes absent_minutes absent_tail session_unsized closed_day
+    session_unattested
 ";
+
+// `count first_day last_day` — the aggregated `pull.request_minutes` line
+// (D-3341 item 2, WP-13b): how many findings one (instrument, month, reason)
+// group holds, and the first and last `YYYY-MM-DD` it covers. A count and two
+// dates on the right. `audit` is the store's own `audit/` directory, where
+// the Zerodha minute-gap ledger `audit/zerodha.gaps` lives beside
+// `audit/pull.journal` (D-3335) — a directory of the bar store, not a
+// parameter path. The rest are reason CODES, the value of that line's `code`
+// field and of the ledger's `why=`: `vendor_empty` and
+// `withheld_unmeasured_session` are D-3335's own, the others name why the
+// request audit or the derive fold (`pull::fold::Withheld`) refused a day or a
+// bucket. Each names a failure, never a location.
 
 // `agreed differed day_absent minute_absent` — `ingest.rs`'s
 // `pull.daycheck` line (D-3001): four COUNTS of days, the pulled day bar

@@ -796,9 +796,10 @@ fn fold_audit_range(
          The seven coarse rungs are NEVER pulled. `pull::ingest::derive_all` folds\n  \
          them from the one-minute file at ingest with the minute-completeness\n  \
          authority, which writes a bucket only when every scheduled minute exists\n  \
-         and withholds exceptional sessions. This audit re-derives with that same\n  \
-         authority; a bucket it withholds is counted as WITHHELD, neither agreement\n  \
-         nor disagreement. Nothing else in this workspace looks across rungs.\n\n",
+         and folds a special session inside its recorded windows. This audit\n  \
+         re-derives with that same authority; a bucket it withholds is counted\n  \
+         as WITHHELD, neither agreement nor disagreement. Nothing else in this\n  \
+         workspace looks across rungs.\n\n",
     );
     let _ = writeln!(
         out,

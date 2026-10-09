@@ -10,8 +10,8 @@
 //! qualifiers (`pub(super)`) on items another module now has to reach.
 //! No route answers differently because of the move.
 
-use super::{Loaded, floor_oldest};
-use crate::{ingest, render};
+use super::{Loaded, census_now, floor_oldest};
+use crate::{census, ingest, render};
 use std::fmt::Write as _;
 
 /// One history claim as JSON object FIELDS — no braces, so the binding claim
@@ -204,10 +204,43 @@ fn finest_fields(feed: pull::vendor::Feed) -> String {
 /// without serving it — `served` says which, and a floor recorded for a
 /// withdrawn rung is a fact worth keeping rather than a capability being
 /// advertised.
+///
+/// # What is offered, what is held, and on what basis (D-3320 to D-3338)
+///
+/// Every field below is read off `pull::vendor::Descriptor` or the census, and
+/// this route spells only the wire words:
+///
+/// * `offered`, and for an excluded feed `excluded_by`, `excluded_on` and
+///   `excluded_because` — the operator's allow-list (D-3338). An excluded feed
+///   is also `ready: false`, so a picker that predates `offered` greys it.
+/// * `rungs` (served) and `derived_rungs` (folded from the feed's minutes;
+///   none for GDFL, D-2802).
+/// * `archive` — the span the store holds from a bought archive, measured —
+///   and `window` — the operator's own span, with the words a month outside it
+///   carries.
+/// * `basis` — per segment and rung: price, volume, `adjusted_as_of`, close,
+///   whether the day bar is a fold, and whether open interest applies
+///   (D-3322, D-3323, D-3324); `[]` with `basis_unverified` for a feed nobody
+///   measured.
+/// * `closing_auction` — what the store holds for a CAS-eligible share from
+///   2026-08-03 (D-3320).
+/// * `store` — the census's state and counters, from which a folder feed's
+///   readiness is derived rather than from a folder probe.
+///
+/// O(1) in the store: one cached census read for the whole answer and a
+/// walk bounded by the closed enums (five feeds, three segments, eleven
+/// rungs). Measured on a shadow of the operator's store, 9 Oct 2026, 200
+/// sequential GETs: p50 0.69 ms, p99 1.37 ms (the base build: 0.66 / 1.26).
 pub(super) async fn feeds_json(
-    axum::extract::State(_site): axum::extract::State<Loaded>,
+    axum::extract::State(site): axum::extract::State<Loaded>,
 ) -> ([(axum::http::HeaderName, &'static str); 1], String) {
     let mut out = String::from("[");
+    // THE STORE, READ ONCE FOR THE WHOLE ANSWER (D-3338). A folder feed is
+    // ready when its census holds bars — the store is what /db reads, and a
+    // folder probe answered a different question for a feed imported from
+    // somewhere else (DB-051). A cache hit is a refcount bump; a miss is the
+    // header read every census reader already pays. No directory is walked.
+    let (censuses, _entries) = census_now(&site);
     // ONE CLOCK READ FOR THE WHOLE ANSWER, so two feeds' rolling floors are
     // resolved against the same day. Reading it per row could straddle
     // midnight and emit two answers that disagree by a day for no reason a
@@ -262,81 +295,7 @@ pub(super) async fn feeds_json(
         }
         history.push(']');
 
-        // CAN THIS FEED ACTUALLY SERVE?
-        //
-        // A feed listed but unusable is worse than one absent: it invites a
-        // pull that cannot work and answers with a failure the operator has to
-        // decode. TrueData and GDFL are the live case — samples were supplied,
-        // the real data has not been bought, and offering them implies a
-        // capability that does not exist.
-        //
-        // The signal is the CENSUS, which is already loaded and is a header
-        // read rather than a directory walk — this is a per-render path and an
-        // O(files) probe here would be the cost `/store` exists to avoid.
-        //
-        // NOT HIDDEN, DISABLED, WITH THE REASON. §4 forbids the silent version:
-        // a feed that vanishes teaches the operator nothing, and one that says
-        // "no data held, and no credential configured" tells them exactly which
-        // of the two things to do.
-        // THE CENSUS READ IS GONE, and its absence is the fix rather than a
-        // tidy-up. It counted what had been INGESTED and was then used to
-        // answer whether a feed could BE ingested — the circularity that made
-        // both archive feeds unreachable. Readiness below asks the kind and the
-        // store prefix; nothing here needs a counter.
-        // A BROKER IS READY WITH AN EMPTY STORE. Its credential is what proves
-        // entitlement and the first pull is what fills the store; an empty
-        // census means "nothing pulled yet", not "not owned". Using the census
-        // as the entitlement signal for a broker is circular — it could never
-        // be selected to do the pull that would make it selectable.
-        //
-        // An ARCHIVE is different: there is no credential, so the only evidence
-        // of ownership is data read from files the operator bought.
-        //
-        // ASKED AS "DOES A CREDENTIAL PROVE ENTITLEMENT HERE", which is
-        // `SourceKind::needs_credential` and is the actual reason, rather than
-        // as a second `match` on the transport that happens to land the same
-        // way. The two were separate and could have drifted; the predicate is
-        // now the same value `kind`, `kind_label` and `verb` are read from.
-        // THE PREDICATE IS THE FEED'S KIND AND ITS STORE PREFIX — NOT ITS CENSUS.
-        //
-        // `a966a6f` moved archive readiness onto the folder and put the call in
-        // the `Some(_)` arm of a match on `held`. That was DEAD CODE, and the
-        // audit caught it: `held` is `Some` only when the census is
-        // `Census::Held` (`census.rs` returns `None` for `Absent` and
-        // `Unreadable`), so a never-ingested TrueData or GDFL produced
-        // `held == None`, fell to the `None` arm, and was refused. The fix sat
-        // behind the very condition it was written to remove and the
-        // circularity survived it — manifest needs an ingest, an ingest needs
-        // ready, ready needed the manifest.
-        //
-        // AND THE ARM IT FELL TO LIED. It said "<feed> has no store prefix",
-        // while `Feed::store_vendor` returns `Some(Vendor::TrueData)` and
-        // `Some(Vendor::Gdfl)`. The operator was told to buy the archive he had
-        // already bought and to give the feed a prefix it already had — two
-        // remedies that are both no-ops, so following the page could never
-        // clear the state.
-        //
-        // `held` is therefore not consulted at all. It answered a question
-        // about INGEST HISTORY and readiness is a question about ENTITLEMENT.
-        let (ready, why) = if kind.needs_credential() {
-            // A broker's credential is the entitlement, so it is ready with an
-            // empty store: the first pull is what fills it.
-            (true, String::new())
-        } else if feed.store_vendor().is_none() {
-            // The one case the old `None` arm was actually written for, and now
-            // the only case that can reach this sentence.
-            (
-                false,
-                format!(
-                    "{} has no store prefix, so nothing it pulled could be filed",
-                    feed.display()
-                ),
-            )
-        } else {
-            // An archive has no credential, so the evidence is the files the
-            // operator bought — whatever the census has or has not recorded.
-            archive_ready(feed)
-        };
+        let (ready, why) = readiness(feed, kind, census_row(&censuses, feed));
 
         // THE KIND, ITS LABEL AND THE VERB — ALL THREE FROM ONE VALUE, ALL
         // THREE FREE.
@@ -384,9 +343,13 @@ pub(super) async fn feeds_json(
             // vendor" send an operator to different places.
             pull::vendor::Transport::LocalArchive(_) => "local_folder",
         };
+        // WHAT IS OFFERED, WHAT IS HELD, AND ON WHAT BASIS (D-3322, D-3323,
+        // D-3324, D-3338). Every word below is read off the descriptor; this
+        // route spells the wire words and invents no fact.
+        let (served, derived) = rungs_of(feed);
         let _ = write!(
             out,
-            r#"{{"wire":{},"display":{},"kind":{},"kind_label":{},"verb":{},"ready":{ready},"why":{},"fno":{},"finest":{finest},"history":{history}}}"#,
+            r#"{{"wire":{},"display":{},"kind":{},"kind_label":{},"verb":{},"ready":{ready},"why":{},{offer},"rungs":{rungs},"derived_rungs":{derived_rungs},"archive":{archive},"window":{window},"basis":{basis},"basis_unverified":{unverified},"close_source":{close_source},"closing_auction":{auction},"store":{store},"fno":{},"finest":{finest},"history":{history}}}"#,
             render::json_string(feed.wire()),
             render::json_string(feed.display()),
             render::json_string(match kind {
@@ -397,6 +360,24 @@ pub(super) async fn feeds_json(
             render::json_string(kind.verb()),
             render::json_string(&why),
             render::json_string(fno),
+            offer = offer_fields(feed.descriptor().offer),
+            rungs = words_array(served.iter().copied()),
+            derived_rungs = words_array(derived.iter().map(|tf| tf.as_str())),
+            archive = span_json(feed.descriptor().archive, None),
+            window = span_json(feed.descriptor().window, Some(OUTSIDE_WINDOW)),
+            basis = basis_json(feed, &served, &derived),
+            unverified = match feed.descriptor().basis {
+                pull::vendor::Basis::Unverified(why) => render::json_string(why),
+                pull::vendor::Basis::Measured { .. } => "null".to_owned(),
+            },
+            close_source = match feed.descriptor().basis {
+                pull::vendor::Basis::Measured { close_source, .. } => {
+                    render::json_string(close_source)
+                }
+                pull::vendor::Basis::Unverified(_) => "null".to_owned(),
+            },
+            auction = auction_json(feed.descriptor().closing_auction),
+            store = store_json(census_row(&censuses, feed)),
             finest = finest_fields(feed),
         );
     }
@@ -410,85 +391,383 @@ pub(super) async fn feeds_json(
     )
 }
 
-/// Whether an ARCHIVE feed has data the operator actually bought, and why not.
+/// Whether a feed can serve the operator, and why not — `ready` and `why` on
+/// `/feeds.json`.
 ///
-/// # Why the folder and not the census
+/// `row` is the feed's census row from the one store read the route makes;
+/// only a folder feed reads it (D-3338). O(1): a few field reads and no
+/// filesystem call.
+fn readiness(
+    feed: pull::vendor::Feed,
+    kind: pull::vendor::SourceKind,
+    row: Option<&census::VendorCensus>,
+) -> (bool, String) {
+    // CAN THIS FEED ACTUALLY SERVE THE OPERATOR?
+    //
+    // NOT HIDDEN, DISABLED, WITH THE REASON. §4 forbids the silent version: a
+    // feed that vanishes teaches the operator nothing, and one that says why
+    // it is not ready tells him which thing to do. Four answers, in order:
+    //
+    // * excluded by the operator — whatever its entitlement (D-3338);
+    // * a broker — its credential proves entitlement, so it is ready with an
+    //   empty store: the first pull is what fills it, and asking the census
+    //   would make it unselectable for the very pull that fills it;
+    // * a feed with no store prefix — nothing it read could be filed;
+    // * a folder feed — ready when its STORE holds bars (`held_ready`).
+    //
+    // `SourceKind::needs_credential` is asked rather than a second `match` on
+    // the transport, so this and `kind`, `kind_label` and `verb` are read from
+    // one value and cannot drift.
+    //
+    // EXCLUDED BY THE OPERATOR, BEFORE ANYTHING ELSE (D-3338). Dhan and Groww
+    // hold a credential and so read `ready: true`, which every picker that
+    // predates `offered` took as "offer it" (DB-051, DB-G24). An excluded feed
+    // is not ready for the operator, whatever its entitlement, and the reason
+    // names who excluded it, when and where it is recorded.
+    if let pull::vendor::Offer::Excluded { on, source, .. } = feed.descriptor().offer {
+        return (
+            false,
+            format!(
+                "{} is excluded by the operator since {on}: {source}",
+                feed.display()
+            ),
+        );
+    }
+    if kind.needs_credential() {
+        // A broker's credential is the entitlement, so it is ready with an
+        // empty store: the first pull is what fills it.
+        (true, String::new())
+    } else if feed.store_vendor().is_none() {
+        // The one case the old `None` arm was actually written for, and now
+        // the only case that can reach this sentence.
+        (
+            false,
+            format!(
+                "{} has no store prefix, so nothing it pulled could be filed",
+                feed.display()
+            ),
+        )
+    } else {
+        // AN ARCHIVE HAS NO CREDENTIAL, AND ITS EVIDENCE IS NOW THE STORE.
+        //
+        // This read the folder at `~/.brutex/vendor-data/<feed>` and called
+        // GDFL "not ready — no folder … yet" while its store held about 3.1
+        // billion bars, because `cli gdfl-import` reads the operator's own
+        // data root (D-2804) and that folder was never part of it (DB-051,
+        // D-3338). The circularity the folder probe was written to break —
+        // a census that fills from an ingest which needed readiness — is
+        // gone with it: nothing in this server ingests an archive on the
+        // strength of this field, and `/folder.json` still answers a
+        // folder's reach on demand.
+        held_ready(feed, row)
+    }
+}
+
+/// The label D-3338 gives a month outside the operator's window, so no page
+/// spells it a second way.
+const OUTSIDE_WINDOW: &str = "outside your window";
+
+/// This feed's census row in one read of the store, or `None` where the feed
+/// has no store prefix or the read yielded no row for it.
 ///
-/// A broker proves entitlement with a credential, so it is ready with an empty
-/// store — `SourceKind::needs_credential` answers that and this function is
-/// never reached for one. An archive has no credential, so the only evidence is
-/// the files themselves. Asking the census instead made readiness circular: the
-/// census fills from an ingest, the ingest needs readiness, so a freshly bought
-/// archive could never be selected to do the pull that would make it
-/// selectable.
+/// [`census::read_all`] yields one row per `Vendor::ALL` entry in that order,
+/// so the row at the vendor's index is its own; the search behind it runs only
+/// for a row out of that order and is bounded by the vendor count.
+fn census_row(
+    censuses: &[census::VendorCensus],
+    feed: pull::vendor::Feed,
+) -> Option<&census::VendorCensus> {
+    let vendor = feed.store_vendor()?;
+    censuses
+        .get(vendor as usize)
+        .filter(|row| row.vendor == vendor)
+        .or_else(|| censuses.iter().find(|row| row.vendor == vendor))
+}
+
+/// Whether a FOLDER feed's store holds bars, and why not (D-3338).
 ///
 /// # Three refusals, never one
 ///
-/// `CLAUDE.md` §4 forbids collapsing distinct failures into one silence, and
-/// these three are the operator's whole diagnostic path — they tell him whether
-/// to set a path, fix a permission, or copy his files in:
+/// `CLAUDE.md` §4 forbids collapsing distinct failures into one silence:
 ///
-/// * the root or the feed's folder cannot be resolved at all;
-/// * the folder is not there yet;
-/// * the folder is there and holds nothing.
+/// * no census row at all for the feed;
+/// * a census that is absent or unreadable — its own note says which, where;
+/// * a census that loaded and holds no bars.
 ///
 /// # Cost
 ///
-/// O(1). `read_dir` opens the directory and `next()` pulls ONE entry — the
-/// count of files in it is never walked, so a folder holding 100,000 CSVs
-/// answers in the same time as one holding a single file. That matters because
-/// this runs on the `/feeds.json` render path, where the comment above the
-/// readiness match already warns that an O(files) probe is the cost `/store`
-/// exists to avoid.
-///
-/// UNVERIFIED as a measured figure. Nothing here was timed against a folder of
-/// 100,000 CSVs, and the sentence above about one answering as fast as a folder
-/// of one is what the STRUCTURE implies — one `read_dir` and one `next()`,
-/// never a `count()` and never a `collect()` — not a reading anybody took.
-/// `CLAUDE.md` §3 rule 6, and the same admission `docs/06-limits.md` §65 makes
-/// about the walk this probe exists to avoid.
-fn archive_ready(feed: pull::vendor::Feed) -> (bool, String) {
-    let root = match pull::folder::root() {
-        Ok(root) => root,
-        Err(why) => {
-            return (
-                false,
-                format!("the archive root could not be resolved: {why}"),
-            );
-        }
-    };
-    let dir = match pull::folder::folder_of(&root, feed) {
-        Ok(dir) => dir,
-        Err(why) => {
-            return (
-                false,
-                format!(
-                    "{}'s archive folder could not be named: {why}",
-                    feed.display()
-                ),
-            );
-        }
-    };
-    let shown = dir.display();
-    match std::fs::read_dir(&dir) {
-        // NOT THERE YET is not the same fact as EMPTY, and the operator acts
-        // differently on each: one is a path to create or configure, the other
-        // is files to copy.
-        Err(why) if why.kind() == std::io::ErrorKind::NotFound => (
+/// O(1): the census is already read by the caller, and this is two field
+/// reads. No filesystem call.
+fn held_ready(feed: pull::vendor::Feed, row: Option<&census::VendorCensus>) -> (bool, String) {
+    let Some(row) = row else {
+        return (
             false,
-            format!("no folder at {shown} yet — the bought CSVs go there"),
-        ),
-        Err(why) => (false, format!("{shown} could not be read: {why}")),
-        Ok(mut entries) => match entries.next() {
-            Some(_) => (true, String::new()),
-            None => (
-                false,
-                format!(
-                    "{shown} is there and holds nothing — the bought CSVs have not been copied in"
-                ),
+            format!(
+                "{} has no census row, so nothing says what its store holds",
+                feed.display()
             ),
-        },
+        );
+    };
+    match row.counters() {
+        Some((_, bars, _)) if bars > 0 => (true, String::new()),
+        Some(_) => (
+            false,
+            format!(
+                "{}'s census at {} loaded and holds no bars yet: nothing has been imported for it",
+                feed.display(),
+                row.path.display()
+            ),
+        ),
+        None => (false, row.note()),
     }
+}
+
+/// What the store holds for a feed, as one JSON object: the census's state,
+/// its month files and bars, and its own note when it did not load.
+///
+/// The three counters are one field read each (`docs/04-invariants.md`
+/// M-series); nothing is walked.
+fn store_json(row: Option<&census::VendorCensus>) -> String {
+    let Some(row) = row else {
+        return r#"{"state":"no_prefix","month_files":null,"bars":null,"note":null}"#.to_owned();
+    };
+    let state = match row.state {
+        census::Census::Held { .. } => "held",
+        census::Census::Absent => "absent",
+        census::Census::Unreadable { .. } => "unreadable",
+    };
+    match row.counters() {
+        Some((month_files, bars, _)) => format!(
+            r#"{{"state":"{state}","month_files":{month_files},"bars":{bars},"note":{}}}"#,
+            match row.degraded() {
+                Some(why) => render::json_string(&why),
+                None => "null".to_owned(),
+            }
+        ),
+        None => format!(
+            r#"{{"state":"{state}","month_files":null,"bars":null,"note":{}}}"#,
+            render::json_string(&row.note())
+        ),
+    }
+}
+
+/// `offered`, and who excluded a feed, when and why — as JSON object FIELDS.
+///
+/// The three exclusion fields are `null` on an offered feed and all present
+/// on an excluded one, so a reader never tells an absent key from a null.
+fn offer_fields(offer: pull::vendor::Offer) -> String {
+    match offer {
+        pull::vendor::Offer::Offered => {
+            r#""offered":true,"excluded_by":null,"excluded_on":null,"excluded_because":null"#
+                .to_owned()
+        }
+        pull::vendor::Offer::Excluded { by, on, source } => format!(
+            r#""offered":false,"excluded_by":{},"excluded_on":{},"excluded_because":{}"#,
+            render::json_string(by.word()),
+            render::json_string(&on.to_string()),
+            render::json_string(source),
+        ),
+    }
+}
+
+/// The wire word for who states a span.
+const fn span_standing_word(standing: pull::vendor::SpanStanding) -> &'static str {
+    match standing {
+        pull::vendor::SpanStanding::Measured => "measured",
+        pull::vendor::SpanStanding::Operator => "operator",
+    }
+}
+
+/// A dated span as one JSON object, or `null`. `label_outside` is the words
+/// a page prints on a month outside it, where the span has one.
+fn span_json(span: Option<pull::vendor::Span>, label_outside: Option<&str>) -> String {
+    let Some(span) = span else {
+        return "null".to_owned();
+    };
+    let label = match label_outside {
+        Some(words) => format!(r#","label_outside":{}"#, render::json_string(words)),
+        None => String::new(),
+    };
+    format!(
+        r#"{{"from":{},"to":{},"standing":{},"source":{}{label}}}"#,
+        render::json_string(&span.from.to_string()),
+        render::json_string(&span.to.to_string()),
+        render::json_string(span_standing_word(span.standing)),
+        render::json_string(span.source),
+    )
+}
+
+/// A JSON array of strings.
+fn words_array<'a>(words: impl Iterator<Item = &'a str>) -> String {
+    let mut out = String::from("[");
+    for (n, word) in words.enumerate() {
+        if n > 0 {
+            out.push(',');
+        }
+        out.push_str(&render::json_string(word));
+    }
+    out.push(']');
+    out
+}
+
+/// The rungs a feed's store holds: the ones it SERVES, as the descriptor
+/// declares them, and the ones derived from its minutes.
+///
+/// # The derived set is `pull::ingest`'s rule, restated and pinned
+///
+/// `pull::ingest::derived_from` is private; its count is public. A rung is
+/// derived from one-minute bars when it is longer than a minute, a whole
+/// multiple of it, and not the day — D-0077's day is served, never derived —
+/// and only for a feed `pull::ingest::derives_for` admits (never GDFL, D-2802).
+/// `the_derived_rungs_are_the_ingest_rule` holds the count against
+/// `pull::ingest::derived_count`, so the two cannot drift silently.
+fn rungs_of(feed: pull::vendor::Feed) -> (Vec<&'static str>, Vec<store::path::Timeframe>) {
+    let served: Vec<&'static str> = pull::vendor::Granularity::ALL
+        .into_iter()
+        .filter(|rung| feed.serves(*rung))
+        .map(pull::vendor::Granularity::dir)
+        .collect();
+    let folds_minutes = feed.store_vendor().is_some_and(pull::ingest::derives_for)
+        && feed.serves(pull::vendor::Granularity::Minute1);
+    let derived = if folds_minutes {
+        let source = store::path::Timeframe::MINUTE_1.secs();
+        store::path::Timeframe::KNOWN
+            .iter()
+            .copied()
+            .filter(|target| {
+                target.secs() > source
+                    && target.secs().is_multiple_of(source)
+                    && target.secs() != store::path::Timeframe::DAY_1.secs()
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    (served, derived)
+}
+
+/// The wire word for what a feed's store holds for the closing auction.
+const fn auction_word(handling: pull::vendor::AuctionHandling) -> &'static str {
+    match handling {
+        pull::vendor::AuctionHandling::MinutesEndBeforeAuction => "minutes_end_before_auction",
+        pull::vendor::AuctionHandling::PrintKeptApart => "print_kept_apart",
+    }
+}
+
+/// A feed's closing-auction note as one JSON object, or `null` for a feed
+/// nobody measured (D-3320). The day and the 15:15 are the descriptor's, which
+/// holds them from the eligible share's session table; nothing here spells
+/// either.
+fn auction_json(note: Option<pull::vendor::AuctionNote>) -> String {
+    let Some(note) = note else {
+        return "null".to_owned();
+    };
+    let close = note.continuous_close_minute;
+    format!(
+        r#"{{"from":{},"eligible_continuous_close":"{:02}:{:02}","handling":{},"label":{},"source":{}}}"#,
+        render::json_string(&note.from.to_string()),
+        close / 60,
+        close % 60,
+        render::json_string(auction_word(note.handling)),
+        render::json_string(note.handling.label()),
+        render::json_string(note.source),
+    )
+}
+
+/// The wire word for a price basis (D-3323).
+const fn price_word(price: pull::vendor::PriceBasis) -> &'static str {
+    match price {
+        pull::vendor::PriceBasis::Raw => "raw",
+        pull::vendor::PriceBasis::AsPublished => "as_published",
+        pull::vendor::PriceBasis::VendorAdjusted => "vendor_adjusted",
+    }
+}
+
+/// The wire word for a volume basis (D-3323).
+const fn volume_word(volume: pull::vendor::VolumeBasis) -> &'static str {
+    match volume {
+        pull::vendor::VolumeBasis::Raw => "raw",
+        pull::vendor::VolumeBasis::VendorOwn => "vendor_own",
+        pull::vendor::VolumeBasis::NotTraded => "none",
+    }
+}
+
+/// The wire word for what a close is (D-3324).
+const fn close_word(close: pull::vendor::CloseSemantics) -> &'static str {
+    match close {
+        pull::vendor::CloseSemantics::Official => "official",
+        pull::vendor::CloseSemantics::LastPrint => "last_print",
+    }
+}
+
+/// Every (segment, rung) a feed holds, with its price, volume and close basis
+/// and whether open interest applies — D-3323's `basis` array, with D-3324's
+/// `close` on each row. `[]` for a feed nobody measured, whose
+/// `basis_unverified` says so.
+///
+/// At most three segments × eleven rungs, so the answer is bounded by the
+/// closed enums, never by the store.
+fn basis_json(
+    feed: pull::vendor::Feed,
+    served: &[&'static str],
+    derived: &[store::path::Timeframe],
+) -> String {
+    let basis = feed.descriptor().basis;
+    let pull::vendor::Basis::Measured { segments, .. } = basis else {
+        return "[]".to_owned();
+    };
+    let day = pull::vendor::Granularity::Day1.dir();
+    let rungs = served
+        .iter()
+        .map(|rung| (*rung, false))
+        .chain(derived.iter().map(|tf| (tf.as_str(), true)));
+    let mut out = String::from("[");
+    let mut n = 0usize;
+    for (rung, is_derived) in rungs {
+        let daily = rung == day;
+        let close = basis.close_of(daily);
+        let day_is_fold = match basis {
+            pull::vendor::Basis::Measured { day: Some(day), .. } if daily => {
+                if day.is_fold {
+                    "true"
+                } else {
+                    "false"
+                }
+            }
+            _ => "null",
+        };
+        for row in segments {
+            if n > 0 {
+                out.push(',');
+            }
+            n += 1;
+            let _ = write!(
+                out,
+                r#"{{"segment":{},"rung":{},"derived":{is_derived},"price":{},"price_label":{},"volume":{},"volume_label":{},"adjusted_as_of":{},"close":{},"close_label":{},"day_is_fold":{day_is_fold},"oi":{},"source":{}}}"#,
+                render::json_string(row.segment.as_str()),
+                render::json_string(rung),
+                render::json_string(price_word(row.price)),
+                render::json_string(row.price.label()),
+                render::json_string(volume_word(row.volume)),
+                render::json_string(row.volume.label()),
+                if row.price.adjusted_as_of_pull_date() {
+                    r#""pull_date""#
+                } else {
+                    "null"
+                },
+                close.map_or_else(|| "null".to_owned(), |c| render::json_string(close_word(c))),
+                close.map_or_else(|| "null".to_owned(), |c| render::json_string(c.label())),
+                render::json_string(if pull::vendor::open_interest_applies(row.segment) {
+                    "carried"
+                } else {
+                    "not_applicable"
+                }),
+                render::json_string(row.source),
+            );
+        }
+    }
+    out.push(']');
+    out
 }
 
 #[cfg(test)]
@@ -623,8 +902,11 @@ mod tests {
         // carries, produced by its own `match` in the same function, and the
         // browser had started guessing one from the other. `kind`, `kind_label`
         // and `verb` are all `SourceKind`'s, read from one value per feed.
+        // DHAN IS A REST FEED AND IS NOT READY: the operator excluded it
+        // (D-3338), and the reason is the first thing its row says after the
+        // kind. It held `"ready":true` on its credential alone (DB-G24).
         assert!(body.starts_with(
-            r#"[{"wire":"dhan","display":"Dhan","kind":"rest","kind_label":"REST API","verb":"pull","ready":true,"why":""#
+            r#"[{"wire":"dhan","display":"Dhan","kind":"rest","kind_label":"REST API","verb":"pull","ready":false,"why":"Dhan is excluded by the operator since 2026-10-06: "#
         ), "{body}");
         assert!(
             !body.contains(r#""transport":"#),
@@ -806,5 +1088,424 @@ mod tests {
             ),
             None
         );
+    }
+
+    // -- what is offered, what is held, and on what basis --------------------
+
+    /// The route's answer, parsed: one object per feed, in `Feed::ALL` order.
+    async fn feeds_of(name: &str, root: &std::path::Path) -> Vec<serde_json::Value> {
+        let dir = masters(name, None, None);
+        let site = Loaded::new(Site::load(&dir, root));
+        let (_, body) = feeds_json(axum::extract::State(site)).await;
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("feeds JSON");
+        parsed.as_array().expect("an array of feeds").clone()
+    }
+
+    /// The row for `wire`.
+    fn row<'a>(rows: &'a [serde_json::Value], wire: &str) -> &'a serde_json::Value {
+        rows.iter()
+            .find(|row| row["wire"] == wire)
+            .unwrap_or_else(|| panic!("a row for {wire}: {rows:?}"))
+    }
+
+    /// A store whose GDFL census holds `entries` one-second NIFTY months of
+    /// `rows` bars each; `None` writes nothing, so the census is absent.
+    fn gdfl_store(name: &str, entries: Option<(u32, u64)>) -> std::path::PathBuf {
+        use pull::manifest::{Entry, EntryKey, Manifest, manifest_path};
+        let root = store_root(name);
+        let Some((months, rows)) = entries else {
+            return root;
+        };
+        let mut manifest = Manifest::open(brutex_core::vendor::Vendor::Gdfl, &[], &[])
+            .expect("a genesis manifest");
+        for m in 0..months {
+            manifest
+                .record(Entry {
+                    key: EntryKey {
+                        contract: None,
+                        exchange: brutex_core::instrument::Exchange::Nse,
+                        segment: brutex_core::instrument::Segment::Index,
+                        symbol: brutex_core::symbol::Symbol::new("NIFTY").expect("a symbol"),
+                        timeframe: store::path::Timeframe::SECOND_1,
+                        month: store::path::YearMonth::new(
+                            2026,
+                            1 + u8::try_from(m).expect("small"),
+                        )
+                        .expect("a month"),
+                    },
+                    rows,
+                    first_ts_micros: 1_767_240_900_000_000,
+                    last_ts_micros: 1_767_263_399_000_000,
+                })
+                .expect("records");
+        }
+        let path = manifest_path(&root, brutex_core::vendor::Vendor::Gdfl);
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("mkdir");
+        std::fs::write(&path, manifest.image()).expect("writes");
+        root
+    }
+
+    /// **ZERODHA AND GDFL ARE OFFERED; DHAN, GROWW AND TRUEDATA ARE EXCLUDED BY
+    /// THE OPERATOR, NOT READY, AND SAY SO** (D-3338; DB-051, DB-G24).
+    ///
+    /// Before: dhan and groww read `ready: true` on their credential, and every
+    /// picker offered all five.
+    #[tokio::test]
+    async fn only_zerodha_and_gdfl_are_offered_and_the_rest_are_excluded_by_the_operator() {
+        let rows = feeds_of("feeds-offer", &gdfl_store("feeds-offer", None)).await;
+        assert_eq!(rows.len(), pull::vendor::Feed::ALL.len());
+        for wire in ["zerodha", "gdfl"] {
+            let feed = row(&rows, wire);
+            assert_eq!(feed["offered"], true, "{feed}");
+            for key in ["excluded_by", "excluded_on", "excluded_because"] {
+                assert!(
+                    feed[key].is_null(),
+                    "{wire}: {key} is null, not absent: {feed}"
+                );
+            }
+        }
+        assert_eq!(
+            row(&rows, "zerodha")["ready"],
+            true,
+            "a broker with a credential"
+        );
+        for (wire, display) in [
+            ("dhan", "Dhan"),
+            ("groww", "Groww"),
+            ("truedata", "TrueData"),
+        ] {
+            let feed = row(&rows, wire);
+            assert_eq!(feed["offered"], false, "{feed}");
+            assert_eq!(feed["excluded_by"], "operator", "{feed}");
+            assert_eq!(feed["excluded_on"], "2026-10-06", "{feed}");
+            assert!(
+                feed["excluded_because"]
+                    .as_str()
+                    .is_some_and(|why| why.contains("D-3338")),
+                "{feed}"
+            );
+            assert_eq!(
+                feed["ready"], false,
+                "{wire}: excluded is not ready: {feed}"
+            );
+            assert!(
+                feed["why"]
+                    .as_str()
+                    .is_some_and(|why| why.starts_with(&format!(
+                        "{display} is excluded by the operator since 2026-10-06"
+                    ))),
+                "{feed}"
+            );
+        }
+        assert_eq!(
+            rows.iter().filter(|feed| feed["offered"] == true).count(),
+            2,
+            "exactly two feeds are offered"
+        );
+    }
+
+    /// **GDFL'S READINESS IS ITS STORE, NOT A FOLDER PROBE** (D-3338; DB-051,
+    /// DB-G68).
+    ///
+    /// GDFL read "ingest not ready — no folder at ~/.brutex/vendor-data/gdfl
+    /// yet" while its store held about 3.1 billion bars imported by `cli
+    /// gdfl-import`. Every census state answers here, each in its own words.
+    #[tokio::test]
+    async fn gdfl_is_ready_when_its_store_holds_bars_and_says_which_census_state_it_is_not() {
+        // HELD, WITH BARS: ready, and the counters cross the wire.
+        let rows = feeds_of("feeds-held", &gdfl_store("feeds-held", Some((2, 22_500)))).await;
+        let gdfl = row(&rows, "gdfl");
+        assert_eq!(gdfl["ready"], true, "{gdfl}");
+        assert_eq!(gdfl["why"], "", "{gdfl}");
+        assert_eq!(gdfl["store"]["state"], "held", "{gdfl}");
+        assert_eq!(gdfl["store"]["month_files"], 2, "{gdfl}");
+        assert_eq!(gdfl["store"]["bars"], 45_000, "{gdfl}");
+        assert!(
+            gdfl["store"]["note"].is_null(),
+            "a census that loaded whole: {gdfl}"
+        );
+
+        // HELD, EMPTY: a census that loaded and holds nothing is not ready.
+        let rows = feeds_of("feeds-genesis", &gdfl_store("feeds-genesis", Some((0, 0)))).await;
+        let gdfl = row(&rows, "gdfl");
+        assert_eq!(gdfl["ready"], false, "{gdfl}");
+        assert!(
+            gdfl["why"]
+                .as_str()
+                .is_some_and(|why| why.contains("holds no bars yet")),
+            "{gdfl}"
+        );
+        assert_eq!(gdfl["store"]["state"], "held");
+        assert_eq!(gdfl["store"]["bars"], 0);
+
+        // ABSENT: the census's own note, which names the path it looked at.
+        let rows = feeds_of("feeds-absent", &gdfl_store("feeds-absent", None)).await;
+        let gdfl = row(&rows, "gdfl");
+        assert_eq!(gdfl["ready"], false, "{gdfl}");
+        assert_eq!(gdfl["store"]["state"], "absent", "{gdfl}");
+        assert!(
+            gdfl["store"]["bars"].is_null(),
+            "an absent census is not zero: {gdfl}"
+        );
+        let why = gdfl["why"].as_str().expect("a reason");
+        assert!(
+            !why.is_empty() && !why.contains("vendor-data"),
+            "no folder probe: {why}"
+        );
+        assert_eq!(
+            gdfl["store"]["note"], gdfl["why"],
+            "one note, two places: {gdfl}"
+        );
+
+        // UNREADABLE: a manifest of zeros is refused, and the refusal is named.
+        let root = store_root("feeds-unreadable");
+        let path = pull::manifest::manifest_path(&root, brutex_core::vendor::Vendor::Gdfl);
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("mkdir");
+        std::fs::write(&path, vec![0u8; 4096]).expect("writes");
+        let rows = feeds_of("feeds-unreadable", &root).await;
+        let gdfl = row(&rows, "gdfl");
+        assert_eq!(gdfl["ready"], false, "{gdfl}");
+        assert_eq!(gdfl["store"]["state"], "unreadable", "{gdfl}");
+        assert!(
+            gdfl["why"]
+                .as_str()
+                .is_some_and(|why| why.contains("UNREADABLE")),
+            "{gdfl}"
+        );
+    }
+
+    /// **GDFL IS ONE SECOND OVER ITS MEASURED ARCHIVE, 2018-09-03 TO
+    /// 2026-09-24, RAW, AND ITS OPEN INTEREST APPLIES TO CONTRACTS ONLY**
+    /// (D-2802, D-3322, D-3323, D-3324, D-3338; DB-051, DB-G24, DB-G68).
+    #[tokio::test]
+    async fn gdfl_is_one_second_over_its_measured_archive_and_raw() {
+        let rows = feeds_of("feeds-basis", &gdfl_store("feeds-basis", None)).await;
+
+        // GDFL: one second, over 2018-09-03..2026-09-24, measured.
+        let gdfl = row(&rows, "gdfl");
+        assert_eq!(gdfl["rungs"], serde_json::json!(["1s"]), "{gdfl}");
+        assert_eq!(gdfl["derived_rungs"], serde_json::json!([]), "{gdfl}");
+        assert_eq!(gdfl["archive"]["from"], "2018-09-03");
+        assert_eq!(gdfl["archive"]["to"], "2026-09-24");
+        assert_eq!(gdfl["archive"]["standing"], "measured");
+        assert!(gdfl["window"].is_null());
+        let history: Vec<&str> = gdfl["history"]
+            .as_array()
+            .expect("history")
+            .iter()
+            .filter_map(|rung| rung["rung"].as_str())
+            .collect();
+        assert_eq!(history, ["1s"], "no 1min or 1day row is advertised: {gdfl}");
+        let basis = gdfl["basis"].as_array().expect("a basis array");
+        assert_eq!(basis.len(), 3, "three segments at one rung: {gdfl}");
+        for (segment, price, volume, oi) in [
+            ("INDEX", "as_published", "none", "not_applicable"),
+            ("CASH", "raw", "raw", "not_applicable"),
+            ("FNO", "raw", "raw", "carried"),
+        ] {
+            let at = basis
+                .iter()
+                .find(|row| row["segment"] == segment)
+                .unwrap_or_else(|| panic!("{segment}: {gdfl}"));
+            assert_eq!(at["rung"], "1s");
+            assert_eq!(at["derived"], false);
+            assert_eq!(at["price"], price, "{at}");
+            assert_eq!(at["volume"], volume, "{at}");
+            assert!(at["adjusted_as_of"].is_null(), "{at}");
+            assert_eq!(at["close"], "last_print", "{at}");
+            assert_eq!(at["close_label"], "last print", "{at}");
+            assert!(at["day_is_fold"].is_null(), "{at}");
+            assert_eq!(at["oi"], oi, "{at}");
+            assert!(
+                at["source"].as_str().is_some_and(|s| s.contains("D-3323")),
+                "{at}"
+            );
+        }
+        assert!(gdfl["basis_unverified"].is_null());
+        assert!(
+            gdfl["close_source"]
+                .as_str()
+                .is_some_and(|s| s.contains("D-3324"))
+        );
+    }
+
+    /// **ZERODHA SERVES 1MIN AND 1DAY AND THE RUNGS DERIVED FROM ITS MINUTES,
+    /// OVER THE OPERATOR'S WINDOW, ITS SHARES BACK-ADJUSTED AS OF THE PULL
+    /// DATE, ITS DAY CLOSE OFFICIAL** (D-3322, D-3323, D-3324, D-3338; DB-017,
+    /// DB-033, DB-035, DB-036, DB-G24, DB-G43, DB-G58, DB-G75, DB-G100).
+    #[tokio::test]
+    async fn zerodha_says_its_window_its_adjusted_shares_and_its_official_day_close() {
+        let rows = feeds_of("feeds-zerodha", &gdfl_store("feeds-zerodha", None)).await;
+        // ZERODHA: 1min and 1day served, the derived rungs, the operator's
+        // window, and its shares back-adjusted as of the pull date.
+        let zerodha = row(&rows, "zerodha");
+        assert_eq!(
+            zerodha["rungs"],
+            serde_json::json!(["1min", "1day"]),
+            "{zerodha}"
+        );
+        assert!(zerodha["archive"].is_null());
+        assert_eq!(zerodha["window"]["from"], "2018-01-01");
+        assert_eq!(zerodha["window"]["to"], "2026-09-30");
+        assert_eq!(zerodha["window"]["standing"], "operator");
+        assert_eq!(zerodha["window"]["label_outside"], OUTSIDE_WINDOW);
+        let basis = zerodha["basis"].as_array().expect("a basis array");
+        let cell = |segment: &str, rung: &str| {
+            basis
+                .iter()
+                .find(|row| row["segment"] == segment && row["rung"] == rung)
+                .unwrap_or_else(|| panic!("{segment} {rung}: {zerodha}"))
+        };
+        let day = cell("CASH", "1day");
+        assert_eq!(day["price"], "vendor_adjusted", "{day}");
+        assert!(
+            day["price_label"]
+                .as_str()
+                .is_some_and(|s| s.contains("pull date"))
+        );
+        assert_eq!(day["volume"], "vendor_own", "{day}");
+        assert_eq!(day["adjusted_as_of"], "pull_date", "{day}");
+        assert_eq!(day["close"], "official", "{day}");
+        assert_eq!(day["close_label"], "official close", "{day}");
+        assert_eq!(day["day_is_fold"], false, "{day}");
+        assert_eq!(day["oi"], "not_applicable", "{day}");
+        let minute = cell("CASH", "1min");
+        assert_eq!(minute["close"], "last_print", "{minute}");
+        assert!(minute["day_is_fold"].is_null(), "{minute}");
+        assert_eq!(minute["adjusted_as_of"], "pull_date", "{minute}");
+        let index = cell("INDEX", "1day");
+        assert_eq!(
+            (&index["price"], &index["volume"], &index["oi"]),
+            (
+                &serde_json::json!("as_published"),
+                &serde_json::json!("none"),
+                &serde_json::json!("not_applicable")
+            ),
+            "{index}"
+        );
+        assert!(index["adjusted_as_of"].is_null());
+        assert!(
+            basis.iter().all(|row| row["segment"] != "FNO"),
+            "Zerodha holds no contract: {zerodha}"
+        );
+        let derived: Vec<&serde_json::Value> =
+            basis.iter().filter(|row| row["derived"] == true).collect();
+        assert!(
+            !derived.is_empty(),
+            "the derived rungs carry a basis too: {zerodha}"
+        );
+        assert!(
+            derived.iter().all(|row| row["close"] == "last_print"),
+            "a derived rung closes on its last print: {zerodha}"
+        );
+    }
+
+    /// **EACH OFFERED FEED SAYS WHAT IT HOLDS FOR THE CLOSING AUCTION, AND THE
+    /// THREE UNMEASURED FEEDS SAY THEY WERE NEVER MEASURED** (D-3320, D-3323;
+    /// DB-034, DB-G42).
+    #[tokio::test]
+    async fn the_closing_auction_is_described_per_feed_and_an_unmeasured_basis_says_so() {
+        let rows = feeds_of("feeds-auction", &gdfl_store("feeds-auction", None)).await;
+        let (zerodha, gdfl) = (row(&rows, "zerodha"), row(&rows, "gdfl"));
+        // THE CLOSING AUCTION, PER FEED (D-3320): from 2026-08-03, an eligible
+        // share's continuous trading ends at 15:15, and each feed says what
+        // its store holds after it.
+        for (feed, handling) in [
+            (zerodha, "minutes_end_before_auction"),
+            (gdfl, "print_kept_apart"),
+        ] {
+            let auction = &feed["closing_auction"];
+            assert_eq!(auction["from"], "2026-08-03", "{feed}");
+            assert_eq!(auction["eligible_continuous_close"], "15:15", "{feed}");
+            assert_eq!(auction["handling"], handling, "{feed}");
+            assert!(auction["label"].as_str().is_some_and(|l| !l.is_empty()));
+            assert!(
+                auction["source"]
+                    .as_str()
+                    .is_some_and(|s| s.contains("D-3320"))
+            );
+        }
+        assert!(
+            zerodha["closing_auction"]["label"]
+                .as_str()
+                .is_some_and(|l| l.contains("15:14")),
+            "{zerodha}"
+        );
+
+        // THE OTHER THREE: never measured, and the wire says so.
+        for wire in ["dhan", "groww", "truedata"] {
+            let feed = row(&rows, wire);
+            assert!(feed["closing_auction"].is_null(), "{feed}");
+            assert_eq!(feed["basis"], serde_json::json!([]), "{feed}");
+            assert!(
+                feed["basis_unverified"]
+                    .as_str()
+                    .is_some_and(|why| why.starts_with("UNVERIFIED")),
+                "{feed}"
+            );
+            assert!(feed["close_source"].is_null(), "{feed}");
+            assert!(
+                feed["archive"].is_null() && feed["window"].is_null(),
+                "{feed}"
+            );
+        }
+    }
+
+    /// **THE DERIVED RUNGS ARE THE INGEST RULE**: `rungs_of` restates
+    /// `pull::ingest`'s private `derived_from`, so its count is held against
+    /// the public `derived_count`, and GDFL derives nothing (D-2802).
+    #[test]
+    fn the_derived_rungs_are_the_ingest_rule() {
+        let (served, derived) = rungs_of(pull::vendor::Feed::Zerodha);
+        assert_eq!(served, ["1min", "1day"]);
+        assert_eq!(
+            derived.len(),
+            pull::ingest::derived_count(store::path::Timeframe::MINUTE_1)
+        );
+        assert!(derived.iter().all(|tf| {
+            tf.secs() > 60 && tf.secs() % 60 == 0 && *tf != store::path::Timeframe::DAY_1
+        }));
+        let (served, derived) = rungs_of(pull::vendor::Feed::Gdfl);
+        assert_eq!(served, ["1s"]);
+        assert!(derived.is_empty(), "GDFL is folded into nothing");
+        // TrueData serves a minute and is not GDFL, so it would derive; its
+        // basis is unmeasured, which `basis_json` answers with `[]`.
+        let (_, derived) = rungs_of(pull::vendor::Feed::TrueData);
+        assert!(!derived.is_empty());
+        assert_eq!(
+            basis_json(pull::vendor::Feed::TrueData, &[], &derived),
+            "[]"
+        );
+    }
+
+    /// The arms the route cannot reach with the shipped five feeds: a feed
+    /// with no census row, a census row out of `Vendor::ALL` order, and a
+    /// store answer with no prefix.
+    #[test]
+    fn a_missing_or_reordered_census_row_is_answered_in_words() {
+        use brutex_core::vendor::Vendor;
+        let absent = |vendor| census::VendorCensus {
+            vendor,
+            path: std::path::PathBuf::from("/NOWHERE"),
+            state: census::Census::Absent,
+        };
+        // OUT OF ORDER: the indexed probe misses, and the bounded search finds it.
+        let reordered = [absent(Vendor::Gdfl), absent(Vendor::Dhan)];
+        assert_eq!(
+            census_row(&reordered, pull::vendor::Feed::Dhan).map(|row| row.vendor),
+            Some(Vendor::Dhan)
+        );
+        assert!(census_row(&reordered, pull::vendor::Feed::Zerodha).is_none());
+        // NO ROW: not ready, and the words say nothing is known.
+        let (ready, why) = held_ready(pull::vendor::Feed::Gdfl, None);
+        assert!(!ready && why.contains("has no census row"), "{why}");
+        assert_eq!(
+            store_json(None),
+            r#"{"state":"no_prefix","month_files":null,"bars":null,"note":null}"#
+        );
+        // A SPAN IS NULL WHERE NONE IS HELD.
+        assert_eq!(span_json(None, Some(OUTSIDE_WINDOW)), "null");
+        assert_eq!(words_array(std::iter::empty()), "[]");
+        assert_eq!(words_array(["1s", "1min"].into_iter()), r#"["1s","1min"]"#);
     }
 }

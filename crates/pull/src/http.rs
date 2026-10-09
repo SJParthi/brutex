@@ -968,7 +968,44 @@ pub fn decode_body(
             ),
         });
     }
-    decode_value(&root, spec, listing)
+    decode_value(&root, spec, Asked::unnamed(listing))
+}
+
+/// Who a decoded window was asked for, so a row it refuses can be named.
+///
+/// # Why the instrument travels into the decoder
+///
+/// `pull.decode bars carried an impossible OHLC and were skipped` named no
+/// instrument, no timestamp and no row: the operator's log held six such
+/// events and `1026 of 14685` and `1521 of 15750` bars skipped with nothing to
+/// open (DB-G46). The decoder is the last place the vendor's own row is in
+/// hand, so it is where the name has to be attached — and the vendor's id for
+/// the instrument is the name the vendor would recognise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Asked<'a> {
+    /// The listing class, which decides what is impossible.
+    pub(crate) listing: crate::vendor::Listing,
+    /// The vendor's id for the instrument, or `None` on a path that asked for
+    /// no instrument by name (`decode_body`, which tests and fixtures call).
+    pub(crate) instrument: Option<&'a str>,
+}
+
+impl<'a> Asked<'a> {
+    /// A window asked for by listing alone.
+    pub(crate) const fn unnamed(listing: crate::vendor::Listing) -> Self {
+        Self {
+            listing,
+            instrument: None,
+        }
+    }
+
+    /// A window asked for by a request, which names the instrument.
+    pub(crate) fn of(request: &'a crate::fetch::BarRequest) -> Self {
+        Self {
+            listing: request.listing,
+            instrument: Some(request.instrument_id.as_str()),
+        }
+    }
 }
 
 /// The first key that appears twice in one JSON object of `body`, decoded.
@@ -1051,8 +1088,9 @@ fn not_json(why: &serde_json::Error) -> FetchError {
 fn decode_value(
     root: &serde_json::Value,
     spec: &HttpSpec,
-    listing: crate::vendor::Listing,
+    asked: Asked<'_>,
 ) -> Result<RawWindow, FetchError> {
+    let listing = asked.listing;
     // COUNTED ACROSS THE WHOLE BODY, reported ONCE. A per-row event would put
     // a `telemetry::emit` inside the decode loop; one per window is the
     // granularity `CLAUDE.md` section 3 rule 4 affords. See `one_volume`.
@@ -1134,7 +1172,7 @@ fn decode_value(
                 note_negative_volume_bars(decided.negative_volume, keep.len());
                 note_negative_interest_bars(decided.negative_open_interest, keep.len());
                 let mut arrays = arrays;
-                note_impossible_bars(drop_impossible_bars(&mut arrays), keep.len());
+                refuse_impossible_bars(&mut arrays, keep.len(), asked, spec);
                 RawWindow::decode(&arrays)
             })()
         }
@@ -1152,10 +1190,10 @@ fn decode_value(
         // conversions run per object: rupees to paisa through `csv::paisa`, no
         // float, and a value off the tick grid refused by name.
         ResponseShape::ArrayOfObjects { envelope } => {
-            decode_objects(root, spec, envelope, listing, &mut corrected)
+            decode_objects(root, spec, envelope, asked, &mut corrected)
         }
         ResponseShape::PositionalRows { envelope, array } => {
-            decode_positional(root, spec, envelope, array, listing, &mut corrected)
+            decode_positional(root, spec, envelope, array, asked, &mut corrected)
         }
     };
     // ONLY WHEN A WINDOW ACTUALLY LANDED. A refused window wrote nothing, so an
@@ -1238,9 +1276,10 @@ fn decode_objects(
     root: &serde_json::Value,
     spec: &HttpSpec,
     envelope: Option<&'static str>,
-    listing: crate::vendor::Listing,
+    asked: Asked<'_>,
     corrected: &mut usize,
 ) -> Result<RawWindow, FetchError> {
+    let listing = asked.listing;
     let container = container(root, envelope)?;
     let f = spec.fields;
 
@@ -1385,7 +1424,7 @@ fn decode_objects(
     // separate rules in this decoder reached two of the three shapes and missed
     // the same one; this one is applied at every `RawWindow::decode` in the
     // file, so a shape cannot be forgotten without deleting the call.
-    note_impossible_bars(drop_impossible_bars(&mut arrays), items.len());
+    refuse_impossible_bars(&mut arrays, items.len(), asked, spec);
     RawWindow::decode(&arrays)
 }
 
@@ -1791,34 +1830,202 @@ fn note_negative_interest_bars(negative_bars: usize, bars: usize) {
     );
 }
 
-/// One event per WINDOW for rows whose four prices cannot be a bar.
+/// How many refused rows one window's event and stderr line name in full,
+/// besides the last, which is always named.
 ///
-/// Same per-window rule and same denominator as the two above, and the same
-/// reason for both.
-fn note_impossible_bars(dropped: usize, bars: usize) {
-    if dropped == 0 {
-        return;
+/// Bounded because a window can refuse thousands — the operator's log holds
+/// `1521 of 15750` — and one event per row would roll the 64 MiB ring in
+/// minutes, which is DB-G46's other half. The COUNT is always whole; the names
+/// are the first eight and the last, so a reader knows where the run of bad
+/// rows starts and ends and how many lie between (D-3341's aggregate shape).
+const NAMED_ROWS: usize = 8;
+
+/// Why one row's four prices cannot be a bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Impossible {
+    /// A price below zero, on any listing.
+    Negative,
+    /// A share priced at zero. No share trades for nothing: Zerodha's 1day
+    /// rows for MAZDOCK in 2018 carry open, high, low and close all zero with
+    /// a non-zero volume, two years before its 2020-10-12 listing, and /db
+    /// served them as bars at ₹0.00 (DB-031). An INDEX may legitimately read
+    /// zero — NIFTY50DIVPOINT resets to nothing at a financial year's start —
+    /// so the rule is the share's alone, and a derivative keeps the old one.
+    /// What a zero means is UNVERIFIED and is not guessed; the row is refused,
+    /// not repaired, as D-3318 refuses a zero LTP in GDFL's capital-market
+    /// files.
+    ShareAtZero,
+    /// A high below another price, or a low above one.
+    Order,
+}
+
+impl Impossible {
+    /// The reason, in a sentence's words.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Negative => "a price below zero",
+            Self::ShareAtZero => "a share priced at zero",
+            Self::Order => "a high below another price or a low above one",
+        }
     }
+}
+
+/// One refused row, as the vendor sent it: where it sat in the decoded window,
+/// its instant in the vendor's encoding, and its four prices in paisa.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RefusedRow {
+    /// Its position among the rows decoded so far.
+    row: usize,
+    /// The vendor's timestamp, in the descriptor's encoding; `None` where
+    /// the timestamp column is short, which `RawWindow::decode` then refuses.
+    timestamp: Option<i64>,
+    /// Open, high, low and close, in paisa.
+    prices: [i64; 4],
+    /// Why it is not a bar.
+    why: Impossible,
+}
+
+impl RefusedRow {
+    /// The row in an operator's words: the decoded position, the IST instant
+    /// the landing would have filed it at, the four prices and the reason.
+    fn sentence(self, encoding: crate::vendor::TimestampEncoding) -> String {
+        let [open, high, low, close] = self.prices;
+        let at = match self.timestamp.map(|raw| {
+            (
+                raw,
+                crate::session::IstMoment::from_epoch_secs(crate::fetch::epoch_utc(raw, encoding)),
+            )
+        }) {
+            Some((_, Ok(moment))) => format!(
+                "{} {:02}:{:02}:{:02} IST",
+                moment.day(),
+                moment.minute_of_day() / 60,
+                moment.minute_of_day() % 60,
+                moment.second_of_minute()
+            ),
+            Some((raw, Err(_))) => format!("timestamp {raw}, no instant this build can hold"),
+            None => "no timestamp".to_owned(),
+        };
+        format!(
+            "row {} at {at}: open {open}, high {high}, low {low}, close {close} paisa, {}",
+            self.row,
+            self.why.label()
+        )
+    }
+}
+
+/// What one window refused for an impossible OHLC: every row counted, the
+/// first [`NAMED_ROWS`] and the last named.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Refusals {
+    /// Every refused row.
+    count: usize,
+    /// Of those, shares priced at zero.
+    share_at_zero: usize,
+    /// The first [`NAMED_ROWS`] refused rows, in order.
+    named: Vec<RefusedRow>,
+    /// The last refused row, when there are more than [`NAMED_ROWS`].
+    last: Option<RefusedRow>,
+}
+
+impl Refusals {
+    /// Count one refused row, keeping its name if it is among the first or is
+    /// the latest. O(1): a push into a vector capped at [`NAMED_ROWS`], or one
+    /// overwrite.
+    fn note(&mut self, refused: RefusedRow) {
+        self.count = self.count.saturating_add(1);
+        if refused.why == Impossible::ShareAtZero {
+            self.share_at_zero = self.share_at_zero.saturating_add(1);
+        }
+        if self.named.len() < NAMED_ROWS {
+            self.named.push(refused);
+        } else {
+            self.last = Some(refused);
+        }
+    }
+}
+
+/// Drop every row whose four prices cannot be a bar for `asked.listing`, and
+/// report the refusals against the instrument — the one call every decode
+/// shape makes before `RawWindow::decode`, so no shape can drop a row without
+/// naming it (DB-031, DB-G46).
+fn refuse_impossible_bars(
+    arrays: &mut ParallelArrays,
+    bars: usize,
+    asked: Asked<'_>,
+    spec: &HttpSpec,
+) {
+    note_impossible_bars(
+        &drop_impossible_bars(arrays, asked.listing),
+        bars,
+        asked,
+        spec.timestamps,
+    );
+}
+
+/// One event per WINDOW for rows whose four prices cannot be a bar, naming the
+/// instrument, each named row's instant, its four prices and why.
+///
+/// Same per-window rule and same denominator as the two above. **What changed
+/// is the name** (DB-G46): the event used to carry `skipped` and `bars` and
+/// nothing else, so `1026 of 14685` reached the operator's log with no
+/// instrument, no instant and no row to open. It now carries the vendor's id
+/// for the instrument and its listing, the count by reason, and the first and
+/// last refused rows in full, with up to [`NAMED_ROWS`] listed; the stderr line
+/// says the same. At most twelve fields and 512 bytes a string (`telemetry`'s
+/// bounds), so nothing a vendor sends can widen the line.
+fn note_impossible_bars(
+    refused: &Refusals,
+    bars: usize,
+    asked: Asked<'_>,
+    encoding: crate::vendor::TimestampEncoding,
+) {
+    let Some(&first) = refused.named.first() else {
+        return;
+    };
+    let instrument = asked.instrument.unwrap_or("not named by this caller");
+    let listing = format!("{:?}", asked.listing);
+    let first_text = first.sentence(encoding);
+    let last_text = refused
+        .last
+        .or_else(|| refused.named.last().copied())
+        .map_or_else(String::new, |row| row.sentence(encoding));
+    let listed = refused
+        .named
+        .iter()
+        .map(|row| row.sentence(encoding))
+        .collect::<Vec<_>>()
+        .join("; ");
     let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::new(
             telemetry::Level::Warn,
             "pull.decode",
             "bars carried an impossible OHLC and were skipped",
         )
-        .with(
-            "skipped",
-            telemetry::Value::Uint(u64::try_from(dropped).unwrap_or(u64::MAX)),
-        )
-        .with(
-            "bars",
-            telemetry::Value::Uint(u64::try_from(bars).unwrap_or(u64::MAX)),
-        ),
+        // EVERY KEY IS ONE GATE 1D ALREADY DECLARES, so naming the rows added
+        // no new segment-shaped literal to this crate: `zero` counts the
+        // shares priced at zero, `at` is the first refused row and `to` the
+        // last, so a reader sees where the run starts and ends.
+        .with("instrument", telemetry::Value::Str(instrument))
+        .with("listing", telemetry::Value::Str(&listing))
+        .with("skipped", telemetry::Value::count(refused.count))
+        .with("zero", telemetry::Value::count(refused.share_at_zero))
+        .with("bars", telemetry::Value::count(bars))
+        .with("at", telemetry::Value::Str(&first_text))
+        .with("to", telemetry::Value::Str(&last_text)),
     );
     eprintln!(
-        "brutex: {dropped} of {bars} bars carried an impossible OHLC and were \
-         skipped — a high below its low, or a negative price. Caught here, \
-         where the vendor's own row is still in hand, rather than at the store \
-         append where the index names nothing an operator can open."
+        "brutex: {instrument} ({listing}): {} of {bars} bars carried an impossible \
+         OHLC and were skipped, {} of them a share priced at zero. Named: \
+         {listed}{}. Caught here, where the vendor's own row is still in hand, \
+         rather than at the store append where the index names nothing an \
+         operator can open.",
+        refused.count,
+        refused.share_at_zero,
+        match refused.last {
+            Some(last) => format!("; … and the last, {}", last.sentence(encoding)),
+            None => String::new(),
+        }
     );
 }
 
@@ -2059,7 +2266,8 @@ struct Kept {
 
 /// Rows whose four prices cannot be a bar, dropped from every column at once.
 ///
-/// Returns how many were dropped.
+/// Returns every dropped row counted, and the first [`NAMED_ROWS`] and the last
+/// named, for [`note_impossible_bars`] to report against the instrument.
 ///
 /// # Why this is here and not at the store's write boundary
 ///
@@ -2088,6 +2296,14 @@ struct Kept {
 /// sign clause is redundant there and load-bearing on the archive path, whose
 /// decoder parses a leading minus and never checks it.
 ///
+/// # And a share at zero, which `ohlc_is_sane` admits
+///
+/// For a [`crate::vendor::Listing::Equity`] row a price of zero is refused as
+/// well ([`Impossible::ShareAtZero`], DB-031): no share trades for nothing, and
+/// Zerodha's 2018 MAZDOCK rows were all-zero bars with volume two years before
+/// the listing. An index keeps zero (NIFTY50DIVPOINT resets to it), and so does
+/// a contract, whose rule nobody has measured a reason to change.
+///
 /// # Why every column, including the ones it does not read
 ///
 /// A row is a bar. Dropping index `i` from the prices and not from `volume` or
@@ -2099,40 +2315,53 @@ struct Kept {
 /// **UNVERIFIED as a measured bound.** No bench in this workspace
 /// times this, so the shape above is read from the source rather
 /// than measured. `CLAUDE.md` §3 rule 6.
-fn drop_impossible_bars(arrays: &mut ParallelArrays) -> usize {
+fn drop_impossible_bars(arrays: &mut ParallelArrays, listing: crate::vendor::Listing) -> Refusals {
     let rows = arrays.open.len();
     let mut keep = Vec::with_capacity(rows);
-    let mut dropped = 0usize;
+    let mut refused = Refusals::default();
+    let share = listing == crate::vendor::Listing::Equity;
     for i in 0..rows {
         // A COLUMN SHORTER THAN `open` KEEPS ITS ROW. `RawWindow::decode` owns
         // the length disagreement and names all seven at once; answering it
         // here with a silent drop would erase the very evidence it reports.
-        let sane = match (
+        let why = match (
             arrays.open.get(i),
             arrays.high.get(i),
             arrays.low.get(i),
             arrays.close.get(i),
         ) {
             (Some(&open), Some(&high), Some(&low), Some(&close)) => {
-                high >= open
+                let prices = [open, high, low, close];
+                let why = if prices.iter().any(|&price| price < 0) {
+                    Some(Impossible::Negative)
+                } else if share && prices.contains(&0) {
+                    Some(Impossible::ShareAtZero)
+                } else if high >= open
                     && high >= low
                     && high >= close
                     && low <= open
                     && low <= close
-                    && open >= 0
-                    && high >= 0
-                    && low >= 0
-                    && close >= 0
+                {
+                    None
+                } else {
+                    Some(Impossible::Order)
+                };
+                why.map(|why| RefusedRow {
+                    row: i,
+                    timestamp: arrays.timestamp.get(i).copied(),
+                    prices,
+                    why,
+                })
             }
-            _ => true,
+            _ => None,
         };
-        if !sane {
-            dropped = dropped.saturating_add(1);
+        if let Some(row) = why {
+            refused.note(row);
         }
-        keep.push(sane);
+        keep.push(why.is_none());
     }
-    if dropped == 0 {
-        return 0;
+    if refused.count == 0 {
+        return refused;
     }
     // ONE MASK, APPLIED THE SAME WAY TO EVERY COLUMN. `retain` visits in order,
     // so a fresh counter per column reads the same verdict for the same row; a
@@ -2160,7 +2389,7 @@ fn drop_impossible_bars(arrays: &mut ParallelArrays) -> usize {
     if !arrays.open_interest.is_empty() {
         filter(&mut arrays.open_interest);
     }
-    dropped
+    refused
 }
 
 /// One column, filtered through the mask [`kept_rows`] computed.
@@ -3158,7 +3387,7 @@ impl HttpSource {
         //
         // Read through the WHOLE contract, so a code the vendor misfiled is
         // still read by its sentence — the rule D-0325 established.
-        let decoded = self.settle_answer(&text, status, request.listing)?;
+        let decoded = self.settle_answer(&text, status, Asked::of(request))?;
 
         // NAMED AS A DECODE FAULT, BECAUSE THE EXCHANGE ALREADY SUCCEEDED.
         //
@@ -3241,14 +3470,14 @@ impl HttpSource {
         &self,
         text: &str,
         status: u16,
-        listing: crate::vendor::Listing,
+        asked: Asked<'_>,
     ) -> Result<Result<RawWindow, FetchError>, FetchError> {
         // ONE PARSE FOR BOTH READERS. Each used to run its own `from_str` over
         // the same text, so every success body was parsed twice. W1-pull2-1.
         let parsed = parse_answer(text);
         self.weigh_parsed(parsed.as_ref().ok(), text, status)?;
         Ok(match &parsed {
-            Ok(root) => decode_value(root, &self.spec, listing),
+            Ok(root) => decode_value(root, &self.spec, asked),
             Err(why) => Err(not_json(why)),
         })
     }
@@ -3396,9 +3625,10 @@ fn decode_positional(
     spec: &HttpSpec,
     envelope: Option<&'static str>,
     array: &'static str,
-    listing: crate::vendor::Listing,
+    asked: Asked<'_>,
     corrected: &mut usize,
 ) -> Result<RawWindow, FetchError> {
+    let listing = asked.listing;
     let container = container(root, envelope)?;
     let rows = array_at(container, array)?;
 
@@ -3552,7 +3782,7 @@ fn decode_positional(
     note_negative_volume_bars(negative, rows.len());
     note_negative_interest_bars(interest, rows.len());
     // AND THE SECOND DOOR. See the note on the object shape's call.
-    note_impossible_bars(drop_impossible_bars(&mut arrays), rows.len());
+    refuse_impossible_bars(&mut arrays, rows.len(), asked, spec);
     RawWindow::decode(&arrays)
 }
 
@@ -4359,10 +4589,13 @@ mod tests {
                 "{{\"open\":[{sent}],\"high\":[{sent}],\"low\":[{sent}],\
                   \"close\":[{sent}],\"volume\":[1],\"timestamp\":[1751337900]}}"
             );
+            // AN INDEX, so the zero row is a level and not a share priced at
+            // nothing, which `drop_impossible_bars` refuses (DB-031). The grid
+            // is the same for every listing; only the zero rule differs.
             let window = decode_body(
                 &body,
                 &spec(PriceScale::Rupees),
-                crate::vendor::Listing::Equity,
+                crate::vendor::Listing::Index,
             )
             .expect("decodes");
             assert_eq!(window.rows[0].open, want, "{sent} rupees is {want} paisa");
@@ -4622,13 +4855,23 @@ mod tests {
                 "{{\"open\":[{sent}],\"high\":[{sent}],\"low\":[{sent}],\
                   \"close\":[{sent}],\"volume\":[1],\"timestamp\":[1]}}"
             );
+            // AN INDEX LEVEL: the zero decodes as the zero it is. The same row
+            // as a SHARE decodes too, and is then refused as a share priced at
+            // zero (DB-031) — the snap rule and the zero rule are two rules.
             let window = decode_body(
+                &body,
+                &spec(PriceScale::Rupees),
+                crate::vendor::Listing::Index,
+            )
+            .unwrap_or_else(|why| panic!("{sent} is a real zero: {why}"));
+            assert_eq!(window.rows[0].open, 0, "{sent} decodes as the zero it is");
+            let share = decode_body(
                 &body,
                 &spec(PriceScale::Rupees),
                 crate::vendor::Listing::Equity,
             )
-            .unwrap_or_else(|why| panic!("{sent} is a real zero: {why}"));
-            assert_eq!(window.rows[0].open, 0, "{sent} decodes as the zero it is");
+            .unwrap_or_else(|why| panic!("{sent} decodes for a share too: {why}"));
+            assert!(share.rows.is_empty(), "{sent}: a share at zero is refused");
         }
     }
 
@@ -5032,18 +5275,204 @@ mod tests {
             "open == high == low == close is legal"
         );
 
-        // AND A ZERO-PRICED BAR IS KEPT. `ohlc_is_sane` admits zero, and
-        // `CLAUDE.md` §7 says zero means zero rather than absence — so the
-        // sign clause must refuse only what is BELOW zero.
+        // A ZERO-PRICED BAR IS KEPT FOR AN INDEX AND A CONTRACT, AND REFUSED
+        // FOR A SHARE (DB-031). This asserted the share's zero bar KEPT, on
+        // `ohlc_is_sane` admitting zero. That is right for an index —
+        // NIFTY50DIVPOINT resets to zero at a financial year's start — and it
+        // is how Zerodha's 2018 MAZDOCK rows, all four prices zero with a
+        // volume, two years before the listing, reached /db as bars at ₹0.00.
         let zero = r#"{"open":[0],"high":[0],"low":[0],"close":[0],
                        "volume":[0],"timestamp":[1751337900]}"#;
+        for listing in [
+            crate::vendor::Listing::Index,
+            crate::vendor::Listing::Derivative,
+        ] {
+            let window = decode_body(zero, &spec(PriceScale::Rupees), listing)
+                .expect("zero is a level an index can read");
+            assert_eq!(window.rows.len(), 1, "{listing:?}: zero is not negative");
+        }
         let window = decode_body(
             zero,
             &spec(PriceScale::Rupees),
             crate::vendor::Listing::Equity,
         )
-        .expect("zero is a price like any other");
-        assert_eq!(window.rows.len(), 1, "zero is not negative");
+        .expect("one refused row does not refuse the window");
+        assert!(
+            window.rows.is_empty(),
+            "a share priced at zero is refused by name, not stored"
+        );
+    }
+
+    /// **A SHARE PRICED AT ZERO IS REFUSED BY NAME, IN EVERY DECODE SHAPE,
+    /// AND THE REST OF THE WINDOW LANDS** (DB-031).
+    ///
+    /// The rows are invented: a share's zero bar between two ordinary ones,
+    /// prices that cannot be mistaken for any real instrument's. Every clause
+    /// that can zero a share is driven alone — one zero price is enough — and
+    /// the count by reason is what `note_impossible_bars` reports.
+    #[test]
+    fn a_share_priced_at_zero_is_refused_and_counted_by_reason() {
+        for (open, high, low, close, which) in [
+            (0, 0, 0, 0, "all four zero, MAZDOCK 2018's shape"),
+            (0, 7, 3, 5, "the open alone"),
+            (5, 0, 0, 0, "a high of zero"),
+            (5, 7, 0, 5, "the low alone"),
+            (5, 7, 3, 0, "the close alone"),
+        ] {
+            let mut one = arrays_of(
+                &[
+                    (100, 110, 90, 105),
+                    (open, high, low, close),
+                    (200, 210, 190, 205),
+                ],
+                false,
+            );
+            let refused = drop_impossible_bars(&mut one, crate::vendor::Listing::Equity);
+            assert_eq!(refused.count, 1, "{which}");
+            assert_eq!(refused.share_at_zero, 1, "{which}: counted by its reason");
+            assert_eq!(refused.named.len(), 1);
+            assert_eq!(refused.named[0].row, 1, "{which}: the decoded row is named");
+            assert_eq!(
+                refused.named[0].timestamp,
+                Some(1_751_337_901),
+                "{which}: with its own stamp"
+            );
+            assert_eq!(refused.named[0].prices, [open, high, low, close]);
+            assert_eq!(one.open, vec![100, 200], "{which}: the rest lands");
+            assert_eq!(one.timestamp, vec![1_751_337_900, 1_751_337_902]);
+
+            // AN INDEX MAY READ ZERO, AND SO MAY A CONTRACT. Only the order
+            // rule can drop these, and every row here that is ordered stays.
+            for listing in [
+                crate::vendor::Listing::Index,
+                crate::vendor::Listing::Derivative,
+            ] {
+                let mut kept = arrays_of(&[(open, high, low, close)], false);
+                let refused = drop_impossible_bars(&mut kept, listing);
+                assert_eq!(refused.share_at_zero, 0, "{listing:?}: {which}");
+            }
+        }
+
+        // THE SHAPES THAT DECODE A BODY REACH IT TOO: the object shape and the
+        // positional one, which is Kite's.
+        let objects = r#"{"candles":[
+            {"open":0,"high":0,"low":0,"close":0,"volume":67,"timestamp":1751337900},
+            {"open":101.10,"high":101.20,"low":101.00,"close":101.15,"volume":3,
+             "timestamp":1751337960}]}"#;
+        let spec_objects = HttpSpec {
+            response: ResponseShape::ArrayOfObjects {
+                envelope: Some("candles"),
+            },
+            ..spec(PriceScale::Rupees)
+        };
+        let window = decode_body(objects, &spec_objects, crate::vendor::Listing::Equity)
+            .expect("the object shape refuses the row, not the window");
+        assert_eq!(window.rows.len(), 1);
+        assert_eq!(window.rows[0].open, 10_110, "and the good row survives");
+
+        let positional = r#"{"data":{"candles":[
+            ["2018-01-01T09:15:00+0530",0,0,0,0,67,0],
+            ["2018-01-02T09:15:00+0530",101.1,101.2,101.0,101.15,3,0]]}}"#;
+        let spec_rows = HttpSpec {
+            response: ResponseShape::PositionalRows {
+                envelope: Some("data"),
+                array: "candles",
+            },
+            timestamps: crate::vendor::TimestampEncoding::IsoDateTimeOffset,
+            ..spec(PriceScale::Rupees)
+        };
+        let window = decode_body(positional, &spec_rows, crate::vendor::Listing::Equity)
+            .expect("the positional shape refuses the row, not the window");
+        assert_eq!(window.rows.len(), 1);
+        assert_eq!(window.rows[0].close, 10_115);
+    }
+
+    /// **A REFUSED ROW IS NAMED: THE INSTRUMENT, ITS INSTANT, ITS PRICES AND
+    /// WHY** (DB-G46).
+    ///
+    /// The log held `1026 of 14685` bars skipped with nothing to open. The
+    /// sentence a row renders as is what the event and the stderr line carry,
+    /// so it is asserted directly; the bound on how many are named is
+    /// asserted beside it.
+    #[test]
+    fn a_refused_row_names_its_instant_its_prices_and_why() {
+        let row = RefusedRow {
+            row: 3,
+            // 2018-01-01 09:15:00 IST.
+            timestamp: Some(1_514_778_300),
+            prices: [0, 0, 0, 0],
+            why: Impossible::ShareAtZero,
+        };
+        assert_eq!(
+            row.sentence(crate::vendor::TimestampEncoding::EpochSecondsUtc),
+            "row 3 at 2018-01-01 09:15:00 IST: open 0, high 0, low 0, close 0 paisa, \
+             a share priced at zero"
+        );
+        // AN IST-TEXT VENDOR'S VALUE IS SHIFTED BACK BEFORE IT IS NAMED, so a
+        // name and a filed bar never disagree about the instant.
+        let ist = RefusedRow {
+            timestamp: Some(1_514_778_300 + crate::session::IST_OFFSET_SECS),
+            ..row
+        };
+        assert!(
+            ist.sentence(crate::vendor::TimestampEncoding::IstDateTimeText)
+                .contains("2018-01-01 09:15:00 IST"),
+            "the same instant through the text encoding"
+        );
+        let unplaceable = RefusedRow {
+            timestamp: Some(i64::MAX),
+            why: Impossible::Order,
+            ..row
+        };
+        assert!(
+            unplaceable
+                .sentence(crate::vendor::TimestampEncoding::EpochSecondsUtc)
+                .contains("no instant this build can hold"),
+            "a stamp no calendar can place is named, not dropped from the name"
+        );
+        let unstamped = RefusedRow {
+            timestamp: None,
+            why: Impossible::Negative,
+            ..row
+        };
+        let said = unstamped.sentence(crate::vendor::TimestampEncoding::EpochSecondsUtc);
+        assert!(
+            said.contains("no timestamp") && said.contains("a price below zero"),
+            "{said}"
+        );
+
+        // EVERY ROW IS COUNTED; THE FIRST EIGHT AND THE LAST ARE NAMED.
+        let quads: Vec<(i64, i64, i64, i64)> = (0..20).map(|_| (100, 50, 90, 95)).collect();
+        let mut many = arrays_of(&quads, false);
+        let refused = drop_impossible_bars(&mut many, crate::vendor::Listing::Index);
+        assert_eq!(refused.count, 20, "the count is whole");
+        assert_eq!(refused.named.len(), NAMED_ROWS, "the names are bounded");
+        assert_eq!(refused.named[0].row, 0);
+        assert_eq!(refused.named[NAMED_ROWS - 1].row, NAMED_ROWS - 1);
+        assert_eq!(
+            refused.last.map(|last| last.row),
+            Some(19),
+            "and the last refused row is the one kept beside them"
+        );
+        assert!(many.open.is_empty(), "and every one of them is dropped");
+
+        // THE EVENT IS EMITTED FOR A NAMED CALLER AND AN UNNAMED ONE, and is
+        // silent for a window that refused nothing.
+        note_impossible_bars(
+            &refused,
+            20,
+            Asked {
+                listing: crate::vendor::Listing::Index,
+                instrument: Some("INVENTED ID"),
+            },
+            crate::vendor::TimestampEncoding::EpochSecondsUtc,
+        );
+        note_impossible_bars(
+            &Refusals::default(),
+            20,
+            Asked::unnamed(crate::vendor::Listing::Equity),
+            crate::vendor::TimestampEncoding::EpochSecondsUtc,
+        );
     }
 
     /// One column set, for driving [`drop_impossible_bars`] directly.
@@ -5106,7 +5535,7 @@ mod tests {
         ] {
             let mut one = arrays_of(&[(open, high, low, close)], false);
             assert_eq!(
-                drop_impossible_bars(&mut one),
+                drop_impossible_bars(&mut one, crate::vendor::Listing::Index).count,
                 1,
                 "{why}: ({open},{high},{low},{close}) is not a bar"
             );
@@ -5120,12 +5549,22 @@ mod tests {
         for (open, high, low, close, why) in [
             (100, 110, 90, 105, "an ordinary bar"),
             (100, 100, 100, 100, "a flat bar — common at an open"),
-            (0, 0, 0, 0, "zero is a price, not an absence (CLAUDE.md §7)"),
+            (
+                0,
+                0,
+                0,
+                0,
+                "zero is an index level, not an absence (CLAUDE.md §7)",
+            ),
             (100, 110, 90, 110, "the close AT the high"),
             (100, 110, 90, 90, "the close AT the low"),
         ] {
             let mut one = arrays_of(&[(open, high, low, close)], false);
-            assert_eq!(drop_impossible_bars(&mut one), 0, "{why} is a bar");
+            assert_eq!(
+                drop_impossible_bars(&mut one, crate::vendor::Listing::Index).count,
+                0,
+                "{why} is a bar"
+            );
             assert_eq!(one.open.len(), 1, "{why}: and it is kept");
         }
     }
@@ -5153,7 +5592,10 @@ mod tests {
         ];
 
         let mut with_oi = arrays_of(&quads, true);
-        assert_eq!(drop_impossible_bars(&mut with_oi), 1);
+        assert_eq!(
+            drop_impossible_bars(&mut with_oi, crate::vendor::Listing::Equity).count,
+            1
+        );
         assert_eq!(with_oi.open, vec![100, 300], "prices keep rows 0 and 2");
         assert_eq!(with_oi.high, vec![110, 310]);
         assert_eq!(with_oi.low, vec![90, 290]);
@@ -5171,7 +5613,10 @@ mod tests {
         );
 
         let mut without = arrays_of(&quads, false);
-        assert_eq!(drop_impossible_bars(&mut without), 1);
+        assert_eq!(
+            drop_impossible_bars(&mut without, crate::vendor::Listing::Equity).count,
+            1
+        );
         assert!(
             without.open_interest.is_empty(),
             "an absent column stays absent — filtering it would invent one"
@@ -5188,7 +5633,11 @@ mod tests {
     #[test]
     fn a_clean_window_is_not_filtered_at_all() {
         let mut clean = arrays_of(&[(100, 110, 90, 105), (200, 210, 190, 205)], true);
-        assert_eq!(drop_impossible_bars(&mut clean), 0, "nothing to drop");
+        assert_eq!(
+            drop_impossible_bars(&mut clean, crate::vendor::Listing::Equity),
+            Refusals::default(),
+            "nothing to drop"
+        );
         assert_eq!(clean.open, vec![100, 200]);
         assert_eq!(clean.open_interest, vec![7_000, 7_001], "untouched");
     }
@@ -8234,7 +8683,7 @@ mod tests {
 
         PARSES.with(|c| c.set(0));
         let window = source
-            .settle_answer(body, 200, crate::vendor::Listing::Equity)
+            .settle_answer(body, 200, Asked::unnamed(crate::vendor::Listing::Equity))
             .expect("no refusal in a bars body")
             .expect("and it decodes");
         assert_eq!(window.rows.len(), 1);
@@ -8245,7 +8694,7 @@ mod tests {
         let dead = r#"{"errorType":"Invalid_Authentication","errorCode":"DH-901",
                        "errorMessage":"Client ID or access token is invalid"}"#;
         let Err(FetchError::VendorRefused { named, .. }) =
-            source.settle_answer(dead, 200, crate::vendor::Listing::Equity)
+            source.settle_answer(dead, 200, Asked::unnamed(crate::vendor::Listing::Equity))
         else {
             panic!("a refusal under a 200 is still a refusal")
         };
@@ -8254,9 +8703,11 @@ mod tests {
 
         // AND A BODY THAT IS NOT JSON IS STILL A DECODE FAULT, NOT A SUCCESS.
         PARSES.with(|c| c.set(0));
-        let Ok(Err(FetchError::TransportFailed { detail })) =
-            source.settle_answer("not json", 200, crate::vendor::Listing::Equity)
-        else {
+        let Ok(Err(FetchError::TransportFailed { detail })) = source.settle_answer(
+            "not json",
+            200,
+            Asked::unnamed(crate::vendor::Listing::Equity),
+        ) else {
             panic!("a body that is not JSON fails the decode")
         };
         assert!(detail.contains("not JSON"), "{detail}");

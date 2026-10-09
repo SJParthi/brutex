@@ -7,8 +7,9 @@
 //! one-minute file at ingest time. When this audit was written derive called
 //! the plain `pull::fold::fold`; it now calls
 //! `pull::fold::complete_minutes_with_calendar`, which writes only buckets
-//! whose every scheduled minute exists and withholds exceptional sessions
-//! outright. **The audit's reference is that same authority** (GAP12-4,
+//! whose every scheduled minute exists and, since D-3321, folds a special
+//! session inside its recorded windows (it withheld them outright before).
+//! **The audit's reference is that same authority** (GAP12-4,
 //! D-0912): against the plain fold, a correctly derived month holding a
 //! disaster-recovery Saturday disagreed on every rung, and
 //! `fold_audit_agrees_with_a_correctly_derived_month_holding_a_dr_saturday`
@@ -569,13 +570,22 @@ mod tests {
 
     /// GAP12-4, D-0912: the reference is the derive authority, so a month that
     /// `pull` derived correctly agrees, and the buckets derive withheld are
-    /// counted as withheld rather than as store defects. The exceptional DR
-    /// Saturday is ONE diagnostic per rung, not one per bucket: derive names an
-    /// exceptional session once per day (audit-20261003 hunt-pull-3, D-1533).
+    /// counted as withheld rather than as store defects. The DR Saturday was
+    /// withheld whole, one diagnostic per rung (hunt-pull-3, D-1533); since
+    /// D-3321 (WP-13b) derive folds it inside its two recorded windows, so
+    /// nothing is withheld and its buckets are in the month the reference
+    /// writes: 21 at five minutes beside the two regular days' 75 each.
     #[test]
     fn fold_audit_agrees_with_a_correctly_derived_month_holding_a_dr_saturday() {
         let minutes = month_with_a_dr_saturday();
-        for (rung, withheld) in DERIVED_RUNGS.into_iter().zip([1; 7]) {
+        let five = pull::fold::complete_minutes_for_venue(
+            &minutes,
+            store_bucket(Timeframe::MINUTE_5).expect("derived width"),
+            pull::vendor::Venue::NseIndex,
+        )
+        .expect("derive policy folds the fixture");
+        assert_eq!(five.0.len(), 75 + 21 + 75, "{:?}", five.1);
+        for (rung, withheld) in DERIVED_RUNGS.into_iter().zip([0; 7]) {
             let bucket = store_bucket(rung).expect("derived width");
             let (stored, _) = pull::fold::complete_minutes_for_venue(
                 &minutes,
@@ -596,15 +606,6 @@ mod tests {
                 MAX_REPORTED.min(usize::try_from(withheld).expect("small")),
                 "{}",
                 rung.as_str()
-            );
-            assert!(
-                verdict
-                    .withheld_named
-                    .iter()
-                    .all(|why| why.contains("exceptional session")),
-                "{}: {:?}",
-                rung.as_str(),
-                verdict.withheld_named
             );
         }
     }
@@ -685,12 +686,17 @@ mod tests {
         assert!(!root.exists(), "nothing was created or read");
     }
 
-    /// A month derived by the plain fold before derive withheld exceptional
-    /// sessions holds bars the derive authority does not write, and the audit
-    /// names that as a disagreement.
+    /// A month derived by the plain fold holds bars the derive authority does
+    /// not write wherever derive withholds a bucket, and the audit names that
+    /// as a disagreement. This was the whole DR Saturday until D-3321
+    /// (WP-13b) folded special sessions inside their windows: a plain fold of
+    /// its complete windows now agrees, and the bucket a missing 09:20 leaves
+    /// short is what derive withholds at every rung and the plain fold writes.
     #[test]
-    fn a_legacy_plain_fold_of_a_withheld_session_disagrees() {
-        let minutes = month_with_a_dr_saturday();
+    fn a_legacy_plain_fold_of_a_withheld_bucket_disagrees() {
+        let complete = month_with_a_dr_saturday();
+        let mut minutes = complete.clone();
+        minutes.remove(375 + 5); // the Saturday's 09:20
         for rung in DERIVED_RUNGS {
             let bucket = store_bucket(rung).expect("derived width");
             let legacy = pull::fold::fold(&minutes, bucket).expect("plain fold");
@@ -700,6 +706,14 @@ mod tests {
                 verdict.stored_bars > verdict.folded_bars,
                 "{}",
                 rung.as_str()
+            );
+            let whole = pull::fold::fold(&complete, bucket).expect("plain fold");
+            let verdict = compare(rung, INDEX, &complete, &whole).expect("valid fold");
+            assert!(
+                verdict.agrees(),
+                "{}: {:?}",
+                rung.as_str(),
+                verdict.disagreements
             );
         }
     }

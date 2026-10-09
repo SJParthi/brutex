@@ -18670,16 +18670,18 @@ mod tests {
         );
     }
 
-    /// **A MUHURAT ROW IN A CASH BODY IS SKIPPED, NOT A REFUSAL OF THE BODY
-    /// (D-3344).**
+    /// **A MUHURAT ROW IN A CASH BODY IS NEVER A REFUSAL OF THE BODY (D-3344),
+    /// AND SINCE D-3319 ITS WINDOW'S MINUTES ARE SOURCE DAYS LIKE ANY OTHER.**
     ///
-    /// 2021-11-04 is a Muhurat whose length the calendar never measured, so the
-    /// verdict on any minute of it is `SessionLengthUnmeasured`. This took that
-    /// as a refusal of the whole body's dated schedule, and with it every day
-    /// of a 60-day cash answer: the same whole-window loss `fetch::land_rows`
-    /// had. The landing now refuses that day alone, so the day owes no
-    /// eligibility and is simply not a source day; every other day still is,
-    /// and a genuinely unreadable stamp still refuses.
+    /// 2021-11-04 is a Muhurat whose length `calendar::kind_of` leaves
+    /// unmeasured, and the verdict on any minute of it was
+    /// `SessionLengthUnmeasured`. This took that as a refusal of the whole
+    /// body's dated schedule, and with it every day of a 60-day cash answer:
+    /// the same whole-window loss `fetch::land_rows` had. D-3344 made the day
+    /// owe nothing; WP-13b lands it inside its recorded window, 18:15-19:14
+    /// (`session::with_recorded_window`), so the 18:15 minute is kept and the
+    /// day is a source day, a 15:00 minute on it is outside the session and
+    /// is not, and a genuinely unreadable stamp still refuses.
     #[test]
     fn a_muhurat_row_in_a_cash_body_is_skipped_not_a_refusal_of_the_body() {
         use pull::fetch::{RawRow, RawWindow};
@@ -18704,6 +18706,15 @@ mod tests {
         assert_eq!(
             super::observed_cash_source_days(
                 &[(window, RawWindow { rows })],
+                TimestampEncoding::EpochSecondsUtc
+            )
+            .unwrap(),
+            vec![before, muhurat]
+        );
+        let outside = vec![row(at(before, 555)), row(at(muhurat, 15 * 60))];
+        assert_eq!(
+            super::observed_cash_source_days(
+                &[(window, RawWindow { rows: outside })],
                 TimestampEncoding::EpochSecondsUtc
             )
             .unwrap(),

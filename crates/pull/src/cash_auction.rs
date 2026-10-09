@@ -464,9 +464,18 @@ impl DailyEligibility {
 /// The loader owns the instrument, authenticated source and master-date binding.
 /// Do not reuse a schedule across instruments or carry the last known flag
 /// forward. This type records no auction prices and grants no trading approval.
+///
+/// # The flag is kept, and the close is read from the session tables
+///
+/// This held the CLOSE per day, computed here from two literals (`15 * 60 +
+/// 15` and `15 * 60 + 30`) — a second copy of the hours `crate::vendor` owns.
+/// It now holds the dated FLAG, and [`Self::close`] asks
+/// [`crate::vendor::Venue::share_hours_on`], the one door that turns a flag into
+/// a continuous close (D-3320). Contradiction is still refused on the flag, so
+/// a day offered eligible and then ineligible is refused exactly as before.
 #[derive(Debug, Default, Clone)]
 pub struct Schedule {
-    closes: HashMap<u32, u16>,
+    flags: HashMap<u32, bool>,
 }
 
 impl Schedule {
@@ -477,32 +486,51 @@ impl Schedule {
     /// Returns `UNVERIFIED` if the date already carries a different flag. Its
     /// existing value is preserved; the caller must propagate the refusal.
     pub fn insert(&mut self, day: Day, eligible: bool) -> Result<(), String> {
-        let close = if eligible { 15 * 60 + 15 } else { 15 * 60 + 30 };
-        match self.closes.entry(day.days_from_epoch()) {
-            Entry::Occupied(entry) if *entry.get() != close => {
+        match self.flags.entry(day.days_from_epoch()) {
+            Entry::Occupied(entry) if *entry.get() != eligible => {
                 Err(unknown(&format!("conflicting dated eligibility on {day}")))
             }
             Entry::Occupied(_) => Ok(()),
             Entry::Vacant(entry) => {
-                entry.insert(close);
+                entry.insert(eligible);
                 Ok(())
             }
         }
     }
 
     /// Exclusive continuous-session close in IST minutes: 930 before the CAS
-    /// change; afterward 915 for an explicit eligible flag, otherwise 930.
+    /// change; afterward 915 for an explicit eligible flag and 930 for an
+    /// explicit ineligible one — read from
+    /// [`crate::vendor::Venue::share_hours_on`], never from a literal here.
     ///
     /// # Errors
-    /// Returns `UNVERIFIED` after the change if this exact date is absent.
+    /// Returns `UNVERIFIED` after the change if this exact date is absent, and
+    /// for any session row without verified hours.
     pub fn close(&self, day: Day) -> Result<u16, String> {
-        if !crate::vendor::cash_auction_eligibility_required(day) {
-            return Ok(15 * 60 + 30);
-        }
-        self.closes
-            .get(&day.days_from_epoch())
-            .copied()
-            .ok_or_else(|| unknown(&format!("no dated cash-auction eligibility on {day}")))
+        use crate::calendar::CasEligibility;
+        // BEFORE THE CHANGE THE FLAG IS NOT READ: `share_hours_on` answers the
+        // venue's anchor whatever is passed, so `Unknown` asks nothing.
+        let cas = if crate::vendor::cash_auction_eligibility_required(day) {
+            match self.flags.get(&day.days_from_epoch()) {
+                Some(true) => CasEligibility::Eligible,
+                Some(false) => CasEligibility::NotEligible,
+                None => {
+                    return Err(unknown(&format!(
+                        "no dated cash-auction eligibility on {day}"
+                    )));
+                }
+            }
+        } else {
+            CasEligibility::Unknown
+        };
+        let session = crate::vendor::Venue::NseCash
+            .share_hours_on(day, cas)
+            .map_err(|why| unknown(&why.to_string()))?;
+        // EVERY SHIPPED ROW CLOSES AT OR BEFORE MINUTE 1,440, checked at compile
+        // time by the session tables' shape, so the saturating arm is a
+        // backstop no test can drive (`CLAUDE.md` §3 rule 6, said here rather
+        // than left for a coverage report to find).
+        Ok(u16::try_from(session.close_minute()).unwrap_or(u16::MAX))
     }
 }
 
@@ -1349,7 +1377,7 @@ mod tests {
                     .contains("conflicting")
             );
             assert_eq!(schedule.close(day), Ok(original));
-            assert_eq!(schedule.closes.len(), 1);
+            assert_eq!(schedule.flags.len(), 1);
             assert_eq!(schedule.clone().close(day), Ok(original));
         }
     }

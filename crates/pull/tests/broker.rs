@@ -672,14 +672,15 @@ fn the_broker_path_and_the_folder_path_are_one_implementation() {
     let mut archive_done =
         ingest::from_members(&[member], &archive_scratch.store(), plan(&request));
     // Only the broker door attests the declared request, beyond shared folding.
-    archive_done.failures.push(pull::ingest::Failure {
-        instrument: "NIFTY".to_owned(),
-        why: "request minute coverage gap on 2025-07-01: 09:19–15:30 IST (end exclusive), 371 missing scheduled minutes; no bars fabricated".to_owned(),
-        // The audit answers sentences, so its gaps carry no day field yet
-        // (DB-G45; `request_minutes` is WP-13b's).
-        month: None,
-        day: None,
-    });
+    // FILED UNDER THE DAY THE GAP IS ON (DB-G45, D-3341): 2025-07-01 and its
+    // month, never the request window's first month and never no month.
+    archive_done.failures.push(
+        pull::ingest::Failure::new(
+            "NIFTY",
+            "request minute coverage gap on 2025-07-01: 09:19–15:30 IST (end exclusive), 371 missing scheduled minutes; no bars fabricated",
+        )
+        .on_day(Day::new(2025, 7, 1).expect("a day")),
+    );
     assert_eq!(
         done, archive_done,
         "all shared outcomes agree; the broker additionally reports exact request-span coverage"
