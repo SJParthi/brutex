@@ -11,9 +11,10 @@
 //! qualifiers (`pub(super)`) on items another module now has to reach.
 //! No route answers differently because of the move.
 
-use super::{Addressed, Loaded, param, timeframe_param};
+use super::{Addressed, Loaded, param, params, timeframe_param};
 use crate::{bars, ingest, render};
 use std::fmt::Write as _;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// The bars of one month as a JSON array, narrowed to a half-open microsecond
 /// window.
@@ -27,21 +28,47 @@ use std::fmt::Write as _;
 /// Extracted from [`bars_json`] because that function is at clippy's line
 /// ceiling, and because the emit is the part worth reading on its own: it is
 /// the only place a bar becomes bytes on this route.
+#[cfg(test)]
 pub(super) fn bars_array(
     rows: &[store::format::Bar],
     from: Option<i64>,
     to: Option<i64>,
 ) -> (String, Vec<String>) {
+    bars_array_of(rows, from, to, None)
+}
+
+/// [`bars_array`] for a series of `segment`: an `INDEX` or `CASH` bar's open
+/// interest is not applicable and is served `null` with `oichg_why`
+/// `not_a_derivative`, whatever was stored, and an `INDEX` bar's volume
+/// carries `v_why` `index_no_volume` (D-3322; DB-036, DB-G28, DB-G100). A
+/// Zerodha index or share month stores `0` there, which is a measurement
+/// nobody took; GDFL stores the null. Both now read the same.
+///
+/// A derivative's row is unchanged, byte for byte, so a one-second option
+/// month is not made larger by a reason it never carries.
+pub(super) fn bars_array_of(
+    rows: &[store::format::Bar],
+    from: Option<i64>,
+    to: Option<i64>,
+    segment: Option<brutex_core::instrument::Segment>,
+) -> (String, Vec<String>) {
+    use brutex_core::instrument::Segment;
     let inside = |bar: &store::format::Bar| {
         from.is_none_or(|at| bar.ts_micros >= at) && to.is_none_or(|at| bar.ts_micros < at)
     };
-    let mut out = String::with_capacity(rows.len() * 96 + 32);
+    let tail = match segment {
+        Some(Segment::Index) => r#","oichg_why":"not_a_derivative","v_why":"index_no_volume""#,
+        Some(Segment::Cash) => r#","oichg_why":"not_a_derivative""#,
+        Some(Segment::Fno) | None => "",
+    };
+    let oi_applies = tail.is_empty();
+    let mut out = String::with_capacity(rows.len() * (96 + tail.len()) + 32);
     let mut withheld = Vec::new();
     out.push('[');
     let mut written = 0usize;
     for bar in rows.iter().filter(|bar| inside(bar)) {
         // A VALUE A BROWSER CANNOT HOLD IS WITHHELD BY NAME (CE-60, D-2687).
-        if let Some(why) = inexact_bar(bar) {
+        if let Some(why) = inexact_bar(bar, oi_applies) {
             withheld.push(why);
             continue;
         }
@@ -52,14 +79,14 @@ pub(super) fn bars_array(
         // `lightweight-charts` takes UTC seconds. The store holds micros.
         let _ = write!(
             out,
-            r#"{{"t":{},"o":{},"h":{},"l":{},"c":{},"v":{},"oi":{}}}"#,
+            r#"{{"t":{},"o":{},"h":{},"l":{},"c":{},"v":{},"oi":{}{tail}}}"#,
             bar.ts_micros / 1_000_000,
             bar.open,
             bar.high,
             bar.low,
             bar.close,
             bar.volume,
-            if bar.open_interest == store::format::OI_NULL {
+            if !oi_applies || bar.open_interest == store::format::OI_NULL {
                 "null".to_owned()
             } else {
                 bar.open_interest.to_string()
@@ -87,8 +114,10 @@ const fn browser_exact(value: i64) -> bool {
 /// either quote such values or refuse them; these two keep their wire shape and
 /// withhold the bar, named in the `faults` they already carry, so every page is
 /// covered by one rule at the server (CE-60, D-2687).
-fn inexact_bar(bar: &store::format::Bar) -> Option<String> {
-    let interest = (bar.open_interest != store::format::OI_NULL).then_some(bar.open_interest);
+fn inexact_bar(bar: &store::format::Bar, oi_applies: bool) -> Option<String> {
+    // AN OPEN INTEREST SERVED AS `null` IS NOT SENT, so it cannot be rounded.
+    let interest =
+        (oi_applies && bar.open_interest != store::format::OI_NULL).then_some(bar.open_interest);
     [
         ("o", Some(bar.open)),
         ("h", Some(bar.high)),
@@ -226,11 +255,36 @@ pub(super) async fn bars_json(
         Ok(bounds) => bounds,
         Err(why) => return refuse(why),
     };
-    let file = match asked.open(&site, asked.month) {
-        Ok(file) => file,
-        Err(why) => return refuse(why),
-    };
+    // OFF THE ASYNC WORKERS (DB-066). A month of one-second bars is a 35 MB
+    // read and render; on a Tokio worker it stalled every other route that
+    // shared it. The blocking pool admits it, and a full pool answers 429 by
+    // name rather than queueing behind it.
+    let answer =
+        crate::detail::run_store_read(move || month_answer(&site, &asked, from_micros, to_micros))
+            .await;
+    match answer {
+        Ok(Ok((status, body))) => (status, json(), body),
+        Ok(Err(why)) => refuse(why),
+        Err(why) => {
+            let (status, body) = crate::detail::admission_refused(
+                "a month of bars",
+                crate::detail::MAX_STORE_READ_CONCURRENT,
+                &why,
+            );
+            (status, json(), body)
+        }
+    }
+}
 
+/// [`bars_json`]'s blocking half: open the month, locate the day window and
+/// render it. Returns the status and body, or the refusal sentence.
+fn month_answer(
+    site: &Loaded,
+    asked: &Addressed,
+    from_micros: Option<i64>,
+    to_micros: Option<i64>,
+) -> Result<(axum::http::StatusCode, String), String> {
+    let file = asked.open(site, asked.month)?;
     // THE WINDOW IS ADDRESSED, NOT FILTERED, and it used to be filtered.
     //
     // This read the WHOLE month — `page(&file, 0, n_valid)` — and handed the
@@ -298,26 +352,27 @@ pub(super) async fn bars_json(
         .map_or(held, |index| index.clamp(begins, held));
     let (rows, mut faults) = bars::page(&file, begins, ends.saturating_sub(begins));
 
-    let (out, mut withheld) = bars_array(&rows, from_micros, to_micros);
+    let segment = brutex_core::instrument::Segment::parse(&asked.segment).ok();
+    let (out, mut withheld) = bars_array_of(&rows, from_micros, to_micros, segment);
     faults.append(&mut withheld);
 
     // A FAULTY RECORD IS NOT SILENTLY SKIPPED. `page` returns what it could
     // read and what it could not; dropping the second half would draw a chart
     // with a hole in it and no way to know.
     if !faults.is_empty() {
-        return (
+        return Ok((
             axum::http::StatusCode::PARTIAL_CONTENT,
-            json(),
             format!(
                 r#"{{"bars":{out},"faults":{}}}"#,
                 render::json_string(&faults.join("; "))
             ),
-        );
+        ));
     }
-    (axum::http::StatusCode::OK, json(), out)
+    Ok((axum::http::StatusCode::OK, out))
 }
 
-/// One page of bars across a RANGE of months, answered in ONE request.
+/// One page of bars across a RANGE of months and one or more series,
+/// answered in ONE request.
 ///
 /// # The 2,187 requests this replaces
 ///
@@ -328,41 +383,81 @@ pub(super) async fn bars_json(
 /// **2,187 requests**, past what a browser will open, and every one of them
 /// failed `net::ERR_INSUFFICIENT_RESOURCES`.
 ///
-/// Paging by time was then fixed in the browser by reading the census counts
-/// and opening only the file the page sits in — one request, any depth. What
-/// that could NOT fix is a sort on a price column: no index answers "the fifty
-/// largest closes", so the grid fetched every row of every month and sorted
-/// them in JavaScript. Measured: **76 requests and 9.4 seconds**, and the cost
-/// was never the network — it was parsing 623,498 rows into objects to throw
-/// away all but fifty.
+/// # Several series, ordered on the server (D-3326)
 ///
-/// This route answers the same question by reading the files it already has on
-/// local disk and returning the fifty. `bars::window` seeks when the order is
-/// the store's own and scans when it is not, and says which it did.
+/// `/db` then asked each contract of a chain separately with the same offset
+/// and limit, and re-sorted the union of the pages it held: page 2 of an
+/// 80-series close sort overlapped the true page 2 on 22 of 50 rows, the
+/// total was the first series' alone, and a CE+PE pair was stacked rather
+/// than merged by time (DB-002, DB-003, DB-G82, DB-G92, DB-G93). `key=` names
+/// every series of one request, repeated up to [`bars::MAX_SERIES`] times, and
+/// the server merges and pages them; `series_totals` says what each holds.
 ///
 /// # Why the extremes ride along
 ///
 /// The grid scales its magnitude bars against the widest range in the QUERY so
-/// that turning a page cannot change what a full bar means. That property was
-/// lost when the browser stopped reading every month. `extremes=1` restores it
-/// for the cost of the scan it already takes — one number, computed where the
-/// bytes are.
+/// that turning a page cannot change what a full bar means. `extremes=1`
+/// restores it for the cost of a scan, and now says where each extreme is.
 /// Everything `/bars/window.json` reads off the query string.
 ///
 /// Parsed as one step so the handler is dispatch rather than a wall of
 /// `match … return refuse`. Every field REFUSES rather than defaulting where a
 /// default would answer a different question than the one asked.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the four yes/no parameters of the query string, each its own field \
+              as `bars::WindowQuery` has them"
+)]
 pub(super) struct WindowAsk {
     pub(super) vendor: brutex_core::vendor::Vendor,
     pub(super) timeframe: store::path::Timeframe,
-    pub(super) contract: Option<brutex_core::instrument::Contract>,
+    pub(super) series: Vec<bars::SeriesKey>,
     pub(super) from: store::path::YearMonth,
     pub(super) to: store::path::YearMonth,
     pub(super) sort: bars::SortKey,
     pub(super) desc: bool,
-    pub(super) offset: usize,
+    pub(super) offset: Option<usize>,
     pub(super) limit: usize,
     pub(super) want_extremes: bool,
+    pub(super) at: Option<i64>,
+    pub(super) filter: bars::Filter,
+    pub(super) lookback: bool,
+    pub(super) coverage: bool,
+}
+
+/// A two-way flag, refused by name when it is neither.
+fn flag(query: &str, key: &str, absent: bool) -> Result<bool, String> {
+    match param(query, key).as_str() {
+        "" => Ok(absent),
+        "0" | "false" => Ok(false),
+        "1" | "true" => Ok(true),
+        other => Err(format!(
+            "{other:?} is not a {key} flag. Accepted: 0, 1, false, true."
+        )),
+    }
+}
+
+/// `HH:MM:SS` (or `HH:MM`, read as `:00`) as seconds of the day, or a
+/// refusal naming `key`.
+fn time_of_day(key: &str, text: &str) -> Result<u32, String> {
+    let fields: Vec<&str> = text.split(':').collect();
+    let number = |field: Option<&&str>, top: u32| {
+        field
+            .filter(|field| field.len() == 2 && field.bytes().all(|b| b.is_ascii_digit()))
+            .and_then(|field| field.parse::<u32>().ok())
+            .filter(|&value| value < top)
+    };
+    let parsed = match fields.len() {
+        2 => number(fields.first(), 24)
+            .zip(number(fields.get(1), 60))
+            .map(|(h, m)| h * 3_600 + m * 60),
+        3 => number(fields.first(), 24)
+            .zip(number(fields.get(1), 60))
+            .zip(number(fields.get(2), 60))
+            .map(|((h, m), sec)| h * 3_600 + m * 60 + sec),
+        _ => None,
+    };
+    parsed.ok_or_else(|| format!("{text:?} is not an IST time of day HH:MM:SS for {key:?}"))
 }
 
 impl WindowAsk {
@@ -385,31 +480,23 @@ impl WindowAsk {
         let from = month_of("from")?;
         let to = month_of("to")?;
         let timeframe = timeframe_param(query)?;
-        let raw_contract = param(query, "contract");
-        let contract = if raw_contract.is_empty() {
-            None
-        } else {
-            Some(
-                brutex_core::instrument::Contract::parse(&raw_contract).ok_or_else(|| {
-                    format!("{raw_contract:?} is not a contract segment this store can name")
-                })?,
-            )
-        };
+        let series = Self::series(query)?;
         let sort = bars::SortKey::parse(&param(query, "sort")).ok_or_else(|| {
             format!(
-                "{:?} is not a column this grid sorts on. Accepted: ts, o, h, l, c, v, oi.",
+                "{:?} is not a column this grid sorts on. Accepted: ts, o, h, l, c, v, oi, tod.",
                 param(query, "sort")
             )
         })?;
         // A NON-NUMBER IS A REFUSAL, NOT A ZERO. `offset=banana` silently
         // reading from the top would answer a different question than the one
         // asked, and the pager would look right while showing the wrong rows.
-        let number = |key: &str, fallback: usize| {
+        let number = |key: &str| {
             let raw = param(query, key);
             if raw.is_empty() {
-                Ok(fallback)
+                Ok(None)
             } else {
                 raw.parse::<usize>()
+                    .map(Some)
                     .map_err(|_| format!("{raw:?} is not a whole number for {key:?}"))
             }
         };
@@ -436,20 +523,21 @@ impl WindowAsk {
                 ));
             }
         };
+        let at = Self::instant(query, sort)?;
         Ok(Self {
             vendor,
             timeframe,
-            contract,
+            series,
             from,
             to,
             sort,
             desc,
-            offset: number("offset", 0)?,
+            offset: number("offset")?,
             // A LIMIT OUTSIDE 1..=MAX IS REFUSED, NOT CLAMPED. `limit=5000`
             // answered 1,000 rows under a 200 and a pager stepping by what it
             // asked skipped 4,000 of them; `limit=0` answered an empty page
             // beside a non-zero total (P1-01-01, P1-02-02, D-1765).
-            limit: match number("limit", bars::PAGE_BARS)? {
+            limit: match number("limit")?.unwrap_or(bars::PAGE_BARS) {
                 limit @ 1..=bars::MAX_WINDOW_LIMIT => limit,
                 other => {
                     return Err(format!(
@@ -459,8 +547,180 @@ impl WindowAsk {
                 }
             },
             want_extremes,
+            at,
+            filter: Self::filter(query)?,
+            lookback: flag(query, "lookback", true)?,
+            coverage: flag(query, "coverage", false)?,
         })
     }
+
+    /// The series: every `key=`, or the one `exchange`, `segment`, `symbol`
+    /// and `contract` name.
+    fn series(query: &str) -> Result<Vec<bars::SeriesKey>, String> {
+        let keys = params(query, "key");
+        if keys.is_empty() {
+            let raw_contract = param(query, "contract");
+            let contract = if raw_contract.is_empty() {
+                None
+            } else {
+                Some(
+                    brutex_core::instrument::Contract::parse(&raw_contract).ok_or_else(|| {
+                        format!("{raw_contract:?} is not a contract segment this store can name")
+                    })?,
+                )
+            };
+            return Ok(vec![bars::SeriesKey::new(
+                &param(query, "exchange"),
+                &param(query, "segment"),
+                &param(query, "symbol"),
+                contract,
+            )]);
+        }
+        // ONE WAY TO NAME A SERIES PER REQUEST. Both at once would leave the
+        // reader to guess which one the answer is about.
+        if ["symbol", "contract"]
+            .iter()
+            .any(|key| !param(query, key).is_empty())
+        {
+            return Err(
+                "name the series with key=, or with exchange, segment, symbol and contract, \
+                 not both"
+                    .to_owned(),
+            );
+        }
+        if keys.len() > bars::MAX_SERIES {
+            return Err(format!(
+                "too_many_series: {} keys were named and one window reads at most {}",
+                keys.len(),
+                bars::MAX_SERIES
+            ));
+        }
+        let mut series = Vec::with_capacity(keys.len());
+        for key in &keys {
+            let parsed = bars::SeriesKey::parse(key)
+                .ok_or_else(|| format!("{key:?} is not a census instrument key"))?;
+            // `all(!=)`, not the membership call gate 11 refuses.
+            if !series.iter().all(|held| *held != parsed) {
+                return Err(format!("{key:?} is named twice"));
+            }
+            series.push(parsed);
+        }
+        Ok(series)
+    }
+
+    /// `at=<unix seconds>` as UTC micros; refused with any order but time.
+    fn instant(query: &str, sort: bars::SortKey) -> Result<Option<i64>, String> {
+        let raw = param(query, "at");
+        if raw.is_empty() {
+            return Ok(None);
+        }
+        if sort.scans() {
+            return Err("at= finds an instant in time order, so it needs sort=ts".to_owned());
+        }
+        raw.parse::<i64>()
+            .ok()
+            .and_then(|secs| secs.checked_mul(1_000_000))
+            .map(Some)
+            .ok_or_else(|| format!("{raw:?} is not a whole number of unix seconds for \"at\""))
+    }
+
+    /// `from_day`, `to_day`, `tod_from` and `tod_to`.
+    fn filter(query: &str) -> Result<bars::Filter, String> {
+        let from = ist_midnight_micros("from_day", &param(query, "from_day"))?;
+        let to = ist_midnight_micros("to_day", &param(query, "to_day"))?;
+        if from.zip(to).is_some_and(|(from, to)| from > to) {
+            return Err("from_day must be on or before to_day".to_owned());
+        }
+        let tod_from = param(query, "tod_from");
+        let tod_to = param(query, "tod_to");
+        let tod = if tod_from.is_empty() && tod_to.is_empty() {
+            None
+        } else {
+            let lo = if tod_from.is_empty() {
+                0
+            } else {
+                time_of_day("tod_from", &tod_from)?
+            };
+            let hi = if tod_to.is_empty() {
+                86_399
+            } else {
+                time_of_day("tod_to", &tod_to)?
+            };
+            if lo > hi {
+                return Err(
+                    "tod_from must be at or before tod_to: a window across midnight is not served"
+                        .to_owned(),
+                );
+            }
+            Some((lo, hi))
+        };
+        Ok(bars::Filter {
+            from,
+            to: to.map(|at| at + 86_400 * 1_000_000),
+            tod,
+        })
+    }
+
+    /// The query the window reads.
+    fn query(self) -> bars::WindowQuery {
+        bars::WindowQuery {
+            vendor: self.vendor,
+            timeframe: self.timeframe,
+            series: self.series,
+            from: self.from,
+            to: self.to,
+            sort: self.sort,
+            desc: self.desc,
+            offset: self.offset,
+            limit: self.limit,
+            want_extremes: self.want_extremes,
+            at: self.at,
+            filter: self.filter,
+            lookback: self.lookback,
+            coverage: self.coverage,
+        }
+    }
+}
+
+/// Window scans — a non-time sort, a fold of the extremes, or the O(days)
+/// work of a time-of-day bound or `coverage=1` — that may be queued or
+/// running at once on the blocking pool.
+///
+/// A pool of its own, apart from `crate::detail::run_store_read`'s, so a seek
+/// never waits behind a scan (D-3326, DB-066): a scan reads up to
+/// [`bars::MAX_SCAN_BARS`] records, a seek a page.
+pub(super) const MAX_SCAN_CONCURRENT: usize = 2;
+
+static SCANS_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+
+/// One admitted scan; dropping it returns the slot.
+struct ScanPermit;
+
+impl Drop for ScanPermit {
+    fn drop(&mut self) {
+        SCANS_ACTIVE.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Runs a window scan on the blocking pool, in the scan pool of
+/// [`MAX_SCAN_CONCURRENT`] slots, or refuses before queueing.
+async fn run_scan<T, F>(work: F) -> Result<T, crate::detail::RunError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    SCANS_ACTIVE
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+            (active < MAX_SCAN_CONCURRENT).then_some(active.saturating_add(1))
+        })
+        .map_err(|_| crate::detail::RunError::Saturated)?;
+    let permit = ScanPermit;
+    tokio::task::spawn_blocking(move || {
+        let _held = permit;
+        work()
+    })
+    .await
+    .map_err(|why| crate::detail::RunError::Join(why.to_string()))
 }
 
 pub(super) async fn bars_window_json(
@@ -490,37 +750,181 @@ pub(super) async fn bars_window_json(
         Ok(asked) => asked,
         Err(why) => return refuse(why),
     };
-    let window = match bars::window(
-        &site.store_root,
-        asked.vendor,
-        &param(query, "exchange"),
-        &param(query, "segment"),
-        &param(query, "symbol"),
-        asked.timeframe,
-        asked.contract,
-        asked.from,
-        asked.to,
-        asked.sort,
-        asked.desc,
-        asked.offset,
-        asked.limit,
-        asked.want_extremes,
-    ) {
-        Ok(window) => window,
-        Err(why) => return refuse(why),
+    let scanned = asked.sort.scans() || asked.want_extremes;
+    // THE SCAN POOL ALSO HOLDS THE WORK THAT GROWS WITH DAYS. A time-of-day
+    // bound locates every day's window and `coverage=1` counts every held
+    // month's days: O(days), measured at 0.9 to 1.7 s for a first request
+    // over NIFTY's 97 one-second months (most without a `.tix`), and 0.6 ms
+    // once the month's runs are memoised. Either would hold a seek slot for
+    // that second, so it waits where the sorts wait (D-3326, DB-066).
+    let heavy = scanned || asked.filter.tod.is_some() || asked.coverage;
+    let root = site.store_root.clone();
+    let query = asked.query();
+    let work = move || {
+        let window = bars::window(&root, &query)?;
+        Ok::<_, String>(render_window(&window, scanned))
     };
-    let (sort, want_extremes) = (asked.sort, asked.want_extremes);
-
-    let (body, withheld) = render_window(&window, sort.scans() || want_extremes);
+    // OFF THE ASYNC WORKERS, AND A SCAN APART FROM A SEEK (DB-066).
+    let answered = if heavy {
+        run_scan(work).await
+    } else {
+        crate::detail::run_store_read(work).await
+    };
+    let (body, withheld, faulted) = match answered {
+        Ok(Ok(rendered)) => rendered,
+        Ok(Err(why)) => return refuse(why),
+        Err(why) => {
+            let (status, body) = crate::detail::admission_refused(
+                if heavy {
+                    "a bar window scan"
+                } else {
+                    "a bar window"
+                },
+                if heavy {
+                    MAX_SCAN_CONCURRENT
+                } else {
+                    crate::detail::MAX_STORE_READ_CONCURRENT
+                },
+                &why,
+            );
+            return (status, json(), body);
+        }
+    };
     // PARTIAL CONTENT WHEN A RECORD WOULD NOT READ, the same status
     // `/bars.json` answers with, for the same reason: the rows are real and
     // the set is not whole, and one status must not mean both.
-    let status = if window.faults.is_empty() && withheld == 0 {
+    let status = if !faulted && withheld == 0 {
         axum::http::StatusCode::OK
     } else {
         axum::http::StatusCode::PARTIAL_CONTENT
     };
     (status, json(), body)
+}
+
+/// One extreme as JSON: `{"v", "t", "key"}`, `t` in UTC seconds like a bar's.
+fn extreme_json(extreme: Option<bars::Extreme>, keys: &[bars::SeriesTotal]) -> String {
+    extreme.map_or_else(
+        || "null".to_owned(),
+        |extreme| {
+            format!(
+                r#"{{"v":{},"t":{},"key":{}}}"#,
+                extreme.v,
+                extreme.t.div_euclid(1_000_000),
+                keys.get(extreme.series)
+                    .map_or_else(|| "null".to_owned(), |held| render::json_string(&held.key))
+            )
+        },
+    )
+}
+
+/// The window's extremes as JSON, or `null` with the reason pushed to
+/// `withheld` when a value would not survive a browser's JSON number.
+fn extremes_json(window: &bars::Window, withheld: &mut Vec<String>) -> String {
+    let Some(top) = window.extremes else {
+        return "null".to_owned();
+    };
+    let values = [
+        Some(top.range),
+        Some(top.volume),
+        top.close_max.map(|e| e.v),
+        top.close_min.map(|e| e.v),
+        top.high_max.map(|e| e.v),
+        top.low_min.map(|e| e.v),
+        top.range_max.map(|e| e.v),
+        top.volume_max.map(|e| e.v),
+    ];
+    if values
+        .into_iter()
+        .flatten()
+        .any(|value| !browser_exact(value))
+    {
+        withheld.push(format!(
+            "the window's extremes (range {}, volume {}) lie outside \
+             ±(2^53 − 1), which a browser's JSON number cannot hold \
+             exactly; withheld as null",
+            top.range, top.volume
+        ));
+        return "null".to_owned();
+    }
+    let keys = &window.series;
+    format!(
+        r#"{{"range":{},"volume":{},"close_max":{},"close_min":{},"high_max":{},"low_min":{},"range_max":{},"volume_max":{}}}"#,
+        top.range,
+        top.volume,
+        extreme_json(top.close_max, keys),
+        extreme_json(top.close_min, keys),
+        extreme_json(top.high_max, keys),
+        extreme_json(top.low_min, keys),
+        extreme_json(top.range_max, keys),
+        extreme_json(top.volume_max, keys),
+    )
+}
+
+/// One window row as JSON, or the sentence withholding it because a browser's
+/// JSON number cannot hold one of its values (CE-60, D-2687).
+fn render_row(
+    window: &bars::Window,
+    row: &bars::WindowBar,
+    several: bool,
+) -> Result<String, String> {
+    let bar = &row.bar;
+    let change = [("chg", row.chg), ("oichg", row.oichg)]
+        .into_iter()
+        .find_map(|(field, bps)| {
+            bps.filter(|&held| !browser_exact(held))
+                .map(|held| inexact_fault(bar.ts_micros, field, held))
+        });
+    if let Some(why) = inexact_bar(bar, row.oi_applies).or(change) {
+        return Err(why);
+    }
+    // EXACTLY ONE OF EACH PAIR IS NON-NULL, on every row, the same contract
+    // `/store.json`'s `chg_bps`/`chg_why` already keeps. An unknown change
+    // is never `0` — zero is a real bar that closed where the last one did.
+    let value = |bps: Option<i64>| bps.map_or_else(|| "null".to_owned(), |n| n.to_string());
+    let why = |bps: Option<i64>, reason: &str| {
+        if bps.is_some() {
+            "null".to_owned()
+        } else {
+            render::json_string(reason)
+        }
+    };
+    let word = |text: Option<&str>| text.map_or_else(|| "null".to_owned(), render::json_string);
+    let day = bars::ist_day(bar.ts_micros);
+    let mut out = String::with_capacity(256);
+    let _ = write!(
+        out,
+        r#"{{"t":{},"o":{},"h":{},"l":{},"c":{},"v":{},"v_why":{},"oi":{},"chg":{},"chg_why":{},"oichg":{},"oichg_why":{},"month":{},"phase":{}"#,
+        bar.ts_micros / 1_000_000,
+        bar.open,
+        bar.high,
+        bar.low,
+        bar.close,
+        bar.volume,
+        word(row.v_why),
+        if !row.oi_applies || bar.open_interest == store::format::OI_NULL {
+            "null".to_owned()
+        } else {
+            bar.open_interest.to_string()
+        },
+        value(row.chg),
+        why(row.chg, row.chg_why),
+        value(row.oichg),
+        why(row.oichg, row.oichg_why),
+        render::json_string(day.get(..7).unwrap_or(&day)),
+        word(row.phase),
+    );
+    if several {
+        let _ = write!(
+            out,
+            r#","key":{}"#,
+            window
+                .series
+                .get(row.series)
+                .map_or_else(|| "null".to_owned(), |held| render::json_string(&held.key))
+        );
+    }
+    out.push('}');
+    Ok(out)
 }
 
 /// A [`bars::Window`] as the JSON the grid reads.
@@ -532,94 +936,78 @@ pub(super) async fn bars_window_json(
 /// `months_missing` is on it for the same reason: a sparse store is legal, and
 /// a reader must be able to tell a gap from a refusal — `CLAUDE.md` §4.
 ///
-/// Returns the body and how many bars or extremes were withheld because a
-/// browser's JSON number cannot hold one of their values (CE-60, D-2687); the
-/// caller answers 206 when that is not zero, as for a record that would not
-/// read. Each is named in `faults`.
-pub(super) fn render_window(window: &bars::Window, scanned: bool) -> (String, usize) {
-    let mut rows = String::with_capacity(window.bars.len() * 128 + 32);
+/// Returns the body, how many bars or extremes were withheld because a
+/// browser's JSON number cannot hold one of their values (CE-60, D-2687), and
+/// whether the window named a fault; the caller answers 206 for either.
+pub(super) fn render_window(window: &bars::Window, scanned: bool) -> (String, usize, bool) {
+    let mut rows = String::with_capacity(window.bars.len() * 200 + 32);
     let mut withheld: Vec<String> = Vec::new();
+    let several = window.series.len() > 1;
     rows.push('[');
     let mut written = 0usize;
     for row in &window.bars {
-        let bar = &row.bar;
-        let change = [("chg", row.chg), ("oichg", row.oichg)]
-            .into_iter()
-            .find_map(|(field, bps)| {
-                bps.filter(|&held| !browser_exact(held))
-                    .map(|held| inexact_fault(bar.ts_micros, field, held))
-            });
-        if let Some(why) = inexact_bar(bar).or(change) {
-            withheld.push(why);
-            continue;
-        }
-        if written > 0 {
-            rows.push(',');
-        }
-        written = written.saturating_add(1);
-        // EXACTLY ONE OF EACH PAIR IS NON-NULL, on every row, the same contract
-        // `/store.json`'s `chg_bps`/`chg_why` already keeps. An unknown change
-        // is never `0` — zero is a real bar that closed where the last one did.
-        let value = |bps: Option<i64>| bps.map_or_else(|| "null".to_owned(), |n| n.to_string());
-        let why = |bps: Option<i64>, reason: &str| {
-            if bps.is_some() {
-                "null".to_owned()
-            } else {
-                render::json_string(reason)
+        match render_row(window, row, several) {
+            Ok(text) => {
+                if written > 0 {
+                    rows.push(',');
+                }
+                written = written.saturating_add(1);
+                rows.push_str(&text);
             }
-        };
-        let _ = write!(
-            rows,
-            r#"{{"t":{},"o":{},"h":{},"l":{},"c":{},"v":{},"oi":{},"chg":{},"chg_why":{},"oichg":{},"oichg_why":{}}}"#,
-            bar.ts_micros / 1_000_000,
-            bar.open,
-            bar.high,
-            bar.low,
-            bar.close,
-            bar.volume,
-            if bar.open_interest == store::format::OI_NULL {
-                "null".to_owned()
-            } else {
-                bar.open_interest.to_string()
-            },
-            value(row.chg),
-            why(row.chg, row.chg_why),
-            value(row.oichg),
-            why(row.oichg, row.oichg_why)
-        );
+            Err(why) => withheld.push(why),
+        }
     }
     rows.push(']');
 
-    let extremes = window.extremes.map_or_else(
-        || "null".to_owned(),
-        |top| {
-            if browser_exact(top.range) && browser_exact(top.volume) {
-                format!(r#"{{"range":{},"volume":{}}}"#, top.range, top.volume)
-            } else {
-                withheld.push(format!(
-                    "the window's extremes (range {}, volume {}) lie outside \
-                     ±(2^53 − 1), which a browser's JSON number cannot hold \
-                     exactly; withheld as null",
-                    top.range, top.volume
-                ));
-                "null".to_owned()
-            }
-        },
-    );
+    let extremes = extremes_json(window, &mut withheld);
     let mut faults: Vec<&str> = window.faults.iter().map(String::as_str).collect();
     faults.extend(withheld.iter().map(String::as_str));
+    let list = |items: &mut dyn Iterator<Item = String>| {
+        let joined: Vec<String> = items.collect();
+        format!("[{}]", joined.join(","))
+    };
+    let missing = list(&mut window.missing_months.iter().map(|m| render::json_string(m)));
+    let totals = list(&mut window.series.iter().map(|held| {
+        format!(
+            r#"{{"key":{},"total":{}}}"#,
+            render::json_string(&held.key),
+            held.total
+        )
+    }));
+    let coverage = list(&mut window.coverage.iter().map(|month| {
+        format!(
+            r#"{{"key":{},"month":{},"rows":{},"days_covered":{}}}"#,
+            window
+                .series
+                .get(month.series)
+                .map_or_else(|| "null".to_owned(), |held| render::json_string(&held.key)),
+            render::json_string(&month.month.to_string()),
+            month.rows,
+            month.days_covered
+        )
+    }));
     let body = format!(
-        r#"{{"total":{},"months_read":{},"months_missing":{},"scanned":{scanned},"extremes":{extremes},"faults":{},"bars":{rows}}}"#,
+        r#"{{"total":{},"offset":{},"months_read":{},"months_missing":{},"missing_months":{missing},"months_outside_life":{},"scanned":{scanned},"scan_rows":{},"at_index":{},"series_totals":{totals},"extremes":{extremes},"extremes_why":{},"coverage":{coverage},"faults":{},"bars":{rows}}}"#,
         window.total,
+        window.offset,
         window.months_read,
         window.months_missing,
+        window.months_outside_life,
+        window.scan_rows,
+        window
+            .at_index
+            .map_or_else(|| "null".to_owned(), |index| index.to_string()),
+        window
+            .extremes_why
+            .as_deref()
+            .map_or_else(|| "null".to_owned(), render::json_string),
         if faults.is_empty() {
             "null".to_owned()
         } else {
             render::json_string(&faults.join("; "))
         }
     );
-    (body, withheld.len())
+    (body, withheld.len(), !window.faults.is_empty())
 }
 
 #[cfg(test)]
@@ -730,5 +1118,101 @@ mod tests {
         assert_eq!(code, axum::http::StatusCode::BAD_REQUEST, "{junk}");
         assert!(junk.contains("from"), "named date refusal: {junk}");
         assert_eq!(junk.matches("\"t\":").count(), 0, "no bar response: {junk}");
+    }
+
+    /// **A FULL SCAN POOL REFUSES A SCAN BY NAME, AND A SEEK IS STILL
+    /// ANSWERED.** D-3326, DB-066, DB-G80: every window ran on a Tokio worker
+    /// with no admission, so a few 97-month sorts could hold every worker and
+    /// queue every route behind them. A sort or an extremes fold now waits in
+    /// a pool of [`MAX_SCAN_CONCURRENT`] slots apart from the seek pool; when
+    /// it is full the scan answers 429 naming that bound, and a time-ordered
+    /// page in the same instant is served from the other pool.
+    #[tokio::test]
+    async fn a_full_scan_pool_refuses_a_scan_by_name_and_a_seek_is_still_answered() {
+        let root = store_root("scanpool");
+        let month = store::path::YearMonth::new(2024, 1).expect("a legal month");
+        let path = store::path::StorePath::new(store::path::PathParts {
+            vendor: Vendor::Dhan,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: store::path::Timeframe::MINUTE_1,
+            month,
+            file: store::path::FileKind::Bars,
+        })
+        .expect("a legal path");
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the id is the cross-check `open` folds; any 32 bits serve"
+        )]
+        let symbol_id = brutex_core::universe::fnv1a("NIFTY") as u32;
+        let mut file =
+            store::file::BarFile::open_or_create(&root, path, symbol_id).expect("a bar file");
+        // 2024-01-02 09:15 IST onward, one invented bar a minute.
+        let open = (19_724 * 86_400 - 19_800 + 9 * 3_600 + 15 * 60) * 1_000_000;
+        let rows: Vec<store::format::Bar> = (0..5)
+            .map(|n| store::format::Bar {
+                ts_micros: open + n * 60_000_000,
+                open: 1_000 + n,
+                high: 1_010 + n,
+                low: 990 + n,
+                close: 1_005 + n,
+                volume: 0,
+                open_interest: i64::MIN,
+            })
+            .collect();
+        file.append(&rows).expect("five legal bars");
+        drop(file);
+        let loaded = std::sync::Arc::new(Site::serving(&masters("scanpool", None, None), &root));
+        let ask = |sort: &str| {
+            let uri: axum::http::Uri = format!(
+                "/bars/window.json?feed=dhan&exchange=NSE&segment=INDEX&symbol=NIFTY\
+                 &timeframe=1min&from=2024-01&to=2024-01&limit=5&sort={sort}"
+            )
+            .parse()
+            .expect("a uri");
+            bars_window_json(axum::extract::State(std::sync::Arc::clone(&loaded)), uri)
+        };
+        // EVERY SLOT TAKEN, whatever another test holds at this instant.
+        SCANS_ACTIVE.fetch_add(MAX_SCAN_CONCURRENT, Ordering::AcqRel);
+        let (scan, _, refused) = ask("c").await;
+        let (seek, _, served) = ask("ts").await;
+        // A TIME-OF-DAY BOUND AND A COVERAGE COUNT ARE O(days): they wait
+        // where the sorts wait, not in a seek's slot.
+        let (timed, _, timed_body) = ask("ts&tod_from=09:15:00&tod_to=09:16:59").await;
+        let (covered, _, covered_body) = ask("ts&coverage=1").await;
+        SCANS_ACTIVE.fetch_sub(MAX_SCAN_CONCURRENT, Ordering::AcqRel);
+        for (status, body) in [(timed, &timed_body), (covered, &covered_body)] {
+            assert_eq!(status, axum::http::StatusCode::TOO_MANY_REQUESTS, "{body}");
+            assert!(body.contains("a bar window scan not admitted"), "{body}");
+        }
+        assert_eq!(scan, axum::http::StatusCode::TOO_MANY_REQUESTS, "{refused}");
+        assert!(
+            refused.contains("a bar window scan not admitted")
+                && refused.contains(&format!("at most {MAX_SCAN_CONCURRENT} run at once")),
+            "the refusal names the pool and its bound: {refused}"
+        );
+        // A seek may itself meet a full seek pool shared with other tests;
+        // that is a 429 naming the OTHER pool, never the scan's.
+        assert!(
+            !served.contains("a bar window scan"),
+            "a seek never waits on the scan pool: {served}"
+        );
+        if seek == axum::http::StatusCode::OK {
+            assert_eq!(served.matches("\"t\":").count(), 5, "{served}");
+        } else {
+            assert_eq!(seek, axum::http::StatusCode::TOO_MANY_REQUESTS, "{served}");
+        }
+        // AND WITH THE SLOTS FREE AGAIN THE SAME SCAN IS ANSWERED.
+        for _ in 0..400 {
+            let (status, _, body) = ask("c").await;
+            if status == axum::http::StatusCode::OK {
+                assert_eq!(body.matches("\"t\":").count(), 5, "{body}");
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("the scan pool stayed full for two seconds after the slots were returned");
     }
 }
