@@ -65178,3 +65178,15 @@ attempt; before, four builds) and
 `a_column_builds_retry_loop_reads_the_daily_context_once` (four passes, one
 daily load where there were four, and the same withholding, census and
 digest as the census path).
+
+### D-4720 — A rung's readback opens the ledger once per root — 2026-10-09
+
+**Finding.** W2-cli8-4, test gap. D-1700's `recorded_row` reads a rung's row
+through the shared ledger handle, but no test counted opens, so a fresh
+`Results::open(root)?.of_identity(..)` per rung passed every test.
+
+**Decision.** `a_rungs_readback_opens_the_ledger_once_per_root_not_once_per_rung`
+reads three rungs' rows by identity in a child process (the shared handle is
+process-global) and requires `results::OPENS == 1`. With the fresh open it
+failed `left: 3, right: 1`. No production code changes; the child's proof
+line is declared to gate 23 beside D-0695's.

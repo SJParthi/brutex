@@ -583,3 +583,75 @@ fn the_omitted_row_line_starts_one_row_past_the_listing() -> Result<(), Box<dyn 
     }
     Ok(())
 }
+
+/// **A range rung reads its row back through one held ledger handle.**
+/// W2-cli8-4, D-4720.
+///
+/// `recorded_row` replaced `latest_for` (D-1700): one identity probe of the
+/// process's shared ledger handle, opened once per root. Its two tests prove
+/// it reads the RIGHT row, and both pass on a `recorded_row` that opened the
+/// ledger afresh for every rung, an O(runs) identity pass per rung, which is
+/// the cost D-1700 removed. Three rungs over one root now open the ledger
+/// once. In a child process: the handle is process-wide, and any other test
+/// using another root between two calls here would evict it.
+#[test]
+fn a_rungs_readback_opens_the_ledger_once_per_root_not_once_per_rung()
+-> Result<(), Box<dyn std::error::Error>> {
+    const CHILD: &str = "BRUTEX_TEST_RUNG_READBACK_OPENS";
+    if std::env::var_os(CHILD).is_some() {
+        return readback_opens_child();
+    }
+    let output = std::process::Command::new(std::env::current_exe()?)
+        .args([
+            "--exact",
+            "results_report_tests::a_rungs_readback_opens_the_ledger_once_per_root_not_once_per_rung",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CHILD, "1")
+        .output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("1 passed"), "{stdout}");
+    assert!(stdout.contains("READBACK OPENS 1 FOR 3 RUNGS"), "{stdout}");
+    Ok(())
+}
+
+/// The child half: three rows written through a private handle, then read
+/// back one rung at a time by identity, counting ledger opens.
+fn readback_opens_child() -> Result<(), Box<dyn std::error::Error>> {
+    let rows: Vec<Record> = (1..=3).map(|id| row(id, 100, 2)).collect();
+    let fixture = Fixture::new(&rows)?;
+    let (found, opens, _) = counted(|| {
+        rows.iter()
+            .map(|record| {
+                let page = format!(
+                    "{}\n  row 0 in x\n  {}{}\n",
+                    crate::RECORDED_HEAD,
+                    crate::RECORDED_IDENTITY,
+                    record.identity_hex()
+                );
+                crate::recorded_row(
+                    &fixture.0,
+                    &page,
+                    crate::RungKey {
+                        feed: "zerodha",
+                        underlying: "NIFTY",
+                        rung: "15min",
+                        from: (2026, 1),
+                        to: (2026, 1),
+                        min_hits: record.min_hits,
+                    },
+                )
+            })
+            .collect::<Result<Vec<_>, String>>()
+    });
+    assert_eq!(found?, rows, "each rung reads its own row");
+    assert_eq!(opens, 1, "one ledger open for every rung of the root");
+    println!("READBACK OPENS {opens} FOR {} RUNGS", rows.len());
+    Ok(())
+}
