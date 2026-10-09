@@ -1,4 +1,5 @@
 import { build, probe } from './prefix.js';
+import { headerRefusalFrom } from './refusal.js';
 
 /** One retained catalogue and one current read for the selected feed.
  * Duplicate callers share the same promise. Replaced requests are aborted and
@@ -45,9 +46,11 @@ export function createCatalogueLoader(state, request) {
         });
         if (active !== current) return;
         if (!response.ok) {
-          const note = response.headers.get('x-brutex-master-note');
-          const phase = response.headers.get('x-brutex-master-state');
-          throw new Error(note ? (phase ? `${phase} — ${note}` : note) : `HTTP ${response.status}`);
+          // THE HALF THAT FAILED, BY NAME. This printed the master's sentence
+          // whatever failed, so an unreadable census was blamed on a master
+          // that read; an unknown feed's 400 printed its status alone (W2,
+          // D-3212).
+          throw new Error(await headerRefusalFrom('/instruments.json', response));
         }
         const rows = await response.json();
         if (active !== current) return;

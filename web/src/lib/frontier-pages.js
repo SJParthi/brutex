@@ -1,3 +1,5 @@
+import { refusalFrom } from './refusal.js';
+
 /**
  * Assemble the complete committed frontier before either ranking surface sees it.
  * These transport ceilings mirror api::detail: at most 4,096 rows, 256 per page.
@@ -37,7 +39,7 @@ function sameAdmission(left, right) {
 
 /**
  * @param {string} identity
- * @param {(url: string) => Promise<{ok: boolean, status: number, json: () => Promise<any>}>} request
+ * @param {(url: string) => Promise<{ok: boolean, status: number, json: () => Promise<any>, text?: () => Promise<string>}>} request
  * @returns {Promise<any>}
  */
 export async function fetchCompleteFrontier(identity, request) {
@@ -55,7 +57,9 @@ export async function fetchCompleteFrontier(identity, request) {
       `/frontier.json?identity=${encodeURIComponent(identity)}&page=${page}&limit=${FRONTIER_PAGE_ROWS}`
     );
     if (!response.ok || (response.status !== 200 && response.status !== 206)) {
-      throw new Error(`/frontier.json answered ${response.status} on page ${page}.`);
+      // THE SERVER'S `refusal`, NOT THE STATUS ALONE (W3, D-3213). Every
+      // refusal this route writes names itself in the body.
+      throw new Error(`Frontier page ${page} refused: ${await refusalFrom('/frontier.json', /** @type {Response} */ (response))}`);
     }
     const body = await response.json();
     const refuse = (/** @type {string} */ why) => {

@@ -66717,3 +66717,342 @@ itself was **not run** here, because this fixer may not build `cli`.
 
 **Probes, after:** each of P18–P23, and P24 (the old `sh -c` shape), is
 refused by gate 1b; the real tree passes. Invariant FXE-05.
+
+### D-3211 — The backtest page keeps an uncounted swept surface uncounted — 2026-10-09
+
+**What was observed.** `/universes.json` answers a feed with no instrument
+master `"counted_from":"no master"` with every count `null`
+(`crates/api/src/coverage.rs` `target_json`). The backtest page's
+`loadSurface` read the swept target's `matched` as `Number(target.matched ??
+0)`, so the page held `matched: 0`, and `coverNote` built "0 of N are swept"
+from it: a measurement of a file the feed does not publish. A refused read
+(the unknown-feed 400 names its reason in `refused`) and a thrown read both set
+the surface to `null` and dropped the reason. Measured on this base: `coverNote`
+is a `$derived` with no render site in the template (`grep -n coverNote`
+finds only its declaration and one comment), so the invented zero lived in the
+page's state and its sentence rather than on screen; the finding is fixed at
+both.
+
+**Decided.** `sweptSurface.matched` is an exact non-negative safe integer or
+`null`, beside `countedFrom` (the server's own word) and `why` (the refusal).
+A non-2xx is read through `refusalFrom('/universes.json', response)`, a thrown
+read keeps its message, and the feed gate is asked again after the reason is
+read. `coverNote` says "swept count not measured (<why or counted_from>)"
+whenever `matched` is `null`; a measured count, a real zero included, is shown
+as before. OBSV-12, `web/tests/swept-surface.test.js`.
+
+**Rejected.** Rendering `coverNote` in the template. It was never rendered on
+this base, and placing a new line on the backtest form is a layout decision
+outside this finding.
+
+### D-3212 — A census- or master-stamped refusal names the half that failed — 2026-10-09
+
+**What was observed.** `/instruments.json` answers 503 when the selected
+feed's census will not load or its master will not decode, and `/store.json`
+answers 503 for an unreadable census; both keep a JSON array body and stamp
+the reason in `x-brutex-census-state`/`-note` and `x-brutex-master-state`/`-note`
+(D-0124). Three readers dropped it. `catalogue-loader.js` printed the master's
+sentence whatever had failed, so an unreadable census read "read — groww:
+master read; 812 instrument(s) in the merged universe" — a master that was
+fine, blamed — and an unknown feed's 400 printed "HTTP 400" though its body
+names the feed in `refused`. `feed-summary.js` (the census HEAD survey) and
+the `/ingest` roster measurement (`measureRoster`) printed the status alone.
+
+**Decided.** `web/src/lib/refusal.js` gains `headerRefusal(headers)`: the
+master half when the master state is present and not `read`, and the census
+half when the census state is `unreadable`, each with its note or a sentence
+saying none was sent; `null` when neither names a failure.
+`headerRefusalFrom(route, response)` puts it in the CE-83 sentence, falling
+back to the body's reason (`reasonOf`). The loader and the roster use
+`headerRefusalFrom('/instruments.json', …)`; the HEAD survey, which has no
+body, uses `headerRefusal` in `refusalSentence('census HEAD', …)`. OBSV-13.
+
+### D-3213 — A refused frontier page names the server's refusal — 2026-10-09
+
+**What was observed.** Every non-2xx `/frontier.json` answer writes its cause
+in `refusal` (`crates/api/src/frontierjson.rs` `refuse`, `unavailable`,
+`too_large`, `range_refusal`): a 400 selector refusal, the 429 saturation
+sentence, a 503 preflight failure, the 413 row ceiling, the 416 range.
+`fetchCompleteFrontier` threw "/frontier.json answered 503 on page 0." and
+the reason was never read. `web/tests/frontier-pages.test.js` pinned that
+behaviour with a stub that had no body.
+
+**Decided.** A non-2xx (or a 2xx other than 200/206) throws "Frontier page
+<n> refused: " followed by `refusalFrom('/frontier.json', response)`. The
+pinned test now gives its HTML stub a `text()` and asserts the HTML is quoted
+with the status, still without parsing the body as JSON. OBSV-14.
+
+### D-3214 — A refused `/live.json` read is shown with the server's refusal — 2026-10-09
+
+**What was observed.** `/live.json` refuses with `{"runs":[],"listed":false,
+"refusal":…}` under 429 (snapshot capacity full) or 503 (a task that could not
+be joined, an unset store root, a live census that refused)
+(`crates/api/src/livejson.rs` `unavailable`). The backtest page's
+`fetchLiveTop` wrote "/live.json answered 503. The heap is still being written
+to the store — this page could not read it back.": the status, and a cause
+nobody measured, in place of the one the server wrote.
+
+**Decided.** `fetchLiveTop` reads a non-2xx through
+`refusalFrom('/live.json', response)` and shows exactly that sentence in the
+panel's existing "could not be read" line. The run binding (conc18-4) is asked
+again after the body is read, so a refusal for a sweep replaced meanwhile is
+dropped. OBSV-15.
+
+### D-3215 — A refused saved-evidence read names the server's refusal — 2026-10-09
+
+**What was observed.** `/sweep-evidence.json` refuses a selector (400), a
+saturated detail door (429) or a changed or unreadable saved attempt (503)
+with the detail envelope `{"schema_version":1,"status":"refused",
+"evidence":null,"rows":[],"refusal":…}` (`crates/api/src/sweepevidence.rs`
+`refusal`). `fetchSweepEvidence` threw "Saved evidence request failed (HTTP
+503)." and never read it; every sibling saved-evidence reader already passes
+the same envelope through `detailRefusal`.
+
+**Decided.** `fetchSweepEvidence` throws `detailRefusal(response, …)`: the
+status sentence followed by the bounded `refusal`, and the status sentence
+alone for a body that is not the envelope (a proxy's HTML). OBSV-16.
+
+### D-3216 — An unreadable execution status is shown with its `running.why` — 2026-10-09
+
+**What was observed.** `/backtest/run.json` answers an exact attempt it cannot
+read with 503 (a malformed `?attempt=` with 400), and the global view's failed
+external read with 503, each as `{"running":{"status":"unknown","why":…}}`
+(`crates/api/src/sweeprun.rs` `browser_attempt_unknown`, `unknown_status`).
+None of `refusalOf`'s three keys (D-1789) is set, so the reason was unreadable
+by the shared helper, and six readers printed the status alone:
+`receipt-batch.js` `observe`, `boolean-launch.js` `observe`,
+`index-stop-launch.js` `observe`, and the backtest page's `pollSweep`,
+`adoptRunning` and `refreshCurrentAdmission`.
+
+**Decided.** `refusalOf` reads `running.why` after the three top-level keys,
+and only when `running.status` is `unknown`: a running or finished payload's
+`why` describes the run and is not a refusal. Every one of the six readers
+puts `refusalFrom('/backtest/run.json', response)` in its existing sentence;
+the page's two pollers ask their ticket again after the body is read, so a
+replaced read publishes nothing. No reader's resend or launch rule moved: each
+still refuses to resend and still leaves the state `unknown`. OBSV-17.
+
+### D-3217 — A refused launch-configuration read names the server's refusal — 2026-10-09
+
+**What was observed.** `/engine/boolean-launch.json` and
+`/engine/index-stop-launch.json` answer a failed bounded configuration read
+503 with `{"ready":false,"refusal":…}` (`crates/api/src/booleanlaunch.rs` and
+`crates/api/src/indexstoplaunch.rs`, `metadata`). `BooleanLaunch.svelte`
+`readConfiguration` printed "Research configuration returned HTTP 503", and
+`IndexStopLaunch.svelte` printed "The live app does not provide single-stop
+configuration details (HTTP 503)" — a guess about an older server, made for
+every status including the one that names its cause.
+
+**Decided.** Both read a non-2xx through `refusalFrom(<route>, response)` and
+keep their closing clause ("No launch was attempted." / "No sweep was
+submitted."). An older server's 404 now reads "answered HTTP 404 and named no
+reason", which is what was measured. OBSV-18.
+
+### D-3218 — The audit layer's own refusal is read by every detail reader, with whether the handler ran — 2026-10-09
+
+**What was observed.** Every route in `crates/api/src/operation_audit.rs`
+`AUDITED` (22 of them) can be refused by the audit journal itself, before or
+after its handler: 429 when the journal is busy, 503 otherwise, with
+`{"schema_version":1,"refusal":…,"code":"invocation_audit_unavailable",
+"handler_completed":bool,"why":…}` (`failure`), or the read twin
+`invocation_audit_read_unavailable` with no `handler_completed`
+(`read_failure`). `web/src/lib/detail-refusal.js` `detailRefusal` accepted only
+the detail envelope (`status:"refused"`, `rows:[]`), so every detail reader of
+an audited route — candidate trades, saved evidence, the Boolean catalog,
+evidence, qualified search, campaign and later comparison, Selection V6 and
+expression search — printed "(HTTP 429)." and dropped both the refusal and
+whether the handler had run. Only `invocation-audit.js` validated the envelope,
+in its own copy. `refusal.js` `refusalOf` read the envelope's bare `refusal`
+and dropped its `why`, so the `/live.json`, `/frontier.json`,
+`/backtest/run.json` and `/engine/boolean-launch.json` readers could not say
+whether the handler ran.
+
+**Decided.** One validator, `refusal.js` `auditRefusal`, moved from
+`invocation-audit.js` unchanged in what it accepts (schema 1; a write code with
+a boolean `handler_completed` or a read code without one; a non-blank refusal
+and a string why, each at most 4096). It answers "refusal why".
+`detailRefusal` reads it after the detail envelope, `refusalOf` reads it before
+its three keys, and `invocation-audit.js` now calls `detailRefusal` instead of
+its copy. An envelope that does not validate is still not echoed by
+`detailRefusal`, and is still read for its bare `refusal` by `refusalOf`, as
+before. OBSV-19.
+
+### D-3219 — An undated live heap and an unheld census generation are unknown, never zero — 2026-10-09
+
+**What was observed.** Two pages turned a null the server sends on purpose into
+a zero, and the zero read as a measurement.
+
+1. `/live.json` sends `idle_secs` and `stale` as null when the heap file cannot
+   be dated (`crates/api/src/livejson.rs`). The backtest page's
+   `fetchLiveTop` carried a comment saying an undated run "now sorts last", but
+   sorted on `Number(r?.idle_secs)`, and `Number(null)` is 0 and finite: the
+   undated run still sorted first. It was then rendered "updated 0s ago"
+   (`Number(best.idle_secs) || 0`) with no "not moving" pill
+   (`best.stale === true`).
+2. `/audit.json` sends `store.generation` and `store.commits` as null when no
+   census is held (`crates/api/src/audit_json.rs`, whose own test pins
+   `"generation":null` for an absent census). The audit page footer rendered
+   `n0(generation ?? 0)` and `n0(commits ?? 0)`, "generation 0, 0 committed
+   entries", although the same page's count-up effect had already been moved to
+   `?? Number.NaN` for this reason. Each sample held `generation ?? 0`, so a
+   census that became readable while the page was open read as all of its
+   commits "measured" between two answers, and the strip said RUNNING.
+
+**Decided.** An age is a non-negative finite JSON number or null; a null sorts
+after every dated heap and `liveFreshness` renders it "age unknown: /live.json
+could not date this heap" with an "undated" pill. `stale` keeps `true`, `false`
+or null. On `/audit`, `audit-pages.js` `generationOf` keeps a sample's
+generation as a non-negative safe integer or null, and `generationStep` takes
+no difference across a null. The strip says "not comparable" for such a
+difference instead of "unchanged", and the footer renders an unknown count as
+"—". OBSV-20, OBSV-21.
+
+### D-3220 — The backtest page's own readers name the server's reason on every refusal — 2026-10-09
+
+**What was observed.** Seven readers on `web/src/routes/backtest/+page.svelte`
+dropped the reason a refusing server had written:
+
+1. `fetchTrades` (`/trades.json`) and `fetchTop` (`/engine/top.json`) parsed
+   the body before checking the status. A plain-text refusal became a JSON
+   parse error, and a JSON one was shown as its bare `refusal` with no route
+   or status.
+2. `fetchLedger` (`/backtest.json`) printed "answered 429" alone for every
+   status but 404 and 503. A 503 that was not ledger-shaped, such as the
+   audit layer's envelope on this audited route, was reported as "`runs` is
+   not an array".
+3. `fetchVocab` (`/vocab.json`) printed the status alone.
+4. `loadSeries` and `loadBenchmark` (`/bars/window.json`) printed "answered
+   400" and "answered 400/200", although the route sends `{"error":…}` and
+   one of the two endpoints had not refused at all.
+5. `loadRungs` (`/store.json`) did `if (!response.ok) return;`. The switcher
+   had already been cleared, so an unreadable census, an unknown feed or an
+   UNAVAILABLE master removed it with nothing said.
+
+**Decided.** Each reader checks the status first and names the route, the
+status and the body's reason through `refusal.js`.
+- `/store.json` is read through `headerRefusalFrom`, because it stamps an
+  unreadable census in headers (D-3212).
+- `/backtest.json` reads a 503 as text. A ledger-shaped one is still admitted
+  as a ledger; anything else is named through the new `reasonOfText`, the
+  text half of `reasonOf`. A 200 that is not JSON still fails as a parse
+  error.
+- The buy-and-hold reference names each refused endpoint and only those.
+- The rung switcher renders "Timeframe switcher unavailable: <reason>" where
+  it would have been.
+
+Every new await is followed by the reader's existing staleness check. OBSV-22.
+
+### D-3221 — A plain-text refusal is named by every reader that can receive one — 2026-10-09
+
+**What was observed.** Any route can be refused before its handler runs, in
+plain text. `crates/api/src/server.rs` `request_bounds_refusal` answers 414,
+431 and a repeated-field 400 with "REFUSED — … Nothing was read or run.", and
+the cross-site admission layer answers 403 with its reason. Thirteen readers
+outside the backtest page lost that sentence:
+
+- **Status alone.** `feed-startup.js` and the console probe in
+  `+layout.svelte` (`/feeds.json`), `runtime-inspection.js`
+  (`/inspection.json`), Autopilot `tick` (`/autopilot.json`) and ingest
+  `pollRunCurrent` (`/pull/run.json`) printed only "HTTP N".
+- **JSON parsed first.** `database-pages.js` and the database page's
+  `readWindow` (`/bars/window.json`) and `refreshMasters` on `/mapping`
+  (`/masters/refresh`) parsed the body before checking the status, so the
+  sentence became a JSON parse error. `refreshMasters` then said "The refresh
+  keeps running on the server" about a refresh that was never dispatched.
+- **Not JSON.** The terminal's `quote` and `monthBars` (`/bars/window.json`),
+  Markets `readMonth` and the database page's `fetchBarFile` (`/bars.json`)
+  said "no reason recorded" or "the body was not JSON".
+- **Wrong cause.** Autopilot `send` called a non-JSON refusal "the API is not
+  behind this route" and pointed at the dev proxy.
+- **Dropped.** Ingest `resumeRunCurrent` returned silently on a non-2xx or a
+  throw. Ingest `readFolder` (`/folder.json`) threw a parse error.
+
+**Decided.** Each reader checks the status before parsing and names the
+route, the status and the reason through `refusal.js`. Plain text is quoted
+up to 500 characters, and a JSON body's `error`, `refused` or `refusal` key
+is read.
+- `readFolder` carries a `why` beside its parsed body, so a halt can still
+  name its folder.
+- `resumeRunCurrent` writes the reason to `pollError` and leaves Pull offered,
+  as before.
+- `refreshMasters` reads every JSON answer as before and names a non-JSON
+  refusal without claiming the refresh ran.
+- Autopilot `send` keeps the dev-proxy message for a 2xx HTML answer only.
+- A 404 to `/inspection.json` is still a legacy server, and a 2xx that is not
+  JSON still fails loudly.
+
+OBSV-23.
+
+### D-3222 — An unconfirmed command answer names the server's reason and is still never resent — 2026-10-09
+
+**What was observed.** Five POST readers handled an answer that neither
+confirmed nor refused by printing a fixed sentence, or the status alone. They
+dropped whatever the body said:
+
+- `receipt-batch.js`, `boolean-launch.js` and `index-stop-launch.js`
+  (`/engine/command`)
+- the backtest page's `/backtest/run` and `/backtest/descend`, through
+  `sweep-admission.js` `sweepSubmission`
+- the ingest page's `/pull/run`
+
+All of these routes but `/pull/run` are audited. The audit layer's 429 or 503
+names its refusal and says whether the handler was dispatched
+(`operation_audit.rs` `failure`), and that was the sentence lost. A
+plain-text request-bounds refusal was parsed as JSON first. For the backtest
+page that meant a null body; for the other readers it meant a parse error.
+
+**Decided.** One reader, `refusal.js` `commandReply`, reads the reply once and
+never throws.
+- A 2xx is parsed as JSON, or is null when it is not JSON.
+- A non-2xx is read as text. Its JSON body is kept, and its reason is named
+  through `reasonOfText`. For the audit envelope that is the refusal and the
+  why (D-3218).
+
+Each reader's unconfirmed message now carries `refusalSentence(route, status,
+reason)`. `sweepSubmission` takes the reason and the route.
+
+No phase or resend rule moved. Every unconfirmed answer stays `unknown`, and
+nothing is resent, including an audit refusal that says the handler was not
+dispatched. Treating that answer as a refusal would allow a resend, which is a
+decision for the owner and is not made here. OBSV-24.
+
+### D-3223 — A pull run with no before-reading shows no progress figure — 2026-10-09
+
+**What was observed.** `/ingest` `resumeRunCurrent` picks up a pull run
+already in flight when the page loads, and keeps watching it when its
+before-reading of the store fails. The comment there says the card "cannot
+show a difference". The card showed one anyway:
+
+- `share` and `unitsLeft` read `baseline?.units ?? 0`, so the card drew
+  "0% · 0/N".
+- `everGrew` was false, so the foot said "nothing landed yet".
+- `unitsLeft` counted every unit as still to go, and `etaSecs` extrapolated
+  over that count.
+
+None of these was measured. The headline comment on the card says the
+opposite: "EVERY NUMBER HERE IS MEASURED, AND THE ONES THAT ARE NOT ARE
+ABSENT".
+
+**Decided.** Without a baseline, `share` and `unitsLeft` are null, and so is
+`etaSecs`. The card shows "progress not measured" with one sentence saying
+why, in place of the fraction, the meter and the foot. A run pressed from this
+page is unchanged: it still refuses to start without a before-reading. OBSV-25.
+
+### D-3224 — A refused Stop on /ingest names its reason — 2026-10-09
+
+**What was observed.** `/ingest` `stopWatching` posts `/pull/run/stop`. On a
+non-2xx it read the body as JSON once, kept the one shape that means the stop
+was taken but not saved (`stopping:true, stop_persisted:false`, OBSV-09,
+D-3208), and otherwise threw "the server answered HTTP N". Every POST on this
+server passes origin admission (`same_origin_writes_only`) and the form-field
+check (`one_value_per_form_field`) before its handler. Both refuse in
+text/plain with a sentence that ends "Nothing was read or run." The page read
+that sentence, failed to parse it as JSON, and dropped it. A JSON refusal
+carrying `error` was dropped the same way.
+
+**Decided.** The body is read as text once and parsed as JSON from that text.
+The unpersisted-stop branch is unchanged. Every other non-2xx throws
+`refusalSentence('/pull/run/stop', status, reasonOfText(text))`, which names
+the route, the status and the server's own reason, or says that it named none.
+The stop stays undelivered: `stopAsked` and `aborted` are reset and no
+`stopWarning` is set. OBSV-26.

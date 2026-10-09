@@ -2,9 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {parse} from 'svelte/compiler';
+import {refusalFrom} from '../src/lib/refusal.js';
 import {validateIndexStopMetadata,indexStopLaunchPlan,indexStopLaunchObservation,indexStopServerMonth,indexStopSplitProposal,indexStopContextMonth,indexStopRewardRiskCaption,createIndexStopLaunch,indexStopQualificationHref} from '../src/lib/index-stop-launch.js';
 import {hex,RUNGS,ATTEMPT,metadata,researchPolicy,input,plan,running,saved,deferred,tick} from './index-stop-fixture.js';
-const reply=(/** @type {any} */ body,status=200)=>({ok:status>=200&&status<300,status,json:async()=>body});
+const reply=(/** @type {any} */ body,status=200)=>({ok:status>=200&&status<300,status,json:async()=>body,text:async()=>JSON.stringify(body)});
 
 test('native metadata fixes both directions and fills, single stop, daily rule and configuration-only readiness',()=>{
  const value=validateIndexStopMetadata(metadata());assert.equal(value.ready,true);assert.match(value.readiness_scope,/configuration-only/);assert.deepEqual(value.execution_rules.readings,['pessimistic','optimistic']);assert.deepEqual(value.execution_rules.directions,['long','short']);assert.equal(value.policy.values.length,39);assert.equal(value.work_model.estimated_seconds,null);
@@ -188,4 +189,58 @@ test('acknowledged results automatically open one exact timeframe comparison and
  assert.strictEqual(select(run,''),latest.qualifications[0]);assert.strictEqual(select(run,'5min'),latest.qualifications[1]);assert.strictEqual(select(run,'1day'),latest.qualifications[0]);assert.equal(select({},''),null);
  assert.equal((source.match(/<IndexStopQualification /g)??[]).length,1);assert.match(source,/<IndexStopQualification initialIdentity=\{selectedComparison.identity\} initialCompletion=\{selectedComparison.completion\} autoLoad=\{true\}/);
  const nav=/<nav class="controls" aria-label="Choose saved results timeframe">([\s\S]*?)<\/nav>/.exec(source);assert.ok(nav);assert.match(nav[1],/onclick=\{\(\)=>\{savedTimeframe=row.timeframe;\}\}/);assert.doesNotMatch(nav[1],/controller|start|POST|fetch|request/);
+});
+
+// W6 (OBSV-17, D-3216): the exact-attempt read's 503 names its cause in `running.why`.
+test('an unreadable exact attempt names the server reason and its launch is not resent (W6)',async()=>{
+ const why='persistent invocation read unavailable: Saturated',p=plan(),states=/** @type {any[]} */([]),calls=/** @type {any[]} */([]);
+ const ctl=createIndexStopLaunch({changed:s=>states.push(s),listen:()=>()=>{},interval:100000,request:async(url,options)=>{calls.push({url,options});return options?.method==='POST'?reply({accepted:true,attempt:ATTEMPT,refusal:null},202):/** @type {any} */(Response.json({running:{where:'browser',status:'unknown',requested_attempt:ATTEMPT,in_flight:false,why,refusal:null,report:null}},{status:503}));}});
+ try{
+  await ctl.start(p);await tick();
+  assert.equal(states.at(-1).phase,'unknown');
+  assert.equal(states.at(-1).why,`This exact attempt could not be read: /backtest/run.json answered HTTP 503: ${why}; its launch will not be resent.`);
+  assert.equal(calls.filter(c=>c.options?.method==='POST').length,1);
+ }finally{ctl.dispose();}
+});
+
+// W7 (OBSV-18, D-3217): `/engine/index-stop-launch.json` refuses with
+// `{"ready":false,"refusal":…}` (`crates/api/src/indexstoplaunch.rs`
+// `metadata`); the panel printed the status and a guess about an old app.
+test('a refused single-stop configuration read names the server refusal; no sweep is submitted (W7)',async()=>{
+ const source=readFileSync(new URL('../src/lib/IndexStopLaunch.svelte',import.meta.url),'utf8'),tree=parse(source);
+ const node=tree.instance?.content.body.find((/** @type {any} */ row)=>row.type==='FunctionDeclaration'&&row.id?.name==='readConfiguration');assert.ok(node);
+ const fields=tree.instance?.content.body.flatMap((/** @type {any} */ row)=>row.declarations??[]).find((/** @type {any} */ row)=>row.id?.name==='fields');assert.ok(fields);
+ const mount=new Function('ask','refusalFrom',`
+  let config={phase:'idle',body:null,why:''},serverMonth=null,settings={maxLossPoints:'',batchPrograms:'',nodeAllowance:'',batchAllowance:''},generation=0,configAbort=null;
+  const fields=${source.slice(fields.init.start,fields.init.end)},onTimeframes=()=>{},validateIndexStopMetadata=()=>{throw new Error('a refusal is not metadata');},indexStopServerMonth=()=>null;
+  ${source.slice(node.start,node.end)}
+  return {readConfiguration,config:()=>config};
+ `);
+ const refusal='bounded configuration read unavailable: Saturated';
+ const app=mount(async()=>Response.json({schema_version:1,ready:false,refusal},{status:503}),refusalFrom);
+ await app.readConfiguration();
+ assert.equal(app.config().phase,'failed');
+ assert.equal(app.config().why,`/engine/index-stop-launch.json answered HTTP 503: ${refusal}. No sweep was submitted.`);
+ const old=mount(async()=>new Response('',{status:404}),refusalFrom);
+ await old.readConfiguration();
+ assert.equal(old.config().why,'/engine/index-stop-launch.json answered HTTP 404 and named no reason. No sweep was submitted.');
+});
+
+// F5 (OBSV-24, D-3222): the unconfirmed launch message dropped the body.
+test('an unconfirmed single-stop launch answer names the server reason and is never resent (F5)',async()=>{
+ const audit={schema_version:1,refusal:'bounded request audit capacity is full; retry this exact request',code:'invocation_audit_unavailable',handler_completed:false,why:'The handler was not dispatched because its required audit start was unavailable.'};
+ for(const [answer,said] of /** @type {[()=>any,RegExp][]} */([
+  [()=>reply(audit,429),/\(\/engine\/command answered HTTP 429: bounded request audit capacity is full; retry this exact request The handler was not dispatched/],
+  [()=>new Response('REFUSED — the request headers are 70000 bytes. Nothing was read or run.\n',{status:431}),/\(\/engine\/command answered HTTP 431: REFUSED — the request headers are 70000 bytes\. Nothing was read or run\.\)/]
+ ])){
+  const p=plan(),states=/** @type {any[]} */([]),calls=/** @type {any[]} */([]);
+  const ctl=createIndexStopLaunch({changed:s=>states.push(s),listen:()=>()=>{},interval:100000,request:async(url,options)=>{calls.push({url,options});return answer();}});
+  try{
+   await ctl.start(p);
+   assert.equal(states.at(-1).phase,'unknown');
+   assert.match(states.at(-1).why,said);
+   assert.match(states.at(-1).why,/no duplicate request will be sent/);
+   assert.equal(calls.length,1);
+  }finally{ctl.dispose();}
+ }
 });

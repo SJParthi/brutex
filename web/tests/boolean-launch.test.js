@@ -759,3 +759,33 @@ test('native work sizing is additive, preserved exactly, and never converted to 
   assert.equal(validateBooleanLaunchMetadata(body).work_model.conjunction_program_lower_bound, String((1n << 384n) - 1n));
   const wrong = metadata(); wrong.work_model = { ...body.work_model, eta_seconds: 10 }; assert.throws(() => validateBooleanLaunchMetadata(wrong), /unmeasured total or ETA/);
 });
+
+// W6 (OBSV-17, D-3216): the exact-attempt read's 503 names its cause in `running.why`.
+test('an unreadable exact attempt names the server reason and is not resent (W6)', async () => {
+  const why = 'persistent invocation read unavailable: Saturated';
+  const plan = planFor();
+  const testRun = driver(url => url === '/engine/command' ? accepted() : response({ running: {
+    where: 'browser', status: 'unknown', requested_attempt: ATTEMPT, in_flight: false, why, refusal: null, report: null } }, 503));
+  await testRun.launch.start(plan);
+  assert.equal(testRun.latest().phase, 'unknown');
+  assert.equal(testRun.latest().why, `Exact attempt status is unavailable: /backtest/run.json answered HTTP 503: ${why}. The launch will not be resent.`);
+  assert.equal(testRun.calls.filter(call => call.body).length, 1);
+});
+
+// F5 (OBSV-24, D-3222): the unconfirmed launch message dropped the body.
+test('an unconfirmed Boolean launch answer names the server reason and is never resent (F5)', async () => {
+  const audit = { schema_version: 1, refusal: 'bounded request audit capacity is full; retry this exact request',
+    code: 'invocation_audit_unavailable', handler_completed: false,
+    why: 'The handler was not dispatched because its required audit start was unavailable.' };
+  const plan = planFor();
+  for (const [answer, said] of /** @type {[() => Response, RegExp][]} */ ([
+    [() => Response.json(audit, { status: 429 }), /\(\/engine\/command answered HTTP 429: bounded request audit capacity is full; retry this exact request The handler was not dispatched/],
+    [() => new Response('REFUSED — the request headers are 70000 bytes. Nothing was read or run.\n', { status: 431 }), /\(\/engine\/command answered HTTP 431: REFUSED — the request headers are 70000 bytes\. Nothing was read or run\.\)/]
+  ])) {
+    const testRun = driver(answer); await testRun.launch.start(plan);
+    assert.equal(testRun.latest().phase, 'unknown');
+    assert.match(testRun.latest().why, said);
+    assert.match(testRun.latest().why, /will not be resent/);
+    await testRun.launch.recheck(); assert.equal(testRun.calls.length, 1);
+  }
+});

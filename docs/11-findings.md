@@ -1128,3 +1128,41 @@ test recorded failing against the pre-fix code.
   narrowings the route offers); the pull, autopilot and resolve routes having
   no invocation-journal row (EXEMPT under D-0568, and autopilot pause/resume
   emit their own events).
+
+### Observability lens L1, round 3 web refusals (audit/fx-w) — dispositions — 2026-10-09
+
+Narrative only. No row is added to the table above. Each id is `F-` and the
+first six hex digits of the SHA-256 of the title as written here. W1 to W7 are
+the seven round-3 web survivors the refuter upheld; F1 to F7 are further
+instances of the same two shapes (a non-2xx whose server reason is dropped, an
+unknown rendered as zero) found by searching the rest of `web/src`. Each fix is
+`IN PROGRESS` on `audit/fx-w` until it merges to `main`, and each has a node
+test recorded failing against the pre-fix code.
+
+- **F-9BFA4E** `wrong` (W1) — The backtest page read an uncounted swept surface as 0 of N swept. `web/src/routes/backtest/+page.svelte` `loadSurface`, `coverNote`. IN PROGRESS. D-3211, OBSV-12.
+- **F-8B1759** `wrong` (W2) — A census-unreadable refusal was shown as a master message. `web/src/lib/catalogue-loader.js`, `web/src/lib/feed-summary.js`, `web/src/routes/ingest/+page.svelte` (`headerRefusal` in `web/src/lib/refusal.js`). IN PROGRESS. D-3212, OBSV-13.
+- **F-69930F** `gap` (W3) — A refused frontier page dropped the server's refusal. `web/src/lib/frontier-pages.js`. IN PROGRESS. D-3213, OBSV-14.
+- **F-B97AEA** `gap` (W4) — A refused live heap read dropped the server's refusal. `web/src/routes/backtest/+page.svelte` `fetchLiveTop`. IN PROGRESS. D-3214, OBSV-15.
+- **F-9A3F5E** `gap` (W5) — A refused saved-evidence read dropped the server's refusal. `web/src/lib/sweep-evidence.js`. IN PROGRESS. D-3215, OBSV-16.
+- **F-78AF26** `gap` (W6) — An unreadable run status dropped its running.why. `web/src/lib/refusal.js` `refusalOf`; `receipt-batch.js`, `boolean-launch.js`, `index-stop-launch.js`, backtest `pollSweep`. IN PROGRESS. D-3216, OBSV-17.
+- **F-F0E6D7** `gap` (W7) — A refused launch-configuration read dropped the server's refusal. `web/src/lib/BooleanLaunch.svelte`, `web/src/lib/IndexStopLaunch.svelte`. IN PROGRESS. D-3217, OBSV-18.
+- **F-ABD0CC** `gap` (F1) — The audit layer's own refusal envelope was read by no detail reader. `web/src/lib/refusal.js` `auditRefusal`, `web/src/lib/detail-refusal.js`, `web/src/lib/invocation-audit.js`. IN PROGRESS. D-3218, OBSV-19.
+- **F-A7BE22** `wrong` (F3) — An undated live heap and an unheld census generation were read as zero. `web/src/routes/backtest/+page.svelte` `liveFreshness`; `web/src/lib/audit-pages.js` `generationOf`, `generationStep`; `web/src/routes/audit/+page.svelte`. IN PROGRESS. D-3219, OBSV-20, OBSV-21.
+- **F-5FB2F6** `gap` (F2) — The backtest page's own readers dropped the server's reason on a refusal. `web/src/routes/backtest/+page.svelte` trades, top, ledger, vocabulary, series, benchmark and rung readers. IN PROGRESS. D-3220, OBSV-22.
+- **F-3B9ADD** `gap` (F4) — Thirteen readers dropped a plain-text or JSON refusal. feed startup, runtime inspection, database pages, terminal, layout probe, autopilot, markets, db, mapping and ingest readers. IN PROGRESS. D-3221, OBSV-23.
+- **F-6A39ED** `gap` (F5) — An unconfirmed command answer dropped the server's reason. `web/src/lib/refusal.js` `commandReply`; sweep admission, receipt batch, boolean and index-stop launch, ingest `/pull/run`. IN PROGRESS. D-3222, OBSV-24.
+- **F-F5B9CC** `wrong` (F6) — A resumed pull run with no before-reading drew 0 percent progress. `web/src/routes/ingest/+page.svelte` `share`, `unitsLeft`, `etaSecs`. IN PROGRESS. D-3223, OBSV-25.
+- **F-131178** `gap` (F7) — A refused Stop on the ingest page dropped the server's reason. `web/src/routes/ingest/+page.svelte` `stopWatching`. IN PROGRESS. D-3224, OBSV-26.
+- NEEDS OWNER, not fixed: the `/ingest` `POST /pull/run` catch says nothing
+  was asked of any vendor and nothing was written even when the request timed
+  out or the answer was lost and the run may have started; the audit
+  envelope's `handler_completed:false` is kept as an unknown outcome (never
+  resent) rather than read as a refusal. Both are policy, not a dropped
+  reason.
+- REFUTED, with reasons: `detailRefusal` does not echo an audit envelope that
+  fails validation (pinned by `web/tests/invocation-audit.test.js`, *malformed
+  or oversized refusal details remain failures without echoing arbitrary
+  response bodies*, deliberate); the gaps and audit readers already carry the
+  server text; `?? 0` on count maps and chart scale maxima is arithmetic over
+  held rows, not an unknown shown as zero; markets skew and autopilot
+  `census.at` are guarded before render.

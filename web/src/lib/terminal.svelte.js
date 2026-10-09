@@ -54,6 +54,7 @@
 import { ask } from '$lib/ask.js';
 import { pooled, IN_FLIGHT } from '$lib/pooled.js';
 import { parseKey } from '$lib/instrument.js';
+import { refusalFrom } from '$lib/refusal.js';
 /* THE EXCHANGE'S DAY, NOT THE BROWSER'S. A bar timestamped 15:29 IST is
    09:59 UTC, and a machine west of Greenwich would file the whole afternoon
    session under the previous date. `$lib/dates.js` owns the `Asia/Kolkata`
@@ -327,6 +328,9 @@ export function quote(feed, key, timeframe, month) {
     });
     try {
       const res = await ask(`/bars/window.json?${q}`);
+      // THE STATUS BEFORE THE BODY (F4, D-3221). A plain-text refusal parsed
+      // to null here and was reported as "no reason recorded for it".
+      if (!res.ok) return nothing(key, await refusalFrom('/bars/window.json', res));
       const body = await res.json().catch(() => null);
       if (!body || !Array.isArray(body.bars)) {
         return nothing(
@@ -459,6 +463,8 @@ export function monthBars(feed, key, timeframe, month) {
     });
     try {
       const res = await ask(`/bars/window.json?${q}`);
+      // The status before the body, as `quote` above (F4, D-3221).
+      if (!res.ok) return { bars: [], why: await refusalFrom('/bars/window.json', res), faults: null, total: 0 };
       const body = await res.json().catch(() => null);
       if (!body || !Array.isArray(body.bars)) {
         return {

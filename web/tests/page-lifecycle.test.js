@@ -4,7 +4,8 @@ import { readFileSync } from 'node:fs';
 import { parse } from 'svelte/compiler';
 import { createPageRequests, watchVisible } from '../src/lib/page-requests.js';
 import { pooled } from '../src/lib/pooled.js';
-import { mergePages, nextOrdinal, pageFor } from '../src/lib/audit-pages.js';
+import { generationOf, mergePages, nextOrdinal, pageFor } from '../src/lib/audit-pages.js';
+import * as refusal from '../src/lib/refusal.js';
 
 /** @param {string} route @param {string[]} names */
 function functions(route, names) {
@@ -71,7 +72,7 @@ function auditPage(request) {
   assert.ok(rows, 'audit: the actual PAGE_ROWS constant is required');
   assert.match(source, /const merged = \$derived\(mergePages\(payload\?\.runs \?\? \[\], older\)\);/);
   const timer = clock();
-  const create = new Function('ask', 'createPageRequests', 'timer', 'mergePages', 'nextOrdinal', 'pageFor', `
+  const create = new Function('ask', 'createPageRequests', 'timer', 'mergePages', 'nextOrdinal', 'pageFor', 'generationOf', `
     const feeds={active:'A'}, document={hidden:false}, load={state:'idle',error:null};
     const auditRequests=createPageRequests(timer), olderRequests=createPageRequests(timer);
     let payload=null, samples=[], rtt=[], base=null, older=[], pagesHeld=1, loadingOlder=false, live=true;
@@ -85,7 +86,7 @@ function auditPage(request) {
       hide:()=>{document.hidden=true;auditRequests.cancel();olderRequests.cancel();}};
     }
   `);
-  return create(request, createPageRequests, timer, mergePages, nextOrdinal, pageFor);
+  return create(request, createPageRequests, timer, mergePages, nextOrdinal, pageFor, generationOf);
 }
 /** @param {string} label */
 const auditBody = (label) => ({ label, at: 10, store: { months: [], bars: 1, instrument_months: 1, generation: 1 }, runs: [{ ordinal: 500, label }], journal: { pages: 3, records: 501 } });
@@ -253,7 +254,7 @@ function ingestPage(request) {
   const { source, code } = functions('ingest', ['stopWatchingRun', 'resumeRunCurrent', 'resumeRun', 'pollRunCurrent', 'watchRun']);
   assert.match(source, /viewAlive = false;\s*resumeRequests.dispose\(\);\s*stopWatchingRun\(\)/);
   const timer = clock();
-  const create = new Function('request', 'createPageRequests', 'realWatchVisible', 'timer', `
+  const create = new Function('request', 'createPageRequests', 'realWatchVisible', 'timer', ...Object.keys(refusal), `
     const resumeRequests=createPageRequests(timer), POLL_MS=2000;
     let viewAlive=true,stopRunWatch=null,runWatchPromise=null,finishRunWatch=null,wake=()=>{};
     const document={visibilityState:'visible',addEventListener:(_,fn)=>{wake=fn;},removeEventListener:()=>{wake=()=>{};}};
@@ -266,7 +267,7 @@ function ingestPage(request) {
       hide:()=>{document.visibilityState='hidden';wake();}, show:()=>{document.visibilityState='visible';wake();},
       dispose:()=>{viewAlive=false;resumeRequests.dispose();stopWatchingRun();}};
   `);
-  return create(request, createPageRequests, watchVisible, timer);
+  return create(request, createPageRequests, watchVisible, timer, ...Object.values(refusal));
 }
 const runningIngest = () => ({ running: true, feeds: [{ legs: 2, legsDone: 1, doing: 'fixture progress' }] });
 

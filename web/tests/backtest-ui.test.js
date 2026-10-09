@@ -313,7 +313,9 @@ test('malformed ledger envelopes and unsafe derived arithmetic fail closed', () 
   const fetch = between(page, 'async function fetchLedger()', '$effect(() =>');
   assert.match(fetch, /validateLedgerPayload\(body\)/);
   assert.match(fetch, /if \(!checked\.ok\)/);
-  assert.match(fetch, /why: `\$\{checked\.why\} Nothing from it was ranked or opened\.`/);
+  // F2 (D-3220): the schema complaint is the 200 branch; a refused 503 that is
+  // not ledger-shaped names its status and reason instead.
+  assert.match(fetch, /response\.ok\s*\? `\$\{checked\.why\} Nothing from it was ranked or opened\.`/);
   assert.match(page, /exactIntegerDelta\(bench\.close, bench\.open\)/);
   assert.match(page, /exactIntegerDelta\(openRun\.pessimistic, buyHold\.gain\)/);
   assert.match(page, /roundedScaledRatio\(openRun\.pessimistic, bench\.open, 10_000\)/);
