@@ -73,3 +73,20 @@ Every fixer committed and stopped; branches pushed as `wip/audit-fx/<name>`; not
 After 09:05: at most 2 agents. Finish WIP per notes, merge all into audit/integ, cli switch to cost model v3, full
 validation, mutation survivors (api so far: answer_memo Debug, candidatejson summary_for), push, hand to PR 74 thread,
 then the Artifact.
+
+## RESUMED 2026-10-09 09:30 UTC at full speed (Parthi lifted the 2-agent cap; weekly guard 93%/98% still applies)
+- `audit/integ` = a7a27dc3 (pushed as `wip/audit-fx/integ`): every fixer lane merged (fx-e, fx-w, fx-b2, fx-a, fx-b1,
+  fx-c, fx-d, fx-r, l4), web/build rebuilt (W1 passes at 3617160f), lake bench clippy fixed. `wip/audit-batch3-integ`
+  is still de932e5b; it moves only when the combined branch is validated.
+- Running from a7a27dc3 (each in its own worktree and target dir):
+  - int-u (`audit/int-u`, wt-u): api + cli compile/clippy breaks from the merge (~31 api clippy errors), lane WIP there.
+  - int-l (`audit/int-l`, wt-l): lower crates (runner test, engine/vocab/pull/store/lake/telemetry WIP).
+  - def-c (`audit/def-c`, wt-dc): cli replay cost items, D-4520..D-4534.
+  - def-p (`audit/def-p`, wt-dp): pull/store cost items, D-4550..D-4564.
+  - Artifact agent: fills https://claude.ai/artifact/7cvC2yoWTHviHri8zz4TPx (Dashboard type) via ArtifactData from
+    out/*.tsv + after.tsv; leaves a refresh recipe.
+- Reserved but not started: D-4535..D-4549 (sobs-16 searchable log, sobs-18 research ledger read endpoints).
+- Next: merge int-u, int-l, def-c, def-p into audit/integ (merge commits), rebuild web/build if web/src changed, full
+  validation, mutation pre-run on `git diff fbdabaec <head> -- crates`, kill survivors, push wip/audit-batch3-integ,
+  send the sha to the PR 74 CI thread and to the Merge leftover workstreams thread (it merges this branch into its own
+  and hands PR 74 one sha).
