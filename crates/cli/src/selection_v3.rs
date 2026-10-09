@@ -1120,7 +1120,7 @@ impl SelectionLedgerV3 {
         let parent = path
             .parent()
             .ok_or_else(|| "selection V3 ledger has no parent directory".to_owned())?;
-        std::fs::create_dir_all(parent).map_err(|why| {
+        crate::fixed_tail::create_dir_all_durable(parent).map_err(|why| {
             format!(
                 "selection V3 ledger directory {} could not be created: {why}",
                 parent.display()
@@ -1167,6 +1167,17 @@ impl SelectionLedgerV3 {
                 .map_err(|why| format!("{} could not be shared-locked: {why}", path.display()))?;
         }
         let opened = (|| {
+            if writable {
+                // rnew-1, D-4460: the writer cuts what a killed process left,
+                // a torn header or a sub-record tail, loudly and under its lock.
+                crate::fixed_tail::heal_header_and_tail(
+                    &file,
+                    &path,
+                    &header_bytes()?,
+                    SELECTION_V3_STRIDE,
+                    &crate::fixed_tail::magic_and_version(MAGIC_V3, VERSION_V3),
+                )?;
+            }
             let len = file
                 .metadata()
                 .map_err(|why| format!("{} length could not be read: {why}", path.display()))?
@@ -1175,6 +1186,10 @@ impl SelectionLedgerV3 {
                 if !writable {
                     return Err(format!("{} is empty and read-only", path.display()));
                 }
+                // The new name is made durable BEFORE the header is written
+                // (sobs-12, D-4461): a kill between the two leaves an empty
+                // file, which the next writer treats as new and barriers again.
+                crate::fixed_tail::sync_parent(&path)?;
                 write_header(&mut file)?;
                 file.sync_all().map_err(|why| {
                     format!("{} V3 header could not be synced: {why}", path.display())
@@ -1474,6 +1489,15 @@ impl SelectionIndexesV3 {
 }
 
 fn write_header(file: &mut File) -> Result<(), SelectionV3Refusal> {
+    let header = header_bytes()?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|why| format!("selection V3 header seek failed: {why}"))?;
+    file.write_all(&header)
+        .map_err(|why| format!("selection V3 header write failed: {why}"))
+}
+
+/// The one header a V3 ledger begins with.
+fn header_bytes() -> Result<[u8; HEADER_BYTES], SelectionV3Refusal> {
     let mut header = [0_u8; HEADER_BYTES];
     let mut encoder = Encoder::new(&mut header);
     encoder.bytes(&MAGIC_V3)?;
@@ -1484,10 +1508,7 @@ fn write_header(file: &mut File) -> Result<(), SelectionV3Refusal> {
     encoder.u64(SCORE_SCALE)?;
     encoder.zeros(8)?;
     encoder.finish()?;
-    file.seek(SeekFrom::Start(0))
-        .map_err(|why| format!("selection V3 header seek failed: {why}"))?;
-    file.write_all(&header)
-        .map_err(|why| format!("selection V3 header write failed: {why}"))
+    Ok(header)
 }
 
 fn scan_file(
@@ -2445,6 +2466,63 @@ mod tests {
             &[first.selection_id(), second.selection_id()]
         );
         drop(reopened);
+        cleanup(&root);
+    }
+
+    /// rnew-1, D-4460: a process killed mid-append leaves a sub-record tail,
+    /// and one killed while writing a new ledger's header a strict prefix of
+    /// it. Readers still refuse both; the next writer cuts either, says so
+    /// once, and keeps every committed receipt.
+    #[test]
+    fn a_kill_torn_tail_or_header_is_cut_by_the_writer_and_history_kept() {
+        let root = root("kill-torn");
+        let first = receipt(14, 60, 2);
+        let mut ledger = SelectionLedgerV3::open(&root, 4).expect("create kill-torn fixture");
+        ledger.append(&first).expect("append first");
+        drop(ledger);
+        let path = SelectionLedgerV3::path(&root);
+        crate::fixed_tail::attack::torn_tails(
+            &[(path.as_path(), SELECTION_V3_STRIDE)],
+            &mut || {
+                Ok(format!(
+                    "{:?}",
+                    SelectionLedgerV3::open_read(&root, 4)?.selection_ids()
+                ))
+            },
+            &mut || SelectionLedgerV3::open(&root, 4).map(drop),
+        );
+        let header = super::header_bytes().expect("V3 header");
+        for torn in [1, HEADER_BYTES / 2, HEADER_BYTES - 1] {
+            let fresh = root.join(format!("torn-header-{torn}"));
+            std::fs::create_dir_all(SelectionLedgerV3::path(&fresh).parent().unwrap())
+                .expect("torn-header results");
+            std::fs::write(SelectionLedgerV3::path(&fresh), &header[..torn]).expect("torn header");
+            assert!(SelectionLedgerV3::open_read(&fresh, 4).is_err());
+            drop(crate::noted::take());
+            drop(SelectionLedgerV3::open(&fresh, 4).expect("the writer heals its header"));
+            assert_eq!(crate::noted::count("torn ledger header truncated"), 1);
+            assert_eq!(
+                std::fs::read(SelectionLedgerV3::path(&fresh)).expect("V3 bytes"),
+                header.to_vec()
+            );
+        }
+        // sobs-12, D-4461: a new ledger's name is made durable BEFORE its
+        // header is written, and a failed directory barrier is refused by name.
+        let unsynced = root.join("unsynced");
+        let path = SelectionLedgerV3::path(&unsynced);
+        let armed = crate::fixed_tail::fault::Armed::arm(
+            &path.parent().unwrap().display().to_string(),
+            crate::fixed_tail::fault::Kind::DirectorySync,
+        );
+        let refusal = SelectionLedgerV3::open(&unsynced, 4).expect_err("the barrier refuses");
+        assert!(
+            refusal.contains("injected directory sync fault"),
+            "{refusal}"
+        );
+        drop(armed);
+        assert_eq!(std::fs::metadata(&path).expect("created").len(), 0);
+        drop(SelectionLedgerV3::open(&unsynced, 4).expect("the writer retries"));
+        assert_eq!(std::fs::read(&path).expect("V3 bytes"), header.to_vec());
         cleanup(&root);
     }
 

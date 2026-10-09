@@ -1754,11 +1754,9 @@ jobs:
           #     Folded with D-1450.
           declared='api/src/calendar_of.rs:println!:2
           api/src/constituents.rs:println!:2
-          api/src/main.rs:eprintln!:2
           core/src/universe.rs:println!:2
           core/src/vendor.rs:println!:1
           pull/src/pricing.rs:println!:1
-          cli/src/lib.rs:eprintln!:3
           greeks/src/bsm.rs:println!:4
           greeks/src/normal.rs:println!:3
           greeks/src/solver.rs:println!:7'
@@ -1786,7 +1784,6 @@ jobs:
           cli/src/boolean_candidate_tests.rs:eprintln!:2
           cli/src/index_stop_qualification_tests.rs:eprintln!:2
           cli/src/index_stop_tests.rs:println!:1
-          cli/src/operation_audit.rs:eprintln!:2
           pull/src/cash_auction.rs:eprintln!:3
           pull/src/cash_session_cache.rs:eprintln!:2"
           # TWO MORE, one kind (D-1849): the result lines of two IGNORED
@@ -1821,7 +1818,14 @@ jobs:
           # telemetry/src/say.rs names `stderr()` once: `stderr_line`, the
           # writer that cannot panic, through which pull's decode notices and
           # the sink's own last-resort notice go (r53-1, D-4413).
-          declared_handles='api/src/server.rs:handle:3
+          # api/src/main.rs and cli/src/lib.rs name `stderr()` once each (r53-1,
+          # D-4463): their seven `eprintln!` -- api main 2, cli lib 3, cli
+          # operation_audit 2 -- PANICKED on a closed stderr and now go through
+          # one `tell` per crate, which writes and drops a failed line. The
+          # diagnostics among them still emit their event beside it.
+          declared_handles='api/src/main.rs:handle:1
+          api/src/server.rs:handle:3
+          cli/src/lib.rs:handle:1
           cli/src/main.rs:handle:2
           telemetry/src/say.rs:handle:1'
           # Both sides are compared as sorted lists of non-empty words, so an

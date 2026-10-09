@@ -219,11 +219,16 @@ pub(crate) struct StoredOosFoldV1<'c> {
 }
 
 impl StoredOosFoldV1<'_> {
-    /// Mints one witness over this fold. Per witness: the cohort integrity
-    /// check twice (each re-derives the cohort identity, hashing the signal,
-    /// minute-context, daily and execution streams, Θ(S + Q + D + E)), the
-    /// evaluator check, and the Runner replay over the OOS execution bars.
-    /// The fold's column evaluation and alignment are not repeated.
+    /// Mints one witness over this fold. Per witness: the strict source guards
+    /// and the root re-checked before and after (the two things that CAN change
+    /// while a fold is held), the evaluator check, and the Runner replay over
+    /// the OOS execution bars. The fold's column evaluation and alignment are
+    /// not repeated, and neither is the cohort identity: it was derived when
+    /// the fold was built, and the fold borrows the cohort immutably, so its
+    /// bytes cannot change while any witness of it is minted. Until D-4468
+    /// (W2-cli16-1) each witness re-derived it twice, Θ(S + Q + D + E) of
+    /// hashing per witness; counted by
+    /// `strict_v6_one_oos_fold_serves_every_witness_of_its_cohort`.
     ///
     /// # Errors
     ///
@@ -243,7 +248,7 @@ impl StoredOosFoldV1<'_> {
         mut observer: Option<&mut StoredOosObserverV1<'_>>,
     ) -> Result<StoredPostTrainingOosWitnessV1, StoredPostTrainingOosRefusal> {
         let cohort = self.cohort;
-        cohort.require_integrity()?;
+        cohort.require_sources_current("before minting stored post-training OOS witness")?;
         if self.specification.as_bytes() != &disposition.evaluation_spec_fingerprint() {
             return Err("stored OOS disposition evaluator differs before fold".to_owned());
         }
@@ -265,10 +270,7 @@ impl StoredOosFoldV1<'_> {
         witness
             .require_integrity()
             .map_err(|why| format!("stored OOS Runner witness integrity refused: {why}"))?;
-        cohort
-            .root
-            .require_same("after minting stored post-training OOS witness")?;
-        cohort.require_integrity()?;
+        cohort.require_sources_current("after minting stored post-training OOS witness")?;
         let run_id = witness.run_id().bytes();
         let selected_exit_digest = witness.selected_exit_digest();
         let universe_digest = witness.universe_digest();
@@ -369,6 +371,15 @@ impl StoredPostTrainingOosCohortV1 {
     #[must_use]
     pub(crate) const fn audit(&self) -> StoredPostTrainingOosAuditV1 {
         self.audit
+    }
+
+    /// What a fold's witness re-checks (W2-cli16-1, D-4468): the strict
+    /// source guards and the admitted root, the two things that can change
+    /// while a fold is held. The cohort's own bytes cannot: a fold borrows the
+    /// cohort immutably, and [`Self::fold_inner`] proved its identity once.
+    fn require_sources_current(&self, stage: &str) -> Result<(), StoredPostTrainingOosRefusal> {
+        self.stored.require_current()?;
+        self.root.require_same(stage)
     }
 
     fn require_integrity(&self) -> Result<(), StoredPostTrainingOosRefusal> {
@@ -533,6 +544,8 @@ impl StoredPostTrainingOosCohortV1 {
     }
 
     fn derive_cohort_id(&self) -> Result<[u8; 32], StoredPostTrainingOosRefusal> {
+        #[cfg(test)]
+        COHORT_ID_DERIVATIONS.with(|count| count.set(count.get().saturating_add(1)));
         let execution = self.execution()?;
         let execution_calendar = crate::stored::calendar_receipt_v2_for_bars(
             execution,
@@ -635,4 +648,11 @@ fn hash_parts(domain: &[u8], parts: &[&[u8]]) -> [u8; 32] {
         hasher.update(part);
     }
     hasher.finalize()
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// Test-only: cohort identity derivations on this thread (W2-cli16-1,
+    /// D-4468), so a test can count them per fold and per witness.
+    pub(crate) static COHORT_ID_DERIVATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }

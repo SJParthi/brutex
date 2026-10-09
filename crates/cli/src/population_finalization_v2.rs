@@ -1276,6 +1276,17 @@ impl PopulationFinalizationV2Ledger {
             require_regular_file(&data_file, &data_path)?;
             if writable {
                 sync_directory_entries(&root_file, &root_path)?;
+                // rnew-1, D-4460: the writer cuts a kill-torn tail under its
+                // exclusive lock. A block is acknowledged only by its synced
+                // Completion, so bytes past the last whole record were never
+                // acknowledged; a whole record is never cut.
+                crate::fixed_tail::heal_torn_tail(
+                    &data_file,
+                    &data_path,
+                    0,
+                    POPULATION_FINALIZATION_V2_RECORD_BYTES as u64,
+                    &[],
+                )?;
             }
             let root_generation = directory_generation(&root_file, &root_path)?;
             let lock_generation = file_generation(&held_lock, &lock_path, 0)?;
@@ -3785,6 +3796,32 @@ mod tests {
         assert_eq!(
             std::fs::read(root.path().join(LEDGER_FILE)).expect("reread orphan bytes"),
             before
+        );
+    }
+
+    /// rnew-1, D-4460: a process killed mid-append leaves a sub-record tail.
+    /// A reader still refuses it; the next writer cuts it, says so once, and
+    /// keeps the committed block.
+    #[test]
+    fn a_kill_torn_tail_is_cut_by_the_writer_and_history_kept() {
+        let limits = bounds(64);
+        let root = TestPath::directory("kill-torn");
+        let value = prepared();
+        persist_population_finalization_v2(root.path(), limits, &value).expect("seed ledger");
+        let ledger = root.path().join(LEDGER_FILE);
+        crate::fixed_tail::attack::torn_tails(
+            &[(
+                ledger.as_path(),
+                POPULATION_FINALIZATION_V2_RECORD_BYTES as u64,
+            )],
+            &mut || {
+                let opened = PopulationFinalizationV2Ledger::open_read(root.path(), limits)?;
+                Ok(format!(
+                    "{:?}",
+                    opened.reopen_structural_receipt(&value.finalization_id())?
+                ))
+            },
+            &mut || PopulationFinalizationV2Ledger::open_write(root.path(), limits).map(drop),
         );
     }
 

@@ -442,11 +442,35 @@ impl Attempt {
     }
 
     /// Explicitly end the operation after its result publication has settled.
+    ///
+    /// A TERMINAL THAT CANNOT BE CONFIRMED IS LOGGED HERE, once, for every
+    /// caller (sobs-4, D-4462). It was logged only from `Drop`, which never
+    /// sees this failure: the attempt is disarmed whether or not the terminal
+    /// landed, so an explicit `finish` that failed reached the log only if its
+    /// caller happened to log it, and the CLI's caller printed it to stdout.
     /// # Errors
     /// A missing durability barrier, prior audit failure or duplicate terminal.
     pub fn finish(&mut self, phase: Phase, status: u16) -> Result<(), String> {
+        let settled = self.settle(phase, status);
+        if let Err(why) = &settled {
+            crate::note(
+                &telemetry::Event::error("cli.audit", "terminal audit unconfirmed")
+                    .with("phase", phase.label())
+                    .with("why", telemetry::Value::Str(why.as_str())),
+            );
+        }
+        settled
+    }
+
+    /// [`Self::finish`]'s write, disarming the attempt once it was tried.
+    fn settle(&mut self, phase: Phase, status: u16) -> Result<(), String> {
         if !phase.terminal() {
             return Err(error("finish requires an explicit terminal phase"));
+        }
+        #[cfg(test)]
+        if tests::take_finish_fault() {
+            self.armed = false;
+            return Err(error("injected terminal audit fault"));
         }
         let result = self
             .state
@@ -474,12 +498,10 @@ impl Drop for Attempt {
             } else {
                 Phase::Cancelled
             };
+            // `finish` has logged the failure; this line is for whoever is
+            // watching, and it cannot panic on a closed stderr (r53-1).
             if let Err(why) = self.finish(phase, 0) {
-                let _noted = telemetry::emit(
-                    &telemetry::Event::error("cli.audit", "terminal audit unconfirmed")
-                        .with("why", telemetry::Value::Str(&why)),
-                );
-                eprintln!("{why}; terminal audit is unconfirmed");
+                crate::tell(format_args!("{why}; terminal audit is unconfirmed"));
             }
         }
     }
@@ -522,7 +544,10 @@ pub fn completed_boundary() {
                     &telemetry::Event::error("cli.audit", "boundary audit unconfirmed")
                         .with("why", telemetry::Value::Str(&why)),
                 );
-                eprintln!("{why}; this invocation cannot acknowledge a successful terminal audit");
+                // Cannot panic on a closed stderr (r53-1, D-4463).
+                crate::tell(format_args!(
+                    "{why}; this invocation cannot acknowledge a successful terminal audit"
+                ));
             }
         }
     });
@@ -698,4 +723,4 @@ pub fn page(root: &Path, before: Option<u64>, limit: usize) -> Result<Vec<Record
 
 #[cfg(test)]
 #[path = "operation_audit_tests.rs"]
-mod tests;
+pub(crate) mod tests;

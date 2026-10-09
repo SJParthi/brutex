@@ -1961,6 +1961,26 @@ impl PopulationAdmissionV2Ledger {
             if root_identity_after != root_identity {
                 return Err("Admission V2 root changed while child files opened".to_owned());
             }
+            if writable {
+                // rnew-1, D-4460: the writer cuts a kill-torn tail under its
+                // exclusive lock (as D-1910's ledgers do). Receipt-last, so the
+                // bytes past the last whole record were never acknowledged; a
+                // whole record is never cut. Readers still refuse the tail.
+                for (file, path, stride) in [
+                    (
+                        &decision_file,
+                        &decision_path,
+                        POPULATION_ADMISSION_V2_DECISION_BYTES,
+                    ),
+                    (
+                        &completion_file,
+                        &completion_path,
+                        POPULATION_ADMISSION_V2_COMPLETION_BYTES,
+                    ),
+                ] {
+                    crate::fixed_tail::heal_torn_tail(file, path, 0, stride as u64, &[])?;
+                }
+            }
             let lock_generation = file_generation(&lock_file, &lock_path, bounds.completion_bytes)?;
             let decision_generation =
                 file_generation(&decision_file, &decision_path, bounds.decision_bytes)?;
@@ -3569,6 +3589,36 @@ mod tests {
         assert_refuses(
             PopulationAdmissionV2Ledger::open_read(torn.path(), bounds()),
             "torn",
+        );
+    }
+
+    /// rnew-1, D-4460: a process killed while writing a decision or the
+    /// Completion leaves a sub-record tail. A reader still refuses it; the
+    /// next writer cuts it, says so once, and keeps the committed block.
+    #[test]
+    fn a_kill_torn_tail_in_either_file_is_cut_by_the_writer_and_history_kept() {
+        let root = TestRoot::new("kill-torn");
+        let value = prepared();
+        persist_population_admission_v2(root.path(), bounds(), &value).expect("persist fixture");
+        let block = value.source.block_id;
+        let decisions = root.path().join(DECISION_FILE);
+        let completions = root.path().join(COMPLETION_FILE);
+        crate::fixed_tail::attack::torn_tails(
+            &[
+                (
+                    decisions.as_path(),
+                    POPULATION_ADMISSION_V2_DECISION_BYTES as u64,
+                ),
+                (
+                    completions.as_path(),
+                    POPULATION_ADMISSION_V2_COMPLETION_BYTES as u64,
+                ),
+            ],
+            &mut || {
+                let ledger = PopulationAdmissionV2Ledger::open_read(root.path(), bounds())?;
+                Ok(format!("{:?}", ledger.reopen_structural_receipt(&block)?))
+            },
+            &mut || PopulationAdmissionV2Ledger::open_write(root.path(), bounds()).map(drop),
         );
     }
 

@@ -229,6 +229,8 @@ pub mod minute_gaps;
 /// Durable outer invocation lifecycle, separate from computation evidence.
 pub mod operation_audit;
 mod ordered;
+/// The one event log record a crash leaves, for both binaries (sobs-1, D-4464).
+pub mod panic_log;
 pub mod pool;
 pub mod pool_oos;
 /// Complete, fixed-stride candidate populations and their receipt-last commit.
@@ -2315,7 +2317,28 @@ pub fn run_durable(args: &[String], out: &mut String) -> u8 {
     if !is_sweep_command(command) {
         return run(args, out);
     }
-    let started = store_root().and_then(|root| {
+    run_admitted(store_root(), args, out, telemetry::global())
+}
+
+/// [`run_durable`]'s sweep arm, with the store root and the sink passed in so
+/// each of its refusals is reachable from a test (sobs-4, D-4462).
+///
+/// BOTH REFUSALS THIS ADDS ARE LOGGED, NOT ONLY PRINTED. An admission that
+/// could not start wrote one stdout line and no event, and a terminal audit
+/// that could not be confirmed turned exit 0 into [`FAILED`] AFTER
+/// `command finished` had already been logged with `exit_code=0`, so `/logs`
+/// said success for a run the shell was told had failed. The admission refusal
+/// is now one `command refused` event, and `command finished` is emitted only
+/// once the audit's terminal has settled, so its `exit_code` is the code this
+/// returns and an unconfirmed audit is named in its `audit` field.
+fn run_admitted(
+    root: Result<std::path::PathBuf, stored::Refusal>,
+    args: &[String],
+    out: &mut String,
+    sink: Option<&telemetry::Sink>,
+) -> u8 {
+    let command = args.first().map_or("", String::as_str);
+    let started = root.and_then(|root| {
         let lease = execution_lease::Lease::acquire(&root).map_err(|why| why.to_string())?;
         let audit = operation_audit::begin(&root, operation_audit::Origin::Cli, command)?;
         Ok((lease, audit))
@@ -2327,23 +2350,42 @@ pub fn run_durable(args: &[String], out: &mut String) -> u8 {
                 out,
                 "refused: required execution admission could not start: {why}. No command was dispatched."
             );
+            command_event(
+                sink,
+                sink.and_then(telemetry::Sink::reserve_run_id),
+                &telemetry::Event::warn("cli.lifecycle", "command refused")
+                    .with("command", command)
+                    .with("sweep_command", true)
+                    .with("phase", "refused")
+                    .with("reason", why.as_str())
+                    .with("exit_code", u64::from(FAILED)),
+            );
             return FAILED;
         }
     };
-    let code = audit.enter(|| run(args, out));
+    let (attempt, code) = audit.enter(|| {
+        let attempt = command_started(command, sink);
+        (attempt, dispatch(args, out))
+    });
     let phase = if code == OK {
         operation_audit::Phase::Completed
     } else {
         operation_audit::Phase::Refused
     };
-    if let Err(why) = audit.finish(phase, 0) {
-        let _ = writeln!(
-            out,
-            "\nrefused: required terminal invocation audit is unconfirmed: {why}. Existing computation evidence was not removed."
-        );
-        return FAILED;
+    match audit.finish(phase, 0) {
+        Ok(()) => {
+            command_finished(command, sink, attempt, code, out, None);
+            code
+        }
+        Err(why) => {
+            let _ = writeln!(
+                out,
+                "\nrefused: required terminal invocation audit is unconfirmed: {why}. Existing computation evidence was not removed."
+            );
+            command_finished(command, sink, attempt, FAILED, out, Some(why.as_str()));
+            FAILED
+        }
     }
-    code
 }
 
 /// Lifecycle IDs affect these two events only. Legacy inner progress without
@@ -2351,6 +2393,14 @@ pub fn run_durable(args: &[String], out: &mut String) -> u8 {
 /// other's ambient sink run or change argument/provenance refusal semantics.
 fn run_with_sink(args: &[String], out: &mut String, sink: Option<&telemetry::Sink>) -> u8 {
     let command = args.first().map_or("", String::as_str);
+    let attempt = command_started(command, sink);
+    let code = dispatch(args, out);
+    command_finished(command, sink, attempt, code, out, None);
+    code
+}
+
+/// Emits `command started` and returns the run it was filed under.
+fn command_started(command: &str, sink: Option<&telemetry::Sink>) -> Option<u64> {
     let attempt =
         operation_audit::current_id().or_else(|| sink.and_then(telemetry::Sink::reserve_run_id));
     command_event(
@@ -2361,7 +2411,19 @@ fn run_with_sink(args: &[String], out: &mut String, sink: Option<&telemetry::Sin
             .with("sweep_command", is_sweep_command(command))
             .with("phase", "running"),
     );
-    let code = dispatch(args, out);
+    attempt
+}
+
+/// Emits `command finished` with the exit `code` the process will return, and
+/// `audit` when the terminal invocation audit could not be confirmed.
+fn command_finished(
+    command: &str,
+    sink: Option<&telemetry::Sink>,
+    attempt: Option<u64>,
+    code: u8,
+    out: &str,
+    audit: Option<&str>,
+) {
     let finished = telemetry::Event::info("cli.lifecycle", "command finished")
         .with("command", command)
         .with("sweep_command", is_sweep_command(command))
@@ -2378,8 +2440,11 @@ fn run_with_sink(args: &[String], out: &mut String, sink: Option<&telemetry::Sin
         Some(why) => finished.with("reason", why),
         None => finished,
     };
+    let finished = match audit {
+        Some(why) => finished.with("audit", why),
+        None => finished,
+    };
     command_event(sink, attempt, &finished);
-    code
 }
 
 /// The line a refused command's `command finished` event carries.
@@ -3651,12 +3716,70 @@ fn binding_attempt() -> Option<u64> {
 }
 
 pub(crate) fn note(event: &telemetry::Event<'_>) {
+    #[cfg(test)]
+    noted::record(event);
     // The result is deliberately discarded HERE and only here. `emit` returns
     // `NotInstalled` rather than panicking when nothing was installed, which is
     // what makes these call sites safe in a test binary that never installs a
     // sink — and `install_log` above is the one place that reports the absence,
     // so reporting it again per event would be noise on every line.
     let _ = telemetry::emit(event);
+}
+
+/// One line for whoever is watching stderr, never a panic (r53-1, D-4463).
+///
+/// `eprintln!` PANICS when stderr is a closed pipe -- `cli descend ... 2>&1 | head -1`
+/// closes it under a run with minutes left -- and the release profile aborts on
+/// a panic, so a progress line could kill the run it was reporting on. A line
+/// that cannot be written is dropped: stderr is the channel that failed, so
+/// nobody is left on it to tell. A DIAGNOSTIC sent here also emits its event,
+/// because stderr is not a log (gate 23); a progress line does not.
+pub(crate) fn tell(line: std::fmt::Arguments<'_>) {
+    let _shown = tell_on(&mut std::io::stderr(), line);
+}
+
+/// [`tell`] over a writer a test can close. Returns whether the line landed.
+fn tell_on(err: &mut impl std::io::Write, line: std::fmt::Arguments<'_>) -> bool {
+    err.write_fmt(format_args!("{line}\n")).is_ok()
+}
+
+/// Test support: every event [`note`] was handed on this thread since the
+/// thread first called [`noted::take`], so a test can prove a repair or a
+/// refusal was LOGGED and not only performed (D-4460). A thread that never
+/// asks keeps nothing.
+#[cfg(test)]
+pub(crate) mod noted {
+    use std::cell::RefCell;
+
+    std::thread_local! {
+        static SEEN: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
+    }
+
+    /// Keeps one line naming the event's target, message and fields, once
+    /// this thread is watching.
+    pub(super) fn record(event: &telemetry::Event<'_>) {
+        SEEN.with(|seen| {
+            if let Some(lines) = seen.borrow_mut().as_mut() {
+                lines.push(format!(
+                    "{} {} {:?}",
+                    event.target(),
+                    event.message(),
+                    event.fields()
+                ));
+            }
+        });
+    }
+
+    /// The events noted on this thread since the last call, oldest first;
+    /// the first call starts the watch and returns nothing.
+    pub(crate) fn take() -> Vec<String> {
+        SEEN.with(|seen| seen.borrow_mut().replace(Vec::new()).unwrap_or_default())
+    }
+
+    /// How many noted events on this thread carry `message`, taken.
+    pub(crate) fn count(message: &str) -> usize {
+        take().iter().filter(|line| line.contains(message)).count()
+    }
 }
 
 /// Writes the binary's whole output to `out`, and returns the exit code the
@@ -6684,11 +6807,18 @@ fn session_index(bars: &[indicators::Candle]) -> Vec<i64> {
                 // OUT OF ORDER, WHICH THE STORE FORBIDS. Reported rather than
                 // sorted around: sorting here would paper over a broken
                 // invariant one layer down and produce a plausible index.
-                eprintln!(
+                // Said on stderr without a panic, and LOGGED, because a
+                // broken store invariant is a diagnostic (r53-1, D-4463).
+                note(
+                    &telemetry::Event::warn("cli.session_index", "bars out of order")
+                        .with("day", day)
+                        .with("follows", last),
+                );
+                tell(format_args!(
                     "session index: {day} follows {last}, which the store's \
                      monotonic timestamps forbid — the index stops here rather \
                      than reordering bars it did not order"
-                );
+                ));
                 return days;
             }
             _ => days.push(day),
@@ -16404,11 +16534,11 @@ fn elite_descend_seeded(
         // PROGRESS TO STDERR as each step lands, for the reason `descend`
         // records: a walk that buffers its whole output prints nothing for
         // minutes and an operator cannot tell a long run from a wedged one.
-        eprintln!(
+        tell(format_args!(
             "  [{}/{}] elite at {support} ppm",
             step.saturating_add(1),
             ladder.len()
-        );
+        ));
         let page = screen_step(question, *support, policy, &mut cache);
 
         // ADMITTED ROWS ARE READ BACK OFF THE RENDERED PAGE, which is the
@@ -17293,7 +17423,7 @@ fn descend_in(
         // Stderr and not stdout, so the REPORT stays a single clean artifact on
         // stdout that a pipe or a file capture sees whole. Progress is for the
         // human watching; the report is for whatever reads the output.
-        eprintln!("  [{}/{}] {line}", step + 1, ladder.len());
+        tell(format_args!("  [{}/{}] {line}", step + 1, ladder.len()));
         steps.push((support, row));
     }
     descent_table(&mut out, steps);
@@ -19662,6 +19792,11 @@ fn identity_hex(identity: &[u8; 32]) -> String {
 /// promised the walk "once per process". This keeps one handle and brings it
 /// up to date with its `refresh`, which reads only the rows appended since:
 /// O(delta) per run for trades and frontier, which have no prefix recheck.
+/// So a held trade or frontier handle is NOT the disk state a fresh open
+/// would see: a row it already indexed and something else then rewrote in
+/// place is never re-read by it, and only a fresh open (a new process, a
+/// changed inode or a refused refresh) refuses on it (r64-1, D-4469;
+/// `trades::tests::a_held_writer_does_not_reread_a_row_it_indexed_and_a_fresh_open_does`).
 /// The receipt handle (`result_set::Receipts`), like
 /// `results::with_shared_writer`, also re-hashes its indexed prefix when
 /// another writer grew the file (D-1560, D-3305, D-3318): O(indexed bytes +
@@ -32541,5 +32676,252 @@ mod derived_floor_tests {
             !code.contains(concat!("data_digest:data_", "digest(&span.bars)")),
             "no stored span that may trade on a second series may identify itself from signal bars alone"
         );
+    }
+}
+
+/// sobs-4 (D-4462) and r53-1 (D-4463): what the durable sweep arm logs when
+/// it refuses, and the stderr line that cannot panic.
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    reason = "the same exception every test module in this workspace takes: a \
+              test that cannot panic cannot fail."
+)]
+mod admission_and_stderr_tests {
+    use super::{FAILED, OK, run_admitted, session_index, tell_on};
+
+    fn argv(words: &[&str]) -> Vec<String> {
+        words.iter().map(|w| (*w).to_owned()).collect()
+    }
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "brutex-admission-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn lifecycle(logs: &std::path::Path, sink: &telemetry::Sink) -> Vec<telemetry::Record> {
+        let mut events = telemetry::tail(
+            logs,
+            sink.keep_files(),
+            &telemetry::Query::last(64).from_target("cli.lifecycle"),
+        )
+        .records;
+        events.sort_by_key(|event| event.seq);
+        events
+    }
+
+    fn text<'a>(event: &'a telemetry::Record, name: &str) -> Option<&'a str> {
+        event.field(name).and_then(telemetry::OwnedValue::as_str)
+    }
+
+    fn number(event: &telemetry::Record, name: &str) -> Option<u64> {
+        event.field(name).and_then(telemetry::OwnedValue::as_u64)
+    }
+
+    /// An admission that cannot start dispatches nothing, exits FAILED, and
+    /// says so in ONE `command refused` event carrying the reason; it wrote
+    /// only a stdout line before.
+    #[test]
+    fn an_admission_that_cannot_start_is_refused_and_logged() {
+        let logs = scratch("refused-logs");
+        let sink = telemetry::Sink::open(&telemetry::Config::new(&logs)).expect("private sink");
+        let mut out = String::new();
+        let code = run_admitted(
+            Err("the configured store root is absent".to_owned()),
+            &argv(&["sweep", "6", "200"]),
+            &mut out,
+            Some(&sink),
+        );
+        assert_eq!(code, FAILED, "{out}");
+        assert!(
+            out.starts_with(
+                "refused: required execution admission could not start: the configured store root is absent"
+            ),
+            "{out}"
+        );
+        assert!(
+            !out.contains("THESE BARS ARE GENERATED"),
+            "nothing ran: {out}"
+        );
+        let events = lifecycle(&logs, &sink);
+        assert_eq!(
+            events.len(),
+            1,
+            "one event and no `command started`: {events:?}"
+        );
+        let event = events.first().expect("the refusal event");
+        assert_eq!(event.message, "command refused");
+        assert_eq!(event.level, telemetry::Level::Warn);
+        assert_eq!(number(event, "exit_code"), Some(u64::from(FAILED)));
+        assert_eq!(text(event, "phase"), Some("refused"));
+        assert_eq!(text(event, "command"), Some("sweep"));
+        assert!(
+            text(event, "reason").is_some_and(|why| why.contains("store root is absent")),
+            "{event:?}"
+        );
+        drop(sink);
+        let _ = std::fs::remove_dir_all(&logs);
+    }
+
+    /// `command finished` is emitted once the terminal audit has settled, so
+    /// its `exit_code` is the code the shell reads. A sweep that succeeded
+    /// and whose terminal could not be confirmed was logged `exit_code=0` and
+    /// then exited FAILED.
+    #[test]
+    fn the_finish_event_carries_the_exit_code_the_shell_reads() {
+        use crate::operation_audit::{ID_BASE, Phase, read, tests::fail_next_finish};
+        let root = scratch("finish-root");
+        std::fs::create_dir_all(&root).expect("a store root");
+        let logs = scratch("finish-logs");
+        let sink = telemetry::Sink::open(&telemetry::Config::new(&logs)).expect("private sink");
+
+        let mut landed = String::new();
+        let code = run_admitted(
+            Ok(root.clone()),
+            &argv(&["sweep", "6", "200"]),
+            &mut landed,
+            Some(&sink),
+        );
+        assert_eq!(code, OK, "{landed}");
+
+        fail_next_finish();
+        drop(crate::noted::take());
+        let mut unconfirmed = String::new();
+        let code = run_admitted(
+            Ok(root.clone()),
+            &argv(&["sweep", "6", "200"]),
+            &mut unconfirmed,
+            Some(&sink),
+        );
+        assert_eq!(code, FAILED, "{unconfirmed}");
+        assert!(
+            unconfirmed.contains("THESE BARS ARE GENERATED")
+                && unconfirmed
+                    .contains("refused: required terminal invocation audit is unconfirmed"),
+            "{unconfirmed}"
+        );
+        assert_eq!(crate::noted::count("terminal audit unconfirmed"), 1);
+
+        let mut misused = String::new();
+        let misuse = run_admitted(
+            Ok(root.clone()),
+            &argv(&["sweep", "six", "200"]),
+            &mut misused,
+            Some(&sink),
+        );
+        assert_ne!(misuse, OK, "{misused}");
+        assert_ne!(misuse, FAILED, "{misused}");
+
+        let events = lifecycle(&logs, &sink);
+        let started: Vec<&telemetry::Record> = events
+            .iter()
+            .filter(|event| event.message == "command started")
+            .collect();
+        let finished: Vec<&telemetry::Record> = events
+            .iter()
+            .filter(|event| event.message == "command finished")
+            .collect();
+        assert_eq!(started.len(), 3, "{events:?}");
+        assert_eq!(
+            finished
+                .iter()
+                .map(|event| number(event, "exit_code"))
+                .collect::<Vec<_>>(),
+            vec![
+                Some(u64::from(OK)),
+                Some(u64::from(FAILED)),
+                Some(u64::from(misuse))
+            ],
+            "{events:?}"
+        );
+        assert_eq!(
+            finished
+                .iter()
+                .map(|event| text(event, "phase"))
+                .collect::<Vec<_>>(),
+            vec![Some("completed"), Some("refused"), Some("refused")]
+        );
+        assert_eq!(text(finished[0], "audit"), None);
+        assert!(
+            text(finished[1], "audit")
+                .is_some_and(|why| why.contains("injected terminal audit fault")),
+            "{:?}",
+            finished[1]
+        );
+        assert!(
+            text(finished[1], "reason")
+                .is_some_and(|why| why.contains("terminal invocation audit is unconfirmed")),
+            "{:?}",
+            finished[1]
+        );
+        assert_eq!(text(finished[2], "audit"), None);
+        for (start, finish) in started.iter().zip(&finished) {
+            assert_eq!(start.run, finish.run, "each pair shares its invocation");
+        }
+
+        let phases: Vec<Phase> = (1..=3)
+            .map(|n| {
+                read(&root, ID_BASE + n)
+                    .expect("audit reads")
+                    .expect("audit record")
+                    .phase
+            })
+            .collect();
+        assert_eq!(
+            phases,
+            vec![Phase::Completed, Phase::Started, Phase::Refused]
+        );
+        drop(sink);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&logs);
+    }
+
+    /// r53-1, D-4463: a line for a closed stderr is dropped, never a panic,
+    /// and an open one gets the line whole.
+    #[test]
+    fn a_stderr_line_is_dropped_not_a_panic_when_the_stream_is_closed() {
+        struct Closed;
+        impl std::io::Write for Closed {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+        }
+        assert!(!tell_on(&mut Closed, format_args!("progress {}", 1)));
+        let mut open = Vec::new();
+        assert!(tell_on(&mut open, format_args!("progress {}", 2)));
+        assert_eq!(open, b"progress 2\n".to_vec());
+    }
+
+    /// r53-1, D-4463: bars out of order stop the session index where they
+    /// break, and the broken store invariant is LOGGED, not only printed.
+    #[test]
+    fn bars_out_of_order_stop_the_session_index_and_are_logged() {
+        const DAY: i64 = 86_400_000_000;
+        let at = |micros: i64| indicators::Candle {
+            ts_micros: micros,
+            ..indicators::Candle::default()
+        };
+        let base = 1_705_290_600_000_000;
+        drop(crate::noted::take());
+        let ordered = [at(base), at(base + 60_000_000), at(base + DAY)];
+        assert_eq!(session_index(&ordered).len(), 2);
+        assert_eq!(crate::noted::count("bars out of order"), 0);
+        let broken = [at(base + DAY), at(base), at(base + 2 * DAY)];
+        assert_eq!(
+            session_index(&broken),
+            vec![indicators::ist_day(base + DAY)],
+            "the index stops at the break and keeps what came before"
+        );
+        assert_eq!(crate::noted::count("bars out of order"), 1);
     }
 }

@@ -1773,7 +1773,7 @@ impl SelectionLedger {
         let parent = path
             .parent()
             .ok_or_else(|| "selection ledger has no parent directory".to_owned())?;
-        std::fs::create_dir_all(parent).map_err(|why| {
+        crate::fixed_tail::create_dir_all_durable(parent).map_err(|why| {
             format!(
                 "selection ledger directory {} could not be created: {why}",
                 parent.display()
@@ -1821,6 +1821,15 @@ impl SelectionLedger {
                 .map_err(|why| format!("{} could not be shared-locked: {why}", path.display()))?;
         }
         let opened = (|| {
+            if writable {
+                crate::fixed_tail::heal_header_and_tail(
+                    &file,
+                    &path,
+                    &header_bytes()?,
+                    SELECTION_STRIDE,
+                    &crate::fixed_tail::magic_and_version(MAGIC, VERSION),
+                )?;
+            }
             let len = file
                 .metadata()
                 .map_err(|why| format!("{} length could not be read: {why}", path.display()))?
@@ -1829,6 +1838,10 @@ impl SelectionLedger {
                 if !writable {
                     return Err(format!("{} is empty and read-only", path.display()));
                 }
+                // The new name is made durable BEFORE the header is written
+                // (sobs-12, D-4461): a kill between the two leaves an empty
+                // file, which the next writer treats as new and barriers again.
+                crate::fixed_tail::sync_parent(&path)?;
                 write_header(&mut file)?;
                 file.sync_all().map_err(|why| {
                     format!("{} header could not be synced: {why}", path.display())
@@ -2117,7 +2130,7 @@ impl SelectionLedgerV2 {
         let parent = path
             .parent()
             .ok_or_else(|| "selection V2 ledger has no parent directory".to_owned())?;
-        std::fs::create_dir_all(parent).map_err(|why| {
+        crate::fixed_tail::create_dir_all_durable(parent).map_err(|why| {
             format!(
                 "selection V2 ledger directory {} could not be created: {why}",
                 parent.display()
@@ -2163,6 +2176,15 @@ impl SelectionLedgerV2 {
                 .map_err(|why| format!("{} could not be shared-locked: {why}", path.display()))?;
         }
         let opened = (|| {
+            if writable {
+                crate::fixed_tail::heal_header_and_tail(
+                    &file,
+                    &path,
+                    &header_bytes_v2()?,
+                    SELECTION_V2_STRIDE,
+                    &crate::fixed_tail::magic_and_version(MAGIC_V2, VERSION_V2),
+                )?;
+            }
             let len = file
                 .metadata()
                 .map_err(|why| format!("{} length could not be read: {why}", path.display()))?
@@ -2171,6 +2193,10 @@ impl SelectionLedgerV2 {
                 if !writable {
                     return Err(format!("{} is empty and read-only", path.display()));
                 }
+                // The new name is made durable BEFORE the header is written
+                // (sobs-12, D-4461): a kill between the two leaves an empty
+                // file, which the next writer treats as new and barriers again.
+                crate::fixed_tail::sync_parent(&path)?;
                 write_header_v2(&mut file)?;
                 file.sync_all().map_err(|why| {
                     format!("{} header could not be synced: {why}", path.display())
@@ -2770,6 +2796,15 @@ const fn metrics_from_row(metrics: TopMetricsV1) -> Metrics {
 }
 
 fn write_header(file: &mut File) -> Result<(), SelectionRefusal> {
+    let header = header_bytes()?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|why| format!("selection header seek failed: {why}"))?;
+    file.write_all(&header)
+        .map_err(|why| format!("selection header write failed: {why}"))
+}
+
+/// The one header a V1 ledger begins with.
+fn header_bytes() -> Result<[u8; HEADER_BYTES], SelectionRefusal> {
     let mut header = [0_u8; HEADER_BYTES];
     let mut encoder = Encoder::new(&mut header);
     encoder.bytes(&MAGIC)?;
@@ -2780,10 +2815,7 @@ fn write_header(file: &mut File) -> Result<(), SelectionRefusal> {
     encoder.u64(SCORE_SCALE)?;
     encoder.zeros(8)?;
     encoder.finish()?;
-    file.seek(SeekFrom::Start(0))
-        .map_err(|why| format!("selection header seek failed: {why}"))?;
-    file.write_all(&header)
-        .map_err(|why| format!("selection header write failed: {why}"))
+    Ok(header)
 }
 
 #[derive(Debug)]
@@ -2911,6 +2943,15 @@ fn scan_receipts(
 }
 
 fn write_header_v2(file: &mut File) -> Result<(), SelectionRefusal> {
+    let header = header_bytes_v2()?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|why| format!("selection V2 header seek failed: {why}"))?;
+    file.write_all(&header)
+        .map_err(|why| format!("selection V2 header write failed: {why}"))
+}
+
+/// The one header a V2 ledger begins with.
+fn header_bytes_v2() -> Result<[u8; HEADER_BYTES], SelectionRefusal> {
     let mut header = [0_u8; HEADER_BYTES];
     let mut encoder = Encoder::new(&mut header);
     encoder.bytes(&MAGIC_V2)?;
@@ -2921,10 +2962,7 @@ fn write_header_v2(file: &mut File) -> Result<(), SelectionRefusal> {
     encoder.u64(SCORE_SCALE)?;
     encoder.zeros(8)?;
     encoder.finish()?;
-    file.seek(SeekFrom::Start(0))
-        .map_err(|why| format!("selection V2 header seek failed: {why}"))?;
-    file.write_all(&header)
-        .map_err(|why| format!("selection V2 header write failed: {why}"))
+    Ok(header)
 }
 
 #[derive(Debug)]
@@ -5428,6 +5466,122 @@ mod tests {
         assert_eq!(reopened.selection_ids(), &[second.selection_id()]);
         drop(reopened);
         std::fs::remove_dir_all(root).expect("append rollback fixture cleanup");
+    }
+
+    /// rnew-1, D-4460: a process killed mid-append leaves a sub-record tail,
+    /// and one killed while writing a new ledger's header leaves a strict
+    /// prefix of it. Readers still refuse both; the next V1 or V2 writer cuts
+    /// either, says so once, and keeps every committed receipt.
+    #[test]
+    fn a_kill_torn_tail_or_header_is_cut_by_the_v1_and_v2_writers_and_history_kept() {
+        let root = root("kill-torn");
+        let ranking = policy();
+        let first = selection_fixture(
+            &root.join("population-v1"),
+            2,
+            300,
+            ranking,
+            pair_variant(41, 71, span()),
+        );
+        let mut ledger = SelectionLedger::open(&root, 2).expect("V1 writer");
+        ledger.append(&first).expect("V1 receipt committed");
+        drop(ledger);
+        let v1 = SelectionLedger::path(&root);
+        crate::fixed_tail::attack::torn_tails(
+            &[(v1.as_path(), super::SELECTION_STRIDE)],
+            &mut || {
+                Ok(format!(
+                    "{:?}",
+                    SelectionLedger::open_read(&root, 2)?.selection_ids()
+                ))
+            },
+            &mut || SelectionLedger::open(&root, 2).map(drop),
+        );
+
+        let second = selection_fixture_v2(&root.join("population-v2"), 2, 300, ranking);
+        let mut ledger = SelectionLedgerV2::open(&root, 2).expect("V2 writer");
+        ledger.append(&second).expect("V2 receipt committed");
+        drop(ledger);
+        let v2 = SelectionLedgerV2::path(&root);
+        crate::fixed_tail::attack::torn_tails(
+            &[(v2.as_path(), super::SELECTION_V2_STRIDE)],
+            &mut || {
+                Ok(format!(
+                    "{:?}",
+                    SelectionLedgerV2::open_read(&root, 2)?.selection_ids()
+                ))
+            },
+            &mut || SelectionLedgerV2::open(&root, 2).map(drop),
+        );
+
+        let v1_header = super::header_bytes().expect("V1 header");
+        let v2_header = super::header_bytes_v2().expect("V2 header");
+        for torn in [1, super::HEADER_BYTES / 2, super::HEADER_BYTES - 1] {
+            let fresh = root.join(format!("torn-header-{torn}"));
+            std::fs::create_dir_all(fresh.join("results")).expect("torn-header results");
+            std::fs::write(SelectionLedger::path(&fresh), &v1_header[..torn])
+                .expect("torn V1 header");
+            std::fs::write(SelectionLedgerV2::path(&fresh), &v2_header[..torn])
+                .expect("torn V2 header");
+            assert!(SelectionLedger::open_read(&fresh, 2).is_err());
+            assert!(SelectionLedgerV2::open_read(&fresh, 2).is_err());
+            drop(crate::noted::take());
+            drop(SelectionLedger::open(&fresh, 2).expect("V1 writer heals its header"));
+            drop(SelectionLedgerV2::open(&fresh, 2).expect("V2 writer heals its header"));
+            assert_eq!(crate::noted::count("torn ledger header truncated"), 2);
+            assert_eq!(
+                std::fs::read(SelectionLedger::path(&fresh)).expect("V1 bytes"),
+                v1_header.to_vec()
+            );
+            assert_eq!(
+                std::fs::read(SelectionLedgerV2::path(&fresh)).expect("V2 bytes"),
+                v2_header.to_vec()
+            );
+            assert!(
+                SelectionLedger::open_read(&fresh, 2)
+                    .expect("healed V1 reads")
+                    .selection_ids()
+                    .is_empty()
+            );
+        }
+        // sobs-12, D-4461: a new ledger's name is made durable BEFORE its
+        // header is written, and a failed directory barrier is refused by name.
+        let unsynced = root.join("unsynced");
+        let v1 = SelectionLedger::path(&unsynced);
+        let v2 = SelectionLedgerV2::path(&unsynced);
+        let results = v1
+            .parent()
+            .expect("a ledger has a directory")
+            .display()
+            .to_string();
+        let armed = crate::fixed_tail::fault::Armed::arm(
+            &results,
+            crate::fixed_tail::fault::Kind::DirectorySync,
+        );
+        let refusal = SelectionLedger::open(&unsynced, 2).expect_err("V1 barrier refuses");
+        assert!(
+            refusal.contains("injected directory sync fault"),
+            "{refusal}"
+        );
+        drop(armed);
+        let armed = crate::fixed_tail::fault::Armed::arm(
+            &results,
+            crate::fixed_tail::fault::Kind::DirectorySync,
+        );
+        let refusal = SelectionLedgerV2::open(&unsynced, 2).expect_err("V2 barrier refuses");
+        assert!(
+            refusal.contains("injected directory sync fault"),
+            "{refusal}"
+        );
+        drop(armed);
+        for path in [&v1, &v2] {
+            assert_eq!(std::fs::metadata(path).expect("created").len(), 0);
+        }
+        drop(SelectionLedger::open(&unsynced, 2).expect("V1 retries"));
+        drop(SelectionLedgerV2::open(&unsynced, 2).expect("V2 retries"));
+        assert_eq!(std::fs::read(&v1).expect("V1 bytes"), v1_header.to_vec());
+        assert_eq!(std::fs::read(&v2).expect("V2 bytes"), v2_header.to_vec());
+        std::fs::remove_dir_all(root).expect("kill-torn fixture cleanup");
     }
 
     #[test]

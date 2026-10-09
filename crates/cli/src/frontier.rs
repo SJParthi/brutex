@@ -905,7 +905,8 @@ impl Frontier {
     /// lock, with a `cli.ledger` event (D-1901).
     pub fn open(root: &Path) -> Result<Self, Refusal> {
         let dir = root.join("results");
-        std::fs::create_dir_all(&dir)
+        // Every directory this makes is made durable (sobs-12, D-4461).
+        crate::fixed_tail::create_dir_all_durable(&dir)
             .map_err(|why| format!("the results directory could not be made: {why}"))?;
         let path = Self::path(root);
         let file = OpenOptions::new()
@@ -959,6 +960,10 @@ impl Frontier {
             .map_err(|why| format!("{} could not be measured: {why}", self.path.display()))?
             .len();
         if len == 0 {
+            // The new name is made durable BEFORE the header is written
+            // (sobs-12, D-4461): a kill between the two leaves an empty file,
+            // which the next writer treats as new and barriers again.
+            crate::fixed_tail::sync_parent(&self.path)?;
             return write_fresh_header(&mut self.file, &self.path);
         }
         check_header(&mut self.file, &self.path, len)?;
@@ -3414,6 +3419,50 @@ mod tests {
         assert!(why.contains("16 bytes"), "hard ceiling: {why}");
         assert!(why.contains("No partial frontier index"), "{why}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// sobs-12, D-4461: the frontier writer makes the `results/` directory it
+    /// creates durable, and the new file's name durable BEFORE its header is
+    /// written. Each failed directory barrier is refused by name, and a retry
+    /// after one completes the file.
+    #[test]
+    fn a_new_frontiers_directory_and_name_are_made_durable_and_a_failed_barrier_is_named() {
+        use crate::fixed_tail::fault::{Armed, Kind};
+        let r = root("durable-names");
+        let dir = r.join("results");
+        let path = Frontier::path(&r);
+
+        let armed = Armed::arm(&r.display().to_string(), Kind::DirectorySync);
+        let why = Frontier::open(&r).expect_err("the barrier on the root refuses");
+        assert!(
+            why.contains("the results directory could not be made")
+                && why.contains("injected directory sync fault"),
+            "{why}"
+        );
+        drop(armed);
+        assert!(
+            dir.is_dir() && !path.exists(),
+            "no file before its directory is durable"
+        );
+
+        let armed = Armed::arm(&dir.display().to_string(), Kind::DirectorySync);
+        let why = Frontier::open(&r).expect_err("the barrier on results/ refuses");
+        assert!(why.contains("injected directory sync fault"), "{why}");
+        drop(armed);
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("the file was created")
+                .len(),
+            0,
+            "no header is written before its name is durable"
+        );
+
+        drop(Frontier::open(&r).expect("a retry completes the file"));
+        assert_eq!(
+            std::fs::metadata(&path).expect("the frontier").len(),
+            u64::try_from(HEADER_BYTES).expect("a header length")
+        );
+        let _ = std::fs::remove_dir_all(&r);
     }
 }
 

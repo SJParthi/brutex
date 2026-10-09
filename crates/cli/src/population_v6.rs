@@ -1953,6 +1953,14 @@ impl PopulationV6Ledger {
             // no byte left in it can tell the two apart. So initialising a file
             // some earlier process left empty emits a named `Warn` event
             // (`REINITIALISED_EMPTY`) before the header is written.
+            //
+            // A HEADER TORN BY A KILL IS CUT FIRST (rnew-1, D-4460): a
+            // non-empty strict prefix of the constant header never passed its
+            // barrier, so the writer cuts it to nothing, says so, and
+            // initialises as above. Any other short content still refuses.
+            if writable {
+                crate::fixed_tail::heal_torn_header(&data_file, &data_path, &header())?;
+            }
             let empty = data_file
                 .metadata()
                 .map_err(|why| format!("cannot stat Population V6 data: {why}"))?
@@ -1964,7 +1972,8 @@ impl PopulationV6Ledger {
                     crate::note(&reinitialised_empty_event(&shown));
                 }
                 data_file
-                    .write_all(&header())
+                    .seek(SeekFrom::Start(0))
+                    .and_then(|_| data_file.write_all(&header()))
                     .and_then(|()| data_file.sync_all())
                     .map_err(|why| format!("cannot initialize Population V6 header: {why}"))?;
                 root_file
@@ -1972,6 +1981,18 @@ impl PopulationV6Ledger {
                     .map_err(|why| format!("cannot sync Population V6 directory: {why}"))?;
             } else {
                 verify_header(&mut data_file)?;
+            }
+            if writable {
+                // rnew-1, D-4460: the writer cuts a kill-torn record tail under
+                // its exclusive lock. Receipt-last, so bytes past the last whole
+                // record were never acknowledged; a whole record is never cut.
+                crate::fixed_tail::heal_torn_tail(
+                    &data_file,
+                    &data_path,
+                    HEADER_BYTES as u64,
+                    RECORD_BYTES as u64,
+                    &header(),
+                )?;
             }
             if lock_created {
                 lock_file
@@ -3732,6 +3753,70 @@ mod tests {
         })
     }
 
+    /// rnew-1, D-4460: a process killed mid-append leaves a sub-record tail
+    /// past the header and the committed block; killed mid-header, a strict
+    /// prefix of the header. A reader still refuses either. The next writer
+    /// cuts the tail (keeping every whole record) or the torn header (and
+    /// initialises), says so once, and the reader then opens.
+    #[test]
+    fn a_kill_torn_tail_or_header_is_cut_by_the_writer_and_history_kept() -> Result<(), String> {
+        with_evaluated_prepared(|_source, prepared, root| {
+            let committed = root.join("kill-torn");
+            std::fs::create_dir(&committed)
+                .map_err(|why| format!("cannot create kill-torn root: {why}"))?;
+            let mut writer = PopulationV6Ledger::open_write(&committed, bounds())?;
+            let (written, receipt) = writer.append(&prepared)?;
+            assert!(written);
+            drop(writer);
+            let data = committed.join(DATA_FILE);
+            crate::fixed_tail::attack::torn_tails(
+                &[(data.as_path(), RECORD_BYTES as u64)],
+                &mut || {
+                    let mut opened = PopulationV6Ledger::open_read(&committed, bounds())?;
+                    opened.read_complete(receipt)?;
+                    Ok(format!(
+                        "{:?}",
+                        opened.receipts.get(&receipt.population_id())
+                    ))
+                },
+                &mut || PopulationV6Ledger::open_write(&committed, bounds()).map(drop),
+            );
+
+            for torn in [1, HEADER_BYTES / 2, HEADER_BYTES - 1] {
+                let fresh = root.join(format!("torn-header-{torn}"));
+                std::fs::create_dir(&fresh)
+                    .map_err(|why| format!("cannot create torn-header root: {why}"))?;
+                std::fs::write(fresh.join(DATA_FILE), &header()[..torn])
+                    .map_err(|why| format!("cannot write torn header: {why}"))?;
+                assert!(PopulationV6Ledger::open_read(&fresh, bounds()).is_err());
+                drop(crate::noted::take());
+                drop(PopulationV6Ledger::open_write(&fresh, bounds())?);
+                assert_eq!(crate::noted::count("torn ledger header truncated"), 1);
+                assert_eq!(
+                    std::fs::read(fresh.join(DATA_FILE))
+                        .map_err(|why| format!("cannot reread healed header: {why}"))?,
+                    header().to_vec(),
+                    "a {torn}-byte torn header is cut and written whole"
+                );
+                drop(PopulationV6Ledger::open_read(&fresh, bounds())?);
+            }
+
+            let foreign = root.join("foreign-short");
+            std::fs::create_dir(&foreign)
+                .map_err(|why| format!("cannot create foreign-short root: {why}"))?;
+            std::fs::write(foreign.join(DATA_FILE), b"NOT-A-POPV6")
+                .map_err(|why| format!("cannot write foreign short file: {why}"))?;
+            assert!(PopulationV6Ledger::open_write(&foreign, bounds()).is_err());
+            assert_eq!(
+                std::fs::read(foreign.join(DATA_FILE))
+                    .map_err(|why| format!("cannot reread foreign file: {why}"))?,
+                b"NOT-A-POPV6".to_vec(),
+                "short content that is not this header is never cut"
+            );
+            Ok(())
+        })
+    }
+
     /// pop1-2, D-1900: a short write or failed barrier, on the evidence or on
     /// the Completion, is cut back; the ledger opens and the exact rerun
     /// commits. The fault fires through the ledger's own append.
@@ -4040,16 +4125,33 @@ mod tests {
         assert_eq!(bytes, header().to_vec());
         drop(PopulationV6Ledger::open_read(&root, bounds())?);
 
+        // A ONE-BYTE HEADER IS A TORN ONE, AND THE WRITER CUTS IT NOW (rnew-1,
+        // D-4460). It refused unchanged until then, which is the wedge
+        // D-0918's limit named: a reader still refuses it, and only a byte
+        // that is not the header's own first byte is left for refusal.
         std::fs::write(root.join(DATA_FILE), [header()[0]]).map_err(|why| why.to_string())?;
-        let short = PopulationV6Ledger::open_write(&root, bounds());
+        let short = PopulationV6Ledger::open_read(&root, bounds());
         assert!(
             matches!(&short, Err(why) if why.contains("cannot read Population V6 header")),
-            "a one-byte header still refuses: {:?}",
+            "a reader still refuses a one-byte header: {:?}",
             short.as_ref().err()
+        );
+        drop(PopulationV6Ledger::open_write(&root, bounds())?);
+        assert_eq!(
+            std::fs::read(root.join(DATA_FILE)).map_err(|why| why.to_string())?,
+            header().to_vec()
+        );
+        std::fs::write(root.join(DATA_FILE), [header()[0] ^ 0xff])
+            .map_err(|why| why.to_string())?;
+        let foreign = PopulationV6Ledger::open_write(&root, bounds());
+        assert!(
+            matches!(&foreign, Err(why) if why.contains("cannot read Population V6 header")),
+            "a one-byte file that is not the header's prefix still refuses: {:?}",
+            foreign.as_ref().err()
         );
         assert_eq!(
             std::fs::read(root.join(DATA_FILE)).map_err(|why| why.to_string())?,
-            vec![header()[0]]
+            vec![header()[0] ^ 0xff]
         );
         std::fs::remove_dir_all(&root).map_err(|why| why.to_string())?;
         Ok(())
