@@ -49,7 +49,15 @@ WORK, in this order (use Workflows; up to 6 agents while usage allows):
    route, Rust-only, control permutations, robustness on a shadow server, GDFL edge days, observability); a row is
    Correct only when a second agent reproduced it. Then a fresh audit round; repeat fix -> deploy -> verify until a
    whole round finds zero.
-6. Only then: GDFL engine parts (work-20260925/state/resume-kit/scripts/gdfl-parts-r4.js) and the import attack
+6. AUTOMATE THE CHECKS (operator, 9 Oct): stop relying on agents to prove the data. Port the checks Claude ran by hand
+   (work-20260925/state/gdfl-board/reconcile.py: rebuild a day's one-second bars from the raw GDFL file with the D-2802
+   late-row rule and compare price/volume/OI with the store; completeness.py: every trading day present against the
+   archive's day list and the calendar, no gaps or duplicates, journal seconds = stored seconds; the Zerodha minute
+   checks) into Rust cli verbs, run automatically at the end of every GDFL import day and every Zerodha pull, written
+   to the store's audit as one record per instrument-day (O(1) to look up), and shown on /verify and as a per-day
+   verified/failed badge on /db. Then any pull or import is captured, stored, checked and visible with no agent in
+   the loop. Record it as a decision; Rust only; tests that fail when the check is broken.
+7. Only then: GDFL engine parts (work-20260925/state/resume-kit/scripts/gdfl-parts-r4.js) and the import attack
    (work-20260925/state/attack/gdfl-attack-r5.js).
 
 BOARD: the old board belongs to the other account, so publish a NEW one: Artifact quickstart (dashboard), then the
