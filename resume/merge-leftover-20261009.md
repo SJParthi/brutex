@@ -122,3 +122,28 @@ the binding constraint; this thread goes quiet after the handover.
    tree is the combined integration. Push it and send its sha to the PR 74 CI
    thread (cse_0192cvXYTyfh6ihYTAF7UgaR). Do not dispatch CI unless that is
    agreed.
+
+## State at 14:20 UTC 2026-10-09 (handed, idle)
+
+- `claude/project-thread-lx6ptl` @ `614fdc4b` (pushed): `bff477f0` + the
+  merge of `wip/audit-fx/integ` `a7a27dc3` (98ae0a42, D-4623..D-4628,
+  D-4647..D-4658) + the merge of the audit's paused head `8102ca76`
+  (1d98ec9c, D-4659..D-4661) + fixes for the checks that merge failed
+  (614fdc4b, D-4662, MRG-17). Sent to the PR 74 thread, which merges it on
+  top of final/all-fixes `ff390a4f` (ledger tails: keep both).
+- `8102ca76` is NOT the audit's final `wip/audit-batch3-integ`; that comes
+  when the audit resumes and must be merged the same way.
+- Validated: fmt; clippy -D warnings (workspace); full test run on 1d98ec9c
+  147 pass, 5 fail (2 git-ownership env-only, 3 fixed in 614fdc4b and
+  re-run green); static gates on 614fdc4b 25 pass, 4 fail.
+- The 4 failing gates fail on `8102ca76` itself (checked by running the job
+  there with only its broken Gate 0 sed self-test removed). They are the
+  audit's open items: 1d (`microseconds`, `x7` in crates/pull tests), 12
+  (operation_audit_tests latency doc, topjson.rs:1), 21 (telemetry loss.rs
+  OpenOptions::new, sink.rs File::open), 23 (10 api latency-test prints).
+- Decision numbers used: D-4600..D-4662. Next free in this range: D-4663.
+- Traps this merge found (no textual conflict): browser word `fetch(` vs
+  the boundary-read check; D-3511's `echo "use sed here"` vs D-4493's word
+  rule; a dropped `cli::live::Live` removes its file (D-2641), so fixtures
+  must hold views; `target=swept` needs `member=NIFTY` (D-2759); census
+  surface is 210 rows (D-3507); IST offset must be `pull::session`'s.
