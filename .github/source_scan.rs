@@ -1902,7 +1902,11 @@ fn spawn_target_ok(t: &[Token], at: usize, arg: &[Token]) -> bool {
 fn spawn_findings(path: &str, src: &str) -> Result<Vec<String>, String> {
     let lexed = lex(src)?;
     let t = &lexed.tokens;
-    let mut out = Vec::new();
+    let mut out = metavariable_constructors(path, t);
+    let local = (0..t.len()).any(|k| {
+        matches!(t.get(k).and_then(ident), Some("enum" | "struct"))
+            && is_ident(t.get(k + 1), "Command")
+    });
     for (i, tok) in t.iter().enumerate() {
         if ident(tok) != Some("Command") {
             continue;
@@ -1912,6 +1916,14 @@ fn spawn_findings(path: &str, src: &str) -> Result<Vec<String>, String> {
                 "{path}:{}: `Command` is renamed, which hides its spawns from this scan",
                 tok.line
             ));
+            continue;
+        }
+        // D-3500: the constructor reached without `Command::new(` -- a type
+        // alias, the qualified `<Command>::new`, `Command::new` taken as a
+        // value, and an impl whose `Self::new` is the constructor -- starts a
+        // program whose name this scan never reads, so each is refused.
+        if let Some(how) = hidden_constructor(t, i, local) {
+            out.push(format!("{path}:{}: `Command` {how}", tok.line));
             continue;
         }
         if !is_path_sep(t, i + 1) || !is_ident(t.get(i + 3), "new") || !is_punct(t.get(i + 4), '(')
@@ -1931,6 +1943,98 @@ fn spawn_findings(path: &str, src: &str) -> Result<Vec<String>, String> {
         }
     }
     Ok(out)
+}
+
+/// How the `Command` token at `i` reaches its constructor without the
+/// `Command::new(` spelling [`spawn_findings`] reads, or `None`. `local` is
+/// whether the file declares its own `enum` or `struct Command`, whose impls
+/// are not the process type's.
+fn hidden_constructor(t: &[Token], i: usize, local: bool) -> Option<&'static str> {
+    if is_path_sep(t, i + 1) && is_ident(t.get(i + 3), "new") && !is_punct(t.get(i + 4), '(') {
+        return Some("is constructed through a value, which hides the program it starts");
+    }
+    if is_path_sep(t, i + 1) && is_punct(t.get(i + 3), '<') {
+        return Some("is reached through a turbofish, which hides its spawns from this scan");
+    }
+    // The path the token ends: back over `ident ::` pairs and a leading `::`.
+    let mut b = i;
+    while b >= 3
+        && is_path_sep(t, b - 2)
+        && t.get(b - 3).and_then(ident).is_some_and(|s| s != "for")
+    {
+        b -= 3;
+    }
+    if b >= 2 && is_path_sep(t, b - 2) {
+        b -= 2;
+    }
+    // `<[path::]Command>::new`: a qualified self type, not a generic argument
+    // (`Vec::<Command>` has `::` before its `<`).
+    if is_punct(t.get(i + 1), '>')
+        && is_path_sep(t, i + 2)
+        && is_ident(t.get(i + 4), "new")
+        && b > 0
+        && is_punct(t.get(b - 1), '<')
+        && !(b >= 3 && is_path_sep(t, b - 3))
+    {
+        return Some("is reached through a qualified path, which hides its spawns from this scan");
+    }
+    // `impl .. for [(][path::]Command[<>][)] {` or `.. where`.
+    let mut before = b;
+    while before > 0 && is_punct(t.get(before - 1), '(') {
+        before -= 1;
+    }
+    let mut after = i + 1;
+    if is_punct(t.get(after), '<') && is_punct(t.get(after + 1), '>') {
+        after += 2;
+    }
+    while is_punct(t.get(after), ')') {
+        after += 1;
+    }
+    if !local
+        && before > 0
+        && is_ident(t.get(before - 1), "for")
+        && (is_punct(t.get(after), '{') || is_ident(t.get(after), "where"))
+    {
+        return Some("has an impl whose `Self::new` hides its spawns from this scan");
+    }
+    // The statement holding the token, from the last `;`, `{` or `}` before
+    // it, past any `#[..]` attributes.
+    let mut k = (0..i)
+        .rev()
+        .find(|&k| is_punct(t.get(k), ';') || is_punct(t.get(k), '{') || is_punct(t.get(k), '}'))
+        .map_or(0, |k| k + 1);
+    while is_punct(t.get(k), '#') && is_punct(t.get(k + 1), '[') {
+        k = skip_group(t, k + 1);
+    }
+    if is_ident(t.get(k), "pub") {
+        k += 1;
+        if is_punct(t.get(k), '(') {
+            k = skip_group(t, k);
+        }
+    }
+    is_ident(t.get(k), "type")
+        .then_some("is renamed by a type alias, which hides its spawns from this scan")
+}
+
+/// `<$name>::new(`: a macro metavariable used as a qualified self type, whose
+/// path the scan cannot read wherever the macro is invoked (D-3500).
+fn metavariable_constructors(path: &str, t: &[Token]) -> Vec<String> {
+    (0..t.len())
+        .filter(|&k| {
+            is_punct(t.get(k), '<')
+                && is_punct(t.get(k + 1), '$')
+                && t.get(k + 2).and_then(ident).is_some()
+                && is_punct(t.get(k + 3), '>')
+                && is_path_sep(t, k + 4)
+                && is_ident(t.get(k + 6), "new")
+        })
+        .map(|k| {
+            format!(
+                "{path}:{}: `<$..>::new` constructs a type a macro is handed, which this scan cannot read",
+                t[k].line
+            )
+        })
+        .collect()
 }
 
 /// `unsafe`, or a foreign block, anywhere in the file's tokens.
@@ -2860,6 +2964,107 @@ fn inline_flag(prog: &str, flag: &str) -> bool {
     }
 }
 
+/// D-3511: a word with its outer quotes removed.
+fn unquoted(word: &str) -> &str {
+    word.trim_matches(['"', '\''])
+}
+
+/// D-3511: tools that are not interpreters but run a program a step writes
+/// inline or assembles, refused by name where no workflow needs them and by
+/// form where one does. `sed` (its `e` command and `s///e` flag hand text to a
+/// shell, and its scripts are a second language, D-2315), `make` (`--eval`,
+/// `-f -`) and `rustup` (`override`, `default` and `run` outrank the pinned
+/// toolchain) appear in no workflow, so any invocation is refused, as is any
+/// `git -c`, `git --config-env` or `git config` (`alias.*=!…`,
+/// `core.fsmonitor`, `core.pager` and `core.sshCommand` each run a program).
+/// `find -exec` of a run-time name, `env -S` in any flag cluster, and an
+/// `xargs -I R` whose shell `-c` program holds `R` are refused by form.
+fn runner_programs(words: &[&str]) -> Vec<(String, &'static str)> {
+    let mut out = Vec::new();
+    // A word that starts inside a quoted string is text, not a command.
+    let mut open: Option<char> = None;
+    for (i, w) in words.iter().enumerate() {
+        let inside = open.is_some();
+        for c in w.chars() {
+            match open {
+                Some(q) if c == q => open = None,
+                None if c == '\'' || c == '"' => open = Some(c),
+                _ => {}
+            }
+        }
+        if inside {
+            continue;
+        }
+        let rest = &words[i + 1..];
+        match bare_word(w) {
+            "sed" | "gsed" => out.push((
+                (*w).to_owned(),
+                "a sed script is a second language and its `e` runs a shell; read text with a .github/*.rs tool",
+            )),
+            "make" | "gmake" => out.push(((*w).to_owned(), "make runs recipes a step can write inline")),
+            "rustup" => out.push((
+                (*w).to_owned(),
+                "rustup can choose a toolchain past rust-toolchain.toml",
+            )),
+            "git" => {
+                if let Some(f) = rest.iter().find(|f| {
+                    let f = unquoted(f);
+                    f == "-c" || f == "config" || f.starts_with("--config-env")
+                }) {
+                    out.push((
+                        format!("{w} {f}"),
+                        "a git configuration value can name a program git runs",
+                    ));
+                }
+            }
+            "find" => {
+                let runtime = rest.windows(2).any(|p| {
+                    matches!(p[0], "-exec" | "-execdir" | "-ok" | "-okdir")
+                        && unquoted(p[1]).starts_with('$')
+                });
+                if runtime {
+                    out.push(((*w).to_owned(), "`-exec` runs a program named at run time"));
+                }
+            }
+            "env" => {
+                if let Some(f) = rest.iter().map(|f| unquoted(f)).find(|f| {
+                    (f.starts_with('-') && !f.starts_with("--") && f.contains('S'))
+                        || f.starts_with("--split-string")
+                }) {
+                    out.push((format!("{w} {f}"), "splits a run-time string into a command"));
+                }
+            }
+            "xargs" => {
+                let replace = rest.iter().enumerate().find_map(|(k, f)| {
+                    let f = unquoted(f);
+                    if f == "-I" {
+                        rest.get(k + 1).map(|r| unquoted(r).to_owned())
+                    } else if let Some(r) = f.strip_prefix("--replace=") {
+                        Some(r.to_owned())
+                    } else {
+                        f.strip_prefix("-I").filter(|r| !r.is_empty()).map(str::to_owned)
+                    }
+                });
+                let shell_c = (0..rest.len()).any(|k| {
+                    interpreter(rest[k]).is_some_and(|(_, f)| matches!(f, Family::Shell))
+                        && rest.get(k + 1).is_some_and(|f| inline_flag("sh", f))
+                        && replace
+                            .as_deref()
+                            .is_some_and(|r| operand(rest.get(k + 2..).unwrap_or(&[])).0.contains(r))
+                });
+                if shell_c {
+                    out.push((
+                        (*w).to_owned(),
+                        "runs each input line as a shell program",
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 /// One quoted shell word that may span several whitespace-split words:
 /// its text and how many words it took.
 fn operand(words: &[&str]) -> (String, usize) {
@@ -2892,6 +3097,12 @@ fn operand(words: &[&str]) -> (String, usize) {
 /// the awk ratchet can count its own.
 fn inline_programs(l: &str) -> Vec<(String, &'static str, Family)> {
     let mut out = Vec::new();
+    // D-3511: read over the whole line, so a `|` inside a quoted sed script
+    // is the script's delimiter rather than a pipe.
+    let whole: Vec<&str> = l.split_whitespace().collect();
+    for (shown, why) in runner_programs(&whole) {
+        out.push((shown, why, Family::Shell));
+    }
     let mut cut = l.to_owned();
     for sep in ["&&", "||", "$(", "`", ";", "|", "<("] {
         cut = cut.replace(sep, "\n");
@@ -2947,7 +3158,9 @@ fn inline_programs(l: &str) -> Vec<(String, &'static str, Family)> {
                 Family::Shell => {
                     if let Some(k) = rest.iter().position(|f| inline_flag(prog, f)) {
                         let program = rest.get(k + 1).copied().unwrap_or("");
+                        // D-3511: `xargs sh -c '{}'` runs each input line.
                         if program.trim_start_matches(['"', '\'']).starts_with('$')
+                            || program.contains("{}")
                             || program.is_empty()
                         {
                             out.push((
@@ -3870,7 +4083,15 @@ fn build_key_leaves(src: &str) -> Result<Vec<Leaf>, String> {
         .into_iter()
         .filter(|l| {
             let p: Vec<&str> = l.path.iter().map(String::as_str).collect();
-            matches!(p.as_slice(), ["package", "build" | "links"])
+            // D-3510: `metabuild`, `cargo-features` and a profile's `rustflags`
+            // or `codegen-backend` each make cargo run code it chose, given a
+            // nightly cargo; none is needed by a stable workspace.
+            matches!(
+                p.as_slice(),
+                ["package", "build" | "links" | "metabuild"] | ["cargo-features"]
+            ) || (p.len() >= 3
+                && p[0] == "profile"
+                && matches!(p[p.len() - 1], "rustflags" | "codegen-backend"))
         })
         .collect())
 }
@@ -3960,6 +4181,10 @@ fn mutants_skip_findings(path: &str, src: &str) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
+/// The text cargo-mutants writes into a mutated line, in two pieces so this
+/// file does not hold it whole and refuse itself (D-3508).
+const MUTANT_MARKER: [&str; 2] = ["changed by cargo-", "mutants"];
+
 /// What gate 1 refuses by CONTENT in a tracked file outside `web/`: a NUL
 /// byte (no allowed extension is binary, and a NUL makes grep skip the file),
 /// bytes that are not UTF-8, a `.rs` that opens with a shebang (a script
@@ -3999,6 +4224,16 @@ fn content_findings(path: &str, bytes: &[u8]) -> Vec<String> {
     match std::str::from_utf8(bytes) {
         Err(_) => out.push(format!("{path}: is not UTF-8")),
         Ok(text) => {
+            // D-3508: a mutated line committed from an `--in-place` run.
+            let marker = MUTANT_MARKER.concat();
+            for (n, line) in text.lines().enumerate() {
+                if line.contains(&marker) {
+                    out.push(format!(
+                        "{path}:{}: a cargo-mutants marker -- a live mutation was committed",
+                        n + 1
+                    ));
+                }
+            }
             if path.ends_with(".rs") {
                 match lex(text) {
                     Ok(l) if l.shebang => out.push(format!(
@@ -5495,6 +5730,28 @@ mod tests {
     }
 
     #[test]
+    fn a_nightly_only_manifest_key_is_a_build_key() {
+        // D-3510 (ONEAUTH-11): each runs code cargo picks, on a nightly cargo.
+        for src in [
+            "cargo-features = [\"profile-rustflags\"]\n[package]\nname = \"a\"\n",
+            "[package]\nname = \"a\"\nmetabuild = [\"mb\"]\n",
+            "[profile.dev]\nrustflags = [\"-C\", \"linker=x.rs\"]\n",
+            "[profile.release.package.\"*\"]\nrustflags = [\"-C\", \"link-arg=x\"]\n",
+            "[profile.dev]\ncodegen-backend = \"/tmp/x.so\"\n",
+            "profile.bench.codegen-backend = \"x\"\n",
+        ] {
+            assert_eq!(build_key_leaves(src).unwrap().len(), 1, "missed: {src}");
+        }
+        for src in [
+            "[profile.release]\noverflow-checks = true\npanic = \"unwind\"\n",
+            "[dependencies]\nmetabuild = \"1\"\n",
+            "[package.metadata.rustflags]\nx = 1\n",
+        ] {
+            assert!(build_key_leaves(src).unwrap().is_empty(), "refused: {src}");
+        }
+    }
+
+    #[test]
     fn a_bench_cargo_would_skip_is_refused() {
         // P1-08-02, D-2660.
         for src in [
@@ -5570,6 +5827,40 @@ mod tests {
             content_findings("web/x.rs", b"#[mutants::skip]\nfn f() {}\n").is_empty(),
             "web/ is unrestricted"
         );
+    }
+
+    #[test]
+    fn a_live_mutation_marker_is_refused_in_any_tracked_file() {
+        // D-3508 (ONEAUTH-09): pr74/g18-rest committed `while pos >= <marker> 0`
+        // in crates/telemetry/src/tail.rs, an endless loop that every static
+        // gate passed. The marker is assembled here as the gate assembles it.
+        let marker = format!("/* ~ {} ~ */", MUTANT_MARKER.concat());
+        for (path, src) in [
+            (
+                "crates/telemetry/src/tail.rs",
+                format!("fn f() {{ while pos >= {marker} 0 {{}} }}\n"),
+            ),
+            ("crates/a/tests/t.rs", format!("// {marker}\n")),
+            (".github/x.rs", format!("const S: &str = \"{marker}\";\n")),
+            ("docs/x.md", format!("{marker}\n")),
+            ("Cargo.toml", format!("# {}\n", MUTANT_MARKER.concat())),
+        ] {
+            assert!(
+                content_findings(path, src.as_bytes())
+                    .iter()
+                    .any(|f| f.contains("cargo-mutants marker")),
+                "passed: {path}: {src}"
+            );
+        }
+        for src in [
+            "// changed by cargo\n",
+            "// cargo-mutants changed nothing\n",
+        ] {
+            assert!(
+                content_findings("crates/a/src/lib.rs", src.as_bytes()).is_empty(),
+                "refused: {src}"
+            );
+        }
     }
 
     #[test]
@@ -5671,7 +5962,7 @@ mod tests {
         );
     }
 
-    // ---- audit-20261003 (D-1600..D-1619) ----
+    // ---- audit-20261003 (D-1600..D-1614) ----
 
     #[test]
     fn a_step_that_swallows_or_skips_its_command_is_refused() {
@@ -6002,6 +6293,58 @@ mod tests {
     }
 
     #[test]
+    fn a_program_runner_that_is_not_an_interpreter_is_refused() {
+        // D-3511 (ONEAUTH-12). Each starts a program the step assembles or
+        // writes inline, through a tool that is not on the interpreter list;
+        // the second half are the round-3 review's bypasses of a first, form-
+        // reading version.
+        for bad in [
+            "          sed 's/.*/date/e' f\n",
+            "          sed -n 'e uname' f\n",
+            "          sed \"s/.*/$PROG/e\" f\n",
+            "          sed -E -e 's|a|b|ge' f\n",
+            "          sed -e 's/a/b/' f\n",
+            "          make --eval='all: ; @echo hi' all\n",
+            "          git -c alias.x='!echo hi' x\n",
+            "          git config alias.z '!sh'\n",
+            "          find . -exec \"$PROG\" \\;\n",
+            "          find . -execdir $P {} +\n",
+            "          xargs -I{} sh -c '{}' < f\n",
+            "          env -S \"$PROG\"\n",
+            "          env --split-string=\"$PROG\"\n",
+            "          sed -e's/.*/echo P/e' f\n",
+            "          sed -n '/./I e echo P' f\n",
+            "          sed -n -e '1{e echo P' -e '}' f\n",
+            "          sed -n '\\%h%e echo P' f\n",
+            "          echo '1e echo P' | sed -n -f - f\n",
+            "          git -c ALIAS.zz='!echo P' zz\n",
+            "          git -c core.fsmonitor='echo P' status\n",
+            "          git --config-env=alias.x=V x\n",
+            "          env -iS'echo P'\n",
+            "          printf 'all:\\n\\t@echo P\\n' | make -f - all\n",
+            "          xargs -I % sh -c '%' < f\n",
+            "          xargs --replace=@ bash -c 'run @' < f\n",
+            "          rustup override set nightly\n",
+            "          rustup run nightly cargo build\n",
+        ] {
+            assert!(!workflow_findings("w", bad).is_empty(), "passed: {bad}");
+        }
+        for good in [
+            "          sed_free=1\n",
+            "          echo \"use sed here\"\n",
+            "          git ls-files -z\n",
+            "          git rev-parse HEAD\n",
+            "          find . -name '*.rs' -exec rustfmt --check {} +\n",
+            "          xargs -0 -r \"$tool\" workflow < f\n",
+            "          (cd \"$t\" && xargs -I{} env {} $skip < tests.list)\n",
+            "          env FOO=1 cargo test\n",
+            "          xargs -I{} cp {} out/ < f\n",
+        ] {
+            assert!(workflow_findings("w", good).is_empty(), "refused: {good}");
+        }
+    }
+
+    #[test]
     fn every_unmounted_rust_file_under_web_is_a_root_with_its_kind() {
         // P15-17, D-2324. Gate 6d ran four named files; a new root, or one
         // such as `probes/x.rs`, was compiled by nothing.
@@ -6199,6 +6542,56 @@ mod tests {
             "fn bin() -> PathBuf { PathBuf::from(env!(\"CARGO_BIN_EXE_cli\")) } fn t() { Command::new(bin()); }",
             "fn h() -> (&'static str, u8) { match x { A => (\"open\", 0), _ => (\"xdg-open\", 0) } } fn t() { let (program, args) = h(); Command::new(program); }",
             "fn t() { Command::new(\"git\"); Command::new(\"/usr/bin/mkfifo\"); }",
+        ] {
+            assert_eq!(
+                spawn_findings("t.rs", src).unwrap(),
+                Vec::<String>::new(),
+                "{src}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_spawn_through_another_spelling_of_the_constructor_is_refused() {
+        // D-3500 (ONEAUTH-01). Each line started `sh` and the scan above
+        // returned nothing: the constructor reached without the literal
+        // `Command::new(` token run, so the argument was never read.
+        for src in [
+            "fn t() { type C = std::process::Command; C::new(\"sh\").status(); }",
+            "pub(crate) type C = Command;",
+            "fn t() { <std::process::Command>::new(\"sh\").status(); }",
+            "fn t() { < Command > :: new(\"sh\"); }",
+            "fn t() { let f = std::process::Command::new; f(\"sh\"); }",
+            "fn t() { [\"sh\"].map(Command::new); }",
+            "fn t() { Some(\"sh\").map(Command :: new); }",
+            "impl Go for std::process::Command { fn go() -> Self { Self::new(\"sh\") } }",
+            "impl<T> Go<T> for Command where T: X { fn go() -> Self { Self::new(\"sh\") } }",
+            "impl Go for ::std::process::Command { fn go() -> Self { Self::new(\"sh\") } }",
+            // Round-3 review bypasses of the first version.
+            "#[allow(dead_code)] type C = std::process::Command; fn t() { C::new(\"sh\"); }",
+            "#[cfg(unix)]\npub type C = Command;",
+            "fn t() { std::process::Command::<>::new(\"sh\").status(); }",
+            "impl Go for (std::process::Command) { fn go() -> Self { Self::new(\"sh\") } }",
+            "impl Go for std::process::Command<> { fn go() -> Self { Self::new(\"sh\") } }",
+            "macro_rules! m { ($c:path) => { <$c>::new(\"sh\").status() } }",
+        ] {
+            assert!(
+                !spawn_findings("t.rs", src).unwrap().is_empty(),
+                "passed: {src}"
+            );
+        }
+        // The spellings crate code uses and that start nothing on their own.
+        for src in [
+            "use std::process::Command;\nuse std::process::{Command, Stdio};",
+            "fn t(c: &mut Command) -> Command { Command::new(\"git\") }",
+            "fn t() -> Option<Command> { let v: Vec<Command> = Vec::new(); None }",
+            "fn t() { let c: std::process::Command = Command::new(\"git\"); }",
+            "type Out = std::process::Output;",
+            "struct S { c: Command, d: u8 }",
+            "fn t() -> Command { Command::new(\"git\") }\nenum Command { A }\nimpl Command { fn f() {} }",
+            "use std::process::Command; fn t() { let v = Vec::<Command>::with_capacity(2); }",
+            "pub enum Command { A }\nimpl std::fmt::Display for Command { fn fmt(&self) {} }",
+            "struct S { c: Option<(Command, u8)> }\nfn f(c: Command) {}",
         ] {
             assert_eq!(
                 spawn_findings("t.rs", src).unwrap(),

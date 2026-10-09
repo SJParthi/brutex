@@ -68400,3 +68400,599 @@ one-past-`i64` neighbours, malformed exponents and points; and the same through
 fraction, an out-of-range whole, a non-number, the sentinel, a negative and a
 microsecond overflow, and in the displayed message). Both fail on the old
 readers.
+
+### D-3500 — Gate 0's spawn scan refuses the constructor reached by another spelling — 2026-10-06
+
+**What was observed.** Lens L4 (one authority) built `.github/source_scan.rs`
+at `969493e` and handed `spawns` five one-line files that each start `sh`:
+a `type` alias of `std::process::Command`, the qualified
+`<std::process::Command>::new`, `Command::new` taken as a value
+(`let f = Command::new; f("sh")`), `["sh"].map(Command::new)`, and an
+`impl .. for Command` whose `Self::new("sh")` is the constructor. Each exited
+0. The scan read only the literal `Command :: new (` token run, so the
+argument of every other spelling was never read. Gate 2 refuses the ident
+`Command` in a build script outright, but crate code outside `build.rs` had
+only this scan, and gate 1e's PATH stubs see only what a build or test
+actually runs.
+
+**Decided.** `spawn_findings` asks `hidden_constructor` about every `Command`
+token first, and refuses: `Command :: new` not followed by `(`; `Command >`
+followed by `::`; `for [path ::] Command` followed by `{` or `where`; and any
+statement opening with `[pub [(..)]] type` that holds the token. Each refusal
+names the spelling. Type positions crate code uses (`&mut Command`,
+`-> Command`, `Option<Command>`, `Vec::<Command>`, a field, a `use` group, and
+every impl of a file's own `enum` or `struct Command`) stay clean; the whole
+tree is clean under the widened scan. Round 3 (D-3515) added the attribute-led
+alias, the turbofish `Command::<>::new`, `impl .. for (Command)` and
+`Command<>`, and `<$c>::new` in a macro. Proved by
+`a_spawn_through_another_spelling_of_the_constructor_is_refused`, which failed
+first on the type-alias line.
+
+**Not closed.** A constructor reached through a macro that builds the path
+from fragments, or through a trait method on another type that returns a
+`Command`, is still not read; gate 1e's runtime stubs remain the second signal.
+
+### D-3501 — A manifest comment naming a banned crate says it is banned — 2026-10-06
+
+**What was observed.** `crates/pull/Cargo.toml` said rustls "reaches `ring`
+0.17.14", that `nm target/release/api` shows "72 `ring_core` symbols", and that
+"the binary is not free of C: `ring` arrives through the `reqwest` line". D-0211
+removed `ring` (the `-no-provider` feature and `rustls-graviola`) and D-0212
+banned it in `deny.toml`. `cargo tree --workspace --locked -i ring --target all`
+prints nothing on `969493e`; `ring` keeps only a `Cargo.lock` entry for an
+optional edge. The coordinator's Rust-only scan raised it; L4 reproduced it.
+
+**Decided.** The two `pull` paragraphs now state the current provider and the
+ban, and `lake`'s `encryption` sentence says `deny.toml` bans `ring`. `deny.toml`
+is the one authority on which native crates may build, so
+`core/tests/graph.rs` reads its `[bans] deny` list and refuses any run of
+manifest comment lines that names a banned crate in backticks without saying
+`deny.toml` (`a_manifest_comment_naming_a_banned_crate_says_it_is_banned`). On
+the old manifests it named five mentions: `lake/Cargo.toml:10 ring`,
+`pull/Cargo.toml:89 ring`, and `pull/Cargo.toml:115` `aws-lc-rs`,
+`aws-lc-sys`, `ring`.
+
+**Rejected.** A test that the resolved graph holds no banned crate: that is
+`cargo deny check`'s job already (D-0212), and a test cannot run cargo
+(D-2344). The defect here was the prose, not the graph.
+
+### D-3502 — `CLAUDE.md` §5 and `AGENTS.md` §5 are checked against the manifests — 2026-10-06
+
+**What was observed.** `docs/06-limits.md` ("The hand-drawn crate graphs are
+checked by nothing — D-0683") recorded that `cli`'s `pull` and `vocab` arrows
+were missing from the law's picture for three weeks while the checked
+`docs/01-architecture.md` table carried both, and that a check deriving the
+pictures from the manifests was "still not built". Lens L4's scope (d) names
+it.
+
+**Decided.** `core/tests/graph.rs` reads the first fenced block of `## 5.` in
+`CLAUDE.md` and `AGENTS.md`: `depends on NOTHING a · b` gives each root no
+arrows, `x y <-- a · b` gives each consumer `{x, y}`, a consumer drawn twice is
+refused, and the drawn map must equal the thirteen manifests' declared
+workspace dependencies both ways
+(`the_law_pictures_of_the_graph_are_the_manifests`). Dropping `vocab` from
+`cli`'s row in `CLAUDE.md` turns it red. §5's sentence "nothing parses this
+block as a whole" is replaced in both files; this entry is that edit's
+authority. The ASCII diagram above `docs/01-architecture.md`'s table is still
+unparsed.
+
+### D-3503 — Gates 10b and 27 read an id that shares its cell with the claim — 2026-10-06
+
+**What was observed.** Seventeen rows of `docs/04-invariants.md` write the
+id and the claim in one cell, `| AU-O1STORE-2 — **…** | proof | ✓ |`
+(AU-PROBEAPI-6, AU-O1CLI-2..6, AU-O1ENGINE-22..24 and -40, AU-O1STORE-1..2,
+AU-PROBESTORE-4..6, -7a, -7b). `invariant_id` in `.github/gates_tree.rs`
+(gate 10b) and `row_id` in `.github/gates_ledger.rs` (gate 27) take an id only
+when `|` follows it, so these seventeen were never counted and a second row
+with any of their ids passed both gates. D-1185 cites "Invariant
+AU-O1STORE-2", which therefore resolved by eye only.
+
+**Decided.** Both readers take ` — ` (space, em dash, space) after the id as
+the end of the id, exactly like `|`; `| I-1 x |`, `| I-1 - x |` and an em dash
+without the spaces still read nothing. Proved by
+`gate_10b_reads_an_id_that_shares_its_cell_with_the_claim` and
+`gate27_reads_an_id_that_shares_its_cell_with_the_claim`, each red on the old
+reader. The seventeen ids are unique today, so both gates stay green.
+
+**Rejected.** Rewriting the seventeen rows into the four-column shape: it
+reorders cells gate 10 reads for the proof and status, and the next author
+would write the shape again with nothing refusing it.
+
+### D-3504 — Every cited decision heads an entry; every cited `I-` invariant has a row — 2026-10-06
+
+**What was observed.** `docs/06-limits.md` (D-0684) records that gate 27b
+checks uniqueness only: "A number that heads nothing is not reported." Lens L4
+resolved every `D-NNNN` in the tracked tree outside `web/` against the
+ledger's headings and found, besides the known D-0051 and D-0676 and the
+gate-test fixture D-1234, two dangling citations: `docs/04-invariants.md`'s
+heading "Fixboard numeric passes 5 and 6 (D-2710 onward)" (the run starts at
+D-2712) and `.github/source_scan.rs`'s "audit-20261003 (D-1600..D-1619)" (the
+run ends at D-1614). `crates/core/src/vendor.rs` cited invariant `I-41`; the
+`I-` rows ended at `I-39`.
+
+**Decided.** The heading reads D-2712, the range D-1614, and `I-41` gets the
+row its test always proved. `crates/core/tests/citations.rs` walks the root
+documents and manifests, `docs/` but the ledger, `.github/` and `crates/`, and
+fails on any `D-NNNN` that heads nothing unless it is one of three named
+unwritten numbers, each with its reason; it fails on any `I-` id cited under
+`crates/` with no row. On `0edc1a0` it named D-2710, D-1619 and I-41.
+
+**Not closed.** Other invariant prefixes (`C-`, `X-`, `AF-`, …) cited in code
+are not resolved: the same shapes name findings, fixtures and retired rows,
+and no reader yet tells them apart.
+
+### D-3505 — `pull::rolling::shift_six` rounds a negative tie by core's half-up rule — 2026-10-06
+
+**What was observed.** `shift_six` (the implied-volatility reader) says it
+rounds "half-up at the seventh decimal, which is the same rule `CLAUDE.md` §7
+gives for snapping a price — one rounding rule for the whole product". The one
+authority for that rule is `core::price::Paisa::from_rupee_text_half_up`, which
+sends a tie toward positive infinity (`-14.5` is `-14`). `shift_six` added one
+to the magnitude whenever the seventh digit was 5 or more and negated after,
+so `-0.0000005` read as `-1` millionth where the rule gives `0`.
+
+**Decided.** For a negative value the magnitude grows only past the tie (a
+seventh digit above 5, or 5 with a nonzero digit after it); positive values are
+unchanged. `a_negative_tie_rounds_by_the_one_rule_core_gives_a_price` pins six
+named cases and compares 3,100 texts (both signs, two whole parts, fractions of
+seven to nine digits) with core's function applied to the text with the point
+moved four places; it failed first on `-0.0000005`.
+
+**Effect on stored bytes.** Only a vendor implied volatility that is negative
+and an exact tie at the seventh decimal reads differently; files written before
+keep their bytes (append-only), and a re-pull of such a row writes the
+corrected millionth.
+
+### D-3506 — One function builds each shared results path — 2026-10-06
+
+**What was observed.** `results/population-write.lock`, the one lock every
+population, admission, execution and Selection V4 writer and joined reader
+holds, was built in six places: a private `lock_path` in
+`execution_capability.rs`, `admission_store.rs`, `execution_disposition_v2.rs`
+and `population.rs`, and inline in `selection_v4_authority.rs` and
+`admission_join.rs`. `results/runs.bin` was built by
+`cli::results::Results::path` and again by `api::backtest::path_in`. All
+agreed, and nothing kept them agreeing: a renamed lock in one writer would lock
+a file no other writer locks while every write still succeeded. The refuter
+found no divergence today and confirmed nothing guarded it (`unguarded`).
+
+**Decided.** `cli::population::population_write_lock` is the one construction
+of the lock path and the five other sites call it; `api::backtest::path_in`
+calls `Results::path`. `cli/tests/one_path_authority.rs` counts each
+`.join("…")` construction across every crate's `src/` and requires exactly one,
+in its owner's file; it named the six lock sites before the change.
+
+### D-3507 — `InstrumentKey::swept_surface` enumerates the engine surface; `/store` names all 210 — 2026-10-06
+
+**What was observed.** D-0048 makes the `/store` coverage axis "the union of
+what the censuses hold and what the engine sweeps", so a swept instrument the
+store lacks is still a row. D-0506 and D-0682 widened the sweep to the 208 F&O
+shares, and `api::census::swept_series` kept `["BANKNIFTY", "NIFTY"]`, its doc
+quoting a §1 that no longer says it: on an empty store `/store?show=gaps`
+showed two rows, and a swept share nobody had pulled had no row anywhere. Core
+offered `is_sweepable` (a yes or no) but no enumeration, so a caller that
+needed the list wrote its own. Five `api` comments still called the surface "a
+two-element table", "a TWO-ROW table" or "two instruments".
+
+**Decided.** `core::instrument::InstrumentKey::swept_surface` yields the two
+`SWEPT` indices and then each NSE cash equity of `FNO_UNDERLYINGS`, every
+candidate filtered through `is_sweepable`;
+`the_swept_surface_is_exactly_what_is_sweepable_admits` compares it with the
+predicate over every index and cash key the universe can spell on both
+exchanges. `swept_series` maps it, and `held_series` sorts the axis it joins.
+An empty store's gaps view is now
+210 rows × 36 months = 7,560 cells over 38 pages of 200; the indices sort
+first, so page 1 still opens on them. Nine tests that encoded the two-row
+axis were re-derived (grid rows 360 → 7,848, page counts, the clamp's last
+page) and `A-18` restated. The comments are corrected.
+
+**Cost.** `held_series` stays O(keys log keys) (`docs/06-limits.md` §32) with
+210 more keys; a page still renders 200 cells.
+
+**Not changed.** The `web/` comments that say 213 equities
+(`web/src/routes/terminal/+page.svelte`, `web/src/lib/terminal.svelte.js`) are
+left: a comment edit rebuilds hashed `web/build` chunks Gate W1 compares, and
+that churn belongs with the next `web/` change.
+
+### D-3508 — Gate 1 refuses a committed cargo-mutants marker in any tracked file — 2026-10-06
+
+**What was observed.** Commits 92bcd1a and 99d8217 on `pr74/g18-rest`
+carried a live mutation out of an `--in-place` cargo-mutants run:
+`crates/telemetry/src/tail.rs:503` read `while pos >= /* ~ <marker> ~ */ 0`,
+an endless loop (repaired in 0d8c386). The marker is the text cargo-mutants
+writes into every line it mutates, "changed by cargo-" followed by
+"mutants". No language-purity gate read for it, so only the slow test and
+mutation jobs could have stopped it, and an endless loop stops them by timing
+out. The coordinator raised it to lens L4.
+
+**Decided.** `source_scan content` (gate 1) refuses any tracked file outside
+`web/` that holds the marker, naming the line. The needle is the constant
+`MUTANT_MARKER`, held in two pieces so the tool's own source does not hold it
+whole, and no tracked file may spell it whole either (this entry splits it).
+`a_live_mutation_marker_is_refused_in_any_tracked_file` failed first on the
+`tail.rs` shape; planting the marker on that line and running the gate 1 step
+exited 1 naming `crates/telemetry/src/tail.rs:503`.
+
+### D-3509 — `CLAUDE.md` §10 is compared with the files under `docs/` — 2026-10-06
+
+**What was observed.** §10 is the one statement of which documents bind. It
+listed eight documents while fourteen existed (D-0212 item 5) and then said
+"all fourteen are listed now" while 25 more existed (D-1764), each found by a
+reader rather than a check; `CLAUDE.md` itself records that "nothing checks
+this file". A new `docs/36-…` today would sit outside both the table and the
+"`docs/12-` to `docs/35-`" sentence with every gate green.
+
+**Decided.** `crates/core/tests/citations.rs` reads §10's table rows and the
+range its "hold no authority" sentence names, requires every row to name an
+existing file, and requires every `.md` under `docs/` to be a row, a numbered
+report inside that range, or under `docs/research-policy/`
+(`every_document_is_classified_by_the_law`). Planting `docs/36-probe.md` turns
+it red. No law text changes: the table, the range and the files agree today.
+
+### D-3510 — Gates 1g and 2 refuse every door to a nightly toolchain — 2026-10-06
+
+**What was observed.** Gate 1g allowlisted the keys of `rust-toolchain.toml`
+and never read `toolchain.channel`'s value, so `"nightly-2026-09-01"` passed.
+`RUSTC_BOOTSTRAP: 1` in a workflow (which turns the pinned stable cargo into a
+nightly one) and `cargo +toolchain` were refused by no gate. Once nightly is
+on, four manifest keys run code cargo picks and no gate read them:
+`cargo-features`, `profile.*.rustflags` (a linker, or `overflow-checks=off`
+past gate 25, which reads only the `overflow-checks` key),
+`profile.*.codegen-backend`, and `package.metabuild` (a build-dependency run as
+a build script, with no `build.rs` for gate 2 to see). The refuter reproduced
+every part on a clone: gates 0, 1g, 13 and 25 all printed OK, and stable
+`cargo metadata` accepted the manifest with `RUSTC_BOOTSTRAP=1`.
+
+**Decided.** Gate 1g refuses a `toolchain.channel` that is not a quoted run of
+one to three dot-separated digit groups (`"1.97.1"`), and its environment-name
+list gains `RUSTC_BOOTSTRAP` and `__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS`;
+its other-door rule refuses `cargo +…`. `source_scan build-keys` prints
+`package.metabuild`, `cargo-features` and any `profile.…rustflags` or
+`profile.…codegen-backend` leaf, so gate 2 (which refuses every line it prints)
+and gate 13 layer 3 refuse them in every TOML spelling. Proved by
+`gate_1g_refuses_every_door_to_a_nightly_toolchain` and
+`a_nightly_only_manifest_key_is_a_build_key`, both red first.
+
+**Needs the owner.** `auto-merge.yml`'s sensitive-path list covers `.github/`,
+`CLAUDE.md` and `CODEOWNERS`, not `rust-toolchain.toml` or `Cargo.toml`, so a
+change to those two alone auto-merges on green CI. Whether they need a
+code-owner review is a policy choice, not a gate defect; UNVERIFIED that it is
+wanted.
+
+### D-3511 — Gate 0 refuses a program run through sed, make, git, find, env or xargs — 2026-10-06
+
+**What was observed.** Gate 0's inline-program reading knew interpreters by
+name. A workflow step could still run a program written inline or assembled at
+run time through tools that are not on that list: GNU sed's `e` command and
+the `e` flag of `s` (`sed "s/.*/$PROG/e"`), `make --eval`, a git `!` alias
+(`git -c alias.x="!$PROG" x`), `find -exec "$PROG"`, `env -S "$PROG"`, and
+`xargs -I{} sh -c '{}'` (a shell's `-c` program that is each input line). The
+refuter ran twelve such lines through `source_scan workflow`; ten passed. And
+gate 12's step still piped the scanner's `fns` output through an inline
+`sed -E` program, which D-2315 calls a second language in a tracked file.
+
+**Decided.** `inline_programs` reads, over the whole unsplit line,
+`runner_programs`: a `sed` script any of whose commands is `e` or an `s` with
+an `e` flag, `make -E`/`--eval`, `git -c alias.…`/`git config alias.…` with a
+`!` value, `find -exec`/`-execdir`/`-ok`/`-okdir` of a `$` word, and `env
+-S`/`--split-string`; a shell's `-c` program holding `{}` counts as assembled
+at run time. Round 3 (D-3515) found that reading sed scripts leaks (attached
+`-e`, `{` blocks, `I` address flags, `\%re%` addresses, `-f -`), so `sed`,
+`make`, `rustup`, `git -c`, `git --config-env` and `git config` — none used by
+any workflow — are refused outright, `env -S` in any flag cluster, and an
+`xargs -I R` whose shell `-c` program holds `R`. `find … -exec rustfmt {} +`,
+gate 6d's `xargs -I{} env {}` and gate 0's own `xargs … "$tool"` stay clean. Gate 12 reads `FILE:LINE:name` through
+`gates-ledger path-declarations`, the reading gate 10 already uses, so no
+inline `sed` program remains in a workflow. Proved by
+`a_program_runner_that_is_not_an_interpreter_is_refused`, red first.
+
+**Not closed.** `xargs "$tool"` and `find -exec "$tool"` cannot be told from a
+hostile `$PROG` by text alone; a named program in a variable is the D-2344
+limit gate 0 already records.
+
+### D-3512 — The IST offset is spelled only by its authorities — 2026-10-06
+
+**What was observed.** `pull::session::IST_OFFSET_SECS` is pinned to
+`store::path::IST_OFFSET_SECS`, and `indicators::IST_OFFSET_MICROS` documents
+itself as "one definition, three crates". Production code re-typed the offset
+as a bare literal in seven places, each agreeing today and none tied to an
+authority: `indicators/src/orb.rs` (a private `IST_OFFSET_MICROS`),
+`pull/src/gaps.rs` (a private `IST_OFFSET_SECS` inside `ist`),
+`cli/src/boolean_oos_reader.rs` (two), `cli/src/boolean_qualification_reader.rs`
+and `runner/src/expression_oos.rs` (two).
+
+**Decided.** Each names an authority it may depend on: `indicators` its own
+constant, `pull` `session`'s, `cli` and `runner` `indicators::IST_OFFSET_MICROS`.
+`crates/core/tests/one_ist_offset.rs` walks every crate's `src/`, skips
+`*_tests.rs` and each column-0 `#[cfg(test)] mod` (past multi-line
+attributes), and refuses any spelling of 19,800 seconds outside the three
+definitions and `session`'s pin; it listed the seven sites before the change.
+Round 3 (D-3515) found the first reader stopped at an indented
+`#[cfg(test)]` statement and missed `api/src/bars.rs` (two, spelled
+`5 * 3600 + 1800`), `api/src/calendar_of.rs` (two) and
+`runner/src/expression_validation.rs`; those name the authority now too. Test
+fixtures keep their literals.
+
+### D-3513 — `pull::ssm` dates its SigV4 stamp with `telemetry::civil_from_days` — 2026-10-06
+
+**What was observed.** `pull/src/ssm.rs` carried a private Hinnant
+`civil_from_days` whose comment said `pull` "does not take `costs`, and
+`docs/01-architecture.md` gives it `core` and `store` only" — false since
+D-0206 (`costs`), D-0217 (`greeks`) and the `telemetry` arrow. Nothing tested
+it: its only caller, `now_stamp`, reads the clock and runs only against real
+AWS.
+
+**Decided.** `now_stamp` calls a pure `stamp_of(secs)` built on
+`telemetry::civil_from_days`, and the private copy and its comment are gone.
+`the_amz_date_is_the_civil_stamp_of_the_clock` pins the epoch, both ends of a
+leap day, 2000-02-29, the last second of 2100-02-28 (a century year that is
+not a leap year), and a known instant.
+
+**Not closed.** About a dozen other civil-date conversions remain (`costs`,
+`store`, `pull::session`, `cli` and `indicators` test helpers among them).
+Several are forced by the graph — `indicators` may depend on `vocab` alone
+(gate 22), and `costs` and `store` do not depend on `telemetry` — so a single
+authority would have to live in `core`. Recorded in `docs/06-limits.md`.
+
+### D-3514 — The backtest chart's month presets use the 375-minute session — 2026-10-06
+
+**What was observed.** `web/src/routes/backtest/+page.svelte` computed a
+month as `Math.round((555 * 60) / secs) * 21` bars while its doc said "a
+6.25-hour session". 555 is the minute of the 09:15 open past IST midnight; a
+regular session is 375 one-minute bars (`pull::session::BARS_PER_REGULAR_SESSION`).
+Every preset spanned about 1.48 times its label: at one minute "1M" was 11,655
+bars against 7,875, so "3M" showed about 4.4 months.
+
+**Decided.** `web/src/lib/presets.js` holds `barsPerMonth`: a session's bars
+at the rung, rounded up as the fold counts a short last bucket, times 21, one a
+session at daily and wider, and zero for a rung with no length.
+`web/tests/backtest-presets.test.js` pins the fold's per-session counts (375,
+188, 75, 38, 25, 13, 7) from `pull/tests/anchor.rs`; it failed first because
+the module did not exist. `web/build` is rebuilt (Gate W1), with the deferred
+`web/` comments of D-3507 (213 equities, now 208) in the same build.
+svelte-check stays at 0 and W2's 870 tests pass.
+
+**Not closed.** The 375 is a copy in the browser of a fact the api does not
+serve; serving `BARS_PER_REGULAR_SESSION` would make it one authority.
+
+### D-3515 — Round 3 of lens L4: the lens's own gates, attacked and corrected — 2026-10-06
+
+**What was observed.** A fresh-eyes adversarial review of D-3500..D-3514
+proved each new gate leaky or wrong in places, by running the tools on crafted
+input: the spawn scan passed `#[allow(..)] type C = Command;`,
+`Command::<>::new`, `impl .. for (Command)`, `Command<>` and `<$c>::new` in a
+macro, and refused `Vec::<Command>` and a local `enum Command`'s `Display`
+impl; gate 0 passed eleven sed, git, env, make and xargs forms (each run and
+seen to execute); gate 1g passed `"cargo" +nightly`, `cargo '+nightly'` and a
+`\` continuation; gates 10b and 27 still skipped six `| C4-RUNNER-0N: claim |`
+rows; the IST-offset test stopped at an indented `#[cfg(test)]` and missed
+five production sites; and `cli/tests/one_path_authority.rs` counted only
+`.join("runs.bin")`.
+
+**Decided.** Each is closed in its own gate and proved by its test, the
+review's inputs added to the refused lists: the spawn scan reads past
+attributes, refuses the turbofish, the parenthesised and `<>` impl targets and
+the metavariable constructor, requires a qualified self `<` not preceded by
+`::`, and exempts impls in a file declaring its own `Command`; gate 0 refuses
+the six tools by name and the three forms by shape (D-3511); gate 1g reads
+`cargo +` with quotes removed and continuations joined; the id readers take
+` — `, ` – ` and `: `; the IST test skips only test modules (D-3512); and the
+path test counts any production string literal ending in either name, skipping
+test modules, with a planted `"x/results/runs.bin"` in `api` turning it red.
+
+**Recorded.** The D-0370 and D-0372 duplicate headings the coordinator asked
+about are D-0684's: issued twice on 2026-08-29, tabled there with subject and
+writing commit, kept because the ledger is append-only and citations name
+them, and pinned by gate 27b to exactly two headings each while every other
+number must head one. No change is needed; gate 27b is the gate that refuses
+duplicate decision ids.
+
+### D-3516 — The browser holds the IST offset and the session once, and derives a candle on `pull::fold`'s grid — 2026-10-09
+
+**What was observed (lens L4, round 4).** `web/src/routes/markets/+page.svelte`
+derived a coarser candle from stored bars with its own fold,
+`Math.floor((t + 19800) / w) * w - 19800`: every width counted from IST
+midnight. `pull::fold`, the store's one fold authority, counts every intraday
+rung from the 09:15 open, and D-1430 corrected `runner::resample` for exactly
+this. The two grids agree only when the width divides 555 minutes, so at 2, 10,
+30 and 60 minutes the page's first candle of a session began at 09:14, 09:10,
+09:00 and 09:00 and held part of a width, while the stored rung of the same
+name began at 09:15. Which one the page drew depended on which rung the feed
+held (`asStored` draws the stored bars as they are). Separately, twelve sites
+in ten files under `web/src` typed the IST offset (as seconds, milliseconds,
+microseconds and a BigInt: the markets, db, ingest and autopilot pages,
+`hold-series.js`, `trade-analytics.js`, `boolean-oos.js`,
+`index-stop-results.js`, `index-stop-vix.js`, `index-stop-launch.js`) and
+three typed the 375-bar
+session (`presets.js`, the db page, the ingest page's rung table), none tied to
+the Rust definitions.
+
+**Decided.** `web/src/lib/ist.js` restates `pull::session::IST_OFFSET_SECS`,
+`SESSION_OPEN_MINUTE` and `BARS_PER_REGULAR_SESSION` once, with the unit
+variants derived from the seconds, and every file above imports them;
+`presets.js` re-exports its `SESSION_MINUTES` from it. `ist.js` also holds
+`bucketStart(t, width)`: under a day, `t − ((t + IST − 09:15) mod day) mod
+width`, the rule `runner::resample` restates (D-1430), which for every width
+that divides a day is `pull::fold`'s grid edge for edge; a day or wider keeps
+IST midnight. The markets page's `aggregate` calls it. `web/tests/ist.test.js`
+reads the three `pub const` lines of `crates/pull/src/session.rs` and holds the
+web copy to them, holds `bucketStart` to the open-anchored grid at all eight
+stored intraday rungs over a whole session, on the next session and 20,000
+days earlier, to a 09:15 start for widths that do not divide a day (7, 45 and
+75 minutes), and to IST midnight at a day; it extracts the markets page's own
+`aggregate` with the Svelte parser and drives 375 one-minute bars through it
+(13 thirty-minute candles from 09:15, the last of 15 minutes; 7 hourly); and it
+refuses any other spelling of 19,800 seconds (any unit, any separators) or of
+375 or 555 in the code of any `.js`, `.ts` or `.svelte` file under `web/src`,
+comments removed, with a reader test of its own. Run against the sources as
+they were, the aggregate test and the spelling test failed (the spelling test
+listing `boolean-oos.js`'s two BigInt sites first) and the other five passed.
+D-3514's "Not closed" — the browser's 375 was a copy of a fact the api does
+not serve — is closed by the same test: the copy is now held to the Rust
+definition rather than served. `web/tests/autopilot-coverage.test.js` and
+`web/tests/database-page-fixture.js` run page functions lifted out by the
+Svelte parser and pass in what the page imports; each now passes the
+`ist.js` constant its page imports. `web/build` is rebuilt (Gate W1).
+
+**Rejected.** Serving the three numbers from the api. They are fixed by law
+and the exchange, not by configuration, and the page would then refuse to draw
+a chart while the server is down for a number it can read from source at test
+time.
+
+### D-3517 — The IST-offset reader sees the offset in minutes and skips every test-only module file — 2026-10-09
+
+**What was observed (lens L4, round 4).** `runner::synthetic::IST_OPEN_UTC_MICROS`
+was `(555 - 330) * 60 * 1_000_000`: the IST offset as 330 minutes, in
+production code, a spelling `crates/core/tests/one_ist_offset.rs` (D-3512,
+ONEAUTH-13) did not hold, so the test passed with a copy of the offset tied
+to nothing. The same reader skipped `*_tests.rs` and inline test modules but
+read as production every file a `#[cfg(test)] mod name;` declares under any
+other name: `pull/src/emit_sites.rs`, `store/src/emits.rs`,
+`engine/src/manifest.rs` and `api/src/{scratch,isolated,emitted}.rs`.
+
+**Decided.** `IST_OPEN_UTC_MICROS` is `SESSION_OPEN_MINUTE * MINUTE_MICROS -
+IST_OFFSET_MICROS` on `indicators`' constants (D-3518), and
+`runner::synthetic::tests::a_session_opens_at_0345_utc_and_closes_after_0959_utc`
+pins it to the clock time it names. The reader adds `- 330` and `+ 330` to its
+spellings, treats `pub mod` at any `pub(…)` visibility as a module, passes
+over `//` lines among a test module's attributes, and resolves every column-0
+`#[cfg(test)]` `mod name;` to the file Rust would compile (beside a `lib.rs`,
+`main.rs` or `mod.rs`, under the stem's directory otherwise, or the
+`#[path]` given, relative to the declaring file) and skips it. The middle two
+were found by the widened spellings themselves: their first run listed the
+test-only `(555 - 330)` in `indicators::column`'s `pub(super) mod tests` and a
+test fixture's `555..930` in `api::pullrun`, whose test module carries a
+comment between `#[cfg(test)]` and `#[allow(…)]`. A column-0 `#[cfg(test)]`
+item that is not a module is still read, strictly. Its reader test now lists
+the `(555 - 330)` line and that strict read, and a new test pins the
+module-file resolution on `lib.rs` and non-`lib.rs` declarations, `#[path]`,
+`pub(in …)` behind a comment, an inline module, `pubx mod` and a
+`#[cfg(all(test, unix))]` declaration that is not read.
+
+### D-3518 — The 09:15 open has named authorities, each tied to `pull::session`'s — 2026-10-09
+
+**What was observed (lens L4, round 4).** Six production definitions of the
+open: `pull::session::SESSION_OPEN_MINUTE` (const-asserted to 555),
+`pull::calendar::OPEN_MINUTE`, `store::path::Timeframe::OPEN_MINUTES_PAST_IST_MIDNIGHT`,
+a private `OPEN_MINUTE` in `indicators::orb`, a private
+`OPEN_MINUTES_PAST_IST_MIDNIGHT` in `runner::resample`, and the `555` inside
+`runner::synthetic::IST_OPEN_UTC_MICROS`, and a seventh, test-only, in
+`runner::exit_grid_policy` (`REGULAR_OPEN_IST_MINUTE`, under `#[cfg(test)]`).
+Round 2 refuted "the three 09:15 constants" as pinned; the last four were tied
+to no other copy (the resampler only through its byte-equality with
+`pull::fold`), and the session
+length was restated in `runner::synthetic::BARS_PER_SESSION` and
+`pull::calendar::FULL_BARS` beside `BARS_PER_REGULAR_SESSION`.
+
+**Decided.** `indicators::SESSION_OPEN_MINUTE` is the sweep side's one copy
+(`indicators` may not name `pull` or `store`, gate 22): `orb` uses it,
+`runner::resample`'s constant and `runner::exit_grid_policy`'s test-only one
+are defined as it, and `runner::synthetic` builds its open from it.
+`pull::calendar` const-asserts its `u16` copy to 555 (a
+`u16`/`u32` comparison needs a cast this crate refuses) and `pull::session`
+const-asserts its own to `store`'s. `crates/cli/tests/one_session_open.rs`,
+in the one crate that names all four, holds every open, both offsets and every
+session length to `pull::session`'s, and holds every bar of three
+`runner::synthetic::sessions` to a minute of a regular session as
+`pull::session::IstMoment` reads the clock, its minute of day the open plus
+its index and its IST day its session. `crates/core/tests/one_ist_offset.rs`
+refuses any production spelling of the open (`9 * 60 + 15`, 33,300 seconds or
+the whole number 555) outside nine named lines: the four definitions, the two
+pins, `cli::stored`'s frozen `NSE_OPEN_MINUTE_V2` (its digest is stored
+evidence and may not follow a moved open) and the dated irregular sessions of
+`pull::calendar` (each is what happened on its day). Run against the code as
+it was, it listed `indicators/src/orb.rs`, `runner/src/exit_grid_policy.rs`,
+`runner/src/resample.rs` and `runner/src/synthetic.rs`, and the offset test
+listed `runner/src/synthetic.rs`.
+
+### D-3519 — The browser's rung list and charge list are held to their Rust sources — 2026-10-09
+
+**What was observed (lens L4, round 4).** Round 2 recorded (`docs/06-limits.md`)
+that the web's `CAMPAIGN_RUNGS` is not tied to the Rust rung list and that its
+index-to-label lookups do not fail loudly: `BooleanQualifiedSearch.svelte` and
+`ResearchTester.svelte` print `CAMPAIGN_RUNGS[Number(rung)]` for a rung index
+the server sends, so a list that drifted from `cli::EVERY_RUNG` would label a
+result with another rung and nothing would refuse it. `charge-scope.js` prints
+its own list of the charges a share trade pays (brokerage, STT, stamp duty and
+five more, "an UNVERIFIED list") when the server sends no `equity_note`, a copy
+of `runner::audit`'s equity header held to nothing.
+
+**Decided.** `web/tests/boolean-campaign.test.js` reads `pub const EVERY_RUNG`
+from `crates/cli/src/lib.rs` and holds `CAMPAIGN_RUNGS` to it, order and all;
+`web/tests/charge-scope.test.js` reads `equity_header` from
+`crates/runner/src/audit.rs`, joins its continued lines, and holds the page's
+note to the header's list verbatim and its trades sentence to each of the
+eight charges. Each failed when the web copy was edited (two rungs swapped; DP
+charges dropped). The versioned rung arrays in `cli` (`CANONICAL_RUNGS` of the
+selection and replay versions, `CALENDAR_POLICY_RUNGS_V2`) are left as they
+are: each is a frozen part of one evidence version and must not follow a later
+list (`CLAUDE.md` §3 rule 8).
+
+### D-3520 — Decision citations are resolved in the front end, the handovers and the tool configurations too — 2026-10-09
+
+**What was observed (lens L4, round 4).** `crates/core/tests/citations.rs`
+(D-3504, ONEAUTH-05) read the root law files, `docs/`, `.github/` and
+`crates/`, and left `web/` out on the ground that it "cites no decision as
+authority". Its sources cited 83 distinct decisions before this round, the two root handovers
+and `.config/nextest.toml` three more, and nothing resolved any of them.
+All of them resolve today.
+
+**Decided.** The test reads every `.md` and `.toml` at the root, `.config/`,
+`config/`, `.claude/`, and `web/`'s `.js`, `.mjs`, `.ts`, `.svelte`, `.css`,
+`.html`, `.md` and `.rs` files, skipping `target`, `node_modules`, `build` and
+`.svelte-kit` directories (generated or installed text), and asserts that a
+web source and a handover are read and nothing under a skipped directory is.
+
+### D-3521 — The five civil-date copies are compared on every day — 2026-10-09
+
+**What was observed.** Round 2 recorded in `docs/06-limits.md` that Hinnant's
+civil-date algorithm is written in `telemetry::clock`, `costs::day`,
+`store::path`, `pull::session` and `cli::stability` (the `cli::stored`,
+`cli::vix_reference` and `api`/`indicators` copies it also named are test
+fixtures), each tested where it lives and "no test compares them with one
+another". No one crate can hold it for all five: `telemetry` depends on nothing
+(gate 21) and `costs` and `store` name neither `telemetry` nor `pull`.
+
+**Decided.** `crates/cli/tests/one_civil_calendar.rs` walks every day
+`pull::session::Day` admits (2,932,897, 1970-01-01 to 9999-12-31) and holds
+`telemetry::civil_from_days`, `cli::stability::Grain::Month`, `costs::day`
+both ways on its 40,542-day window, and `store::path::YearMonth::ist_bounds_micros`
+on all 96,360 months (each starting at its first day's IST midnight and
+ending where the next starts) to `pull`'s answer. The copies stay; the
+"compares nothing" half of the limit is closed.
+
+### D-3522 — Lens L4 round 4: what else was checked, and the question left open — 2026-10-09
+
+**Checked and not a defect, with the reason.**
+- The candidate-persistence layout (`owner.lock`, `body.bin`,
+  `complete.bin` under `<namespace>/<identity>/`) is spelled in
+  `boolean_candidate_persistence`, `boolean_observation_file` and
+  `boolean_campaign_reader`. A reader that drifted from the writer opens a
+  file that does not exist and refuses through `readonly_file::open`; unlike
+  the lock of D-3506, no drift degrades silently.
+- `attempts.bin` is joined three times in `cli::sweep_evidence`, each onto
+  the same `base(root)` (`results/sweep-evidence-v1`), and in `api::recovery`
+  onto its own `root(site)` (`audit/recovery-v1`): two different files, each
+  built in one module from one base function.
+- `web/src/lib/boolean-work-model.js` bounds `live_conditions` by 384, the
+  mask width; a wider mask makes the page refuse the descriptor loudly.
+- `charge-scope.js`'s `SWEPT_INDICES` decides only whether the zero-levy
+  sentence may print when the server sent no `equity_note`; every other case,
+  an unknown symbol included, is labelled gross.
+- `pull::calendar`'s irregular-session windows that begin at 555 are dated
+  facts about those days, not the regular open, and `cli::stored`'s
+  `NSE_OPEN_MINUTE_V2` is frozen with its digest (D-3518 names both).
+- Every decision a web, handover or tool file cites resolves (D-3520). The
+  browser takes condition names and `vocab_version` from `/vocab.json`
+  (D-0288): `web/src` names a table row only in comments, and
+  `condition-groups.js` splits a served name by its shape, holding no list.
+  A search outside `crates/costs` for a `const`, `static` or `let` named for
+  STT, stamp, brokerage, SEBI, GST, txn, transaction, levy, charge, fee or cost
+  and bound to a number found no cost rate (its five hits are three test
+  timestamps and two feed constants).
+- Not measured: a census of every place `api` and `cli` re-bucket bars. This
+  round checked the browser's fold (D-3516) and the sweep side's open
+  (D-3518) only.
+
+**Left open, for the owner.** Whether `rust-toolchain.toml` and `Cargo.toml`
+join the auto-merge workflow's sensitive paths (D-3510) is not decided here.

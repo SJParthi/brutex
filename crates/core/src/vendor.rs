@@ -2759,7 +2759,7 @@ mod tests {
 
     #[test]
     fn every_series_code_survives_the_open_addressed_table_it_moved_into() {
-        // I-41. `board_of` probes three `MemberIndex` tables instead of
+        // I-41 (row written by D-3504). `board_of` probes three `MemberIndex` tables instead of
         // binary-searching three arrays. A collision that silently dropped a
         // member would not fail to compile and would not look wrong -- it would
         // reclassify a measured bond as `Unrecognised`, which is a LOUD decline

@@ -1,5 +1,6 @@
 import { detailRefusal } from './detail-refusal.js';
 import { catalogCoordinate, gridSummary } from './boolean-catalog.js';
+import { IST_OFFSET_MICROS_BIG } from './ist.js';
 const U64=18446744073709551615n, I64=9223372036854775807n;
 /** @param {any} v */
 const uint=v=>typeof v==='string'&&/^(0|[1-9][0-9]*)$/.test(v)&&BigInt(v)<=U64;
@@ -12,9 +13,9 @@ const object=v=>v!==null&&typeof v==='object'&&!Array.isArray(v);
 /** @param {any} v @param {string[]} keys @param {(value:any)=>boolean} valid */
 const fields=(v,keys,valid)=>object(v)&&keys.every(key=>valid(v[key]));
 /** @param {string} micros */
-const day=micros=>{const shifted=BigInt(micros)+19800000000n;return (shifted<0n?shifted-86399999999n:shifted)/86400000000n;};
+const day=micros=>{const shifted=BigInt(micros)+IST_OFFSET_MICROS_BIG;return (shifted<0n?shifted-86399999999n:shifted)/86400000000n;};
 /** @param {string} micros */
-const clock=micros=>((BigInt(micros)+19800000000n)%86400000000n+86400000000n)%86400000000n;
+const clock=micros=>((BigInt(micros)+IST_OFFSET_MICROS_BIG)%86400000000n+86400000000n)%86400000000n;
 /** @param {any} selection */
 export function laterSelection(selection){
  const {identity,completion=null,kind='coordinates',candidate=null,offset='0',limit=32}=selection;

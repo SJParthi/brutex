@@ -43,6 +43,7 @@
   import Picker from '$lib/Picker.svelte';
   import { catalogue } from '$lib/index.svelte.js';
   import { MON, dayLabel, monthLabel, stampLabel } from '$lib/dates.js';
+  import { IST_OFFSET_MS, SESSION_MINUTES } from '$lib/ist.js';
   // `untrack`, because one effect on this page must react to a FEED CHANGE and
   // to nothing else — see the rung-drop effect for why an effect that reacts to
   // its own write is a hazard rather than a nicety.
@@ -499,7 +500,7 @@
   /** @type {Rung[]} */
   const RUNGS = [
     { dir: '1s', label: 'Ticks', phrase: 'one second', stored: false, per: null },
-    { dir: '1min', label: '1 minute', phrase: 'one minute', stored: true, per: 375 },
+    { dir: '1min', label: '1 minute', phrase: 'one minute', stored: true, per: SESSION_MINUTES },
     { dir: '1day', label: '1 day', phrase: 'one day', stored: true, per: 1 }
   ];
 
@@ -935,7 +936,6 @@
   // remove: `01/07/2025` is 1 July here and 7 January in half the world.
 
   const DAY_MS = 86_400_000;
-  const IST_OFFSET_MS = 19_800_000; // +05:30, and India has no daylight saving.
 
   /** The IST date of a moment, as `YYYY-MM-DD`. */
   function istDay(ms = Date.now()) {

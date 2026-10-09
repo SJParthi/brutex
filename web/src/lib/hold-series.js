@@ -33,8 +33,8 @@
 
 import { basisPoints } from './bps.js';
 import { istDay } from './dates.js';
+import { IST_OFFSET_MS } from './ist.js';
 
-const IST_OFFSET_MS = 19_800_000;
 const DAY_MS = 86_400_000;
 
 /**

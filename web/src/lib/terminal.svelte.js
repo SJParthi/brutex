@@ -34,7 +34,7 @@
  * last close exists only in a bar file.
  *
  * So a table of N instruments would be N requests, and the engine surface is
- * 213 equities plus two indices. 215 requests to fill one screen is not a
+ * 208 equities plus two indices (D-0682). 210 requests to fill one screen is not a
  * table, it is an outage.
  *
  * # Therefore: incremental, and the viewport is the increment

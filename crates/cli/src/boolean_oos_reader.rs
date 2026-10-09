@@ -402,7 +402,7 @@ pub(super) fn decode(body: &[u8], identity: [u8; 32]) -> Result<(Summary, Decode
     ))
 }
 fn day(ts: i64) -> i128 {
-    (i128::from(ts) + 19_800_000_000).div_euclid(86_400_000_000)
+    (i128::from(ts) + i128::from(indicators::IST_OFFSET_MICROS)).div_euclid(86_400_000_000)
 }
 pub(super) fn validate_actual(
     decoded: &Decoded,
@@ -431,7 +431,8 @@ pub(super) fn validate_actual(
                 || trade.entry_micros.rem_euclid(60_000_000) != 0
                 || trade.exit_micros.rem_euclid(60_000_000) != 0
                 || day(trade.entry_micros) != day(trade.exit_micros)
-                || (i128::from(trade.exit_micros) + 19_800_000_000).rem_euclid(86_400_000_000)
+                || (i128::from(trade.exit_micros) + i128::from(indicators::IST_OFFSET_MICROS))
+                    .rem_euclid(86_400_000_000)
                     > 54_540_000_000
             {
                 return Err("Boolean later trade outside exact same-day deadline/source".into());

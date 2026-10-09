@@ -1166,3 +1166,73 @@ test recorded failing against the pre-fix code.
   server text; `?? 0` on count maps and chart scale maxima is arithmetic over
   held rows, not an unknown shown as zero; markets skew and autopilot
   `census.at` are guarded before render.
+
+### One-authority lens L4 (attack/one-authority) — dispositions — 2026-10-06
+
+Narrative only. No row is added to the table above.
+
+- **`F-589ABF`** `unguarded` — Gate 0 spawn scan misses the constructor
+  reached by another spelling: fixed. D-3500, ONEAUTH-01.
+- **`F-B96DC3`** `wrong` — Pull manifest comments claim ring is linked after
+  D-0211 removed it: fixed. D-3501, ONEAUTH-02.
+- **`F-AD043C`** `unguarded` — CLAUDE.md and AGENTS.md crate-graph pictures
+  are checked by nothing: fixed. D-3502, ONEAUTH-03.
+- **`F-9082AA`** `unguarded` — Invariant ids sharing their cell with the claim
+  are invisible to gates 10b and 27: fixed. D-3503, ONEAUTH-04.
+- **`F-F0AAB3`** `unguarded` — Cited decision numbers and invariant ids that
+  resolve to nothing (an invariants heading citing 2710, a range ending at 1619, invariant I-41): fixed. D-3504, ONEAUTH-05.
+- **`F-B082CC`** `wrong` — shift_six rounds a negative tie away from zero
+  while claiming core's rule: fixed. D-3505, ONEAUTH-06.
+- **`F-624E08`** `unguarded` — The population write lock path is built in six
+  places and the ledger path in two: fixed. D-3506, ONEAUTH-07.
+- **`F-64A53E`** `wrong` — The /store axis names two swept instruments of 210,
+  and core has no surface enumeration: fixed. D-3507, ONEAUTH-08.
+- **REFUTED** (recorded so the next pass does not repeat them): `pull::csv::paisa`
+  vs core's text parser (deliberate strictness, D-1494, refuses loudly);
+  `api::recovery`'s index list and `runner::research_family`'s Total Market gate
+  (D-0682 keeps both as independent checks, identical answers today);
+  `CLAUDE.md` §10's count of 25 (correct).
+- **`F-67659A`** `unguarded` — A committed cargo-mutants marker passes every static gate: fixed. D-3508, ONEAUTH-09.
+- **`F-E739E5`** `unguarded` — CLAUDE.md section 10 is compared with the docs directory by nothing: fixed. D-3509, ONEAUTH-10.
+- **`F-D47132`** `unguarded` — A nightly toolchain and the manifest keys it
+  unlocks pass every gate: fixed. D-3510, ONEAUTH-11.
+- **`F-F95A6F`** `unguarded` — Gate 0 misses programs run through sed, make,
+  git, find, env and xargs: fixed. D-3511, ONEAUTH-12.
+- **`F-384764`** `unguarded` — The IST offset is re-typed as a literal in seven
+  production places: fixed. D-3512, ONEAUTH-13.
+- **`F-E960DF`** `unguarded` — pull ssm carries an untested private civil date
+  with a false justification: fixed. D-3513, ONEAUTH-14.
+- **`F-5741E4`** `wrong` — The backtest month presets use the 555-minute open
+  as the session length: fixed. D-3514.
+- **Round 2 REFUTED or latent:** the three 09:15 constants (each pinned to
+  555, cross-checked at run time by `pull::fold`); `cli::stored`'s
+  `NSE_OPEN_MINUTE_V2` (a frozen wire constant pinned by its digest test); the
+  hand-encoded index family (every disk decoder refuses an unknown code); the
+  web forced-exit copies (pinned by `FORCED_EXIT_MINUTE == 910`); the
+  auto-merge CODEOWNERS parse (latent, recorded in `docs/06-limits.md`).
+- **`F-616724`** `unguarded` — The lens's own gates leak: spawn spellings, sed and git forms, quoted cargo +, unread id cells, a blind IST reader: fixed. D-3515, ONEAUTH-01/04/11/12/13/15.
+
+### One-authority lens L4, round 4 (fixer `fxl4`) — dispositions — 2026-10-09
+
+Narrative only. No row is added to the table above, and no `F-` id was
+filed: these were found while finishing the lens, not through the ledger.
+
+- `wrong` — The markets page derived 2-, 10-, 30- and 60-minute candles from
+  IST midnight while `pull::fold` files every intraday rung from 09:15; the
+  offset was typed twelve times in ten web files and the session length in
+  three: fixed. D-3516, ONEAUTH-16, ONEAUTH-17.
+- `unguarded` — The IST-offset reader missed the offset as 330 minutes
+  (`runner::synthetic`) and read test-only module files, a `pub(super)` test
+  module and a commented test-module header as production: fixed.
+  D-3517, ONEAUTH-18, ONEAUTH-21.
+- `unguarded` — Four private copies of the 09:15 open (`indicators::orb`,
+  `runner::resample`, `runner::synthetic`, test-only `runner::exit_grid_policy`)
+  tied to nothing: fixed. D-3518, ONEAUTH-19, ONEAUTH-20.
+- `unguarded` — The web campaign rung list and fallback charge list held to
+  no Rust source: fixed. D-3519, ONEAUTH-22.
+- `unguarded` — Decision citations in `web/`, the handovers and the tool
+  configurations resolved by nothing: fixed. D-3520, ONEAUTH-24.
+- `unguarded` — Five civil-date copies compared by nothing: fixed. D-3521,
+  ONEAUTH-23.
+- **Round 4 REFUTED or not measured:** recorded in D-3522. D-3510 (auto-merge
+  sensitive paths) is left to the owner.

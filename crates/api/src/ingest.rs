@@ -242,8 +242,10 @@ impl SpotTarget {
     /// label, the counter and the run were three different answers to one
     /// question.
     ///
-    /// TWO CONSTANT-TIME TESTS, not a lookup. `is_sweepable` compares against a
-    /// two-element table and `contains` is a bitflag test, so deciding whether
+    /// TWO CONSTANT-TIME TESTS, not a lookup. `is_sweepable` compares an index
+    /// against the two-element `SWEPT` table and a share against one
+    /// `FNO_INDEX` probe and the five index names (D-3507 corrected "a
+    /// two-element table"), and `contains` is a bitflag test, so deciding whether
     /// one instrument is in the target costs the same at 800 as at one — this
     /// runs once per candidate while building the list, never inside the pull.
     #[must_use]

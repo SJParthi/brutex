@@ -52,9 +52,11 @@ const ONE_MINUTE_MICROS: i64 = 60_000_000;
 /// One civil day in microseconds.
 const DAY_MICROS: i64 = 24 * 60 * ONE_MINUTE_MICROS;
 
-/// First regular-session one-minute stamp, 09:15 IST.
+/// First regular-session one-minute stamp, 09:15 IST: `indicators`' copy of
+/// the open, the one the sweep side of the graph holds (D-3518). This was a
+/// private `9 * 60 + 15`, test-only and tied to nothing.
 #[cfg(test)]
-const REGULAR_OPEN_IST_MINUTE: i64 = 9 * 60 + 15;
+const REGULAR_OPEN_IST_MINUTE: i64 = indicators::SESSION_OPEN_MINUTE;
 
 /// Identity of the fill/cost behavior the grid engine implemented until
 /// D-1514. **Superseded and refused by name**: [`implemented_cost_model`]

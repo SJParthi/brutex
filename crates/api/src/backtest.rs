@@ -995,12 +995,13 @@ impl Ledger {
 
 /// Where the ledger lives beneath a store root: `<root>/results/runs.bin`.
 ///
-/// The same two segments `cli::results::Results::path` joins. Stated here as
-/// its own function so a test can name the file without reconstructing the
-/// path, and so the refusal above can print it.
+/// `cli::results::Results::path` builds it, and only it (D-3506): this used
+/// to join the same two segments itself, which agreed with the writer only
+/// until the writer moved. Kept as its own function so a test can name the
+/// file without reconstructing the path, and so the refusal above can print it.
 #[must_use]
 pub fn path_in(root: &Path) -> PathBuf {
-    root.join("results").join("runs.bin")
+    cli::results::Results::path(root)
 }
 
 /// The newest `limit` runs beneath a store root, and every fact about the read.

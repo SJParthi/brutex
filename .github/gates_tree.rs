@@ -693,6 +693,24 @@ fn toml_key(line: &str) -> &str {
     shaped().unwrap_or(line)
 }
 
+/// D-3510: the value of a `toolchain.channel` scanner line is a quoted stable
+/// release, one to three dot-separated runs of digits (`"1.97.1"`). `nightly`,
+/// `beta`, a date, a host triple or the moving `stable` name are refused:
+/// each either unlocks nightly-only manifest keys or stops being a pin.
+fn stable_release(line: &str) -> bool {
+    let Some((_, value)) = line.split_once(" = ") else {
+        return false;
+    };
+    let Some(inner) = value.strip_prefix('"').and_then(|v| v.strip_suffix('"')) else {
+        return false;
+    };
+    let parts: Vec<&str> = inner.split('.').collect();
+    (1..=3).contains(&parts.len())
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+}
+
 /// A tool file may carry only the keys its allowlist names.
 fn check_keys(file: &str, present: bool, keys: &Scan, allow: fn(&str) -> bool, r: &mut Report) {
     if !present {
@@ -729,7 +747,8 @@ fn then_sets(c: &[char], mut i: usize, space: &dyn Fn(char) -> bool) -> bool {
     matches!(c.get(i), Some(':' | '='))
 }
 
-const WRAPPERS: [&str; 11] = [
+// D-3510: the last two turn a stable toolchain into a nightly one.
+const WRAPPERS: [&str; 13] = [
     "RUSTC_WRAPPER",
     "RUSTC_WORKSPACE_WRAPPER",
     "CARGO_BUILD_RUSTC_WRAPPER",
@@ -741,6 +760,8 @@ const WRAPPERS: [&str; 11] = [
     "RUSTC_LINKER",
     "RUSTUP_TOOLCHAIN",
     "RUSTUP_HOME",
+    "RUSTC_BOOTSTRAP",
+    "__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS",
 ];
 
 /// `(^|[^A-Z0-9_])(<WRAPPERS>|CARGO_TARGET_[A-Z0-9_]+_(RUNNER|LINKER))([^A-Za-z0-9_]|$)`:
@@ -966,6 +987,29 @@ fn env_file_line(line: &str) -> bool {
 /// Every workflow line that sets a compiler wrapper, runner or linker, in the
 /// step's order: the first pattern over every file, then the second, then the
 /// third.
+/// D-3510: `cargo +toolchain` picks a toolchain past `rust-toolchain.toml`.
+/// Read with quotes removed and `\` continuations joined, so `"cargo"
+/// '+nightly'` and `cargo \` + newline + `+nightly` are the same words.
+fn cargo_plus(logical: &str) -> bool {
+    let c: Vec<char> = logical
+        .chars()
+        .filter(|x| *x != '"' && *x != '\'')
+        .collect();
+    if c.iter().find(|x| !ascii_space(**x)) == Some(&'#') {
+        return false;
+    }
+    (0..c.len()).any(|i| {
+        if (i > 0 && ident_char(c[i - 1])) || !at(&c, i, "cargo") {
+            return false;
+        }
+        let mut p = i + "cargo".len();
+        while c.get(p).is_some_and(|x| ascii_space(*x) || *x == '\\') {
+            p += 1;
+        }
+        p > i + "cargo".len() && c.get(p) == Some(&'+')
+    })
+}
+
 fn workflow_doors(workflows: &[(String, String)]) -> Vec<String> {
     let mut out = Vec::new();
     let rules: [fn(&str) -> bool; 3] = [wrapper_line, other_door_line, env_file_line];
@@ -974,6 +1018,29 @@ fn workflow_doors(workflows: &[(String, String)]) -> Vec<String> {
             for (n, l) in lines_of(text).into_iter().enumerate() {
                 if rule(l) {
                     out.push(format!("{name}:{}:{l}", n + 1));
+                }
+            }
+        }
+    }
+    for (name, text) in workflows {
+        let lines = lines_of(text);
+        let mut first = 0;
+        let mut logical = String::new();
+        for (n, l) in lines.iter().enumerate() {
+            if logical.is_empty() {
+                first = n;
+            }
+            match l.trim_end().strip_suffix('\\') {
+                Some(head) => {
+                    logical.push_str(head);
+                    logical.push(' ');
+                }
+                None => {
+                    logical.push_str(l);
+                    if cargo_plus(&logical) {
+                        out.push(format!("{name}:{}:{}", first + 1, logical.trim()));
+                    }
+                    logical.clear();
                 }
             }
         }
@@ -1018,6 +1085,15 @@ fn gate_1g_verdict(
         toolchain_key,
         &mut r,
     );
+    if tools.toolchain.0 && tools.toolchain.1.ok() {
+        for l in tools.toolchain.1.lines() {
+            if toml_key(l) == "toolchain.channel" && !stable_release(l) {
+                r.refuse(format!(
+                    "REFUSED  {TOOLCHAIN} pins a channel that is not a pinned stable release: {l}"
+                ));
+            }
+        }
+    }
     check_keys(
         NEXTEST,
         tools.nextest.0,
@@ -2828,6 +2904,11 @@ fn invariant_id(line: &str) -> Option<&str> {
         .unwrap_or(rest.len());
     let (tok, after) = rest.split_at(end);
     let after = after.strip_prefix('`').unwrap_or(after);
+    // D-3503: `| ID — claim |` shares the cell with its claim and is a row.
+    let after = [" — ", " – ", ": "]
+        .iter()
+        .find_map(|sep| after.strip_prefix(sep))
+        .map_or(after, |_| "|");
     (id_shape(tok) && after.trim_start_matches(' ').starts_with('|')).then_some(tok)
 }
 
@@ -3750,6 +3831,75 @@ mod tests {
     }
 
     #[test]
+    fn gate_1g_refuses_every_door_to_a_nightly_toolchain() {
+        // D-3510 (ONEAUTH-11). A nightly channel, or a stable one told to
+        // behave as nightly, unlocks manifest keys (`cargo-features`, profile
+        // `rustflags`, `codegen-backend`, `metabuild`) no gate read.
+        for channel in [
+            "\"nightly\"",
+            "\"nightly-2026-09-01\"",
+            "\"beta\"",
+            "\"stable\"",
+            "\"1.97.1-x86_64-unknown-linux-gnu\"",
+            "\"1..2\"",
+            "\".1\"",
+            "\"\"",
+            "1",
+        ] {
+            let t = scan(
+                &format!("rust-toolchain.toml:4:toolchain.channel = {channel}\n"),
+                0,
+            );
+            let n = ok();
+            let tools = ToolFiles {
+                toolchain: (true, &t),
+                nextest: (false, &n),
+            };
+            let r = gate_1g_verdict(&names(&["a"]), &tools, &[("w".into(), String::new())]);
+            assert!(r.refused, "{channel}");
+            assert!(
+                r.text().contains("not a pinned stable release"),
+                "{}",
+                r.text()
+            );
+        }
+        for channel in ["\"1.97.1\"", "\"1.97\"", "\"1\""] {
+            let t = scan(
+                &format!("rust-toolchain.toml:4:toolchain.channel = {channel}\n"),
+                0,
+            );
+            let n = ok();
+            let tools = ToolFiles {
+                toolchain: (true, &t),
+                nextest: (false, &n),
+            };
+            let r = gate_1g_verdict(&names(&["a"]), &tools, &[("w".into(), String::new())]);
+            assert!(!r.refused, "{channel}: {}", r.text());
+        }
+        for l in [
+            "      RUSTC_BOOTSTRAP: 1",
+            "    env RUSTC_BOOTSTRAP=1 cargo build",
+            "  __CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS: nightly",
+            "    cargo +nightly build --workspace",
+            "    cargo  +1.98.0 test",
+            "    \"cargo\" +nightly build",
+            "    'cargo' +nightly build",
+            "    cargo \"+nightly\" build",
+            "    cargo '+nightly' build",
+            "    cargo \\\n      +nightly build",
+        ] {
+            assert!(gate_1g_of(&["a"], l).refused, "{l}");
+        }
+        for l in [
+            "    cargo build # +nightly in prose",
+            "    a+b",
+            "  MY_RUSTC_BOOTSTRAP_NOTE: x",
+        ] {
+            assert!(!gate_1g_of(&["a"], l).refused, "{l}");
+        }
+    }
+
+    #[test]
     fn a_toml_key_is_read_from_the_scanners_line() {
         assert_eq!(toml_key("f:12:a.b = 1"), "a.b");
         assert_eq!(toml_key("f:x:a.b = 1"), "f:x:a.b = 1");
@@ -4463,6 +4613,39 @@ mod tests {
         let r = gate_10b("| ID | Invariant |\n|---|---|\n");
         assert!(r.refused);
         assert!(r.text().contains("GATE 10B READ NO INVARIANT IDENTIFIER"));
+    }
+
+    #[test]
+    fn gate_10b_reads_an_id_that_shares_its_cell_with_the_claim() {
+        // D-3503 (ONEAUTH-04).
+        assert_eq!(
+            invariant_id("| AU-O1CLI-6 — **a** | t | ✓ |"),
+            Some("AU-O1CLI-6")
+        );
+        assert_eq!(
+            invariant_id("|  `AU-PROBESTORE-7b` — x"),
+            Some("AU-PROBESTORE-7b")
+        );
+        assert_eq!(
+            invariant_id("| C4-RUNNER-01: claim | t | ✓ |"),
+            Some("C4-RUNNER-01")
+        );
+        assert_eq!(
+            invariant_id("| C4-RUNNER-02 – claim |"),
+            Some("C4-RUNNER-02")
+        );
+        for l in [
+            "| I-1 x |",
+            "| I-1 - x |",
+            "| I-1 —x |",
+            "| I-1—x |",
+            "| I-1:x |",
+        ] {
+            assert_eq!(invariant_id(l), None, "{l}");
+        }
+        let r = gate_10b("| AU-O1CLI-6 — **a** | t | ✓ |\n| AU-O1CLI-6 | b | t | ✓ |\n");
+        assert!(r.refused);
+        assert!(r.text().contains("AU-O1CLI-6"), "{}", r.text());
     }
 
     // ---- gate 7 ----

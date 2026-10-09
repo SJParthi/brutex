@@ -89,6 +89,7 @@
   import { watchVisible } from '$lib/page-requests.js';
   import { refusalFrom } from '$lib/refusal.js';
   import { untrack } from 'svelte';
+  import { IST_OFFSET_MS } from '$lib/ist.js';
 
   /* ======================================================================
      THE SHAPES, WRITTEN DOWN ONCE
@@ -376,7 +377,7 @@
    */
   function istTime(epoch) {
     if (typeof epoch !== 'number' || !Number.isFinite(epoch) || epoch <= 0) return null;
-    const d = new Date(epoch + 19800000);
+    const d = new Date(epoch + IST_OFFSET_MS);
     const p2 = (/** @type {number} */ x) => String(x).padStart(2, '0');
     return `${p2(d.getUTCHours())}:${p2(d.getUTCMinutes())}:${p2(d.getUTCSeconds())}`;
   }
@@ -902,7 +903,7 @@
    * @param {number | null} micros @returns {string | null} */
   function censusDay(micros) {
     if (micros === null || !Number.isSafeInteger(micros) || micros < 0) return null;
-    return new Date(Math.floor(micros / 1000) + 19800000).toISOString().slice(0, 10);
+    return new Date(Math.floor(micros / 1000) + IST_OFFSET_MS).toISOString().slice(0, 10);
   }
 
   /** One O(readable rows) projection per census or scope change. Distinct

@@ -303,7 +303,9 @@ impl ResearchResolvedExitGridV1 {
             .first()
             .ok_or("later expression execution is empty")?
             .ts_micros;
-        let day = |ts: i64| (i128::from(ts) + 19_800_000_000).div_euclid(86_400_000_000);
+        let day = |ts: i64| {
+            (i128::from(ts) + i128::from(indicators::IST_OFFSET_MICROS)).div_euclid(86_400_000_000)
+        };
         if first <= self.training_last_ts_micros()
             || day(first) <= day(self.training_last_ts_micros())
         {
@@ -387,7 +389,8 @@ fn summarize(
                 .get(index)
                 .ok_or("later expression support source absent")?
                 .ts_micros;
-            let day = (i128::from(stamp) + 19_800_000_000).div_euclid(86_400_000_000);
+            let day = (i128::from(stamp) + i128::from(indicators::IST_OFFSET_MICROS))
+                .div_euclid(86_400_000_000);
             if last != Some(day) {
                 support = support
                     .checked_add(1)
