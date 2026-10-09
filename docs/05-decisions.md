@@ -65025,3 +65025,92 @@ on a live leader would derive a second time and lose the single-flight
 guarantee D-1443 exists for. **Honest limit:** the `Landing` kill depends on
 test order. A rename that sorted a single-flight test ahead of it would
 restore the timeout, so the ordering is pinned in the test's own doc.
+
+### D-4700 — `pool-oos` pass 1 is `pool`'s pass 1, one instrument at a time in surface order, and the order guard reads every caller of a recording rung kernel — 2026-10-09
+
+**What was wrong.** G1-1, which leaves GAP13-13 and R9-cli-o1-0 PARTIAL.
+`pool_oos::run_under` screened its surface with
+`surface.par_iter().map(|symbol| Screened { outcome: crate::one_rung(..) })`.
+That is the shape D-1701 removed from `pool`. `pool-oos` was added after
+D-1701 (D-1576) with its own copy of pass 1. Every screen writes durable
+records from inside itself: preparation and probe attempts, frontier, trade
+and receipt blocks, its `runs.bin` row and its terminals. Here they were all
+written from rayon workers, so they landed in thread-completion order. Up to
+the pool's width of sweeps also ran at once, while
+`SWEEPS_SHARING_THIS_MACHINE` stayed at its resting 1, so each one took the
+whole machine's candidate ceiling and every core. D-1709 measured that
+oversubscription: eight such sweeps claimed 157 GB of 48.
+
+Neither guard could see it.
+`ordered::tests::every_whole_command_fan_out_writes_in_input_order` and
+`pool::tests::every_outer_loop_over_one_rung_runs_in_input_order` each named
+fixed files and functions, and neither read `pool_oos.rs`.
+
+**Decided.**
+- **One pass-1 function serves both verbs.** `pool::screen_pass_one` is
+  `crate::in_input_order(surface, ..)` around `one_rung_cached`. It takes the
+  root `run` resolved and the commit stamp as arguments, and raises no
+  `SharedBy`. That is D-1709's shape: one sweep in flight, the counter's 1
+  is true, and each sweep's own support lanes and pricing use every core.
+  `pool::run_under` and `pool_oos::run_under` both call it.
+  - `pool`'s pass 2 moved into `pool::price_surface`, so no caller of a
+    recording kernel spells parallel work itself.
+- **The guard is exhaustive within its reach.**
+  `ordered::tests::every_caller_of_a_recording_rung_kernel_runs_it_in_input_order`
+  reads every `.rs` file under `crates/cli/src` at test time.
+  - It finds each call of `one_rung(` and `one_rung_cached(`. A definition, a
+    method, a longer name, a comment and a string literal are not calls.
+  - For each call it finds the enclosing function. It then finds each
+    non-test caller of those functions, one level up.
+  - No body at either level may spell a parallel primitive: `par_iter`,
+    `par_bridge`, `par_chunks`, `par_extend`, `par_drain`, `rayon::join`,
+    `rayon::scope`, `rayon::spawn`, `ThreadPoolBuilder`, `thread::spawn`,
+    `thread::scope` or `ordered::map`.
+  - No first-level caller may raise `SharedBy::these`.
+  - A wrapper whose name is defined in two files is refused, not guessed.
+  - The test requires the callers it knows to be found, so a scanner that
+    found nothing would fail.
+  - `the_recording_caller_scan_sees_calls_and_nothing_else` holds the scanner
+    to a synthetic source.
+  - `pool::tests::every_outer_loop_over_one_rung_runs_in_input_order` now
+    reads its callers through the same scanner instead of a list.
+- **A behavioural test drives the order.**
+  `pool::tests::pass_one_files_in_surface_order_on_any_pool_width` runs
+  `screen_pass_one` over three instruments, with the first one held back
+  1.5 s by a test seam. It runs once on an explicit 4-thread pool and once
+  on a 1-thread pool. On each, ledger row i must be screen i, by identity and
+  by instrument, and the attempt tokens must rise.
+  `the_pass_one_seam_holds_back_exactly_the_named_screen` pins the seam.
+- **Two stale texts are corrected.** `pool.rs`'s module header said pass 1
+  screens "in parallel". Two test docs said pass 1 reads its root from the
+  environment.
+
+**Measured before the fix.** On the unfixed tree the scanner test failed at
+`ordered_tests.rs:471` with "pool.rs `run_under` calls a recording rung
+kernel and spells parallel work". That body held pass 2's `par_iter` beside
+pass 1, which is why pass 2 moved out. With only that moved, the test failed
+with the same message for `pool_oos.rs`'s `run_under`, which is the defect.
+The order test, with `screen_pass_one`'s map made parallel, failed at
+`pool.rs:4051` with "4 thread(s): ledger row 0 is surface instrument 0".
+
+**What changes in results.** Nothing stored changes shape, digest or
+identity. It is the same `one_rung_cached` call under the same root and the
+same stamp: `run` resolves the root from the environment and hands it
+through, where `one_rung` used to resolve it again from that same
+environment. Only two things change: the order in which `pool-oos` pass 1
+appends, and how many sweeps it runs at once. A `pool-oos` pass 1 now costs
+the sum of its screens rather than overlapping them. NOT MEASURED.
+
+**Rejected.**
+- `SharedBy::these(n)` around a parallel pass 1. D-1709 rejected this: the
+  divided ceiling enters `policy_of` and so the run identity, and each screen
+  would then record a run that differs from `range-rung`'s.
+- Adding `pool_oos.rs` to the fixed lists. The defect was a file the list did
+  not name, and the next one would be another.
+
+**Honest limit.** The scanner reads text, not a syntax tree.
+- It follows callers two levels up. A third wrapper level, a call through a
+  function pointer or a macro, or a parallel primitive not on its list would
+  not be seen.
+- It relies on rustfmt's layout: a function closes with `}` at its own
+  indentation.

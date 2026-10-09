@@ -224,4 +224,4 @@ pub(crate) fn turn() -> Turn {
 
 #[cfg(test)]
 #[path = "ordered_tests.rs"]
-mod tests;
+pub(crate) mod tests;

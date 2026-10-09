@@ -19,8 +19,10 @@
 //!
 //! 1. **PER SYMBOL.** Every instrument the store holds on this rung and this
 //!    feed that is on the engine surface — the two indices and every F&O cash
-//!    equity present — is screened exactly as `range-rung` screens one, in
-//!    parallel, one run identity each. The rows are the best combination on
+//!    equity present — is screened exactly as `range-rung` screens one, one
+//!    at a time in surface order (D-1701; this said "in parallel" until
+//!    D-4700, long after the code stopped being), one run identity each. The
+//!    rows are the best combination on
 //!    each stock ALONE. A stock whose own best row already has a tiny worst
 //!    trade and a huge best one is a candidate on its own, and that table says
 //!    which.
@@ -143,6 +145,114 @@ fn tail_rule_bp(rules: crate::Rules) -> i64 {
 pub(crate) struct Screened {
     pub(crate) symbol: String,
     pub(crate) outcome: Result<crate::results::Record, String>,
+}
+
+/// **Pass 1, `pool`'s and `pool-oos`'s: every surface instrument screened
+/// exactly as `range-rung` screens one, ONE AT A TIME, IN SURFACE ORDER.**
+///
+/// Each screen is a [`crate::one_rung_cached`], which writes its preparation
+/// and probe attempts, frontier, trade and receipt blocks and `runs.bin` row
+/// from inside itself. So the loop is [`crate::in_input_order`], as
+/// `sweep_rungs` runs rungs (D-1701, D-1709), and both verbs call this one
+/// function rather than each spelling its own loop.
+///
+/// # Why not in parallel
+///
+/// `pool-oos` screened its surface as a rayon parallel map (G1-1, D-4700), the
+/// shape D-1701 removed from `pool`: every instrument's durable rows landed in
+/// thread-completion order (GAP13-13), and up to the pool's width of sweeps
+/// ran at once while nothing raised `SWEEPS_SHARING_THIS_MACHINE`, so each
+/// took the whole machine's candidate ceiling and every core (R9-cli-o1-0;
+/// D-1709 measured eight such sweeps claiming 157 GB of 48). Dividing the
+/// ceiling instead would fold a different ceiling into every identity, so a
+/// pool's run would differ from `range-rung`'s for the same instrument. One
+/// at a time, the counter's 1 is the truth, and each screen's own support
+/// lanes and grid pricing still use every core.
+///
+/// # The root is the caller's
+///
+/// `root` is the store the caller already resolved through
+/// `crate::store_root`, the root `one_rung` would resolve again from the
+/// same environment, so production reads exactly what it read. Passing it
+/// lets an in-process test drive pass 1 on a generated store.
+///
+/// # Cost
+///
+/// `surface.len()` screens in sequence, each what `range-rung` costs on that
+/// instrument. Not a §3 rule-4 operation; `docs/06-limits.md` §171 states it.
+pub(crate) fn screen_pass_one(
+    root: &std::path::Path,
+    commit: Option<&'static str>,
+    vendor_word: &str,
+    surface: &[String],
+    rung: &'static str,
+    (from, to): ((u16, u8), (u16, u8)),
+    support_ppm: Option<u64>,
+) -> Vec<Screened> {
+    crate::in_input_order(surface, |symbol| {
+        #[cfg(test)]
+        pause_if_held_back(root, symbol);
+        Screened {
+            symbol: symbol.clone(),
+            outcome: crate::one_rung_cached(
+                crate::RungAsk {
+                    vendor_word,
+                    underlying: symbol,
+                    rung,
+                    from,
+                    to,
+                    support_ppm,
+                    attempt: None,
+                },
+                crate::RungStore {
+                    root: Ok(root.to_path_buf()),
+                    commit,
+                },
+                &mut crate::AuditCache::default(),
+            )
+            .outcome,
+        }
+    })
+}
+
+/// A test seam: the store root and the instrument whose pass-1 screen is held
+/// back, so the screens would finish in a different order from the surface's.
+/// Process-wide, so a screen on any thread sees it, and keyed by root, so no
+/// other test's store is slowed. D-4700.
+#[cfg(test)]
+static HELD_BACK: std::sync::Mutex<Option<(std::path::PathBuf, String)>> =
+    std::sync::Mutex::new(None);
+
+/// Hold back every later pass-1 screen of `symbol` on `root`; `None` clears.
+#[cfg(test)]
+pub(crate) fn hold_back(held: Option<(&std::path::Path, &str)>) {
+    let mut slot = HELD_BACK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *slot = held.map(|(root, symbol)| (root.to_path_buf(), symbol.to_owned()));
+}
+
+/// Whether the seam holds this screen back: exactly the named root AND
+/// symbol, and nothing when none is named. Its own function so the choice is
+/// asserted directly: the ordering test would pass whichever screen was slow.
+#[cfg(test)]
+fn is_held_back(
+    held: Option<&(std::path::PathBuf, String)>,
+    root: &std::path::Path,
+    symbol: &str,
+) -> bool {
+    held.is_some_and(|(held_root, held_symbol)| held_root == root && held_symbol == symbol)
+}
+
+#[cfg(test)]
+fn pause_if_held_back(root: &std::path::Path, symbol: &str) {
+    let held = HELD_BACK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if is_held_back(held.as_ref(), root, symbol) {
+        std::thread::sleep(std::time::Duration::from_millis(1_500));
+    }
 }
 
 /// One `(combination, side)` the union holds, in first-seen order.
@@ -321,19 +431,17 @@ fn run(
 /// returned: [`at_least_one_screened`] refuses the verb instead, with every
 /// instrument's reason and the head's `unread` blocks (D-0696).
 ///
-/// **The root is supplied for the head, the union and pass 2, not pass 1.**
-/// Pass 1 screens each instrument through `crate::one_rung`, exactly as
-/// `range-rung` does, and that reads the store root from the environment. An
-/// in-process test therefore drives this function only on a surface that is
-/// empty, where it returns after the head. A surface with an instrument on it
-/// is driven through the verb itself, by
-/// `the_pool_verb_prints_its_whole_page_on_a_generated_store`, from a child
-/// process whose environment names a generated store. That reaches this
-/// function only in a stamped build -- one of a tree equal to HEAD, as a
-/// clean checkout is -- because [`run`] checks the stamp first and an
-/// unstamped build refuses there. The stamp never kept a clean build's test
-/// out of [`run`]; the store root read from the environment is what keeps an
-/// in-process test off a non-empty surface (D-0696).
+/// **The root is supplied for the head, pass 1, the union and pass 2.**
+/// Until D-4700 pass 1 screened through `crate::one_rung`, which reads the
+/// store root from the environment; [`screen_pass_one`] takes this root, the
+/// one [`run`] resolved from that same environment. Pass 1 also takes the
+/// commit stamp, so an unstamped build's in-process call still refuses each
+/// instrument there: this function is driven in-process on an empty surface,
+/// where it returns after the head, and with an instrument on it through the
+/// verb itself, by `the_pool_verb_prints_its_whole_page_on_a_generated_store`,
+/// from a child process whose environment names a generated store, in a
+/// stamped build only. Pass 1 itself is driven in-process through
+/// [`screen_pass_one`] with a stated commit (D-0696, D-4700).
 fn run_under(
     root: &std::path::Path,
     vendor: brutex_core::vendor::Vendor,
@@ -359,18 +467,20 @@ fn run_under(
 
     // ── PASS 1: every instrument, exactly as `range-rung` screens one ──
     //
-    // ONE AT A TIME, IN SURFACE ORDER, as `sweep_rungs` runs rungs. This was a
-    // rayon parallel map over the surface, which wrote every instrument's ledger row and
-    // attempts in thread-completion order (GAP13-13) and ran up to the rayon
-    // pool's width of sweeps at once while nothing raised
-    // `SWEEPS_SHARING_THIS_MACHINE`, so each concurrent sweep took the whole
-    // machine's ceiling and every core (R9-cli-o1-0). With one sweep in flight
-    // the counter's 1 is the truth, and each sweep's own support lanes and
-    // pricing still use every core. D-1701.
-    let screened: Vec<Screened> = crate::in_input_order(&surface, |symbol| Screened {
-        symbol: symbol.clone(),
-        outcome: crate::one_rung(vendor_word, symbol, rung, from, to, support_ppm, None).outcome,
-    });
+    // ONE AT A TIME, IN SURFACE ORDER, in the function `pool-oos` shares
+    // (D-1701, D-4700). This was a rayon parallel map over the surface until
+    // D-1701, which filed every instrument's ledger row and attempts in
+    // thread-completion order (GAP13-13) and gave each concurrent sweep the
+    // whole machine (R9-cli-o1-0); see `screen_pass_one`.
+    let screened = screen_pass_one(
+        root,
+        crate::commit_stamp(),
+        vendor_word,
+        &surface,
+        rung,
+        (from, to),
+        support_ppm,
+    );
     let screened_ok = screened.iter().filter(|s| s.outcome.is_ok()).count();
     crate::note(
         &telemetry::Event::info("cli.pool", "pass 1 finished")
@@ -406,10 +516,7 @@ fn run_under(
             .with("candidates", count(union.len()))
             .with("instruments", count(surface.len())),
     );
-    let priced: Vec<Result<Vec<Priced>, String>> = surface
-        .par_iter()
-        .map(|symbol| price_all(root, vendor, symbol, rung, from, to, &union))
-        .collect();
+    let priced = price_surface(root, vendor, &surface, rung, (from, to), &union);
     let rules = crate::Rules::operator();
     let pooled = fold(&union, &surface, &priced, rules);
     crate::note(
@@ -427,6 +534,26 @@ fn run_under(
     );
     render_pooled(&mut out, &union, &surface, &priced, &pooled, rules);
     Ok(out)
+}
+
+/// Pass 2's pricing: [`price_all`] for every surface instrument, in parallel
+/// over INSTRUMENTS with an indexed `collect`, so the result is in surface
+/// order whatever the thread count. It writes nothing, which is why it may be
+/// parallel where pass 1 may not. Its own function so pass 1's caller holds
+/// no parallel spelling (`every_caller_of_a_recording_rung_kernel_runs_it_in_input_order`,
+/// D-4700).
+fn price_surface(
+    root: &std::path::Path,
+    vendor: brutex_core::vendor::Vendor,
+    surface: &[String],
+    rung: &'static str,
+    (from, to): ((u16, u8), (u16, u8)),
+    union: &[Candidate],
+) -> Vec<Result<Vec<Priced>, String>> {
+    surface
+        .par_iter()
+        .map(|symbol| price_all(root, vendor, symbol, rung, from, to, union))
+        .collect()
 }
 
 /// Everything the page says before a bar is read, and the surface pass 1
@@ -2216,8 +2343,12 @@ mod tests {
     /// test stayed green. Everything after the stamp, feed, rung and root
     /// checks is now `run_under`, which this drives on a scratch store whose
     /// surface is empty, where it returns after the head. A surface with an
-    /// instrument on it is screened through `one_rung`, which reads the root
-    /// from the environment, so no in-process test drives that path.
+    /// instrument on it is screened by `screen_pass_one`, under the root
+    /// handed here and the build's commit stamp, so an unstamped build's
+    /// in-process call refuses each instrument; pass 1 itself is driven
+    /// in-process through `screen_pass_one` with a stated commit (D-4700;
+    /// until then it screened through `one_rung`, which read the root from
+    /// the environment).
     /// `the_pool_verb_prints_its_whole_page_on_a_generated_store` drives it
     /// from a child process, in a stamped build only, and here it is held by
     /// the shape of the source in every build: `out` is bound from
@@ -2716,7 +2847,8 @@ mod tests {
     /// commit-stamp check, was false: the build script stamps a tree equal to
     /// HEAD, and a clean checkout, CI's among them, is one. What keeps an
     /// in-process test off a surface with an instrument on it is the store
-    /// root, which `run` and pass 1's `one_rung` read from the environment.
+    /// root, which `run` reads from the environment and hands to pass 1
+    /// (until D-4700 pass 1's `one_rung` read it there itself).
     /// So this test runs itself again as a child, as
     /// `public_generated_probe_and_screen_agree_with_durable_results` runs
     /// itself. The child inherits no `BRUTEX_` variable from the shell that
@@ -3817,6 +3949,101 @@ mod tests {
         assert!(!root.exists(), "a refused feed creates no tree");
     }
 
+    /// `run` on a rayon pool of exactly `threads`, so a verdict about order
+    /// never depends on the width of the machine running the test.
+    fn on_pool<R: Send>(threads: usize, run: impl FnOnce() -> R + Send) -> R {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .expect("a pool")
+            .install(run)
+    }
+
+    /// **Pass 1 -- `pool`'s and `pool-oos`'s -- files every instrument's
+    /// ledger row and attempts in SURFACE order, whatever order its screens
+    /// would finish in, on a four-thread pool and on a one-thread pool.**
+    /// G1-1, D-4700.
+    ///
+    /// The surface's first instrument is held back. `pool-oos` screened its
+    /// surface as a rayon parallel map, so on any pool wider than one thread
+    /// the held-back instrument was filed LAST: its ledger row was not row 0
+    /// and its attempt token was not the smallest.
+    #[test]
+    fn pass_one_files_in_surface_order_on_any_pool_width() {
+        let _knobs = crate::knobs::serially();
+        crate::knobs::clear_all();
+        crate::knobs::set("BRUTEX_VALIDATE", "0");
+        for threads in [4, 1] {
+            crate::audited_stored::with_warmed_store_of(
+                &["NIFTY", "BANKNIFTY", "RELIANCE"],
+                |root| {
+                    let span = ((2025, 5), (2025, 5));
+                    let (_, surface, _) =
+                        super::head_under(root, "zerodha", "5min", span.0, span.1, None)
+                            .expect("the head");
+                    assert_eq!(surface, ["BANKNIFTY", "NIFTY", "RELIANCE"], "premise");
+                    super::hold_back(Some((root, "BANKNIFTY")));
+                    let screened = on_pool(threads, || {
+                        super::screen_pass_one(
+                            root,
+                            Some("generated-pass-one-order"),
+                            "zerodha",
+                            &surface,
+                            "5min",
+                            span,
+                            Some(600_000),
+                        )
+                    });
+                    super::hold_back(None);
+                    let names: Vec<&str> = screened.iter().map(|s| s.symbol.as_str()).collect();
+                    assert_eq!(names, surface, "{threads} thread(s)");
+                    let mut ledger = crate::results::Results::open_read(root).expect("ledger");
+                    assert_eq!(ledger.len().expect("rows"), 3, "{threads} thread(s)");
+                    let mut previous = 0;
+                    for (index, screen) in (0_u64..).zip(&screened) {
+                        let record = screen.outcome.as_ref().expect("each instrument records");
+                        let row = ledger.read(index).expect("row");
+                        assert_eq!(
+                            row.identity, record.identity,
+                            "{threads} thread(s): ledger row {index} is surface instrument {index}"
+                        );
+                        assert_eq!(
+                            crate::results::read_field(&row.underlying),
+                            screen.symbol,
+                            "{threads} thread(s)"
+                        );
+                        let evidence =
+                            crate::sweep_evidence::read(root, record.identity, 1_048_576)
+                                .expect("evidence")
+                                .expect("its attempt");
+                        assert!(
+                            evidence.attempt > previous,
+                            "{threads} thread(s): attempt tokens rise in surface order"
+                        );
+                        previous = evidence.attempt;
+                    }
+                },
+            );
+        }
+        crate::knobs::clear_all();
+    }
+
+    /// The seam holds back exactly the named root and instrument, and nothing
+    /// when none is named.
+    #[test]
+    fn the_pass_one_seam_holds_back_exactly_the_named_screen() {
+        let root = std::path::Path::new("/a");
+        let held = (root.to_path_buf(), "NIFTY".to_owned());
+        assert!(super::is_held_back(Some(&held), root, "NIFTY"));
+        assert!(!super::is_held_back(Some(&held), root, "BANKNIFTY"));
+        assert!(!super::is_held_back(
+            Some(&held),
+            std::path::Path::new("/b"),
+            "NIFTY"
+        ));
+        assert!(!super::is_held_back(None, root, "NIFTY"));
+    }
+
     /// **`in_input_order` runs one call at a time, in input order, even when
     /// the first is the slowest.** GAP13-13, R9-cli-o1-0, D-1701.
     #[test]
@@ -3838,37 +4065,47 @@ mod tests {
         assert!(crate::in_input_order(&[] as &[u8], |_| 0_u8).is_empty());
     }
 
-    /// Both outer loops over `one_rung` -- `range-all`'s and pool pass 1's --
-    /// go through `in_input_order` and neither is a `par_iter`. Each
-    /// `one_rung` writes durable rows from inside the kernel, so a parallel
-    /// outer loop writes them in completion order (GAP13-13) and runs several
-    /// whole-machine sweeps at once (R9-cli-o1-0). D-1701.
+    /// **Every outer loop over a recording rung kernel goes through
+    /// `in_input_order`, and no caller of one -- found by scanning every file
+    /// under `src`, not a list -- spells parallel work.** `range-all`'s
+    /// `sweep_rungs` and pass 1's `screen_pass_one` are the two loops; `pool`
+    /// and `pool-oos` both reach pass 1 through `screen_pass_one`, and
+    /// neither holds a parallel spelling of its own. Each kernel writes
+    /// durable rows from inside itself, so a parallel caller writes them in
+    /// completion order (GAP13-13) and runs several whole-machine sweeps at
+    /// once (R9-cli-o1-0). This read two named files and missed `pool-oos`'s
+    /// pass 1 (G1-1). D-1701, D-4700.
     #[test]
     fn every_outer_loop_over_one_rung_runs_in_input_order() {
-        let body = |source: &'static str, head: &str| -> &'static str {
-            let from = source.find(head).expect("the function");
-            source
-                .get(from..)
-                .and_then(|rest| rest.find("\n}\n").and_then(|to| rest.get(..to)))
-                .expect("its body")
+        use crate::ordered::tests::{parallel_in, recording_callers, sources};
+        let callers = recording_callers(&sources()).expect("every caller is found");
+        let find = |file: &str, name: &str, level: u8| {
+            callers
+                .iter()
+                .find(|c| c.file == file && c.name == name && c.level == level && !c.test)
+                .unwrap_or_else(|| unreachable!("{file} {name} level {level}: {callers:#?}"))
         };
-        let rungs = body(include_str!("lib.rs"), "\nfn sweep_rungs(");
-        assert!(rungs.contains("in_input_order(rungs,") && !rungs.contains("par_iter"));
-        assert!(
-            !rungs.contains("SharedBy::these"),
-            "one sweep in flight shares nothing"
-        );
-        let pool = body(include_str!("pool.rs"), "\nfn run_under(");
-        let pass_1 = pool
-            .split_once("PASS 1:")
-            .and_then(|(_, rest)| rest.split_once("PASS 2:"))
-            .expect("pass 1")
-            .0;
-        assert!(
-            pass_1.contains("crate::in_input_order(&surface,"),
-            "{pass_1}"
-        );
-        assert!(pass_1.contains("crate::one_rung("));
-        assert!(!pass_1.contains("par_iter"), "{pass_1}");
+        for (file, name, shape) in [
+            ("lib.rs", "sweep_rungs", "in_input_order(rungs,"),
+            (
+                "pool.rs",
+                "screen_pass_one",
+                "crate::in_input_order(surface,",
+            ),
+        ] {
+            let body = &find(file, name, 1).body;
+            assert!(body.contains(shape), "{file} {name}:\n{body}");
+            assert!(
+                !body.contains("SharedBy::these"),
+                "one sweep in flight shares nothing"
+            );
+        }
+        for file in ["pool.rs", "pool_oos.rs"] {
+            let body = &find(file, "run_under", 2).body;
+            assert!(body.contains("screen_pass_one("), "{file}");
+        }
+        for caller in &callers {
+            assert_eq!(parallel_in(&caller.body), None, "{caller:#?}");
+        }
     }
 }

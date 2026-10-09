@@ -77,7 +77,7 @@ use std::path::Path;
 use rayon::prelude::*;
 
 use crate::frontier::Direction;
-use crate::pool::{Candidate, PreparedSpan, Screened};
+use crate::pool::{Candidate, PreparedSpan};
 
 /// A month range, first and last month inclusive, as `(year, month)`.
 type Months = ((u16, u8), (u16, u8));
@@ -573,22 +573,19 @@ fn run_under(
     if surface.is_empty() {
         return Ok(out);
     }
-    let screened: Vec<Screened> = surface
-        .par_iter()
-        .map(|symbol| Screened {
-            symbol: symbol.clone(),
-            outcome: crate::one_rung(
-                vendor_word,
-                symbol,
-                rung,
-                training.0,
-                training.1,
-                support_ppm,
-                None,
-            )
-            .outcome,
-        })
-        .collect();
+    // PASS 1 IS `pool`'s, CALLED, NOT COPIED: one instrument at a time in
+    // surface order. This was a rayon parallel map around `one_rung` (G1-1,
+    // D-4700), so every screen's durable rows landed in thread-completion
+    // order and each concurrent sweep took the whole machine.
+    let screened = crate::pool::screen_pass_one(
+        root,
+        crate::commit_stamp(),
+        vendor_word,
+        &surface,
+        rung,
+        training,
+        support_ppm,
+    );
     crate::pool::at_least_one_screened(&screened, &unread)?;
     crate::pool::render_per_symbol(&mut out, &screened);
     let (union, unread) = crate::pool::union_of(root, &screened);

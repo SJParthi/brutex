@@ -8774,7 +8774,8 @@ made exact by exposing each cell's trade sequence from the grid, which is a
 change inside the pricing loop and is not made. Every report labels the
 column as a bound.
 
-Cost: pass 1 is I screens, one at a time in surface order (D-1701), each
+Cost: pass 1 is I screens, one at a time in surface order (D-1701), in
+`pool::screen_pass_one`, which `pool-oos` shares since D-4700, each
 what `range-rung` costs on that instrument, with that screen's sweep and
 pricing parallel inside it. The union admits the parent ledger and receipt
 sidecar once, O(L + R) for L ledger rows and R receipts, then reads one
@@ -12995,8 +12996,13 @@ not:
   to `runs.bin` follow input order. D-1709 keeps this shape over D-1556's
   ordered lanes for those two loops. The Boolean family pools run as
   `ordered::map` lanes (D-1556, "Ordered lanes" below), so their writes follow
-  input order too. Reports are gathered in input order and every ledger
-  lookup is by identity. A plain `descend` step's cost is stated under
+  input order too. `pool-oos` pass 1 was a parallel map around `one_rung`
+  from D-1576 until D-4700 (G1-1), so its rows followed thread completion and
+  its concurrent sweeps each took the whole machine; it now calls
+  `pool::screen_pass_one`, the one function `pool` pass 1 runs, and an order
+  guard reads every caller of `one_rung`/`one_rung_cached` in the crate
+  rather than a list of files. Reports are gathered in input order and every
+  ledger lookup is by identity. A plain `descend` step's cost is stated under
   "Plain `descend` (D-1557)" below, which replaced the D-1567 statement here.
 - **`latest_for` (D-1567, removed by D-1700).** It was O(runs) per call: it
   opened the results ledger, which builds the identity index and hashes the
@@ -15162,6 +15168,13 @@ most 100,000).
   on a rung above one minute they are coarser than the exit grid's minute
   replay. One later span is one draw. Multiplicity across separate
   `pool-oos` invocations is not controlled (gaps-12).
+- **`pool-oos` pass 1 (D-4700).** One screen at a time in surface order,
+  through `pool::screen_pass_one`, so each screen is what `range-rung` costs
+  on that instrument, with its sweep and pricing parallel inside it, and pass
+  1 costs the sum of I screens. Until D-4700 it was a rayon map of up to the
+  pool's width of whole-machine sweeps at once, with nothing raising
+  `SWEEPS_SHARING_THIS_MACHINE` (G1-1): the oversubscription D-1709 measured
+  at 157 GB claimed of 48. The wall-clock change is NOT MEASURED.
 - **`pool-oos` memory (D-2300).** The spans are streamed: each lane prepares
   one span, walks every union candidate over it, and drops its bars and
   column before the next, so at most one span per running Rayon lane is
@@ -15460,7 +15473,8 @@ The rollback on a failed append is one `seek`, one `set_len` and one
   chunk's slowest month plus its sequential filing (one ledger append and one
   terminal per month), not the parallel makespan of the whole walk. Memory per
   chunk is what one month per worker holds, as before.
-- **`range-all` and pool pass 1 run `one_rung` one call at a time.** Each
+- **`range-all` and pool pass 1 run `one_rung` one call at a time** (and
+  `pool-oos` pass 1, the same function since D-4700). Each
   sweep's support lanes and each screen's candidate pricing are still
   parallel, and each call now gets the whole machine's ceiling and cores; what
   no longer overlaps is each rung's or instrument's span loads, column folds
