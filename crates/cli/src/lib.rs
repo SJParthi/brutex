@@ -8219,8 +8219,10 @@ fn append_condition_names(out: &mut String, record: &crate::results::Record) {
     // was made and never what made it. Version 3 of the ledger carries the six
     // mask words for exactly this line.
     //
-    // `runner::report::names_from_words` and not `vocab` directly: see its own
-    // comment -- `CLAUDE.md` §5 does not give `cli` a `vocab` arrow.
+    // `runner::report::names_from_words` and not `vocab` directly, so this line
+    // and `render_top_record` decode the six stored words one way. `cli` does
+    // hold the `vocab` arrow (D-0683); the call is not a workaround for a
+    // missing one (G1-4, D-4736).
     let names = runner::report::names_from_words(record.mask_words);
     if names.is_empty() {
         // Distinguishable from "the names are missing". An all-zero mask means

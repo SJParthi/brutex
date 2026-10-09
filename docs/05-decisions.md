@@ -65140,3 +65140,34 @@ nothing where the overlay census withholds the day. `docs/06-limits.md` now
 says O(signal + minutes + d).
 
 Invariants L1FC-06, L1FC-07.
+
+### D-4736 — No comment in `crates/` may deny `cli` one of its nine arrows — 2026-10-09
+
+**Finding.** G1-4. These comments denied arrows that `cli` has:
+- a comment in `cli::append_condition_names`: "`CLAUDE.md` §5 does not give
+  `cli` a `vocab` arrow";
+- the doc of `runner::report::names_from_words`: "`vocab` is **not among
+  them**";
+- the head of `crates/cli/Cargo.toml`: "ONE DEPENDENCY, AND IT IS THE JOIN
+  CRATE" and "NO ARROW TO `store`".
+
+`cli` declares all nine arrows (D-0683, D-0208). D-1706's test read only the
+files directly under `crates/cli/src`, and only six exact sentences.
+
+**The decision.** Each sentence is corrected. The manifest's head is now
+history that cites D-0169 and D-0208. `crate_graph_claims.rs` now walks every
+`.rs` file and `Cargo.toml` under `crates/`. It reads `cli`'s arrows from the
+`path = "../X"` keys of `cli`'s own manifest, and the premise requires nine.
+It flags a comment clause when the clause has:
+- a denial word;
+- one of those arrows;
+- either `cli` with no other crate named before the denial, or, inside
+  `crates/cli`, no crate named before the denial at all.
+
+Quoted text is a citation and is skipped. A separate test pins the detector
+against five false sentences and six true ones. The exact lint-name check
+stays limited to `cli`, because `api` has no `indicators` or `runner` arrow
+and so its reasons for the same suppression are true. Run against the
+fbdabaec tree, the widened test named exactly the three sentences above.
+
+Invariants L1FC-08, L1FC-09.
