@@ -345,3 +345,28 @@ fn turns_are_granted_in_round_then_input_order_within_a_deadline() {
         "round by round, lanes in input order"
     );
 }
+
+/// **The two turn tests above are first in the test order, by name.** D-4180.
+///
+/// Under one test thread and fail-fast, a mutant that leaves a turn ungranted
+/// is caught only if one of these runs before any test that waits on a turn
+/// with no deadline. `.config/nextest.toml` gives both `priority = 100` by
+/// exact name, and nextest does not complain when a filter matches nothing,
+/// so a rename would silently put the hang back. The two function pointers
+/// below stop compiling on a rename, and the config is checked for both names.
+#[test]
+fn the_d_4180_priority_names_both_turn_tests() {
+    let _: fn() = a_lane_never_waits_on_its_own_slot;
+    let _: fn() = turns_are_granted_in_round_then_input_order_within_a_deadline;
+    let config = include_str!("../../../.config/nextest.toml");
+    for name in [
+        "a_lane_never_waits_on_its_own_slot",
+        "turns_are_granted_in_round_then_input_order_within_a_deadline",
+    ] {
+        let filter = format!("test(=ordered::tests::{name})");
+        assert!(
+            config.contains(&filter),
+            "`.config/nextest.toml` must run {filter} first (D-4180)"
+        );
+    }
+}
