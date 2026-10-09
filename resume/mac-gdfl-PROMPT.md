@@ -29,6 +29,8 @@ SET UP:
   BRUTEX_WEB=wt/APP/web, caffeinate).
 - Kill leftover cargo/rustc from the old session with a bash per-pid loop, unsandboxed, never the :8080 api.
 - Start caffeinate -dimsu -t 172800 and request keep-awake.
+- Run one small Workflow agent first to confirm this account can run agents: on 9 Oct the last agents failed with
+  "Your organization has disabled Claude subscription access for Claude Code". If that recurs, say so plainly and stop.
 
 WORK, in this order (use Workflows; up to 6 agents while usage allows):
 1. /db fix run: Workflow scriptPath work-20260925/state/fix/db-fix-round-1b.js, launched FRESH (never
@@ -60,6 +62,8 @@ WORK, in this order (use Workflows; up to 6 agents while usage allows):
    to the store's audit as one record per instrument-day (O(1) to look up), and shown on /verify and as a per-day
    verified/failed badge on /db. Then any pull or import is captured, stored, checked and visible with no agent in
    the loop. Record it as a decision; Rust only; tests that fail when the check is broken.
+   NOTE: the design says reconcile.py places a late row at the running maximum, which it calls different from D-2802
+   (its test GV-04 pins the difference). Check that first-hand before trusting the 29-day accuracy table.
    ALSO GDFL FROM THE INGEST PAGE (operator, 9 Oct): today Zerodha pulls start from /ingest (POST /pull/run), but a GDFL
    import starts only from the command line (cli gdfl-import via state/import-scratch/run-real-store.sh) and /ingest
    only shows its journal (/imports.json). Add a GDFL import form to /ingest that runs the same Rust import: source
