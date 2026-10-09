@@ -5866,10 +5866,53 @@ impl Site {
     ///
     /// The verdict, when the fresh parse reads no vendor at all.
     pub fn reparse(&self, masters: &Path) -> Result<String, String> {
+        self.reparse_unless(masters, false)
+    }
+
+    /// [`Site::reparse`], SKIPPED when no master has moved since the parse
+    /// this site answers from. What `POST /masters/refresh` calls.
+    ///
+    /// # Why (so1-5, D-4438)
+    ///
+    /// A refresh re-parsed every master and rebuilt the merged universe, its
+    /// catalogue orders, join and coverage, every time it was pressed, while
+    /// `pull::masters::land` already declines to rewrite a master whose bytes
+    /// are unchanged. So a refresh that landed nothing new rebuilt the same
+    /// universe from the same bytes. The skip compares one `stat` per master
+    /// (device, inode, length and both clocks, [`MasterStamps`]) with the
+    /// stamps taken BEFORE the parse being answered from; any write moves the
+    /// status-change time, so a master that reads differently cannot keep its
+    /// stamp. A stamp that could not be taken never matches, and the parse
+    /// runs. The answer says which happened.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`Site::reparse`] refuses with, when it runs.
+    pub fn reparse_if_moved(&self, masters: &Path) -> Result<String, String> {
+        self.reparse_unless(masters, true)
+    }
+
+    /// [`Site::reparse`], or nothing when `skip_unmoved` and every master's
+    /// stamp is the one the held parse was taken under.
+    fn reparse_unless(&self, masters: &Path, skip_unmoved: bool) -> Result<String, String> {
         let _reload = self
             .reload_lock
             .lock()
             .map_err(|_| "master reload lock poisoned; previous universe retained".to_owned())?;
+        // TAKEN BEFORE THE READ, like `parsed_at` below: a master written
+        // during the parse keeps a stamp the next refresh does not match.
+        let stamps = MasterStamps::of(masters);
+        if skip_unmoved {
+            let held = self.universe();
+            if stamps.is_some() && held.masters == stamps {
+                return Ok(format!(
+                    "no master moved since the parse this process answers from \
+                     (generation {}), so the universe was not re-parsed: {}",
+                    held.generation,
+                    held.read.notes.join(" · ")
+                ));
+            }
+        }
         // A file changed during parsing must remain visibly newer than this
         // snapshot, not be hidden by a timestamp taken after the read.
         let parsed_at = std::time::SystemTime::now();
@@ -5927,6 +5970,7 @@ impl Site {
             targets,
             target_keys,
             generation,
+            masters: stamps,
         };
         Ok(summary)
     }
@@ -5997,6 +6041,9 @@ impl Site {
                 targets,
                 target_keys,
                 generation: 0,
+                // UNKNOWN until `Site::load` names the directory it parsed,
+                // and an unknown stamp never lets a refresh skip its parse.
+                masters: None,
             }),
             censuses,
             series,
@@ -6021,11 +6068,18 @@ impl Site {
     /// The whole site, read off disk once.
     #[must_use]
     pub fn load(masters: &Path, store_root: &Path) -> Self {
-        Self::new(
+        // Stamped BEFORE the parse, as `Site::reparse` stamps (D-4438).
+        let stamps = MasterStamps::of(masters);
+        let mut site = Self::new(
             universe(masters),
             census::read_all(store_root),
             store_root.to_path_buf(),
-        )
+        );
+        site.parsed
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .masters = stamps;
+        site
     }
 
     /// The same site, permitted to reach a live broker.
@@ -6184,6 +6238,39 @@ pub struct Parsed {
     /// `autopilot::SeriesCache` compares it to know whether its work lists are
     /// still the universe's (W1-api1-1, D-0949).
     pub generation: u64,
+    /// One `stat` of every master, taken before this parse read them, or
+    /// `None` when that is unknown. [`Site::reparse_if_moved`] skips a parse
+    /// only when a fresh set equals it. so1-5, D-4438.
+    pub(crate) masters: Option<MasterStamps>,
+}
+
+/// What one `stat` of each master said: the directory and, per master in
+/// [`master_paths`] order, its stamp or `None` for a master that is not
+/// there. so1-5, D-4438.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MasterStamps {
+    dir: PathBuf,
+    files: Vec<Option<crate::answer_memo::FileStamp>>,
+}
+
+impl MasterStamps {
+    /// Stamps every master under `dir`, or `None` when any `stat` failed for
+    /// a reason other than absence: a stamp that could not be taken must not
+    /// compare equal to anything.
+    pub(crate) fn of(dir: &Path) -> Option<Self> {
+        let mut files = Vec::with_capacity(Vendor::MASTERED.len());
+        for (_, path) in master_paths(dir) {
+            match crate::answer_memo::FileStamp::of(&path) {
+                Ok(stamp) => files.push(Some(stamp)),
+                Err(why) if why.kind() == std::io::ErrorKind::NotFound => files.push(None),
+                Err(_) => return None,
+            }
+        }
+        Some(Self {
+            dir: dir.to_path_buf(),
+            files,
+        })
+    }
 }
 
 /// How many instruments each spot target names.
@@ -21481,6 +21568,112 @@ mod tests {
         site.reparse(&dir).expect("restored input reloads");
         assert!(site.universe().at >= before);
         assert_eq!(site.universe().read.merged.by_key.len(), count);
+    }
+
+    /// **A refresh whose masters did not move is answered without a parse;
+    /// any write, a replacement, an appearance, a removal or an unknown stamp
+    /// parses again, and a refused parse is never skipped into.** so1-5,
+    /// D-4438.
+    #[test]
+    fn a_refresh_with_no_master_moved_does_not_reparse() {
+        let groww = format!("{GROWW_HEAD}NSE,CASH,,NIFTY,IDX,,NIFTY,,,NSE-NIFTY\n");
+        let dir = masters("reparse-if-moved", Some(&groww), Some(DHAN_HEAD));
+        let site = Loaded::new(site("reparse-if-moved", &dir));
+        let generation = || site.universe().generation;
+        let start = generation();
+        assert!(
+            site.universe().masters.is_some(),
+            "the boot parse is stamped"
+        );
+
+        let said = site.reparse_if_moved(&dir).expect("unchanged masters");
+        assert!(said.starts_with("no master moved"), "{said}");
+        assert_eq!(generation(), start, "the boot parse still answers");
+        assert_eq!(
+            crate::mastersrun::reload(&site, &dir).expect("a skipped reload is a reload"),
+            said
+        );
+        assert_eq!(generation(), start);
+
+        // The same bytes written again: the status-change time moves.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(dir.join("groww_instruments.csv"), &groww).expect("rewrite");
+        site.reparse_if_moved(&dir).expect("a rewrite parses");
+        assert_eq!(generation(), start + 1);
+        site.reparse_if_moved(&dir).expect("and is then unchanged");
+        assert_eq!(generation(), start + 1);
+
+        // A master that goes is a parse, which refuses the lost feed; one
+        // that comes back is a parse, which is accepted.
+        let zerodha = dir.join("zerodha_instruments.csv");
+        std::fs::remove_file(&zerodha).expect("remove fixture only");
+        let why = site
+            .reparse_if_moved(&dir)
+            .expect_err("a lost feed parses and refuses");
+        assert!(why.contains("previously readable feed"), "{why}");
+        assert_eq!(generation(), start + 1);
+        std::fs::write(&zerodha, ZERODHA_HEAD).expect("restore fixture");
+        site.reparse_if_moved(&dir)
+            .expect("a returned master parses");
+        assert_eq!(generation(), start + 2);
+
+        // A damaged master refuses, keeps the held parse, and stays refused:
+        // the refusal did not record its stamps, so it is never skipped.
+        site.reparse_if_moved(&dir).expect("settled");
+        let settled = generation();
+        std::fs::write(
+            dir.join("groww_instruments.csv"),
+            format!("{GROWW_HEAD}broken\n"),
+        )
+        .expect("damage fixture only");
+        for _ in 0..2 {
+            let why = site.reparse_if_moved(&dir).expect_err("damage refuses");
+            assert!(why.contains("previous universe retained"), "{why}");
+        }
+        assert_eq!(generation(), settled);
+        std::fs::write(dir.join("groww_instruments.csv"), &groww).expect("repair");
+        site.reparse_if_moved(&dir).expect("a repair parses");
+        assert_eq!(generation(), settled + 1);
+
+        // An unknown stamp never matches.
+        site.parsed
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .masters = None;
+        site.reparse_if_moved(&dir).expect("parses");
+        assert_eq!(generation(), settled + 2);
+
+        // `reparse` itself is unconditional, as every caller before D-4438
+        // relies on.
+        site.reparse(&dir).expect("parses");
+        assert_eq!(generation(), settled + 3);
+        assert_eq!(MasterStamps::of(&dir), site.universe().masters);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What a refresh's reparse costs when nothing moved (four `stat`s and a
+    /// lock) against a parse of the same fixture masters. A measurement, run
+    /// on purpose; the numbers are in `docs/06-limits.md`'s D-4438 row. so1-5.
+    #[test]
+    #[ignore = "a latency measurement, run on purpose: see crate::latency"]
+    fn latency_master_refresh_skip_and_parse() {
+        let mut groww = String::from(GROWW_HEAD);
+        for n in 0..20_000 {
+            let isin = (0..10)
+                .map(|d| format!("INE{n:06}A0{d}"))
+                .find(|isin| brutex_core::isin::Isin::new(isin).is_ok())
+                .expect("one check digit verifies");
+            let _ = writeln!(groww, "NSE,CASH,,SYM{n},EQ,EQ,{isin},,,NSE-SYM{n}");
+        }
+        let dir = masters("reparse-latency", Some(&groww), Some(DHAN_HEAD));
+        let site = Loaded::new(site("reparse-latency", &dir));
+        let skip = crate::latency::Timed::run(2_000, || site.reparse_if_moved(&dir).map(drop))
+            .expect("skip");
+        let parse = crate::latency::Timed::run(20, || site.reparse(&dir).map(drop)).expect("parse");
+        println!("masters: {} groww rows, {} bytes", 20_000, groww.len());
+        println!("{}", skip.line("reparse_if_moved, nothing moved"));
+        println!("{}", parse.line("reparse, 20,000-row fixture master"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

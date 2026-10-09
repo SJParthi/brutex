@@ -13975,6 +13975,16 @@ trace:
                      compile-time cap -- a vendor adding index series grows it
                      -- and it is recorded that way rather than as a bound.
 
+CORRECTION (so1-5, D-4438, 9 October 2026). "Not one is reachable from an HTTP
+handler" stopped being true when `POST /masters/refresh` was added:
+`mastersrun::reload` calls `Site::reparse`, which runs `universe()` and so all
+three sorts, once per press. Each is still bounded as stated above (750 names,
+2 groups per bucket, 35 index series). Since D-4438 the refresh calls
+`Site::reparse_if_moved`, which stamps every master and does not reach
+`universe()` when none moved since the parse being served; a press after a
+master moved still pays the parse and these sorts, on a blocking thread. The
+text above is kept as written, with this note, rather than overwritten.
+
 WHAT THIS DOES NOT COVER, said plainly so the entry cannot be read as wider
 than it is: `crates/api`'s own ratio bench reports THIRTY C-15 breaches, up to
 2,346 ps per instrument per request against a 1,000 ps ceiling. That is
@@ -16436,3 +16446,13 @@ Measured by `api::latency` (`api` test build (the workspace's optimized test pro
   (`latency_live_json_at_its_ceilings`): a warm answer {so4_warm}; a cold
   `CensusCache::refresh` {so4_cold}. The per-request folder listing and clone
   are `cli`'s and are unchanged here.
+- **A master refresh rebuilt the whole universe on every press (so1-5,
+  D-4438).** `POST /masters/refresh` called `Site::reparse`, which runs
+  `universe()` (catalog, join and coverage builds, the three sorts the gate-11
+  note above called startup-only). Since D-4438 it calls
+  `Site::reparse_if_moved`: one `stat` per master compared with the stamps the
+  held parse was taken under, and no parse when none moved. A press after a
+  master moved pays the parse, on a blocking thread. Measured
+  (`latency_master_refresh_skip_and_parse`, a 20,000-row Groww fixture
+  master): nothing moved {so5_skip}; a full reparse {so5_parse}. Proved by
+  `api::server::tests::a_refresh_with_no_master_moved_does_not_reparse`.

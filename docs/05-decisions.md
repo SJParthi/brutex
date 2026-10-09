@@ -66583,3 +66583,18 @@ refused by name; the warm answer and the cold refresh are measured at the
 ceilings and recorded. Proved by
 `the_live_route_answers_at_its_ceilings_and_refuses_past_them`. FXB1-09.
 
+### D-4438 — A master refresh with no master moved does not reparse the universe — 2026-10-09
+
+**What was observed.** so1-5: `POST /masters/refresh` called `Site::reparse`,
+which re-ran `universe()` (catalog, join and coverage builds) on every press,
+while `docs/06-limits.md` said the universe's sorts were startup-only.
+
+**Decided.** `Parsed` carries `MasterStamps` (device, inode, length, modified
+and status-change time of each master, taken before the parse). The refresh
+calls `Site::reparse_if_moved`: when every stamp equals the held parse's, it
+answers that no master moved and keeps the parse; otherwise it parses as
+before. A master that cannot be stamped (any error but not-found) makes the
+stamps absent, so the refresh parses. The reparse runs on `spawn_blocking`.
+`reparse` itself stays unconditional. Proved by
+`a_refresh_with_no_master_moved_does_not_reparse`. FXB1-10.
+
