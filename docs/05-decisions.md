@@ -65171,3 +65171,21 @@ and so its reasons for the same suppression are true. Run against the
 fbdabaec tree, the widened test named exactly the three sentences above.
 
 Invariants L1FC-08, L1FC-09.
+
+### D-4737 — The unwired-primitive record reads past test modules; the bottom-half rate's doc names its caller — 2026-10-09
+
+**Finding.** G3-3. `unwired_validation_record.rs` cut each caller file at its
+first `#[cfg(test)]`. `cli/src/lib.rs` declares its first test module on line
+57, so the scan read 56 lines of the file that makes the most calls. `pbo.rs`
+still said "**No production caller (D-1544).**" for
+`anchored_walk_forward_bottom_half_rate_v1`, which D-1724 wired into
+`cli::overfitting_of`. Once the scan read the whole file it failed: "crates/cli/src/lib.rs
+names anchored_walk_forward_bottom_half_rate_v1: it is wired now".
+
+**The decision.** The scan now removes only the `#[cfg(test)]` items, by
+brace and indentation, so the release text is complete. Its premise requires
+more than 10,000 lines of `lib.rs`. The doc names its caller, and the test
+asserts both halves: the doc says so, and `overfitting_of`'s release body
+makes the call. D-1544's sentence for the other four primitives still holds.
+
+Invariant L1FC-10.
