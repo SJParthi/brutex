@@ -65137,3 +65137,52 @@ right 0),
 (its rewrites now pin the modification time, so the metadata refusal does not
 depend on the timestamp tick),
 `cli::ledger_append_lookup_costs::section_154_states_index_reads_the_bounded_reserve_and_the_two_open_append`.
+
+### D-4766 — An Observation lookup reads its own pair, and an append door opens once — 2026-10-09
+
+**What was wrong.** W2-cli11-3: each Observation V1 and V2 `reopen_audit` read
+the whole bounded authority file into memory and hashed it, O(B) time and O(B)
+memory per lookup. The only production lookup is the append door's own fresh
+reopen. Each door made five whole-file reads and two scans: the writer's open,
+the pre-append check, the post-write refresh, a second open, and the lookup.
+D-1681 stated the cost and kept the hash.
+
+**Decided.** The plan G4 §C named, checked against the layout: an authority is
+a contiguous Data/Completion pair at physical records `2·seq` and `2·seq+1`,
+stride 512 bytes in V1 and 1,024 in V2.
+
+- `require_unchanged` is metadata only, the existing pair of
+  `require_observation_generation` calls on the lock and the file. An open now
+  measures those generations before it reads and re-checks them after, so the
+  bytes its scan validated are the bytes later checks compare against.
+- A lookup re-reads the found pair at its fixed offset. Both seals are checked,
+  the Completion must name the sequence and validate against the Data, and the
+  pair must decode to exactly the cached audit and indexed Data. V2 also
+  requires the raw seals to equal the cached digests.
+- The append door re-reads only the committed pair through the writer's handle
+  (`reverify_committed`, the D-1680 shape). It checks the generation, that a
+  written pair ends the file, and the index entry, then re-reads the pair.
+- The post-write refresh is one streaming hash pass with O(1) memory. It must
+  first reproduce the verified digest of the bytes the handle had already
+  validated, so a non-cooperating edit below the new pair is refused rather
+  than adopted. The removed second open used to catch that edit.
+
+A door is now one open (one read, one scan) plus one hash pass on a write, and
+none on a reuse. No byte, format or identity changes.
+
+**What is no longer seen per lookup.** An equal-metadata, same-length rewrite
+of another authority's pair. That pair's own lookup and the next open refuse
+it, the residual D-1681 accepted for the Pre-Admission page.
+
+**Rejected.** Re-verifying only the previous tail pair before an append, as G4
+§C sketched. The streaming prefix check after the write covers every byte
+below the new pair, so it subsumes that.
+
+Tests: `cli::population_observations_v1::tests::lookups_read_no_whole_file_and_one_append_door_scans_once`
+(failed first on the unfixed door: "V1 written: one open, one post-write pass",
+left (5, 2, 0), right (1, 1, 1)),
+`cli::population_observations_v1::tests::a_v1_lookup_rereads_its_own_pair_and_not_another`,
+`cli::population_observations_v1::tests::a_v1_reverify_and_refresh_adopt_only_what_the_handle_verified`,
+`cli::population_observations_v1::tests::a_v2_lookup_reverify_and_refresh_reread_only_their_own_pair`,
+`cli::ledger_append_lookup_costs::observation_lookups_still_hash_the_whole_file_and_say_so`,
+`cli::ledger_append_lookup_costs::a_pre_admission_page_checks_metadata_and_its_lookups_are_priced_by_file_bytes`.

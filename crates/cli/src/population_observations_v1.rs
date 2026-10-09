@@ -1743,9 +1743,10 @@ impl ObservationAuthorityAuditV1 {
 /// Whether a receipt-last observation authority was appended or exactly reused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ObservationAuthorityCommitV1 {
-    /// New Data and Completion records were synced, then freshly reopened.
+    /// New Data and Completion records were synced, then re-read through the
+    /// writer's handle (D-4766).
     Written(ObservationAuthorityAuditV1),
-    /// Exact existing semantic bytes were freshly reopened without duplication.
+    /// Exact existing semantic bytes were re-read without duplication.
     Reused(ObservationAuthorityAuditV1),
 }
 
@@ -2106,7 +2107,11 @@ pub struct ObservationAuthorityLedgerV1 {
     audits: std::collections::HashMap<[u8; 32], ObservationAuthorityAuditV1>,
     data_by_id: std::collections::HashMap<[u8; 32], ObservationAuthorityDataV1>,
     orphan: Option<(u64, ObservationAuthorityDataV1)>,
+    /// Domain digest of the file's first `snapshot_len` bytes as this handle
+    /// last verified them: at open from the bytes its scan validated, after
+    /// each owned write by one streaming pass that first reproduces it.
     snapshot_digest: [u8; 32],
+    snapshot_len: u64,
     lock_generation: ObservationFileGenerationV1,
     file_generation: ObservationFileGenerationV1,
     writable: bool,
@@ -2201,11 +2206,18 @@ impl ObservationAuthorityLedgerV1 {
                 &authority_header(),
             )?;
         }
+        // The generations are measured BEFORE the read and re-checked after
+        // it, so the bytes the scan validated are the ones every later
+        // metadata check compares against (D-4766).
+        let lock_generation = observation_file_generation(&lock, &lock_path)?;
+        let file_generation = observation_file_generation(&file, &file_path)?;
         let bytes = read_bounded_authority_file(&mut file, bounds)?;
         let (audits, data_by_id, orphan) = scan_authority_file(&bytes, bounds)?;
         let snapshot_digest = digest_authority_file(&bytes);
-        let lock_generation = observation_file_generation(&lock, &lock_path)?;
-        let file_generation = observation_file_generation(&file, &file_path)?;
+        let snapshot_len = u64::try_from(bytes.len())
+            .map_err(|_| "observation authority length does not fit u64".to_owned())?;
+        require_observation_generation(lock_generation, &lock, &lock_path)?;
+        require_observation_generation(file_generation, &file, &file_path)?;
         Ok(Self {
             lock_path,
             file_path,
@@ -2216,32 +2228,113 @@ impl ObservationAuthorityLedgerV1 {
             data_by_id,
             orphan,
             snapshot_digest,
+            snapshot_len,
             lock_generation,
             file_generation,
             writable,
         })
     }
 
-    /// Returns one cached audit only after detecting any stale same-length edit.
+    /// Returns one cached audit only after re-verifying the bytes it names.
     ///
     /// # Complexity
     ///
-    /// Each lookup reads the whole bounded authority file into memory and
-    /// hashes it, so it is O(B) time and O(B) transient memory in file bytes
-    /// B; only the identity-map probe that follows is average O(1). The
-    /// content hash is kept deliberately: it is what refuses a same-length
-    /// edit a metadata generation cannot see (W2-cli11-3, D-1681). Invariant
-    /// LBE-06; UNVERIFIED as a measured time.
+    /// Average O(1) time and O(1) memory in file bytes: the lock and file
+    /// generations are compared by metadata only (length, device/inode,
+    /// nanosecond modification/change times), the identity map is probed
+    /// once, and a found audit's Data and Completion records, the 1,024-byte
+    /// pair at `HEADER + 512 x 2 x record_sequence`, are re-read and must
+    /// decode to exactly the cached audit and Data. Before D-4766 each lookup
+    /// read and hashed the whole file, O(B) (W2-cli11-3). Not seen per lookup:
+    /// a same-length rewrite of ANOTHER authority's pair that leaves every
+    /// metadata field equal; that pair's own lookup and the next open refuse
+    /// it. Invariant L1FE-06, proven by
+    /// `cli::population_observations_v1::tests::lookups_read_no_whole_file_and_one_append_door_scans_once`;
+    /// stated from the source, not timed.
     ///
     /// # Errors
     ///
-    /// Refuses any file mutation or bounded read failure since open.
+    /// Refuses a changed or replaced lock or file, a pair that no longer
+    /// decodes to the cached audit, or a read failure.
     pub fn reopen_audit(
         &mut self,
         authority_id: &[u8; 32],
     ) -> Result<Option<ObservationAuthorityAuditV1>, String> {
         self.require_unchanged()?;
-        Ok(self.audits.get(authority_id).copied())
+        let Some(audit) = self.audits.get(authority_id).copied() else {
+            return Ok(None);
+        };
+        self.reverify_pair(&audit)?;
+        Ok(Some(audit))
+    }
+
+    /// Re-reads the Data/Completion pair at `audit.record_sequence` and
+    /// requires it to decode, seal-checked, to exactly `audit` and to the Data
+    /// this handle indexed: O(1) reads and hashing (D-4766), proven by
+    /// `cli::population_observations_v1::tests::a_v1_lookup_rereads_its_own_pair_and_not_another`.
+    fn reverify_pair(&mut self, audit: &ObservationAuthorityAuditV1) -> Result<(), String> {
+        let sequence = audit.record_sequence;
+        let reread = (|| {
+            let (data_raw, completion_raw) = read_pair_at::<AUTHORITY_RECORD_BYTES>(
+                &mut self.file,
+                OBSERVATION_AUTHORITY_HEADER_BYTES_V1,
+                sequence,
+            )?;
+            let data = ObservationAuthorityDataV1::decode(&data_raw)?;
+            let completion = ObservationAuthorityCompletionV1::decode(&completion_raw)?;
+            if completion.record_sequence != sequence {
+                return Err("its Completion names another sequence".to_owned());
+            }
+            completion.validate(&data)?;
+            if audit_of(&data, completion) != *audit
+                || self.data_by_id.get(&data.authority_id) != Some(&data)
+            {
+                return Err("its records decode to another authority".to_owned());
+            }
+            Ok(())
+        })();
+        reread.map_err(|why| {
+            format!("observation authority pair {sequence} changed after open: {why}")
+        })
+    }
+
+    /// Re-reads the pair this handle just committed (W2-cli11-3, D-4766): the
+    /// generations must be current, the file must end where a written pair
+    /// ends (or hold a reused one), the index must hold exactly this audit,
+    /// and the pair must decode to it. The bytes before a written pair were
+    /// proven unchanged by the append's own streaming pass, so no second open
+    /// is needed. O(1) beyond that pass, proven by
+    /// `cli::population_observations_v1::tests::lookups_read_no_whole_file_and_one_append_door_scans_once`.
+    fn reverify_committed(
+        &mut self,
+        committed: &ObservationAuthorityCommitV1,
+    ) -> Result<ObservationAuthorityAuditV1, String> {
+        let expected = committed.audit();
+        self.require_unchanged()?;
+        if self.audits.get(&expected.authority_id) != Some(&expected) {
+            return Err(
+                "observation authority committed audit is not the one this handle indexed"
+                    .to_owned(),
+            );
+        }
+        let pair_end = pair_end(
+            OBSERVATION_AUTHORITY_HEADER_BYTES_V1,
+            OBSERVATION_AUTHORITY_RECORD_STRIDE_V1,
+            expected.record_sequence,
+        )?;
+        let len = self.file_generation.len;
+        let in_place = match committed {
+            ObservationAuthorityCommitV1::Written(_) => len == pair_end,
+            ObservationAuthorityCommitV1::Reused(_) => len >= pair_end,
+        };
+        if !in_place {
+            return Err(format!(
+                "observation authority file holds {len} bytes; the committed pair ends at byte {pair_end}"
+            ));
+        }
+        self.reverify_pair(&expected)?;
+        self.require_unchanged()?;
+        Ok(expected)
     }
 
     fn append_data(
@@ -2347,17 +2440,11 @@ impl ObservationAuthorityLedgerV1 {
         Ok(ObservationAuthorityCommitV1::Written(audit))
     }
 
-    fn require_unchanged(&mut self) -> Result<(), String> {
+    /// Metadata only: a constant number of `stat` calls and no content read
+    /// (D-4766). Before D-4766 this read and hashed the whole file.
+    fn require_unchanged(&self) -> Result<(), String> {
         require_observation_generation(self.lock_generation, &self.lock_file, &self.lock_path)?;
-        require_observation_generation(self.file_generation, &self.file, &self.file_path)?;
-        let bytes = read_bounded_authority_file(&mut self.file, self.bounds)?;
-        if digest_authority_file(&bytes) != self.snapshot_digest {
-            return Err(format!(
-                "observation authority file {} changed after open",
-                self.file_path.display()
-            ));
-        }
-        Ok(())
+        require_observation_generation(self.file_generation, &self.file, &self.file_path)
     }
 
     /// Appends one record through the shared rollback, then syncs it (D-1854).
@@ -2417,11 +2504,32 @@ impl ObservationAuthorityLedgerV1 {
             })
     }
 
+    /// After an owned write or a rollback: one streaming pass that must
+    /// reproduce the verified digest over the first `snapshot_len` bytes, so a
+    /// non-cooperating edit made below this handle's write is refused rather
+    /// than adopted, and then extends the snapshot to the whole file and
+    /// re-measures both generations (D-4766).
     fn refresh_snapshot(&mut self) -> Result<(), String> {
-        let bytes = read_bounded_authority_file(&mut self.file, self.bounds)?;
-        self.snapshot_digest = digest_authority_file(&bytes);
-        self.lock_generation = observation_file_generation(&self.lock_file, &self.lock_path)?;
-        self.file_generation = observation_file_generation(&self.file, &self.file_path)?;
+        let lock_generation = observation_file_generation(&self.lock_file, &self.lock_path)?;
+        let file_generation = observation_file_generation(&self.file, &self.file_path)?;
+        let (prefix, full) = hash_authority_prefix(
+            &mut self.file,
+            AUTHORITY_FILE_DIGEST_DOMAIN,
+            self.snapshot_len,
+            file_generation.len,
+        )?;
+        if prefix != self.snapshot_digest {
+            return Err(format!(
+                "observation authority file {} changed below byte {} while this handle appended",
+                self.file_path.display(),
+                self.snapshot_len
+            ));
+        }
+        require_observation_generation(file_generation, &self.file, &self.file_path)?;
+        self.snapshot_digest = full;
+        self.snapshot_len = file_generation.len;
+        self.lock_generation = lock_generation;
+        self.file_generation = file_generation;
         Ok(())
     }
 }
@@ -2445,8 +2553,9 @@ impl PairedCandidateObservationsV1 {
         require_authority_audit_for_data(&data, audit)
     }
 
-    /// Persists this opaque capability Data-first/Completion-last and requires
-    /// a fresh read-only reopen before returning success.
+    /// Persists this opaque capability Data-first/Completion-last and re-reads
+    /// the committed pair through the writer's handle before returning success
+    /// (D-4766).
     ///
     /// # Errors
     ///
@@ -2465,6 +2574,9 @@ impl PairedCandidateObservationsV1 {
     }
 }
 
+/// One open, the append, and a re-read of only the committed pair through the
+/// same handle: one scan per door where there were two, and no whole-file read
+/// after the open (W2-cli11-3, D-4766).
 fn append_authority_data_and_reopen(
     root: &Path,
     bounds: ObservationAuthorityBoundsV1,
@@ -2472,15 +2584,7 @@ fn append_authority_data_and_reopen(
 ) -> Result<ObservationAuthorityCommitV1, String> {
     let mut ledger = ObservationAuthorityLedgerV1::open(root, bounds)?;
     let committed = ledger.append_data(data)?;
-    let expected = committed.audit();
-    drop(ledger);
-    let mut reopened = ObservationAuthorityLedgerV1::open_read(root, bounds)?;
-    let audit = reopened
-        .reopen_audit(&expected.authority_id)?
-        .ok_or_else(|| "observation authority disappeared after receipt-last append".to_owned())?;
-    if audit != expected {
-        return Err("observation authority fresh reopen differs from written bytes".to_owned());
-    }
+    let audit = ledger.reverify_committed(&committed)?;
     require_authority_audit_for_data(data, &audit)?;
     Ok(match committed {
         ObservationAuthorityCommitV1::Written(_) => ObservationAuthorityCommitV1::Written(audit),
@@ -2636,6 +2740,8 @@ fn scan_authority_file(
     bytes: &[u8],
     bounds: ObservationAuthorityBoundsV1,
 ) -> Result<ObservationScanV1, String> {
+    #[cfg(test)]
+    OBSERVATION_SCANS.with(|count| count.set(count.get().saturating_add(1)));
     if bytes.get(..AUTHORITY_HEADER_BYTES) != Some(authority_header().as_slice()) {
         return Err("observation authority file header is absent or corrupt".to_owned());
     }
@@ -2831,6 +2937,8 @@ fn read_bounded_authority_file(
     file: &mut File,
     bounds: ObservationAuthorityBoundsV1,
 ) -> Result<Vec<u8>, String> {
+    #[cfg(test)]
+    OBSERVATION_FILE_READS.with(|count| count.set(count.get().saturating_add(1)));
     let len = file
         .metadata()
         .map_err(|why| format!("cannot stat observation authority file: {why}"))?
@@ -2856,11 +2964,109 @@ fn read_bounded_authority_file(
     Ok(bytes)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only counts on this thread: whole-file bounded reads, file scans
+    /// and streaming hash passes, V1 and V2 together (D-4766).
+    static OBSERVATION_FILE_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static OBSERVATION_SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static OBSERVATION_HASH_PASSES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 fn digest_authority_file(bytes: &[u8]) -> [u8; 32] {
     let mut hasher = Hasher::new();
     hasher.update(AUTHORITY_FILE_DIGEST_DOMAIN);
     hasher.update(bytes);
     hasher.finalize()
+}
+
+/// The byte one past a Data/Completion pair at `sequence`.
+fn pair_end(header: u64, stride: u64, sequence: u64) -> Result<u64, String> {
+    sequence
+        .checked_add(1)
+        .and_then(|pairs| pairs.checked_mul(2))
+        .and_then(|records| records.checked_mul(stride))
+        .and_then(|bytes| bytes.checked_add(header))
+        .ok_or_else(|| "observation authority pair end overflowed u64".to_owned())
+}
+
+/// Reads the two `N`-byte records of the pair at `sequence`: Data at physical
+/// record `2 x sequence`, Completion right after it (D-4766).
+fn read_pair_at<const N: usize>(
+    file: &mut File,
+    header: u64,
+    sequence: u64,
+) -> Result<([u8; N], [u8; N]), String> {
+    let stride = u64::try_from(N).map_err(|_| "record stride does not fit u64".to_owned())?;
+    let offset = sequence
+        .checked_mul(2)
+        .and_then(|record| record.checked_mul(stride))
+        .and_then(|bytes| bytes.checked_add(header))
+        .ok_or_else(|| "observation authority pair offset overflowed u64".to_owned())?;
+    let mut data = [0_u8; N];
+    let mut completion = [0_u8; N];
+    file.seek(SeekFrom::Start(offset))
+        .and_then(|_| file.read_exact(&mut data))
+        .and_then(|()| file.read_exact(&mut completion))
+        .map_err(|why| format!("cannot read pair {sequence}: {why}"))?;
+    Ok((data, completion))
+}
+
+/// One streaming read pass over exactly `len` bytes under `domain`, returning
+/// the digest of the first `cut` bytes and of all of them (the first `cut`
+/// bytes feed two hashers from one buffer); it equals
+/// `digest_authority_file` / `digest_observation_v2_file` of those bytes, with
+/// O(1) memory rather than a whole-file buffer (D-4766), proven by
+/// `cli::population_observations_v1::tests::a_v1_reverify_and_refresh_adopt_only_what_the_handle_verified`.
+fn hash_authority_prefix(
+    file: &mut File,
+    domain: &[u8],
+    cut: u64,
+    len: u64,
+) -> Result<([u8; 32], [u8; 32]), String> {
+    #[cfg(test)]
+    OBSERVATION_HASH_PASSES.with(|count| count.set(count.get().saturating_add(1)));
+    let rest = len.checked_sub(cut).ok_or_else(|| {
+        format!("observation authority file holds {len} bytes, fewer than the {cut} last verified")
+    })?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|why| format!("cannot seek observation authority file to hash it: {why}"))?;
+    let mut prefix = Hasher::new();
+    prefix.update(domain);
+    let mut whole = Hasher::new();
+    whole.update(domain);
+    hash_more(file, &mut [&mut prefix, &mut whole], cut)?;
+    hash_more(file, &mut [&mut whole], rest)?;
+    Ok((prefix.finalize(), whole.finalize()))
+}
+
+/// Feeds exactly `bytes` more bytes of `file` into every hasher in `hashers`.
+fn hash_more(file: &mut File, hashers: &mut [&mut Hasher], bytes: u64) -> Result<(), String> {
+    let mut buffer = [0_u8; 16 * 1_024];
+    let mut remaining = bytes;
+    while remaining != 0 {
+        let want = usize::try_from(remaining.min(16 * 1_024))
+            .map_err(|_| "hash chunk does not fit usize".to_owned())?;
+        let chunk = buffer
+            .get_mut(..want)
+            .ok_or_else(|| "hash chunk exceeds its buffer".to_owned())?;
+        let read = file
+            .read(chunk)
+            .map_err(|why| format!("cannot hash observation authority file: {why}"))?;
+        if read == 0 {
+            return Err("observation authority file ended while it was hashed".to_owned());
+        }
+        let chunk = buffer
+            .get(..read)
+            .ok_or_else(|| "hash read exceeds its buffer".to_owned())?;
+        for hasher in hashers.iter_mut() {
+            hasher.update(chunk);
+        }
+        remaining = remaining.saturating_sub(
+            u64::try_from(read).map_err(|_| "hash read does not fit u64".to_owned())?,
+        );
+    }
+    Ok(())
 }
 
 fn digest_sessions(sessions: &[i64]) -> [u8; 32] {
@@ -3122,9 +3328,10 @@ impl ObservationAuthorityAuditV2 {
 /// Whether an Observation V2 authority was written or exactly reused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ObservationAuthorityCommitV2 {
-    /// Data and then Completion were synchronized and freshly reopened.
+    /// Data and then Completion were synchronized and re-read through the
+    /// writer's handle (D-4766).
     Written(ObservationAuthorityAuditV2),
-    /// Exact semantic bytes already existed and were freshly reopened.
+    /// Exact semantic bytes already existed and were re-read.
     Reused(ObservationAuthorityAuditV2),
 }
 
@@ -3344,8 +3551,9 @@ impl ProducedObservationAuthorityV2 {
         })
     }
 
-    /// Persists Data first and Completion last, then requires a fresh read-only
-    /// reopen before returning success.
+    /// Persists Data first and Completion last, then re-reads the committed
+    /// pair through the writer's handle before returning success: one scan
+    /// per door where there were two (W2-cli11-3, D-4766).
     pub(crate) fn append_and_reopen(
         &self,
         root: impl AsRef<Path>,
@@ -3354,14 +3562,9 @@ impl ProducedObservationAuthorityV2 {
         let root = root.as_ref();
         let mut ledger = ObservationAuthorityLedgerV2::open(root, bounds)?;
         let committed = ledger.append_data(&self.value)?;
-        let expected = committed.audit();
-        drop(ledger);
-        let mut reopened = ObservationAuthorityLedgerV2::open_read(root, bounds)?;
-        let audit = reopened
-            .reopen_audit(&self.value.authority_id)?
-            .ok_or_else(|| "Observation V2 authority disappeared after append".to_owned())?;
-        if audit != expected {
-            return Err("Observation V2 fresh reopen differs from written bytes".to_owned());
+        let audit = ledger.reverify_committed(&committed)?;
+        if audit.authority_id != self.value.authority_id {
+            return Err("Observation V2 committed a foreign authority".to_owned());
         }
         Ok(match committed {
             ObservationAuthorityCommitV2::Written(_) => {
@@ -3413,7 +3616,9 @@ pub struct ObservationAuthorityLedgerV2 {
     audits: HashMap<[u8; 32], ObservationAuthorityAuditV2>,
     data_by_id: HashMap<[u8; 32], ObservationAuthorityDataV2>,
     orphan: Option<ObservationAuthorityDataV2>,
+    /// As [`ObservationAuthorityLedgerV1`]'s: the verified prefix digest.
     snapshot_digest: [u8; 32],
+    snapshot_len: u64,
     lock_generation: ObservationFileGenerationV1,
     file_generation: ObservationFileGenerationV1,
     writable: bool,
@@ -3496,11 +3701,16 @@ impl ObservationAuthorityLedgerV2 {
                 &observation_v2_header(),
             )?;
         }
+        // Measured before the read, re-checked after it (D-4766).
+        let lock_generation = observation_file_generation(&lock_file, &lock_path)?;
+        let file_generation = observation_file_generation(&file, &file_path)?;
         let bytes = read_bounded_observation_v2_file(&mut file, bounds)?;
         let (audits, data_by_id, orphan) = scan_observation_v2_file(&bytes, bounds)?;
         let snapshot_digest = digest_observation_v2_file(&bytes);
-        let lock_generation = observation_file_generation(&lock_file, &lock_path)?;
-        let file_generation = observation_file_generation(&file, &file_path)?;
+        let snapshot_len = u64::try_from(bytes.len())
+            .map_err(|_| "Observation V2 length does not fit u64".to_owned())?;
+        require_observation_generation(lock_generation, &lock_file, &lock_path)?;
+        require_observation_generation(file_generation, &file, &file_path)?;
         Ok(Self {
             lock_path,
             file_path,
@@ -3511,32 +3721,108 @@ impl ObservationAuthorityLedgerV2 {
             data_by_id,
             orphan,
             snapshot_digest,
+            snapshot_len,
             lock_generation,
             file_generation,
             writable,
         })
     }
 
-    /// Returns one cached audit only after detecting stale or replaced bytes.
+    /// Returns one cached audit only after re-verifying the bytes it names.
     ///
     /// # Complexity
     ///
-    /// Each lookup reads the whole bounded authority file into memory and
-    /// hashes it, so it is O(B) time and O(B) transient memory in file bytes
-    /// B; only the identity-map probe that follows is average O(1). The
-    /// content hash is kept deliberately: it is what refuses a same-length
-    /// edit a metadata generation cannot see (W2-cli11-3, D-1681). Invariant
-    /// LBE-06; UNVERIFIED as a measured time.
+    /// Average O(1) time and O(1) memory in file bytes: metadata-only
+    /// generation checks, one identity-map probe, and a re-read of the found
+    /// audit's 2,048-byte Data/Completion pair at
+    /// `HEADER + 1,024 x 2 x record_sequence`, whose seals must equal the
+    /// cached digests and whose records must decode to exactly the cached
+    /// Data. Before D-4766 each lookup read and hashed the whole file, O(B)
+    /// (W2-cli11-3). Not seen per lookup: a same-length rewrite of ANOTHER
+    /// authority's pair that leaves every metadata field equal; that pair's
+    /// own lookup and the next open refuse it. Invariant L1FE-06, proven by
+    /// `cli::population_observations_v1::tests::lookups_read_no_whole_file_and_one_append_door_scans_once`;
+    /// stated from the source, not timed.
     ///
     /// # Errors
     ///
-    /// Refuses any lock/data generation change or bounded content mismatch.
+    /// Refuses any lock/data generation change, a pair that no longer decodes
+    /// to the cached audit, or a read failure.
     pub fn reopen_audit(
         &mut self,
         authority_id: &[u8; 32],
     ) -> Result<Option<ObservationAuthorityAuditV2>, String> {
         self.require_unchanged()?;
-        Ok(self.audits.get(authority_id).copied())
+        let Some(audit) = self.audits.get(authority_id).copied() else {
+            return Ok(None);
+        };
+        self.reverify_pair(&audit)?;
+        Ok(Some(audit))
+    }
+
+    /// The V2 pair re-read: both seals must equal the cached digests and both
+    /// records must decode to the indexed Data at this sequence (D-4766).
+    fn reverify_pair(&mut self, audit: &ObservationAuthorityAuditV2) -> Result<(), String> {
+        let sequence = audit.record_sequence;
+        let reread = (|| {
+            let (data_raw, completion_raw) = read_pair_at::<AUTHORITY_V2_RECORD_BYTES>(
+                &mut self.file,
+                OBSERVATION_AUTHORITY_HEADER_BYTES_V2,
+                sequence,
+            )?;
+            let (data_kind, data) = ObservationAuthorityDataV2::decode(&data_raw)?;
+            let (completion_kind, completion) =
+                ObservationAuthorityDataV2::decode(&completion_raw)?;
+            if data_kind != AUTHORITY_V2_DATA_KIND
+                || completion_kind != AUTHORITY_V2_COMPLETION_KIND
+                || data.record_sequence != sequence
+                || completion != data
+            {
+                return Err("its records are not this sequence's Data/Completion pair".to_owned());
+            }
+            if get_fixed::<32>(&data_raw, AUTHORITY_V2_PAYLOAD_BYTES)? != audit.data_record_digest
+                || get_fixed::<32>(&completion_raw, AUTHORITY_V2_PAYLOAD_BYTES)?
+                    != audit.completion_digest
+                || observation_v2_audit(&data)? != *audit
+                || self.data_by_id.get(&data.authority_id) != Some(&data)
+            {
+                return Err("its records decode to another authority".to_owned());
+            }
+            Ok(())
+        })();
+        reread.map_err(|why| format!("Observation V2 pair {sequence} changed after open: {why}"))
+    }
+
+    /// The V2 twin of [`ObservationAuthorityLedgerV1::reverify_committed`].
+    fn reverify_committed(
+        &mut self,
+        committed: &ObservationAuthorityCommitV2,
+    ) -> Result<ObservationAuthorityAuditV2, String> {
+        let expected = committed.audit();
+        self.require_unchanged()?;
+        if self.audits.get(&expected.authority_id) != Some(&expected) {
+            return Err(
+                "Observation V2 committed audit is not the one this handle indexed".to_owned(),
+            );
+        }
+        let pair_end = pair_end(
+            OBSERVATION_AUTHORITY_HEADER_BYTES_V2,
+            OBSERVATION_AUTHORITY_RECORD_STRIDE_V2,
+            expected.record_sequence,
+        )?;
+        let len = self.file_generation.len;
+        let in_place = match committed {
+            ObservationAuthorityCommitV2::Written(_) => len == pair_end,
+            ObservationAuthorityCommitV2::Reused(_) => len >= pair_end,
+        };
+        if !in_place {
+            return Err(format!(
+                "Observation V2 file holds {len} bytes; the committed pair ends at byte {pair_end}"
+            ));
+        }
+        self.reverify_pair(&expected)?;
+        self.require_unchanged()?;
+        Ok(expected)
     }
 
     fn append_data(
@@ -3619,14 +3905,10 @@ impl ObservationAuthorityLedgerV2 {
         Ok(())
     }
 
-    fn require_unchanged(&mut self) -> Result<(), String> {
+    /// Metadata only, as V1's (D-4766).
+    fn require_unchanged(&self) -> Result<(), String> {
         require_observation_generation(self.lock_generation, &self.lock_file, &self.lock_path)?;
-        require_observation_generation(self.file_generation, &self.file, &self.file_path)?;
-        let bytes = read_bounded_observation_v2_file(&mut self.file, self.bounds)?;
-        if digest_observation_v2_file(&bytes) != self.snapshot_digest {
-            return Err("Observation V2 file changed after open".to_owned());
-        }
-        Ok(())
+        require_observation_generation(self.file_generation, &self.file, &self.file_path)
     }
 
     /// Appends one record through the shared rollback, then syncs it (D-1854).
@@ -3686,11 +3968,28 @@ impl ObservationAuthorityLedgerV2 {
             })
     }
 
+    /// As V1's: one streaming pass that must reproduce the verified prefix,
+    /// then extends it and re-measures the generations (D-4766).
     fn refresh_snapshot(&mut self) -> Result<(), String> {
-        let bytes = read_bounded_observation_v2_file(&mut self.file, self.bounds)?;
-        self.snapshot_digest = digest_observation_v2_file(&bytes);
-        self.lock_generation = observation_file_generation(&self.lock_file, &self.lock_path)?;
-        self.file_generation = observation_file_generation(&self.file, &self.file_path)?;
+        let lock_generation = observation_file_generation(&self.lock_file, &self.lock_path)?;
+        let file_generation = observation_file_generation(&self.file, &self.file_path)?;
+        let (prefix, full) = hash_authority_prefix(
+            &mut self.file,
+            AUTHORITY_V2_FILE_DOMAIN,
+            self.snapshot_len,
+            file_generation.len,
+        )?;
+        if prefix != self.snapshot_digest {
+            return Err(format!(
+                "Observation V2 file changed below byte {} while this handle appended",
+                self.snapshot_len
+            ));
+        }
+        require_observation_generation(file_generation, &self.file, &self.file_path)?;
+        self.snapshot_digest = full;
+        self.snapshot_len = file_generation.len;
+        self.lock_generation = lock_generation;
+        self.file_generation = file_generation;
         Ok(())
     }
 }
@@ -3771,6 +4070,8 @@ fn scan_observation_v2_file(
     bytes: &[u8],
     bounds: ObservationAuthorityBoundsV2,
 ) -> Result<ObservationV2Scan, String> {
+    #[cfg(test)]
+    OBSERVATION_SCANS.with(|count| count.set(count.get().saturating_add(1)));
     if bytes.get(..AUTHORITY_V2_HEADER_BYTES) != Some(observation_v2_header().as_slice()) {
         return Err("Observation V2 file header is absent or corrupt".to_owned());
     }
@@ -3848,6 +4149,8 @@ fn read_bounded_observation_v2_file(
     file: &mut File,
     bounds: ObservationAuthorityBoundsV2,
 ) -> Result<Vec<u8>, String> {
+    #[cfg(test)]
+    OBSERVATION_FILE_READS.with(|count| count.set(count.get().saturating_add(1)));
     let len = file
         .metadata()
         .map_err(|why| format!("cannot stat Observation V2 file: {why}"))?
@@ -4183,6 +4486,347 @@ mod tests {
             scores
                 .windows(2)
                 .all(|pair| pair[0].identity != pair[1].identity)
+        );
+    }
+
+    /// Zeroes the three Observation counters; returns a reader of
+    /// (whole-file reads, scans, streaming hash passes).
+    fn observation_counts() -> impl Fn() -> (u64, u64, u64) {
+        OBSERVATION_FILE_READS.with(|count| count.set(0));
+        OBSERVATION_SCANS.with(|count| count.set(0));
+        OBSERVATION_HASH_PASSES.with(|count| count.set(0));
+        || {
+            (
+                OBSERVATION_FILE_READS.with(std::cell::Cell::get),
+                OBSERVATION_SCANS.with(std::cell::Cell::get),
+                OBSERVATION_HASH_PASSES.with(std::cell::Cell::get),
+            )
+        }
+    }
+
+    #[test]
+    fn lookups_read_no_whole_file_and_one_append_door_scans_once() {
+        // W2-cli11-3: each lookup read and hashed the whole file, and each
+        // append door made about five whole-file passes and two scans.
+        let bounds = authority_bounds();
+        let root = test_dir();
+        let data = authority_data_fixture(70);
+        let read = observation_counts();
+        let written =
+            append_authority_data_and_reopen(root.path(), bounds, &data).expect("V1 door writes");
+        assert!(matches!(written, ObservationAuthorityCommitV1::Written(_)));
+        assert_eq!(
+            read(),
+            (1, 1, 1),
+            "V1 written: one open, one post-write pass"
+        );
+        let read = observation_counts();
+        let reused =
+            append_authority_data_and_reopen(root.path(), bounds, &data).expect("V1 door reuses");
+        assert!(matches!(reused, ObservationAuthorityCommitV1::Reused(_)));
+        assert_eq!(read(), (1, 1, 0), "V1 reused: one open and nothing else");
+        let mut ledger =
+            ObservationAuthorityLedgerV1::open_read(root.path(), bounds).expect("V1 reader opens");
+        let read = observation_counts();
+        for _ in 0..10 {
+            assert_eq!(
+                ledger.reopen_audit(&data.authority_id).expect("V1 lookup"),
+                Some(written.audit())
+            );
+            assert_eq!(
+                ledger.reopen_audit(&[0x5A; 32]).expect("V1 absent lookup"),
+                None
+            );
+        }
+        assert_eq!(read(), (0, 0, 0), "twenty V1 lookups read no whole file");
+
+        let bounds_v2 = authority_bounds_v2();
+        let root_v2 = test_dir();
+        let (source, commit) =
+            crate::pre_admission_data::observation_v2_zero_production_fixture(88)
+                .expect("zero source fixture derives");
+        let produced = produce_natural_extinction_observation_v2(&source, &commit)
+            .expect("zero source prepares Observation V2");
+        let read = observation_counts();
+        let written_v2 = produced
+            .append_and_reopen(root_v2.path(), bounds_v2)
+            .expect("V2 door writes");
+        assert!(matches!(
+            written_v2,
+            ObservationAuthorityCommitV2::Written(_)
+        ));
+        assert_eq!(
+            read(),
+            (1, 1, 1),
+            "V2 written: one open, one post-write pass"
+        );
+        let read = observation_counts();
+        assert!(matches!(
+            produced
+                .append_and_reopen(root_v2.path(), bounds_v2)
+                .expect("V2 door reuses"),
+            ObservationAuthorityCommitV2::Reused(_)
+        ));
+        assert_eq!(read(), (1, 1, 0), "V2 reused: one open and nothing else");
+        let mut ledger_v2 = ObservationAuthorityLedgerV2::open_read(root_v2.path(), bounds_v2)
+            .expect("V2 reader opens");
+        let read = observation_counts();
+        for _ in 0..10 {
+            assert_eq!(
+                ledger_v2
+                    .reopen_audit(&produced.value.authority_id)
+                    .expect("V2 lookup"),
+                Some(written_v2.audit())
+            );
+            assert_eq!(
+                ledger_v2
+                    .reopen_audit(&[0x5A; 32])
+                    .expect("V2 absent lookup"),
+                None
+            );
+        }
+        assert_eq!(read(), (0, 0, 0), "twenty V2 lookups read no whole file");
+    }
+
+    /// Flips one byte at `offset` in place, as a non-cooperating writer would.
+    fn flip_at(path: &Path, offset: u64) {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .expect("fixture file opens");
+        let mut byte = [0_u8; 1];
+        file.seek(SeekFrom::Start(offset))
+            .and_then(|_| file.read_exact(&mut byte))
+            .expect("fixture byte reads");
+        byte[0] ^= 1;
+        file.seek(SeekFrom::Start(offset))
+            .and_then(|_| file.write_all(&byte))
+            .and_then(|()| file.sync_data())
+            .expect("fixture byte writes");
+    }
+
+    /// Pins the file's modification time far from now, so a change is visible
+    /// to a metadata generation whatever the filesystem's timestamp tick.
+    fn pin_mtime(path: &Path) {
+        OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("fixture file opens")
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1))
+            .expect("fixture mtime sets");
+    }
+
+    /// Byte 40 of the Data (or Completion) record of the pair at `sequence`.
+    fn pair_byte(header: u64, stride: u64, sequence: u64, completion: bool) -> u64 {
+        header + stride * (2 * sequence + u64::from(completion)) + 40
+    }
+
+    #[test]
+    fn a_v1_lookup_rereads_its_own_pair_and_not_another() {
+        // D-4766: metadata generations plus the looked-up pair. A rewrite
+        // inside one timestamp tick is modelled by re-measuring the cached
+        // file generation after it.
+        let bounds = authority_bounds();
+        let root = test_dir();
+        let first = authority_data_fixture(71);
+        let second = authority_data_fixture(72);
+        append_authority_data_and_reopen(root.path(), bounds, &first).expect("first commits");
+        append_authority_data_and_reopen(root.path(), bounds, &second).expect("second commits");
+        let path = root.path().join(AUTHORITY_FILE);
+        let at = |sequence, completion| {
+            pair_byte(
+                OBSERVATION_AUTHORITY_HEADER_BYTES_V1,
+                OBSERVATION_AUTHORITY_RECORD_STRIDE_V1,
+                sequence,
+                completion,
+            )
+        };
+        for completion in [false, true] {
+            let mut ledger =
+                ObservationAuthorityLedgerV1::open_read(root.path(), bounds).expect("V1 opens");
+            flip_at(&path, at(0, completion));
+            ledger.file_generation =
+                observation_file_generation(&ledger.file, &ledger.file_path).expect("re-measures");
+            let why = ledger
+                .reopen_audit(&first.authority_id)
+                .expect_err("its own pair refuses");
+            assert!(why.contains("pair 0 changed after open"), "{why}");
+            assert!(
+                ledger
+                    .reopen_audit(&second.authority_id)
+                    .expect("another pair is not read")
+                    .is_some()
+            );
+            flip_at(&path, at(0, completion));
+        }
+        let mut ledger =
+            ObservationAuthorityLedgerV1::open_read(root.path(), bounds).expect("V1 opens");
+        flip_at(&path, at(1, false));
+        ledger.file_generation =
+            observation_file_generation(&ledger.file, &ledger.file_path).expect("re-measures");
+        assert!(
+            ledger
+                .reopen_audit(&first.authority_id)
+                .expect("the limit: another pair is not seen by this lookup")
+                .is_some()
+        );
+        assert!(
+            ledger
+                .reopen_audit(&second.authority_id)
+                .expect_err("that pair's own lookup refuses")
+                .contains("pair 1 changed after open")
+        );
+        drop(ledger);
+        assert!(
+            ObservationAuthorityLedgerV1::open_read(root.path(), bounds).is_err(),
+            "the next open refuses it"
+        );
+        flip_at(&path, at(1, false));
+        let mut ledger =
+            ObservationAuthorityLedgerV1::open_read(root.path(), bounds).expect("V1 opens");
+        pin_mtime(&path);
+        let why = ledger
+            .reopen_audit(&[0x5A; 32])
+            .expect_err("a metadata-visible change refuses even an absent id");
+        assert!(why.contains("changed since open"), "{why}");
+    }
+
+    #[test]
+    fn a_v1_reverify_and_refresh_adopt_only_what_the_handle_verified() {
+        let bounds = authority_bounds();
+        let root = test_dir();
+        let first = authority_data_fixture(73);
+        let one = append_authority_data_and_reopen(root.path(), bounds, &first)
+            .expect("first commits")
+            .audit();
+        append_authority_data_and_reopen(root.path(), bounds, &authority_data_fixture(74))
+            .expect("second commits");
+        let path = root.path().join(AUTHORITY_FILE);
+        let mut ledger =
+            ObservationAuthorityLedgerV1::open(root.path(), bounds).expect("V1 writer opens");
+        assert_eq!(
+            ledger
+                .reverify_committed(&ObservationAuthorityCommitV1::Reused(one))
+                .expect("a reused pair inside the file re-reads"),
+            one
+        );
+        let why = ledger
+            .reverify_committed(&ObservationAuthorityCommitV1::Written(one))
+            .expect_err("a written pair must end the file");
+        assert!(why.contains("the committed pair ends at byte"), "{why}");
+        let mut foreign = one;
+        foreign.authority_id = [0xEE; 32];
+        let why = ledger
+            .reverify_committed(&ObservationAuthorityCommitV1::Reused(foreign))
+            .expect_err("an audit this handle did not index");
+        assert!(why.contains("not the one this handle indexed"), "{why}");
+
+        flip_at(&path, OBSERVATION_AUTHORITY_HEADER_BYTES_V1 + 40);
+        let why = ledger
+            .refresh_snapshot()
+            .expect_err("an edit below the verified length refuses");
+        assert!(why.contains("changed below byte"), "{why}");
+        flip_at(&path, OBSERVATION_AUTHORITY_HEADER_BYTES_V1 + 40);
+        ledger
+            .refresh_snapshot()
+            .expect("the verified bytes refresh");
+        let bytes = std::fs::read(&path).expect("authority file reads");
+        assert_eq!(
+            ledger.snapshot_len,
+            u64::try_from(bytes.len()).expect("length fits")
+        );
+        assert_eq!(ledger.snapshot_digest, digest_authority_file(&bytes));
+    }
+
+    #[test]
+    fn a_v2_lookup_reverify_and_refresh_reread_only_their_own_pair() {
+        let bounds = authority_bounds_v2();
+        let root = test_dir();
+        let mut produced = Vec::new();
+        for tag in [88, 89] {
+            let (source, commit) =
+                crate::pre_admission_data::observation_v2_zero_production_fixture(tag)
+                    .expect("zero source fixture derives");
+            let value = produce_natural_extinction_observation_v2(&source, &commit)
+                .expect("zero source prepares Observation V2");
+            value
+                .append_and_reopen(root.path(), bounds)
+                .expect("V2 commits");
+            produced.push(value);
+        }
+        let first = produced[0].value.authority_id;
+        let second = produced[1].value.authority_id;
+        let path = root.path().join(AUTHORITY_V2_FILE);
+        let at = |sequence, completion| {
+            pair_byte(
+                OBSERVATION_AUTHORITY_HEADER_BYTES_V2,
+                OBSERVATION_AUTHORITY_RECORD_STRIDE_V2,
+                sequence,
+                completion,
+            )
+        };
+        for completion in [false, true] {
+            let mut ledger =
+                ObservationAuthorityLedgerV2::open_read(root.path(), bounds).expect("V2 opens");
+            flip_at(&path, at(0, completion));
+            ledger.file_generation =
+                observation_file_generation(&ledger.file, &ledger.file_path).expect("re-measures");
+            let why = ledger
+                .reopen_audit(&first)
+                .expect_err("its own pair refuses");
+            assert!(why.contains("pair 0 changed after open"), "{why}");
+            assert!(
+                ledger
+                    .reopen_audit(&second)
+                    .expect("another pair")
+                    .is_some()
+            );
+            flip_at(&path, at(0, completion));
+        }
+        let mut ledger =
+            ObservationAuthorityLedgerV2::open(root.path(), bounds).expect("V2 writer opens");
+        let one = ledger
+            .reopen_audit(&first)
+            .expect("lookup reads")
+            .expect("indexed");
+        assert_eq!(
+            ledger
+                .reverify_committed(&ObservationAuthorityCommitV2::Reused(one))
+                .expect("a reused pair re-reads"),
+            one
+        );
+        let why = ledger
+            .reverify_committed(&ObservationAuthorityCommitV2::Written(one))
+            .expect_err("a written pair must end the file");
+        assert!(why.contains("the committed pair ends at byte"), "{why}");
+        let mut foreign = one;
+        foreign.authority_id = [0xEE; 32];
+        assert!(
+            ledger
+                .reverify_committed(&ObservationAuthorityCommitV2::Reused(foreign))
+                .expect_err("not indexed")
+                .contains("not the one this handle indexed")
+        );
+        flip_at(&path, at(0, false));
+        assert!(
+            ledger
+                .refresh_snapshot()
+                .expect_err("an edit below the verified length refuses")
+                .contains("changed below byte")
+        );
+        flip_at(&path, at(0, false));
+        ledger
+            .refresh_snapshot()
+            .expect("the verified bytes refresh");
+        let bytes = std::fs::read(&path).expect("V2 file reads");
+        assert_eq!(ledger.snapshot_digest, digest_observation_v2_file(&bytes));
+        pin_mtime(&path);
+        assert!(
+            ledger
+                .reopen_audit(&[0x5A; 32])
+                .expect_err("a metadata-visible change refuses")
+                .contains("changed since open")
         );
     }
 

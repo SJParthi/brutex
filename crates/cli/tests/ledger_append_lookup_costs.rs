@@ -21,6 +21,8 @@
 //!   names and now pin the one open.
 //! * G4-1 (D-4765): every cached Statistics V2 read hashed the whole data file
 //!   four times while §154 said a lookup is average O(1) and a page O(rows).
+//! * W2-cli11-3 (D-4766): the Observation lookups no longer hash the whole
+//!   file; the test LBE-06 names for that keeps its name and pins the new shape.
 //!
 //! Every file a constant below names is read at compile time, so a rename
 //! fails the build rather than skipping the check. A separate test crate, as
@@ -150,18 +152,26 @@ fn a_pre_admission_page_checks_metadata_and_its_lookups_are_priced_by_file_bytes
     let section_153 = flat(section(153));
     assert!(section_153.contains("A page costs O(P) for P returned rows: since D-1681"));
     assert!(section_153.contains("A cached `reopen_audit` lookup still content-hashes both files"));
+    // §157 and §161 price the Observation lookups at average O(1) since
+    // D-4766, which `observation_lookups_still_hash_the_whole_file_and_say_so`
+    // pins against the source.
     let section_157 = flat(section(157));
     assert!(!section_157.contains("hashes its bounded bytes; hash-index lookup is average O(1)"));
-    assert!(section_157.contains("so one lookup is O(file bytes)"));
+    assert!(!section_157.contains("so one lookup is O(file bytes)"));
+    assert!(section_157.contains("A cached `reopen_audit` lookup is average O(1) since D-4766"));
     let section_161 = flat(section(161));
     assert!(!section_161.contains("identity-map lookup is average O(1); allocation"));
-    assert!(section_161.contains("reads and hashes the whole bounded file, O(B)"));
+    assert!(!section_161.contains("lookup reads and hashes the whole bounded file, O(B), before"));
+    assert!(section_161.contains("One cached `reopen_audit` lookup is average O(1)"));
 
     let module = flat(PRE_ADMISSION.get(..3_000).expect("the module header"));
     assert!(!module.contains("A page is proportional to the returned records after that scan"));
     assert!(module.contains("A page checks file generations by metadata only"));
 }
 
+/// LBE-06 names this test, and invariant rows are append-only, so the name
+/// stays. What it pinned, a whole-file read per Observation lookup, D-4766
+/// removed: it now pins the metadata check and the pair re-read (L1FE-06).
 #[test]
 fn observation_lookups_still_hash_the_whole_file_and_say_so() {
     let mut lookups = 0;
@@ -169,24 +179,37 @@ fn observation_lookups_still_hash_the_whole_file_and_say_so() {
     while let Some(at) = rest.find("    pub fn reopen_audit(") {
         let body = method(rest, "    pub fn reopen_audit(");
         assert!(body.contains("self.require_unchanged()?"));
+        assert!(body.contains("self.reverify_pair(&audit)?"));
         let doc_start = rest
             .get(..at)
             .expect("a prefix")
             .rfind("\n\n")
             .expect("a gap");
         let doc = flat(rest.get(doc_start..at).expect("the rustdoc"));
-        assert!(doc.contains("so it is O(B) time and O(B) transient memory"));
+        assert!(!doc.contains("so it is O(B) time and O(B) transient memory"));
+        assert!(doc.contains("Average O(1) time and O(1) memory in file bytes"));
         lookups += 1;
         rest = rest.get(at + 1..).expect("a suffix");
     }
     assert_eq!(lookups, 2, "Observation V1 and V2 each have one lookup");
-    let unchanged = method(OBSERVATIONS, "    fn require_unchanged(&mut self)");
-    assert!(unchanged.contains("read_bounded_authority_file"));
+    let mut checks = 0;
+    let mut rest = OBSERVATIONS;
+    while let Some(at) = rest.find("    fn require_unchanged(&self)") {
+        let unchanged = method(rest, "    fn require_unchanged(&self)");
+        assert!(
+            !unchanged.contains("read_bounded_") && !unchanged.contains("digest_"),
+            "an Observation lookup reads the whole file again; re-measure §157 and §161"
+        );
+        checks += 1;
+        rest = rest.get(at + 1..).expect("a suffix");
+    }
+    assert_eq!(checks, 2, "V1 and V2 each have one metadata check");
+    assert!(!OBSERVATIONS.contains("fn require_unchanged(&mut self)"));
 
     let chapter = chapter(CHAPTER);
     for needed in [
         "Pre-Admission Data V1 `page`** (§153) is now O(P)",
-        "Observation V1 and V2 `reopen_audit`** (§157, §161) read the whole bounded authority file",
+        "Observation V1 and V2 `reopen_audit`** (§157, §161) are average O(1) since D-4766",
         "Finalization V2 `reopen_structural_receipt`** re-hashes the bounded data file",
     ] {
         assert!(

@@ -8325,10 +8325,17 @@ The companion authority contains only fixed-size identities, counts and
 digests. It does not durably retain the O(C·P + C·K) raw evidence. Crash recovery
 therefore requires the upstream exact Candidate replay to derive the same
 observations again before an orphan Data may receive Completion. Opening the
-ledger scans and hashes its bounded bytes. A cached `reopen_audit` lookup
-reads and hashes the whole bounded file again before its hash-index probe, so
-one lookup is O(file bytes); only the probe itself is average O(1) (D-1681
-corrected an older sentence here that called the lookup average O(1)). One
+ledger reads, scans and hashes its bounded bytes once. A cached `reopen_audit`
+lookup is average O(1) since D-4766: it compares the lock and data generations
+by metadata only, probes the identity map once and re-reads the found
+authority's 1,024-byte Data/Completion pair at its fixed offset, which must
+decode to exactly the cached audit; no file is read whole or hashed. Until
+D-4766 each lookup read and hashed the whole bounded file, O(file bytes), which
+D-1681 had stated here (W2-cli11-3). Not seen per lookup: a same-length rewrite
+of another authority's pair that leaves every metadata field equal; that pair's
+own lookup and the next open refuse it. One append door is one open plus one
+streaming hash pass after the write, which must first reproduce the digest of
+the bytes the open validated, and a re-read of the committed pair. One
 fixed-stride record position is worst-case O(1) in record count after
 admission. Allocation, hashing, locking, sync and device latency are not
 constant-time.
@@ -8442,16 +8449,20 @@ record, so the zero-family outcome retains the full Candidate/source and
 natural-extinction proof without fabricating an observation row or statistic.
 That constant record width does not make production, open or persistence O(1).
 
-For A admitted Observation authorities and B file bytes, open/fresh reopen scan
-and validate O(B) bytes and retain O(A) identity/data indexes. Append validates
+For A admitted Observation authorities and B file bytes, an open scans and
+validates O(B) bytes and retains O(A) identity/data indexes. Append validates
 the embedded Pre-Admission record, hashes fixed records, synchronizes Data then
-Completion, hashes the bounded file and freshly reopens it. One fixed-stride
-record address is worst-case O(1) in record count after admission. One cached
-`reopen_audit` lookup reads and hashes the whole bounded file, O(B), before an
-identity-map probe that is average O(1) (D-1681); allocation, locking, synchronization,
-filesystem traversal, page faults, controller behavior, removable-drive loss
-and latency have no constant bound. The explicit byte/authority ceilings refuse
-excess; they do not truncate history or hide a failure.
+Completion, makes one streaming hash pass over the file that must reproduce the
+digest of the bytes the open validated, and re-reads the committed pair through
+the writer's handle: one open per append door where there were two (D-4766).
+One fixed-stride record address is worst-case O(1) in record count after
+admission. One cached `reopen_audit` lookup is average O(1): metadata-only
+generation checks, an identity-map probe and a re-read of the found authority's
+2,048-byte pair. Until D-4766 it read and hashed the whole bounded file, O(B)
+(D-1681). Allocation, locking, synchronization, filesystem traversal, page
+faults, controller behavior, removable-drive loss and latency have no constant
+bound. The explicit byte/authority ceilings refuse excess; they do not truncate
+history or hide a failure.
 
 The focused Observation V1+V2 suite is **11/11 green** and covers the exact
 opaque Pre-Admission commit join, NIFTY/BANKNIFTY family separation, nonzero
@@ -15412,10 +15423,16 @@ or average O(1).
   equal. A rewrite of a record it returns is refused by that record's seal.
 - **Pre-Admission Data V1 `reopen_audit`** still content-hashes the lock and
   data files, O(file bytes) per lookup, then probes its map in average O(1).
-- **Observation V1 and V2 `reopen_audit`** (§157, §161) read the whole bounded
-  authority file into memory and hash it, O(B) time and O(B) transient memory
-  per lookup, before an average-O(1) map probe. Kept deliberately: they are
-  audit-only lookups, and the content hash is what refuses a same-length edit.
+- **Observation V1 and V2 `reopen_audit`** (§157, §161) are average O(1) since
+  D-4766: metadata-only generation checks, one map probe and a re-read of the
+  found authority's Data/Completion pair (1,024 bytes in V1, 2,048 in V2),
+  which must decode to the cached audit. Until D-4766 they read the whole
+  bounded authority file into memory and hashed it, O(B) time and O(B)
+  transient memory per lookup. Not seen per lookup: an equal-metadata
+  same-length rewrite of another authority's pair; its own lookup and the next
+  open refuse it. Each append door is one open and one scan where it was two,
+  plus one streaming hash pass after the write that must reproduce the bytes
+  the open validated.
 - **Finalization V2 `reopen_structural_receipt`** re-hashes the bounded data
   file through `require_unchanged`, O(file bytes) per lookup, before an
   average-O(1) probe; its rustdoc already said so and this section is its
