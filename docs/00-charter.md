@@ -195,12 +195,37 @@ Muhurat sessions, confirmed bar-for-bar against the lake:
 
 | Date | Session (IST) | Bars |
 |---|---|---|
+| 2018-11-07 (Wed) | 17:30 – 18:30 | 60 — MEASURED from GDFL ticks (below); the date is NSE/CMTR/36475's |
+| 2019-10-27 (Sun) | 18:15 – 19:15 | 60 — MEASURED from GDFL ticks (below); the date is NSE/CMTR/39612's |
 | 2020-11-14 (Sat) | 18:15 – 19:15 | 60 |
 | 2021-11-04 (Thu) | 18:15 – 19:15 | 60 |
 | 2022-10-24 (Mon) | 18:15 – 19:15 | 60 |
-| 2023-11-12 (Sun) | 18:00 – 19:00 | **46** — a 14-bar deficit; the open is UNVERIFIED, first bar is 18:07 |
+| 2023-11-12 (Sun) | 18:15 – 19:15 | 60 — MEASURED from GDFL ticks (below). Supersedes 18:00 – 19:00 and 46 bars, a row that marked its own open UNVERIFIED (first bar 18:07) |
 | 2024-11-01 (Fri) | 18:00 – 19:00 | 60 |
 | 2025-10-21 (Tue) | 13:45 – 14:45 | 60 — an afternoon session, not an evening one |
+
+**The tick measurement, 9 Oct 2026 (D-3319).** Read only from the vendor's
+GDFL capital-market day zips (`STOCKS/<yyyy>/<MON_yyyy>/GFDLCM_STOCK_TICK_<ddmmyyyy>.zip`
+and the `INDICES` twin) in the vendor archive named under "GDFL
+capital-market tick files" below, with `unzip -p` and `awk`, counts and minute
+spans only; no row is reproduced. A trade is a row whose `LTQ` is positive. On
+every date in the table the minutes in which each of RELIANCE, INFY, HDFCBANK,
+SBIN, TCS and ICICIBANK trades at least three times run unbroken for sixty
+minutes, from the window's open to its last minute (17:30–18:29 in 2018,
+18:15–19:14 in 2019 to 2023, 18:00–18:59 in 2024, 13:45–14:44 in 2025), and
+NIFTY 50's value changes in every one of those minutes. Before the window a
+share trades at most once, and NIFTY 50 prints its first value at the
+first-row stamp under "GDFL capital-market tick files" below and does not
+change again until the window opens (in 2024 it also changes in the 17:59
+minute). After the window no minute holds three trades of any of the six
+until the post-close session, ten or more minutes later (18:40 in 2018, 19:25
+or 19:26 in 2019 to 2023, 19:19 in 2024, 14:55 in 2025). NIFTY 50 also changes in the minute after
+the window's last in 2019 to 2023 (19:15) and in the two after it in 2025
+(14:45–14:46), and in one isolated later minute in 2018 to 2024 (18:31, 19:17
+or 19:18, and 19:10). The same walk gives 09:15–09:59 and 11:30–12:29 for
+all six on both drill Saturdays and 09:15–15:29 for RELIANCE and INFY on
+2024-01-20, as measured above from Zerodha. No exchange notice of these timings is recorded
+here.
 
 2026 has an announced Muhurat date (2026-11-08) with **no notified timings**.
 It is therefore absent rather than guessed.
@@ -916,6 +941,29 @@ from 09:21:08 to 10:21:00; on 2020-03-23 every stock is absent from 09:59 to
 `pull::calendar` as **suspected** halts with those measured windows (WP-14);
 they stay suspected until a circular is recorded here, and a suspected halt's
 minutes are neither owed nor excused (D-3336).
+
+**Re-measured on 9 Oct 2026 from the GDFL day files (D-3320)**, counts and
+times only, read as the Muhurat measurement in §3 was, from the capital-market
+day zips and the options day zips (`<MON_yyyy>/GFDLNFO_TICK_<ddmmyyyy>.zip`)
+of the vendor archives. On 2020-03-13 RELIANCE, HDFCBANK, INFY, SBIN, TCS and
+ICICIBANK trade last at 09:21:08 and next at 10:21:00; across the whole stock
+day file 25 trades print after 09:21:08, the last at 09:22:03, five of them in
+the 09:22 minute and all five in names outside `core::universe::FNO_UNDERLYINGS`,
+and the next is at 10:21:00. NIFTY 50 and NIFTY BANK change last at 09:21:09 and next, after
+the auction, at 10:21:01; NIFTY 50 changes in every minute 10:06–10:13 and in
+no other minute from 09:22 to 10:20. Every NIFTY and BANKNIFTY option trades
+last by 09:21:44 and next at 10:21:00; eight trades of stock options print in
+the 09:22 minute, the last at 09:22:58. On 2020-03-23 every share in the stock
+day file trades last at 09:58:07 and next at 10:57:00; NIFTY 50 changes last
+at 09:58:07 and NIFTY BANK at 09:58:08, both next at 10:57:01, and NIFTY 50
+changes in no minute from 09:59 to 10:56 except 10:42–10:49; every NIFTY and
+BANKNIFTY option trades last at 09:58:00 and next at 10:57:00, and stock
+options last at 09:58:37. Each is a 45-minute halt and a 15-minute reopening
+call auction, `[10:06, 10:21)` and `[10:42, 10:57)`, in the shape of the NSE
+rule above; that shape is an inference from these times, not a record. On
+2021-02-24 RELIANCE, HDFCBANK, INFY, SBIN and TCS trade last at 11:43:00 and
+ICICIBANK at 11:42:59, three minutes past SEBI's 11:40, and all six next at
+15:45:00; the SEBI order stays the record.
 
 ## VWAP applicability evidence — reviewed 2026-09-06
 
