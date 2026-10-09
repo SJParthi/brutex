@@ -327,7 +327,7 @@ fn every_refusal_says_what_it_is() {
         "batch=3",
         "new=3",
         "does not fit",
-        "counted in memory part way through the batch: words",
+        "(the census's own words: words)",
         "nothing of the day's batch was published",
         "the run stopped there after 2 day(s) imported",
     ] {
@@ -411,9 +411,13 @@ impl Census for Tight {
         let new = self.new_in(held);
         let free = MAX_ENTRIES - self.n_valid;
         if new.len() as u64 > free {
+            // The census's own up-front refusal (D-3316 item 5, WP-10): the
+            // file's n_valid, the batch and the limit, before any row is
+            // recorded.
             return Some(
                 crate::manifest::ManifestError::TooManyEntries {
-                    n_valid: MAX_ENTRIES + 1,
+                    n_valid: self.n_valid,
+                    batch: new.len() as u64,
                     limit: MAX_ENTRIES,
                 }
                 .to_string(),
@@ -514,7 +518,8 @@ fn the_run_stops_at_the_first_day_whose_batch_does_not_fit_the_census() {
     assert_eq!(*measured, room(MAX_ENTRIES - 1, 3, 3));
     assert!(!measured.fits() && measured.free() == 1);
     assert_eq!(
-        why, "n_valid is 2097153; this build holds at most 2097152",
+        why,
+        "n_valid is 2097151 of a capacity of 2097152 (1 free); a batch of 3 entries does not fit",
         "the census's own words, kept"
     );
     assert_eq!(done.days_imported, 3, "day four is not counted imported");
@@ -552,8 +557,8 @@ fn the_run_stops_at_the_first_day_whose_batch_does_not_fit_the_census() {
     assert!(
         census_failure.why.starts_with(
             "the census is full, so nothing of the batch was published: n_valid=2097151 \
-             limit=2097152 free=1 batch=3 new=3 (the census's words, counted in memory: n_valid \
-             is 2097153;"
+             limit=2097152 free=1 batch=3 new=3 (the census's own words: n_valid is 2097151 \
+             of a capacity of 2097152 (1 free); a batch of 3 entries does not fit)"
         ),
         "{}",
         census_failure.why

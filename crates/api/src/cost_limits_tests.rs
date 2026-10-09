@@ -26,6 +26,10 @@ const CENSUS: &str = include_str!("census.rs");
 const VERIFY: &str = include_str!("verify.rs");
 const INGEST: &str = include_str!("../../pull/src/ingest.rs");
 const MANIFEST: &str = include_str!("../../pull/src/manifest.rs");
+// THE CENSUS READ D-3316 MOVED BEHIND `census_store::Target::load` (WP-10):
+// the single file through `read_census` as before, a migrated vendor's
+// partition through `read_epoch`. The cost this file holds is unchanged.
+const CENSUS_STORE: &str = include_str!("../../pull/src/census_store.rs");
 
 /// The D-1446 section, from its heading to the next `## ` heading or the end.
 fn section() -> &'static str {
@@ -129,12 +133,27 @@ fn w1_api5_1_a_body_reads_the_whole_census_and_the_bullet_says_so() {
         .expect("one from_window per body")
         .1;
     assert!(walk.contains("pull::ingest::from_window("), "{body}");
-    for head in ["fn from_members_inner(", "fn record_all("] {
-        assert!(
-            item(INGEST, head).contains("read_census(&census_path, vendor)"),
-            "`{head}` reads the whole census on every call"
-        );
-    }
+    assert!(
+        item(INGEST, "fn from_members_inner(").contains("target.load()"),
+        "`fn from_members_inner(` reads the whole census on every call"
+    );
+    assert!(
+        item(INGEST, "fn record_all(").contains("census_store::record(store_root, vendor, held)"),
+        "`fn record_all(` goes through the census cycle"
+    );
+    assert!(
+        item(CENSUS_STORE, "pub fn cycle(").contains("target.load()"),
+        "and every cycle reads the whole census"
+    );
+    let load = CENSUS_STORE
+        .split_once("pub fn load(&self)")
+        .and_then(|(_, rest)| rest.split_once("\n    }\n"))
+        .map_or("", |(body, _)| body);
+    assert!(
+        load.contains("read_census(&path, self.vendor)")
+            && load.contains("read_epoch(&path, self.vendor, segment)"),
+        "`Target::load` reads the single file or the partition whole: {load}"
+    );
     assert!(
         item(INGEST, "fn read_census(").contains("fs::read(path)"),
         "and the read is the whole file"

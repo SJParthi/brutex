@@ -325,8 +325,10 @@ pub enum ImportRefusal {
         day: Day,
         /// The census file's room for the batch, measured after the refusal.
         room: CensusRoom,
-        /// The census's own words. They quote its counter in memory part way
-        /// through the batch, never the file's: `room` is the file's.
+        /// The census's own words. Since D-3316 item 5 the census refuses a
+        /// batch up front, before recording any of it, naming its file's
+        /// `n_valid`, capacity, free slots and the batch (WP-10); `room` is
+        /// this module's own measurement of the same file, kept beside them.
         why: String,
         /// What the run did before it stopped. The refused day's files and
         /// bars are counted in it, because they are on disk; the day is not
@@ -435,8 +437,7 @@ impl core::fmt::Display for ImportRefusal {
                 f,
                 "the census is full and cannot take {} {day}: its file holds n_valid={} of the \
                  limit={} this build writes, free={}, and the day's batch={} entries (new={}) \
-                 does not fit (the census's own words, counted in memory part way through the \
-                 batch: {why}); {}",
+                 does not fit (the census's own words: {why}); {}",
                 kind.as_str(),
                 room.n_valid,
                 room.limit,
@@ -1365,10 +1366,25 @@ impl core::ops::Deref for Refused {
 
 /// A failure about `instrument`, in words: the one place this module builds
 /// a [`Failure`] by its fields, so a field `pull::ingest` adds is added here.
+/// A reader's refusal is not yet tied to a day here; [`note_failure`] gives
+/// it the day it is reported under.
 fn failure(instrument: &str, why: String) -> Failure {
     Failure {
         instrument: instrument.to_owned(),
         why,
+        month: None,
+        day: None,
+    }
+}
+
+/// A failure of import day `day`, carrying that day and its month, so a log
+/// or a ring files it under the day it concerns and never under the run's
+/// first month (DB-G45, D-3341 item 1).
+fn failure_on(day: Day, instrument: &str, why: String) -> Failure {
+    Failure {
+        month: day.year_month().ok(),
+        day: Some(day),
+        ..failure(instrument, why)
     }
 }
 
@@ -1889,7 +1905,7 @@ fn note_failure(kind: ImportKind, day: Day, about: &str, why: &str, cause: Cause
             .with("stage", cause.stage.as_str())
             .with("code", cause.code),
     );
-    failure(&format!("{day} {about}"), why.to_owned())
+    failure_on(day, &format!("{day} {about}"), why.to_owned())
 }
 
 /// One failure of a day and its cause (D-3317).
@@ -2552,7 +2568,7 @@ fn stop_at_census(
     let words = census_words(&why, &room);
     failures.push(Staged {
         cause,
-        failure: failure(&format!("{day} census"), words.clone()),
+        failure: failure_on(day, &format!("{day} census"), words.clone()),
     });
     let _incomplete = close_day(
         ctx,
@@ -2610,7 +2626,7 @@ fn census_words(why: &str, room: &Result<CensusRoom, String>) -> String {
     match room {
         Ok(room) if !room.fits() => format!(
             "the census is full, so nothing of the batch was published: n_valid={} limit={} \
-             free={} batch={} new={} (the census's words, counted in memory: {why})",
+             free={} batch={} new={} (the census's own words: {why})",
             room.n_valid,
             room.limit,
             room.free(),

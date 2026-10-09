@@ -2369,9 +2369,35 @@ const RISKFREE_LITERAL: &str = "cut_off_price implicit_yield_pct released 2020-0
 // extension (D-2329), which the import test checks beside each bar month.
 // None names an account, an environment or a vendor field.
 const GDFL_JOINED_PIECE: &str = "05 09 2018 2023 dd dddd sub tix";
+// D-3316 (WP-10): census version 4. `v4` is the store's own directory of
+// version-4 censuses (`manifest/v4/<vendor>/<SEGMENT>/<epoch>.man`,
+// `pull::manifest::V4_ROOT`). `capacity` and `headroom` are the two counters a
+// version-4 header carries beside its count, and the telemetry fields
+// `pull.manifest` reports them under. `from_entries`, `to_entries`,
+// `from_epoch`, `to_epoch`, `full`, `repair` and `recount` are the fields and
+// reasons of the `census compacted` line; `files_seen`, `files_in_range`, `files_empty`,
+// `not_store_names`, `offered`, `recorded`, `days_closed` and
+// `days_left_open` those of `census recounted`; `legacy_version`,
+// `legacy_generation`, `legacy_entries` and `partitions` those of `census
+// migrated` and of the migration receipt's key=value lines. `run`,
+// `recounted`, `torn` and `unrecorded` are words of the GDFL import journal's
+// lines (D-3317): two verbs, the torn-line mark of D-2814 and the commit a
+// binary without a stamp records. The rest are test fixtures and `expect`
+// labels: `broker-shifted-day-two` a scratch directory's tag, `0123abcd` an
+// invented commit stamp, `2019-11`, `2019-11-4` and
+// `2019-11-14-1` malformed journal days, and `again`, `closes`, `compacts`,
+// `counted`, `foreign`, `installed`, `listed`, `mismatch`, `parent`,
+// `repairs` and `reset` labels. Every one names a counter, a directory or a
+// journal word of the bar store's census, and none is an account, an
+// environment, a vendor credential or a field of a parameter path.
+const CENSUS_V4_LITERAL: &str = "v4 capacity headroom from_entries to_entries from_epoch to_epoch \
+     full repair recount files_seen files_in_range files_empty not_store_names offered recorded \
+     days_closed days_left_open legacy_version legacy_generation legacy_entries partitions run \
+     recounted torn unrecorded broker-shifted-day-two 0123abcd 2019-11 2019-11-4 2019-11-14-1 again closes compacts \
+     counted foreign installed listed mismatch parent repairs reset";
 
 /// Every declared group, in the order the step joined them.
-const DECLARED: [&str; 58] = [
+const DECLARED: [&str; 59] = [
     SEG_SHAPE,
     VENDOR_WIRE,
     CLAIM_STANDING,
@@ -2430,6 +2456,7 @@ const DECLARED: [&str; 58] = [
     GDFL_IMPORT_LITERAL,
     RISKFREE_LITERAL,
     GDFL_JOINED_PIECE,
+    CENSUS_V4_LITERAL,
 ];
 
 fn declared() -> BTreeSet<&'static str> {

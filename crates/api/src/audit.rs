@@ -2300,6 +2300,8 @@ mod tests {
         done.failures.push(Failure {
             instrument: "ABB-III".to_owned(),
             why: "the census refused the record".to_owned(),
+            month: None,
+            day: None,
         });
         let record = Record::of_run(Scope::Spot, at(5), 1, "folder", window(), &done);
         assert_eq!(record.outcome, Outcome::Failed);

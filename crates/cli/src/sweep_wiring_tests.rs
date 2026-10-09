@@ -147,9 +147,13 @@ fn only_actual_computation_verbs_can_establish_sweep_status() {
     for word in super::COMMANDS {
         let non_sweep = matches!(
             word,
-            "checksum-audit-stored"
+            "census-migrate"
+                | "census-recount"
+                | "checksum-audit-stored"
                 | "fold-audit"
+                | "gdfl-dayflags"
                 | "gdfl-import"
+                | "tix-rebuild"
                 | "research-plan"
                 | "policy-check"
                 | "results"

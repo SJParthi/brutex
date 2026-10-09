@@ -153,6 +153,39 @@
 //! shape of the code and no bench in this workspace times it.
 //! `CLAUDE.md` §3 rule 6: a structural argument is not a
 //! measurement, however sound it is.
+//!
+//! # Version 4: one file per (vendor, segment), sized by its own header (D-3316)
+//!
+//! Versions 1 to 3 are ONE file per vendor, and their entry region is an
+//! append-only LOG: an update to a key is a new entry, so the file grows with
+//! the number of writes, not with the number of months held. Measured on the
+//! operator's store on 6 Oct 2026, `gdfl.man` held 2,096,855 entries over
+//! 246,147 keys (8.5 entries per key) and refused every options day after
+//! 2019-11-13 at [`MAX_ENTRIES`] while the bars kept landing (DB-058, DB-G01,
+//! DB-G49, DB-G60, DB-G78). Raising the constant would not have fixed it
+//! (DB-G05): the log keeps growing, and every reader is built with the same
+//! compiled number, so a file grown past it is unreadable (DB-G08).
+//!
+//! Version 4 changes three things and keeps the entry bytes of version 3:
+//!
+//! * **Partitioned, in epochs.** `manifest/v4/<vendor>/<SEGMENT>/<epoch>.man`,
+//!   one directory per segment, so a Zerodha write never opens a GDFL file and
+//!   the option contracts are a census of their own. The current epoch is the
+//!   highest-numbered file present; an older one is an immutable generation.
+//!   [`epoch_path`].
+//! * **Capacity in the header.** Bytes `12..16` of a version-4 slot hold the
+//!   file's own capacity and byte `56` its segment, so a reader is bound by the
+//!   file it reads, never by a writer's compiled constant (DB-G08).
+//!   [`ManifestHeader::capacity`].
+//! * **Compaction.** [`Manifest::compacted`] keeps the newest row per key, in
+//!   key order. The writer installs it as the NEXT epoch by rename and never
+//!   writes the epoch it replaced again, so history is never rewritten in place.
+//!
+//! A vendor's census becomes version 4 only through `cli census-migrate`,
+//! never silently: a reader that knows only versions 1 to 3 would otherwise
+//! stop seeing every month written after the switch. Until then the single
+//! file is read and written exactly as before. `docs/02-store-format.md` §11.7
+//! to §11.9 are the authority for the bytes.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -193,10 +226,71 @@ pub const MAGIC_V2: [u8; 8] = *b"BRUTEXM2";
 /// The seven bytes shared by every manifest version.
 pub const MAGIC_FAMILY: [u8; 7] = *b"BRUTEXM";
 
-/// The format version this build **writes**. Version 1 is read, never written.
+/// The format version this build writes for a **single-file** census.
+/// Version 1 is read, never written.
 ///
-/// `Layout::KNOWN` is what this build **reads**, and it holds all three.
+/// `Layout::KNOWN` is what this build **reads**, and it holds all four. A
+/// partition is written at [`PARTITION_FORMAT_VERSION`]; a single file that has
+/// not been migrated keeps this one, so a reader built before version 4 keeps
+/// reading it until `cli census-migrate` moves the vendor (D-3316).
 pub const FORMAT_VERSION: u16 = 3;
+
+/// The format version of one `(vendor, segment)` partition epoch (D-3316).
+///
+/// Written with [`MAGIC_V2`]: the entry is version 3's and the slot keeps its
+/// geometry, so the magic names the geometry exactly as it did for version 3;
+/// the version field is what tells a reader the two reserved runs now hold
+/// fields (D-3316 item 3).
+pub const PARTITION_FORMAT_VERSION: u16 = 4;
+
+/// The largest capacity a version-4 header can declare: the width of its
+/// 32-bit field, and nothing else.
+///
+/// **Not a policy and not a reader's guess.** D-3316: "a reader bounds the
+/// entry region by the header's `capacity` and the file's length, never by a
+/// constant compiled into the reader". This is the field's own range, so a
+/// reader that admits every value the field can carry is bound by the file
+/// alone; the entry count it then reserves for is bounded by the bytes really
+/// read, so a large declared capacity is never an allocation.
+pub const MAX_CAPACITY: u64 = 4_294_967_295;
+
+/// [`MAX_CAPACITY`] in the width a slice is chunked at. A literal in both
+/// widths for the reason [`HEADER_LEN`] gives.
+const MAX_CAPACITY_LEN: usize = 4_294_967_295;
+
+/// The capacity floor of an option-and-future partition (D-3316 item 4).
+///
+/// **More than twice the archive's option contract-months.** The audit
+/// estimates about 2.2 million `(contract, month)` keys for the GDFL options
+/// archive, 2018-09 to 2026-09 (DB-G05, DB-G60; an estimate from the vendor's
+/// member lists, not a count of keys this build has written). 2²³ = 8,388,608
+/// is 3.8× that. An epoch's capacity is the larger of this and twice its keys.
+pub const FNO_FLOOR: u64 = 8_388_608;
+
+/// The capacity floor of an index or cash-equity partition (D-3316 item 4):
+/// 2²⁰ = 1,048,576. Measured on 6 Oct 2026, the whole Zerodha census, every
+/// segment together, held 204,249 keys.
+pub const SPOT_FLOOR: u64 = 1_048_576;
+
+/// The directory under [`MANIFEST_ROOT`] that holds every version-4 census:
+/// `manifest/v4/`. D-3316 item 1.
+pub const V4_ROOT: &str = "v4";
+
+/// The first epoch a partition has: `000001`. D-3316 item 1.
+pub const FIRST_EPOCH: u32 = 1;
+
+/// The last epoch six decimal digits can name. A compaction past it is
+/// refused by name rather than spelled with a seventh digit no reader parses.
+pub const LAST_EPOCH: u32 = 999_999;
+
+/// The digits of an epoch's file name.
+pub const EPOCH_DIGITS: usize = 6;
+
+/// The suffix of an epoch being written, which no reader reads (D-3316 item 2).
+pub const EPOCH_TMP_SUFFIX: &str = ".man.tmp";
+
+/// The extension of a version-4 segment's lock, beside its directory.
+pub const LOCK_EXTENSION: &str = ".lock";
 
 /// Bytes per header slot, and per checksummed image unit.
 ///
@@ -222,12 +316,14 @@ pub const ENTRY_LEN: usize = 128;
 
 /// The widest entry stride a [`Layout`] row may declare.
 ///
-/// Derived, not chosen: `HEADER_LEN + MAX_ENTRIES · stride` must fit a `u64`,
-/// because [`Layout::offset_within_bounds`] is total past the ordinal check.
-/// Ten orders of magnitude above anything a real format would use, and it is
+/// Derived, not chosen: `HEADER_LEN + MAX_CAPACITY · stride` must fit a
+/// `u64`, because [`Layout::offset_within_bounds`] is total past the ordinal
+/// check. Bounded by [`MAX_CAPACITY`] rather than [`MAX_ENTRIES`] since
+/// version 4, because a partition's ordinals run to its own capacity (D-3316).
+/// Seven orders of magnitude above anything a real format would use, and it is
 /// here so that "the arithmetic cannot overflow" is a checked property of every
-/// declared row rather than a sentence about the two rows that exist today.
-pub const MAX_ENTRY_STRIDE: u64 = (u64::MAX - HEADER_LEN) / MAX_ENTRIES;
+/// declared row rather than a sentence about the rows that exist today.
+pub const MAX_ENTRY_STRIDE: u64 = (u64::MAX - HEADER_LEN) / MAX_CAPACITY;
 
 /// Version 1's entry stride, in the width an offset is computed in.
 const V1_ENTRY_STRIDE: u64 = 64;
@@ -262,13 +358,19 @@ pub const SLOT_COUNT: u64 = 2;
 /// The assertion below is what keeps it honest.
 pub const HEADER_LEN: u64 = 32_768;
 
-/// The most entries one manifest may hold.
+/// The most entries one **single-file** manifest (versions 1 to 3) may hold.
 ///
 /// `docs/07-o1-architecture.md` law 5 — bound every input at the boundary.
-/// Measured scale is ~248,000 files across every vendor and expiry;
-/// 2,097,152 is 8.4× that and caps one manifest at 134 MB. The refusal names
-/// the number, so an operator who legitimately outgrows it is told what to
-/// raise rather than being handed an allocation the size of the file.
+///
+/// **The sizing note this carried was wrong, and the store paid for it.** It
+/// read "measured scale is ~248,000 files; 2,097,152 is 8.4× that". The census
+/// is an append LOG, not one row per file: every import day appends one entry
+/// per contract-month it touched, so `gdfl.man` reached 2,096,855 entries over
+/// 246,147 keys and refused every options day from 2019-11-14 while the bars
+/// kept landing (DB-058, DB-G05, DB-G49). The constant keeps its value, because
+/// every version-1-to-3 file on disk and every reader built before version 4
+/// is bound by it; a version-4 partition carries its own capacity in its
+/// header instead (D-3316).
 pub const MAX_ENTRIES: u64 = 2_097_152;
 
 /// [`MAX_ENTRIES`] as a `usize`, for the map reservation.
@@ -402,10 +504,86 @@ pub const APPEND_HEADROOM_FACTOR: usize = 2;
 /// ```
 #[must_use]
 pub fn reservation_for(n_valid: u64) -> usize {
-    let census = usize::try_from(n_valid).unwrap_or(MAX_ENTRIES_LEN);
-    census
-        .saturating_mul(APPEND_HEADROOM_FACTOR)
-        .min(MAX_ENTRIES_LEN)
+    reservation_within(n_valid, MAX_ENTRIES)
+}
+
+/// [`reservation_for`], capped at a partition's own capacity rather than at
+/// [`MAX_ENTRIES`] (D-3316).
+///
+/// `min(count · APPEND_HEADROOM_FACTOR, capacity)`. A version-4 partition is
+/// not bound by the single-file ceiling, so its reservation cannot be either;
+/// but it is bound by its own header, and reserving past that would be room no
+/// append can use. `count` is always a number the bytes in hand bound — a
+/// header's `n_valid` after [`ManifestHeader::validate`] has checked it against
+/// the region — so a large declared capacity never becomes an allocation.
+///
+/// # Examples
+///
+/// ```
+/// # use pull::manifest::{MAX_ENTRIES, reservation_within};
+/// assert_eq!(reservation_within(1_792, 1 << 23), 3_584);
+/// assert_eq!(reservation_within(3_000_000, 1 << 23), 6_000_000);
+/// assert_eq!(reservation_within(3_000_000, MAX_ENTRIES), MAX_ENTRIES as usize);
+/// assert_eq!(reservation_within(5, u64::MAX), 10);
+/// assert_eq!(reservation_within(u64::MAX, 7), 7);
+/// ```
+#[must_use]
+pub fn reservation_within(count: u64, capacity: u64) -> usize {
+    let cap = usize::try_from(capacity.min(MAX_CAPACITY)).unwrap_or(MAX_CAPACITY_LEN);
+    let census = usize::try_from(count).unwrap_or(cap);
+    census.saturating_mul(APPEND_HEADROOM_FACTOR).min(cap)
+}
+
+/// The capacity floor of `segment`'s partitions: [`FNO_FLOOR`] for option and
+/// future contracts, [`SPOT_FLOOR`] for an index or a cash equity. D-3316
+/// item 4.
+///
+/// # Examples
+///
+/// ```
+/// # use brutex_core::instrument::Segment;
+/// # use pull::manifest::{FNO_FLOOR, SPOT_FLOOR, capacity_floor};
+/// assert_eq!(capacity_floor(Segment::Fno), FNO_FLOOR);
+/// assert_eq!(capacity_floor(Segment::Index), SPOT_FLOOR);
+/// assert_eq!(capacity_floor(Segment::Cash), SPOT_FLOOR);
+/// ```
+#[must_use]
+pub const fn capacity_floor(segment: Segment) -> u64 {
+    match segment {
+        Segment::Fno => FNO_FLOOR,
+        Segment::Index | Segment::Cash => SPOT_FLOOR,
+    }
+}
+
+/// The capacity an epoch holding `keys` keys is given: the larger of the
+/// segment's floor and twice its key count. D-3316 item 4, exactly.
+///
+/// # Errors
+///
+/// [`ManifestError::CapacityOutOfRange`] when twice the keys passes
+/// [`MAX_CAPACITY`] — a capacity the header's field cannot carry.
+///
+/// # Examples
+///
+/// ```
+/// # use brutex_core::instrument::Segment;
+/// # use pull::manifest::{FNO_FLOOR, SPOT_FLOOR, epoch_capacity};
+/// // The audit's gdfl census: 242,341 keys, far under the option floor.
+/// assert_eq!(epoch_capacity(Segment::Fno, 242_341), Ok(FNO_FLOOR));
+/// // Past half the floor, twice the keys.
+/// assert_eq!(epoch_capacity(Segment::Index, SPOT_FLOOR / 2 + 1), Ok(SPOT_FLOOR + 2));
+/// assert!(epoch_capacity(Segment::Fno, u64::MAX / 2).is_err());
+/// ```
+pub const fn epoch_capacity(segment: Segment, keys: u64) -> Result<u64, ManifestError> {
+    let Some(twice) = keys.checked_mul(2) else {
+        return Err(ManifestError::CapacityOutOfRange { capacity: u64::MAX });
+    };
+    let floor = capacity_floor(segment);
+    let capacity = if twice > floor { twice } else { floor };
+    if capacity > MAX_CAPACITY {
+        return Err(ManifestError::CapacityOutOfRange { capacity });
+    }
+    Ok(capacity)
 }
 
 /// [`store::format::SLOT_STRIDE`] as a `usize`, for slicing a region.
@@ -419,6 +597,12 @@ const SLOT_STRIDE_LEN: usize = 16_384;
 const HEADER_REGION_LEN: usize = 32_768;
 
 const _: () = assert!(MAX_ENTRIES == 2_097_152 && MAX_ENTRIES_LEN == 2_097_152);
+// THE FIELD'S OWN RANGE, in both widths, and every floor inside it: a floor
+// the field could not carry would be a capacity no reader could read back.
+const _: () = assert!(MAX_CAPACITY == u32::MAX as u64 && MAX_CAPACITY_LEN == u32::MAX as usize);
+const _: () = assert!(FNO_FLOOR == 8_388_608 && SPOT_FLOOR == 1_048_576);
+const _: () = assert!(FNO_FLOOR <= MAX_CAPACITY && SPOT_FLOOR <= MAX_CAPACITY);
+const _: () = assert!(LAST_EPOCH == 999_999 && EPOCH_DIGITS == 6);
 const _: () = assert!(SLOT_STRIDE == 16_384 && SLOT_STRIDE_LEN == 16_384);
 const _: () = assert!(HEADER_LEN == 32_768 && HEADER_REGION_LEN == 32_768);
 const _: () = assert!(HEADER_LEN == SLOT_COUNT * SLOT_STRIDE);
@@ -457,9 +641,22 @@ const H_TOTAL_ROWS: usize = 40;
 const H_VENDOR: usize = 48;
 /// Bytes the vendor segment occupies.
 const H_VENDOR_LEN: usize = 8;
+/// Byte offset of `capacity`, a `u32`, in a VERSION-4 header slot.
+///
+/// Reserved space at versions 1 to 3, written zero and never read there.
+/// `docs/02-store-format.md` §2: a future field takes reserved space in a new
+/// version, never by reinterpreting an old one. D-3316.
+const H_CAPACITY: usize = 12;
+/// Byte offset of the segment code in a VERSION-4 header slot.
+const H_SEGMENT: usize = 56;
+/// The three bytes after the segment code: reserved, and REFUSED when not zero
+/// at version 4 (versions 1 to 3 never read `56..60` at all).
+const H_V4_RESERVED: usize = 57;
 
 const _: () = assert!(MAX_VENDOR_LEN <= H_VENDOR_LEN);
 const _: () = assert!(H_VENDOR + H_VENDOR_LEN <= OFF_CRC);
+const _: () = assert!(H_STRIDE + 2 == H_CAPACITY && H_CAPACITY + 4 == H_GENERATION);
+const _: () = assert!(H_VENDOR + H_VENDOR_LEN == H_SEGMENT && H_V4_RESERVED + 3 == OFF_CRC);
 
 /// Byte offset of the symbol in an entry.
 const E_SYMBOL: usize = 0;
@@ -537,6 +734,162 @@ pub fn manifest_path(root: &Path, vendor: Vendor) -> PathBuf {
     out
 }
 
+/// The directory every version-4 census lives under: `manifest/v4/`. D-3316.
+///
+/// # Examples
+///
+/// ```
+/// # use std::path::Path;
+/// # use pull::manifest::v4_root;
+/// assert_eq!(v4_root(Path::new("/s")), Path::new("/s/manifest/v4"));
+/// ```
+#[must_use]
+pub fn v4_root(root: &Path) -> PathBuf {
+    let mut out =
+        PathBuf::with_capacity(root.as_os_str().len() + 2 + MANIFEST_ROOT.len() + V4_ROOT.len());
+    out.push(root);
+    out.push(MANIFEST_ROOT);
+    out.push(V4_ROOT);
+    out
+}
+
+/// The directory one vendor's version-4 census lives in:
+/// `manifest/v4/<vendor>/`. D-3316 item 1.
+///
+/// **Its existence is what marks the vendor as migrated** (D-3316 item 7: "for
+/// a vendor with a `manifest/v4/<vendor>/` directory the API reads only it").
+/// `cli census-migrate` creates it by renaming a complete staging directory
+/// into place, so it is either absent or whole. While it is absent,
+/// [`manifest_path`]'s single file is the vendor's census and is read and
+/// written exactly as before.
+///
+/// # Examples
+///
+/// ```
+/// # use std::path::Path;
+/// # use brutex_core::vendor::Vendor;
+/// # use pull::manifest::vendor_dir;
+/// assert_eq!(vendor_dir(Path::new("/s"), Vendor::Gdfl), Path::new("/s/manifest/v4/gdfl"));
+/// ```
+#[must_use]
+pub fn vendor_dir(root: &Path, vendor: Vendor) -> PathBuf {
+    let mut out = v4_root(root);
+    out.push(vendor.as_str());
+    out
+}
+
+/// The directory of one `(vendor, segment)` census's epochs:
+/// `manifest/v4/<vendor>/<SEGMENT>/`. D-3316 item 1.
+///
+/// # Examples
+///
+/// ```
+/// # use std::path::Path;
+/// # use brutex_core::instrument::Segment;
+/// # use brutex_core::vendor::Vendor;
+/// # use pull::manifest::segment_dir;
+/// assert_eq!(
+///     segment_dir(Path::new("/s"), Vendor::Gdfl, Segment::Fno),
+///     Path::new("/s/manifest/v4/gdfl/FNO")
+/// );
+/// ```
+#[must_use]
+pub fn segment_dir(root: &Path, vendor: Vendor, segment: Segment) -> PathBuf {
+    let mut out = vendor_dir(root, vendor);
+    out.push(segment.as_str());
+    out
+}
+
+/// The lock one `(vendor, segment)` census is written under:
+/// `manifest/v4/<vendor>/<SEGMENT>.lock`, beside its directory. D-3316 item 1.
+///
+/// # Examples
+///
+/// ```
+/// # use std::path::Path;
+/// # use brutex_core::instrument::Segment;
+/// # use brutex_core::vendor::Vendor;
+/// # use pull::manifest::segment_lock_path;
+/// assert_eq!(
+///     segment_lock_path(Path::new("/s"), Vendor::Gdfl, Segment::Cash),
+///     Path::new("/s/manifest/v4/gdfl/CASH.lock")
+/// );
+/// ```
+#[must_use]
+pub fn segment_lock_path(root: &Path, vendor: Vendor, segment: Segment) -> PathBuf {
+    let mut out = vendor_dir(root, vendor);
+    out.push(format!("{}{LOCK_EXTENSION}", segment.as_str()));
+    out
+}
+
+/// The file name of `epoch`: six decimal digits and `.man`. D-3316 item 1.
+///
+/// # Examples
+///
+/// ```
+/// # use pull::manifest::epoch_name;
+/// assert_eq!(epoch_name(1), "000001.man");
+/// assert_eq!(epoch_name(999_999), "999999.man");
+/// ```
+#[must_use]
+pub fn epoch_name(epoch: u32) -> String {
+    format!("{epoch:0EPOCH_DIGITS$}{MANIFEST_EXTENSION}")
+}
+
+/// The epoch a file name names, if it names one: exactly six ASCII digits, then
+/// `.man`, from [`FIRST_EPOCH`]. Anything else — `1.man`, `0000001.man`,
+/// `000000.man`, `000002.man.tmp` — is not an epoch. D-3316 items 1 and 2.
+///
+/// # Examples
+///
+/// ```
+/// # use pull::manifest::parse_epoch_name;
+/// assert_eq!(parse_epoch_name("000001.man"), Some(1));
+/// assert_eq!(parse_epoch_name("000042.man"), Some(42));
+/// assert_eq!(parse_epoch_name("000000.man"), None);
+/// assert_eq!(parse_epoch_name("1.man"), None);
+/// assert_eq!(parse_epoch_name("0000001.man"), None);
+/// assert_eq!(parse_epoch_name("000002.man.tmp"), None);
+/// assert_eq!(parse_epoch_name("00000a.man"), None);
+/// ```
+#[must_use]
+pub fn parse_epoch_name(name: &str) -> Option<u32> {
+    let digits = name.strip_suffix(MANIFEST_EXTENSION)?;
+    if digits.len() != EPOCH_DIGITS || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits
+        .parse::<u32>()
+        .ok()
+        .filter(|epoch| *epoch >= FIRST_EPOCH)
+}
+
+/// One epoch of one `(vendor, segment)` census:
+/// `manifest/v4/<vendor>/<SEGMENT>/<epoch>.man`. D-3316 item 1.
+///
+/// # Examples
+///
+/// ```
+/// # use std::path::Path;
+/// # use brutex_core::instrument::Segment;
+/// # use brutex_core::vendor::Vendor;
+/// # use pull::manifest::epoch_path;
+/// assert_eq!(
+///     epoch_path(Path::new("/s"), Vendor::Gdfl, Segment::Fno, 1),
+///     Path::new("/s/manifest/v4/gdfl/FNO/000001.man")
+/// );
+/// ```
+#[must_use]
+pub fn epoch_path(root: &Path, vendor: Vendor, segment: Segment, epoch: u32) -> PathBuf {
+    let mut out = segment_dir(root, vendor, segment);
+    out.push(epoch_name(epoch));
+    out
+}
+
+/// The three segments in the order of their on-disk codes, which is the order
+/// partitions are locked, read and published in.
+pub const SEGMENTS: [Segment; 3] = [Segment::Index, Segment::Cash, Segment::Fno];
+
 /// The geometry of one manifest format version, and the dispatch that selects
 /// it.
 ///
@@ -571,6 +924,8 @@ pub struct Layout {
     entry_stride: u64,
     entry_stride_len: usize,
     carries_closes: bool,
+    /// Whether the header slot carries a capacity and a segment — version 4.
+    partitioned: bool,
 }
 
 impl Layout {
@@ -600,11 +955,32 @@ impl Layout {
     /// is what a version field is for.
     pub const V3: Self = Self::declared(3, MAGIC_V2, ENTRY_STRIDE, ENTRY_LEN, true);
 
-    /// Every version this build can read, in ascending order.
-    pub const KNOWN: &'static [Self] = &[Self::V1, Self::V2, Self::V3];
+    /// Version 4 — version 3's 128-byte entry, in an epoch file that holds ONE
+    /// `(vendor, segment)` and carries its own capacity (D-3316).
+    ///
+    /// The entry bytes are version 3's, byte for byte, so one decoder serves
+    /// both; what differs is the header slot, which spends two runs versions 1
+    /// to 3 reserved: bytes `12..16` hold the capacity and byte `56` the
+    /// segment. A reader bound by the file it reads rather than by a constant
+    /// compiled into it is the whole point (DB-G08).
+    ///
+    /// The magic is still `BRUTEXM2` (D-3316 item 3): the magic names the
+    /// GEOMETRY — slot and entry strides — and neither moved, exactly the
+    /// argument [`Layout::V3`] makes. The version field is what says the two
+    /// reserved runs now hold fields.
+    pub const V4: Self =
+        Self::declared(4, MAGIC_V2, ENTRY_STRIDE, ENTRY_LEN, true).with_partition();
 
-    /// The version this build writes. Older versions are read, never written.
+    /// Every version this build can read, in ascending order.
+    pub const KNOWN: &'static [Self] = &[Self::V1, Self::V2, Self::V3, Self::V4];
+
+    /// The version this build writes a **single-file** census at. Older
+    /// versions are read, never written. A partition is written at
+    /// [`Layout::PARTITION`].
     pub const CURRENT: Self = Self::V3;
+
+    /// The version this build writes a `(vendor, segment)` partition at.
+    pub const PARTITION: Self = Self::V4;
 
     /// Declares a version's geometry at compile time.
     ///
@@ -636,7 +1012,26 @@ impl Layout {
             entry_stride,
             entry_stride_len,
             carries_closes,
+            partitioned: false,
         }
+    }
+
+    /// This geometry with a version-4 header slot: capacity and segment.
+    ///
+    /// A separate step rather than a sixth argument to [`Layout::declared`],
+    /// so every row declared before version 4 reads exactly as it did.
+    #[must_use]
+    pub const fn with_partition(self) -> Self {
+        Self {
+            partitioned: true,
+            ..self
+        }
+    }
+
+    /// Whether a header of this version carries a capacity and a segment.
+    #[must_use]
+    pub const fn partitioned(self) -> bool {
+        self.partitioned
     }
 
     /// Declares a version's geometry, refusing a degenerate one.
@@ -666,6 +1061,7 @@ impl Layout {
                 entry_stride,
                 entry_stride_len,
                 carries_closes,
+                partitioned: false,
             }),
         }
     }
@@ -750,13 +1146,13 @@ impl Layout {
     }
 
     /// The byte offset of entry `ordinal`, for an ordinal already known to be
-    /// within [`MAX_ENTRIES`].
+    /// within the file's capacity — [`MAX_ENTRIES`] for a single file, the
+    /// header's own capacity (at most [`MAX_CAPACITY`]) for a partition.
     ///
-    /// Total, not fallible. `MAX_ENTRIES · entry_stride + HEADER_LEN` is 268 MB
-    /// at the widest stride this build declares, so past the bound check there
-    /// is nothing left that can overflow — and therefore nothing left that needs
-    /// a failure arm. [`Layout::declare`] is what keeps that true for a row
-    /// added later.
+    /// Total, not fallible. `MAX_CAPACITY · entry_stride + HEADER_LEN` fits
+    /// a `u64` for every stride [`Layout::declare`] admits, so past the bound
+    /// check there is nothing left that can overflow — and therefore nothing
+    /// left that needs a failure arm.
     #[must_use]
     pub const fn offset_within_bounds(self, ordinal: u64) -> u64 {
         HEADER_LEN + ordinal * self.entry_stride
@@ -793,7 +1189,10 @@ impl Layout {
     }
 
     /// How many whole entries of this version `entries` holds, capped at
-    /// [`MAX_ENTRIES`].
+    /// [`MAX_CAPACITY`].
+    ///
+    /// The cap was [`MAX_ENTRIES`] until version 4, which made every partition
+    /// past the single-file ceiling read as a truncated file (DB-G08).
     ///
     /// **Computed per version rather than once for the file**, because the
     /// answer is the byte length divided by a stride that the header has not
@@ -808,7 +1207,7 @@ impl Layout {
     pub fn capacity_for(self, entries: &[u8]) -> u64 {
         entries
             .chunks_exact(self.entry_stride_len)
-            .take(MAX_ENTRIES_LEN)
+            .take(MAX_CAPACITY_LEN)
             .fold(0u64, |seen, _| seen + 1)
     }
 }
@@ -838,14 +1237,14 @@ const fn degenerate_field(
     if entry_stride_len == 0 {
         return Some("entry_stride_len");
     }
-    // `HEADER_LEN + MAX_ENTRIES·stride` must fit a `u64`, because
+    // `HEADER_LEN + MAX_CAPACITY·stride` must fit a `u64`, because
     // `Layout::offset_within_bounds` is total past the ordinal check and has no
     // failure arm to take.
     //
     // Written as ONE comparison against [`MAX_ENTRY_STRIDE`] rather than as a
-    // `checked_mul` followed by a `checked_add`: at this [`MAX_ENTRIES`] the
-    // second of those could never fire — the products step by 2,097,152 and the
-    // header region is 32,768, so a product that fits always leaves room for it
+    // `checked_mul` followed by a `checked_add`: at this [`MAX_CAPACITY`] the
+    // second of those could never fire — [`MAX_ENTRY_STRIDE`] is the quotient
+    // of `u64::MAX − HEADER_LEN`, so a product that fits always leaves room for it
     // — and an arm no input can enter is an arm no test can close.
     if entry_stride > MAX_ENTRY_STRIDE {
         return Some("entry_stride");
@@ -1043,10 +1442,23 @@ pub enum ManifestError {
     },
     /// No slot in the header region decoded.
     NoValidHeader,
-    /// `n_valid` claims more entries than [`MAX_ENTRIES`].
+    /// The census cannot hold what is asked of it: a batch of `batch` entries
+    /// does not fit after the `n_valid` it already holds, or (`batch` zero) a
+    /// header already counts past its own limit — [`MAX_ENTRIES`] for a single
+    /// file, the header's capacity for a partition.
+    ///
+    /// **`n_valid` is the census's committed count, never the in-memory counter
+    /// of whichever entry happened to be first past the limit** (DB-G10). The
+    /// refusal that read `n_valid is 2097153` was the counter after 4,103 of a
+    /// day's entries had been accepted in memory; the file held 2,093,049.
+    /// Every number here is now one a reader can check against the file:
+    /// `n_valid`, the batch, the limit, and the free slots between them.
+    /// D-3316 item 5, and D-3317's `reason=too_many_entries` is this variant.
     TooManyEntries {
-        /// The counter that was refused.
+        /// Entries the census holds before the batch.
         n_valid: u64,
+        /// Entries the batch needs; zero for a header already past its limit.
+        batch: u64,
         /// The bound.
         limit: u64,
     },
@@ -1121,9 +1533,62 @@ pub enum ManifestError {
         /// Which field.
         field: &'static str,
     },
+    /// A version-4 capacity of zero, or one past [`MAX_CAPACITY`] — the width
+    /// of the header's field. D-3316.
+    ///
+    /// Refused rather than clamped: the capacity is what bounds the read, so a
+    /// clamped one would read a different file than the writer described.
+    CapacityOutOfRange {
+        /// The capacity the header declared.
+        capacity: u64,
+    },
+    /// A version-4 header's segment byte names no segment this build defines.
+    UnknownSegmentCode {
+        /// The code that was found.
+        code: u8,
+    },
+    /// A version-4 header holds a non-zero byte in a run it reserves.
+    ///
+    /// Refused by name, unlike versions 1 to 3, whose reserved runs nothing
+    /// read: version 4 is the version that started spending them, and a
+    /// non-zero byte there is a writer this build does not know.
+    ReservedNotZero {
+        /// The offset of the first non-zero byte, within the slot.
+        offset: usize,
+    },
+    /// The file at a partition path is not that partition: a single-file
+    /// census, or another segment's. D-3316.
+    PartitionMismatch {
+        /// The segment the path names.
+        asked: Segment,
+        /// The segment the header names, or [`None`] for a single-file census.
+        found: Option<Segment>,
+    },
+    /// An entry in a partition is keyed to a different segment.
+    ///
+    /// A partition is ONE segment's census by construction, so a row of
+    /// another would be counted where no reader of that segment looks.
+    ForeignSegment {
+        /// Which entry.
+        ordinal: u64,
+        /// The partition's segment.
+        partition: Segment,
+        /// The entry's.
+        found: Segment,
+    },
+    /// A single-file census (versions 1 to 3) was asked to compact. Its
+    /// readers include builds that know no version past 3, so it moves to
+    /// version 4 only through `cli census-migrate` (D-3316 item 6), never as a
+    /// side effect of a write.
+    SingleFileNotCompacted,
 }
 
 impl fmt::Display for ManifestError {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per refusal, each a sentence; splitting the match would \
+                  scatter the wording a test pins as distinct per variant"
+    )]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             Self::OrdinalOutOfRange { ordinal, limit } => {
@@ -1156,9 +1621,31 @@ impl fmt::Display for ManifestError {
                 write!(f, "header region holds {slots} whole slots, needs {need}")
             }
             Self::NoValidHeader => f.write_str("no header slot survived; the header is unreadable"),
-            Self::TooManyEntries { n_valid, limit } => {
-                write!(f, "n_valid is {n_valid}; this build holds at most {limit}")
-            }
+            Self::TooManyEntries {
+                n_valid,
+                batch: 0,
+                limit,
+            } => write!(f, "n_valid is {n_valid}; this census holds at most {limit}"),
+            Self::TooManyEntries {
+                n_valid,
+                batch: 1,
+                limit,
+            } => write!(
+                f,
+                "n_valid is {n_valid} of a capacity of {limit} ({} free); a batch of 1 \
+                 entry does not fit",
+                limit.saturating_sub(n_valid)
+            ),
+            Self::TooManyEntries {
+                n_valid,
+                batch,
+                limit,
+            } => write!(
+                f,
+                "n_valid is {n_valid} of a capacity of {limit} ({} free); a batch of \
+                 {batch} entries does not fit",
+                limit.saturating_sub(n_valid)
+            ),
             Self::CounterExceedsRegion { n_valid, capacity } => {
                 write!(f, "n_valid is {n_valid}; the region holds {capacity}")
             }
@@ -1196,6 +1683,45 @@ impl fmt::Display for ManifestError {
             Self::DegenerateLayout { field } => {
                 write!(f, "{field} is not a geometry a manifest could have")
             }
+            Self::CapacityOutOfRange { capacity } => write!(
+                f,
+                "a capacity of {capacity} entries; a version-4 header carries \
+                 1..={MAX_CAPACITY}"
+            ),
+            Self::UnknownSegmentCode { code } => {
+                write!(f, "the header's segment code {code} is not defined")
+            }
+            Self::ReservedNotZero { offset } => write!(
+                f,
+                "header byte {offset} is reserved at version 4 and is not zero"
+            ),
+            Self::PartitionMismatch { asked, found } => match found {
+                Some(found) => write!(
+                    f,
+                    "this partition file holds {}, not {}",
+                    found.as_str(),
+                    asked.as_str()
+                ),
+                None => write!(
+                    f,
+                    "a single-file census (version 1 to 3) is at the {} partition's path",
+                    asked.as_str()
+                ),
+            },
+            Self::ForeignSegment {
+                ordinal,
+                partition,
+                found,
+            } => write!(
+                f,
+                "entry {ordinal} is a {} row in the {} partition",
+                found.as_str(),
+                partition.as_str()
+            ),
+            Self::SingleFileNotCompacted => f.write_str(
+                "a single-file census (version 1 to 3) is never compacted by a \
+                 write; `cli census-migrate` moves it to version 4",
+            ),
         }
     }
 }
@@ -1724,6 +2250,17 @@ pub struct ManifestHeader {
     pub n_keys: u64,
     /// Rows held across every distinct key — the counter law 3 is about.
     pub total_rows: u64,
+    /// The most entries this file may hold. D-3316.
+    ///
+    /// **Read from the file at version 4** (bytes `12..16`), so a reader is
+    /// bound by what the writer declared and not by a constant compiled into
+    /// the reader (DB-G08). At versions 1 to 3 there is no such field, and the
+    /// value is [`MAX_ENTRIES`] — the bound every such file was written under.
+    /// [`ManifestHeader::limit`] is the number every check uses.
+    pub capacity: u64,
+    /// The segment this file is the census of, at version 4; [`None`] for a
+    /// single-file census, which holds every segment.
+    pub segment: Option<Segment>,
 }
 
 /// One header write: one offset, one buffer, one positional write.
@@ -1768,7 +2305,8 @@ pub struct Append {
 }
 
 impl ManifestHeader {
-    /// A fresh header for an empty manifest: generation 0, no entries.
+    /// A fresh header for an empty **single-file** manifest: generation 0, no
+    /// entries, version 3, bound by [`MAX_ENTRIES`].
     #[must_use]
     pub const fn genesis(vendor: Vendor) -> Self {
         Self {
@@ -1779,7 +2317,37 @@ impl ManifestHeader {
             n_valid: 0,
             n_keys: 0,
             total_rows: 0,
+            capacity: MAX_ENTRIES,
+            segment: None,
         }
+    }
+
+    /// A fresh header for an empty `(vendor, segment)` partition, version 4,
+    /// declaring `capacity`. D-3316.
+    ///
+    /// # Errors
+    ///
+    /// [`ManifestError::CapacityOutOfRange`] for zero or past
+    /// [`MAX_CAPACITY`] — a capacity the header's field cannot carry.
+    pub const fn genesis_partition(
+        vendor: Vendor,
+        segment: Segment,
+        capacity: u64,
+    ) -> Result<Self, ManifestError> {
+        if capacity == 0 || capacity > MAX_CAPACITY {
+            return Err(ManifestError::CapacityOutOfRange { capacity });
+        }
+        Ok(Self {
+            format_version: PARTITION_FORMAT_VERSION,
+            entry_stride: ENTRY_STRIDE_U16,
+            vendor,
+            generation: 0,
+            n_valid: 0,
+            n_keys: 0,
+            total_rows: 0,
+            capacity,
+            segment: Some(segment),
+        })
     }
 
     /// The geometry this header's version declares.
@@ -1794,17 +2362,67 @@ impl ManifestHeader {
         Layout::for_version(self.format_version)
     }
 
-    /// This header restated at the version this build writes.
+    /// The version this header is WRITTEN at: [`Layout::PARTITION`] for a
+    /// partition, [`Layout::CURRENT`] for a single file.
+    ///
+    /// Decided by the segment, which only a partition carries, so a census
+    /// loaded from a version-1 single file is restated at version 3 and never
+    /// promoted to a partition behind a reader's back (D-3316).
+    #[must_use]
+    pub const fn write_layout(&self) -> Layout {
+        if self.segment.is_some() {
+            Layout::PARTITION
+        } else {
+            Layout::CURRENT
+        }
+    }
+
+    /// The most entries this header may count: [`MAX_ENTRIES`] for a single
+    /// file, the declared capacity for a partition.
+    ///
+    /// **The single file ignores its `capacity` field on purpose.** Versions 1
+    /// to 3 have no such field on disk, so a value in memory past
+    /// [`MAX_ENTRIES`] is one no file could have carried; bounding by the
+    /// constant keeps every such file as readable by an older build as it was.
+    #[must_use]
+    pub const fn limit(&self) -> u64 {
+        if self.segment.is_some() {
+            self.capacity
+        } else {
+            MAX_ENTRIES
+        }
+    }
+
+    /// The entries still free before this header's [`ManifestHeader::limit`].
+    #[must_use]
+    pub const fn headroom(&self) -> u64 {
+        self.limit().saturating_sub(self.n_valid)
+    }
+
+    /// Refuses a partition capacity the header's field cannot carry.
+    const fn check_capacity(&self) -> Result<(), ManifestError> {
+        if self.segment.is_some() && (self.capacity == 0 || self.capacity > MAX_CAPACITY) {
+            return Err(ManifestError::CapacityOutOfRange {
+                capacity: self.capacity,
+            });
+        }
+        Ok(())
+    }
+
+    /// This header restated at the version this build writes it at.
     ///
     /// **The migration, and it is one line.** A census loaded from a version-1
-    /// file is published at version 2, because older versions are read and never
+    /// file is published at version 3, because older versions are read and never
     /// written — the same rule `store::layout::Layout::CURRENT` states. Nothing
     /// on disk is mutated by this: the version-1 bytes stay exactly as they are
     /// until a run has something new to record, and then the whole file is
     /// rewritten rather than appended to. See [`Manifest::upgrading`].
+    ///
+    /// A partition is restated at version 4; a single file stays a single file
+    /// at version 3 — see [`ManifestHeader::write_layout`].
     const fn at_current(self) -> Self {
         Self {
-            format_version: FORMAT_VERSION,
+            format_version: self.write_layout().version(),
             entry_stride: ENTRY_STRIDE_U16,
             ..self
         }
@@ -1822,9 +2440,10 @@ impl ManifestHeader {
     ///
     /// [`ManifestError::GenerationExhausted`] or
     /// [`ManifestError::CounterOverflow`] — both refusals, never wraps.
-    /// [`ManifestError::TooManyEntries`] past [`MAX_ENTRIES`], or
-    /// [`ManifestError::KeyCountExceedsEntries`] for a key count no set of
-    /// entries could produce.
+    /// [`ManifestError::TooManyEntries`] past [`ManifestHeader::limit`],
+    /// [`ManifestError::CapacityOutOfRange`] for a partition capacity no reader
+    /// would accept, or [`ManifestError::KeyCountExceedsEntries`] for a key
+    /// count no set of entries could produce.
     pub const fn advance(
         &self,
         appended: u64,
@@ -1837,10 +2456,14 @@ impl ManifestHeader {
         let Some(n_valid) = self.n_valid.checked_add(appended) else {
             return Err(ManifestError::CounterOverflow);
         };
-        if n_valid > MAX_ENTRIES {
+        if let Err(refused) = self.check_capacity() {
+            return Err(refused);
+        }
+        if n_valid > self.limit() {
             return Err(ManifestError::TooManyEntries {
-                n_valid,
-                limit: MAX_ENTRIES,
+                n_valid: self.n_valid,
+                batch: appended,
+                limit: self.limit(),
             });
         }
         if n_keys > n_valid {
@@ -1862,15 +2485,20 @@ impl ManifestHeader {
     ///
     /// # Errors
     ///
-    /// [`ManifestError::TooManyEntries`],
+    /// [`ManifestError::CapacityOutOfRange`],
+    /// [`ManifestError::TooManyEntries`] past [`ManifestHeader::limit`],
     /// [`ManifestError::CounterExceedsRegion`] — trusting the counter over the
     /// region reads past the end and returns whatever was there — or
     /// [`ManifestError::KeyCountExceedsEntries`].
     pub const fn validate(&self, capacity: u64) -> Result<(), ManifestError> {
-        if self.n_valid > MAX_ENTRIES {
+        if let Err(refused) = self.check_capacity() {
+            return Err(refused);
+        }
+        if self.n_valid > self.limit() {
             return Err(ManifestError::TooManyEntries {
                 n_valid: self.n_valid,
-                limit: MAX_ENTRIES,
+                batch: 0,
+                limit: self.limit(),
             });
         }
         if self.n_valid > capacity {
@@ -1901,30 +2529,34 @@ impl ManifestHeader {
     /// # Errors
     ///
     /// [`ManifestError::TooManyEntries`] if the counter is past
-    /// [`MAX_ENTRIES`], or [`ManifestError::UnknownVersion`] for a header naming
-    /// a version no [`Layout`] declares — its `durable_through` is an offset,
-    /// and an offset needs a stride. Past those gates every offset below is
-    /// plain arithmetic that provably cannot overflow, which is why nothing
-    /// downstream carries a failure arm no test could enter.
+    /// [`ManifestHeader::limit`], [`ManifestError::CapacityOutOfRange`], or
+    /// [`ManifestError::UnknownVersion`] for a header naming a version no
+    /// [`Layout`] declares — its `durable_through` is an offset, and an offset
+    /// needs a stride. Past those gates every offset below is plain arithmetic
+    /// that provably cannot overflow, which is why nothing downstream carries a
+    /// failure arm no test could enter.
     pub fn commit(&self) -> Result<Commit, ManifestError> {
-        if self.n_valid > MAX_ENTRIES {
+        self.check_capacity()?;
+        if self.n_valid > self.limit() {
             return Err(ManifestError::TooManyEntries {
                 n_valid: self.n_valid,
-                limit: MAX_ENTRIES,
+                batch: 0,
+                limit: self.limit(),
             });
         }
         Ok(self.commit_at(self.layout()?))
     }
 
     /// [`ManifestHeader::commit`] for a header whose counter is already known
-    /// to be within [`MAX_ENTRIES`] and whose geometry the caller holds.
+    /// to be within its [`ManifestHeader::limit`] and whose geometry the caller
+    /// holds.
     ///
     /// Private, and neither precondition is a comment on a public door: the only
     /// callers other than [`ManifestHeader::commit`] are [`Manifest::record_held`]
     /// and [`Manifest::image`], which reach it through
     /// [`ManifestHeader::advance`] and [`ManifestHeader::at_current`] — the
-    /// first refuses a counter past [`MAX_ENTRIES`] and both leave the version
-    /// at [`Layout::CURRENT`].
+    /// first refuses a counter past the header's limit and both leave the
+    /// version at [`ManifestHeader::write_layout`].
     fn commit_at(&self, layout: Layout) -> Commit {
         let slot = self.generation % SLOT_COUNT;
         Commit {
@@ -1953,6 +2585,15 @@ impl ManifestHeader {
         write_at(&mut out, H_N_KEYS, self.n_keys.to_le_bytes());
         write_at(&mut out, H_TOTAL_ROWS, self.total_rows.to_le_bytes());
         write_text(&mut out, H_VENDOR, self.vendor.as_str());
+        // THE TWO VERSION-4 FIELDS, AND ONLY AT VERSION 4. A single-file slot
+        // keeps both runs zero, byte for byte the image it always had, so a
+        // reader built before version 4 reads it exactly as before.
+        if Layout::for_version(self.format_version).is_ok_and(Layout::partitioned) {
+            let capacity = u32::try_from(self.capacity).unwrap_or(u32::MAX);
+            write_at(&mut out, H_CAPACITY, capacity.to_le_bytes());
+            let code = self.segment.map_or(0, segment_code);
+            write_at(&mut out, H_SEGMENT, [code]);
+        }
         seal(&mut out);
         out
     }
@@ -2009,6 +2650,38 @@ impl ManifestHeader {
             .into_iter()
             .find(|v| v.as_str() == name)
             .ok_or(ManifestError::UnknownVendor)?;
+        // THE FILE'S OWN BOUND, at version 4; the single-file constant before
+        // it, because no such field was ever written there. D-3316, DB-G08.
+        let (capacity, segment) = if layout.partitioned() {
+            // Every value the 32-bit field can carry is admitted but zero: the
+            // reader is bound by the file, not by a number of its own (D-3316
+            // item 3), and a capacity is never an allocation (`load` reserves
+            // from `n_valid`, which the region bounds).
+            let capacity = u64::from(u32::from_le_bytes(le_bytes(&image, H_CAPACITY)));
+            if capacity == 0 {
+                return Err(ManifestError::CapacityOutOfRange { capacity });
+            }
+            let [code] = le_bytes(&image, H_SEGMENT);
+            let segment =
+                segment_of(code).map_err(|_| ManifestError::UnknownSegmentCode { code })?;
+            // THREE BYTES, NAMED ONE BY ONE: the first that is not zero is the
+            // offset the refusal names. A pattern over a fixed-size array, so
+            // the check is bounded by the slot's layout and not by any data.
+            let first_set = match le_bytes::<3>(&image, H_V4_RESERVED) {
+                [0, 0, 0] => None,
+                [0, 0, _] => Some(2),
+                [0, _, _] => Some(1),
+                _ => Some(0),
+            };
+            if let Some(at) = first_set {
+                return Err(ManifestError::ReservedNotZero {
+                    offset: H_V4_RESERVED + at,
+                });
+            }
+            (capacity, Some(segment))
+        } else {
+            (MAX_ENTRIES, None)
+        };
         Ok((
             Self {
                 format_version,
@@ -2018,6 +2691,8 @@ impl ManifestHeader {
                 n_valid: u64::from_le_bytes(le_bytes(&image, H_N_VALID)),
                 n_keys: u64::from_le_bytes(le_bytes(&image, H_N_KEYS)),
                 total_rows: u64::from_le_bytes(le_bytes(&image, H_TOTAL_ROWS)),
+                capacity,
+                segment,
             },
             layout,
         ))
@@ -2291,12 +2966,20 @@ impl Manifest {
     /// guarantee is about the loaded index, which is the one a query touches.
     /// See `docs/06-limits.md` §17.
     fn genesis(vendor: Vendor) -> Self {
+        Self::empty(ManifestHeader::genesis(vendor), FORMAT_VERSION)
+    }
+
+    /// A census of no entries under `header`, as `loaded_version` — the one
+    /// constructor every genesis goes through, single file or partition, so
+    /// the index that reserves nothing (see [`Manifest::genesis`]) is built in
+    /// one place.
+    fn empty(header: ManifestHeader, loaded_version: u16) -> Self {
         Self {
-            header: ManifestHeader::genesis(vendor),
+            header,
             log: Vec::new(),
             index: HashMap::new(),
             degraded: None,
-            loaded_version: FORMAT_VERSION,
+            loaded_version,
         }
     }
 
@@ -2317,7 +3000,7 @@ impl Manifest {
         if header_region.is_empty() && entries.is_empty() {
             // THE ONE OUTCOME NOTHING DOWNSTREAM CAN TELL APART FROM AN EMPTY
             // STORE. See `note_census_absent` for why an absence earns a line.
-            note_census_absent(vendor);
+            note_census_absent(vendor, None);
             return Ok(Self::genesis(vendor));
         }
         Self::load(vendor, header_region, entries)
@@ -2357,6 +3040,96 @@ impl Manifest {
             .split_at_checked(HEADER_REGION_LEN)
             .unwrap_or((file, &[]));
         Self::open(vendor, header_region, entries)
+    }
+
+    /// The census in one EPOCH file of a `(vendor, segment)` partition, from
+    /// the file's whole bytes. D-3316.
+    ///
+    /// Loaded exactly as [`Manifest::open_image`] loads a single file, then
+    /// refused unless its header is that partition's: a single-file census or
+    /// another segment's epoch at this path would otherwise be appended to
+    /// under the wrong name.
+    ///
+    /// **Empty bytes are refused, never a genesis.** An epoch is installed by
+    /// rename from a complete temporary (D-3316 items 2 and 4), so an epoch file
+    /// that exists is never empty; a partition with no epoch yet is the
+    /// caller's to start with [`Manifest::partition_genesis`], because only the
+    /// caller listed the directory and knows there is none. Treating an empty
+    /// epoch as a fresh census is the D-0036 hazard one directory down.
+    ///
+    /// # Errors
+    ///
+    /// [`ManifestError::HeaderRegionTooShort`] for empty bytes,
+    /// [`ManifestError::PartitionMismatch`], or whatever [`Manifest::load`]
+    /// refuses.
+    pub fn open_partition(
+        vendor: Vendor,
+        segment: Segment,
+        file: &[u8],
+    ) -> Result<Self, ManifestError> {
+        if file.is_empty() {
+            return Err(ManifestError::HeaderRegionTooShort {
+                slots: 0,
+                need: SLOT_COUNT,
+            });
+        }
+        let census = Self::open_image(vendor, file)?;
+        if census.header.segment != Some(segment) {
+            return Err(ManifestError::PartitionMismatch {
+                asked: segment,
+                found: census.header.segment,
+            });
+        }
+        Ok(census)
+    }
+
+    /// An empty partition, for a `(vendor, segment)` that has no epoch yet.
+    ///
+    /// Public, unlike the single-file genesis, because a partition's epochs are
+    /// listed, not opened: the D-0036 hazard (a fresh census started over a
+    /// file that already holds one) is closed by the caller handing this only a
+    /// segment whose directory holds no epoch, which
+    /// `pull::ingest::census_store` does after listing it.
+    ///
+    /// # Errors
+    ///
+    /// [`ManifestError::CapacityOutOfRange`].
+    pub fn partition_genesis(
+        vendor: Vendor,
+        segment: Segment,
+        capacity: u64,
+    ) -> Result<Self, ManifestError> {
+        Ok(Self::empty(
+            ManifestHeader::genesis_partition(vendor, segment, capacity)?,
+            PARTITION_FORMAT_VERSION,
+        ))
+    }
+
+    /// The census of a `(vendor, segment)` whose directory holds no epoch: a
+    /// genesis partition at the segment's [`capacity_floor`], with the
+    /// `census absent` line a missing single file leaves too. D-3316.
+    ///
+    /// A separate door from [`Manifest::partition_genesis`] because a
+    /// compaction and a migration also start from a genesis, and neither is a
+    /// census that was absent; only a reader that listed the directory and
+    /// found nothing is.
+    #[must_use]
+    pub fn partition_absent(vendor: Vendor, segment: Segment) -> Self {
+        note_census_absent(vendor, Some(segment));
+        Self::empty(
+            ManifestHeader {
+                format_version: PARTITION_FORMAT_VERSION,
+                entry_stride: ENTRY_STRIDE_U16,
+                vendor,
+                generation: 0,
+                n_valid: 0,
+                n_keys: 0,
+                total_rows: 0,
+                capacity: capacity_floor(segment),
+                segment: Some(segment),
+            },
+            PARTITION_FORMAT_VERSION,
+        )
     }
 
     /// Loads a manifest from its header region and its entry region.
@@ -2478,9 +3251,23 @@ impl Manifest {
         // onto a `Vec` with no spare capacity copies the whole log, so a
         // reservation of exactly `n_valid` would move the O(census) arm out of
         // the map and into the log rather than removing it.
+        //
+        // A PARTITION RESERVES ITS INDEX FROM ITS KEYS, not from its log
+        // (D-3316). The index holds one element per key, so `2 · n_keys` leaves
+        // as many free slots as there are keys — the same scale-free argument
+        // with the number that bounds the table. An epoch's log can run to its
+        // capacity between two compactions (D-3316 item 4 compacts once per
+        // fill), and reserving the TABLE from the log at the option floor would
+        // be gigabytes of buckets for keys that need a fraction of them. A
+        // single file keeps the reservation D-0040 measured and two tests pin.
+        let index_from = match header.segment {
+            Some(_) => header.n_keys.min(header.n_valid),
+            None => header.n_valid,
+        };
         let mut index: HashMap<EntryKey, Held> =
-            HashMap::with_capacity(reservation_for(header.n_valid));
-        let mut log: Vec<Held> = Vec::with_capacity(reservation_for(header.n_valid));
+            HashMap::with_capacity(reservation_within(index_from, header.limit()));
+        let mut log: Vec<Held> =
+            Vec::with_capacity(reservation_within(header.n_valid, header.limit()));
         let mut n_keys = 0u64;
 
         // CHUNKED AT THE HEADER'S OWN STRIDE, from the layout its version
@@ -2493,6 +3280,17 @@ impl Manifest {
                 .decode_entry(chunk)
                 .map_err(|fault| ManifestError::Entry { ordinal, fault })?;
             let entry = held.entry;
+            // ONE SEGMENT PER PARTITION, checked where every entry is already
+            // being decoded, so it costs one comparison and no pass.
+            if let Some(partition) = header.segment
+                && entry.key.segment != partition
+            {
+                return Err(ManifestError::ForeignSegment {
+                    ordinal,
+                    partition,
+                    found: entry.key.segment,
+                });
+            }
             log.push(held);
             match index.insert(entry.key, held) {
                 None => n_keys += 1,
@@ -2608,6 +3406,192 @@ impl Manifest {
         self.header.total_rows
     }
 
+    /// The most entries this census may hold: the partition's own declared
+    /// capacity, or [`MAX_ENTRIES`] for a single file. One field read. D-3316.
+    #[must_use]
+    pub const fn capacity(&self) -> u64 {
+        self.header.limit()
+    }
+
+    /// Entries still free before [`Manifest::capacity`]. One field read.
+    ///
+    /// What `/store.json` must be able to say beside "held" (DB-G08, DB-G78):
+    /// a census at its ceiling is not a healthy one, and the reader can now
+    /// tell without knowing the writer's build.
+    #[must_use]
+    pub const fn headroom(&self) -> u64 {
+        self.header.headroom()
+    }
+
+    /// The segment this census is the partition of, or [`None`] for a
+    /// single-file census.
+    #[must_use]
+    pub const fn segment(&self) -> Option<Segment> {
+        self.header.segment
+    }
+
+    /// Entries in the log that a newer entry for the same key has superseded.
+    /// `n_valid − n_keys`, one subtraction.
+    #[must_use]
+    pub const fn superseded(&self) -> u64 {
+        self.header.n_valid.saturating_sub(self.header.n_keys)
+    }
+
+    /// The newest entry of every key, in KEY ORDER (the derived [`Ord`] of
+    /// [`EntryKey`]). The shared half of [`Manifest::compacted`] and
+    /// [`Manifest::partitions`]. D-3316 item 4.
+    ///
+    /// The index already holds exactly the newest entry per key — every
+    /// [`Manifest::record_held`] and every [`Manifest::load`] keeps it so — so
+    /// this is one pass over the index and one sort of its values, with no
+    /// walk of the log at all. Deterministic: two processes given the same
+    /// census produce the same order, and therefore the same bytes
+    /// (`CLAUDE.md` §3 rule 5).
+    fn newest_in_key_order(&self) -> Vec<Held> {
+        let mut newest: Vec<Held> = self.index.values().copied().collect();
+        newest.sort_unstable_by_key(|held| held.entry.key);
+        newest
+    }
+
+    /// An epoch of `segment` holding exactly `rows` — one per key, already in
+    /// key order — at [`epoch_capacity`] of their count, at `generation`.
+    ///
+    /// Built through [`Manifest::record_held`], the same validated door every
+    /// write takes, so the counters, the index and the log agree by
+    /// construction and a row this census once accepted cannot be rewritten in
+    /// a way a reader could not reproduce. The genesis it starts from is at
+    /// generation `generation − count`, so after the rows are recorded the
+    /// epoch publishes `generation` itself.
+    fn epoch_of(
+        vendor: Vendor,
+        segment: Segment,
+        rows: &[Held],
+        generation: u64,
+    ) -> Result<Self, ManifestError> {
+        let keys = u64::try_from(rows.len()).unwrap_or(u64::MAX);
+        let capacity = epoch_capacity(segment, keys)?;
+        let Some(start) = generation.checked_sub(keys) else {
+            return Err(ManifestError::GenerationExhausted);
+        };
+        let mut epoch = Self::partition_genesis(vendor, segment, capacity)?;
+        epoch.header.generation = start;
+        let reserve = reservation_within(keys, capacity);
+        epoch.index.reserve(reserve);
+        epoch.log.reserve(reserve);
+        for held in rows {
+            let _append = epoch.record_held(*held)?;
+        }
+        Ok(epoch)
+    }
+
+    /// This census split into its version-4 partitions, ONE PER SEGMENT,
+    /// including a segment that holds no key, each compacted to the newest row
+    /// per key in key order. **The migration's in-memory half** (D-3316 item
+    /// 6: "writes epoch `000001` of each segment from the version-3 file's
+    /// newest `Held` per key").
+    ///
+    /// Returned in [`SEGMENTS`] order. Each partition's keys, rows and closes
+    /// are exactly what [`Manifest::held`] answers on `self` for that segment,
+    /// so the partitions' keys and totals sum to `self`'s; each partition's
+    /// capacity is [`epoch_capacity`] of its keys. A segment with no key is an
+    /// empty epoch at its floor: writing it makes "the vendor is migrated" mean
+    /// the same thing for every segment, so a reader never has to tell a missing
+    /// segment from a lost one.
+    ///
+    /// **Each partition's generation CONTINUES the single file's**: it starts
+    /// at `self`'s generation and advances once per key it records, so every
+    /// partition publishes a generation above every one the single file ever
+    /// did. A reader keyed on a generation — an entity tag, a `since=` delta
+    /// (WP-30) — therefore never sees the vendor's census go backwards across
+    /// the migration, and the rule `docs/02-store-format.md` §11.7 states for
+    /// epochs, that the generation keeps rising, holds from the first epoch on.
+    /// An empty partition carries `self`'s generation unchanged.
+    ///
+    /// # Cost
+    ///
+    /// O(keys · log keys) for the sort, once per vendor, by `cli census-migrate`.
+    ///
+    /// # Errors
+    ///
+    /// [`ManifestError::CapacityOutOfRange`] for a segment whose keys could not
+    /// be given a capacity, [`ManifestError::GenerationExhausted`] for a
+    /// generation that cannot continue, or whatever [`Manifest::record_held`]
+    /// refuses — which, for rows this census already accepted, is nothing.
+    pub fn partitions(&self) -> Result<Vec<Self>, ManifestError> {
+        let newest = self.newest_in_key_order();
+        let mut out = Vec::with_capacity(SEGMENTS.len());
+        for segment in SEGMENTS {
+            // Key order sorts by contract first, so a segment's rows are not one
+            // run; one filter per segment over the newest rows, three in all.
+            let rows: Vec<Held> = newest
+                .iter()
+                .filter(|held| held.entry.key.segment == segment)
+                .copied()
+                .collect();
+            let keys = u64::try_from(rows.len()).unwrap_or(u64::MAX);
+            let Some(generation) = self.header.generation.checked_add(keys) else {
+                return Err(ManifestError::GenerationExhausted);
+            };
+            out.push(Self::epoch_of(
+                self.header.vendor,
+                segment,
+                &rows,
+                generation,
+            )?);
+        }
+        Ok(out)
+    }
+
+    /// This partition as its NEXT EPOCH: one row per key — the newest — in key
+    /// order. **The compaction.** D-3316 item 4.
+    ///
+    /// # What changes, and what does not
+    ///
+    /// `n_valid` becomes `n_keys`, because nothing superseded remains. `n_keys`
+    /// and `total_rows` do not move: the total was always the sum over the
+    /// newest row per key, and that is exactly what is kept. Every key's
+    /// [`Manifest::held`] answers the same before and after. `generation`
+    /// advances past the replaced epoch's, so a reader keyed on it sees a change
+    /// and generations stay monotonic across epochs. The capacity is
+    /// [`epoch_capacity`] of the keys: "the larger of the segment's floor and
+    /// twice its key count".
+    ///
+    /// # Nothing on disk is touched
+    ///
+    /// This is the in-memory half. The writer installs the result as
+    /// `<epoch + 1>.man` by rename from a temporary, and never writes the epoch
+    /// it replaced again (`pull::ingest::census_store`).
+    ///
+    /// # Cost
+    ///
+    /// O(keys · log keys) once — one pass over the index and one sort — paid
+    /// once per fill, about one in every `capacity − keys` appends, which with a
+    /// capacity of at least twice the keys is amortised O(log keys) per append.
+    /// Measured in `crates/pull/benches/ratio.rs` (C-14).
+    ///
+    /// # Errors
+    ///
+    /// [`ManifestError::SingleFileNotCompacted`] for a single-file census,
+    /// [`ManifestError::CapacityOutOfRange`] for keys no capacity can carry,
+    /// [`ManifestError::GenerationExhausted`] — each a refusal.
+    pub fn compacted(&self) -> Result<Self, ManifestError> {
+        let Some(segment) = self.header.segment else {
+            return Err(ManifestError::SingleFileNotCompacted);
+        };
+        let Some(generation) = self
+            .header
+            .generation
+            .checked_add(self.header.n_keys.max(1))
+        else {
+            return Err(ManifestError::GenerationExhausted);
+        };
+        let rows = self.newest_in_key_order();
+        let mut epoch = Self::epoch_of(self.header.vendor, segment, &rows, generation)?;
+        epoch.degraded = self.degraded;
+        epoch.loaded_version = self.loaded_version;
+        Ok(epoch)
+    }
+
     /// The version this census was **loaded** from.
     ///
     /// [`FORMAT_VERSION`] for a genesis census and for one read from a file this
@@ -2636,7 +3620,7 @@ impl Manifest {
     /// 5 is about the bytes.
     #[must_use]
     pub const fn upgrading(&self) -> bool {
-        self.loaded_version != FORMAT_VERSION
+        self.loaded_version != self.header.write_layout().version()
     }
 
     /// The newest entry for one key, if any. One hash probe.
@@ -2913,6 +3897,17 @@ impl Manifest {
         entry
             .check()
             .map_err(|fault| ManifestError::Entry { ordinal, fault })?;
+        // A PARTITION IS ONE SEGMENT'S CENSUS (D-3316). A row of another
+        // segment recorded here is a month no reader of its own segment finds.
+        if let Some(partition) = self.header.segment
+            && entry.key.segment != partition
+        {
+            return Err(ManifestError::ForeignSegment {
+                ordinal,
+                partition,
+                found: entry.key.segment,
+            });
+        }
 
         let (n_keys, total_rows) = match self.index.get(&entry.key) {
             None => (
@@ -2959,11 +3954,13 @@ impl Manifest {
         // gate that would still report 100%.
         //
         // `advance` also restates the version as the one this build writes, so
-        // the geometry below is `Layout::CURRENT` on every path, including the
-        // one that loaded a version-1 file.
+        // the geometry below is `write_layout()` on every path — version 3 for
+        // a single file, including one loaded from version 1, and version 4
+        // for a partition. Both strides are 128, so the offset is one formula.
         let header = self.header.advance(1, n_keys, total_rows)?;
-        let offset = Layout::CURRENT.offset_within_bounds(ordinal);
-        let commit = header.commit_at(Layout::CURRENT);
+        let layout = header.write_layout();
+        let offset = layout.offset_within_bounds(ordinal);
+        let commit = header.commit_at(layout);
 
         self.log.push(held);
         self.index.insert(entry.key, held);
@@ -3039,10 +4036,12 @@ impl Manifest {
         // version-1 file images as version 2, with every entry it read carrying
         // `Closes::UNKNOWN` — which is the truth about them: version 1 had
         // nowhere to record a close, so nothing ever did.
-        let commit = self.header.at_current().commit_at(Layout::CURRENT);
-        // `log.len()` is at most `MAX_ENTRIES`, so this product is at most
-        // 268,435,456 and the sum cannot overflow a `usize` on any target that
-        // could hold the log in the first place.
+        let current = self.header.at_current();
+        let commit = current.commit_at(current.write_layout());
+        // `log.len()` is at most the header's limit, itself at most
+        // `MAX_CAPACITY`, so this product is at most 549,755,813,760 and the
+        // sum cannot overflow a 64-bit `usize`; a target narrower than that
+        // could not hold the log in the first place.
         let mut out = Vec::with_capacity(HEADER_REGION_LEN + self.log.len() * ENTRY_LEN);
 
         // Two slots, written out longhand rather than indexed into, because
@@ -3128,12 +4127,22 @@ impl Manifest {
 /// so at the default floor this alone would be a line per poll. The outcomes
 /// that must survive that floor are the faults, and [`note_census_load`] puts
 /// them at warn and error.
-fn note_census_absent(vendor: Vendor) {
+fn note_census_absent(vendor: Vendor, segment: Option<Segment>) {
+    let version = match segment {
+        Some(_) => PARTITION_FORMAT_VERSION,
+        None => FORMAT_VERSION,
+    };
     let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::new(telemetry::Level::Debug, "pull.manifest", "census absent")
             .with("vendor", telemetry::Value::Str(vendor.as_str()))
             .with("outcome", telemetry::Value::Str("absent"))
-            .with("version", telemetry::Value::Uint(u64::from(FORMAT_VERSION)))
+            // WHICH census was absent: a partition names its segment, a single
+            // file names "all". Two different files, two different facts.
+            .with(
+                "segment",
+                telemetry::Value::Str(segment.map_or("all", Segment::as_str)),
+            )
+            .with("version", telemetry::Value::Uint(u64::from(version)))
             // Zero, and it means zero: a genesis census really does hold no
             // entries. The `-1` in `note_census_load` is the other fact — a
             // census whose count could not be read at all.
@@ -3200,6 +4209,21 @@ fn note_census_load(vendor: Vendor, region_bytes: usize, loaded: &Result<Manifes
             telemetry::Value::Int(-1),
         ),
     };
+    // THE CEILING BESIDE THE COUNT (D-3316, DB-G08). A census at 2,096,855 of
+    // 2,097,152 loaded as "held" with nothing on the line to say it was full;
+    // the headroom is the number that would have said so.
+    let (capacity, headroom, segment) = match held {
+        Some(census) => (
+            telemetry::Value::Uint(census.header.limit()),
+            telemetry::Value::Uint(census.header.headroom()),
+            census.header.segment.map_or("all", Segment::as_str),
+        ),
+        None => (
+            telemetry::Value::Int(-1),
+            telemetry::Value::Int(-1),
+            "unreadable",
+        ),
+    };
     // `region_bytes` is the entry region's length, not its contents: a census
     // that refuses for `CounterExceedsRegion` is a file somebody truncated, and
     // the length is the number that says so. The bytes themselves are never
@@ -3212,6 +4236,9 @@ fn note_census_load(vendor: Vendor, region_bytes: usize, loaded: &Result<Manifes
         .with("entries", entries)
         .with("keys", keys)
         .with("rows", rows)
+        .with("capacity", capacity)
+        .with("headroom", headroom)
+        .with("segment", telemetry::Value::Str(segment))
         .with("region_bytes", telemetry::Value::Uint(region_bytes as u64));
     let reason = fault.map(|why| why.to_string());
     let _dropped_when_filtered = telemetry::emit(&match reason.as_deref() {
@@ -3270,8 +4297,17 @@ fn note_census_imaged(census: &Manifest, bytes: usize) {
             telemetry::Value::Str(census.header.vendor.as_str()),
         )
         // Always the version this build WRITES, never the loaded one:
-        // `Manifest::image` publishes at `Layout::CURRENT` on every path.
-        .with("version", telemetry::Value::Uint(u64::from(FORMAT_VERSION)))
+        // `Manifest::image` publishes at `write_layout()` on every path — 3
+        // for a single file, 4 for a partition.
+        .with(
+            "version",
+            telemetry::Value::Uint(u64::from(census.header.write_layout().version())),
+        )
+        .with(
+            "segment",
+            telemetry::Value::Str(census.header.segment.map_or("all", Segment::as_str)),
+        )
+        .with("capacity", telemetry::Value::Uint(census.header.limit()))
         .with(
             "from_version",
             telemetry::Value::Uint(u64::from(census.loaded_version)),
@@ -3310,6 +4346,13 @@ struct Census {
 }
 
 const _: () = assert!(MAX_ENTRIES * ENTRY_STRIDE + HEADER_LEN < u64::MAX);
+const _: () = assert!(match MAX_CAPACITY.checked_mul(MAX_ENTRY_STRIDE) {
+    Some(product) => product.checked_add(HEADER_LEN).is_some(),
+    None => false,
+});
+const _: () = assert!(Layout::PARTITION.version() == PARTITION_FORMAT_VERSION);
+const _: () = assert!(Layout::PARTITION.partitioned() && !Layout::CURRENT.partitioned());
+const _: () = assert!(Layout::PARTITION.entry_stride() == Layout::CURRENT.entry_stride());
 
 /// The eight magic bytes for a version, or the family alone for one no
 /// [`Layout`] declares.

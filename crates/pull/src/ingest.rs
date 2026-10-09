@@ -126,6 +126,10 @@
 //! measurement, however sound it is.
 
 use std::fs;
+/// The census on disk: single file or per-segment epochs, compaction into the
+/// next epoch, migration and recount. D-3316 (WP-10).
+#[path = "census_store.rs"]
+pub mod census_store;
 #[path = "request_minutes.rs"]
 mod request_minutes;
 use std::io::{ErrorKind, Write as _};
@@ -182,6 +186,51 @@ pub struct Failure {
     pub instrument: String,
     /// Why, in its own words.
     pub why: String,
+    /// The month this failure is about, when it is about one. D-3341, DB-G45.
+    ///
+    /// **Carried, never derived from the request.** The pull's audit lines
+    /// were all filed under `month=2018-01` — the first month of an 8.75-year
+    /// window — because the caller only had the window to name: 48,396 "member
+    /// did not land" lines, among them a gap on 2019-12-02, a Muhurat refusal
+    /// on 2020-11-14 and a derived-rung failure for 2026-09. The failure knows
+    /// which month it concerns; this is where it says so. [`None`] for a
+    /// failure that is not about one month — a census, a whole member whose
+    /// rows span several.
+    pub month: Option<store::path::YearMonth>,
+    /// The day this failure is about, when it is about one. D-3341, DB-G45.
+    pub day: Option<crate::session::Day>,
+}
+
+impl Failure {
+    /// A failure about no particular month or day.
+    #[must_use]
+    pub fn new(instrument: impl Into<String>, why: impl Into<String>) -> Self {
+        Self {
+            instrument: instrument.into(),
+            why: why.into(),
+            month: None,
+            day: None,
+        }
+    }
+
+    /// This failure, about `month`.
+    #[must_use]
+    pub fn in_month(self, month: store::path::YearMonth) -> Self {
+        Self {
+            month: Some(month),
+            ..self
+        }
+    }
+
+    /// This failure, about `day` — and so about the month `day` is in.
+    #[must_use]
+    pub fn on_day(self, day: crate::session::Day) -> Self {
+        Self {
+            month: day.year_month().ok().or(self.month),
+            day: Some(day),
+            ..self
+        }
+    }
 }
 
 /// What a run put on disk, and what it did not.
@@ -742,9 +791,9 @@ fn derived_shortfall(member: &Member, landed: &Landed) -> Option<Failure> {
     if landed.derived == landed.derived_expected {
         return None;
     }
-    Some(Failure {
-        instrument: member.instrument.clone(),
-        why: format!(
+    let failure = Failure::new(
+        member.instrument.clone(),
+        format!(
             "{} of {} derived rung(s) landed. The pulled rung is on disk and the \
              folded ones are not, so this instrument-month reads as held at one \
              timeframe and missing at the rest. Why each rung failed is on the \
@@ -752,7 +801,22 @@ fn derived_shortfall(member: &Member, landed: &Landed) -> Option<Failure> {
              reporting itself clean.",
             landed.derived, landed.derived_expected
         ),
+    );
+    // THE MONTH THE SHORTFALL IS IN, when the member wrote one (DB-G45).
+    Some(match one_month(&landed.entries) {
+        Some(month) => failure.in_month(month),
+        None => failure,
     })
+}
+
+/// The one month every row in `entries` is about, or [`None`] when they span
+/// several or there are none. O(entries), which is a member's rungs.
+fn one_month(entries: &[Held]) -> Option<store::path::YearMonth> {
+    let first = entries.first()?.entry.key.month;
+    entries
+        .iter()
+        .all(|held| held.entry.key.month == first)
+        .then_some(first)
 }
 
 fn note_not_derived(instrument: &str, rung: Timeframe, why: &str) {
@@ -766,6 +830,12 @@ fn note_not_derived(instrument: &str, rung: Timeframe, why: &str) {
 
 /// [`from_members`]'s body, split only so the two `note_*` helpers can sit
 /// beside it rather than between its documentation and its signature.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the census cycle — locate, lock, read, record per member, install — \
+              is one read-modify-write under one lock, and splitting it would \
+              hand the lock across a function boundary the type does not track"
+)]
 fn from_members_inner(members: &[Member], store_root: &Path, plan: Plan<'_>) -> Ingested {
     let Plan { vendor, .. } = plan;
     let mut done = Ingested {
@@ -790,6 +860,16 @@ fn from_members_inner(members: &[Member], store_root: &Path, plan: Plan<'_>) -> 
         return refused_whole(members, &census_path, why);
     }
 
+    // WHICH CENSUS THIS RUN'S ROWS GO TO (D-3316): the vendor's single file
+    // until it is migrated, then the partition of the plan's segment — one run
+    // is one plan and one plan is one segment, so a Zerodha cash pull never
+    // reads, locks or rewrites another segment's census, let alone GDFL's.
+    let target = match census_store::target_for_plan(store_root, vendor, plan.segment) {
+        Ok(target) => target,
+        Err(why) => return refused_whole(members, &census_path, why),
+    };
+    let census_path = target.named();
+
     // THE LOCK, AND IT IS TAKEN BEFORE THE READ.
     //
     // The census cycle is read-whole-file, mutate in memory, write-whole-file.
@@ -802,33 +882,41 @@ fn from_members_inner(members: &[Member], store_root: &Path, plan: Plan<'_>) -> 
     //
     // Declared before `census` so it drops after it — the lock outlives every
     // use of the thing it protects.
-    let census_lock = match CensusLock::take(&census_path) {
+    let census_lock = match target.lock() {
         Ok(guard) => guard,
         Err(why) => return refused_whole(members, &census_path, why),
     };
+    if let Err(why) = target.still_where_located() {
+        return refused_whole(members, &census_path, why);
+    }
 
-    let mut census = match read_census(&census_path, vendor) {
-        Ok(census) => census,
+    // Under the lock, so a partition's current epoch cannot move under it.
+    let mut loaded = match target.load() {
+        Ok(loaded) => loaded,
         Err(why) => return refused_whole(members, &census_path, why),
     };
+    // Set when a partition at its capacity is compacted mid-run (D-3316 item
+    // 5): the appends below are then relative to an epoch not yet written,
+    // and the install publishes the next epoch whole instead.
+    let mut compacted = false;
 
     // A census that loaded degraded may still be appended to — recovering from
     // a torn commit *is* writing the next generation — but never silently.
     // What it recovered is a prefix: months a newer generation had committed
     // are not in it and cannot be got back from it, only from the bar files.
-    let repairing = census.degraded_reason().is_some();
-    if let Some(why) = census.degraded_reason() {
+    let repairing = loaded.census.degraded_reason().is_some();
+    if let Some(why) = loaded.census.degraded_reason() {
         note_census_degraded(&census_path, &why.to_string());
-        done.failures.push(Failure {
-            instrument: census_path.display().to_string(),
-            why: format!(
+        done.failures.push(Failure::new(
+            census_path.display().to_string(),
+            format!(
                 "the census loaded DEGRADED at generation {} after stepping \
                  over: {why}. This run's install is the repair, and any month \
                  a newer generation had committed is not in it — that is \
-                 recoverable only by walking bars/",
-                census.header().generation
+                 recoverable only by walking bars/ (`cli census-recount`, D-3316)",
+                loaded.census.header().generation
             ),
-        });
+        ));
     }
     // A REPAIR still publishes the whole image, because it may rewrite entries
     // the append region already holds and an append-only log cannot say that.
@@ -892,7 +980,9 @@ fn from_members_inner(members: &[Member], store_root: &Path, plan: Plan<'_>) -> 
                 }
                 done.failures.extend(landed.failures);
                 for held in landed.entries {
-                    match count(&mut census, held) {
+                    // A PARTITION AT ITS CAPACITY IS COMPACTED AND THE ROW
+                    // RETRIED (D-3316); a single file refuses as it always did.
+                    match census_store::count_growing(&mut loaded.census, held, &mut compacted) {
                         Ok(changed) => {
                             done.counted += 1;
                             if let Some(append) = changed {
@@ -910,39 +1000,45 @@ fn from_members_inner(members: &[Member], store_root: &Path, plan: Plan<'_>) -> 
                             // in the log as well as on the receipt, because a
                             // later run refetches a month already on disk.
                             note_bars_not_counted(&member.instrument, held.entry.rows, &why);
-                            done.failures.push(Failure {
-                                instrument: member.instrument.clone(),
-                                why: format!(
-                                    "{} holds {} bar(s) the census does not count: {why}",
-                                    member.instrument, held.entry.rows
-                                ),
-                            });
+                            done.failures.push(
+                                Failure::new(
+                                    member.instrument.clone(),
+                                    format!(
+                                        "{} holds {} bar(s) the census does not count: {why}",
+                                        member.instrument, held.entry.rows
+                                    ),
+                                )
+                                .in_month(held.entry.key.month),
+                            );
                         }
                     }
                 }
             }
             Err(why) => {
                 note_not_landed(member, &why);
-                done.failures.push(Failure {
-                    instrument: member.instrument.clone(),
-                    why,
-                });
+                done.failures
+                    .push(Failure::new(member.instrument.clone(), why));
             }
         }
     }
 
     // ONE INSTALL, AFTER THE LOOP — and none at all when nothing changed, so
     // a re-run of the same folder leaves the census byte for byte as it was.
-    if let Err(why) = install_census(&census_lock, &census_path, &census, &appends, publish) {
+    // A partition compacted mid-run, or loaded degraded, is published whole as
+    // its next epoch, and the epoch it replaces is never written again
+    // (D-3316 items 2 and 4).
+    if let Err(why) =
+        census_store::install_run(&census_lock, &target, &loaded, &appends, publish, compacted)
+    {
         note_census_unpublished(&census_path, appends.len(), &why);
-        done.failures.push(Failure {
-            instrument: census_path.display().to_string(),
-            why: format!(
+        done.failures.push(Failure::new(
+            census_path.display().to_string(),
+            format!(
                 "{} slice(s) are on disk and the census that counts them was \
                  not published: {why}",
                 done.counted
             ),
-        });
+        ));
     }
 
     done
@@ -977,10 +1073,7 @@ fn refused_whole(members: &[Member], about: &Path, why: String) -> Ingested {
     Ingested {
         members: members.len(),
         rows_read,
-        failures: vec![Failure {
-            instrument: about.display().to_string(),
-            why,
-        }],
+        failures: vec![Failure::new(about.display().to_string(), why)],
         ..Ingested::default()
     }
 }
@@ -1067,15 +1160,19 @@ pub fn from_window(
             return Ingested {
                 members: 1,
                 rows_read: raw.rows.len(),
-                failures: vec![Failure {
-                    instrument: instrument.to_owned(),
-                    why: format!(
-                        "off-grid broker candle at {} ({:?}) for {}; refused before fold or append",
-                        row.timestamp,
-                        plan.encoding,
-                        plan.request.granularity.label()
+                failures: vec![on_stamp_day(
+                    Failure::new(
+                        instrument,
+                        format!(
+                            "off-grid broker candle at {} ({:?}) for {}; refused before fold or append",
+                            row.timestamp,
+                            plan.encoding,
+                            plan.request.granularity.label()
+                        ),
                     ),
-                }],
+                    row.timestamp,
+                    plan.encoding,
+                )],
                 ..Ingested::default()
             };
         }
@@ -1089,13 +1186,17 @@ pub fn from_window(
                 return Ingested {
                     members: 1,
                     rows_read: raw.rows.len(),
-                    failures: vec![Failure {
-                        instrument: instrument.to_owned(),
-                        why: format!(
-                            "conflicting vendor candles at {}; refused before append",
-                            row.timestamp
+                    failures: vec![on_stamp_day(
+                        Failure::new(
+                            instrument,
+                            format!(
+                                "conflicting vendor candles at {}; refused before append",
+                                row.timestamp
+                            ),
                         ),
-                    }],
+                        row.timestamp,
+                        plan.encoding,
+                    )],
                     ..Ingested::default()
                 };
             }
@@ -1127,6 +1228,34 @@ pub fn from_window(
         );
     }
     done
+}
+
+/// `failure`, about the IST day a vendor stamp falls on, when that day is one
+/// the calendar can name. DB-G45: the failure carries its own day rather than
+/// the window's first month.
+fn on_stamp_day(failure: Failure, timestamp: i64, encoding: TimestampEncoding) -> Failure {
+    match stamp_day(timestamp, encoding) {
+        Some(day) => failure.on_day(day),
+        None => failure,
+    }
+}
+
+/// The IST calendar day a vendor stamp falls on, in the same arithmetic
+/// [`broker_stamp_on_grid`] uses, or [`None`] for a stamp outside the
+/// calendar's range.
+fn stamp_day(timestamp: i64, encoding: TimestampEncoding) -> Option<crate::session::Day> {
+    let offset = i128::from(crate::session::IST_OFFSET_SECS) * 1_000;
+    let utc_millis = match encoding {
+        TimestampEncoding::EpochMillisUtc => i128::from(timestamp),
+        TimestampEncoding::EpochSecondsUtc | TimestampEncoding::IsoDateTimeOffset => {
+            i128::from(timestamp) * 1_000
+        }
+        TimestampEncoding::IstDateTimeText | TimestampEncoding::IsoDateTimeText => {
+            i128::from(timestamp) * 1_000 - offset
+        }
+    };
+    let days = (utc_millis + offset).div_euclid(86_400_000);
+    crate::session::Day::from_days(u32::try_from(days).ok()?).ok()
 }
 
 /// Broker candles must already start on the requested grid. Archive snapshots
@@ -1192,30 +1321,20 @@ fn broker_stamp_on_grid(
 /// shape of the code and no bench in this workspace times it.
 /// `CLAUDE.md` §3 rule 6: a structural argument is not a
 /// measurement, however sound it is.
+///
+/// # The census at its ceiling refuses UP FRONT (D-3316, DB-G10)
+///
+/// The batch is probed before a row is recorded. A single file without room
+/// for it refuses with the FILE's `n_valid`, its capacity, the free slots and
+/// the batch's size, and says nothing was published — where it used to record
+/// rows in memory until the first one past the ceiling, and report that row's
+/// in-memory counter (`n_valid is 2097153`) as if it were the file's. A
+/// migrated vendor's partition compacts once into its next epoch instead, and
+/// refuses with the same numbers only when one row per key still leaves no
+/// room for the batch (D-3316 item 5). Rows go to one partition per segment,
+/// each all-or-nothing. See [`census_store::record`].
 fn record_all(store_root: &Path, vendor: Vendor, held: &[Held]) -> Option<String> {
-    let census_path = crate::manifest::manifest_path(store_root, vendor);
-    let lock = match CensusLock::take(&census_path) {
-        Ok(lock) => lock,
-        Err(why) => return Some(why.clone()),
-    };
-    let mut census = match read_census(&census_path, vendor) {
-        Ok(census) => census,
-        Err(why) => return Some(why),
-    };
-    // RESERVED FROM THE BOUND IN HAND — at most one append per entry offered.
-    let mut appends: Vec<Append> = Vec::with_capacity(held.len());
-    for one in held {
-        match count(&mut census, *one) {
-            Ok(Some(append)) => appends.push(append),
-            Ok(None) => {}
-            Err(why) => return Some(why),
-        }
-    }
-    if let Err(why) = install_census(&lock, &census_path, &census, &appends, false) {
-        note_census_unpublished(&census_path, appends.len(), &why);
-        return Some(why);
-    }
-    None
+    census_store::record(store_root, vendor, held).err()
 }
 
 /// Writes a batch of census rows in ONE cycle — one lock, one read, one install.
@@ -1328,10 +1447,7 @@ pub fn from_rows(
         Ok(three) => three,
         Err(why) => {
             note_not_filed(instrument, "address", &why);
-            done.failures.push(Failure {
-                instrument: instrument.to_owned(),
-                why,
-            });
+            done.failures.push(Failure::new(instrument, why));
             return done;
         }
     };
@@ -1374,10 +1490,8 @@ pub fn from_rows(
         }
         Err(why) => {
             note_not_filed(instrument, "bars", &why);
-            done.failures.push(Failure {
-                instrument: instrument.to_owned(),
-                why,
-            });
+            done.failures
+                .push(Failure::new(instrument, why).in_month(ym));
             return done;
         }
     };
@@ -1417,10 +1531,8 @@ pub fn from_rows(
     // on a stamp that has no bar.
     if let Err(why) = write_overlay(overlays, store_root, symbol_id, parts) {
         note_not_filed(instrument, "overlay", &why);
-        done.failures.push(Failure {
-            instrument: instrument.to_owned(),
-            why,
-        });
+        done.failures
+            .push(Failure::new(instrument, why).in_month(ym));
     }
     name_the_origin(&mut done, origin);
     done
@@ -1756,12 +1868,15 @@ fn write_month(
         timeframe,
         month,
     };
-    write_and_count(slice, store_root, identity.symbol_id, parts, key).map_err(|why| Failure {
-        instrument: member.instrument.clone(),
-        why: format!(
-            "{}: {month}: {why}; this month only: the member's other months land and are counted",
-            member.instrument
-        ),
+    write_and_count(slice, store_root, identity.symbol_id, parts, key).map_err(|why| {
+        Failure::new(
+            member.instrument.clone(),
+            format!(
+                "{}: {month}: {why}; this month only: the member's other months land and are counted",
+                member.instrument
+            ),
+        )
+        .in_month(month)
     })
 }
 
@@ -1776,16 +1891,19 @@ fn write_month(
 fn refused_day_failures(instrument: &str, days: &[fetch::RefusedDay]) -> Vec<Failure> {
     days.iter()
         .map(|refused| {
-            let day = crate::session::Day::from_days(refused.day)
-                .map_or_else(|_| format!("day {}", refused.day), |day| day.to_string());
+            let civil = crate::session::Day::from_days(refused.day).ok();
+            let day = civil.map_or_else(|| format!("day {}", refused.day), |day| day.to_string());
             let why = format!(
                 "{day}: {} minute row(s) refused: the exchange calendar records a traded session on this day whose length was never measured (a Muhurat), so no bar on it can be judged in or out of session; this day only, the rest of the window lands; measure the session and record it in the calendar's irregular table, after which adding these minutes to a month that holds later days is a versioned store repair, not a re-pull",
                 refused.rows
             );
             note_not_filed(instrument, "unmeasured session day", &why);
-            Failure {
-                instrument: instrument.to_owned(),
-                why,
+            // THE DAY IT IS ABOUT, carried (DB-G45): the Muhurat of 2020-11-14
+            // was filed under the window's first month, 2018-01.
+            let failure = Failure::new(instrument, why);
+            match civil {
+                Some(civil) => failure.on_day(civil),
+                None => failure,
             }
         })
         .collect()
@@ -2330,10 +2448,7 @@ fn derive_all(
                 for rung in derived_from(source) {
                     note_not_derived(instrument, rung, &why);
                 }
-                failures.push(Failure {
-                    instrument: instrument.to_owned(),
-                    why,
-                });
+                failures.push(Failure::new(instrument, why).in_month(into.month));
                 return failures;
             }
         }
@@ -2398,17 +2513,19 @@ fn derive_all(
             Ok((held, diagnostics, line)) => {
                 entries.push(held);
                 ledger.extend(line);
-                failures.extend(diagnostics.into_iter().map(|why| Failure {
-                    instrument: instrument.to_owned(),
-                    why: format!("{}: {why}", rung.as_str()),
+                failures.extend(diagnostics.into_iter().map(|why| {
+                    Failure::new(instrument, format!("{}: {why}", rung.as_str()))
+                        .in_month(into.month)
                 }));
             }
             Err(why) => {
                 note_not_derived(instrument, rung, &why);
-                failures.push(Failure {
-                    instrument: instrument.to_owned(),
-                    why: format!("{}: {why}", rung.as_str()),
-                });
+                // THE MONTH THE RUNG WAS FOLDED FOR (DB-G45): a derived-rung
+                // failure for 2026-09 was filed under 2018-01.
+                failures.push(
+                    Failure::new(instrument, format!("{}: {why}", rung.as_str()))
+                        .in_month(into.month),
+                );
             }
         }
     }
@@ -3394,7 +3511,19 @@ impl CensusLock {
         if let Some(dir) = path.parent() {
             let _ = fs::create_dir_all(dir);
         }
-        let lock_path = path.with_extension("man.lock");
+        Self::take_at(&path.with_extension("man.lock"))
+    }
+
+    /// [`CensusLock::take`] at an explicit lock path, creating no directory.
+    ///
+    /// A version-4 partition's lock is `manifest/v4/<vendor>/<SEGMENT>.lock`,
+    /// beside the segment's directory of epochs rather than beside one epoch,
+    /// because the epoch a cycle appends to can change under compaction while
+    /// the partition it belongs to does not (D-3316 item 1). The vendor's
+    /// directory is NOT created here: its existence is what marks the vendor
+    /// as migrated, so only `census_store::migrate` may make it.
+    fn take_at(lock_path: &Path) -> Result<Self, String> {
+        let lock_path = lock_path.to_path_buf();
         // A LOCK THAT CANNOT BE TAKEN IS A REFUSAL, NEVER A RUN WITHOUT ONE.
         //
         // This arm used to be `else { return Ok(Self { _held: None }) }` — any
@@ -4761,5 +4890,142 @@ mod tests {
             .expect_err("and it is refused rather than read as a census");
         assert!(why.contains(&fifo.display().to_string()), "{why}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A FAILURE CARRIES ITS OWN MONTH AND DAY** (DB-G45, D-3341 item 1).
+    ///
+    /// Every "member did not land" line of a pull was filed under
+    /// `month=2018-01`, the first month of an 8.75-year window, because the
+    /// failure carried nothing better. These are the doors that set the fields:
+    /// a day sets its month too, a month alone leaves the day unset, and a
+    /// failure about no month says so with `None` rather than a guess.
+    #[test]
+    fn a_failure_carries_its_own_month_and_day_never_the_window_s() {
+        use super::{Failure, refused_day_failures, stamp_day};
+        use crate::session::Day;
+        use crate::vendor::TimestampEncoding;
+        use store::path::YearMonth;
+
+        let bare = Failure::new("NIFTY", "why");
+        assert_eq!((bare.month, bare.day), (None, None));
+        let month = YearMonth::new(2026, 9).expect("a month");
+        let in_month = bare.clone().in_month(month);
+        assert_eq!((in_month.month, in_month.day), (Some(month), None));
+        let muhurat = Day::new(2020, 11, 14).expect("a day");
+        let on_day = in_month.on_day(muhurat);
+        assert_eq!(
+            on_day.month,
+            Some(YearMonth::new(2020, 11).expect("a month"))
+        );
+        assert_eq!(
+            on_day.day,
+            Some(muhurat),
+            "the day wins over a month set before"
+        );
+        assert_eq!(
+            (on_day.instrument.as_str(), on_day.why.as_str()),
+            ("NIFTY", "why")
+        );
+
+        // A Muhurat refusal names the Muhurat's day, whatever the window was.
+        let refused = refused_day_failures(
+            "NIFTY",
+            &[crate::fetch::RefusedDay {
+                day: muhurat.days_from_epoch(),
+                rows: 60,
+            }],
+        );
+        assert_eq!(refused.len(), 1);
+        let first = refused.first().expect("one refusal");
+        assert_eq!(first.day, Some(muhurat));
+        assert_eq!(
+            first.month,
+            Some(YearMonth::new(2020, 11).expect("a month"))
+        );
+        assert!(
+            first
+                .why
+                .starts_with("2020-11-14: 60 minute row(s) refused")
+        );
+        // A day number the calendar cannot name is said, never guessed.
+        let unnamed = refused_day_failures(
+            "NIFTY",
+            &[crate::fetch::RefusedDay {
+                day: u32::MAX,
+                rows: 1,
+            }],
+        );
+        let unnamed = unnamed.first().expect("one refusal");
+        assert_eq!((unnamed.month, unnamed.day), (None, None));
+        assert!(unnamed.why.starts_with(&format!("day {}", u32::MAX)));
+
+        // A vendor stamp's IST day, in each encoding's own arithmetic: 18:29:59
+        // UTC on 2 Dec 2019 is 23:59:59 IST that day, and a second later the
+        // next day; an IST-text stamp is already IST.
+        let utc = 1_575_311_399_i64; // 2019-12-02 18:29:59 UTC
+        let dec2 = Day::new(2019, 12, 2).expect("a day");
+        let dec3 = Day::new(2019, 12, 3).expect("a day");
+        assert_eq!(
+            stamp_day(utc, TimestampEncoding::EpochSecondsUtc),
+            Some(dec2)
+        );
+        assert_eq!(
+            stamp_day(utc + 1, TimestampEncoding::EpochSecondsUtc),
+            Some(dec3)
+        );
+        assert_eq!(
+            stamp_day(utc * 1_000, TimestampEncoding::EpochMillisUtc),
+            Some(dec2)
+        );
+        assert_eq!(
+            stamp_day(utc + 1, TimestampEncoding::IsoDateTimeOffset),
+            Some(dec3)
+        );
+        let ist_text = utc + crate::session::IST_OFFSET_SECS;
+        assert_eq!(
+            stamp_day(ist_text, TimestampEncoding::IstDateTimeText),
+            Some(dec2)
+        );
+        assert_eq!(
+            stamp_day(ist_text + 1, TimestampEncoding::IsoDateTimeText),
+            Some(dec3)
+        );
+        assert_eq!(
+            stamp_day(i64::MIN / 2_000, TimestampEncoding::EpochSecondsUtc),
+            None
+        );
+    }
+
+    /// The one month a member's rows are about, or none when they span two.
+    #[test]
+    fn a_shortfall_names_its_month_only_when_its_rows_have_one() {
+        use super::one_month;
+        use crate::manifest::{Closes, Entry, Held};
+        use store::path::YearMonth;
+
+        let row = |month: u8| {
+            Held::new(
+                Entry {
+                    key: EntryKey {
+                        contract: None,
+                        exchange: brutex_core::instrument::Exchange::Nse,
+                        segment: brutex_core::instrument::Segment::Index,
+                        symbol: brutex_core::symbol::Symbol::new("NIFTY").expect("a symbol"),
+                        timeframe: Timeframe::MINUTE_1,
+                        month: YearMonth::new(2026, month).expect("a month"),
+                    },
+                    rows: 1,
+                    first_ts_micros: 1,
+                    last_ts_micros: 1,
+                },
+                Closes::UNKNOWN,
+            )
+        };
+        assert_eq!(one_month(&[]), None);
+        assert_eq!(
+            one_month(&[row(9), row(9)]),
+            Some(YearMonth::new(2026, 9).expect("a month"))
+        );
+        assert_eq!(one_month(&[row(8), row(9)]), None);
     }
 }

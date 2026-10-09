@@ -158,7 +158,7 @@ pub(super) fn report(
                 .with("last_day", telemetry::Value::Str(&group.last_day))
                 .with("reason", telemetry::Value::Str(&group.text)),
         );
-        done.failures.push(failure(instrument, group.text));
+        done.failures.push(group.receipt(instrument));
     }
     if audit.days.is_empty() {
         return;
@@ -183,12 +183,11 @@ pub(super) fn report(
 }
 
 /// A receipt failure. The one constructor here, so a field added to
-/// [`Failure`] is one edit in this file.
+/// [`Failure`] is one edit in this file. It is about no month or day until a
+/// caller says which (DB-G45, D-3341): [`Group::receipt`] and
+/// [`record_derived`] do.
 fn failure(instrument: &str, why: String) -> Failure {
-    Failure {
-        instrument: instrument.to_owned(),
-        why,
-    }
+    Failure::new(instrument, why)
 }
 
 fn audited_venue(plan: Plan<'_>) -> Option<Venue> {
@@ -448,6 +447,28 @@ struct Group {
     last_day: String,
     /// The receipt's sentence.
     text: String,
+    /// The month the group is about, as the receipt files it (DB-G45): the
+    /// month of its days, [`None`] for findings about no day.
+    about_month: Option<store::path::YearMonth>,
+    /// The one day the group is about, when all its findings are on one day.
+    about_day: Option<Day>,
+}
+
+impl Group {
+    /// This group's receipt failure, filed under the month and, when it is
+    /// about one day, the day its findings concern — never the request
+    /// window's first month (DB-G45, D-3341). Consumes the sentence.
+    fn receipt(self, instrument: &str) -> Failure {
+        let failure = failure(instrument, self.text);
+        let failure = match self.about_month {
+            Some(month) => failure.in_month(month),
+            None => failure,
+        };
+        match self.about_day {
+            Some(day) => failure.on_day(day),
+            None => failure,
+        }
+    }
 }
 
 /// One group per (month, code, detail), in first-occurrence order. A group
@@ -507,6 +528,12 @@ fn aggregate(findings: &[Finding], vendor: brutex_core::vendor::Vendor) -> Vec<G
             first_day,
             last_day,
             text,
+            about_month: open.month,
+            about_day: if open.first_day == open.last_day {
+                open.first_day
+            } else {
+                None
+            },
         }
     };
     let mut done: Vec<Group> = Vec::new();
@@ -629,13 +656,16 @@ pub(super) fn record_derived(
 ) -> Option<Failure> {
     let why = append_ledger(store_root, vendor, lines).err()?;
     super::note_not_filed(instrument, "derive ledger", &why);
-    Some(failure(
-        instrument,
-        format!(
-            "{month}: the derive ledger was not written ({} line(s)): {why}; the derived bars and their census rows are unaffected",
-            lines.len()
-        ),
-    ))
+    Some(
+        failure(
+            instrument,
+            format!(
+                "{month}: the derive ledger was not written ({} line(s)): {why}; the derived bars and their census rows are unaffected",
+                lines.len()
+            ),
+        )
+        .in_month(month),
+    )
 }
 
 /// Appends `lines` to `<store>/audit/<vendor>.gaps` in one write, and syncs
@@ -965,6 +995,27 @@ mod tests {
         assert_eq!(groups[2].text, "unverified x");
         assert_eq!(groups[3].text, "unverified y");
         assert!(aggregate(&[], brutex_core::vendor::Vendor::Zerodha).is_empty());
+
+        // EACH RECEIPT FAILURE IS FILED UNDER ITS OWN MONTH (DB-G45): July's
+        // one gap under 2025-07 and its day; August's three gaps over two days
+        // under 2025-08 and no single day; the two UNVERIFIED findings on
+        // 2025-08-04 under that day. Never the request window's first month.
+        let receipts: Vec<Failure> = groups.into_iter().map(|g| g.receipt("NIFTY")).collect();
+        let filed: Vec<(Option<String>, Option<String>)> = receipts
+            .iter()
+            .map(|f| (f.month.map(|m| m.to_string()), f.day.map(|d| d.to_string())))
+            .collect();
+        assert_eq!(
+            filed,
+            vec![
+                (Some("2025-07".into()), Some("2025-07-31".into())),
+                (Some("2025-08".into()), None),
+                (Some("2025-08".into()), Some("2025-08-04".into())),
+                (Some("2025-08".into()), Some("2025-08-04".into())),
+            ]
+        );
+        assert_eq!(receipts[0].why, "gap a");
+        assert_eq!(receipts[0].instrument, "NIFTY");
     }
 
     /// **THE LEDGER IS APPENDED, ONE LINE PER RECORD, AND REFUSES A BROKEN
