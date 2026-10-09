@@ -66491,6 +66491,21 @@ its size.
 decodes only a file within the bound. Proved by
 `an_oversized_catalogue_cut_inside_a_character_is_refused_by_size`. FXB1-02.
 
+### D-4432 — `/bars.json` past the header's last stamp answers after one record read — 2026-10-09
+
+**What was observed.** W1-api5-8: a `from=` after the month's last bar paid
+the bisection, and in a month born without `FLAG_CHECKSUMS` a landing at
+`n_valid` fell back to reading the whole month to answer `[]`.
+
+**Decided.** `bars_json` first asks `past_the_last_bar`: when `from` is past
+the header's `last_ts_micros`, it reads the one record at `n_valid - 1` and
+answers `[]` when that record carries the header's stamp (or, in a month born
+without checksums, is the all-zero record an interrupted append leaves). An
+unreadable or disagreeing record, or an empty month, falls through to the
+existing bisection, so a damaged tail is still found by the path that found
+it before. Proved by
+`bars_json_past_the_headers_last_stamp_reads_one_record`. FXB1-03.
+
 ### D-4434 — Eight trade readers are kept, and the crate's latency measurements share one harness — 2026-10-09
 
 **What was observed.** W1-api2-3: `/candidate-trades.json`'s exact trade page

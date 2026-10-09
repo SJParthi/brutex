@@ -2549,6 +2549,23 @@ async fn bars_json(
     // after the bisection's `ceil(log2(n_valid + 1))` reads instead of
     // `n_valid`. A file born without the flag has nothing that could detect the
     // zeros, so it keeps the full read.
+    //
+    // AND PAST THE HEADER'S LAST STAMP, NO BISECTION AT ALL (W1-api5-8, D-4432).
+    // A month born without `FLAG_CHECKSUMS` kept the whole read above, and
+    // every month paid the bisection. The header answers it first:
+    // `Header::advance` refuses any batch that does not begin after the
+    // committed `last_ts_micros`, and sets it to the batch's last stamp, so
+    // no committed bar is stamped past it -- including the records an
+    // interrupted append left as zeros, whose stamps the header carries even
+    // though their bytes never landed. A `from` after it is an empty window.
+    // The one record read is the content check: the last record must be the
+    // bar the header names (in a sealed month that read verifies its block),
+    // or, in an unsealed month, the zeros of an interrupted append. Anything
+    // else -- a refusal, a different stamp -- is a file whose bytes disagree
+    // with its header, and it takes the path below, which reads and names it.
+    if from_micros.is_some_and(|at| past_the_last_bar(&file, at)) {
+        return (axum::http::StatusCode::OK, json(), "[]".to_owned());
+    }
     let landed = from_micros
         .and_then(|at| file.first_at_or_after(at).ok())
         .and_then(|index| usize::try_from(index).ok());
@@ -2592,6 +2609,28 @@ async fn bars_json(
         );
     }
     (axum::http::StatusCode::OK, json(), out)
+}
+
+/// Whether `from` lies after every bar `file` has committed, proven by its
+/// header and one record read. See the D-4432 comment in [`bars_json`].
+///
+/// True only when the header holds a record, `from` is after the header's
+/// `last_ts_micros`, and record `n_valid - 1` reads as the bar that stamp
+/// names -- or, in a month born without checksums, as the all-zero record an
+/// interrupted append leaves. A read that refuses or disagrees is `false`,
+/// and the caller's slower path reads and names the damage.
+fn past_the_last_bar(file: &store::file::BarFile, from: i64) -> bool {
+    let header = file.header();
+    let Some(last) = header.n_valid.checked_sub(1) else {
+        return false;
+    };
+    if from <= header.last_ts_micros {
+        return false;
+    }
+    file.read_record(last).is_ok_and(|bar| {
+        bar.ts_micros == header.last_ts_micros
+            || (!header.checksums_present() && bar == store::format::Bar::default())
+    })
 }
 
 /// Whether one stored instrument-month is COMPLETE, and where it is not.
@@ -27859,6 +27898,191 @@ mod tests {
             "the bisection walked up through the zeros to n_valid; an unsealed \
              month must still be read, and its three real bars returned: {body}"
         );
+    }
+
+    /// **PAST THE HEADER'S LAST STAMP, A MONTH IS ANSWERED FROM ITS HEADER AND
+    /// ONE RECORD (W1-api5-8, D-4432)** -- sealed or not.
+    ///
+    /// An unsealed month (a forged version-2 file: three real bars, then seven
+    /// records of zeros under a header naming ten, `last_ts` the third bar's)
+    /// used to be read whole to answer a window past its end. Record 5, inside
+    /// the zeros, is overwritten with a bar stamped 2024-01-03: a whole read
+    /// returns it, so an empty answer for `from=2024-01-02` proves the month
+    /// was not read. The content check is pinned both ways: the same month
+    /// with its LAST record replaced by a bar the header does not name is read
+    /// (and returns that bar), and a sealed month whose last record is in a
+    /// zero tail is read and its damage named, never answered empty. At
+    /// exactly the last stamp the window is not past it.
+    #[tokio::test]
+    #[expect(clippy::too_many_lines, reason = "three forged months and their asks")]
+    async fn bars_json_past_the_headers_last_stamp_reads_one_record() {
+        use std::os::unix::fs::FileExt as _;
+        let month = store::path::YearMonth::new(2024, 1).expect("a legal month");
+        // 2024-01-01 12:00 IST plus `m` minutes.
+        let stamp = |m: i64| ((19_723 * 86_400 - 19_800 + 6 * 3_600) + m * 60) * 1_000_000;
+        let bar = |m: i64| store::format::Bar {
+            ts_micros: stamp(m),
+            open: 100,
+            high: 110,
+            low: 90,
+            close: 105,
+            volume: 1,
+            open_interest: i64::MIN,
+        };
+        let path = store::path::StorePath::new(store::path::PathParts {
+            vendor: Vendor::Dhan,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: store::path::Timeframe::MINUTE_1,
+            month,
+            file: store::path::FileKind::Bars,
+        })
+        .expect("a legal path");
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the id is the cross-check `open` folds; any 32 bits serve"
+        )]
+        let symbol_id = brutex_core::universe::fnv1a("NIFTY") as u32;
+        let v2 = store::layout::Layout::V2;
+        // Three real bars and seven records of zeros, the header naming ten;
+        // `then` rewrites records after the image is laid out.
+        let forge = |root: &std::path::Path, then: &dyn Fn(&mut Vec<u8>)| {
+            let genesis = store::header::Header::genesis_at(v2, symbol_id, 60, 0);
+            let named = genesis.advance(10, stamp(0), stamp(2)).expect("a commit");
+            let mut image = vec![0u8; usize::try_from(store::format::HEADER_LEN).expect("small")];
+            for commit in [
+                genesis.commit().expect("genesis"),
+                named.commit().expect("commit"),
+            ] {
+                let at = usize::try_from(commit.offset).expect("small");
+                image
+                    .iter_mut()
+                    .skip(at)
+                    .zip(commit.bytes)
+                    .for_each(|(dst, src)| *dst = src);
+            }
+            for m in 0..3 {
+                image.extend_from_slice(&bar(m).image());
+            }
+            image.resize(
+                usize::try_from(v2.offset_of(10).expect("an offset")).expect("small"),
+                0,
+            );
+            then(&mut image);
+            let bin = path.to_path_buf(root);
+            std::fs::create_dir_all(bin.parent().expect("a parent")).expect("the directory");
+            std::fs::write(&bin, &image).expect("the forged month");
+        };
+        let put = |image: &mut Vec<u8>, index: u64, at: store::format::Bar| {
+            let from = usize::try_from(v2.offset_of(index).expect("an offset")).expect("small");
+            image
+                .iter_mut()
+                .skip(from)
+                .zip(at.image())
+                .for_each(|(dst, src)| *dst = src);
+        };
+        // 2024-01-03 10:00 IST, inside the month and past every real bar.
+        let later = |minutes: i64| store::format::Bar {
+            ts_micros: stamp(2 * 1_440 - 120 + minutes),
+            ..bar(0)
+        };
+        let ask = |root: &std::path::Path, tag: &str, window: &str| {
+            let site = std::sync::Arc::new(Site::serving(&masters(tag, None, None), root));
+            let uri: axum::http::Uri = format!(
+                "/bars.json?feed=dhan&exchange=NSE&segment=INDEX&symbol=NIFTY\
+                 &timeframe=1min&month=2024-01{window}"
+            )
+            .parse()
+            .expect("a uri");
+            async move { bars_json(axum::extract::State(site), uri).await }
+        };
+
+        // UNSEALED, A ZERO TAIL, A STRAY BAR INSIDE THE ZEROS.
+        let root = store_root("barspastheader");
+        forge(&root, &|image| put(image, 5, later(0)));
+        let file = store::file::BarFile::open_existing(&root, path, symbol_id).expect("opens");
+        assert!(!file.header().checksums_present(), "the premise: unsealed");
+        assert_eq!(file.header().last_ts_micros, stamp(2));
+        assert!(past_the_last_bar(&file, stamp(2) + 1));
+        assert!(
+            !past_the_last_bar(&file, stamp(2)),
+            "at the last stamp is not past it"
+        );
+        assert!(!past_the_last_bar(&file, stamp(0)));
+        drop(file);
+        let (code, _, body) = ask(&root, "barspastheader", "&from=2024-01-02").await;
+        assert_eq!(
+            (code, body.as_str()),
+            (axum::http::StatusCode::OK, "[]"),
+            "answered from the header: a whole read would have returned record 5"
+        );
+        let (code, _, body) = ask(&root, "barspastheader", "&from=2024-01-01").await;
+        assert_eq!(code, axum::http::StatusCode::OK, "{body}");
+        assert!(body.matches("\"t\":").count() >= 3, "{body}");
+
+        // UNSEALED, THE LAST RECORD IS A BAR THE HEADER DOES NOT NAME: read.
+        let root = store_root("barspastheadermismatch");
+        forge(&root, &|image| put(image, 9, later(5)));
+        let file = store::file::BarFile::open_existing(&root, path, symbol_id).expect("opens");
+        assert!(
+            !past_the_last_bar(&file, stamp(2) + 1),
+            "a disagreeing last record"
+        );
+        drop(file);
+        let (code, _, body) = ask(&root, "barspastheadermismatch", "&from=2024-01-02").await;
+        assert_eq!(code, axum::http::StatusCode::OK, "{body}");
+        assert_eq!(
+            body.matches("\"t\":").count(),
+            1,
+            "the month is read, and the bar the header does not name is what it holds: {body}"
+        );
+
+        // SEALED, A ZERO TAIL: the last record fails its block check.
+        let root = store_root("barspastheadersealed");
+        let mut file =
+            store::file::BarFile::open_or_create(&root, path, symbol_id).expect("a bar file");
+        file.append(&(0..3).map(bar).collect::<Vec<_>>())
+            .expect("legal bars");
+        let header = file.header();
+        drop(file);
+        let layout = store::layout::Layout::CURRENT;
+        let bin = path.to_path_buf(&root);
+        let raw = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&bin)
+            .expect("the month opens for the fault");
+        let from = layout.offset_of(3).expect("an offset");
+        let to = layout.offset_of(10).expect("an offset");
+        raw.write_all_at(&vec![0u8; usize::try_from(to - from).expect("small")], from)
+            .expect("the zero extent");
+        let mut grown = header;
+        grown.n_valid = 10;
+        grown.generation = header.generation + 1;
+        let commit = grown.commit().expect("a header image");
+        raw.write_all_at(&commit.bytes, commit.offset)
+            .expect("the header names the zeros");
+        drop(raw);
+        let file = store::file::BarFile::open_existing(&root, path, symbol_id).expect("opens");
+        assert!(file.header().checksums_present(), "the premise: sealed");
+        assert!(
+            !past_the_last_bar(&file, stamp(2) + 1),
+            "the zeros fail their block"
+        );
+        drop(file);
+        let (code, _, body) = ask(&root, "barspastheadersealed", "&from=2024-01-02").await;
+        assert_ne!(
+            (code, body.as_str()),
+            (axum::http::StatusCode::OK, "[]"),
+            "a sealed zero tail is never answered empty from its header"
+        );
+
+        // AN EMPTY MONTH IS NEVER PAST ANYTHING BY THIS PROOF.
+        let root = store_root("barspastheaderempty");
+        let file =
+            store::file::BarFile::open_or_create(&root, path, symbol_id).expect("a bar file");
+        assert!(!past_the_last_bar(&file, i64::MAX));
     }
 
     /// **A COMPLETE SESSION SCORES ZERO LOSSES, AND ONE MISSING MINUTE IS

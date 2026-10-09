@@ -343,9 +343,29 @@ fn w1_api5_8_a_window_past_the_last_bar_reads_the_month_only_when_unsealed() {
             "zero-filled records",
             "Since D-2280 only in a month born without `FLAG_CHECKSUMS`",
             "`ceil(log2(n_valid + 1))` reads",
+            "Since D-4432",
+            "`last_ts_micros`",
+            "one record read",
+            "bars_json_past_the_headers_last_stamp_reads_one_record",
         ],
     );
     let route = item(SERVER, "async fn bars_json(");
+    assert!(
+        route.contains(
+            "if from_micros.is_some_and(|at| past_the_last_bar(&file, at)) {\n        \
+             return (axum::http::StatusCode::OK, json(), \"[]\".to_owned());"
+        ),
+        "past the header's last stamp, one record read answers: {route}"
+    );
+    let past = item(SERVER, "fn past_the_last_bar(");
+    assert!(
+        past.contains("if from <= header.last_ts_micros {"),
+        "{past}"
+    );
+    assert!(
+        past.contains("file.read_record(last).is_ok_and(|bar| {"),
+        "{past}"
+    );
     assert!(
         route.contains(
             "if landed == Some(held) && file.header().checksums_present() {\n        \

@@ -12282,9 +12282,14 @@ rule 6); every bound is read from the source.
   tail fails that check and the bisection refuses, so a landing that survives
   it proves the window empty and `[]` is answered after
   `ceil(log2(n_valid + 1))` reads. An unsealed month has nothing that detects
-  zero-filled records, which is why it alone keeps the full read: that part
-  is inherent to the file it was born as. Proved by
+  zero-filled records, which is why it alone kept the full read. Proved by
   `api::server::tests::bars_json_past_a_sealed_months_last_bar_reads_no_more_than_the_bisection`.
+  **Since D-4432 a `from` past the header's `last_ts_micros` costs one record
+  read in either kind of month:** `past_the_last_bar` reads record
+  `n_valid - 1` and answers `[]` when it carries the header's stamp (or, unsealed,
+  is the all-zero record an interrupted append leaves); a disagreeing or
+  unreadable record falls through to the paths above, which name the damage.
+  Proved by `api::server::tests::bars_json_past_the_headers_last_stamp_reads_one_record`.
 * **W1-api5-9 — `indexmap_json`.** A build: `nse_indices.csv` is read and
   parsed whole (`indexmap::Published::read`), and every key of the merged
   universe is filtered to the index symbols: O(file bytes + U). **Since
