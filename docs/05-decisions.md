@@ -65050,3 +65050,20 @@ marker's sequence, and the fault still raised (R1286-api-01).
 
 **Rejected.** Racing a writer thread against the reader. It would pass or
 fail by scheduling, which is no test.
+
+### D-4131 — The reading path's `records unreadable` line names the first damaged file — 2026-10-08
+
+**What was observed.** Run 1286 reported `bars::read_in_time` with the `!`
+deleted from `!bad.is_empty()` as MISSED. That makes the first CLEAN month the
+file the request's one `records unreadable` line names. G18-api-27 (D-2046)
+pins the seek path; nothing pinned the reading path, which a window takes when
+ordered by anything but time.
+
+**Decided.** A test orders a two-month window by close, once with February
+damaged after a clean January and once with January damaged before a clean
+February, and requires exactly one line, naming the damaged file. One flipped
+byte fails its record's whole checksum block, which in a ten-row month is all
+ten rows, so the test also requires ten named faults and the clean month's ten
+rows, whole (R1286-api-02).
+
+**Rejected.** Nothing else was needed: the code was right.
