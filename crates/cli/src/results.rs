@@ -2025,6 +2025,29 @@ mod tests {
                 "and how many records survived, which is what makes it \
                  actionable rather than merely alarming: {why}"
             );
+            // THE READ DOOR NEVER CUTS (R1286-cli-07, D-4100): it holds only a
+            // shared lock, so it refuses with the reader's own sentence and
+            // leaves every byte where it was. Only the writer's door below, under
+            // its exclusive lock, may cut the part-record.
+            assert_eq!(
+                why,
+                format!(
+                    "{} ends with {orphan} bytes that are not a whole record: \
+                     2 complete records occupy {} bytes after the {HEADER}-byte \
+                     header, and the file is {}. A write was interrupted. \
+                     A reader leaves the orphan bytes alone; the next writer \
+                     cuts them under its lock, since a part-record was never \
+                     acknowledged.",
+                    path.display(),
+                    2 * STRIDE,
+                    HEADER + 2 * STRIDE + orphan
+                )
+            );
+            assert_eq!(
+                std::fs::metadata(&path).expect("still torn").len(),
+                HEADER + 2 * STRIDE + orphan,
+                "a reader changes no byte of a torn ledger"
+            );
             // sweep-2, D-1901: the writer's door cuts the part-record, which
             // was never acknowledged, and the ledger records again.
             let mut writer = Results::open(&r).expect("the writer cuts the torn tail");

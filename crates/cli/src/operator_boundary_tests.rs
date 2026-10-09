@@ -722,6 +722,22 @@ fn a_requested_stop_refuses_at_the_next_month_and_names_the_cancellation()
         assert!(report.starts_with("refused: "), "{report}");
         assert!(report.contains(crate::cancel::CANCELLED), "{report}");
         assert!(!report.contains(crate::STORED_PROVENANCE), "{report}");
+        // THE WHOLE TABLE IS REFUSED AT ITS OWN BOUNDARY, by the stop and
+        // naming it, before the every-rung-refused summary could stand in for
+        // it (R1286-cli-03, D-4100). Each rung's month refused with the stop,
+        // so without this check the page would be that summary, which names
+        // no boundary and reads like a refusal of the arguments.
+        for (rungs, count) in [(&["1min"][..], 1), (&["1min", "5min"][..], 2)] {
+            let report = crate::range_over("zerodha", "NIFTY", rungs, (2025, 5), (2025, 5), None);
+            assert_eq!(
+                report,
+                format!(
+                    "refused: {} Stopped at: the {count} rung(s) of NIFTY on zerodha, before \
+                     their table was rendered.\n",
+                    crate::cancel::CANCELLED
+                )
+            );
+        }
         assert!(
             crate::cancel::observed() >= 3,
             "{}",

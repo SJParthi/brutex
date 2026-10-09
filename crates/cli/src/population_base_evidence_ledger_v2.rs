@@ -2286,6 +2286,51 @@ mod projection_tests {
         );
     }
 
+    /// **A retired-name probe that cannot answer refuses the root; only a
+    /// clean "not found" admits it.** R1286-cli-08, D-4100.
+    ///
+    /// The documented rule names three refusals -- a file, a dangling link,
+    /// and a probe that cannot answer -- and only the first two were driven.
+    /// Two probes that cannot answer are made here without privilege: a root
+    /// that is a regular file (the probe fails `ENOTDIR`) and a root whose
+    /// joined path is longer than any path the kernel resolves (it fails
+    /// before any lookup). Neither failure is an absence, so each refuses by
+    /// the first retired name, as a reconciliation refusal; the control root,
+    /// where both probes answer "not found", is admitted.
+    #[test]
+    fn a_retired_name_probe_that_cannot_answer_refuses_the_root() {
+        let root = TestRoot::new();
+        let not_a_directory = root.parent.join("plain-file");
+        std::fs::write(&not_a_directory, b"not a directory").expect("a regular file");
+        let mut too_long = root.parent.clone();
+        for _ in 0..21 {
+            too_long.push("d".repeat(200));
+        }
+        let [first, _] = RETIRED_V2_FILES;
+        for unanswerable in [not_a_directory, too_long] {
+            for name in RETIRED_V2_FILES {
+                let probe = std::fs::symlink_metadata(unanswerable.join(name))
+                    .expect_err("premise: the probe cannot answer");
+                assert_ne!(
+                    probe.kind(),
+                    std::io::ErrorKind::NotFound,
+                    "premise: not an absence: {probe}"
+                );
+            }
+            let refused = refuse_retired_v2_ledger(&unanswerable)
+                .expect_err("a probe that cannot answer refuses");
+            assert!(
+                matches!(&refused, BaseEvidenceLedgerRefusalV2::Reconciliation(why)
+                    if why.contains("refused by name") && why.contains(first)),
+                "{refused}"
+            );
+        }
+        assert!(
+            refuse_retired_v2_ledger(root.ledger()).is_ok(),
+            "a clean absence of both names admits the root"
+        );
+    }
+
     struct TestRoot {
         parent: PathBuf,
         ledger: PathBuf,
