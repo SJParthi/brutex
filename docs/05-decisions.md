@@ -66510,3 +66510,74 @@ replays the audit's probe P07. With the check disabled it fails on
 every probe answers against the held bars. A reader opened after the swap
 uses the new index. A `.bin` path that names nothing makes the handle bisect.
 Proof: FXA-07.
+
+### D-4417 — A non-finite float in the event log reads back as a float, not as text — 2026-10-09
+
+**Finding (satk-5).** `encode::push_float` wrote NaN and the infinities as the
+JSON strings `"NaN"`, `"Infinity"` and `"-Infinity"`, and `record::scalar`
+read them back as `OwnedValue::Str`. A statistic that went non-finite could
+not be told apart from a text field that said so. `Record::matches` reported
+the round trip failed, against the crate's own comments in `record.rs` and
+`value.rs`.
+
+**Decision.** A non-finite float is written as the one-member object
+`{"float":"NaN"}`, with `"-NaN"`, `"Infinity"` or `"-Infinity"` in its place.
+That is legal JSON and greppable. A field's value is otherwise always a
+scalar, so the shape cannot be mistaken for text. The reader maps exactly this
+shape back to `OwnedValue::Float`; a NaN keeps its sign but not its payload.
+Any other object in a field's place is still refused where it opens, as
+before. The key is `encode::NONFINITE_KEY`, shared by the writer and the
+reader.
+
+Lines written before this change carry the bare strings and still read as
+text. That ambiguity is in their bytes, and no reader can remove it. A reader
+built before this change, given a new line that carries a non-finite float,
+refuses the line and counts it in `Tail::malformed`, so the failure is loud
+rather than silent. The api's `/logs.json` already renders a non-finite
+`Float` as `null`.
+
+**Evidence.**
+`a_non_finite_float_round_trips_as_a_float_and_text_saying_nan_stays_text`
+round-trips NaN, -NaN, +inf and -inf bit for bit, with `matches` true. A
+text field `"NaN"` beside them stays text, and an old line reads as text.
+Five other object shapes are refused. Proof: FXA-08.
+
+### D-4418 — An event log line that repeats a key is refused by name, and the writer never repeats one — 2026-10-09
+
+**Finding (satk-6).** `Record::decode` matched each key and let the last copy
+win. An `"level":"error"` followed by `"level":"trace"` read as trace and fell
+under a level filter. A repeated `fields` replaced the first object, and a
+repeated field key was kept twice with `Record::field` answering the first.
+`1e-400` read as `0.0` while `1e400` was refused.
+
+**Decision.** The ten line keys the decoder reads are tracked in a `u16` mask,
+and a second occurrence of any of them is `LineFault::RepeatedKey { key }`.
+A key a later build added is still stepped over, copies included, because
+nothing reads it. Inside `fields`, a key equal to one already kept is
+`RepeatedKey` too. That costs at most `MAX_FIELDS` comparisons, since the
+comma guard admits no thirteenth member. A decimal with a non-zero digit that
+parses to zero is `BadNumber`, the same as one that parses to infinity.
+
+The writer never produces either. Its line keys are fixed, and the smallest
+finite float it writes is `5e-324`. `Event::with` now counts a field in
+`dropped` instead of keeping it when the line would spell its key the same as
+one already kept. That covers the same key again, or a longer key that
+`MAX_KEY_BYTES` cuts to the same prefix. The first value is kept, as the first
+`MAX_FIELDS` are, and the line's `"dropped"` says a field was not.
+
+Measured on this VM in release, building a 12-field event 200,000 times: p50
+375–377 ns and p99 416–507 ns before, p50 442 ns and p99 524–543 ns after,
+which is about 66 ns per full event. No production caller builds an event
+with a repeated key. That was checked by a scan of every `Event::…`
+builder chain and of every event built in a loop in `api` and `cli`. Old logs
+from this workspace's writers therefore stay readable. A log written by
+another program that repeats a key is refused line by line and counted in
+`Tail::malformed`.
+
+**Evidence.** `a_repeated_key_is_refused_by_name_and_the_writer_never_repeats_one`
+covers all ten line keys repeated, a repeated unknown key that is accepted,
+a repeated field key, the writer's first-value-kept rule for the same key and
+for a cut-to-the-same-spelling key, three underflowing literals refused, and
+`0.0`, `-0.0`, `0e-999` and `5e-324` kept. Four existing tests built their
+ceiling cases from one repeated key; they now use distinct keys of the same
+width. Proof: FXA-09.

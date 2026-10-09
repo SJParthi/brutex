@@ -1975,11 +1975,23 @@ mod tests {
         let control = |n: usize| "\u{1}".repeat(n);
         let target = control(MAX_TARGET_BYTES);
         let message = control(MAX_MESSAGE_BYTES);
-        let key = control(MAX_KEY_BYTES);
+        // TWELVE DISTINCT KEYS, each `MAX_KEY_BYTES` of six-byte escapes: the
+        // writer counts a repeated key rather than writing it twice (D-4418),
+        // so the widest line needs twelve spellings. The last byte varies over
+        // control characters with no short escape, so the width is unchanged.
+        let keys: Vec<String> = [1_u8, 2, 3, 4, 5, 6, 7, 0x0b, 0x0e, 0x0f, 0x10, 0x11]
+            .into_iter()
+            .map(|last| {
+                let mut key = control(MAX_KEY_BYTES - 1);
+                key.push(char::from(last));
+                key
+            })
+            .collect();
+        assert_eq!(keys.len(), MAX_FIELDS);
         let value = control(MAX_STR_VALUE_BYTES);
         let mut event = Event::error(&target, &message);
-        for _ in 0..MAX_FIELDS {
-            event = event.with(&key, value.as_str());
+        for key in &keys {
+            event = event.with(key, value.as_str());
         }
         let event = event.with("past the ceiling", u64::MAX);
 

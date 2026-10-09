@@ -13411,6 +13411,9 @@ one or the other:
                 ENCODER type, not a value type: `Value::paisa`
                 exists and produces `Value::Int`, and the `Float`
                 variant's own doc reads "Never a price."
+                `record.rs` is allowed 5 since D-4417: the reader's
+                four non-finite words (`NaN`, `-NaN`, `Infinity`,
+                `-Infinity`) map to their `f64` values on four lines.
 `crates/core/src/vendor.rs` had an entry here because `parse_strike` routed the
 strike through a binary float. It parses the digits now, so the entry is removed
 rather than left loose -- CI warned `no longer matches rule 2 -- tighten it`, and
@@ -14329,6 +14332,10 @@ Result<(), LineFault>` is a PARSER method, every call site is
 `self.expect(b'"')?` or `scan.expect(b'{')?`, and every one
 propagates rather than panicking. Renaming it to satisfy a grep
 would be the tail wagging the gate.
+(D-4417 adds three more calls of that parser method in
+`record::nonfinite`, which reads `{"float":"NaN"}` back as a float,
+so `record.rs` is allowed 7, and the parser method's calls are now
+twelve of the entries in this list.)
 
 ssm.rs::hmac is the one real `Result::expect` in shipping code, and
 it stays. `Hmac::new_from_slice` returns `InvalidLength`, which HMAC
@@ -16447,3 +16454,14 @@ this VM's ext4, 100,000 checks against a six-deep store path: p50 1.13 µs,
 p99 1.94 µs, max 12.1 ms. The maximum is scheduler noise from concurrent
 builds, not a bound. It is paid once per handle, never per lookup. A writer
 pays nothing new: it holds the month's lock, and its index is decided at open.
+
+### `Event::with` now compares each key against those already kept (D-4418)
+
+So that the writer never writes a field key twice, each `with` compares its
+key, as the line would spell it, against the at most `MAX_FIELDS` keys
+already kept. That is at most 66 comparisons for a full 12-field event, a
+bound that does not grow. Measured on this VM in release, 200,000 builds of a
+12-field event: p50 442 ns and p99 524–543 ns, against p50 375–377 ns and p99
+416–507 ns before. The decoder's repeated-key checks are a `u16` mask for the
+line keys and at most `MAX_FIELDS` comparisons per field key. They are argued
+from the code, not timed.
