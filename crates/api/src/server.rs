@@ -19697,45 +19697,52 @@ fn log_level_from(raw: Option<&str>) -> (telemetry::Config, String) {
     (config, note)
 }
 
-/// The environment variable that suppresses opening a browser on start.
+/// The environment variable that ASKS for a browser on start: `1` opens one.
+///
+/// Opening is opt-in (rustonly-4, D-4430). Absent, or any other value, the
+/// server prints its address and spawns nothing.
+pub const OPEN_ENV: &str = "BRUTEX_OPEN";
+
+/// The environment variable that refuses a browser on start, whatever
+/// [`OPEN_ENV`] says. Kept from when opening was the default, so a launcher
+/// that still sets it keeps the meaning it had (D-4430).
 pub const NO_OPEN_ENV: &str = "BRUTEX_NO_OPEN";
 
-/// Opens the operator's browser at `url`, and returns what happened.
+/// What the start-up launch did, for [`opening_line`].
+#[derive(Debug, PartialEq, Eq)]
+enum Launch {
+    /// The operating system's URL handler was started.
+    Opened,
+    /// Nothing was spawned because nobody asked, or [`NO_OPEN_ENV`] refused;
+    /// the reason names the variable.
+    Declined(String),
+    /// The handler was asked for and could not be started; the reason names it.
+    Failed(String),
+}
+
+/// Opens the operator's browser at `url` only when [`OPEN_ENV`] is `1`, and
+/// returns what happened.
+///
+/// # Opt-in, and why it changed (rustonly-4, D-4430)
+///
+/// This opened a browser on every start unless [`NO_OPEN_ENV`] was set. Off
+/// macOS and Windows the handler is `xdg-open`, whose freedesktop.org
+/// `xdg-utils` implementation is a shell script, so a default start could run
+/// a shell. Whether a given host's `xdg-open` is that script, a wrapper, or
+/// absent is UNVERIFIED. The default now spawns nothing: the banner prints the
+/// address, and the IDE run configuration (`.claude/launch.json`) already
+/// names the same URL for the IDE to open. An operator who wants the window
+/// sets `BRUTEX_OPEN=1`, and only then is the handler started.
 ///
 /// # Why this is not a violation of `CLAUDE.md` §2
 ///
 /// §2 forbids "any `build.rs` that invokes an external process". This is not a
 /// build script: nothing here runs during `cargo build`, and gate 2 greps
-/// `*build.rs` for exactly that reason. The bare-machine promise §2 protects —
-/// that `cargo build`, `cargo test` and `cargo clippy` pass with no foreign
-/// toolchain — is untouched, because the only thing spawned here is the
-/// operating system's own URL handler, at run time, on a machine that by
-/// definition already has a browser the operator is about to look at.
-///
-/// # On Linux the handler may be a script, and that is allowed (rustonly-4, D-1202)
-///
-/// Off macOS and Windows the handler is `xdg-open`. The freedesktop.org
-/// `xdg-utils` implementation of it is a shell script, so on such a host this
-/// binary can start a shell at run time. Whether a given host's `xdg-open` is
-/// that script, a wrapper, or absent is UNVERIFIED and is not this crate's to
-/// decide: it is the operator's desktop, chosen and installed by them, exactly
-/// as `open` and `explorer.exe` are on the other two families.
-///
-/// D-1202 records why that is not the "interpreted runtime, as a dependency, a
-/// dev-dependency, or a tool" `CLAUDE.md` §2 forbids: nothing in the workspace
-/// names it, `cargo build`, `cargo test` and `cargo clippy` never reach it (no
-/// test calls [`open_in_browser`]; the tests drive [`open_unless_suppressed`]
-/// only on its suppressed arm, and a `:0` listener never opens), the URL it is
-/// handed is this server's own `http://` loopback address and never operator
-/// text, and [`NO_OPEN_ENV`] turns it off. A spawn failure is printed, never
-/// swallowed.
-///
-/// # Why it is opt-OUT rather than opt-in
-///
-/// The whole stated run procedure is one click, and a procedure whose last step
-/// is "now go and type the address yourself" is not one click. A default that
-/// has to be enabled would leave every fresh clone in the state this function
-/// exists to remove.
+/// `*build.rs` for exactly that reason. `cargo build`, `cargo test` and `cargo
+/// clippy` never reach the spawn (no test calls [`open_in_browser`]; the tests
+/// drive [`open_if_asked`] only on its declining arms, and a `:0` listener is
+/// never opened), and the URL handed to it is this server's own `http://`
+/// loopback address, never operator text. D-1202 records the rest.
 ///
 /// # Why a failure is reported rather than swallowed
 ///
@@ -19744,8 +19751,12 @@ pub const NO_OPEN_ENV: &str = "BRUTEX_NO_OPEN";
 /// silent failure would leave an operator waiting for a window that is never
 /// coming, so the caller prints the URL. `CLAUDE.md` §4: degrade loudly and
 /// name the reason.
-fn open_in_browser(url: &str) -> Result<(), String> {
-    open_unless_suppressed(url, std::env::var_os(NO_OPEN_ENV).as_deref())
+fn open_in_browser(url: &str) -> Launch {
+    open_if_asked(
+        url,
+        std::env::var_os(OPEN_ENV).as_deref(),
+        std::env::var_os(NO_OPEN_ENV).as_deref(),
+    )
 }
 
 /// The URL launcher available on one supported host family.
@@ -19778,17 +19789,38 @@ const fn browser_handler(host: BrowserHost) -> (&'static str, &'static [&'static
     }
 }
 
-/// [`open_in_browser`] with the opt-out as an argument, so a test owns it.
+/// [`open_in_browser`] with both variables as arguments, so a test owns them.
 ///
 /// Split out because the workspace denies `unsafe_code` and `std::env::set_var`
-/// is `unsafe` in edition 2024 — so the suppression arm is untestable while the
-/// variable is read inside the function. That constraint pushed toward the same
-/// shape [`log_dir_from`] already has, and the lint was right: a function that
-/// reads process-global state is one no test can pin without racing every other
-/// test in the binary.
-fn open_unless_suppressed(url: &str, suppressed: Option<&std::ffi::OsStr>) -> Result<(), String> {
-    if suppressed.is_some() {
-        return Err(format!("{NO_OPEN_ENV} is set"));
+/// is `unsafe` in edition 2024 — so the declining arms are untestable while the
+/// variables are read inside the function. That constraint pushed toward the
+/// same shape [`log_dir_from`] already has, and the lint was right: a function
+/// that reads process-global state is one no test can pin without racing every
+/// other test in the binary.
+///
+/// `asked` must be exactly `1`. A refusal wins over an ask, and an ask with any
+/// other value (`0`, `yes`, empty) is declined by name rather than read as a
+/// yes: the side that spawns nothing is the safe one (D-4430).
+fn open_if_asked(
+    url: &str,
+    asked: Option<&std::ffi::OsStr>,
+    refused: Option<&std::ffi::OsStr>,
+) -> Launch {
+    if refused.is_some() {
+        return Launch::Declined(format!("{NO_OPEN_ENV} is set"));
+    }
+    match asked {
+        None => {
+            return Launch::Declined(format!(
+                "opening a browser is opt-in; set {OPEN_ENV}=1 to have it opened"
+            ));
+        }
+        Some(value) if value != "1" => {
+            return Launch::Declined(format!(
+                "{OPEN_ENV} is {value:?}, and only 1 opens a browser"
+            ));
+        }
+        Some(_) => {}
     }
     // THE HANDLER IS THE PLATFORM'S, NEVER A BROWSER BY NAME. Naming a browser
     // picks one the operator may not use and may not have; the OS already knows
@@ -19809,6 +19841,7 @@ fn open_unless_suppressed(url: &str, suppressed: Option<&std::ffi::OsStr>) -> Re
                 .map(drop)
                 .map_err(|why| format!("{program}: the child cannot be reaped: {why}"))
         })
+        .map_or_else(Launch::Failed, |()| Launch::Opened)
 }
 
 /// Waits for `child` on a thread of its own, so it is reaped when it exits.
@@ -19962,17 +19995,19 @@ fn first_event_note(first: telemetry::Emitted) -> Option<String> {
 /// ADDRESS rather than on a test flag: a flag has to be remembered by every
 /// future harness, and the one that forgets is the one that opens the window.
 /// `open` is a parameter so a test proves that without a browser. G18-api-16.
-fn opening_line(
-    addr: std::net::SocketAddr,
-    open: impl FnOnce(&str) -> Result<(), String>,
-) -> String {
+///
+/// A launch nobody asked for is not a failure, and the line says so in other
+/// words: `address:` with the reason, where a failed launch keeps its
+/// `NOT OPENED` (D-4430).
+fn opening_line(addr: std::net::SocketAddr, open: impl FnOnce(&str) -> Launch) -> String {
     let home = format!("http://{addr}/");
     if addr.port() == 0 {
         "  opening: skipped — port 0 addresses nothing".to_owned()
     } else {
         match open(&home) {
-            Ok(()) => format!("  opening: {home}"),
-            Err(why) => format!("  opening: NOT OPENED ({why}) — go to {home}"),
+            Launch::Opened => format!("  opening: {home}"),
+            Launch::Declined(why) => format!("  address: {home} — not opened ({why})"),
+            Launch::Failed(why) => format!("  opening: NOT OPENED ({why}) — go to {home}"),
         }
     }
 }
@@ -26187,32 +26222,52 @@ mod tests {
         assert!(
             include_str!("server.rs")
                 .contains(".and_then(|child| {\n            reap_detached(child)"),
-            "open_unless_suppressed hands its child to the reaper"
+            "open_if_asked hands its child to the reaper"
         );
     }
 
-    /// `BRUTEX_NO_OPEN` is honoured, and the refusal names the variable rather
-    /// than reporting a spawn that never happened.
+    /// Opening a browser is opt-in (rustonly-4, D-4430): nothing is spawned
+    /// unless `BRUTEX_OPEN` is exactly `1`, `BRUTEX_NO_OPEN` refuses even an
+    /// ask, and each decline names the variable that decided it.
     ///
     /// The spawning arm is deliberately not exercised: asserting it would open
     /// a browser window on the machine running the suite, and a test with a
     /// visible side effect on the operator's desktop is one they will disable.
     #[test]
-    fn the_browser_is_not_opened_when_the_operator_said_not_to() {
-        let why = open_unless_suppressed("http://127.0.0.1:8080/", Some(std::ffi::OsStr::new("1")))
-            .expect_err("it must refuse when the variable is set");
-        assert!(
-            why.contains(NO_OPEN_ENV),
-            "the refusal names the variable that caused it: {why}"
-        );
-        // AN EMPTY VALUE STILL SUPPRESSES. `var_os` returns `Some("")` for
-        // `BRUTEX_NO_OPEN=`, and an operator who wrote that meant "off" — the
-        // test pins the presence rule rather than a truthiness one.
-        assert!(
-            open_unless_suppressed("http://127.0.0.1:8080/", Some(std::ffi::OsStr::new("")))
-                .is_err(),
-            "presence suppresses, whatever the value"
-        );
+    fn the_browser_is_opened_only_when_the_operator_asked_for_it() {
+        let url = "http://127.0.0.1:8080/";
+        let declined = |launch: Launch| match launch {
+            Launch::Declined(why) => why,
+            other => panic!("nothing may be spawned here: {other:?}"),
+        };
+        // ABSENT: THE DEFAULT SPAWNS NOTHING, and says how to ask.
+        let why = declined(open_if_asked(url, None, None));
+        assert!(why.contains("opt-in") && why.contains(OPEN_ENV), "{why}");
+        // ANY VALUE BUT `1` IS NOT AN ASK, the empty one included.
+        for value in ["", "0", "yes", "true", "11", " 1"] {
+            let why = declined(open_if_asked(url, Some(std::ffi::OsStr::new(value)), None));
+            assert!(
+                why.contains(OPEN_ENV) && why.contains("only 1 opens"),
+                "{value:?}: {why}"
+            );
+        }
+        // A REFUSAL WINS over an ask, and over silence, whatever its value.
+        for refused in ["", "1", "0"] {
+            for asked in [None, Some("1"), Some("0")] {
+                let why = declined(open_if_asked(
+                    url,
+                    asked.map(std::ffi::OsStr::new),
+                    Some(std::ffi::OsStr::new(refused)),
+                ));
+                assert_eq!(
+                    why,
+                    format!("{NO_OPEN_ENV} is set"),
+                    "{asked:?} {refused:?}"
+                );
+            }
+        }
+        assert_eq!(OPEN_ENV, "BRUTEX_OPEN");
+        assert_eq!(NO_OPEN_ENV, "BRUTEX_NO_OPEN");
     }
 
     /// The Windows row is the regression proof: the URL is appended later as
@@ -30711,7 +30766,7 @@ mod tests {
         assert_eq!(
             opening_line(zero, |url| {
                 asked.push(url.to_owned());
-                Ok(())
+                Launch::Opened
             }),
             "  opening: skipped — port 0 addresses nothing"
         );
@@ -30720,14 +30775,22 @@ mod tests {
         assert_eq!(
             opening_line(bound, |url| {
                 asked.push(url.to_owned());
-                Ok(())
+                Launch::Opened
             }),
             "  opening: http://127.0.0.1:8123/"
         );
         assert_eq!(asked, ["http://127.0.0.1:8123/"]);
         assert_eq!(
-            opening_line(bound, |_| Err("no launcher".to_owned())),
+            opening_line(bound, |_| Launch::Failed("no launcher".to_owned())),
             "  opening: NOT OPENED (no launcher) — go to http://127.0.0.1:8123/"
+        );
+        // NOT ASKED IS NOT A FAILURE (D-4430): the address, and why it was
+        // not opened, without the failure's capitals.
+        assert_eq!(
+            opening_line(bound, |_| Launch::Declined(
+                "BRUTEX_OPEN is not set".to_owned()
+            )),
+            "  address: http://127.0.0.1:8123/ — not opened (BRUTEX_OPEN is not set)"
         );
     }
 

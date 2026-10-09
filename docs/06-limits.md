@@ -16392,3 +16392,7 @@ states it). GAP16-26 is closed by D-1173 (money accumulated in `i64`/`i128`,
 one conversion to `f64` at the edge). ET-strategies-trades-ranking-costs-9 is
 the §72 text corrected by D-1448. rustonly-4 is `xdg-open` as the operating
 system's URL handler, kept by D-1202 and off with `BRUTEX_NO_OPEN`.
+**Since D-4430 it is not started at all unless asked:** the server prints its
+address, and only `BRUTEX_OPEN=1` starts the handler (`BRUTEX_NO_OPEN` still
+refuses even an ask).
+

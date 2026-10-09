@@ -66460,6 +66460,25 @@ returning, as the install refusal already did. OBSV-11.
 **Rejected.** Refusing the whole batch louder. The siblings' bars are on disk
 and their rows are sound; dropping them is the loss, not the noise.
 
+### D-4430 — The server opens a browser only when asked — 2026-10-09
+
+**What was observed.** rustonly-4: `api` started the operating system's URL
+handler on every start unless `BRUTEX_NO_OPEN` was set. Off macOS and Windows
+that handler is `xdg-open`, whose freedesktop.org implementation is a shell
+script, so a default start could run a shell. D-1202 kept the handler and
+made it switchable off; the finding asked for the opposite default.
+
+**Decided.** Opening is opt-in. `BRUTEX_OPEN` set to exactly `1` asks for the
+handler; absent or any other value spawns nothing, and the start-up banner
+prints the address with the reason it was not opened (`not opened
+(BRUTEX_OPEN is not set)`). `BRUTEX_NO_OPEN` is kept as a veto that wins
+over an ask, so a launcher that still sets it keeps its meaning. The handler
+list itself (D-1202) is unchanged. Proved by `open_if_asked`'s tests in
+`crates/api/src/server.rs`. FXB1-01.
+
+**Rejected.** Dropping the handler. An operator who wants the window keeps it
+with one variable; nothing in the default path runs an outside program.
+
 ### D-4434 — Eight trade readers are kept, and the crate's latency measurements share one harness — 2026-10-09
 
 **What was observed.** W1-api2-3: `/candidate-trades.json`'s exact trade page
