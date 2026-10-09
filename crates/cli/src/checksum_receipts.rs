@@ -352,7 +352,7 @@ fn publish(path: &Path, expected: &[u8; BYTES]) -> Result<(), String> {
             .map_err(error)?;
         }
         file.sync_all().map_err(error)?;
-        File::open(path.parent().ok_or("receipt parent absent")?)
+        crate::readonly_file::directory(path.parent().ok_or("receipt parent absent")?)
             .and_then(|dir| dir.sync_all())
             .map_err(error)?;
         regular_generation(&file, path)?;
@@ -374,7 +374,7 @@ fn namespace_directory(root: &Path, namespace: &str, create: bool) -> Result<Pat
     let base = root.join(namespace);
     if create {
         match fs::create_dir(&base) {
-            Ok(()) => File::open(&root)
+            Ok(()) => crate::readonly_file::directory(&root)
                 .and_then(|dir| dir.sync_all())
                 .map_err(error)?,
             Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => {}

@@ -1490,7 +1490,7 @@ impl ExecutionCapabilityLedger {
     /// [`Self::open`], plus any missing path.
     pub fn open_read(root: &Path) -> Result<Self, ExecutionCapabilityRefusal> {
         let lock_path = Self::lock_path(root);
-        let writer_lock = File::open(&lock_path)
+        let writer_lock = crate::readonly_file::read(&lock_path)
             .map_err(|why| format!("{} could not be opened: {why}", lock_path.display()))?;
         writer_lock
             .lock_shared()
@@ -1498,16 +1498,16 @@ impl ExecutionCapabilityLedger {
         let opened = (|| {
             let paths = LedgerPaths::of(root);
             let files = LedgerFiles {
-                parameter: File::open(&paths.parameter).map_err(|why| {
+                parameter: crate::readonly_file::read(&paths.parameter).map_err(|why| {
                     format!("{} could not be opened: {why}", paths.parameter.display())
                 })?,
-                percentile: File::open(&paths.percentile).map_err(|why| {
+                percentile: crate::readonly_file::read(&paths.percentile).map_err(|why| {
                     format!("{} could not be opened: {why}", paths.percentile.display())
                 })?,
-                capability: File::open(&paths.capability).map_err(|why| {
+                capability: crate::readonly_file::read(&paths.capability).map_err(|why| {
                     format!("{} could not be opened: {why}", paths.capability.display())
                 })?,
-                completion: File::open(&paths.completion).map_err(|why| {
+                completion: crate::readonly_file::read(&paths.completion).map_err(|why| {
                     format!("{} could not be opened: {why}", paths.completion.display())
                 })?,
             };
@@ -2292,13 +2292,15 @@ fn append_encoded<const STRIDE: usize>(
 }
 
 fn open_or_create(path: &Path) -> Result<File, ExecutionCapabilityRefusal> {
-    OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
-        .map_err(|why| format!("{} could not be opened: {why}", path.display()))
+    crate::readonly_file::regular(
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false),
+        path,
+    )
+    .map_err(|why| format!("{} could not be opened: {why}", path.display()))
 }
 
 fn ensure_record_header(
@@ -2511,7 +2513,7 @@ fn platform_generation(
 }
 
 fn sync_directory(path: &Path) -> Result<(), ExecutionCapabilityRefusal> {
-    File::open(path)
+    crate::readonly_file::directory(path)
         .and_then(|directory| directory.sync_all())
         .map_err(|why| {
             format!(

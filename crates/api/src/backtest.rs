@@ -24,9 +24,10 @@
 //! statements of itself is a format that can diverge. Three things hold it
 //! together:
 //!
-//! 1. **Nothing here writes.** [`File::open`] is read-only and there is no
-//!    append path in this module. A reader that drifts renders wrong; a writer
-//!    that drifts corrupts. Only one crate may write, and it is `cli`.
+//! 1. **Nothing here writes.** [`cli::readonly_file::read`] is read-only and
+//!    there is no append path in this module. A reader that drifts renders
+//!    wrong; a writer that drifts corrupts. Only one crate may write, and it is
+//!    `cli`.
 //! 2. **The stride is asserted against the field sum at compile time** —
 //!    [`FIELD_SUM`] below — which is the same check
 //!    `the_stride_is_exactly_what_the_writer_writes` makes on the writer's
@@ -73,7 +74,6 @@
 //! measurement, however sound it is.
 
 use std::fmt::Write as _;
-use std::fs::File;
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 
@@ -1023,7 +1023,7 @@ pub fn path_in(root: &Path) -> PathBuf {
 #[must_use]
 pub fn read(root: &Path, limit: usize) -> Ledger {
     let path = path_in(root);
-    match File::open(&path) {
+    match cli::readonly_file::read(&path) {
         Ok(mut file) => read_from(path, &mut file, limit),
         // NOT AN ERROR, AND THE SENTENCE SAYS SO. A store that has never been
         // swept has no ledger, and rendering that as a failure would teach an
@@ -1968,6 +1968,45 @@ mod tests {
             "a real open failure must NOT wear the empty-ledger sentence: {why}"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// G5-2 (D-4732): a FIFO where the ledger belongs is refused at once. The
+    /// read was `File::open`, which waits in `open(2)` for a writer, so a page
+    /// refresh parked its worker until one arrived. The bound is 5 s.
+    #[test]
+    fn a_fifo_at_the_ledger_path_is_refused_without_waiting() {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let root = std::env::temp_dir().join(format!(
+            "brutex-backtest-fifo-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("results")).expect("a temp root");
+        let made = std::process::Command::new("mkfifo")
+            .arg(path_in(&root))
+            .status()
+            .expect("mkfifo runs");
+        assert!(made.success(), "premise: the FIFO exists");
+        let (sent, got) = std::sync::mpsc::channel();
+        let reader = root.clone();
+        std::thread::spawn(move || {
+            let _ = sent.send(read(&reader, 10));
+        });
+        let answer = got.recv_timeout(std::time::Duration::from_secs(5));
+        if answer.is_err() {
+            // A reader parked in `open(2)` counts as the FIFO's reader, so a
+            // non-blocking writer opens and releases it.
+            let _ = std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(store::open_flags::O_NONBLOCK)
+                .open(path_in(&root));
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        let ledger = answer.expect("the read answered within 5 s instead of waiting for a writer");
+        let why = ledger.refusal.expect("a FIFO is refused, not read");
+        assert!(why.contains("not a regular file"), "{why}");
+        assert_eq!((ledger.total, ledger.runs.len()), (0, 0));
     }
 
     #[test]

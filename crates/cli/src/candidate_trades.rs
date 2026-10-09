@@ -1310,12 +1310,10 @@ fn write_exact(path: &Path, magic: [u8; 8], payload: &[u8]) -> Result<[u8; 32], 
     hash.update(&header);
     hash.update(payload);
     let digest = hash.finalize();
-    match OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .open(path)
-    {
+    match crate::readonly_file::regular(
+        OpenOptions::new().read(true).write(true).create_new(true),
+        path,
+    ) {
         Ok(file) => {
             // A write or sync failure releases the lock through the guard's
             // explicit unlock, never by close (D-0693).
@@ -1339,7 +1337,7 @@ fn write_exact(path: &Path, magic: [u8; 8], payload: &[u8]) -> Result<[u8; 32], 
     if observed != digest || actual != payload {
         return Err("immutable candidate detail already contains different bytes".to_owned());
     }
-    File::open(path.parent().ok_or("candidate detail path has no parent")?)
+    crate::readonly_file::directory(path.parent().ok_or("candidate detail path has no parent")?)
         .and_then(|file| file.sync_all())
         .map_err(io_error)?;
     #[cfg(test)]

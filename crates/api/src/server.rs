@@ -18987,6 +18987,9 @@ fn take_serve_lock(store_root: &Path, addr: std::net::SocketAddr) -> Result<Serv
             }
         }
     }
+    // Read-write, so `open(2)` never waits on a FIFO here (D-4732), and not
+    // through `cli::readonly_file::regular`: a lock name that reaches a device
+    // must still reach the stamp and be refused there.
     let file = match std::fs::OpenOptions::new()
         .read(true)
         .write(true)

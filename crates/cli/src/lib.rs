@@ -92,7 +92,7 @@ mod fixed_tail;
 mod g18_cli_a_tests;
 #[cfg(test)]
 mod operator_boundary_tests;
-mod readonly_file;
+pub mod readonly_file;
 #[cfg(test)]
 mod results_report_tests;
 #[cfg(test)]
@@ -19898,7 +19898,7 @@ fn canonical_underlying(word: &str) -> String {
 /// the ledger's own name is confirmed before success is returned.
 fn confirm_result_directory(root: &std::path::Path) -> Result<(), String> {
     let path = root.join("results");
-    let directory = std::fs::File::open(&path).map_err(|why| {
+    let directory = crate::readonly_file::directory(&path).map_err(|why| {
         format!(
             "{} could not be opened for a durability barrier: {why}",
             path.display()
@@ -22854,13 +22854,15 @@ impl ResultSetLock {
         std::fs::create_dir_all(&dir)
             .map_err(|why| format!("the results directory could not be made: {why}"))?;
         let path = dir.join("write.lock");
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)
-            .map_err(|why| format!("{} could not be opened: {why}", path.display()))?;
+        let file = crate::readonly_file::regular(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false),
+            &path,
+        )
+        .map_err(|why| format!("{} could not be opened: {why}", path.display()))?;
         let held = store::flock::Flock::lock(file, path.clone())
             .map_err(|why| format!("{} could not be locked: {why}", path.display()))?;
         Ok(Self(held))

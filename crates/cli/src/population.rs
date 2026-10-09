@@ -2617,17 +2617,17 @@ impl PopulationLedger {
         let receipt_v3_path = Self::receipt_v3_path(root);
         let receipt_v4_path = Self::receipt_v4_path(root);
         let lock_path = Self::lock_path(root);
-        let writer_lock = File::open(&lock_path)
+        let writer_lock = crate::readonly_file::read(&lock_path)
             .map_err(|why| format!("{} could not be opened: {why}", lock_path.display()))?;
         writer_lock
             .lock_shared()
             .map_err(|why| format!("{} could not be shared-locked: {why}", lock_path.display()))?;
         let opened = (|| {
-            let row_file = File::open(&row_path)
+            let row_file = crate::readonly_file::read(&row_path)
                 .map_err(|why| format!("{} could not be opened: {why}", row_path.display()))?;
-            let receipt_file = File::open(&receipt_path)
+            let receipt_file = crate::readonly_file::read(&receipt_path)
                 .map_err(|why| format!("{} could not be opened: {why}", receipt_path.display()))?;
-            let receipt_v3_file = match File::open(&receipt_v3_path) {
+            let receipt_v3_file = match crate::readonly_file::read(&receipt_v3_path) {
                 Ok(file) => Some(file),
                 Err(why) if why.kind() == std::io::ErrorKind::NotFound => None,
                 Err(why) => {
@@ -2637,7 +2637,7 @@ impl PopulationLedger {
                     ));
                 }
             };
-            let receipt_v4_file = match File::open(&receipt_v4_path) {
+            let receipt_v4_file = match crate::readonly_file::read(&receipt_v4_path) {
                 Ok(file) => Some(file),
                 Err(why) if why.kind() == std::io::ErrorKind::NotFound => None,
                 Err(why) => {
@@ -2690,13 +2690,15 @@ impl PopulationLedger {
         std::fs::create_dir_all(&dir)
             .map_err(|why| format!("the results directory could not be made: {why}"))?;
         let lock_path = Self::lock_path(root);
-        let writer_lock = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&lock_path)
-            .map_err(|why| format!("{} could not be opened: {why}", lock_path.display()))?;
+        let writer_lock = crate::readonly_file::regular(
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false),
+            &lock_path,
+        )
+        .map_err(|why| format!("{} could not be opened: {why}", lock_path.display()))?;
         writer_lock
             .lock()
             .map_err(|why| format!("{} could not be locked: {why}", lock_path.display()))?;
@@ -4925,13 +4927,15 @@ fn read_receipt_v4_at(
 }
 
 fn open_or_create(path: &Path) -> Result<File, PopulationRefusal> {
-    OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
-        .map_err(|why| format!("{} could not be opened: {why}", path.display()))
+    crate::readonly_file::regular(
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false),
+        path,
+    )
+    .map_err(|why| format!("{} could not be opened: {why}", path.display()))
 }
 
 fn ensure_header(
@@ -5225,7 +5229,7 @@ fn require_optional_generation_unchanged(
 }
 
 fn sync_directory(path: &Path) -> Result<(), PopulationRefusal> {
-    File::open(path)
+    crate::readonly_file::directory(path)
         .and_then(|directory| directory.sync_all())
         .map_err(|why| {
             format!(

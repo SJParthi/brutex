@@ -463,11 +463,11 @@ pub(crate) fn write_catalog(
     }
     {
         use std::io::Write as _;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)
-            .map_err(|why| format!("cannot create catalog {}: {why}", path.display()))?;
+        let mut file = crate::readonly_file::regular(
+            std::fs::OpenOptions::new().write(true).create_new(true),
+            path,
+        )
+        .map_err(|why| format!("cannot create catalog {}: {why}", path.display()))?;
         file.write_all(text.as_bytes())
             .and_then(|()| file.sync_all())
             .map_err(|why| format!("catalog {} was not written whole: {why}", path.display()))?;

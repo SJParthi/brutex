@@ -95,7 +95,7 @@ const RUNNER_VERDICT_OFFSET: usize = RUNNER_EVIDENCE_OFFSET + RUNNER_EVIDENCE_BY
 const READ_CHUNK_BYTES: usize = 16 * 1_024;
 
 #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
-const O_NOFOLLOW_FLAG: i32 = store::open_flags::O_NOFOLLOW;
+const NOFOLLOW_NONBLOCK: i32 = store::open_flags::O_NOFOLLOW_NONBLOCK;
 
 const _: () = assert!(RUNNER_VERDICT_OFFSET + RUNNER_VERDICT_BYTES == RUNNER_DECISION_BYTES);
 const _: () = assert!(PAYLOAD_BYTES + 32 == RECORD_BYTES);
@@ -3103,8 +3103,8 @@ fn open_root(
     }
     let canonical = std::fs::canonicalize(root)
         .map_err(|why| format!("cannot canonicalize Admission V4 root: {why}"))?;
-    let file =
-        File::open(&canonical).map_err(|why| format!("cannot open Admission V4 root: {why}"))?;
+    let file = crate::readonly_file::directory(&canonical)
+        .map_err(|why| format!("cannot open Admission V4 root: {why}"))?;
     let identity = PlatformIdentity::of(
         &file
             .metadata()
@@ -3125,7 +3125,7 @@ fn open_child(path: &Path, writable: bool) -> Result<(File, bool), PopulationAdm
     let mut options = OpenOptions::new();
     options.read(true).write(writable).create(writable);
     #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
-    options.custom_flags(O_NOFOLLOW_FLAG);
+    options.custom_flags(NOFOLLOW_NONBLOCK);
     let existed = path.exists();
     let file = options
         .open(path)

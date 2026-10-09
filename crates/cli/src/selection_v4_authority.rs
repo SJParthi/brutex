@@ -87,7 +87,7 @@ impl SelectionAuthorityLedgerV4 {
             );
         }
         let lock_path = root.join("results").join("population-write.lock");
-        let outer_lock = File::open(&lock_path)
+        let outer_lock = crate::readonly_file::read(&lock_path)
             .map_err(|why| format!("{} could not be opened: {why}", lock_path.display()))?;
         outer_lock.lock_shared().map_err(|why| {
             format!(
@@ -583,7 +583,7 @@ fn release_outer<T>(
 }
 
 fn independent_lock_handle(path: &Path) -> Result<File, SelectionV4Refusal> {
-    File::open(path).map_err(|why| {
+    crate::readonly_file::read(path).map_err(|why| {
         format!(
             "{} could not be independently opened for a Selection V4 view: {why}",
             path.display()

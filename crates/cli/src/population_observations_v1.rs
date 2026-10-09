@@ -2138,17 +2138,19 @@ impl ObservationAuthorityLedgerV1 {
         let admitted_root = admit_existing_observation_root(root)?;
         let file_path = admitted_root.join(AUTHORITY_FILE);
         let lock_path = admitted_root.join(AUTHORITY_LOCK_FILE);
-        let lock = OpenOptions::new()
-            .read(true)
-            .write(writable)
-            .create(writable)
-            .open(&lock_path)
-            .map_err(|why| {
-                format!(
-                    "cannot open observation authority lock {}: {why}",
-                    lock_path.display()
-                )
-            })?;
+        let lock = crate::readonly_file::regular(
+            OpenOptions::new()
+                .read(true)
+                .write(writable)
+                .create(writable),
+            &lock_path,
+        )
+        .map_err(|why| {
+            format!(
+                "cannot open observation authority lock {}: {why}",
+                lock_path.display()
+            )
+        })?;
         let lock = if writable {
             Flock::lock(lock, lock_path.clone()).map_err(|why| {
                 format!(
@@ -2164,17 +2166,19 @@ impl ObservationAuthorityLedgerV1 {
                 )
             })?
         };
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(writable)
-            .create(writable)
-            .open(&file_path)
-            .map_err(|why| {
-                format!(
-                    "cannot open observation authority file {}: {why}",
-                    file_path.display()
-                )
-            })?;
+        let mut file = crate::readonly_file::regular(
+            OpenOptions::new()
+                .read(true)
+                .write(writable)
+                .create(writable),
+            &file_path,
+        )
+        .map_err(|why| {
+            format!(
+                "cannot open observation authority file {}: {why}",
+                file_path.display()
+            )
+        })?;
         if writable && file.metadata().map_err(|why| why.to_string())?.len() == 0 {
             // A short header write is truncated back to zero bytes, so the next
             // open initializes again instead of refusing a torn header (D-1854).
@@ -2723,7 +2727,7 @@ fn scan_authority_file(
 
 /// Makes newly created names in an observation root durable.
 fn sync_observation_root(root: &Path) -> Result<(), String> {
-    File::open(root)
+    crate::readonly_file::directory(root)
         .and_then(|directory| directory.sync_all())
         .map_err(|why| {
             format!(
@@ -3446,13 +3450,15 @@ impl ObservationAuthorityLedgerV2 {
         let admitted_root = admit_existing_observation_root(root)?;
         let file_path = admitted_root.join(AUTHORITY_V2_FILE);
         let lock_path = admitted_root.join(AUTHORITY_V2_LOCK_FILE);
-        let lock_file = OpenOptions::new()
-            .read(true)
-            .write(writable)
-            .create(writable)
-            .truncate(false)
-            .open(&lock_path)
-            .map_err(|why| format!("cannot open Observation V2 lock: {why}"))?;
+        let lock_file = crate::readonly_file::regular(
+            OpenOptions::new()
+                .read(true)
+                .write(writable)
+                .create(writable)
+                .truncate(false),
+            &lock_path,
+        )
+        .map_err(|why| format!("cannot open Observation V2 lock: {why}"))?;
         let lock_file = if writable {
             Flock::lock(lock_file, lock_path.clone())
                 .map_err(|why| format!("cannot lock Observation V2 writer: {why}"))?
@@ -3460,13 +3466,15 @@ impl ObservationAuthorityLedgerV2 {
             Flock::lock_shared(lock_file, lock_path.clone())
                 .map_err(|why| format!("cannot take shared Observation V2 lock: {why}"))?
         };
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(writable)
-            .create(writable)
-            .truncate(false)
-            .open(&file_path)
-            .map_err(|why| format!("cannot open Observation V2 file: {why}"))?;
+        let mut file = crate::readonly_file::regular(
+            OpenOptions::new()
+                .read(true)
+                .write(writable)
+                .create(writable)
+                .truncate(false),
+            &file_path,
+        )
+        .map_err(|why| format!("cannot open Observation V2 file: {why}"))?;
         if writable
             && file
                 .metadata()

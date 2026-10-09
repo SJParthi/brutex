@@ -282,11 +282,11 @@ fn directory(path: &Path) -> Result<(), String> {
     {
         return Err(error("directory symlinks are refused"));
     }
-    File::open(path)
+    crate::readonly_file::directory(path)
         .and_then(|file| file.sync_all())
         .map_err(error)?;
     if let Some(parent) = path.parent() {
-        File::open(parent)
+        crate::readonly_file::directory(parent)
             .and_then(|file| file.sync_all())
             .map_err(error)?;
     }
@@ -586,7 +586,7 @@ pub fn begin(root: &Path, origin: Origin, label: &str) -> Result<Attempt, String
         .open(own(&base, id))
         .map_err(error)?;
     write_synced(&mut file, &image)?;
-    File::open(&base)
+    crate::readonly_file::directory(&base)
         .and_then(|file| file.sync_all())
         .map_err(error)?;
     Ok(Attempt {

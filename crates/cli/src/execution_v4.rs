@@ -137,7 +137,7 @@ const FORCED_STOP_INCLUDE_TAG: u8 = 1;
 const FORCED_STOP_REQUIRE_TAG: u8 = 2;
 
 #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
-const O_NOFOLLOW_FLAG: i32 = store::open_flags::O_NOFOLLOW;
+const NOFOLLOW_NONBLOCK: i32 = store::open_flags::O_NOFOLLOW_NONBLOCK;
 
 const _: () = assert!(PARAMETER_PAYLOAD_BYTES + SEAL_BYTES == EXECUTION_V4_PARAMETER_BYTES);
 const _: () = assert!(PERCENTILE_PAYLOAD_BYTES + SEAL_BYTES == EXECUTION_V4_PERCENTILE_BYTES);
@@ -4680,7 +4680,7 @@ fn open_root_directory(
         )
     })?;
     require_not_symlink(&canonical, false)?;
-    let file = File::open(&canonical).map_err(|why| {
+    let file = crate::readonly_file::directory(&canonical).map_err(|why| {
         format!(
             "cannot hold Execution V4 root {}: {why}",
             canonical.display()
@@ -4726,7 +4726,7 @@ fn open_child(
         let mut options = OpenOptions::new();
         options.read(true).write(true).create_new(true);
         #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
-        options.custom_flags(O_NOFOLLOW_FLAG);
+        options.custom_flags(NOFOLLOW_NONBLOCK);
         match options.open(path) {
             Ok(file) => {
                 require_regular_file(&file, path)?;
@@ -4745,7 +4745,7 @@ fn open_child(
     let mut options = OpenOptions::new();
     options.read(true).write(writable).truncate(false);
     #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
-    options.custom_flags(O_NOFOLLOW_FLAG);
+    options.custom_flags(NOFOLLOW_NONBLOCK);
     let file = options
         .open(path)
         .map_err(|why| format!("cannot open Execution V4 file {}: {why}", path.display()))?;

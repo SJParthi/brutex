@@ -1699,13 +1699,15 @@ impl SelectionLedgerV4 {
         validate_receipt_limit(max_receipts)?;
         ensure_results_directory(root)?;
         let path = Self::path(root);
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(&path)
-            .map_err(|why| format!("{} could not be opened: {why}", path.display()))?;
+        let file = crate::readonly_file::regular(
+            OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .truncate(false),
+            &path,
+        )
+        .map_err(|why| format!("{} could not be opened: {why}", path.display()))?;
         Self::open_file(file, path, true, max_receipts)
     }
 
@@ -1720,9 +1722,7 @@ impl SelectionLedgerV4 {
     pub fn open_read(root: &Path, max_receipts: usize) -> Result<Self, SelectionV4Refusal> {
         validate_receipt_limit(max_receipts)?;
         let path = Self::path(root);
-        let file = OpenOptions::new()
-            .read(true)
-            .open(&path)
+        let file = crate::readonly_file::regular(OpenOptions::new().read(true), &path)
             .map_err(|why| format!("{} could not be opened read-only: {why}", path.display()))?;
         Self::open_file(file, path, false, max_receipts)
     }

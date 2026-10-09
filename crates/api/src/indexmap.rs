@@ -52,7 +52,8 @@ impl Published {
     /// a size check and the read cannot slip past (UC-19, D-1502).
     pub fn read(path: &Path) -> Result<Self, String> {
         use std::io::Read as _;
-        let file = std::fs::File::open(path).map_err(|why| format!("{}: {why}", path.display()))?;
+        let file =
+            cli::readonly_file::read(path).map_err(|why| format!("{}: {why}", path.display()))?;
         let mut text = String::new();
         file.take(MAX_CATALOGUE_BYTES.saturating_add(1))
             .read_to_string(&mut text)

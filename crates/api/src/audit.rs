@@ -1316,12 +1316,14 @@ impl Journal {
         // leave the lock alive on any duplicate a child spawned by another
         // thread still holds (D-0693).
         let mut file = Flock::try_lock(
-            std::fs::OpenOptions::new()
-                .read(true)
-                .append(true)
-                .create(true)
-                .open(&self.path)
-                .map_err(|e| named("cannot open the journal", &e))?,
+            cli::readonly_file::regular(
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .append(true)
+                    .create(true),
+                &self.path,
+            )
+            .map_err(|e| named("cannot open the journal", &e))?,
             self.path.as_path(),
         )
         .map_err(|e| {
@@ -1416,8 +1418,8 @@ impl Journal {
         // `usize` or wider. The arm is a backstop and no test drives it.
         let span = usize::try_from(wanted.saturating_mul(RECORD_LEN_U64))
             .map_err(|e| format!("{wanted} records do not fit this machine's memory: {e}"))?;
-        let mut file =
-            std::fs::File::open(&self.path).map_err(|e| format!("{}: {e}", self.path.display()))?;
+        let mut file = cli::readonly_file::read(&self.path)
+            .map_err(|e| format!("{}: {e}", self.path.display()))?;
         file.seek(std::io::SeekFrom::Start(
             start.saturating_mul(RECORD_LEN_U64),
         ))

@@ -626,7 +626,13 @@ fn probe_io(root: &std::path::Path, path: &std::path::Path) -> std::io::Result<(
             ),
         ));
     }
-    let mut file = std::fs::File::create(path)?;
+    let mut file = cli::readonly_file::regular(
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true),
+        path,
+    )?;
     file.write_all(b"brutex write probe\n")?;
     // THE BYTES HAVE TO REACH THE DEVICE. A write that only reached the page
     // cache answers "the disk is fine" on a disk that is full, which is the one

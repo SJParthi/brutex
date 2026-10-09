@@ -15967,3 +15967,31 @@ on every request. D-0904 names the same directory walk for three other
 routes; this one was named only in D-1445's list of audited routes. The second
 open is the freshness check, and it is kept. **No timing was taken. The cost
 is UNVERIFIED as a measurement.**
+
+### The FIFO-peer scan reads source text and sees three spellings (D-4732)
+
+`readonly_file::regular`, `read` and `directory` add `O_NONBLOCK` and one
+`fstat` to each open they replace. That is O(1) per open, and no bar or
+candidate loop opens a file. `no_cli_or_api_open_can_wait_for_a_fifo_peer`
+proves only what it reads. It sees release-build source text in `crates/cli/src`
+and `crates/api/src`, with `#[cfg(test)]` items removed by brace and
+indentation, so it depends on `cargo fmt --check`. It refuses:
+- an unqualified `File::open(`;
+- an unqualified `File::create(`;
+- an `OpenOptions::new()` that does not reach `regular`, open read-write, or
+  name a `NONBLOCK` custom flag before its `.open(`.
+
+A read-write open is admitted because `open(2)` never waits on a FIFO for
+`O_RDWR`, which `a_read_write_open_of_a_fifo_never_waits` measures. A read or
+write on such a handle can still wait, and the scan does not see it.
+
+It does not see these:
+- `std::fs::read`, `fs::read_to_string` and `fs::write`. These remain in `api`
+  asset, config and probe paths, and each can wait on a FIFO planted at its
+  path.
+- `File::create_new`, which cannot wait, because `O_EXCL` fails on any
+  existing name.
+- An open built behind a helper that hides `OpenOptions::new()`.
+
+**UNVERIFIED**: how many such whole-file helpers can be reached from an
+operator-writable path. They were not counted.

@@ -69,7 +69,7 @@ pub(super) fn persist(
             expected_bytes,
         )?;
         file.sync_all().map_err(|why| why.to_string())?;
-        File::open(&root)
+        crate::readonly_file::directory(&root)
             .and_then(|directory| directory.sync_all())
             .map_err(|why| why.to_string())?;
         crate::result_set::file_generation(&file, &path)?;
@@ -179,7 +179,7 @@ fn open(path: &Path, writable: bool) -> Result<File, String> {
     #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
-        options.custom_flags(store::open_flags::O_NOFOLLOW);
+        options.custom_flags(store::open_flags::O_NOFOLLOW_NONBLOCK);
     }
     let file = options.open(path).map_err(|why| why.to_string())?;
     let metadata = file.metadata().map_err(|why| why.to_string())?;

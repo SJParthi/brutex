@@ -721,13 +721,15 @@ impl StoredDataCompletenessLedgerV1 {
                 parent.display()
             )
         })?;
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(&path)
-            .map_err(|why| format!("{} could not be opened: {why}", path.display()))?;
+        let file = crate::readonly_file::regular(
+            OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .truncate(false),
+            &path,
+        )
+        .map_err(|why| format!("{} could not be opened: {why}", path.display()))?;
         Self::open_file(file, path, max_receipts, true)
     }
 
@@ -742,7 +744,7 @@ impl StoredDataCompletenessLedgerV1 {
     ) -> Result<Self, StoredDataCompletenessRefusal> {
         validate_max(max_receipts)?;
         let path = Self::path(root);
-        let file = File::open(&path)
+        let file = crate::readonly_file::read(&path)
             .map_err(|why| format!("{} could not be opened read-only: {why}", path.display()))?;
         Self::open_file(file, path, max_receipts, false)
     }

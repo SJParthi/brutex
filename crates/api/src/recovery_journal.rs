@@ -305,12 +305,14 @@ impl Journal {
     }
 
     fn open_at(path: &Path, create: bool, create_new: bool) -> io::Result<Self> {
-        let mut file = OpenOptions::new()
-            .read(true)
-            .append(true)
-            .create(create)
-            .create_new(create_new)
-            .open(path)?;
+        let mut file = cli::readonly_file::regular(
+            OpenOptions::new()
+                .read(true)
+                .append(true)
+                .create(create)
+                .create_new(create_new),
+            path,
+        )?;
         // A guard over a duplicate, so `file` stays free to be read through
         // `&mut` and then moved into `io`. Every `?` below releases the lock
         // through the guard's explicit unlock.
@@ -350,7 +352,7 @@ impl Journal {
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
-        File::open(parent)?.sync_all()?;
+        cli::readonly_file::directory(parent)?.sync_all()?;
         Ok(Self {
             latest: index.latest,
             order: index.order,
@@ -549,7 +551,7 @@ pub(crate) fn tail(path: &Path, limit: usize) -> io::Result<Vec<Record>> {
             "recovery tail limit exceeds {MAX_TAIL_RECORDS} events"
         )));
     }
-    let mut file = File::open(path)?;
+    let mut file = cli::readonly_file::read(path)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() {
         return Err(invalid_data("recovery journal is not a regular file"));
@@ -661,14 +663,15 @@ pub(crate) struct Index {
 /// A live writer refuses the snapshot; callers must not infer an empty inventory.
 /// Cost is O(records) time and O(distinct work units) memory.
 pub(crate) fn snapshot(path: &Path) -> io::Result<Index> {
-    let mut file =
-        Flock::try_lock_shared(File::open(path)?, path).map_err(|error| match error {
+    let mut file = Flock::try_lock_shared(cli::readonly_file::read(path)?, path).map_err(
+        |error| match error {
             TryLockError::WouldBlock => io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "recovery journal has a writer; read-only inventory is unavailable",
             ),
             TryLockError::Error(error) => error,
-        })?;
+        },
+    )?;
     let metadata = file.metadata()?;
     if !metadata.is_file() {
         return Err(invalid_data("recovery journal is not a regular file"));

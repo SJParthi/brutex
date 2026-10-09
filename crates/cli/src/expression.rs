@@ -222,7 +222,7 @@ pub(crate) fn attempt_directory(
         }
         // Sync each parent entry, including the format and identity directories.
         // Syncing only the leaf would not persist newly created ancestors.
-        File::open(&parent)?.sync_all()?;
+        crate::readonly_file::directory(&parent)?.sync_all()?;
     }
     Ok(directory)
 }
@@ -276,11 +276,13 @@ impl EvidenceWriter {
         expression: &Expression,
     ) -> std::io::Result<Self> {
         let pending = directory.join("expression-v1.pending");
-        let opened = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(&pending)?;
+        let opened = crate::readonly_file::regular(
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true),
+            &pending,
+        )?;
         let lock = Flock::lock(opened.try_clone()?, pending.clone())?;
         let mut file = BufWriter::new(opened);
         let mut hash = brutex_core::blake3::Hasher::new();
@@ -289,7 +291,7 @@ impl EvidenceWriter {
         hash.update(&header);
         file.flush()?;
         file.get_ref().sync_all()?;
-        File::open(directory)?.sync_all()?;
+        crate::readonly_file::directory(directory)?.sync_all()?;
         let header_seal = hash.finalize();
         Ok(Self {
             pending,
@@ -389,7 +391,7 @@ impl EvidenceWriter {
             .map_err(std::io::Error::other)?;
         fs::remove_file(&self.pending)?;
         if let Some(directory) = self.published.parent() {
-            File::open(directory)?.sync_all()?;
+            crate::readonly_file::directory(directory)?.sync_all()?;
         }
         let published = self.published;
         self.lock.release()?;

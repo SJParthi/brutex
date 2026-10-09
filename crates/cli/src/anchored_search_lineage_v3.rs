@@ -68,7 +68,7 @@ const LOCK_FILE_MAX_BYTES: u64 = 0;
 const READ_CHUNK_BYTES: usize = 16 * 1_024;
 
 #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
-const O_NOFOLLOW_FLAG: i32 = store::open_flags::O_NOFOLLOW;
+const NOFOLLOW_NONBLOCK: i32 = store::open_flags::O_NOFOLLOW_NONBLOCK;
 
 const _: () = assert!(MEMBER_PAYLOAD_BYTES + SEAL_BYTES == ANCHORED_SEARCH_LINEAGE_V3_MEMBER_BYTES);
 const _: () =
@@ -1591,7 +1591,7 @@ fn open_root(
     }
     let canonical = std::fs::canonicalize(root)
         .map_err(|why| format!("cannot canonicalize search-lineage root: {why}"))?;
-    let file = File::open(&canonical)
+    let file = crate::readonly_file::directory(&canonical)
         .map_err(|why| format!("cannot open search-lineage root directory: {why}"))?;
     let held = file
         .metadata()
@@ -1644,7 +1644,7 @@ fn open_child(path: &Path, writable: bool) -> Result<(File, bool), AnchoredSearc
     options.read(true).write(writable).create(writable);
     #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
     {
-        options.mode(0o600).custom_flags(O_NOFOLLOW_FLAG);
+        options.mode(0o600).custom_flags(NOFOLLOW_NONBLOCK);
     }
     let file = options
         .open(path)

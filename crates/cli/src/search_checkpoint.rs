@@ -170,7 +170,7 @@ impl Journal {
             Flock::try_lock(open_owner(&owner_path)?, owner_path.clone()).map_err(|why| {
                 format!("this exact search is already owned or cannot be locked: {why}")
             })?;
-        File::open(&directory)
+        crate::readonly_file::directory(&directory)
             .map_err(error)?
             .sync_all()
             .map_err(error)?;
@@ -254,17 +254,16 @@ impl Journal {
         let directory = self.directory.join(format!("{sequence:016x}"));
         fs::create_dir(&directory).map_err(error)?;
         self.entries = entries;
-        File::open(&self.directory)
+        crate::readonly_file::directory(&self.directory)
             .map_err(error)?
             .sync_all()
             .map_err(error)?;
         let path = directory.join("payload");
-        let mut raw = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(error)?;
+        let mut raw = crate::readonly_file::regular(
+            OpenOptions::new().read(true).write(true).create_new(true),
+            &path,
+        )
+        .map_err(error)?;
         let mut file = Flock::lock(&mut raw, path.as_path()).map_err(error)?;
         #[cfg(test)]
         tests::payload_locked(&file);
@@ -279,7 +278,7 @@ impl Journal {
             .and_then(|()| file.sync_all())
             .map_err(error)?;
         verify_acknowledged(&mut file, &path, &header, payload, seal)?;
-        File::open(&directory)
+        crate::readonly_file::directory(&directory)
             .map_err(error)?
             .sync_all()
             .map_err(error)?;
@@ -337,7 +336,7 @@ fn publish_marker(directory: &Path, seal: [u8; 32]) -> Result<(), String> {
             ),
         });
     }
-    File::open(directory)
+    crate::readonly_file::directory(directory)
         .map_err(error)?
         .sync_all()
         .map_err(error)
@@ -385,7 +384,7 @@ fn open_owner(path: &Path) -> Result<File, String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
-        options.custom_flags(store::open_flags::O_NOFOLLOW);
+        options.custom_flags(store::open_flags::O_NOFOLLOW_NONBLOCK);
     }
     // create_new never follows an existing symlink, including a dangling one.
     // The existing-file door deliberately has no create flag, so refusal can
@@ -430,7 +429,10 @@ fn regular_bytes(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
 
 fn durable_directory(parent: &Path, path: &Path) -> Result<(), String> {
     match fs::create_dir(path) {
-        Ok(()) => File::open(parent).map_err(error)?.sync_all().map_err(error),
+        Ok(()) => crate::readonly_file::directory(parent)
+            .map_err(error)?
+            .sync_all()
+            .map_err(error),
         Err(why)
             if why.kind() == std::io::ErrorKind::AlreadyExists
                 && fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_dir()) =>

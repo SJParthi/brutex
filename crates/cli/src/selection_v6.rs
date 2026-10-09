@@ -234,7 +234,7 @@ fn open(root: &Path, writable: bool) -> Result<(File, PathBuf), String> {
     #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
-        options.custom_flags(store::open_flags::O_NOFOLLOW);
+        options.custom_flags(store::open_flags::O_NOFOLLOW_NONBLOCK);
     }
     let file = options
         .open(&path)
@@ -428,7 +428,7 @@ fn set_aside_abandoned_tail(
         .map_err(|why| why.to_string())?;
     file.read_exact(&mut tail).map_err(|why| why.to_string())?;
     let aside = root.join(format!("{FILE_NAME}.abandoned-{committed}"));
-    match OpenOptions::new().write(true).create_new(true).open(&aside) {
+    match crate::readonly_file::regular(OpenOptions::new().write(true).create_new(true), &aside) {
         Ok(mut out) => {
             out.write_all(&tail)
                 .and_then(|()| out.sync_all())
@@ -458,7 +458,7 @@ fn set_aside_abandoned_tail(
 }
 
 fn sync_directory(root: &Path) -> Result<(), String> {
-    File::open(root)
+    crate::readonly_file::directory(root)
         .and_then(|directory| directory.sync_all())
         .map_err(|why| why.to_string())
 }

@@ -72,7 +72,7 @@ impl Pending {
         self.require_owner()?;
         let encoded = receipt(identity, payload, bytes);
         write_or_equal(&self.directory.join("complete.bin"), &encoded)?;
-        File::open(&self.directory)
+        crate::readonly_file::directory(&self.directory)
             .map_err(display)?
             .sync_all()
             .map_err(display)?;
@@ -96,11 +96,10 @@ pub(crate) fn prepare_in_namespace(
     let directory_path = base.join(crate::identity_hex(&identity));
     directory(&base, &directory_path)?;
     let owner_path = directory_path.join("owner.lock");
-    match OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&owner_path)
-    {
+    match crate::readonly_file::regular(
+        OpenOptions::new().write(true).create_new(true),
+        &owner_path,
+    ) {
         Ok(file) => {
             file.sync_all().map_err(display)?;
         }
@@ -130,7 +129,7 @@ pub(crate) fn prepare_in_namespace(
         discard(&body_path)?;
         write_or_equal(&body_path, body)?;
     }
-    File::open(&directory_path)
+    crate::readonly_file::directory(&directory_path)
         .map_err(display)?
         .sync_all()
         .map_err(display)?;
@@ -227,7 +226,7 @@ fn directory(parent: &Path, path: &Path) -> Result<(), String> {
     {
         return Err("Boolean candidate namespace is not a real directory".to_owned());
     }
-    File::open(parent)
+    crate::readonly_file::directory(parent)
         .map_err(display)?
         .sync_all()
         .map_err(display)
@@ -238,7 +237,7 @@ fn directory(parent: &Path, path: &Path) -> Result<(), String> {
 /// scratch from an earlier attempt has been discarded, so any difference
 /// here is a different publication and is refused.
 fn write_or_equal(path: &Path, body: &[u8]) -> Result<(), String> {
-    match OpenOptions::new().write(true).create_new(true).open(path) {
+    match crate::readonly_file::regular(OpenOptions::new().write(true).create_new(true), path) {
         Ok(mut file) => {
             // WITHDRAWN, NOT LEFT (ledgers-2, D-1915). A file this call created
             // whose write or barrier failed stayed whole-length in the page
@@ -266,7 +265,7 @@ fn write_or_equal(path: &Path, body: &[u8]) -> Result<(), String> {
             }
             // The reused file is synced too, so a reuse never reports success
             // over bytes no barrier of this run reached (ledgers-2, D-1915).
-            File::open(path)
+            crate::readonly_file::read(path)
                 .and_then(|file| file.sync_all())
                 .map_err(display)?;
             Ok(())

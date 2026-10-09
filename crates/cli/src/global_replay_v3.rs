@@ -2535,30 +2535,31 @@ impl GlobalReplayLedgerV3 {
             &paths.money,
             &paths.completion,
         ] {
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .read(true)
-                .open(path)
-                .map_err(|why| {
-                    format!(
-                        "Global Replay V3 authority file {} could not be opened: {why}",
-                        path.display()
-                    )
-                })?;
-        }
-        let writer_lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&paths.lock)
+            crate::readonly_file::regular(
+                OpenOptions::new().create(true).append(true).read(true),
+                path,
+            )
             .map_err(|why| {
                 format!(
-                    "Global Replay V3 writer lock {} could not be opened: {why}",
-                    paths.lock.display()
+                    "Global Replay V3 authority file {} could not be opened: {why}",
+                    path.display()
                 )
             })?;
+        }
+        let writer_lock = crate::readonly_file::regular(
+            OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true),
+            &paths.lock,
+        )
+        .map_err(|why| {
+            format!(
+                "Global Replay V3 writer lock {} could not be opened: {why}",
+                paths.lock.display()
+            )
+        })?;
         let ledger = Self {
             paths,
             bounds,
@@ -2906,16 +2907,15 @@ fn append_records<T, const N: usize>(
 where
     T: Copy,
 {
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .map_err(|why| {
-            format!(
-                "Global Replay V3 append file {} could not be opened: {why}",
-                path.display()
-            )
-        })?;
+    let mut file =
+        crate::readonly_file::regular(OpenOptions::new().create(true).append(true), path).map_err(
+            |why| {
+                format!(
+                    "Global Replay V3 append file {} could not be opened: {why}",
+                    path.display()
+                )
+            },
+        )?;
     // The same rollback law as V1 and V2: a refused append leaves this file
     // exactly as long as it was (D-0926).
     crate::global_replay::append_encoded_with(&mut file, path, records.iter().copied().map(encode))
@@ -2937,7 +2937,7 @@ fn read_records<T, const N: usize>(
     if stride != N || N == 0 {
         return Err("Global Replay V3 fixed-record stride contract is invalid".to_owned());
     }
-    let mut file = OpenOptions::new().read(true).open(path).map_err(|why| {
+    let mut file = crate::readonly_file::read(path).map_err(|why| {
         format!(
             "Global Replay V3 authority file {} could not be read: {why}",
             path.display()

@@ -65025,3 +65025,53 @@ on a live leader would derive a second time and lose the single-flight
 guarantee D-1443 exists for. **Honest limit:** the `Landing` kill depends on
 test order. A rename that sorted a single-flight test ahead of it would
 restore the timeout, so the ordering is pinned in the test's own doc.
+
+### D-4732 — Every `cli` and `api` open that could wait on a FIFO peer goes through a non-blocking door, and a scan holds it — 2026-10-09
+
+**Finding.** G5-2 and W2-cli13-4. D-1743 is headed "Every cli ledger open sets
+`O_NONBLOCK` and admits only a regular file". It fixed the opens it listed.
+`frontier.rs`, `trades.rs` and four `sweep_evidence.rs` readers still used
+`File::open`. A census of `crates/cli/src` and `crates/api/src` release code
+counted 170 opens that set no `O_NONBLOCK`: plain `File::open` and
+`File::create` calls, `OpenOptions` chains, and directory opens used as
+durability barriers. A FIFO planted at one of those paths made `open(2)` wait
+for a peer that never came. `a_fifo_at_any_cli_ledger_path_refuses_without_waiting`
+failed on the first new door it reached: "opening …/results/frontier.bin
+waited for a FIFO peer".
+
+**The decision.**
+- `readonly_file` is `pub`, with three doors:
+  - `regular`, the D-1743 door, now public;
+  - `read`, for a read-only regular file;
+  - `directory`, a read-only open with `O_NONBLOCK` that refuses anything but
+    a directory.
+- Every `File::open` and `File::create` in `cli` and `api` release code now
+  goes through one of these doors, and so does every `OpenOptions` chain that
+  set no non-blocking flag and did not open read-write.
+- A read-write open never waits on a FIFO (fifo(7)), and
+  `a_read_write_open_of_a_fifo_never_waits` pins that. `api`'s serve lock
+  stays a plain read-write open, so a lock name that reaches a device still
+  reaches its stamp. `a_serve_lock_stamp_that_fails_is_cleared_or_refused_never_left_stale`
+  drives that path through `/dev/full`, and routing the lock through
+  `regular` broke it.
+- Sixteen modules opened their handle with `O_NOFOLLOW` alone. They now use
+  `O_NOFOLLOW_NONBLOCK` and keep their own type check.
+- The FIFO test now also covers `Frontier`, `Trades` and five `sweep_evidence`
+  readers. Each is planted and refused within its bounded wait.
+- `api::backtest::read` gets its own FIFO test with a 5 s bound.
+- `no_cli_or_api_open_can_wait_for_a_fifo_peer` walks every release source in
+  both crates, with `#[cfg(test)]` items removed. It refuses an unqualified
+  `File::open(` or `File::create(`, and any `OpenOptions::new()` that does not
+  reach `regular`, open read-write, or carry a `NONBLOCK` custom flag.
+
+D-1743's heading claimed every ledger open. That claim is true only from this
+entry on.
+
+**Honest limits.** The scan does not see `std::fs::read`, `fs::write`,
+`read_to_string` or `File::create_new`. `create_new` cannot wait, because
+`O_EXCL` fails on any existing name. The other three are whole-file helpers in
+`api` asset and config paths, and they are listed in `docs/06-limits.md`.
+The scan works on source text, not syntax: an open built through a helper
+that hides `OpenOptions::new()` is not seen.
+
+Invariants L1FC-01, L1FC-02, L1FC-03, L1FC-14.

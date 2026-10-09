@@ -664,7 +664,7 @@ impl AdmissionAuthorityLedger {
 
     fn open_existing(root: &Path, max_bytes: Option<u64>) -> Result<Self, AdmissionStoreRefusal> {
         let lock_path = Self::lock_path(root);
-        let writer_lock = File::open(&lock_path)
+        let writer_lock = crate::readonly_file::read(&lock_path)
             .map_err(|why| format!("{} could not be opened: {why}", lock_path.display()))?;
         writer_lock
             .lock_shared()
@@ -672,9 +672,9 @@ impl AdmissionAuthorityLedger {
         let opened = (|| {
             let decision_path = Self::decision_path(root);
             let completion_path = Self::completion_path(root);
-            let decision_file = File::open(&decision_path)
+            let decision_file = crate::readonly_file::read(&decision_path)
                 .map_err(|why| format!("{} could not be opened: {why}", decision_path.display()))?;
-            let completion_file = File::open(&completion_path).map_err(|why| {
+            let completion_file = crate::readonly_file::read(&completion_path).map_err(|why| {
                 format!("{} could not be opened: {why}", completion_path.display())
             })?;
             Self::from_files(
@@ -1589,13 +1589,15 @@ fn read_completion_at(
 }
 
 fn open_or_create(path: &Path) -> Result<File, AdmissionStoreRefusal> {
-    OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
-        .map_err(|why| format!("{} could not be opened: {why}", path.display()))
+    crate::readonly_file::regular(
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false),
+        path,
+    )
+    .map_err(|why| format!("{} could not be opened: {why}", path.display()))
 }
 
 fn ensure_header(
@@ -1853,7 +1855,7 @@ fn require_generation_unchanged(
 }
 
 fn sync_directory(path: &Path) -> Result<(), AdmissionStoreRefusal> {
-    File::open(path)
+    crate::readonly_file::directory(path)
         .and_then(|directory| directory.sync_all())
         .map_err(|why| {
             format!(
