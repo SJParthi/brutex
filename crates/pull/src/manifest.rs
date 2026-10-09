@@ -3493,11 +3493,19 @@ impl Manifest {
     /// Returned in [`SEGMENTS`] order. Each partition's keys, rows and closes
     /// are exactly what [`Manifest::held`] answers on `self` for that segment,
     /// so the partitions' keys and totals sum to `self`'s; each partition's
-    /// capacity is [`epoch_capacity`] of its keys, and its generation is its
-    /// key count (its genesis is 0). A segment with no key is an empty epoch at
-    /// its floor: writing it makes "the vendor is migrated" mean the same thing
-    /// for every segment, so a reader never has to tell a missing segment from a
-    /// lost one.
+    /// capacity is [`epoch_capacity`] of its keys. A segment with no key is an
+    /// empty epoch at its floor: writing it makes "the vendor is migrated" mean
+    /// the same thing for every segment, so a reader never has to tell a missing
+    /// segment from a lost one.
+    ///
+    /// **Each partition's generation CONTINUES the single file's**: it starts
+    /// at `self`'s generation and advances once per key it records, so every
+    /// partition publishes a generation above every one the single file ever
+    /// did. A reader keyed on a generation — an entity tag, a `since=` delta
+    /// (WP-30) — therefore never sees the vendor's census go backwards across
+    /// the migration, and the rule `docs/02-store-format.md` §11.7 states for
+    /// epochs, that the generation keeps rising, holds from the first epoch on.
+    /// An empty partition carries `self`'s generation unchanged.
     ///
     /// # Cost
     ///
@@ -3506,8 +3514,9 @@ impl Manifest {
     /// # Errors
     ///
     /// [`ManifestError::CapacityOutOfRange`] for a segment whose keys could not
-    /// be given a capacity, or whatever [`Manifest::record_held`] refuses —
-    /// which, for rows this census already accepted, is nothing.
+    /// be given a capacity, [`ManifestError::GenerationExhausted`] for a
+    /// generation that cannot continue, or whatever [`Manifest::record_held`]
+    /// refuses — which, for rows this census already accepted, is nothing.
     pub fn partitions(&self) -> Result<Vec<Self>, ManifestError> {
         let newest = self.newest_in_key_order();
         let mut out = Vec::with_capacity(SEGMENTS.len());
@@ -3520,7 +3529,15 @@ impl Manifest {
                 .copied()
                 .collect();
             let keys = u64::try_from(rows.len()).unwrap_or(u64::MAX);
-            out.push(Self::epoch_of(self.header.vendor, segment, &rows, keys)?);
+            let Some(generation) = self.header.generation.checked_add(keys) else {
+                return Err(ManifestError::GenerationExhausted);
+            };
+            out.push(Self::epoch_of(
+                self.header.vendor,
+                segment,
+                &rows,
+                generation,
+            )?);
         }
         Ok(out)
     }

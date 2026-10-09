@@ -420,6 +420,22 @@ fn a_migration_compacts_into_epochs_and_leaves_the_single_file_untouched() {
     let (_, cash) = partition(&root, Segment::Cash);
     assert_eq!(cash.keys(), 0, "an empty segment is an empty epoch");
 
+    // THE GENERATION CONTINUES THE SINGLE FILE'S: four writes made it 4, and
+    // each partition advances from there by its own keys, so no reader keyed
+    // on a generation sees the census go backwards across the migration.
+    let legacy_generation = Manifest::open_image(Vendor::Gdfl, &before)
+        .expect("the single file")
+        .header()
+        .generation;
+    assert_eq!(legacy_generation, 4);
+    assert_eq!(fno.header().generation, legacy_generation + 1);
+    assert_eq!(idx.header().generation, legacy_generation + 1);
+    assert_eq!(
+        cash.header().generation,
+        legacy_generation,
+        "no key, no step"
+    );
+
     // Twice is refused, by name, and changes nothing.
     let mut twice = String::new();
     assert_eq!(migrate_with(&["gdfl"], &store, &mut twice), FAILED);

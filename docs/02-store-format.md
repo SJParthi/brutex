@@ -1005,7 +1005,10 @@ by segment with the newest row per key, checks the split's keys and rows equal
 the single file's, writes `<SEGMENT>/000001.man` for every segment — an empty
 segment is an empty epoch at its floor — and the receipt into
 `manifest/v4/<vendor>.staging/`, reads every epoch back, renames the staging
-directory to `manifest/v4/<vendor>/`, and flushes `manifest/v4/`. **The single
+directory to `manifest/v4/<vendor>/`, and flushes `manifest/v4/`. Each
+partition's `generation` continues the single file's — the single file's
+generation plus the partition's keys — so no reader keyed on a generation sees
+the vendor's census go backwards across the migration. **The single
 file is not touched.** The receipt is `key=value` lines —
 `format=census-migration-v1`, `legacy=`, `legacy_version=`,
 `legacy_generation=`, `legacy_entries=`, `legacy_bytes=`, then one
