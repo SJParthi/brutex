@@ -66459,3 +66459,229 @@ returning, as the install refusal already did. OBSV-11.
 
 **Rejected.** Refusing the whole batch louder. The siblings' bars are on disk
 and their rows are sound; dropping them is the loss, not the noise.
+
+### D-4460 — Nine ledgers cut a kill-torn tail or header loudly, and a rollback's cut is synced — 2026-10-09
+
+**Finding (rnew-1).** Nine ledgers whose failed append rolls back with
+`append_rollback` refused a ragged length at open and never called
+`fixed_tail::heal_torn_tail`: Execution V3, Admission V2, Finalization V2 and
+V3, Population V5 and V6, Selection V1/V2 (`selection.rs`), V3 and V4. A
+process killed mid-append (kill, OOM, power loss) runs no rollback, so the
+sub-record tail it left wedged that ledger for every later run, while their
+sibling ledgers (Execution V4, Base Evidence V3) already repaired it.
+`append_rollback`'s own `set_len` was not synced, so a power loss could bring
+back the partial record it had just removed.
+
+**Decided.** Each of the nine writers, under its exclusive lock and before its
+header check, cuts a tail that is not a whole record with
+`fixed_tail::heal_torn_tail` (Population V6 and the Selection ledgers also cut
+a non-empty strict prefix of their constant header with `heal_torn_header`,
+through the new `heal_header_and_tail`, and then write the header whole as for
+a new file). Every cut is synced and emits `cli.ledger` Warn "torn ledger tail
+truncated" or "torn ledger header truncated" naming the path. A whole record
+is never cut; readers still refuse a ragged file; short content that is not
+the header's own prefix still refuses unchanged. `append_rollback` follows its
+cut with `sync_all` and names a failed barrier as a failed rollback.
+
+**What changes.** No stored format, digest or result: the bytes cut were
+never acknowledged (every one of these ledgers is receipt-last). D-0918's
+"a one-byte header still refuses the writer" for Population V6 is superseded:
+a one-byte file that is the header's first byte is a torn header and is cut;
+a byte that is not still refuses (C4-CLI-06-01 amended).
+
+**Proof.** `fixed_tail::attack::torn_tails` appends a 1-byte, half-stride and
+stride−1 tail to every file of each ledger and requires a reader refusal, a
+writer cut back to exactly the committed length, exactly one logged cut naming
+the file, and the committed state read back unchanged. The nine tests are
+named in FXC-01. `a_rollback_cut_is_synced_and_a_failed_barrier_is_named`.
+
+**Not covered here.** Finalization V4 and Population Statistics V2/V3 (and
+other ledgers not in the finding's list) still refuse a torn tail; they were
+not in rnew-1 and are left as found.
+
+### D-4461 — A new result file's directory and name are made durable before its header — 2026-10-09
+
+**Finding (sobs-12, cli half).** `results.rs`, `frontier.rs`, `trades.rs` and
+`result_set.rs` created `results/` with `create_dir_all` and the file with
+`OpenOptions::create`, and synced only the file. The directory entries were
+never flushed, so a power cut right after the first synced record could lose
+the whole file. The Selection ledgers had the same shape.
+
+**Decided.** `fixed_tail::create_dir_all_durable` makes every directory it
+creates durable with one barrier on that directory's parent, and
+`fixed_tail::sync_parent` makes a new file's name durable BEFORE its header
+is written, so a kill between the two leaves an empty file that the next
+writer treats as new and barriers again. A failed barrier is refused by name.
+Cost: barriers only on creation, never per record; an existing directory
+costs one `try_exists`.
+
+**Residual, stated.** A directory or file that a failed barrier left in place
+is found existing by the next writer and takes no barrier, so a power cut
+after that retry but before the kernel flushes the directory could still lose
+it. Closing that needs a barrier on every open; not done. `api/src/audit.rs`,
+also named by sobs-12, is outside this change.
+
+**Proof.** `a_new_ledgers_directory_and_name_are_made_durable_and_a_failed_barrier_is_named`
+(results), `a_new_frontiers_directory_and_name_are_made_durable_and_a_failed_barrier_is_named`,
+`a_new_trade_files_directory_and_name_are_made_durable_and_a_failed_barrier_is_named`,
+`a_new_receipt_files_directory_and_name_are_made_durable_and_a_failed_barrier_is_named`,
+`created_directories_are_made_durable_and_a_failed_barrier_is_named`. FXC-02.
+
+### D-4462 — A sweep refused by its required audit is logged, and `command finished` carries the code the shell reads — 2026-10-09
+
+**Finding (sobs-4).** In `run_durable`'s sweep arm an admission that could not
+start wrote one stdout line and no event, and a terminal audit that could not
+be confirmed turned exit 0 into FAILED after `command finished` had already
+been logged with `exit_code=0`: `/logs` said success for a run the shell was
+told had failed. `operation_audit::Attempt::finish` logged its own failure
+only from `Drop`, which an explicit `finish` disarms.
+
+**Decided.** The arm is `run_admitted`. An admission refusal emits one
+`cli.lifecycle` Warn "command refused" with the reason and `exit_code`.
+`command started` is emitted inside the audit and `command finished` only
+after the audit's terminal has settled, with the exit code returned and, when
+the terminal is unconfirmed, an `audit` field naming why. `finish` itself
+emits `cli.audit` Error "terminal audit unconfirmed" with phase and reason, so
+every caller's failure is logged once.
+
+**Proof.** `an_admission_that_cannot_start_is_refused_and_logged`,
+`the_finish_event_carries_the_exit_code_the_shell_reads` (`cli/src/lib.rs`),
+`an_unconfirmed_terminal_is_logged_once_by_finish_itself`
+(`operation_audit_tests.rs`). FXC-03.
+
+### D-4463 — A `cli` or `api` stderr line can no longer panic on a closed stream — 2026-10-09
+
+**Finding (r53-1, the `cli` and `api` sites).** `eprintln!` panics when stderr
+is a closed pipe, and the release profile aborts on a panic. Seven sites could
+kill the process they were reporting on: `cli/src/lib.rs` (the session-index
+diagnostic and two descent progress lines), `cli/src/operation_audit.rs` (two
+audit diagnostics) and `api/src/main.rs` (two).
+
+**Decided.** Each crate writes stderr through one `tell` that drops a line it
+cannot write. Gate 23's rule is kept: the declared `eprintln!` counts for
+those three files are removed and each of `cli/src/lib.rs` and
+`api/src/main.rs` declares its one `stderr()` handle. A diagnostic among them
+still emits its event (the session index now emits `cli.session_index` Warn
+"bars out of order"); progress lines do not. `pull` and `telemetry`, also named
+by r53-1, are outside this change.
+
+**Proof.** `a_stderr_line_is_dropped_not_a_panic_when_the_stream_is_closed`
+in `crates/cli/src/lib.rs` and in `crates/api/src/main.rs`;
+`bars_out_of_order_stop_the_session_index_and_are_logged`. FXC-04.
+
+### D-4464 — A panic leaves one event in the log before the default hook runs — 2026-10-09
+
+**Finding (sobs-1).** No panic hook existed (`std::panic::set_hook`: 0 hits);
+both binaries abort on a panic in release, and the message and location went
+only to stderr.
+
+**Decided.** `cli::panic_log::install` runs first in both `main`s. Its hook
+emits ONE `error` event, "process panicked", with message, location, thread
+and pid, syncs the sink, then hands the panic to the previous hook. The emit
+runs on a helper thread waited for at most `panic_log::WAIT` (2 s), so a
+panic raised while the sink's lock is held cannot hang the process; a panic
+inside the hook's own work writes nothing more; with no sink, a full disk or
+a closed stderr every failure is dropped, never unwrapped.
+
+**Proof.** `crates/cli/tests/panic_hook.rs`
+`a_panic_is_logged_once_and_a_closed_stderr_or_missing_sink_never_aborts`
+re-runs itself as a child whose stderr is a closed pipe, with and without a
+sink, and requires exit 101 (unwound, not aborted) and exactly one event;
+`panic_log::tests::delivery_is_bounded_and_never_waits_on_a_blocked_write`.
+FXC-05.
+
+### D-4465 — The sweep-evidence read bound is on what a read touches, not on the file — 2026-10-09
+
+**Finding (r3-1).** `sweep_evidence::bound` refused any read of a file longer
+than `max_bytes`, so a ranked file past the API's 64 MiB scan bound (335,545
+rows at 200 bytes, reachable by raising the screen cap) refused every page
+and every read of that identity, including reads of its 16-byte header.
+
+**Decided.** `bound(touched, max_bytes)` refuses a read that would TOUCH more
+than the bound: a header, one event, or one page's header plus rows. The
+file's length is used only for its row count. A page wider than the bound is
+still refused, not cut.
+
+**Proof.** `a_ranked_file_beyond_the_read_bound_still_reads_and_pages`
+(`crates/cli/tests/sweep_evidence.rs`). FXC-06.
+
+### D-4466 — `crates/cli/Cargo.toml` no longer says `cli` is loop-free — 2026-10-09
+
+**Finding (AC-gates-o1-4).** The manifest's telemetry comment still said
+"`cli` holds no loop over bars and no loop over candidates" after `CLAUDE.md`
+§5 stopped saying it. It is false: `window_range_percentile` walks bars and
+`screen` walks every candidate in `by_evidence.par_iter()`.
+
+**Decided.** The comment says what is true: `cli` is not on gate 17's list,
+is not loop-free, and keeps its events at structural boundaries.
+Documentation only. **Proof.** `the_manifest_does_not_say_cli_is_loop_free`
+(`crates/cli/tests/crate_graph_claims.rs`). FXC-07.
+
+### D-4467 — A Base Evidence append scans the ledger once; its fresh reopen reads one block — 2026-10-09
+
+**Finding (W2-cli10-0; stated by D-1639).** `append_and_reopen_base_evidence_v2`
+opened the ledger for write and then read-only, and each open's `scan`
+read, seal-checked and ordered-hashed every record: one family append was
+O(R_total) twice over every Base record ever committed.
+
+**Decided, as D-1845 did for Finalization V4.** The writer's open scan stays:
+it is the index the append and its duplicate check run on, and the only proof
+that earlier history is intact before anything is appended. The fresh reopen
+no longer scans: under the shared lock it opens the files afresh, verifies
+both headers, requires each path to still name the inode the writer wrote,
+reads the ONE completion at its physical index (now kept per universe) and
+its predecessor's end, validates that completion's block and compares it with
+the prepared bytes: O(this family's records). The earlier blocks are those
+the writer's open validated and its generation checks held unchanged up to
+its last barrier.
+
+**No output changes.** The returned audit is required equal to the one the
+append derived, which a full fresh open also derives (the test compares it).
+
+**Proof.** `a_base_append_scans_once_and_its_bounded_reopen_still_refuses_damage`
+(`candidate_universe.rs`) counts one scan per written or reused append, and
+damages the ledger between the writer's release and the reopen four ways (a
+sealed payload byte, a same-bytes file at a new inode, a cut record block, a
+cut completion), each refused by name. Counted, not timed. FXC-08.
+
+### D-4468 — A post-training OOS witness no longer re-derives its cohort identity — 2026-10-09
+
+**Finding (W2-cli16-1; D-1684 made the fold once per cohort).**
+`StoredOosFoldV1::mint_inner` called `cohort.require_integrity()` before and
+after each witness, and each call re-derived the cohort identity, hashing the
+signal, minute-context, daily and execution streams: Θ(S + Q + D + E) twice
+per witness, on top of the fold's own derivation.
+
+**Decided.** A witness re-checks only what can change while a fold is held:
+the strict source guards and the admitted root
+(`require_sources_current`), before and after. The cohort's identity is
+derived once, when the fold is built (`fold_inner` calls `require_integrity`),
+and cannot change under it: the fold borrows the cohort immutably. No output
+changes.
+
+**Proof.** `strict_v6_one_oos_fold_serves_every_witness_of_its_cohort`
+(`strict_v6_tests.rs`) now counts ONE cohort identity derivation for a fold
+and three witnesses (seven before). FXC-09.
+
+### D-4469 — A held trade or frontier writer is not the disk state a fresh open sees: D-1777 narrowed — 2026-10-09
+
+**Finding (r64-1).** D-1777 says a cached handle "sees the same disk state a
+fresh open would". For `chosen-trades.bin` and `frontier.bin` that is false
+for an in-place rewrite: their `refresh` reads only rows appended since, so a
+row the held handle already indexed and something else then rewrote is never
+re-read, while a fresh open re-reads it and refuses every write. D-1841 stated
+this narrowing and its code never landed.
+
+**Decided: the narrowing is stated, not removed.** Re-verifying the indexed
+prefix on every recorded run is the Θ(rows) per run D-1777 removed, and a
+cheaper stamp check cannot see a same-size rewrite within one timestamp tick
+(D-0036). The held handle still refuses every row appended since, a replaced
+or shrunken file, and a ragged tail; a new process, a changed inode or any
+refused refresh reopens fresh and re-reads everything. `index_row`'s and
+`with_cached_handle`'s rustdocs say so. D-1777's sentence is amended by this
+entry; the receipt sidecar keeps its prefix re-hash (D-1560, D-3305).
+
+**Proof.** `a_held_writer_does_not_reread_a_row_it_indexed_and_a_fresh_open_does`
+(`crates/cli/src/trades.rs`) rewrites row 0 in place behind a held writer,
+requires the held handle to append past it and a fresh open to refuse with
+"whole chosen-trade row 0 whose integrity seal failed". FXC-10.

@@ -8702,7 +8702,7 @@ D-1684 removes per witness is the column evaluation and alignment, not that
 term. Then the authenticated Runner replay over its OOS bars and exit paths. Until
 D-1636 (W2-cli16-1) this paragraph called minting "proportional to the replay";
 D-1636 stated the per-witness Θ(S + Q + D + E) recomputation, and D-1684 then
-moved the column fold and alignment out of it. Full future V4 preflight/scheduling is at least O(P + C) before
+moved the column fold and alignment out of it. **Since D-4468 a witness no longer re-derives the cohort identity:** it re-checks the strict source guards and the admitted root before and after, and the identity is derived once, when the fold is built; the fold borrows the cohort immutably, so it cannot change under its witnesses. Per witness what remains is those guards and the authenticated Runner replay; `strict_v6_one_oos_fold_serves_every_witness_of_its_cohort` counts one derivation for a fold and three witnesses. Counted, not timed. Full future V4 preflight/scheduling is at least O(P + C) before
 persistence. Explicit record ceilings refuse excess before allocation where
 the store header permits; they do not convert any whole operation into O(1).
 
@@ -10911,6 +10911,16 @@ fails (a short write under a small `RLIMIT_FSIZE`, or a full disk) leaves those
 bytes, and every later open refuses them as a short header, the same wedge by a
 different injection. This is a residual, found by reading the source; it was not
 reproduced, and no test pins it.
+
+**Since D-4460 (rnew-1) the writer cuts a torn header.** A non-empty strict
+prefix of the constant header, which is what a header write killed or failed
+part-way leaves, is cut to nothing under the writer lock, logged as `cli.ledger`
+"torn ledger header truncated", and the header is written whole; a reader still
+refuses it, and a short file that is not the header's prefix still refuses the
+writer unchanged. The one-byte case above is that prefix, so "a 1-byte header
+still refuses unchanged" no longer holds for the writer.
+`a_kill_torn_tail_or_header_is_cut_by_the_writer_and_history_kept` pins 1, 32 and
+63 bytes.
 
 ## `/trades.json` refreshes past a damaged row in O(new rows) — D-0919
 
@@ -15243,6 +15253,12 @@ own cold admission (`records`, `bytes`, `nodes`). Held to the code by
   and again whenever the root changes, the path names a different file (by
   device and inode), a refresh is refused or an operation is refused; each of
   those opens fresh. UNVERIFIED as a measurement: no bench times it.
+  **What a held trade or frontier handle does not see (r64-1, D-4469).** Their
+  refresh never re-reads a row it already indexed, so a row rewritten in place
+  behind a held writer is not refused by it; a fresh open re-reads it and
+  refuses every write. D-1777's "the same disk state a fresh open would" is
+  narrowed to rows appended since.
+  `a_held_writer_does_not_reread_a_row_it_indexed_and_a_fresh_open_does` pins it.
 - **`strict::size_sweeper` per rung (W2-cli16-3).** `ledger_v6` calls it once
   for each of the eight rungs. Each call loads the whole NIFTY signal, daily
   and exact-minute span (with prior context) under the strict checksum
@@ -15302,6 +15318,12 @@ is a separate item and is not changed by D-1835.
   universe ever committed, not O(the family's records), and N family appends
   cost Θ(N·R_total). The module rustdoc says "O(records)"; this states what
   the records are.
+  **Fixed by D-4467.** The fresh reopen reads only the committed completion
+  and its block: O(this family's records). The writer's open scan remains,
+  O(R_total) once per append, being the index the append and its duplicate
+  check run on and the proof that earlier history is intact before anything
+  is appended. `a_base_append_scans_once_and_its_bounded_reopen_still_refuses_damage`
+  counts one scan per append. Counted, not timed.
 - **`derive_strategy_digest_v1` is O(G) per call (W2-cli10-2).** It
   validates the whole evaluated grid before deriving one cell. Production
   derives per cell through `derive_strategy_digest_from_validated_v1` after
