@@ -194,8 +194,8 @@ pub fn isqrt_i128_counted(v: i128) -> (i128, u32) {
     let bits = i128::BITS.saturating_sub(v.leading_zeros());
     let mut guess: i128 = 1_i128 << bits.div_ceil(2);
     let mut i: u32 = 0;
-    while i < NEWTON_STEPS {
-        i = i.saturating_add(1);
+    for step in 1..=NEWTON_STEPS {
+        i = step;
         let next = guess.midpoint(v / guess);
         // THE TEXTBOOK EXIT: from above, Newton decreases until it reaches the
         // floor, and the first step that does not decrease means it has.
@@ -204,6 +204,11 @@ pub fn isqrt_i128_counted(v: i128) -> (i128, u32) {
         }
         guess = next;
     }
+    // A RANGE, NOT `while i < NEWTON_STEPS` (R1286-rest-04, D-4152). The same
+    // steps, the same exit and the same count, with no comparison on the bound:
+    // no input reaches it -- 8 steps is the most any of 41,656,974 measured
+    // inputs took -- so `<` and `<=` there were one program, and Gate 18 run
+    // 1286 could not kill the second.
     (guess, i)
 }
 

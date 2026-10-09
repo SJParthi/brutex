@@ -65116,3 +65116,32 @@ two apart.
 on `i64` returns the larger value, and either one on a tie, which is the same
 integer. Every result is the same, and no operator is left to mutate. The
 grid's existing excursion tests pin the figure. R1286-rest-06.
+
+### D-4152 — `isqrt_i128_counted` steps over a range, because its bound is never reached — 2026-10-08
+
+**What was observed.** Gate 18 run 1286 left `while i < NEWTON_STEPS` in
+`indicators::vwap::isqrt_i128_counted` with `<` as `<=` MISSED. That mutant
+allows a seventeenth step, and no input takes even a ninth. Measured with an
+untracked copy of the function over 41,656,974 inputs, every root equal to
+`i128::isqrt`, the most steps taken was 8. The inputs were:
+
+- every `v` in `1..=2*10^7`;
+- the 2,000 values at each end of every bit width from 1 to 127;
+- the squares within 2,000 roots of both ends of every width, and two either
+  side of each;
+- 2*10^7 xorshift values spread across the widths.
+
+The seed is at most twice the root, so Newton from above has a relative error
+of at most 1 and squares it at every step. Six steps bring it under 1e-28,
+inside one unit of any `i128` root, and the floor needs at most two more.
+
+**Decided.** The loop is `for step in 1..=NEWTON_STEPS`, recording `step` as
+the count. It takes the same steps, stops at the same exit, and reports the
+same count, with no comparison left to mutate. The existing tests pin the
+exact counts (2 at 1, 5 at `i64::MAX` and at 10^30, 6 at `i128::MAX`), the
+exact root of every input to 10^6 and of `k^2 - 1` up to `i128::MAX.isqrt()`,
+and the ceiling. R1286-rest-04 names the shape.
+
+**Rejected.** Lowering `NEWTON_STEPS` to 8 so the bound would bite. That spends
+the documented margin of twice the measured worst case to make a mutant
+visible.
